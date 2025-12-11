@@ -118,11 +118,3 @@ Detailed documentation is available in the [`docs/`](docs/) folder:
 ## License
 
 This project is licensed under the [GNU General Public License v3.0](LICENSE). You may copy, modify, and distribute under the GPL-3.0 terms. Commercial use must respect copyleft requirements.
-
-## Preparing for GitHub
-
-- Initialize git and create your first commit: `git init && git add . && git commit -m "chore: initial import"`.
-- Set your remote before pushing: `git remote add origin git@github.com:<your-org>/cc-trade.git`.
-- Sensitive files are already ignored via `.gitignore` (`.env*`, `node_modules`, `dist*`, `playwright-report`, `tele_announcer`).
-- No API keys or secrets are present in the repo; environment variables are used instead.
-- Run the test suite before pushing: `npm run test:all`. For faster checks, run `npm test` and `npm run test:e2e` separately.
