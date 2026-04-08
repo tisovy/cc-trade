@@ -184,18 +184,18 @@ export const ChartWrapper = (props) => {
     // Track outer container height for RSI sizing
     useEffect(() => {
         if (!outerContainerRef.current) return;
-        
+
         const updateOuterHeight = () => {
             if (outerContainerRef.current) {
                 setOuterContainerHeight(outerContainerRef.current.clientHeight);
             }
         };
-        
+
         updateOuterHeight();
-        
+
         const resizeObserver = new ResizeObserver(updateOuterHeight);
         resizeObserver.observe(outerContainerRef.current);
-        
+
         return () => resizeObserver.disconnect();
     }, []);
 
@@ -1100,7 +1100,7 @@ export const ChartWrapper = (props) => {
             event.preventDefault();
             event.stopPropagation();
 
-            // Calculate Total Notional for maintaining value
+            // Calculate values based on side
             const price = parseFloat(order.price);
             const quantity = parseFloat(order.origQty);
             const totalNotional = price * quantity;
@@ -1118,6 +1118,8 @@ export const ChartWrapper = (props) => {
                 active: true,
                 order: order,
                 totalNotional: totalNotional,
+                startQuantity: quantity, // Store original quantity
+                side: order.side,        // Store side explicitly
                 currentY: y
             };
 
@@ -1125,15 +1127,10 @@ export const ChartWrapper = (props) => {
             const isBuy = order.side === 'BUY';
             const color = isBuy ? '#26a69a' : '#ef5350';
 
-            // Format label initially same as order
-            // But we need to dynamically update it during drag if we want to show new Qty?
-            // Or just show "Dragging..."? The request says "recalculate it".
-            // So we should probably update label as we drag.
-
             setDraggingGhost({
                 y: y,
                 color: color,
-                label: "Dragging...", // Will be updated in mouseMove
+                label: "Drag to move...",
                 side: order.side,
             });
         }
@@ -1173,18 +1170,36 @@ export const ChartWrapper = (props) => {
             const newY = point.y;
             const newPrice = point.price;
 
-            // Calculate new quantity to maintain total notional
+            // Calculate new values based on strategy
+            // BUY: Constant Notional (spend same amount)
+            // SELL: Constant Quantity (sell same amount)
+            const side = draggingStateRef.current.side;
             const totalNotional = draggingStateRef.current.totalNotional;
-            let newQty = 0;
-            if (newPrice > 0) {
-                newQty = totalNotional / newPrice;
+            const startQuantity = draggingStateRef.current.startQuantity;
+
+            let displayQty = 0;
+
+            if (side === 'BUY') {
+                // Keep Notional Constant
+                if (newPrice > 0) {
+                    displayQty = totalNotional / newPrice;
+                }
+            } else {
+                // Keep Quantity Constant (SELL)
+                displayQty = startQuantity;
             }
 
             // Format label for ghost
             const market = panel?.market;
             const marketValueDecimals = market === 'USDT' ? 0 : 6;
             const targetPrecision = enabledMarketBalance ? marketValueDecimals : precision?.quantity ?? 3;
-            const valueToDisplay = enabledMarketBalance ? totalNotional : newQty; // Total stays constant ideally, Qty changes
+
+            // What value to display? 
+            // If enabledMarketBalance, we usually show Total Value.
+            // If disabled, we show Quantity.
+            const valueToDisplay = enabledMarketBalance
+                ? (side === 'BUY' ? totalNotional : displayQty * newPrice)
+                : displayQty;
 
             const truncated = precisionTruncate(valueToDisplay, targetPrecision);
             let labelText = '';
@@ -1256,17 +1271,22 @@ export const ChartWrapper = (props) => {
                 const pricePrecision = precision?.price ?? DEFAULT_PRECISION.price;
                 const formattedPrice = precisionTruncate(newPrice, pricePrecision).toFixed(pricePrecision);
 
-                // Recalculate Quantity
-                // Qty = Total / Price
+                // Recalculate Quantity based on strategy
                 const numericPrice = parseFloat(formattedPrice);
-                let newQty = originalOrder.origQty;
-                if (numericPrice > 0) {
-                    newQty = totalNotional / numericPrice;
+                let newQty = 0;
+
+                if (draggingStateRef.current.side === 'BUY') {
+                    // BUY: Constant Notional
+                    if (numericPrice > 0) {
+                        newQty = totalNotional / numericPrice;
+                    }
+                } else {
+                    // SELL: Constant Quantity
+                    newQty = draggingStateRef.current.startQuantity;
                 }
 
                 // Format quantity to precision
                 const quantityPrecision = precision?.quantity ?? DEFAULT_PRECISION.quantity;
-                // Ensure we don't exceed step size logic if strictly required, but basic truncation is good start
                 const formattedQty = precisionTruncate(newQty, quantityPrecision).toFixed(quantityPrecision);
 
                 // Place new order
@@ -1453,7 +1473,7 @@ export const ChartWrapper = (props) => {
     }, []);
 
     return (
-        <div 
+        <div
             ref={outerContainerRef}
             className="chart-with-rsi-container"
             style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%', overflow: 'hidden' }}

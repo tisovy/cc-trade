@@ -153,12 +153,12 @@
 }
 
 .chart-order-line.buy {
-  border-top: 1px dashed rgba(38, 166, 154, 0.9);
+  border-top: 1px dashed rgb(38, 166, 154);
   box-shadow: 0 0 6px rgba(38, 166, 154, 0.5);
 }
 
 .chart-order-line.sell {
-  border-top: 1px dashed rgba(239, 83, 80, 0.9);
+  border-top: 1px dashed rgb(239, 83, 80);
   box-shadow: 0 0 6px rgba(239, 83, 80, 0.5);
 }
 
@@ -188,17 +188,17 @@
 }
 
 .chart-order-line.buy .chart-order-tag {
-  background: rgba(38, 166, 154, 0.9);
+  background: rgb(38, 166, 154);
   color: #fff;
 }
 
 .chart-order-line.sell .chart-order-tag {
-  background: rgba(239, 83, 80, 0.9);
+  background: rgb(239, 83, 80);
   color: #fff;
 }
 
 .chart-order-line.ghost .chart-order-tag {
-  background: rgba(100, 100, 100, 0.8);
+  background: rgb(100, 100, 100);
   color: #fff;
 }
 

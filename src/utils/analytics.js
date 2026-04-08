@@ -78,7 +78,7 @@ export const getAnalyticsConfig = () => {
 
   // Default fallback
   return {
-    baseUrl: 'http://localhost:3000',
+    baseUrl: 'http://localhost:3000', // TODO: update this address
     key: '',
     secret: '',
     pollInterval: 45000,
