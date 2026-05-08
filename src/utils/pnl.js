@@ -48,6 +48,45 @@ export const savePnLData = (data) => {
 };
 
 /**
+ * Compute the start of the calendar period that the given timestamp falls into.
+ * Used both to detect stale snapshots and to label time ranges consistently.
+ * Week starts on Monday (ISO).
+ */
+const getPeriodStart = (period, now = new Date()) => {
+    switch (period) {
+        case 'day': {
+            const d = new Date(now);
+            d.setHours(0, 0, 0, 0);
+            return d;
+        }
+        case 'week': {
+            const d = new Date(now);
+            d.setHours(0, 0, 0, 0);
+            const dow = d.getDay(); // 0 = Sun, 1 = Mon, ...
+            const daysFromMonday = dow === 0 ? 6 : dow - 1;
+            d.setDate(d.getDate() - daysFromMonday);
+            return d;
+        }
+        case 'month':
+            return new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+        case 'all':
+        default:
+            return null;
+    }
+};
+
+/**
+ * A snapshot is stale when it was taken before the current period's start.
+ * The 'all' period never goes stale — it's only refreshed by a manual reset.
+ */
+export const isSnapshotStale = (period, snapshot, now = new Date()) => {
+    if (!snapshot || !snapshot.timestamp) return true;
+    const start = getPeriodStart(period, now);
+    if (!start) return false;
+    return snapshot.timestamp < start.getTime();
+};
+
+/**
  * Calculate total portfolio value in USDT and BTC
  * BTC value = sum of all coins converted to BTC (not USDT/btcPrice)
  * This way if BTC goes up but your alts don't, you see you're losing BTC
@@ -131,14 +170,6 @@ export const takeSnapshot = (period, balances, ticker) => {
     };
     data.tradesSince[period] = 0;
 
-    // If resetting 'all', also reset other periods
-    if (period === 'all') {
-        ['day', 'week', 'month'].forEach(p => {
-            data.snapshots[p] = { ...data.snapshots[period] };
-            data.tradesSince[p] = 0;
-        });
-    }
-
     savePnLData(data);
     return data;
 };
@@ -147,28 +178,36 @@ export const takeSnapshot = (period, balances, ticker) => {
  * Calculate P&L by comparing current balance to snapshot
  */
 export const calculatePnL = (period, balances, ticker) => {
-    const data = loadPnLData();
-    const snapshot = data.snapshots[period];
+    let data = loadPnLData();
+    let snapshot = data.snapshots[period];
 
     const { totalUSDT: currentUSDT, totalBTC: currentBTC, btcPrice } = calculatePortfolioValue(balances, ticker);
 
-    if (!snapshot) {
-        // No snapshot yet - show 0 and prompt to reset
-        return {
-            hasSnapshot: false,
-            pnl: 0,
-            pnlPercent: 0,
-            pnlBTC: 0,
-            pnlBTCPercent: 0,
-            startValue: 0,
-            currentValue: currentUSDT,
-            startValueBTC: 0,
-            currentValueBTC: currentBTC,
-            btcPrice,
-            tradeCount: data.tradesSince[period] || 0,
-            snapshotTime: null,
-            period
-        };
+    // Auto-anchor when the snapshot is missing OR has rolled past its calendar boundary
+    // (e.g. a 'day' snapshot taken yesterday is no longer the anchor for "today").
+    // Skip when we don't yet have valid portfolio data, so we don't anchor at zero.
+    const needsRefresh = !snapshot || isSnapshotStale(period, snapshot);
+    if (needsRefresh) {
+        if (currentUSDT > 0) {
+            data = takeSnapshot(period, balances, ticker);
+            snapshot = data.snapshots[period];
+        } else {
+            return {
+                hasSnapshot: false,
+                pnl: 0,
+                pnlPercent: 0,
+                pnlBTC: 0,
+                pnlBTCPercent: 0,
+                startValue: 0,
+                currentValue: currentUSDT,
+                startValueBTC: 0,
+                currentValueBTC: currentBTC,
+                btcPrice,
+                tradeCount: data.tradesSince[period] || 0,
+                snapshotTime: null,
+                period
+            };
+        }
     }
 
     // USDT P&L
