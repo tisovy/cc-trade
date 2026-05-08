@@ -554,6 +554,32 @@ export function setupBinanceConnection() {
         }
     };
 
+    // Shared balance refresh - fetches via REST and broadcasts to all renderers
+    // Deduplicated by in-flight guard to avoid duplicate calls from rapid events
+    let _balanceRefreshInFlight = false;
+    const fetchAndBroadcastBalances = async () => {
+        if (!client || USE_MOCK) return;
+        if (_balanceRefreshInFlight) return;
+        _balanceRefreshInFlight = true;
+        try {
+            await rateLimiter.execute(async () => {
+                const accountResponse = await client.restAPI.getAccount();
+                const account = await accountResponse.data();
+                const balances = {};
+                account?.balances?.forEach(b => {
+                    if (parseFloat(b.free) > 0 || parseFloat(b.locked) > 0) {
+                        balances[b.asset] = { available: b.free, onOrder: b.locked };
+                    }
+                });
+                broadcastToRenderers({ balances });
+            }, 10);
+        } catch (error) {
+            logger.error("Broadcast balance fetch error:", error);
+        } finally {
+            _balanceRefreshInFlight = false;
+        }
+    };
+
     wsServer.on("request", (request) => {
         logger.info("Connection from origin " + request.origin + ".");
         const connection = request.accept(null, request.origin);
@@ -950,6 +976,9 @@ export function setupBinanceConnection() {
 
                     logger.info("User Data Stream connected.");
 
+                    // Catch up on any balance changes missed during reconnection gap
+                    fetchAndBroadcastBalances();
+
                     userDataWsConnection.on('message', (data) => {
                         const payload = extractStreamPayload(data);
                         if (!payload) return;
@@ -959,8 +988,19 @@ export function setupBinanceConnection() {
                             logger.info(`[stream] Execution Report: ${report.symbol} ${report.side} ${report.status}`);
                             // Broadcast to ALL connected renderers
                             broadcastToRenderers({ execution_update: report });
+
+                            // Refresh balances via REST for fill events as a fallback
+                            // in case outboundAccountPosition is missed
+                            if (report.status === 'FILLED' || report.status === 'PARTIALLY_FILLED') {
+                                fetchAndBroadcastBalances();
+                            }
                         } else if (payload.e === 'outboundAccountPosition') {
+                            // Fast incremental balance update from WebSocket
                             broadcastToRenderers({ balance_update: payload });
+                        } else if (payload.e === 'balanceUpdate') {
+                            // Deposit/withdrawal event - fetch fresh balances via REST
+                            logger.info(`[stream] Balance Update (deposit/withdrawal): asset=${payload.a} delta=${payload.d}`);
+                            fetchAndBroadcastBalances();
                         }
                     });
 

@@ -951,7 +951,8 @@ export const DataProvider = ({ children }) => {
         });
         break;
       case 'balances':
-        setBalances(prev => balanceUpdate(payload, prev));
+        // Full REST snapshot - replace entirely to remove coins that went to zero
+        setBalances(payload);
         break;
       case 'orders':
         setOrders(payload);
@@ -1079,7 +1080,11 @@ export const DataProvider = ({ children }) => {
         break;
 
       case 'balances':
+        // Full REST snapshot - replace entirely to remove coins that went to zero
+        setBalances(payload);
+        break;
       case 'balance_update':
+        // Incremental update from outboundAccountPosition - merge changed coins
         setBalances(prev => balanceUpdate(payload, prev));
         break;
 
