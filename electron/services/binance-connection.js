@@ -862,6 +862,11 @@ export function setupBinanceConnection() {
                 
                 // Subscribe to All Tickers Stream (shared by all renderers)
                 let globalWsReconnecting = false;
+                // Liveness tracking for the high-volume !ticker@arr stream. If it
+                // goes silent the renderer is stuck on its initial REST snapshot
+                // (Balances Sum / P&L / Activity freeze) while charts keep moving on
+                // the separate kline socket. The watchdog below reconnects on stall.
+                let lastTickerMessageAt = Date.now();
                 const subscribeGlobal = async (retryCount = 0) => {
                     const MAX_RETRIES = 5;
                     const RETRY_DELAY_BASE = 3000;
@@ -871,30 +876,45 @@ export function setupBinanceConnection() {
                     
                     try {
                         await throttleWsConnection();
+                        // NOTE: '!ticker@arr' is deprecated and Binance no longer
+                        // pushes data on it (connects but stays silent), which froze
+                        // every 24h-ticker consumer (Balances Sum, P&L, Activity).
+                        // '!miniTicker@arr' is the live equivalent (c/o/h/l/q every ~1s).
                         globalWsConnection = await client.websocketStreams.connect({
-                            stream: '!ticker@arr'
+                            stream: '!miniTicker@arr'
                         });
                         globalWsReconnecting = false;
 
                         globalWsConnection.on('message', (data) => {
+                            lastTickerMessageAt = Date.now();
                             const payload = extractStreamPayload(data);
                             if (!payload) return;
                             const tickerArray = Array.isArray(payload)
                                 ? payload
-                                : payload?.e === '24hrTicker'
+                                : (payload?.e === '24hrMiniTicker' || payload?.e === '24hrTicker')
                                     ? [payload]
                                     : [];
                             if (!tickerArray.length) return;
                             tickerArray.forEach(ticker => {
                                 if (ticker?.s && (ticker.s.includes("BTC") || ticker.s.includes("USDT"))) {
+                                    // miniTicker carries c/o/h/l/q but no 24h %change (P),
+                                    // so derive it from open (o) and close (c) to keep the
+                                    // field intact for any consumer. Full ticker still has P.
+                                    const open = parseFloat(ticker.o);
+                                    const close = parseFloat(ticker.c);
+                                    const pct = ticker.P !== undefined
+                                        ? ticker.P
+                                        : (Number.isFinite(open) && open > 0 && Number.isFinite(close)
+                                            ? (((close - open) / open) * 100).toFixed(3)
+                                            : undefined);
                                     const update = {
                                         symbol: ticker.s,
                                         lastPrice: ticker.c,
-                                        priceChangePercent: ticker.P,
+                                        priceChangePercent: pct,
                                         highPrice: ticker.h,
                                         lowPrice: ticker.l,
                                         quoteVolume: ticker.q,
-                                        closeTime: ticker.C
+                                        closeTime: ticker.C ?? ticker.E
                                     };
                                     const upserted = tickerCache.upsert(update);
                                     if (upserted) {
@@ -941,6 +961,30 @@ export function setupBinanceConnection() {
                     }
                 };
                 subscribeGlobal();
+
+                // Watchdog: the !ticker@arr stream pushes every ~1s, so a long
+                // silence means the socket stalled without firing error/close.
+                // Force a reconnect so 24h-ticker consumers (Balances Sum, P&L,
+                // Activity) resume updating. Created once for the global sockets.
+                const TICKER_STALL_MS = 30000;
+                setInterval(() => {
+                    if (rendererConnections.size === 0) return;
+                    if (Date.now() - lastTickerMessageAt <= TICKER_STALL_MS) return;
+                    logger.warn(`[ticker-stream] No !ticker@arr data for >${TICKER_STALL_MS / 1000}s — forcing reconnect`);
+                    lastTickerMessageAt = Date.now(); // reset to avoid a tight reconnect loop
+                    try {
+                        const closer = typeof globalWsConnection?.disconnect === 'function'
+                            ? globalWsConnection.disconnect.bind(globalWsConnection)
+                            : typeof globalWsConnection?.close === 'function'
+                                ? globalWsConnection.close.bind(globalWsConnection)
+                                : null;
+                        if (closer) closer();
+                    } catch (err) {
+                        logger.debug('[ticker-stream] Error closing stalled socket (ignored):', err?.code || err?.message);
+                    }
+                    globalWsConnection = null;
+                    subscribeGlobal();
+                }, 15000);
 
                 // Subscribe to User Data Stream (shared by all renderers)
                 let userDataReconnecting = false;

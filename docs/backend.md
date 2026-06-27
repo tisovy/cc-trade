@@ -23,7 +23,7 @@ The service uses the absolute minimum number of WebSocket connections to Binance
 
 | Socket | Stream(s) | Purpose |
 | --- | --- | --- |
-| `globalWsConnection` | `!ticker@arr` | 24h ticker updates for all symbols |
+| `globalWsConnection` | `!miniTicker@arr` | 24h ticker updates for all symbols (`!ticker@arr` is deprecated/silent) |
 | `userDataWsConnection` | `<listenKey>` | User data (orders, balances, execution reports) |
 | `marketWsConnection` | Combined streams | **ALL market data in ONE socket** (klines + trade + depth) |
 

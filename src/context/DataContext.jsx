@@ -329,6 +329,16 @@ export const DataProvider = ({ children }) => {
     const key = normalizeSymbolKey(initialPanelState.selected);
     return historyBySymbolRef.current[key] ?? [];
   });
+  // Refs mirroring orders/history so the websocket handler reconciles execution
+  // reports against the freshest data. Without this, back-to-back fills arriving
+  // faster than a React commit reconcile against a stale closure, and an
+  // already-removed order can reappear ("hang") on the chart, desyncing from the
+  // exchange. The refs are also updated synchronously where execution reports are
+  // applied (see handleChannelData), so even same-tick bursts stay consistent.
+  const ordersRef = useRef(orders);
+  const historyRef = useRef(history);
+  useEffect(() => { ordersRef.current = orders; }, [orders]);
+  useEffect(() => { historyRef.current = history; }, [history]);
   const [analyticsState, setAnalyticsState] = useState(() => ({
     enabled: ANALYTICS_AVAILABLE,
     strength: [],
@@ -935,11 +945,13 @@ export const DataProvider = ({ children }) => {
         setTicker(payload);
         break;
       case 'ticker_update':
+        // parseTickerUpdate / the legacy handler use payload = index, extra = update.
+        // Match that convention here (was swapped, which silently dropped every tick).
         setTicker(prev => {
           const newTicker = [...prev];
-          const index = extra;
-          if (typeof index === 'number' && payload) {
-            newTicker[index] = { ...newTicker[index], ...payload };
+          const index = payload;
+          if (typeof index === 'number' && extra) {
+            newTicker[index] = { ...newTicker[index], ...extra };
           }
           return newTicker;
         });
@@ -1068,8 +1080,12 @@ export const DataProvider = ({ children }) => {
 
       case 'orders':
       case 'execution_update':
+        // Keep the ref in lockstep so a burst of fills reconciles against the
+        // just-updated orders rather than a stale render closure.
+        ordersRef.current = payload;
         setOrders(payload);
         if (Array.isArray(extra)) {
+          historyRef.current = extra;
           updateHistoryCache(extra, extra[0]?.symbol ?? panel.selected);
           incrementTradeCount();
         }
@@ -1188,8 +1204,8 @@ export const DataProvider = ({ children }) => {
     // Legacy message format - parse using existing logic
     const parsed = parseData(
       event.data,
-      orders,
-      history,
+      ordersRef.current,
+      historyRef.current,
       panel
     );
 
@@ -1230,8 +1246,6 @@ export const DataProvider = ({ children }) => {
     // Use the unified channel data handler for consistency
     handleChannelData(type, payload, extra);
   }, [
-    orders,
-    history,
     panel,
     detailSubscription,
     handleChannelData,
