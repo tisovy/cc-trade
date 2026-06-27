@@ -49,18 +49,20 @@ export const savePnLData = (data) => {
 
 /**
  * Compute the start of the calendar period that the given timestamp falls into.
- * Used both to detect stale snapshots and to label time ranges consistently.
- * Week starts on Monday (ISO).
+ * Used to detect stale snapshots (and, via isSnapshotStale, to decide when a
+ * time-range label should fall back to the period name). Week starts on Monday
+ * (ISO). `now` may be a Date or an epoch number.
  */
 const getPeriodStart = (period, now = new Date()) => {
+    const ref = now instanceof Date ? now : new Date(now);
     switch (period) {
         case 'day': {
-            const d = new Date(now);
+            const d = new Date(ref);
             d.setHours(0, 0, 0, 0);
             return d;
         }
         case 'week': {
-            const d = new Date(now);
+            const d = new Date(ref);
             d.setHours(0, 0, 0, 0);
             const dow = d.getDay(); // 0 = Sun, 1 = Mon, ...
             const daysFromMonday = dow === 0 ? 6 : dow - 1;
@@ -68,7 +70,7 @@ const getPeriodStart = (period, now = new Date()) => {
             return d;
         }
         case 'month':
-            return new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+            return new Date(ref.getFullYear(), ref.getMonth(), 1, 0, 0, 0, 0);
         case 'all':
         default:
             return null;
@@ -85,6 +87,20 @@ export const isSnapshotStale = (period, snapshot, now = new Date()) => {
     if (!start) return false;
     return snapshot.timestamp < start.getTime();
 };
+
+/**
+ * Whether the live portfolio data is complete enough to anchor a snapshot or
+ * compute P&L. We require a loaded BTC price (so the BTC baseline is valid and
+ * USDT/alt -> BTC conversions work) and a populated balances map. A transient
+ * empty balances refresh ({}) or a tick before BTCUSDT arrives leaves these
+ * unmet, so we neither re-anchor at zero nor flash a bogus -100%.
+ *
+ * Note: an account that genuinely sold everything to zero still keeps its coin
+ * keys (with available:0), so it passes this check and its real loss is shown —
+ * only a truly empty/not-yet-loaded map is treated as "no data".
+ */
+const hasLiveData = (balances, btcPrice) =>
+    btcPrice > 0 && !!balances && Object.keys(balances).length > 0;
 
 /**
  * Calculate total portfolio value in USDT and BTC
@@ -157,9 +173,21 @@ export const calculateTotalUSDT = (balances, ticker) => {
 /**
  * Take a balance snapshot for a period
  */
-export const takeSnapshot = (period, balances, ticker) => {
+export const takeSnapshot = (period, balances, ticker, portfolio = null) => {
     const data = loadPnLData();
-    const { totalUSDT, totalBTC, btcPrice } = calculatePortfolioValue(balances, ticker);
+    // Reuse the caller's already-computed totals when provided, to avoid
+    // recomputing the whole portfolio over the same balances/ticker.
+    const { totalUSDT, totalBTC, btcPrice } = portfolio || calculatePortfolioValue(balances, ticker);
+
+    // Never anchor a baseline on incomplete data (prices not loaded yet, or an
+    // empty balances refresh). This is the single chokepoint for ALL snapshot
+    // writes, so it also protects the manual Reset / Start-Tracking button: a
+    // click before BTCUSDT loads can't persist a totalBTC=0 / btcPrice=0 anchor
+    // that would later display a fake BTC gain. Returns the data unchanged so
+    // callers stay consistent; the next ready tick anchors correctly.
+    if (!hasLiveData(balances, btcPrice)) {
+        return data;
+    }
 
     data.snapshots[period] = {
         timestamp: Date.now(),
@@ -175,39 +203,84 @@ export const takeSnapshot = (period, balances, ticker) => {
 };
 
 /**
+ * Build the "no active baseline" result — either we have no usable portfolio
+ * data yet, or the account holds nothing to track. The panel renders its
+ * "Start Tracking" state from this.
+ */
+const emptyPnL = (period, currentUSDT, currentBTC, btcPrice, tradeCount) => ({
+    hasSnapshot: false,
+    pnl: 0,
+    pnlPercent: 0,
+    pnlBTC: 0,
+    pnlBTCPercent: 0,
+    startValue: 0,
+    currentValue: currentUSDT,
+    startValueBTC: 0,
+    currentValueBTC: currentBTC,
+    btcPrice,
+    tradeCount: tradeCount || 0,
+    snapshotTime: null,
+    period
+});
+
+/**
+ * Build a flat (0) P&L result against an existing snapshot. Used when we hold a
+ * valid baseline but the current read is incomplete (prices not loaded yet, or
+ * an empty balances refresh) — showing "unchanged" for one tick is correct,
+ * whereas computing against a zero current value would flash a spurious -100%.
+ */
+const flatPnL = (period, snapshot, tradeCount, btcPrice) => {
+    const startBTC = snapshot.totalBTC || 0;
+    return {
+        hasSnapshot: true,
+        pnl: 0,
+        pnlPercent: 0,
+        pnlBTC: 0,
+        pnlBTCPercent: 0,
+        startValue: snapshot.totalUSDT,
+        currentValue: snapshot.totalUSDT,
+        startValueBTC: startBTC,
+        currentValueBTC: startBTC,
+        btcPrice: snapshot.btcPrice || btcPrice,
+        snapshotBtcPrice: snapshot.btcPrice || btcPrice,
+        tradeCount: tradeCount || 0,
+        snapshotTime: snapshot.timestamp,
+        period
+    };
+};
+
+/**
  * Calculate P&L by comparing current balance to snapshot
  */
 export const calculatePnL = (period, balances, ticker) => {
     let data = loadPnLData();
     let snapshot = data.snapshots[period];
 
-    const { totalUSDT: currentUSDT, totalBTC: currentBTC, btcPrice } = calculatePortfolioValue(balances, ticker);
+    const portfolio = calculatePortfolioValue(balances, ticker);
+    const { totalUSDT: currentUSDT, totalBTC: currentBTC, btcPrice } = portfolio;
 
-    // Auto-anchor when the snapshot is missing OR has rolled past its calendar boundary
-    // (e.g. a 'day' snapshot taken yesterday is no longer the anchor for "today").
-    // Skip when we don't yet have valid portfolio data, so we don't anchor at zero.
+    // Only trust these totals once prices have loaded and balances are populated.
+    // Acting on a half-loaded tick is what produced the zero-baseline and
+    // -100%-flash bugs, so it gates both the anchor and the comparison below.
+    const dataReady = hasLiveData(balances, btcPrice);
+
+    // Auto-anchor when the snapshot is missing OR has rolled past its calendar
+    // boundary (e.g. a 'day' snapshot taken yesterday is no longer the anchor
+    // for "today").
     const needsRefresh = !snapshot || isSnapshotStale(period, snapshot);
     if (needsRefresh) {
-        if (currentUSDT > 0) {
-            data = takeSnapshot(period, balances, ticker);
+        // Anchor only on complete data with real value, so we never persist a
+        // zero/partial baseline (which would later show a fake gain or loss).
+        if (dataReady && currentUSDT > 0) {
+            data = takeSnapshot(period, balances, ticker, portfolio);
             snapshot = data.snapshots[period];
         } else {
-            return {
-                hasSnapshot: false,
-                pnl: 0,
-                pnlPercent: 0,
-                pnlBTC: 0,
-                pnlBTCPercent: 0,
-                startValue: 0,
-                currentValue: currentUSDT,
-                startValueBTC: 0,
-                currentValueBTC: currentBTC,
-                btcPrice,
-                tradeCount: data.tradesSince[period] || 0,
-                snapshotTime: null,
-                period
-            };
+            return emptyPnL(period, currentUSDT, currentBTC, btcPrice, data.tradesSince[period]);
         }
+    } else if (!dataReady) {
+        // We have a valid baseline but the current read is incomplete — show
+        // flat rather than a spurious total-loss flash.
+        return flatPnL(period, snapshot, data.tradesSince[period], btcPrice);
     }
 
     // USDT P&L
@@ -277,7 +350,10 @@ export const getTimeRangeLabel = (period, data) => {
     const pnlData = data || loadPnLData();
     const snapshot = pnlData.snapshots?.[period];
 
-    if (snapshot && snapshot.timestamp) {
+    // A snapshot that has rolled past its period boundary is no longer the active
+    // baseline (calculatePnL will re-anchor it), so fall back to the period name
+    // instead of advertising a stale "Since <old date>" that contradicts the body.
+    if (snapshot && snapshot.timestamp && !isSnapshotStale(period, snapshot)) {
         const date = new Date(snapshot.timestamp);
         return `Since ${date.toLocaleDateString()} ${date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
     }
