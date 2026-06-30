@@ -179,7 +179,7 @@ export const normalizeMessage = (message) => {
 const detectLegacyMessageType = (message) => {
     const knownTypes = [
         'chart', 'depth', 'trades', 'orders', 'balances',
-        'filters', 'history', 'ticker', 'ticker_update',
+        'filters', 'history', 'ticker', 'ticker_update', 'ticker_batch',
         'execution_update', 'balance_update'
     ];
 

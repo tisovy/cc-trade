@@ -201,6 +201,11 @@ export const ChartWrapper = (props) => {
 
     // State for order overlays (Y positions)
     const [visibleOrders, setVisibleOrders] = useState([]);
+    // Signatures of the last committed overlays so the per-frame rAF loops below
+    // only call setState when positions/labels actually change (otherwise they
+    // committed a fresh array ~60x/sec, churning React + GC continuously).
+    const lastOrderSigRef = useRef(null);
+    const lastAlertSigRef = useRef(null);
     // State for alert overlays
     const [visibleAlerts, setVisibleAlerts] = useState([]);
     // State for completed order overlays
@@ -632,7 +637,10 @@ export const ChartWrapper = (props) => {
         let rafId;
         const updateOrders = () => {
             if (!candleSeriesRef.current || !chartRef.current || !orders) {
-                setVisibleOrders([]);
+                if (lastOrderSigRef.current !== '') {
+                    lastOrderSigRef.current = '';
+                    setVisibleOrders([]);
+                }
                 return;
             }
 
@@ -676,7 +684,15 @@ export const ChartWrapper = (props) => {
                 };
             }).filter(o => o && o.y !== null); // Filter nulls if any
 
-            setVisibleOrders(nextVisibleOrders);
+            // Only commit when the rendered overlays actually changed (id + y
+            // rounded to 0.5px + label), so idle frames don't trigger re-renders.
+            const sig = nextVisibleOrders
+                .map(o => `${o.orderId}:${Math.round(o.y * 2) / 2}:${o.label}`)
+                .join('|');
+            if (sig !== lastOrderSigRef.current) {
+                lastOrderSigRef.current = sig;
+                setVisibleOrders(nextVisibleOrders);
+            }
             rafId = requestAnimationFrame(updateOrders);
         };
 
@@ -691,7 +707,10 @@ export const ChartWrapper = (props) => {
         let rafId;
         const updateAlerts = () => {
             if (!candleSeriesRef.current || !chartRef.current || !alerts) {
-                setVisibleAlerts([]);
+                if (lastAlertSigRef.current !== '') {
+                    lastAlertSigRef.current = '';
+                    setVisibleAlerts([]);
+                }
                 return;
             }
 
@@ -711,7 +730,14 @@ export const ChartWrapper = (props) => {
                 };
             }).filter(a => a && a.y !== null);
 
-            setVisibleAlerts(nextVisibleAlerts);
+            // Only commit when overlays actually changed (idle frames are skipped).
+            const sig = nextVisibleAlerts
+                .map(a => `${a.id}:${Math.round(a.y * 2) / 2}:${a.priceFormatted}`)
+                .join('|');
+            if (sig !== lastAlertSigRef.current) {
+                lastAlertSigRef.current = sig;
+                setVisibleAlerts(nextVisibleAlerts);
+            }
             rafId = requestAnimationFrame(updateAlerts);
         };
 

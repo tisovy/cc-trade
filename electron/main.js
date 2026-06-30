@@ -25,7 +25,7 @@ process.on('uncaughtException', (error) => {
   // Don't exit - let the app continue running
 });
 
-process.on('unhandledRejection', (reason, promise) => {
+process.on('unhandledRejection', (reason, _promise) => {
   const error = reason instanceof Error ? reason : new Error(String(reason));
   const isNetworkError = error?.code === 'ECONNRESET' ||
                          error?.code === 'ETIMEDOUT' ||

@@ -183,16 +183,25 @@ class RateLimiter {
                 return await fn();
             } catch (err) {
                 lastError = err;
-                const isNetworkError = err?.code === 'ECONNRESET' || 
+                const isNetworkError = err?.code === 'ECONNRESET' ||
                                        err?.code === 'ETIMEDOUT' ||
                                        err?.code === 'ENOTFOUND' ||
                                        err?.code === 'ECONNREFUSED' ||
                                        err?.message?.includes('socket disconnected') ||
                                        err?.message?.includes('network');
-                
-                if (isNetworkError && attempt < maxRetries) {
-                    const retryDelay = 1000 * (attempt + 1); // 1s, 2s, 3s
-                    logger.warn(`Network error (${err.code || 'unknown'}), retrying in ${retryDelay}ms (attempt ${attempt + 1}/${maxRetries})`);
+                // Binance -1021: the signed request's timestamp fell outside the
+                // recvWindow (clock drift or a delayed send). A retry rebuilds the
+                // request with a FRESH timestamp, so it usually succeeds. Safe even
+                // for newOrder/deleteOrder: -1021 means the request was rejected
+                // before any matching, so no duplicate order can result.
+                const isTimestampError = err?.code === -1021 ||
+                                       err?.message?.includes('recvWindow') ||
+                                       err?.message?.includes('Timestamp for this request');
+
+                if ((isNetworkError || isTimestampError) && attempt < maxRetries) {
+                    const retryDelay = isTimestampError ? 250 : 1000 * (attempt + 1); // ts: quick retry; net: 1s,2s
+                    const kind = isTimestampError ? 'timestamp/recvWindow' : 'network';
+                    logger.warn(`${kind} error (${err.code || 'unknown'}), retrying in ${retryDelay}ms (attempt ${attempt + 1}/${maxRetries})`);
                     await new Promise(resolve => setTimeout(resolve, retryDelay));
                     continue;
                 }
@@ -205,6 +214,15 @@ class RateLimiter {
 
 // Global rate limiter instance: 800 weight/min, 500ms delay between requests
 const rateLimiter = new RateLimiter(800, 60000, 500);
+
+// recvWindow for SIGNED REST requests. The @binance/spot lib stamps the request
+// timestamp from Date.now() at send time and does NOT set recvWindow, so it
+// defaults to Binance's strict 5000ms — easily exceeded by modest clock drift or
+// a send delayed behind a busy event loop, yielding -1021 "Timestamp ... outside
+// of the recvWindow". 60000ms is the maximum Binance allows and absorbs latency
+// and clock-behind drift. (A local clock running AHEAD by >1s is rejected
+// regardless of recvWindow — see the startup clock-drift warning.)
+const SIGNED_RECV_WINDOW = 60000;
 
 // WebSocket connection throttle (500ms between new connections)
 let lastWsConnectionTime = 0;
@@ -518,6 +536,33 @@ export function setupBinanceConnection() {
         originalConsoleLog.apply(console, args);
     };
 
+    // One-time clock-drift diagnostic. Signed requests fail with -1021 when the
+    // local clock differs from Binance server time beyond the recvWindow. We can't
+    // override the library's Date.now()-based timestamp, so surface a clear,
+    // actionable warning (recvWindow already absorbs latency / clock-behind drift,
+    // but a clock running AHEAD by >1s is rejected regardless).
+    const checkClockDrift = async () => {
+        if (USE_MOCK || !client) return;
+        try {
+            const sentAt = Date.now();
+            const res = await client.restAPI.sendRequest('/api/v3/time', 'GET');
+            const data = await res.data();
+            const serverTime = Number(data?.serverTime);
+            if (!Number.isFinite(serverTime)) return;
+            // Compare server time to the request's midpoint to cancel out round-trip.
+            const localMid = sentAt + (Date.now() - sentAt) / 2;
+            const drift = Math.round(localMid - serverTime); // +ve = local ahead
+            if (Math.abs(drift) > 1000) {
+                logger.warn(`[clock] Local clock is ${Math.abs(drift)}ms ${drift > 0 ? 'AHEAD of' : 'BEHIND'} Binance server time. Signed requests use recvWindow=${SIGNED_RECV_WINDOW}ms; a clock running AHEAD by >1s causes -1021 "Timestamp ... outside of the recvWindow" errors that recvWindow cannot fix — sync your system clock (e.g. enable NTP).`);
+            } else {
+                logger.info(`[clock] Clock drift vs Binance server time: ${drift}ms (within tolerance).`);
+            }
+        } catch (err) {
+            logger.debug('[clock] Could not check Binance server time:', err?.code || err?.message);
+        }
+    };
+    void checkClockDrift();
+
     const parsedPort = parseInt(process.env.WS_PORT || process.env.WEBSOCKET_PORT || process.env.VITE_WS_PORT || '14477', 10);
     const websocketServerPort = Number.isFinite(parsedPort) ? parsedPort : 14477;
     const server = http.createServer((request, response) => {
@@ -541,6 +586,7 @@ export function setupBinanceConnection() {
     let globalWsConnection = null;      // Ticker stream (!ticker@arr)
     let userDataWsConnection = null;    // User data stream (orders/balances)
     let keepAliveInterval = null;
+    let tickerStallInterval = null;     // Watchdog interval for the ticker stream
     let globalSocketsInitialized = false;
     const rendererConnections = new Set();  // Track all connected renderers
 
@@ -563,7 +609,7 @@ export function setupBinanceConnection() {
         _balanceRefreshInFlight = true;
         try {
             await rateLimiter.execute(async () => {
-                const accountResponse = await client.restAPI.getAccount();
+                const accountResponse = await client.restAPI.getAccount({ recvWindow: SIGNED_RECV_WINDOW });
                 const account = await accountResponse.data();
                 const balances = {};
                 account?.balances?.forEach(b => {
@@ -598,7 +644,7 @@ export function setupBinanceConnection() {
         const fetchBalances = async () => {
             if (!client) return;
             try {
-                const accountResponse = await client.restAPI.getAccount();
+                const accountResponse = await client.restAPI.getAccount({ recvWindow: SIGNED_RECV_WINDOW });
                 const account = await accountResponse.data();
                 const balances = {};
                 account?.balances?.forEach(b => {
@@ -615,7 +661,7 @@ export function setupBinanceConnection() {
         const fetchOpenOrders = async () => {
             if (!client) return;
             try {
-                const openOrdersResponse = await client.restAPI.getOpenOrders({});
+                const openOrdersResponse = await client.restAPI.getOpenOrders({ recvWindow: SIGNED_RECV_WINDOW });
                 const openOrders = await openOrdersResponse.data();
                 emit({ orders: openOrders });
             } catch (error) {
@@ -626,7 +672,7 @@ export function setupBinanceConnection() {
         const fetchTradeHistoryForSymbol = async (symbol) => {
             if (!client) return;
             try {
-                const myTradesResponse = await client.restAPI.myTrades({ symbol, limit: 500 });
+                const myTradesResponse = await client.restAPI.myTrades({ symbol, limit: 500, recvWindow: SIGNED_RECV_WINDOW });
                 const myTrades = await myTradesResponse.data();
                 emit({ history: myTrades });
             } catch (error) {
@@ -695,7 +741,8 @@ export function setupBinanceConnection() {
                     timeInForce: 'GTC',
                     quantity: numericQuantity.toString(),
                     price: numericPrice.toString(),
-                    newOrderRespType: 'FULL'
+                    newOrderRespType: 'FULL',
+                    recvWindow: SIGNED_RECV_WINDOW
                 });
                 const data = await response.data();
                 emit({ execution_update: normalizeExecutionReport(data, { x: 'NEW' }) });
@@ -718,7 +765,7 @@ export function setupBinanceConnection() {
                 return;
             }
             try {
-                const cancelParams = { symbol: targetSymbol };
+                const cancelParams = { symbol: targetSymbol, recvWindow: SIGNED_RECV_WINDOW };
                 if (orderId) {
                     cancelParams.orderId = orderId;
                 } else if (origClientOrderId) {
@@ -876,6 +923,19 @@ export function setupBinanceConnection() {
                     
                     try {
                         await throttleWsConnection();
+                        // Tear down any previous miniTicker socket before opening a
+                        // new one. Reconnect triggers (close handler, watchdog, retry)
+                        // can otherwise overlap and leave an orphaned-but-subscribed
+                        // socket alive whose message handler keeps broadcasting — that
+                        // is what multiplied the per-tick fan-out over a long session.
+                        if (globalWsConnection) {
+                            const previous = globalWsConnection;
+                            globalWsConnection = null;
+                            // disconnect() while still connected sets the library's
+                            // closeInitiated, so it won't self-revive this base; the
+                            // close handler's identity guard ignores its close event.
+                            await safeDisconnect(previous, 'previous global stream');
+                        }
                         // NOTE: '!ticker@arr' is deprecated and Binance no longer
                         // pushes data on it (connects but stays silent), which froze
                         // every 24h-ticker consumer (Balances Sum, P&L, Activity).
@@ -884,6 +944,7 @@ export function setupBinanceConnection() {
                             stream: '!miniTicker@arr'
                         });
                         globalWsReconnecting = false;
+                        const conn = globalWsConnection; // capture for the close guard below
 
                         globalWsConnection.on('message', (data) => {
                             lastTickerMessageAt = Date.now();
@@ -895,6 +956,12 @@ export function setupBinanceConnection() {
                                     ? [payload]
                                     : [];
                             if (!tickerArray.length) return;
+                            // Coalesce the whole push into ONE frame. miniTicker@arr
+                            // delivers hundreds of symbols ~once/sec; emitting one frame
+                            // per symbol caused hundreds of separate setTicker() renders
+                            // per second on the renderer (the UI freeze). One batched
+                            // frame = one renderer render per push.
+                            const batch = [];
                             tickerArray.forEach(ticker => {
                                 if (ticker?.s && (ticker.s.includes("BTC") || ticker.s.includes("USDT"))) {
                                     // miniTicker carries c/o/h/l/q but no 24h %change (P),
@@ -918,14 +985,14 @@ export function setupBinanceConnection() {
                                     };
                                     const upserted = tickerCache.upsert(update);
                                     if (upserted) {
-                                        // Broadcast to ALL connected renderers
-                                        broadcastToRenderers({
-                                            ticker_update: upserted.entry,
-                                            index: upserted.index
-                                        });
+                                        batch.push({ index: upserted.index, entry: upserted.entry });
                                     }
                                 }
                             });
+                            if (batch.length) {
+                                // Broadcast a single coalesced frame to ALL renderers.
+                                broadcastToRenderers({ ticker_batch: batch });
+                            }
                         });
                         globalWsConnection.on('error', (err) => {
                             const isNetworkError = err?.code === 'ECONNRESET' || err?.code === 'ETIMEDOUT' || 
@@ -939,9 +1006,14 @@ export function setupBinanceConnection() {
                         globalWsConnection.on('close', (code, reason) => {
                             const readableReason = typeof reason === 'string' ? reason : reason?.toString() ?? 'no reason';
                             logger.warn(`Global WS closed (${code}): ${readableReason}`);
+                            // Only the CURRENT socket drives reconnect. A superseded
+                            // socket (teardown) or a library-revived zombie base must not
+                            // null the live ref or schedule a reconnect — that double
+                            // path is what spawned competing sockets and churn.
+                            if (globalWsConnection !== conn) return;
                             globalWsConnection = null;
                             // Auto-reconnect on abnormal close if any renderer is connected
-                            if (code !== 1000 && rendererConnections.size > 0) {
+                            if (code !== 1000 && rendererConnections.size > 0 && !globalWsReconnecting) {
                                 logger.info('Scheduling global WS reconnection...');
                                 setTimeout(() => subscribeGlobal(), 5000);
                             }
@@ -967,22 +1039,20 @@ export function setupBinanceConnection() {
                 // Force a reconnect so 24h-ticker consumers (Balances Sum, P&L,
                 // Activity) resume updating. Created once for the global sockets.
                 const TICKER_STALL_MS = 30000;
-                setInterval(() => {
+                // Track the handle so the all-renderers-disconnected cleanup can
+                // clear it. Previously this interval was never cleared, so every
+                // renderer reconnect (which re-runs this init block) spawned another
+                // watchdog while the old ones kept running — each independently
+                // reconnecting the ticker socket and multiplying the fan-out flood.
+                if (tickerStallInterval) clearInterval(tickerStallInterval);
+                tickerStallInterval = setInterval(() => {
                     if (rendererConnections.size === 0) return;
                     if (Date.now() - lastTickerMessageAt <= TICKER_STALL_MS) return;
                     logger.warn(`[ticker-stream] No !ticker@arr data for >${TICKER_STALL_MS / 1000}s — forcing reconnect`);
                     lastTickerMessageAt = Date.now(); // reset to avoid a tight reconnect loop
-                    try {
-                        const closer = typeof globalWsConnection?.disconnect === 'function'
-                            ? globalWsConnection.disconnect.bind(globalWsConnection)
-                            : typeof globalWsConnection?.close === 'function'
-                                ? globalWsConnection.close.bind(globalWsConnection)
-                                : null;
-                        if (closer) closer();
-                    } catch (err) {
-                        logger.debug('[ticker-stream] Error closing stalled socket (ignored):', err?.code || err?.message);
-                    }
-                    globalWsConnection = null;
+                    // subscribeGlobal() tears down the existing socket itself (and the
+                    // superseded socket's close handler no-ops via its identity guard),
+                    // so just trigger it — no second reconnect is scheduled.
                     subscribeGlobal();
                 }, 15000);
 
@@ -1013,10 +1083,22 @@ export function setupBinanceConnection() {
                     logger.info("Listen Key obtained successfully.");
 
                     await throttleWsConnection();
+                    // Tear down any previous user-data socket first so we never run
+                    // two in parallel (which would duplicate executionReport /
+                    // outboundAccountPosition events and leak the old base's timers).
+                    if (userDataWsConnection) {
+                        const previousUserData = userDataWsConnection;
+                        userDataWsConnection = null;
+                        // Drop the old socket's keep-alive (a fresh one is created
+                        // below); its close handler's identity guard will no-op.
+                        if (keepAliveInterval) { clearInterval(keepAliveInterval); keepAliveInterval = null; }
+                        await safeDisconnect(previousUserData, 'previous user data stream');
+                    }
                     userDataWsConnection = await client.websocketStreams.connect({
                         stream: listenKey
                     });
                     userDataReconnecting = false;
+                    const udConn = userDataWsConnection; // capture for the close guard
 
                     logger.info("User Data Stream connected.");
 
@@ -1058,12 +1140,16 @@ export function setupBinanceConnection() {
                         }
                     });
 
-                    userDataWsConnection.on('close', () => {
+                    udConn.on('close', () => {
                         logger.warn("User Data Stream closed");
-                        if (keepAliveInterval) clearInterval(keepAliveInterval);
+                        // Only the CURRENT socket manages the shared keep-alive and
+                        // reconnect; ignore closes from a superseded/zombie socket so
+                        // it can't kill the live keep-alive or duplicate the stream.
+                        if (userDataWsConnection !== udConn) return;
+                        if (keepAliveInterval) { clearInterval(keepAliveInterval); keepAliveInterval = null; }
                         userDataWsConnection = null;
                         // Auto-reconnect on unexpected close if any renderer connected
-                        if (rendererConnections.size > 0) {
+                        if (rendererConnections.size > 0 && !userDataReconnecting) {
                             logger.info('Scheduling User Data Stream reconnection...');
                             setTimeout(() => startUserDataStream(), 5000);
                         }
@@ -1424,14 +1510,24 @@ export function setupBinanceConnection() {
             if (rendererConnections.size === 0) {
                 logger.info("All renderers disconnected, cleaning up shared sockets...");
                 globalSocketsInitialized = false;
-                
+
+                // Stop the ticker watchdog so it can't keep resurrecting the global
+                // socket after teardown. The sockets' close handlers no-op here
+                // because we null the refs before their close events fire (identity
+                // guard) and because rendererConnections is empty.
+                if (tickerStallInterval) {
+                    clearInterval(tickerStallInterval);
+                    tickerStallInterval = null;
+                }
                 if (globalWsConnection) {
-                    void safeDisconnect(globalWsConnection, 'global stream');
+                    const staleGlobal = globalWsConnection;
                     globalWsConnection = null;
+                    void safeDisconnect(staleGlobal, 'global stream');
                 }
                 if (userDataWsConnection) {
-                    void safeDisconnect(userDataWsConnection, 'user data stream');
+                    const staleUserData = userDataWsConnection;
                     userDataWsConnection = null;
+                    void safeDisconnect(staleUserData, 'user data stream');
                 }
                 if (keepAliveInterval) {
                     clearInterval(keepAliveInterval);

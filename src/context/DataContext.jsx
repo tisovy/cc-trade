@@ -956,6 +956,19 @@ export const DataProvider = ({ children }) => {
           return newTicker;
         });
         break;
+      case 'ticker_batch':
+        // payload is an array of { index, entry } — apply all in one render.
+        setTicker(prev => {
+          const newTicker = [...prev];
+          const updates = Array.isArray(payload) ? payload : [];
+          for (const u of updates) {
+            if (u && typeof u.index === 'number') {
+              newTicker[u.index] = { ...newTicker[u.index], ...u.entry };
+            }
+          }
+          return newTicker;
+        });
+        break;
       case 'filters':
         setFilters(prev => {
           if (!payload || typeof payload !== 'object') return prev;
@@ -1228,18 +1241,30 @@ export const DataProvider = ({ children }) => {
     }
 
     // Global message types (ticker) - handle specially
-    if (type === 'ticker' || type === 'ticker_update') {
+    if (type === 'ticker' || type === 'ticker_update' || type === 'ticker_batch') {
       if (type === 'ticker') {
         setTicker(payload);
-        touchChannel('ticker');
+      } else if (type === 'ticker_batch') {
+        // Apply the whole coalesced push in ONE state update (one array copy,
+        // one render) instead of one setTicker per symbol — this is the fix for
+        // the periodic UI freeze under the miniTicker fan-out.
+        setTicker(prev => {
+          const newTicker = [...prev];
+          for (const u of payload) {
+            if (u && typeof u.index === 'number') {
+              newTicker[u.index] = { ...newTicker[u.index], ...u.entry };
+            }
+          }
+          return newTicker;
+        });
       } else {
         setTicker(prev => {
           const newTicker = [...prev];
           newTicker[payload] = { ...newTicker[payload], ...extra };
           return newTicker;
         });
-        touchChannel('ticker');
       }
+      touchChannel('ticker');
       return;
     }
 

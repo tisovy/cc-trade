@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { round, getMarket, getCoin, filterCoins, balanceUpdate } from './utils'
+import { round, getMarket, getCoin, filterCoins, balanceUpdate, parseData } from './utils'
 
 describe('utils', () => {
     describe('round', () => {
@@ -54,6 +54,34 @@ describe('utils', () => {
 
             expect(result.BTC.available).toBe(1.5)
             expect(result.ETH.available).toBe(2)
+        })
+    })
+
+    describe('parseData ticker messages', () => {
+        const panel = { market: 'USDT' }
+
+        it('parses a single ticker_update (legacy per-symbol frame)', () => {
+            const msg = JSON.stringify({ ticker_update: { symbol: 'BTCUSDT', lastPrice: '100' }, index: 3 })
+            const result = parseData(msg, [], [], panel)
+            expect(result.type).toBe('ticker_update')
+            expect(result.payload).toBe(3)
+            expect(result.extra).toEqual({ symbol: 'BTCUSDT', lastPrice: '100' })
+        })
+
+        it('parses a coalesced ticker_batch frame into the array payload', () => {
+            const batch = [
+                { index: 0, entry: { symbol: 'BTCUSDT', lastPrice: '100' } },
+                { index: 5, entry: { symbol: 'ETHUSDT', lastPrice: '50' } },
+            ]
+            const result = parseData(JSON.stringify({ ticker_batch: batch }), [], [], panel)
+            expect(result.type).toBe('ticker_batch')
+            expect(result.payload).toEqual(batch)
+        })
+
+        it('returns an empty batch array when ticker_batch is malformed', () => {
+            const result = parseData(JSON.stringify({ ticker_batch: null }), [], [], panel)
+            expect(result.type).toBe('ticker_batch')
+            expect(result.payload).toEqual([])
         })
     })
 })
