@@ -1,6 +1,7 @@
 import { test, expect, _electron as electron } from '@playwright/test';
 import path from 'path';
 import { WebSocketServer } from 'ws';
+import { waitForAppWindow } from './helpers/electronAppWindow.js';
 
 test.describe('Feature: Quick Switch', () => {
     let electronApp;
@@ -46,8 +47,7 @@ test.describe('Feature: Quick Switch', () => {
             },
         });
 
-        // Wait for window
-        mainWindow = await electronApp.firstWindow();
+        mainWindow = await waitForAppWindow(electronApp);
 
         // Inject MOCK_WS_URL
         await mainWindow.context().addInitScript((port) => {

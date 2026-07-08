@@ -1,6 +1,7 @@
 import { test, expect, _electron as electron } from '@playwright/test';
 import path from 'path';
 import { WebSocketServer } from 'ws';
+import { waitForAppWindow } from './helpers/electronAppWindow.js';
 
 test.describe('Feature: Safe Order Reduction', () => {
     let electronApp;
@@ -62,7 +63,7 @@ test.describe('Feature: Safe Order Reduction', () => {
             },
         });
 
-        mainWindow = await electronApp.firstWindow();
+        mainWindow = await waitForAppWindow(electronApp);
         await mainWindow.context().addInitScript((port) => {
             window.MOCK_WS_URL = `ws://localhost:${port}`;
             localStorage.setItem('MOCK_WS_URL', `ws://localhost:${port}`);

@@ -1,6 +1,7 @@
 import { test, expect, _electron as electron } from '@playwright/test';
 import path from 'path';
 import { WebSocketServer } from 'ws';
+import { waitForAppWindow } from './helpers/electronAppWindow.js';
 
 test.describe('Trading Flow (Mocked)', () => {
     let electronApp;
@@ -118,27 +119,7 @@ test.describe('Trading Flow (Mocked)', () => {
             },
         });
 
-        // Wait for the app window
-        let appWindow = null;
-        for (let i = 0; i < 20; i++) {
-            const windows = await electronApp.windows();
-            for (const win of windows) {
-                if (await win.title() === 'CC-trade') {
-                    appWindow = win;
-                    break;
-                }
-            }
-            if (appWindow) break;
-            await new Promise(r => setTimeout(r, 500));
-        }
-
-        if (!appWindow) {
-            // Fallback to first window if title not found (e.g. loading)
-            console.log('CC-trade window not found, using first window');
-            mainWindow = await electronApp.firstWindow();
-        } else {
-            mainWindow = appWindow;
-        }
+        mainWindow = await waitForAppWindow(electronApp, { pollInterval: 500 });
 
         // Inject MOCK_WS_URL before page load
         await mainWindow.context().addInitScript((port) => {
