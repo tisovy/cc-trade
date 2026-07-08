@@ -5,6 +5,11 @@ import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { Buffer } from 'buffer';
 import { ChannelManager, CHANNEL_TYPES } from './channel-manager.js';
+import {
+    LOCAL_WEBSOCKET_HOST,
+    createLocalWebSocketAccess,
+    validateLocalWebSocketRequest,
+} from './local-websocket-access.js';
 
 const LOG_LEVELS = { error: 0, warn: 1, info: 2, debug: 3 };
 const activeLogLevel = LOG_LEVELS[(process.env.LOG_LEVEL || 'info').toLowerCase()] ?? LOG_LEVELS.info;
@@ -445,7 +450,7 @@ const safeDisconnect = async (socket, label) => {
     }
 };
 
-export function setupBinanceConnection() {
+export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSocketAccess() } = {}) {
     const APIKEY = process.env.BK;
     const APISECRET = process.env.BS;
     const USE_MOCK = !APIKEY;
@@ -565,13 +570,14 @@ export function setupBinanceConnection() {
 
     const parsedPort = parseInt(process.env.WS_PORT || process.env.WEBSOCKET_PORT || process.env.VITE_WS_PORT || '14477', 10);
     const websocketServerPort = Number.isFinite(parsedPort) ? parsedPort : 14477;
+    const websocketServerHost = localWebSocketAccess.host || LOCAL_WEBSOCKET_HOST;
     const server = http.createServer((request, response) => {
         response.writeHead(404);
         response.end();
     });
 
-    server.listen(websocketServerPort, () => {
-        logger.info("Websocket is listening on port: " + websocketServerPort);
+    server.listen(websocketServerPort, websocketServerHost, () => {
+        logger.info(`Websocket is listening on ${websocketServerHost}:${websocketServerPort}`);
     });
 
     const wsServer = new WebSocketServer({
@@ -628,6 +634,13 @@ export function setupBinanceConnection() {
 
     wsServer.on("request", (request) => {
         logger.info("Connection from origin " + request.origin + ".");
+        const accessCheck = validateLocalWebSocketRequest(request, localWebSocketAccess);
+        if (!accessCheck.allowed) {
+            logger.warn(`Rejected local WebSocket request: ${accessCheck.reason}`);
+            request.reject(accessCheck.status, accessCheck.reason);
+            return;
+        }
+
         const connection = request.accept(null, request.origin);
         logger.info("Connection accepted.");
         

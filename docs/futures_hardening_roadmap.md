@@ -34,7 +34,7 @@ Goal: reduce operational and security risk without changing the visible workflow
 
 1. [x] Remove analytics secret exposure from the renderer bundle and localStorage.
 2. [x] Gate `openDevTools()` behind a development flag so packaged and E2E builds do not open DevTools by default.
-3. [ ] Add local WebSocket access control:
+3. [x] Add local WebSocket access control:
    - bind explicitly to localhost;
    - validate origin where possible;
    - add a per-session token/nonce between Electron main and renderer.

@@ -3,6 +3,10 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import { shouldOpenDevTools } from './devtools.js'
 import { setupBinanceConnection } from './services/binance-connection.js'
+import {
+  createLocalWebSocketAccess,
+  createRendererWebSocketArguments,
+} from './services/local-websocket-access.js'
 
 const analyticsSecret = process.env.ANALYTICS_SECRET || '';
 if (process.env.ANALYTICS_SECRET) {
@@ -52,7 +56,10 @@ process.on('unhandledRejection', (reason, _promise) => {
   // Don't exit - let the app continue running
 });
 
-setupBinanceConnection();
+const localWebSocketAccess = createLocalWebSocketAccess();
+const rendererWebSocketArguments = createRendererWebSocketArguments(localWebSocketAccess);
+
+setupBinanceConnection({ localWebSocketAccess });
 
 // Get proxy URL from environment (supports http_proxy, HTTP_PROXY, https_proxy, HTTPS_PROXY)
 const getSystemProxy = () => {
@@ -110,6 +117,7 @@ function createWindow() {
       nodeIntegration: true,
       contextIsolation: false,
       sandbox: false,
+      additionalArguments: rendererWebSocketArguments,
     },
   })
 

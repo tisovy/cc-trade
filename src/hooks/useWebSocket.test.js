@@ -38,6 +38,18 @@ describe('useWebSocket', () => {
         expect(global.WebSocket).toHaveBeenCalledWith(url)
     })
 
+    it('should redact local websocket token in connection logs', () => {
+        const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {})
+        const url = 'ws://127.0.0.1:14477/?token=abc123'
+
+        renderHook(() => useWebSocket(url, {}, vi.fn()))
+
+        expect(global.WebSocket).toHaveBeenCalledWith(url)
+        expect(logSpy).toHaveBeenCalledWith('Connecting to WebSocket:', 'ws://127.0.0.1:14477/?token=redacted')
+
+        logSpy.mockRestore()
+    })
+
     it('should send detail request on open', () => {
         const detail = {
             symbol: 'BTCUSDT',

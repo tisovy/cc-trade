@@ -4,8 +4,15 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import { shouldOpenDevTools } from './devtools.js'
 import { setupBinanceConnection } from './services/binance-connection.js'
+import {
+    createLocalWebSocketAccess,
+    createRendererWebSocketArguments,
+} from './services/local-websocket-access.js'
 
-setupBinanceConnection();
+const localWebSocketAccess = createLocalWebSocketAccess();
+const rendererWebSocketArguments = createRendererWebSocketArguments(localWebSocketAccess);
+
+setupBinanceConnection({ localWebSocketAccess });
 
 const isWaylandSession = () => process.env.XDG_SESSION_TYPE === 'wayland' || !!process.env.WAYLAND_DISPLAY;
 
@@ -29,6 +36,7 @@ function createWindow() {
             nodeIntegration: true,
             contextIsolation: false,
             sandbox: false,
+            additionalArguments: rendererWebSocketArguments,
         },
     })
 

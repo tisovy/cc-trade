@@ -3,13 +3,16 @@
 ## Electron Main Process (`electron/main.js`)
 
 - Initializes Electron window (1200×800) and opens DevTools only during Vite dev-server runs or with `ELECTRON_OPEN_DEVTOOLS=true`.
+- Creates a per-session local WebSocket token, passes it to `setupBinanceConnection()`, and exposes it to the renderer through Electron `additionalArguments`.
 - Imports and executes `setupBinanceConnection()` before creating the BrowserWindow so the WebSocket server is always ready.
 - Loads the Vite dev server URL during development, otherwise serves the built `dist/index.html`.
 
 ## Binance Connection Service (`electron/services/binance-connection.js`)
 
 ### Responsibilities
-1. **WebSocket Server**: Creates an HTTP server + WebSocketServer on `process.env.WS_PORT` (defaults to `14477`).
+1. **WebSocket Server**: Creates an HTTP server + WebSocketServer on `127.0.0.1` and `process.env.WS_PORT` (defaults to `14477`).
+   - Incoming WebSocket upgrades are accepted only after local-origin validation where the browser supplies `Origin`.
+   - Electron main and renderer share a per-session token; the renderer sends it as a local WebSocket query parameter before the legacy or channel message protocol starts.
 2. **Mock Mode**: When `BK/BS` are missing we emit synthetic ticker/depth/trade/chart data every second so the renderer can boot without hitting Binance.
 3. **Live Mode**: Uses `@binance/spot` REST + WebSocket Streams to hydrate:
    - 24h ticker snapshots + incremental updates for the Activity panel.

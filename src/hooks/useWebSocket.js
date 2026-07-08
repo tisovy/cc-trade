@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { createSubscribeRequest, createUnsubscribeRequest, normalizeMessage, CHANNEL_TYPES } from '../utils/channels';
+import { redactLocalWebSocketAccess } from '../utils/localWebSocketAccess';
 
 /**
  * WebSocket hook with channel subscription support
@@ -153,7 +154,7 @@ const useWebSocket = (url, detailSubscription, handleMessage) => {
 
     useEffect(() => {
         const connect = () => {
-            console.log('Connecting to WebSocket:', url);
+            console.log('Connecting to WebSocket:', redactLocalWebSocketAccess(url));
             const ws = new WebSocket(url);
             connectionRef.current = ws;
 

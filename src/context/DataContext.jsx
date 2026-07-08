@@ -22,6 +22,11 @@ import {
   requestAnalyticsCombined,
   requestActivityMetrics,
 } from '../utils/analytics';
+import {
+  getRendererLocalWebSocketAccess,
+  redactLocalWebSocketAccess,
+  withLocalWebSocketAccess,
+} from '../utils/localWebSocketAccess';
 
 
 
@@ -280,10 +285,12 @@ export const DataProvider = ({ children }) => {
 
   // Resolve WS_URL at runtime to allow for mocking
   const WS_PORT = import.meta.env.VITE_WS_PORT || 14477;
+  const localWebSocketAccess = getRendererLocalWebSocketAccess();
   // Check localStorage, window, and import.meta.env
   const MOCK_URL = localStorage.getItem('MOCK_WS_URL') || window.MOCK_WS_URL || import.meta.env.MOCK_WS_URL;
-  const WS_URL = MOCK_URL || import.meta.env.VITE_WS_URL || `ws://localhost:${WS_PORT}`;
-  console.log('Using WebSocket URL:', WS_URL, 'Mock:', MOCK_URL);
+  const configuredWsUrl = MOCK_URL || import.meta.env.VITE_WS_URL || `ws://${localWebSocketAccess.host}:${WS_PORT}`;
+  const WS_URL = withLocalWebSocketAccess(configuredWsUrl, localWebSocketAccess);
+  console.log('Using WebSocket URL:', redactLocalWebSocketAccess(WS_URL, localWebSocketAccess.tokenParam), 'Mock:', MOCK_URL);
 
   const initialPanelState = (() => {
     const storedPanel = readStorage(STORAGE_KEYS.PANEL, null);
@@ -1400,5 +1407,3 @@ export const useDataContext = () => {
   }
   return context;
 };
-
-
