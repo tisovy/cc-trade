@@ -39,7 +39,7 @@ Goal: reduce operational and security risk without changing the visible workflow
    - validate origin where possible;
    - add a per-session token/nonce between Electron main and renderer.
 4. [x] Add command-level validation and rejection messages in the backend for malformed order/cancel requests.
-5. [ ] Keep current spot order behavior unchanged, including the `0.999` quantity reduction.
+5. [x] Keep current spot order behavior unchanged, including the `0.999` quantity reduction.
 
 Acceptance:
 
