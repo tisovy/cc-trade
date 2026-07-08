@@ -3,6 +3,10 @@ import path from 'path';
 import { WebSocketServer } from 'ws';
 import { waitForAppWindow } from './helpers/electronAppWindow.js';
 import { reloadWithE2eLocalStorage } from './helpers/e2eLocalStorage.js';
+import {
+    attachMockWebSocketHandlers,
+    createMockMarketState,
+} from './helpers/mockWebSocketMessages.js';
 
 test.describe('Feature: Quick Switch', () => {
     let electronApp;
@@ -13,27 +17,14 @@ test.describe('Feature: Quick Switch', () => {
     test.beforeAll(async () => {
         // 1. Start Mock WebSocket Server
         wss = new WebSocketServer({ port: MOCK_PORT });
-        wss.on('connection', (ws) => {
-            ws.send(JSON.stringify({
-                balances: { 'USDT': { available: '1000.00', onOrder: '0.00' } },
-                orders: [],
-                filters: { 'BTCUSDT': { tickSize: '0.01', stepSize: '0.000001' } },
-                ticker: [{ symbol: 'BTCUSDT', lastPrice: '50000.00' }]
-            }));
+        const marketState = createMockMarketState({
+            balances: { 'USDT': { available: '1000.00', onOrder: '0.00' } },
+            filters: { 'BTCUSDT': { tickSize: '0.01', stepSize: '0.000001' } },
+            ticker: [{ symbol: 'BTCUSDT', lastPrice: '50000.00', priceChangePercent: '1.5', quoteVolume: '100000000' }],
+        });
 
-            ws.on('message', (message) => {
-                const payload = JSON.parse(message);
-                if (payload.request === 'chart') {
-                    ws.send(JSON.stringify({
-                        type: 'chart',
-                        payload: [
-                            { time: Date.now() - 60000, open: 50000, high: 51000, low: 49000, close: 50500 },
-                            { time: Date.now(), open: 50500, high: 51500, low: 50000, close: 51000 }
-                        ],
-                        meta: { symbol: 'BTCUSDT', interval: '1h' }
-                    }));
-                }
-            });
+        wss.on('connection', (ws) => {
+            attachMockWebSocketHandlers(ws, marketState);
         });
 
         // 2. Launch Electron

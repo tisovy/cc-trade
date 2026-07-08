@@ -3,53 +3,42 @@ import path from 'path';
 import { WebSocketServer } from 'ws';
 import { waitForAppWindow } from './helpers/electronAppWindow.js';
 import { reloadWithE2eLocalStorage } from './helpers/e2eLocalStorage.js';
+import {
+    attachMockWebSocketHandlers,
+    createMockMarketState,
+} from './helpers/mockWebSocketMessages.js';
 
 test.describe('Feature: Safe Order Reduction', () => {
     let electronApp;
     let mainWindow;
     let wss;
+    let lastOrder;
     const MOCK_PORT = 54323;
 
     test.beforeAll(async () => {
         wss = new WebSocketServer({ port: MOCK_PORT });
+        const marketState = createMockMarketState({
+            balances: { 'USDT': { available: '2000000.00', onOrder: '0.00' } },
+            filters: { 'BTCUSDT': { tickSize: '0.01', stepSize: '0.000001', quantityPrecision: 6 } },
+            ticker: [{ symbol: 'BTCUSDT', lastPrice: '50000.00', priceChangePercent: '1.5', quoteVolume: '100000000' }],
+            depth: {
+                bids: { '12345.00': '1.0' },
+                asks: { '12346.00': '1.0' },
+            },
+        });
+
         wss.on('connection', (ws) => {
-            ws.send(JSON.stringify({
-                balances: { 'USDT': { available: '2000000.00', onOrder: '0.00' } },
-                orders: [],
-                filters: { 'BTCUSDT': { tickSize: '0.01', stepSize: '0.000001', quantityPrecision: 6 } },
-                ticker: [{ symbol: 'BTCUSDT', lastPrice: '50000.00' }]
-            }));
-
-            // Send Depth
-            ws.send(JSON.stringify({
-                depth: {
-                    bids: { '12345.00': '1.0' },
-                    asks: { '12346.00': '1.0' }
-                },
-                symbol: 'BTCUSDT'
-            }));
-
-            ws.on('message', (message) => {
-                const payload = JSON.parse(message);
-                if (payload.request === 'chart') {
-                    ws.send(JSON.stringify({
-                        type: 'chart',
-                        payload: [
-                            { time: Date.now() - 60000, open: 50000, high: 51000, low: 49000, close: 50500 },
-                            { time: Date.now(), open: 50500, high: 51500, low: 50000, close: 51000 }
-                        ],
-                        meta: { symbol: 'BTCUSDT', interval: '1h' }
-                    }));
-                }
-                if (payload.request === 'buyOrder') {
+            attachMockWebSocketHandlers(ws, marketState, {
+                onLegacyOrder: (payload, mockWs) => {
+                    lastOrder = payload.data;
                     // Echo back the received quantity for verification
-                    ws.send(JSON.stringify({
+                    mockWs.sendJson({
                         test_echo: {
                             quantity: payload.data.quantity,
                             price: payload.data.price
                         }
-                    }));
-                }
+                    });
+                },
             });
         });
 
@@ -93,23 +82,7 @@ test.describe('Feature: Safe Order Reduction', () => {
 
         const buyButton = modal.locator('[data-testid="submit-order-btn"]');
 
-        // Note: Old echoPromise approach removed - using direct client listener below instead
-
-        // Better approach: Capture console logs or just wait for a specific response if the app handles it.
-        // But the app doesn't handle 'test_echo'.
-        // So we need to intercept the request in the test or use the echo to verify.
-        // Since we can't easily read the ws messages from the test process without a client,
-        // let's rely on the mock server storing the last received order.
-
-        let lastOrder = null;
-        wss.clients.forEach(client => {
-            client.on('message', msg => {
-                const payload = JSON.parse(msg);
-                if (payload.request === 'buyOrder') {
-                    lastOrder = payload.data;
-                }
-            });
-        });
+        lastOrder = null;
 
         await buyButton.click();
 

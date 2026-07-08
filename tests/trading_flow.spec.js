@@ -3,6 +3,10 @@ import path from 'path';
 import { WebSocketServer } from 'ws';
 import { waitForAppWindow } from './helpers/electronAppWindow.js';
 import { reloadWithE2eLocalStorage } from './helpers/e2eLocalStorage.js';
+import {
+    attachMockWebSocketHandlers,
+    createMockMarketState,
+} from './helpers/mockWebSocketMessages.js';
 
 test.describe('Trading Flow (Mocked)', () => {
     let electronApp;
@@ -13,79 +17,63 @@ test.describe('Trading Flow (Mocked)', () => {
     test.beforeAll(async () => {
         // 1. Start Mock WebSocket Server
         wss = new WebSocketServer({ port: MOCK_PORT });
+        const marketState = createMockMarketState({
+            balances: { 'USDT': { available: '2000.00', onOrder: '0.00' }, 'BTC': { available: '0.5', onOrder: '0.0' } },
+            filters: { 'BTCUSDT': { tickSize: '0.01', stepSize: '0.000001', minQty: '0.000001', minNotional: '10' } },
+            ticker: [{ symbol: 'BTCUSDT', lastPrice: '50000.00', priceChangePercent: '1.5', quoteVolume: '100000000' }],
+            depth: {
+                bids: { '12345.00': '1.0', '12344.00': '2.0' },
+                asks: { '12346.00': '1.0', '12347.00': '2.0' },
+            },
+        });
+
         wss.on('connection', (ws) => {
             console.log('Mock WS Connected');
 
-            // Send Initial State immediately on connection
-            ws.send(JSON.stringify({
-                balances: { 'USDT': { available: '2000.00', onOrder: '0.00' }, 'BTC': { available: '0.5', onOrder: '0.0' } },
-                orders: [],
-                filters: { 'BTCUSDT': { tickSize: '0.01', stepSize: '0.000001', minQty: '0.000001', minNotional: '10' } },
-                ticker: [{ symbol: 'BTCUSDT', lastPrice: '50000.00' }]
-            }));
+            attachMockWebSocketHandlers(ws, marketState, {
+                onLegacyOrder: (payload, mockWs) => {
+                    console.log('Received:', payload);
 
-            // Send Depth
-            ws.send(JSON.stringify({
-                depth: {
-                    bids: { '12345.00': '1.0', '12344.00': '2.0' },
-                    asks: { '12346.00': '1.0', '12347.00': '2.0' }
-                },
-                symbol: 'BTCUSDT'
-            }));
-
-            // Send Chart Data
-            ws.send(JSON.stringify({
-                chart: [
-                    { time: Date.now() - 60000, open: '49900', high: '50100', low: '49800', close: '50000', volume: '10' },
-                    { time: Date.now(), open: '50000', high: '50200', low: '49900', close: '50100', volume: '5' }
-                ],
-                symbol: 'BTCUSDT',
-                interval: '1h'
-            }));
-
-            ws.on('message', (message) => {
-                const payload = JSON.parse(message);
-                console.log('Received:', payload);
-
-                if (payload.request === 'buyOrder') {
-                    // App reduces quantity by 0.1% (0.1 -> 0.0999)
-                    // Price comes from ASK row (12346)
-                    if (payload.data.price === '12346' && (payload.data.quantity === '0.1' || payload.data.quantity === '0.0999')) {
-                        // Send Execution Report (NEW)
-                        ws.send(JSON.stringify({
-                            execution_update: {
-                                e: 'executionReport',
-                                s: 'BTCUSDT',
-                                S: 'BUY',
-                                o: 'LIMIT',
-                                x: 'NEW',
-                                X: 'NEW',
-                                i: 12345,
-                                p: '12346',
-                                q: '0.0999',
-                                z: '0.0',
-                                T: Date.now()
-                            }
-                        }));
-                        // Update Orders List
-                        ws.send(JSON.stringify({
-                            orders: [{
-                                symbol: 'BTCUSDT',
-                                orderId: 12345,
-                                price: '12346',
-                                origQty: '0.0999',
-                                side: 'BUY',
-                                type: 'LIMIT',
-                                status: 'NEW',
-                                time: Date.now()
-                            }]
-                        }));
+                    if (payload.request === 'buyOrder') {
+                        // App reduces quantity by 0.1% (0.1 -> 0.0999)
+                        // Price comes from ASK row (12346)
+                        if (payload.data.price === '12346' && (payload.data.quantity === '0.1' || payload.data.quantity === '0.0999')) {
+                            // Send Execution Report (NEW)
+                            mockWs.sendJson({
+                                execution_update: {
+                                    e: 'executionReport',
+                                    s: 'BTCUSDT',
+                                    S: 'BUY',
+                                    o: 'LIMIT',
+                                    x: 'NEW',
+                                    X: 'NEW',
+                                    i: 12345,
+                                    p: '12346',
+                                    q: '0.0999',
+                                    z: '0.0',
+                                    T: Date.now()
+                                }
+                            });
+                            // Update Orders List
+                            mockWs.sendJson({
+                                orders: [{
+                                    symbol: 'BTCUSDT',
+                                    orderId: 12345,
+                                    price: '12346',
+                                    origQty: '0.0999',
+                                    executedQty: '0',
+                                    side: 'BUY',
+                                    type: 'LIMIT',
+                                    status: 'NEW',
+                                    time: Date.now()
+                                }]
+                            });
+                        }
                     }
-                }
-
-                if (payload.request === 'cancelOrder') {
+                },
+                onLegacyCancel: (_payload, mockWs) => {
                     // Send Execution Report (CANCELED)
-                    ws.send(JSON.stringify({
+                    mockWs.sendJson({
                         execution_update: {
                             e: 'executionReport',
                             s: 'BTCUSDT',
@@ -99,12 +87,12 @@ test.describe('Trading Flow (Mocked)', () => {
                             z: '0.0',
                             T: Date.now()
                         }
-                    }));
+                    });
                     // Update Orders List (Empty)
-                    ws.send(JSON.stringify({
+                    mockWs.sendJson({
                         orders: []
-                    }));
-                }
+                    });
+                },
             });
         });
 
