@@ -10,6 +10,10 @@ import {
     createLocalWebSocketAccess,
     validateLocalWebSocketRequest,
 } from './local-websocket-access.js';
+import {
+    validateLegacyCancelCommand,
+    validateLegacyOrderCommand,
+} from './trading-command-validation.js';
 
 const LOG_LEVELS = { error: 0, warn: 1, info: 2, debug: 3 };
 const activeLogLevel = LOG_LEVELS[(process.env.LOG_LEVEL || 'info').toLowerCase()] ?? LOG_LEVELS.info;
@@ -701,49 +705,45 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
         };
 
         const handleOrderPlacement = async (payload, requestType = 'buyOrder') => {
+            const validation = validateLegacyOrderCommand(payload, {
+                requestType,
+                selectedSymbol: panelSettings?.selected,
+            });
+            if (!validation.ok) {
+                logger.warn(`[orders] Rejected ${requestType}:`, validation.rejection.command_rejected);
+                emit(validation.rejection);
+                return;
+            }
+
+            const {
+                symbol,
+                side: resolvedSide,
+                quantityValue,
+                priceValue,
+                numericQuantity,
+                numericPrice,
+            } = validation.command;
+
             if (USE_MOCK) {
                 logger.info(`[MOCK] Order Placed: ${requestType}`, payload);
                 emit({
                     execution_update: {
                         e: 'executionReport',
-                        s: payload.symbol || panelSettings?.selected,
-                        S: (payload.side || (requestType === 'sellOrder' ? 'SELL' : 'BUY'))?.toUpperCase(),
+                        s: symbol,
+                        S: resolvedSide,
                         o: 'LIMIT',
                         x: 'NEW',
                         X: 'NEW',
                         i: Date.now(),
-                        p: payload.price ?? payload.p,
-                        q: payload.quantity ?? payload.qty,
+                        p: priceValue,
+                        q: quantityValue,
                         z: '0.0',
                         T: Date.now()
                     }
                 });
                 return;
             }
-            if (!client || !payload) return;
-            const quantityValue = payload.quantity ?? payload.qty;
-            const priceValue = payload.price ?? payload.p;
-            const symbol = payload.symbol || panelSettings?.selected;
-            const resolvedSide = (payload.side || (requestType === 'sellOrder' ? 'SELL' : 'BUY'))?.toUpperCase();
-            const numericQuantity = Number(quantityValue);
-            const numericPrice = Number(priceValue);
-
-            if (
-                !symbol ||
-                !resolvedSide ||
-                !Number.isFinite(numericQuantity) ||
-                numericQuantity <= 0 ||
-                !Number.isFinite(numericPrice) ||
-                numericPrice <= 0
-            ) {
-                logger.warn("Order payload missing required fields:", {
-                    symbol,
-                    side: resolvedSide,
-                    quantity: quantityValue,
-                    price: priceValue
-                });
-                return;
-            }
+            if (!client) return;
 
             try {
                 logger.info(`[orders] ${resolvedSide} ${symbol} qty=${numericQuantity} price=${numericPrice}`);
@@ -769,14 +769,23 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
         };
 
         const handleCancelOrder = async (payload) => {
-            if (!client || !payload) return;
-            const targetSymbol = payload.symbol || panelSettings?.selected;
-            const orderId = payload.orderId || payload.id;
-            const origClientOrderId = payload.origClientOrderId || payload.clientOrderId;
-            if (!targetSymbol || (!orderId && !origClientOrderId)) {
-                logger.warn("Cancel payload missing symbol or orderId:", payload);
+            const validation = validateLegacyCancelCommand(payload, {
+                selectedSymbol: panelSettings?.selected,
+            });
+            if (!validation.ok) {
+                logger.warn('[orders] Rejected cancelOrder:', validation.rejection.command_rejected);
+                emit(validation.rejection);
                 return;
             }
+            if (!client) return;
+
+            const {
+                symbol: targetSymbol,
+                orderId,
+                origClientOrderId,
+                newClientOrderId,
+            } = validation.command;
+
             try {
                 const cancelParams = { symbol: targetSymbol, recvWindow: SIGNED_RECV_WINDOW };
                 if (orderId) {
@@ -784,8 +793,8 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
                 } else if (origClientOrderId) {
                     cancelParams.origClientOrderId = origClientOrderId;
                 }
-                if (payload.newClientOrderId) {
-                    cancelParams.newClientOrderId = payload.newClientOrderId;
+                if (newClientOrderId) {
+                    cancelParams.newClientOrderId = newClientOrderId;
                 }
 
                 logger.info(`[orders] Cancel ${targetSymbol} orderId=${cancelParams.orderId ?? cancelParams.origClientOrderId}`);
