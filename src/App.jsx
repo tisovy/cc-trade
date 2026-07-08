@@ -20,6 +20,11 @@ import { AlertProvider } from './context/AlertProvider';
 import { useAlertContext } from './hooks/useAlertContext';
 import { NotificationProvider } from './context/NotificationProvider'
 import { calculatePrecision } from './utils/precision';
+import {
+  createSpotCancelOrderCommand,
+  createSpotPlaceOrderCommand,
+  toLegacyTradingRequest,
+} from './utils/tradingCommands';
 
 // View types
 const VIEWS = {
@@ -258,12 +263,11 @@ function AppShell() {
     }
 
     if (type === 'cancel') {
-      const payload = {
+      const command = createSpotCancelOrderCommand({
         symbol: data.symbol,
         orderId: data.id || data.orderId,
-        id: data.id || data.orderId,
-      };
-      wsConnection.send(JSON.stringify({ request: 'cancelOrder', data: payload }));
+      });
+      wsConnection.send(JSON.stringify(toLegacyTradingRequest(command)));
       return;
     }
 
@@ -285,18 +289,13 @@ function AppShell() {
       const factor = Math.pow(10, quantityDecimals);
       const finalQuantity = Math.floor(reducedQuantity * factor) / factor;
 
-      const payload = {
+      const command = createSpotPlaceOrderCommand({
         symbol: data.symbol,
         side: data.side,
         price: Number(data.price).toString(),
         quantity: finalQuantity.toString(),
-      };
-      wsConnection.send(
-        JSON.stringify({
-          request: data.side === 'SELL' ? 'sellOrder' : 'buyOrder',
-          data: payload,
-        })
-      );
+      });
+      wsConnection.send(JSON.stringify(toLegacyTradingRequest(command)));
       return;
     }
   }, [wsConnection, filters]);

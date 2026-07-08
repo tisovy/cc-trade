@@ -1,3 +1,5 @@
+import { TRADING_COMMAND_ACTIONS } from '../../src/utils/tradingCommands.js';
+
 const DEFAULT_SYMBOL = 'BTCUSDT';
 const DEFAULT_INTERVAL = '1h';
 
@@ -287,6 +289,18 @@ const handleChannelProtocolMessage = (payload, marketState, state, api, handlers
             api.sendDepthViewSnapshot(payload.symbol || marketState.symbol);
             break;
         case 'disable_depth_view':
+            break;
+        case TRADING_COMMAND_ACTIONS.PLACE_ORDER:
+            state.lastOrder = payload;
+            handlers.onTypedOrder?.(payload, api);
+            break;
+        case TRADING_COMMAND_ACTIONS.CANCEL_ORDER:
+            handlers.onTypedCancel?.(payload, api);
+            break;
+        case TRADING_COMMAND_ACTIONS.REPLACE_ORDER:
+        case TRADING_COMMAND_ACTIONS.CANCEL_ALL:
+        case TRADING_COMMAND_ACTIONS.ACCOUNT_REFRESH:
+            handlers.onTypedCommand?.(payload, api);
             break;
         case 'order':
             state.lastOrder = payload.data || payload;

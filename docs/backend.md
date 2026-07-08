@@ -90,8 +90,13 @@ The backend implements rate limiting to comply with Binance API restrictions:
 | Renderer → Service | `{ action: 'disable_depth_view' }` | Disable trade + depth streams (call when leaving DepthView). |
 | Renderer → Service | `{ action: 'order', type: 'buy'|'sell', symbol, price, quantity }` | Place an order. |
 | Renderer → Service | `{ action: 'cancelOrder', orderId, symbol }` | Cancel an order. |
+| Renderer → Service | `{ action: 'trade.placeOrder', version: 1, marketType: 'spot', accountId, clientOrderId, symbol, side, orderType: 'LIMIT', timeInForce: 'GTC', price, quantity }` | Versioned spot order command. Supported for the current LIMIT/GTC spot path. |
+| Renderer → Service | `{ action: 'trade.cancelOrder', version: 1, marketType: 'spot', accountId, clientOrderId, symbol, orderId \| origClientOrderId }` | Versioned spot cancel command. `clientOrderId` is command identity; `origClientOrderId` targets the exchange order. |
+| Renderer → Service | `{ action: 'account.refresh', version: 1, marketType: 'spot', accountId, symbol? }` | Refresh spot account state. |
 | Service → Renderer | `{ channelId, type: 'chart', symbol, interval, payload, extra }` | Chart data with channel metadata. |
 | Service → Renderer | `{ channelId: 'global', type: 'ticker', payload }` | Global ticker updates. |
+
+`trade.replaceOrder` and `trade.cancelAll` are part of the versioned command family but currently return explicit backend rejections until their execution semantics are implemented.
 
 **Legacy Protocol** (still supported for backward compatibility):
 

@@ -1,9 +1,14 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import {
     createCommandRejection,
+    validateTypedTradingCommand,
     validateLegacyCancelCommand,
     validateLegacyOrderCommand,
 } from './trading-command-validation.js';
+import {
+    TRADE_COMMAND_VERSION,
+    TRADING_COMMAND_ACTIONS,
+} from '../../src/utils/tradingCommands.js';
 
 describe('backend trading command validation', () => {
     beforeEach(() => {
@@ -167,6 +172,190 @@ describe('backend trading command validation', () => {
                     request: 'cancelOrder',
                     code: 'INVALID_CANCEL_TARGET',
                 },
+            },
+        });
+    });
+
+    it('accepts typed spot place-order commands and resolves the legacy handler target', () => {
+        expect(validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.PLACE_ORDER,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'spot',
+            accountId: 'default',
+            clientOrderId: 'client-123',
+            symbol: 'BTCUSDT',
+            side: 'BUY',
+            orderType: 'LIMIT',
+            timeInForce: 'GTC',
+            price: '50000.00',
+            quantity: '0.010000',
+        })).toEqual({
+            ok: true,
+            command: {
+                action: TRADING_COMMAND_ACTIONS.PLACE_ORDER,
+                version: TRADE_COMMAND_VERSION,
+                marketType: 'spot',
+                accountId: 'default',
+                clientOrderId: 'client-123',
+                symbol: 'BTCUSDT',
+                side: 'BUY',
+                orderType: 'LIMIT',
+                timeInForce: 'GTC',
+                priceValue: '50000.00',
+                quantityValue: '0.010000',
+                numericPrice: 50000,
+                numericQuantity: 0.01,
+                requestType: 'buyOrder',
+                orderPayload: {
+                    symbol: 'BTCUSDT',
+                    side: 'BUY',
+                    price: '50000.00',
+                    quantity: '0.010000',
+                },
+            },
+        });
+    });
+
+    it('accepts typed spot cancel commands without treating clientOrderId as the cancel target', () => {
+        expect(validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.CANCEL_ORDER,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'spot',
+            accountId: 'default',
+            clientOrderId: 'command-client-id',
+            symbol: 'ETHUSDT',
+            origClientOrderId: 'target-client-id',
+            newClientOrderId: 'cancel-client-id',
+        })).toEqual({
+            ok: true,
+            command: {
+                action: TRADING_COMMAND_ACTIONS.CANCEL_ORDER,
+                version: TRADE_COMMAND_VERSION,
+                marketType: 'spot',
+                accountId: 'default',
+                clientOrderId: 'command-client-id',
+                symbol: 'ETHUSDT',
+                orderId: null,
+                origClientOrderId: 'target-client-id',
+                newClientOrderId: 'cancel-client-id',
+                cancelPayload: {
+                    symbol: 'ETHUSDT',
+                    orderId: null,
+                    origClientOrderId: 'target-client-id',
+                    newClientOrderId: 'cancel-client-id',
+                },
+            },
+        });
+
+        expect(validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.CANCEL_ORDER,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'spot',
+            accountId: 'default',
+            clientOrderId: 'command-client-id',
+            symbol: 'ETHUSDT',
+        })).toMatchObject({
+            ok: false,
+            rejection: {
+                command_rejected: {
+                    request: TRADING_COMMAND_ACTIONS.CANCEL_ORDER,
+                    code: 'INVALID_TYPED_CANCEL_TARGET',
+                },
+            },
+        });
+    });
+
+    it('rejects typed commands that would change current spot execution guarantees', () => {
+        expect(validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.PLACE_ORDER,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'futures',
+            symbol: 'BTCUSDT',
+            side: 'BUY',
+            orderType: 'LIMIT',
+            timeInForce: 'GTC',
+            price: '50000',
+            quantity: '0.01',
+        })).toMatchObject({
+            ok: false,
+            rejection: {
+                command_rejected: {
+                    request: TRADING_COMMAND_ACTIONS.PLACE_ORDER,
+                    code: 'UNSUPPORTED_MARKET_TYPE',
+                },
+            },
+        });
+
+        expect(validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.PLACE_ORDER,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'spot',
+            symbol: 'BTCUSDT',
+            side: 'BUY',
+            orderType: 'MARKET',
+            timeInForce: 'GTC',
+            price: '50000',
+            quantity: '0.01',
+        })).toMatchObject({
+            ok: false,
+            rejection: {
+                command_rejected: {
+                    request: TRADING_COMMAND_ACTIONS.PLACE_ORDER,
+                    code: 'UNSUPPORTED_TYPED_ORDER_TYPE',
+                },
+            },
+        });
+    });
+
+    it('defines disabled typed command families with explicit backend rejection', () => {
+        expect(validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.REPLACE_ORDER,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'spot',
+            symbol: 'BTCUSDT',
+        })).toMatchObject({
+            ok: false,
+            rejection: {
+                command_rejected: {
+                    request: TRADING_COMMAND_ACTIONS.REPLACE_ORDER,
+                    code: 'TYPED_COMMAND_NOT_ENABLED',
+                },
+            },
+        });
+
+        expect(validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.CANCEL_ALL,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'spot',
+            symbol: 'BTCUSDT',
+        })).toMatchObject({
+            ok: false,
+            rejection: {
+                command_rejected: {
+                    request: TRADING_COMMAND_ACTIONS.CANCEL_ALL,
+                    code: 'TYPED_COMMAND_NOT_ENABLED',
+                },
+            },
+        });
+    });
+
+    it('accepts account refresh as a typed command family', () => {
+        expect(validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.ACCOUNT_REFRESH,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'spot',
+            accountId: 'default',
+            clientOrderId: 'refresh-1',
+            symbol: 'BTCUSDT',
+        })).toEqual({
+            ok: true,
+            command: {
+                action: TRADING_COMMAND_ACTIONS.ACCOUNT_REFRESH,
+                version: TRADE_COMMAND_VERSION,
+                marketType: 'spot',
+                accountId: 'default',
+                clientOrderId: 'refresh-1',
+                symbol: 'BTCUSDT',
             },
         });
     });

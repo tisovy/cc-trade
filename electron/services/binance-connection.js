@@ -13,7 +13,9 @@ import {
 import {
     validateLegacyCancelCommand,
     validateLegacyOrderCommand,
+    validateTypedTradingCommand,
 } from './trading-command-validation.js';
+import { TRADING_COMMAND_ACTIONS } from '../../src/utils/tradingCommands.js';
 
 const LOG_LEVELS = { error: 0, warn: 1, info: 2, debug: 3 };
 const activeLogLevel = LOG_LEVELS[(process.env.LOG_LEVEL || 'info').toLowerCase()] ?? LOG_LEVELS.info;
@@ -816,6 +818,34 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
             }
         };
 
+        const handleTypedTradingCommand = async (payload) => {
+            const validation = validateTypedTradingCommand(payload, {
+                selectedSymbol: panelSettings?.selected,
+            });
+            if (!validation.ok) {
+                logger.warn(`[orders] Rejected ${payload?.action || 'typed command'}:`, validation.rejection.command_rejected);
+                emit(validation.rejection);
+                return;
+            }
+
+            switch (validation.command.action) {
+                case TRADING_COMMAND_ACTIONS.PLACE_ORDER:
+                    await handleOrderPlacement(validation.command.orderPayload, validation.command.requestType);
+                    break;
+                case TRADING_COMMAND_ACTIONS.CANCEL_ORDER:
+                    await handleCancelOrder(validation.command.cancelPayload);
+                    break;
+                case TRADING_COMMAND_ACTIONS.ACCOUNT_REFRESH:
+                    if (validation.command.symbol) {
+                        await refreshAccountState(validation.command.symbol);
+                    } else {
+                        await rateLimiter.execute(() => fetchBalances(), 10);
+                        await rateLimiter.execute(() => fetchOpenOrders(), 3);
+                    }
+                    break;
+            }
+        };
+
         // Legacy emit for backward compatibility
         const emit = (payload, overrideRequestId) => {
             const reqId = overrideRequestId ?? activeRequestId;
@@ -1464,6 +1494,13 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
                         marketStreamManager.disableDepthView();
                         break;
                     }
+                    case TRADING_COMMAND_ACTIONS.PLACE_ORDER:
+                    case TRADING_COMMAND_ACTIONS.CANCEL_ORDER:
+                    case TRADING_COMMAND_ACTIONS.REPLACE_ORDER:
+                    case TRADING_COMMAND_ACTIONS.CANCEL_ALL:
+                    case TRADING_COMMAND_ACTIONS.ACCOUNT_REFRESH:
+                        await handleTypedTradingCommand(data);
+                        break;
                     case 'order': {
                         // Order with channel context
                         const orderType = data.type === 'sell' ? 'sellOrder' : 'buyOrder';

@@ -100,6 +100,13 @@ Rules:
 - Add typed commands behind adapter functions first.
 - Do not change UI flows in this phase.
 
+Progress:
+
+- [x] Add typed spot command builders and legacy adapters for current place/cancel flow.
+- [x] Add backend validation/dispatch for `trade.placeOrder`, `trade.cancelOrder`, and `account.refresh`.
+- [x] Define `trade.replaceOrder` and `trade.cancelAll` with explicit disabled-command backend rejection.
+- [ ] Migrate the spot UI wire protocol from legacy messages to typed command messages after the adapter path is proven.
+
 Acceptance:
 
 - Existing spot UI can place/cancel orders through the adapter path.
