@@ -23,7 +23,7 @@ test.describe('Critical Flow', () => {
 
     test('should render key components', async () => {
         // Check for OrderBook (might be empty)
-        const orderBook = mainWindow.locator('.ob');
+        const orderBook = mainWindow.locator('.ob .order-book');
         await expect(orderBook).toBeVisible();
 
         // Check for Chart
@@ -37,11 +37,11 @@ test.describe('Critical Flow', () => {
 
     test('should switch tabs in InfoPanel', async () => {
         // Tabs are divs with IDs
-        const ordersTab = mainWindow.locator('#orders');
+        const ordersTab = mainWindow.locator('.info-panel .header #orders');
         await ordersTab.click();
 
         // Verify Orders content is shown (e.g. "No open orders")
-        const noOrders = mainWindow.locator('text=No open orders');
+        const noOrders = mainWindow.locator('.info-panel .feed', { hasText: 'No open orders' });
         // It might take a moment if it was fetching, but initial state is likely empty
         if (await noOrders.isVisible()) {
             await expect(noOrders).toBeVisible();
@@ -50,11 +50,11 @@ test.describe('Critical Flow', () => {
             // But in this env, likely empty.
         }
 
-        const balancesTab = mainWindow.locator('#balances');
+        const balancesTab = mainWindow.locator('.info-panel .header #balances');
         await balancesTab.click();
 
         // Verify Balances headers
-        const coinHeader = mainWindow.locator('.header .item', { hasText: 'Coin' }).first();
+        const coinHeader = mainWindow.locator('.info-panel .feed > .header .item', { hasText: 'Coin' }).first();
         await expect(coinHeader).toBeVisible();
     });
 });

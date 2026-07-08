@@ -85,7 +85,7 @@ test.describe('Feature: Quick Switch', () => {
         await expect(modal).toBeVisible();
 
         // 3. Verify Input contains 'E'
-        const input = modal.locator('input');
+        const input = modal.locator('.quick-switch-input');
         await expect(input).toHaveValue('E');
 
         // 4. Select a pair (Mock results might be empty if not provided, but UI should show)

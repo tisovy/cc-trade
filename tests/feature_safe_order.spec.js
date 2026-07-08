@@ -79,16 +79,16 @@ test.describe('Feature: Safe Order Reduction', () => {
 
     test('should reduce order quantity by 0.1%', async () => {
         // 1. Open Order Modal via OrderBook
-        const askRow = mainWindow.locator('.ob .ob-sell .item').first();
+        const askRow = mainWindow.locator('.order-book .feed .ob-sell .columns').first();
         await expect(askRow).toBeVisible();
         await askRow.dblclick();
 
         // 2. Fill and Submit Order
-        const modal = mainWindow.locator('.modal-content');
+        const modal = mainWindow.locator('.order-form-modal .modal-content');
         await expect(modal).toBeVisible();
         await mainWindow.waitForTimeout(1000);
 
-        const amountInput = modal.locator('#formAmount');
+        const amountInput = modal.locator('input#formAmount');
         await amountInput.fill('100'); // Input 100
 
         const buyButton = modal.locator('[data-testid="submit-order-btn"]');

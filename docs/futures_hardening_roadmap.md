@@ -56,7 +56,7 @@ Goal: make regression checks reliable before larger architecture work.
 1. [x] Update E2E app-window selection to ignore DevTools windows.
 2. [x] Disable DevTools in E2E unless explicitly requested.
 3. [x] Reset or control persisted localStorage state in tests (`currentView`, mock WS URL, chart config).
-4. [ ] Update stale selectors for current UI structure.
+4. [x] Update stale selectors for current UI structure.
 5. [ ] Ensure mock WebSocket messages cover both legacy and channel protocol paths where tests need them.
 
 Acceptance:
@@ -239,20 +239,21 @@ Suggested UI order:
 
 ## Start Here Next Session
 
-Start with Phase 1, task 3:
+Start with Phase 2, task 5:
 
-**Add local WebSocket access control without changing the visible trading workflow.**
+**Ensure mock WebSocket messages cover both legacy and channel protocol paths where tests need them.**
 
 Implementation entry points:
 
-- `electron/main.js`
-- `electron/services/binance-connection.js`
-- renderer WebSocket connection bootstrap
-- focused tests around accepted/rejected local clients
+- `tests/trading_flow.spec.js`
+- `tests/feature_safe_order.spec.js`
+- `tests/helpers/e2eLocalStorage.js`
+- `src/hooks/useWebSocket.js`
+- `src/context/DataContext.jsx`
 
 Expected first PR scope:
 
-- Bind the local WebSocket service explicitly to loopback.
-- Add an Electron main-to-renderer session token/nonce before accepting trading commands.
-- Reject malformed or unauthenticated local WebSocket clients with clear logs.
-- No UI changes.
+- Audit mocked WebSocket payloads used by E2E tests.
+- Cover the legacy trading command path (`buyOrder`, `sellOrder`, `cancelOrder`) where order flow tests need it.
+- Cover channel protocol messages where chart/depth/subscription tests need them.
+- Keep the legacy protocol available and do not change spot order behavior.

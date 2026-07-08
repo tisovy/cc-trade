@@ -147,18 +147,18 @@ test.describe('Trading Flow (Mocked)', () => {
     test('should place and cancel an order', async () => {
         // 1. Open Order Form via OrderBook
         // Click ASK row to trigger BUY order
-        const askRow = mainWindow.locator('.ob .ob-sell .item').first();
+        const askRow = mainWindow.locator('.order-book .feed .ob-sell .columns').first();
         await expect(askRow).toBeVisible();
         await askRow.dblclick();
 
         // 2. Fill and Submit Order
-        const modal = mainWindow.locator('.modal-content');
+        const modal = mainWindow.locator('.order-form-modal .modal-content');
         await expect(modal).toBeVisible();
 
         // Wait for animation/render
         await mainWindow.waitForTimeout(1000);
 
-        const amountInput = modal.locator('#formAmount');
+        const amountInput = modal.locator('input#formAmount');
         await amountInput.fill('0.1');
 
         const buyButton = modal.locator('[data-testid="submit-order-btn"]');
@@ -167,10 +167,10 @@ test.describe('Trading Flow (Mocked)', () => {
         await expect(modal).toBeHidden();
 
         // 3. Verify Order in InfoPanel
-        const ordersTab = mainWindow.locator('#orders');
+        const ordersTab = mainWindow.locator('.info-panel .header #orders');
         await ordersTab.click();
 
-        const orderRow = mainWindow.locator('.order-card', { hasText: '12346' });
+        const orderRow = mainWindow.locator('.info-panel .order-card', { hasText: '12346.00' });
         await expect(orderRow).toBeVisible();
 
         // 4. Cancel Order
