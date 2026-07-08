@@ -2,6 +2,7 @@ import './env-setup.js';
 import { app, BrowserWindow, Menu } from 'electron'
 import path from 'path'
 import { fileURLToPath } from 'url'
+import { shouldOpenDevTools } from './devtools.js'
 import { setupBinanceConnection } from './services/binance-connection.js'
 
 setupBinanceConnection();
@@ -40,10 +41,12 @@ function createWindow() {
     if (process.env.VITE_DEV_SERVER_URL) {
         console.log('Loading URL:', process.env.VITE_DEV_SERVER_URL)
         win.loadURL(process.env.VITE_DEV_SERVER_URL)
-        win.webContents.openDevTools(devToolsOptions)
     } else {
         console.log('Loading file:', path.join(__dirname, '../dist/index.html'))
         win.loadFile(path.join(__dirname, '../dist/index.html'))
+    }
+
+    if (shouldOpenDevTools({ allowDevServerDefault: false })) {
         win.webContents.openDevTools(devToolsOptions)
     }
 

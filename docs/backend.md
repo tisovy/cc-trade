@@ -2,7 +2,7 @@
 
 ## Electron Main Process (`electron/main.js`)
 
-- Initializes Electron window (1200×800), enables devtools, and registers `Cmd/Ctrl+Shift+I`.
+- Initializes Electron window (1200×800) and opens DevTools only during Vite dev-server runs or with `ELECTRON_OPEN_DEVTOOLS=true`.
 - Imports and executes `setupBinanceConnection()` before creating the BrowserWindow so the WebSocket server is always ready.
 - Loads the Vite dev server URL during development, otherwise serves the built `dist/index.html`.
 
@@ -168,4 +168,3 @@ The backend implements rate limiting to comply with Binance API restrictions:
 - **Server-side validation**
   - `tele_announcer/server.js` lives alongside its own `package.json` and redis/Telegram dependencies. It reads the same env vars (prefixed with `ANALYTICS_`) and exposes `/analytics/*` routes protected by HMAC signatures.
   - Because this service is a separate deployment unit, nothing inside the React/Electron workspace depends on it; keep its dependencies isolated under `tele_announcer/`.
-

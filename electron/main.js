@@ -1,6 +1,7 @@
 import { app, BrowserWindow, Menu, ipcMain, session } from 'electron'
 import path from 'path'
 import { fileURLToPath } from 'url'
+import { shouldOpenDevTools } from './devtools.js'
 import { setupBinanceConnection } from './services/binance-connection.js'
 
 const analyticsSecret = process.env.ANALYTICS_SECRET || '';
@@ -138,10 +139,12 @@ function createWindow() {
   if (process.env.VITE_DEV_SERVER_URL) {
     console.log('Loading URL:', process.env.VITE_DEV_SERVER_URL)
     win.loadURL(process.env.VITE_DEV_SERVER_URL)
-    win.webContents.openDevTools(devToolsOptions)
   } else {
     console.log('Loading file:', path.join(__dirname, '../dist/index.html'))
     win.loadFile(path.join(__dirname, '../dist/index.html'))
+  }
+
+  if (shouldOpenDevTools({ allowDevServerDefault: !app.isPackaged })) {
     win.webContents.openDevTools(devToolsOptions)
   }
 
