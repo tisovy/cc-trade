@@ -9,11 +9,13 @@ export default defineConfig({
     port: 5174
   },
   define: {
-    // Expose analytics env vars to browser
+    // Expose only non-secret analytics env vars to browser
     'process.env.ANALYTICS_URL': JSON.stringify(process.env.ANALYTICS_URL || ''),
     'process.env.ANALYTICS_BASE_URL': JSON.stringify(process.env.ANALYTICS_BASE_URL || ''),
     'process.env.ANALYTICS_KEY': JSON.stringify(process.env.ANALYTICS_KEY || ''),
-    'process.env.ANALYTICS_SECRET': JSON.stringify(process.env.ANALYTICS_SECRET || ''),
+    'process.env.ANALYTICS_REQUIRES_MAIN_SIGNING': JSON.stringify(
+      process.env.ANALYTICS_SECRET ? 'true' : process.env.ANALYTICS_REQUIRES_MAIN_SIGNING || ''
+    ),
     'process.env.ANALYTICS_POLL_INTERVAL': JSON.stringify(process.env.ANALYTICS_POLL_INTERVAL || ''),
     'process.env.ANALYTICS_LIMIT': JSON.stringify(process.env.ANALYTICS_LIMIT || ''),
   },

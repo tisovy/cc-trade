@@ -3,6 +3,12 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import { setupBinanceConnection } from './services/binance-connection.js'
 
+const analyticsSecret = process.env.ANALYTICS_SECRET || '';
+if (process.env.ANALYTICS_SECRET) {
+  process.env.ANALYTICS_REQUIRES_MAIN_SIGNING = 'true';
+  delete process.env.ANALYTICS_SECRET;
+}
+
 // ============================================================
 // Global error handlers to prevent crashes from network errors
 // ============================================================
@@ -61,17 +67,19 @@ const getSystemProxy = () => {
   }
 };
 
-// Analytics config from environment - will be injected into browser
+// Analytics config from environment - only non-secret values are injected into browser
 const getAnalyticsConfig = () => {
+  const requiresMainProcessSigning = Boolean(analyticsSecret);
   const config = {
     baseUrl: process.env.ANALYTICS_URL || process.env.ANALYTICS_BASE_URL || 'http://localhost:3000',
+    pollInterval: Math.max(5000, Number(process.env.ANALYTICS_POLL_INTERVAL) || 45000),
+    limit: Math.min(200, Math.max(5, Number(process.env.ANALYTICS_LIMIT) || 40)),
+    enabled: !requiresMainProcessSigning,
+    authMode: requiresMainProcessSigning ? 'main-process-required' : 'none',
   };
-  // Only add credentials if they're configured
+  // Public key is safe to expose; signing secret must stay in main.
   if (process.env.ANALYTICS_KEY) {
     config.key = process.env.ANALYTICS_KEY;
-  }
-  if (process.env.ANALYTICS_SECRET) {
-    config.secret = process.env.ANALYTICS_SECRET;
   }
   return config;
 };
@@ -114,15 +122,16 @@ function createWindow() {
   win.webContents.on('did-finish-load', () => {
     const config = getAnalyticsConfig();
     const configJson = JSON.stringify(config);
-    // Always overwrite localStorage with current env config
+    // Always overwrite localStorage with current non-secret env config
     win.webContents.executeJavaScript(`
-      const existing = localStorage.getItem('analyticsConfig');
       const newConfig = ${configJson};
       localStorage.setItem('analyticsConfig', JSON.stringify(newConfig));
-      console.log('[Electron] Analytics config updated:', newConfig);
-      if (existing) {
-        console.log('[Electron] Previous config was:', existing);
-      }
+      console.log('[Electron] Analytics config updated:', {
+        baseUrl: newConfig.baseUrl,
+        hasKey: Boolean(newConfig.key),
+        enabled: Boolean(newConfig.enabled),
+        authMode: newConfig.authMode
+      });
     `);
   });
 

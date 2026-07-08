@@ -2,111 +2,96 @@
  * Analytics API client
  * 
  * Configuration sources (in priority order):
- * 1. localStorage 'analyticsConfig'
- * 2. process.env (Node/Electron)
+ * 1. localStorage 'analyticsConfig' (non-secret values only)
+ * 2. process.env (non-secret Vite/Electron values only)
  * 3. Default to localhost:3000
  */
 
-const encoder = typeof TextEncoder !== "undefined" ? new TextEncoder() : null;
-
-const bufferToHex = (buffer) => {
-  if (!buffer) return "";
-  const bytes = buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : buffer;
-  return Array.from(bytes)
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
+const DEFAULT_ANALYTICS_CONFIG = {
+  baseUrl: 'http://localhost:3000',
+  key: '',
+  pollInterval: 45000,
+  limit: 40,
+  enabled: true,
+  authMode: 'none',
 };
 
-const getSubtleCrypto = () => {
-  if (typeof window !== "undefined" && window.crypto?.subtle) {
-    return window.crypto.subtle;
+const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+
+const normalizeAnalyticsConfig = (source = {}) => {
+  const hadSecret = hasOwn(source, 'secret') && Boolean(source.secret);
+  const requiresMainProcessSigning = hadSecret || source.authMode === 'main-process-required';
+
+  return {
+    baseUrl: String(source.baseUrl || DEFAULT_ANALYTICS_CONFIG.baseUrl).trim(),
+    key: String(source.key || '').trim(),
+    pollInterval: Math.max(5000, Number(source.pollInterval) || DEFAULT_ANALYTICS_CONFIG.pollInterval),
+    limit: Math.min(200, Math.max(5, Number(source.limit) || DEFAULT_ANALYTICS_CONFIG.limit)),
+    enabled: source.enabled === false || requiresMainProcessSigning ? false : true,
+    authMode: requiresMainProcessSigning ? 'main-process-required' : 'none',
+  };
+};
+
+const writeSanitizedAnalyticsConfig = (config) => {
+  try {
+    localStorage.setItem('analyticsConfig', JSON.stringify(config));
+  } catch {
+    // Ignore storage errors
   }
-  if (typeof self !== "undefined" && self.crypto?.subtle) {
-    return self.crypto.subtle;
-  }
-  return null;
 };
 
 /**
- * Get analytics config from multiple sources
- * Priority: localStorage > process.env > defaults
+ * Get analytics config from multiple sources without exposing signing secrets.
+ * Priority: localStorage > non-secret process.env > defaults.
  */
 export const getAnalyticsConfig = () => {
-  // Try localStorage first
   try {
     const stored = localStorage.getItem('analyticsConfig');
     if (stored) {
       const parsed = JSON.parse(stored);
-      if (parsed && typeof parsed === 'object' && parsed.baseUrl) {
-        return {
-          baseUrl: String(parsed.baseUrl || '').trim(),
-          key: String(parsed.key || '').trim(),
-          secret: String(parsed.secret || '').trim(),
-          pollInterval: Math.max(5000, Number(parsed.pollInterval) || 45000),
-          limit: Math.min(200, Math.max(5, Number(parsed.limit) || 40)),
-        };
+      const hasConfigValues = parsed && typeof parsed === 'object' && (
+        parsed.baseUrl ||
+        parsed.key ||
+        parsed.pollInterval ||
+        parsed.limit ||
+        parsed.enabled === false ||
+        parsed.authMode ||
+        hasOwn(parsed, 'secret')
+      );
+      if (hasConfigValues) {
+        const config = normalizeAnalyticsConfig(parsed);
+        if (hasOwn(parsed, 'secret')) {
+          writeSanitizedAnalyticsConfig(config);
+        }
+        return config;
       }
     }
   } catch {
-    // Ignore parse errors
+    // Ignore storage and parse errors
   }
 
-  // Try process.env (works in Electron with nodeIntegration: true)
-  // eslint-disable-next-line no-undef
+  // eslint-disable-next-line no-undef -- Electron exposes process in renderer.
   const env = typeof process !== 'undefined' ? process.env : {};
-  if (env.ANALYTICS_URL || env.ANALYTICS_BASE_URL) {
-    const config = {
-      baseUrl: String(env.ANALYTICS_URL || env.ANALYTICS_BASE_URL || '').trim(),
-      key: String(env.ANALYTICS_KEY || '').trim(),
-      secret: String(env.ANALYTICS_SECRET || '').trim(),
-      pollInterval: Math.max(5000, Number(env.ANALYTICS_POLL_INTERVAL) || 45000),
-      limit: Math.min(200, Math.max(5, Number(env.ANALYTICS_LIMIT) || 40)),
-    };
+  const requiresMainProcessSigning = env.ANALYTICS_REQUIRES_MAIN_SIGNING === 'true';
+  if (env.ANALYTICS_URL || env.ANALYTICS_BASE_URL || requiresMainProcessSigning) {
+    const config = normalizeAnalyticsConfig({
+      baseUrl: env.ANALYTICS_URL || env.ANALYTICS_BASE_URL,
+      key: env.ANALYTICS_KEY,
+      pollInterval: env.ANALYTICS_POLL_INTERVAL,
+      limit: env.ANALYTICS_LIMIT,
+      enabled: !requiresMainProcessSigning,
+      authMode: requiresMainProcessSigning ? 'main-process-required' : 'none',
+    });
 
-    // Cache to localStorage for future use
     if (config.baseUrl) {
-      try {
-        localStorage.setItem('analyticsConfig', JSON.stringify(config));
-        console.log('[Analytics] Cached config from environment to localStorage');
-      } catch {
-        // Ignore storage errors
-      }
+      writeSanitizedAnalyticsConfig(config);
+      console.log('[Analytics] Cached sanitized config from environment to localStorage');
     }
 
     return config;
   }
 
-  // Default fallback
-  return {
-    baseUrl: 'http://localhost:3000', // TODO: update this address
-    key: '',
-    secret: '',
-    pollInterval: 45000,
-    limit: 40
-  };
-};
-
-const hmacSha256Hex = async (secret, payload) => {
-  if (!secret || !payload) {
-    throw new Error("Missing secret or payload for HMAC");
-  }
-
-  const subtle = getSubtleCrypto();
-  if (!subtle || !encoder) {
-    throw new Error("WebCrypto is not available for analytics signing");
-  }
-
-  const keyData = encoder.encode(secret);
-  const messageData = encoder.encode(payload);
-  const cryptoKey = await subtle.importKey(
-    "raw",
-    keyData,
-    { name: "HMAC", hash: { name: "SHA-256" } },
-    false,
-    ["sign"]
-  );
-  const signatureBuffer = await subtle.sign("HMAC", cryptoKey, messageData);
-  return bufferToHex(signatureBuffer);
+  return { ...DEFAULT_ANALYTICS_CONFIG };
 };
 
 const buildRouteUrl = (baseUrl, route) => {
@@ -117,9 +102,16 @@ const buildRouteUrl = (baseUrl, route) => {
   return new URL(normalizedRoute, baseUrl);
 };
 
-const getRelativePath = (url) => {
-  if (!(url instanceof URL)) return "";
-  return `${url.pathname}${url.search || ""}`;
+const isAnalyticsEnabled = (config) => {
+  if (!config.baseUrl) {
+    console.log('[Analytics] No baseUrl configured');
+    return false;
+  }
+  if (config.enabled === false || config.authMode === 'main-process-required') {
+    console.log('[Analytics] Analytics disabled until main-process signing proxy is available');
+    return false;
+  }
+  return true;
 };
 
 export const requestAnalyticsCombined = async ({ limit, signal } = {}) => {
@@ -128,11 +120,11 @@ export const requestAnalyticsCombined = async ({ limit, signal } = {}) => {
   console.log('[Analytics] Config loaded:', {
     baseUrl: config.baseUrl,
     hasKey: !!config.key,
-    hasSecret: !!config.secret
+    enabled: config.enabled,
+    authMode: config.authMode
   });
 
-  if (!config.baseUrl) {
-    console.log('[Analytics] No baseUrl configured');
+  if (!isAnalyticsEnabled(config)) {
     return null;
   }
 
@@ -141,20 +133,10 @@ export const requestAnalyticsCombined = async ({ limit, signal } = {}) => {
     url.searchParams.set("limit", Math.max(1, Number(limit)));
   }
 
-  // Build headers - only include auth if credentials are configured
+  // Renderer-side signing is intentionally disabled. Authenticated analytics
+  // must go through a main-process proxy so the secret never enters React.
   const headers = {};
-  if (config.key && config.secret) {
-    const relativePath = getRelativePath(url);
-    const timestamp = Date.now().toString();
-    const payload = `${config.key}:${timestamp}:GET:${relativePath}:`;
-    const signature = await hmacSha256Hex(config.secret, payload);
-    headers["X-Analytics-Key"] = config.key;
-    headers["X-Analytics-Ts"] = timestamp;
-    headers["X-Analytics-Signature"] = signature;
-    console.log('[Analytics] Auth headers added for combined request');
-  } else {
-    console.log('[Analytics] No auth credentials, sending unauthenticated request');
-  }
+  console.log('[Analytics] Renderer signing disabled, sending unsigned combined request');
 
   const startTime = Date.now();
   console.log('[Analytics] Fetching combined:', url.toString());
@@ -201,11 +183,11 @@ export const requestActivityMetrics = async ({ interval, limit, volumeThreshold,
   console.log('[Analytics] Config loaded for activity:', {
     baseUrl: config.baseUrl,
     hasKey: !!config.key,
-    hasSecret: !!config.secret
+    enabled: config.enabled,
+    authMode: config.authMode
   });
 
-  if (!config.baseUrl) {
-    console.log('[Analytics] No baseUrl configured');
+  if (!isAnalyticsEnabled(config)) {
     return null;
   }
 
@@ -220,20 +202,10 @@ export const requestActivityMetrics = async ({ interval, limit, volumeThreshold,
     url.searchParams.set("volumeThreshold", Number(volumeThreshold));
   }
 
-  // Build headers - only include auth if credentials are configured
+  // Renderer-side signing is intentionally disabled. Authenticated analytics
+  // must go through a main-process proxy so the secret never enters React.
   const headers = {};
-  if (config.key && config.secret) {
-    const relativePath = getRelativePath(url);
-    const timestamp = Date.now().toString();
-    const payload = `${config.key}:${timestamp}:GET:${relativePath}:`;
-    const signature = await hmacSha256Hex(config.secret, payload);
-    headers["X-Analytics-Key"] = config.key;
-    headers["X-Analytics-Ts"] = timestamp;
-    headers["X-Analytics-Signature"] = signature;
-    console.log('[Analytics] Auth headers added for activity request');
-  } else {
-    console.log('[Analytics] No auth credentials, sending unauthenticated request');
-  }
+  console.log('[Analytics] Renderer signing disabled, sending unsigned activity request');
 
   const startTime = Date.now();
   console.log('[Analytics] Fetching activity:', url.toString());
