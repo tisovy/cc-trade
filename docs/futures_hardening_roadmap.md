@@ -55,7 +55,7 @@ Goal: make regression checks reliable before larger architecture work.
 
 1. [x] Update E2E app-window selection to ignore DevTools windows.
 2. [x] Disable DevTools in E2E unless explicitly requested.
-3. [ ] Reset or control persisted localStorage state in tests (`currentView`, mock WS URL, chart config).
+3. [x] Reset or control persisted localStorage state in tests (`currentView`, mock WS URL, chart config).
 4. [ ] Update stale selectors for current UI structure.
 5. [ ] Ensure mock WebSocket messages cover both legacy and channel protocol paths where tests need them.
 

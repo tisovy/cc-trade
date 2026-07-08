@@ -2,6 +2,7 @@ import { test, expect, _electron as electron } from '@playwright/test';
 import path from 'path';
 import { WebSocketServer } from 'ws';
 import { waitForAppWindow } from './helpers/electronAppWindow.js';
+import { reloadWithE2eLocalStorage } from './helpers/e2eLocalStorage.js';
 
 test.describe('Feature: Safe Order Reduction', () => {
     let electronApp;
@@ -13,7 +14,7 @@ test.describe('Feature: Safe Order Reduction', () => {
         wss = new WebSocketServer({ port: MOCK_PORT });
         wss.on('connection', (ws) => {
             ws.send(JSON.stringify({
-                balances: { 'USDT': { available: '1000.00', onOrder: '0.00' } },
+                balances: { 'USDT': { available: '2000000.00', onOrder: '0.00' } },
                 orders: [],
                 filters: { 'BTCUSDT': { tickSize: '0.01', stepSize: '0.000001', quantityPrecision: 6 } },
                 ticker: [{ symbol: 'BTCUSDT', lastPrice: '50000.00' }]
@@ -64,18 +65,16 @@ test.describe('Feature: Safe Order Reduction', () => {
         });
 
         mainWindow = await waitForAppWindow(electronApp);
-        await mainWindow.context().addInitScript((port) => {
-            window.MOCK_WS_URL = `ws://localhost:${port}`;
-            localStorage.setItem('MOCK_WS_URL', `ws://localhost:${port}`);
-        }, MOCK_PORT);
-
-        await mainWindow.reload();
-        await mainWindow.waitForLoadState('domcontentloaded');
+        await reloadWithE2eLocalStorage(mainWindow, {
+            mockWsUrl: `ws://localhost:${MOCK_PORT}`,
+            selected: 'BTCUSDT',
+            interval: '1h',
+        });
     });
 
     test.afterAll(async () => {
         if (wss) wss.close();
-        await electronApp.close();
+        if (electronApp) await electronApp.close();
     });
 
     test('should reduce order quantity by 0.1%', async () => {

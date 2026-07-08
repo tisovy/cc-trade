@@ -2,6 +2,7 @@ import { test, expect, _electron as electron } from '@playwright/test';
 import path from 'path';
 import { WebSocketServer } from 'ws';
 import { waitForAppWindow } from './helpers/electronAppWindow.js';
+import { reloadWithE2eLocalStorage } from './helpers/e2eLocalStorage.js';
 
 test.describe('Trading Flow (Mocked)', () => {
     let electronApp;
@@ -120,17 +121,11 @@ test.describe('Trading Flow (Mocked)', () => {
         });
 
         mainWindow = await waitForAppWindow(electronApp, { pollInterval: 500 });
-
-        // Inject MOCK_WS_URL before page load
-        await mainWindow.context().addInitScript((port) => {
-            window.MOCK_WS_URL = `ws://localhost:${port}`;
-            localStorage.setItem('MOCK_WS_URL', `ws://localhost:${port}`);
-        }, MOCK_PORT);
-
-        // Reload to apply the init script
-        await mainWindow.evaluate(() => window.location.reload());
-
-        await mainWindow.waitForLoadState('domcontentloaded');
+        await reloadWithE2eLocalStorage(mainWindow, {
+            mockWsUrl: `ws://localhost:${MOCK_PORT}`,
+            selected: 'BTCUSDT',
+            interval: '1h',
+        });
         await expect(mainWindow).toHaveTitle('CC-trade');
 
         mainWindow.on('console', msg => console.log('PAGE LOG:', msg.text()));
@@ -146,7 +141,7 @@ test.describe('Trading Flow (Mocked)', () => {
 
     test.afterAll(async () => {
         if (wss) wss.close();
-        await electronApp.close();
+        if (electronApp) await electronApp.close();
     });
 
     test('should place and cancel an order', async () => {
@@ -175,11 +170,11 @@ test.describe('Trading Flow (Mocked)', () => {
         const ordersTab = mainWindow.locator('#orders');
         await ordersTab.click();
 
-        const orderRow = mainWindow.locator('.order-main', { hasText: '12346' });
+        const orderRow = mainWindow.locator('.order-card', { hasText: '12346' });
         await expect(orderRow).toBeVisible();
 
         // 4. Cancel Order
-        const cancelBtn = orderRow.locator('.cancel-order-stub');
+        const cancelBtn = orderRow.locator('.order-card-cancel');
         await cancelBtn.click();
 
         // 5. Verify Order Removed

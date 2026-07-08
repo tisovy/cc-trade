@@ -2,6 +2,7 @@ import { test, expect, _electron as electron } from '@playwright/test';
 import path from 'path';
 import { WebSocketServer } from 'ws';
 import { waitForAppWindow } from './helpers/electronAppWindow.js';
+import { reloadWithE2eLocalStorage } from './helpers/e2eLocalStorage.js';
 
 test.describe('Feature: Quick Switch', () => {
     let electronApp;
@@ -48,22 +49,18 @@ test.describe('Feature: Quick Switch', () => {
         });
 
         mainWindow = await waitForAppWindow(electronApp);
-
-        // Inject MOCK_WS_URL
-        await mainWindow.context().addInitScript((port) => {
-            window.MOCK_WS_URL = `ws://localhost:${port}`;
-            localStorage.setItem('MOCK_WS_URL', `ws://localhost:${port}`);
-        }, MOCK_PORT);
-
-        await mainWindow.reload();
-        await mainWindow.waitForLoadState('domcontentloaded');
+        await reloadWithE2eLocalStorage(mainWindow, {
+            mockWsUrl: `ws://localhost:${MOCK_PORT}`,
+            selected: 'BTCUSDT',
+            interval: '1h',
+        });
 
         mainWindow.on('console', msg => console.log('PAGE LOG:', msg.text()));
     });
 
     test.afterAll(async () => {
         if (wss) wss.close();
-        await electronApp.close();
+        if (electronApp) await electronApp.close();
     });
 
     test('should open quick switch modal on key press and select pair', async () => {
