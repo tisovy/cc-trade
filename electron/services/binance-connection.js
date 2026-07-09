@@ -1061,9 +1061,7 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
                         if (keepAliveInterval) { clearInterval(keepAliveInterval); keepAliveInterval = null; }
                         await safeDisconnect(previousUserData, 'previous user data stream');
                     }
-                    userDataWsConnection = await client.websocketStreams.connect({
-                        stream: listenKey
-                    });
+                    userDataWsConnection = await spotTradingAdapter.connectUserDataStream(listenKey);
                     userDataReconnecting = false;
                     const udConn = userDataWsConnection; // capture for the close guard
 

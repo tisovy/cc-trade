@@ -576,4 +576,31 @@ describe('SpotTradingAdapter', () => {
             { listenKey: 'listen-123' },
         );
     });
+
+    it('connects the spot user-data stream with the listen key and preserves connection identity', async () => {
+        const connection = {};
+        const connect = vi.fn().mockResolvedValue(connection);
+        const client = {
+            ...makeClient(),
+            websocketStreams: { connect },
+        };
+        const adapter = new SpotTradingAdapter({ client, recvWindow: 60000 });
+
+        await expect(adapter.connectUserDataStream('listen-123')).resolves.toBe(connection);
+
+        expect(connect).toHaveBeenCalledOnce();
+        expect(connect).toHaveBeenCalledWith({ stream: 'listen-123' });
+    });
+
+    it('propagates spot user-data stream connection rejections unchanged', async () => {
+        const error = new Error('connection failed');
+        const connect = vi.fn().mockRejectedValue(error);
+        const client = {
+            ...makeClient(),
+            websocketStreams: { connect },
+        };
+        const adapter = new SpotTradingAdapter({ client, recvWindow: 60000 });
+
+        await expect(adapter.connectUserDataStream('listen-123')).rejects.toBe(error);
+    });
 });

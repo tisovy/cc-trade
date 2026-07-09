@@ -157,7 +157,7 @@ Progress:
 - [x] Move mock spot order-placement execution report construction behind an adapter-owned helper while preserving the existing renderer payload shape.
 - [x] Restore per-operation refresh failure isolation after the account-operation extraction so balances, open orders, and history still run sequentially after an exhausted operation failure.
 - [x] Move the spot server-time REST request behind the adapter while preserving clock-drift validation, logging, and startup behavior.
-- [ ] Move spot user-data WebSocket connection creation behind the adapter without changing reconnect, teardown, or keep-alive timing.
+- [x] Move spot user-data WebSocket connection creation behind the adapter without changing reconnect, teardown, or keep-alive timing.
 - [ ] Reuse adapter-owned balance refresh operation metadata for stream-triggered shared balance refreshes.
 - [ ] Add service-level orchestration coverage before changing higher-risk subscription or trading flows.
 
@@ -272,7 +272,7 @@ Suggested UI order:
 
 Continue Phase 4 with the smallest unchecked backend-only seam:
 
-**Move spot user-data WebSocket connection creation behind `SpotTradingAdapter`.**
+**Reuse adapter-owned balance refresh operation metadata for stream-triggered shared balance refreshes.**
 
 Implementation entry points:
 
@@ -282,6 +282,6 @@ Implementation entry points:
 
 Expected scope:
 
-- Preserve the exact `{ stream: listenKey }` WebSocket connection parameters.
-- Keep reconnect, teardown, and keep-alive ownership in the connection service.
+- Preserve the stream-triggered shared balance refresh in-flight guard, renderer broadcasts, and error handling.
+- Preserve the adapter-owned balance payload contract and rate-limit weight `10`.
 - Do not change renderer payloads, rate-limit weights, typed or legacy command behavior, or futures execution state.

@@ -237,6 +237,10 @@ export class SpotTradingAdapter {
         return this.client.restAPI.sendRequest(SPOT_USER_DATA_STREAM_PATH, 'PUT', { listenKey });
     }
 
+    connectUserDataStream(listenKey) {
+        return this.client.websocketStreams.connect({ stream: listenKey });
+    }
+
     async placeOrder(command) {
         const response = await this.client.restAPI.newOrder({
             symbol: command.symbol,
