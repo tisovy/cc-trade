@@ -15,6 +15,10 @@ import {
     validateLegacyOrderCommand,
     validateTypedTradingCommand,
 } from './trading-command-validation.js';
+import {
+    SpotTradingAdapter,
+    normalizeSpotExecutionReport,
+} from './spot-trading-adapter.js';
 import { TRADING_COMMAND_ACTIONS } from '../../src/utils/tradingCommands.js';
 
 const LOG_LEVELS = { error: 0, warn: 1, info: 2, debug: 3 };
@@ -316,34 +320,7 @@ const tickerCache = {
 };
 let tickerSnapshotPromise = null;
 
-const normalizeExecutionReport = (payload = {}, overrides = {}) => {
-    const timestamp = payload.transactTime ?? payload.updateTime ?? payload.T ?? Date.now();
-    const status = overrides.status || payload.status || payload.X || payload.orderStatus || 'NEW';
-    return {
-        e: 'executionReport',
-        s: payload.symbol ?? payload.s,
-        symbol: payload.symbol ?? payload.s,
-        S: payload.side ?? payload.S,
-        side: payload.side ?? payload.S,
-        o: payload.type ?? payload.o,
-        type: payload.type ?? payload.o,
-        x: overrides.x || payload.x || payload.executionType || status,
-        X: status,
-        status,
-        i: payload.orderId ?? payload.i,
-        orderId: payload.orderId ?? payload.i,
-        p: payload.price ?? payload.origPrice ?? payload.p ?? '0',
-        price: payload.price ?? payload.origPrice ?? payload.p ?? '0',
-        q: payload.origQty ?? payload.quantity ?? payload.q ?? '0',
-        origQty: payload.origQty ?? payload.quantity ?? payload.q ?? '0',
-        z: payload.executedQty ?? payload.cummulativeQuoteQty ?? payload.z ?? '0',
-        l: payload.executedQty ?? payload.l ?? '0',
-        T: timestamp,
-        transactTime: timestamp,
-        time: timestamp,
-        ...overrides
-    };
-};
+const normalizeExecutionReport = normalizeSpotExecutionReport;
 
 const applyLogMasking = (() => {
     let applied = false;
@@ -466,6 +443,7 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
     logger.info(`Starting Binance Service. Mock Mode: ${USE_MOCK}`);
 
     let client;
+    let spotTradingAdapter = null;
 
     const ensureTickerSnapshot = async () => {
         if (!client) return [];
@@ -508,6 +486,10 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
         client = new Spot({
             configurationRestAPI: restConfig,
             configurationWebsocketStreams: sharedProxyAgent ? { agent: sharedProxyAgent } : {}
+        });
+        spotTradingAdapter = new SpotTradingAdapter({
+            client,
+            recvWindow: SIGNED_RECV_WINDOW,
         });
 
         const restBaseOptions = client?.restAPI?.configuration?.baseOptions;
@@ -616,19 +598,12 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
     // Deduplicated by in-flight guard to avoid duplicate calls from rapid events
     let _balanceRefreshInFlight = false;
     const fetchAndBroadcastBalances = async () => {
-        if (!client || USE_MOCK) return;
+        if (!spotTradingAdapter || USE_MOCK) return;
         if (_balanceRefreshInFlight) return;
         _balanceRefreshInFlight = true;
         try {
             await rateLimiter.execute(async () => {
-                const accountResponse = await client.restAPI.getAccount({ recvWindow: SIGNED_RECV_WINDOW });
-                const account = await accountResponse.data();
-                const balances = {};
-                account?.balances?.forEach(b => {
-                    if (parseFloat(b.free) > 0 || parseFloat(b.locked) > 0) {
-                        balances[b.asset] = { available: b.free, onOrder: b.locked };
-                    }
-                });
+                const balances = await spotTradingAdapter.getAccountState();
                 broadcastToRenderers({ balances });
             }, 10);
         } catch (error) {
@@ -661,16 +636,9 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
         const marketStreamManager = channelManager.getMarketStreamManager();
 
         const fetchBalances = async () => {
-            if (!client) return;
+            if (!spotTradingAdapter) return;
             try {
-                const accountResponse = await client.restAPI.getAccount({ recvWindow: SIGNED_RECV_WINDOW });
-                const account = await accountResponse.data();
-                const balances = {};
-                account?.balances?.forEach(b => {
-                    if (parseFloat(b.free) > 0 || parseFloat(b.locked) > 0) {
-                        balances[b.asset] = { available: b.free, onOrder: b.locked };
-                    }
-                });
+                const balances = await spotTradingAdapter.getAccountState();
                 emit({ balances });
             } catch (error) {
                 logger.error("Balances Fetch Error:", error);
@@ -678,10 +646,9 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
         };
 
         const fetchOpenOrders = async () => {
-            if (!client) return;
+            if (!spotTradingAdapter) return;
             try {
-                const openOrdersResponse = await client.restAPI.getOpenOrders({ recvWindow: SIGNED_RECV_WINDOW });
-                const openOrders = await openOrdersResponse.data();
+                const openOrders = await spotTradingAdapter.getOpenOrders();
                 emit({ orders: openOrders });
             } catch (error) {
                 logger.error("Open Orders Fetch Error:", error);
@@ -689,10 +656,9 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
         };
 
         const fetchTradeHistoryForSymbol = async (symbol) => {
-            if (!client) return;
+            if (!spotTradingAdapter) return;
             try {
-                const myTradesResponse = await client.restAPI.myTrades({ symbol, limit: 500, recvWindow: SIGNED_RECV_WINDOW });
-                const myTrades = await myTradesResponse.data();
+                const myTrades = await spotTradingAdapter.getTradeHistory(symbol);
                 emit({ history: myTrades });
             } catch (error) {
                 logger.error("Trade History Fetch Error:", error);
@@ -745,22 +711,19 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
                 });
                 return;
             }
-            if (!client) return;
+            if (!spotTradingAdapter) return;
 
             try {
                 logger.info(`[orders] ${resolvedSide} ${symbol} qty=${numericQuantity} price=${numericPrice}`);
-                const response = await client.restAPI.newOrder({
+                const executionReport = await spotTradingAdapter.placeOrder({
                     symbol,
                     side: resolvedSide,
-                    type: 'LIMIT',
+                    orderType: 'LIMIT',
                     timeInForce: 'GTC',
-                    quantity: numericQuantity.toString(),
-                    price: numericPrice.toString(),
-                    newOrderRespType: 'FULL',
-                    recvWindow: SIGNED_RECV_WINDOW
+                    numericQuantity,
+                    numericPrice,
                 });
-                const data = await response.data();
-                emit({ execution_update: normalizeExecutionReport(data, { x: 'NEW' }) });
+                emit({ execution_update: executionReport });
                 await refreshAccountState(symbol);
             } catch (error) {
                 logger.error("Order placement error:", error);
@@ -779,7 +742,7 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
                 emit(validation.rejection);
                 return;
             }
-            if (!client) return;
+            if (!spotTradingAdapter) return;
 
             const {
                 symbol: targetSymbol,
@@ -789,26 +752,14 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
             } = validation.command;
 
             try {
-                const cancelParams = { symbol: targetSymbol, recvWindow: SIGNED_RECV_WINDOW };
-                if (orderId) {
-                    cancelParams.orderId = orderId;
-                } else if (origClientOrderId) {
-                    cancelParams.origClientOrderId = origClientOrderId;
-                }
-                if (newClientOrderId) {
-                    cancelParams.newClientOrderId = newClientOrderId;
-                }
-
-                logger.info(`[orders] Cancel ${targetSymbol} orderId=${cancelParams.orderId ?? cancelParams.origClientOrderId}`);
-                const response = await client.restAPI.deleteOrder(cancelParams);
-                const data = await response.data();
-                emit({
-                    execution_update: normalizeExecutionReport(data, {
-                        x: 'CANCELED',
-                        status: 'CANCELED',
-                        X: 'CANCELED'
-                    })
+                logger.info(`[orders] Cancel ${targetSymbol} orderId=${orderId ?? origClientOrderId}`);
+                const executionReport = await spotTradingAdapter.cancelOrder({
+                    symbol: targetSymbol,
+                    orderId,
+                    origClientOrderId,
+                    newClientOrderId,
                 });
+                emit({ execution_update: executionReport });
                 await refreshAccountState(targetSymbol);
             } catch (error) {
                 logger.error("Cancel order error:", error);
@@ -1341,31 +1292,8 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
             // Exchange Info (Filters) - for detail channels (weight ~10)
             if (isDetail && channel.state.initChart) {
                 fetchPromises.push(rateLimiter.execute(async () => {
-                    const res = await client.restAPI.exchangeInfo({ symbol });
-                    const exchangeInfo = await res.data();
-                    const symbolInfo = exchangeInfo?.symbols?.[0];
-                    if (symbolInfo) {
-                        const parsedFilters = {
-                            status: symbolInfo.status,
-                            baseAsset: symbolInfo.baseAsset,
-                            quoteAsset: symbolInfo.quoteAsset,
-                            baseAssetPrecision: symbolInfo.baseAssetPrecision,
-                            quoteAssetPrecision: symbolInfo.quoteAssetPrecision,
-                            quotePrecision: symbolInfo.quotePrecision,
-                        };
-                        symbolInfo.filters.forEach(f => {
-                            if (f.filterType === 'MIN_NOTIONAL') parsedFilters.minNotional = f.minNotional;
-                            if (f.filterType === 'PRICE_FILTER') {
-                                parsedFilters.minPrice = f.minPrice;
-                                parsedFilters.maxPrice = f.maxPrice;
-                                parsedFilters.tickSize = f.tickSize;
-                            }
-                            if (f.filterType === 'LOT_SIZE') {
-                                parsedFilters.stepSize = f.stepSize;
-                                parsedFilters.minQty = f.minQty;
-                                parsedFilters.maxQty = f.maxQty;
-                            }
-                        });
+                    const parsedFilters = await spotTradingAdapter.getExchangeInfo(symbol);
+                    if (parsedFilters) {
                         emitGlobal('filters', { [symbol]: parsedFilters });
                         channel.state.initChart = false;
                     }

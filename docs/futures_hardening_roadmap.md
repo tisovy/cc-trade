@@ -137,6 +137,19 @@ Move spot-specific assumptions into the adapter:
 - spot user-data stream normalization;
 - `LIMIT/GTC` default handling.
 
+Progress:
+
+- [x] Map current spot backend responsibilities in `electron/services/binance-connection.js`:
+  - spot account balances: REST `getAccount`, nonzero free/locked filtering, renderer `{ balances }` payloads;
+  - spot exchange filters: REST `exchangeInfo`, `MIN_NOTIONAL` / `PRICE_FILTER` / `LOT_SIZE` parsing, global `{ filters }` payloads;
+  - spot open orders: REST `getOpenOrders`, renderer `{ orders }` payloads;
+  - spot trade history: REST `myTrades({ limit: 500 })`, renderer `{ history }` payloads;
+  - spot order execution: validated `LIMIT/GTC` `newOrder`, `FULL` response normalization, post-order account refresh;
+  - spot order cancellation: validated `deleteOrder`, cancellation execution normalization, post-cancel account refresh;
+  - spot user-data stream normalization: `executionReport`, `outboundAccountPosition`, and `balanceUpdate` broadcasts;
+  - non-spot concerns still in the service: local WebSocket access control, renderer connection lifecycle, ticker streams, market chart/depth/trade streams, mock mode.
+- [x] Add the first `SpotTradingAdapter` seam for current spot exchange/account/order REST operations while preserving legacy and typed command behavior.
+
 Acceptance:
 
 - Spot behavior remains identical from the user's perspective.
