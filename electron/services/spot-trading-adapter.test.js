@@ -165,6 +165,42 @@ describe('SpotTradingAdapter', () => {
         expect(client.restAPI.myTrades).not.toHaveBeenCalled();
     });
 
+    it('builds detail account snapshot operations with existing weights, labels, and payload shapes', async () => {
+        const client = makeClient({
+            getAccount: vi.fn().mockResolvedValue(makeResponse({
+                balances: [{ asset: 'USDT', free: '25.00', locked: '5.00' }],
+            })),
+            getOpenOrders: vi.fn().mockResolvedValue(makeResponse([{ orderId: 789 }])),
+            myTrades: vi.fn().mockResolvedValue(makeResponse([{ id: 321 }])),
+        });
+        const adapter = new SpotTradingAdapter({ client, recvWindow: 60000 });
+
+        const operations = adapter.getDetailAccountSnapshotOperations('ETHUSDT');
+
+        expect(operations.map(({ type, weight, errorLabel }) => ({ type, weight, errorLabel }))).toEqual([
+            { type: 'balances', weight: 10, errorLabel: 'Balances Fetch Error' },
+            { type: 'openOrders', weight: 3, errorLabel: 'Open Orders Fetch Error' },
+            { type: 'tradeHistory', weight: 10, errorLabel: 'Trade History Fetch Error' },
+        ]);
+        await expect(operations[0].loadPayload()).resolves.toEqual({
+            balances: { USDT: { available: '25.00', onOrder: '5.00' } },
+        });
+        await expect(operations[1].loadPayload()).resolves.toEqual({
+            orders: [{ orderId: 789 }],
+        });
+        await expect(operations[2].loadPayload()).resolves.toEqual({
+            history: [{ id: 321 }],
+        });
+
+        expect(client.restAPI.getAccount).toHaveBeenCalledWith({ recvWindow: 60000 });
+        expect(client.restAPI.getOpenOrders).toHaveBeenCalledWith({ recvWindow: 60000 });
+        expect(client.restAPI.myTrades).toHaveBeenCalledWith({
+            symbol: 'ETHUSDT',
+            limit: 500,
+            recvWindow: 60000,
+        });
+    });
+
     it('places LIMIT/GTC spot orders with the existing REST parameter contract', async () => {
         const client = makeClient({
             newOrder: vi.fn().mockResolvedValue(makeResponse({

@@ -111,6 +111,12 @@ const SPOT_ACCOUNT_REFRESH_WEIGHTS = {
     tradeHistory: 10,
 };
 
+const SPOT_ACCOUNT_REFRESH_ERROR_LABELS = {
+    balances: 'Balances Fetch Error',
+    openOrders: 'Open Orders Fetch Error',
+    tradeHistory: 'Trade History Fetch Error',
+};
+
 export class SpotTradingAdapter {
     constructor({ client, recvWindow }) {
         this.client = client;
@@ -180,6 +186,13 @@ export class SpotTradingAdapter {
         }
 
         return operations;
+    }
+
+    getDetailAccountSnapshotOperations(symbol) {
+        return this.getAccountRefreshOperations(symbol).map((operation) => ({
+            ...operation,
+            errorLabel: SPOT_ACCOUNT_REFRESH_ERROR_LABELS[operation.type],
+        }));
     }
 
     normalizeUserDataStreamEvent(payload) {

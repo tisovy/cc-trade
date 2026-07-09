@@ -632,40 +632,15 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
         const channelManager = new ChannelManager(logger);
         const marketStreamManager = channelManager.getMarketStreamManager();
 
-        const fetchBalances = async () => {
-            if (!spotTradingAdapter) return;
-            try {
-                const payload = await spotTradingAdapter.getAccountStatePayload();
-                emit(payload);
-            } catch (error) {
-                logger.error("Balances Fetch Error:", error);
-            }
-        };
-
-        const fetchOpenOrders = async () => {
-            if (!spotTradingAdapter) return;
-            try {
-                const payload = await spotTradingAdapter.getOpenOrdersPayload();
-                emit(payload);
-            } catch (error) {
-                logger.error("Open Orders Fetch Error:", error);
-            }
-        };
-
-        const fetchTradeHistoryForSymbol = async (symbol) => {
-            if (!spotTradingAdapter) return;
-            try {
-                const payload = await spotTradingAdapter.getTradeHistoryPayload(symbol);
-                emit(payload);
-            } catch (error) {
-                logger.error("Trade History Fetch Error:", error);
-            }
-        };
-
         const emitSpotRefreshOperation = async (operation) => {
             const payload = await operation.loadPayload();
             emit(payload);
         };
+
+        const enqueueSpotRefreshOperation = (operation) => (
+            rateLimiter.execute(() => emitSpotRefreshOperation(operation), operation.weight)
+                .catch((err) => logger.error(operation.errorLabel || 'Account Refresh Fetch Error:', err))
+        );
 
         const refreshAccountState = async (symbol) => {
             if (!spotTradingAdapter) return;
@@ -1300,11 +1275,11 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
                 }, 10).catch(err => logger.error("Exchange Info Fetch Error:", err)));
             }
 
-            // Account State - for detail channels only (weight ~10 each)
-            if (isDetail) {
-                fetchPromises.push(rateLimiter.execute(() => fetchBalances(), 10).catch(err => logger.error("Balances Fetch Error:", err)));
-                fetchPromises.push(rateLimiter.execute(() => fetchOpenOrders(), 3).catch(err => logger.error("Open Orders Fetch Error:", err)));
-                fetchPromises.push(rateLimiter.execute(() => fetchTradeHistoryForSymbol(symbol), 10).catch(err => logger.error("Trade History Fetch Error:", err)));
+            // Account State - for detail channels only
+            if (isDetail && spotTradingAdapter) {
+                for (const operation of spotTradingAdapter.getDetailAccountSnapshotOperations(symbol)) {
+                    fetchPromises.push(enqueueSpotRefreshOperation(operation));
+                }
             }
 
             // Recent Trades - for detail channels (weight ~1)
