@@ -18,6 +18,7 @@ import {
 import {
     SpotTradingAdapter,
     buildSpotMockOrderPlacementExecutionReport,
+    runSpotAccountRefreshOperations,
 } from './spot-trading-adapter.js';
 import { TRADING_COMMAND_ACTIONS } from '../../src/utils/tradingCommands.js';
 
@@ -536,9 +537,7 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
         if (USE_MOCK || !client) return;
         try {
             const sentAt = Date.now();
-            const res = await client.restAPI.sendRequest('/api/v3/time', 'GET');
-            const data = await res.data();
-            const serverTime = Number(data?.serverTime);
+            const serverTime = Number(await spotTradingAdapter.getServerTime());
             if (!Number.isFinite(serverTime)) return;
             // Compare server time to the request's midpoint to cancel out round-trip.
             const localMid = sentAt + (Date.now() - sentAt) / 2;
@@ -645,9 +644,13 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
 
         const refreshAccountState = async (symbol) => {
             if (!spotTradingAdapter) return;
-            for (const operation of spotTradingAdapter.getAccountRefreshOperations(symbol)) {
-                await rateLimiter.execute(() => emitSpotRefreshOperation(operation), operation.weight);
-            }
+            await runSpotAccountRefreshOperations({
+                operations: spotTradingAdapter.getAccountRefreshOperations(symbol),
+                executeOperation: (operation) => (
+                    rateLimiter.execute(() => emitSpotRefreshOperation(operation), operation.weight)
+                ),
+                onOperationError: ({ error, errorLabel }) => logger.error(`${errorLabel}:`, error),
+            });
         };
 
         const handleOrderPlacement = async (payload, requestType = 'buyOrder') => {

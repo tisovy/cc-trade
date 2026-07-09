@@ -117,7 +117,27 @@ const SPOT_ACCOUNT_REFRESH_ERROR_LABELS = {
     tradeHistory: 'Trade History Fetch Error',
 };
 
+export const runSpotAccountRefreshOperations = async ({
+    operations = [],
+    executeOperation,
+    onOperationError,
+}) => {
+    for (const operation of operations) {
+        try {
+            await executeOperation(operation);
+        } catch (error) {
+            onOperationError?.({
+                error,
+                errorLabel: SPOT_ACCOUNT_REFRESH_ERROR_LABELS[operation.type]
+                    || 'Account Refresh Fetch Error',
+                operation,
+            });
+        }
+    }
+};
+
 const SPOT_USER_DATA_STREAM_PATH = '/api/v3/userDataStream';
+const SPOT_SERVER_TIME_PATH = '/api/v3/time';
 
 export class SpotTradingAdapter {
     constructor({ client, recvWindow }) {
@@ -129,6 +149,12 @@ export class SpotTradingAdapter {
         return this.client.restAPI.exchangeInfo({ symbol })
             .then(readResponseData)
             .then(parseSpotExchangeFilters);
+    }
+
+    async getServerTime() {
+        const response = await this.client.restAPI.sendRequest(SPOT_SERVER_TIME_PATH, 'GET');
+        const data = await response.data();
+        return data?.serverTime;
     }
 
     getAccountState() {

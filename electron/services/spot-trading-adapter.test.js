@@ -6,6 +6,7 @@ import {
     normalizeSpotExecutionReport,
     normalizeSpotUserDataStreamEvent,
     parseSpotExchangeFilters,
+    runSpotAccountRefreshOperations,
 } from './spot-trading-adapter.js';
 
 const makeResponse = (data) => ({
@@ -106,6 +107,21 @@ describe('SpotTradingAdapter', () => {
         });
     });
 
+    it('reads spot server time through the existing REST contract', async () => {
+        const client = makeClient({
+            sendRequest: vi.fn()
+                .mockResolvedValueOnce(makeResponse({ serverTime: 1783591200123 }))
+                .mockResolvedValueOnce(makeResponse({})),
+        });
+        const adapter = new SpotTradingAdapter({ client, recvWindow: 60000 });
+
+        await expect(adapter.getServerTime()).resolves.toBe(1783591200123);
+        await expect(adapter.getServerTime()).resolves.toBeUndefined();
+
+        expect(client.restAPI.sendRequest).toHaveBeenNthCalledWith(1, '/api/v3/time', 'GET');
+        expect(client.restAPI.sendRequest).toHaveBeenNthCalledWith(2, '/api/v3/time', 'GET');
+    });
+
     it('builds mock spot placement execution reports with the existing renderer payload shape', () => {
         expect(buildSpotMockOrderPlacementExecutionReport({
             symbol: 'BTCUSDT',
@@ -188,6 +204,41 @@ describe('SpotTradingAdapter', () => {
             orders: [],
         });
         expect(client.restAPI.myTrades).not.toHaveBeenCalled();
+    });
+
+    it('runs spot account refresh operations sequentially and isolates failures', async () => {
+        const operations = [
+            { type: 'balances', weight: 10 },
+            { type: 'openOrders', weight: 3 },
+            { type: 'tradeHistory', weight: 10 },
+        ];
+        const balancesError = new Error('balances unavailable');
+        const executionOrder = [];
+        let activeOperations = 0;
+        let maxActiveOperations = 0;
+        const onOperationError = vi.fn();
+
+        await runSpotAccountRefreshOperations({
+            operations,
+            executeOperation: async (operation) => {
+                executionOrder.push(operation.type);
+                activeOperations += 1;
+                maxActiveOperations = Math.max(maxActiveOperations, activeOperations);
+                await Promise.resolve();
+                activeOperations -= 1;
+                if (operation.type === 'balances') throw balancesError;
+            },
+            onOperationError,
+        });
+
+        expect(executionOrder).toEqual(['balances', 'openOrders', 'tradeHistory']);
+        expect(maxActiveOperations).toBe(1);
+        expect(onOperationError).toHaveBeenCalledTimes(1);
+        expect(onOperationError).toHaveBeenCalledWith({
+            error: balancesError,
+            errorLabel: 'Balances Fetch Error',
+            operation: operations[0],
+        });
     });
 
     it('builds detail account snapshot operations with existing weights, labels, and payload shapes', async () => {

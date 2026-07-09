@@ -16,7 +16,7 @@ This document is the implementation roadmap for stabilizing the current spot ter
 - Backend: Electron main process plus Node services using `@binance/spot`.
 - No Python service is present in this workspace.
 - Market data is partly on the newer channel protocol.
-- Trading commands still use the legacy WebSocket protocol (`buyOrder`, `sellOrder`, `cancelOrder`).
+- Renderer trading commands use the versioned typed protocol; the legacy WebSocket protocol (`buyOrder`, `sellOrder`, `cancelOrder`) remains available for compatibility.
 - Spot order execution is currently limited to `LIMIT` + `GTC`.
 - E2E builds keep DevTools closed by default; remaining E2E work should focus on deterministic state and selectors.
 
@@ -155,6 +155,11 @@ Progress:
 - [x] Move spot user-data stream listen-key creation and renewal behind adapter-owned helpers while preserving stream setup, keep-alive behavior, and rate-limit weights.
 - [x] Keep current spot order placement `LIMIT/GTC` defaults owned by the adapter while preserving renderer payloads and REST order parameters.
 - [x] Move mock spot order-placement execution report construction behind an adapter-owned helper while preserving the existing renderer payload shape.
+- [x] Restore per-operation refresh failure isolation after the account-operation extraction so balances, open orders, and history still run sequentially after an exhausted operation failure.
+- [x] Move the spot server-time REST request behind the adapter while preserving clock-drift validation, logging, and startup behavior.
+- [ ] Move spot user-data WebSocket connection creation behind the adapter without changing reconnect, teardown, or keep-alive timing.
+- [ ] Reuse adapter-owned balance refresh operation metadata for stream-triggered shared balance refreshes.
+- [ ] Add service-level orchestration coverage before changing higher-risk subscription or trading flows.
 
 Acceptance:
 
@@ -265,21 +270,18 @@ Suggested UI order:
 
 ## Start Here Next Session
 
-Start with Phase 2, task 5:
+Continue Phase 4 with the smallest unchecked backend-only seam:
 
-**Ensure mock WebSocket messages cover both legacy and channel protocol paths where tests need them.**
+**Move spot user-data WebSocket connection creation behind `SpotTradingAdapter`.**
 
 Implementation entry points:
 
-- `tests/trading_flow.spec.js`
-- `tests/feature_safe_order.spec.js`
-- `tests/helpers/e2eLocalStorage.js`
-- `src/hooks/useWebSocket.js`
-- `src/context/DataContext.jsx`
+- `electron/services/binance-connection.js`
+- `electron/services/spot-trading-adapter.js`
+- `electron/services/spot-trading-adapter.test.js`
 
-Expected first PR scope:
+Expected scope:
 
-- Audit mocked WebSocket payloads used by E2E tests.
-- Cover the legacy trading command path (`buyOrder`, `sellOrder`, `cancelOrder`) where order flow tests need it.
-- Cover channel protocol messages where chart/depth/subscription tests need them.
-- Keep the legacy protocol available and do not change spot order behavior.
+- Preserve the exact `{ stream: listenKey }` WebSocket connection parameters.
+- Keep reconnect, teardown, and keep-alive ownership in the connection service.
+- Do not change renderer payloads, rate-limit weights, typed or legacy command behavior, or futures execution state.
