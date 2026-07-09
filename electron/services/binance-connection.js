@@ -1043,19 +1043,16 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
                     try {
                         logger.info("Starting User Data Stream setup...");
 
-                        const response = await rateLimiter.execute(
-                            () => client.restAPI.sendRequest('/api/v3/userDataStream', 'POST'),
+                        const listenKey = await rateLimiter.execute(
+                            () => spotTradingAdapter.createUserDataStreamListenKey(),
                             1
                         );
-                        const data = await response.data();
-
-                    const listenKey = data?.listenKey;
-                    if (!listenKey) {
-                        logger.error("Failed to obtain listenKey");
-                        userDataReconnecting = false;
-                        return;
-                    }
-                    logger.info("Listen Key obtained successfully.");
+                        if (!listenKey) {
+                            logger.error("Failed to obtain listenKey");
+                            userDataReconnecting = false;
+                            return;
+                        }
+                        logger.info("Listen Key obtained successfully.");
 
                     await throttleWsConnection();
                     // Tear down any previous user-data socket first so we never run
@@ -1137,7 +1134,7 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
                     keepAliveInterval = setInterval(async () => {
                         try {
                             await rateLimiter.execute(
-                                () => client.restAPI.sendRequest('/api/v3/userDataStream', 'PUT', { listenKey }),
+                                () => spotTradingAdapter.renewUserDataStreamListenKey(listenKey),
                                 1
                             );
                             logger.debug("Renewed listenKey");

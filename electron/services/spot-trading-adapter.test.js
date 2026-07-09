@@ -17,6 +17,7 @@ const makeClient = (overrides = {}) => ({
         getAccount: vi.fn(),
         getOpenOrders: vi.fn(),
         myTrades: vi.fn(),
+        sendRequest: vi.fn(),
         newOrder: vi.fn(),
         deleteOrder: vi.fn(),
         ...overrides,
@@ -430,5 +431,30 @@ describe('SpotTradingAdapter', () => {
                 },
             },
         });
+    });
+
+    it('creates and renews spot user-data stream listen keys through the existing REST contract', async () => {
+        const renewResponse = makeResponse({});
+        const client = makeClient({
+            sendRequest: vi.fn()
+                .mockResolvedValueOnce(makeResponse({ listenKey: 'listen-123' }))
+                .mockResolvedValueOnce(renewResponse),
+        });
+        const adapter = new SpotTradingAdapter({ client, recvWindow: 60000 });
+
+        await expect(adapter.createUserDataStreamListenKey()).resolves.toBe('listen-123');
+        await expect(adapter.renewUserDataStreamListenKey('listen-123')).resolves.toBe(renewResponse);
+
+        expect(client.restAPI.sendRequest).toHaveBeenNthCalledWith(
+            1,
+            '/api/v3/userDataStream',
+            'POST',
+        );
+        expect(client.restAPI.sendRequest).toHaveBeenNthCalledWith(
+            2,
+            '/api/v3/userDataStream',
+            'PUT',
+            { listenKey: 'listen-123' },
+        );
     });
 });

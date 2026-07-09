@@ -117,6 +117,8 @@ const SPOT_ACCOUNT_REFRESH_ERROR_LABELS = {
     tradeHistory: 'Trade History Fetch Error',
 };
 
+const SPOT_USER_DATA_STREAM_PATH = '/api/v3/userDataStream';
+
 export class SpotTradingAdapter {
     constructor({ client, recvWindow }) {
         this.client = client;
@@ -197,6 +199,16 @@ export class SpotTradingAdapter {
 
     normalizeUserDataStreamEvent(payload) {
         return normalizeSpotUserDataStreamEvent(payload);
+    }
+
+    async createUserDataStreamListenKey() {
+        const response = await this.client.restAPI.sendRequest(SPOT_USER_DATA_STREAM_PATH, 'POST');
+        const data = await response.data();
+        return data?.listenKey;
+    }
+
+    renewUserDataStreamListenKey(listenKey) {
+        return this.client.restAPI.sendRequest(SPOT_USER_DATA_STREAM_PATH, 'PUT', { listenKey });
     }
 
     async placeOrder(command) {
