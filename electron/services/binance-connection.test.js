@@ -1,8 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const moduleMocks = vi.hoisted(() => {
-    const websocketServerHandlers = {};
-    const rendererHandlers = {};
+    const state = {};
 
     const makeSocket = () => {
         const handlers = {};
@@ -15,76 +14,89 @@ const moduleMocks = vi.hoisted(() => {
         };
     };
 
-    const marketSocket = makeSocket();
-    const userDataSocket = makeSocket();
-    const httpServer = {
-        listen: vi.fn((port, host, callback) => callback?.()),
-        close: vi.fn(),
-    };
-    const websocketServer = {
-        on: vi.fn((event, handler) => {
-            websocketServerHandlers[event] = handler;
-        }),
-    };
-    const createHttpServer = vi.fn(() => httpServer);
-    const WebSocketServer = vi.fn(function MockWebSocketServer() {
-        return websocketServer;
-    });
-
-    const sendRequest = vi.fn(async (path, method) => ({
-        data: vi.fn().mockResolvedValue(
-            path === '/api/v3/time' && method === 'GET'
-                ? { serverTime: Date.now() }
-                : path === '/api/v3/userDataStream' && method === 'POST'
-                    ? { listenKey: 'listen-key-123' }
-                    : {},
-        ),
-    }));
-    const connect = vi.fn(({ stream }) => Promise.resolve(
-        stream === '!miniTicker@arr' ? marketSocket : userDataSocket,
-    ));
-    const spotClient = {
-        restAPI: {
-            configuration: { baseOptions: { headers: {} } },
-            axiosInstance: {
-                interceptors: {
-                    request: { use: vi.fn() },
-                },
-            },
-            sendRequest,
-            ticker24hr: vi.fn().mockResolvedValue({
-                data: vi.fn().mockResolvedValue([]),
+    const reset = () => {
+        state.websocketServerHandlers = {};
+        state.rendererHandlers = {};
+        state.marketSocket = makeSocket();
+        state.userDataSocket = makeSocket();
+        state.userDataConnection = Promise.resolve(state.userDataSocket);
+        state.httpServer = {
+            listen: vi.fn((port, host, callback) => callback?.()),
+            close: vi.fn(),
+        };
+        state.websocketServer = {
+            on: vi.fn((event, handler) => {
+                state.websocketServerHandlers[event] = handler;
             }),
-        },
-        websocketStreams: { connect },
+        };
+        state.sendRequest = vi.fn(async (path, method) => ({
+            data: vi.fn().mockResolvedValue(
+                path === '/api/v3/time' && method === 'GET'
+                    ? { serverTime: Date.now() }
+                    : path === '/api/v3/userDataStream' && method === 'POST'
+                        ? { listenKey: 'listen-key-123' }
+                        : {},
+            ),
+        }));
+        state.connect = vi.fn(({ stream }) => (
+            stream === '!miniTicker@arr'
+                ? Promise.resolve(state.marketSocket)
+                : state.userDataConnection
+        ));
+        state.spotClient = {
+            restAPI: {
+                configuration: { baseOptions: { headers: {} } },
+                axiosInstance: {
+                    interceptors: {
+                        request: { use: vi.fn() },
+                    },
+                },
+                sendRequest: state.sendRequest,
+                ticker24hr: vi.fn().mockResolvedValue({
+                    data: vi.fn().mockResolvedValue([]),
+                }),
+            },
+            websocketStreams: { connect: state.connect },
+        };
+        state.rendererConnection = {
+            connected: true,
+            remoteAddress: '127.0.0.1',
+            sendUTF: vi.fn(),
+            on: vi.fn((event, handler) => {
+                state.rendererHandlers[event] = handler;
+            }),
+        };
     };
+
+    const createHttpServer = vi.fn(() => state.httpServer);
+    const WebSocketServer = vi.fn(function MockWebSocketServer() {
+        return state.websocketServer;
+    });
     const Spot = vi.fn(function MockSpot() {
-        return spotClient;
+        return state.spotClient;
     });
 
-    const rendererConnection = {
-        connected: true,
-        remoteAddress: '127.0.0.1',
-        sendUTF: vi.fn(),
-        on: vi.fn((event, handler) => {
-            rendererHandlers[event] = handler;
-        }),
-    };
+    reset();
 
     return {
         Spot,
         WebSocketServer,
-        connect,
         createHttpServer,
-        httpServer,
-        marketSocket,
-        rendererConnection,
-        rendererHandlers,
-        sendRequest,
-        spotClient,
-        userDataSocket,
-        websocketServer,
-        websocketServerHandlers,
+        makeSocket,
+        reset,
+        setUserDataConnection: (connection) => {
+            state.userDataConnection = connection;
+        },
+        get connect() { return state.connect; },
+        get httpServer() { return state.httpServer; },
+        get marketSocket() { return state.marketSocket; },
+        get rendererConnection() { return state.rendererConnection; },
+        get rendererHandlers() { return state.rendererHandlers; },
+        get sendRequest() { return state.sendRequest; },
+        get spotClient() { return state.spotClient; },
+        get userDataSocket() { return state.userDataSocket; },
+        get websocketServer() { return state.websocketServer; },
+        get websocketServerHandlers() { return state.websocketServerHandlers; },
     };
 });
 
@@ -106,9 +118,6 @@ vi.mock('./local-websocket-access.js', () => ({
     validateLocalWebSocketRequest: vi.fn(() => ({ allowed: true })),
 }));
 
-import { setupBinanceConnection } from './binance-connection.js';
-import { SpotTradingAdapter } from './spot-trading-adapter.js';
-
 const flushMicrotasks = async () => {
     for (let index = 0; index < 10; index += 1) {
         await Promise.resolve();
@@ -119,8 +128,13 @@ describe('setupBinanceConnection user-data orchestration', () => {
     let originalConsoleLog;
     let originalStdoutWrite;
     let originalStderrWrite;
+    let setupBinanceConnection;
+    let SpotTradingAdapter;
 
-    beforeEach(() => {
+    beforeEach(async () => {
+        vi.resetModules();
+        vi.clearAllMocks();
+        moduleMocks.reset();
         vi.useFakeTimers();
         vi.setSystemTime(new Date('2026-07-09T10:00:00.000Z'));
         vi.stubEnv('BK', 'test-api-key');
@@ -138,9 +152,14 @@ describe('setupBinanceConnection user-data orchestration', () => {
         vi.spyOn(console, 'info').mockImplementation(() => {});
         vi.spyOn(console, 'warn').mockImplementation(() => {});
         vi.spyOn(console, 'error').mockImplementation(() => {});
+
+        ({ setupBinanceConnection } = await import('./binance-connection.js'));
+        ({ SpotTradingAdapter } = await import('./spot-trading-adapter.js'));
     });
 
-    afterEach(() => {
+    afterEach(async () => {
+        moduleMocks.rendererHandlers.close?.();
+        await flushMicrotasks();
         vi.clearAllTimers();
         vi.useRealTimers();
         vi.unstubAllEnvs();
@@ -150,19 +169,42 @@ describe('setupBinanceConnection user-data orchestration', () => {
         process.stderr.write = originalStderrWrite;
     });
 
-    it('connects live user data and coalesces adapter-owned balance catch-up', async () => {
-        let resolveBalancePayload;
-        const balancePayload = {
+    it('connects live user data and coalesces adapter-owned stream refreshes', async () => {
+        let resolveUserDataConnection;
+        const userDataConnectionPromise = new Promise((resolve) => {
+            resolveUserDataConnection = resolve;
+        });
+        moduleMocks.setUserDataConnection(userDataConnectionPromise);
+
+        let resolveInitialBalancePayload;
+        let resolveStreamBalancePayload;
+        const initialBalancePayload = {
             balances: {
                 USDT: { available: '100.00', onOrder: '5.00' },
             },
         };
-        const balancePayloadPromise = new Promise((resolve) => {
-            resolveBalancePayload = resolve;
+        const streamBalancePayload = {
+            balances: {
+                USDT: { available: '103.00', onOrder: '5.00' },
+            },
+        };
+        const initialBalancePayloadPromise = new Promise((resolve) => {
+            resolveInitialBalancePayload = resolve;
         });
-        const loadBalancePayload = vi.fn(() => balancePayloadPromise);
+        const streamBalancePayloadPromise = new Promise((resolve) => {
+            resolveStreamBalancePayload = resolve;
+        });
+        const loadBalancePayload = vi.fn()
+            .mockImplementationOnce(() => initialBalancePayloadPromise)
+            .mockImplementationOnce(() => streamBalancePayloadPromise);
         const loadOpenOrdersPayload = vi.fn();
-        const readBalanceWeight = vi.fn(() => 10);
+        const initialWeightValueOf = vi.fn(() => 10);
+        const streamWeightValueOf = vi.fn(() => 10);
+        const initialWeight = { valueOf: initialWeightValueOf };
+        const streamWeight = { valueOf: streamWeightValueOf };
+        const readBalanceWeight = vi.fn()
+            .mockReturnValueOnce(initialWeight)
+            .mockReturnValueOnce(streamWeight);
         const balanceOperation = {
             type: 'balances',
             get weight() {
@@ -209,7 +251,14 @@ describe('setupBinanceConnection user-data orchestration', () => {
         );
         expect(connectUserDataStream).toHaveBeenCalledOnce();
         expect(connectUserDataStream).toHaveBeenCalledWith('listen-key-123');
+        expect(connectUserDataStream.mock.results[0].value).toBe(userDataConnectionPromise);
         expect(moduleMocks.connect).toHaveBeenCalledWith({ stream: 'listen-key-123' });
+        expect(moduleMocks.userDataSocket.on).not.toHaveBeenCalled();
+        expect(getAccountRefreshOperations).not.toHaveBeenCalled();
+        expect(loadBalancePayload).not.toHaveBeenCalled();
+
+        resolveUserDataConnection(moduleMocks.userDataSocket);
+        await flushMicrotasks();
 
         expect(moduleMocks.userDataSocket.on).toHaveBeenNthCalledWith(
             1,
@@ -230,9 +279,24 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(getAccountRefreshOperations).toHaveBeenCalledOnce();
         expect(getAccountRefreshOperations).toHaveBeenCalledWith();
         expect(readBalanceWeight).toHaveBeenCalledOnce();
-        expect(readBalanceWeight).toHaveReturnedWith(10);
+        expect(readBalanceWeight).toHaveNthReturnedWith(1, initialWeight);
+        expect(initialWeightValueOf).toHaveBeenCalledOnce();
+        expect(initialWeightValueOf).toHaveReturnedWith(10);
         expect(loadBalancePayload).toHaveBeenCalledOnce();
         expect(loadOpenOrdersPayload).not.toHaveBeenCalled();
+        expect(initialWeightValueOf.mock.invocationCallOrder[0]).toBeLessThan(
+            loadBalancePayload.mock.invocationCallOrder[0],
+        );
+        expect(moduleMocks.rendererConnection.sendUTF).not.toHaveBeenCalled();
+
+        resolveInitialBalancePayload(initialBalancePayload);
+        await flushMicrotasks();
+
+        expect(moduleMocks.rendererConnection.sendUTF).toHaveBeenCalledOnce();
+        expect(moduleMocks.rendererConnection.sendUTF).toHaveBeenNthCalledWith(
+            1,
+            JSON.stringify(initialBalancePayload),
+        );
 
         moduleMocks.userDataSocket.handlers.message(JSON.stringify({
             e: 'balanceUpdate',
@@ -246,20 +310,31 @@ describe('setupBinanceConnection user-data orchestration', () => {
         }));
         await flushMicrotasks();
 
-        expect(getAccountRefreshOperations).toHaveBeenCalledOnce();
+        expect(getAccountRefreshOperations).toHaveBeenCalledTimes(2);
+        expect(readBalanceWeight).toHaveBeenCalledTimes(2);
+        expect(readBalanceWeight).toHaveNthReturnedWith(2, streamWeight);
+        expect(streamWeightValueOf).toHaveBeenCalledOnce();
+        expect(streamWeightValueOf).toHaveReturnedWith(10);
         expect(loadBalancePayload).toHaveBeenCalledOnce();
         expect(loadOpenOrdersPayload).not.toHaveBeenCalled();
-        expect(moduleMocks.rendererConnection.sendUTF).not.toHaveBeenCalled();
-
-        resolveBalancePayload(balancePayload);
-        await flushMicrotasks();
-
         expect(moduleMocks.rendererConnection.sendUTF).toHaveBeenCalledOnce();
-        expect(moduleMocks.rendererConnection.sendUTF).toHaveBeenCalledWith(
-            JSON.stringify(balancePayload),
-        );
 
-        moduleMocks.rendererHandlers.close();
+        await vi.advanceTimersByTimeAsync(500);
         await flushMicrotasks();
+
+        expect(loadBalancePayload).toHaveBeenCalledTimes(2);
+        expect(streamWeightValueOf.mock.invocationCallOrder[0]).toBeLessThan(
+            loadBalancePayload.mock.invocationCallOrder[1],
+        );
+        expect(moduleMocks.rendererConnection.sendUTF).toHaveBeenCalledOnce();
+
+        resolveStreamBalancePayload(streamBalancePayload);
+        await flushMicrotasks();
+
+        expect(moduleMocks.rendererConnection.sendUTF).toHaveBeenCalledTimes(2);
+        expect(moduleMocks.rendererConnection.sendUTF).toHaveBeenNthCalledWith(
+            2,
+            JSON.stringify(streamBalancePayload),
+        );
     });
 });
