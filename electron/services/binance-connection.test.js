@@ -337,4 +337,143 @@ describe('setupBinanceConnection user-data orchestration', () => {
             JSON.stringify(streamBalancePayload),
         );
     });
+
+    it('retries failed user-data connections at exact service boundaries', async () => {
+        const retryDelays = [3000, 6000, 9000, 12000, 15000];
+        const listenKeys = Array.from(
+            { length: retryDelays.length + 1 },
+            (_, index) => `retry-listen-key-${index + 1}`,
+        );
+        const lifecycle = [];
+        const attemptTimes = [];
+        let nextListenKeyIndex = 0;
+
+        moduleMocks.sendRequest.mockImplementation(async (path, method) => {
+            if (path === '/api/v3/time' && method === 'GET') {
+                return {
+                    data: vi.fn().mockResolvedValue({ serverTime: Date.now() }),
+                };
+            }
+
+            if (path === '/api/v3/userDataStream' && method === 'POST') {
+                const listenKey = listenKeys[nextListenKeyIndex];
+                nextListenKeyIndex += 1;
+                lifecycle.push(`create:${listenKey}`);
+                return {
+                    data: vi.fn().mockResolvedValue({ listenKey }),
+                };
+            }
+
+            return { data: vi.fn().mockResolvedValue({}) };
+        });
+
+        const createListenKey = vi.spyOn(
+            SpotTradingAdapter.prototype,
+            'createUserDataStreamListenKey',
+        );
+        const connectUserDataStream = vi.spyOn(
+            SpotTradingAdapter.prototype,
+            'connectUserDataStream',
+        ).mockImplementation((listenKey) => {
+            lifecycle.push(`connect:${listenKey}`);
+            attemptTimes.push(Date.now());
+            return Promise.reject(Object.assign(
+                new Error('user-data socket reset'),
+                { code: 'ECONNRESET' },
+            ));
+        });
+        const getListenKeyRequests = () => moduleMocks.sendRequest.mock.calls.filter(
+            ([path, method]) => (
+                path === '/api/v3/userDataStream' && method === 'POST'
+            ),
+        );
+
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1' },
+        });
+
+        const request = {
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        };
+        moduleMocks.websocketServerHandlers.request(request);
+
+        await flushMicrotasks();
+        await vi.advanceTimersByTimeAsync(500);
+        await flushMicrotasks();
+
+        expect(moduleMocks.marketSocket.handlers.message).toEqual(expect.any(Function));
+        expect(moduleMocks.connect).toHaveBeenCalledOnce();
+        expect(moduleMocks.connect).toHaveBeenCalledWith({ stream: '!miniTicker@arr' });
+        expect(createListenKey).toHaveBeenCalledOnce();
+        expect(getListenKeyRequests()).toHaveLength(1);
+        expect(connectUserDataStream).toHaveBeenCalledOnce();
+        expect(connectUserDataStream).toHaveBeenNthCalledWith(1, listenKeys[0]);
+        expect(moduleMocks.rendererConnection.connected).toBe(true);
+
+        for (const [index, delay] of retryDelays.entries()) {
+            // Keep the independent market-stream watchdog from reconnecting while
+            // the cumulative user-data retry schedule crosses 45 seconds.
+            moduleMocks.marketSocket.handlers.message('{}');
+
+            await vi.advanceTimersByTimeAsync(delay - 1);
+            await flushMicrotasks();
+
+            expect(createListenKey).toHaveBeenCalledTimes(index + 1);
+            expect(getListenKeyRequests()).toHaveLength(index + 1);
+            expect(connectUserDataStream).toHaveBeenCalledTimes(index + 1);
+            expect(moduleMocks.rendererConnection.connected).toBe(true);
+
+            await vi.advanceTimersByTimeAsync(1);
+            await flushMicrotasks();
+
+            expect(createListenKey).toHaveBeenCalledTimes(index + 2);
+            expect(getListenKeyRequests()).toHaveLength(index + 2);
+            expect(connectUserDataStream).toHaveBeenCalledTimes(index + 2);
+            expect(connectUserDataStream).toHaveBeenNthCalledWith(
+                index + 2,
+                listenKeys[index + 1],
+            );
+            expect(moduleMocks.rendererConnection.connected).toBe(true);
+        }
+
+        expect(connectUserDataStream.mock.calls.map(([listenKey]) => listenKey)).toEqual(
+            listenKeys,
+        );
+        expect(lifecycle).toEqual(
+            listenKeys.flatMap((listenKey) => [
+                `create:${listenKey}`,
+                `connect:${listenKey}`,
+            ]),
+        );
+        for (let index = 0; index < listenKeys.length; index += 1) {
+            expect(createListenKey.mock.invocationCallOrder[index]).toBeLessThan(
+                connectUserDataStream.mock.invocationCallOrder[index],
+            );
+        }
+        expect(
+            attemptTimes.slice(1).map((time, index) => time - attemptTimes[index]),
+        ).toEqual(retryDelays);
+
+        const retryWarnings = console.warn.mock.calls
+            .map(([message]) => message)
+            .filter((message) => String(message).startsWith(
+                'User Data Stream connection failed',
+            ));
+        expect(retryWarnings).toEqual(retryDelays.map(
+            (delay, index) => (
+                `User Data Stream connection failed (ECONNRESET), retrying in ${delay}ms (${index + 1}/5)`
+            ),
+        ));
+
+        moduleMocks.marketSocket.handlers.message('{}');
+        await vi.advanceTimersByTimeAsync(retryDelays.at(-1) + 1);
+        await flushMicrotasks();
+
+        expect(createListenKey).toHaveBeenCalledTimes(6);
+        expect(getListenKeyRequests()).toHaveLength(6);
+        expect(connectUserDataStream).toHaveBeenCalledTimes(6);
+        expect(moduleMocks.connect).toHaveBeenCalledOnce();
+        expect(moduleMocks.rendererConnection.connected).toBe(true);
+    });
 });

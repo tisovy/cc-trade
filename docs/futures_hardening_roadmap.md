@@ -272,7 +272,7 @@ Suggested UI order:
 
 Continue Phase 4 with the next focused service-level checkpoint:
 
-**Add retry and teardown ordering coverage for `setupBinanceConnection` without changing the live user-data lifecycle.**
+**Add prior-socket replacement and teardown-ordering coverage for `setupBinanceConnection` without changing the live user-data lifecycle.**
 
 Implementation entry points:
 
@@ -281,6 +281,7 @@ Implementation entry points:
 
 Expected scope:
 
-- Add network retry count and delay coverage, then prior-socket teardown ordering coverage as separate focused tests.
+- Add focused prior-socket replacement and teardown-ordering coverage without broadening into retry, keep-alive renewal, trading flows, or production refactoring.
 - Preserve throttle ordering, `safeDisconnect` ordering, socket identity guards, and 30-minute keep-alive ownership.
 - Do not change renderer payloads, rate-limit weights, typed or legacy command behavior, or futures execution state.
+- Do not start Phase 5.
