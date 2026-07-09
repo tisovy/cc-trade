@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import {
     SpotTradingAdapter,
+    buildSpotMockOrderPlacementExecutionReport,
     normalizeSpotBalances,
     normalizeSpotExecutionReport,
     normalizeSpotUserDataStreamEvent,
@@ -102,6 +103,29 @@ describe('SpotTradingAdapter', () => {
             symbol: 'BTCUSDT',
             limit: 500,
             recvWindow: 60000,
+        });
+    });
+
+    it('builds mock spot placement execution reports with the existing renderer payload shape', () => {
+        expect(buildSpotMockOrderPlacementExecutionReport({
+            symbol: 'BTCUSDT',
+            side: 'BUY',
+            priceValue: '12346',
+            quantityValue: '0.0999',
+            orderId: 12345,
+            eventTime: Date.parse('2026-07-09T10:00:01.000Z'),
+        })).toEqual({
+            e: 'executionReport',
+            s: 'BTCUSDT',
+            S: 'BUY',
+            o: 'LIMIT',
+            x: 'NEW',
+            X: 'NEW',
+            i: 12345,
+            p: '12346',
+            q: '0.0999',
+            z: '0.0',
+            T: Date.parse('2026-07-09T10:00:01.000Z'),
         });
     });
 

@@ -17,6 +17,7 @@ import {
 } from './trading-command-validation.js';
 import {
     SpotTradingAdapter,
+    buildSpotMockOrderPlacementExecutionReport,
 } from './spot-trading-adapter.js';
 import { TRADING_COMMAND_ACTIONS } from '../../src/utils/tradingCommands.js';
 
@@ -672,19 +673,12 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
             if (USE_MOCK) {
                 logger.info(`[MOCK] Order Placed: ${requestType}`, payload);
                 emit({
-                    execution_update: {
-                        e: 'executionReport',
-                        s: symbol,
-                        S: resolvedSide,
-                        o: 'LIMIT',
-                        x: 'NEW',
-                        X: 'NEW',
-                        i: Date.now(),
-                        p: priceValue,
-                        q: quantityValue,
-                        z: '0.0',
-                        T: Date.now()
-                    }
+                    execution_update: buildSpotMockOrderPlacementExecutionReport({
+                        symbol,
+                        side: resolvedSide,
+                        priceValue,
+                        quantityValue,
+                    }),
                 });
                 return;
             }

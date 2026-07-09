@@ -249,3 +249,24 @@ export class SpotTradingAdapter {
         });
     }
 }
+
+export const buildSpotMockOrderPlacementExecutionReport = ({
+    symbol,
+    side,
+    priceValue,
+    quantityValue,
+    orderId = Date.now(),
+    eventTime = Date.now(),
+}) => ({
+    e: 'executionReport',
+    s: symbol,
+    S: side,
+    o: 'LIMIT',
+    x: 'NEW',
+    X: 'NEW',
+    i: orderId,
+    p: priceValue,
+    q: quantityValue,
+    z: '0.0',
+    T: eventTime,
+});
