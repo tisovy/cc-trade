@@ -695,8 +695,6 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
                 const executionReport = await spotTradingAdapter.placeOrder({
                     symbol,
                     side: resolvedSide,
-                    orderType: 'LIMIT',
-                    timeInForce: 'GTC',
                     numericQuantity,
                     numericPrice,
                 });

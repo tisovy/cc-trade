@@ -249,6 +249,50 @@ describe('SpotTradingAdapter', () => {
         });
     });
 
+    it('owns the current LIMIT/GTC defaults for validated spot order fields', async () => {
+        const client = makeClient({
+            newOrder: vi.fn().mockResolvedValue(makeResponse({
+                symbol: 'BTCUSDT',
+                side: 'BUY',
+                type: 'LIMIT',
+                orderId: 654,
+                price: '25000',
+                origQty: '0.5',
+                executedQty: '0',
+                transactTime: Date.parse('2026-07-09T10:00:01.000Z'),
+            })),
+        });
+        const adapter = new SpotTradingAdapter({ client, recvWindow: 60000 });
+
+        await expect(adapter.placeOrder({
+            symbol: 'BTCUSDT',
+            side: 'BUY',
+            numericQuantity: 0.5,
+            numericPrice: 25000,
+        })).resolves.toMatchObject({
+            e: 'executionReport',
+            s: 'BTCUSDT',
+            S: 'BUY',
+            o: 'LIMIT',
+            x: 'NEW',
+            X: 'NEW',
+            i: 654,
+            p: '25000',
+            q: '0.5',
+        });
+
+        expect(client.restAPI.newOrder).toHaveBeenCalledWith({
+            symbol: 'BTCUSDT',
+            side: 'BUY',
+            type: 'LIMIT',
+            timeInForce: 'GTC',
+            quantity: '0.5',
+            price: '25000',
+            newOrderRespType: 'FULL',
+            recvWindow: 60000,
+        });
+    });
+
     it('cancels spot orders with the existing REST parameter contract', async () => {
         const client = makeClient({
             deleteOrder: vi.fn().mockResolvedValue(makeResponse({
