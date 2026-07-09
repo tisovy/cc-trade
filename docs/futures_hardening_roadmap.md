@@ -272,7 +272,7 @@ Suggested UI order:
 
 Continue Phase 4 with the next focused service-level checkpoint:
 
-**Add prior-socket replacement and teardown-ordering coverage for `setupBinanceConnection` without changing the live user-data lifecycle.**
+**Add exact 30-minute user-data listen-key keep-alive renewal and interval-ownership coverage for `setupBinanceConnection` without changing the live user-data lifecycle.**
 
 Implementation entry points:
 
@@ -281,7 +281,8 @@ Implementation entry points:
 
 Expected scope:
 
-- Add focused prior-socket replacement and teardown-ordering coverage without broadening into retry, keep-alive renewal, trading flows, or production refactoring.
-- Preserve throttle ordering, `safeDisconnect` ordering, socket identity guards, and 30-minute keep-alive ownership.
-- Do not change renderer payloads, rate-limit weights, typed or legacy command behavior, or futures execution state.
+- Prove renewal does not run one millisecond before the 30-minute boundary, then renews the active socket's exact listen key at the boundary through `SpotTradingAdapter.renewUserDataStreamListenKey`.
+- Prove cleared or superseded keep-alive intervals cannot renew stale listen keys or interfere with the current socket's interval ownership.
+- Preserve listen-key renewal weight `1`, renderer retention, socket identity guards, and market/user-data connection separation.
+- Do not broaden into retry matrices, renewal-failure retries, trading flows, market-data behavior, UI work, or production refactoring.
 - Do not start Phase 5.

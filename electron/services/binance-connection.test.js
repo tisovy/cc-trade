@@ -486,4 +486,339 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(moduleMocks.rendererConnection.close).not.toHaveBeenCalled();
         expect(moduleMocks.rendererConnection.connected).toBe(true);
     });
+
+    it('replaces a prior user-data socket in teardown order and ignores its late close', async () => {
+        const listenKeys = {
+            a: 'replacement-listen-key-A',
+            b: 'replacement-listen-key-B',
+            c: 'replacement-listen-key-C',
+        };
+        const keepAliveDelay = 30 * 60 * 1000;
+        const lifecycle = [];
+        const socketA = moduleMocks.makeSocket();
+        const socketB = moduleMocks.makeSocket();
+        const socketC = moduleMocks.makeSocket();
+        let nextListenKeyIndex = 0;
+        let resolveListenKeyC;
+        let resolveSocketBDisconnect;
+
+        const listenKeyCResponse = new Promise((resolve) => {
+            resolveListenKeyC = resolve;
+        });
+        const socketBDisconnect = new Promise((resolve) => {
+            resolveSocketBDisconnect = resolve;
+        });
+        const readListenKeyCResponse = vi.fn(() => listenKeyCResponse);
+
+        socketB.close = vi.fn().mockResolvedValue(undefined);
+        socketB.disconnect.mockImplementation(() => {
+            lifecycle.push('disconnect:B:start');
+            return socketBDisconnect.then(() => {
+                lifecycle.push('disconnect:B:resolved');
+            });
+        });
+
+        const orderedListenKeys = [listenKeys.a, listenKeys.b, listenKeys.c];
+        moduleMocks.sendRequest.mockImplementation(async (path, method) => {
+            if (path === '/api/v3/time' && method === 'GET') {
+                return {
+                    data: vi.fn().mockResolvedValue({ serverTime: Date.now() }),
+                };
+            }
+
+            if (path === '/api/v3/userDataStream' && method === 'POST') {
+                const listenKey = orderedListenKeys[nextListenKeyIndex];
+                nextListenKeyIndex += 1;
+                lifecycle.push(`create:${listenKey}`);
+
+                if (!listenKey) {
+                    throw new Error('Unexpected user-data listen-key creation');
+                }
+
+                return {
+                    data: listenKey === listenKeys.c
+                        ? readListenKeyCResponse
+                        : vi.fn().mockResolvedValue({ listenKey }),
+                };
+            }
+
+            return { data: vi.fn().mockResolvedValue({}) };
+        });
+
+        const loadBalancePayload = vi.fn().mockResolvedValue({ balances: {} });
+        vi.spyOn(
+            SpotTradingAdapter.prototype,
+            'getAccountRefreshOperations',
+        ).mockReturnValue([{
+            type: 'balances',
+            weight: 10,
+            loadPayload: loadBalancePayload,
+        }]);
+
+        const createListenKey = vi.spyOn(
+            SpotTradingAdapter.prototype,
+            'createUserDataStreamListenKey',
+        );
+        const connectUserDataStream = vi.spyOn(
+            SpotTradingAdapter.prototype,
+            'connectUserDataStream',
+        ).mockImplementation((listenKey) => {
+            lifecycle.push(`connect:${listenKey}`);
+
+            if (listenKey === listenKeys.a) return Promise.resolve(socketA);
+            if (listenKey === listenKeys.b) return Promise.resolve(socketB);
+            if (listenKey === listenKeys.c) return Promise.resolve(socketC);
+            return Promise.reject(new Error(`Unexpected user-data stream: ${listenKey}`));
+        });
+        const getListenKeyRequests = () => moduleMocks.sendRequest.mock.calls.filter(
+            ([path, method]) => (
+                path === '/api/v3/userDataStream' && method === 'POST'
+            ),
+        );
+
+        const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+        const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
+        const getKeepAliveHandles = () => setIntervalSpy.mock.calls.flatMap(
+            ([, delay], index) => (
+                delay === keepAliveDelay
+                    ? [setIntervalSpy.mock.results[index].value]
+                    : []
+            ),
+        );
+        const getClearCount = (handle) => clearIntervalSpy.mock.calls.filter(
+            ([clearedHandle]) => Object.is(clearedHandle, handle),
+        ).length;
+        const getReconnectScheduleCount = () => console.info.mock.calls.filter(
+            ([message]) => message === 'Scheduling User Data Stream reconnection...',
+        ).length;
+
+        try {
+            setupBinanceConnection({
+                localWebSocketAccess: { host: '127.0.0.1' },
+            });
+
+            const requestA = {
+                origin: 'http://localhost:5174',
+                accept: vi.fn(() => moduleMocks.rendererConnection),
+            };
+            moduleMocks.websocketServerHandlers.request(requestA);
+
+            await flushMicrotasks();
+            await vi.advanceTimersByTimeAsync(500);
+            await flushMicrotasks();
+
+            expect(createListenKey).toHaveBeenCalledOnce();
+            expect(getListenKeyRequests()).toHaveLength(1);
+            expect(connectUserDataStream).toHaveBeenCalledOnce();
+            expect(connectUserDataStream).toHaveBeenNthCalledWith(1, listenKeys.a);
+            expect(socketA.handlers.close).toEqual(expect.any(Function));
+            expect(new Set([socketA, socketB, socketC])).toHaveProperty('size', 3);
+
+            const [keepAliveA] = getKeepAliveHandles();
+            expect(keepAliveA).toBeDefined();
+
+            const oldReconnectBoundary = Date.now() + 5000;
+            socketA.handlers.close();
+            await flushMicrotasks();
+
+            expect(getClearCount(keepAliveA)).toBe(1);
+            expect(getReconnectScheduleCount()).toBe(1);
+
+            moduleMocks.rendererConnection.close();
+            await flushMicrotasks();
+
+            expect(moduleMocks.rendererConnection.close).toHaveBeenCalledOnce();
+            expect(moduleMocks.rendererConnection.connected).toBe(false);
+            expect(socketA.disconnect).not.toHaveBeenCalled();
+
+            moduleMocks.rendererConnection.connected = true;
+            const requestB = {
+                origin: 'http://localhost:5174',
+                accept: vi.fn(() => moduleMocks.rendererConnection),
+            };
+            moduleMocks.websocketServerHandlers.request(requestB);
+
+            await flushMicrotasks();
+            await vi.advanceTimersByTimeAsync(500);
+            await flushMicrotasks();
+            await vi.advanceTimersByTimeAsync(500);
+            await flushMicrotasks();
+
+            expect(createListenKey).toHaveBeenCalledTimes(2);
+            expect(getListenKeyRequests()).toHaveLength(2);
+            expect(connectUserDataStream).toHaveBeenCalledTimes(2);
+            expect(connectUserDataStream).toHaveBeenNthCalledWith(2, listenKeys.b);
+            expect(socketB.handlers.close).toEqual(expect.any(Function));
+            expect(moduleMocks.rendererConnection.connected).toBe(true);
+            expect(moduleMocks.rendererConnection.close).toHaveBeenCalledOnce();
+
+            const [, keepAliveB] = getKeepAliveHandles();
+            expect(keepAliveB).toBeDefined();
+            expect(keepAliveB).not.toBe(keepAliveA);
+            expect(getClearCount(keepAliveB)).toBe(0);
+
+            const rendererBPayload = {
+                e: 'outboundAccountPosition',
+                u: Date.now(),
+                B: [{ a: 'USDT', f: '100.00', l: '0.00' }],
+            };
+            const sendsBeforeBMessage = moduleMocks.rendererConnection.sendUTF.mock.calls.length;
+            socketB.handlers.message(JSON.stringify(rendererBPayload));
+
+            expect(moduleMocks.rendererConnection.sendUTF).toHaveBeenCalledTimes(
+                sendsBeforeBMessage + 1,
+            );
+            expect(moduleMocks.rendererConnection.sendUTF).toHaveBeenLastCalledWith(
+                JSON.stringify({ balance_update: rendererBPayload }),
+            );
+
+            const timeUntilOldReconnect = oldReconnectBoundary - Date.now();
+            expect(timeUntilOldReconnect).toBeGreaterThan(1);
+
+            await vi.advanceTimersByTimeAsync(timeUntilOldReconnect - 1);
+            await flushMicrotasks();
+
+            expect(createListenKey).toHaveBeenCalledTimes(2);
+            expect(connectUserDataStream).toHaveBeenCalledTimes(2);
+            expect(socketB.disconnect).not.toHaveBeenCalled();
+            expect(getClearCount(keepAliveB)).toBe(0);
+
+            await vi.advanceTimersByTimeAsync(1);
+            await flushMicrotasks();
+
+            expect(createListenKey).toHaveBeenCalledTimes(3);
+            expect(getListenKeyRequests()).toHaveLength(3);
+            expect(readListenKeyCResponse).toHaveBeenCalledOnce();
+            expect(connectUserDataStream).toHaveBeenCalledTimes(2);
+            expect(socketB.disconnect).not.toHaveBeenCalled();
+            expect(socketB.close).not.toHaveBeenCalled();
+            expect(getClearCount(keepAliveB)).toBe(0);
+            expect(moduleMocks.rendererConnection.connected).toBe(true);
+            expect(moduleMocks.rendererConnection.close).toHaveBeenCalledOnce();
+
+            resolveListenKeyC({ listenKey: listenKeys.c });
+            await flushMicrotasks();
+
+            expect(getClearCount(keepAliveB)).toBe(1);
+            expect(socketB.disconnect).toHaveBeenCalledOnce();
+            expect(socketB.close).not.toHaveBeenCalled();
+            expect(connectUserDataStream).toHaveBeenCalledTimes(2);
+            expect(getKeepAliveHandles()).toHaveLength(2);
+
+            const clearBCallIndex = clearIntervalSpy.mock.calls.findIndex(
+                ([handle]) => Object.is(handle, keepAliveB),
+            );
+            expect(clearBCallIndex).toBeGreaterThanOrEqual(0);
+            expect(createListenKey.mock.invocationCallOrder[2]).toBeLessThan(
+                clearIntervalSpy.mock.invocationCallOrder[clearBCallIndex],
+            );
+            expect(readListenKeyCResponse.mock.invocationCallOrder[0]).toBeLessThan(
+                clearIntervalSpy.mock.invocationCallOrder[clearBCallIndex],
+            );
+            expect(clearIntervalSpy.mock.invocationCallOrder[clearBCallIndex]).toBeLessThan(
+                socketB.disconnect.mock.invocationCallOrder[0],
+            );
+
+            await flushMicrotasks();
+            expect(connectUserDataStream).toHaveBeenCalledTimes(2);
+            expect(moduleMocks.rendererConnection.connected).toBe(true);
+
+            resolveSocketBDisconnect();
+            await flushMicrotasks();
+
+            expect(connectUserDataStream).toHaveBeenCalledTimes(3);
+            expect(connectUserDataStream).toHaveBeenNthCalledWith(3, listenKeys.c);
+            expect(socketB.disconnect.mock.invocationCallOrder[0]).toBeLessThan(
+                connectUserDataStream.mock.invocationCallOrder[2],
+            );
+            expect(socketC.on).toHaveBeenCalledTimes(3);
+            expect(socketC.on).toHaveBeenNthCalledWith(
+                1,
+                'message',
+                expect.any(Function),
+            );
+            expect(socketC.on).toHaveBeenNthCalledWith(
+                2,
+                'error',
+                expect.any(Function),
+            );
+            expect(socketC.on).toHaveBeenNthCalledWith(
+                3,
+                'close',
+                expect.any(Function),
+            );
+
+            const [, , keepAliveC] = getKeepAliveHandles();
+            expect(keepAliveC).toBeDefined();
+            expect(keepAliveC).not.toBe(keepAliveB);
+            expect(getClearCount(keepAliveC)).toBe(0);
+            expect(moduleMocks.rendererConnection.connected).toBe(true);
+            expect(moduleMocks.rendererConnection.close).toHaveBeenCalledOnce();
+
+            socketB.handlers.close();
+            await flushMicrotasks();
+
+            expect(getClearCount(keepAliveC)).toBe(0);
+            expect(socketC.disconnect).not.toHaveBeenCalled();
+            expect(createListenKey).toHaveBeenCalledTimes(3);
+            expect(connectUserDataStream).toHaveBeenCalledTimes(3);
+
+            await vi.advanceTimersByTimeAsync(5001);
+            await flushMicrotasks();
+
+            expect(getClearCount(keepAliveC)).toBe(0);
+            expect(socketC.disconnect).not.toHaveBeenCalled();
+            expect(createListenKey).toHaveBeenCalledTimes(3);
+            expect(getListenKeyRequests()).toHaveLength(3);
+            expect(connectUserDataStream).toHaveBeenCalledTimes(3);
+            expect(getReconnectScheduleCount()).toBe(1);
+            expect(moduleMocks.rendererConnection.connected).toBe(true);
+            expect(moduleMocks.rendererConnection.close).toHaveBeenCalledOnce();
+
+            const rendererCPayload = {
+                e: 'outboundAccountPosition',
+                u: Date.now(),
+                B: [{ a: 'USDT', f: '101.00', l: '0.00' }],
+            };
+            const sendsBeforeCMessage = moduleMocks.rendererConnection.sendUTF.mock.calls.length;
+            socketC.handlers.message(JSON.stringify(rendererCPayload));
+
+            expect(moduleMocks.rendererConnection.sendUTF).toHaveBeenCalledTimes(
+                sendsBeforeCMessage + 1,
+            );
+            expect(moduleMocks.rendererConnection.sendUTF).toHaveBeenLastCalledWith(
+                JSON.stringify({ balance_update: rendererCPayload }),
+            );
+            expect(connectUserDataStream.mock.calls.map(([listenKey]) => listenKey)).toEqual([
+                listenKeys.a,
+                listenKeys.b,
+                listenKeys.c,
+            ]);
+            expect(lifecycle).toEqual([
+                `create:${listenKeys.a}`,
+                `connect:${listenKeys.a}`,
+                `create:${listenKeys.b}`,
+                `connect:${listenKeys.b}`,
+                `create:${listenKeys.c}`,
+                'disconnect:B:start',
+                'disconnect:B:resolved',
+                `connect:${listenKeys.c}`,
+            ]);
+            expect(moduleMocks.connect.mock.calls).toEqual([
+                [{ stream: '!miniTicker@arr' }],
+                [{ stream: '!miniTicker@arr' }],
+            ]);
+
+            socketC.handlers.close();
+            await flushMicrotasks();
+
+            expect(getClearCount(keepAliveC)).toBe(1);
+            expect(getReconnectScheduleCount()).toBe(2);
+            expect(createListenKey).toHaveBeenCalledTimes(3);
+            expect(connectUserDataStream).toHaveBeenCalledTimes(3);
+        } finally {
+            clearIntervalSpy.mockRestore();
+            setIntervalSpy.mockRestore();
+        }
+    });
 });
