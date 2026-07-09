@@ -1,6 +1,7 @@
 const DEFAULT_APP_TITLE = 'CC-trade';
 const DEFAULT_TIMEOUT_MS = 10000;
 const DEFAULT_POLL_INTERVAL_MS = 250;
+const DEFAULT_VIEWPORT_SIZE = { width: 1200, height: 800 };
 
 const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -26,6 +27,14 @@ const describeWindow = async (windowPage) => {
     return `"${title || '<untitled>'}" ${url || '<no-url>'}`;
 };
 
+const normalizeWindowViewport = async (windowPage, viewportSize) => {
+    if (!viewportSize || typeof windowPage.setViewportSize !== 'function') {
+        return;
+    }
+
+    await windowPage.setViewportSize(viewportSize);
+};
+
 export const isDevToolsWindow = async (windowPage) => {
     const title = (await readWindowTitle(windowPage)).trim().toLowerCase();
     const url = readWindowUrl(windowPage).toLowerCase();
@@ -44,6 +53,7 @@ export const waitForAppWindow = async (
         title = DEFAULT_APP_TITLE,
         timeout = DEFAULT_TIMEOUT_MS,
         pollInterval = DEFAULT_POLL_INTERVAL_MS,
+        viewportSize = DEFAULT_VIEWPORT_SIZE,
     } = {},
 ) => {
     const deadline = Date.now() + timeout;
@@ -62,6 +72,7 @@ export const waitForAppWindow = async (
             firstNonDevToolsWindow ??= windowPage;
 
             if (!title || await readWindowTitle(windowPage) === title) {
+                await normalizeWindowViewport(windowPage, viewportSize);
                 return windowPage;
             }
         }
@@ -75,6 +86,7 @@ export const waitForAppWindow = async (
     }
 
     if (firstNonDevToolsWindow) {
+        await normalizeWindowViewport(firstNonDevToolsWindow, viewportSize);
         return firstNonDevToolsWindow;
     }
 

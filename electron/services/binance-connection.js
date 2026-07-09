@@ -17,7 +17,6 @@ import {
 } from './trading-command-validation.js';
 import {
     SpotTradingAdapter,
-    normalizeSpotExecutionReport,
 } from './spot-trading-adapter.js';
 import { TRADING_COMMAND_ACTIONS } from '../../src/utils/tradingCommands.js';
 
@@ -319,8 +318,6 @@ const tickerCache = {
     }
 };
 let tickerSnapshotPromise = null;
-
-const normalizeExecutionReport = normalizeSpotExecutionReport;
 
 const applyLogMasking = (() => {
     let applied = false;
@@ -1112,23 +1109,26 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
                         const payload = extractStreamPayload(data);
                         if (!payload) return;
 
-                        if (payload.e === 'executionReport') {
-                            const report = normalizeExecutionReport(payload);
+                        const streamEvent = spotTradingAdapter.normalizeUserDataStreamEvent(payload);
+                        if (!streamEvent) return;
+
+                        if (streamEvent.type === 'executionReport') {
+                            const report = streamEvent.executionReport;
                             logger.info(`[stream] Execution Report: ${report.symbol} ${report.side} ${report.status}`);
                             // Broadcast to ALL connected renderers
-                            broadcastToRenderers({ execution_update: report });
+                            broadcastToRenderers(streamEvent.rendererPayload);
 
                             // Refresh balances via REST for fill events as a fallback
                             // in case outboundAccountPosition is missed
-                            if (report.status === 'FILLED' || report.status === 'PARTIALLY_FILLED') {
+                            if (streamEvent.shouldRefreshBalances) {
                                 fetchAndBroadcastBalances();
                             }
-                        } else if (payload.e === 'outboundAccountPosition') {
+                        } else if (streamEvent.type === 'outboundAccountPosition') {
                             // Fast incremental balance update from WebSocket
-                            broadcastToRenderers({ balance_update: payload });
-                        } else if (payload.e === 'balanceUpdate') {
+                            broadcastToRenderers(streamEvent.rendererPayload);
+                        } else if (streamEvent.type === 'balanceUpdate') {
                             // Deposit/withdrawal event - fetch fresh balances via REST
-                            logger.info(`[stream] Balance Update (deposit/withdrawal): asset=${payload.a} delta=${payload.d}`);
+                            logger.info(`[stream] Balance Update (deposit/withdrawal): asset=${streamEvent.balanceUpdate.a} delta=${streamEvent.balanceUpdate.d}`);
                             fetchAndBroadcastBalances();
                         }
                     });

@@ -3,6 +3,7 @@ import {
     SpotTradingAdapter,
     normalizeSpotBalances,
     normalizeSpotExecutionReport,
+    normalizeSpotUserDataStreamEvent,
     parseSpotExchangeFilters,
 } from './spot-trading-adapter.js';
 
@@ -226,6 +227,111 @@ describe('SpotTradingAdapter', () => {
             T: Date.parse('2026-07-09T10:00:03.000Z'),
             transactTime: Date.parse('2026-07-09T10:00:03.000Z'),
             time: Date.parse('2026-07-09T10:00:03.000Z'),
+        });
+    });
+
+    it('normalizes executionReport stream events into the existing renderer payload shape', () => {
+        const streamEvent = normalizeSpotUserDataStreamEvent({
+            e: 'executionReport',
+            s: 'BTCUSDT',
+            S: 'BUY',
+            o: 'LIMIT',
+            x: 'TRADE',
+            X: 'PARTIALLY_FILLED',
+            i: 42,
+            p: '50000',
+            q: '0.01',
+            z: '0.005',
+            T: Date.parse('2026-07-09T10:00:04.000Z'),
+        });
+
+        expect(streamEvent).toMatchObject({
+            type: 'executionReport',
+            shouldRefreshBalances: true,
+            rendererPayload: {
+                execution_update: {
+                    e: 'executionReport',
+                    s: 'BTCUSDT',
+                    symbol: 'BTCUSDT',
+                    S: 'BUY',
+                    side: 'BUY',
+                    o: 'LIMIT',
+                    type: 'LIMIT',
+                    x: 'TRADE',
+                    X: 'PARTIALLY_FILLED',
+                    status: 'PARTIALLY_FILLED',
+                    i: 42,
+                    orderId: 42,
+                    p: '50000',
+                    price: '50000',
+                    q: '0.01',
+                    origQty: '0.01',
+                    z: '0.005',
+                    T: Date.parse('2026-07-09T10:00:04.000Z'),
+                    transactTime: Date.parse('2026-07-09T10:00:04.000Z'),
+                    time: Date.parse('2026-07-09T10:00:04.000Z'),
+                },
+            },
+        });
+        expect(streamEvent.executionReport).toBe(streamEvent.rendererPayload.execution_update);
+    });
+
+    it('keeps outboundAccountPosition stream events as balance_update payloads', () => {
+        const payload = {
+            e: 'outboundAccountPosition',
+            u: Date.parse('2026-07-09T10:00:05.000Z'),
+            B: [{ a: 'USDT', f: '100.00', l: '0.00' }],
+        };
+
+        expect(normalizeSpotUserDataStreamEvent(payload)).toEqual({
+            type: 'outboundAccountPosition',
+            balanceUpdate: payload,
+            rendererPayload: { balance_update: payload },
+            shouldRefreshBalances: false,
+        });
+    });
+
+    it('normalizes balanceUpdate stream events as REST refresh triggers only', () => {
+        const payload = {
+            e: 'balanceUpdate',
+            a: 'USDT',
+            d: '25.00',
+            T: Date.parse('2026-07-09T10:00:06.000Z'),
+        };
+
+        expect(normalizeSpotUserDataStreamEvent(payload)).toEqual({
+            type: 'balanceUpdate',
+            balanceUpdate: payload,
+            rendererPayload: null,
+            shouldRefreshBalances: true,
+        });
+    });
+
+    it('ignores non-account spot stream events', () => {
+        expect(normalizeSpotUserDataStreamEvent({ e: '24hrTicker', s: 'BTCUSDT' })).toBeNull();
+        expect(normalizeSpotUserDataStreamEvent(null)).toBeNull();
+    });
+
+    it('exposes user-data stream normalization through the adapter instance', () => {
+        const adapter = new SpotTradingAdapter({ client: makeClient(), recvWindow: 60000 });
+
+        expect(adapter.normalizeUserDataStreamEvent({
+            e: 'executionReport',
+            s: 'ETHUSDT',
+            S: 'SELL',
+            X: 'NEW',
+        })).toMatchObject({
+            type: 'executionReport',
+            shouldRefreshBalances: false,
+            rendererPayload: {
+                execution_update: {
+                    e: 'executionReport',
+                    s: 'ETHUSDT',
+                    S: 'SELL',
+                    X: 'NEW',
+                    status: 'NEW',
+                },
+            },
         });
     });
 });

@@ -64,4 +64,20 @@ test.describe('waitForAppWindow', () => {
 
         expect(await waitForAppWindow(createElectronApp([appWindow]))).toBe(appWindow);
     });
+
+    test('normalizes the returned app viewport when supported', async () => {
+        const viewportCalls = [];
+        const appWindow = {
+            ...createWindowPage({
+                title: 'CC-trade',
+                url: 'file:///app/dist/index.html',
+            }),
+            setViewportSize: async (viewportSize) => {
+                viewportCalls.push(viewportSize);
+            },
+        };
+
+        expect(await waitForAppWindow(createElectronApp([appWindow]))).toBe(appWindow);
+        expect(viewportCalls).toEqual([{ width: 1200, height: 800 }]);
+    });
 });

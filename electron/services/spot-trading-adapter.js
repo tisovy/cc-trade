@@ -70,6 +70,39 @@ export const normalizeSpotExecutionReport = (payload = {}, overrides = {}) => {
     };
 };
 
+export const normalizeSpotUserDataStreamEvent = (payload = {}) => {
+    if (payload?.e === 'executionReport') {
+        const executionReport = normalizeSpotExecutionReport(payload);
+        return {
+            type: 'executionReport',
+            executionReport,
+            rendererPayload: { execution_update: executionReport },
+            shouldRefreshBalances: executionReport.status === 'FILLED'
+                || executionReport.status === 'PARTIALLY_FILLED',
+        };
+    }
+
+    if (payload?.e === 'outboundAccountPosition') {
+        return {
+            type: 'outboundAccountPosition',
+            balanceUpdate: payload,
+            rendererPayload: { balance_update: payload },
+            shouldRefreshBalances: false,
+        };
+    }
+
+    if (payload?.e === 'balanceUpdate') {
+        return {
+            type: 'balanceUpdate',
+            balanceUpdate: payload,
+            rendererPayload: null,
+            shouldRefreshBalances: true,
+        };
+    }
+
+    return null;
+};
+
 const readResponseData = async (response) => response.data();
 
 export class SpotTradingAdapter {
@@ -104,6 +137,10 @@ export class SpotTradingAdapter {
             limit: 500,
             recvWindow: this.recvWindow,
         }).then(readResponseData);
+    }
+
+    normalizeUserDataStreamEvent(payload) {
+        return normalizeSpotUserDataStreamEvent(payload);
     }
 
     async placeOrder(command) {
