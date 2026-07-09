@@ -105,6 +105,12 @@ export const normalizeSpotUserDataStreamEvent = (payload = {}) => {
 
 const readResponseData = async (response) => response.data();
 
+const SPOT_ACCOUNT_REFRESH_WEIGHTS = {
+    balances: 10,
+    openOrders: 3,
+    tradeHistory: 10,
+};
+
 export class SpotTradingAdapter {
     constructor({ client, recvWindow }) {
         this.client = client;
@@ -123,6 +129,10 @@ export class SpotTradingAdapter {
             .then(normalizeSpotBalances);
     }
 
+    getAccountStatePayload() {
+        return this.getAccountState().then((balances) => ({ balances }));
+    }
+
     getOpenOrders(symbol) {
         const params = { recvWindow: this.recvWindow };
         if (symbol) {
@@ -131,12 +141,45 @@ export class SpotTradingAdapter {
         return this.client.restAPI.getOpenOrders(params).then(readResponseData);
     }
 
+    getOpenOrdersPayload(symbol) {
+        return this.getOpenOrders(symbol).then((orders) => ({ orders }));
+    }
+
     getTradeHistory(symbol) {
         return this.client.restAPI.myTrades({
             symbol,
             limit: 500,
             recvWindow: this.recvWindow,
         }).then(readResponseData);
+    }
+
+    getTradeHistoryPayload(symbol) {
+        return this.getTradeHistory(symbol).then((history) => ({ history }));
+    }
+
+    getAccountRefreshOperations(symbol) {
+        const operations = [
+            {
+                type: 'balances',
+                weight: SPOT_ACCOUNT_REFRESH_WEIGHTS.balances,
+                loadPayload: () => this.getAccountStatePayload(),
+            },
+            {
+                type: 'openOrders',
+                weight: SPOT_ACCOUNT_REFRESH_WEIGHTS.openOrders,
+                loadPayload: () => this.getOpenOrdersPayload(),
+            },
+        ];
+
+        if (symbol) {
+            operations.push({
+                type: 'tradeHistory',
+                weight: SPOT_ACCOUNT_REFRESH_WEIGHTS.tradeHistory,
+                loadPayload: () => this.getTradeHistoryPayload(symbol),
+            });
+        }
+
+        return operations;
     }
 
     normalizeUserDataStreamEvent(payload) {

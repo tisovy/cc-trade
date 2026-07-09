@@ -600,8 +600,8 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
         _balanceRefreshInFlight = true;
         try {
             await rateLimiter.execute(async () => {
-                const balances = await spotTradingAdapter.getAccountState();
-                broadcastToRenderers({ balances });
+                const payload = await spotTradingAdapter.getAccountStatePayload();
+                broadcastToRenderers(payload);
             }, 10);
         } catch (error) {
             logger.error("Broadcast balance fetch error:", error);
@@ -635,8 +635,8 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
         const fetchBalances = async () => {
             if (!spotTradingAdapter) return;
             try {
-                const balances = await spotTradingAdapter.getAccountState();
-                emit({ balances });
+                const payload = await spotTradingAdapter.getAccountStatePayload();
+                emit(payload);
             } catch (error) {
                 logger.error("Balances Fetch Error:", error);
             }
@@ -645,8 +645,8 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
         const fetchOpenOrders = async () => {
             if (!spotTradingAdapter) return;
             try {
-                const openOrders = await spotTradingAdapter.getOpenOrders();
-                emit({ orders: openOrders });
+                const payload = await spotTradingAdapter.getOpenOrdersPayload();
+                emit(payload);
             } catch (error) {
                 logger.error("Open Orders Fetch Error:", error);
             }
@@ -655,18 +655,23 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
         const fetchTradeHistoryForSymbol = async (symbol) => {
             if (!spotTradingAdapter) return;
             try {
-                const myTrades = await spotTradingAdapter.getTradeHistory(symbol);
-                emit({ history: myTrades });
+                const payload = await spotTradingAdapter.getTradeHistoryPayload(symbol);
+                emit(payload);
             } catch (error) {
                 logger.error("Trade History Fetch Error:", error);
             }
         };
 
+        const emitSpotRefreshOperation = async (operation) => {
+            const payload = await operation.loadPayload();
+            emit(payload);
+        };
+
         const refreshAccountState = async (symbol) => {
-            // Rate-limited account refresh
-            await rateLimiter.execute(() => fetchBalances(), 10);
-            await rateLimiter.execute(() => fetchOpenOrders(), 3);
-            await rateLimiter.execute(() => fetchTradeHistoryForSymbol(symbol), 10);
+            if (!spotTradingAdapter) return;
+            for (const operation of spotTradingAdapter.getAccountRefreshOperations(symbol)) {
+                await rateLimiter.execute(() => emitSpotRefreshOperation(operation), operation.weight);
+            }
         };
 
         const handleOrderPlacement = async (payload, requestType = 'buyOrder') => {
@@ -784,12 +789,7 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
                     await handleCancelOrder(validation.command.cancelPayload);
                     break;
                 case TRADING_COMMAND_ACTIONS.ACCOUNT_REFRESH:
-                    if (validation.command.symbol) {
-                        await refreshAccountState(validation.command.symbol);
-                    } else {
-                        await rateLimiter.execute(() => fetchBalances(), 10);
-                        await rateLimiter.execute(() => fetchOpenOrders(), 3);
-                    }
+                    await refreshAccountState(validation.command.symbol);
                     break;
             }
         };

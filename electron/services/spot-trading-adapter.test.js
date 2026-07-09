@@ -104,6 +104,67 @@ describe('SpotTradingAdapter', () => {
         });
     });
 
+    it('builds account refresh operations with the existing weights and renderer payload shapes', async () => {
+        const client = makeClient({
+            getAccount: vi.fn().mockResolvedValue(makeResponse({
+                balances: [{ asset: 'USDT', free: '100.00', locked: '0.00' }],
+            })),
+            getOpenOrders: vi.fn().mockResolvedValue(makeResponse([{ orderId: 123 }])),
+            myTrades: vi.fn().mockResolvedValue(makeResponse([{ id: 456 }])),
+        });
+        const adapter = new SpotTradingAdapter({ client, recvWindow: 60000 });
+
+        const operations = adapter.getAccountRefreshOperations('BTCUSDT');
+
+        expect(operations.map(({ type, weight }) => ({ type, weight }))).toEqual([
+            { type: 'balances', weight: 10 },
+            { type: 'openOrders', weight: 3 },
+            { type: 'tradeHistory', weight: 10 },
+        ]);
+        await expect(operations[0].loadPayload()).resolves.toEqual({
+            balances: { USDT: { available: '100.00', onOrder: '0.00' } },
+        });
+        await expect(operations[1].loadPayload()).resolves.toEqual({
+            orders: [{ orderId: 123 }],
+        });
+        await expect(operations[2].loadPayload()).resolves.toEqual({
+            history: [{ id: 456 }],
+        });
+
+        expect(client.restAPI.getAccount).toHaveBeenCalledWith({ recvWindow: 60000 });
+        expect(client.restAPI.getOpenOrders).toHaveBeenCalledWith({ recvWindow: 60000 });
+        expect(client.restAPI.myTrades).toHaveBeenCalledWith({
+            symbol: 'BTCUSDT',
+            limit: 500,
+            recvWindow: 60000,
+        });
+    });
+
+    it('keeps symbol-less account refresh scoped to balances and open orders', async () => {
+        const client = makeClient({
+            getAccount: vi.fn().mockResolvedValue(makeResponse({
+                balances: [{ asset: 'BTC', free: '0.50', locked: '0.10' }],
+            })),
+            getOpenOrders: vi.fn().mockResolvedValue(makeResponse([])),
+            myTrades: vi.fn(),
+        });
+        const adapter = new SpotTradingAdapter({ client, recvWindow: 60000 });
+
+        const operations = adapter.getAccountRefreshOperations();
+
+        expect(operations.map(({ type, weight }) => ({ type, weight }))).toEqual([
+            { type: 'balances', weight: 10 },
+            { type: 'openOrders', weight: 3 },
+        ]);
+        await expect(operations[0].loadPayload()).resolves.toEqual({
+            balances: { BTC: { available: '0.50', onOrder: '0.10' } },
+        });
+        await expect(operations[1].loadPayload()).resolves.toEqual({
+            orders: [],
+        });
+        expect(client.restAPI.myTrades).not.toHaveBeenCalled();
+    });
+
     it('places LIMIT/GTC spot orders with the existing REST parameter contract', async () => {
         const client = makeClient({
             newOrder: vi.fn().mockResolvedValue(makeResponse({
