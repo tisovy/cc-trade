@@ -28,17 +28,21 @@ test.describe('Feature: Safe Order Reduction', () => {
         });
 
         wss.on('connection', (ws) => {
+            const captureOrder = (payload, mockWs) => {
+                const orderPayload = payload.data || payload;
+                lastOrder = orderPayload;
+                // Echo back the received quantity for verification
+                mockWs.sendJson({
+                    test_echo: {
+                        quantity: orderPayload.quantity,
+                        price: orderPayload.price
+                    }
+                });
+            };
+
             attachMockWebSocketHandlers(ws, marketState, {
-                onLegacyOrder: (payload, mockWs) => {
-                    lastOrder = payload.data;
-                    // Echo back the received quantity for verification
-                    mockWs.sendJson({
-                        test_echo: {
-                            quantity: payload.data.quantity,
-                            price: payload.data.price
-                        }
-                    });
-                },
+                onTypedOrder: captureOrder,
+                onLegacyOrder: captureOrder,
             });
         });
 
@@ -67,6 +71,9 @@ test.describe('Feature: Safe Order Reduction', () => {
     });
 
     test('should reduce order quantity by 0.1%', async () => {
+        await mainWindow.keyboard.press('Escape');
+        await expect(mainWindow.locator('.quick-switch-backdrop')).toBeHidden();
+
         // 1. Open Order Modal via OrderBook
         const askRow = mainWindow.locator('.order-book .feed .ob-sell .columns').first();
         await expect(askRow).toBeVisible();

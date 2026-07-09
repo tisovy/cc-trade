@@ -46,8 +46,26 @@ describe('trading command contract', () => {
         });
     });
 
-    it('adapts spot place-order commands to the unchanged legacy wire payload', () => {
-        const command = createSpotPlaceOrderCommand({
+    it('adapts spot place-order commands to unchanged legacy wire payloads', () => {
+        const buyCommand = createSpotPlaceOrderCommand({
+            clientOrderId: 'client-0',
+            symbol: 'BTCUSDT',
+            side: 'BUY',
+            price: '12346',
+            quantity: '99.9',
+        });
+
+        expect(toLegacyTradingRequest(buyCommand)).toEqual({
+            request: 'buyOrder',
+            data: {
+                symbol: 'BTCUSDT',
+                side: 'BUY',
+                price: '12346',
+                quantity: '99.9',
+            },
+        });
+
+        const sellCommand = createSpotPlaceOrderCommand({
             clientOrderId: 'client-1',
             symbol: 'ETHUSDT',
             side: 'SELL',
@@ -55,7 +73,7 @@ describe('trading command contract', () => {
             quantity: '1.25',
         });
 
-        expect(toLegacyTradingRequest(command)).toEqual({
+        expect(toLegacyTradingRequest(sellCommand)).toEqual({
             request: 'sellOrder',
             data: {
                 symbol: 'ETHUSDT',

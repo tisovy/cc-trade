@@ -1,6 +1,14 @@
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { attachMockLocalStorage } from '@/test/mocks'
+import {
+  DEFAULT_ACCOUNT_ID,
+  DEFAULT_SPOT_ORDER_TYPE,
+  DEFAULT_SPOT_TIME_IN_FORCE,
+  SPOT_MARKET_TYPE,
+  TRADE_COMMAND_VERSION,
+  TRADING_COMMAND_ACTIONS,
+} from './utils/tradingCommands'
 import App from './App'
 
 const mocks = vi.hoisted(() => ({
@@ -134,7 +142,7 @@ describe('App spot order payloads', () => {
     localStorageMock.clear()
   })
 
-  it('keeps the legacy buyOrder payload and 0.999 quantity reduction', () => {
+  it('sends typed buy place-order commands with the 0.999 quantity reduction', () => {
     mocks.order = {
       symbol: 'BTCUSDT',
       side: 'BUY',
@@ -147,17 +155,21 @@ describe('App spot order payloads', () => {
 
     expect(mocks.send).toHaveBeenCalledTimes(1)
     expect(JSON.parse(mocks.send.mock.calls[0][0])).toEqual({
-      request: 'buyOrder',
-      data: {
-        symbol: 'BTCUSDT',
-        side: 'BUY',
-        price: '12346',
-        quantity: '99.9',
-      },
+      action: TRADING_COMMAND_ACTIONS.PLACE_ORDER,
+      version: TRADE_COMMAND_VERSION,
+      marketType: SPOT_MARKET_TYPE,
+      accountId: DEFAULT_ACCOUNT_ID,
+      clientOrderId: expect.any(String),
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: DEFAULT_SPOT_ORDER_TYPE,
+      timeInForce: DEFAULT_SPOT_TIME_IN_FORCE,
+      price: '12346',
+      quantity: '99.9',
     })
   })
 
-  it('keeps the legacy sellOrder payload with the same 0.999 reduction path', () => {
+  it('sends typed sell place-order commands with the same 0.999 reduction path', () => {
     mocks.order = {
       symbol: 'BTCUSDT',
       side: 'SELL',
@@ -170,17 +182,21 @@ describe('App spot order payloads', () => {
 
     expect(mocks.send).toHaveBeenCalledTimes(1)
     expect(JSON.parse(mocks.send.mock.calls[0][0])).toEqual({
-      request: 'sellOrder',
-      data: {
-        symbol: 'BTCUSDT',
-        side: 'SELL',
-        price: '12345.5',
-        quantity: '1.233',
-      },
+      action: TRADING_COMMAND_ACTIONS.PLACE_ORDER,
+      version: TRADE_COMMAND_VERSION,
+      marketType: SPOT_MARKET_TYPE,
+      accountId: DEFAULT_ACCOUNT_ID,
+      clientOrderId: expect.any(String),
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      orderType: DEFAULT_SPOT_ORDER_TYPE,
+      timeInForce: DEFAULT_SPOT_TIME_IN_FORCE,
+      price: '12345.5',
+      quantity: '1.233',
     })
   })
 
-  it('keeps the legacy cancelOrder payload aliases', () => {
+  it('sends typed cancel-order commands from the spot cancel path', () => {
     mocks.cancelOrder = {
       symbol: 'BTCUSDT',
       id: 12345,
@@ -191,12 +207,13 @@ describe('App spot order payloads', () => {
 
     expect(mocks.send).toHaveBeenCalledTimes(1)
     expect(JSON.parse(mocks.send.mock.calls[0][0])).toEqual({
-      request: 'cancelOrder',
-      data: {
-        symbol: 'BTCUSDT',
-        orderId: 12345,
-        id: 12345,
-      },
+      action: TRADING_COMMAND_ACTIONS.CANCEL_ORDER,
+      version: TRADE_COMMAND_VERSION,
+      marketType: SPOT_MARKET_TYPE,
+      accountId: DEFAULT_ACCOUNT_ID,
+      clientOrderId: expect.any(String),
+      symbol: 'BTCUSDT',
+      orderId: 12345,
     })
   })
 })

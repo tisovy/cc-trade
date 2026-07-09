@@ -23,7 +23,6 @@ import { calculatePrecision } from './utils/precision';
 import {
   createSpotCancelOrderCommand,
   createSpotPlaceOrderCommand,
-  toLegacyTradingRequest,
 } from './utils/tradingCommands';
 
 // View types
@@ -267,7 +266,7 @@ function AppShell() {
         symbol: data.symbol,
         orderId: data.id || data.orderId,
       });
-      wsConnection.send(JSON.stringify(toLegacyTradingRequest(command)));
+      wsConnection.send(JSON.stringify(command));
       return;
     }
 
@@ -295,7 +294,7 @@ function AppShell() {
         price: Number(data.price).toString(),
         quantity: finalQuantity.toString(),
       });
-      wsConnection.send(JSON.stringify(toLegacyTradingRequest(command)));
+      wsConnection.send(JSON.stringify(command));
       return;
     }
   }, [wsConnection, filters]);
