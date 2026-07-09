@@ -577,30 +577,36 @@ describe('SpotTradingAdapter', () => {
         );
     });
 
-    it('connects the spot user-data stream with the listen key and preserves connection identity', async () => {
+    it('connects the spot user-data stream and preserves promise and connection identity', async () => {
         const connection = {};
-        const connect = vi.fn().mockResolvedValue(connection);
+        const connectionPromise = Promise.resolve(connection);
+        const connect = vi.fn().mockReturnValue(connectionPromise);
         const client = {
             ...makeClient(),
             websocketStreams: { connect },
         };
         const adapter = new SpotTradingAdapter({ client, recvWindow: 60000 });
+        const result = adapter.connectUserDataStream('listen-123');
 
-        await expect(adapter.connectUserDataStream('listen-123')).resolves.toBe(connection);
+        expect(result).toBe(connectionPromise);
+        await expect(result).resolves.toBe(connection);
 
         expect(connect).toHaveBeenCalledOnce();
         expect(connect).toHaveBeenCalledWith({ stream: 'listen-123' });
     });
 
-    it('propagates spot user-data stream connection rejections unchanged', async () => {
+    it('returns the original rejected spot user-data stream connection promise unchanged', async () => {
         const error = new Error('connection failed');
-        const connect = vi.fn().mockRejectedValue(error);
+        const connectionPromise = Promise.reject(error);
+        const connect = vi.fn().mockReturnValue(connectionPromise);
         const client = {
             ...makeClient(),
             websocketStreams: { connect },
         };
         const adapter = new SpotTradingAdapter({ client, recvWindow: 60000 });
+        const result = adapter.connectUserDataStream('listen-123');
 
-        await expect(adapter.connectUserDataStream('listen-123')).rejects.toBe(error);
+        expect(result).toBe(connectionPromise);
+        await expect(result).rejects.toBe(error);
     });
 });
