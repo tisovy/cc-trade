@@ -159,7 +159,7 @@ Progress:
 - [x] Move the spot server-time REST request behind the adapter while preserving clock-drift validation, logging, and startup behavior.
 - [x] Move spot user-data WebSocket connection creation behind the adapter without changing reconnect, teardown, or keep-alive timing.
 - [x] Reuse adapter-owned balance refresh operation metadata for stream-triggered shared balance refreshes.
-- [ ] Add service-level orchestration coverage before changing higher-risk subscription or trading flows.
+- [x] Add service-level orchestration coverage before changing higher-risk subscription or trading flows.
 
 Acceptance:
 
@@ -270,17 +270,17 @@ Suggested UI order:
 
 ## Start Here Next Session
 
-Continue Phase 4 with the smallest unchecked backend-only seam:
+Continue Phase 4 with the next focused service-level checkpoint:
 
-**Add focused service-level orchestration coverage for `setupBinanceConnection` before changing higher-risk subscription or trading flows.**
+**Add retry and teardown ordering coverage for `setupBinanceConnection` without changing the live user-data lifecycle.**
 
 Implementation entry points:
 
-- `electron/services/binance-connection.js`
-- `electron/services/binance-connection.test.js` (new focused service test)
+- `electron/services/binance-connection.test.js`
+- `electron/services/binance-connection.js` only if a minimal deterministic seam is unavoidable
 
 Expected scope:
 
-- Introduce only the minimum dependency, timer, and socket control needed for deterministic service tests.
-- Start with user-data setup and shared balance-refresh orchestration, then add retry and teardown ordering coverage incrementally.
+- Add network retry count and delay coverage, then prior-socket teardown ordering coverage as separate focused tests.
+- Preserve throttle ordering, `safeDisconnect` ordering, socket identity guards, and 30-minute keep-alive ownership.
 - Do not change renderer payloads, rate-limit weights, typed or legacy command behavior, or futures execution state.
