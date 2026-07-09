@@ -62,6 +62,10 @@ const moduleMocks = vi.hoisted(() => {
             connected: true,
             remoteAddress: '127.0.0.1',
             sendUTF: vi.fn(),
+            close: vi.fn(() => {
+                state.rendererConnection.connected = false;
+                state.rendererHandlers.close?.();
+            }),
             on: vi.fn((event, handler) => {
                 state.rendererHandlers[event] = handler;
             }),
@@ -140,6 +144,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
         vi.stubEnv('BK', 'test-api-key');
         vi.stubEnv('BS', 'test-api-secret');
         vi.stubEnv('WS_PORT', '14477');
+        vi.stubEnv('LOG_LEVEL', 'info');
         vi.stubEnv('https_proxy', '');
         vi.stubEnv('HTTPS_PROXY', '');
         vi.stubEnv('http_proxy', '');
@@ -467,13 +472,18 @@ describe('setupBinanceConnection user-data orchestration', () => {
         ));
 
         moduleMocks.marketSocket.handlers.message('{}');
-        await vi.advanceTimersByTimeAsync(retryDelays.at(-1) + 1);
+        // A wrongly permitted sixth retry would use the next linear delay (18s),
+        // so cross that boundary to make the no-seventh-attempt proof direct.
+        await vi.advanceTimersByTimeAsync(
+            retryDelays.at(-1) + retryDelays[0] + 1,
+        );
         await flushMicrotasks();
 
         expect(createListenKey).toHaveBeenCalledTimes(6);
         expect(getListenKeyRequests()).toHaveLength(6);
         expect(connectUserDataStream).toHaveBeenCalledTimes(6);
         expect(moduleMocks.connect).toHaveBeenCalledOnce();
+        expect(moduleMocks.rendererConnection.close).not.toHaveBeenCalled();
         expect(moduleMocks.rendererConnection.connected).toBe(true);
     });
 });
