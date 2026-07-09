@@ -599,10 +599,12 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
         if (_balanceRefreshInFlight) return;
         _balanceRefreshInFlight = true;
         try {
+            const balanceOperation = spotTradingAdapter.getAccountRefreshOperations()
+                .find(({ type }) => type === 'balances');
             await rateLimiter.execute(async () => {
-                const payload = await spotTradingAdapter.getAccountStatePayload();
+                const payload = await balanceOperation.loadPayload();
                 broadcastToRenderers(payload);
-            }, 10);
+            }, balanceOperation.weight);
         } catch (error) {
             logger.error("Broadcast balance fetch error:", error);
         } finally {

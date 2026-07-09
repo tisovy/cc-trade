@@ -158,7 +158,7 @@ Progress:
 - [x] Restore per-operation refresh failure isolation after the account-operation extraction so balances, open orders, and history still run sequentially after an exhausted operation failure.
 - [x] Move the spot server-time REST request behind the adapter while preserving clock-drift validation, logging, and startup behavior.
 - [x] Move spot user-data WebSocket connection creation behind the adapter without changing reconnect, teardown, or keep-alive timing.
-- [ ] Reuse adapter-owned balance refresh operation metadata for stream-triggered shared balance refreshes.
+- [x] Reuse adapter-owned balance refresh operation metadata for stream-triggered shared balance refreshes.
 - [ ] Add service-level orchestration coverage before changing higher-risk subscription or trading flows.
 
 Acceptance:
@@ -272,16 +272,15 @@ Suggested UI order:
 
 Continue Phase 4 with the smallest unchecked backend-only seam:
 
-**Reuse adapter-owned balance refresh operation metadata for stream-triggered shared balance refreshes.**
+**Add focused service-level orchestration coverage for `setupBinanceConnection` before changing higher-risk subscription or trading flows.**
 
 Implementation entry points:
 
 - `electron/services/binance-connection.js`
-- `electron/services/spot-trading-adapter.js`
-- `electron/services/spot-trading-adapter.test.js`
+- `electron/services/binance-connection.test.js` (new focused service test)
 
 Expected scope:
 
-- Preserve the stream-triggered shared balance refresh in-flight guard, renderer broadcasts, and error handling.
-- Preserve the adapter-owned balance payload contract and rate-limit weight `10`.
+- Introduce only the minimum dependency, timer, and socket control needed for deterministic service tests.
+- Start with user-data setup and shared balance-refresh orchestration, then add retry and teardown ordering coverage incrementally.
 - Do not change renderer payloads, rate-limit weights, typed or legacy command behavior, or futures execution state.
