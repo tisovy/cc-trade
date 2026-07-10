@@ -1,12 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
     FUTURES_ACCOUNT_BALANCE_ERROR_CODES,
+    FUTURES_ALGO_OPEN_ORDERS_ERROR_CODES,
     FUTURES_EXCHANGE_INFO_ERROR_CODES,
     FUTURES_FUNDING_STATE_ERROR_CODES,
     FUTURES_MARK_PRICE_ERROR_CODES,
     FUTURES_OPEN_ORDERS_ERROR_CODES,
     FUTURES_POSITION_RISK_ERROR_CODES,
     FuturesAccountBalanceError,
+    FuturesAlgoOpenOrdersError,
     FuturesExchangeInfoError,
     FuturesFundingStateError,
     FuturesMarkPriceError,
@@ -14,6 +16,7 @@ import {
     FuturesPositionRiskError,
     FuturesTradingAdapter,
     normalizeFuturesAccountBalance,
+    normalizeFuturesAlgoOpenOrders,
     normalizeFuturesExchangeInfo,
     normalizeFuturesFundingState,
     normalizeFuturesMarkPrice,
@@ -243,6 +246,74 @@ const expectedOpenOrder = {
     priceProtect: false,
     priceMatch: 'NONE',
     selfTradePreventionMode: 'NONE',
+    goodTillDate: 0,
+};
+
+const makeAlgoOpenOrder = (overrides = {}) => ({
+    algoId: 2148627,
+    clientAlgoId: 'current-algo-order-000001',
+    algoType: 'CONDITIONAL',
+    orderType: 'TAKE_PROFIT',
+    symbol: 'BTCUSDT',
+    side: 'SELL',
+    positionSide: 'BOTH',
+    timeInForce: 'GTC',
+    quantity: '0.010000',
+    algoStatus: 'NEW',
+    actualOrderId: '',
+    actualPrice: '0.00000',
+    triggerPrice: '750.000',
+    price: '750.000',
+    icebergQuantity: null,
+    tpTriggerPrice: '0.000',
+    tpPrice: '0.000',
+    slTriggerPrice: '0.000',
+    slPrice: '0.000',
+    tpOrderType: '',
+    selfTradePreventionMode: 'EXPIRE_MAKER',
+    workingType: 'CONTRACT_PRICE',
+    priceMatch: 'NONE',
+    closePosition: false,
+    priceProtect: false,
+    reduceOnly: false,
+    createTime: 1750514941540,
+    updateTime: 1750514941540,
+    triggerTime: 0,
+    goodTillDate: 0,
+    ...overrides,
+});
+
+const expectedAlgoOpenOrder = {
+    marketType: 'futures',
+    algoId: 2148627,
+    clientAlgoId: 'current-algo-order-000001',
+    algoType: 'CONDITIONAL',
+    orderType: 'TAKE_PROFIT',
+    symbol: 'BTCUSDT',
+    side: 'SELL',
+    positionSide: 'BOTH',
+    timeInForce: 'GTC',
+    quantity: '0.010000',
+    algoStatus: 'NEW',
+    actualOrderId: '',
+    actualPrice: '0.00000',
+    triggerPrice: '750.000',
+    price: '750.000',
+    icebergQuantity: null,
+    tpTriggerPrice: '0.000',
+    tpPrice: '0.000',
+    slTriggerPrice: '0.000',
+    slPrice: '0.000',
+    tpOrderType: '',
+    selfTradePreventionMode: 'EXPIRE_MAKER',
+    workingType: 'CONTRACT_PRICE',
+    priceMatch: 'NONE',
+    closePosition: false,
+    priceProtect: false,
+    reduceOnly: false,
+    createTime: 1750514941540,
+    updateTime: 1750514941540,
+    triggerTime: 0,
     goodTillDate: 0,
 };
 
@@ -1502,6 +1573,492 @@ describe('normalizeFuturesOpenOrders', () => {
     });
 });
 
+describe('normalizeFuturesAlgoOpenOrders', () => {
+    it('normalizes the official current-algo-open-orders array with exact source types', () => {
+        const result = normalizeFuturesAlgoOpenOrders(
+            [makeAlgoOpenOrder()],
+            'BTCUSDT',
+        );
+
+        expect(result).toEqual([expectedAlgoOpenOrder]);
+
+        [
+            ['quantity', '0.010000'],
+            ['actualPrice', '0.00000'],
+            ['triggerPrice', '750.000'],
+            ['price', '750.000'],
+            ['tpTriggerPrice', '0.000'],
+            ['tpPrice', '0.000'],
+            ['slTriggerPrice', '0.000'],
+            ['slPrice', '0.000'],
+        ].forEach(([field, expectedValue]) => {
+            expect(result[0][field]).toBe(expectedValue);
+            expect(typeof result[0][field]).toBe('string');
+        });
+
+        expect(result[0].algoId).toBe(2148627);
+        expect(result[0].clientAlgoId).toBe('current-algo-order-000001');
+        expect(result[0].actualOrderId).toBe('');
+        expect(result[0].tpOrderType).toBe('');
+        expect(result[0].icebergQuantity).toBeNull();
+        [
+            'algoId',
+            'createTime',
+            'updateTime',
+            'triggerTime',
+            'goodTillDate',
+        ].forEach((field) => {
+            expect(Number.isSafeInteger(result[0][field])).toBe(true);
+        });
+        expect(result[0].closePosition).toBe(false);
+        expect(result[0].priceProtect).toBe(false);
+        expect(result[0].reduceOnly).toBe(false);
+    });
+
+    it('preserves source order across multiple current algo open orders', () => {
+        const source = [
+            makeAlgoOpenOrder({
+                algoId: 3003,
+                clientAlgoId: 'third-source-algo-order',
+                triggerPrice: '93003.00000000',
+            }),
+            makeAlgoOpenOrder({
+                algoId: 1001,
+                clientAlgoId: 'first-numbered-algo-order',
+                triggerPrice: '93001.00000000',
+            }),
+            makeAlgoOpenOrder({
+                algoId: 2002,
+                clientAlgoId: 'second-numbered-algo-order',
+                triggerPrice: '93002.00000000',
+            }),
+        ];
+
+        const result = normalizeFuturesAlgoOpenOrders(source, 'BTCUSDT');
+
+        expect(result.map((order) => order.algoId)).toEqual([3003, 1001, 2002]);
+        expect(result.map((order) => order.clientAlgoId)).toEqual([
+            'third-source-algo-order',
+            'first-numbered-algo-order',
+            'second-numbered-algo-order',
+        ]);
+        expect(result.map((order) => order.triggerPrice)).toEqual([
+            '93003.00000000',
+            '93001.00000000',
+            '93002.00000000',
+        ]);
+    });
+
+    it('accepts an empty official array as a valid fresh empty result', () => {
+        const source = [];
+        const result = normalizeFuturesAlgoOpenOrders(source, 'BTCUSDT');
+
+        expect(result).toEqual([]);
+        expect(result).not.toBe(source);
+    });
+
+    it('requires and preserves exact symbol identity without canonicalization', () => {
+        const result = normalizeFuturesAlgoOpenOrders([
+            makeAlgoOpenOrder({ clientAlgoId: 'BTCUSDT-exact-algo-000001' }),
+        ], 'BTCUSDT');
+
+        expect(result).toEqual([{
+            ...expectedAlgoOpenOrder,
+            clientAlgoId: 'BTCUSDT-exact-algo-000001',
+        }]);
+        expect(result[0].symbol).toBe('BTCUSDT');
+    });
+
+    it.each([
+        ['a different symbol', [makeAlgoOpenOrder({ symbol: 'ETHUSDT' })], 'BTCUSDT'],
+        ['a case-mismatched response symbol', [
+            makeAlgoOpenOrder({ symbol: 'btcusdt' }),
+        ], 'BTCUSDT'],
+        ['a case-mismatched requested symbol', [makeAlgoOpenOrder()], 'btcusdt'],
+    ])('fails deterministically for %s', (_label, payload, requestedSymbol) => {
+        expect(() => normalizeFuturesAlgoOpenOrders(
+            payload,
+            requestedSymbol,
+        )).toThrowError(new FuturesAlgoOpenOrdersError(
+            FUTURES_ALGO_OPEN_ORDERS_ERROR_CODES.SYMBOL_UNAVAILABLE,
+            `Futures symbol "${requestedSymbol}" is unavailable in algo-open-orders response`,
+        ));
+    });
+
+    it('rejects a mixed-symbol response instead of silently filtering it', () => {
+        expect(() => normalizeFuturesAlgoOpenOrders([
+            makeAlgoOpenOrder(),
+            makeAlgoOpenOrder({
+                symbol: 'ETHUSDT',
+                algoId: 2148628,
+                clientAlgoId: 'eth-current-algo-order-000001',
+            }),
+        ], 'BTCUSDT')).toThrowError(new FuturesAlgoOpenOrdersError(
+            FUTURES_ALGO_OPEN_ORDERS_ERROR_CODES.MALFORMED_RESPONSE,
+            'Malformed futures algo-open-orders response',
+        ));
+    });
+
+    it.each([undefined, null, 123, '', '   '])(
+        'fails before response parsing for invalid requested symbol %#',
+        (requestedSymbol) => {
+            expect(() => normalizeFuturesAlgoOpenOrders(
+                [makeAlgoOpenOrder()],
+                requestedSymbol,
+            )).toThrowError(new FuturesAlgoOpenOrdersError(
+                FUTURES_ALGO_OPEN_ORDERS_ERROR_CODES.INVALID_SYMBOL,
+                'Futures symbol must be a non-empty string',
+            ));
+        },
+    );
+
+    it.each([
+        ['an undefined payload', undefined],
+        ['a null payload', null],
+        ['an object instead of the documented array', makeAlgoOpenOrder()],
+        ['a scalar payload', 'BTCUSDT'],
+        ['a null entry', [null]],
+        ['an array entry', [[]]],
+        ['a missing symbol identity', [makeAlgoOpenOrder({ symbol: undefined })]],
+        ['a numeric symbol identity', [makeAlgoOpenOrder({ symbol: 123 })]],
+        ['a blank symbol identity', [makeAlgoOpenOrder({ symbol: '   ' })]],
+        ['a malformed entry among otherwise valid entries', [
+            makeAlgoOpenOrder(),
+            null,
+        ]],
+    ])('fails deterministically for %s', (_label, payload) => {
+        expect(() => normalizeFuturesAlgoOpenOrders(
+            payload,
+            'BTCUSDT',
+        )).toThrowError(new FuturesAlgoOpenOrdersError(
+            FUTURES_ALGO_OPEN_ORDERS_ERROR_CODES.MALFORMED_RESPONSE,
+            'Malformed futures algo-open-orders response',
+        ));
+    });
+
+    it.each([
+        'quantity',
+        'actualPrice',
+        'triggerPrice',
+        'price',
+        'tpTriggerPrice',
+        'tpPrice',
+        'slTriggerPrice',
+        'slPrice',
+    ])('rejects a non-string required decimal in %s', (field) => {
+        expect(() => normalizeFuturesAlgoOpenOrders([
+            makeAlgoOpenOrder({ [field]: 0 }),
+        ], 'BTCUSDT')).toThrowError(new FuturesAlgoOpenOrdersError(
+            FUTURES_ALGO_OPEN_ORDERS_ERROR_CODES.MALFORMED_RESPONSE,
+            'Malformed futures algo-open-orders response',
+        ));
+    });
+
+    it.each([
+        'quantity',
+        'actualPrice',
+        'triggerPrice',
+        'price',
+        'tpTriggerPrice',
+        'tpPrice',
+        'slTriggerPrice',
+        'slPrice',
+    ])('rejects a blank required decimal in %s', (field) => {
+        expect(() => normalizeFuturesAlgoOpenOrders([
+            makeAlgoOpenOrder({ [field]: '   ' }),
+        ], 'BTCUSDT')).toThrowError(new FuturesAlgoOpenOrdersError(
+            FUTURES_ALGO_OPEN_ORDERS_ERROR_CODES.MALFORMED_RESPONSE,
+            'Malformed futures algo-open-orders response',
+        ));
+    });
+
+    it.each([
+        'clientAlgoId',
+        'algoType',
+        'orderType',
+        'side',
+        'positionSide',
+        'timeInForce',
+        'algoStatus',
+        'selfTradePreventionMode',
+        'workingType',
+        'priceMatch',
+    ])('rejects a blank required string in %s', (field) => {
+        expect(() => normalizeFuturesAlgoOpenOrders([
+            makeAlgoOpenOrder({ [field]: '   ' }),
+        ], 'BTCUSDT')).toThrowError(new FuturesAlgoOpenOrdersError(
+            FUTURES_ALGO_OPEN_ORDERS_ERROR_CODES.MALFORMED_RESPONSE,
+            'Malformed futures algo-open-orders response',
+        ));
+    });
+
+    it.each([
+        'clientAlgoId',
+        'quantity',
+        'actualOrderId',
+        'icebergQuantity',
+        'algoId',
+        'closePosition',
+        'goodTillDate',
+    ])('rejects a missing required %s field', (field) => {
+        const source = makeAlgoOpenOrder();
+        delete source[field];
+
+        expect(() => normalizeFuturesAlgoOpenOrders([
+            source,
+        ], 'BTCUSDT')).toThrowError(new FuturesAlgoOpenOrdersError(
+            FUTURES_ALGO_OPEN_ORDERS_ERROR_CODES.MALFORMED_RESPONSE,
+            'Malformed futures algo-open-orders response',
+        ));
+    });
+
+    it('preserves documented empty-string identifiers without inventing nulls', () => {
+        const [result] = normalizeFuturesAlgoOpenOrders([
+            makeAlgoOpenOrder(),
+        ], 'BTCUSDT');
+
+        expect(result.actualOrderId).toBe('');
+        expect(result.tpOrderType).toBe('');
+        expect(result.actualOrderId).not.toBeNull();
+        expect(result.tpOrderType).not.toBeNull();
+    });
+
+    it('preserves populated actual-order and take-profit-order identifiers exactly', () => {
+        const [result] = normalizeFuturesAlgoOpenOrders([
+            makeAlgoOpenOrder({
+                actualOrderId: '00192837465',
+                tpOrderType: 'TAKE_PROFIT_MARKET',
+            }),
+        ], 'BTCUSDT');
+
+        expect(result.actualOrderId).toBe('00192837465');
+        expect(result.tpOrderType).toBe('TAKE_PROFIT_MARKET');
+    });
+
+    it.each([
+        ['actualOrderId', null],
+        ['actualOrderId', 123],
+        ['actualOrderId', '   '],
+        ['tpOrderType', null],
+        ['tpOrderType', false],
+        ['tpOrderType', '   '],
+    ])('rejects malformed empty-string-capable %s value %#', (field, value) => {
+        expect(() => normalizeFuturesAlgoOpenOrders([
+            makeAlgoOpenOrder({ [field]: value }),
+        ], 'BTCUSDT')).toThrowError(new FuturesAlgoOpenOrdersError(
+            FUTURES_ALGO_OPEN_ORDERS_ERROR_CODES.MALFORMED_RESPONSE,
+            'Malformed futures algo-open-orders response',
+        ));
+    });
+
+    it('preserves the documented nullable iceberg quantity without coercion', () => {
+        const [nullableResult] = normalizeFuturesAlgoOpenOrders([
+            makeAlgoOpenOrder({ icebergQuantity: null }),
+        ], 'BTCUSDT');
+        const [decimalResult] = normalizeFuturesAlgoOpenOrders([
+            makeAlgoOpenOrder({ icebergQuantity: '0.00010000' }),
+        ], 'BTCUSDT');
+        const [literalNullResult] = normalizeFuturesAlgoOpenOrders([
+            makeAlgoOpenOrder({ icebergQuantity: 'null' }),
+        ], 'BTCUSDT');
+
+        expect(nullableResult.icebergQuantity).toBeNull();
+        expect(decimalResult.icebergQuantity).toBe('0.00010000');
+        expect(typeof decimalResult.icebergQuantity).toBe('string');
+        expect(literalNullResult.icebergQuantity).toBe('null');
+        expect(typeof literalNullResult.icebergQuantity).toBe('string');
+    });
+
+    it.each([undefined, 0, false, '', '   '])(
+        'rejects an undocumented iceberg-quantity value %# without coercion',
+        (icebergQuantity) => {
+            expect(() => normalizeFuturesAlgoOpenOrders([
+                makeAlgoOpenOrder({ icebergQuantity }),
+            ], 'BTCUSDT')).toThrowError(new FuturesAlgoOpenOrdersError(
+                FUTURES_ALGO_OPEN_ORDERS_ERROR_CODES.MALFORMED_RESPONSE,
+                'Malformed futures algo-open-orders response',
+            ));
+        },
+    );
+
+    it.each([
+        'algoId',
+        'createTime',
+        'updateTime',
+        'triggerTime',
+        'goodTillDate',
+    ])('rejects a non-integer value in %s', (field) => {
+        expect(() => normalizeFuturesAlgoOpenOrders([
+            makeAlgoOpenOrder({ [field]: '0' }),
+        ], 'BTCUSDT')).toThrowError(new FuturesAlgoOpenOrdersError(
+            FUTURES_ALGO_OPEN_ORDERS_ERROR_CODES.MALFORMED_RESPONSE,
+            'Malformed futures algo-open-orders response',
+        ));
+    });
+
+    it.each([
+        ['a negative integer', -1],
+        ['a fractional number', 1.5],
+        ['an unsafe integer', Number.MAX_SAFE_INTEGER + 1],
+    ])('rejects %s for an integer field', (_label, invalidInteger) => {
+        expect(() => normalizeFuturesAlgoOpenOrders([
+            makeAlgoOpenOrder({ updateTime: invalidInteger }),
+        ], 'BTCUSDT')).toThrowError(new FuturesAlgoOpenOrdersError(
+            FUTURES_ALGO_OPEN_ORDERS_ERROR_CODES.MALFORMED_RESPONSE,
+            'Malformed futures algo-open-orders response',
+        ));
+    });
+
+    it('preserves zero as a safe integer without synthesizing timestamp state', () => {
+        const [result] = normalizeFuturesAlgoOpenOrders([
+            makeAlgoOpenOrder({
+                algoId: 0,
+                createTime: 0,
+                updateTime: 0,
+                triggerTime: 0,
+                goodTillDate: 0,
+            }),
+        ], 'BTCUSDT');
+
+        expect(result).toMatchObject({
+            algoId: 0,
+            createTime: 0,
+            updateTime: 0,
+            triggerTime: 0,
+            goodTillDate: 0,
+        });
+    });
+
+    it.each(['closePosition', 'priceProtect', 'reduceOnly'])(
+        'rejects a non-boolean flag in %s',
+        (field) => {
+            expect(() => normalizeFuturesAlgoOpenOrders([
+                makeAlgoOpenOrder({ [field]: 'false' }),
+            ], 'BTCUSDT')).toThrowError(new FuturesAlgoOpenOrdersError(
+                FUTURES_ALGO_OPEN_ORDERS_ERROR_CODES.MALFORMED_RESPONSE,
+                'Malformed futures algo-open-orders response',
+            ));
+        },
+    );
+
+    it('preserves true boolean flags without coercion', () => {
+        const [result] = normalizeFuturesAlgoOpenOrders([
+            makeAlgoOpenOrder({
+                closePosition: true,
+                priceProtect: true,
+                reduceOnly: true,
+            }),
+        ], 'BTCUSDT');
+
+        expect(result.closePosition).toBe(true);
+        expect(result.priceProtect).toBe(true);
+        expect(result.reduceOnly).toBe(true);
+    });
+
+    it.each([
+        ['algoId', {
+            algoId: 2148627,
+            clientAlgoId: 'different-client-algo-id',
+        }],
+        ['clientAlgoId', {
+            algoId: 2148628,
+            clientAlgoId: 'current-algo-order-000001',
+        }],
+    ])('rejects duplicate %s identities', (_identity, duplicateOverrides) => {
+        expect(() => normalizeFuturesAlgoOpenOrders([
+            makeAlgoOpenOrder(),
+            makeAlgoOpenOrder(duplicateOverrides),
+        ], 'BTCUSDT')).toThrowError(new FuturesAlgoOpenOrdersError(
+            FUTURES_ALGO_OPEN_ORDERS_ERROR_CODES.MALFORMED_RESPONSE,
+            'Malformed futures algo-open-orders response',
+        ));
+    });
+
+    it('preserves source immutability and returns fresh algo-order objects', () => {
+        const source = [
+            makeAlgoOpenOrder({ ignoredField: 'not-normalized' }),
+            makeAlgoOpenOrder({
+                algoId: 2148628,
+                clientAlgoId: 'current-algo-order-000002',
+            }),
+        ];
+        const snapshot = structuredClone(source);
+
+        const result = normalizeFuturesAlgoOpenOrders(source, 'BTCUSDT');
+        const secondResult = normalizeFuturesAlgoOpenOrders(source, 'BTCUSDT');
+
+        expect(source).toEqual(snapshot);
+        expect(result).not.toBe(source);
+        expect(result[0]).not.toBe(source[0]);
+        expect(result[1]).not.toBe(source[1]);
+        expect(result[0]).not.toBe(result[1]);
+        expect(result[0]).not.toBe(secondResult[0]);
+        expect(result[0]).not.toHaveProperty('ignoredField');
+    });
+
+    it('keeps regular and algo open-order contracts strictly separate', () => {
+        const [regularOrder] = normalizeFuturesOpenOrders([makeOpenOrder({
+            algoId: 2148627,
+            clientAlgoId: 'must-not-cross-into-regular-orders',
+            icebergQuantity: null,
+        })], 'BTCUSDT');
+        const [algoOrder] = normalizeFuturesAlgoOpenOrders([makeAlgoOpenOrder({
+            orderId: 1917641,
+            clientOrderId: 'must-not-cross-into-algo-orders',
+            avgPrice: '0.00000',
+            activatePrice: '9020.00000000',
+            priceRate: '0.3000',
+            callbackRate: '0.3000',
+        })], 'BTCUSDT');
+
+        expect(regularOrder).not.toHaveProperty('algoId');
+        expect(regularOrder).not.toHaveProperty('clientAlgoId');
+        expect(regularOrder).not.toHaveProperty('icebergQuantity');
+        expect(algoOrder).not.toHaveProperty('orderId');
+        expect(algoOrder).not.toHaveProperty('clientOrderId');
+        expect(algoOrder).not.toHaveProperty('avgPrice');
+        expect(algoOrder).not.toHaveProperty('activatePrice');
+        expect(algoOrder).not.toHaveProperty('priceRate');
+        expect(algoOrder).not.toHaveProperty('callbackRate');
+    });
+
+    it('keeps all six completed futures read-only contracts unchanged', () => {
+        const exchangeInfo = makeExchangeInfo(makeFuturesSymbol());
+        const premiumIndex = makeMarkPrice();
+
+        expect(normalizeFuturesExchangeInfo(exchangeInfo, 'BTCUSDT')).toEqual({
+            marketType: 'futures',
+            symbol: 'BTCUSDT',
+            pair: 'BTCUSDT',
+            contractType: 'PERPETUAL',
+            status: 'TRADING',
+            assets: { base: 'BTC', quote: 'USDT', margin: 'USDT' },
+            filters: expectedFilters,
+            supportedOrderTypes: ['LIMIT', 'MARKET', 'STOP'],
+            supportedTimeInForce: ['GTC', 'IOC', 'FOK', 'GTX'],
+        });
+        expect(normalizeFuturesMarkPrice(premiumIndex, 'BTCUSDT')).toEqual(
+            expectedMarkPrice,
+        );
+        expect(normalizeFuturesFundingState(premiumIndex, 'BTCUSDT')).toEqual(
+            expectedFundingState,
+        );
+        expect(normalizeFuturesPositionRisk(
+            [makePositionRisk()],
+            'BTCUSDT',
+            'BOTH',
+        )).toEqual(expectedPositionRisk);
+        expect(normalizeFuturesAccountBalance(
+            [makeAccountBalance()],
+            'USDT',
+        )).toEqual(expectedAccountBalance);
+        expect(normalizeFuturesOpenOrders(
+            [makeOpenOrder()],
+            'BTCUSDT',
+        )).toEqual([expectedOpenOrder]);
+    });
+});
+
 describe('FuturesTradingAdapter', () => {
     it('loads and unwraps official-client-style exchange metadata at the adapter boundary', async () => {
         const source = makeExchangeInfo(makeFuturesSymbol());
@@ -1738,6 +2295,136 @@ describe('FuturesTradingAdapter', () => {
         expect(data).toHaveBeenCalledWith();
     });
 
+    it('loads symbol-scoped current algo open orders from an official-client-style body', async () => {
+        const data = vi.fn().mockResolvedValue([makeAlgoOpenOrder()]);
+        const transport = {
+            getOpenAlgoOrders: vi.fn().mockResolvedValue({ data }),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getAlgoOpenOrders('BTCUSDT')).resolves.toEqual([
+            expectedAlgoOpenOrder,
+        ]);
+        expect(transport.getOpenAlgoOrders.mock.calls).toEqual([
+            [{ symbol: 'BTCUSDT' }],
+        ]);
+        expect(data).toHaveBeenCalledWith();
+    });
+
+    it('accepts raw current-algo-open-orders arrays from the read-only transport', async () => {
+        const transport = {
+            getOpenAlgoOrders: vi.fn().mockResolvedValue([
+                makeAlgoOpenOrder({
+                    algoId: 2148628,
+                    clientAlgoId: 'current-algo-order-000002',
+                }),
+                makeAlgoOpenOrder(),
+            ]),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getAlgoOpenOrders('BTCUSDT')).resolves.toEqual([
+            {
+                ...expectedAlgoOpenOrder,
+                algoId: 2148628,
+                clientAlgoId: 'current-algo-order-000002',
+            },
+            expectedAlgoOpenOrder,
+        ]);
+        expect(transport.getOpenAlgoOrders).toHaveBeenCalledWith({
+            symbol: 'BTCUSDT',
+        });
+    });
+
+    it('accepts a raw empty current-algo-open-orders array', async () => {
+        const transport = {
+            getOpenAlgoOrders: vi.fn().mockResolvedValue([]),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getAlgoOpenOrders('BTCUSDT')).resolves.toEqual([]);
+        expect(transport.getOpenAlgoOrders).toHaveBeenCalledWith({
+            symbol: 'BTCUSDT',
+        });
+    });
+
+    it.each([undefined, null, 123, '', '   '])(
+        'rejects invalid algo-open-orders symbol %# before invoking the transport',
+        async (symbol) => {
+            const transport = {
+                getOpenAlgoOrders: vi.fn(),
+            };
+            const adapter = new FuturesTradingAdapter({ transport });
+
+            await expect(adapter.getAlgoOpenOrders(symbol)).rejects.toThrowError(
+                new FuturesAlgoOpenOrdersError(
+                    FUTURES_ALGO_OPEN_ORDERS_ERROR_CODES.INVALID_SYMBOL,
+                    'Futures symbol must be a non-empty string',
+                ),
+            );
+            expect(transport.getOpenAlgoOrders).not.toHaveBeenCalled();
+        },
+    );
+
+    it('preserves current-algo-open-orders transport error identity', async () => {
+        const transportError = new Error(
+            'futures algo-open-orders transport unavailable',
+        );
+        const transport = {
+            getOpenAlgoOrders: vi.fn().mockRejectedValue(transportError),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getAlgoOpenOrders('BTCUSDT')).rejects.toBe(
+            transportError,
+        );
+        expect(transport.getOpenAlgoOrders).toHaveBeenCalledWith({
+            symbol: 'BTCUSDT',
+        });
+    });
+
+    it('preserves current-algo-open-orders response-body error identity', async () => {
+        const responseError = new Error(
+            'futures algo-open-orders response body unavailable',
+        );
+        const data = vi.fn().mockRejectedValue(responseError);
+        const transport = {
+            getOpenAlgoOrders: vi.fn().mockResolvedValue({ data }),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getAlgoOpenOrders('BTCUSDT')).rejects.toBe(
+            responseError,
+        );
+        expect(transport.getOpenAlgoOrders).toHaveBeenCalledWith({
+            symbol: 'BTCUSDT',
+        });
+        expect(data).toHaveBeenCalledWith();
+    });
+
+    it('keeps regular and algo open-order transports independent', async () => {
+        const transport = {
+            getOpenOrders: vi.fn().mockResolvedValue([makeOpenOrder()]),
+            getOpenAlgoOrders: vi.fn().mockResolvedValue([makeAlgoOpenOrder()]),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getOpenOrders('BTCUSDT')).resolves.toEqual([
+            expectedOpenOrder,
+        ]);
+        expect(transport.getOpenOrders).toHaveBeenCalledTimes(1);
+        expect(transport.getOpenAlgoOrders).not.toHaveBeenCalled();
+
+        await expect(adapter.getAlgoOpenOrders('BTCUSDT')).resolves.toEqual([
+            expectedAlgoOpenOrder,
+        ]);
+        expect(transport.getOpenOrders).toHaveBeenCalledTimes(1);
+        expect(transport.getOpenAlgoOrders).toHaveBeenCalledTimes(1);
+        expect(transport.getOpenAlgoOrders).toHaveBeenCalledWith({
+            symbol: 'BTCUSDT',
+        });
+    });
+
     it('propagates transport errors without relabeling them as normalization failures', async () => {
         const transportError = new Error('futures transport unavailable');
         const transport = {
@@ -1862,6 +2549,7 @@ describe('FuturesTradingAdapter', () => {
             'getPositionRisk',
             'getAccountBalance',
             'getOpenOrders',
+            'getAlgoOpenOrders',
         ]);
 
         const forbiddenExecutionMethods = [
