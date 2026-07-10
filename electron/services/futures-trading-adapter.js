@@ -24,6 +24,12 @@ export const FUTURES_POSITION_RISK_ERROR_CODES = Object.freeze({
     POSITION_SIDE_UNAVAILABLE: 'FUTURES_POSITION_SIDE_UNAVAILABLE',
 });
 
+export const FUTURES_ACCOUNT_BALANCE_ERROR_CODES = Object.freeze({
+    INVALID_MARGIN_ASSET: 'INVALID_FUTURES_MARGIN_ASSET',
+    MALFORMED_RESPONSE: 'MALFORMED_FUTURES_ACCOUNT_BALANCE',
+    MARGIN_ASSET_UNAVAILABLE: 'FUTURES_MARGIN_ASSET_UNAVAILABLE',
+});
+
 export class FuturesExchangeInfoError extends Error {
     constructor(code, message) {
         super(message);
@@ -56,6 +62,14 @@ export class FuturesPositionRiskError extends Error {
     }
 }
 
+export class FuturesAccountBalanceError extends Error {
+    constructor(code, message) {
+        super(message);
+        this.name = 'FuturesAccountBalanceError';
+        this.code = code;
+    }
+}
+
 const isRecord = (value) => value !== null
     && typeof value === 'object'
     && !Array.isArray(value);
@@ -80,6 +94,11 @@ const malformedFundingStateError = () => new FuturesFundingStateError(
 const malformedPositionRiskError = () => new FuturesPositionRiskError(
     FUTURES_POSITION_RISK_ERROR_CODES.MALFORMED_RESPONSE,
     'Malformed futures position-risk response',
+);
+
+const malformedAccountBalanceError = () => new FuturesAccountBalanceError(
+    FUTURES_ACCOUNT_BALANCE_ERROR_CODES.MALFORMED_RESPONSE,
+    'Malformed futures account-balance response',
 );
 
 const FUTURES_POSITION_SIDES = new Set(['BOTH', 'LONG', 'SHORT']);
@@ -428,6 +447,72 @@ export const normalizeFuturesPositionRisk = (
     };
 };
 
+/**
+ * Normalize one USDⓈ-M V3 account-balance entry selected by margin asset.
+ * Balance decimals remain exact strings and the update timestamp remains an integer.
+ */
+export const normalizeFuturesAccountBalance = (
+    accountBalanceResponse,
+    requestedMarginAsset,
+) => {
+    if (!isNonEmptyString(requestedMarginAsset)) {
+        throw new FuturesAccountBalanceError(
+            FUTURES_ACCOUNT_BALANCE_ERROR_CODES.INVALID_MARGIN_ASSET,
+            'Futures margin asset must be a non-empty string',
+        );
+    }
+    if (!Array.isArray(accountBalanceResponse)) throw malformedAccountBalanceError();
+    if (accountBalanceResponse.some(
+        (candidate) => !isRecord(candidate) || !isNonEmptyString(candidate.asset),
+    )) {
+        throw malformedAccountBalanceError();
+    }
+
+    const assetIdentities = new Set();
+    accountBalanceResponse.forEach((candidate) => {
+        if (assetIdentities.has(candidate.asset)) throw malformedAccountBalanceError();
+        assetIdentities.add(candidate.asset);
+    });
+
+    const accountBalance = accountBalanceResponse.find(
+        (candidate) => candidate.asset === requestedMarginAsset,
+    );
+    if (!accountBalance) {
+        throw new FuturesAccountBalanceError(
+            FUTURES_ACCOUNT_BALANCE_ERROR_CODES.MARGIN_ASSET_UNAVAILABLE,
+            `Futures margin asset "${requestedMarginAsset}" is unavailable in account-balance response`,
+        );
+    }
+
+    const decimalFields = [
+        'balance',
+        'crossWalletBalance',
+        'crossUnPnl',
+        'availableBalance',
+        'maxWithdrawAmount',
+    ];
+    if (!isNonEmptyString(accountBalance.accountAlias)
+        || decimalFields.some((field) => !isNonEmptyString(accountBalance[field]))
+        || typeof accountBalance.marginAvailable !== 'boolean'
+        || !Number.isSafeInteger(accountBalance.updateTime)
+        || accountBalance.updateTime < 0) {
+        throw malformedAccountBalanceError();
+    }
+
+    return {
+        marketType: 'futures',
+        accountAlias: accountBalance.accountAlias,
+        asset: accountBalance.asset,
+        balance: accountBalance.balance,
+        crossWalletBalance: accountBalance.crossWalletBalance,
+        crossUnPnl: accountBalance.crossUnPnl,
+        availableBalance: accountBalance.availableBalance,
+        maxWithdrawAmount: accountBalance.maxWithdrawAmount,
+        marginAvailable: accountBalance.marginAvailable,
+        updateTime: accountBalance.updateTime,
+    };
+};
+
 const readExchangeInfoData = async (response) => {
     if (typeof response?.data === 'function') return response.data();
     return response;
@@ -444,6 +529,11 @@ const readFundingStateData = async (response) => {
 };
 
 const readPositionRiskData = async (response) => {
+    if (typeof response?.data === 'function') return response.data();
+    return response;
+};
+
+const readAccountBalanceData = async (response) => {
     if (typeof response?.data === 'function') return response.data();
     return response;
 };
@@ -475,5 +565,11 @@ export class FuturesTradingAdapter {
         const response = await this.transport.getPositionRiskV3({ symbol });
         const positionRisk = await readPositionRiskData(response);
         return normalizeFuturesPositionRisk(positionRisk, symbol, positionSide);
+    }
+
+    async getAccountBalance(marginAsset) {
+        const response = await this.transport.getBalanceV3();
+        const accountBalance = await readAccountBalanceData(response);
+        return normalizeFuturesAccountBalance(accountBalance, marginAsset);
     }
 }

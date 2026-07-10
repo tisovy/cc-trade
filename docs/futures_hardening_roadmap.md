@@ -207,6 +207,7 @@ Progress:
 - [x] Add isolated USDⓈ-M mark-price/index-price normalization behind the injected read-only futures transport.
 - [x] Add isolated current USDⓈ-M funding-rate/countdown normalization from the premium-index source.
 - [x] Add isolated USDⓈ-M V3 position-risk normalization behind the injected read-only futures transport.
+- [x] Add isolated USDⓈ-M V3 account-balance normalization behind the injected read-only futures transport.
 
 First checkpoint contract:
 
@@ -326,7 +327,36 @@ Fourth checkpoint rules and audit:
 - Spot behavior remains unchanged, backend validation still rejects non-spot typed trading commands with `UNSUPPORTED_MARKET_TYPE`, and no dependency was added.
 - Validation passed: futures adapter `145/145`, spot adapter `21/21`, futures-command rejection suite `10/10`, shuffled non-isolated futures+spot `166/166`, full suite `368 passed / 2 skipped`, lint, and build.
 
-Phase status: **In progress; exchange-metadata, mark/index-price, current-funding, and position-risk boundary checkpoints complete (2026-07-10).**
+Fifth checkpoint contract:
+
+```js
+{
+  marketType: "futures",
+  accountAlias,
+  asset,
+  balance: string,
+  crossWalletBalance: string,
+  crossUnPnl: string,
+  availableBalance: string,
+  maxWithdrawAmount: string,
+  marginAvailable: boolean,
+  updateTime: number
+}
+```
+
+Fifth checkpoint rules and audit:
+
+- The source is the current official USDⓈ-M Futures Account Balance V3 endpoint, signed `GET /fapi/v3/balance` with request weight `5`. V3 is deliberately version-pinned; V2 remains separately visible but was announced for replacement/deprecation without a final retirement date, and V1 is unsupported.
+- The documented response is always an account-wide array and has no asset request parameter. The adapter calls only the version-explicit injected `getBalanceV3()` transport with no arguments, then selects one explicitly requested margin asset locally.
+- Margin-asset identity is exact and case-sensitive. An empty array, missing asset, or case mismatch raises a stable unavailable-asset identity; invalid requested assets have a stable invalid-asset identity; malformed candidate identities and duplicate asset identities anywhere in the array raise a stable account-balance normalization error.
+- Candidate identities and global duplicates validate before selection, while complete field validation applies to the selected asset entry only. Response order and undocumented cross-row account-alias consistency are not assumed.
+- `balance`, `crossWalletBalance`, `crossUnPnl`, `availableBalance`, and `maxWithdrawAmount` remain exact non-empty strings, including signs and trailing zeroes. `accountAlias` remains an exact non-empty string, `marginAvailable` remains a boolean with `false` valid, and `updateTime` remains a non-negative safe integer with zero accepted by normalizer policy.
+- The pure normalizer does not mutate or return a source entry, and unknown fields are excluded. Raw arrays and established official-client-style async `response.data()` bodies are supported, while transport and response-body errors propagate unchanged by identity.
+- The only adapter surface added is read-only `getAccountBalance(marginAsset)`. The completed exchange-info, mark/index-price, current-funding, and position-risk contracts remain unchanged, and balances are not merged with positions or a generic account-state framework.
+- No futures client, service import, Electron/renderer wiring, WebSocket, open-order, or execution surface was added. Spot behavior remains unchanged, backend validation still rejects non-spot typed trading commands with `UNSUPPORTED_MARKET_TYPE`, and no dependency was added.
+- Validation passed: futures adapter `188/188`, spot adapter `21/21`, futures-command rejection suite `10/10`, shuffled non-isolated futures+spot `209/209`, full suite `411 passed / 2 skipped`, lint, and build.
+
+Phase status: **In progress; exchange-metadata, mark/index-price, current-funding, position-risk, and account-balance boundary checkpoints complete (2026-07-10).**
 
 UI surface should be minimal:
 
@@ -418,18 +448,21 @@ Suggested UI order:
 
 Continue Phase 5 with the next narrow read-only futures boundary checkpoint:
 
-**Add isolated USDⓈ-M account-balance normalization to `FuturesTradingAdapter`.**
+**Add isolated symbol-scoped USDⓈ-M current-open-order normalization to `FuturesTradingAdapter`.**
 
 Implementation entry point:
 
 - existing `electron/services/futures-trading-adapter.js` and focused unit tests;
-- current official Binance USDⓈ-M futures account-balance endpoint documentation before choosing the version or freezing fields.
+- current official Binance USDⓈ-M Current All Open Orders documentation before freezing fields or transport naming.
 
 Expected scope:
 
-- Extend only the injected read-only transport boundary and add a pure balance normalizer for one explicitly requested margin asset without composing a futures client or account service.
-- Preserve documented balance, wallet, PnL, available, and withdrawal decimal values as exact strings and documented timestamps as integers; define deterministic array-shape, asset-selection, missing-asset, malformed, duplicate, and transport/body-error behavior from official evidence.
-- Keep the completed exchange-info, mark/index-price, current-funding, and position-risk contracts unchanged; do not merge balances with positions or add a generic futures account-state framework.
+- Extend only the injected read-only transport boundary and add a pure normalizer for the current open orders of one explicitly requested symbol.
+- Use only the explicit-symbol signed `GET /fapi/v1/openOrders` behavior; do not add the higher-weight account-wide request or infer a symbol after an account-wide fetch.
+- Treat the documented array response deterministically: an empty array is a valid no-open-orders result, preserve source order, require exact case-sensitive symbol identity, and define stable behavior for wrong or mixed symbols, malformed entries, and duplicate order identities.
+- Preserve documented price, quantity, quote, and rate decimals as exact strings; preserve string identifiers exactly, integer identifiers and timestamps as integers, and flags as booleans. Freeze only fields supported by current official evidence.
+- Preserve source immutability and established futures error identity, including unchanged transport and response-body errors.
+- Keep the completed exchange-info, mark/index-price, current-funding, position-risk, and account-balance contracts unchanged; do not merge orders with balances or positions and do not create a generic account-state framework.
 - Keep `FuturesTradingAdapter` free of order placement, cancellation, leverage, margin-mode, or other execution methods; backend futures execution must remain rejected.
 - Do not wire the adapter into `binance-connection.js`, Electron startup, renderer state, WebSockets, or visible UI in this checkpoint.
-- Defer open futures orders, service orchestration, testnet client composition, and the futures mode indicator/position panel to later reviewed Phase 5 checkpoints.
+- Defer algo open orders, order history/query, account-wide open-order reads, service orchestration, testnet client composition, and the futures mode indicator/position panel to later reviewed Phase 5 checkpoints.

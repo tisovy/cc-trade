@@ -1,14 +1,17 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+    FUTURES_ACCOUNT_BALANCE_ERROR_CODES,
     FUTURES_EXCHANGE_INFO_ERROR_CODES,
     FUTURES_FUNDING_STATE_ERROR_CODES,
     FUTURES_MARK_PRICE_ERROR_CODES,
     FUTURES_POSITION_RISK_ERROR_CODES,
+    FuturesAccountBalanceError,
     FuturesExchangeInfoError,
     FuturesFundingStateError,
     FuturesMarkPriceError,
     FuturesPositionRiskError,
     FuturesTradingAdapter,
+    normalizeFuturesAccountBalance,
     normalizeFuturesExchangeInfo,
     normalizeFuturesFundingState,
     normalizeFuturesMarkPrice,
@@ -152,6 +155,32 @@ const expectedPositionRisk = {
     openOrderInitialMargin: '0',
     adl: 2,
     updateTime: 1720736417660,
+};
+
+const makeAccountBalance = (overrides = {}) => ({
+    accountAlias: 'SgsR',
+    asset: 'USDT',
+    balance: '122607.3513790300',
+    crossWalletBalance: '23.724692060',
+    crossUnPnl: '-0.00000000',
+    availableBalance: '22.00000010',
+    maxWithdrawAmount: '21.500000000',
+    marginAvailable: true,
+    updateTime: 1617939110373,
+    ...overrides,
+});
+
+const expectedAccountBalance = {
+    marketType: 'futures',
+    accountAlias: 'SgsR',
+    asset: 'USDT',
+    balance: '122607.3513790300',
+    crossWalletBalance: '23.724692060',
+    crossUnPnl: '-0.00000000',
+    availableBalance: '22.00000010',
+    maxWithdrawAmount: '21.500000000',
+    marginAvailable: true,
+    updateTime: 1617939110373,
 };
 
 describe('normalizeFuturesExchangeInfo', () => {
@@ -833,6 +862,209 @@ describe('normalizeFuturesPositionRisk', () => {
     });
 });
 
+describe('normalizeFuturesAccountBalance', () => {
+    it('normalizes the official V3 array response without changing decimal strings', () => {
+        const result = normalizeFuturesAccountBalance(
+            [makeAccountBalance()],
+            'USDT',
+        );
+
+        expect(result).toEqual(expectedAccountBalance);
+        expect(result.balance).toBe('122607.3513790300');
+        expect(result.crossWalletBalance).toBe('23.724692060');
+        expect(result.crossUnPnl).toBe('-0.00000000');
+        expect(result.availableBalance).toBe('22.00000010');
+        expect(result.maxWithdrawAmount).toBe('21.500000000');
+        expect(result.updateTime).toBe(1617939110373);
+    });
+
+    it('selects the requested margin asset independently of response order', () => {
+        const source = [
+            makeAccountBalance({
+                accountAlias: 'AnotherAlias',
+                asset: 'USDC',
+                balance: '10.00000000',
+            }),
+            makeAccountBalance(),
+        ];
+
+        expect(normalizeFuturesAccountBalance(source, 'USDT')).toEqual(
+            expectedAccountBalance,
+        );
+    });
+
+    it('validates full fields only for the requested asset after validating all identities', () => {
+        const source = [
+            makeAccountBalance({
+                asset: 'USDC',
+                accountAlias: undefined,
+                balance: 10,
+            }),
+            makeAccountBalance(),
+        ];
+
+        expect(normalizeFuturesAccountBalance(source, 'USDT')).toEqual(
+            expectedAccountBalance,
+        );
+    });
+
+    it.each([
+        ['an empty response', [], 'USDT'],
+        ['a response with a different asset', [
+            makeAccountBalance({ asset: 'USDC' }),
+        ], 'USDT'],
+        ['a multi-asset response without the requested asset', [
+            makeAccountBalance({ asset: 'USDC' }),
+            makeAccountBalance({ asset: 'BNB' }),
+        ], 'USDT'],
+        ['a case-mismatched requested asset', [makeAccountBalance()], 'usdt'],
+    ])('fails deterministically when the requested margin asset is unavailable in %s', (
+        _label,
+        payload,
+        requestedMarginAsset,
+    ) => {
+        expect(() => normalizeFuturesAccountBalance(
+            payload,
+            requestedMarginAsset,
+        )).toThrowError(new FuturesAccountBalanceError(
+            FUTURES_ACCOUNT_BALANCE_ERROR_CODES.MARGIN_ASSET_UNAVAILABLE,
+            `Futures margin asset "${requestedMarginAsset}" is unavailable in account-balance response`,
+        ));
+    });
+
+    it.each([null, 123, '', '   '])(
+        'fails deterministically for an invalid requested margin asset %#',
+        (marginAsset) => {
+            expect(() => normalizeFuturesAccountBalance(
+                [makeAccountBalance()],
+                marginAsset,
+            )).toThrowError(new FuturesAccountBalanceError(
+                FUTURES_ACCOUNT_BALANCE_ERROR_CODES.INVALID_MARGIN_ASSET,
+                'Futures margin asset must be a non-empty string',
+            ));
+        },
+    );
+
+    it.each([
+        ['a null payload', null],
+        ['an object instead of the documented array', makeAccountBalance()],
+        ['a scalar payload', 'USDT'],
+        ['a null candidate', [null]],
+        ['a missing asset identity', [makeAccountBalance({ asset: undefined })]],
+        ['a non-string asset identity', [makeAccountBalance({ asset: 123 })]],
+        ['a blank asset identity', [makeAccountBalance({ asset: '   ' })]],
+        ['a malformed unrelated asset identity', [
+            makeAccountBalance(),
+            makeAccountBalance({ asset: undefined }),
+        ]],
+        ['a missing account alias', [makeAccountBalance({ accountAlias: undefined })]],
+        ['a blank account alias', [makeAccountBalance({ accountAlias: '   ' })]],
+        ['a numeric wallet balance', [makeAccountBalance({ balance: 122607.35 })]],
+        ['a blank cross-wallet balance', [makeAccountBalance({
+            crossWalletBalance: '   ',
+        })]],
+        ['a missing cross unrealized PnL', [makeAccountBalance({ crossUnPnl: undefined })]],
+        ['a numeric available balance', [makeAccountBalance({ availableBalance: 22 })]],
+        ['a blank maximum withdrawal amount', [makeAccountBalance({
+            maxWithdrawAmount: '',
+        })]],
+        ['a string margin-availability flag', [makeAccountBalance({
+            marginAvailable: 'true',
+        })]],
+        ['a numeric margin-availability flag', [makeAccountBalance({
+            marginAvailable: 1,
+        })]],
+        ['a null margin-availability flag', [makeAccountBalance({
+            marginAvailable: null,
+        })]],
+        ['a string update time', [makeAccountBalance({ updateTime: '1617939110373' })]],
+        ['a fractional update time', [makeAccountBalance({
+            updateTime: 1617939110373.5,
+        })]],
+        ['a negative update time', [makeAccountBalance({ updateTime: -1 })]],
+        ['an unsafe update time', [makeAccountBalance({
+            updateTime: Number.MAX_SAFE_INTEGER + 1,
+        })]],
+        ['a duplicate requested asset identity', [
+            makeAccountBalance(),
+            makeAccountBalance(),
+        ]],
+        ['a duplicate unrelated asset identity', [
+            makeAccountBalance({ asset: 'USDC' }),
+            makeAccountBalance({ asset: 'USDC' }),
+            makeAccountBalance(),
+        ]],
+    ])('fails deterministically for %s', (_label, payload) => {
+        expect(() => normalizeFuturesAccountBalance(
+            payload,
+            'USDT',
+        )).toThrowError(new FuturesAccountBalanceError(
+            FUTURES_ACCOUNT_BALANCE_ERROR_CODES.MALFORMED_RESPONSE,
+            'Malformed futures account-balance response',
+        ));
+    });
+
+    it('preserves false as a valid margin-availability flag', () => {
+        expect(normalizeFuturesAccountBalance(
+            [makeAccountBalance({ marginAvailable: false })],
+            'USDT',
+        )).toEqual({
+            ...expectedAccountBalance,
+            marginAvailable: false,
+        });
+    });
+
+    it('preserves zero as a valid normalizer-policy update timestamp', () => {
+        expect(normalizeFuturesAccountBalance(
+            [makeAccountBalance({ updateTime: 0 })],
+            'USDT',
+        ).updateTime).toBe(0);
+    });
+
+    it('does not mutate the source or return the selected source object', () => {
+        const source = [
+            makeAccountBalance({ asset: 'USDC' }),
+            makeAccountBalance({ ignoredField: 'ignored' }),
+        ];
+        const snapshot = structuredClone(source);
+
+        const result = normalizeFuturesAccountBalance(source, 'USDT');
+
+        expect(source).toEqual(snapshot);
+        expect(result).not.toBe(source[1]);
+        expect(result).toEqual(expectedAccountBalance);
+        expect(result).not.toHaveProperty('ignoredField');
+    });
+
+    it('keeps all completed futures contracts unchanged', () => {
+        const exchangeInfo = makeExchangeInfo(makeFuturesSymbol());
+        const premiumIndex = makeMarkPrice();
+
+        expect(normalizeFuturesExchangeInfo(exchangeInfo, 'BTCUSDT')).toEqual({
+            marketType: 'futures',
+            symbol: 'BTCUSDT',
+            pair: 'BTCUSDT',
+            contractType: 'PERPETUAL',
+            status: 'TRADING',
+            assets: { base: 'BTC', quote: 'USDT', margin: 'USDT' },
+            filters: expectedFilters,
+            supportedOrderTypes: ['LIMIT', 'MARKET', 'STOP'],
+            supportedTimeInForce: ['GTC', 'IOC', 'FOK', 'GTX'],
+        });
+        expect(normalizeFuturesMarkPrice(premiumIndex, 'BTCUSDT')).toEqual(
+            expectedMarkPrice,
+        );
+        expect(normalizeFuturesFundingState(premiumIndex, 'BTCUSDT')).toEqual(
+            expectedFundingState,
+        );
+        expect(normalizeFuturesPositionRisk(
+            [makePositionRisk()],
+            'BTCUSDT',
+            'BOTH',
+        )).toEqual(expectedPositionRisk);
+    });
+});
+
 describe('FuturesTradingAdapter', () => {
     it('loads and unwraps official-client-style exchange metadata at the adapter boundary', async () => {
         const source = makeExchangeInfo(makeFuturesSymbol());
@@ -950,6 +1182,34 @@ describe('FuturesTradingAdapter', () => {
         });
     });
 
+    it('loads and unwraps V3 account balances at the adapter boundary', async () => {
+        const data = vi.fn().mockResolvedValue([makeAccountBalance()]);
+        const transport = {
+            getBalanceV3: vi.fn().mockResolvedValue({ data }),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getAccountBalance('USDT')).resolves.toEqual(
+            expectedAccountBalance,
+        );
+        expect(transport.getBalanceV3).toHaveBeenCalledWith();
+        expect(data).toHaveBeenCalledWith();
+    });
+
+    it('accepts raw V3 multi-asset balances from the injected read-only transport', async () => {
+        const transport = {
+            getBalanceV3: vi.fn().mockResolvedValue([
+                makeAccountBalance({ asset: 'USDC' }),
+                makeAccountBalance(),
+            ]),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getAccountBalance('USDT')).resolves.toEqual(
+            expectedAccountBalance,
+        );
+    });
+
     it('propagates transport errors without relabeling them as normalization failures', async () => {
         const transportError = new Error('futures transport unavailable');
         const transport = {
@@ -1042,6 +1302,28 @@ describe('FuturesTradingAdapter', () => {
         );
     });
 
+    it('preserves account-balance transport error identity', async () => {
+        const transportError = new Error('futures account-balance transport unavailable');
+        const transport = {
+            getBalanceV3: vi.fn().mockRejectedValue(transportError),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getAccountBalance('USDT')).rejects.toBe(transportError);
+    });
+
+    it('preserves account-balance response-body error identity', async () => {
+        const responseError = new Error('futures account-balance response body unavailable');
+        const transport = {
+            getBalanceV3: vi.fn().mockResolvedValue({
+                data: vi.fn().mockRejectedValue(responseError),
+            }),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getAccountBalance('USDT')).rejects.toBe(responseError);
+    });
+
     it('exposes no futures execution surface', () => {
         const adapter = new FuturesTradingAdapter({ transport: {} });
         expect(Object.getOwnPropertyNames(FuturesTradingAdapter.prototype)).toEqual([
@@ -1050,6 +1332,7 @@ describe('FuturesTradingAdapter', () => {
             'getMarkPrice',
             'getFundingState',
             'getPositionRisk',
+            'getAccountBalance',
         ]);
 
         const forbiddenExecutionMethods = [
