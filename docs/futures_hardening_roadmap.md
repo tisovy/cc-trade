@@ -272,16 +272,17 @@ Suggested UI order:
 
 Continue Phase 4 with the next focused service-level checkpoint:
 
-**Add service-level coverage preventing an already-fired user-data keep-alive callback from renewing after the final renderer tears the stream down.**
+**Add service-level ownership coverage for a user-data listen-key creation request that resolves after final-renderer teardown.**
 
 Implementation entry points:
 
 - `electron/services/binance-connection.test.js`
-- `electron/services/binance-connection.js` only if the regression proves a minimal ownership guard is required
+- `electron/services/binance-connection.js` only if the regression proves a minimal ownership correction is required
 
 Expected scope:
 
-- Deterministically pause a 30-minute renewal callback inside the existing rate limiter, close the final renderer, then release the callback and prove it cannot issue a stale listen-key PUT or recreate user-data state.
-- Preserve the exact 30-minute boundary, renewal weight `1`, five-second active-renderer reconnect, socket identity guards, interval cleanup, and market/user-data connection separation.
-- Do not broaden into socket-replacement matrices, renewal-failure retries, trading flows, market-data behavior, UI work, or production refactoring.
+- Defer the mocked POST `/api/v3/userDataStream` response, close the final renderer while it is pending, then resolve a distinct listen key and prove it never reaches `connectUserDataStream` or acquires handlers and a 30-minute interval.
+- Prove later five-second and 30-minute advances cannot resurrect user-data state, while market-stream calls remain independently identified.
+- Preserve retry counts and delays, renewal weight `1`, prior-socket teardown ordering, renderer payloads, adapter operation weights, and current `0.999` quantity reduction.
+- Do not broaden into retry matrices, renewal-failure behavior, trading flows, market-data behavior, UI work, or production refactoring.
 - Do not start Phase 5.

@@ -1058,6 +1058,157 @@ describe('setupBinanceConnection user-data orchestration', () => {
         }
     });
 
+    it('drops a rate-limited renewal after final renderer teardown', async () => {
+        const listenKey = 'rate-limited-renewal-listen-key';
+        const keepAliveDelay = 30 * 60 * 1000;
+        const marketWatchdogDelay = 15 * 1000;
+        const loadBalancePayload = vi.fn().mockResolvedValue({ balances: {} });
+        const renewalResponse = { data: vi.fn().mockResolvedValue({}) };
+
+        moduleMocks.sendRequest.mockImplementation(async (path, method) => {
+            if (path === '/api/v3/time' && method === 'GET') {
+                return {
+                    data: vi.fn().mockResolvedValue({ serverTime: Date.now() }),
+                };
+            }
+
+            if (path === '/api/v3/userDataStream' && method === 'POST') {
+                return {
+                    data: vi.fn().mockResolvedValue({ listenKey }),
+                };
+            }
+
+            if (path === '/api/v3/userDataStream' && method === 'PUT') {
+                return renewalResponse;
+            }
+
+            return { data: vi.fn().mockResolvedValue({}) };
+        });
+
+        vi.spyOn(
+            SpotTradingAdapter.prototype,
+            'getAccountRefreshOperations',
+        ).mockReturnValue([{
+            type: 'balances',
+            weight: 10,
+            loadPayload: loadBalancePayload,
+        }]);
+
+        const createListenKey = vi.spyOn(
+            SpotTradingAdapter.prototype,
+            'createUserDataStreamListenKey',
+        );
+        const connectUserDataStream = vi.spyOn(
+            SpotTradingAdapter.prototype,
+            'connectUserDataStream',
+        );
+        const renewListenKey = vi.spyOn(
+            SpotTradingAdapter.prototype,
+            'renewUserDataStreamListenKey',
+        );
+        const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+        const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+        const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
+        const getIntervalHandles = (delay) => setIntervalSpy.mock.calls.flatMap(
+            ([, intervalDelay], index) => (
+                intervalDelay === delay
+                    ? [setIntervalSpy.mock.results[index].value]
+                    : []
+            ),
+        );
+        const getClearCount = (handle) => clearIntervalSpy.mock.calls.filter(
+            ([clearedHandle]) => Object.is(clearedHandle, handle),
+        ).length;
+        const getRenewalRequests = () => moduleMocks.sendRequest.mock.calls.filter(
+            ([path, method]) => path === '/api/v3/userDataStream' && method === 'PUT',
+        );
+
+        try {
+            setupBinanceConnection({
+                localWebSocketAccess: { host: '127.0.0.1' },
+            });
+
+            const request = {
+                origin: 'http://localhost:5174',
+                accept: vi.fn(() => moduleMocks.rendererConnection),
+            };
+            moduleMocks.websocketServerHandlers.request(request);
+
+            await flushMicrotasks();
+            await vi.advanceTimersByTimeAsync(500);
+            await flushMicrotasks();
+
+            expect(createListenKey).toHaveBeenCalledOnce();
+            expect(connectUserDataStream).toHaveBeenCalledOnce();
+            expect(connectUserDataStream).toHaveBeenCalledWith(listenKey);
+            expect(moduleMocks.userDataSocket.handlers.message).toEqual(expect.any(Function));
+
+            const [keepAliveInterval] = getIntervalHandles(keepAliveDelay);
+            const [marketWatchdog] = getIntervalHandles(marketWatchdogDelay);
+            expect(getIntervalHandles(keepAliveDelay)).toHaveLength(1);
+            expect(getIntervalHandles(marketWatchdogDelay)).toHaveLength(1);
+            clearInterval(marketWatchdog);
+
+            const renewalBoundary = Date.now() + keepAliveDelay;
+            await vi.advanceTimersByTimeAsync(keepAliveDelay - 1);
+            await flushMicrotasks();
+
+            expect(Date.now()).toBe(renewalBoundary - 1);
+            expect(loadBalancePayload).toHaveBeenCalledOnce();
+
+            moduleMocks.userDataSocket.handlers.message(JSON.stringify({
+                e: 'balanceUpdate',
+                a: 'USDT',
+                d: '1.00',
+            }));
+            await flushMicrotasks();
+
+            expect(loadBalancePayload).toHaveBeenCalledTimes(2);
+            expect(renewListenKey).not.toHaveBeenCalled();
+            expect(getRenewalRequests()).toEqual([]);
+
+            vi.advanceTimersByTime(1);
+            await flushMicrotasks();
+
+            expect(Date.now()).toBe(renewalBoundary);
+            expect(renewListenKey).not.toHaveBeenCalled();
+            expect(getRenewalRequests()).toEqual([]);
+            expect(moduleMocks.rendererConnection.connected).toBe(true);
+            expect(setTimeoutSpy.mock.calls.filter(
+                ([, delay]) => delay === 499,
+            )).toHaveLength(1);
+
+            moduleMocks.rendererConnection.close();
+            await flushMicrotasks();
+
+            expect(moduleMocks.rendererConnection.connected).toBe(false);
+            expect(getClearCount(keepAliveInterval)).toBe(1);
+            expect(moduleMocks.userDataSocket.disconnect).toHaveBeenCalledOnce();
+
+            await vi.advanceTimersByTimeAsync(499);
+            await flushMicrotasks();
+
+            expect(renewListenKey).not.toHaveBeenCalled();
+            expect(getRenewalRequests()).toEqual([]);
+
+            await vi.advanceTimersByTimeAsync(keepAliveDelay);
+            await flushMicrotasks();
+
+            expect(renewListenKey).not.toHaveBeenCalled();
+            expect(getRenewalRequests()).toEqual([]);
+            expect(createListenKey).toHaveBeenCalledOnce();
+            expect(connectUserDataStream).toHaveBeenCalledOnce();
+            expect(moduleMocks.connect.mock.calls).toEqual([
+                [{ stream: '!miniTicker@arr' }],
+                [{ stream: listenKey }],
+            ]);
+        } finally {
+            clearIntervalSpy.mockRestore();
+            setIntervalSpy.mockRestore();
+            setTimeoutSpy.mockRestore();
+        }
+    });
+
     it('disconnects an in-flight user-data socket that resolves after renderer teardown', async () => {
         let resolveUserDataConnection;
         const userDataConnection = new Promise((resolve) => {

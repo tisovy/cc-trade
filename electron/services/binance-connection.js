@@ -1144,11 +1144,21 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
                     // Keep-alive every 30 minutes
                     keepAliveInterval = setInterval(async () => {
                         try {
-                            await rateLimiter.execute(
-                                () => spotTradingAdapter.renewUserDataStreamListenKey(listenKey),
+                            const renewed = await rateLimiter.execute(
+                                async () => {
+                                    // The interval can be cleared while an already-fired
+                                    // callback is waiting for rate-limiter spacing. Recheck
+                                    // ownership immediately before issuing the PUT so a
+                                    // superseded or renderer-less stream cannot renew.
+                                    if (rendererConnections.size === 0 || userDataWsConnection !== udConn) {
+                                        return false;
+                                    }
+                                    await spotTradingAdapter.renewUserDataStreamListenKey(listenKey);
+                                    return true;
+                                },
                                 1
                             );
-                            logger.debug("Renewed listenKey");
+                            if (renewed) logger.debug("Renewed listenKey");
                         } catch (err) {
                             logger.warn("Failed to renew listenKey:", err?.code || err?.message);
                         }
