@@ -1,0 +1,172 @@
+export const FUTURES_EXCHANGE_INFO_ERROR_CODES = Object.freeze({
+    INVALID_SYMBOL: 'INVALID_FUTURES_SYMBOL',
+    MALFORMED_RESPONSE: 'MALFORMED_FUTURES_EXCHANGE_INFO',
+    SYMBOL_UNAVAILABLE: 'FUTURES_SYMBOL_UNAVAILABLE',
+});
+
+export class FuturesExchangeInfoError extends Error {
+    constructor(code, message) {
+        super(message);
+        this.name = 'FuturesExchangeInfoError';
+        this.code = code;
+    }
+}
+
+const isRecord = (value) => value !== null
+    && typeof value === 'object'
+    && !Array.isArray(value);
+
+const isNonEmptyString = (value) => typeof value === 'string' && value.trim().length > 0;
+
+const malformedResponseError = () => new FuturesExchangeInfoError(
+    FUTURES_EXCHANGE_INFO_ERROR_CODES.MALFORMED_RESPONSE,
+    'Malformed futures exchange-info response',
+);
+
+const requireStringFields = (value, fields) => {
+    if (!isRecord(value) || fields.some((field) => !isNonEmptyString(value[field]))) {
+        throw malformedResponseError();
+    }
+};
+
+const normalizeStringArray = (value) => {
+    if (value === undefined || value === null) return [];
+    if (!Array.isArray(value) || value.some((item) => !isNonEmptyString(item))) {
+        throw malformedResponseError();
+    }
+    return [...value];
+};
+
+const normalizeRangeFilter = (filter, sourceFields) => {
+    requireStringFields(filter, sourceFields);
+    return {
+        min: filter[sourceFields[0]],
+        max: filter[sourceFields[1]],
+        [sourceFields[2]]: filter[sourceFields[2]],
+    };
+};
+
+const RECOGNIZED_FILTER_TYPES = new Set([
+    'PRICE_FILTER',
+    'LOT_SIZE',
+    'MARKET_LOT_SIZE',
+    'MIN_NOTIONAL',
+]);
+
+const normalizeFuturesFilters = (filters) => {
+    if (filters === undefined || filters === null) {
+        return {
+            price: null,
+            quantity: null,
+            marketQuantity: null,
+            minimumNotional: null,
+        };
+    }
+    if (!Array.isArray(filters)) throw malformedResponseError();
+
+    const filtersByType = new Map();
+    filters.forEach((filter) => {
+        if (!isRecord(filter) || !isNonEmptyString(filter.filterType)) {
+            throw malformedResponseError();
+        }
+        if (!RECOGNIZED_FILTER_TYPES.has(filter.filterType)) return;
+        if (filtersByType.has(filter.filterType)) throw malformedResponseError();
+        filtersByType.set(filter.filterType, filter);
+    });
+
+    const priceFilter = filtersByType.get('PRICE_FILTER');
+    const quantityFilter = filtersByType.get('LOT_SIZE');
+    const marketQuantityFilter = filtersByType.get('MARKET_LOT_SIZE');
+    const minimumNotionalFilter = filtersByType.get('MIN_NOTIONAL');
+
+    if (minimumNotionalFilter) {
+        requireStringFields(minimumNotionalFilter, ['notional']);
+    }
+
+    return {
+        price: priceFilter
+            ? normalizeRangeFilter(priceFilter, ['minPrice', 'maxPrice', 'tickSize'])
+            : null,
+        quantity: quantityFilter
+            ? normalizeRangeFilter(quantityFilter, ['minQty', 'maxQty', 'stepSize'])
+            : null,
+        marketQuantity: marketQuantityFilter
+            ? normalizeRangeFilter(marketQuantityFilter, ['minQty', 'maxQty', 'stepSize'])
+            : null,
+        minimumNotional: minimumNotionalFilter?.notional ?? null,
+    };
+};
+
+/**
+ * Normalize one USDⓈ-M futures symbol into the read-only futures instrument contract.
+ * Decimal constraints remain exact strings and no input object is mutated.
+ */
+export const normalizeFuturesExchangeInfo = (exchangeInfo, requestedSymbol) => {
+    if (!isNonEmptyString(requestedSymbol)) {
+        throw new FuturesExchangeInfoError(
+            FUTURES_EXCHANGE_INFO_ERROR_CODES.INVALID_SYMBOL,
+            'Futures symbol must be a non-empty string',
+        );
+    }
+    if (!isRecord(exchangeInfo) || !Array.isArray(exchangeInfo.symbols)) {
+        throw malformedResponseError();
+    }
+    if (exchangeInfo.symbols.some(
+        (candidate) => !isRecord(candidate) || !isNonEmptyString(candidate.symbol),
+    )) {
+        throw malformedResponseError();
+    }
+
+    const symbolInfo = exchangeInfo.symbols.find(
+        (candidate) => candidate.symbol === requestedSymbol,
+    );
+    if (!symbolInfo) {
+        throw new FuturesExchangeInfoError(
+            FUTURES_EXCHANGE_INFO_ERROR_CODES.SYMBOL_UNAVAILABLE,
+            `Futures symbol "${requestedSymbol}" is unavailable in exchange info`,
+        );
+    }
+
+    requireStringFields(symbolInfo, [
+        'symbol',
+        'pair',
+        'contractType',
+        'status',
+        'baseAsset',
+        'quoteAsset',
+        'marginAsset',
+    ]);
+
+    return {
+        marketType: 'futures',
+        symbol: symbolInfo.symbol,
+        pair: symbolInfo.pair,
+        contractType: symbolInfo.contractType,
+        status: symbolInfo.status,
+        assets: {
+            base: symbolInfo.baseAsset,
+            quote: symbolInfo.quoteAsset,
+            margin: symbolInfo.marginAsset,
+        },
+        filters: normalizeFuturesFilters(symbolInfo.filters),
+        supportedOrderTypes: normalizeStringArray(symbolInfo.orderTypes),
+        supportedTimeInForce: normalizeStringArray(symbolInfo.timeInForce),
+    };
+};
+
+const readExchangeInfoData = async (response) => {
+    if (typeof response?.data === 'function') return response.data();
+    return response;
+};
+
+export class FuturesTradingAdapter {
+    constructor({ transport }) {
+        this.transport = transport;
+    }
+
+    async getExchangeInfo(symbol) {
+        const response = await this.transport.getExchangeInfo();
+        const exchangeInfo = await readExchangeInfoData(response);
+        return normalizeFuturesExchangeInfo(exchangeInfo, symbol);
+    }
+}
