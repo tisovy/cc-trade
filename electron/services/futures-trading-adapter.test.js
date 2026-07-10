@@ -1,11 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
     FUTURES_EXCHANGE_INFO_ERROR_CODES,
+    FUTURES_FUNDING_STATE_ERROR_CODES,
     FUTURES_MARK_PRICE_ERROR_CODES,
     FuturesExchangeInfoError,
+    FuturesFundingStateError,
     FuturesMarkPriceError,
     FuturesTradingAdapter,
     normalizeFuturesExchangeInfo,
+    normalizeFuturesFundingState,
     normalizeFuturesMarkPrice,
 } from './futures-trading-adapter.js';
 
@@ -90,6 +93,15 @@ const expectedMarkPrice = {
     markPrice: '11793.631045620000',
     indexPrice: '11781.804959700000',
     estimatedSettlePrice: '11781.161388150000',
+    time: 1597370495002,
+};
+
+const expectedFundingState = {
+    marketType: 'futures',
+    symbol: 'BTCUSDT',
+    lastFundingRate: '0.000382460000',
+    interestRate: '0.000100000000',
+    nextFundingTime: 1597392000000,
     time: 1597370495002,
 };
 
@@ -375,6 +387,126 @@ describe('normalizeFuturesMarkPrice', () => {
     });
 });
 
+describe('normalizeFuturesFundingState', () => {
+    it('normalizes the official single-symbol response without changing rate strings', () => {
+        const source = makeMarkPrice({ lastFundingRate: '-0.000382460000' });
+        const result = normalizeFuturesFundingState(source, 'BTCUSDT');
+
+        expect(result).toEqual({
+            ...expectedFundingState,
+            lastFundingRate: '-0.000382460000',
+        });
+        expect(result.lastFundingRate).not.toBe('-0.00038246');
+        expect(result.interestRate).not.toBe('0.0001');
+        expect(result.nextFundingTime).toBe(1597392000000);
+        expect(result.time).toBe(1597370495002);
+        expect(result).not.toHaveProperty('markPrice');
+        expect(result).not.toHaveProperty('indexPrice');
+        expect(result).not.toHaveProperty('estimatedSettlePrice');
+        expect(result).not.toHaveProperty('countdownMs');
+    });
+
+    it('selects the requested symbol from the official multi-symbol response variant', () => {
+        const source = [
+            makeMarkPrice({
+                symbol: 'ETHUSDT',
+                lastFundingRate: '0.000010000000',
+                interestRate: '0.000200000000',
+                nextFundingTime: 1597400000000,
+                time: 1597370500000,
+            }),
+            makeMarkPrice(),
+        ];
+
+        expect(normalizeFuturesFundingState(source, 'BTCUSDT')).toEqual(
+            expectedFundingState,
+        );
+    });
+
+    it.each([
+        ['a different single-symbol response', makeMarkPrice({ symbol: 'ETHUSDT' }), 'BTCUSDT'],
+        ['an empty multi-symbol response', [], 'BTCUSDT'],
+        ['a multi-symbol response without the requested symbol', [
+            makeMarkPrice({ symbol: 'ETHUSDT' }),
+            makeMarkPrice({ symbol: 'BNBUSDT' }),
+        ], 'BTCUSDT'],
+        ['a case-mismatched requested symbol', makeMarkPrice(), 'btcusdt'],
+    ])('fails deterministically when the requested symbol is unavailable in %s', (
+        _label,
+        payload,
+        requestedSymbol,
+    ) => {
+        expect(() => normalizeFuturesFundingState(payload, requestedSymbol)).toThrowError(
+            new FuturesFundingStateError(
+                FUTURES_FUNDING_STATE_ERROR_CODES.SYMBOL_UNAVAILABLE,
+                `Futures symbol "${requestedSymbol}" is unavailable in funding-state response`,
+            ),
+        );
+    });
+
+    it.each([
+        ['a null payload', null],
+        ['a scalar payload', 'BTCUSDT'],
+        ['a missing symbol identity', {}],
+        ['a non-string symbol identity', makeMarkPrice({ symbol: 123 })],
+        ['a malformed candidate in a multi-symbol response', [makeMarkPrice(), null]],
+        ['a missing latest funding rate', makeMarkPrice({ lastFundingRate: undefined })],
+        ['a numeric latest funding rate', makeMarkPrice({ lastFundingRate: 0.00038246 })],
+        ['a blank latest funding rate', makeMarkPrice({ lastFundingRate: '   ' })],
+        ['a missing interest rate', makeMarkPrice({ interestRate: undefined })],
+        ['a numeric interest rate', makeMarkPrice({ interestRate: 0.0001 })],
+        ['a string next-funding time', makeMarkPrice({ nextFundingTime: '1597392000000' })],
+        ['a negative next-funding time', makeMarkPrice({ nextFundingTime: -1 })],
+        ['an unsafe next-funding time', makeMarkPrice({
+            nextFundingTime: Number.MAX_SAFE_INTEGER + 1,
+        })],
+        ['a string observation time', makeMarkPrice({ time: '1597370495002' })],
+        ['a fractional observation time', makeMarkPrice({ time: 1597370495002.5 })],
+        ['a negative observation time', makeMarkPrice({ time: -1 })],
+        ['duplicate requested symbols', [makeMarkPrice(), makeMarkPrice()]],
+    ])('fails deterministically for %s', (_label, payload) => {
+        expect(() => normalizeFuturesFundingState(payload, 'BTCUSDT')).toThrowError(
+            new FuturesFundingStateError(
+                FUTURES_FUNDING_STATE_ERROR_CODES.MALFORMED_RESPONSE,
+                'Malformed futures funding-state response',
+            ),
+        );
+    });
+
+    it.each([null, 123, '', '   '])(
+        'fails deterministically for an invalid requested symbol %#',
+        (symbol) => {
+            expect(() => normalizeFuturesFundingState(makeMarkPrice(), symbol)).toThrowError(
+                new FuturesFundingStateError(
+                    FUTURES_FUNDING_STATE_ERROR_CODES.INVALID_SYMBOL,
+                    'Futures symbol must be a non-empty string',
+                ),
+            );
+        },
+    );
+
+    it('does not mutate the source response or return the selected source object', () => {
+        const source = [
+            makeMarkPrice({ symbol: 'ETHUSDT' }),
+            makeMarkPrice(),
+        ];
+        const snapshot = structuredClone(source);
+
+        const result = normalizeFuturesFundingState(source, 'BTCUSDT');
+
+        expect(source).toEqual(snapshot);
+        expect(result).not.toBe(source[1]);
+        expect(result).toEqual(expectedFundingState);
+    });
+
+    it('keeps the completed mark/index contract unchanged for the shared source payload', () => {
+        const source = makeMarkPrice();
+
+        expect(normalizeFuturesMarkPrice(source, 'BTCUSDT')).toEqual(expectedMarkPrice);
+        expect(normalizeFuturesFundingState(source, 'BTCUSDT')).toEqual(expectedFundingState);
+    });
+});
+
 describe('FuturesTradingAdapter', () => {
     it('loads and unwraps official-client-style exchange metadata at the adapter boundary', async () => {
         const source = makeExchangeInfo(makeFuturesSymbol());
@@ -429,6 +561,34 @@ describe('FuturesTradingAdapter', () => {
         await expect(adapter.getMarkPrice('BTCUSDT')).resolves.toEqual(expectedMarkPrice);
     });
 
+    it('loads current funding state from the wrapped premium-index response', async () => {
+        const data = vi.fn().mockResolvedValue(makeMarkPrice());
+        const transport = {
+            getMarkPrice: vi.fn().mockResolvedValue({ data }),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getFundingState('BTCUSDT')).resolves.toEqual(
+            expectedFundingState,
+        );
+        expect(transport.getMarkPrice).toHaveBeenCalledWith({ symbol: 'BTCUSDT' });
+        expect(data).toHaveBeenCalledWith();
+    });
+
+    it('accepts raw multi-symbol funding state from the injected read-only transport', async () => {
+        const transport = {
+            getMarkPrice: vi.fn().mockResolvedValue([
+                makeMarkPrice({ symbol: 'ETHUSDT' }),
+                makeMarkPrice(),
+            ]),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getFundingState('BTCUSDT')).resolves.toEqual(
+            expectedFundingState,
+        );
+    });
+
     it('propagates transport errors without relabeling them as normalization failures', async () => {
         const transportError = new Error('futures transport unavailable');
         const transport = {
@@ -473,12 +633,35 @@ describe('FuturesTradingAdapter', () => {
         await expect(adapter.getMarkPrice('BTCUSDT')).rejects.toBe(responseError);
     });
 
+    it('preserves current-funding transport error identity', async () => {
+        const transportError = new Error('futures funding transport unavailable');
+        const transport = {
+            getMarkPrice: vi.fn().mockRejectedValue(transportError),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getFundingState('BTCUSDT')).rejects.toBe(transportError);
+    });
+
+    it('preserves current-funding response-body error identity', async () => {
+        const responseError = new Error('futures funding response body unavailable');
+        const transport = {
+            getMarkPrice: vi.fn().mockResolvedValue({
+                data: vi.fn().mockRejectedValue(responseError),
+            }),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getFundingState('BTCUSDT')).rejects.toBe(responseError);
+    });
+
     it('exposes no futures execution surface', () => {
         const adapter = new FuturesTradingAdapter({ transport: {} });
         expect(Object.getOwnPropertyNames(FuturesTradingAdapter.prototype)).toEqual([
             'constructor',
             'getExchangeInfo',
             'getMarkPrice',
+            'getFundingState',
         ]);
 
         const forbiddenExecutionMethods = [

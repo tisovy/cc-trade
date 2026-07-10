@@ -10,6 +10,12 @@ export const FUTURES_MARK_PRICE_ERROR_CODES = Object.freeze({
     SYMBOL_UNAVAILABLE: FUTURES_EXCHANGE_INFO_ERROR_CODES.SYMBOL_UNAVAILABLE,
 });
 
+export const FUTURES_FUNDING_STATE_ERROR_CODES = Object.freeze({
+    INVALID_SYMBOL: FUTURES_EXCHANGE_INFO_ERROR_CODES.INVALID_SYMBOL,
+    MALFORMED_RESPONSE: 'MALFORMED_FUTURES_FUNDING_STATE',
+    SYMBOL_UNAVAILABLE: FUTURES_EXCHANGE_INFO_ERROR_CODES.SYMBOL_UNAVAILABLE,
+});
+
 export class FuturesExchangeInfoError extends Error {
     constructor(code, message) {
         super(message);
@@ -22,6 +28,14 @@ export class FuturesMarkPriceError extends Error {
     constructor(code, message) {
         super(message);
         this.name = 'FuturesMarkPriceError';
+        this.code = code;
+    }
+}
+
+export class FuturesFundingStateError extends Error {
+    constructor(code, message) {
+        super(message);
+        this.name = 'FuturesFundingStateError';
         this.code = code;
     }
 }
@@ -40,6 +54,11 @@ const malformedResponseError = () => new FuturesExchangeInfoError(
 const malformedMarkPriceError = () => new FuturesMarkPriceError(
     FUTURES_MARK_PRICE_ERROR_CODES.MALFORMED_RESPONSE,
     'Malformed futures mark-price response',
+);
+
+const malformedFundingStateError = () => new FuturesFundingStateError(
+    FUTURES_FUNDING_STATE_ERROR_CODES.MALFORMED_RESPONSE,
+    'Malformed futures funding-state response',
 );
 
 const requireStringFields = (value, fields) => {
@@ -224,12 +243,69 @@ export const normalizeFuturesMarkPrice = (markPriceResponse, requestedSymbol) =>
     };
 };
 
+/**
+ * Normalize current USDⓈ-M funding state from a premium-index response.
+ * Rate decimals remain exact strings and funding/observation timestamps remain integers.
+ */
+export const normalizeFuturesFundingState = (fundingStateResponse, requestedSymbol) => {
+    if (!isNonEmptyString(requestedSymbol)) {
+        throw new FuturesFundingStateError(
+            FUTURES_FUNDING_STATE_ERROR_CODES.INVALID_SYMBOL,
+            'Futures symbol must be a non-empty string',
+        );
+    }
+
+    const candidates = Array.isArray(fundingStateResponse)
+        ? fundingStateResponse
+        : [fundingStateResponse];
+
+    if (candidates.some(
+        (candidate) => !isRecord(candidate) || !isNonEmptyString(candidate.symbol),
+    )) {
+        throw malformedFundingStateError();
+    }
+
+    const matchingCandidates = candidates.filter(
+        (candidate) => candidate.symbol === requestedSymbol,
+    );
+    if (matchingCandidates.length === 0) {
+        throw new FuturesFundingStateError(
+            FUTURES_FUNDING_STATE_ERROR_CODES.SYMBOL_UNAVAILABLE,
+            `Futures symbol "${requestedSymbol}" is unavailable in funding-state response`,
+        );
+    }
+    if (matchingCandidates.length > 1) throw malformedFundingStateError();
+
+    const fundingState = matchingCandidates[0];
+    const decimalFields = ['lastFundingRate', 'interestRate'];
+    const timestampFields = ['nextFundingTime', 'time'];
+    if (decimalFields.some((field) => !isNonEmptyString(fundingState[field]))
+        || timestampFields.some((field) => !Number.isSafeInteger(fundingState[field])
+            || fundingState[field] < 0)) {
+        throw malformedFundingStateError();
+    }
+
+    return {
+        marketType: 'futures',
+        symbol: fundingState.symbol,
+        lastFundingRate: fundingState.lastFundingRate,
+        interestRate: fundingState.interestRate,
+        nextFundingTime: fundingState.nextFundingTime,
+        time: fundingState.time,
+    };
+};
+
 const readExchangeInfoData = async (response) => {
     if (typeof response?.data === 'function') return response.data();
     return response;
 };
 
 const readMarkPriceData = async (response) => {
+    if (typeof response?.data === 'function') return response.data();
+    return response;
+};
+
+const readFundingStateData = async (response) => {
     if (typeof response?.data === 'function') return response.data();
     return response;
 };
@@ -249,5 +325,11 @@ export class FuturesTradingAdapter {
         const response = await this.transport.getMarkPrice({ symbol });
         const markPrice = await readMarkPriceData(response);
         return normalizeFuturesMarkPrice(markPrice, symbol);
+    }
+
+    async getFundingState(symbol) {
+        const response = await this.transport.getMarkPrice({ symbol });
+        const fundingState = await readFundingStateData(response);
+        return normalizeFuturesFundingState(fundingState, symbol);
     }
 }
