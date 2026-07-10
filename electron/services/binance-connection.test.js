@@ -834,6 +834,230 @@ describe('setupBinanceConnection user-data orchestration', () => {
         }
     });
 
+    it('renews only the active user-data listen key at the exact keep-alive boundary', async () => {
+        const listenKeys = {
+            stale: 'renewal-listen-key-stale',
+            active: 'renewal-listen-key-active',
+        };
+        const keepAliveDelay = 30 * 60 * 1000;
+        const marketWatchdogDelay = 15 * 1000;
+        const staleSocket = moduleMocks.makeSocket();
+        const activeSocket = moduleMocks.makeSocket();
+        const orderedListenKeys = [listenKeys.stale, listenKeys.active];
+        const renewalResponse = { data: vi.fn().mockResolvedValue({}) };
+        let nextListenKeyIndex = 0;
+
+        moduleMocks.sendRequest.mockImplementation(async (path, method) => {
+            if (path === '/api/v3/time' && method === 'GET') {
+                return {
+                    data: vi.fn().mockResolvedValue({ serverTime: Date.now() }),
+                };
+            }
+
+            if (path === '/api/v3/userDataStream' && method === 'POST') {
+                const listenKey = orderedListenKeys[nextListenKeyIndex];
+                nextListenKeyIndex += 1;
+
+                if (!listenKey) {
+                    throw new Error('Unexpected user-data listen-key creation');
+                }
+
+                return {
+                    data: vi.fn().mockResolvedValue({ listenKey }),
+                };
+            }
+
+            if (path === '/api/v3/userDataStream' && method === 'PUT') {
+                return renewalResponse;
+            }
+
+            return { data: vi.fn().mockResolvedValue({}) };
+        });
+
+        moduleMocks.connect.mockImplementation(({ stream }) => {
+            if (stream === '!miniTicker@arr') {
+                return Promise.resolve(moduleMocks.marketSocket);
+            }
+            if (stream === listenKeys.stale) return Promise.resolve(staleSocket);
+            if (stream === listenKeys.active) return Promise.resolve(activeSocket);
+            return Promise.reject(new Error(`Unexpected Binance stream: ${stream}`));
+        });
+
+        vi.spyOn(
+            SpotTradingAdapter.prototype,
+            'getAccountRefreshOperations',
+        ).mockReturnValue([{
+            type: 'balances',
+            weight: 10,
+            loadPayload: vi.fn().mockResolvedValue({ balances: {} }),
+        }]);
+
+        const createListenKey = vi.spyOn(
+            SpotTradingAdapter.prototype,
+            'createUserDataStreamListenKey',
+        );
+        const connectUserDataStream = vi.spyOn(
+            SpotTradingAdapter.prototype,
+            'connectUserDataStream',
+        );
+        const renewListenKey = vi.spyOn(
+            SpotTradingAdapter.prototype,
+            'renewUserDataStreamListenKey',
+        );
+        const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+        const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
+        const getIntervalHandles = (delay) => setIntervalSpy.mock.calls.flatMap(
+            ([, intervalDelay], index) => (
+                intervalDelay === delay
+                    ? [setIntervalSpy.mock.results[index].value]
+                    : []
+            ),
+        );
+        const getClearCount = (handle) => clearIntervalSpy.mock.calls.filter(
+            ([clearedHandle]) => Object.is(clearedHandle, handle),
+        ).length;
+        const getActiveKeepAliveHandles = () => getIntervalHandles(keepAliveDelay).filter(
+            (handle) => getClearCount(handle) === 0,
+        );
+        const getRenewalRequests = () => moduleMocks.sendRequest.mock.calls.filter(
+            ([path, method]) => path === '/api/v3/userDataStream' && method === 'PUT',
+        );
+        const getMarketStreamCalls = () => moduleMocks.connect.mock.calls.filter(
+            ([{ stream }]) => stream === '!miniTicker@arr',
+        );
+        const getUserDataStreamCalls = () => moduleMocks.connect.mock.calls.filter(
+            ([{ stream }]) => Object.values(listenKeys).includes(stream),
+        );
+
+        try {
+            setupBinanceConnection({
+                localWebSocketAccess: { host: '127.0.0.1' },
+            });
+
+            const request = {
+                origin: 'http://localhost:5174',
+                accept: vi.fn(() => moduleMocks.rendererConnection),
+            };
+            moduleMocks.websocketServerHandlers.request(request);
+
+            await flushMicrotasks();
+            await vi.advanceTimersByTimeAsync(500);
+            await flushMicrotasks();
+
+            expect(createListenKey).toHaveBeenCalledOnce();
+            expect(connectUserDataStream).toHaveBeenCalledOnce();
+            expect(connectUserDataStream).toHaveBeenCalledWith(listenKeys.stale);
+            expect(new Set([
+                moduleMocks.marketSocket,
+                staleSocket,
+                activeSocket,
+            ])).toHaveProperty('size', 3);
+
+            const [staleKeepAlive] = getIntervalHandles(keepAliveDelay);
+            expect(staleKeepAlive).toBeDefined();
+            expect(getActiveKeepAliveHandles()).toEqual([staleKeepAlive]);
+
+            staleSocket.handlers.close();
+            await flushMicrotasks();
+
+            expect(getClearCount(staleKeepAlive)).toBe(1);
+            expect(getActiveKeepAliveHandles()).toEqual([]);
+            expect(renewListenKey).not.toHaveBeenCalled();
+
+            await vi.advanceTimersByTimeAsync(5000);
+            await flushMicrotasks();
+
+            expect(createListenKey).toHaveBeenCalledTimes(2);
+            expect(connectUserDataStream).toHaveBeenCalledTimes(2);
+            expect(connectUserDataStream).toHaveBeenNthCalledWith(2, listenKeys.active);
+            expect(activeSocket.handlers.close).toEqual(expect.any(Function));
+
+            const keepAliveHandles = getIntervalHandles(keepAliveDelay);
+            expect(keepAliveHandles).toHaveLength(2);
+            const [, activeKeepAlive] = keepAliveHandles;
+            expect(activeKeepAlive).toBeDefined();
+            expect(activeKeepAlive).not.toBe(staleKeepAlive);
+            expect(getActiveKeepAliveHandles()).toEqual([activeKeepAlive]);
+
+            const [marketWatchdog] = getIntervalHandles(marketWatchdogDelay);
+            expect(getIntervalHandles(marketWatchdogDelay)).toHaveLength(1);
+            expect(marketWatchdog).toBeDefined();
+            clearInterval(marketWatchdog);
+            expect(getClearCount(marketWatchdog)).toBe(1);
+
+            const activeKeepAliveBoundary = Date.now() + keepAliveDelay;
+            await vi.advanceTimersByTimeAsync(keepAliveDelay - 1);
+            await flushMicrotasks();
+
+            expect(Date.now()).toBe(activeKeepAliveBoundary - 1);
+            expect(renewListenKey).not.toHaveBeenCalled();
+            expect(getRenewalRequests()).toEqual([]);
+            expect(getActiveKeepAliveHandles()).toEqual([activeKeepAlive]);
+            expect(moduleMocks.rendererConnection.connected).toBe(true);
+            expect(moduleMocks.rendererConnection.close).not.toHaveBeenCalled();
+            expect(getMarketStreamCalls()).toEqual([
+                [{ stream: '!miniTicker@arr' }],
+            ]);
+            expect(getUserDataStreamCalls()).toEqual([
+                [{ stream: listenKeys.stale }],
+                [{ stream: listenKeys.active }],
+            ]);
+
+            await vi.advanceTimersByTimeAsync(1);
+            await flushMicrotasks();
+
+            expect(Date.now()).toBe(activeKeepAliveBoundary);
+            expect(renewListenKey).toHaveBeenCalledOnce();
+            expect(renewListenKey).toHaveBeenCalledWith(listenKeys.active);
+            expect(renewListenKey).not.toHaveBeenCalledWith(listenKeys.stale);
+            expect(getRenewalRequests()).toEqual([[
+                '/api/v3/userDataStream',
+                'PUT',
+                { listenKey: listenKeys.active },
+            ]]);
+            expect(await renewListenKey.mock.results[0].value).toBe(renewalResponse);
+            expect(getActiveKeepAliveHandles()).toEqual([activeKeepAlive]);
+            expect(moduleMocks.rendererConnection.connected).toBe(true);
+            expect(moduleMocks.rendererConnection.close).not.toHaveBeenCalled();
+
+            const rendererPayload = {
+                e: 'outboundAccountPosition',
+                u: Date.now(),
+                B: [{ a: 'USDT', f: '105.00', l: '0.00' }],
+            };
+            const sendsBeforeRenewalMessage = moduleMocks.rendererConnection.sendUTF.mock.calls.length;
+            activeSocket.handlers.message(JSON.stringify(rendererPayload));
+
+            expect(moduleMocks.rendererConnection.sendUTF).toHaveBeenCalledTimes(
+                sendsBeforeRenewalMessage + 1,
+            );
+            expect(moduleMocks.rendererConnection.sendUTF).toHaveBeenLastCalledWith(
+                JSON.stringify({ balance_update: rendererPayload }),
+            );
+
+            moduleMocks.rendererConnection.close();
+            await flushMicrotasks();
+
+            expect(moduleMocks.rendererConnection.connected).toBe(false);
+            expect(getClearCount(activeKeepAlive)).toBe(1);
+            expect(getActiveKeepAliveHandles()).toEqual([]);
+            expect(activeSocket.disconnect).toHaveBeenCalledOnce();
+
+            await vi.advanceTimersByTimeAsync(keepAliveDelay);
+            await flushMicrotasks();
+
+            expect(renewListenKey).toHaveBeenCalledOnce();
+            expect(getRenewalRequests()).toHaveLength(1);
+            expect(createListenKey).toHaveBeenCalledTimes(2);
+            expect(connectUserDataStream).toHaveBeenCalledTimes(2);
+            expect(getMarketStreamCalls()).toHaveLength(1);
+            expect(getUserDataStreamCalls()).toHaveLength(2);
+        } finally {
+            clearIntervalSpy.mockRestore();
+            setIntervalSpy.mockRestore();
+        }
+    });
+
     it('disconnects an in-flight user-data socket that resolves after renderer teardown', async () => {
         let resolveUserDataConnection;
         const userDataConnection = new Promise((resolve) => {

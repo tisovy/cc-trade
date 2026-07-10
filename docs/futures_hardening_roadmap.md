@@ -272,17 +272,16 @@ Suggested UI order:
 
 Continue Phase 4 with the next focused service-level checkpoint:
 
-**Add exact 30-minute user-data listen-key keep-alive renewal and interval-ownership coverage for `setupBinanceConnection` without changing the live user-data lifecycle.**
+**Add service-level coverage preventing an already-fired user-data keep-alive callback from renewing after the final renderer tears the stream down.**
 
 Implementation entry points:
 
 - `electron/services/binance-connection.test.js`
-- `electron/services/binance-connection.js` only if a minimal deterministic seam is unavoidable
+- `electron/services/binance-connection.js` only if the regression proves a minimal ownership guard is required
 
 Expected scope:
 
-- Prove renewal does not run one millisecond before the 30-minute boundary, then renews the active socket's exact listen key at the boundary through `SpotTradingAdapter.renewUserDataStreamListenKey`.
-- Prove cleared or superseded keep-alive intervals cannot renew stale listen keys or interfere with the current socket's interval ownership.
-- Preserve listen-key renewal weight `1`, renderer retention, socket identity guards, and market/user-data connection separation.
-- Do not broaden into retry matrices, renewal-failure retries, trading flows, market-data behavior, UI work, or production refactoring.
+- Deterministically pause a 30-minute renewal callback inside the existing rate limiter, close the final renderer, then release the callback and prove it cannot issue a stale listen-key PUT or recreate user-data state.
+- Preserve the exact 30-minute boundary, renewal weight `1`, five-second active-renderer reconnect, socket identity guards, interval cleanup, and market/user-data connection separation.
+- Do not broaden into socket-replacement matrices, renewal-failure retries, trading flows, market-data behavior, UI work, or production refactoring.
 - Do not start Phase 5.
