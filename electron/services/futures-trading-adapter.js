@@ -4,10 +4,24 @@ export const FUTURES_EXCHANGE_INFO_ERROR_CODES = Object.freeze({
     SYMBOL_UNAVAILABLE: 'FUTURES_SYMBOL_UNAVAILABLE',
 });
 
+export const FUTURES_MARK_PRICE_ERROR_CODES = Object.freeze({
+    INVALID_SYMBOL: FUTURES_EXCHANGE_INFO_ERROR_CODES.INVALID_SYMBOL,
+    MALFORMED_RESPONSE: 'MALFORMED_FUTURES_MARK_PRICE',
+    SYMBOL_UNAVAILABLE: FUTURES_EXCHANGE_INFO_ERROR_CODES.SYMBOL_UNAVAILABLE,
+});
+
 export class FuturesExchangeInfoError extends Error {
     constructor(code, message) {
         super(message);
         this.name = 'FuturesExchangeInfoError';
+        this.code = code;
+    }
+}
+
+export class FuturesMarkPriceError extends Error {
+    constructor(code, message) {
+        super(message);
+        this.name = 'FuturesMarkPriceError';
         this.code = code;
     }
 }
@@ -21,6 +35,11 @@ const isNonEmptyString = (value) => typeof value === 'string' && value.trim().le
 const malformedResponseError = () => new FuturesExchangeInfoError(
     FUTURES_EXCHANGE_INFO_ERROR_CODES.MALFORMED_RESPONSE,
     'Malformed futures exchange-info response',
+);
+
+const malformedMarkPriceError = () => new FuturesMarkPriceError(
+    FUTURES_MARK_PRICE_ERROR_CODES.MALFORMED_RESPONSE,
+    'Malformed futures mark-price response',
 );
 
 const requireStringFields = (value, fields) => {
@@ -154,7 +173,63 @@ export const normalizeFuturesExchangeInfo = (exchangeInfo, requestedSymbol) => {
     };
 };
 
+/**
+ * Normalize one USDⓈ-M futures mark-price observation for a requested symbol.
+ * Price decimals remain exact strings and funding fields stay outside this checkpoint.
+ */
+export const normalizeFuturesMarkPrice = (markPriceResponse, requestedSymbol) => {
+    if (!isNonEmptyString(requestedSymbol)) {
+        throw new FuturesMarkPriceError(
+            FUTURES_MARK_PRICE_ERROR_CODES.INVALID_SYMBOL,
+            'Futures symbol must be a non-empty string',
+        );
+    }
+
+    const candidates = Array.isArray(markPriceResponse)
+        ? markPriceResponse
+        : [markPriceResponse];
+
+    if (candidates.some(
+        (candidate) => !isRecord(candidate) || !isNonEmptyString(candidate.symbol),
+    )) {
+        throw malformedMarkPriceError();
+    }
+
+    const matchingCandidates = candidates.filter(
+        (candidate) => candidate.symbol === requestedSymbol,
+    );
+    if (matchingCandidates.length === 0) {
+        throw new FuturesMarkPriceError(
+            FUTURES_MARK_PRICE_ERROR_CODES.SYMBOL_UNAVAILABLE,
+            `Futures symbol "${requestedSymbol}" is unavailable in mark-price response`,
+        );
+    }
+    if (matchingCandidates.length > 1) throw malformedMarkPriceError();
+
+    const markPrice = matchingCandidates[0];
+    const decimalFields = ['markPrice', 'indexPrice', 'estimatedSettlePrice'];
+    if (decimalFields.some((field) => !isNonEmptyString(markPrice[field]))
+        || !Number.isSafeInteger(markPrice.time)
+        || markPrice.time < 0) {
+        throw malformedMarkPriceError();
+    }
+
+    return {
+        marketType: 'futures',
+        symbol: markPrice.symbol,
+        markPrice: markPrice.markPrice,
+        indexPrice: markPrice.indexPrice,
+        estimatedSettlePrice: markPrice.estimatedSettlePrice,
+        time: markPrice.time,
+    };
+};
+
 const readExchangeInfoData = async (response) => {
+    if (typeof response?.data === 'function') return response.data();
+    return response;
+};
+
+const readMarkPriceData = async (response) => {
     if (typeof response?.data === 'function') return response.data();
     return response;
 };
@@ -168,5 +243,11 @@ export class FuturesTradingAdapter {
         const response = await this.transport.getExchangeInfo();
         const exchangeInfo = await readExchangeInfoData(response);
         return normalizeFuturesExchangeInfo(exchangeInfo, symbol);
+    }
+
+    async getMarkPrice(symbol) {
+        const response = await this.transport.getMarkPrice({ symbol });
+        const markPrice = await readMarkPriceData(response);
+        return normalizeFuturesMarkPrice(markPrice, symbol);
     }
 }

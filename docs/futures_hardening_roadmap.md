@@ -204,6 +204,7 @@ Add a futures adapter for read-only endpoints and streams:
 Progress:
 
 - [x] Define the first futures-only domain contract and add an isolated read-only `FuturesTradingAdapter` exchange-metadata/filter normalization seam.
+- [x] Add isolated USDⓈ-M mark-price/index-price normalization behind the injected read-only futures transport.
 
 First checkpoint contract:
 
@@ -237,7 +238,31 @@ First checkpoint rules and audit:
 - Backend validation still rejects non-spot typed trading commands with `UNSUPPORTED_MARKET_TYPE`; futures execution remains disabled.
 - Validation passed: futures adapter `25/25`, spot adapter `21/21`, futures-command rejection suite `10/10`, shuffled non-isolated futures+spot `46/46`, full suite `248 passed / 2 skipped`, lint, and build.
 
-Phase status: **In progress; first read-only boundary checkpoint complete (2026-07-10).**
+Second checkpoint contract:
+
+```js
+{
+  marketType: "futures",
+  symbol,
+  markPrice: string,
+  indexPrice: string,
+  estimatedSettlePrice: string,
+  time: number
+}
+```
+
+Second checkpoint rules and audit:
+
+- The contract follows the current official USDⓈ-M `GET /fapi/v1/premiumIndex` fields and accepts its documented single-object and multi-symbol array response variants.
+- `markPrice`, `indexPrice`, and `estimatedSettlePrice` remain the exact source strings, including trailing zeroes; `time` remains the endpoint's non-negative safe-integer observation timestamp.
+- Requested-symbol selection is exact and case-sensitive. A wrong-symbol object, empty array, or array without the requested symbol raises the established unavailable-symbol identity; malformed identities, required price fields, timestamps, and duplicate requested-symbol entries raise a stable mark-price normalization error.
+- The pure normalizer does not mutate or return its source object. Raw payloads and official-client-style async response bodies are supported, while transport and response-body errors propagate unchanged by identity.
+- Although the official endpoint also returns funding fields, `lastFundingRate`, `interestRate`, and `nextFundingTime` are intentionally excluded until the separate funding/countdown checkpoint.
+- The only adapter surface added is read-only `getMarkPrice(symbol)` over the injected transport. No futures client, service import, Electron/renderer wiring, WebSocket, account state, or execution method was added.
+- Spot code and behavior remain unchanged, and backend validation still rejects non-spot typed trading commands with `UNSUPPORTED_MARKET_TYPE`.
+- Validation passed: futures adapter `49/49`, spot adapter `21/21`, futures-command rejection suite `10/10`, shuffled non-isolated futures+spot `70/70`, full suite `272 passed / 2 skipped`, lint, and build.
+
+Phase status: **In progress; exchange-metadata and mark/index-price boundary checkpoints complete (2026-07-10).**
 
 UI surface should be minimal:
 
@@ -329,18 +354,18 @@ Suggested UI order:
 
 Continue Phase 5 with the next narrow read-only futures boundary checkpoint:
 
-**Add isolated mark-price/index-price normalization to `FuturesTradingAdapter`.**
+**Add isolated current funding-rate/countdown normalization to `FuturesTradingAdapter`.**
 
 Implementation entry point:
 
 - existing `electron/services/futures-trading-adapter.js` and focused unit tests;
-- current official Binance USDⓈ-M mark-price endpoint documentation before freezing field names or response-shape handling.
+- current official Binance USDⓈ-M funding and mark-price endpoint documentation before choosing the narrow source or freezing field names.
 
 Expected scope:
 
-- Extend only the injected read-only transport boundary and add a pure mark/index-price normalizer for a requested futures symbol.
-- Preserve mark price, index price, and any other decimal values as exact strings; define deterministic single-symbol, multi-symbol, malformed-response, unavailable-symbol, and transport-error behavior from official evidence.
-- Reuse the established futures symbol identity/error conventions without adding a generic market-data framework or speculative funding/position abstractions.
+- Extend only the injected read-only transport boundary and add a pure current funding-state normalizer for a requested futures symbol.
+- Preserve funding and interest-rate decimals as exact strings and funding/observation timestamps as integers; define deterministic response-shape, unavailable-symbol, malformed-response, and transport/body-error behavior from official evidence.
+- Reuse the established futures symbol identity/error conventions and keep the completed exchange-info and mark/index-price contracts unchanged; do not add funding history or a generic market-data framework.
 - Keep `FuturesTradingAdapter` free of order placement, cancellation, leverage, margin-mode, or other execution methods; backend futures execution must remain rejected.
 - Do not wire the adapter into `binance-connection.js`, Electron startup, renderer state, WebSockets, or visible UI in this checkpoint.
-- Defer funding, countdowns, positions, balances, PnL, liquidation price, open futures orders, service orchestration, testnet client composition, and the futures mode indicator/position panel to later reviewed Phase 5 checkpoints.
+- Defer positions, balances, PnL, liquidation price, open futures orders, service orchestration, testnet client composition, and the futures mode indicator/position panel to later reviewed Phase 5 checkpoints.

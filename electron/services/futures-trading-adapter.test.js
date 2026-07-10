@@ -1,9 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
     FUTURES_EXCHANGE_INFO_ERROR_CODES,
+    FUTURES_MARK_PRICE_ERROR_CODES,
     FuturesExchangeInfoError,
+    FuturesMarkPriceError,
     FuturesTradingAdapter,
     normalizeFuturesExchangeInfo,
+    normalizeFuturesMarkPrice,
 } from './futures-trading-adapter.js';
 
 const makeFuturesSymbol = (overrides = {}) => ({
@@ -67,6 +70,27 @@ const expectedFilters = {
         stepSize: '0.01000000',
     },
     minimumNotional: '50.00000000',
+};
+
+const makeMarkPrice = (overrides = {}) => ({
+    symbol: 'BTCUSDT',
+    markPrice: '11793.631045620000',
+    indexPrice: '11781.804959700000',
+    estimatedSettlePrice: '11781.161388150000',
+    lastFundingRate: '0.000382460000',
+    interestRate: '0.000100000000',
+    nextFundingTime: 1597392000000,
+    time: 1597370495002,
+    ...overrides,
+});
+
+const expectedMarkPrice = {
+    marketType: 'futures',
+    symbol: 'BTCUSDT',
+    markPrice: '11793.631045620000',
+    indexPrice: '11781.804959700000',
+    estimatedSettlePrice: '11781.161388150000',
+    time: 1597370495002,
 };
 
 describe('normalizeFuturesExchangeInfo', () => {
@@ -260,6 +284,97 @@ describe('normalizeFuturesExchangeInfo', () => {
     });
 });
 
+describe('normalizeFuturesMarkPrice', () => {
+    it('normalizes the official single-symbol response without changing decimal strings', () => {
+        const result = normalizeFuturesMarkPrice(makeMarkPrice(), 'BTCUSDT');
+
+        expect(result).toEqual(expectedMarkPrice);
+        expect(result.markPrice).not.toBe('11793.63104562');
+        expect(result.indexPrice).not.toBe('11781.8049597');
+        expect(result.estimatedSettlePrice).not.toBe('11781.16138815');
+        expect(result).not.toHaveProperty('lastFundingRate');
+        expect(result).not.toHaveProperty('interestRate');
+        expect(result).not.toHaveProperty('nextFundingTime');
+    });
+
+    it('selects the requested symbol from the official multi-symbol response variant', () => {
+        const source = [
+            makeMarkPrice({
+                symbol: 'ETHUSDT',
+                markPrice: '3000.10000000',
+                indexPrice: '2999.90000000',
+                estimatedSettlePrice: '2998.80000000',
+            }),
+            makeMarkPrice(),
+        ];
+
+        expect(normalizeFuturesMarkPrice(source, 'BTCUSDT')).toEqual(expectedMarkPrice);
+    });
+
+    it.each([
+        ['a different single-symbol response', makeMarkPrice({ symbol: 'ETHUSDT' })],
+        ['an empty multi-symbol response', []],
+        ['a multi-symbol response without the requested symbol', [
+            makeMarkPrice({ symbol: 'ETHUSDT' }),
+            makeMarkPrice({ symbol: 'BNBUSDT' }),
+        ]],
+    ])('fails deterministically when the requested symbol is unavailable in %s', (_label, payload) => {
+        expect(() => normalizeFuturesMarkPrice(payload, 'BTCUSDT')).toThrowError(
+            new FuturesMarkPriceError(
+                FUTURES_MARK_PRICE_ERROR_CODES.SYMBOL_UNAVAILABLE,
+                'Futures symbol "BTCUSDT" is unavailable in mark-price response',
+            ),
+        );
+    });
+
+    it.each([
+        ['a null payload', null],
+        ['a scalar payload', 'BTCUSDT'],
+        ['a missing symbol identity', {}],
+        ['a non-string symbol identity', makeMarkPrice({ symbol: 123 })],
+        ['a malformed candidate in a multi-symbol response', [makeMarkPrice(), null]],
+        ['a missing mark price', makeMarkPrice({ markPrice: undefined })],
+        ['a numeric mark price', makeMarkPrice({ markPrice: 11793.63 })],
+        ['a missing index price', makeMarkPrice({ indexPrice: undefined })],
+        ['a numeric estimated settlement price', makeMarkPrice({
+            estimatedSettlePrice: 11781.16,
+        })],
+        ['a string observation time', makeMarkPrice({ time: '1597370495002' })],
+        ['a negative observation time', makeMarkPrice({ time: -1 })],
+        ['duplicate requested symbols', [makeMarkPrice(), makeMarkPrice()]],
+    ])('fails deterministically for %s', (_label, payload) => {
+        expect(() => normalizeFuturesMarkPrice(payload, 'BTCUSDT')).toThrowError(
+            new FuturesMarkPriceError(
+                FUTURES_MARK_PRICE_ERROR_CODES.MALFORMED_RESPONSE,
+                'Malformed futures mark-price response',
+            ),
+        );
+    });
+
+    it.each(['', '   '])('fails deterministically for an invalid requested symbol %#', (symbol) => {
+        expect(() => normalizeFuturesMarkPrice(makeMarkPrice(), symbol)).toThrowError(
+            new FuturesMarkPriceError(
+                FUTURES_MARK_PRICE_ERROR_CODES.INVALID_SYMBOL,
+                'Futures symbol must be a non-empty string',
+            ),
+        );
+    });
+
+    it('does not mutate the source response or return the selected source object', () => {
+        const source = [
+            makeMarkPrice({ symbol: 'ETHUSDT' }),
+            makeMarkPrice(),
+        ];
+        const snapshot = structuredClone(source);
+
+        const result = normalizeFuturesMarkPrice(source, 'BTCUSDT');
+
+        expect(source).toEqual(snapshot);
+        expect(result).not.toBe(source[1]);
+        expect(result).toEqual(expectedMarkPrice);
+    });
+});
+
 describe('FuturesTradingAdapter', () => {
     it('loads and unwraps official-client-style exchange metadata at the adapter boundary', async () => {
         const source = makeExchangeInfo(makeFuturesSymbol());
@@ -290,6 +405,30 @@ describe('FuturesTradingAdapter', () => {
         });
     });
 
+    it('loads and unwraps official-client-style mark prices at the adapter boundary', async () => {
+        const data = vi.fn().mockResolvedValue(makeMarkPrice());
+        const transport = {
+            getMarkPrice: vi.fn().mockResolvedValue({ data }),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getMarkPrice('BTCUSDT')).resolves.toEqual(expectedMarkPrice);
+        expect(transport.getMarkPrice).toHaveBeenCalledWith({ symbol: 'BTCUSDT' });
+        expect(data).toHaveBeenCalledWith();
+    });
+
+    it('accepts raw multi-symbol mark prices from an injected read-only transport', async () => {
+        const transport = {
+            getMarkPrice: vi.fn().mockResolvedValue([
+                makeMarkPrice({ symbol: 'ETHUSDT' }),
+                makeMarkPrice(),
+            ]),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getMarkPrice('BTCUSDT')).resolves.toEqual(expectedMarkPrice);
+    });
+
     it('propagates transport errors without relabeling them as normalization failures', async () => {
         const transportError = new Error('futures transport unavailable');
         const transport = {
@@ -312,11 +451,34 @@ describe('FuturesTradingAdapter', () => {
         await expect(adapter.getExchangeInfo('BTCUSDT')).rejects.toBe(responseError);
     });
 
+    it('preserves mark-price transport error identity', async () => {
+        const transportError = new Error('futures mark-price transport unavailable');
+        const transport = {
+            getMarkPrice: vi.fn().mockRejectedValue(transportError),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getMarkPrice('BTCUSDT')).rejects.toBe(transportError);
+    });
+
+    it('preserves mark-price response-body error identity', async () => {
+        const responseError = new Error('futures mark-price response body unavailable');
+        const transport = {
+            getMarkPrice: vi.fn().mockResolvedValue({
+                data: vi.fn().mockRejectedValue(responseError),
+            }),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getMarkPrice('BTCUSDT')).rejects.toBe(responseError);
+    });
+
     it('exposes no futures execution surface', () => {
         const adapter = new FuturesTradingAdapter({ transport: {} });
         expect(Object.getOwnPropertyNames(FuturesTradingAdapter.prototype)).toEqual([
             'constructor',
             'getExchangeInfo',
+            'getMarkPrice',
         ]);
 
         const forbiddenExecutionMethods = [
