@@ -30,6 +30,12 @@ export const FUTURES_ACCOUNT_BALANCE_ERROR_CODES = Object.freeze({
     MARGIN_ASSET_UNAVAILABLE: 'FUTURES_MARGIN_ASSET_UNAVAILABLE',
 });
 
+export const FUTURES_OPEN_ORDERS_ERROR_CODES = Object.freeze({
+    INVALID_SYMBOL: FUTURES_EXCHANGE_INFO_ERROR_CODES.INVALID_SYMBOL,
+    MALFORMED_RESPONSE: 'MALFORMED_FUTURES_OPEN_ORDERS',
+    SYMBOL_UNAVAILABLE: FUTURES_EXCHANGE_INFO_ERROR_CODES.SYMBOL_UNAVAILABLE,
+});
+
 export class FuturesExchangeInfoError extends Error {
     constructor(code, message) {
         super(message);
@@ -70,6 +76,14 @@ export class FuturesAccountBalanceError extends Error {
     }
 }
 
+export class FuturesOpenOrdersError extends Error {
+    constructor(code, message) {
+        super(message);
+        this.name = 'FuturesOpenOrdersError';
+        this.code = code;
+    }
+}
+
 const isRecord = (value) => value !== null
     && typeof value === 'object'
     && !Array.isArray(value);
@@ -99,6 +113,11 @@ const malformedPositionRiskError = () => new FuturesPositionRiskError(
 const malformedAccountBalanceError = () => new FuturesAccountBalanceError(
     FUTURES_ACCOUNT_BALANCE_ERROR_CODES.MALFORMED_RESPONSE,
     'Malformed futures account-balance response',
+);
+
+const malformedOpenOrdersError = () => new FuturesOpenOrdersError(
+    FUTURES_OPEN_ORDERS_ERROR_CODES.MALFORMED_RESPONSE,
+    'Malformed futures open-orders response',
 );
 
 const FUTURES_POSITION_SIDES = new Set(['BOTH', 'LONG', 'SHORT']);
@@ -513,6 +532,119 @@ export const normalizeFuturesAccountBalance = (
     };
 };
 
+const requireOpenOrdersSymbol = (requestedSymbol) => {
+    if (!isNonEmptyString(requestedSymbol)) {
+        throw new FuturesOpenOrdersError(
+            FUTURES_OPEN_ORDERS_ERROR_CODES.INVALID_SYMBOL,
+            'Futures symbol must be a non-empty string',
+        );
+    }
+};
+
+/**
+ * Normalize current regular USDⓈ-M open orders for one explicitly requested symbol.
+ * Decimal values remain exact strings, source order is preserved, and no source entry
+ * is returned or mutated. Algo open orders use a separate endpoint and contract.
+ */
+export const normalizeFuturesOpenOrders = (openOrdersResponse, requestedSymbol) => {
+    requireOpenOrdersSymbol(requestedSymbol);
+    if (!Array.isArray(openOrdersResponse)) throw malformedOpenOrdersError();
+    if (openOrdersResponse.length === 0) return [];
+    if (openOrdersResponse.some(
+        (candidate) => !isRecord(candidate) || !isNonEmptyString(candidate.symbol),
+    )) {
+        throw malformedOpenOrdersError();
+    }
+
+    const matchingOrders = openOrdersResponse.filter(
+        (candidate) => candidate.symbol === requestedSymbol,
+    );
+    if (matchingOrders.length === 0) {
+        throw new FuturesOpenOrdersError(
+            FUTURES_OPEN_ORDERS_ERROR_CODES.SYMBOL_UNAVAILABLE,
+            `Futures symbol "${requestedSymbol}" is unavailable in open-orders response`,
+        );
+    }
+    if (matchingOrders.length !== openOrdersResponse.length) {
+        throw malformedOpenOrdersError();
+    }
+
+    const decimalFields = [
+        'avgPrice',
+        'cumQuote',
+        'executedQty',
+        'origQty',
+        'price',
+        'stopPrice',
+    ];
+    const stringFields = [
+        'clientOrderId',
+        'origType',
+        'side',
+        'positionSide',
+        'status',
+        'timeInForce',
+        'type',
+        'workingType',
+        'priceMatch',
+        'selfTradePreventionMode',
+    ];
+    const integerFields = ['orderId', 'time', 'updateTime', 'goodTillDate'];
+    const booleanFields = ['reduceOnly', 'closePosition', 'priceProtect'];
+    const orderIds = new Set();
+    const clientOrderIds = new Set();
+
+    return matchingOrders.map((openOrder) => {
+        if (decimalFields.some((field) => !isNonEmptyString(openOrder[field]))
+            || stringFields.some((field) => !isNonEmptyString(openOrder[field]))
+            || integerFields.some((field) => !Number.isSafeInteger(openOrder[field])
+                || openOrder[field] < 0)
+            || booleanFields.some((field) => typeof openOrder[field] !== 'boolean')
+            || (openOrder.activatePrice !== undefined
+                && !isNonEmptyString(openOrder.activatePrice))
+            || (openOrder.priceRate !== undefined
+                && !isNonEmptyString(openOrder.priceRate))) {
+            throw malformedOpenOrdersError();
+        }
+        if (orderIds.has(openOrder.orderId)
+            || clientOrderIds.has(openOrder.clientOrderId)) {
+            throw malformedOpenOrdersError();
+        }
+        orderIds.add(openOrder.orderId);
+        clientOrderIds.add(openOrder.clientOrderId);
+
+        return {
+            marketType: 'futures',
+            avgPrice: openOrder.avgPrice,
+            clientOrderId: openOrder.clientOrderId,
+            cumQuote: openOrder.cumQuote,
+            executedQty: openOrder.executedQty,
+            orderId: openOrder.orderId,
+            origQty: openOrder.origQty,
+            origType: openOrder.origType,
+            price: openOrder.price,
+            reduceOnly: openOrder.reduceOnly,
+            side: openOrder.side,
+            positionSide: openOrder.positionSide,
+            status: openOrder.status,
+            stopPrice: openOrder.stopPrice,
+            closePosition: openOrder.closePosition,
+            symbol: openOrder.symbol,
+            time: openOrder.time,
+            timeInForce: openOrder.timeInForce,
+            type: openOrder.type,
+            activatePrice: openOrder.activatePrice ?? null,
+            priceRate: openOrder.priceRate ?? null,
+            updateTime: openOrder.updateTime,
+            workingType: openOrder.workingType,
+            priceProtect: openOrder.priceProtect,
+            priceMatch: openOrder.priceMatch,
+            selfTradePreventionMode: openOrder.selfTradePreventionMode,
+            goodTillDate: openOrder.goodTillDate,
+        };
+    });
+};
+
 const readExchangeInfoData = async (response) => {
     if (typeof response?.data === 'function') return response.data();
     return response;
@@ -534,6 +666,11 @@ const readPositionRiskData = async (response) => {
 };
 
 const readAccountBalanceData = async (response) => {
+    if (typeof response?.data === 'function') return response.data();
+    return response;
+};
+
+const readOpenOrdersData = async (response) => {
     if (typeof response?.data === 'function') return response.data();
     return response;
 };
@@ -571,5 +708,12 @@ export class FuturesTradingAdapter {
         const response = await this.transport.getBalanceV3();
         const accountBalance = await readAccountBalanceData(response);
         return normalizeFuturesAccountBalance(accountBalance, marginAsset);
+    }
+
+    async getOpenOrders(symbol) {
+        requireOpenOrdersSymbol(symbol);
+        const response = await this.transport.getOpenOrders({ symbol });
+        const openOrders = await readOpenOrdersData(response);
+        return normalizeFuturesOpenOrders(openOrders, symbol);
     }
 }

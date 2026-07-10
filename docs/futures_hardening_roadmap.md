@@ -208,6 +208,7 @@ Progress:
 - [x] Add isolated current USDⓈ-M funding-rate/countdown normalization from the premium-index source.
 - [x] Add isolated USDⓈ-M V3 position-risk normalization behind the injected read-only futures transport.
 - [x] Add isolated USDⓈ-M V3 account-balance normalization behind the injected read-only futures transport.
+- [x] Add isolated symbol-scoped USDⓈ-M current-open-order normalization behind the injected read-only futures transport.
 
 First checkpoint contract:
 
@@ -356,7 +357,56 @@ Fifth checkpoint rules and audit:
 - No futures client, service import, Electron/renderer wiring, WebSocket, open-order, or execution surface was added. Spot behavior remains unchanged, backend validation still rejects non-spot typed trading commands with `UNSUPPORTED_MARKET_TYPE`, and no dependency was added.
 - Validation passed: futures adapter `188/188`, spot adapter `21/21`, futures-command rejection suite `10/10`, shuffled non-isolated futures+spot `209/209`, full suite `411 passed / 2 skipped`, lint, and build.
 
-Phase status: **In progress; exchange-metadata, mark/index-price, current-funding, position-risk, and account-balance boundary checkpoints complete (2026-07-10).**
+Sixth checkpoint contract:
+
+```js
+[
+  {
+    marketType: "futures",
+    avgPrice: string,
+    clientOrderId: string,
+    cumQuote: string,
+    executedQty: string,
+    orderId: number,
+    origQty: string,
+    origType: string,
+    price: string,
+    reduceOnly: boolean,
+    side: string,
+    positionSide: string,
+    status: string,
+    stopPrice: string,
+    closePosition: boolean,
+    symbol: string,
+    time: number,
+    timeInForce: string,
+    type: string,
+    activatePrice: string | null,
+    priceRate: string | null,
+    updateTime: number,
+    workingType: string,
+    priceProtect: boolean,
+    priceMatch: string,
+    selfTradePreventionMode: string,
+    goodTillDate: number
+  }
+]
+```
+
+Sixth checkpoint rules and audit:
+
+- The source is the current official USDⓈ-M Current All Open Orders endpoint, signed `GET /fapi/v1/openOrders`. Its IP request weight is `1` with one symbol and `40` when `symbol` is omitted; the adapter validates a non-empty requested symbol before calling only the injected `getOpenOrders({ symbol })` transport, so this checkpoint has no account-wide request path.
+- The documented response is an array. A valid empty array returns a fresh empty result; non-empty results preserve source order and require every entry to have the exact, case-sensitive requested symbol. An all-wrong or case-mismatched response raises the established unavailable-symbol identity, while mixed-symbol responses and malformed candidate identities raise the stable open-orders normalization error.
+- `orderId` is symbol-scoped and `clientOrderId` is unique among current open orders. A duplicate of either identity is malformed; entries are never sorted, merged, aggregated, or deduplicated by choosing one source row.
+- `avgPrice`, `cumQuote`, `executedQty`, `origQty`, `price`, and `stopPrice` remain exact non-empty strings. The currently documented trailing-only `activatePrice` and `priceRate` fields remain exact strings when present and normalize independently to `null` when absent; their presence does not trigger, infer, or merge a separate algo-order read.
+- `clientOrderId` and all documented enum-like fields remain exact non-empty strings. `orderId`, `time`, `updateTime`, and `goodTillDate` remain non-negative safe integers, including documented `goodTillDate: 0`; `reduceOnly`, `closePosition`, and `priceProtect` remain booleans with both values preserved. Unknown fields are excluded.
+- The pure normalizer does not mutate or return its source array or entries. Raw arrays and established official-client-style async `response.data()` bodies are supported, while transport and response-body errors propagate unchanged by identity.
+- Current regular orders remain separate from the official signed `GET /fapi/v1/openAlgoOrders` contract for conditional, TP/SL, and trailing-stop algo orders. This checkpoint adds neither an algo transport nor order-history/query behavior.
+- The only adapter surface added is read-only `getOpenOrders(symbol)`. The completed exchange-info, mark/index-price, current-funding, position-risk, and account-balance contracts remain unchanged, and orders are not merged with balances, positions, or a generic account-state framework.
+- No futures client, service import, Electron/renderer wiring, WebSocket, execution method, or dependency was added. Spot behavior remains unchanged, and backend validation still rejects non-spot typed trading commands with `UNSUPPORTED_MARKET_TYPE`.
+- Validation passed: futures adapter `263/263`, spot adapter `21/21`, futures-command rejection suite `10/10`, shuffled non-isolated futures+spot `284/284`, full suite `486 passed / 2 skipped`, lint, and build.
+
+Phase status: **In progress; exchange-metadata, mark/index-price, current-funding, position-risk, account-balance, and current-open-order boundary checkpoints complete (2026-07-10).**
 
 UI surface should be minimal:
 
@@ -448,21 +498,22 @@ Suggested UI order:
 
 Continue Phase 5 with the next narrow read-only futures boundary checkpoint:
 
-**Add isolated symbol-scoped USDⓈ-M current-open-order normalization to `FuturesTradingAdapter`.**
+**Add isolated symbol-scoped USDⓈ-M current-algo-open-order normalization to `FuturesTradingAdapter`.**
 
 Implementation entry point:
 
 - existing `electron/services/futures-trading-adapter.js` and focused unit tests;
-- current official Binance USDⓈ-M Current All Open Orders documentation before freezing fields or transport naming.
+- current official Binance USDⓈ-M Current All Algo Open Orders documentation before freezing fields or transport naming.
 
 Expected scope:
 
-- Extend only the injected read-only transport boundary and add a pure normalizer for the current open orders of one explicitly requested symbol.
-- Use only the explicit-symbol signed `GET /fapi/v1/openOrders` behavior; do not add the higher-weight account-wide request or infer a symbol after an account-wide fetch.
-- Treat the documented array response deterministically: an empty array is a valid no-open-orders result, preserve source order, require exact case-sensitive symbol identity, and define stable behavior for wrong or mixed symbols, malformed entries, and duplicate order identities.
-- Preserve documented price, quantity, quote, and rate decimals as exact strings; preserve string identifiers exactly, integer identifiers and timestamps as integers, and flags as booleans. Freeze only fields supported by current official evidence.
+- Extend only the injected read-only transport boundary and add a pure normalizer for current algo open orders of one explicitly requested symbol.
+- Use only the explicit-symbol signed `GET /fapi/v1/openAlgoOrders` behavior; do not add its higher-weight account-wide request or infer a symbol after an account-wide fetch.
+- Treat the documented array response deterministically: an empty array is a valid no-open-algo-orders result, preserve source order, require exact case-sensitive symbol identity, and define stable behavior for wrong or mixed symbols, malformed entries, and duplicate `algoId` or `clientAlgoId` identities.
+- Freeze only fields supported by the current official algo response contract. Preserve documented price, quantity, and rate decimals as exact strings; preserve string identifiers exactly, integer identifiers and timestamps as integers, nullable values without coercion, and flags as booleans.
 - Preserve source immutability and established futures error identity, including unchanged transport and response-body errors.
-- Keep the completed exchange-info, mark/index-price, current-funding, position-risk, and account-balance contracts unchanged; do not merge orders with balances or positions and do not create a generic account-state framework.
+- Keep algo orders strictly separate from current regular `GET /fapi/v1/openOrders` results. Do not combine, infer, or convert identities or fields across the two official contracts.
+- Keep the completed exchange-info, mark/index-price, current-funding, position-risk, account-balance, and current-open-order contracts unchanged; do not merge orders with balances or positions and do not create a generic account-state framework.
 - Keep `FuturesTradingAdapter` free of order placement, cancellation, leverage, margin-mode, or other execution methods; backend futures execution must remain rejected.
 - Do not wire the adapter into `binance-connection.js`, Electron startup, renderer state, WebSockets, or visible UI in this checkpoint.
-- Defer algo open orders, order history/query, account-wide open-order reads, service orchestration, testnet client composition, and the futures mode indicator/position panel to later reviewed Phase 5 checkpoints.
+- Defer regular/algo order history and query, account-wide reads, service orchestration, testnet client composition, and the futures mode indicator/position panel to later reviewed Phase 5 checkpoints.
