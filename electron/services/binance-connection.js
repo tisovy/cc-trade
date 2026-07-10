@@ -1033,6 +1033,11 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
                 const startUserDataStream = async (retryCount = 0) => {
                     const MAX_RETRIES = 5;
                     const RETRY_DELAY_BASE = 3000;
+
+                    // Close/retry timers and awaited setup stages can outlive the
+                    // renderer session that started them. Do not resurrect shared
+                    // user-data state after the last renderer tears global sockets down.
+                    if (rendererConnections.size === 0) return;
                     
                     if (userDataReconnecting && retryCount === 0) return;
                     userDataReconnecting = true;
@@ -1063,7 +1068,18 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
                         if (keepAliveInterval) { clearInterval(keepAliveInterval); keepAliveInterval = null; }
                         await safeDisconnect(previousUserData, 'previous user data stream');
                     }
-                    userDataWsConnection = await spotTradingAdapter.connectUserDataStream(listenKey);
+                    if (rendererConnections.size === 0) {
+                        userDataReconnecting = false;
+                        return;
+                    }
+
+                    const nextUserDataConnection = await spotTradingAdapter.connectUserDataStream(listenKey);
+                    if (rendererConnections.size === 0) {
+                        userDataReconnecting = false;
+                        await safeDisconnect(nextUserDataConnection, 'orphaned user data stream');
+                        return;
+                    }
+                    userDataWsConnection = nextUserDataConnection;
                     userDataReconnecting = false;
                     const udConn = userDataWsConnection; // capture for the close guard
 

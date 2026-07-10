@@ -816,8 +816,80 @@ describe('setupBinanceConnection user-data orchestration', () => {
             expect(getReconnectScheduleCount()).toBe(2);
             expect(createListenKey).toHaveBeenCalledTimes(3);
             expect(connectUserDataStream).toHaveBeenCalledTimes(3);
+
+            moduleMocks.rendererConnection.close();
+            await flushMicrotasks();
+
+            expect(moduleMocks.rendererConnection.connected).toBe(false);
+
+            await vi.advanceTimersByTimeAsync(5000);
+            await flushMicrotasks();
+
+            expect(createListenKey).toHaveBeenCalledTimes(3);
+            expect(getListenKeyRequests()).toHaveLength(3);
+            expect(connectUserDataStream).toHaveBeenCalledTimes(3);
         } finally {
             clearIntervalSpy.mockRestore();
+            setIntervalSpy.mockRestore();
+        }
+    });
+
+    it('disconnects an in-flight user-data socket that resolves after renderer teardown', async () => {
+        let resolveUserDataConnection;
+        const userDataConnection = new Promise((resolve) => {
+            resolveUserDataConnection = resolve;
+        });
+        const orphanedSocket = moduleMocks.makeSocket();
+        const createListenKey = vi.spyOn(
+            SpotTradingAdapter.prototype,
+            'createUserDataStreamListenKey',
+        );
+        const connectUserDataStream = vi.spyOn(
+            SpotTradingAdapter.prototype,
+            'connectUserDataStream',
+        ).mockReturnValue(userDataConnection);
+        const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+
+        try {
+            setupBinanceConnection({
+                localWebSocketAccess: { host: '127.0.0.1' },
+            });
+
+            const request = {
+                origin: 'http://localhost:5174',
+                accept: vi.fn(() => moduleMocks.rendererConnection),
+            };
+            moduleMocks.websocketServerHandlers.request(request);
+
+            await flushMicrotasks();
+            await vi.advanceTimersByTimeAsync(500);
+            await flushMicrotasks();
+
+            expect(createListenKey).toHaveBeenCalledOnce();
+            expect(connectUserDataStream).toHaveBeenCalledOnce();
+            expect(connectUserDataStream).toHaveBeenCalledWith('listen-key-123');
+            expect(orphanedSocket.on).not.toHaveBeenCalled();
+
+            moduleMocks.rendererConnection.close();
+            await flushMicrotasks();
+
+            expect(moduleMocks.rendererConnection.connected).toBe(false);
+
+            resolveUserDataConnection(orphanedSocket);
+            await flushMicrotasks();
+
+            expect(orphanedSocket.disconnect).toHaveBeenCalledOnce();
+            expect(orphanedSocket.on).not.toHaveBeenCalled();
+            expect(setIntervalSpy.mock.calls.filter(
+                ([, delay]) => delay === 30 * 60 * 1000,
+            )).toHaveLength(0);
+            expect(createListenKey).toHaveBeenCalledOnce();
+            expect(connectUserDataStream).toHaveBeenCalledOnce();
+            expect(moduleMocks.connect).toHaveBeenCalledOnce();
+            expect(moduleMocks.connect).toHaveBeenCalledWith({
+                stream: '!miniTicker@arr',
+            });
+        } finally {
             setIntervalSpy.mockRestore();
         }
     });
