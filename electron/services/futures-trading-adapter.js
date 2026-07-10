@@ -16,6 +16,14 @@ export const FUTURES_FUNDING_STATE_ERROR_CODES = Object.freeze({
     SYMBOL_UNAVAILABLE: FUTURES_EXCHANGE_INFO_ERROR_CODES.SYMBOL_UNAVAILABLE,
 });
 
+export const FUTURES_POSITION_RISK_ERROR_CODES = Object.freeze({
+    INVALID_SYMBOL: FUTURES_EXCHANGE_INFO_ERROR_CODES.INVALID_SYMBOL,
+    INVALID_POSITION_SIDE: 'INVALID_FUTURES_POSITION_SIDE',
+    MALFORMED_RESPONSE: 'MALFORMED_FUTURES_POSITION_RISK',
+    SYMBOL_UNAVAILABLE: FUTURES_EXCHANGE_INFO_ERROR_CODES.SYMBOL_UNAVAILABLE,
+    POSITION_SIDE_UNAVAILABLE: 'FUTURES_POSITION_SIDE_UNAVAILABLE',
+});
+
 export class FuturesExchangeInfoError extends Error {
     constructor(code, message) {
         super(message);
@@ -40,6 +48,14 @@ export class FuturesFundingStateError extends Error {
     }
 }
 
+export class FuturesPositionRiskError extends Error {
+    constructor(code, message) {
+        super(message);
+        this.name = 'FuturesPositionRiskError';
+        this.code = code;
+    }
+}
+
 const isRecord = (value) => value !== null
     && typeof value === 'object'
     && !Array.isArray(value);
@@ -60,6 +76,13 @@ const malformedFundingStateError = () => new FuturesFundingStateError(
     FUTURES_FUNDING_STATE_ERROR_CODES.MALFORMED_RESPONSE,
     'Malformed futures funding-state response',
 );
+
+const malformedPositionRiskError = () => new FuturesPositionRiskError(
+    FUTURES_POSITION_RISK_ERROR_CODES.MALFORMED_RESPONSE,
+    'Malformed futures position-risk response',
+);
+
+const FUTURES_POSITION_SIDES = new Set(['BOTH', 'LONG', 'SHORT']);
 
 const requireStringFields = (value, fields) => {
     if (!isRecord(value) || fields.some((field) => !isNonEmptyString(value[field]))) {
@@ -295,6 +318,116 @@ export const normalizeFuturesFundingState = (fundingStateResponse, requestedSymb
     };
 };
 
+/**
+ * Normalize one USDⓈ-M V3 position-risk entry selected by symbol and position side.
+ * BOTH identifies one-way mode; LONG and SHORT identify independent hedge-mode positions.
+ * Decimal values remain exact strings and integer risk/timestamp fields remain integers.
+ */
+export const normalizeFuturesPositionRisk = (
+    positionRiskResponse,
+    requestedSymbol,
+    requestedPositionSide,
+) => {
+    if (!isNonEmptyString(requestedSymbol)) {
+        throw new FuturesPositionRiskError(
+            FUTURES_POSITION_RISK_ERROR_CODES.INVALID_SYMBOL,
+            'Futures symbol must be a non-empty string',
+        );
+    }
+    if (!FUTURES_POSITION_SIDES.has(requestedPositionSide)) {
+        throw new FuturesPositionRiskError(
+            FUTURES_POSITION_RISK_ERROR_CODES.INVALID_POSITION_SIDE,
+            'Futures position side must be one of BOTH, LONG, or SHORT',
+        );
+    }
+    if (!Array.isArray(positionRiskResponse)) throw malformedPositionRiskError();
+    if (positionRiskResponse.some(
+        (candidate) => !isRecord(candidate)
+            || !isNonEmptyString(candidate.symbol)
+            || !FUTURES_POSITION_SIDES.has(candidate.positionSide),
+    )) {
+        throw malformedPositionRiskError();
+    }
+
+    const identityKeys = new Set();
+    const positionModes = new Set();
+    positionRiskResponse.forEach((candidate) => {
+        const identityKey = JSON.stringify([candidate.symbol, candidate.positionSide]);
+        if (identityKeys.has(identityKey)) throw malformedPositionRiskError();
+        identityKeys.add(identityKey);
+        positionModes.add(candidate.positionSide === 'BOTH' ? 'one-way' : 'hedge');
+    });
+    if (positionModes.size > 1) throw malformedPositionRiskError();
+
+    const symbolCandidates = positionRiskResponse.filter(
+        (candidate) => candidate.symbol === requestedSymbol,
+    );
+    if (symbolCandidates.length === 0) {
+        throw new FuturesPositionRiskError(
+            FUTURES_POSITION_RISK_ERROR_CODES.SYMBOL_UNAVAILABLE,
+            `Futures symbol "${requestedSymbol}" is unavailable in position-risk response`,
+        );
+    }
+
+    const matchingCandidates = symbolCandidates.filter(
+        (candidate) => candidate.positionSide === requestedPositionSide,
+    );
+    if (matchingCandidates.length === 0) {
+        throw new FuturesPositionRiskError(
+            FUTURES_POSITION_RISK_ERROR_CODES.POSITION_SIDE_UNAVAILABLE,
+            `Futures position side "${requestedPositionSide}" is unavailable for symbol "${requestedSymbol}" in position-risk response`,
+        );
+    }
+    if (matchingCandidates.length > 1) throw malformedPositionRiskError();
+
+    const positionRisk = matchingCandidates[0];
+    const decimalFields = [
+        'positionAmt',
+        'entryPrice',
+        'breakEvenPrice',
+        'markPrice',
+        'unRealizedProfit',
+        'liquidationPrice',
+        'isolatedMargin',
+        'notional',
+        'isolatedWallet',
+        'initialMargin',
+        'maintMargin',
+        'positionInitialMargin',
+        'openOrderInitialMargin',
+    ];
+    if (decimalFields.some((field) => !isNonEmptyString(positionRisk[field]))
+        || !isNonEmptyString(positionRisk.marginAsset)
+        || !Number.isSafeInteger(positionRisk.adl)
+        || positionRisk.adl < 0
+        || !Number.isSafeInteger(positionRisk.updateTime)
+        || positionRisk.updateTime < 0) {
+        throw malformedPositionRiskError();
+    }
+
+    return {
+        marketType: 'futures',
+        symbol: positionRisk.symbol,
+        positionSide: positionRisk.positionSide,
+        positionAmt: positionRisk.positionAmt,
+        entryPrice: positionRisk.entryPrice,
+        breakEvenPrice: positionRisk.breakEvenPrice,
+        markPrice: positionRisk.markPrice,
+        unRealizedProfit: positionRisk.unRealizedProfit,
+        liquidationPrice: positionRisk.liquidationPrice,
+        isolatedMargin: positionRisk.isolatedMargin,
+        notional: positionRisk.notional,
+        marginAsset: positionRisk.marginAsset,
+        isolatedWallet: positionRisk.isolatedWallet,
+        initialMargin: positionRisk.initialMargin,
+        maintMargin: positionRisk.maintMargin,
+        positionInitialMargin: positionRisk.positionInitialMargin,
+        openOrderInitialMargin: positionRisk.openOrderInitialMargin,
+        adl: positionRisk.adl,
+        updateTime: positionRisk.updateTime,
+    };
+};
+
 const readExchangeInfoData = async (response) => {
     if (typeof response?.data === 'function') return response.data();
     return response;
@@ -306,6 +439,11 @@ const readMarkPriceData = async (response) => {
 };
 
 const readFundingStateData = async (response) => {
+    if (typeof response?.data === 'function') return response.data();
+    return response;
+};
+
+const readPositionRiskData = async (response) => {
     if (typeof response?.data === 'function') return response.data();
     return response;
 };
@@ -331,5 +469,11 @@ export class FuturesTradingAdapter {
         const response = await this.transport.getMarkPrice({ symbol });
         const fundingState = await readFundingStateData(response);
         return normalizeFuturesFundingState(fundingState, symbol);
+    }
+
+    async getPositionRisk(symbol, positionSide) {
+        const response = await this.transport.getPositionRiskV3({ symbol });
+        const positionRisk = await readPositionRiskData(response);
+        return normalizeFuturesPositionRisk(positionRisk, symbol, positionSide);
     }
 }

@@ -206,6 +206,7 @@ Progress:
 - [x] Define the first futures-only domain contract and add an isolated read-only `FuturesTradingAdapter` exchange-metadata/filter normalization seam.
 - [x] Add isolated USDⓈ-M mark-price/index-price normalization behind the injected read-only futures transport.
 - [x] Add isolated current USDⓈ-M funding-rate/countdown normalization from the premium-index source.
+- [x] Add isolated USDⓈ-M V3 position-risk normalization behind the injected read-only futures transport.
 
 First checkpoint contract:
 
@@ -287,7 +288,45 @@ Third checkpoint rules and audit:
 - No futures client, service import, Electron/renderer wiring, WebSocket, account state, funding history, or execution method was added. Spot behavior remains unchanged, and backend validation still rejects non-spot typed trading commands with `UNSUPPORTED_MARKET_TYPE`.
 - Validation passed: futures adapter `82/82`, spot adapter `21/21`, futures-command rejection suite `10/10`, shuffled non-isolated futures+spot `103/103`, full suite `305 passed / 2 skipped`, lint, and build.
 
-Phase status: **In progress; exchange-metadata, mark/index-price, and current-funding boundary checkpoints complete (2026-07-10).**
+Fourth checkpoint contract:
+
+```js
+{
+  marketType: "futures",
+  symbol,
+  positionSide,
+  positionAmt: string,
+  entryPrice: string,
+  breakEvenPrice: string,
+  markPrice: string,
+  unRealizedProfit: string,
+  liquidationPrice: string,
+  isolatedMargin: string,
+  notional: string,
+  marginAsset: string,
+  isolatedWallet: string,
+  initialMargin: string,
+  maintMargin: string,
+  positionInitialMargin: string,
+  openOrderInitialMargin: string,
+  adl: number,
+  updateTime: number
+}
+```
+
+Fourth checkpoint rules and audit:
+
+- The source is the current official USDⓈ-M Position Information V3 endpoint, signed `GET /fapi/v3/positionRisk`. V2 is still documented but announced for deprecation as a different contract; its `marginType`, `isAutoAddMargin`, `leverage`, and `maxNotionalValue` fields are not borrowed into V3 normalization.
+- V3's documented raw response is always an array and includes only symbols with positions or open orders. The adapter calls only the version-explicit injected `getPositionRiskV3({ symbol })` transport; an empty or missing-symbol response remains unavailable and never becomes a synthetic zero position.
+- Position identity is the exact, case-sensitive `(symbol, positionSide)` pair. Callers must request `BOTH` for one-way mode or `LONG` / `SHORT` for hedge mode; sides are never inferred or aggregated from signed `positionAmt` values.
+- A same-symbol `LONG` and `SHORT` pair is valid, and normalizer policy accepts a single hedge-side identity without requiring its counterpart. Missing requested sides have a stable unavailable-side identity, duplicate composite identities and account-wide mixed `BOTH`/hedge identities are malformed, and invalid requested sides have a stable invalid-side identity.
+- All documented position, price, PnL, notional, wallet, and margin decimals remain exact non-empty strings. `adl` and `updateTime` remain non-negative safe integers; normalizer policy accepts `updateTime: 0`. Binance's `bidNotional` and `askNotional` fields are excluded because the endpoint marks them “ignore.”
+- The pure normalizer does not mutate or return a source entry. Raw arrays and official-client-style async response bodies are supported, while transport and response-body errors propagate unchanged by identity.
+- The only adapter surface added is read-only `getPositionRisk(symbol, positionSide)`. The completed exchange-info, mark/index-price, and current-funding contracts remain unchanged, and no generic futures account state, client composition, service/renderer wiring, WebSocket, balance, open-order, or execution surface was added.
+- Spot behavior remains unchanged, backend validation still rejects non-spot typed trading commands with `UNSUPPORTED_MARKET_TYPE`, and no dependency was added.
+- Validation passed: futures adapter `145/145`, spot adapter `21/21`, futures-command rejection suite `10/10`, shuffled non-isolated futures+spot `166/166`, full suite `368 passed / 2 skipped`, lint, and build.
+
+Phase status: **In progress; exchange-metadata, mark/index-price, current-funding, and position-risk boundary checkpoints complete (2026-07-10).**
 
 UI surface should be minimal:
 
@@ -379,18 +418,18 @@ Suggested UI order:
 
 Continue Phase 5 with the next narrow read-only futures boundary checkpoint:
 
-**Add isolated USDⓈ-M position-risk normalization to `FuturesTradingAdapter`.**
+**Add isolated USDⓈ-M account-balance normalization to `FuturesTradingAdapter`.**
 
 Implementation entry point:
 
 - existing `electron/services/futures-trading-adapter.js` and focused unit tests;
-- current official Binance USDⓈ-M position-information endpoint documentation before choosing the version or freezing fields.
+- current official Binance USDⓈ-M futures account-balance endpoint documentation before choosing the version or freezing fields.
 
 Expected scope:
 
-- Extend only the injected read-only transport boundary and add a pure position-risk normalizer without composing a futures client or account service.
-- Model requested-symbol selection and one-way versus hedge-mode `positionSide` identity explicitly; preserve position/risk decimal values as exact strings and documented timestamps as integers, with deterministic missing, malformed, duplicate, and transport/body-error behavior from official evidence.
-- Keep the completed exchange-info, mark/index-price, and current-funding contracts unchanged; do not add a generic futures account-state framework.
+- Extend only the injected read-only transport boundary and add a pure balance normalizer for one explicitly requested margin asset without composing a futures client or account service.
+- Preserve documented balance, wallet, PnL, available, and withdrawal decimal values as exact strings and documented timestamps as integers; define deterministic array-shape, asset-selection, missing-asset, malformed, duplicate, and transport/body-error behavior from official evidence.
+- Keep the completed exchange-info, mark/index-price, current-funding, and position-risk contracts unchanged; do not merge balances with positions or add a generic futures account-state framework.
 - Keep `FuturesTradingAdapter` free of order placement, cancellation, leverage, margin-mode, or other execution methods; backend futures execution must remain rejected.
 - Do not wire the adapter into `binance-connection.js`, Electron startup, renderer state, WebSockets, or visible UI in this checkpoint.
-- Defer balances, open futures orders, service orchestration, testnet client composition, and the futures mode indicator/position panel to later reviewed Phase 5 checkpoints.
+- Defer open futures orders, service orchestration, testnet client composition, and the futures mode indicator/position panel to later reviewed Phase 5 checkpoints.

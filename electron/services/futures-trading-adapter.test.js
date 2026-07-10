@@ -3,13 +3,16 @@ import {
     FUTURES_EXCHANGE_INFO_ERROR_CODES,
     FUTURES_FUNDING_STATE_ERROR_CODES,
     FUTURES_MARK_PRICE_ERROR_CODES,
+    FUTURES_POSITION_RISK_ERROR_CODES,
     FuturesExchangeInfoError,
     FuturesFundingStateError,
     FuturesMarkPriceError,
+    FuturesPositionRiskError,
     FuturesTradingAdapter,
     normalizeFuturesExchangeInfo,
     normalizeFuturesFundingState,
     normalizeFuturesMarkPrice,
+    normalizeFuturesPositionRisk,
 } from './futures-trading-adapter.js';
 
 const makeFuturesSymbol = (overrides = {}) => ({
@@ -103,6 +106,52 @@ const expectedFundingState = {
     interestRate: '0.000100000000',
     nextFundingTime: 1597392000000,
     time: 1597370495002,
+};
+
+const makePositionRisk = (overrides = {}) => ({
+    symbol: 'BTCUSDT',
+    positionSide: 'BOTH',
+    positionAmt: '30.000',
+    entryPrice: '0.385000',
+    breakEvenPrice: '0.385077',
+    markPrice: '0.41047590',
+    unRealizedProfit: '0.76427700',
+    liquidationPrice: '0',
+    isolatedMargin: '0.00000000',
+    notional: '12.31427700',
+    marginAsset: 'USDT',
+    isolatedWallet: '0',
+    initialMargin: '0.61571385',
+    maintMargin: '0.08004280',
+    positionInitialMargin: '0.61571385',
+    openOrderInitialMargin: '0',
+    adl: 2,
+    bidNotional: '0',
+    askNotional: '0',
+    updateTime: 1720736417660,
+    ...overrides,
+});
+
+const expectedPositionRisk = {
+    marketType: 'futures',
+    symbol: 'BTCUSDT',
+    positionSide: 'BOTH',
+    positionAmt: '30.000',
+    entryPrice: '0.385000',
+    breakEvenPrice: '0.385077',
+    markPrice: '0.41047590',
+    unRealizedProfit: '0.76427700',
+    liquidationPrice: '0',
+    isolatedMargin: '0.00000000',
+    notional: '12.31427700',
+    marginAsset: 'USDT',
+    isolatedWallet: '0',
+    initialMargin: '0.61571385',
+    maintMargin: '0.08004280',
+    positionInitialMargin: '0.61571385',
+    openOrderInitialMargin: '0',
+    adl: 2,
+    updateTime: 1720736417660,
 };
 
 describe('normalizeFuturesExchangeInfo', () => {
@@ -507,6 +556,283 @@ describe('normalizeFuturesFundingState', () => {
     });
 });
 
+describe('normalizeFuturesPositionRisk', () => {
+    it('normalizes the official V3 one-way response without changing decimal strings', () => {
+        const source = [makePositionRisk()];
+        const result = normalizeFuturesPositionRisk(source, 'BTCUSDT', 'BOTH');
+
+        expect(result).toEqual(expectedPositionRisk);
+        expect(result.positionAmt).not.toBe('30');
+        expect(result.entryPrice).not.toBe('0.385');
+        expect(result.markPrice).not.toBe('0.4104759');
+        expect(result.unRealizedProfit).not.toBe('0.764277');
+        expect(result.updateTime).toBe(1720736417660);
+        expect(result).not.toHaveProperty('bidNotional');
+        expect(result).not.toHaveProperty('askNotional');
+    });
+
+    it('models and selects the official V3 LONG and SHORT hedge-mode identities', () => {
+        const longPosition = makePositionRisk({
+            positionSide: 'LONG',
+            positionAmt: '30.000',
+        });
+        const shortPosition = makePositionRisk({
+            positionSide: 'SHORT',
+            positionAmt: '-10.000',
+            entryPrice: '70.92841000',
+            breakEvenPrice: '70.900038636',
+            unRealizedProfit: '21.20817624',
+            liquidationPrice: '2260.56757210',
+            notional: '-49.72023376',
+            updateTime: 1708943511656,
+        });
+        const source = [longPosition, shortPosition];
+
+        expect(normalizeFuturesPositionRisk(source, 'BTCUSDT', 'LONG')).toEqual({
+            ...expectedPositionRisk,
+            positionSide: 'LONG',
+        });
+        expect(normalizeFuturesPositionRisk(source, 'BTCUSDT', 'SHORT')).toEqual({
+            ...expectedPositionRisk,
+            positionSide: 'SHORT',
+            positionAmt: '-10.000',
+            entryPrice: '70.92841000',
+            breakEvenPrice: '70.900038636',
+            unRealizedProfit: '21.20817624',
+            liquidationPrice: '2260.56757210',
+            notional: '-49.72023376',
+            updateTime: 1708943511656,
+        });
+    });
+
+    it('selects the requested symbol and side independently of response order', () => {
+        const source = [
+            makePositionRisk({
+                symbol: 'ETHUSDT',
+                positionSide: 'LONG',
+                marginAsset: 'USDT',
+            }),
+            makePositionRisk({
+                positionSide: 'SHORT',
+                positionAmt: '-10.000',
+                notional: '-4.10475900',
+            }),
+            makePositionRisk({ positionSide: 'LONG' }),
+        ];
+
+        expect(normalizeFuturesPositionRisk(source, 'BTCUSDT', 'SHORT')).toEqual({
+            ...expectedPositionRisk,
+            positionSide: 'SHORT',
+            positionAmt: '-10.000',
+            notional: '-4.10475900',
+        });
+    });
+
+    it('accepts a single hedge-side identity without requiring its counterpart', () => {
+        const source = [makePositionRisk({ positionSide: 'SHORT' })];
+
+        expect(normalizeFuturesPositionRisk(source, 'BTCUSDT', 'SHORT')).toEqual({
+            ...expectedPositionRisk,
+            positionSide: 'SHORT',
+        });
+    });
+
+    it.each([
+        ['an empty response', [], 'BTCUSDT'],
+        ['a response with a different symbol', [makePositionRisk({ symbol: 'ETHUSDT' })], 'BTCUSDT'],
+        ['a multi-symbol response without the requested symbol', [
+            makePositionRisk({ symbol: 'ETHUSDT' }),
+            makePositionRisk({ symbol: 'BNBUSDT' }),
+        ], 'BTCUSDT'],
+        ['a case-mismatched requested symbol', [makePositionRisk()], 'btcusdt'],
+    ])('fails deterministically when the requested symbol is unavailable in %s', (
+        _label,
+        payload,
+        requestedSymbol,
+    ) => {
+        expect(() => normalizeFuturesPositionRisk(
+            payload,
+            requestedSymbol,
+            'BOTH',
+        )).toThrowError(new FuturesPositionRiskError(
+            FUTURES_POSITION_RISK_ERROR_CODES.SYMBOL_UNAVAILABLE,
+            `Futures symbol "${requestedSymbol}" is unavailable in position-risk response`,
+        ));
+    });
+
+    it.each([
+        ['a one-way response when LONG is requested', [makePositionRisk()], 'LONG'],
+        ['a hedge response when BOTH is requested', [
+            makePositionRisk({ positionSide: 'LONG' }),
+            makePositionRisk({ positionSide: 'SHORT' }),
+        ], 'BOTH'],
+        ['a LONG-only response when SHORT is requested', [
+            makePositionRisk({ positionSide: 'LONG' }),
+        ], 'SHORT'],
+    ])('fails deterministically when the requested side is unavailable in %s', (
+        _label,
+        payload,
+        requestedPositionSide,
+    ) => {
+        expect(() => normalizeFuturesPositionRisk(
+            payload,
+            'BTCUSDT',
+            requestedPositionSide,
+        )).toThrowError(new FuturesPositionRiskError(
+            FUTURES_POSITION_RISK_ERROR_CODES.POSITION_SIDE_UNAVAILABLE,
+            `Futures position side "${requestedPositionSide}" is unavailable for symbol "BTCUSDT" in position-risk response`,
+        ));
+    });
+
+    it.each([null, 123, '', '   '])(
+        'fails deterministically for an invalid requested symbol %#',
+        (symbol) => {
+            expect(() => normalizeFuturesPositionRisk(
+                [makePositionRisk()],
+                symbol,
+                'BOTH',
+            )).toThrowError(new FuturesPositionRiskError(
+                FUTURES_POSITION_RISK_ERROR_CODES.INVALID_SYMBOL,
+                'Futures symbol must be a non-empty string',
+            ));
+        },
+    );
+
+    it.each([undefined, null, '', 'both', 'BUY', 123])(
+        'fails deterministically for an invalid requested position side %#',
+        (positionSide) => {
+            expect(() => normalizeFuturesPositionRisk(
+                [makePositionRisk()],
+                'BTCUSDT',
+                positionSide,
+            )).toThrowError(new FuturesPositionRiskError(
+                FUTURES_POSITION_RISK_ERROR_CODES.INVALID_POSITION_SIDE,
+                'Futures position side must be one of BOTH, LONG, or SHORT',
+            ));
+        },
+    );
+
+    it.each([
+        ['a null payload', null],
+        ['an object instead of the documented array', makePositionRisk()],
+        ['a scalar payload', 'BTCUSDT'],
+        ['a missing symbol identity', [makePositionRisk({ symbol: undefined })]],
+        ['a non-string symbol identity', [makePositionRisk({ symbol: 123 })]],
+        ['a missing response-side identity', [makePositionRisk({ positionSide: undefined })]],
+        ['an unsupported response-side identity', [makePositionRisk({ positionSide: 'BUY' })]],
+        ['a malformed unrelated candidate', [makePositionRisk(), null]],
+        ['mixed one-way and hedge identities for one symbol', [
+            makePositionRisk(),
+            makePositionRisk({ positionSide: 'LONG' }),
+        ]],
+        ['mixed one-way and hedge identities across symbols', [
+            makePositionRisk({ symbol: 'ETHUSDT', positionSide: 'LONG' }),
+            makePositionRisk(),
+        ]],
+        ['a duplicate non-requested hedge identity', [
+            makePositionRisk({ positionSide: 'LONG' }),
+            makePositionRisk({ positionSide: 'SHORT' }),
+            makePositionRisk({ positionSide: 'SHORT' }),
+        ]],
+        ['a duplicate composite identity for another symbol', [
+            makePositionRisk({ symbol: 'ETHUSDT' }),
+            makePositionRisk({ symbol: 'ETHUSDT' }),
+            makePositionRisk(),
+        ]],
+        ['a missing position amount', [makePositionRisk({ positionAmt: undefined })]],
+        ['a numeric entry price', [makePositionRisk({ entryPrice: 0.385 })]],
+        ['a blank break-even price', [makePositionRisk({ breakEvenPrice: '   ' })]],
+        ['a missing mark price', [makePositionRisk({ markPrice: undefined })]],
+        ['a numeric unrealized profit', [makePositionRisk({ unRealizedProfit: 0.764277 })]],
+        ['a missing liquidation price', [makePositionRisk({ liquidationPrice: undefined })]],
+        ['a numeric isolated margin', [makePositionRisk({ isolatedMargin: 0 })]],
+        ['a missing notional', [makePositionRisk({ notional: undefined })]],
+        ['a blank margin asset', [makePositionRisk({ marginAsset: '   ' })]],
+        ['a missing isolated wallet', [makePositionRisk({ isolatedWallet: undefined })]],
+        ['a numeric initial margin', [makePositionRisk({ initialMargin: 0.61571385 })]],
+        ['a missing maintenance margin', [makePositionRisk({ maintMargin: undefined })]],
+        ['a blank position initial margin', [makePositionRisk({
+            positionInitialMargin: '',
+        })]],
+        ['a numeric open-order initial margin', [makePositionRisk({
+            openOrderInitialMargin: 0,
+        })]],
+        ['a string ADL rank', [makePositionRisk({ adl: '2' })]],
+        ['a negative ADL rank', [makePositionRisk({ adl: -1 })]],
+        ['a fractional ADL rank', [makePositionRisk({ adl: 1.5 })]],
+        ['an unsafe ADL rank', [makePositionRisk({
+            adl: Number.MAX_SAFE_INTEGER + 1,
+        })]],
+        ['a string update time', [makePositionRisk({ updateTime: '1720736417660' })]],
+        ['a fractional update time', [makePositionRisk({
+            updateTime: 1720736417660.5,
+        })]],
+        ['a negative update time', [makePositionRisk({ updateTime: -1 })]],
+        ['an unsafe update time', [makePositionRisk({
+            updateTime: Number.MAX_SAFE_INTEGER + 1,
+        })]],
+        ['duplicate symbol and side identities', [makePositionRisk(), makePositionRisk()]],
+    ])('fails deterministically for %s', (_label, payload) => {
+        expect(() => normalizeFuturesPositionRisk(
+            payload,
+            'BTCUSDT',
+            'BOTH',
+        )).toThrowError(new FuturesPositionRiskError(
+            FUTURES_POSITION_RISK_ERROR_CODES.MALFORMED_RESPONSE,
+            'Malformed futures position-risk response',
+        ));
+    });
+
+    it('preserves zero as a valid normalizer-policy update timestamp', () => {
+        expect(normalizeFuturesPositionRisk(
+            [makePositionRisk({ updateTime: 0 })],
+            'BTCUSDT',
+            'BOTH',
+        ).updateTime).toBe(0);
+    });
+
+    it('does not mutate the source response or return the selected source object', () => {
+        const source = [
+            makePositionRisk({ symbol: 'ETHUSDT', positionSide: 'LONG' }),
+            makePositionRisk({ positionSide: 'LONG' }),
+            makePositionRisk({ positionSide: 'SHORT' }),
+        ];
+        const snapshot = structuredClone(source);
+
+        const result = normalizeFuturesPositionRisk(source, 'BTCUSDT', 'LONG');
+
+        expect(source).toEqual(snapshot);
+        expect(result).not.toBe(source[1]);
+        expect(result).toEqual({
+            ...expectedPositionRisk,
+            positionSide: 'LONG',
+        });
+    });
+
+    it('keeps all completed futures contracts unchanged', () => {
+        const exchangeInfo = makeExchangeInfo(makeFuturesSymbol());
+        const premiumIndex = makeMarkPrice();
+
+        expect(normalizeFuturesExchangeInfo(exchangeInfo, 'BTCUSDT')).toEqual({
+            marketType: 'futures',
+            symbol: 'BTCUSDT',
+            pair: 'BTCUSDT',
+            contractType: 'PERPETUAL',
+            status: 'TRADING',
+            assets: { base: 'BTC', quote: 'USDT', margin: 'USDT' },
+            filters: expectedFilters,
+            supportedOrderTypes: ['LIMIT', 'MARKET', 'STOP'],
+            supportedTimeInForce: ['GTC', 'IOC', 'FOK', 'GTX'],
+        });
+        expect(normalizeFuturesMarkPrice(premiumIndex, 'BTCUSDT')).toEqual(
+            expectedMarkPrice,
+        );
+        expect(normalizeFuturesFundingState(premiumIndex, 'BTCUSDT')).toEqual(
+            expectedFundingState,
+        );
+    });
+});
+
 describe('FuturesTradingAdapter', () => {
     it('loads and unwraps official-client-style exchange metadata at the adapter boundary', async () => {
         const source = makeExchangeInfo(makeFuturesSymbol());
@@ -589,6 +915,41 @@ describe('FuturesTradingAdapter', () => {
         );
     });
 
+    it('loads and unwraps V3 position risk at the adapter boundary', async () => {
+        const data = vi.fn().mockResolvedValue([makePositionRisk()]);
+        const transport = {
+            getPositionRiskV3: vi.fn().mockResolvedValue({ data }),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getPositionRisk('BTCUSDT', 'BOTH')).resolves.toEqual(
+            expectedPositionRisk,
+        );
+        expect(transport.getPositionRiskV3).toHaveBeenCalledWith({
+            symbol: 'BTCUSDT',
+        });
+        expect(data).toHaveBeenCalledWith();
+    });
+
+    it('accepts raw V3 hedge positions from the injected read-only transport', async () => {
+        const transport = {
+            getPositionRiskV3: vi.fn().mockResolvedValue([
+                makePositionRisk({ positionSide: 'LONG' }),
+                makePositionRisk({
+                    positionSide: 'SHORT',
+                    positionAmt: '-10.000',
+                }),
+            ]),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getPositionRisk('BTCUSDT', 'SHORT')).resolves.toEqual({
+            ...expectedPositionRisk,
+            positionSide: 'SHORT',
+            positionAmt: '-10.000',
+        });
+    });
+
     it('propagates transport errors without relabeling them as normalization failures', async () => {
         const transportError = new Error('futures transport unavailable');
         const transport = {
@@ -655,6 +1016,32 @@ describe('FuturesTradingAdapter', () => {
         await expect(adapter.getFundingState('BTCUSDT')).rejects.toBe(responseError);
     });
 
+    it('preserves position-risk transport error identity', async () => {
+        const transportError = new Error('futures position-risk transport unavailable');
+        const transport = {
+            getPositionRiskV3: vi.fn().mockRejectedValue(transportError),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getPositionRisk('BTCUSDT', 'BOTH')).rejects.toBe(
+            transportError,
+        );
+    });
+
+    it('preserves position-risk response-body error identity', async () => {
+        const responseError = new Error('futures position-risk response body unavailable');
+        const transport = {
+            getPositionRiskV3: vi.fn().mockResolvedValue({
+                data: vi.fn().mockRejectedValue(responseError),
+            }),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getPositionRisk('BTCUSDT', 'BOTH')).rejects.toBe(
+            responseError,
+        );
+    });
+
     it('exposes no futures execution surface', () => {
         const adapter = new FuturesTradingAdapter({ transport: {} });
         expect(Object.getOwnPropertyNames(FuturesTradingAdapter.prototype)).toEqual([
@@ -662,6 +1049,7 @@ describe('FuturesTradingAdapter', () => {
             'getExchangeInfo',
             'getMarkPrice',
             'getFundingState',
+            'getPositionRisk',
         ]);
 
         const forbiddenExecutionMethods = [
