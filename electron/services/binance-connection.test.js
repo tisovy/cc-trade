@@ -1462,6 +1462,164 @@ describe('setupBinanceConnection user-data orchestration', () => {
         }
     });
 
+    it('drops a listen-key creation retry waiting in RateLimiter after final renderer teardown', async () => {
+        const retryDelay = 1000;
+        const reconnectDelay = 5 * 1000;
+        const keepAliveDelay = 30 * 60 * 1000;
+        const creationRendererStates = [];
+        const retryableError = Object.assign(
+            new Error('listen-key creation connection reset'),
+            { code: 'ECONNRESET' },
+        );
+
+        moduleMocks.sendRequest.mockImplementation(async (path, method) => {
+            if (path === '/api/v3/time' && method === 'GET') {
+                return {
+                    data: vi.fn().mockResolvedValue({ serverTime: Date.now() }),
+                };
+            }
+
+            if (path === '/api/v3/userDataStream' && method === 'POST') {
+                creationRendererStates.push(moduleMocks.rendererConnection.connected);
+                throw retryableError;
+            }
+
+            return { data: vi.fn().mockResolvedValue({}) };
+        });
+
+        const createListenKey = vi.spyOn(
+            SpotTradingAdapter.prototype,
+            'createUserDataStreamListenKey',
+        );
+        const connectUserDataStream = vi.spyOn(
+            SpotTradingAdapter.prototype,
+            'connectUserDataStream',
+        );
+        const renewListenKey = vi.spyOn(
+            SpotTradingAdapter.prototype,
+            'renewUserDataStreamListenKey',
+        );
+        const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+        const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+        const getListenKeyRequests = () => moduleMocks.sendRequest.mock.calls.filter(
+            ([path, method]) => path === '/api/v3/userDataStream' && method === 'POST',
+        );
+        const getRenewalRequests = () => moduleMocks.sendRequest.mock.calls.filter(
+            ([path, method]) => path === '/api/v3/userDataStream' && method === 'PUT',
+        );
+        const getMarketStreamCalls = () => moduleMocks.connect.mock.calls.filter(
+            ([{ stream }]) => stream === '!miniTicker@arr',
+        );
+        const getUserDataStreamCalls = () => moduleMocks.connect.mock.calls.filter(
+            ([{ stream }]) => stream !== '!miniTicker@arr',
+        );
+        const getUserDataIntervals = () => setIntervalSpy.mock.calls.filter(
+            ([, delay]) => delay === keepAliveDelay,
+        );
+        const getRateLimiterRetryTimers = () => setTimeoutSpy.mock.calls.filter(
+            ([, delay]) => delay === retryDelay,
+        );
+        const getRateLimiterRetryWarnings = () => console.warn.mock.calls.filter(
+            ([message]) => (
+                message === 'network error (ECONNRESET), retrying in 1000ms (attempt 1/2)'
+            ),
+        );
+        const getReconnectSchedules = () => console.info.mock.calls.filter(
+            ([message]) => message === 'Scheduling User Data Stream reconnection...',
+        );
+        const getListenKeySuccessLogs = () => console.info.mock.calls.filter(
+            ([message]) => message === 'Listen Key obtained successfully.',
+        );
+        const getListenKeyFailureLogs = () => console.error.mock.calls.filter(
+            ([message]) => (
+                message === 'Failed to obtain listenKey'
+                || message === 'Failed to start User Data Stream:'
+            ),
+        );
+        const expectNoUserDataState = () => {
+            expect(createListenKey).toHaveBeenCalledOnce();
+            expect(getListenKeyRequests()).toHaveLength(1);
+            expect(connectUserDataStream).not.toHaveBeenCalled();
+            expect(getUserDataStreamCalls()).toEqual([]);
+            expect(moduleMocks.userDataSocket.on).not.toHaveBeenCalled();
+            expect(moduleMocks.userDataSocket.handlers.message).toBeUndefined();
+            expect(moduleMocks.userDataSocket.handlers.error).toBeUndefined();
+            expect(moduleMocks.userDataSocket.handlers.close).toBeUndefined();
+            expect(getUserDataIntervals()).toEqual([]);
+            expect(renewListenKey).not.toHaveBeenCalled();
+            expect(getRenewalRequests()).toEqual([]);
+            expect(getReconnectSchedules()).toEqual([]);
+            expect(getListenKeySuccessLogs()).toEqual([]);
+            expect(getListenKeyFailureLogs()).toEqual([]);
+        };
+
+        try {
+            setupBinanceConnection({
+                localWebSocketAccess: { host: '127.0.0.1' },
+            });
+
+            const request = {
+                origin: 'http://localhost:5174',
+                accept: vi.fn(() => moduleMocks.rendererConnection),
+            };
+            moduleMocks.websocketServerHandlers.request(request);
+
+            await flushMicrotasks();
+
+            expect(moduleMocks.rendererConnection.connected).toBe(true);
+            expect(creationRendererStates).toEqual([true]);
+            expect(createListenKey).toHaveBeenCalledOnce();
+            expect(getListenKeyRequests()).toHaveLength(1);
+            expect(getRateLimiterRetryWarnings()).toHaveLength(1);
+            expect(getRateLimiterRetryTimers()).toHaveLength(1);
+            expect(getMarketStreamCalls()).toEqual([
+                [{ stream: '!miniTicker@arr' }],
+            ]);
+            expectNoUserDataState();
+
+            const retryBoundary = Date.now() + retryDelay;
+            moduleMocks.rendererConnection.close();
+            await flushMicrotasks();
+
+            expect(moduleMocks.rendererConnection.connected).toBe(false);
+            expect(moduleMocks.rendererConnection.close).toHaveBeenCalledOnce();
+            expect(moduleMocks.marketSocket.disconnect).toHaveBeenCalledOnce();
+            expect(vi.getTimerCount()).toBe(1);
+
+            await vi.advanceTimersByTimeAsync(retryDelay - 1);
+            await flushMicrotasks();
+
+            expect(Date.now()).toBe(retryBoundary - 1);
+            expect(moduleMocks.rendererConnection.connected).toBe(false);
+            expect(vi.getTimerCount()).toBe(1);
+            expectNoUserDataState();
+
+            await vi.advanceTimersByTimeAsync(1);
+            await flushMicrotasks();
+
+            expect(Date.now()).toBe(retryBoundary);
+            expect(moduleMocks.rendererConnection.connected).toBe(false);
+            expect(creationRendererStates).toEqual([true]);
+            expect(vi.getTimerCount()).toBe(0);
+            expect(getRateLimiterRetryWarnings()).toHaveLength(1);
+            expectNoUserDataState();
+
+            await vi.advanceTimersByTimeAsync(reconnectDelay);
+            await flushMicrotasks();
+            await vi.advanceTimersByTimeAsync(keepAliveDelay);
+            await flushMicrotasks();
+
+            expect(moduleMocks.rendererConnection.connected).toBe(false);
+            expect(creationRendererStates).toEqual([true]);
+            expect(getMarketStreamCalls()).toHaveLength(1);
+            expect(getRateLimiterRetryWarnings()).toHaveLength(1);
+            expectNoUserDataState();
+        } finally {
+            setIntervalSpy.mockRestore();
+            setTimeoutSpy.mockRestore();
+        }
+    });
+
     it('drops a listen key created after final renderer teardown', async () => {
         const listenKey = 'late-listen-key-after-final-renderer-teardown';
         const keepAliveDelay = 30 * 60 * 1000;

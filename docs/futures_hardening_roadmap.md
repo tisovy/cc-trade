@@ -166,6 +166,25 @@ Acceptance:
 - Spot behavior remains identical from the user's perspective.
 - Order/balance/history parsing is easier to test in isolation.
 
+Phase status: **Complete (2026-07-10).**
+
+Exit audit:
+
+- [x] Verified that `SpotTradingAdapter` owns the declared spot balances, filters, open orders, history, placement/cancellation, listen-key creation/renewal, user-data normalization, server time, account-refresh metadata, and user-data WebSocket creation boundaries.
+- [x] Verified that remaining direct Binance behavior in `binance-connection.js` is limited to intentional public market-data transport, client composition, mock data, and service/renderer orchestration.
+- [x] Verified that typed and legacy commands converge on the adapter-backed handlers, futures commands remain rejected, and `LIMIT/GTC`, renderer payloads, `10/3/10` refresh weights, sequential refresh isolation, and the renderer's `0.999` quantity reduction remain unchanged.
+- [x] Verified listen-key weight `1`, RateLimiter's two active-renderer retries at exact `1000ms` / `2000ms` delays, outer user-data retries at `3s` / `6s` / `9s` / `12s` / `15s`, exact five-second reconnects, prior-socket nulling and teardown ordering, interval clearing, `safeDisconnect`, and zero-renderer guards.
+- [x] Added service coverage proving that a listen-key POST which fails with `ECONNRESET` cannot retry after final-renderer teardown while its exact `1000ms` RateLimiter delay is pending. No second adapter/POST call, socket, handlers, keep-alive, renewal, reconnect, or false success/failure log can appear at the boundary or after later five-second and 30-minute advances.
+- [x] Passed the Phase 4 completion matrix: service `9/9` at both normal and ambient `LOG_LEVEL=error` invocation, adapter `21/21`, RateLimiter `20/20`, shuffled non-isolated service+adapter `30/30`, full suite `223 passed / 2 skipped`, lint, and build.
+
+Deferred general hardening (not Phase 4 acceptance blockers):
+
+- Renderer-generation cancellation after final teardown and a new session is a separate lifecycle policy; current guards and replacement ordering preserve the Phase 4 ownership contract.
+- Cross-generation out-of-order user-data socket resolution is the highest-priority deferred lifecycle risk because a stale generation could overwrite newer shared socket state; it requires explicit generation/attempt ownership rather than an adapter-boundary change.
+- Queued renderer-scoped account-refresh REST work can consume rate-limit weight after teardown, but disconnected renderer delivery is already suppressed; cancellation is later efficiency hardening.
+- Renewal retry/exhaustion policy deserves exact service-boundary coverage, while current per-attempt ownership checks, weight `1`, and RateLimiter delays already preserve Phase 4 behavior.
+- Higher-risk trading and market-subscription orchestration should gain broader end-to-end service coverage before those flows are changed; current UI, validation, adapter, and channel-manager contracts establish Phase 4 acceptance.
+
 ## Phase 5: Futures Read-Only Mode
 
 Goal: add futures data without allowing futures execution yet.
@@ -270,20 +289,19 @@ Suggested UI order:
 
 ## Start Here Next Session
 
-Continue Phase 4 with the next focused service-level regression checkpoint:
+Begin Phase 5 with the first read-only futures boundary checkpoint:
 
-**Prove a user-data listen-key creation retry waiting inside `RateLimiter` cannot issue another POST after final-renderer teardown.**
+**Define the futures domain contract and add the first isolated `FuturesTradingAdapter` exchange-metadata/filter normalization seam.**
 
 Implementation entry point:
 
-- `electron/services/binance-connection.test.js`
+- new `electron/services/futures-trading-adapter.js` and focused unit tests;
+- `docs/futures_hardening_roadmap.md` if the endpoint/response contract needs clarification.
 
 Expected scope:
 
-- Let the first listen-key creation call issue its POST while a renderer is active, reject it with a retryable network error, and prove the exact first `RateLimiter` retry delay of `1000ms` is pending.
-- Close the final renderer during that retry delay, then cross the exact boundary and prove the retry rechecks ownership before the adapter: `createUserDataStreamListenKey` and POST counts remain at one.
-- Prove the intentional ownership skip emits no false listen-key success or service-level creation-failure log and cannot connect a user-data socket, acquire handlers or a 30-minute interval, renew, or schedule a user-data reconnect; keep `!miniTicker@arr` independently identified.
-- Prove later five-second and 30-minute advances cannot create user-data state.
-- Expect test-only coverage: do not change production unless the regression contradicts the existing closure semantics.
-- Preserve creation and renewal weight `1`, active-renderer internal retry count and exact `1000ms` / `2000ms` delays, five-second reconnect behavior, prior-socket teardown ordering, renderer payloads, adapter operation weights, and current `0.999` quantity reduction.
-- Do not broaden into a retry matrix, renderer-generation ownership, renewal-failure behavior, trading flows, market-data behavior, UI work, or production refactoring. Do not start Phase 5.
+- Specify distinct spot and futures instrument/domain shapes before service or UI wiring.
+- Select the read-only futures testnet/mock client boundary and normalize only exchange metadata and futures filters in this first seam.
+- Keep the adapter free of order-placement, cancellation, leverage-changing, or other execution methods; production futures execution must remain rejected.
+- Prove normalization and error contracts with isolated adapter tests before adding live service orchestration or visible UI.
+- Preserve all completed spot behavior and defer the futures mode indicator/position panel to later reviewed Phase 5 checkpoints.
