@@ -1045,10 +1045,25 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
                     try {
                         logger.info("Starting User Data Stream setup...");
 
+                        let listenKeyCreationSkipped = false;
                         const listenKey = await rateLimiter.execute(
-                            () => spotTradingAdapter.createUserDataStreamListenKey(),
+                            () => {
+                                // A reconnect can lose its final renderer while waiting
+                                // for rate-limiter spacing. Recheck ownership immediately
+                                // before issuing the POST so teardown cannot create a
+                                // renderer-less listen key.
+                                if (rendererConnections.size === 0) {
+                                    listenKeyCreationSkipped = true;
+                                    return undefined;
+                                }
+                                return spotTradingAdapter.createUserDataStreamListenKey();
+                            },
                             1
                         );
+                        if (listenKeyCreationSkipped) {
+                            userDataReconnecting = false;
+                            return;
+                        }
                         if (!listenKey) {
                             logger.error("Failed to obtain listenKey");
                             userDataReconnecting = false;

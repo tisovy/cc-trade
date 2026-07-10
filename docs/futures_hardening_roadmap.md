@@ -270,19 +270,20 @@ Suggested UI order:
 
 ## Start Here Next Session
 
-Continue Phase 4 with the next focused service-level checkpoint:
+Continue Phase 4 with the next focused service-level regression checkpoint:
 
-**Add service-level ownership coverage preventing a rate-limited user-data listen-key creation callback from issuing its POST after final-renderer teardown.**
+**Prove a user-data listen-key creation retry waiting inside `RateLimiter` cannot issue another POST after final-renderer teardown.**
 
-Implementation entry points:
+Implementation entry point:
 
 - `electron/services/binance-connection.test.js`
-- `electron/services/binance-connection.js` only if the regression proves a minimal ownership correction is required
 
 Expected scope:
 
-- Deterministically pause an already-fired listen-key creation callback inside the existing rate limiter, close the final renderer, then release the wait and prove it cannot issue a stale POST or create user-data state.
-- Prove later five-second and 30-minute advances cannot resurrect user-data state, while market-stream calls remain independently identified.
-- Preserve creation and renewal weight `1`, exact retry counts and delays, prior-socket teardown ordering, renderer payloads, adapter operation weights, and current `0.999` quantity reduction.
-- Do not broaden into retry matrices, generation-ownership scenarios, renewal-failure behavior, trading flows, market-data behavior, UI work, or production refactoring.
-- Do not start Phase 5.
+- Let the first listen-key creation call issue its POST while a renderer is active, reject it with a retryable network error, and prove the exact first `RateLimiter` retry delay of `1000ms` is pending.
+- Close the final renderer during that retry delay, then cross the exact boundary and prove the retry rechecks ownership before the adapter: `createUserDataStreamListenKey` and POST counts remain at one.
+- Prove the intentional ownership skip emits no false listen-key success or service-level creation-failure log and cannot connect a user-data socket, acquire handlers or a 30-minute interval, renew, or schedule a user-data reconnect; keep `!miniTicker@arr` independently identified.
+- Prove later five-second and 30-minute advances cannot create user-data state.
+- Expect test-only coverage: do not change production unless the regression contradicts the existing closure semantics.
+- Preserve creation and renewal weight `1`, active-renderer internal retry count and exact `1000ms` / `2000ms` delays, five-second reconnect behavior, prior-socket teardown ordering, renderer payloads, adapter operation weights, and current `0.999` quantity reduction.
+- Do not broaden into a retry matrix, renderer-generation ownership, renewal-failure behavior, trading flows, market-data behavior, UI work, or production refactoring. Do not start Phase 5.
