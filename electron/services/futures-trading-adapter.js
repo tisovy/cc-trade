@@ -42,6 +42,14 @@ export const FUTURES_ALGO_OPEN_ORDERS_ERROR_CODES = Object.freeze({
     SYMBOL_UNAVAILABLE: FUTURES_EXCHANGE_INFO_ERROR_CODES.SYMBOL_UNAVAILABLE,
 });
 
+export const FUTURES_ALGO_ORDER_ERROR_CODES = Object.freeze({
+    INVALID_SYMBOL: FUTURES_EXCHANGE_INFO_ERROR_CODES.INVALID_SYMBOL,
+    INVALID_LOOKUP_IDENTITY: 'INVALID_FUTURES_ALGO_ORDER_LOOKUP_IDENTITY',
+    LOOKUP_IDENTITY_MISMATCH: 'FUTURES_ALGO_ORDER_LOOKUP_IDENTITY_MISMATCH',
+    MALFORMED_RESPONSE: 'MALFORMED_FUTURES_ALGO_ORDER',
+    SYMBOL_UNAVAILABLE: FUTURES_EXCHANGE_INFO_ERROR_CODES.SYMBOL_UNAVAILABLE,
+});
+
 export class FuturesExchangeInfoError extends Error {
     constructor(code, message) {
         super(message);
@@ -98,6 +106,14 @@ export class FuturesAlgoOpenOrdersError extends Error {
     }
 }
 
+export class FuturesAlgoOrderError extends Error {
+    constructor(code, message) {
+        super(message);
+        this.name = 'FuturesAlgoOrderError';
+        this.code = code;
+    }
+}
+
 const isRecord = (value) => value !== null
     && typeof value === 'object'
     && !Array.isArray(value);
@@ -137,6 +153,11 @@ const malformedOpenOrdersError = () => new FuturesOpenOrdersError(
 const malformedAlgoOpenOrdersError = () => new FuturesAlgoOpenOrdersError(
     FUTURES_ALGO_OPEN_ORDERS_ERROR_CODES.MALFORMED_RESPONSE,
     'Malformed futures algo-open-orders response',
+);
+
+const malformedAlgoOrderError = () => new FuturesAlgoOrderError(
+    FUTURES_ALGO_ORDER_ERROR_CODES.MALFORMED_RESPONSE,
+    'Malformed futures algo-order response',
 );
 
 const FUTURES_POSITION_SIDES = new Set(['BOTH', 'LONG', 'SHORT']);
@@ -800,6 +821,151 @@ export const normalizeFuturesAlgoOpenOrders = (
     });
 };
 
+const requireAlgoOrderExpectedSymbol = (expectedSymbol) => {
+    if (!isNonEmptyString(expectedSymbol)) {
+        throw new FuturesAlgoOrderError(
+            FUTURES_ALGO_ORDER_ERROR_CODES.INVALID_SYMBOL,
+            'Futures symbol must be a non-empty string',
+        );
+    }
+};
+
+const normalizeAlgoOrderLookupIdentity = (lookupIdentity) => {
+    if (!isRecord(lookupIdentity)) {
+        throw new FuturesAlgoOrderError(
+            FUTURES_ALGO_ORDER_ERROR_CODES.INVALID_LOOKUP_IDENTITY,
+            'Futures algo-order lookup must contain exactly one safe-integer algoId or non-empty clientAlgoId',
+        );
+    }
+
+    const hasAlgoId = lookupIdentity.algoId !== undefined;
+    const hasClientAlgoId = lookupIdentity.clientAlgoId !== undefined;
+    const hasExactlyOneIdentity = hasAlgoId !== hasClientAlgoId;
+    const hasValidAlgoId = !hasAlgoId
+        || (Number.isSafeInteger(lookupIdentity.algoId) && lookupIdentity.algoId >= 0);
+    const hasValidClientAlgoId = !hasClientAlgoId
+        || isNonEmptyString(lookupIdentity.clientAlgoId);
+
+    if (!hasExactlyOneIdentity || !hasValidAlgoId || !hasValidClientAlgoId) {
+        throw new FuturesAlgoOrderError(
+            FUTURES_ALGO_ORDER_ERROR_CODES.INVALID_LOOKUP_IDENTITY,
+            'Futures algo-order lookup must contain exactly one safe-integer algoId or non-empty clientAlgoId',
+        );
+    }
+
+    if (hasAlgoId) return { algoId: lookupIdentity.algoId };
+    return { clientAlgoId: lookupIdentity.clientAlgoId };
+};
+
+/**
+ * Normalize one identifier-scoped USDⓈ-M algo-order query response.
+ * The expected symbol remains a local identity guard because the official query
+ * transport accepts only one algo identifier, not a symbol.
+ */
+export const normalizeFuturesAlgoOrder = (
+    algoOrderResponse,
+    expectedSymbol,
+    lookupIdentity,
+) => {
+    requireAlgoOrderExpectedSymbol(expectedSymbol);
+    const normalizedLookupIdentity = normalizeAlgoOrderLookupIdentity(lookupIdentity);
+
+    if (!isRecord(algoOrderResponse)
+        || !isNonEmptyString(algoOrderResponse.symbol)
+        || !Number.isSafeInteger(algoOrderResponse.algoId)
+        || algoOrderResponse.algoId < 0
+        || !isNonEmptyString(algoOrderResponse.clientAlgoId)) {
+        throw malformedAlgoOrderError();
+    }
+    if (algoOrderResponse.symbol !== expectedSymbol) {
+        throw new FuturesAlgoOrderError(
+            FUTURES_ALGO_ORDER_ERROR_CODES.SYMBOL_UNAVAILABLE,
+            `Futures symbol "${expectedSymbol}" is unavailable in algo-order response`,
+        );
+    }
+
+    const [lookupField, lookupValue] = Object.entries(normalizedLookupIdentity)[0];
+    if (algoOrderResponse[lookupField] !== lookupValue) {
+        throw new FuturesAlgoOrderError(
+            FUTURES_ALGO_ORDER_ERROR_CODES.LOOKUP_IDENTITY_MISMATCH,
+            'Futures algo-order response does not match the requested lookup identity',
+        );
+    }
+
+    const decimalFields = ['quantity', 'actualPrice', 'triggerPrice', 'price'];
+    const nonEmptyStringFields = [
+        'algoType',
+        'orderType',
+        'side',
+        'positionSide',
+        'timeInForce',
+        'algoStatus',
+        'selfTradePreventionMode',
+        'workingType',
+        'priceMatch',
+    ];
+    const emptyStringAllowedFields = ['actualOrderId', 'tpOrderType'];
+    const timestampFields = ['createTime', 'updateTime', 'triggerTime', 'goodTillDate'];
+    const booleanFields = ['closePosition', 'priceProtect', 'reduceOnly'];
+    const hasActualType = algoOrderResponse.actualType !== undefined;
+    const hasActualQty = algoOrderResponse.actualQty !== undefined;
+
+    if (decimalFields.some((field) => !isNonEmptyString(algoOrderResponse[field]))
+        || nonEmptyStringFields.some(
+            (field) => !isNonEmptyString(algoOrderResponse[field]),
+        )
+        || emptyStringAllowedFields.some(
+            (field) => typeof algoOrderResponse[field] !== 'string'
+                || (algoOrderResponse[field].length > 0
+                    && algoOrderResponse[field].trim().length === 0),
+        )
+        || timestampFields.some(
+            (field) => !Number.isSafeInteger(algoOrderResponse[field])
+                || algoOrderResponse[field] < 0,
+        )
+        || booleanFields.some(
+            (field) => typeof algoOrderResponse[field] !== 'boolean',
+        )
+        || (algoOrderResponse.icebergQuantity !== null
+            && !isNonEmptyString(algoOrderResponse.icebergQuantity))
+        || (hasActualType && !isNonEmptyString(algoOrderResponse.actualType))
+        || (hasActualQty && !isNonEmptyString(algoOrderResponse.actualQty))) {
+        throw malformedAlgoOrderError();
+    }
+
+    return {
+        marketType: 'futures',
+        algoId: algoOrderResponse.algoId,
+        clientAlgoId: algoOrderResponse.clientAlgoId,
+        algoType: algoOrderResponse.algoType,
+        orderType: algoOrderResponse.orderType,
+        symbol: algoOrderResponse.symbol,
+        side: algoOrderResponse.side,
+        positionSide: algoOrderResponse.positionSide,
+        timeInForce: algoOrderResponse.timeInForce,
+        quantity: algoOrderResponse.quantity,
+        algoStatus: algoOrderResponse.algoStatus,
+        actualOrderId: algoOrderResponse.actualOrderId,
+        actualPrice: algoOrderResponse.actualPrice,
+        ...(hasActualType ? { actualType: algoOrderResponse.actualType } : {}),
+        ...(hasActualQty ? { actualQty: algoOrderResponse.actualQty } : {}),
+        triggerPrice: algoOrderResponse.triggerPrice,
+        price: algoOrderResponse.price,
+        icebergQuantity: algoOrderResponse.icebergQuantity,
+        tpOrderType: algoOrderResponse.tpOrderType,
+        selfTradePreventionMode: algoOrderResponse.selfTradePreventionMode,
+        workingType: algoOrderResponse.workingType,
+        priceMatch: algoOrderResponse.priceMatch,
+        closePosition: algoOrderResponse.closePosition,
+        priceProtect: algoOrderResponse.priceProtect,
+        reduceOnly: algoOrderResponse.reduceOnly,
+        createTime: algoOrderResponse.createTime,
+        updateTime: algoOrderResponse.updateTime,
+        triggerTime: algoOrderResponse.triggerTime,
+        goodTillDate: algoOrderResponse.goodTillDate,
+    };
+};
+
 const readExchangeInfoData = async (response) => {
     if (typeof response?.data === 'function') return response.data();
     return response;
@@ -831,6 +997,11 @@ const readOpenOrdersData = async (response) => {
 };
 
 const readAlgoOpenOrdersData = async (response) => {
+    if (typeof response?.data === 'function') return response.data();
+    return response;
+};
+
+const readAlgoOrderData = async (response) => {
     if (typeof response?.data === 'function') return response.data();
     return response;
 };
@@ -882,5 +1053,17 @@ export class FuturesTradingAdapter {
         const response = await this.transport.getOpenAlgoOrders({ symbol });
         const algoOpenOrders = await readAlgoOpenOrdersData(response);
         return normalizeFuturesAlgoOpenOrders(algoOpenOrders, symbol);
+    }
+
+    async getAlgoOrder(expectedSymbol, lookupIdentity) {
+        requireAlgoOrderExpectedSymbol(expectedSymbol);
+        const normalizedLookupIdentity = normalizeAlgoOrderLookupIdentity(lookupIdentity);
+        const response = await this.transport.queryAlgoOrder(normalizedLookupIdentity);
+        const algoOrder = await readAlgoOrderData(response);
+        return normalizeFuturesAlgoOrder(
+            algoOrder,
+            expectedSymbol,
+            normalizedLookupIdentity,
+        );
     }
 }

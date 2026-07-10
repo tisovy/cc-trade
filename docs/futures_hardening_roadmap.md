@@ -210,6 +210,7 @@ Progress:
 - [x] Add isolated USDⓈ-M V3 account-balance normalization behind the injected read-only futures transport.
 - [x] Add isolated symbol-scoped USDⓈ-M current-open-order normalization behind the injected read-only futures transport.
 - [x] Add isolated symbol-scoped USDⓈ-M current-algo-open-order normalization behind the injected read-only futures transport.
+- [x] Add isolated identifier-scoped USDⓈ-M algo-order query normalization behind the injected read-only futures transport.
 
 First checkpoint contract:
 
@@ -461,7 +462,57 @@ Seventh checkpoint rules and audit:
 - No futures client, service import, Electron/renderer wiring, WebSocket, history/query, account-wide read, execution method, or dependency was added. Spot behavior remains unchanged, and backend validation still rejects non-spot typed trading commands with `UNSUPPORTED_MARKET_TYPE`.
 - Validation passed: futures adapter `362/362`, spot adapter `21/21`, futures-command rejection suite `10/10`, shuffled non-isolated futures+spot `383/383`, full suite `585 passed / 2 skipped`, lint, and build.
 
-Phase status: **In progress; exchange-metadata, mark/index-price, current-funding, position-risk, account-balance, current-open-order, and current-algo-open-order boundary checkpoints complete (2026-07-10).**
+Eighth checkpoint contract:
+
+```js
+{
+  marketType: "futures",
+  algoId: number,
+  clientAlgoId: string,
+  algoType: string,
+  orderType: string,
+  symbol: string,
+  side: string,
+  positionSide: string,
+  timeInForce: string,
+  quantity: string,
+  algoStatus: string,
+  actualOrderId: string,
+  actualPrice: string,
+  actualType?: string,
+  actualQty?: string,
+  triggerPrice: string,
+  price: string,
+  icebergQuantity: string | null,
+  tpOrderType: string,
+  selfTradePreventionMode: string,
+  workingType: string,
+  priceMatch: string,
+  closePosition: boolean,
+  priceProtect: boolean,
+  reduceOnly: boolean,
+  createTime: number,
+  updateTime: number,
+  triggerTime: number,
+  goodTillDate: number
+}
+```
+
+Eighth checkpoint rules and audit:
+
+- The source is the current official USDⓈ-M Query Algo Order endpoint, signed `GET /fapi/v1/algoOrder` with IP request weight `1`. The endpoint accepts `algoId` or `clientAlgoId` but no symbol parameter; the adapter deliberately applies a stricter exactly-one lookup invariant, retains the expected symbol as a local response guard, and calls only injected `queryAlgoOrder({ algoId })` or `queryAlgoOrder({ clientAlgoId })`.
+- Both adapter entry and pure normalization require a non-empty expected symbol plus exactly one non-negative safe-integer `algoId` or non-empty `clientAlgoId`. Neither, both, invalid identities, and invalid symbols fail deterministically before transport use; unknown lookup keys, the expected symbol, `recvWindow`, and fallback hints never cross the transport boundary.
+- The documented response is one object, never an array. Response symbol matching is exact and case-sensitive, and the returned lookup field must equal the requested identifier without canonicalization. Wrong symbols retain the established unavailable-symbol identity, lookup disagreement has a dedicated stable identity, and malformed response identities or fields have a dedicated algo-order normalization identity.
+- The query contract adds conditionally present `actualType` (after trigger) and `actualQty` (after partial/full fill) while omitting the current-open-algo array's TP/SL price quartet. Each conditional field remains absent when omitted and remains an exact non-empty string when present; their presence is independent and never inferred from status or from each other. Unknown open-array, trailing, and regular-order fields are excluded.
+- `quantity`, `actualPrice`, optional `actualQty`, `triggerPrice`, and `price` remain exact non-empty strings, including lexical scale. `clientAlgoId` and enum-like values remain exact strings, and the documented empty `actualOrderId` and `tpOrderType` values remain empty strings rather than synthetic nulls. Official artifacts disagree between JSON `null` and the literal string `"null"` for `icebergQuantity`, so both representations and decimal strings remain distinct and uncoerced.
+- `algoId`, `createTime`, `updateTime`, `triggerTime`, and `goodTillDate` remain non-negative safe integers, including zero; negative `algoId` rejection is an established adapter hardening invariant because Binance describes it as a self-incrementing identifier but publishes no formal minimum. `closePosition`, `priceProtect`, and `reduceOnly` remain booleans with both values preserved.
+- The pure normalizer does not mutate or return its source object. Raw objects and established official-client-style async `response.data()` bodies are supported, while transport and response-body errors propagate unchanged by identity.
+- Queried algo orders remain strictly separate from regular current-open arrays and current algo-open arrays. The adapter never calls either list transport as a fallback, never borrows their response shapes, and never converts algo identities into regular-order identities.
+- The only adapter surface added is read-only `getAlgoOrder(expectedSymbol, lookupIdentity)`. All seven completed futures contracts remain unchanged, and no balances, positions, or orders are merged into a generic account-state framework.
+- No futures client, service import, Electron/renderer wiring, WebSocket, history, account-wide read, execution method, or dependency was added. Spot behavior remains unchanged, and backend validation still rejects non-spot typed trading commands with `UNSUPPORTED_MARKET_TYPE`.
+- Validation passed: futures adapter `522/522`, spot adapter `21/21`, futures-command rejection suite `10/10`, shuffled non-isolated futures+spot `543/543`, full suite `745 passed / 2 skipped`, lint, and build.
+
+Phase status: **In progress; exchange-metadata, mark/index-price, current-funding, position-risk, account-balance, current-open-order, current-algo-open-order, and identifier-scoped algo-order-query boundary checkpoints complete (2026-07-10).**
 
 UI surface should be minimal:
 
@@ -553,22 +604,22 @@ Suggested UI order:
 
 Continue Phase 5 with the next narrow read-only futures boundary checkpoint:
 
-**Add isolated identifier-scoped USDⓈ-M algo-order query normalization to `FuturesTradingAdapter`.**
+**Add isolated identifier-scoped USDⓈ-M regular-order query normalization to `FuturesTradingAdapter`.**
 
 Implementation entry point:
 
 - existing `electron/services/futures-trading-adapter.js` and focused unit tests;
-- current official Binance USDⓈ-M Query Algo Order documentation before freezing fields, identifier policy, or transport naming.
+- current official Binance USDⓈ-M Query Order documentation before freezing fields, identifier policy, optional-field behavior, or transport naming.
 
 Expected scope:
 
-- Extend only the injected read-only transport boundary and add a pure normalizer for one queried algo order with an explicitly requested expected symbol and exactly one lookup identity.
-- Use only the signed `GET /fapi/v1/algoOrder` behavior with exactly one of safe-integer `algoId` or non-empty `clientAlgoId`; reject neither/both identities before transport invocation and do not add list/history fallback behavior.
-- Treat the documented single-object response deterministically: require exact case-sensitive expected-symbol identity, require the returned identity to match the requested lookup identity, and define stable errors for unavailable/mismatched identities and malformed fields.
-- Freeze only fields supported by the current official query response, which differs from the current-open-algo array by documenting optional triggered `actualType` and filled/partially-filled `actualQty` fields and not documenting the open-array TP/SL price quartet. Preserve decimals and identifiers exactly, integers/timestamps as safe integers, nullable or conditionally absent values without coercion, and flags as booleans.
+- Extend only the injected read-only transport boundary and add a pure normalizer for one regular queried order with one explicitly requested symbol and one lookup identity.
+- Use only signed `GET /fapi/v1/order`, which requires `symbol` and accepts `orderId` or `origClientOrderId`. Reverify current official identifier precedence before choosing a local neither/both policy; reject malformed lookup values before transport invocation and do not add open-order or history fallback behavior.
+- Send the exact requested symbol through the injected query transport, require exact case-sensitive response-symbol agreement, require the returned `orderId` or `clientOrderId` to agree with the requested lookup identity, and define stable errors for unavailable/mismatched identities and malformed fields.
+- Freeze only fields supported by the current official single-order response. Reverify conditional trailing-stop fields such as `activatePrice` and `priceRate`; preserve documented decimals and identifiers exactly, integers/timestamps as safe integers, nullable or conditionally absent values without coercion, and flags as booleans.
 - Preserve source immutability and established futures error identity, including unchanged transport and response-body errors.
-- Keep queried algo orders strictly separate from current regular and current-algo-open-order results. Do not reuse the open-array normalizer because its documented field set and response shape differ.
-- Keep all seven completed futures contracts unchanged; do not merge queried orders with balances or positions and do not create a generic account-state framework.
+- Keep the queried regular order strictly separate from regular current-open arrays, current algo-open arrays, and the identifier-scoped algo-order query. Share no array normalizer merely because some fields overlap.
+- Keep all eight completed futures contracts unchanged; do not merge queried orders with balances or positions and do not create a generic account-state framework.
 - Keep `FuturesTradingAdapter` free of order placement, cancellation, leverage, margin-mode, or other execution methods; backend futures execution must remain rejected.
 - Do not wire the adapter into `binance-connection.js`, Electron startup, renderer state, WebSockets, or visible UI in this checkpoint.
-- Defer regular/algo order histories, regular single-order query, account-wide reads, service orchestration, testnet client composition, and the futures mode indicator/position panel to later reviewed Phase 5 checkpoints.
+- Defer regular/algo order histories, current-open single-order query, account-wide reads, service orchestration, testnet client composition, and the futures mode indicator/position panel to later reviewed Phase 5 checkpoints.
