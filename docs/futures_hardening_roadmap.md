@@ -272,7 +272,7 @@ Suggested UI order:
 
 Continue Phase 4 with the next focused service-level checkpoint:
 
-**Add service-level ownership coverage for a user-data listen-key creation request that resolves after final-renderer teardown.**
+**Add service-level ownership coverage preventing a rate-limited user-data listen-key creation callback from issuing its POST after final-renderer teardown.**
 
 Implementation entry points:
 
@@ -281,8 +281,8 @@ Implementation entry points:
 
 Expected scope:
 
-- Defer the mocked POST `/api/v3/userDataStream` response, close the final renderer while it is pending, then resolve a distinct listen key and prove it never reaches `connectUserDataStream` or acquires handlers and a 30-minute interval.
+- Deterministically pause an already-fired listen-key creation callback inside the existing rate limiter, close the final renderer, then release the wait and prove it cannot issue a stale POST or create user-data state.
 - Prove later five-second and 30-minute advances cannot resurrect user-data state, while market-stream calls remain independently identified.
-- Preserve retry counts and delays, renewal weight `1`, prior-socket teardown ordering, renderer payloads, adapter operation weights, and current `0.999` quantity reduction.
-- Do not broaden into retry matrices, renewal-failure behavior, trading flows, market-data behavior, UI work, or production refactoring.
+- Preserve creation and renewal weight `1`, exact retry counts and delays, prior-socket teardown ordering, renderer payloads, adapter operation weights, and current `0.999` quantity reduction.
+- Do not broaden into retry matrices, generation-ownership scenarios, renewal-failure behavior, trading flows, market-data behavior, UI work, or production refactoring.
 - Do not start Phase 5.

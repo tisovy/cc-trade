@@ -1209,6 +1209,137 @@ describe('setupBinanceConnection user-data orchestration', () => {
         }
     });
 
+    it('drops a listen key created after final renderer teardown', async () => {
+        const listenKey = 'late-listen-key-after-final-renderer-teardown';
+        const keepAliveDelay = 30 * 60 * 1000;
+        const reconnectDelay = 5 * 1000;
+        let resolveListenKeyPayload;
+        const listenKeyPayload = new Promise((resolve) => {
+            resolveListenKeyPayload = resolve;
+        });
+        const readListenKeyPayload = vi.fn(() => listenKeyPayload);
+
+        moduleMocks.sendRequest.mockImplementation(async (path, method) => {
+            if (path === '/api/v3/time' && method === 'GET') {
+                return {
+                    data: vi.fn().mockResolvedValue({ serverTime: Date.now() }),
+                };
+            }
+
+            if (path === '/api/v3/userDataStream' && method === 'POST') {
+                return { data: readListenKeyPayload };
+            }
+
+            return { data: vi.fn().mockResolvedValue({}) };
+        });
+
+        const createListenKey = vi.spyOn(
+            SpotTradingAdapter.prototype,
+            'createUserDataStreamListenKey',
+        );
+        const connectUserDataStream = vi.spyOn(
+            SpotTradingAdapter.prototype,
+            'connectUserDataStream',
+        );
+        const renewListenKey = vi.spyOn(
+            SpotTradingAdapter.prototype,
+            'renewUserDataStreamListenKey',
+        );
+        const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+        const getListenKeyRequests = () => moduleMocks.sendRequest.mock.calls.filter(
+            ([path, method]) => path === '/api/v3/userDataStream' && method === 'POST',
+        );
+        const getRenewalRequests = () => moduleMocks.sendRequest.mock.calls.filter(
+            ([path, method]) => path === '/api/v3/userDataStream' && method === 'PUT',
+        );
+        const getMarketStreamCalls = () => moduleMocks.connect.mock.calls.filter(
+            ([{ stream }]) => stream === '!miniTicker@arr',
+        );
+        const getLateUserDataStreamCalls = () => moduleMocks.connect.mock.calls.filter(
+            ([{ stream }]) => stream === listenKey,
+        );
+        const getUserDataIntervals = () => setIntervalSpy.mock.calls.filter(
+            ([, delay]) => delay === keepAliveDelay,
+        );
+        const getReconnectSchedules = () => console.info.mock.calls.filter(
+            ([message]) => message === 'Scheduling User Data Stream reconnection...',
+        );
+
+        try {
+            setupBinanceConnection({
+                localWebSocketAccess: { host: '127.0.0.1' },
+            });
+
+            const request = {
+                origin: 'http://localhost:5174',
+                accept: vi.fn(() => moduleMocks.rendererConnection),
+            };
+            moduleMocks.websocketServerHandlers.request(request);
+
+            await flushMicrotasks();
+
+            expect(moduleMocks.rendererConnection.connected).toBe(true);
+            expect(createListenKey).toHaveBeenCalledOnce();
+            expect(getListenKeyRequests()).toHaveLength(1);
+            expect(readListenKeyPayload).toHaveBeenCalledOnce();
+            expect(connectUserDataStream).not.toHaveBeenCalled();
+            expect(getMarketStreamCalls()).toEqual([
+                [{ stream: '!miniTicker@arr' }],
+            ]);
+            expect(getLateUserDataStreamCalls()).toEqual([]);
+            expect(moduleMocks.userDataSocket.on).not.toHaveBeenCalled();
+            expect(getUserDataIntervals()).toEqual([]);
+
+            moduleMocks.rendererConnection.close();
+            await flushMicrotasks();
+
+            expect(moduleMocks.rendererConnection.connected).toBe(false);
+            expect(moduleMocks.marketSocket.disconnect).toHaveBeenCalledOnce();
+
+            resolveListenKeyPayload({ listenKey });
+            await flushMicrotasks();
+
+            expect(moduleMocks.rendererConnection.connected).toBe(false);
+            expect(connectUserDataStream).not.toHaveBeenCalled();
+            expect(getLateUserDataStreamCalls()).toEqual([]);
+            expect(moduleMocks.userDataSocket.handlers.message).toBeUndefined();
+            expect(moduleMocks.userDataSocket.handlers.error).toBeUndefined();
+            expect(moduleMocks.userDataSocket.handlers.close).toBeUndefined();
+            expect(getUserDataIntervals()).toEqual([]);
+            expect(getReconnectSchedules()).toEqual([]);
+
+            await vi.advanceTimersByTimeAsync(reconnectDelay);
+            await flushMicrotasks();
+
+            expect(moduleMocks.rendererConnection.connected).toBe(false);
+            expect(createListenKey).toHaveBeenCalledOnce();
+            expect(getListenKeyRequests()).toHaveLength(1);
+            expect(connectUserDataStream).not.toHaveBeenCalled();
+            expect(getMarketStreamCalls()).toHaveLength(1);
+            expect(getLateUserDataStreamCalls()).toEqual([]);
+            expect(moduleMocks.userDataSocket.on).not.toHaveBeenCalled();
+            expect(getUserDataIntervals()).toEqual([]);
+            expect(getReconnectSchedules()).toEqual([]);
+
+            await vi.advanceTimersByTimeAsync(keepAliveDelay);
+            await flushMicrotasks();
+
+            expect(moduleMocks.rendererConnection.connected).toBe(false);
+            expect(createListenKey).toHaveBeenCalledOnce();
+            expect(getListenKeyRequests()).toHaveLength(1);
+            expect(connectUserDataStream).not.toHaveBeenCalled();
+            expect(renewListenKey).not.toHaveBeenCalled();
+            expect(getRenewalRequests()).toEqual([]);
+            expect(getMarketStreamCalls()).toHaveLength(1);
+            expect(getLateUserDataStreamCalls()).toEqual([]);
+            expect(moduleMocks.userDataSocket.on).not.toHaveBeenCalled();
+            expect(getUserDataIntervals()).toEqual([]);
+            expect(getReconnectSchedules()).toEqual([]);
+        } finally {
+            setIntervalSpy.mockRestore();
+        }
+    });
+
     it('disconnects an in-flight user-data socket that resolves after renderer teardown', async () => {
         let resolveUserDataConnection;
         const userDataConnection = new Promise((resolve) => {
