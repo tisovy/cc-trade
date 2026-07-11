@@ -87,6 +87,13 @@ export const FUTURES_ACCOUNT_TRADE_HISTORY_ERROR_CODES = Object.freeze({
     SYMBOL_UNAVAILABLE: FUTURES_EXCHANGE_INFO_ERROR_CODES.SYMBOL_UNAVAILABLE,
 });
 
+export const FUTURES_INCOME_HISTORY_ERROR_CODES = Object.freeze({
+    INVALID_SYMBOL: FUTURES_EXCHANGE_INFO_ERROR_CODES.INVALID_SYMBOL,
+    INVALID_REQUEST_BOUNDS: 'INVALID_FUTURES_INCOME_HISTORY_REQUEST_BOUNDS',
+    MALFORMED_RESPONSE: 'MALFORMED_FUTURES_INCOME_HISTORY',
+    SYMBOL_UNAVAILABLE: FUTURES_EXCHANGE_INFO_ERROR_CODES.SYMBOL_UNAVAILABLE,
+});
+
 export class FuturesExchangeInfoError extends Error {
     constructor(code, message) {
         super(message);
@@ -191,6 +198,14 @@ export class FuturesAccountTradeHistoryError extends Error {
     }
 }
 
+export class FuturesIncomeHistoryError extends Error {
+    constructor(code, message) {
+        super(message);
+        this.name = 'FuturesIncomeHistoryError';
+        this.code = code;
+    }
+}
+
 const isRecord = (value) => value !== null
     && typeof value === 'object'
     && !Array.isArray(value);
@@ -262,6 +277,11 @@ const malformedAccountTradeHistoryError = () => (
         FUTURES_ACCOUNT_TRADE_HISTORY_ERROR_CODES.MALFORMED_RESPONSE,
         'Malformed futures account-trade-history response',
     )
+);
+
+const malformedIncomeHistoryError = () => new FuturesIncomeHistoryError(
+    FUTURES_INCOME_HISTORY_ERROR_CODES.MALFORMED_RESPONSE,
+    'Malformed futures income-history response',
 );
 
 const FUTURES_POSITION_SIDES = new Set(['BOTH', 'LONG', 'SHORT']);
@@ -1885,6 +1905,167 @@ export const normalizeFuturesAccountTradeHistory = (
     });
 };
 
+const FUTURES_INCOME_HISTORY_DEFAULT_LIMIT = 100;
+const FUTURES_INCOME_HISTORY_MAX_LIMIT = 1000;
+const FUTURES_INCOME_HISTORY_MAX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const FUTURES_INCOME_HISTORY_PAGE = 1;
+const FUTURES_INCOME_TYPES = new Set([
+    'TRANSFER',
+    'WELCOME_BONUS',
+    'REALIZED_PNL',
+    'FUNDING_FEE',
+    'COMMISSION',
+    'INSURANCE_CLEAR',
+    'REFERRAL_KICKBACK',
+    'COMMISSION_REBATE',
+    'API_REBATE',
+    'CONTEST_REWARD',
+    'CROSS_COLLATERAL_TRANSFER',
+    'OPTIONS_PREMIUM_FEE',
+    'OPTIONS_SETTLE_PROFIT',
+    'INTERNAL_TRANSFER',
+    'AUTO_EXCHANGE',
+    'DELIVERED_SETTELMENT',
+    'COIN_SWAP_DEPOSIT',
+    'COIN_SWAP_WITHDRAW',
+    'POSITION_LIMIT_INCREASE_FEE',
+    'STRATEGY_UMFUTURES_TRANSFER',
+    'FEE_RETURN',
+    'BFUSD_REWARD',
+]);
+
+const requireIncomeHistorySymbol = (requestedSymbol) => {
+    if (!isNonEmptyString(requestedSymbol)) {
+        throw new FuturesIncomeHistoryError(
+            FUTURES_INCOME_HISTORY_ERROR_CODES.INVALID_SYMBOL,
+            'Futures symbol must be a non-empty string',
+        );
+    }
+};
+
+const invalidIncomeHistoryRequestBoundsError = () => new FuturesIncomeHistoryError(
+    FUTURES_INCOME_HISTORY_ERROR_CODES.INVALID_REQUEST_BOUNDS,
+    'Futures income-history request bounds are invalid',
+);
+
+const normalizeIncomeHistoryRequestBounds = (requestBounds = {}) => {
+    if (!isRecord(requestBounds) || requestBounds.page !== undefined) {
+        throw invalidIncomeHistoryRequestBoundsError();
+    }
+
+    const limit = requestBounds.limit === undefined
+        ? FUTURES_INCOME_HISTORY_DEFAULT_LIMIT
+        : requestBounds.limit;
+    if (!Number.isSafeInteger(limit)
+        || limit < 1
+        || limit > FUTURES_INCOME_HISTORY_MAX_LIMIT) {
+        throw invalidIncomeHistoryRequestBoundsError();
+    }
+
+    const hasIncomeType = requestBounds.incomeType !== undefined;
+    if (hasIncomeType && (!isNonEmptyString(requestBounds.incomeType)
+        || !FUTURES_INCOME_TYPES.has(requestBounds.incomeType))) {
+        throw invalidIncomeHistoryRequestBoundsError();
+    }
+
+    const hasStartTime = requestBounds.startTime !== undefined;
+    const hasEndTime = requestBounds.endTime !== undefined;
+    if (hasStartTime !== hasEndTime) {
+        throw invalidIncomeHistoryRequestBoundsError();
+    }
+
+    if (hasStartTime && (!Number.isSafeInteger(requestBounds.startTime)
+        || requestBounds.startTime < 0
+        || !Number.isSafeInteger(requestBounds.endTime)
+        || requestBounds.endTime < requestBounds.startTime
+        || requestBounds.endTime - requestBounds.startTime
+            > FUTURES_INCOME_HISTORY_MAX_WINDOW_MS)) {
+        throw invalidIncomeHistoryRequestBoundsError();
+    }
+
+    return {
+        ...(hasIncomeType ? { incomeType: requestBounds.incomeType } : {}),
+        ...(hasStartTime ? {
+            startTime: requestBounds.startTime,
+            endTime: requestBounds.endTime,
+        } : {}),
+        page: FUTURES_INCOME_HISTORY_PAGE,
+        limit,
+    };
+};
+
+/**
+ * Normalize USDⓈ-M income history for one explicitly requested symbol.
+ * This account-flow contract preserves wire order and remains separate from
+ * trades, regular/algo orders, positions, balances, and spot history.
+ */
+export const normalizeFuturesIncomeHistory = (
+    incomeHistoryResponse,
+    requestedSymbol,
+) => {
+    requireIncomeHistorySymbol(requestedSymbol);
+    if (!Array.isArray(incomeHistoryResponse)) throw malformedIncomeHistoryError();
+    if (incomeHistoryResponse.length === 0) return [];
+    if (incomeHistoryResponse.some((candidate) => !isRecord(candidate)
+        || typeof candidate.symbol !== 'string'
+        || (candidate.symbol.length > 0 && !isNonEmptyString(candidate.symbol)))) {
+        throw malformedIncomeHistoryError();
+    }
+
+    const matchingIncome = incomeHistoryResponse.filter(
+        (candidate) => candidate.symbol === requestedSymbol,
+    );
+    if (matchingIncome.length === 0) {
+        throw new FuturesIncomeHistoryError(
+            FUTURES_INCOME_HISTORY_ERROR_CODES.SYMBOL_UNAVAILABLE,
+            `Futures symbol "${requestedSymbol}" is unavailable in income-history response`,
+        );
+    }
+    if (matchingIncome.length !== incomeHistoryResponse.length) {
+        throw malformedIncomeHistoryError();
+    }
+
+    const transactionIdsByIncomeType = new Map();
+
+    return matchingIncome.map((incomeEntry) => {
+        if (!isNonEmptyString(incomeEntry.incomeType)
+            || !isNonEmptyString(incomeEntry.income)
+            || !isNonEmptyString(incomeEntry.asset)
+            || typeof incomeEntry.info !== 'string'
+            || (incomeEntry.info.length > 0 && !isNonEmptyString(incomeEntry.info))
+            || !Number.isSafeInteger(incomeEntry.time)
+            || incomeEntry.time < 0
+            || !Number.isSafeInteger(incomeEntry.tranId)
+            || incomeEntry.tranId < 0
+            || typeof incomeEntry.tradeId !== 'string'
+            || (incomeEntry.tradeId.length > 0
+                && !isNonEmptyString(incomeEntry.tradeId))) {
+            throw malformedIncomeHistoryError();
+        }
+
+        const transactionIds = transactionIdsByIncomeType.get(
+            incomeEntry.incomeType,
+        ) ?? new Set();
+        if (transactionIds.has(incomeEntry.tranId)) {
+            throw malformedIncomeHistoryError();
+        }
+        transactionIds.add(incomeEntry.tranId);
+        transactionIdsByIncomeType.set(incomeEntry.incomeType, transactionIds);
+
+        return {
+            marketType: 'futures',
+            symbol: incomeEntry.symbol,
+            incomeType: incomeEntry.incomeType,
+            income: incomeEntry.income,
+            asset: incomeEntry.asset,
+            info: incomeEntry.info,
+            time: incomeEntry.time,
+            tranId: incomeEntry.tranId,
+            tradeId: incomeEntry.tradeId,
+        };
+    });
+};
+
 const readExchangeInfoData = async (response) => {
     if (typeof response?.data === 'function') return response.data();
     return response;
@@ -1946,6 +2127,11 @@ const readAlgoOrderHistoryData = async (response) => {
 };
 
 const readAccountTradeHistoryData = async (response) => {
+    if (typeof response?.data === 'function') return response.data();
+    return response;
+};
+
+const readIncomeHistoryData = async (response) => {
     if (typeof response?.data === 'function') return response.data();
     return response;
 };
@@ -2076,5 +2262,16 @@ export class FuturesTradingAdapter {
         });
         const accountTradeHistory = await readAccountTradeHistoryData(response);
         return normalizeFuturesAccountTradeHistory(accountTradeHistory, symbol);
+    }
+
+    async getIncomeHistory(symbol, requestBounds = {}) {
+        requireIncomeHistorySymbol(symbol);
+        const normalizedRequestBounds = normalizeIncomeHistoryRequestBounds(requestBounds);
+        const response = await this.transport.getIncomeHistory({
+            symbol,
+            ...normalizedRequestBounds,
+        });
+        const incomeHistory = await readIncomeHistoryData(response);
+        return normalizeFuturesIncomeHistory(incomeHistory, symbol);
     }
 }

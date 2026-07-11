@@ -8,6 +8,7 @@ import {
     FUTURES_CURRENT_OPEN_ORDER_ERROR_CODES,
     FUTURES_EXCHANGE_INFO_ERROR_CODES,
     FUTURES_FUNDING_STATE_ERROR_CODES,
+    FUTURES_INCOME_HISTORY_ERROR_CODES,
     FUTURES_MARK_PRICE_ERROR_CODES,
     FUTURES_OPEN_ORDERS_ERROR_CODES,
     FUTURES_ORDER_HISTORY_ERROR_CODES,
@@ -21,6 +22,7 @@ import {
     FuturesCurrentOpenOrderError,
     FuturesExchangeInfoError,
     FuturesFundingStateError,
+    FuturesIncomeHistoryError,
     FuturesMarkPriceError,
     FuturesOpenOrdersError,
     FuturesOrderHistoryError,
@@ -35,6 +37,7 @@ import {
     normalizeFuturesCurrentOpenOrder,
     normalizeFuturesExchangeInfo,
     normalizeFuturesFundingState,
+    normalizeFuturesIncomeHistory,
     normalizeFuturesMarkPrice,
     normalizeFuturesOpenOrders,
     normalizeFuturesOrderHistory,
@@ -681,6 +684,30 @@ const expectedAccountTradeHistoryEntry = {
     positionSide: 'SHORT',
     symbol: 'BTCUSDT',
     time: 1569514978020,
+};
+
+const makeIncomeHistoryEntry = (overrides = {}) => ({
+    symbol: 'BTCUSDT',
+    incomeType: 'COMMISSION',
+    income: '-0.01000000',
+    asset: 'USDT',
+    info: 'COMMISSION',
+    time: 1570636800000,
+    tranId: 9689322392,
+    tradeId: '2059192',
+    ...overrides,
+});
+
+const expectedIncomeHistoryEntry = {
+    marketType: 'futures',
+    symbol: 'BTCUSDT',
+    incomeType: 'COMMISSION',
+    income: '-0.01000000',
+    asset: 'USDT',
+    info: 'COMMISSION',
+    time: 1570636800000,
+    tranId: 9689322392,
+    tradeId: '2059192',
 };
 
 describe('normalizeFuturesExchangeInfo', () => {
@@ -5785,6 +5812,442 @@ describe('normalizeFuturesAccountTradeHistory', () => {
     });
 });
 
+describe('normalizeFuturesIncomeHistory', () => {
+    const malformedError = () => new FuturesIncomeHistoryError(
+        FUTURES_INCOME_HISTORY_ERROR_CODES.MALFORMED_RESPONSE,
+        'Malformed futures income-history response',
+    );
+
+    it('normalizes the current official income array with exact source types', () => {
+        const result = normalizeFuturesIncomeHistory(
+            [makeIncomeHistoryEntry()],
+            'BTCUSDT',
+        );
+
+        expect(result).toEqual([expectedIncomeHistoryEntry]);
+        expect(result[0].income).toBe('-0.01000000');
+        expect(typeof result[0].income).toBe('string');
+        expect(result[0].tradeId).toBe('2059192');
+        expect(typeof result[0].tradeId).toBe('string');
+        expect(result[0].time).toBe(1570636800000);
+        expect(result[0].tranId).toBe(9689322392);
+        expect(typeof result[0].tranId).toBe('number');
+    });
+
+    it('preserves undocumented response ordering without sorting by time or ID', () => {
+        const source = [
+            makeIncomeHistoryEntry({
+                incomeType: 'REALIZED_PNL',
+                time: 3000,
+                tranId: 9003,
+            }),
+            makeIncomeHistoryEntry({
+                incomeType: 'COMMISSION',
+                time: 1000,
+                tranId: 1001,
+            }),
+            makeIncomeHistoryEntry({
+                incomeType: 'FUNDING_FEE',
+                time: 2000,
+                tranId: 5002,
+            }),
+        ];
+
+        const result = normalizeFuturesIncomeHistory(source, 'BTCUSDT');
+
+        expect(result.map((entry) => entry.tranId)).toEqual([9003, 1001, 5002]);
+        expect(result.map((entry) => entry.time)).toEqual([3000, 1000, 2000]);
+    });
+
+    it('preserves a valid empty income history as a fresh empty array', () => {
+        const source = [];
+        const result = normalizeFuturesIncomeHistory(source, 'BTCUSDT');
+
+        expect(result).toEqual([]);
+        expect(result).not.toBe(source);
+    });
+
+    it('requires and preserves the exact case-sensitive requested symbol', () => {
+        const [result] = normalizeFuturesIncomeHistory([
+            makeIncomeHistoryEntry({ tranId: 9689322393 }),
+        ], 'BTCUSDT');
+
+        expect(result.symbol).toBe('BTCUSDT');
+        expect(result.tranId).toBe(9689322393);
+    });
+
+    it.each([
+        ['a different response symbol', 'ETHUSDT', 'BTCUSDT'],
+        ['a case-mismatched response symbol', 'btcusdt', 'BTCUSDT'],
+        ['a case-mismatched requested symbol', 'BTCUSDT', 'btcusdt'],
+        ['a documented account-wide empty response symbol', '', 'BTCUSDT'],
+    ])('rejects %s with the established unavailable-symbol identity', (
+        _label,
+        responseSymbol,
+        requestedSymbol,
+    ) => {
+        expect(() => normalizeFuturesIncomeHistory([
+            makeIncomeHistoryEntry({ symbol: responseSymbol }),
+        ], requestedSymbol)).toThrowError(new FuturesIncomeHistoryError(
+            FUTURES_INCOME_HISTORY_ERROR_CODES.SYMBOL_UNAVAILABLE,
+            `Futures symbol "${requestedSymbol}" is unavailable in income-history response`,
+        ));
+    });
+
+    it('rejects mixed exact and account-wide income rows instead of filtering', () => {
+        expect(() => normalizeFuturesIncomeHistory([
+            makeIncomeHistoryEntry(),
+            makeIncomeHistoryEntry({
+                symbol: '',
+                incomeType: 'TRANSFER',
+                tranId: 9689322393,
+                tradeId: '',
+            }),
+        ], 'BTCUSDT')).toThrowError(malformedError());
+    });
+
+    it.each([undefined, null, 123, '', '   '])(
+        'rejects invalid requested symbol %# before parsing income history',
+        (requestedSymbol) => {
+            expect(() => normalizeFuturesIncomeHistory(
+                [makeIncomeHistoryEntry()],
+                requestedSymbol,
+            )).toThrowError(new FuturesIncomeHistoryError(
+                FUTURES_INCOME_HISTORY_ERROR_CODES.INVALID_SYMBOL,
+                'Futures symbol must be a non-empty string',
+            ));
+        },
+    );
+
+    it.each([
+        ['an undefined payload', undefined],
+        ['a null payload', null],
+        ['a single object', makeIncomeHistoryEntry()],
+        ['a scalar payload', 'BTCUSDT'],
+        ['a null entry', [null]],
+        ['a missing entry symbol', [makeIncomeHistoryEntry({ symbol: undefined })]],
+        ['a numeric entry symbol', [makeIncomeHistoryEntry({ symbol: 123 })]],
+        ['a whitespace-only entry symbol', [makeIncomeHistoryEntry({ symbol: '   ' })]],
+        ['a malformed entry among valid entries', [makeIncomeHistoryEntry(), null]],
+    ])('rejects %s as malformed income history', (_label, payload) => {
+        expect(() => normalizeFuturesIncomeHistory(
+            payload,
+            'BTCUSDT',
+        )).toThrowError(malformedError());
+    });
+
+    it.each(['incomeType', 'income', 'asset'])(
+        'rejects malformed required income string %s',
+        (field) => {
+            [123, null, '', '   '].forEach((value) => {
+                expect(() => normalizeFuturesIncomeHistory([
+                    makeIncomeHistoryEntry({ [field]: value }),
+                ], 'BTCUSDT')).toThrowError(malformedError());
+            });
+        },
+    );
+
+    it('preserves an exact empty info string without synthesizing null', () => {
+        const [result] = normalizeFuturesIncomeHistory([
+            makeIncomeHistoryEntry({ info: '' }),
+        ], 'BTCUSDT');
+
+        expect(result.info).toBe('');
+        expect(typeof result.info).toBe('string');
+    });
+
+    it.each([null, 123, '   '])(
+        'rejects malformed income info %# without coercion',
+        (info) => {
+            expect(() => normalizeFuturesIncomeHistory([
+                makeIncomeHistoryEntry({ info }),
+            ], 'BTCUSDT')).toThrowError(malformedError());
+        },
+    );
+
+    it('preserves the documented empty trade ID without synthesizing null', () => {
+        const [result] = normalizeFuturesIncomeHistory([
+            makeIncomeHistoryEntry({ tradeId: '' }),
+        ], 'BTCUSDT');
+
+        expect(result.tradeId).toBe('');
+        expect(typeof result.tradeId).toBe('string');
+    });
+
+    it.each([null, 123, '   '])(
+        'rejects malformed trade ID %# without coercion',
+        (tradeId) => {
+            expect(() => normalizeFuturesIncomeHistory([
+                makeIncomeHistoryEntry({ tradeId }),
+            ], 'BTCUSDT')).toThrowError(malformedError());
+        },
+    );
+
+    it.each([
+        'symbol',
+        'incomeType',
+        'income',
+        'asset',
+        'info',
+        'time',
+        'tranId',
+        'tradeId',
+    ])('rejects a missing required income-history field %s', (field) => {
+        const source = makeIncomeHistoryEntry();
+        delete source[field];
+
+        expect(() => normalizeFuturesIncomeHistory(
+            [source],
+            'BTCUSDT',
+        )).toThrowError(malformedError());
+    });
+
+    it.each(['time', 'tranId'])(
+        'rejects a lexical integer in income-history field %s',
+        (field) => {
+            expect(() => normalizeFuturesIncomeHistory([
+                makeIncomeHistoryEntry({ [field]: '0' }),
+            ], 'BTCUSDT')).toThrowError(malformedError());
+        },
+    );
+
+    it.each(['time', 'tranId'].flatMap((field) => [
+        [field, -1],
+        [field, 1.5],
+        [field, Number.MAX_SAFE_INTEGER + 1],
+        [field, NaN],
+        [field, Infinity],
+        [field, null],
+    ]))('rejects invalid safe-integer value %# in %s', (field, invalidInteger) => {
+        expect(() => normalizeFuturesIncomeHistory([
+            makeIncomeHistoryEntry({ [field]: invalidInteger }),
+        ], 'BTCUSDT')).toThrowError(malformedError());
+    });
+
+    it('preserves signed decimal strings and lexical identifiers without coercion', () => {
+        const [result] = normalizeFuturesIncomeHistory([
+            makeIncomeHistoryEntry({
+                income: '+0000.0100000000',
+                info: 'exact source information',
+                tradeId: '00002059192',
+            }),
+        ], 'BTCUSDT');
+
+        expect(result).toMatchObject({
+            income: '+0000.0100000000',
+            info: 'exact source information',
+            tradeId: '00002059192',
+        });
+    });
+
+    it('preserves exact zero transaction identity and timestamp', () => {
+        const [result] = normalizeFuturesIncomeHistory([
+            makeIncomeHistoryEntry({ time: 0, tranId: 0, tradeId: '' }),
+        ], 'BTCUSDT');
+
+        expect(result).toMatchObject({ time: 0, tranId: 0, tradeId: '' });
+    });
+
+    it('rejects duplicate transaction IDs within one income type', () => {
+        expect(() => normalizeFuturesIncomeHistory([
+            makeIncomeHistoryEntry(),
+            makeIncomeHistoryEntry({
+                income: '-0.02000000',
+                time: 1570636800001,
+                tradeId: '2059193',
+            }),
+        ], 'BTCUSDT')).toThrowError(malformedError());
+    });
+
+    it('preserves a repeated transaction ID across different income types', () => {
+        const result = normalizeFuturesIncomeHistory([
+            makeIncomeHistoryEntry({
+                incomeType: 'TRANSFER',
+                info: 'TRANSFER',
+                tradeId: '',
+            }),
+            makeIncomeHistoryEntry({
+                incomeType: 'COMMISSION',
+                info: 'COMMISSION',
+            }),
+        ], 'BTCUSDT');
+
+        expect(result.map((entry) => entry.tranId)).toEqual([
+            9689322392,
+            9689322392,
+        ]);
+        expect(result.map((entry) => entry.incomeType)).toEqual([
+            'TRANSFER',
+            'COMMISSION',
+        ]);
+    });
+
+    it('preserves repeated trade IDs across distinct transaction identities', () => {
+        const result = normalizeFuturesIncomeHistory([
+            makeIncomeHistoryEntry({ tranId: 9689322392 }),
+            makeIncomeHistoryEntry({
+                incomeType: 'REALIZED_PNL',
+                info: 'REALIZED_PNL',
+                tranId: 9689322393,
+            }),
+        ], 'BTCUSDT');
+
+        expect(result.map((entry) => entry.tradeId)).toEqual(['2059192', '2059192']);
+    });
+
+    it('preserves non-empty response income types without treating filters as an enum', () => {
+        const [result] = normalizeFuturesIncomeHistory([
+            makeIncomeHistoryEntry({ incomeType: 'FUTURE_NEW_INCOME_TYPE' }),
+        ], 'BTCUSDT');
+
+        expect(result.incomeType).toBe('FUTURE_NEW_INCOME_TYPE');
+    });
+
+    it('preserves source immutability and returns fresh detached income rows', () => {
+        const source = [
+            makeIncomeHistoryEntry({ ignoredField: 'not-normalized' }),
+            makeIncomeHistoryEntry({
+                incomeType: 'REALIZED_PNL',
+                info: 'REALIZED_PNL',
+                tranId: 9689322393,
+            }),
+        ];
+        const snapshot = structuredClone(source);
+
+        const result = normalizeFuturesIncomeHistory(source, 'BTCUSDT');
+        const secondResult = normalizeFuturesIncomeHistory(source, 'BTCUSDT');
+
+        expect(source).toEqual(snapshot);
+        expect(result).not.toBe(source);
+        expect(result[0]).not.toBe(source[0]);
+        expect(result[1]).not.toBe(source[1]);
+        expect(result[0]).not.toBe(result[1]);
+        expect(result[0]).not.toBe(secondResult[0]);
+        expect(result[0]).not.toHaveProperty('ignoredField');
+
+        result[0].income = 'mutated-result-only';
+        expect(source[0].income).toBe('-0.01000000');
+        expect(secondResult[0].income).toBe('-0.01000000');
+    });
+
+    it('excludes undocumented trade, order, balance, and position fields', () => {
+        const [result] = normalizeFuturesIncomeHistory([
+            makeIncomeHistoryEntry({
+                id: 698759,
+                orderId: 25851813,
+                commission: '0.01',
+                positionSide: 'BOTH',
+                marginAsset: 'USDT',
+                reduceOnly: false,
+                unknown: true,
+            }),
+        ], 'BTCUSDT');
+
+        [
+            'id',
+            'orderId',
+            'commission',
+            'positionSide',
+            'marginAsset',
+            'reduceOnly',
+            'unknown',
+        ].forEach((field) => expect(result).not.toHaveProperty(field));
+    });
+
+    it('keeps income history separate from account trades and order histories', () => {
+        const income = [makeIncomeHistoryEntry()];
+
+        expect(normalizeFuturesIncomeHistory(income, 'BTCUSDT')).toEqual([
+            expectedIncomeHistoryEntry,
+        ]);
+        expect(() => normalizeFuturesAccountTradeHistory(
+            income,
+            'BTCUSDT',
+        )).toThrowError(new FuturesAccountTradeHistoryError(
+            FUTURES_ACCOUNT_TRADE_HISTORY_ERROR_CODES.MALFORMED_RESPONSE,
+            'Malformed futures account-trade-history response',
+        ));
+        expect(() => normalizeFuturesOrderHistory(
+            income,
+            'BTCUSDT',
+        )).toThrowError(new FuturesOrderHistoryError(
+            FUTURES_ORDER_HISTORY_ERROR_CODES.MALFORMED_RESPONSE,
+            'Malformed futures order-history response',
+        ));
+        expect(() => normalizeFuturesAlgoOrderHistory(
+            income,
+            'BTCUSDT',
+        )).toThrowError(new FuturesAlgoOrderHistoryError(
+            FUTURES_ALGO_ORDER_HISTORY_ERROR_CODES.MALFORMED_RESPONSE,
+            'Malformed futures algo-order-history response',
+        ));
+        expect(() => normalizeFuturesIncomeHistory([
+            makeAccountTradeHistoryEntry(),
+        ], 'BTCUSDT')).toThrowError(malformedError());
+    });
+
+    it('keeps all thirteen completed futures read-only contracts unchanged', () => {
+        const exchangeInfo = makeExchangeInfo(makeFuturesSymbol());
+        const premiumIndex = makeMarkPrice();
+
+        expect(normalizeFuturesExchangeInfo(exchangeInfo, 'BTCUSDT')).toMatchObject({
+            marketType: 'futures',
+            symbol: 'BTCUSDT',
+            filters: expectedFilters,
+        });
+        expect(normalizeFuturesMarkPrice(premiumIndex, 'BTCUSDT')).toEqual(
+            expectedMarkPrice,
+        );
+        expect(normalizeFuturesFundingState(premiumIndex, 'BTCUSDT')).toEqual(
+            expectedFundingState,
+        );
+        expect(normalizeFuturesPositionRisk(
+            [makePositionRisk()],
+            'BTCUSDT',
+            'BOTH',
+        )).toEqual(expectedPositionRisk);
+        expect(normalizeFuturesAccountBalance(
+            [makeAccountBalance()],
+            'USDT',
+        )).toEqual(expectedAccountBalance);
+        expect(normalizeFuturesOpenOrders(
+            [makeOpenOrder()],
+            'BTCUSDT',
+        )).toEqual([expectedOpenOrder]);
+        expect(normalizeFuturesAlgoOpenOrders(
+            [makeAlgoOpenOrder()],
+            'BTCUSDT',
+        )).toEqual([expectedAlgoOpenOrder]);
+        expect(normalizeFuturesAlgoOrder(
+            makeAlgoOrderQuery(),
+            'BTCUSDT',
+            { algoId: 2146760 },
+        )).toEqual(expectedAlgoOrderQuery);
+        expect(normalizeFuturesOrder(
+            makeOrderQuery(),
+            'BTCUSDT',
+            { orderId: 1917643 },
+        )).toEqual(expectedOrderQuery);
+        expect(normalizeFuturesCurrentOpenOrder(
+            makeCurrentOpenOrderQuery(),
+            'BTCUSDT',
+            { orderId: 1917645 },
+        )).toEqual(expectedCurrentOpenOrderQuery);
+        expect(normalizeFuturesOrderHistory(
+            [makeOrderHistoryEntry()],
+            'BTCUSDT',
+        )).toEqual([expectedOrderHistoryEntry]);
+        expect(normalizeFuturesAlgoOrderHistory(
+            [makeAlgoOrderHistoryEntry()],
+            'BTCUSDT',
+        )).toEqual([expectedAlgoOrderHistoryEntry]);
+        expect(normalizeFuturesAccountTradeHistory(
+            [makeAccountTradeHistoryEntry()],
+            'BTCUSDT',
+        )).toEqual([expectedAccountTradeHistoryEntry]);
+    });
+});
+
 describe('FuturesTradingAdapter', () => {
     it('loads and unwraps official-client-style exchange metadata at the adapter boundary', async () => {
         const source = makeExchangeInfo(makeFuturesSymbol());
@@ -8450,6 +8913,578 @@ describe('FuturesTradingAdapter', () => {
         expect(transport.getOpenAlgoOrders).toHaveBeenCalledTimes(1);
     });
 
+    it('loads one bounded income page from an official-client-style body', async () => {
+        const data = vi.fn().mockResolvedValue([makeIncomeHistoryEntry()]);
+        const transport = {
+            getIncomeHistory: vi.fn().mockResolvedValue({ data }),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getIncomeHistory('BTCUSDT')).resolves.toEqual([
+            expectedIncomeHistoryEntry,
+        ]);
+        expect(transport.getIncomeHistory.mock.calls).toEqual([[
+            { symbol: 'BTCUSDT', page: 1, limit: 100 },
+        ]]);
+        expect(data).toHaveBeenCalledWith();
+    });
+
+    it('accepts raw income while sending only the reviewed filter and bounds', async () => {
+        const requestBounds = {
+            incomeType: 'COMMISSION_REBATE',
+            limit: 1000,
+            symbol: 'ETHUSDT',
+            recvWindow: 60000,
+            timestamp: 123,
+            accountWide: true,
+            includeAccountWide: true,
+            cursor: 'next-page',
+            fromId: 9689322392,
+            fallback: 'getAccountTrades',
+            unknown: 'must-not-cross-the-transport-boundary',
+        };
+        const snapshot = structuredClone(requestBounds);
+        const transport = {
+            getIncomeHistory: vi.fn().mockResolvedValue([
+                makeIncomeHistoryEntry({ incomeType: 'COMMISSION_REBATE' }),
+            ]),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getIncomeHistory(
+            'BTCUSDT',
+            requestBounds,
+        )).resolves.toMatchObject([{
+            symbol: 'BTCUSDT',
+            incomeType: 'COMMISSION_REBATE',
+        }]);
+        expect(requestBounds).toEqual(snapshot);
+        expect(transport.getIncomeHistory.mock.calls).toEqual([[
+            {
+                symbol: 'BTCUSDT',
+                incomeType: 'COMMISSION_REBATE',
+                page: 1,
+                limit: 1000,
+            },
+        ]]);
+    });
+
+    it.each([
+        ['equal inclusive timestamps and minimum limit', 1000, 1000, 1],
+        [
+            'the exact local seven-day ceiling and maximum limit',
+            1000,
+            1000 + (7 * 24 * 60 * 60 * 1000),
+            1000,
+        ],
+    ])('transports an exact paired income window at %s', async (
+        _label,
+        startTime,
+        endTime,
+        limit,
+    ) => {
+        const transport = {
+            getIncomeHistory: vi.fn().mockResolvedValue([]),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getIncomeHistory('BTCUSDT', {
+            incomeType: 'FUNDING_FEE',
+            startTime,
+            endTime,
+            limit,
+        })).resolves.toEqual([]);
+        expect(transport.getIncomeHistory.mock.calls).toEqual([[
+            {
+                symbol: 'BTCUSDT',
+                incomeType: 'FUNDING_FEE',
+                startTime,
+                endTime,
+                page: 1,
+                limit,
+            },
+        ]]);
+    });
+
+    it.each([
+        'TRANSFER',
+        'WELCOME_BONUS',
+        'REALIZED_PNL',
+        'FUNDING_FEE',
+        'COMMISSION',
+        'INSURANCE_CLEAR',
+        'REFERRAL_KICKBACK',
+        'COMMISSION_REBATE',
+        'API_REBATE',
+        'CONTEST_REWARD',
+        'CROSS_COLLATERAL_TRANSFER',
+        'OPTIONS_PREMIUM_FEE',
+        'OPTIONS_SETTLE_PROFIT',
+        'INTERNAL_TRANSFER',
+        'AUTO_EXCHANGE',
+        'DELIVERED_SETTELMENT',
+        'COIN_SWAP_DEPOSIT',
+        'COIN_SWAP_WITHDRAW',
+        'POSITION_LIMIT_INCREASE_FEE',
+        'STRATEGY_UMFUTURES_TRANSFER',
+        'FEE_RETURN',
+        'BFUSD_REWARD',
+    ])('transports reviewed income-type filter %s exactly', async (incomeType) => {
+        const transport = {
+            getIncomeHistory: vi.fn().mockResolvedValue([]),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getIncomeHistory(
+            'BTCUSDT',
+            { incomeType },
+        )).resolves.toEqual([]);
+        expect(transport.getIncomeHistory).toHaveBeenCalledWith({
+            symbol: 'BTCUSDT',
+            incomeType,
+            page: 1,
+            limit: 100,
+        });
+    });
+
+    it('uses a fixed first page and explicit live limit in default mode', async () => {
+        const requestBounds = {
+            incomeType: undefined,
+            startTime: undefined,
+            endTime: undefined,
+            page: undefined,
+            limit: undefined,
+            symbol: 'ETHUSDT',
+            recvWindow: 60000,
+            timestamp: 123,
+            accountWide: true,
+            cursor: 'opaque-cursor',
+            nextPage: true,
+            fallbackHint: 'getIncomeHistoryPage',
+            unknown: true,
+        };
+        const snapshot = structuredClone(requestBounds);
+        const transport = {
+            getIncomeHistory: vi.fn().mockResolvedValue([]),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getIncomeHistory(
+            'BTCUSDT',
+            requestBounds,
+        )).resolves.toEqual([]);
+        expect(requestBounds).toEqual(snapshot);
+        expect(transport.getIncomeHistory.mock.calls).toEqual([[
+            { symbol: 'BTCUSDT', page: 1, limit: 100 },
+        ]]);
+    });
+
+    it.each([undefined, null, 123, '', '   '])(
+        'rejects invalid income-history symbol %# before transport use',
+        async (symbol) => {
+            const transport = { getIncomeHistory: vi.fn() };
+            const adapter = new FuturesTradingAdapter({ transport });
+
+            await expect(adapter.getIncomeHistory(symbol)).rejects.toThrowError(
+                new FuturesIncomeHistoryError(
+                    FUTURES_INCOME_HISTORY_ERROR_CODES.INVALID_SYMBOL,
+                    'Futures symbol must be a non-empty string',
+                ),
+            );
+            expect(transport.getIncomeHistory).not.toHaveBeenCalled();
+        },
+    );
+
+    it.each([null, 123, 'bounds', [], false, () => ({})])(
+        'rejects non-record income request bounds %# before transport',
+        async (requestBounds) => {
+            const transport = { getIncomeHistory: vi.fn() };
+            const adapter = new FuturesTradingAdapter({ transport });
+
+            await expect(adapter.getIncomeHistory(
+                'BTCUSDT',
+                requestBounds,
+            )).rejects.toThrowError(new FuturesIncomeHistoryError(
+                FUTURES_INCOME_HISTORY_ERROR_CODES.INVALID_REQUEST_BOUNDS,
+                'Futures income-history request bounds are invalid',
+            ));
+            expect(transport.getIncomeHistory).not.toHaveBeenCalled();
+        },
+    );
+
+    it.each([
+        ['zero', 0],
+        ['negative', -1],
+        ['above the official maximum', 1001],
+        ['fractional', 1.5],
+        ['a numeric string', '100'],
+        ['unsafe', Number.MAX_SAFE_INTEGER + 1],
+        ['NaN', NaN],
+        ['infinite', Infinity],
+        ['null', null],
+        ['boolean', false],
+    ])('rejects %s income limit before transport', async (_label, limit) => {
+        const transport = { getIncomeHistory: vi.fn() };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getIncomeHistory(
+            'BTCUSDT',
+            { limit },
+        )).rejects.toThrowError(new FuturesIncomeHistoryError(
+            FUTURES_INCOME_HISTORY_ERROR_CODES.INVALID_REQUEST_BOUNDS,
+            'Futures income-history request bounds are invalid',
+        ));
+        expect(transport.getIncomeHistory).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        ['an empty string', ''],
+        ['whitespace', '   '],
+        ['a case mismatch', 'commission'],
+        ['an undocumented filter', 'FUTURE_NEW_INCOME_TYPE'],
+        ['a number', 123],
+        ['null', null],
+        ['a boolean', false],
+    ])('rejects %s as an income-type filter before transport', async (
+        _label,
+        incomeType,
+    ) => {
+        const transport = { getIncomeHistory: vi.fn() };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getIncomeHistory(
+            'BTCUSDT',
+            { incomeType },
+        )).rejects.toThrowError(new FuturesIncomeHistoryError(
+            FUTURES_INCOME_HISTORY_ERROR_CODES.INVALID_REQUEST_BOUNDS,
+            'Futures income-history request bounds are invalid',
+        ));
+        expect(transport.getIncomeHistory).not.toHaveBeenCalled();
+    });
+
+    it.each([1, 2, 0, -1, null, '1', false])(
+        'rejects caller-controlled income page %# before transport',
+        async (page) => {
+            const transport = { getIncomeHistory: vi.fn() };
+            const adapter = new FuturesTradingAdapter({ transport });
+
+            await expect(adapter.getIncomeHistory(
+                'BTCUSDT',
+                { page },
+            )).rejects.toThrowError(new FuturesIncomeHistoryError(
+                FUTURES_INCOME_HISTORY_ERROR_CODES.INVALID_REQUEST_BOUNDS,
+                'Futures income-history request bounds are invalid',
+            ));
+            expect(transport.getIncomeHistory).not.toHaveBeenCalled();
+        },
+    );
+
+    it.each([
+        ['startTime only', { startTime: 1000 }],
+        ['endTime only', { endTime: 2000 }],
+        ['startTime plus explicitly undefined endTime', {
+            startTime: 1000,
+            endTime: undefined,
+        }],
+        ['endTime plus explicitly undefined startTime', {
+            startTime: undefined,
+            endTime: 2000,
+        }],
+    ])('rejects one-sided %s income window before transport', async (
+        _label,
+        requestBounds,
+    ) => {
+        const transport = { getIncomeHistory: vi.fn() };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getIncomeHistory(
+            'BTCUSDT',
+            requestBounds,
+        )).rejects.toThrowError(new FuturesIncomeHistoryError(
+            FUTURES_INCOME_HISTORY_ERROR_CODES.INVALID_REQUEST_BOUNDS,
+            'Futures income-history request bounds are invalid',
+        ));
+        expect(transport.getIncomeHistory).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        ['negative startTime', { startTime: -1, endTime: 1000 }],
+        ['fractional startTime', { startTime: 1.5, endTime: 1000 }],
+        ['string startTime', { startTime: '0', endTime: 1000 }],
+        ['unsafe startTime', {
+            startTime: Number.MAX_SAFE_INTEGER + 1,
+            endTime: Number.MAX_SAFE_INTEGER + 1,
+        }],
+        ['negative endTime', { startTime: 0, endTime: -1 }],
+        ['fractional endTime', { startTime: 0, endTime: 1.5 }],
+        ['string endTime', { startTime: 0, endTime: '1000' }],
+        ['unsafe endTime', {
+            startTime: 0,
+            endTime: Number.MAX_SAFE_INTEGER + 1,
+        }],
+        ['null timestamps', { startTime: null, endTime: null }],
+        ['boolean timestamps', { startTime: false, endTime: false }],
+    ])('rejects %s before using the income transport', async (
+        _label,
+        requestBounds,
+    ) => {
+        const transport = { getIncomeHistory: vi.fn() };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getIncomeHistory(
+            'BTCUSDT',
+            requestBounds,
+        )).rejects.toThrowError(new FuturesIncomeHistoryError(
+            FUTURES_INCOME_HISTORY_ERROR_CODES.INVALID_REQUEST_BOUNDS,
+            'Futures income-history request bounds are invalid',
+        ));
+        expect(transport.getIncomeHistory).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        ['a reversed window', 2000, 1000],
+        [
+            'a window one millisecond over the local seven-day ceiling',
+            1000,
+            1001 + (7 * 24 * 60 * 60 * 1000),
+        ],
+    ])('rejects %s before using the income transport', async (
+        _label,
+        startTime,
+        endTime,
+    ) => {
+        const transport = { getIncomeHistory: vi.fn() };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getIncomeHistory('BTCUSDT', {
+            startTime,
+            endTime,
+        })).rejects.toThrowError(new FuturesIncomeHistoryError(
+            FUTURES_INCOME_HISTORY_ERROR_CODES.INVALID_REQUEST_BOUNDS,
+            'Futures income-history request bounds are invalid',
+        ));
+        expect(transport.getIncomeHistory).not.toHaveBeenCalled();
+    });
+
+    it('preserves income transport error identity', async () => {
+        const transportError = new Error('futures income unavailable');
+        const transport = {
+            getIncomeHistory: vi.fn().mockRejectedValue(transportError),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getIncomeHistory(
+            'BTCUSDT',
+            { incomeType: 'COMMISSION', limit: 25 },
+        )).rejects.toBe(transportError);
+        expect(transport.getIncomeHistory).toHaveBeenCalledWith({
+            symbol: 'BTCUSDT',
+            incomeType: 'COMMISSION',
+            page: 1,
+            limit: 25,
+        });
+    });
+
+    it('preserves income response-body error identity', async () => {
+        const responseError = new Error('futures income body unavailable');
+        const data = vi.fn().mockRejectedValue(responseError);
+        const transport = {
+            getIncomeHistory: vi.fn().mockResolvedValue({ data }),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getIncomeHistory('BTCUSDT', {
+            startTime: 1000,
+            endTime: 2000,
+        })).rejects.toBe(responseError);
+        expect(transport.getIncomeHistory).toHaveBeenCalledWith({
+            symbol: 'BTCUSDT',
+            startTime: 1000,
+            endTime: 2000,
+            page: 1,
+            limit: 100,
+        });
+        expect(data).toHaveBeenCalledWith();
+    });
+
+    it('preserves retention-driven empty income without fallback or another page', async () => {
+        const transport = {
+            getIncomeHistory: vi.fn().mockResolvedValue([]),
+            getIncomeHistoryPage: vi.fn(),
+            incomeHistory: vi.fn(),
+            getAccountTrades: vi.fn(),
+            getAllOrders: vi.fn(),
+            getAllAlgoOrders: vi.fn(),
+            queryOrder: vi.fn(),
+            queryCurrentOpenOrder: vi.fn(),
+            getOpenOrders: vi.fn(),
+            queryAlgoOrder: vi.fn(),
+            getOpenAlgoOrders: vi.fn(),
+            getPositionRiskV3: vi.fn(),
+            getBalanceV3: vi.fn(),
+            getRecentTrades: vi.fn(),
+            myTrades: vi.fn(),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getIncomeHistory('BTCUSDT')).resolves.toEqual([]);
+        expect(transport.getIncomeHistory).toHaveBeenCalledTimes(1);
+        Object.entries(transport)
+            .filter(([name]) => name !== 'getIncomeHistory')
+            .forEach(([, method]) => expect(method).not.toHaveBeenCalled());
+    });
+
+    it('does not fall back on unavailable symbol-scoped income history', async () => {
+        const fallbackMethods = {
+            getIncomeHistoryPage: vi.fn(),
+            incomeHistory: vi.fn(),
+            getAccountTrades: vi.fn(),
+            getAllOrders: vi.fn(),
+            getAllAlgoOrders: vi.fn(),
+            getPositionRiskV3: vi.fn(),
+            getBalanceV3: vi.fn(),
+            getRecentTrades: vi.fn(),
+        };
+        const transport = {
+            getIncomeHistory: vi.fn().mockResolvedValue([
+                makeIncomeHistoryEntry({ symbol: 'ETHUSDT' }),
+            ]),
+            ...fallbackMethods,
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getIncomeHistory(
+            'BTCUSDT',
+        )).rejects.toThrowError(new FuturesIncomeHistoryError(
+            FUTURES_INCOME_HISTORY_ERROR_CODES.SYMBOL_UNAVAILABLE,
+            'Futures symbol "BTCUSDT" is unavailable in income-history response',
+        ));
+        expect(transport.getIncomeHistory).toHaveBeenCalledTimes(1);
+        Object.values(fallbackMethods)
+            .forEach((method) => expect(method).not.toHaveBeenCalled());
+    });
+
+    it('does not fall back on malformed income history', async () => {
+        const fallbackMethods = {
+            getIncomeHistoryPage: vi.fn(),
+            incomeHistory: vi.fn(),
+            getAccountTrades: vi.fn(),
+            getAllOrders: vi.fn(),
+            getAllAlgoOrders: vi.fn(),
+            getPositionRiskV3: vi.fn(),
+            getBalanceV3: vi.fn(),
+            getRecentTrades: vi.fn(),
+        };
+        const transport = {
+            getIncomeHistory: vi.fn().mockResolvedValue([
+                makeIncomeHistoryEntry({ tranId: '9689322392' }),
+            ]),
+            ...fallbackMethods,
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getIncomeHistory(
+            'BTCUSDT',
+        )).rejects.toThrowError(new FuturesIncomeHistoryError(
+            FUTURES_INCOME_HISTORY_ERROR_CODES.MALFORMED_RESPONSE,
+            'Malformed futures income-history response',
+        ));
+        expect(transport.getIncomeHistory).toHaveBeenCalledTimes(1);
+        Object.values(fallbackMethods)
+            .forEach((method) => expect(method).not.toHaveBeenCalled());
+    });
+
+    it('keeps income and all thirteen completed futures transports independent', async () => {
+        const transport = {
+            getExchangeInfo: vi.fn().mockResolvedValue(
+                makeExchangeInfo(makeFuturesSymbol()),
+            ),
+            getMarkPrice: vi.fn().mockResolvedValue(makeMarkPrice()),
+            getPositionRiskV3: vi.fn().mockResolvedValue([makePositionRisk()]),
+            getBalanceV3: vi.fn().mockResolvedValue([makeAccountBalance()]),
+            getOpenOrders: vi.fn().mockResolvedValue([makeOpenOrder()]),
+            getOpenAlgoOrders: vi.fn().mockResolvedValue([makeAlgoOpenOrder()]),
+            queryAlgoOrder: vi.fn().mockResolvedValue(makeAlgoOrderQuery()),
+            queryOrder: vi.fn().mockResolvedValue(makeOrderQuery()),
+            queryCurrentOpenOrder: vi.fn().mockResolvedValue(
+                makeCurrentOpenOrderQuery(),
+            ),
+            getAllOrders: vi.fn().mockResolvedValue([makeOrderHistoryEntry()]),
+            getAllAlgoOrders: vi.fn().mockResolvedValue([
+                makeAlgoOrderHistoryEntry(),
+            ]),
+            getAccountTrades: vi.fn().mockResolvedValue([
+                makeAccountTradeHistoryEntry(),
+            ]),
+            getIncomeHistory: vi.fn().mockResolvedValue([makeIncomeHistoryEntry()]),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getExchangeInfo('BTCUSDT')).resolves.toMatchObject({
+            marketType: 'futures',
+            symbol: 'BTCUSDT',
+        });
+        await expect(adapter.getMarkPrice('BTCUSDT')).resolves.toEqual(
+            expectedMarkPrice,
+        );
+        await expect(adapter.getFundingState('BTCUSDT')).resolves.toEqual(
+            expectedFundingState,
+        );
+        await expect(adapter.getPositionRisk(
+            'BTCUSDT',
+            'BOTH',
+        )).resolves.toEqual(expectedPositionRisk);
+        await expect(adapter.getAccountBalance('USDT')).resolves.toEqual(
+            expectedAccountBalance,
+        );
+        await expect(adapter.getOpenOrders('BTCUSDT')).resolves.toEqual([
+            expectedOpenOrder,
+        ]);
+        await expect(adapter.getAlgoOpenOrders('BTCUSDT')).resolves.toEqual([
+            expectedAlgoOpenOrder,
+        ]);
+        await expect(adapter.getAlgoOrder(
+            'BTCUSDT',
+            { algoId: 2146760 },
+        )).resolves.toEqual(expectedAlgoOrderQuery);
+        await expect(adapter.getOrder(
+            'BTCUSDT',
+            { orderId: 1917643 },
+        )).resolves.toEqual(expectedOrderQuery);
+        await expect(adapter.getCurrentOpenOrder(
+            'BTCUSDT',
+            { orderId: 1917645 },
+        )).resolves.toEqual(expectedCurrentOpenOrderQuery);
+        await expect(adapter.getOrderHistory('BTCUSDT')).resolves.toEqual([
+            expectedOrderHistoryEntry,
+        ]);
+        await expect(adapter.getAlgoOrderHistory('BTCUSDT')).resolves.toEqual([
+            expectedAlgoOrderHistoryEntry,
+        ]);
+        await expect(adapter.getAccountTradeHistory('BTCUSDT')).resolves.toEqual([
+            expectedAccountTradeHistoryEntry,
+        ]);
+
+        expect(transport.getIncomeHistory).not.toHaveBeenCalled();
+
+        await expect(adapter.getIncomeHistory('BTCUSDT')).resolves.toEqual([
+            expectedIncomeHistoryEntry,
+        ]);
+        expect(transport.getIncomeHistory).toHaveBeenCalledTimes(1);
+        expect(transport.getExchangeInfo).toHaveBeenCalledTimes(1);
+        expect(transport.getMarkPrice).toHaveBeenCalledTimes(2);
+        expect(transport.getPositionRiskV3).toHaveBeenCalledTimes(1);
+        expect(transport.getBalanceV3).toHaveBeenCalledTimes(1);
+        expect(transport.getOpenOrders).toHaveBeenCalledTimes(1);
+        expect(transport.getOpenAlgoOrders).toHaveBeenCalledTimes(1);
+        expect(transport.queryAlgoOrder).toHaveBeenCalledTimes(1);
+        expect(transport.queryOrder).toHaveBeenCalledTimes(1);
+        expect(transport.queryCurrentOpenOrder).toHaveBeenCalledTimes(1);
+        expect(transport.getAllOrders).toHaveBeenCalledTimes(1);
+        expect(transport.getAllAlgoOrders).toHaveBeenCalledTimes(1);
+        expect(transport.getAccountTrades).toHaveBeenCalledTimes(1);
+    });
+
     it('exposes no futures execution surface', () => {
         const adapter = new FuturesTradingAdapter({ transport: {} });
         expect(Object.getOwnPropertyNames(FuturesTradingAdapter.prototype)).toEqual([
@@ -8467,6 +9502,7 @@ describe('FuturesTradingAdapter', () => {
             'getOrderHistory',
             'getAlgoOrderHistory',
             'getAccountTradeHistory',
+            'getIncomeHistory',
         ]);
 
         const forbiddenExecutionMethods = [
@@ -8482,6 +9518,8 @@ describe('FuturesTradingAdapter', () => {
             'getAllOrders',
             'getAccountTrades',
             'accountTradeList',
+            'incomeHistory',
+            'getIncomeHistoryPage',
         ];
 
         forbiddenExecutionMethods.forEach((method) => {
