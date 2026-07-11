@@ -730,7 +730,54 @@ Twelfth checkpoint rules and audit:
 - Three independent reviews found no remaining implementation, contract, isolation, identity, immutability, error-propagation, or substantive test gap. GitNexus pre-edit upstream impact was `LOW`: one direct focused-test dependent and zero affected processes/modules; no pre-edit HIGH or CRITICAL finding existed. The working-diff audit was `MEDIUM` across `2 files / 35 symbols / 2` existing exchange-info flows, and the complete staged audit was `MEDIUM` across `3 files / 39 symbols / 2` existing exchange-info flows; both are conservative whole-file attribution through the expanded adapter and roadmap. Comparison against `main` was `CRITICAL` across `41 files / 568 symbols / 91 flows`; this exactly matches the audited cumulative long-running branch scope in the session handoff and is not caused by this isolated checkpoint.
 - Validation passed: futures adapter `1183/1183`, spot adapter `21/21`, futures-command rejection suite `10/10`, shuffled non-isolated futures+spot `1204/1204` with seed `20260711`, full suite `1406 passed / 2 skipped`, lint, build, targeted lint, and `git diff --check`. Lint emitted only the existing stale `baseline-browser-mapping` data notice, and build emitted only the existing large-chunk advisory; no dependency or bundle-policy change was made.
 
-Phase status: **In progress; exchange-metadata, mark/index-price, current-funding, position-risk, account-balance, current-open-order array, current-algo-open-order array, identifier-scoped algo-order query, identifier-scoped regular-order query, identifier-scoped current-open regular-order query, symbol-scoped regular-order history, and symbol-scoped algo-order history boundary checkpoints complete (2026-07-11).**
+Thirteenth checkpoint contract:
+
+```js
+[
+  {
+    marketType: "futures",
+    buyer: boolean,
+    commission: string,
+    commissionAsset: string,
+    id: number,
+    maker: boolean,
+    orderId: number,
+    price: string,
+    qty: string,
+    quoteQty: string,
+    realizedPnl: string,
+    side: string,
+    positionSide: string,
+    symbol: string,
+    time: number
+  }
+]
+```
+
+Thirteenth checkpoint rules and audit:
+
+- The source is the current official USDⓈ-M Account Trade List endpoint, signed `GET /fapi/v1/userTrades` with IP request weight `5`. `symbol` and signing-layer `timestamp` are required; `orderId`, `startTime`, `endTime`, `fromId`, `limit`, and `recvWindow` are optional endpoint parameters, but protocol-owned `timestamp` and `recvWindow` remain outside this adapter contract.
+- Binance's actively maintained REST reference says `limit` defaults to `500`, while current generated SDK method documentation still says `100`; both state a maximum of `1000`. The adapter always sends the live value explicitly by default and accepts only safe integers from `1` through `1000`.
+- `getAccountTradeHistory(symbol, bounds = {})` exposes one bounded policy over only injected `getAccountTrades`: default `{ symbol, limit }`, order-filter `{ symbol, orderId, limit }`, inclusive trade cursor `{ symbol, fromId, limit }`, or paired window `{ symbol, startTime, endTime, limit }`. IDs must be non-negative safe integers; windows must be paired non-negative safe integers with `startTime <= endTime` and may span exactly `604800000` milliseconds because this endpoint says the interval cannot be longer than seven days.
+- Known selector modes cannot mix, and one-sided time bounds are rejected because Binance does not document their behavior or the interaction between `orderId`, `fromId`, and time bounds. The adapter sends only the exact requested symbol, the selected reviewed bounds, and explicit limit; caller symbol overrides, `recvWindow`, timestamp overrides, account-wide flags, fallback hints, unknown keys, and unselected bounds never cross the transport boundary.
+- With no time bounds Binance returns the recent seven-day period, and only trades from the past six months are queryable. Binance does not define six months as a fixed millisecond interval, so the adapter invents no local retention cutoff and preserves a retention-driven empty response.
+- The live reference does not document response sort direction, time-bound inclusivity, one-sided-time defaults, or selector precedence. Current generated SDKs label `fromId` inclusive but incorrectly call it an aggregate-trade ID; the adapter preserves the inclusive cursor evidence while the normalizer preserves wire order without sorting, local filtering, or monotonicity assumptions.
+- The live page's schema heading renders the response item as an object, while its example and current generated models define an array. A valid empty array returns a fresh empty result without another page, order, position, income, balance, current-trade, or other fallback read.
+- Every non-empty row must have the exact, case-sensitive requested symbol. All-wrong and case-mismatched arrays use the established unavailable-symbol identity; mixed symbols, malformed identities/fields, or duplicate symbol-scoped trade `id` values use the endpoint-specific malformed-history identity.
+- Duplicate trade-ID rejection is an evidence-backed normalizer invariant: `id` is the endpoint's trade identity and inclusive symbol-scoped cursor, although Binance does not publish a formal uniqueness statement. Repeated `orderId` values across distinct trade IDs remain valid because one parent order can produce multiple partial-fill executions; rows are preserved separately and never merged or deduplicated by order ID.
+- The independently reviewed response contract contains exactly `buyer`, `commission`, `commissionAsset`, `id`, `maker`, `orderId`, `price`, `qty`, `quoteQty`, `realizedPnl`, `side`, `positionSide`, `symbol`, and `time`. Modern generated JS/Python artifacts include the live `orderId` parameter, while the legacy hand-written futures connector omits it; the live endpoint reference governs this checkpoint.
+- `commission`, `price`, `qty`, `quoteQty`, and `realizedPnl` remain exact non-empty strings, including signs and trailing zeroes. `commissionAsset`, `side`, and `positionSide` remain exact non-empty strings; `id`, `orderId`, and `time` remain non-negative safe integers including zero; `buyer` and `maker` remain booleans with both values preserved.
+- No response field is live-documented as nullable or conditional. Missing, null, coerced, or malformed documented fields are rejected, while undocumented fields such as `marginAsset`, public-market `isRPITrade`, order fields, balance/position fields, and spot-history fields are excluded.
+- `normalizeFuturesAccountTradeHistory` is a dedicated pure array normalizer. It does not call or reuse regular/algo history, current/query order, position, balance, or spot trade-history normalizers; it does not mutate or return source entries and returns fresh detached results on repeated calls.
+- Raw arrays and established official-client-style async `response.data()` bodies are supported. Transport and response-body failures propagate unchanged by identity, and empty, unavailable, or malformed account-trade history triggers no fallback read.
+- The only adapter surface added is read-only `getAccountTradeHistory(symbol, bounds)`. The injected endpoint transport remains `getAccountTrades`; `FuturesTradingAdapter` exposes no raw `getAccountTrades` / `accountTradeList`, placement, cancellation, leverage, margin-mode, or other execution method. All twelve earlier futures contracts and all prior transports remain independent.
+- No futures client, service import, Electron/renderer wiring, WebSocket, account-state merge, UI, or dependency was added. Spot behavior remains unchanged, and backend validation still rejects non-spot typed trading commands with `UNSUPPORTED_MARKET_TYPE`.
+- Three independent reviews found no remaining implementation, requirements, isolation, identity, immutability, fallback, error-propagation, or substantive test gap after one low-severity malformed-response no-fallback coverage omission was fixed.
+- GitNexus pre-edit upstream impact was `LOW`: `FuturesTradingAdapter` had one direct focused-test dependent and zero affected processes/modules, while its constructor had no upstream dependent; no pre-edit HIGH or CRITICAL finding existed. The complete working and staged diff audits were `MEDIUM` across `3 files / 41 symbols / 2` existing exchange-info flows, a conservative whole-file attribution through the expanded adapter and roadmap. The pre-index comparison against `main` was `CRITICAL` across `41 files / 590 symbols / 94 flows`; that is the audited cumulative long-running hardening branch supplied in the session handoff, not this isolated checkpoint.
+- After reindexing, the exact checkpoint comparison against `2935f2d` was `HIGH` across `3 files / 31 symbols / 6 flows`; those flows are conservative same-file/shared-helper attributions through `isRecord` and existing exchange/order normalizers. Exact upstream impact for `FuturesTradingAdapter`, `getAccountTradeHistory`, and `normalizeFuturesAccountTradeHistory` remained `LOW`, each with only the focused test as one direct dependent and zero affected processes/modules, while constructor impact remained zero. The refreshed comparison against `main` was `CRITICAL` across `41 files / 612 symbols / 96 flows`, again the cumulative branch rather than this checkpoint.
+- Validation passed: futures adapter `1318/1318`, spot adapter `21/21`, futures-command rejection suite `10/10`, shuffled non-isolated futures+spot `1339/1339` with seed `20260711`, full suite `1541 passed / 2 skipped`, lint, build, targeted lint, and `git diff --check`. Lint emitted only the existing stale `baseline-browser-mapping` data notice, and build emitted only the existing large-chunk advisory; the full suite retained its existing non-failing React `act(...)` and aborted analytics-fetch diagnostics.
+
+Phase status: **In progress; exchange-metadata, mark/index-price, current-funding, position-risk, account-balance, current-open-order array, current-algo-open-order array, identifier-scoped algo-order query, identifier-scoped regular-order query, identifier-scoped current-open regular-order query, symbol-scoped regular-order history, symbol-scoped algo-order history, and symbol-scoped account-trade history boundary checkpoints complete (2026-07-11).**
 
 UI surface should be minimal:
 
@@ -822,23 +869,23 @@ Suggested UI order:
 
 Continue Phase 5 with the next narrow read-only futures boundary checkpoint:
 
-**Add isolated symbol-scoped USDⓈ-M account-trade history normalization to `FuturesTradingAdapter`.**
+**Add isolated symbol-scoped USDⓈ-M income-history normalization to `FuturesTradingAdapter`.**
 
 Implementation entry point:
 
 - existing `electron/services/futures-trading-adapter.js` and focused unit tests;
-- current official Binance USDⓈ-M Account Trade List documentation before freezing request bounds, pagination/cursor behavior, retention behavior, response fields, identity policy, commission/PnL fields, nullable-field policy, or transport naming.
+- current official Binance USDⓈ-M Get Income History documentation before freezing symbol scoping, request bounds, pagination behavior, retention, response fields, identity policy, nullable-field policy, or transport naming.
 
 Expected scope:
 
-- Reverify the signed account-trade endpoint live, including required symbol scoping, request weight, optional `orderId` / trade-ID cursor / time-window / limit behavior, default and maximum limits, maximum query period, retention, ordering, bound inclusivity, and empty-array behavior. Treat every omission or generated-SDK discrepancy explicitly rather than borrowing the regular/algo order-history policies.
-- Freeze one explicit bounded symbol-scoped request policy before transport use. Require a non-empty exact symbol, validate every selected bound locally, send only reviewed keys, and expose no account-wide path or pass-through `recvWindow`, timestamp, account flags, fallback hints, or unknown options.
-- Add a dedicated pure account-trade-history array normalizer. Do not reuse regular-order history, algo-order history, order query/current-open, position, balance, or spot trade-history normalization merely because symbol, order IDs, prices, quantities, commission, or timestamps overlap.
-- Reverify the endpoint's exact response fields and types independently, including trade ID versus order ID scoping, buyer/maker flags, commission asset/amount, realized PnL, quote quantity, position side, and any live-documented conditional or nullable fields. Preserve decimal strings and identifiers lexically, safe integers/timestamps as numbers, and booleans as booleans without coercion.
-- Require exact case-sensitive response-symbol agreement for every row, establish evidence-backed duplicate trade-ID/order-ID behavior, preserve response order and valid empty arrays, preserve source immutability, and use endpoint-specific stable errors.
-- Preserve transport and async response-body error identity unchanged. Do not fetch orders, positions, income, balances, current trades, or another page/endpoint as fallback for empty, unavailable, or malformed account-trade history.
-- Keep all twelve completed futures contracts unchanged; do not merge trades with order histories, positions, balances, or a generic account-state framework.
+- Reverify the signed income-history endpoint live, including whether `symbol` is optional upstream, request weight, income-type filters, time bounds, page/cursor parameters, default and maximum limits, maximum query period, retention, ordering, inclusivity, response fields, and empty-array behavior. Treat every omission or generated-SDK discrepancy independently from account-trade and order-history contracts.
+- Freeze one explicit bounded symbol-scoped request policy before transport use. Require a non-empty exact symbol even if Binance permits an account-wide request, validate every selected bound locally, send only reviewed keys, and expose no account-wide path or pass-through `recvWindow`, timestamp, account flags, fallback hints, or unknown options.
+- Add a dedicated pure income-history array normalizer. Do not reuse account-trade, regular/algo order-history, order query/current-open, position, balance, or spot-history normalizers merely because symbols, assets, amounts, timestamps, or transaction identifiers overlap.
+- Reverify exact response fields and types independently, including income type, asset, amount, symbol, timestamp, transaction/trade identifiers, any `info` field, conditional fields, and nullable or empty-string behavior. Preserve decimal strings and identifiers lexically and safe integers/timestamps as numbers without coercion.
+- Require evidence-backed exact-symbol and duplicate-identity behavior, preserve response order and valid empty arrays, preserve source immutability, and use endpoint-specific stable errors.
+- Preserve transport and async response-body error identity unchanged. Do not fetch trades, orders, positions, balances, another income page, or another endpoint as fallback for empty, unavailable, or malformed income history.
+- Keep all thirteen completed futures contracts unchanged; do not merge income with account trades, orders, positions, balances, or a generic account-state framework.
 - Keep `FuturesTradingAdapter` free of order placement, cancellation, leverage, margin-mode, or other execution methods; backend futures execution must remain rejected.
 - Do not wire the adapter into `binance-connection.js`, Electron startup, renderer state, WebSockets, or visible UI in this checkpoint.
 - Defer account-wide reads, service orchestration, testnet client composition, and the futures mode indicator/position panel to later reviewed Phase 5 checkpoints.
-- Run the complete focused (`1183/1183` baseline), spot (`21/21`), futures-command rejection (`10/10`), shuffled non-isolated futures+spot (`1204/1204` baseline with seed `20260711`), full (`1406 passed / 2 skipped` baseline), lint, build, diff, and GitNexus validation matrix. Perform independent bug/requirements audits, fix every discovered defect, update this roadmap, commit, reindex GitNexus, verify the index at the new commit, and leave a clean worktree.
+- Run the complete focused (`1318/1318` baseline), spot (`21/21`), futures-command rejection (`10/10`), shuffled non-isolated futures+spot (`1339/1339` baseline with seed `20260711`), full (`1541 passed / 2 skipped` baseline), lint, build, diff, and GitNexus validation matrix. Perform independent bug/requirements audits, fix every discovered defect, update this roadmap, commit, reindex GitNexus, verify the index at the new commit, and leave a clean worktree.

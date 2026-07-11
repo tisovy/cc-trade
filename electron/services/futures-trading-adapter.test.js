@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
     FUTURES_ACCOUNT_BALANCE_ERROR_CODES,
+    FUTURES_ACCOUNT_TRADE_HISTORY_ERROR_CODES,
     FUTURES_ALGO_ORDER_HISTORY_ERROR_CODES,
     FUTURES_ALGO_ORDER_ERROR_CODES,
     FUTURES_ALGO_OPEN_ORDERS_ERROR_CODES,
@@ -13,6 +14,7 @@ import {
     FUTURES_ORDER_ERROR_CODES,
     FUTURES_POSITION_RISK_ERROR_CODES,
     FuturesAccountBalanceError,
+    FuturesAccountTradeHistoryError,
     FuturesAlgoOrderHistoryError,
     FuturesAlgoOrderError,
     FuturesAlgoOpenOrdersError,
@@ -26,6 +28,7 @@ import {
     FuturesPositionRiskError,
     FuturesTradingAdapter,
     normalizeFuturesAccountBalance,
+    normalizeFuturesAccountTradeHistory,
     normalizeFuturesAlgoOrderHistory,
     normalizeFuturesAlgoOrder,
     normalizeFuturesAlgoOpenOrders,
@@ -642,6 +645,42 @@ const expectedAlgoOrderHistoryEntry = {
     updateTime: 1750514545091,
     triggerTime: 0,
     goodTillDate: 0,
+};
+
+const makeAccountTradeHistoryEntry = (overrides = {}) => ({
+    buyer: false,
+    commission: '0.07819010',
+    commissionAsset: 'USDT',
+    id: 698759,
+    maker: false,
+    orderId: 25851813,
+    price: '7819.01000000',
+    qty: '0.002000',
+    quoteQty: '15.63802000',
+    realizedPnl: '-0.91539999',
+    side: 'SELL',
+    positionSide: 'SHORT',
+    symbol: 'BTCUSDT',
+    time: 1569514978020,
+    ...overrides,
+});
+
+const expectedAccountTradeHistoryEntry = {
+    marketType: 'futures',
+    buyer: false,
+    commission: '0.07819010',
+    commissionAsset: 'USDT',
+    id: 698759,
+    maker: false,
+    orderId: 25851813,
+    price: '7819.01000000',
+    qty: '0.002000',
+    quoteQty: '15.63802000',
+    realizedPnl: '-0.91539999',
+    side: 'SELL',
+    positionSide: 'SHORT',
+    symbol: 'BTCUSDT',
+    time: 1569514978020,
 };
 
 describe('normalizeFuturesExchangeInfo', () => {
@@ -5306,6 +5345,446 @@ describe('normalizeFuturesAlgoOrderHistory', () => {
     });
 });
 
+describe('normalizeFuturesAccountTradeHistory', () => {
+    const malformedError = () => new FuturesAccountTradeHistoryError(
+        FUTURES_ACCOUNT_TRADE_HISTORY_ERROR_CODES.MALFORMED_RESPONSE,
+        'Malformed futures account-trade-history response',
+    );
+
+    it('normalizes the official account-trade array with exact source types', () => {
+        const result = normalizeFuturesAccountTradeHistory(
+            [makeAccountTradeHistoryEntry()],
+            'BTCUSDT',
+        );
+
+        expect(result).toEqual([expectedAccountTradeHistoryEntry]);
+        [
+            ['commission', '0.07819010'],
+            ['price', '7819.01000000'],
+            ['qty', '0.002000'],
+            ['quoteQty', '15.63802000'],
+            ['realizedPnl', '-0.91539999'],
+        ].forEach(([field, expectedValue]) => {
+            expect(result[0][field]).toBe(expectedValue);
+            expect(typeof result[0][field]).toBe('string');
+        });
+        expect(result[0].commissionAsset).toBe('USDT');
+        expect(result[0].id).toBe(698759);
+        expect(result[0].orderId).toBe(25851813);
+        expect(result[0].time).toBe(1569514978020);
+        expect(result[0].buyer).toBe(false);
+        expect(result[0].maker).toBe(false);
+    });
+
+    it('preserves undocumented response ordering without imposing monotonic IDs', () => {
+        const source = [
+            makeAccountTradeHistoryEntry({
+                id: 9003,
+                orderId: 8003,
+                side: 'BUY',
+            }),
+            makeAccountTradeHistoryEntry({
+                id: 1001,
+                orderId: 8001,
+                side: 'SELL',
+            }),
+            makeAccountTradeHistoryEntry({
+                id: 5002,
+                orderId: 8002,
+                side: 'BUY',
+            }),
+        ];
+
+        const result = normalizeFuturesAccountTradeHistory(source, 'BTCUSDT');
+
+        expect(result.map((trade) => trade.id)).toEqual([9003, 1001, 5002]);
+        expect(result.map((trade) => trade.side)).toEqual(['BUY', 'SELL', 'BUY']);
+    });
+
+    it('preserves a valid empty account-trade history as a fresh empty array', () => {
+        const source = [];
+        const result = normalizeFuturesAccountTradeHistory(source, 'BTCUSDT');
+
+        expect(result).toEqual([]);
+        expect(result).not.toBe(source);
+    });
+
+    it('requires and preserves the exact case-sensitive requested symbol', () => {
+        const [result] = normalizeFuturesAccountTradeHistory([
+            makeAccountTradeHistoryEntry({ id: 698760 }),
+        ], 'BTCUSDT');
+
+        expect(result.symbol).toBe('BTCUSDT');
+        expect(result.id).toBe(698760);
+    });
+
+    it.each([
+        ['a different response symbol', 'ETHUSDT', 'BTCUSDT'],
+        ['a case-mismatched response symbol', 'btcusdt', 'BTCUSDT'],
+        ['a case-mismatched requested symbol', 'BTCUSDT', 'btcusdt'],
+    ])('rejects %s with the established unavailable-symbol identity', (
+        _label,
+        responseSymbol,
+        requestedSymbol,
+    ) => {
+        expect(() => normalizeFuturesAccountTradeHistory([
+            makeAccountTradeHistoryEntry({ symbol: responseSymbol }),
+        ], requestedSymbol)).toThrowError(new FuturesAccountTradeHistoryError(
+            FUTURES_ACCOUNT_TRADE_HISTORY_ERROR_CODES.SYMBOL_UNAVAILABLE,
+            `Futures symbol "${requestedSymbol}" is unavailable in account-trade-history response`,
+        ));
+    });
+
+    it('rejects mixed-symbol account trades instead of silently filtering', () => {
+        expect(() => normalizeFuturesAccountTradeHistory([
+            makeAccountTradeHistoryEntry(),
+            makeAccountTradeHistoryEntry({
+                id: 698760,
+                orderId: 25851814,
+                symbol: 'ETHUSDT',
+            }),
+        ], 'BTCUSDT')).toThrowError(malformedError());
+    });
+
+    it.each([undefined, null, 123, '', '   '])(
+        'rejects invalid requested symbol %# before parsing account trades',
+        (requestedSymbol) => {
+            expect(() => normalizeFuturesAccountTradeHistory(
+                [makeAccountTradeHistoryEntry()],
+                requestedSymbol,
+            )).toThrowError(new FuturesAccountTradeHistoryError(
+                FUTURES_ACCOUNT_TRADE_HISTORY_ERROR_CODES.INVALID_SYMBOL,
+                'Futures symbol must be a non-empty string',
+            ));
+        },
+    );
+
+    it.each([
+        ['an undefined payload', undefined],
+        ['a null payload', null],
+        ['a single object', makeAccountTradeHistoryEntry()],
+        ['a scalar payload', 'BTCUSDT'],
+        ['a null entry', [null]],
+        ['a missing entry symbol', [makeAccountTradeHistoryEntry({
+            symbol: undefined,
+        })]],
+        ['a numeric entry symbol', [makeAccountTradeHistoryEntry({ symbol: 123 })]],
+        ['a blank entry symbol', [makeAccountTradeHistoryEntry({ symbol: '   ' })]],
+        ['a malformed entry among valid entries', [
+            makeAccountTradeHistoryEntry(),
+            null,
+        ]],
+    ])('rejects %s as malformed account-trade history', (_label, payload) => {
+        expect(() => normalizeFuturesAccountTradeHistory(
+            payload,
+            'BTCUSDT',
+        )).toThrowError(malformedError());
+    });
+
+    it.each(['commission', 'price', 'qty', 'quoteQty', 'realizedPnl'])(
+        'rejects malformed required account-trade decimal %s',
+        (field) => {
+            [0, null, '   '].forEach((value) => {
+                expect(() => normalizeFuturesAccountTradeHistory([
+                    makeAccountTradeHistoryEntry({ [field]: value }),
+                ], 'BTCUSDT')).toThrowError(malformedError());
+            });
+        },
+    );
+
+    it.each(['commissionAsset', 'side', 'positionSide'])(
+        'rejects malformed required account-trade string %s',
+        (field) => {
+            [123, null, '   '].forEach((value) => {
+                expect(() => normalizeFuturesAccountTradeHistory([
+                    makeAccountTradeHistoryEntry({ [field]: value }),
+                ], 'BTCUSDT')).toThrowError(malformedError());
+            });
+        },
+    );
+
+    it.each([
+        'buyer',
+        'commission',
+        'commissionAsset',
+        'id',
+        'maker',
+        'orderId',
+        'price',
+        'qty',
+        'quoteQty',
+        'realizedPnl',
+        'side',
+        'positionSide',
+        'symbol',
+        'time',
+    ])('rejects a missing required account-trade field %s', (field) => {
+        const source = makeAccountTradeHistoryEntry();
+        delete source[field];
+
+        expect(() => normalizeFuturesAccountTradeHistory(
+            [source],
+            'BTCUSDT',
+        )).toThrowError(malformedError());
+    });
+
+    it.each(['id', 'orderId', 'time'])(
+        'rejects a non-integer account-trade value in %s',
+        (field) => {
+            expect(() => normalizeFuturesAccountTradeHistory([
+                makeAccountTradeHistoryEntry({ [field]: '0' }),
+            ], 'BTCUSDT')).toThrowError(malformedError());
+        },
+    );
+
+    it.each([
+        ['a negative integer', -1],
+        ['a fractional number', 1.5],
+        ['an unsafe integer', Number.MAX_SAFE_INTEGER + 1],
+        ['NaN', NaN],
+        ['infinity', Infinity],
+        ['null', null],
+    ])('rejects %s for an account-trade integer field', (_label, invalidInteger) => {
+        expect(() => normalizeFuturesAccountTradeHistory([
+            makeAccountTradeHistoryEntry({ id: invalidInteger }),
+        ], 'BTCUSDT')).toThrowError(malformedError());
+    });
+
+    it.each(['buyer', 'maker'])(
+        'rejects a non-boolean account-trade flag in %s',
+        (field) => {
+            ['false', 0, null].forEach((value) => {
+                expect(() => normalizeFuturesAccountTradeHistory([
+                    makeAccountTradeHistoryEntry({ [field]: value }),
+                ], 'BTCUSDT')).toThrowError(malformedError());
+            });
+        },
+    );
+
+    it('preserves signed and scaled decimal strings without coercion', () => {
+        const [result] = normalizeFuturesAccountTradeHistory([
+            makeAccountTradeHistoryEntry({
+                commission: '-0.00000000',
+                price: '0007819.01000000',
+                qty: '0.00200000',
+                quoteQty: '15.6380200000',
+                realizedPnl: '+0.00000000',
+            }),
+        ], 'BTCUSDT');
+
+        expect(result).toMatchObject({
+            commission: '-0.00000000',
+            price: '0007819.01000000',
+            qty: '0.00200000',
+            quoteQty: '15.6380200000',
+            realizedPnl: '+0.00000000',
+        });
+    });
+
+    it('preserves true flags plus zero identifiers and timestamp', () => {
+        const [result] = normalizeFuturesAccountTradeHistory([
+            makeAccountTradeHistoryEntry({
+                buyer: true,
+                maker: true,
+                id: 0,
+                orderId: 0,
+                time: 0,
+            }),
+        ], 'BTCUSDT');
+
+        expect(result).toMatchObject({
+            buyer: true,
+            maker: true,
+            id: 0,
+            orderId: 0,
+            time: 0,
+        });
+    });
+
+    it('rejects duplicate symbol-scoped trade IDs', () => {
+        expect(() => normalizeFuturesAccountTradeHistory([
+            makeAccountTradeHistoryEntry(),
+            makeAccountTradeHistoryEntry({
+                id: 698759,
+                orderId: 25851814,
+                time: 1569514978021,
+            }),
+        ], 'BTCUSDT')).toThrowError(malformedError());
+    });
+
+    it('preserves repeated order IDs across distinct fill trade IDs', () => {
+        const result = normalizeFuturesAccountTradeHistory([
+            makeAccountTradeHistoryEntry({
+                id: 698759,
+                orderId: 25851813,
+                qty: '0.001000',
+            }),
+            makeAccountTradeHistoryEntry({
+                id: 698760,
+                orderId: 25851813,
+                qty: '0.001000',
+                time: 1569514978021,
+            }),
+        ], 'BTCUSDT');
+
+        expect(result.map((trade) => trade.id)).toEqual([698759, 698760]);
+        expect(result.map((trade) => trade.orderId)).toEqual([
+            25851813,
+            25851813,
+        ]);
+    });
+
+    it('preserves source immutability and returns fresh detached trades', () => {
+        const source = [
+            makeAccountTradeHistoryEntry({ ignoredField: 'not-normalized' }),
+            makeAccountTradeHistoryEntry({
+                id: 698760,
+                orderId: 25851813,
+                time: 1569514978021,
+            }),
+        ];
+        const snapshot = structuredClone(source);
+
+        const result = normalizeFuturesAccountTradeHistory(source, 'BTCUSDT');
+        const secondResult = normalizeFuturesAccountTradeHistory(source, 'BTCUSDT');
+
+        expect(source).toEqual(snapshot);
+        expect(result).not.toBe(source);
+        expect(result[0]).not.toBe(source[0]);
+        expect(result[1]).not.toBe(source[1]);
+        expect(result[0]).not.toBe(result[1]);
+        expect(result[0]).not.toBe(secondResult[0]);
+        expect(result[0]).not.toHaveProperty('ignoredField');
+
+        result[0].commission = 'mutated-result-only';
+        expect(source[0].commission).toBe('0.07819010');
+        expect(secondResult[0].commission).toBe('0.07819010');
+    });
+
+    it('excludes undocumented, order, balance, position, and spot-history fields', () => {
+        const [result] = normalizeFuturesAccountTradeHistory([
+            makeAccountTradeHistoryEntry({
+                marginAsset: 'USDT',
+                isRPITrade: true,
+                clientOrderId: 'not-an-account-trade-field',
+                tradeId: 'synthetic-alias',
+                reduceOnly: false,
+                incomeType: 'COMMISSION',
+                isBestMatch: true,
+            }),
+        ], 'BTCUSDT');
+
+        [
+            'marginAsset',
+            'isRPITrade',
+            'clientOrderId',
+            'tradeId',
+            'reduceOnly',
+            'incomeType',
+            'isBestMatch',
+        ].forEach((field) => expect(result).not.toHaveProperty(field));
+    });
+
+    it('keeps account trades separate from completed order-history normalizers', () => {
+        const repeatedOrderTrades = [
+            makeAccountTradeHistoryEntry({ id: 698759 }),
+            makeAccountTradeHistoryEntry({ id: 698760 }),
+        ];
+
+        expect(normalizeFuturesAccountTradeHistory(
+            repeatedOrderTrades,
+            'BTCUSDT',
+        )).toHaveLength(2);
+        expect(() => normalizeFuturesOrderHistory(
+            repeatedOrderTrades,
+            'BTCUSDT',
+        )).toThrowError(new FuturesOrderHistoryError(
+            FUTURES_ORDER_HISTORY_ERROR_CODES.MALFORMED_RESPONSE,
+            'Malformed futures order-history response',
+        ));
+        expect(() => normalizeFuturesAlgoOrderHistory(
+            repeatedOrderTrades,
+            'BTCUSDT',
+        )).toThrowError(new FuturesAlgoOrderHistoryError(
+            FUTURES_ALGO_ORDER_HISTORY_ERROR_CODES.MALFORMED_RESPONSE,
+            'Malformed futures algo-order-history response',
+        ));
+        expect(() => normalizeFuturesCurrentOpenOrder(
+            repeatedOrderTrades,
+            'BTCUSDT',
+            { orderId: 25851813 },
+        )).toThrowError(new FuturesCurrentOpenOrderError(
+            FUTURES_CURRENT_OPEN_ORDER_ERROR_CODES.MALFORMED_RESPONSE,
+            'Malformed futures current-open-order response',
+        ));
+        expect(() => normalizeFuturesOrder(
+            repeatedOrderTrades,
+            'BTCUSDT',
+            { orderId: 25851813 },
+        )).toThrowError(new FuturesOrderError(
+            FUTURES_ORDER_ERROR_CODES.MALFORMED_RESPONSE,
+            'Malformed futures order response',
+        ));
+    });
+
+    it('keeps all twelve completed futures read-only contracts unchanged', () => {
+        const exchangeInfo = makeExchangeInfo(makeFuturesSymbol());
+        const premiumIndex = makeMarkPrice();
+
+        expect(normalizeFuturesExchangeInfo(exchangeInfo, 'BTCUSDT')).toMatchObject({
+            marketType: 'futures',
+            symbol: 'BTCUSDT',
+            filters: expectedFilters,
+        });
+        expect(normalizeFuturesMarkPrice(premiumIndex, 'BTCUSDT')).toEqual(
+            expectedMarkPrice,
+        );
+        expect(normalizeFuturesFundingState(premiumIndex, 'BTCUSDT')).toEqual(
+            expectedFundingState,
+        );
+        expect(normalizeFuturesPositionRisk(
+            [makePositionRisk()],
+            'BTCUSDT',
+            'BOTH',
+        )).toEqual(expectedPositionRisk);
+        expect(normalizeFuturesAccountBalance(
+            [makeAccountBalance()],
+            'USDT',
+        )).toEqual(expectedAccountBalance);
+        expect(normalizeFuturesOpenOrders(
+            [makeOpenOrder()],
+            'BTCUSDT',
+        )).toEqual([expectedOpenOrder]);
+        expect(normalizeFuturesAlgoOpenOrders(
+            [makeAlgoOpenOrder()],
+            'BTCUSDT',
+        )).toEqual([expectedAlgoOpenOrder]);
+        expect(normalizeFuturesAlgoOrder(
+            makeAlgoOrderQuery(),
+            'BTCUSDT',
+            { algoId: 2146760 },
+        )).toEqual(expectedAlgoOrderQuery);
+        expect(normalizeFuturesOrder(
+            makeOrderQuery(),
+            'BTCUSDT',
+            { orderId: 1917643 },
+        )).toEqual(expectedOrderQuery);
+        expect(normalizeFuturesCurrentOpenOrder(
+            makeCurrentOpenOrderQuery(),
+            'BTCUSDT',
+            { orderId: 1917645 },
+        )).toEqual(expectedCurrentOpenOrderQuery);
+        expect(normalizeFuturesOrderHistory(
+            [makeOrderHistoryEntry()],
+            'BTCUSDT',
+        )).toEqual([expectedOrderHistoryEntry]);
+        expect(normalizeFuturesAlgoOrderHistory(
+            [makeAlgoOrderHistoryEntry()],
+            'BTCUSDT',
+        )).toEqual([expectedAlgoOrderHistoryEntry]);
+    });
+});
+
 describe('FuturesTradingAdapter', () => {
     it('loads and unwraps official-client-style exchange metadata at the adapter boundary', async () => {
         const source = makeExchangeInfo(makeFuturesSymbol());
@@ -7436,6 +7915,541 @@ describe('FuturesTradingAdapter', () => {
         expect(transport.getOpenAlgoOrders).toHaveBeenCalledTimes(1);
     });
 
+    it('loads bounded account trades from an official-client-style body', async () => {
+        const data = vi.fn().mockResolvedValue([makeAccountTradeHistoryEntry()]);
+        const transport = {
+            getAccountTrades: vi.fn().mockResolvedValue({ data }),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getAccountTradeHistory('BTCUSDT')).resolves.toEqual([
+            expectedAccountTradeHistoryEntry,
+        ]);
+        expect(transport.getAccountTrades.mock.calls).toEqual([[
+            { symbol: 'BTCUSDT', limit: 500 },
+        ]]);
+        expect(data).toHaveBeenCalledWith();
+    });
+
+    it('accepts raw account trades with an exact zero order ID and maximum limit', async () => {
+        const transport = {
+            getAccountTrades: vi.fn().mockResolvedValue([
+                makeAccountTradeHistoryEntry({ orderId: 0 }),
+            ]),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getAccountTradeHistory('BTCUSDT', {
+            orderId: 0,
+            limit: 1000,
+            symbol: 'ETHUSDT',
+            recvWindow: 60000,
+            timestamp: 123,
+            accountWide: true,
+            fallback: 'getAllOrders',
+            unknown: 'must-not-cross-the-transport-boundary',
+        })).resolves.toMatchObject([{ orderId: 0, symbol: 'BTCUSDT' }]);
+        expect(transport.getAccountTrades.mock.calls).toEqual([[
+            { symbol: 'BTCUSDT', orderId: 0, limit: 1000 },
+        ]]);
+    });
+
+    it('sends the inclusive trade-ID cursor without caller-owned request keys', async () => {
+        const requestBounds = {
+            fromId: 0,
+            limit: 25,
+            symbol: 'ETHUSDT',
+            orderId: undefined,
+            startTime: undefined,
+            endTime: undefined,
+            recvWindow: 5000,
+            timestamp: 123,
+            accountWide: true,
+            fallbackHint: 'getRecentTrades',
+        };
+        const snapshot = structuredClone(requestBounds);
+        const transport = {
+            getAccountTrades: vi.fn().mockResolvedValue([
+                makeAccountTradeHistoryEntry({ id: 0 }),
+            ]),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getAccountTradeHistory(
+            'BTCUSDT',
+            requestBounds,
+        )).resolves.toMatchObject([{ id: 0, symbol: 'BTCUSDT' }]);
+        expect(requestBounds).toEqual(snapshot);
+        expect(transport.getAccountTrades.mock.calls).toEqual([[
+            { symbol: 'BTCUSDT', fromId: 0, limit: 25 },
+        ]]);
+    });
+
+    it.each([
+        ['equal timestamps and minimum limit', 1000, 1000, 1],
+        [
+            'the exact live-documented maximum window and maximum limit',
+            1000,
+            1000 + (7 * 24 * 60 * 60 * 1000),
+            1000,
+        ],
+    ])('transports an exact paired account-trade window at %s', async (
+        _label,
+        startTime,
+        endTime,
+        limit,
+    ) => {
+        const transport = {
+            getAccountTrades: vi.fn().mockResolvedValue([]),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getAccountTradeHistory('BTCUSDT', {
+            startTime,
+            endTime,
+            limit,
+            recvWindow: 5000,
+            timestamp: 123,
+        })).resolves.toEqual([]);
+        expect(transport.getAccountTrades.mock.calls).toEqual([[
+            { symbol: 'BTCUSDT', startTime, endTime, limit },
+        ]]);
+    });
+
+    it('uses an explicit live limit while stripping unknown default-mode keys', async () => {
+        const requestBounds = {
+            limit: undefined,
+            orderId: undefined,
+            fromId: undefined,
+            startTime: undefined,
+            endTime: undefined,
+            symbol: 'ETHUSDT',
+            recvWindow: 60000,
+            timestamp: 123,
+            accountWide: true,
+            fallbackHint: 'getAccountTradeHistoryPage',
+            unknown: true,
+        };
+        const snapshot = structuredClone(requestBounds);
+        const transport = {
+            getAccountTrades: vi.fn().mockResolvedValue([]),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getAccountTradeHistory(
+            'BTCUSDT',
+            requestBounds,
+        )).resolves.toEqual([]);
+        expect(requestBounds).toEqual(snapshot);
+        expect(transport.getAccountTrades.mock.calls).toEqual([[
+            { symbol: 'BTCUSDT', limit: 500 },
+        ]]);
+    });
+
+    it.each([undefined, null, 123, '', '   '])(
+        'rejects invalid account-trade-history symbol %# before transport use',
+        async (symbol) => {
+            const transport = { getAccountTrades: vi.fn() };
+            const adapter = new FuturesTradingAdapter({ transport });
+
+            await expect(adapter.getAccountTradeHistory(symbol)).rejects.toThrowError(
+                new FuturesAccountTradeHistoryError(
+                    FUTURES_ACCOUNT_TRADE_HISTORY_ERROR_CODES.INVALID_SYMBOL,
+                    'Futures symbol must be a non-empty string',
+                ),
+            );
+            expect(transport.getAccountTrades).not.toHaveBeenCalled();
+        },
+    );
+
+    it.each([null, 123, 'bounds', [], false, () => ({})])(
+        'rejects non-record account-trade request bounds %# before transport',
+        async (requestBounds) => {
+            const transport = { getAccountTrades: vi.fn() };
+            const adapter = new FuturesTradingAdapter({ transport });
+
+            await expect(adapter.getAccountTradeHistory(
+                'BTCUSDT',
+                requestBounds,
+            )).rejects.toThrowError(new FuturesAccountTradeHistoryError(
+                FUTURES_ACCOUNT_TRADE_HISTORY_ERROR_CODES.INVALID_REQUEST_BOUNDS,
+                'Futures account-trade-history request bounds are invalid',
+            ));
+            expect(transport.getAccountTrades).not.toHaveBeenCalled();
+        },
+    );
+
+    it.each([
+        ['zero', 0],
+        ['negative', -1],
+        ['above the official maximum', 1001],
+        ['fractional', 1.5],
+        ['a numeric string', '500'],
+        ['unsafe', Number.MAX_SAFE_INTEGER + 1],
+        ['NaN', NaN],
+        ['infinite', Infinity],
+        ['null', null],
+        ['boolean', false],
+    ])('rejects %s account-trade limit before transport', async (_label, limit) => {
+        const transport = { getAccountTrades: vi.fn() };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getAccountTradeHistory(
+            'BTCUSDT',
+            { limit },
+        )).rejects.toThrowError(new FuturesAccountTradeHistoryError(
+            FUTURES_ACCOUNT_TRADE_HISTORY_ERROR_CODES.INVALID_REQUEST_BOUNDS,
+            'Futures account-trade-history request bounds are invalid',
+        ));
+        expect(transport.getAccountTrades).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        ['orderId', null],
+        ['orderId', -1],
+        ['orderId', 1.5],
+        ['orderId', '25851813'],
+        ['orderId', Number.MAX_SAFE_INTEGER + 1],
+        ['orderId', NaN],
+        ['orderId', Infinity],
+        ['orderId', false],
+        ['fromId', null],
+        ['fromId', -1],
+        ['fromId', 1.5],
+        ['fromId', '698759'],
+        ['fromId', Number.MAX_SAFE_INTEGER + 1],
+        ['fromId', NaN],
+        ['fromId', Infinity],
+        ['fromId', false],
+    ])('rejects invalid account-trade %s %# before transport', async (
+        field,
+        value,
+    ) => {
+        const transport = { getAccountTrades: vi.fn() };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getAccountTradeHistory(
+            'BTCUSDT',
+            { [field]: value },
+        )).rejects.toThrowError(new FuturesAccountTradeHistoryError(
+            FUTURES_ACCOUNT_TRADE_HISTORY_ERROR_CODES.INVALID_REQUEST_BOUNDS,
+            'Futures account-trade-history request bounds are invalid',
+        ));
+        expect(transport.getAccountTrades).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        ['order ID plus trade ID', { orderId: 1, fromId: 2 }],
+        ['order ID plus startTime', { orderId: 1, startTime: 1000 }],
+        ['order ID plus endTime', { orderId: 1, endTime: 2000 }],
+        ['order ID plus paired window', {
+            orderId: 1,
+            startTime: 1000,
+            endTime: 2000,
+        }],
+        ['trade ID plus startTime', { fromId: 1, startTime: 1000 }],
+        ['trade ID plus endTime', { fromId: 1, endTime: 2000 }],
+        ['trade ID plus paired window', {
+            fromId: 1,
+            startTime: 1000,
+            endTime: 2000,
+        }],
+    ])('rejects undocumented mixed %s mode before account-trade transport', async (
+        _label,
+        requestBounds,
+    ) => {
+        const transport = { getAccountTrades: vi.fn() };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getAccountTradeHistory(
+            'BTCUSDT',
+            requestBounds,
+        )).rejects.toThrowError(new FuturesAccountTradeHistoryError(
+            FUTURES_ACCOUNT_TRADE_HISTORY_ERROR_CODES.INVALID_REQUEST_BOUNDS,
+            'Futures account-trade-history request bounds are invalid',
+        ));
+        expect(transport.getAccountTrades).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        ['startTime only', { startTime: 1000 }],
+        ['endTime only', { endTime: 2000 }],
+        ['startTime plus explicitly undefined endTime', {
+            startTime: 1000,
+            endTime: undefined,
+        }],
+        ['endTime plus explicitly undefined startTime', {
+            startTime: undefined,
+            endTime: 2000,
+        }],
+    ])('rejects one-sided %s account-trade window before transport', async (
+        _label,
+        requestBounds,
+    ) => {
+        const transport = { getAccountTrades: vi.fn() };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getAccountTradeHistory(
+            'BTCUSDT',
+            requestBounds,
+        )).rejects.toThrowError(new FuturesAccountTradeHistoryError(
+            FUTURES_ACCOUNT_TRADE_HISTORY_ERROR_CODES.INVALID_REQUEST_BOUNDS,
+            'Futures account-trade-history request bounds are invalid',
+        ));
+        expect(transport.getAccountTrades).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        ['negative startTime', { startTime: -1, endTime: 1000 }],
+        ['fractional startTime', { startTime: 1.5, endTime: 1000 }],
+        ['string startTime', { startTime: '0', endTime: 1000 }],
+        ['unsafe startTime', {
+            startTime: Number.MAX_SAFE_INTEGER + 1,
+            endTime: Number.MAX_SAFE_INTEGER + 1,
+        }],
+        ['negative endTime', { startTime: 0, endTime: -1 }],
+        ['fractional endTime', { startTime: 0, endTime: 1.5 }],
+        ['string endTime', { startTime: 0, endTime: '1000' }],
+        ['unsafe endTime', {
+            startTime: 0,
+            endTime: Number.MAX_SAFE_INTEGER + 1,
+        }],
+        ['null timestamps', { startTime: null, endTime: null }],
+        ['boolean timestamps', { startTime: false, endTime: false }],
+    ])('rejects %s before using the account-trade transport', async (
+        _label,
+        requestBounds,
+    ) => {
+        const transport = { getAccountTrades: vi.fn() };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getAccountTradeHistory(
+            'BTCUSDT',
+            requestBounds,
+        )).rejects.toThrowError(new FuturesAccountTradeHistoryError(
+            FUTURES_ACCOUNT_TRADE_HISTORY_ERROR_CODES.INVALID_REQUEST_BOUNDS,
+            'Futures account-trade-history request bounds are invalid',
+        ));
+        expect(transport.getAccountTrades).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        ['a reversed window', 2000, 1000],
+        [
+            'a window one millisecond over seven days',
+            1000,
+            1001 + (7 * 24 * 60 * 60 * 1000),
+        ],
+    ])('rejects %s before using the account-trade transport', async (
+        _label,
+        startTime,
+        endTime,
+    ) => {
+        const transport = { getAccountTrades: vi.fn() };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getAccountTradeHistory('BTCUSDT', {
+            startTime,
+            endTime,
+        })).rejects.toThrowError(new FuturesAccountTradeHistoryError(
+            FUTURES_ACCOUNT_TRADE_HISTORY_ERROR_CODES.INVALID_REQUEST_BOUNDS,
+            'Futures account-trade-history request bounds are invalid',
+        ));
+        expect(transport.getAccountTrades).not.toHaveBeenCalled();
+    });
+
+    it('preserves account-trade transport error identity', async () => {
+        const transportError = new Error('futures account-trades unavailable');
+        const transport = {
+            getAccountTrades: vi.fn().mockRejectedValue(transportError),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getAccountTradeHistory(
+            'BTCUSDT',
+            { limit: 25 },
+        )).rejects.toBe(transportError);
+        expect(transport.getAccountTrades).toHaveBeenCalledWith({
+            symbol: 'BTCUSDT',
+            limit: 25,
+        });
+    });
+
+    it('preserves account-trade response-body error identity', async () => {
+        const responseError = new Error('futures account-trade body unavailable');
+        const data = vi.fn().mockRejectedValue(responseError);
+        const transport = {
+            getAccountTrades: vi.fn().mockResolvedValue({ data }),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getAccountTradeHistory(
+            'BTCUSDT',
+            { fromId: 698759 },
+        )).rejects.toBe(responseError);
+        expect(transport.getAccountTrades).toHaveBeenCalledWith({
+            symbol: 'BTCUSDT',
+            fromId: 698759,
+            limit: 500,
+        });
+        expect(data).toHaveBeenCalledWith();
+    });
+
+    it('preserves retention-driven empty account trades without fallback reads', async () => {
+        const transport = {
+            getAccountTrades: vi.fn().mockResolvedValue([]),
+            getAllOrders: vi.fn(),
+            getAllAlgoOrders: vi.fn(),
+            queryOrder: vi.fn(),
+            queryCurrentOpenOrder: vi.fn(),
+            getOpenOrders: vi.fn(),
+            queryAlgoOrder: vi.fn(),
+            getOpenAlgoOrders: vi.fn(),
+            getPositionRiskV3: vi.fn(),
+            getBalanceV3: vi.fn(),
+            getIncomeHistory: vi.fn(),
+            getRecentTrades: vi.fn(),
+            accountTradeList: vi.fn(),
+            getAccountTradeHistoryPage: vi.fn(),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getAccountTradeHistory('BTCUSDT')).resolves.toEqual([]);
+        expect(transport.getAccountTrades).toHaveBeenCalledTimes(1);
+        Object.entries(transport)
+            .filter(([name]) => name !== 'getAccountTrades')
+            .forEach(([, method]) => expect(method).not.toHaveBeenCalled());
+    });
+
+    it('does not fall back on unavailable account-trade history', async () => {
+        const fallbackMethods = {
+            getAllOrders: vi.fn(),
+            getAllAlgoOrders: vi.fn(),
+            queryOrder: vi.fn(),
+            queryCurrentOpenOrder: vi.fn(),
+            getOpenOrders: vi.fn(),
+            queryAlgoOrder: vi.fn(),
+            getOpenAlgoOrders: vi.fn(),
+            getPositionRiskV3: vi.fn(),
+            getBalanceV3: vi.fn(),
+            getIncomeHistory: vi.fn(),
+            getRecentTrades: vi.fn(),
+            accountTradeList: vi.fn(),
+            getAccountTradeHistoryPage: vi.fn(),
+        };
+        const transport = {
+            getAccountTrades: vi.fn().mockResolvedValue([
+                makeAccountTradeHistoryEntry({ symbol: 'ETHUSDT' }),
+            ]),
+            ...fallbackMethods,
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getAccountTradeHistory(
+            'BTCUSDT',
+        )).rejects.toThrowError(new FuturesAccountTradeHistoryError(
+            FUTURES_ACCOUNT_TRADE_HISTORY_ERROR_CODES.SYMBOL_UNAVAILABLE,
+            'Futures symbol "BTCUSDT" is unavailable in account-trade-history response',
+        ));
+        expect(transport.getAccountTrades).toHaveBeenCalledTimes(1);
+        Object.values(fallbackMethods)
+            .forEach((method) => expect(method).not.toHaveBeenCalled());
+    });
+
+    it('does not fall back on malformed account-trade history', async () => {
+        const fallbackMethods = {
+            getAllOrders: vi.fn(),
+            getAllAlgoOrders: vi.fn(),
+            queryOrder: vi.fn(),
+            queryCurrentOpenOrder: vi.fn(),
+            getOpenOrders: vi.fn(),
+            queryAlgoOrder: vi.fn(),
+            getOpenAlgoOrders: vi.fn(),
+            getPositionRiskV3: vi.fn(),
+            getBalanceV3: vi.fn(),
+            getIncomeHistory: vi.fn(),
+            getRecentTrades: vi.fn(),
+            accountTradeList: vi.fn(),
+            getAccountTradeHistoryPage: vi.fn(),
+        };
+        const transport = {
+            getAccountTrades: vi.fn().mockResolvedValue([
+                makeAccountTradeHistoryEntry({ id: '698759' }),
+            ]),
+            ...fallbackMethods,
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getAccountTradeHistory(
+            'BTCUSDT',
+        )).rejects.toThrowError(new FuturesAccountTradeHistoryError(
+            FUTURES_ACCOUNT_TRADE_HISTORY_ERROR_CODES.MALFORMED_RESPONSE,
+            'Malformed futures account-trade-history response',
+        ));
+        expect(transport.getAccountTrades).toHaveBeenCalledTimes(1);
+        Object.values(fallbackMethods)
+            .forEach((method) => expect(method).not.toHaveBeenCalled());
+    });
+
+    it('keeps account trades and every completed order transport independent', async () => {
+        const transport = {
+            getAccountTrades: vi.fn().mockResolvedValue([
+                makeAccountTradeHistoryEntry(),
+            ]),
+            getAllAlgoOrders: vi.fn().mockResolvedValue([
+                makeAlgoOrderHistoryEntry(),
+            ]),
+            getAllOrders: vi.fn().mockResolvedValue([makeOrderHistoryEntry()]),
+            queryCurrentOpenOrder: vi.fn().mockResolvedValue(
+                makeCurrentOpenOrderQuery(),
+            ),
+            queryOrder: vi.fn().mockResolvedValue(makeOrderQuery()),
+            getOpenOrders: vi.fn().mockResolvedValue([makeOpenOrder()]),
+            queryAlgoOrder: vi.fn().mockResolvedValue(makeAlgoOrderQuery()),
+            getOpenAlgoOrders: vi.fn().mockResolvedValue([makeAlgoOpenOrder()]),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getOrderHistory('BTCUSDT')).resolves.toEqual([
+            expectedOrderHistoryEntry,
+        ]);
+        await expect(adapter.getAlgoOrderHistory('BTCUSDT')).resolves.toEqual([
+            expectedAlgoOrderHistoryEntry,
+        ]);
+        await expect(adapter.getCurrentOpenOrder(
+            'BTCUSDT',
+            { orderId: 1917645 },
+        )).resolves.toEqual(expectedCurrentOpenOrderQuery);
+        await expect(adapter.getOrder(
+            'BTCUSDT',
+            { orderId: 1917643 },
+        )).resolves.toEqual(expectedOrderQuery);
+        await expect(adapter.getOpenOrders('BTCUSDT')).resolves.toEqual([
+            expectedOpenOrder,
+        ]);
+        await expect(adapter.getAlgoOrder(
+            'BTCUSDT',
+            { algoId: 2146760 },
+        )).resolves.toEqual(expectedAlgoOrderQuery);
+        await expect(adapter.getAlgoOpenOrders('BTCUSDT')).resolves.toEqual([
+            expectedAlgoOpenOrder,
+        ]);
+
+        expect(transport.getAccountTrades).not.toHaveBeenCalled();
+
+        await expect(adapter.getAccountTradeHistory('BTCUSDT')).resolves.toEqual([
+            expectedAccountTradeHistoryEntry,
+        ]);
+        expect(transport.getAccountTrades).toHaveBeenCalledTimes(1);
+        expect(transport.getAllAlgoOrders).toHaveBeenCalledTimes(1);
+        expect(transport.getAllOrders).toHaveBeenCalledTimes(1);
+        expect(transport.queryCurrentOpenOrder).toHaveBeenCalledTimes(1);
+        expect(transport.queryOrder).toHaveBeenCalledTimes(1);
+        expect(transport.getOpenOrders).toHaveBeenCalledTimes(1);
+        expect(transport.queryAlgoOrder).toHaveBeenCalledTimes(1);
+        expect(transport.getOpenAlgoOrders).toHaveBeenCalledTimes(1);
+    });
+
     it('exposes no futures execution surface', () => {
         const adapter = new FuturesTradingAdapter({ transport: {} });
         expect(Object.getOwnPropertyNames(FuturesTradingAdapter.prototype)).toEqual([
@@ -7452,6 +8466,7 @@ describe('FuturesTradingAdapter', () => {
             'getCurrentOpenOrder',
             'getOrderHistory',
             'getAlgoOrderHistory',
+            'getAccountTradeHistory',
         ]);
 
         const forbiddenExecutionMethods = [
@@ -7465,6 +8480,8 @@ describe('FuturesTradingAdapter', () => {
             'changeMarginType',
             'getAllAlgoOrders',
             'getAllOrders',
+            'getAccountTrades',
+            'accountTradeList',
         ];
 
         forbiddenExecutionMethods.forEach((method) => {

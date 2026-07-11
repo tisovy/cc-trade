@@ -80,6 +80,13 @@ export const FUTURES_ALGO_ORDER_HISTORY_ERROR_CODES = Object.freeze({
     SYMBOL_UNAVAILABLE: FUTURES_EXCHANGE_INFO_ERROR_CODES.SYMBOL_UNAVAILABLE,
 });
 
+export const FUTURES_ACCOUNT_TRADE_HISTORY_ERROR_CODES = Object.freeze({
+    INVALID_SYMBOL: FUTURES_EXCHANGE_INFO_ERROR_CODES.INVALID_SYMBOL,
+    INVALID_REQUEST_BOUNDS: 'INVALID_FUTURES_ACCOUNT_TRADE_HISTORY_REQUEST_BOUNDS',
+    MALFORMED_RESPONSE: 'MALFORMED_FUTURES_ACCOUNT_TRADE_HISTORY',
+    SYMBOL_UNAVAILABLE: FUTURES_EXCHANGE_INFO_ERROR_CODES.SYMBOL_UNAVAILABLE,
+});
+
 export class FuturesExchangeInfoError extends Error {
     constructor(code, message) {
         super(message);
@@ -176,6 +183,14 @@ export class FuturesAlgoOrderHistoryError extends Error {
     }
 }
 
+export class FuturesAccountTradeHistoryError extends Error {
+    constructor(code, message) {
+        super(message);
+        this.name = 'FuturesAccountTradeHistoryError';
+        this.code = code;
+    }
+}
+
 const isRecord = (value) => value !== null
     && typeof value === 'object'
     && !Array.isArray(value);
@@ -240,6 +255,13 @@ const malformedOrderHistoryError = () => new FuturesOrderHistoryError(
 const malformedAlgoOrderHistoryError = () => new FuturesAlgoOrderHistoryError(
     FUTURES_ALGO_ORDER_HISTORY_ERROR_CODES.MALFORMED_RESPONSE,
     'Malformed futures algo-order-history response',
+);
+
+const malformedAccountTradeHistoryError = () => (
+    new FuturesAccountTradeHistoryError(
+        FUTURES_ACCOUNT_TRADE_HISTORY_ERROR_CODES.MALFORMED_RESPONSE,
+        'Malformed futures account-trade-history response',
+    )
 );
 
 const FUTURES_POSITION_SIDES = new Set(['BOTH', 'LONG', 'SHORT']);
@@ -1705,6 +1727,164 @@ export const normalizeFuturesAlgoOrderHistory = (
     });
 };
 
+const FUTURES_ACCOUNT_TRADE_HISTORY_DEFAULT_LIMIT = 500;
+const FUTURES_ACCOUNT_TRADE_HISTORY_MAX_LIMIT = 1000;
+const FUTURES_ACCOUNT_TRADE_HISTORY_MAX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+const requireAccountTradeHistorySymbol = (requestedSymbol) => {
+    if (!isNonEmptyString(requestedSymbol)) {
+        throw new FuturesAccountTradeHistoryError(
+            FUTURES_ACCOUNT_TRADE_HISTORY_ERROR_CODES.INVALID_SYMBOL,
+            'Futures symbol must be a non-empty string',
+        );
+    }
+};
+
+const invalidAccountTradeHistoryRequestBoundsError = () => (
+    new FuturesAccountTradeHistoryError(
+        FUTURES_ACCOUNT_TRADE_HISTORY_ERROR_CODES.INVALID_REQUEST_BOUNDS,
+        'Futures account-trade-history request bounds are invalid',
+    )
+);
+
+const normalizeAccountTradeHistoryRequestBounds = (requestBounds = {}) => {
+    if (!isRecord(requestBounds)) {
+        throw invalidAccountTradeHistoryRequestBoundsError();
+    }
+
+    const limit = requestBounds.limit === undefined
+        ? FUTURES_ACCOUNT_TRADE_HISTORY_DEFAULT_LIMIT
+        : requestBounds.limit;
+    if (!Number.isSafeInteger(limit)
+        || limit < 1
+        || limit > FUTURES_ACCOUNT_TRADE_HISTORY_MAX_LIMIT) {
+        throw invalidAccountTradeHistoryRequestBoundsError();
+    }
+
+    const hasOrderId = requestBounds.orderId !== undefined;
+    const hasFromId = requestBounds.fromId !== undefined;
+    const hasStartTime = requestBounds.startTime !== undefined;
+    const hasEndTime = requestBounds.endTime !== undefined;
+    const hasTimeWindow = hasStartTime || hasEndTime;
+    const selectedModeCount = [hasOrderId, hasFromId, hasTimeWindow]
+        .filter(Boolean).length;
+
+    if (hasStartTime !== hasEndTime || selectedModeCount > 1) {
+        throw invalidAccountTradeHistoryRequestBoundsError();
+    }
+
+    if (hasOrderId) {
+        if (!Number.isSafeInteger(requestBounds.orderId)
+            || requestBounds.orderId < 0) {
+            throw invalidAccountTradeHistoryRequestBoundsError();
+        }
+        return { orderId: requestBounds.orderId, limit };
+    }
+
+    if (hasFromId) {
+        if (!Number.isSafeInteger(requestBounds.fromId)
+            || requestBounds.fromId < 0) {
+            throw invalidAccountTradeHistoryRequestBoundsError();
+        }
+        return { fromId: requestBounds.fromId, limit };
+    }
+
+    if (!hasTimeWindow) return { limit };
+
+    if (!Number.isSafeInteger(requestBounds.startTime)
+        || requestBounds.startTime < 0
+        || !Number.isSafeInteger(requestBounds.endTime)
+        || requestBounds.endTime < requestBounds.startTime
+        || requestBounds.endTime - requestBounds.startTime
+            > FUTURES_ACCOUNT_TRADE_HISTORY_MAX_WINDOW_MS) {
+        throw invalidAccountTradeHistoryRequestBoundsError();
+    }
+
+    return {
+        startTime: requestBounds.startTime,
+        endTime: requestBounds.endTime,
+        limit,
+    };
+};
+
+/**
+ * Normalize USDⓈ-M account trades for one explicitly requested symbol.
+ * This fill-history contract preserves wire order and remains separate from
+ * order histories, current/query orders, positions, balances, and spot trades.
+ */
+export const normalizeFuturesAccountTradeHistory = (
+    accountTradeHistoryResponse,
+    requestedSymbol,
+) => {
+    requireAccountTradeHistorySymbol(requestedSymbol);
+    if (!Array.isArray(accountTradeHistoryResponse)) {
+        throw malformedAccountTradeHistoryError();
+    }
+    if (accountTradeHistoryResponse.length === 0) return [];
+    if (accountTradeHistoryResponse.some(
+        (candidate) => !isRecord(candidate) || !isNonEmptyString(candidate.symbol),
+    )) {
+        throw malformedAccountTradeHistoryError();
+    }
+
+    const matchingTrades = accountTradeHistoryResponse.filter(
+        (candidate) => candidate.symbol === requestedSymbol,
+    );
+    if (matchingTrades.length === 0) {
+        throw new FuturesAccountTradeHistoryError(
+            FUTURES_ACCOUNT_TRADE_HISTORY_ERROR_CODES.SYMBOL_UNAVAILABLE,
+            `Futures symbol "${requestedSymbol}" is unavailable in account-trade-history response`,
+        );
+    }
+    if (matchingTrades.length !== accountTradeHistoryResponse.length) {
+        throw malformedAccountTradeHistoryError();
+    }
+
+    const decimalFields = [
+        'commission',
+        'price',
+        'qty',
+        'quoteQty',
+        'realizedPnl',
+    ];
+    const stringFields = ['commissionAsset', 'side', 'positionSide'];
+    const integerFields = ['id', 'orderId', 'time'];
+    const booleanFields = ['buyer', 'maker'];
+    const tradeIds = new Set();
+
+    return matchingTrades.map((accountTrade) => {
+        if (decimalFields.some((field) => !isNonEmptyString(accountTrade[field]))
+            || stringFields.some((field) => !isNonEmptyString(accountTrade[field]))
+            || integerFields.some((field) => !Number.isSafeInteger(accountTrade[field])
+                || accountTrade[field] < 0)
+            || booleanFields.some(
+                (field) => typeof accountTrade[field] !== 'boolean',
+            )
+            || tradeIds.has(accountTrade.id)) {
+            throw malformedAccountTradeHistoryError();
+        }
+        tradeIds.add(accountTrade.id);
+
+        return {
+            marketType: 'futures',
+            buyer: accountTrade.buyer,
+            commission: accountTrade.commission,
+            commissionAsset: accountTrade.commissionAsset,
+            id: accountTrade.id,
+            maker: accountTrade.maker,
+            orderId: accountTrade.orderId,
+            price: accountTrade.price,
+            qty: accountTrade.qty,
+            quoteQty: accountTrade.quoteQty,
+            realizedPnl: accountTrade.realizedPnl,
+            side: accountTrade.side,
+            positionSide: accountTrade.positionSide,
+            symbol: accountTrade.symbol,
+            time: accountTrade.time,
+        };
+    });
+};
+
 const readExchangeInfoData = async (response) => {
     if (typeof response?.data === 'function') return response.data();
     return response;
@@ -1761,6 +1941,11 @@ const readOrderHistoryData = async (response) => {
 };
 
 const readAlgoOrderHistoryData = async (response) => {
+    if (typeof response?.data === 'function') return response.data();
+    return response;
+};
+
+const readAccountTradeHistoryData = async (response) => {
     if (typeof response?.data === 'function') return response.data();
     return response;
 };
@@ -1878,5 +2063,18 @@ export class FuturesTradingAdapter {
         });
         const algoOrderHistory = await readAlgoOrderHistoryData(response);
         return normalizeFuturesAlgoOrderHistory(algoOrderHistory, symbol);
+    }
+
+    async getAccountTradeHistory(symbol, requestBounds = {}) {
+        requireAccountTradeHistorySymbol(symbol);
+        const normalizedRequestBounds = normalizeAccountTradeHistoryRequestBounds(
+            requestBounds,
+        );
+        const response = await this.transport.getAccountTrades({
+            symbol,
+            ...normalizedRequestBounds,
+        });
+        const accountTradeHistory = await readAccountTradeHistoryData(response);
+        return normalizeFuturesAccountTradeHistory(accountTradeHistory, symbol);
     }
 }
