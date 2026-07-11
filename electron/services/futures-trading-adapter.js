@@ -58,6 +58,14 @@ export const FUTURES_ORDER_ERROR_CODES = Object.freeze({
     SYMBOL_UNAVAILABLE: FUTURES_EXCHANGE_INFO_ERROR_CODES.SYMBOL_UNAVAILABLE,
 });
 
+export const FUTURES_CURRENT_OPEN_ORDER_ERROR_CODES = Object.freeze({
+    INVALID_SYMBOL: FUTURES_EXCHANGE_INFO_ERROR_CODES.INVALID_SYMBOL,
+    INVALID_LOOKUP_IDENTITY: 'INVALID_FUTURES_CURRENT_OPEN_ORDER_LOOKUP_IDENTITY',
+    LOOKUP_IDENTITY_MISMATCH: 'FUTURES_CURRENT_OPEN_ORDER_LOOKUP_IDENTITY_MISMATCH',
+    MALFORMED_RESPONSE: 'MALFORMED_FUTURES_CURRENT_OPEN_ORDER',
+    SYMBOL_UNAVAILABLE: FUTURES_EXCHANGE_INFO_ERROR_CODES.SYMBOL_UNAVAILABLE,
+});
+
 export class FuturesExchangeInfoError extends Error {
     constructor(code, message) {
         super(message);
@@ -130,6 +138,14 @@ export class FuturesOrderError extends Error {
     }
 }
 
+export class FuturesCurrentOpenOrderError extends Error {
+    constructor(code, message) {
+        super(message);
+        this.name = 'FuturesCurrentOpenOrderError';
+        this.code = code;
+    }
+}
+
 const isRecord = (value) => value !== null
     && typeof value === 'object'
     && !Array.isArray(value);
@@ -179,6 +195,11 @@ const malformedAlgoOrderError = () => new FuturesAlgoOrderError(
 const malformedOrderError = () => new FuturesOrderError(
     FUTURES_ORDER_ERROR_CODES.MALFORMED_RESPONSE,
     'Malformed futures order response',
+);
+
+const malformedCurrentOpenOrderError = () => new FuturesCurrentOpenOrderError(
+    FUTURES_CURRENT_OPEN_ORDER_ERROR_CODES.MALFORMED_RESPONSE,
+    'Malformed futures current-open-order response',
 );
 
 const FUTURES_POSITION_SIDES = new Set(['BOTH', 'LONG', 'SHORT']);
@@ -1126,6 +1147,161 @@ export const normalizeFuturesOrder = (
     };
 };
 
+const requireCurrentOpenOrderSymbol = (requestedSymbol) => {
+    if (!isNonEmptyString(requestedSymbol)) {
+        throw new FuturesCurrentOpenOrderError(
+            FUTURES_CURRENT_OPEN_ORDER_ERROR_CODES.INVALID_SYMBOL,
+            'Futures symbol must be a non-empty string',
+        );
+    }
+};
+
+const invalidCurrentOpenOrderLookupIdentityError = () => (
+    new FuturesCurrentOpenOrderError(
+        FUTURES_CURRENT_OPEN_ORDER_ERROR_CODES.INVALID_LOOKUP_IDENTITY,
+        'Futures current-open-order lookup must contain a safe-integer orderId or non-empty origClientOrderId',
+    )
+);
+
+const normalizeCurrentOpenOrderLookupIdentity = (lookupIdentity) => {
+    if (!isRecord(lookupIdentity)) {
+        throw invalidCurrentOpenOrderLookupIdentityError();
+    }
+
+    // Binance's current-open query accepts both identifiers but does not document
+    // server precedence. Freeze the first-party connector's orderId precedence by
+    // presence, including zero, and never send the unselected identity.
+    if (lookupIdentity.orderId !== undefined) {
+        if (!Number.isSafeInteger(lookupIdentity.orderId)
+            || lookupIdentity.orderId < 0) {
+            throw invalidCurrentOpenOrderLookupIdentityError();
+        }
+        return { orderId: lookupIdentity.orderId };
+    }
+
+    if (!isNonEmptyString(lookupIdentity.origClientOrderId)) {
+        throw invalidCurrentOpenOrderLookupIdentityError();
+    }
+    return { origClientOrderId: lookupIdentity.origClientOrderId };
+};
+
+/**
+ * Normalize one identifier-scoped USDⓈ-M current-open regular-order response.
+ * This endpoint-specific single-object contract remains separate from the broader
+ * regular-order query and from regular/algo current-open array normalizers.
+ */
+export const normalizeFuturesCurrentOpenOrder = (
+    currentOpenOrderResponse,
+    requestedSymbol,
+    lookupIdentity,
+) => {
+    requireCurrentOpenOrderSymbol(requestedSymbol);
+    const normalizedLookupIdentity = normalizeCurrentOpenOrderLookupIdentity(
+        lookupIdentity,
+    );
+
+    if (!isRecord(currentOpenOrderResponse)
+        || !isNonEmptyString(currentOpenOrderResponse.symbol)
+        || !Number.isSafeInteger(currentOpenOrderResponse.orderId)
+        || currentOpenOrderResponse.orderId < 0
+        || !isNonEmptyString(currentOpenOrderResponse.clientOrderId)) {
+        throw malformedCurrentOpenOrderError();
+    }
+    if (currentOpenOrderResponse.symbol !== requestedSymbol) {
+        throw new FuturesCurrentOpenOrderError(
+            FUTURES_CURRENT_OPEN_ORDER_ERROR_CODES.SYMBOL_UNAVAILABLE,
+            `Futures symbol "${requestedSymbol}" is unavailable in current-open-order response`,
+        );
+    }
+
+    const lookupMatches = normalizedLookupIdentity.orderId !== undefined
+        ? currentOpenOrderResponse.orderId === normalizedLookupIdentity.orderId
+        : currentOpenOrderResponse.clientOrderId
+            === normalizedLookupIdentity.origClientOrderId;
+    if (!lookupMatches) {
+        throw new FuturesCurrentOpenOrderError(
+            FUTURES_CURRENT_OPEN_ORDER_ERROR_CODES.LOOKUP_IDENTITY_MISMATCH,
+            'Futures current-open-order response does not match the requested lookup identity',
+        );
+    }
+
+    const decimalFields = [
+        'avgPrice',
+        'cumQuote',
+        'executedQty',
+        'origQty',
+        'price',
+        'stopPrice',
+    ];
+    const stringFields = [
+        'origType',
+        'side',
+        'positionSide',
+        'status',
+        'timeInForce',
+        'type',
+        'workingType',
+        'priceMatch',
+        'selfTradePreventionMode',
+    ];
+    const timestampFields = ['time', 'updateTime', 'goodTillDate'];
+    const booleanFields = ['reduceOnly', 'closePosition', 'priceProtect'];
+    const hasActivatePrice = currentOpenOrderResponse.activatePrice !== undefined;
+    const hasPriceRate = currentOpenOrderResponse.priceRate !== undefined;
+
+    if (decimalFields.some(
+        (field) => !isNonEmptyString(currentOpenOrderResponse[field]),
+    )
+        || stringFields.some(
+            (field) => !isNonEmptyString(currentOpenOrderResponse[field]),
+        )
+        || timestampFields.some(
+            (field) => !Number.isSafeInteger(currentOpenOrderResponse[field])
+                || currentOpenOrderResponse[field] < 0,
+        )
+        || booleanFields.some(
+            (field) => typeof currentOpenOrderResponse[field] !== 'boolean',
+        )
+        || (hasActivatePrice
+            && !isNonEmptyString(currentOpenOrderResponse.activatePrice))
+        || (hasPriceRate
+            && !isNonEmptyString(currentOpenOrderResponse.priceRate))) {
+        throw malformedCurrentOpenOrderError();
+    }
+
+    return {
+        marketType: 'futures',
+        avgPrice: currentOpenOrderResponse.avgPrice,
+        clientOrderId: currentOpenOrderResponse.clientOrderId,
+        cumQuote: currentOpenOrderResponse.cumQuote,
+        executedQty: currentOpenOrderResponse.executedQty,
+        orderId: currentOpenOrderResponse.orderId,
+        origQty: currentOpenOrderResponse.origQty,
+        origType: currentOpenOrderResponse.origType,
+        price: currentOpenOrderResponse.price,
+        reduceOnly: currentOpenOrderResponse.reduceOnly,
+        side: currentOpenOrderResponse.side,
+        positionSide: currentOpenOrderResponse.positionSide,
+        status: currentOpenOrderResponse.status,
+        stopPrice: currentOpenOrderResponse.stopPrice,
+        closePosition: currentOpenOrderResponse.closePosition,
+        symbol: currentOpenOrderResponse.symbol,
+        time: currentOpenOrderResponse.time,
+        timeInForce: currentOpenOrderResponse.timeInForce,
+        type: currentOpenOrderResponse.type,
+        ...(hasActivatePrice
+            ? { activatePrice: currentOpenOrderResponse.activatePrice }
+            : {}),
+        ...(hasPriceRate ? { priceRate: currentOpenOrderResponse.priceRate } : {}),
+        updateTime: currentOpenOrderResponse.updateTime,
+        workingType: currentOpenOrderResponse.workingType,
+        priceProtect: currentOpenOrderResponse.priceProtect,
+        priceMatch: currentOpenOrderResponse.priceMatch,
+        selfTradePreventionMode: currentOpenOrderResponse.selfTradePreventionMode,
+        goodTillDate: currentOpenOrderResponse.goodTillDate,
+    };
+};
+
 const readExchangeInfoData = async (response) => {
     if (typeof response?.data === 'function') return response.data();
     return response;
@@ -1167,6 +1343,11 @@ const readAlgoOrderData = async (response) => {
 };
 
 const readOrderData = async (response) => {
+    if (typeof response?.data === 'function') return response.data();
+    return response;
+};
+
+const readCurrentOpenOrderData = async (response) => {
     if (typeof response?.data === 'function') return response.data();
     return response;
 };
@@ -1241,5 +1422,22 @@ export class FuturesTradingAdapter {
         });
         const order = await readOrderData(response);
         return normalizeFuturesOrder(order, symbol, normalizedLookupIdentity);
+    }
+
+    async getCurrentOpenOrder(symbol, lookupIdentity) {
+        requireCurrentOpenOrderSymbol(symbol);
+        const normalizedLookupIdentity = normalizeCurrentOpenOrderLookupIdentity(
+            lookupIdentity,
+        );
+        const response = await this.transport.queryCurrentOpenOrder({
+            symbol,
+            ...normalizedLookupIdentity,
+        });
+        const currentOpenOrder = await readCurrentOpenOrderData(response);
+        return normalizeFuturesCurrentOpenOrder(
+            currentOpenOrder,
+            symbol,
+            normalizedLookupIdentity,
+        );
     }
 }
