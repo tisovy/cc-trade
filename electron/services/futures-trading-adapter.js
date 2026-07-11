@@ -73,6 +73,13 @@ export const FUTURES_ORDER_HISTORY_ERROR_CODES = Object.freeze({
     SYMBOL_UNAVAILABLE: FUTURES_EXCHANGE_INFO_ERROR_CODES.SYMBOL_UNAVAILABLE,
 });
 
+export const FUTURES_ALGO_ORDER_HISTORY_ERROR_CODES = Object.freeze({
+    INVALID_SYMBOL: FUTURES_EXCHANGE_INFO_ERROR_CODES.INVALID_SYMBOL,
+    INVALID_REQUEST_BOUNDS: 'INVALID_FUTURES_ALGO_ORDER_HISTORY_REQUEST_BOUNDS',
+    MALFORMED_RESPONSE: 'MALFORMED_FUTURES_ALGO_ORDER_HISTORY',
+    SYMBOL_UNAVAILABLE: FUTURES_EXCHANGE_INFO_ERROR_CODES.SYMBOL_UNAVAILABLE,
+});
+
 export class FuturesExchangeInfoError extends Error {
     constructor(code, message) {
         super(message);
@@ -161,6 +168,14 @@ export class FuturesOrderHistoryError extends Error {
     }
 }
 
+export class FuturesAlgoOrderHistoryError extends Error {
+    constructor(code, message) {
+        super(message);
+        this.name = 'FuturesAlgoOrderHistoryError';
+        this.code = code;
+    }
+}
+
 const isRecord = (value) => value !== null
     && typeof value === 'object'
     && !Array.isArray(value);
@@ -220,6 +235,11 @@ const malformedCurrentOpenOrderError = () => new FuturesCurrentOpenOrderError(
 const malformedOrderHistoryError = () => new FuturesOrderHistoryError(
     FUTURES_ORDER_HISTORY_ERROR_CODES.MALFORMED_RESPONSE,
     'Malformed futures order-history response',
+);
+
+const malformedAlgoOrderHistoryError = () => new FuturesAlgoOrderHistoryError(
+    FUTURES_ALGO_ORDER_HISTORY_ERROR_CODES.MALFORMED_RESPONSE,
+    'Malformed futures algo-order-history response',
 );
 
 const FUTURES_POSITION_SIDES = new Set(['BOTH', 'LONG', 'SHORT']);
@@ -1492,6 +1512,199 @@ export const normalizeFuturesOrderHistory = (
     });
 };
 
+const FUTURES_ALGO_ORDER_HISTORY_DEFAULT_LIMIT = 500;
+const FUTURES_ALGO_ORDER_HISTORY_MAX_LIMIT = 1000;
+const FUTURES_ALGO_ORDER_HISTORY_MAX_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+const requireAlgoOrderHistorySymbol = (requestedSymbol) => {
+    if (!isNonEmptyString(requestedSymbol)) {
+        throw new FuturesAlgoOrderHistoryError(
+            FUTURES_ALGO_ORDER_HISTORY_ERROR_CODES.INVALID_SYMBOL,
+            'Futures symbol must be a non-empty string',
+        );
+    }
+};
+
+const invalidAlgoOrderHistoryRequestBoundsError = () => (
+    new FuturesAlgoOrderHistoryError(
+        FUTURES_ALGO_ORDER_HISTORY_ERROR_CODES.INVALID_REQUEST_BOUNDS,
+        'Futures algo-order-history request bounds are invalid',
+    )
+);
+
+const normalizeAlgoOrderHistoryRequestBounds = (requestBounds = {}) => {
+    if (!isRecord(requestBounds)) {
+        throw invalidAlgoOrderHistoryRequestBoundsError();
+    }
+
+    const limit = requestBounds.limit === undefined
+        ? FUTURES_ALGO_ORDER_HISTORY_DEFAULT_LIMIT
+        : requestBounds.limit;
+    if (!Number.isSafeInteger(limit)
+        || limit < 1
+        || limit > FUTURES_ALGO_ORDER_HISTORY_MAX_LIMIT) {
+        throw invalidAlgoOrderHistoryRequestBoundsError();
+    }
+
+    const hasAlgoId = requestBounds.algoId !== undefined;
+    const hasStartTime = requestBounds.startTime !== undefined;
+    const hasEndTime = requestBounds.endTime !== undefined;
+
+    if (hasAlgoId) {
+        if (!Number.isSafeInteger(requestBounds.algoId)
+            || requestBounds.algoId < 0
+            || hasStartTime
+            || hasEndTime) {
+            throw invalidAlgoOrderHistoryRequestBoundsError();
+        }
+        return { algoId: requestBounds.algoId, limit };
+    }
+
+    if (hasStartTime !== hasEndTime) {
+        throw invalidAlgoOrderHistoryRequestBoundsError();
+    }
+    if (!hasStartTime) return { limit };
+
+    if (!Number.isSafeInteger(requestBounds.startTime)
+        || requestBounds.startTime < 0
+        || !Number.isSafeInteger(requestBounds.endTime)
+        || requestBounds.endTime < requestBounds.startTime
+        || requestBounds.endTime - requestBounds.startTime
+            >= FUTURES_ALGO_ORDER_HISTORY_MAX_WINDOW_MS) {
+        throw invalidAlgoOrderHistoryRequestBoundsError();
+    }
+
+    return {
+        startTime: requestBounds.startTime,
+        endTime: requestBounds.endTime,
+        limit,
+    };
+};
+
+/**
+ * Normalize USDⓈ-M algo-order history for one explicitly requested symbol.
+ * This history-array contract preserves wire order and remains separate from
+ * current algo-open arrays, identifier-scoped algo queries, and regular orders.
+ */
+export const normalizeFuturesAlgoOrderHistory = (
+    algoOrderHistoryResponse,
+    requestedSymbol,
+) => {
+    requireAlgoOrderHistorySymbol(requestedSymbol);
+    if (!Array.isArray(algoOrderHistoryResponse)) {
+        throw malformedAlgoOrderHistoryError();
+    }
+    if (algoOrderHistoryResponse.length === 0) return [];
+    if (algoOrderHistoryResponse.some(
+        (candidate) => !isRecord(candidate) || !isNonEmptyString(candidate.symbol),
+    )) {
+        throw malformedAlgoOrderHistoryError();
+    }
+
+    const matchingOrders = algoOrderHistoryResponse.filter(
+        (candidate) => candidate.symbol === requestedSymbol,
+    );
+    if (matchingOrders.length === 0) {
+        throw new FuturesAlgoOrderHistoryError(
+            FUTURES_ALGO_ORDER_HISTORY_ERROR_CODES.SYMBOL_UNAVAILABLE,
+            `Futures symbol "${requestedSymbol}" is unavailable in algo-order-history response`,
+        );
+    }
+    if (matchingOrders.length !== algoOrderHistoryResponse.length) {
+        throw malformedAlgoOrderHistoryError();
+    }
+
+    const decimalFields = [
+        'quantity',
+        'actualPrice',
+        'triggerPrice',
+        'price',
+        'tpTriggerPrice',
+        'tpPrice',
+        'slTriggerPrice',
+        'slPrice',
+    ];
+    const nonEmptyStringFields = [
+        'clientAlgoId',
+        'algoType',
+        'orderType',
+        'side',
+        'positionSide',
+        'timeInForce',
+        'algoStatus',
+        'selfTradePreventionMode',
+        'workingType',
+        'priceMatch',
+    ];
+    const emptyStringAllowedFields = ['actualOrderId', 'tpOrderType'];
+    const integerFields = [
+        'algoId',
+        'createTime',
+        'updateTime',
+        'triggerTime',
+        'goodTillDate',
+    ];
+    const booleanFields = ['closePosition', 'priceProtect', 'reduceOnly'];
+    const algoIds = new Set();
+
+    return matchingOrders.map((historyOrder) => {
+        if (decimalFields.some((field) => !isNonEmptyString(historyOrder[field]))
+            || nonEmptyStringFields.some(
+                (field) => !isNonEmptyString(historyOrder[field]),
+            )
+            || emptyStringAllowedFields.some(
+                (field) => typeof historyOrder[field] !== 'string'
+                    || (historyOrder[field].length > 0
+                        && historyOrder[field].trim().length === 0),
+            )
+            || integerFields.some((field) => !Number.isSafeInteger(historyOrder[field])
+                || historyOrder[field] < 0)
+            || booleanFields.some(
+                (field) => typeof historyOrder[field] !== 'boolean',
+            )
+            || (historyOrder.icebergQuantity !== null
+                && !isNonEmptyString(historyOrder.icebergQuantity))
+            || algoIds.has(historyOrder.algoId)) {
+            throw malformedAlgoOrderHistoryError();
+        }
+        algoIds.add(historyOrder.algoId);
+
+        return {
+            marketType: 'futures',
+            algoId: historyOrder.algoId,
+            clientAlgoId: historyOrder.clientAlgoId,
+            algoType: historyOrder.algoType,
+            orderType: historyOrder.orderType,
+            symbol: historyOrder.symbol,
+            side: historyOrder.side,
+            positionSide: historyOrder.positionSide,
+            timeInForce: historyOrder.timeInForce,
+            quantity: historyOrder.quantity,
+            algoStatus: historyOrder.algoStatus,
+            actualOrderId: historyOrder.actualOrderId,
+            actualPrice: historyOrder.actualPrice,
+            triggerPrice: historyOrder.triggerPrice,
+            price: historyOrder.price,
+            icebergQuantity: historyOrder.icebergQuantity,
+            tpTriggerPrice: historyOrder.tpTriggerPrice,
+            tpPrice: historyOrder.tpPrice,
+            slTriggerPrice: historyOrder.slTriggerPrice,
+            slPrice: historyOrder.slPrice,
+            tpOrderType: historyOrder.tpOrderType,
+            selfTradePreventionMode: historyOrder.selfTradePreventionMode,
+            workingType: historyOrder.workingType,
+            priceMatch: historyOrder.priceMatch,
+            closePosition: historyOrder.closePosition,
+            priceProtect: historyOrder.priceProtect,
+            reduceOnly: historyOrder.reduceOnly,
+            createTime: historyOrder.createTime,
+            updateTime: historyOrder.updateTime,
+            triggerTime: historyOrder.triggerTime,
+            goodTillDate: historyOrder.goodTillDate,
+        };
+    });
+};
+
 const readExchangeInfoData = async (response) => {
     if (typeof response?.data === 'function') return response.data();
     return response;
@@ -1543,6 +1756,11 @@ const readCurrentOpenOrderData = async (response) => {
 };
 
 const readOrderHistoryData = async (response) => {
+    if (typeof response?.data === 'function') return response.data();
+    return response;
+};
+
+const readAlgoOrderHistoryData = async (response) => {
     if (typeof response?.data === 'function') return response.data();
     return response;
 };
@@ -1647,5 +1865,18 @@ export class FuturesTradingAdapter {
         });
         const orderHistory = await readOrderHistoryData(response);
         return normalizeFuturesOrderHistory(orderHistory, symbol);
+    }
+
+    async getAlgoOrderHistory(symbol, requestBounds = {}) {
+        requireAlgoOrderHistorySymbol(symbol);
+        const normalizedRequestBounds = normalizeAlgoOrderHistoryRequestBounds(
+            requestBounds,
+        );
+        const response = await this.transport.getAllAlgoOrders({
+            symbol,
+            ...normalizedRequestBounds,
+        });
+        const algoOrderHistory = await readAlgoOrderHistoryData(response);
+        return normalizeFuturesAlgoOrderHistory(algoOrderHistory, symbol);
     }
 }
