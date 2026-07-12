@@ -864,41 +864,168 @@ Acceptance:
 
 ## Phase 6: Futures Testnet Execution
 
-Goal: enable futures order placement only on testnet first.
+Goal: enable the smallest testnet-only futures order path without weakening the completed read-only, Spot, protocol, lifecycle, credential, or production-exclusion boundaries.
 
-Required command fields:
+The complete planning checkpoint is in [Phase 6 Testnet Futures Execution Design](./futures_phase6_testnet_execution_design.md). It is the implementation contract; this roadmap records the exit decisions and next boundary.
 
-- `marketType`
-- `positionSide`
-- `marginType`
-- `leverage`
-- `reduceOnly`
-- `workingType`
-- `priceProtect`
-- `clientOrderId`
+### Phase 6 planning decision
 
-Required safety gates:
+The first implementation will support only a regular USDⓈ-M Futures Testnet `LIMIT/GTC` order that reduces an existing one-way isolated position:
 
-- stale mark price block;
-- max leverage cap;
-- max notional cap;
-- reduce-only validation;
-- liquidation distance warning;
-- backend-side validation independent of frontend.
+- fixed `https://demo-fapi.binance.com` REST origin;
+- one-way account mode, `positionSide: "BOTH"`, and `reduceOnly: true`;
+- side opposite the current signed non-zero position and quantity no greater than it;
+- no current regular or algo open order for the symbol;
+- observed `ISOLATED` margin and observed leverage asserted, never changed;
+- mandatory backend allowlist, exact-decimal filters, configured max-notional capped by a non-raiseable 10,000-USDT ceiling, hard 3x leverage ceiling, and minimum 1000-bps liquidation distance;
+- `workingType: null` and `priceProtect: false`, both omitted from the regular New Order transport because they are not applicable to this order;
+- deterministic `clientOrderId === "cc6-" + requestId` and durable idempotency;
+- no automatic order POST retry after dispatch under any outcome.
 
-UI surface:
+This subset is safer than an exposure-increasing order because checkpoint one intentionally has no cancellation path. Hedge mode is rejected because Binance prohibits sending `reduceOnly` in hedge mode. Opening orders, hedge reductions, cancellation, modification, conditional/algo orders, leverage/margin/position-mode changes, transfers, and every other write require separate reviews.
 
-- controlled futures order ticket;
-- explicit Long/Short selector;
-- leverage and margin mode controls;
-- reduce-only toggle;
-- order preview before submit.
+The Phase 5 facade stays frozen. Future code must introduce:
 
-Acceptance:
+- `FuturesTestnetExecutionRiskReader`, a separate exact read-only testnet preflight boundary for server time, exchange metadata including `PERCENT_PRICE`, mark, account configuration, symbol configuration, V3 position, V3 balance, and current regular/algo orders;
+- `FuturesTestnetExecutionFacade`, exposing only `placeReduceOnlyLimitGtcOrder(args)` and `queryOrderByOriginalClientOrderId(args)`;
+- `FuturesTestnetExecutionService`, owning the gate, sessions/generations, exact validation, cross-process ownership, integrity-anchored journal, state machine, reconciliation/open-order monitoring, rate admission, and safe acknowledgements.
 
-- Testnet-only execution.
-- All risky actions emit clear backend acknowledgements/rejections.
-- UI changes reviewed before expanding beyond the order ticket.
+No generic SDK client, endpoint name, method, raw options, base override, request passthrough, production host, or additional write method may be exposed.
+
+### Feature gate and trust boundary
+
+Execution remains disabled unless every backend-owned condition passes at dispatch:
+
+- existing `FUTURES_READ_MODE` is exactly `testnet`;
+- future `FUTURES_TESTNET_EXECUTION_ENABLED` is exactly the ASCII text `true`, with no trimming/coercion;
+- fixed demo transport and successful fresh signed testnet-account preflight;
+- main-only captured credentials and every new execution config value, already frozen/deleted from inherited environment before `BrowserWindow`;
+- exact 1–16-symbol comma-separated allowlist grammar, canonical max-notional and positive available-balance caps, leverage cap from 1 through 3, and liquidation-distance floor of at least 1000 bps;
+- completed renderer sandbox/preload/CSP/navigation hardening and Electron single-instance plus exclusive journal ownership;
+- exact versioned command, current owned session, same execution generation/account/symbol, complete risk data no older than five seconds, and dispatch no more than one second after final validation;
+- one-way/single-asset/can-trade account, isolated/no-auto-add symbol, matching observed leverage, empty symbol orders, correct reduction, available margin state, and exact backend risk validation;
+- validated HMAC/rollback-anchored fsync-capable journal, no concurrent/accepted-open command, no unresolved unknown across credential rotation, and no active persisted rate pause/ban.
+
+Mock, production-like configuration, production-only credentials, renderer market mode, or renderer capability state can never enable the route. Credential strings have no reliable environment marker; a signed demo read proves authenticated testnet access but not API-key TRADE permission, and no production origin exists. Disabled/mock/no-session mode starts no new execution readers/timers/network unless a durable nonterminal record requires recovery-only monitoring.
+
+### Typed protocol and acknowledgements
+
+The planned strict action is `futures.execution.placeOrder`, version `1`, on a future dedicated `futures-execution` channel. It accepts exactly:
+
+- backend-issued 128-bit/32-lowercase-hex one-use `requestId` bound to connection/symbol/generation for 30 seconds; never renderer/Spot `Math.random`;
+- `marketType: "futures"`, `environment: "testnet"`, allowlisted symbol, and `BUY|SELL`;
+- `orderType: "LIMIT"`, exact decimal-string quantity/price, `timeInForce: "GTC"`;
+- `positionSide: "BOTH"`, `marginType: "ISOLATED"`, safe-integer leverage, `reduceOnly: true`;
+- `workingType: null`, `priceProtect: false`;
+- exact 36-character deterministic client order ID.
+
+No risk-acknowledgement override exists; warnings are backend hard blocks. The raw command is capped at 4096 UTF-8 bytes, duplicate-key scanned before conversion, and decimals are capped at 40 total/18 fractional digits. No endpoint, URL, transport, timestamp, signature, retry, session, or account-mutation field is accepted. Financial values and order IDs remain strings; only validated safe timestamps cross the boundary.
+
+Renderer-safe acknowledgements are exact `pending`, `accepted`, `rejected`, or `unknown` values with fixed codes, static messages, and monotonic decimal revision. Invalid commands use null identities and never echo malformed text. `accepted` requires a valid exchange response or exact query proving the order exists. `rejected` requires local rejection before intent or a confirmed exchange rejection. `unknown` is never presented as success or failure, and raw HTTP/Binance/network identity remains internal and redacted. Exact session-bound subscribe/prepare/status snapshots restore capability and the current attempt on reconnect; lower/stale revisions cannot overwrite state.
+
+### Ambiguous-result state machine
+
+```text
+received -> locally_rejected
+received -> queued -> locally_rejected
+                   -> dispatched -> exchange_rejected
+                                 -> exchange_accepted -> reconciling
+                                 -> result_unknown -> reconciling -> exchange_rejected
+                                                            -> confirmed_open -> reconciling
+                                                            -> confirmed_filled
+                                                            -> confirmed_canceled
+                                                            -> reconciliation_unavailable
+```
+
+The backend writes/fsyncs `queued` and then `dispatch_intent`. Intent is the exact point of no return: ownership transfers to the process before the one POST invocation, and even an intent-before-send crash is conservatively unknown. Timeout, network loss, malformed success, `408`, `-1006`, `-1007`, any `5xx`, or inability to prove rejection becomes unknown. The POST is never retried.
+
+Reconciliation uses only signed `GET /fapi/v1/order` with exact symbol and original client order ID, a 10-second deadline, and the immediate/1/2/5/10/30-second fast schedule. Query `-2013` does not prove failure. Fast exhaustion enters reconciliation unavailable but retains a five-minute background recovery cadence through the query horizon. Every ACK is queried, and `NEW`/`PARTIALLY_FILLED` remains process-owned and monitored every 60 seconds to a durable terminal status. The external Testnet UI is the only cancellation path. Unknown/open records survive renderer teardown, soft disable, or restart and block later writes globally.
+
+Before intent, session teardown aborts locally. After intent, teardown is not cancellation, recovery continues without a renderer, and stale generations never deliver into a newer session. If a post-intent transition cannot fsync, no new revision/ack is emitted: the last durable pending view remains, status delivery closes, and the block/repair continue until unknown can itself be durably recorded. No unpersisted terminal result is acknowledged.
+
+The journal is not considered renderer-inaccessible under the current Node-enabled Phase 5 window. Renderer sandboxing is a hard prerequisite. The future store uses separate packaged/dev/E2E namespaces, Electron single-instance and exclusive regular-file/no-symlink ownership, main-only `safeStorage` integrity key, sealed latest-hash anchor, length-framed sequence/HMAC records, SHA-256 fixed-field command digests, complete non-secret command snapshots, file and directory fsync, fail-closed corruption/rollback handling, atomic compaction, and permanent ID/digest/terminal-state tombstones. Queued-only crash records become durable local rejections; intent records become unknown. Credential mismatch never queries the wrong account or bypasses an older global unknown.
+
+### Exact financial and transport contract
+
+Native `BigInt` fixed-point arithmetic will parse, compare, align, multiply, subtract, and perform tick/step modulo and basis-point cross multiplication. JavaScript floating point is prohibited and no new dependency is needed.
+
+Backend checks include symbol allowlist/status/contract/assets, `PRICE_FILTER`, `PERCENT_PRICE`, `LOT_SIZE`, `MIN_NOTIONAL`, `MAX_NUM_ORDERS`, tick, step, min/max price and quantity, exchange minimum notional, configured and symbol max notional, leverage, margin type, account/position mode, position side/direction/quantity, reduce-only semantics, open-order absence, mark/position/balance/config freshness, configured positive available-balance buffer, and exact liquidation distance. Official percent price is side-specific; Phase 6 intentionally enforces the opposite bound too as a stricter local band. Official zero min/max bounds are disabled, but zero tick or non-positive LOT_SIZE metadata fails closed. The local path intentionally enforces minimum notional even though Binance documents a reduce-only exemption.
+
+The POST facade sends only canonical `symbol, side, type=LIMIT, timeInForce=GTC, quantity, price, positionSide=BOTH, reduceOnly=true, newClientOrderId, newOrderRespType=ACK, recvWindow=5000, timestamp, signature`. It uses `X-MBX-APIKEY`, HMAC-SHA256 over the exact transmitted pre-signature form serialization, `redirect: "error"`, exact origin/path checks, no proxy/agent/dispatcher/caller overrides, a 10-second whole-operation deadline, 64-KiB body and exact header/message bounds, and zero write retries. Every Phase 6 GET uses the shared Spot/Phase 5 IP limiter with Spot priority and `maxRetries: 0`; the full 25-weight preflight reads mark exactly once and last, begins only with no Spot waiter, and preserves 23-weight Spot headroom. Placement consumes one unit on each order-count window and zero IP weight; the app further limits placement to one per 10 seconds, five per minute, and one nonterminal command, with counters persisted from intent records. Conservative persisted `418`/`429` pauses survive restart; missing/malformed headers close admission rather than assuming capacity.
+
+### Official documentation and SDK review
+
+The 2026-07-12 review used public official sources only; no authenticated or account call was made:
+
+- Product General Information continues to define demo REST/stream hosts, signed timing, `recvWindow`, API-key header, rate-limit/ban, timeout, and unknown 503 behavior.
+- Current regular New Order is signed `POST /fapi/v1/order`, with one unit on both order-count windows and zero IP weight; `LIMIT` requires TIF, quantity, and price. Current Query Order is signed `GET /fapi/v1/order`, IP weight 1, with exact symbol and either order ID or original client ID. Phase 6 chooses original client ID only.
+- `accountConfig` and `symbolConfig` are both weight 5 and supply the account/position mode, permission, margin type, auto-add state, leverage, and max notional omitted by V3 position. V3 position and balance are each weight 5. Change-leverage and change-margin-type are separate signed weight-1 writes with their own required fields/responses; the shared whole-account position-mode change is also weight 1. None is invoked.
+- `MARK_PRICE` and `CONTRACT_PRICE` remain valid working types for current conditional/algo orders, and `priceProtect` constrains trigger divergence. They do not belong to the reviewed regular LIMIT request; current `-4120` also directs conditional orders to the Algo Order API. The live regular type enum still lists conditionals, a product-internal discrepancy resolved by accepting LIMIT only and requiring any conditional path to re-review.
+- Client IDs follow `^[\.A-Z\:/a-z0-9_-]{1,36}$`; duplicate `-4116` reconciles rather than retries. Exact price/quantity filters use `(value-minimum) % increment`, precision fields are not substitutes, and the separate execution reader must add the `PERCENT_PRICE` filter omitted from Phase 5 normalization.
+
+The current official generated JavaScript package is now `@binance/derivatives-trading-usds-futures` `32.0.0` (release commit `fdfcb2089d5145bffdeaa97074152b331c8a12f1`; generated OpenAPI `1.0.0`), newer than the historically correct Phase 5 `26.0.2` review. Its discrepancies are explicit:
+
+- package metadata incorrectly describes this USDⓈ-M connector as COIN-M/COINN-M;
+- README/common exports steer generic testnet use to `testnet.binancefuture.com` while also exporting the product-documented demo host; product General Information governs;
+- generic configuration exposes production default/base overrides, proxy/agents, arbitrary capabilities, a one-second default timeout, and a default retry policy; current retries are GET/DELETE-only, but the surface is still not an acceptable write boundary;
+- New Order models price/quantity as JavaScript numbers and unconstrained/general parameters;
+- Query Order permits both identifiers, while its generated response omits current product fields; Symbol Configuration is actually an array despite singular presentation;
+- generic error handling can discard exact Binance 5xx body identity and does not establish the required success-body validation contract.
+
+Therefore current product documentation governs every discrepancy and no SDK dependency, lockfile change, or generic client will be added.
+
+Primary references: [General Information](https://developers.binance.com/docs/derivatives/usds-margined-futures/general-info), [Common Definition](https://developers.binance.com/docs/derivatives/usds-margined-futures/common-definition), [Error Codes](https://developers.binance.com/docs/derivatives/usds-margined-futures/error-code), [New Order](https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/New-Order), [Query Order](https://developers.binance.com/docs/derivatives/usds-margined-futures/trade/rest-api/Query-Order), and [official JavaScript connector](https://github.com/binance/binance-connector-js/tree/master/clients/derivatives-trading-usds-futures).
+
+### Renderer plan
+
+No renderer execution component is added in this planning session. Before any route, the existing Node-enabled window must be migrated to sandbox/context isolation with a narrow preload bridge and navigation/CSP/window-open restrictions; full Spot regression is mandatory. Only after the backend implementation and fake suites pass may one compact ticket appear in Futures mode, labeled `USDⓈ-M TESTNET · REDUCE ONLY`. It may expose exact quantity/price inputs and a backend risk preview, with leverage/margin as read-only assertions. It has no opening, leverage, margin, reduce-only, cancel, modify, transfer, mock, or production control; it disables on stale/incomplete/disconnected/busy/unknown state and presents revisioned backend unknown/recovery explicitly. Spot/global shortcuts and Enter never submit futures, and no execution data enters `DataContext`, browser storage, analytics, telemetry, or clipboard. Spot UI, shortcuts, LIMIT/GTC, cancellation, refresh timing/weights, and `0.999` remain unchanged.
+
+### Planned implementation checkpoints
+
+1. Strict command/ack schemas, native exact-decimal utility, pure risk evaluator, and deterministic tests only; no route or transport.
+2. Renderer sandbox/preload/CSP/navigation hardening with complete Spot regression; still no route.
+3. Separate exact read-only `FuturesTestnetExecutionRiskReader` plus shared-IP/Spot-priority admission and generation/freshness ownership; Phase 5 frozen.
+4. Single-instance/exclusive ownership, integrity-anchored journal, status snapshots, state machine, fake-only reconciliation, and confirmed-open monitoring; register only the three reviewed read-only status/prepare actions, with no write route or POST facade.
+5. Exact two-method testnet facade with fake signing/host/redirect/deadline/weight/error tests; still no route.
+6. Deliberate installation of `futures.execution.placeOrder` as the only network-write action behind the complete gate; the three reviewed read-only actions remain, and generic typed plus legacy futures remain rejected.
+7. Three repeated independent backend audits, then at most the compact testnet reduce-only ticket.
+8. Any additional order shape/write is a separate checkpoint; Phase 7 remains separate and may not parameterize/reuse Phase 6 host, credentials, channel, protocol, or storage.
+
+### Planned test matrix
+
+Deterministic fake-only tests cover default-disabled and exact config grammar; credential rotation/global block; renderer sandbox and secret/redaction sinks; production/redirect exclusion; strict resource-bounded protocol, backend IDs, revisioned status, and malformed null-identity acks; exact decimal/filter/side-specific percent/notional/leverage/margin/mode/reduce/liquidation boundaries; every reader array identity and fresh/stale/server-clock case; exact URL/signature/deadline/body/header/weights and shared Spot admission; duplicate IDs, two-process locks, journal framing/HMAC/rollback/torn writes/compaction/fsync ordering and 90-day tombstones; queued/intent/post-intent crash cases; every HTTP/body/network ambiguity, persisted bans/counters, zero POST retry, exact fast/slow reconciliation and accepted-open monitoring; reconnect/teardown/stale revisions; continued typed/legacy rejection before and after route installation; and complete Spot/UI/storage isolation. Optional testnet smoke testing is separately authorized, manual, non-default, and excluded from CI.
+
+### Planning audit and GitNexus record
+
+- Pre-edit `npx gitnexus status` was exact: repository `cc-trade`, branch `fix/long-running-stability`, indexed commit and current commit both `81ea13291e328ab57be88121236a09ee72d68034`, clean worktree.
+- GitNexus query/context inventoried `createFuturesReadOnlyTransport`, `FuturesReadOnlyService`, `handleRequest`, `readResource`, `stopSession`, typed/legacy validators and routing, `SpotTradingAdapter.placeOrder`, `RateLimiter.reserve`, `useFuturesReadOnly`, `AppShell`, `DataContext`, `setupBinanceConnection`, credentials, tests, and lifecycle processes. The central read-service and protocol flows remain unchanged.
+- No existing function, class, method, component, source, test, dependency, lockfile, renderer, or transport is edited by this documentation checkpoint, so no upstream symbol impact applies. Future source checkpoints must run per-symbol impact first and report HIGH/CRITICAL results.
+- Three independent read-only audits completed. Safety/ambiguous/lifecycle initially found renderer-writable journal state, missing cross-process/crash/durability ownership, dispatch/status/rate contradictions, and accepted-open recovery gaps. Official-doc/SDK/test review corrected side-specific percent price, zero tick, order-count filter, exact bounds/deadlines, response identity, and missing matrices. Isolation/security/renderer/Spot review required sandbox/preload, redirect rejection, recovery-only disable, binary-downgrade guard, redaction, namespace, credential-rotation, and Phase 7 separation. Every substantive finding was fixed in both documents; all three closure reviews returned PASS, and auditors made no edits.
+- Focused unchanged-boundary validation passed `50/50`: futures typed/legacy rejection `11/11`, Phase 5 protocol `8/8`, Phase 5 service `18/18`, and connection/composition `13/13`.
+- Pre-commit `git diff --check` passed; no executable source/test changed, so targeted lint was not applicable. Scope is exactly the new focused design and this roadmap update; no source, test, dependency, lockfile, renderer, or transport file changed.
+- Exact GitNexus results: working LOW `1 tracked file / 5 Markdown symbols / 0 processes` (the untracked new design was not graph-attributed); staged LOW `2 files / 5 Markdown symbols / 0 processes`; comparison with Phase 5 base `81ea13291e328ab57be88121236a09ee72d68034` LOW `2/5/0`; cumulative comparison with `main` CRITICAL `59 files / 1116 symbols / 165 processes`. The CRITICAL result is inherited Phase 1–5 branch scope, was reported, and does not describe this docs-only checkpoint. Pre-commit circular-import check found zero cycles.
+- After indexing the new design, and repeated after the documentation amend against the final indexed commit, the exact Phase 5-base comparison was LOW `2 files / 66 indexed Markdown symbols / 0 execution processes`; the cumulative `main` comparison was CRITICAL `59 files / 1179 indexed symbols / 166 execution processes`. The increased symbol/process attribution comes from newly indexed documentation headings plus inherited branch history. Post-index circular-import checks found zero cycles.
+
+Safety invariants:
+
+- Phase 5 stays read-only and frozen.
+- Production execution remains structurally impossible.
+- Mock never executes.
+- Renderer state never authorizes a write.
+- No execution route exists while the renderer can access Node/filesystem/process state.
+- One OS-owned app/journal lease and one integrity-anchored attempt own all Phase 6 writes across processes and credential rotation.
+- Leverage and margin are assertions, never implicit writes.
+- Financial validation never uses floating point.
+- No POST is retried after dispatch.
+- Unknown is never reported as success or failure.
+- Teardown is never cancellation.
+- Accepted/open and unknown attempts remain backend-monitored through soft disable/restart; incompatible binary downgrade is prohibited.
+- Redirects, production origins, generic transports, and caller network options are impossible.
+- Legacy futures commands remain rejected, and existing typed futures commands remain rejected until the exact new route is deliberately installed.
+- Spot behavior and ownership remain unchanged.
+- Phase 7 must use separately reviewed production composition, credentials, protocol/channel, and storage; it cannot add a production enum to Phase 6.
+
+Phase status: Planning complete; implementation not started
 
 ## Phase 7: Guarded Production Futures Rollout
 
@@ -938,10 +1065,10 @@ Suggested UI order:
 
 ## Start Here Next Session
 
-Perform a Phase 6 planning/review checkpoint only; do not enable futures execution yet:
+Implement only Phase 6 checkpoint 1 from the focused design:
 
-- re-read the completed Phase 5 exit audit and preserve its transport, protocol, lifecycle, identity, and spot-isolation boundaries;
-- design the explicit testnet-only execution feature gate and backend acknowledgement/rejection protocol before adding any write endpoint;
-- review position-side, margin-type, leverage, reduce-only, working-type, price-protect, client-order-id, stale-mark, max-leverage, max-notional, liquidation-distance, and rollback requirements as one safety contract;
-- inventory which official current generated SDK write artifacts would be needed, but do not add a generic client, dependency, renderer order ticket, or write transport during planning;
-- keep typed and legacy futures execution rejected until a separately reviewed Phase 6 implementation checkpoint authorizes the first exact testnet write.
+- re-read the Phase 5 exit audit and [Phase 6 Testnet Futures Execution Design](./futures_phase6_testnet_execution_design.md);
+- run GitNexus upstream impact before every existing symbol edit and report HIGH/CRITICAL results;
+- add only the new strict command/ack schemas, native `BigInt` exact-decimal utility, pure one-way isolated reduce-only LIMIT/GTC risk evaluator, and deterministic unit tests;
+- do not add or register an execution route, transport, credential path, SDK dependency, renderer ticket, endpoint call, or account/network fixture;
+- keep the Phase 5 facade frozen and keep typed plus legacy futures execution rejected.
