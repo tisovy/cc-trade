@@ -4,9 +4,9 @@ Date: 2026-07-12
 
 Planning base: `81ea13291e328ab57be88121236a09ee72d68034` (`Complete futures read-only Phase 5`)
 
-Decision status: accepted for planning; no implementation is present
+Decision status: accepted; implementation checkpoint 1 is complete
 
-Phase status: Planning complete; implementation not started
+Phase status: Implementation in progress; checkpoint 1 complete
 
 ## 1. Decision summary
 
@@ -928,3 +928,60 @@ Post-index results, repeated after the documentation amend against the final ind
 - Exact Phase 5-base comparison: LOW `2 files / 66 indexed Markdown symbols / 0 execution processes`.
 - Cumulative `main` comparison: CRITICAL `59 files / 1179 indexed symbols / 166 execution processes`; the additional attribution is the newly indexed design headings plus inherited branch history, not executable change in this checkpoint.
 - Circular-import check: zero cycles.
+
+## 18. Checkpoint 1 implementation record
+
+Implementation date: 2026-07-12.
+
+### 18.1 Scope and module isolation
+
+Checkpoint 1 adds only six co-located backend files under `electron/services`: three separately named pure modules and their deterministic Vitest suites.
+
+- `futures-testnet-execution-decimal.js` is a native-`BigInt` leaf module with no imports.
+- `futures-testnet-execution-protocol.js` imports only the exact-decimal leaf.
+- `futures-testnet-execution-risk.js` imports only those two new pure modules.
+
+No existing runtime source, test, renderer, route, transport, Phase 5 facade/service/adapter/protocol, Spot adapter/validator, main-process composition, dependency, lockfile, credential path, journal, feature flag, hostname, or production surface is modified or imported. The exact action literal remains isolated in the new protocol and fake tests. Existing typed and every legacy futures command therefore remain rejected, and no execution route, WebSocket/IPC handler, renderer component, backend endpoint call, Binance network call, or account mutation exists.
+
+### 18.2 Strict command and acknowledgement decisions
+
+- The hostile raw-command entry accepts only a UTF-8 string or byte array, rejects obvious oversize input before encoding/decoding, caps the exact command at 4096 UTF-8 bytes, and uses a project-owned duplicate-key-aware JSON parser. It accepts one scalar-only top-level object, standard JSON string escapes, and integer JSON tokens; decoded duplicate keys, nested objects/arrays, malformed encoding/JSON, fractional/exponent integer spellings, and trailing input fail before financial parsing.
+- Object validation requires an ordinary `Object.prototype` object with exactly the 18 reviewed enumerable own data properties. It reads descriptors rather than property values, so accessors are rejected without invocation; symbols, non-enumerables, custom/null prototypes, aliases, missing fields, and extra fields fail closed.
+- The backend allowlist input is itself an ordinary dense 1–16-entry array with exact descriptor-owned uppercase symbols. Holes, accessors, duplicates, extra/overridden methods, custom prototypes, and malformed members reject; validated members are copied to a trusted `Set` before command membership testing.
+- Quantity and price are canonical positive strings under the exact 40-digit, 18-fractional-digit, and 42-ASCII-byte limits. The request ID is exactly 32 lowercase hex characters and the client ID is exactly the 36-character `cc6-${requestId}` relation. Every fixed LIMIT/GTC, one-way, isolated, reduce-only, non-conditional literal is validated without trimming, case folding, aliases, defaults, or coercion.
+- Acknowledgements have one exact 15-field envelope, fixed safe code/message mapping, canonical decimal-string revision, safe timestamp, and state/acknowledgement/code/order-presence matrix. Protocol rejection uniquely requires all untrusted request/symbol/client identities to be null. Trusted identities must match exactly. Validated order summaries have six exact fields, lossless positive signed-int64 order IDs, bounded exact decimals, safe update time, and reviewed status/state agreement.
+
+### 18.3 Exact-decimal and risk decisions
+
+- External decimal parsing retains `{ coefficient: BigInt, scale, original }`, preserves trailing fractional zeroes, rejects signs where prohibited, leading integer zeroes, exponent notation, separators, whitespace, non-ASCII digits, negative zero, and every out-of-bound value before `BigInt` construction. Derived multiplication is bounded to the reviewed 80-digit/36-scale financial path, with a hard internal resource ceiling.
+- Comparison, scale alignment, addition, subtraction, multiplication, absolute signed position amount, minimum-relative modulo, and basis-point cross multiplication use only integer arithmetic. New executable financial validation contains no `Number`, `parseFloat`, `Math`, exponent-number literal, dependency, or implicit numeric coercion.
+- `evaluateFuturesTestnetExecutionRisk({ command, policy, ownership, observations })` returns only frozen deterministic `{ ok: true }` or `{ ok: false, code, reason }` records. It reads no environment, clock, performance source, network, transport, renderer, journal, filesystem, or global state.
+- Policy owns the exact allowlist, positive configured notional cap under the hard 10,000-USDT ceiling, leverage cap from 1 through 3, positive available-balance buffer, and canonical liquidation floor from 1000 through 10000 bps.
+- Ownership binds the exact testnet symbol, credential/account/connection/generation identities, selected/current metadata digest/version/generation, and validation-to-dispatch age. Each of the nine required observations supplies exact data plus completion, connection, identity, age, future-date, and regression facts. Every age is accepted through 5000 ms exactly, server RTT through 1000 ms, and validation-to-dispatch age through 1000 ms; stale, partial, future, regressing, or mixed identity/generation facts reject.
+- Required metadata is exact `TRADING` perpetual USDT LIMIT/GTC with `PRICE_FILTER`, `PERCENT_PRICE`, `LOT_SIZE`, `MIN_NOTIONAL`, and `MAX_NUM_ORDERS`. Zero price min/max disables only that bound; zero tick and every non-positive/inverted/inconsistent LOT_SIZE fail closed. `multiplierDecimal` is canonical text from 0 through 18 and must equal both multiplier lexical scales. LOT_SIZE also requires `(maxQty - minQty) % stepSize === 0` as the checkpoint's fail-closed local-consistency decision.
+- Percent price explicitly applies BUY upper/SELL lower official checks plus the opposite local bound. Tick/step use the documented minimum-relative modulo. Limit-price notional enforces the exchange minimum even for reduce-only, while quantity times `max(limitPrice, markPrice)` enforces configured and symbol maxima.
+- Account permission, one-way and single-asset modes, exactly one `BOTH` position, isolated/no-auto-add margin, observed leverage equality/caps, exact non-negative isolated margin fields, exactly one USDT balance row, margin availability/buffer, zero regular/algo orders, opposite side, reducible quantity, positive liquidation price, and exact long/short liquidation distance are mandatory. No undocumented margin equality or projected-margin equation is introduced.
+- First-failure precedence is fixed by tests: invalid policy/input, symbol identity, ownership/freshness, exchange/filter schema, account permission/mode, margin/leverage/position, reduce-only state, price/percent/quantity filters, notional, then liquidation distance.
+
+### 18.4 Deterministic tests and independent audits
+
+- New suites pass `235/235`: exact decimal `29`, strict command/ack protocol `98`, and pure risk evaluator `108`.
+- The unchanged regression matrix passes `102/102`: typed/legacy futures rejection `11`, connection/composition `13`, Phase 5 protocol `8`, service `18`, transport `20`, Spot adapter `21`, Spot App/mode `4`, `DataContext` isolation `2`, and trading-command builders `5`.
+- The frozen Phase 5 futures adapter passes all `1477/1477` existing normalizer/transport-isolation cases. Targeted ESLint passes with only the established stale `baseline-browser-mapping` notice.
+- Protocol/exact-decimal review initially found two MEDIUM issues: sparse/overridden-method allowlist bypass and size enforcement after full encode/decode. Both were fixed with descriptor-safe dense copying and pre-encode/decode rejection; closure review passed `127/127` focused cases.
+- Risk/test review initially found two MEDIUM issues—extra balance identities and unused `multiplierDecimal`—plus two LOW test gaps for hard 3x and rejection precedence. Exact-one-USDT selection, scale agreement, independent hard-ceiling coverage, and ten simultaneous-failure precedence cases fixed every finding; closure review passed `235/235`.
+- Isolation review passed on its first closure run: no Phase 5, Spot, renderer, route, transport, credential, hostname, dependency, lockfile, journal, feature-flag, or production coupling. Its new-suite, unchanged-regression, shuffled non-isolated, lint, static-sensitive-scan, and circular-import checks passed. All auditors were read-only and made no edits.
+
+### 18.5 GitNexus impact record
+
+The compatible GitNexus `1.6.9` CLI verified branch, current commit, and indexed commit at checkpoint base `8c65dc70b89d85e0309adbe93d1b4a0a50d63554`. Query/context inspected typed protocol/validation, Phase 5 normalizers/protocol/service/transport, Spot placement isolation, decimal handling, and test flows before source work.
+
+Potential existing seams were deliberately left unchanged. Exact upstream impacts were `validateTypedTradingCommand` LOW `1 impacted / 1 direct / 0 processes / 0 modules`, `normalizeFuturesExchangeInfo` LOW `1/1/0/0`, and `SpotTradingAdapter.placeOrder` LOW `7/2/2/1`. The frozen `parseFuturesReadOnlyRequest` boundary was HIGH `11/6/3/3`, and `createFuturesReadOnlyResponse` was CRITICAL `27/4/14/1`; both warnings were reported before implementation and neither symbol/file was edited. The remaining working/staged/base/main and post-index comparisons are recorded with the roadmap checkpoint audit and final handoff.
+
+Before staging, GitNexus working-scope detection was LOW across `8 files / 6 currently indexed Markdown symbols / 0 execution processes`; the six new JavaScript files do not receive symbol/process attribution until reindexing. The simultaneous pre-stage circular-import check found zero cycles.
+
+The complete staged scope and exact comparison against checkpoint base `8c65dc70b89d85e0309adbe93d1b4a0a50d63554` were likewise LOW at `8 files / 6 currently indexed Markdown symbols / 0 execution processes`. The required cumulative comparison against `main` was CRITICAL at `65 files / 1179 symbols / 166 processes`; this is the inherited long-running Phase 1–6 branch, while the exact checkpoint delta remains isolated and LOW. New JavaScript impact is reserved for the post-commit reindex audit.
+
+After indexing the completed source checkpoint, the exact base comparison became CRITICAL at `8 files / 262 indexed symbols / 23 processes`, and the cumulative `main` comparison became CRITICAL at `65 files / 1435 symbols / 189 processes`. The exact source audit shows that most apparent cross-product reach comes from conservative same-name attribution of the private new helper `reject`: GitNexus reports it as CRITICAL `44 impacted / 10 direct / 15 processes / 3 modules`, including unrelated renderer and Phase 5 functions that neither import nor call the new file. Static import/source review and the isolation suite prove there is no runtime edge.
+
+Exact upstream impacts for the externally meaningful new boundaries were narrow: `parseFuturesTestnetExecutionCommand` LOW `1/1/0/0`, `parseFuturesTestnetExecutionAcknowledgement` LOW `1/1/0/0`, `evaluateFuturesTestnetExecutionRisk` LOW `1/1/0/0`, and `validateFuturesTestnetExecutionCommandObject` LOW `5/3/1/1`; all direct dependants are the new tests or evaluator. The shared exact-decimal entry `parsePositiveExactDecimal` was MEDIUM `14/6/2/1`, wholly inside the new protocol/risk/test module cluster. The post-index circular-import check found zero cycles.

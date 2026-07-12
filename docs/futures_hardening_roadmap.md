@@ -995,6 +995,20 @@ No renderer execution component is added in this planning session. Before any ro
 
 Deterministic fake-only tests cover default-disabled and exact config grammar; credential rotation/global block; renderer sandbox and secret/redaction sinks; production/redirect exclusion; strict resource-bounded protocol, backend IDs, revisioned status, and malformed null-identity acks; exact decimal/filter/side-specific percent/notional/leverage/margin/mode/reduce/liquidation boundaries; every reader array identity and fresh/stale/server-clock case; exact URL/signature/deadline/body/header/weights and shared Spot admission; duplicate IDs, two-process locks, journal framing/HMAC/rollback/torn writes/compaction/fsync ordering and 90-day tombstones; queued/intent/post-intent crash cases; every HTTP/body/network ambiguity, persisted bans/counters, zero POST retry, exact fast/slow reconciliation and accepted-open monitoring; reconnect/teardown/stale revisions; continued typed/legacy rejection before and after route installation; and complete Spot/UI/storage isolation. Optional testnet smoke testing is separately authorized, manual, non-default, and excluded from CI.
 
+### Checkpoint 1 implementation record (2026-07-12)
+
+- [x] Added three separately named, backend-only pure modules under `electron/services` for strict command/ack schemas, native-`BigInt` fixed-point decimals, and the pure futures testnet risk evaluator. They are imported only by one another and their co-located tests; no existing runtime module imports them.
+- [x] Raw commands are duplicate-key-aware, scalar-only, descriptor-safe, capped at 4096 UTF-8 bytes before expensive conversion, and exact across all 18 fields. Quantity/price retain their original canonical strings under 40-digit/18-scale/42-byte limits; the backend-format request ID, exact allowlist, fixed order literals, and deterministic client ID are mandatory.
+- [x] Acknowledgements freeze the exact pending/accepted/rejected/unknown state-code-order matrix, static messages, canonical decimal revisions, lossless signed-int64 order identity, safe timestamps, and null untrusted identities for protocol rejection.
+- [x] Exact-decimal operations cover scale alignment, comparison, addition/subtraction, multiplication, minimum-relative modulo, signed absolute amount, and basis-point cross multiplication without floating financial arithmetic or a dependency.
+- [x] The pure evaluator enforces the full checkpoint-one exchange/filter/notional/account/mode/leverage/margin/position/reduce/order/balance/liquidation contract over explicit same-generation ownership and freshness facts. It resolves planning ambiguities fail-closed: `multiplierDecimal` must match both multiplier scales, LOT_SIZE maximum must align from its minimum, the normalized balance array must contain exactly one USDT row, and rejection precedence is fixed by deterministic multi-failure tests.
+- [x] New tests pass `235/235` (`29` decimal, `98` protocol, `108` risk). Existing typed/legacy rejection plus Phase 5/Spot/renderer isolation passes `102/102`, and the frozen futures adapter passes `1477/1477`. Targeted lint passes with only the existing browser-data notice.
+- [x] Three independent read-only reviews completed. Protocol/decimal fixed two MEDIUM resource/allowlist findings before PASS; risk/test completeness fixed two MEDIUM contract findings and two LOW test gaps before PASS; Phase 5/Spot/renderer/transport/credential/production isolation passed with no finding.
+- [x] GitNexus pre-edit query/context and upstream impact kept all existing seams unchanged. The avoided Phase 5 protocol boundaries were HIGH `11 impacted / 6 direct / 3 processes / 3 modules` and CRITICAL `27/4/14/1`; typed validation, futures normalization, and Spot placement were LOW. Exact diff comparisons and post-index results are recorded in the final checkpoint audit.
+- [x] Pre-stage GitNexus working detection was LOW across `8 files / 6 currently indexed Markdown symbols / 0 execution processes`; new JavaScript symbols await the required final reindex. The pre-stage circular-import check found zero cycles.
+- [x] Complete staged scope and exact comparison with base `8c65dc70b89d85e0309adbe93d1b4a0a50d63554` were each LOW at `8 files / 6 currently indexed Markdown symbols / 0 execution processes`. Cumulative comparison with `main` was CRITICAL at `65 files / 1179 symbols / 166 processes`, inherited from the long-running Phase 1–6 branch rather than this isolated checkpoint. Post-index source attribution is recorded after the final analyze.
+- [x] After source reindex, exact base comparison was CRITICAL `8 files / 262 symbols / 23 processes`; cumulative `main` was CRITICAL `65 / 1435 / 189`. Conservative same-name attribution makes the private isolated `reject` helper appear to reach unrelated renderer/Phase 5 flows despite zero imports. Exact public-boundary impacts stayed LOW for command parsing `1/1/0/0`, acknowledgement parsing `1/1/0/0`, evaluator `1/1/0/0`, and command-object validation `5/3/1/1`; the decimal parser was MEDIUM `14/6/2/1` entirely within the new module/test cluster. Post-index circular-import check found zero cycles.
+
 ### Planning audit and GitNexus record
 
 - Pre-edit `npx gitnexus status` was exact: repository `cc-trade`, branch `fix/long-running-stability`, indexed commit and current commit both `81ea13291e328ab57be88121236a09ee72d68034`, clean worktree.
@@ -1025,7 +1039,7 @@ Safety invariants:
 - Spot behavior and ownership remain unchanged.
 - Phase 7 must use separately reviewed production composition, credentials, protocol/channel, and storage; it cannot add a production enum to Phase 6.
 
-Phase status: Planning complete; implementation not started
+Phase status: Implementation in progress; checkpoint 1 complete
 
 ## Phase 7: Guarded Production Futures Rollout
 
@@ -1065,10 +1079,11 @@ Suggested UI order:
 
 ## Start Here Next Session
 
-Implement only Phase 6 checkpoint 1 from the focused design:
+Implement only Phase 6 checkpoint 2, the renderer-isolation prerequisite:
 
-- re-read the Phase 5 exit audit and [Phase 6 Testnet Futures Execution Design](./futures_phase6_testnet_execution_design.md);
-- run GitNexus upstream impact before every existing symbol edit and report HIGH/CRITICAL results;
-- add only the new strict command/ack schemas, native `BigInt` exact-decimal utility, pure one-way isolated reduce-only LIMIT/GTC risk evaluator, and deterministic unit tests;
-- do not add or register an execution route, transport, credential path, SDK dependency, renderer ticket, endpoint call, or account/network fixture;
-- keep the Phase 5 facade frozen and keep typed plus legacy futures execution rejected.
+- re-read the Phase 5 exit audit and [Phase 6 Testnet Futures Execution Design](./futures_phase6_testnet_execution_design.md), especially checkpoints 2 and 3;
+- run GitNexus upstream impact before every existing function, class, method, or component edit and report HIGH/CRITICAL results before proceeding;
+- disable renderer Node integration, enable context isolation and sandboxing, add only a narrow preload bridge, and enforce the reviewed CSP/navigation/window-open restrictions with complete Spot regression coverage;
+- keep checkpoint 1's protocol/decimal/risk modules pure and unchanged unless a separately reviewed defect requires correction;
+- do not install any futures execution route, status/prepare action, risk reader, transport, credential path, journal, POST facade, renderer execution ticket, endpoint call, or feature flag;
+- do not begin checkpoint 3; keep the Phase 5 facade frozen and all typed/legacy futures execution rejected.
