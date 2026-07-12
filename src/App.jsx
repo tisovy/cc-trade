@@ -13,6 +13,7 @@ import DrawingToolbar from './components/features/tools/DrawingToolbar'
 import AlertPanel from './components/features/tools/AlertPanel'
 import MainView from './components/layout/MainView'
 import NotificationToast from './components/common/NotificationToast'
+import FuturesReadOnlyPanel from './components/features/futures/FuturesReadOnlyPanel'
 import { INTERVALS } from './constants'
 import { DataProvider, useDataContext } from './context/DataContext'
 import { DrawingProvider } from './context/DrawingProvider';
@@ -24,12 +25,46 @@ import {
   createSpotCancelOrderCommand,
   createSpotPlaceOrderCommand,
 } from './utils/tradingCommands';
+import useFuturesReadOnly from './hooks/useFuturesReadOnly';
 
 // View types
 const VIEWS = {
   DEPTH: 'depth',
   MAIN: 'main'
 };
+
+const MARKET_MODES = Object.freeze({
+  SPOT: 'spot',
+  FUTURES: 'futures',
+});
+
+const DEFAULT_FUTURES_SYMBOL = 'BTCUSDT';
+const CONFIGURED_FUTURES_ENVIRONMENT = globalThis.process?.env?.FUTURES_READ_ENVIRONMENT === 'testnet'
+  ? 'testnet'
+  : 'mock';
+
+const MarketModeSwitch = ({ mode, environment, onChange }) => (
+  <div className="market-mode-switch" role="group" aria-label="Market mode">
+    <button
+      type="button"
+      className={mode === MARKET_MODES.SPOT ? 'active' : ''}
+      data-testid="market-mode-spot"
+      aria-pressed={mode === MARKET_MODES.SPOT}
+      onClick={() => onChange(MARKET_MODES.SPOT)}
+    >
+      Spot
+    </button>
+    <button
+      type="button"
+      className={mode === MARKET_MODES.FUTURES ? 'active' : ''}
+      data-testid="market-mode-futures"
+      aria-pressed={mode === MARKET_MODES.FUTURES}
+      onClick={() => onChange(MARKET_MODES.FUTURES)}
+    >
+      Futures{environment ? ` · ${environment.toUpperCase()}` : ''}
+    </button>
+  </div>
+);
 
 function AppShell() {
   const {
@@ -48,6 +83,24 @@ function AppShell() {
   const [showAlertPanel, setShowAlertPanel] = useState(false);
   const [alertInitialPrice, setAlertInitialPrice] = useState(null);
   const [quickSwitch, setQuickSwitch] = useState({ visible: false, mode: 'pair', query: '', selectedIndex: 0 });
+  const [marketMode, setMarketMode] = useState(MARKET_MODES.SPOT);
+  const [futuresSymbol] = useState(DEFAULT_FUTURES_SYMBOL);
+  const futuresState = useFuturesReadOnly({
+    enabled: marketMode === MARKET_MODES.FUTURES,
+    symbol: futuresSymbol,
+    environment: CONFIGURED_FUTURES_ENVIRONMENT,
+    wsConnection,
+    sendMessage,
+  });
+
+  const handleMarketModeChange = useCallback((nextMode) => {
+    if (!Object.values(MARKET_MODES).includes(nextMode)) return;
+    setShowOrderModal(false);
+    setOrderModalData(null);
+    setShowAlertPanel(false);
+    setQuickSwitch(prev => ({ ...prev, visible: false, query: '', selectedIndex: 0 }));
+    setMarketMode(nextMode);
+  }, []);
 
   // Store reference to MainView's slot updater for AnalyticsPanel clicks
   const mainViewSlotUpdaterRef = useRef(null);
@@ -236,6 +289,7 @@ function AppShell() {
 
   useEffect(() => {
     const handleGlobalQuickSwitch = (event) => {
+      if (marketMode !== MARKET_MODES.SPOT) return;
       console.log('Global Keydown:', event.key, event.target.tagName);
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       if (quickSwitch.visible || showOrderModal) return;
@@ -253,7 +307,7 @@ function AppShell() {
 
     document.addEventListener('keydown', handleGlobalQuickSwitch);
     return () => document.removeEventListener('keydown', handleGlobalQuickSwitch);
-  }, [quickSwitch.visible, showOrderModal]);
+  }, [marketMode, quickSwitch.visible, showOrderModal]);
 
   const handleRequest = useCallback((data, type) => {
     if (!wsConnection || wsConnection.readyState !== WebSocket.OPEN) {
@@ -448,47 +502,61 @@ function AppShell() {
   const _showAnalyticsPanel = currentView === VIEWS.DEPTH || showAnalyticsPanelInMainView;
 
   return (
-    <div className="App">
-      {/* Render current view */}
-      {currentView === VIEWS.DEPTH ? (
-        renderDepthView()
+    <div className={`App market-mode-${marketMode}`}>
+      <MarketModeSwitch
+        mode={marketMode}
+        environment={futuresState.environment}
+        onChange={handleMarketModeChange}
+      />
+
+      {marketMode === MARKET_MODES.FUTURES ? (
+        <main className="futures-readonly-view" data-testid="futures-readonly-view">
+          <FuturesReadOnlyPanel state={futuresState} />
+        </main>
       ) : (
         <>
-          {/* Analytics Panel for MainView - rendered at App level for persistence */}
-          {showAnalyticsPanelInMainView && (
-            <div className="persistent-analytics-panel in-main-view">
-              <AnalyticsPanel onPairNavigate={handleAnalyticsPairClick} />
-            </div>
+          {/* Render the established spot view without changing its state or workflow. */}
+          {currentView === VIEWS.DEPTH ? (
+            renderDepthView()
+          ) : (
+            <>
+              {/* Analytics Panel for MainView - rendered at App level for persistence */}
+              {showAnalyticsPanelInMainView && (
+                <div className="persistent-analytics-panel in-main-view">
+                  <AnalyticsPanel onPairNavigate={handleAnalyticsPairClick} />
+                </div>
+              )}
+              <MainView
+                onSwitchToDepth={handleSwitchToDepth}
+                onPairChange={handleMainViewPairChange}
+                onSelectedSlotChange={handleMainViewSelectedSlotChange}
+                showAnalyticsPanel={showAnalyticsPanelInMainView}
+                onToggleAnalyticsPanel={() => setShowAnalyticsPanelInMainView(!showAnalyticsPanelInMainView)}
+                isActive={currentView === VIEWS.MAIN}
+              />
+            </>
           )}
-          <MainView
-            onSwitchToDepth={handleSwitchToDepth}
-            onPairChange={handleMainViewPairChange}
-            onSelectedSlotChange={handleMainViewSelectedSlotChange}
-            showAnalyticsPanel={showAnalyticsPanelInMainView}
-            onToggleAnalyticsPanel={() => setShowAnalyticsPanelInMainView(!showAnalyticsPanelInMainView)}
-            isActive={currentView === VIEWS.MAIN}
+
+          {/* Spot execution modals never exist in the futures render branch. */}
+          <OrderFormModal
+            show={showOrderModal}
+            onHide={() => setShowOrderModal(false)}
+            onSave={handleOrderModalSave}
+            initialData={orderModalData}
+          />
+          <QuickSwitchModal
+            visible={quickSwitch.visible}
+            mode={quickSwitch.mode}
+            query={quickSwitch.query}
+            results={quickSwitchResults}
+            selectedIndex={quickSwitch.selectedIndex}
+            onClose={closeQuickSwitch}
+            onQueryChange={handleQuickSwitchQueryChange}
+            onSelect={handleQuickSwitchSelect}
+            onMoveSelection={moveQuickSwitchSelection}
           />
         </>
       )}
-
-      {/* Modals (shared across views) */}
-      <OrderFormModal
-        show={showOrderModal}
-        onHide={() => setShowOrderModal(false)}
-        onSave={handleOrderModalSave}
-        initialData={orderModalData}
-      />
-      <QuickSwitchModal
-        visible={quickSwitch.visible}
-        mode={quickSwitch.mode}
-        query={quickSwitch.query}
-        results={quickSwitchResults}
-        selectedIndex={quickSwitch.selectedIndex}
-        onClose={closeQuickSwitch}
-        onQueryChange={handleQuickSwitchQueryChange}
-        onSelect={handleQuickSwitchSelect}
-        onMoveSelection={moveQuickSwitchSelection}
-      />
     </div>
   )
 }

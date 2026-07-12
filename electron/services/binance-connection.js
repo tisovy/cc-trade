@@ -11,6 +11,7 @@ import {
     validateLocalWebSocketRequest,
 } from './local-websocket-access.js';
 import {
+    createCommandRejection,
     validateLegacyCancelCommand,
     validateLegacyOrderCommand,
     validateTypedTradingCommand,
@@ -20,6 +21,17 @@ import {
     buildSpotMockOrderPlacementExecutionReport,
     runSpotAccountRefreshOperations,
 } from './spot-trading-adapter.js';
+import { FuturesTradingAdapter } from './futures-trading-adapter.js';
+import { createFuturesReadOnlyService } from './futures-readonly-service.js';
+import {
+    createFuturesReadOnlyTransport,
+    resolveFuturesReadOnlyTransportConfig,
+} from './futures-readonly-transport.js';
+import {
+    FUTURES_READ_RESPONSE_TYPES,
+    createFuturesReadOnlyResponse,
+    isFuturesReadOnlyAction,
+} from '../../src/utils/futuresReadOnlyProtocol.js';
 import { TRADING_COMMAND_ACTIONS } from '../../src/utils/tradingCommands.js';
 
 const LOG_LEVELS = { error: 0, warn: 1, info: 2, debug: 3 };
@@ -116,13 +128,64 @@ const extractStreamPayload = (rawMessage) => {
  * - Weight-based capacity check (800 weight per minute)
  * - Automatic retry on network errors (ECONNRESET, etc.)
  */
-class RateLimiter {
+const createAbortError = () => {
+    const error = new Error('The operation was aborted');
+    error.name = 'AbortError';
+    error.code = 'ABORT_ERR';
+    return error;
+};
+
+const throwIfAborted = (signal) => {
+    if (signal?.aborted) throw createAbortError();
+};
+
+const waitForDelay = (delayMs, signal) => {
+    if (!signal) return new Promise(resolve => setTimeout(resolve, delayMs));
+    throwIfAborted(signal);
+    return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+            signal.removeEventListener('abort', handleAbort);
+            resolve();
+        }, delayMs);
+        const handleAbort = () => {
+            clearTimeout(timer);
+            signal.removeEventListener('abort', handleAbort);
+            reject(createAbortError());
+        };
+        signal.addEventListener('abort', handleAbort, { once: true });
+    });
+};
+
+const waitForPromise = (promise, signal) => {
+    if (!signal) return promise;
+    throwIfAborted(signal);
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        const finish = (callback, value) => {
+            if (settled) return;
+            settled = true;
+            signal.removeEventListener('abort', handleAbort);
+            callback(value);
+        };
+        const handleAbort = () => finish(reject, createAbortError());
+        signal.addEventListener('abort', handleAbort, { once: true });
+        Promise.resolve(promise).then(
+            value => finish(resolve, value),
+            error => finish(reject, error),
+        );
+    });
+};
+
+export class RateLimiter {
     constructor(maxWeight = 800, windowMs = 60000, requestDelayMs = 500) {
         this.maxWeight = maxWeight;        // Max weight per window (conservative)
         this.windowMs = windowMs;          // Window size in ms (1 minute)
         this.requestDelayMs = requestDelayMs; // Hard-coded delay before each request
         this.requests = [];                // Track { timestamp, weight }
         this.lastRequestTime = 0;          // Last request timestamp for spacing
+        // Serialize only admission/reservation. Once admitted, operations remain
+        // independent, so one slow read cannot suppress unrelated resources.
+        this.admissionTail = Promise.resolve();
     }
 
     /**
@@ -144,7 +207,8 @@ class RateLimiter {
     /**
      * Wait until we have capacity for the given weight
      */
-    async waitForCapacity(weight) {
+    async waitForCapacity(weight, signal) {
+        throwIfAborted(signal);
         const currentWeight = this.getCurrentWeight();
         if (currentWeight + weight <= this.maxWeight) {
             return; // We have capacity
@@ -158,23 +222,50 @@ class RateLimiter {
 
         if (waitTime > 0) {
             logger.debug(`Rate limiter: waiting ${waitTime}ms (current weight: ${currentWeight}/${this.maxWeight})`);
-            await new Promise(resolve => setTimeout(resolve, waitTime));
+            await waitForDelay(waitTime, signal);
         }
 
         // Recursive check after waiting
-        return this.waitForCapacity(weight);
+        return this.waitForCapacity(weight, signal);
     }
 
     /**
      * Ensure minimum delay between requests
      */
-    async enforceDelay() {
+    async enforceDelay(signal) {
+        throwIfAborted(signal);
         const now = Date.now();
         const elapsed = now - this.lastRequestTime;
         if (elapsed < this.requestDelayMs) {
-            await new Promise(resolve => setTimeout(resolve, this.requestDelayMs - elapsed));
+            await waitForDelay(this.requestDelayMs - elapsed, signal);
         }
+        throwIfAborted(signal);
         this.lastRequestTime = Date.now();
+    }
+
+    /**
+     * Atomically wait for capacity, apply spacing, and reserve request weight.
+     */
+    async reserve(weight, signal) {
+        const previousAdmission = this.admissionTail;
+        let releaseAdmission;
+        const admissionGate = new Promise(resolve => {
+            releaseAdmission = resolve;
+        });
+        this.admissionTail = previousAdmission.then(
+            () => admissionGate,
+            () => admissionGate,
+        );
+
+        try {
+            await waitForPromise(previousAdmission, signal);
+            await this.waitForCapacity(weight, signal);
+            await this.enforceDelay(signal);
+            throwIfAborted(signal);
+            this.requests.push({ timestamp: Date.now(), weight });
+        } finally {
+            releaseAdmission();
+        }
     }
 
     /**
@@ -183,22 +274,19 @@ class RateLimiter {
      * @param {number} weight - Weight of this request (default 1)
      * @param {number} maxRetries - Max retries on network errors (default 2)
      */
-    async execute(fn, weight = 1, maxRetries = 2) {
-        // Wait for capacity (weight-based)
-        await this.waitForCapacity(weight);
-        
-        // Enforce minimum delay between requests (500ms)
-        await this.enforceDelay();
-
-        this.requests.push({ timestamp: Date.now(), weight });
+    async execute(fn, weight = 1, maxRetries = 2, { signal } = {}) {
+        await this.reserve(weight, signal);
 
         // Execute with retry on network errors
         let lastError;
         for (let attempt = 0; attempt <= maxRetries; attempt++) {
             try {
+                throwIfAborted(signal);
                 return await fn();
             } catch (err) {
                 lastError = err;
+                if (err?.name === 'AbortError') throw err;
+                if (signal?.aborted) throw createAbortError();
                 const isNetworkError = err?.code === 'ECONNRESET' ||
                                        err?.code === 'ETIMEDOUT' ||
                                        err?.code === 'ENOTFOUND' ||
@@ -218,7 +306,7 @@ class RateLimiter {
                     const retryDelay = isTimestampError ? 250 : 1000 * (attempt + 1); // ts: quick retry; net: 1s,2s
                     const kind = isTimestampError ? 'timestamp/recvWindow' : 'network';
                     logger.warn(`${kind} error (${err.code || 'unknown'}), retrying in ${retryDelay}ms (attempt ${attempt + 1}/${maxRetries})`);
-                    await new Promise(resolve => setTimeout(resolve, retryDelay));
+                    await waitForDelay(retryDelay, signal);
                     continue;
                 }
                 throw err;
@@ -435,11 +523,39 @@ const safeDisconnect = async (socket, label) => {
 export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSocketAccess() } = {}) {
     const APIKEY = process.env.BK;
     const APISECRET = process.env.BS;
+    const futuresMode = (process.env.FUTURES_READ_MODE || 'mock').trim().toLowerCase();
+    const futuresApiKey = process.env.FUTURES_TESTNET_API_KEY;
+    const futuresApiSecret = process.env.FUTURES_TESTNET_API_SECRET;
+    const futuresMockScenario = process.env.FUTURES_READ_MOCK_SCENARIO?.trim();
+    const futuresTransportConfig = futuresMode === 'mock'
+        ? {
+            mode: 'mock',
+            ...(futuresMockScenario ? { mockScenario: futuresMockScenario } : {}),
+        }
+        : {
+            mode: futuresMode,
+            apiKey: futuresApiKey,
+            apiSecret: futuresApiSecret,
+        };
+    const resolvedFuturesTransportConfig = resolveFuturesReadOnlyTransportConfig(
+        futuresTransportConfig,
+    );
+    // This non-secret renderer-visible value drives truthful MOCK/TESTNET status
+    // before the first snapshot or while the local socket is disconnected.
+    process.env.FUTURES_READ_ENVIRONMENT = resolvedFuturesTransportConfig.environment;
+
+    // Electron currently enables Node integration in the renderer. Consume the
+    // futures-only credentials before any BrowserWindow is created, retain them
+    // only in this main-process closure, and never expose them through protocol data.
+    delete process.env.FUTURES_TESTNET_API_KEY;
+    delete process.env.FUTURES_TESTNET_API_SECRET;
+
     const USE_MOCK = !APIKEY;
     const sharedProxyAgent = resolveProxyAgent();
-    applyLogMasking([APIKEY, APISECRET]);
+    applyLogMasking([APIKEY, APISECRET, futuresApiKey, futuresApiSecret]);
 
     logger.info(`Starting Binance Service. Mock Mode: ${USE_MOCK}`);
+    logger.info(`Starting Futures Read-Only Service. Environment: ${resolvedFuturesTransportConfig.environment}`);
 
     let client;
     let spotTradingAdapter = null;
@@ -633,6 +749,51 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
         // Channel manager for this connection (each renderer has its own channels)
         const channelManager = new ChannelManager(logger);
         const marketStreamManager = channelManager.getMarketStreamManager();
+        const futuresReadOnlyTransport = createFuturesReadOnlyTransport(
+            futuresTransportConfig,
+        );
+        const futuresReadOnlyAdapter = new FuturesTradingAdapter({
+            transport: futuresReadOnlyTransport,
+        });
+        const futuresReadOnlyService = createFuturesReadOnlyService({
+            adapter: futuresReadOnlyAdapter,
+            transport: futuresReadOnlyTransport,
+            environment: resolvedFuturesTransportConfig.environment,
+            executeRead: (operation, weight, { signal, maxRetries = 0 } = {}) => (
+                rateLimiter.execute(operation, weight, maxRetries, { signal })
+            ),
+            onInternalError: ({ resource, error }) => {
+                const safeCode = error?.code ?? error?.status ?? error?.name ?? 'unknown';
+                logger.warn(`[futures-read] ${resource} failed (${safeCode})`);
+            },
+        });
+
+        const emitFuturesReadOnlyRejection = (data, error) => {
+            const trimmedRequestId = typeof data?.requestId === 'string'
+                ? data.requestId.trim()
+                : '';
+            const requestId = trimmedRequestId
+                ? trimmedRequestId
+                : 'invalid-futures-read-request';
+            const symbol = typeof data?.symbol === 'string'
+                && /^[A-Z0-9_]{1,64}$/.test(data.symbol)
+                ? data.symbol
+                : null;
+            const code = typeof error?.code === 'string'
+                ? error.code
+                : 'FUTURES_READ_REQUEST_REJECTED';
+            const rejection = createFuturesReadOnlyResponse({
+                requestId,
+                type: FUTURES_READ_RESPONSE_TYPES.REJECTION,
+                symbol,
+                environment: resolvedFuturesTransportConfig.environment,
+                payload: {
+                    code,
+                    message: 'Futures read-only request rejected',
+                },
+            });
+            sendJSON(connection, rejection);
+        };
 
         const emitSpotRefreshOperation = async (operation) => {
             const payload = await operation.loadPayload();
@@ -655,10 +816,15 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
             });
         };
 
-        const handleOrderPlacement = async (payload, requestType = 'buyOrder') => {
+        const handleOrderPlacement = async (
+            payload,
+            requestType = 'buyOrder',
+            declaredMarketType,
+        ) => {
             const validation = validateLegacyOrderCommand(payload, {
                 requestType,
                 selectedSymbol: panelSettings?.selected,
+                declaredMarketType,
             });
             if (!validation.ok) {
                 logger.warn(`[orders] Rejected ${requestType}:`, validation.rejection.command_rejected);
@@ -707,9 +873,10 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
             }
         };
 
-        const handleCancelOrder = async (payload) => {
+        const handleCancelOrder = async (payload, declaredMarketType) => {
             const validation = validateLegacyCancelCommand(payload, {
                 selectedSymbol: panelSettings?.selected,
+                declaredMarketType,
             });
             if (!validation.ok) {
                 logger.warn('[orders] Rejected cancelOrder:', validation.rejection.command_rejected);
@@ -1393,6 +1560,31 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
 
             // New channel protocol
             if (data.action) {
+                if (isFuturesReadOnlyAction(data.action)) {
+                    try {
+                        futuresReadOnlyService.handleRequest(
+                            data,
+                            (response) => sendJSON(connection, response),
+                        );
+                    } catch (error) {
+                        emitFuturesReadOnlyRejection(data, error);
+                    }
+                    return;
+                }
+                if (
+                    ['subscribe', 'unsubscribe', 'enable_depth_view', 'disable_depth_view']
+                        .includes(data.action)
+                    && data.marketType !== undefined
+                    && data.marketType !== 'spot'
+                ) {
+                    emit(createCommandRejection(
+                        data.action,
+                        'UNSUPPORTED_MARKET_TYPE',
+                        'only spot market-data channel actions are enabled',
+                        { field: 'marketType', value: data.marketType },
+                    ));
+                    return;
+                }
                 switch (data.action) {
                     case 'subscribe': {
                         const { channelId, channelType, symbol, interval } = data;
@@ -1478,10 +1670,10 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
                 }
                 case 'buyOrder':
                 case 'sellOrder':
-                    await handleOrderPlacement(data.data, data.request);
+                    await handleOrderPlacement(data.data, data.request, data.marketType);
                     break;
                 case 'cancelOrder':
-                    await handleCancelOrder(data.data);
+                    await handleCancelOrder(data.data, data.marketType);
                     break;
                 default:
                     break;
@@ -1497,6 +1689,11 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
 
             // Remove this renderer from tracking
             rendererConnections.delete(connection);
+
+            // Invalidate futures ownership before any asynchronous teardown can
+            // resolve. This stops polling, stale checks, reconnects, sockets, and
+            // late delivery for this renderer generation.
+            futuresReadOnlyService.stop();
 
             // Cleanup this renderer's channels (market socket per-renderer)
             void channelManager.cleanup(safeDisconnect);

@@ -631,6 +631,57 @@ export const normalizeFuturesPositionRisk = (
 };
 
 /**
+ * Normalize the complete symbol-scoped USDⓈ-M V3 position-risk snapshot.
+ * A valid empty response remains an empty array; hedge legs remain independent.
+ */
+export const normalizeFuturesPositionRisks = (positionRiskResponse, requestedSymbol) => {
+    if (!isNonEmptyString(requestedSymbol)) {
+        throw new FuturesPositionRiskError(
+            FUTURES_POSITION_RISK_ERROR_CODES.INVALID_SYMBOL,
+            'Futures symbol must be a non-empty string',
+        );
+    }
+    if (!Array.isArray(positionRiskResponse)) throw malformedPositionRiskError();
+    if (positionRiskResponse.length === 0) return [];
+    if (positionRiskResponse.some(
+        (candidate) => !isRecord(candidate)
+            || !isNonEmptyString(candidate.symbol)
+            || !FUTURES_POSITION_SIDES.has(candidate.positionSide),
+    )) {
+        throw malformedPositionRiskError();
+    }
+
+    const identityKeys = new Set();
+    const positionModes = new Set();
+    positionRiskResponse.forEach((candidate) => {
+        const identityKey = JSON.stringify([candidate.symbol, candidate.positionSide]);
+        if (identityKeys.has(identityKey)) throw malformedPositionRiskError();
+        identityKeys.add(identityKey);
+        positionModes.add(candidate.positionSide === 'BOTH' ? 'one-way' : 'hedge');
+    });
+    if (positionModes.size > 1) throw malformedPositionRiskError();
+
+    const symbolCandidates = positionRiskResponse.filter(
+        (candidate) => candidate.symbol === requestedSymbol,
+    );
+    if (symbolCandidates.length === 0) {
+        throw new FuturesPositionRiskError(
+            FUTURES_POSITION_RISK_ERROR_CODES.SYMBOL_UNAVAILABLE,
+            `Futures symbol "${requestedSymbol}" is unavailable in position-risk response`,
+        );
+    }
+    if (symbolCandidates.length !== positionRiskResponse.length) {
+        throw malformedPositionRiskError();
+    }
+
+    return symbolCandidates.map((candidate) => normalizeFuturesPositionRisk(
+        positionRiskResponse,
+        requestedSymbol,
+        candidate.positionSide,
+    ));
+};
+
+/**
  * Normalize one USDⓈ-M V3 account-balance entry selected by margin asset.
  * Balance decimals remain exact strings and the update timestamp remains an integer.
  */
@@ -2141,8 +2192,10 @@ export class FuturesTradingAdapter {
         this.transport = transport;
     }
 
-    async getExchangeInfo(symbol) {
-        const response = await this.transport.getExchangeInfo();
+    async getExchangeInfo(symbol, signal) {
+        const response = signal === undefined
+            ? await this.transport.getExchangeInfo()
+            : await this.transport.getExchangeInfo({ signal });
         const exchangeInfo = await readExchangeInfoData(response);
         return normalizeFuturesExchangeInfo(exchangeInfo, symbol);
     }
@@ -2159,28 +2212,57 @@ export class FuturesTradingAdapter {
         return normalizeFuturesFundingState(fundingState, symbol);
     }
 
+    async getCurrentMarketState(symbol, signal) {
+        const response = await this.transport.getMarkPrice({
+            symbol,
+            ...(signal === undefined ? {} : { signal }),
+        });
+        const marketState = await readMarkPriceData(response);
+        return {
+            markPrice: normalizeFuturesMarkPrice(marketState, symbol),
+            fundingState: normalizeFuturesFundingState(marketState, symbol),
+        };
+    }
+
     async getPositionRisk(symbol, positionSide) {
         const response = await this.transport.getPositionRiskV3({ symbol });
         const positionRisk = await readPositionRiskData(response);
         return normalizeFuturesPositionRisk(positionRisk, symbol, positionSide);
     }
 
-    async getAccountBalance(marginAsset) {
-        const response = await this.transport.getBalanceV3();
+    async getPositionRisks(symbol, signal) {
+        const response = await this.transport.getPositionRiskV3({
+            symbol,
+            ...(signal === undefined ? {} : { signal }),
+        });
+        const positionRisks = await readPositionRiskData(response);
+        return normalizeFuturesPositionRisks(positionRisks, symbol);
+    }
+
+    async getAccountBalance(marginAsset, signal) {
+        const response = signal === undefined
+            ? await this.transport.getBalanceV3()
+            : await this.transport.getBalanceV3({ signal });
         const accountBalance = await readAccountBalanceData(response);
         return normalizeFuturesAccountBalance(accountBalance, marginAsset);
     }
 
-    async getOpenOrders(symbol) {
+    async getOpenOrders(symbol, signal) {
         requireOpenOrdersSymbol(symbol);
-        const response = await this.transport.getOpenOrders({ symbol });
+        const response = await this.transport.getOpenOrders({
+            symbol,
+            ...(signal === undefined ? {} : { signal }),
+        });
         const openOrders = await readOpenOrdersData(response);
         return normalizeFuturesOpenOrders(openOrders, symbol);
     }
 
-    async getAlgoOpenOrders(symbol) {
+    async getAlgoOpenOrders(symbol, signal) {
         requireAlgoOpenOrdersSymbol(symbol);
-        const response = await this.transport.getOpenAlgoOrders({ symbol });
+        const response = await this.transport.getOpenAlgoOrders({
+            symbol,
+            ...(signal === undefined ? {} : { signal }),
+        });
         const algoOpenOrders = await readAlgoOpenOrdersData(response);
         return normalizeFuturesAlgoOpenOrders(algoOpenOrders, symbol);
     }

@@ -43,6 +43,7 @@ import {
     normalizeFuturesOrderHistory,
     normalizeFuturesOrder,
     normalizeFuturesPositionRisk,
+    normalizeFuturesPositionRisks,
 } from './futures-trading-adapter.js';
 
 const makeFuturesSymbol = (overrides = {}) => ({
@@ -183,6 +184,89 @@ const expectedPositionRisk = {
     adl: 2,
     updateTime: 1720736417660,
 };
+
+describe('normalizeFuturesPositionRisks', () => {
+    it('preserves a valid empty symbol-scoped V3 snapshot without synthesizing a position', () => {
+        expect(normalizeFuturesPositionRisks([], 'BTCUSDT')).toEqual([]);
+        expect(normalizeFuturesPositionRisks([], 'BTCUSDT')).not.toBe(
+            normalizeFuturesPositionRisks([], 'BTCUSDT'),
+        );
+    });
+
+    it('returns one detached one-way position with exact decimal strings', () => {
+        const source = [makePositionRisk({
+            positionAmt: '0.000',
+            unRealizedProfit: '-0.00000000',
+            liquidationPrice: '0',
+        })];
+
+        const result = normalizeFuturesPositionRisks(source, 'BTCUSDT');
+
+        expect(result).toEqual([{
+            ...expectedPositionRisk,
+            positionAmt: '0.000',
+            unRealizedProfit: '-0.00000000',
+            liquidationPrice: '0',
+        }]);
+        expect(result[0]).not.toBe(source[0]);
+    });
+
+    it('preserves both source-ordered hedge legs and positive/negative PnL', () => {
+        const longPosition = makePositionRisk({
+            positionSide: 'LONG',
+            positionAmt: '1.250',
+            unRealizedProfit: '12.34000000',
+            liquidationPrice: '25000.00000000',
+        });
+        const shortPosition = makePositionRisk({
+            positionSide: 'SHORT',
+            positionAmt: '-0.750',
+            unRealizedProfit: '-3.21000000',
+            liquidationPrice: '78000.00000000',
+        });
+
+        const result = normalizeFuturesPositionRisks(
+            [longPosition, shortPosition],
+            'BTCUSDT',
+        );
+
+        expect(result.map(({ positionSide }) => positionSide)).toEqual(['LONG', 'SHORT']);
+        expect(result.map(({ unRealizedProfit }) => unRealizedProfit)).toEqual([
+            '12.34000000',
+            '-3.21000000',
+        ]);
+    });
+
+    it('rejects mixed symbols, duplicate identities, and mixed position modes', () => {
+        const malformedResponses = [
+            [makePositionRisk(), makePositionRisk({ symbol: 'ETHUSDT' })],
+            [makePositionRisk(), makePositionRisk()],
+            [makePositionRisk(), makePositionRisk({ positionSide: 'LONG' })],
+        ];
+
+        malformedResponses.forEach((response) => {
+            try {
+                normalizeFuturesPositionRisks(response, 'BTCUSDT');
+                throw new Error('Expected position-risk normalization to fail');
+            } catch (error) {
+                expect(error).toBeInstanceOf(FuturesPositionRiskError);
+                expect(error.code).toBe(
+                    FUTURES_POSITION_RISK_ERROR_CODES.MALFORMED_RESPONSE,
+                );
+            }
+        });
+    });
+
+    it('retains the unavailable-symbol identity for an all-wrong-symbol response', () => {
+        expect(() => normalizeFuturesPositionRisks(
+            [makePositionRisk({ symbol: 'ETHUSDT' })],
+            'BTCUSDT',
+        )).toThrowError(new FuturesPositionRiskError(
+            FUTURES_POSITION_RISK_ERROR_CODES.SYMBOL_UNAVAILABLE,
+            'Futures symbol "BTCUSDT" is unavailable in position-risk response',
+        ));
+    });
+});
 
 const makeAccountBalance = (overrides = {}) => ({
     accountAlias: 'SgsR',
@@ -9485,6 +9569,93 @@ describe('FuturesTradingAdapter', () => {
         expect(transport.getAccountTrades).toHaveBeenCalledTimes(1);
     });
 
+    it('loads current mark and funding state through one premium-index request', async () => {
+        const transport = {
+            getMarkPrice: vi.fn().mockResolvedValue(makeMarkPrice()),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getCurrentMarketState('BTCUSDT')).resolves.toEqual({
+            markPrice: expectedMarkPrice,
+            fundingState: expectedFundingState,
+        });
+        expect(transport.getMarkPrice).toHaveBeenCalledOnce();
+        expect(transport.getMarkPrice).toHaveBeenCalledWith({ symbol: 'BTCUSDT' });
+    });
+
+    it('loads all current position identities through one symbol-scoped V3 request', async () => {
+        const source = [
+            makePositionRisk({ positionSide: 'LONG', unRealizedProfit: '1.25000000' }),
+            makePositionRisk({ positionSide: 'SHORT', unRealizedProfit: '-0.75000000' }),
+        ];
+        const transport = {
+            getPositionRiskV3: vi.fn().mockResolvedValue(source),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getPositionRisks('BTCUSDT')).resolves.toEqual([
+            { ...expectedPositionRisk, positionSide: 'LONG', unRealizedProfit: '1.25000000' },
+            { ...expectedPositionRisk, positionSide: 'SHORT', unRealizedProfit: '-0.75000000' },
+        ]);
+        expect(transport.getPositionRiskV3).toHaveBeenCalledOnce();
+        expect(transport.getPositionRiskV3).toHaveBeenCalledWith({ symbol: 'BTCUSDT' });
+    });
+
+    it('preserves an empty current-position V3 snapshot without fallback reads', async () => {
+        const transport = {
+            getPositionRiskV3: vi.fn().mockResolvedValue([]),
+            getBalanceV3: vi.fn(),
+            getOpenOrders: vi.fn(),
+            getOpenAlgoOrders: vi.fn(),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await expect(adapter.getPositionRisks('BTCUSDT')).resolves.toEqual([]);
+        expect(transport.getPositionRiskV3).toHaveBeenCalledOnce();
+        expect(transport.getBalanceV3).not.toHaveBeenCalled();
+        expect(transport.getOpenOrders).not.toHaveBeenCalled();
+        expect(transport.getOpenAlgoOrders).not.toHaveBeenCalled();
+    });
+
+    it('propagates the owned AbortSignal through every Phase 5 current-state read', async () => {
+        const controller = new AbortController();
+        const transport = {
+            getExchangeInfo: vi.fn().mockResolvedValue(makeExchangeInfo(makeFuturesSymbol())),
+            getMarkPrice: vi.fn().mockResolvedValue(makeMarkPrice()),
+            getPositionRiskV3: vi.fn().mockResolvedValue([makePositionRisk()]),
+            getBalanceV3: vi.fn().mockResolvedValue([makeAccountBalance()]),
+            getOpenOrders: vi.fn().mockResolvedValue([makeOpenOrder()]),
+            getOpenAlgoOrders: vi.fn().mockResolvedValue([makeAlgoOpenOrder()]),
+        };
+        const adapter = new FuturesTradingAdapter({ transport });
+
+        await adapter.getExchangeInfo('BTCUSDT', controller.signal);
+        await adapter.getCurrentMarketState('BTCUSDT', controller.signal);
+        await adapter.getPositionRisks('BTCUSDT', controller.signal);
+        await adapter.getAccountBalance('USDT', controller.signal);
+        await adapter.getOpenOrders('BTCUSDT', controller.signal);
+        await adapter.getAlgoOpenOrders('BTCUSDT', controller.signal);
+
+        expect(transport.getExchangeInfo).toHaveBeenCalledWith({ signal: controller.signal });
+        expect(transport.getMarkPrice).toHaveBeenCalledWith({
+            symbol: 'BTCUSDT',
+            signal: controller.signal,
+        });
+        expect(transport.getPositionRiskV3).toHaveBeenCalledWith({
+            symbol: 'BTCUSDT',
+            signal: controller.signal,
+        });
+        expect(transport.getBalanceV3).toHaveBeenCalledWith({ signal: controller.signal });
+        expect(transport.getOpenOrders).toHaveBeenCalledWith({
+            symbol: 'BTCUSDT',
+            signal: controller.signal,
+        });
+        expect(transport.getOpenAlgoOrders).toHaveBeenCalledWith({
+            symbol: 'BTCUSDT',
+            signal: controller.signal,
+        });
+    });
+
     it('exposes no futures execution surface', () => {
         const adapter = new FuturesTradingAdapter({ transport: {} });
         expect(Object.getOwnPropertyNames(FuturesTradingAdapter.prototype)).toEqual([
@@ -9492,7 +9663,9 @@ describe('FuturesTradingAdapter', () => {
             'getExchangeInfo',
             'getMarkPrice',
             'getFundingState',
+            'getCurrentMarketState',
             'getPositionRisk',
+            'getPositionRisks',
             'getAccountBalance',
             'getOpenOrders',
             'getAlgoOpenOrders',

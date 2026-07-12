@@ -145,6 +145,9 @@ describe('setupBinanceConnection user-data orchestration', () => {
         vi.stubEnv('BS', 'test-api-secret');
         vi.stubEnv('WS_PORT', '14477');
         vi.stubEnv('LOG_LEVEL', 'info');
+        vi.stubEnv('FUTURES_READ_MODE', 'mock');
+        vi.stubEnv('FUTURES_READ_MOCK_SCENARIO', 'one-way');
+        vi.stubEnv('FUTURES_READ_ENVIRONMENT', '');
         vi.stubEnv('https_proxy', '');
         vi.stubEnv('HTTPS_PROXY', '');
         vi.stubEnv('http_proxy', '');
@@ -1809,5 +1812,190 @@ describe('setupBinanceConnection user-data orchestration', () => {
         } finally {
             setIntervalSpy.mockRestore();
         }
+    });
+
+    it('routes versioned mock futures snapshots separately and tears their lifecycle down', async () => {
+        vi.stubEnv('BK', '');
+        vi.stubEnv('BS', '');
+        vi.stubEnv('FUTURES_READ_MODE', 'mock');
+
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1' },
+        });
+
+        const request = {
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        };
+        moduleMocks.websocketServerHandlers.request(request);
+
+        const subscribe = {
+            action: 'futures.read.subscribe',
+            version: 1,
+            marketType: 'futures',
+            requestId: 'futures-service-test-1',
+            symbol: 'BTCUSDT',
+        };
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify(subscribe),
+        });
+        await vi.advanceTimersByTimeAsync(1_000);
+        await flushMicrotasks();
+
+        const payloads = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message));
+        const futuresSnapshots = payloads.filter((payload) => (
+            payload.channelId === 'futures-readonly' && payload.type === 'snapshot'
+        ));
+        const latestSnapshot = futuresSnapshots.at(-1);
+
+        expect(latestSnapshot).toMatchObject({
+            version: 1,
+            marketType: 'futures',
+            requestId: 'futures-service-test-1',
+            symbol: 'BTCUSDT',
+            environment: 'mock',
+            payload: {
+                symbol: 'BTCUSDT',
+                environment: 'mock',
+                connected: true,
+            },
+        });
+        expect(latestSnapshot.payload.resources.positions.data).toEqual([
+            expect.objectContaining({
+                marketType: 'futures',
+                symbol: 'BTCUSDT',
+                unRealizedProfit: expect.any(String),
+                liquidationPrice: expect.any(String),
+            }),
+        ]);
+        expect(latestSnapshot.payload.resources).not.toHaveProperty('balances');
+        expect(latestSnapshot).not.toHaveProperty('orders');
+
+        const snapshotCountBeforeClose = futuresSnapshots.length;
+        moduleMocks.rendererConnection.close();
+        await vi.advanceTimersByTimeAsync(35_000);
+        await flushMicrotasks();
+
+        const snapshotsAfterClose = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter((payload) => (
+                payload.channelId === 'futures-readonly' && payload.type === 'snapshot'
+            ));
+        expect(snapshotsAfterClose).toHaveLength(snapshotCountBeforeClose);
+    });
+
+    it('emits a safe rejection when an invalid futures request id cannot be echoed', async () => {
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1' },
+        });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'futures.read.subscribe',
+                version: 1,
+                marketType: 'futures',
+                requestId: '   ',
+                symbol: 'BTCUSDT',
+            }),
+        });
+
+        const rejection = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .find(payload => payload.type === 'rejection');
+        expect(rejection).toMatchObject({
+            channelId: 'futures-readonly',
+            requestId: 'invalid-futures-read-request',
+            symbol: 'BTCUSDT',
+            environment: 'mock',
+            payload: {
+                code: 'FUTURES_READ_INVALID_REQUEST_ID',
+                message: 'Futures read-only request rejected',
+            },
+        });
+    });
+
+    it('consumes separate testnet credentials before a renderer can observe process.env', () => {
+        vi.stubEnv('FUTURES_READ_MODE', 'testnet');
+        vi.stubEnv('FUTURES_TESTNET_API_KEY', 'futures-testnet-key');
+        vi.stubEnv('FUTURES_TESTNET_API_SECRET', 'futures-testnet-secret');
+
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1' },
+        });
+
+        expect(process.env.FUTURES_TESTNET_API_KEY).toBeUndefined();
+        expect(process.env.FUTURES_TESTNET_API_SECRET).toBeUndefined();
+        expect(process.env.FUTURES_READ_ENVIRONMENT).toBe('testnet');
+        expect(process.env.BK).toBe('test-api-key');
+        expect(process.env.BS).toBe('test-api-secret');
+    });
+
+    it('rejects outer-envelope legacy futures execution before any spot adapter call', async () => {
+        const placeOrder = vi.spyOn(SpotTradingAdapter.prototype, 'placeOrder');
+        const cancelOrder = vi.spyOn(SpotTradingAdapter.prototype, 'cancelOrder');
+
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1' },
+        });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                request: 'buyOrder',
+                marketType: 'futures',
+                data: {
+                    marketType: 'spot',
+                    symbol: 'BTCUSDT',
+                    quantity: '0.01',
+                    price: '50000',
+                },
+            }),
+        });
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                request: 'cancelOrder',
+                marketType: 'futures',
+                data: {
+                    marketType: 'spot',
+                    symbol: 'BTCUSDT',
+                    orderId: 12345,
+                },
+            }),
+        });
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'subscribe',
+                marketType: 'futures',
+                channelId: 'detail-BTCUSDT-1h-forged',
+                channelType: 'detail',
+                symbol: 'BTCUSDT',
+                interval: '1h',
+            }),
+        });
+
+        expect(placeOrder).not.toHaveBeenCalled();
+        expect(cancelOrder).not.toHaveBeenCalled();
+        const rejections = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.command_rejected?.code === 'UNSUPPORTED_MARKET_TYPE');
+        expect(rejections).toHaveLength(3);
+        expect(rejections.map(payload => payload.command_rejected.request)).toEqual([
+            'buyOrder',
+            'cancelOrder',
+            'subscribe',
+        ]);
     });
 });

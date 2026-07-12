@@ -176,6 +176,86 @@ describe('backend trading command validation', () => {
         });
     });
 
+    it('rejects futures identity on every legacy execution family', () => {
+        expect(validateLegacyOrderCommand({
+            marketType: 'futures',
+            symbol: 'BTCUSDT',
+            quantity: '1',
+            price: '50000',
+        }, { requestType: 'buyOrder' })).toMatchObject({
+            ok: false,
+            rejection: {
+                command_rejected: {
+                    request: 'buyOrder',
+                    code: 'UNSUPPORTED_MARKET_TYPE',
+                    details: { field: 'marketType', value: 'futures' },
+                },
+            },
+        });
+
+        expect(validateLegacyOrderCommand({
+            marketType: 'futures',
+            symbol: 'BTCUSDT',
+            quantity: '1',
+            price: '50000',
+        }, { requestType: 'sellOrder' })).toMatchObject({
+            ok: false,
+            rejection: {
+                command_rejected: {
+                    request: 'sellOrder',
+                    code: 'UNSUPPORTED_MARKET_TYPE',
+                },
+            },
+        });
+
+        expect(validateLegacyCancelCommand({
+            marketType: 'futures',
+            symbol: 'BTCUSDT',
+            orderId: 12345,
+        })).toMatchObject({
+            ok: false,
+            rejection: {
+                command_rejected: {
+                    request: 'cancelOrder',
+                    code: 'UNSUPPORTED_MARKET_TYPE',
+                },
+            },
+        });
+
+        expect(validateLegacyOrderCommand({
+            marketType: 'spot',
+            symbol: 'BTCUSDT',
+            quantity: '1',
+            price: '50000',
+        }, {
+            requestType: 'buyOrder',
+            declaredMarketType: 'futures',
+        })).toMatchObject({
+            ok: false,
+            rejection: {
+                command_rejected: {
+                    request: 'buyOrder',
+                    code: 'UNSUPPORTED_MARKET_TYPE',
+                    details: { field: 'envelope.marketType', value: 'futures' },
+                },
+            },
+        });
+
+        expect(validateLegacyCancelCommand({
+            marketType: 'spot',
+            symbol: 'BTCUSDT',
+            orderId: 12345,
+        }, { declaredMarketType: 'futures' })).toMatchObject({
+            ok: false,
+            rejection: {
+                command_rejected: {
+                    request: 'cancelOrder',
+                    code: 'UNSUPPORTED_MARKET_TYPE',
+                },
+            },
+        });
+    });
+
     it('accepts typed spot place-order commands and resolves the legacy handler target', () => {
         expect(validateTypedTradingCommand({
             action: TRADING_COMMAND_ACTIONS.PLACE_ORDER,

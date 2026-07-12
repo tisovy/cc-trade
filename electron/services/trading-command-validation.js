@@ -327,6 +327,26 @@ const rejectDefinedButDisabledCommand = (payload, baseCommand) => ({
     ),
 });
 
+const rejectUnsupportedLegacyMarket = (payload, requestType, declaredMarketType) => {
+    const marketDeclarations = [
+        { field: 'marketType', value: payload.marketType },
+        { field: 'envelope.marketType', value: declaredMarketType },
+    ].filter(({ value }) => value !== undefined);
+    const unsupported = marketDeclarations.find(({ value }) => (
+        (normalizeTextField(value) || SPOT_MARKET_TYPE) !== SPOT_MARKET_TYPE
+    ));
+    if (!unsupported) return null;
+    return {
+        ok: false,
+        rejection: createCommandRejection(
+            requestType,
+            'UNSUPPORTED_MARKET_TYPE',
+            'only spot legacy trading commands are enabled',
+            unsupported,
+        ),
+    };
+};
+
 export const validateTypedTradingCommand = (payload, { selectedSymbol } = {}) => {
     const baseValidation = validateTypedCommandBase(payload);
     if (!baseValidation.ok) return baseValidation;
@@ -361,7 +381,10 @@ export const validateTypedTradingCommand = (payload, { selectedSymbol } = {}) =>
     }
 };
 
-export const validateLegacyOrderCommand = (payload, { requestType = 'buyOrder', selectedSymbol } = {}) => {
+export const validateLegacyOrderCommand = (
+    payload,
+    { requestType = 'buyOrder', selectedSymbol, declaredMarketType } = {},
+) => {
     if (!isCommandPayloadObject(payload)) {
         return {
             ok: false,
@@ -373,6 +396,13 @@ export const validateLegacyOrderCommand = (payload, { requestType = 'buyOrder', 
             ),
         };
     }
+
+    const marketRejection = rejectUnsupportedLegacyMarket(
+        payload,
+        requestType,
+        declaredMarketType,
+    );
+    if (marketRejection) return marketRejection;
 
     const symbol = normalizeTextField(payload.symbol) || normalizeTextField(selectedSymbol);
     if (!symbol) {
@@ -443,7 +473,10 @@ export const validateLegacyOrderCommand = (payload, { requestType = 'buyOrder', 
     };
 };
 
-export const validateLegacyCancelCommand = (payload, { selectedSymbol } = {}) => {
+export const validateLegacyCancelCommand = (
+    payload,
+    { selectedSymbol, declaredMarketType } = {},
+) => {
     const requestType = 'cancelOrder';
     if (!isCommandPayloadObject(payload)) {
         return {
@@ -456,6 +489,13 @@ export const validateLegacyCancelCommand = (payload, { selectedSymbol } = {}) =>
             ),
         };
     }
+
+    const marketRejection = rejectUnsupportedLegacyMarket(
+        payload,
+        requestType,
+        declaredMarketType,
+    );
+    if (marketRejection) return marketRejection;
 
     const symbol = normalizeTextField(payload.symbol) || normalizeTextField(selectedSymbol);
     if (!symbol) {

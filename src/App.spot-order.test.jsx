@@ -104,7 +104,9 @@ vi.mock('./components/layout/MainView', () => ({
 }))
 
 vi.mock('./components/features/tools/QuickSwitchModal', () => ({
-  default: () => null,
+  default: ({ visible }) => (
+    visible ? <div data-testid="quick-switch-modal">Quick switch</div> : null
+  ),
 }))
 
 vi.mock('./components/features/tools/DrawingToolbar', () => ({
@@ -215,5 +217,73 @@ describe('App spot order payloads', () => {
       symbol: 'BTCUSDT',
       orderId: 12345,
     })
+  })
+
+  it('unmounts every spot execution affordance in futures mode and restores spot unchanged', () => {
+    mocks.order = {
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      price: '12346.00',
+      amount: '100',
+    }
+    mocks.cancelOrder = {
+      symbol: 'BTCUSDT',
+      id: 12345,
+    }
+
+    render(<App />)
+
+    expect(screen.getByTestId('place-spot-order')).toBeInTheDocument()
+    expect(screen.getByTestId('cancel-spot-order')).toBeInTheDocument()
+    expect(screen.getByTestId('market-mode-futures')).toHaveTextContent('Futures · MOCK')
+
+    fireEvent.click(screen.getByTestId('market-mode-futures'))
+
+    expect(screen.getByTestId('futures-readonly-view')).toBeInTheDocument()
+    expect(screen.getByLabelText('USDⓈ-M futures read-only risk')).toBeInTheDocument()
+    expect(screen.queryByTestId('place-spot-order')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('cancel-spot-order')).not.toBeInTheDocument()
+    expect(mocks.send).not.toHaveBeenCalled()
+
+    fireEvent.keyDown(document, { key: 'B' })
+    expect(screen.queryByTestId('quick-switch-modal')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('market-mode-spot'))
+
+    expect(screen.queryByTestId('futures-readonly-view')).not.toBeInTheDocument()
+    expect(screen.getByTestId('place-spot-order')).toBeInTheDocument()
+    expect(screen.getByTestId('cancel-spot-order')).toBeInTheDocument()
+
+    fireEvent.keyDown(document, { key: 'B' })
+    expect(screen.getByTestId('quick-switch-modal')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByTestId('place-spot-order'))
+    fireEvent.click(screen.getByTestId('cancel-spot-order'))
+
+    expect(mocks.send).toHaveBeenCalledTimes(2)
+    expect(mocks.send.mock.calls.map(([payload]) => JSON.parse(payload))).toEqual([
+      {
+        action: TRADING_COMMAND_ACTIONS.PLACE_ORDER,
+        version: TRADE_COMMAND_VERSION,
+        marketType: SPOT_MARKET_TYPE,
+        accountId: DEFAULT_ACCOUNT_ID,
+        clientOrderId: expect.any(String),
+        symbol: 'BTCUSDT',
+        side: 'BUY',
+        orderType: DEFAULT_SPOT_ORDER_TYPE,
+        timeInForce: DEFAULT_SPOT_TIME_IN_FORCE,
+        price: '12346',
+        quantity: '99.9',
+      },
+      {
+        action: TRADING_COMMAND_ACTIONS.CANCEL_ORDER,
+        version: TRADE_COMMAND_VERSION,
+        marketType: SPOT_MARKET_TYPE,
+        accountId: DEFAULT_ACCOUNT_ID,
+        clientOrderId: expect.any(String),
+        symbol: 'BTCUSDT',
+        orderId: 12345,
+      },
+    ])
   })
 })
