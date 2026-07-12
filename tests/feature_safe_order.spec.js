@@ -47,7 +47,7 @@ test.describe('Feature: Safe Order Reduction', () => {
         });
 
         electronApp = await electron.launch({
-            args: [path.join(process.cwd(), 'dist-electron/main.e2e.js')],
+            args: [path.join(process.cwd(), 'dist-electron/main.js')],
             env: {
                 ...process.env,
                 NODE_ENV: 'test',

@@ -7,8 +7,9 @@ import {
     isExpectedToken,
     validateLocalWebSocketRequest,
 } from './local-websocket-access.js';
+import { RENDERER_ORIGIN } from '../renderer-protocol.js';
 
-const makeRequest = ({ origin = 'http://localhost:5174', token = 'session-token', tokenParam = 'token' } = {}) => ({
+const makeRequest = ({ origin = RENDERER_ORIGIN, token = 'session-token', tokenParam = 'token' } = {}) => ({
     origin,
     resourceURL: {
         query: token ? { [tokenParam]: token } : {},
@@ -31,16 +32,27 @@ describe('local WebSocket access control', () => {
         ]);
     });
 
-    it('allows loopback and Electron file origins', () => {
-        expect(isAllowedWebSocketOrigin('http://localhost:5174').allowed).toBe(true);
-        expect(isAllowedWebSocketOrigin('http://127.0.0.1:5174').allowed).toBe(true);
-        expect(isAllowedWebSocketOrigin('http://[::1]:5174').allowed).toBe(true);
-        expect(isAllowedWebSocketOrigin('file://').allowed).toBe(true);
-        expect(isAllowedWebSocketOrigin('null').allowed).toBe(true);
-        expect(isAllowedWebSocketOrigin('').allowed).toBe(true);
+    it('allows only the exact local renderer origin by default', () => {
+        expect(isAllowedWebSocketOrigin(RENDERER_ORIGIN)).toMatchObject({
+            allowed: true,
+            reason: 'local-renderer-origin',
+        });
+        expect(isAllowedWebSocketOrigin('cc-trade://untrusted').allowed).toBe(false);
+        expect(isAllowedWebSocketOrigin('http://localhost:5174').allowed).toBe(false);
+        expect(isAllowedWebSocketOrigin('file://').allowed).toBe(false);
+        expect(isAllowedWebSocketOrigin('null').allowed).toBe(false);
+        expect(isAllowedWebSocketOrigin('').allowed).toBe(false);
     });
 
-    it('rejects non-local origins', () => {
+    it('allows an exact configured loopback development origin and rejects every other origin', () => {
+        const allowedOrigins = [RENDERER_ORIGIN, 'http://localhost:5174/'];
+
+        expect(isAllowedWebSocketOrigin('http://localhost:5174', allowedOrigins)).toMatchObject({
+            allowed: true,
+            reason: 'loopback-dev-origin',
+        });
+        expect(isAllowedWebSocketOrigin('http://127.0.0.1:5174', allowedOrigins).allowed).toBe(false);
+        expect(isAllowedWebSocketOrigin('http://localhost:5175', allowedOrigins).allowed).toBe(false);
         expect(isAllowedWebSocketOrigin('https://example.com').allowed).toBe(false);
         expect(isAllowedWebSocketOrigin('http://localhost.example.com').allowed).toBe(false);
         expect(isAllowedWebSocketOrigin('not a url').allowed).toBe(false);
@@ -62,13 +74,28 @@ describe('local WebSocket access control', () => {
     });
 
     it('rejects requests with bad origin or token before websocket accept', () => {
-        const access = { token: 'session-token', tokenParam: 'token' };
+        const access = {
+            token: 'session-token',
+            tokenParam: 'token',
+            allowedOrigins: [RENDERER_ORIGIN],
+        };
 
         expect(validateLocalWebSocketRequest(makeRequest(), access)).toMatchObject({
             allowed: true,
             status: 101,
         });
+        expect(validateLocalWebSocketRequest(makeRequest({ origin: 'http://localhost:5174' }), {
+            ...access,
+            allowedOrigins: [RENDERER_ORIGIN, 'http://localhost:5174'],
+        })).toMatchObject({
+            allowed: true,
+            status: 101,
+        });
         expect(validateLocalWebSocketRequest(makeRequest({ origin: 'https://example.com' }), access)).toMatchObject({
+            allowed: false,
+            status: 403,
+        });
+        expect(validateLocalWebSocketRequest(makeRequest({ origin: 'file://' }), access)).toMatchObject({
             allowed: false,
             status: 403,
         });

@@ -4,9 +4,9 @@ Date: 2026-07-12
 
 Planning base: `81ea13291e328ab57be88121236a09ee72d68034` (`Complete futures read-only Phase 5`)
 
-Decision status: accepted; implementation checkpoint 1 is complete
+Decision status: accepted; implementation checkpoints 1 and 2 are complete
 
-Phase status: Implementation in progress; checkpoint 1 complete
+Phase status: Implementation in progress; checkpoints 1 and 2 complete
 
 ## 1. Decision summary
 
@@ -729,7 +729,7 @@ Do not call `response.json()`. A project-owned schema-specific duplicate-key-awa
 
 ## 13. Renderer plan
 
-No renderer execution component is part of this planning checkpoint.
+Checkpoint 2 completes the renderer-isolation prerequisite without adding a renderer execution component. Both production and E2E windows are Node-disabled, context-isolated, sandboxed, and loaded through a root-confined internal `cc-trade://renderer/index.html` protocol rather than `file:`. The compiled preload exposes only a frozen data projection for the existing loopback session token/access data, non-secret read environment, and non-secret analytics configuration; it has one fixed main-frame-only IPC request and no renderer-callable IPC or Node capability. The response-header CSP forbids inline script and broad external connection, navigation accepts only the exact local entry (or a non-packaged validated loopback Vite origin), and webviews, redirects, subframes, and new windows are denied. The local protocol authority is internal only, not a network hostname or production endpoint. The existing loopback WebSocket boundary now accepts only that exact local origin in packaged/E2E mode, or one validated loopback development origin in dev, and retains the per-session token validation.
 
 After backend protocol, risk, journal, state machine, facade, gate, and fake-transport tests pass independently, add at most one compact ticket:
 
@@ -889,7 +889,7 @@ The Phase 6 safety journal is solely idempotency/recovery state. It is not the P
 Each checkpoint requires fresh GitNexus impact analysis, focused tests, and independent review before the next begins.
 
 1. Add only the strict command/ack schemas, native exact-decimal utility, pure risk evaluator, and deterministic tests. Do not install a route, transport, credential reader, or renderer control.
-2. Complete the renderer-isolation prerequisite: disable Node integration, enable context isolation and sandboxing, expose only a narrow preload bridge, restrict navigation/window creation/CSP, and retain complete Spot regression behavior. Do not install an execution route.
+2. [x] Complete the renderer-isolation prerequisite: disable Node integration, enable context isolation and sandboxing, expose only a narrow preload bridge, restrict navigation/window creation/CSP, and retain complete Spot regression behavior. Do not install an execution route.
 3. Add the separately named read-only `FuturesTestnetExecutionRiskReader` plus the shared-IP admission extension, injected fakes, freshness bundle, session/generation ownership, and Spot-priority tests. Keep Phase 5 frozen.
 4. Add single-instance/exclusive ownership, the durable journal, global execution mutex, state machine, status snapshots, and reconciliation/open-order monitoring against fakes. Register only the three read-only `subscribeStatus`, `unsubscribeStatus`, and `prepareIntent` actions; there is still no write route or POST facade.
 5. Add the exact two-method `FuturesTestnetExecutionFacade` with fake transport, fixed-host/signature/weight/error/redirect tests. Still no registered execution route.
@@ -985,3 +985,28 @@ The complete staged scope and exact comparison against checkpoint base `8c65dc70
 After indexing the completed source checkpoint, the exact base comparison became CRITICAL at `8 files / 262 indexed symbols / 23 processes`, and the cumulative `main` comparison became CRITICAL at `65 files / 1435 symbols / 189 processes`. The exact source audit shows that most apparent cross-product reach comes from conservative same-name attribution of the private new helper `reject`: GitNexus reports it as CRITICAL `44 impacted / 10 direct / 15 processes / 3 modules`, including unrelated renderer and Phase 5 functions that neither import nor call the new file. Static import/source review and the isolation suite prove there is no runtime edge.
 
 Exact upstream impacts for the externally meaningful new boundaries were narrow: `parseFuturesTestnetExecutionCommand` LOW `1/1/0/0`, `parseFuturesTestnetExecutionAcknowledgement` LOW `1/1/0/0`, `evaluateFuturesTestnetExecutionRisk` LOW `1/1/0/0`, and `validateFuturesTestnetExecutionCommandObject` LOW `5/3/1/1`; all direct dependants are the new tests or evaluator. The shared exact-decimal entry `parsePositiveExactDecimal` was MEDIUM `14/6/2/1`, wholly inside the new protocol/risk/test module cluster. The post-index circular-import check found zero cycles.
+
+## 19. Checkpoint 2 implementation record
+
+Implementation date: 2026-07-12.
+
+### 19.1 Decisions and unchanged boundaries
+
+- Renderer isolation is now a hard prerequisite that is actually present: `nodeIntegration: false`, `contextIsolation: true`, `sandbox: true`, `webSecurity: true`, no webview, and no mixed-content allowance in both production and E2E entry composition.
+- A single compiled preload exposes only immutable `ccTradeRuntime` data. The fixed `cc-trade:renderer-runtime` request is synchronous only to acquire that data during preload initialization, is accepted only from a registered main frame, and exposes no generic send/invoke/listen API. Runtime data is schema-checked and fails closed to a tokenless mock/read-only fallback.
+- Packaged/E2E renderer files are served only from a standard/secure internal `cc-trade://renderer` protocol. The handler accepts only `GET`/`HEAD`, requires the exact scheme authority, rejects escaped paths, verifies realpaths to defeat symlink escape, and sets CSP plus `X-Content-Type-Options: nosniff`. It does not fetch, proxy, or expose a network host.
+- Production ignores arbitrary `VITE_DEV_SERVER_URL`. Development is allowed only when non-packaged and the URL is credential-free `http(s)` loopback. Main-frame/subframe navigation, redirect, webview attachment, and every renderer-created window reject outside the reviewed renderer target.
+- CSP has no bypass privilege and no broad `https:` `connect-src`: it allows self, required existing font sources, exact non-secret analytics origin, and reviewed loopback communication. The app protocol header can validly use `frame-ancestors 'none'`, unlike the former HTML-meta attempt.
+- The established token boundary remains intact. Packaged/E2E loopback requests must have origin `cc-trade://renderer`; dev additionally permits only the exact selected loopback Vite origin. File, opaque/missing, arbitrary-loopback, and other custom origins reject before the unchanged constant-time session-token check.
+- No Phase 6 route/channel/action, reader/preflight, execution config/credential reader, journal/state machine/reconciliation/rate admission, POST/query facade, renderer ticket, feature flag, dependency, lockfile, production host, or network call was introduced. Phase 5 facade/service/transport and checkpoint-1 pure protocol/decimal/risk modules are untouched; typed and legacy futures execution remain rejected.
+
+### 19.2 Deterministic validation and review closure
+
+- New deterministic unit coverage verifies asset-root/symlink confinement, CSP construction, trusted-dev URL resolution, secure window preferences, all navigation/window guards, preload main-frame/data-only behavior, strict origin-plus-token WebSocket admission, and renderer runtime fallback. The focused Electron E2E verifies the local URL, absence of renderer Node/Electron globals, bridge shape, Spot order-book startup through the token boundary, blocked inline script/external connection/external navigation/`file:` navigation, and denied popup.
+- Regression validation passed full Vitest (`39` files, `2032` passed, `2` existing skips), unchanged checkpoint-1 protocol/decimal/risk (`235`), typed/legacy futures rejection (`11`), Phase 5 protocol/service/transport, frozen futures adapter (`1477`), Spot LIMIT/GTC/cancel/`0.999` coverage, full lint, production build, E2E build, and full Playwright (`13` passed).
+- Independent read-only review initially found one HIGH `file:` asset-delivery issue plus MEDIUM remote-dev URL, subframe/main-frame IPC, CSP, and E2E reload-race findings. The final security closure additionally required removal of legacy file/opaque/missing/arbitrary-loopback WebSocket-origin allowances. Every finding was fixed; Electron security, Spot/Phase-5/E2E, and futures-execution/transport/credential/checkpoint-3 isolation closures all PASS. Auditors made no edits.
+
+### 19.3 GitNexus record
+
+- Before edits, GitNexus query/context covered Electron window creation, renderer dependencies, preload/IPC, CSP/navigation/window-open handling, loopback token routing, Spot workflows, Phase 5 read-only service/transport, typed/legacy rejection, and E2E composition. Existing edit impacts were all LOW: production `createWindow` `1 impacted / 1 direct / 0 processes / 0 modules`; E2E `createWindow` one file caller and no process; `reloadWithE2eLocalStorage`, `isAllowedWebSocketOrigin`, and `validateLocalWebSocketRequest` each `0/0/0/0`. No HIGH or CRITICAL result was edited.
+- Before staging, `detect_changes` working scope was LOW (`16 files / 27 symbols / 0 processes`) while staged was clean; after staging, both staged scope and exact comparison with checkpoint base `b35e9500535428ac8f1a24cabc5b698dd28ade02` were LOW (`26 files / 27 symbols / 0 processes`) and working scope was clean. Comparison with `main` was CRITICAL (`77 files / 671 symbols / 122 processes`), inherited from the long-running branch rather than this checkpoint. After source reindex, working/staged scopes were clean; exact base comparison became CRITICAL (`26 files / 154 symbols / 22 processes`) through the intended renderer-runtime/window/analytics paths, and comparison with `main` was CRITICAL (`77 / 1555 / 206`) through inherited branch plus source attribution. The local static circular-import check found `0` cycles across `132` modules before and after reindex.

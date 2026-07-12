@@ -1,10 +1,13 @@
+import { getRendererAnalyticsConfig } from './rendererRuntime';
+
 /**
  * Analytics API client
  * 
  * Configuration sources (in priority order):
- * 1. localStorage 'analyticsConfig' (non-secret values only)
- * 2. process.env (non-secret Vite/Electron values only)
- * 3. Default to localhost:3000
+ * 1. the narrow main-provided renderer runtime bridge (non-secret values only)
+ * 2. localStorage 'analyticsConfig' (non-secret values only)
+ * 3. build/test process.env fallback (non-secret values only)
+ * 4. Default to localhost:3000
  */
 
 const DEFAULT_ANALYTICS_CONFIG = {
@@ -45,6 +48,13 @@ const writeSanitizedAnalyticsConfig = (config) => {
  * Priority: localStorage > non-secret process.env > defaults.
  */
 export const getAnalyticsConfig = () => {
+  const runtimeConfig = getRendererAnalyticsConfig();
+  if (runtimeConfig) {
+    const config = normalizeAnalyticsConfig(runtimeConfig);
+    writeSanitizedAnalyticsConfig(config);
+    return config;
+  }
+
   try {
     const stored = localStorage.getItem('analyticsConfig');
     if (stored) {

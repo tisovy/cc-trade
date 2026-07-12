@@ -29,7 +29,7 @@ test.describe('Feature: Quick Switch', () => {
 
         // 2. Launch Electron
         electronApp = await electron.launch({
-            args: [path.join(process.cwd(), 'dist-electron/main.e2e.js')],
+            args: [path.join(process.cwd(), 'dist-electron/main.js')],
             env: {
                 ...process.env,
                 NODE_ENV: 'test',

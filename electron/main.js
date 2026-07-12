@@ -1,12 +1,31 @@
-import { app, BrowserWindow, Menu, ipcMain, session } from 'electron'
+import { app, BrowserWindow, Menu, ipcMain, protocol, session } from 'electron'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { shouldOpenDevTools } from './devtools.js'
 import { setupBinanceConnection } from './services/binance-connection.js'
 import {
   createLocalWebSocketAccess,
-  createRendererWebSocketArguments,
 } from './services/local-websocket-access.js'
+import {
+  createRendererRuntime,
+  createRendererRuntimeRegistry,
+} from './renderer-runtime.js'
+import {
+  createRendererNavigationGuard,
+  createSecureRendererWebPreferences,
+  installRendererContentSecurityPolicyHeader,
+  installRendererSecurityGuards,
+} from './renderer-security.js'
+import {
+  createRendererContentSecurityPolicy,
+  installRendererAppProtocol,
+  RENDERER_ENTRY_URL,
+  RENDERER_ORIGIN,
+  registerRendererAppProtocolScheme,
+  resolveTrustedRendererDevServerUrl,
+} from './renderer-protocol.js'
+
+registerRendererAppProtocolScheme(protocol)
 
 const analyticsSecret = process.env.ANALYTICS_SECRET || '';
 if (process.env.ANALYTICS_SECRET) {
@@ -56,8 +75,18 @@ process.on('unhandledRejection', (reason, _promise) => {
   // Don't exit - let the app continue running
 });
 
-const localWebSocketAccess = createLocalWebSocketAccess();
-const rendererWebSocketArguments = createRendererWebSocketArguments(localWebSocketAccess);
+const rendererDevServerUrl = resolveTrustedRendererDevServerUrl({
+  value: process.env.VITE_DEV_SERVER_URL,
+  isPackaged: app.isPackaged,
+})
+const localWebSocketAccess = {
+  ...createLocalWebSocketAccess(),
+  allowedOrigins: [
+    RENDERER_ORIGIN,
+    ...(rendererDevServerUrl ? [new URL(rendererDevServerUrl).origin] : []),
+  ],
+};
+const rendererRuntimeRegistry = createRendererRuntimeRegistry(ipcMain)
 
 setupBinanceConnection({ localWebSocketAccess });
 
@@ -92,9 +121,6 @@ const getAnalyticsConfig = () => {
   return config;
 };
 
-// IPC handler for analytics config
-ipcMain.handle('get-analytics-config', () => getAnalyticsConfig());
-
 const isWaylandSession = () => process.env.XDG_SESSION_TYPE === 'wayland' || !!process.env.WAYLAND_DISPLAY;
 
 if (isWaylandSession()) {
@@ -108,18 +134,42 @@ if (isWaylandSession()) {
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
+const rendererRootDirectory = path.join(__dirname, '../dist')
+let hasInstalledDevServerCsp = false
 
 function createWindow() {
+  const devServerUrl = rendererDevServerUrl
+  const rendererUrl = devServerUrl || RENDERER_ENTRY_URL
+  const analyticsConfig = getAnalyticsConfig()
+  const contentSecurityPolicy = createRendererContentSecurityPolicy({
+    analyticsBaseUrl: analyticsConfig.baseUrl,
+  })
+  if (devServerUrl && !hasInstalledDevServerCsp) {
+    installRendererContentSecurityPolicyHeader(session.defaultSession, {
+      rendererUrl: devServerUrl,
+      contentSecurityPolicy,
+    })
+    hasInstalledDevServerCsp = true
+  }
+  const rendererRuntime = createRendererRuntime({
+    localWebSocketAccess,
+    futuresReadEnvironment: process.env.FUTURES_READ_ENVIRONMENT,
+    analyticsConfig,
+  })
   const win = new BrowserWindow({
     width: 1200,
     height: 800,
-    webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
-      sandbox: false,
-      additionalArguments: rendererWebSocketArguments,
-    },
+    webPreferences: createSecureRendererWebPreferences({
+      preload: path.join(__dirname, 'preload.cjs'),
+    }),
   })
+
+  rendererRuntimeRegistry.register(win.webContents, rendererRuntime)
+
+  installRendererSecurityGuards(
+    win.webContents,
+    createRendererNavigationGuard({ devServerUrl, rendererUrl }),
+  )
 
   win.webContents.on('did-fail-load', (event, errorCode, errorDescription) => {
     console.error('Failed to load:', errorCode, errorDescription)
@@ -127,30 +177,8 @@ function createWindow() {
 
   const devToolsOptions = { mode: 'bottom' }
 
-  // Inject analytics config into browser window after page loads
-  win.webContents.on('did-finish-load', () => {
-    const config = getAnalyticsConfig();
-    const configJson = JSON.stringify(config);
-    // Always overwrite localStorage with current non-secret env config
-    win.webContents.executeJavaScript(`
-      const newConfig = ${configJson};
-      localStorage.setItem('analyticsConfig', JSON.stringify(newConfig));
-      console.log('[Electron] Analytics config updated:', {
-        baseUrl: newConfig.baseUrl,
-        hasKey: Boolean(newConfig.key),
-        enabled: Boolean(newConfig.enabled),
-        authMode: newConfig.authMode
-      });
-    `);
-  });
-
-  if (process.env.VITE_DEV_SERVER_URL) {
-    console.log('Loading URL:', process.env.VITE_DEV_SERVER_URL)
-    win.loadURL(process.env.VITE_DEV_SERVER_URL)
-  } else {
-    console.log('Loading file:', path.join(__dirname, '../dist/index.html'))
-    win.loadFile(path.join(__dirname, '../dist/index.html'))
-  }
+  console.log('Loading renderer URL:', rendererUrl)
+  win.loadURL(rendererUrl)
 
   if (shouldOpenDevTools({ allowDevServerDefault: !app.isPackaged })) {
     win.webContents.openDevTools(devToolsOptions)
@@ -180,6 +208,14 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  installRendererAppProtocol({
+    protocol,
+    rootDirectory: rendererRootDirectory,
+    contentSecurityPolicy: createRendererContentSecurityPolicy({
+      analyticsBaseUrl: getAnalyticsConfig().baseUrl,
+    }),
+  })
+
   // Configure proxy from system environment
   const proxyUrl = getSystemProxy();
   if (proxyUrl) {

@@ -1,4 +1,5 @@
 import { randomBytes, timingSafeEqual } from 'crypto';
+import { RENDERER_ORIGIN } from '../renderer-protocol.js';
 
 export const LOCAL_WEBSOCKET_HOST = '127.0.0.1';
 export const LOCAL_WEBSOCKET_TOKEN_PARAM = 'token';
@@ -10,6 +11,36 @@ const HOST_ARG = 'local-ws-host';
 const TOKEN_PARAM_ARG = 'local-ws-token-param';
 
 const normalizeValue = (value) => typeof value === 'string' ? value.trim() : '';
+
+const normalizeLoopbackOrigin = (value, { requireOriginForm = false } = {}) => {
+    const normalized = normalizeValue(value);
+    if (!normalized) return null;
+
+    try {
+        const originUrl = new URL(normalized);
+        if (!LOCAL_ORIGIN_PROTOCOLS.has(originUrl.protocol) || !isLoopbackHostname(originUrl.hostname)) {
+            return null;
+        }
+        if (requireOriginForm && normalized !== originUrl.origin) {
+            return null;
+        }
+        return originUrl.origin;
+    } catch {
+        return null;
+    }
+};
+
+const normalizeConfiguredOrigin = (origin) => {
+    const normalized = normalizeValue(origin);
+    if (normalized === RENDERER_ORIGIN) return RENDERER_ORIGIN;
+    return normalizeLoopbackOrigin(normalized);
+};
+
+const normalizeRequestOrigin = (origin) => {
+    const normalized = normalizeValue(origin);
+    if (normalized === RENDERER_ORIGIN) return RENDERER_ORIGIN;
+    return normalizeLoopbackOrigin(normalized, { requireOriginForm: true });
+};
 
 export const isLoopbackHostname = (hostname) => {
     const normalized = normalizeValue(hostname).toLowerCase();
@@ -38,28 +69,25 @@ export const createRendererWebSocketArguments = ({
     return args;
 };
 
-export const isAllowedWebSocketOrigin = (origin) => {
-    const normalized = normalizeValue(origin);
-    if (!normalized) {
-        return { allowed: true, reason: 'origin-unavailable' };
-    }
-    if (normalized === 'null') {
-        return { allowed: true, reason: 'opaque-origin' };
+export const isAllowedWebSocketOrigin = (origin, allowedOrigins = [RENDERER_ORIGIN]) => {
+    const requestOrigin = normalizeRequestOrigin(origin);
+    if (!requestOrigin) {
+        return { allowed: false, reason: 'invalid-or-missing-origin' };
     }
 
-    try {
-        const originUrl = new URL(normalized);
-        if (originUrl.protocol === 'file:') {
-            return { allowed: true, reason: 'file-origin' };
-        }
-        if (LOCAL_ORIGIN_PROTOCOLS.has(originUrl.protocol) && isLoopbackHostname(originUrl.hostname)) {
-            return { allowed: true, reason: 'loopback-origin' };
-        }
-    } catch {
-        return { allowed: false, reason: 'invalid-origin' };
+    const trustedOrigins = new Set(
+        (Array.isArray(allowedOrigins) ? allowedOrigins : [])
+            .map(normalizeConfiguredOrigin)
+            .filter(Boolean),
+    );
+    if (!trustedOrigins.has(requestOrigin)) {
+        return { allowed: false, reason: 'untrusted-origin' };
     }
 
-    return { allowed: false, reason: 'non-local-origin' };
+    return {
+        allowed: true,
+        reason: requestOrigin === RENDERER_ORIGIN ? 'local-renderer-origin' : 'loopback-dev-origin',
+    };
 };
 
 export const getRequestToken = (request, tokenParam = LOCAL_WEBSOCKET_TOKEN_PARAM) => {
@@ -101,7 +129,7 @@ export const isExpectedToken = (candidate, expected) => {
 };
 
 export const validateLocalWebSocketRequest = (request, access = {}) => {
-    const originCheck = isAllowedWebSocketOrigin(request?.origin);
+    const originCheck = isAllowedWebSocketOrigin(request?.origin, access.allowedOrigins);
     if (!originCheck.allowed) {
         return {
             allowed: false,

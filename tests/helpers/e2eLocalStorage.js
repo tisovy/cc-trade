@@ -84,6 +84,31 @@ export const installE2eLocalStorage = async (page, options = {}) => {
 };
 
 export const reloadWithE2eLocalStorage = async (page, options = {}) => {
-    await installE2eLocalStorage(page, options);
-    await page.reload({ waitUntil: 'domcontentloaded' });
+    const payload = buildE2eStoragePayload(options);
+    await page.context().addInitScript(applyE2eStoragePayload, payload);
+
+    const navigation = page.waitForNavigation({ waitUntil: 'domcontentloaded' });
+    const reload = page.evaluate(({ keysToReset, storage, mockWsUrl }) => {
+        for (const key of keysToReset) {
+            window.localStorage.removeItem(key);
+        }
+
+        for (const [key, value] of Object.entries(storage)) {
+            window.localStorage.setItem(key, value);
+        }
+
+        if (mockWsUrl) {
+            window.MOCK_WS_URL = mockWsUrl;
+        } else {
+            delete window.MOCK_WS_URL;
+        }
+
+        window.location.reload();
+    }, payload).catch((error) => {
+        if (!/Execution context was destroyed|most likely because of a navigation/i.test(String(error))) {
+            throw error;
+        }
+    });
+
+    await Promise.all([navigation, reload]);
 };

@@ -21,17 +21,33 @@ export default defineConfig({
   },
   plugins: [
     react(),
-    electron({
-      entry: process.env.BUILD_MODE === 'e2e' ? 'electron/main.e2e.js' : 'electron/main.js',
-      vite: {
-        build: {
-          lib: {
-            // Playwright and package.json both launch dist-electron/main.js.
-            // Keep that stable filename when the E2E-only entry is selected.
-            fileName: () => 'main.js',
+    electron([
+      {
+        entry: process.env.BUILD_MODE === 'e2e' ? 'electron/main.e2e.js' : 'electron/main.js',
+        vite: {
+          build: {
+            lib: {
+              // Playwright and package.json both launch dist-electron/main.js.
+              // Keep that stable filename when the E2E-only entry is selected.
+              fileName: () => 'main.js',
+            },
           },
         },
       },
-    }),
+      {
+        entry: 'electron/preload.cjs',
+        vite: {
+          build: {
+            lib: {
+              formats: ['cjs'],
+              fileName: () => 'preload.cjs',
+            },
+            rollupOptions: {
+              external: ['electron'],
+            },
+          },
+        },
+      },
+    ]),
   ],
 })

@@ -26,6 +26,7 @@ import {
   createSpotPlaceOrderCommand,
 } from './utils/tradingCommands';
 import useFuturesReadOnly from './hooks/useFuturesReadOnly';
+import { getRendererFuturesReadEnvironment } from './utils/rendererRuntime';
 
 // View types
 const VIEWS = {
@@ -39,9 +40,7 @@ const MARKET_MODES = Object.freeze({
 });
 
 const DEFAULT_FUTURES_SYMBOL = 'BTCUSDT';
-const CONFIGURED_FUTURES_ENVIRONMENT = globalThis.process?.env?.FUTURES_READ_ENVIRONMENT === 'testnet'
-  ? 'testnet'
-  : 'mock';
+const CONFIGURED_FUTURES_ENVIRONMENT = getRendererFuturesReadEnvironment();
 
 const MarketModeSwitch = ({ mode, environment, onChange }) => (
   <div className="market-mode-switch" role="group" aria-label="Market mode">
