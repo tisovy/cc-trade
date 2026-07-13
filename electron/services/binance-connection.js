@@ -4,10 +4,12 @@ import { Spot } from '@binance/spot';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { SocksProxyAgent } from 'socks-proxy-agent';
 import { Buffer } from 'buffer';
+import { randomBytes } from 'node:crypto';
 import { ChannelManager, CHANNEL_TYPES } from './channel-manager.js';
 import {
     LOCAL_WEBSOCKET_HOST,
     createLocalWebSocketAccess,
+    resolveLocalWebSocketPort,
     validateLocalWebSocketRequest,
 } from './local-websocket-access.js';
 import {
@@ -28,11 +30,30 @@ import {
     resolveFuturesReadOnlyTransportConfig,
 } from './futures-readonly-transport.js';
 import {
+    FUTURES_READ_ACTIONS,
     FUTURES_READ_RESPONSE_TYPES,
     createFuturesReadOnlyResponse,
     isFuturesReadOnlyAction,
 } from '../../src/utils/futuresReadOnlyProtocol.js';
 import { TRADING_COMMAND_ACTIONS } from '../../src/utils/tradingCommands.js';
+import {
+    captureFuturesTestnetExecutionConfig,
+} from './futures-testnet-execution-config.js';
+import {
+    createFuturesTestnetExecutionCoordinator,
+} from './futures-testnet-execution-coordinator.js';
+import {
+    createFuturesTestnetExecutionRuntime,
+} from './futures-testnet-execution-composition.js';
+import {
+    FUTURES_TESTNET_EXECUTION_ACTION,
+} from './futures-testnet-execution-protocol.js';
+import {
+    FUTURES_TESTNET_EXECUTION_SESSION_ACTIONS,
+    FUTURES_TESTNET_EXECUTION_SESSION_MAX_BYTES,
+    isPotentialFuturesTestnetExecutionFrame,
+    readFuturesTestnetExecutionAction,
+} from './futures-testnet-execution-session-protocol.js';
 
 const LOG_LEVELS = { error: 0, warn: 1, info: 2, debug: 3 };
 const activeLogLevel = LOG_LEVELS[(process.env.LOG_LEVEL || 'info').toLowerCase()] ?? LOG_LEVELS.info;
@@ -41,6 +62,73 @@ const logger = {
     info: (...args) => activeLogLevel >= LOG_LEVELS.info && console.info(...args),
     warn: (...args) => activeLogLevel >= LOG_LEVELS.warn && console.warn(...args),
     error: (...args) => console.error(...args)
+};
+
+export const LOCAL_RENDERER_WS_MAX_FRAME_BYTES = 16 * 1024;
+export const LOCAL_RENDERER_WS_MAX_MESSAGE_BYTES = 16 * 1024;
+export const LOCAL_RENDERER_WS_MAX_ACTION_FIELDS = 32;
+export const LOCAL_RENDERER_WS_MAX_CHANNELS = 64;
+
+const CHANNEL_ACTIONS = new Set([
+    'subscribe',
+    'unsubscribe',
+    'enable_depth_view',
+    'disable_depth_view',
+]);
+const CHANNEL_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const CHANNEL_SYMBOL_PATTERN = /^[A-Z0-9_]{1,64}$/;
+const CHANNEL_INTERVAL_PATTERN = /^[A-Za-z0-9]{1,16}$/;
+const isMatchingString = (value, pattern) => typeof value === 'string' && pattern.test(value);
+
+const validateRendererActionEnvelope = (data, channelManager) => {
+    if (typeof data.action !== 'string' || data.action.length < 1 || data.action.length > 64) {
+        return { code: 'INVALID_ACTION_ENVELOPE', message: 'action must be a bounded string' };
+    }
+    if (Object.keys(data).length > LOCAL_RENDERER_WS_MAX_ACTION_FIELDS) {
+        return { code: 'INVALID_ACTION_ENVELOPE', message: 'action envelope has too many fields' };
+    }
+
+    const isKnownAction = CHANNEL_ACTIONS.has(data.action)
+        || isFuturesReadOnlyAction(data.action)
+        || Object.values(TRADING_COMMAND_ACTIONS).includes(data.action);
+    if (!isKnownAction) {
+        return { code: 'UNSUPPORTED_ACTION', message: 'action is not supported' };
+    }
+
+    if (!CHANNEL_ACTIONS.has(data.action)) return null;
+    if (data.marketType !== undefined && data.marketType !== 'spot') {
+        return { code: 'UNSUPPORTED_MARKET_TYPE', message: 'only spot channel actions are enabled' };
+    }
+
+    if (data.action === 'subscribe') {
+        if (!isMatchingString(data.channelId, CHANNEL_ID_PATTERN)
+            || !isMatchingString(data.symbol, CHANNEL_SYMBOL_PATTERN)
+            || !isMatchingString(data.interval, CHANNEL_INTERVAL_PATTERN)
+            || (data.channelType !== undefined
+                && data.channelType !== CHANNEL_TYPES.DETAIL
+                && data.channelType !== CHANNEL_TYPES.MINI)) {
+            return { code: 'INVALID_CHANNEL_ACTION', message: 'subscribe fields are invalid' };
+        }
+        const channelType = data.channelType || CHANNEL_TYPES.DETAIL;
+        const replacesDetail = channelType === CHANNEL_TYPES.DETAIL
+            && channelManager.getDetailChannel()
+            && !channelManager.hasChannel(data.channelId);
+        if (!channelManager.hasChannel(data.channelId)
+            && channelManager.getChannelCount() >= LOCAL_RENDERER_WS_MAX_CHANNELS
+            && !replacesDetail) {
+            return { code: 'CHANNEL_LIMIT_EXCEEDED', message: 'channel limit reached' };
+        }
+    } else if (data.action === 'unsubscribe') {
+        if (!isMatchingString(data.channelId, CHANNEL_ID_PATTERN)) {
+            return { code: 'INVALID_CHANNEL_ACTION', message: 'unsubscribe channelId is invalid' };
+        }
+    } else if (data.action === 'enable_depth_view') {
+        if (!isMatchingString(data.symbol, CHANNEL_SYMBOL_PATTERN)) {
+            return { code: 'INVALID_CHANNEL_ACTION', message: 'depth symbol is invalid' };
+        }
+    }
+
+    return null;
 };
 
 // Mock Data Generators (Preserved)
@@ -316,8 +404,21 @@ export class RateLimiter {
     }
 }
 
-// Global rate limiter instance: 800 weight/min, 500ms delay between requests
-const rateLimiter = new RateLimiter(800, 60000, 500);
+// The established Spot limiter remains unchanged. A coordinator wraps its public
+// execute boundary and owns a distinct quota bucket for the fixed demo origin.
+const legacySpotRateLimiter = new RateLimiter(800, 60000, 500);
+let activeExecutionCoordinator = null;
+const rateLimiter = {
+    get maxWeight() {
+        return legacySpotRateLimiter.maxWeight;
+    },
+    getCurrentWeight: () => legacySpotRateLimiter.getCurrentWeight(),
+    execute: (...args) => activeExecutionCoordinator
+        ? activeExecutionCoordinator.executeSpot(...args)
+        : legacySpotRateLimiter.execute(...args),
+};
+
+let processGlobalExecutionRuntimePromise = null;
 
 // recvWindow for SIGNED REST requests. The @binance/spot lib stamps the request
 // timestamp from Date.now() at send time and does NOT set recvWindow, so it
@@ -520,12 +621,19 @@ const safeDisconnect = async (socket, label) => {
     }
 };
 
-export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSocketAccess() } = {}) {
+export function setupBinanceConnection({
+    localWebSocketAccess = createLocalWebSocketAccess(),
+    futuresExecutionConfig: suppliedFuturesExecutionConfig,
+    futuresExecutionKeyProtection,
+    futuresExecutionStorageDirectory,
+} = {}) {
     const APIKEY = process.env.BK;
     const APISECRET = process.env.BS;
     const futuresMode = (process.env.FUTURES_READ_MODE || 'mock').trim().toLowerCase();
-    const futuresApiKey = process.env.FUTURES_TESTNET_API_KEY;
-    const futuresApiSecret = process.env.FUTURES_TESTNET_API_SECRET;
+    const futuresExecutionConfig = suppliedFuturesExecutionConfig
+        ?? captureFuturesTestnetExecutionConfig({ futuresReadMode: futuresMode });
+    const futuresApiKey = futuresExecutionConfig.credentials?.apiKey;
+    const futuresApiSecret = futuresExecutionConfig.credentials?.apiSecret;
     const futuresMockScenario = process.env.FUTURES_READ_MOCK_SCENARIO?.trim();
     const futuresTransportConfig = futuresMode === 'mock'
         ? {
@@ -544,11 +652,48 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
     // before the first snapshot or while the local socket is disconnected.
     process.env.FUTURES_READ_ENVIRONMENT = resolvedFuturesTransportConfig.environment;
 
-    // Electron currently enables Node integration in the renderer. Consume the
-    // futures-only credentials before any BrowserWindow is created, retain them
-    // only in this main-process closure, and never expose them through protocol data.
+    // A direct service composition (including tests) still scrubs credential
+    // variables. Main captures every execution-prefixed value even earlier.
     delete process.env.FUTURES_TESTNET_API_KEY;
     delete process.env.FUTURES_TESTNET_API_SECRET;
+
+    const futuresTestnetIpLimiter = new RateLimiter(800, 60000, 500);
+    const executionCoordinator = createFuturesTestnetExecutionCoordinator({
+        legacySpotExecutor: (...args) => legacySpotRateLimiter.execute(...args),
+        getLegacySpotAvailableWeight: () => Math.max(
+            0,
+            legacySpotRateLimiter.maxWeight - legacySpotRateLimiter.getCurrentWeight(),
+        ),
+        futuresTestnetExecutor: (...args) => futuresTestnetIpLimiter.execute(...args),
+        getFuturesTestnetAvailableWeight: () => Math.max(
+            0,
+            futuresTestnetIpLimiter.maxWeight - futuresTestnetIpLimiter.getCurrentWeight(),
+        ),
+    });
+    activeExecutionCoordinator = executionCoordinator;
+    if (processGlobalExecutionRuntimePromise === null) {
+        processGlobalExecutionRuntimePromise = createFuturesTestnetExecutionRuntime({
+            config: futuresExecutionConfig,
+            storageDirectory: futuresExecutionStorageDirectory,
+            coordinator: executionCoordinator,
+            keyProtection: futuresExecutionKeyProtection,
+            onInternalError: ({ phase, code }) => {
+                logger.warn(`[futures-execution] ${phase} failed (${code})`);
+            },
+        }).catch(async (error) => {
+            logger.warn(`[futures-execution] durable runtime unavailable (${error?.code || error?.name || 'unknown'})`);
+            return createFuturesTestnetExecutionRuntime({
+                config: Object.freeze({
+                    ...futuresExecutionConfig,
+                    enabled: false,
+                    code: 'FUTURES_EXECUTION_DISABLED',
+                    credentials: null,
+                }),
+                coordinator: null,
+            });
+        });
+    }
+    const executionRuntimePromise = processGlobalExecutionRuntimePromise;
 
     const USE_MOCK = !APIKEY;
     const sharedProxyAgent = resolveProxyAgent();
@@ -669,8 +814,7 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
     };
     void checkClockDrift();
 
-    const parsedPort = parseInt(process.env.WS_PORT || process.env.WEBSOCKET_PORT || process.env.VITE_WS_PORT || '14477', 10);
-    const websocketServerPort = Number.isFinite(parsedPort) ? parsedPort : 14477;
+    const websocketServerPort = resolveLocalWebSocketPort(localWebSocketAccess.port);
     const websocketServerHost = localWebSocketAccess.host || LOCAL_WEBSOCKET_HOST;
     const server = http.createServer((request, response) => {
         response.writeHead(404);
@@ -683,7 +827,9 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
 
     const wsServer = new WebSocketServer({
         httpServer: server,
-        autoAcceptConnections: false
+        autoAcceptConnections: false,
+        maxReceivedFrameSize: LOCAL_RENDERER_WS_MAX_FRAME_BYTES,
+        maxReceivedMessageSize: LOCAL_RENDERER_WS_MAX_MESSAGE_BYTES,
     });
 
     // ============================================================
@@ -738,6 +884,7 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
         }
 
         const connection = request.accept(null, request.origin);
+        const executionConnectionId = randomBytes(16).toString('hex');
         logger.info("Connection accepted.");
         
         // Track this renderer connection
@@ -1555,34 +1702,107 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
         };
 
         connection.on("message", async (message) => {
-            if (message.type !== "utf8") return;
-            const data = JSON.parse(message.utf8Data);
+            if (message.type !== "utf8" || typeof message.utf8Data !== 'string') return;
+            const rawUtf8Frame = message.utf8Data;
+            const rawFrameBytes = Buffer.byteLength(rawUtf8Frame, 'utf8');
+            if (rawFrameBytes > LOCAL_RENDERER_WS_MAX_MESSAGE_BYTES) {
+                logger.warn('Rejected oversized renderer WebSocket message');
+                connection.drop?.(1009, 'message too large');
+                return;
+            }
+
+            // Preserve the untouched UTF-8 frame for the dedicated execution
+            // parsers. No generic JSON conversion may precede the 4096-byte and
+            // duplicate-key checks on this route.
+            let executionAction = null;
+            if (rawFrameBytes > FUTURES_TESTNET_EXECUTION_SESSION_MAX_BYTES
+                && isPotentialFuturesTestnetExecutionFrame(rawUtf8Frame)) {
+                const runtime = await executionRuntimePromise;
+                await runtime.service.handlePlaceOrder(rawUtf8Frame, {
+                    connectionId: executionConnectionId,
+                    emit: payload => sendJSON(connection, payload),
+                });
+                return;
+            }
+            if (rawFrameBytes <= FUTURES_TESTNET_EXECUTION_SESSION_MAX_BYTES) {
+                try {
+                    executionAction = readFuturesTestnetExecutionAction(rawUtf8Frame);
+                } catch {
+                    if (isPotentialFuturesTestnetExecutionFrame(rawUtf8Frame)) {
+                        const runtime = await executionRuntimePromise;
+                        await runtime.service.handlePlaceOrder(rawUtf8Frame, {
+                            connectionId: executionConnectionId,
+                            emit: payload => sendJSON(connection, payload),
+                        });
+                        return;
+                    }
+                }
+            }
+            if (executionAction === FUTURES_TESTNET_EXECUTION_ACTION) {
+                const runtime = await executionRuntimePromise;
+                await runtime.service.handlePlaceOrder(rawUtf8Frame, {
+                    connectionId: executionConnectionId,
+                    emit: payload => sendJSON(connection, payload),
+                });
+                return;
+            }
+            if ([
+                FUTURES_TESTNET_EXECUTION_SESSION_ACTIONS.SUBSCRIBE_STATUS,
+                FUTURES_TESTNET_EXECUTION_SESSION_ACTIONS.UNSUBSCRIBE_STATUS,
+                FUTURES_TESTNET_EXECUTION_SESSION_ACTIONS.PREPARE_INTENT,
+            ].includes(executionAction)) {
+                const runtime = await executionRuntimePromise;
+                await runtime.service.handleSessionRequest(rawUtf8Frame, {
+                    connectionId: executionConnectionId,
+                    emit: payload => sendJSON(connection, payload),
+                });
+                return;
+            }
+
+            let data;
+            try {
+                data = JSON.parse(rawUtf8Frame);
+            } catch {
+                logger.warn('Rejected malformed renderer WebSocket JSON');
+                return;
+            }
+            if (!data || typeof data !== 'object' || Array.isArray(data)) {
+                logger.warn('Rejected non-object renderer WebSocket message');
+                return;
+            }
 
             // New channel protocol
-            if (data.action) {
+            if (data.action !== undefined) {
+                const envelopeError = validateRendererActionEnvelope(data, channelManager);
+                if (envelopeError) {
+                    emit(createCommandRejection(
+                        typeof data.action === 'string' && data.action.length <= 64
+                            ? data.action
+                            : 'action',
+                        envelopeError.code,
+                        envelopeError.message,
+                    ));
+                    return;
+                }
                 if (isFuturesReadOnlyAction(data.action)) {
                     try {
                         futuresReadOnlyService.handleRequest(
                             data,
                             (response) => sendJSON(connection, response),
                         );
+                        const runtime = await executionRuntimePromise;
+                        if (data.action === FUTURES_READ_ACTIONS.SUBSCRIBE) {
+                            runtime.service.bindReadSession({
+                                connectionId: executionConnectionId,
+                                symbol: data.symbol,
+                                environment: resolvedFuturesTransportConfig.environment,
+                            });
+                        } else if (data.action === FUTURES_READ_ACTIONS.UNSUBSCRIBE) {
+                            runtime.service.unbindReadSession(executionConnectionId);
+                        }
                     } catch (error) {
                         emitFuturesReadOnlyRejection(data, error);
                     }
-                    return;
-                }
-                if (
-                    ['subscribe', 'unsubscribe', 'enable_depth_view', 'disable_depth_view']
-                        .includes(data.action)
-                    && data.marketType !== undefined
-                    && data.marketType !== 'spot'
-                ) {
-                    emit(createCommandRejection(
-                        data.action,
-                        'UNSUPPORTED_MARKET_TYPE',
-                        'only spot market-data channel actions are enabled',
-                        { field: 'marketType', value: data.marketType },
-                    ));
                     return;
                 }
                 switch (data.action) {
@@ -1629,16 +1849,6 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
                     case TRADING_COMMAND_ACTIONS.ACCOUNT_REFRESH:
                         await handleTypedTradingCommand(data);
                         break;
-                    case 'order': {
-                        // Order with channel context
-                        const orderType = data.type === 'sell' ? 'sellOrder' : 'buyOrder';
-                        await handleOrderPlacement(data, orderType);
-                        break;
-                    }
-                    case 'cancelOrder': {
-                        await handleCancelOrder(data);
-                        break;
-                    }
                 }
                 return;
             }
@@ -1694,6 +1904,9 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
             // resolve. This stops polling, stale checks, reconnects, sockets, and
             // late delivery for this renderer generation.
             futuresReadOnlyService.stop();
+            void executionRuntimePromise.then((runtime) => {
+                runtime.service.disconnect(executionConnectionId);
+            });
 
             // Cleanup this renderer's channels (market socket per-renderer)
             void channelManager.cleanup(safeDisconnect);
@@ -1727,5 +1940,68 @@ export function setupBinanceConnection({ localWebSocketAccess = createLocalWebSo
                 }
             }
         });
+    });
+
+    let closePromise = null;
+    const close = () => {
+        if (closePromise) return closePromise;
+        closePromise = (async () => {
+            globalSocketsInitialized = false;
+            if (tickerStallInterval) {
+                clearInterval(tickerStallInterval);
+                tickerStallInterval = null;
+            }
+            if (keepAliveInterval) {
+                clearInterval(keepAliveInterval);
+                keepAliveInterval = null;
+            }
+            for (const connection of [...rendererConnections]) {
+                try {
+                    connection.drop?.(1001, 'main process shutdown');
+                } catch {
+                    connection.close?.();
+                }
+            }
+            rendererConnections.clear();
+            const staleGlobal = globalWsConnection;
+            const staleUserData = userDataWsConnection;
+            globalWsConnection = null;
+            userDataWsConnection = null;
+            await Promise.all([
+                safeDisconnect(staleGlobal, 'global stream'),
+                safeDisconnect(staleUserData, 'user data stream'),
+            ]);
+
+            const runtime = await executionRuntimePromise;
+            await runtime.service.shutdown();
+            activeExecutionCoordinator = null;
+            if (processGlobalExecutionRuntimePromise === executionRuntimePromise) {
+                processGlobalExecutionRuntimePromise = null;
+            }
+            wsServer.shutDown?.();
+            await new Promise((resolve) => {
+                let settled = false;
+                const done = () => {
+                    if (settled) return;
+                    settled = true;
+                    clearTimeout(timeout);
+                    resolve();
+                };
+                const timeout = setTimeout(done, 5_000);
+                timeout.unref?.();
+                try {
+                    server.close(done);
+                    server.closeAllConnections?.();
+                } catch {
+                    done();
+                }
+            });
+        })();
+        return closePromise;
+    };
+
+    return Object.freeze({
+        executionReady: executionRuntimePromise,
+        close,
     });
 }

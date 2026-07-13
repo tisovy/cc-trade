@@ -1,8 +1,17 @@
-import { app, BrowserWindow, Menu, ipcMain, protocol, session } from 'electron'
+import { app, BrowserWindow, Menu, ipcMain, protocol, safeStorage, session } from 'electron'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { shouldOpenDevTools } from './devtools.js'
 import { setupBinanceConnection } from './services/binance-connection.js'
+import {
+  captureFuturesTestnetExecutionConfig,
+} from './services/futures-testnet-execution-config.js'
+import {
+  installFuturesTestnetExecutionLogSanitizer,
+} from './services/futures-testnet-execution-sanitizer.js'
+import {
+  createElectronSafeStorageIntegrityKeyProtection,
+} from './services/futures-testnet-execution-key-protection.js'
 import {
   createLocalWebSocketAccess,
 } from './services/local-websocket-access.js'
@@ -26,6 +35,24 @@ import {
 } from './renderer-protocol.js'
 
 registerRendererAppProtocolScheme(protocol)
+
+// Capture and remove every execution credential/config value before any
+// BrowserWindow can exist. The captured object never crosses the main-process
+// boundary.
+const futuresExecutionConfig = captureFuturesTestnetExecutionConfig({
+  futuresReadMode: process.env.FUTURES_READ_MODE || 'mock',
+})
+installFuturesTestnetExecutionLogSanitizer({
+  secretValues: [
+    futuresExecutionConfig.credentials?.apiKey,
+    futuresExecutionConfig.credentials?.apiSecret,
+  ],
+})
+
+// The durable execution ledger has exactly one process owner. A second app
+// instance exits before opening the ledger or creating a renderer.
+const hasExclusiveExecutionOwnership = app.requestSingleInstanceLock()
+if (!hasExclusiveExecutionOwnership) app.quit()
 
 const analyticsSecret = process.env.ANALYTICS_SECRET || '';
 if (process.env.ANALYTICS_SECRET) {
@@ -87,8 +114,8 @@ const localWebSocketAccess = {
   ],
 };
 const rendererRuntimeRegistry = createRendererRuntimeRegistry(ipcMain)
-
-setupBinanceConnection({ localWebSocketAccess });
+let binanceController = null
+let isExecutionShutdownStarted = false
 
 // Get proxy URL from environment (supports http_proxy, HTTP_PROXY, https_proxy, HTTPS_PROXY)
 const getSystemProxy = () => {
@@ -143,6 +170,7 @@ function createWindow() {
   const analyticsConfig = getAnalyticsConfig()
   const contentSecurityPolicy = createRendererContentSecurityPolicy({
     analyticsBaseUrl: analyticsConfig.baseUrl,
+    localWebSocketAccess,
   })
   if (devServerUrl && !hasInstalledDevServerCsp) {
     installRendererContentSecurityPolicyHeader(session.defaultSession, {
@@ -208,11 +236,35 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  if (!hasExclusiveExecutionOwnership) return
+
+  let futuresExecutionKeyProtection = null
+  try {
+    futuresExecutionKeyProtection = createElectronSafeStorageIntegrityKeyProtection({ safeStorage })
+  } catch (error) {
+    console.warn('[Electron] Futures execution secure storage unavailable:', error)
+  }
+
+  binanceController = setupBinanceConnection({
+    localWebSocketAccess,
+    futuresExecutionConfig,
+    futuresExecutionKeyProtection,
+    futuresExecutionStorageDirectory: path.join(
+      app.getPath('userData'),
+      app.isPackaged
+        ? 'futures-testnet-execution'
+        : 'futures-testnet-execution-development',
+      'v1',
+    ),
+  })
+  await binanceController.executionReady
+
   installRendererAppProtocol({
     protocol,
     rootDirectory: rendererRootDirectory,
     contentSecurityPolicy: createRendererContentSecurityPolicy({
       analyticsBaseUrl: getAnalyticsConfig().baseUrl,
+      localWebSocketAccess,
     }),
   })
 
@@ -235,6 +287,20 @@ app.whenReady().then(async () => {
       createWindow()
     }
   })
+}).catch((error) => {
+  console.error('[Electron] Main-process startup failed:', error)
+  app.quit()
+})
+
+app.on('before-quit', (event) => {
+  if (!binanceController || isExecutionShutdownStarted) return
+  event.preventDefault()
+  isExecutionShutdownStarted = true
+  void binanceController.close()
+    .catch((error) => {
+      console.error('[Electron] Execution shutdown failed:', error)
+    })
+    .finally(() => app.quit())
 })
 
 app.on('window-all-closed', () => {

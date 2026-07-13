@@ -1,16 +1,16 @@
 # Phase 6 Testnet Futures Execution Design
 
-Date: 2026-07-12
+Date: 2026-07-12; testnet-grade implementation amendment 2026-07-13
 
 Planning base: `81ea13291e328ab57be88121236a09ee72d68034` (`Complete futures read-only Phase 5`)
 
-Decision status: accepted; implementation checkpoints 1 and 2 are complete
+Decision status: accepted; amended as the normative testnet-grade implementation contract
 
-Phase status: Implementation in progress; checkpoints 1 and 2 complete
+Phase status: **Complete (2026-07-13).**
 
 ## 1. Decision summary
 
-The first futures write checkpoint will be narrower than the Phase 6 sketch that preceded this review. It will eventually support exactly one Binance USDⓈ-M Futures Testnet order shape:
+The first futures write checkpoint is narrower than the Phase 6 sketch that preceded this review. It supports exactly one Binance USDⓈ-M Futures Testnet order shape:
 
 - regular `LIMIT` with `GTC`;
 - one-way position mode only;
@@ -26,7 +26,7 @@ The first futures write checkpoint will be narrower than the Phase 6 sketch that
 
 This is the minimum defensible write. A persistent exposure-increasing `GTC` order would be unsafe as the first path because the checkpoint deliberately has no cancellation path. Hedge mode is also excluded because Binance does not permit `reduceOnly` on hedge-mode new orders. A one-way reduce-only order lets the exchange independently enforce the core invariant that the order cannot increase exposure.
 
-The completed Phase 5 facade remains frozen. A later implementation must introduce a separately named execution risk reader, a two-method testnet execution facade, and a backend execution service. It must not add write methods to `createFuturesReadOnlyTransport`, `FuturesTradingAdapter`, or `FuturesReadOnlyService`.
+The completed Phase 5 facade remains frozen. Phase 6 uses a separately named `FuturesTestnetExecutionRiskReader`, an exact two-method `FuturesTestnetExecutionFacade`, and one process-global `FuturesTestnetExecutionService`. It does not add write methods to `createFuturesReadOnlyTransport`, `FuturesTradingAdapter`, or `FuturesReadOnlyService`.
 
 The following remain out of scope until separately reviewed checkpoints:
 
@@ -50,7 +50,7 @@ The current shared spot limiter also has retry behavior appropriate to reads. A 
 
 ### Decision
 
-A later implementation will add three separate boundaries:
+The implementation has three separate boundaries:
 
 1. `FuturesTestnetExecutionRiskReader`
    - Testnet-only and read-only.
@@ -64,8 +64,20 @@ A later implementation will add three separate boundaries:
    - Does not expose a client, endpoint, method, URL, headers, body, retry count, timestamp, `recvWindow`, or transport options.
 
 3. `FuturesTestnetExecutionService`
-   - Process/account singleton that owns the feature gate, connection/session binding, exact validation, rate admission, durable idempotency journal, one-command mutex, state machine, reconciliation, and renderer-safe acknowledgements.
+   - Process-global/account-exclusive singleton that owns the feature gate, connection/session/generation binding, exact validation, rate admission, durable idempotency journal, one-command mutex, state machine, reconciliation, restart/teardown recovery, and renderer-safe status snapshots.
    - A renderer connection may observe its owned attempt, but renderer lifetime does not own a dispatched order.
+
+### 2026-07-13 testnet-grade amendment
+
+This amendment converts the planning language into the normative implementation model. It does not broaden the reviewed write. The service is authorized only by main-process state captured before the first `BrowserWindow`; renderer state is never authority. Every `FUTURES_TESTNET_EXECUTION_*` value and both execution credentials are captured into a frozen backend configuration and deleted from the inherited environment before any window exists. E2E forcibly disables execution and scrubs inherited execution values. The only network origin is the compiled constant `https://demo-fapi.binance.com`; every redirect is rejected. There is no production enum, hostname, credential reader, composition branch, protocol action, journal namespace, recovery operation, or renderer control in Phase 6.
+
+One Electron single-instance lock, one owner-only journal lease, and one process-global service own the account attempt. The service fsyncs the canonical queued record and the `dispatch_intent` before the single order POST. Request/client identity and command digest are durable and idempotent; the POST is never retried. Any unproven result after intent is durably `result_unknown`, remains globally blocking, and is reconciled only with Query Order by the exact original client order ID. Accepted/open orders remain owned and monitored across renderer teardown and process restart. Journal framing, integrity, sequence, anchor, ownership, link, mode, or rollback failure closes execution; corruption is never treated as an empty ledger. Packaged, development, E2E, and any future production storage are distinct namespaces and cannot be selected by renderer input.
+
+The execution reader owns exact server-time, exchange-info, account-config, symbol-config, V3 position, V3 USDT balance, symbol regular-open-order, symbol algo-open-order, and final mark-price reads. Every array response is selected by exact symbol/asset identity rather than position. Decimal strings and int64 exchange identities remain lossless. The process-wide coordinator gives Spot admission priority while accounting for Phase 6 in a separate per-origin quota bucket; it does not change the CRITICAL Spot limiter or inherit a retrying write path.
+
+The original raw WebSocket UTF-8 frame is retained for the dedicated execution parser. The outer server bounds a raw frame at 16,384 bytes and a connection at 64 subscribed channels; the execution command is rejected above 4096 bytes before ordinary JSON conversion and uses duplicate-key-aware parsing. Packaged routing derives its token-bearing URL only from the exact main-issued runtime host and port. Renderer-controlled `MOCK_WS_URL` routing is absent. E2E mock routing is an explicit harness-only, isolated, tokenless endpoint and execution remains forced off. CSP `connect-src` contains reviewed exact endpoints rather than wildcard loopback ports.
+
+The renderer has one dedicated execution hook and one compact `USDⓈ-M TESTNET · REDUCE ONLY` ticket outside `DataContext`, browser storage, analytics, telemetry, clipboard, Spot/global shortcuts, and generic Enter handling. It renders only backend-owned capability, intent, pending, accepted, rejected, unknown, and recovery state. It synchronously suppresses double submission but never infers placement success, cancellation, or recovery.
 
 ### Consequences
 
@@ -207,7 +219,7 @@ The live regular New Order enum still lists conditional order types even though 
 Binance documents `newClientOrderId` as unique among open orders and constrained by `^[\.A-Z\:/a-z0-9_-]{1,36}$`. The first path uses exactly `cc6-${requestId}`, which is 36 characters and matches the documented grammar. The local rule is intentionally stronger:
 
 - no caller-selected prefix or arbitrary client ID;
-- no reuse of any journaled ID: full terminal records may compact, but permanent request-ID/client-ID/digest tombstones remain;
+- no reuse of any journaled ID: full terminal records and permanent request-ID/client-ID/digest tombstones remain until the bounded journal fails closed;
 - an identical request/digest returns its existing state without another POST;
 - a request-ID or client-ID collision with a different digest is rejected;
 - Binance duplicate code `-4116` enters exact reconciliation; it never causes an automatic retry or immediate failure claim.
@@ -290,12 +302,12 @@ No SDK dependency, source copy, lockfile change, or runtime client is justified 
 
 ## 5. Backend-owned feature gate
 
-Execution is disabled by default. A future implementation may resolve a non-secret capability only when every condition below is true at final dispatch admission:
+Execution is disabled by default. The backend resolves a non-secret capability only when every condition below is true at final dispatch admission:
 
 1. Existing `FUTURES_READ_MODE` is exactly `testnet`; missing values resolve to the existing safe `mock` default.
 2. New `FUTURES_TESTNET_EXECUTION_ENABLED` is exactly the four ASCII bytes `true`; there is no trimming, case folding, numeric/boolean coercion, or alternate enabled value.
 3. The facade's compiled environment is exactly `testnet` and its only REST origin is `https://demo-fapi.binance.com`.
-4. Captured `FUTURES_TESTNET_API_KEY` and `FUTURES_TESTNET_API_SECRET` satisfy existing non-empty validation. Every `FUTURES_TESTNET_EXECUTION_*` value and both credentials are parsed/frozen in main and deleted from `process.env` before `BrowserWindow` creation.
+4. Captured `FUTURES_TESTNET_API_KEY` and `FUTURES_TESTNET_API_SECRET` are each exactly 1 through 128 visible, non-space ASCII bytes (`^[\x21-\x7e]{1,128}$`); controls, whitespace, non-ASCII text, and oversize values fail closed. Every `FUTURES_TESTNET_EXECUTION_*` value and both credentials are parsed/frozen in main and deleted from `process.env` before `BrowserWindow` creation.
 5. A fresh signed account preflight succeeds on the fixed testnet host. API key text has no trustworthy environment marker; the read proves only authenticated demo-account access, not the key's TRADE permission. Production-only credentials fail the demo read and no production host exists to receive them.
 6. `FUTURES_TESTNET_EXECUTION_ALLOWED_SYMBOLS` is 2 through 335 ASCII bytes and matches `^[A-Z0-9]{2,20}(,[A-Z0-9]{2,20}){0,15}$`; it contains 1 through 16 unique symbols, no whitespace, empty member, escape, or duplicate, and the command symbol is present.
 7. `FUTURES_TESTNET_EXECUTION_MAX_NOTIONAL_USDT` is a canonical positive fixed-point string under the command's 40-total-digit/18-fractional-digit bound and no greater than the non-raiseable Phase 6 ceiling `10000` USDT.
@@ -319,9 +331,9 @@ The renderer receives capability status but cannot set it, weaken it, choose a h
 
 ## 6. Versioned command protocol
 
-The future route is a new action and a new channel. Existing typed and legacy futures commands remain rejected until the route-install checkpoint deliberately registers it.
+The execution route is one dedicated action on one dedicated channel. Generic typed and every legacy futures command remain rejected after that exact route is deliberately registered.
 
-The request/client IDs are not renderer randomness. After a current-session status/prepare handshake, main generates 128 bits with `node:crypto.randomBytes(16)`, lower-hex encodes them, binds the one-use pair to the connection/symbol/generation, and expires the unused intent after 30 seconds. `Math.random`, the existing Spot request-ID helper, caller-chosen IDs, and ID reuse are prohibited. The command must return exactly that active pair.
+The request/client IDs are not renderer randomness. After a revisioned current-session status/prepare handshake and trusted preflight, main generates 128 bits with `node:crypto.randomBytes(16)`, lower-hex encodes them, binds the one-use pair plus backend-derived reducing side and observed leverage to the connection/symbol/generation, and expires the unused intent after 30 seconds. `Math.random`, the existing Spot request-ID helper, caller-chosen IDs, and ID reuse are prohibited. The command must return exactly that active intent.
 
 ```json
 {
@@ -355,9 +367,9 @@ Validation is exact and fail-closed:
 - `requestId` is exactly the current backend-issued 32-lowercase-hex one-use intent.
 - `marketType`, `environment`, `orderType`, `timeInForce`, `positionSide`, `marginType`, `reduceOnly`, `workingType`, and `priceProtect` equal the literals shown; `workingType` is exactly JSON `null`.
 - `symbol` matches `^[A-Z0-9]{2,20}$`, is one exact backend-allowlisted symbol, and matches the current owned session.
-- `side` is exactly `BUY` or `SELL`; later risk validation requires the reducing direction.
+- `side` is exactly the backend intent's `BUY` or `SELL` reducing direction; the renderer cannot choose it.
 - `quantity` and `price` are canonical positive fixed-point strings with at most 40 total digits, at most 18 fractional digits, and at most 42 ASCII bytes each: ASCII digits with at most one decimal point, no sign, whitespace, exponent, separator, leading zero except `0.x`, trailing decimal point, negative zero, `NaN`, or `Infinity`.
-- `leverage` is a safe integer, exactly equals fresh observed leverage, and is within both configured and hard caps.
+- `leverage` is the backend intent's safe integer observed leverage and is within both configured and hard caps; the renderer cannot choose or change it.
 - `clientOrderId` is exactly the backend-issued 36-character concatenation `cc6-${requestId}`; no independently chosen value is accepted.
 - No timestamp, order ID, session/generation, endpoint, URL, option, header, signature, `recvWindow`, retry, cancellation, or account-mutation field is accepted.
 - No risk-warning acknowledgement is accepted in checkpoint one. Liquidation and other warnings are hard blocks; a future override would require a separate one-use backend token design and review.
@@ -453,14 +465,14 @@ Messages are static and contain no HTTP status, Binance message/body, URL, heade
 
 ### 7.1 Status, prepare, and reconnect protocol
 
-The dedicated channel also accepts only two read-only session-bound actions:
+The dedicated channel also accepts only three read-only session-bound actions:
 
 ```json
-{"action":"futures.execution.subscribeStatus","version":1,"marketType":"futures","environment":"testnet","symbol":"BTCUSDT"}
-{"action":"futures.execution.prepareIntent","version":1,"marketType":"futures","environment":"testnet","symbol":"BTCUSDT"}
+{"action":"futures.execution.subscribeStatus","version":1,"revision":"0","marketType":"futures","environment":"testnet","symbol":"BTCUSDT"}
+{"action":"futures.execution.prepareIntent","version":1,"revision":"7","marketType":"futures","environment":"testnet","symbol":"BTCUSDT"}
 ```
 
-They contain exactly those fields, are accepted only from the connection's current owned Phase 5 futures session, and cannot choose an account, generation, request ID, client ID, query, or reconciliation operation. Unsubscribe is the same exact identity with action `futures.execution.unsubscribeStatus`. Prepare creates at most one 30-second one-use intent and performs no new account/network/write call, but issues nothing unless backend capability is enabled and a valid current server-time sample already exists. Its `expiresAt` uses the safe local monotonic-derived wall anchor.
+They contain exactly those fields, are accepted only from the connection's current owned Phase 5 futures session, and cannot choose an account, generation, request ID, client ID, query, or reconciliation operation. Unsubscribe is the same exact identity with action `futures.execution.unsubscribeStatus`. Prepare issues at most one 30-second one-use intent only after the separate risk reader completes a trusted testnet preflight, including server time, account/position mode, isolated symbol configuration, observed leverage, and the one nonzero `BOTH` position. Side is derived as the only reducing direction. Prepare performs no write and the order POST remains impossible until a fresh placement preflight and durable dispatch intent also pass. `expiresAt` uses the safe local monotonic-derived wall anchor.
 
 The backend emits an exact current snapshot on subscribe, prepare, reconnect, and every durable transition:
 
@@ -479,7 +491,7 @@ The backend emits an exact current snapshot on subscribe, prepare, reconnect, an
 }
 ```
 
-When issued, `intent` contains exactly the backend-generated request ID, deterministic client ID, and safe-integer `expiresAt`. `attempt` is the latest acknowledgement-shaped safe snapshot. The credential binding, internal generation, raw errors, journal path, and account material never cross the boundary. Renderer state accepts only a strictly greater decimal revision for the same backend-owned connection/session identity; stale/lower revisions and old-generation late delivery are ignored. Delivery failure never changes journal state, retries a POST, or cancels monitoring. An old unknown blocks status capability globally even after credentials rotate.
+When issued, `intent` contains exactly the backend-generated request ID, deterministic client ID, symbol, backend-derived `side`, observed `leverage`, and safe-integer `expiresAt`. `attempt` is the latest acknowledgement-shaped safe snapshot. The credential binding, internal generation, raw errors, journal path, and account material never cross the boundary. Renderer state accepts only a strictly greater decimal revision for the same backend-owned connection/session identity; stale/lower revisions and old-generation late delivery are ignored. Delivery failure never changes journal state, retries a POST, or cancels monitoring. An old unknown blocks status capability globally even after credentials rotate.
 
 ## 8. Exact-decimal and backend safety contract
 
@@ -543,11 +555,12 @@ The numerator must be positive. Compare `numerator * 10000` with `markPrice * co
 
 ### 8.4 Freshness and ownership
 
-Execution freshness is intentionally stricter than the Phase 5 UI stale window:
+Execution freshness is intentionally stricter than the Phase 5 UI stale window and is tiered by how quickly the observed fact can change:
 
-- mark receipt age: at most 5 seconds;
-- every signed account/symbol/position/balance/order snapshot completion age: at most 5 seconds;
-- server-time sample age: at most 5 seconds with measured round-trip no greater than 1 second;
+- static exchange configuration (`exchangeInfo` and its exact metadata digest/generation): at most 300 seconds;
+- dynamic account and symbol configuration (`accountConfig` and `symbolConfig`): at most 30 seconds;
+- live risk state (mark price, V3 position, V3 USDT balance, regular open orders, and algo open orders): at most 5 seconds;
+- server-time sample: at most 5 seconds with measured round-trip no greater than 1 second;
 - final pure validation-to-dispatch interval: at most 1 second; otherwise rerun the entire preflight;
 - exchange timestamps may not regress and may not be implausibly future-dated relative to the bounded server offset;
 - all observations carry the same credential identity, environment, symbol, connection identity, and internal generation.
@@ -557,13 +570,13 @@ Missing, partial, stale, disconnected, future-dated, regressing, malformed, cros
 The exact preflight pipeline, while holding the execution ownership lock, is:
 
 1. Resolve replay/collision/busy state; do not create a queued record for a busy request.
-2. Prove local order-count readiness and request shared-IP low-priority admission within 1000 ms. The complete uncached reviewed preflight is 25 IP weight and the current maximum Spot account-refresh batch is 23, so execution starts only with no Spot waiter and at least 48 units of shared local capacity remaining.
+2. Prove local order-count readiness and request low-priority admission from the process-global coordinator within 1000 ms. The complete uncached reviewed preflight is 25 demo-origin IP weight and the current maximum Spot account-refresh batch is 23. Execution starts only with no Spot waiter, capacity for the complete 25-weight demo reservation, and at least 23 units of Spot-origin headroom; the coordinator never merges origins into one misleading counter.
 3. Read server time first. Capture monotonic `t0`, wall `w0`, and monotonic `t1`; require `t1-t0 <= 1000 ms`; estimate local midpoint as `w0 + floor((t1-t0)/2)` and store `serverTime - midpoint`. Later timestamps derive from `w0 + (monotonicNow-t0) + offset`, not a potentially jumping wall clock.
-4. Through the same process-wide IP limiter, with Spot priority, exact per-call atomic reservations, and `maxRetries: 0`, acquire exchange info, account config, symbol config, V3 position, V3 balance, regular open orders, and algo open orders. Every GET has a transport-owned 10,000 ms whole-operation deadline, but the bundle still fails if any final age exceeds 5 seconds.
+4. Through coordinator-owned per-origin buckets, with Spot priority, exact per-call atomic reservations, and `maxRetries: 0`, acquire exchange info, account config, symbol config, V3 position, V3 balance, regular open orders, and algo open orders. Every GET has a transport-owned 10,000 ms whole-operation deadline, and every normalized result must remain inside its tier at final validation.
 5. Normalize arrays by exact identity: reject empty, wrong-symbol/asset, mixed-symbol, duplicate, case-mismatched, extra-identity, missing-field, or wrong-type rows. Source order and harmless extra response fields do not select identity or weaken required-field validation.
 6. Read the mark exactly once and last, bringing the complete preflight to exactly 25 IP weight; then run the pure evaluator, recheck command/session/generation/metadata digest, and append/fsync `dispatch_intent` within 1 second.
 
-The shared limiter extension must preserve existing Spot weights, 500 ms spacing, priority, and refresh scheduling. Future reads are lower priority and fail the preflight rather than leave queued work that could delay Spot; every orchestrator retry re-admits and reserves weight again. A separate Phase 6 IP limiter is prohibited because it would undercount aggregate Spot/Phase 5 traffic. External orders or configuration can still race after the last read; the exchange's one-way `reduceOnly` enforcement is the final exposure guard.
+The coordinator wrapper preserves existing Spot weights, 500 ms spacing, priority, and refresh scheduling without modifying the CRITICAL Spot limiter. Futures reads are lower priority and fail the preflight rather than leave queued work that could delay Spot; every orchestrator retry re-admits and reserves weight again. Each exchange origin has its own quota bucket, while the coordinator retains one process-wide view of Spot waiters and admission priority. External orders or configuration can still race after the last read; the exchange's one-way `reduceOnly` enforcement is the final exposure guard.
 
 ## 9. Leverage and margin-mode decision
 
@@ -599,15 +612,17 @@ There is no automatic futures order POST retry for timeout, connection loss, `40
 Current `userData` is not outside renderer access: the Phase 5 window has Node integration. No journal or execution route may be installed until the renderer-isolation prerequisite in checkpoint 2 is complete. After that hardening, the main process owns these exact storage rules:
 
 - Acquire Electron's OS-backed single-instance lock before credential/execution setup. Refusal to acquire exits or leaves execution disabled before opening the journal. Hold a second exclusive journal/account lease for the process lifetime.
-- Packaged testnet path is `userData/futures-testnet-execution/v1/journal.bin`; development uses `futures-testnet-execution-dev/v1`; E2E receives an injected temporary directory and can never open the packaged path. Future production may not reuse any namespace.
+- Packaged testnet path is `userData/futures-testnet-execution/v1/journal.bin`; development uses `futures-testnet-execution-development/v1`; E2E forces execution disabled, opens no execution journal, and can never open the packaged path. Future production may not reuse any namespace.
 - Parent directories are owner-only `0700`; journal/key/anchor are owner-only `0600`. Open with no-follow/exclusive semantics, verify regular-file type, owner, link count, and mode before use, and reject symlink, replacement, wrong owner/mode, or lock loss.
 - Generate an integrity key in main and persist it only through Electron `safeStorage`; fail execution closed when secure storage is unavailable. Store a separately sealed latest `{sequence, recordHash}` anchor so a valid old journal rollback is detected.
 - Each record is at most 16,384 bytes: 4-byte big-endian payload length, fixed-order UTF-8 versioned payload, and 32-byte HMAC-SHA256 chaining previous hash, sequence, and payload. Sequence is a canonical positive decimal with exact increment one.
 - The command digest is lowercase SHA-256 over UTF-8 `cc-trade/futures-testnet-command/v1` followed by length-prefixed exact fields in protocol order, preserving the lexical quantity/price strings. No delimiter ambiguity or generic object serialization is permitted.
 - Store the complete non-secret canonical command, digest, request/client IDs, environment/symbol, opaque `HMAC(integrityKey, demoOrigin + NUL + apiKey)` credential binding, generation lineage, timestamps, rate/ban state, safe transition, and lossless exchange identity. This supplies every field needed for restart reconciliation and a safe renderer summary.
-- Append and fsync `queued`; append and fsync `dispatch_intent`; append and fsync every later transition before external acknowledgement. File creation/replacement and compaction also fsync the parent directory.
+- Append and fsync `queued`; append and fsync `dispatch_intent`; append and fsync every later actual state/order transition before external acknowledgement. File and anchor creation/replacement also fsync the parent directory.
 - Only a provably incomplete final record beyond the sealed last-good anchor may be truncated to that anchor and fsynced. Unknown version, anchor rollback, HMAC/sequence failure, mid-file corruption, missing anchored data, or unexplained truncation disables execution and leaves the account globally blocked.
-- Compaction writes a same-directory temporary file, fsyncs it, atomically renames it, fsyncs the directory, and updates the sealed anchor. Unknown/accepted/open records remain complete. After 90 days, terminal detail may compact only to a permanent `{requestId, clientOrderId, digest, terminalState, safeCode}` tombstone; tombstones never expire and identical collision returns that terminal safe state while any changed collision rejects.
+- Phase 6 performs no journal compaction or record deletion: complete request/client identities, digests, and terminal states are permanent idempotency tombstones. The journal is bounded to 50,000 records and 16 MiB and fails execution closed before reading or appending beyond either bound. A future compacting format requires a separately reviewed migration that preserves every permanent identity and active attempt.
+- A valid-shape command that does not own the current backend-issued intent, including no-session, mismatched, or expired-intent input, is a transient status rejection and creates no journal record. Only a backend-owned admitted identity may consume permanent journal capacity.
+- An unchanged identity-complete `confirmed_open` observation is not a transition: it schedules the next 60-second monitor without appending. A changed status, executed quantity, average price, update time, or identity is fsynced before publication. Thus an unchanged order can be monitored for the full query horizon without consuming one record per poll.
 - Never store credentials, signatures, signed URLs/bodies, headers, raw responses, or unredacted errors.
 
 A journal/fsync failure before `dispatch_intent` rejects locally and proves no POST was committed. A startup `queued` record without intent is deterministically transitioned and fsynced to `locally_rejected` with `FUTURES_EXECUTION_INTERRUPTED_BEFORE_DISPATCH`; identical replay returns that terminal rejection and a new order needs a newly prepared ID. Any intent without a durable proven result becomes `result_unknown` and reconciles only.
@@ -659,12 +674,27 @@ Every valid ACK is followed by Query Order; ambiguity is not the only query owne
 
 - Reconciliation GETs may retry only under this explicit schedule.
 - A successful ACK/query must contain exact client ID, symbol, side, `positionSide: "BOTH"`, `type: "LIMIT"`, `origType: "LIMIT"`, `timeInForce: "GTC"`, `reduceOnly: true`, `closePosition: false`, command-equivalent `origQty` and price, canonical non-negative executed quantity/average price, recognized status, safe update time, supported response working type, `priceProtect: false`, and a positive lossless order ID no greater than signed-int64 maximum. Quantity and price compare by exact fixed-point numeric equality after scale alignment (`1.0` equals `1.00`) with no rounding. One missing/wrong field or malformed/truncated success after intent is unknown.
-- A returned exchange order ID is retained as a lossless string and must remain stable.
+- A valid POST ACK exchange order ID is retained durably as a lossless string. Every later Query Order still looks up by exact original client ID and must return that same order ID; mismatch remains unknown and cannot advance state, including after restart. Ambiguous POST outcomes have no expected ACK ID and rely on the remaining complete query identity checks.
 - Query `-2013` is not evidence of failed placement after an ambiguous dispatch.
 - Binance's query retention limits mean an unfilled `CANCELED`/`EXPIRED` order may become unavailable after three days and other orders after 90 days. Absence inside or outside those windows never converts a durable unknown into failure.
 - Fast exhaustion produces `reconciliation_unavailable`, then a backend-only query every 5 minutes while the original credential binding is available and the order is within the 90-day query horizon. Beyond that horizon it remains blocked/unavailable until a separately reviewed recovery action; absence never proves failure.
 - A confirmed open order is queried by exact original client ID every 60 seconds until `FILLED`, `CANCELED`, `EXPIRED`, `EXPIRED_IN_MATCH`, or validated `REJECTED`. Monitoring survives restart, renderer teardown, and soft disable; bans pause it. The external Binance Testnet interface is the only cancellation mechanism in checkpoint one.
 - Query status `REJECTED` transitions to `exchange_rejected`. `confirmed_filled`, `confirmed_canceled`, `exchange_rejected`, and `locally_rejected` are terminal; all other states retain process ownership.
+
+### 10.6 Backend-only testnet recovery procedure
+
+Recovery is deliberately not a WebSocket, IPC, preload, renderer, generic typed, legacy, or HTTP action. `recoverTestnetAttempt` is an internal main-process composition operation owned by the process-global service. It cannot accept a host, account, request ID, client ID, order ID, transition, terminal result, or instruction to resend/cancel an order.
+
+The operator procedure is exact:
+
+1. Stop every app instance without deleting, moving, editing, truncating, or copying state into another namespace. Preserve the packaged testnet `v1` directory exactly.
+2. Restore the original demo-account credential pair whose opaque binding is recorded for the attempt, retain the fixed demo-only execution configuration, and start one normal app instance. Credential rotation does not create a bypass namespace.
+3. Before any window can authorize execution, main acquires the Electron single-instance lock and journal lease, validates file ownership/mode/link count, HMAC chain, sequence, anchor, credential binding, and the last durable state. Any mismatch remains fail-closed and globally blocking; recovery never “repairs” authenticated corruption by clearing it.
+4. The backend recovery worker invokes only `queryOrderByOriginalClientOrderId` with the journaled exact symbol and original client ID. It never invokes the order POST and never retries or reconstructs placement. Query reads obey the coordinator, current rate pause, exact redirect/deadline/resource bounds, and the documented fast/slow schedule.
+5. Only an identity-complete Query Order response may advance the fsynced state to accepted/open/filled/canceled/rejected. Query `-2013`, missing original credentials, a rate ban, retention expiry, malformed identity, transport ambiguity, or failure to fsync leaves `reconciliation_unavailable`/unknown durable and all Phase 6 writes blocked.
+6. If Query Order confirms an open testnet order, monitoring continues every 60 seconds. Any desired cancellation is performed only in Binance's external Testnet interface; the app then observes the resulting terminal state. No operator or renderer may write a terminal result into the ledger.
+
+This procedure is testnet-only. A future production recovery system must use separately reviewed code, credentials, protocol, storage, operational authorization, and hosts; it cannot call or parameterize this operation.
 
 ## 11. Transport and rate-limit design
 
@@ -686,21 +716,21 @@ The backend service, not the facade caller, owns the validated command, but the 
 
 Immediately before I/O, the facade asserts exact HTTPS origin and path, forbids URL credentials, proxy, agent/dispatcher, redirect callback, and caller headers, and uses `redirect: "error"`. HTTP 301, 302, 303, 307, or 308 is an error with zero follow-up request, so an API key, signature, or POST can never escape the demo origin.
 
-The POST and each Query Order GET have a transport-owned 10,000 ms whole-operation deadline including body read. After durable intent, POST deadline/abort/late delivery is unknown; renderer teardown does not own that abort signal. A Query Order deadline is one failed scheduled read. All timers/listeners are cleared once and late responses cannot mutate a later attempt.
+The POST and each Query Order GET have a transport-owned 10,000 ms whole-operation deadline including body read. Fetch and body-read work race an owned deadline promise, so an injected or nonconforming implementation that ignores `AbortSignal` can neither hang shutdown nor return a late valid result. After durable intent, POST deadline/abort/late delivery is unknown; renderer teardown does not own that abort signal. A Query Order deadline is one failed scheduled read. All timers/listeners are cleared once and late responses cannot mutate a later attempt.
 
-Response parsing limits are exact: 65,536 body bytes while streaming, 64 response headers, 4096 bytes per header value, 32,768 aggregate header bytes, 512 UTF-8 bytes for Binance `msg`, and 4096 sanitized bytes of retained body diagnostic plus a SHA-256 body digest. Oversized/chunked overflow aborts parsing; after intent it is unknown. The facade recognizes a 2xx `{code,msg}` error body rather than treating HTTP status alone as success.
+Response parsing limits are exact. The facade and every compact GET allow 65,536 body bytes and 1,024 JSON value nodes. Only exact public `GET /fapi/v1/exchangeInfo` selects a 2,097,152-byte/131,072-node profile; the live fixed testnet response reviewed on 2026-07-13 was 879,889 bytes with 50,645 value nodes, so the profile is bounded with reviewed growth headroom. That profile cannot be caller-selected or reused by another endpoint, and 2 MiB plus one byte or node 131,073 rejects. All profiles share at most 8 JSON levels, 64 response headers, 4096 bytes per header value, 32,768 aggregate header bytes, 512 UTF-8 bytes for Binance `msg`, and 4096 bytes per decoded string/diagnostic plus a SHA-256 body digest. Oversized/chunked overflow aborts parsing; after intent it is unknown. The facade recognizes a 2xx `{code,msg}` error body rather than treating HTTP status alone as success.
 
 Do not call `response.json()`. A project-owned schema-specific duplicate-key-aware JSON tokenizer captures integer tokens before JavaScript numeric conversion: `orderId` is 1–19 ASCII digits parsed to `BigInt`, bounded by `9223372036854775807`, and exposed as its original decimal string; timestamp tokens must be non-negative safe integers; financial fields must be JSON strings and pass the fixed-point parser. Unknown/duplicate identity fields, unsafe integers, floats/exponents for integer fields, or wrong top-level shape fail the response schema.
 
 ### 11.2 Admission
 
-- Every Phase 6 GET uses the existing process-wide IP-weight admission shared with Spot and Phase 5, with Spot priority, exact atomic reservation per transport attempt, and `maxRetries: 0`. The orchestrator alone owns scheduled query retries and re-reserves each time.
-- POST uses a separate process-wide testnet-account order-count limiter and never the generic retry wrapper. The shared IP admission extension must preserve Spot's existing weights, 500 ms delay, and scheduling semantics.
+- Every Phase 6 GET uses a process-global coordinator with a fixed demo-origin IP-weight bucket, Spot waiter priority, exact atomic reservation per transport attempt, and `maxRetries: 0`. The legacy Spot limiter remains unchanged behind a separate Spot-origin bucket. The orchestrator alone owns scheduled Query Order retries and re-reserves each time.
+- POST uses a separate process-wide testnet-account order-count limiter and never the generic retry wrapper. The coordinator wrapper preserves Spot's existing weights, 500 ms delay, and scheduling semantics.
 - Local policy permits at most one placement attempt per 10 seconds and five per rolling minute, both stricter than or equal to the documented header dimensions.
 - The one-nonterminal-command mutex and zero-current-open-order rule are additional limits.
-- Parse Binance order-count and used-weight headers internally for conservative future admission; never expose raw headers. Advertised lower limits reduce local admission. Missing/malformed/negative/overflow order-count or used-weight headers close new writes for at least 120 seconds rather than assuming capacity.
-- `Retry-After` accepts only a canonical non-negative integer number of seconds or a syntactically valid HTTP date relative to server-adjusted time, is clamped safely to the documented three-day maximum, and never uses an untrusted wall-clock rollback. Missing/malformed `429` uses a 120-second floor; missing/malformed `418` uses a three-day fallback. The later of valid server value and local floor is persisted across restart.
-- Body `-1003`, lower advertised order limits, HTTP `401`/`403`/WAF, and malformed/missing rate headers all close admission conservatively and never authorize retry.
+- Durable local dispatch timestamps, rather than unauthenticated caller input or success-header interpretation, are the only order-count admission authority in Phase 6. Raw order-count/used-weight headers remain bounded and discarded; adding remote-counter admission requires a separately reviewed schema. Restart restores the exact local rolling windows from the journal.
+- Any HTTP `429` after dispatch uses a 120-second pause floor and any HTTP `418` uses a three-day floor even when its body/header is missing or malformed. `Retry-After` may extend the floor only when it is canonical non-negative integer seconds and is safely clamped to three days; HTTP dates and every other form are treated as malformed and use the floor. The resulting pause is fsynced and restored across restart.
+- A valid reviewed body `-1003`/`-1015` is rate-limited; malformed/unrecognized `401`/`403`, rate, WAF, and error bodies remain unknown. None authorizes a POST retry, and status-derived rate pauses never reinterpret the placement result as a confirmed rejection.
 - Reconciliation remains required but waits while the server says the IP is banned.
 
 ### 11.3 Errors and redaction
@@ -738,7 +768,7 @@ After backend protocol, risk, journal, state machine, facade, gate, and fake-tra
 - reduce-long/reduce-short presentation derived from the current signed position; no opening Long/Short choice;
 - exact-string quantity and price fields; `LIMIT/GTC`, one-way `BOTH`, isolated margin, current leverage, working type not applicable, and price-protect false shown as fixed/read-only facts;
 - no leverage, margin-mode, position-mode, reduce-only toggle, cancel, modify, transfer, production, or mock execution control;
-- preview of fresh mark age, current position, max reducible quantity, conservative notional, configured cap, liquidation distance, and deterministic client ID;
+- backend-issued intent summary with deterministic client ID, reducing side, observed leverage, and expiry;
 - disabled for gate-off, mock, stale/incomplete/disconnected data, mismatched account state, existing orders, busy state, or unresolved unknown result;
 - backend pending/rejected/accepted/unknown acknowledgements displayed verbatim through safe mappings; never invent success;
 - unknown result remains prominent and blocks another submission;
@@ -787,14 +817,14 @@ All automated tests use injected deterministic fakes. Default tests must fail if
 
 - exact demo origin, path, HTTP verb, content type, form/query location, field set, order, encoding, header, `recvWindow`, timestamp offset, and signature bytes;
 - caller cannot override any transport-owned value;
-- exact 10,000 ms POST/query deadline, late delivery suppression, timer/listener cleanup, 65,536-byte body, header, message, and diagnostic bounds;
+- exact 10,000 ms POST/query deadline, ignored-abort/never-settling transport races, late delivery suppression, timer/listener cleanup, generic 65,536-byte/1,024-node bounds, exact exchange-info 2 MiB/131,072-node profile, and shared header/message/diagnostic bounds;
 - documented weight reservation for every preflight/reconciliation endpoint;
 - shuffled concurrent Spot/Phase5/Phase6 shared reservations, 23-weight Spot headroom, Spot priority, and exactly one `maxRetries: 0` GET per schedule point;
-- placement increments both order-count dimensions and no IP-weight assumption;
+- placement reserves both persisted local order-count dimensions and makes no IP-weight assumption;
 - persisted local 10-second/minute windows, global execution mutex, and open-order admission;
 - exact original-client-ID reconciliation and lossless order ID parsing;
 - ACK/query required-field mismatch one field at a time, scale-equivalent decimal equality, and order IDs at `2^53-1`, `2^53`, and signed-int64 maximum;
-- `-1003`, 401/403/WAF, lower advertised limits, and missing/malformed/negative/overflow order-count, used-weight, `Retry-After`, and ban values;
+- reviewed `-1003`/`-1015`, exact-schema 401/403, malformed/unrecognized errors, and integer/missing/malformed `Retry-After` plus 418/429 floor handling;
 - no POST retry under any transport/status/body outcome.
 
 ### 14.4 Decimal and risk boundaries
@@ -819,9 +849,10 @@ All automated tests use injected deterministic fakes. Default tests must fail if
 
 - duplicate request ID with identical digest returns stored state without dispatch;
 - changed-payload request collision and client-ID collision reject;
+- 50,001 sequential valid-shape commands without backend intents produce zero journal records and zero POSTs;
 - simultaneous renderer/process submissions serialize and later requests get busy;
 - pre-intent journal open/append/fsync failures prove no dispatch;
-- journal byte truncation at every offset, HMAC/sequence/version/anchor corruption, rollback/replacement/symlink/wrong-mode, lock loss, crash around each fsync, atomic compaction, and replay after 90-day tombstoning;
+- journal partial/torn writes, HMAC/sequence/version/anchor corruption, rollback/replacement/symlink/wrong-mode/wrong-owner cases, lock loss, crash around each fsync, replay permanence, and record/byte capacity failure;
 - two child processes contend for the single-instance/journal lease; only one can admit;
 - queued-only restart becomes durable local rejection; credential rotation/mismatch preserves global unknown block;
 - post-intent transition/terminal fsync failures emit unknown, retain ownership, and acknowledge only after durable state;
@@ -831,7 +862,7 @@ All automated tests use injected deterministic fakes. Default tests must fail if
 - valid ACK, confirmed exchange body rejection, `-1006`, `-1007`, `-1008`, duplicate `-4116`, malformed `2xx`, `408`, `418`, `429`, every `5xx`, and network loss;
 - every 503/5xx variant classified unknown after dispatch and zero POST retries;
 - exact reconciliation schedule, identity mismatch, repeated `-2013`, temporary read errors, ban delay, terminal statuses, and exhaustion;
-- ACK-to-query, `NEW`/`PARTIALLY_FILLED` 60-second monitoring to later fill/cancel/reject, restart-open, teardown-open, long-lived open, and soft-disabled recovery-only startup;
+- ACK-order-ID persistence and mismatch through restart; ACK-to-query, `NEW`/`PARTIALLY_FILLED` 60-second monitoring to later fill/cancel/reject, restart-open, teardown-open, high-cycle unchanged-open no-growth, changed-open persistence, long-lived open, and soft-disabled recovery-only startup;
 - five-minute slow unknown recovery, 3-day/90-day retention boundary, missing credentials, binary downgrade guard, and graceful shutdown;
 - unresolved unknown remains durable and account-wide blocking;
 - persisted dispatch counters and 418/429 deadlines survive restart and wall-clock rollback;
@@ -1010,3 +1041,21 @@ Implementation date: 2026-07-12.
 
 - Before edits, GitNexus query/context covered Electron window creation, renderer dependencies, preload/IPC, CSP/navigation/window-open handling, loopback token routing, Spot workflows, Phase 5 read-only service/transport, typed/legacy rejection, and E2E composition. Existing edit impacts were all LOW: production `createWindow` `1 impacted / 1 direct / 0 processes / 0 modules`; E2E `createWindow` one file caller and no process; `reloadWithE2eLocalStorage`, `isAllowedWebSocketOrigin`, and `validateLocalWebSocketRequest` each `0/0/0/0`. No HIGH or CRITICAL result was edited.
 - Before staging, `detect_changes` working scope was LOW (`16 files / 27 symbols / 0 processes`) while staged was clean; after staging, both staged scope and exact comparison with checkpoint base `b35e9500535428ac8f1a24cabc5b698dd28ade02` were LOW (`26 files / 27 symbols / 0 processes`) and working scope was clean. Comparison with `main` was CRITICAL (`77 files / 671 symbols / 122 processes`), inherited from the long-running branch rather than this checkpoint. After source reindex, working/staged scopes were clean; exact base comparison became CRITICAL (`26 files / 154 symbols / 22 processes`) through the intended renderer-runtime/window/analytics paths, and comparison with `main` was CRITICAL (`77 / 1555 / 206`) through inherited branch plus source attribution. The local static circular-import check found `0` cycles across `132` modules before and after reindex.
+
+### 19.4 Reopened acceptance closure
+
+Checkpoint 2 was reopened on 2026-07-13 before the execution route was admitted. The closure tightens, rather than replaces, the original sandbox and protocol decisions:
+
+- Packaged renderer routing no longer reads `MOCK_WS_URL`, `VITE_WS_URL`, browser storage, query data, or any renderer-selected endpoint. Main supplies a validated loopback host and exact numeric port; the session token is appended only when the destination host and port exactly match that issued runtime endpoint.
+- E2E mock routing is a separate harness-only `E2E_MOCK_WS_URL` capture. It is explicit, isolated from packaged runtime projection and browser storage, tokenless, and paired with forced execution disable plus inherited execution-variable scrubbing.
+- CSP permits reviewed exact loopback endpoints instead of `localhost:*`/`127.0.0.1:*`. The outer WebSocket boundary rejects raw frames over 16,384 bytes, malformed action envelopes, and more than 64 subscribed channels per connection before service work.
+- The hidden Spot aliases `action: "order"` and `action: "cancelOrder"` are absent. Only the reviewed typed and validated legacy Spot request routes remain; their main-process tests prove placement, cancellation, refresh sequencing, and the unchanged exact `0.999` behavior.
+- The dedicated execution parser receives the original raw UTF-8 frame. Its 4096-byte pre-conversion cap and duplicate-key rejection therefore cannot be bypassed by an earlier parse/re-serialization step.
+
+The historical validation counts above describe the original 2026-07-12 checkpoint. Reopened-acceptance and integrated-delivery results are reported by the final Phase 6 verification record rather than retroactively changing those counts.
+
+## 20. Integrated Phase 6 completion record
+
+Phase 6 completed on 2026-07-13 after the reopened checkpoint-2 closure and the full testnet-execution delivery. The final independent adversarial audit returned PASS with no remaining concrete acceptance blocker. Production Futures composition, credentials, protocol, storage, recovery, and hosts remain absent.
+
+Final verification passed full Vitest (`57` files, `2307` passed, `2` existing skips), full ESLint, production build, isolated E2E build, all `13` Electron Playwright scenarios, `git diff --check`, circular-import checks, and static route/credential/host/write/isolation scans. GitNexus final comparisons were CRITICAL by integrated scope: checkpoint base `b35e9500535428ac8f1a24cabc5b698dd28ade02` at `36 files / 262 indexed symbols / 49 processes`, `main` at `77 / 1587 / 212`, and local tracked scope at `29 / 149 / 43`; new untracked Phase 6 symbols were not represented in those graph totals before commit.

@@ -44,14 +44,31 @@ export const getTrustedAnalyticsOrigin = (analyticsBaseUrl) => {
   return url.origin
 }
 
-export const createRendererContentSecurityPolicy = ({ analyticsBaseUrl } = {}) => {
-  const connectSources = [
-    "'self'",
-    'http://localhost:*',
-    'ws://localhost:*',
-    'http://127.0.0.1:*',
-    'ws://127.0.0.1:*',
-  ]
+export const getTrustedLocalWebSocketOrigin = (localWebSocketAccess = {}) => {
+  const host = typeof localWebSocketAccess.host === 'string'
+    ? localWebSocketAccess.host.trim().toLowerCase()
+    : ''
+  const port = localWebSocketAccess.port
+  if (!LOOPBACK_HOSTS.has(host) || !Number.isSafeInteger(port) || port < 1 || port > 65535) {
+    return null
+  }
+
+  try {
+    return new URL(`ws://${host}:${port}`).origin
+  } catch {
+    return null
+  }
+}
+
+export const createRendererContentSecurityPolicy = ({
+  analyticsBaseUrl,
+  localWebSocketAccess = { host: '127.0.0.1', port: 14477 },
+} = {}) => {
+  const connectSources = ["'self'"]
+  const localWebSocketOrigin = getTrustedLocalWebSocketOrigin(localWebSocketAccess)
+  if (localWebSocketOrigin) {
+    connectSources.push(localWebSocketOrigin)
+  }
   const analyticsOrigin = getTrustedAnalyticsOrigin(analyticsBaseUrl)
   if (analyticsOrigin && !connectSources.includes(analyticsOrigin)) {
     connectSources.push(analyticsOrigin)

@@ -23,13 +23,27 @@ import {
 } from './futures-testnet-execution-protocol.js';
 
 export const FUTURES_TESTNET_EXECUTION_RISK_LIMITS = Object.freeze({
-    MAX_OBSERVATION_AGE_MS: 5000,
+    MAX_STATIC_CONFIGURATION_AGE_MS: 300_000,
+    MAX_ACCOUNT_CONFIGURATION_AGE_MS: 30_000,
+    MAX_DYNAMIC_RISK_AGE_MS: 5_000,
     MAX_SERVER_TIME_ROUND_TRIP_MS: 1000,
     MAX_VALIDATION_TO_DISPATCH_AGE_MS: 1000,
     HARD_MAX_LEVERAGE: 3,
     HARD_MAX_NOTIONAL_USDT: '10000',
     MIN_LIQUIDATION_DISTANCE_BPS: '1000',
     MAX_LIQUIDATION_DISTANCE_BPS: '10000',
+});
+
+const OBSERVATION_MAXIMUM_AGES = Object.freeze({
+    serverTime: FUTURES_TESTNET_EXECUTION_RISK_LIMITS.MAX_DYNAMIC_RISK_AGE_MS,
+    exchangeInfo: FUTURES_TESTNET_EXECUTION_RISK_LIMITS.MAX_STATIC_CONFIGURATION_AGE_MS,
+    markPrice: FUTURES_TESTNET_EXECUTION_RISK_LIMITS.MAX_DYNAMIC_RISK_AGE_MS,
+    accountConfig: FUTURES_TESTNET_EXECUTION_RISK_LIMITS.MAX_ACCOUNT_CONFIGURATION_AGE_MS,
+    symbolConfig: FUTURES_TESTNET_EXECUTION_RISK_LIMITS.MAX_ACCOUNT_CONFIGURATION_AGE_MS,
+    positions: FUTURES_TESTNET_EXECUTION_RISK_LIMITS.MAX_DYNAMIC_RISK_AGE_MS,
+    balance: FUTURES_TESTNET_EXECUTION_RISK_LIMITS.MAX_DYNAMIC_RISK_AGE_MS,
+    regularOpenOrders: FUTURES_TESTNET_EXECUTION_RISK_LIMITS.MAX_DYNAMIC_RISK_AGE_MS,
+    algoOpenOrders: FUTURES_TESTNET_EXECUTION_RISK_LIMITS.MAX_DYNAMIC_RISK_AGE_MS,
 });
 
 export const FUTURES_TESTNET_EXECUTION_RISK_REASONS = Object.freeze({
@@ -329,7 +343,7 @@ const parseObservations = (value, ownership) => {
             || observation.connectionIdentity !== ownership.connectionIdentity
             || observation.generation !== ownership.generation
             || !isSafeNonNegativeInteger(observation.ageMs)
-            || observation.ageMs > FUTURES_TESTNET_EXECUTION_RISK_LIMITS.MAX_OBSERVATION_AGE_MS
+            || observation.ageMs > OBSERVATION_MAXIMUM_AGES[name]
             || observation.futureDated !== false
             || observation.regressed !== false) {
             return reject(

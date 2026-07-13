@@ -14,6 +14,7 @@ import AlertPanel from './components/features/tools/AlertPanel'
 import MainView from './components/layout/MainView'
 import NotificationToast from './components/common/NotificationToast'
 import FuturesReadOnlyPanel from './components/features/futures/FuturesReadOnlyPanel'
+import FuturesTestnetExecutionTicket from './components/features/futures/FuturesTestnetExecutionTicket'
 import { INTERVALS } from './constants'
 import { DataProvider, useDataContext } from './context/DataContext'
 import { DrawingProvider } from './context/DrawingProvider';
@@ -26,6 +27,7 @@ import {
   createSpotPlaceOrderCommand,
 } from './utils/tradingCommands';
 import useFuturesReadOnly from './hooks/useFuturesReadOnly';
+import useFuturesTestnetExecution from './hooks/useFuturesTestnetExecution';
 import { getRendererFuturesReadEnvironment } from './utils/rendererRuntime';
 
 // View types
@@ -90,6 +92,11 @@ function AppShell() {
     environment: CONFIGURED_FUTURES_ENVIRONMENT,
     wsConnection,
     sendMessage,
+  });
+  const futuresExecution = useFuturesTestnetExecution({
+    enabled: marketMode === MARKET_MODES.FUTURES,
+    symbol: futuresSymbol,
+    wsConnection,
   });
 
   const handleMarketModeChange = useCallback((nextMode) => {
@@ -511,6 +518,11 @@ function AppShell() {
       {marketMode === MARKET_MODES.FUTURES ? (
         <main className="futures-readonly-view" data-testid="futures-readonly-view">
           <FuturesReadOnlyPanel state={futuresState} />
+          <FuturesTestnetExecutionTicket
+            state={futuresExecution}
+            onPrepareIntent={futuresExecution.prepareIntent}
+            onPlaceOrder={futuresExecution.placeOrder}
+          />
         </main>
       ) : (
         <>

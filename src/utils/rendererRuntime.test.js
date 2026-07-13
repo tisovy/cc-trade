@@ -15,6 +15,7 @@ describe('renderer runtime bridge reader', () => {
     vi.stubGlobal('ccTradeRuntime', {
       localWebSocketAccess: {
         host: '127.0.0.1',
+        port: 14477,
         token: 'sessionToken_123',
         tokenParam: 'token',
       },
@@ -32,6 +33,7 @@ describe('renderer runtime bridge reader', () => {
     expect(getRendererRuntime()).toEqual({
       localWebSocketAccess: {
         host: '127.0.0.1',
+        port: 14477,
         token: 'sessionToken_123',
         tokenParam: 'token',
       },
@@ -47,6 +49,7 @@ describe('renderer runtime bridge reader', () => {
     })
     expect(getRendererLocalWebSocketAccess()).toEqual({
       host: '127.0.0.1',
+      port: 14477,
       token: 'sessionToken_123',
       tokenParam: 'token',
     })
@@ -58,6 +61,7 @@ describe('renderer runtime bridge reader', () => {
     vi.stubGlobal('ccTradeRuntime', {
       localWebSocketAccess: {
         host: 'example.com',
+        port: 14477,
         token: 'sessionToken_123',
         tokenParam: 'token',
       },
@@ -68,6 +72,7 @@ describe('renderer runtime bridge reader', () => {
     expect(getRendererRuntime()).toEqual({
       localWebSocketAccess: {
         host: '127.0.0.1',
+        port: 14477,
         token: '',
         tokenParam: 'token',
       },

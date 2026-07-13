@@ -27,7 +27,6 @@ const E2E_STORAGE_KEYS = [
 ];
 
 const buildE2eStoragePayload = ({
-    mockWsUrl = null,
     selected = 'BTCUSDT',
     market = 'USDT',
     interval = '1h',
@@ -50,18 +49,13 @@ const buildE2eStoragePayload = ({
         analytics_volume_filter: JSON.stringify(10000000),
     };
 
-    if (mockWsUrl) {
-        storage.MOCK_WS_URL = mockWsUrl;
-    }
-
     return {
-        mockWsUrl,
         storage,
         keysToReset: E2E_STORAGE_KEYS,
     };
 };
 
-const applyE2eStoragePayload = ({ keysToReset, storage, mockWsUrl }) => {
+const applyE2eStoragePayload = ({ keysToReset, storage }) => {
     for (const key of keysToReset) {
         window.localStorage.removeItem(key);
     }
@@ -70,11 +64,7 @@ const applyE2eStoragePayload = ({ keysToReset, storage, mockWsUrl }) => {
         window.localStorage.setItem(key, value);
     }
 
-    if (mockWsUrl) {
-        window.MOCK_WS_URL = mockWsUrl;
-    } else {
-        delete window.MOCK_WS_URL;
-    }
+    delete window.MOCK_WS_URL;
 };
 
 export const installE2eLocalStorage = async (page, options = {}) => {
@@ -88,7 +78,7 @@ export const reloadWithE2eLocalStorage = async (page, options = {}) => {
     await page.context().addInitScript(applyE2eStoragePayload, payload);
 
     const navigation = page.waitForNavigation({ waitUntil: 'domcontentloaded' });
-    const reload = page.evaluate(({ keysToReset, storage, mockWsUrl }) => {
+    const reload = page.evaluate(({ keysToReset, storage }) => {
         for (const key of keysToReset) {
             window.localStorage.removeItem(key);
         }
@@ -97,11 +87,7 @@ export const reloadWithE2eLocalStorage = async (page, options = {}) => {
             window.localStorage.setItem(key, value);
         }
 
-        if (mockWsUrl) {
-            window.MOCK_WS_URL = mockWsUrl;
-        } else {
-            delete window.MOCK_WS_URL;
-        }
+        delete window.MOCK_WS_URL;
 
         window.location.reload();
     }, payload).catch((error) => {

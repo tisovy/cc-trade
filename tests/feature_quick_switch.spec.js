@@ -33,7 +33,7 @@ test.describe('Feature: Quick Switch', () => {
             env: {
                 ...process.env,
                 NODE_ENV: 'test',
-                MOCK_WS_URL: `ws://localhost:${MOCK_PORT}`,
+                E2E_MOCK_WS_URL: `ws://localhost:${MOCK_PORT}`,
                 BK: '',
                 BS: '',
             },
@@ -41,7 +41,6 @@ test.describe('Feature: Quick Switch', () => {
 
         mainWindow = await waitForAppWindow(electronApp);
         await reloadWithE2eLocalStorage(mainWindow, {
-            mockWsUrl: `ws://localhost:${MOCK_PORT}`,
             selected: 'BTCUSDT',
             interval: '1h',
         });

@@ -5,8 +5,12 @@ import { fileURLToPath } from 'url'
 import { shouldOpenDevTools } from './devtools.js'
 import { setupBinanceConnection } from './services/binance-connection.js'
 import {
+    captureFuturesTestnetExecutionConfig,
+} from './services/futures-testnet-execution-config.js'
+import {
     createLocalWebSocketAccess,
 } from './services/local-websocket-access.js'
+import { captureE2eMockWebSocketAccess } from './e2e-websocket-route.js'
 import {
     createRendererRuntime,
     createRendererRuntimeRegistry,
@@ -28,6 +32,11 @@ import {
 
 registerRendererAppProtocolScheme(protocol)
 
+const futuresExecutionConfig = captureFuturesTestnetExecutionConfig({
+    futuresReadMode: 'mock',
+    forceDisabled: true,
+})
+
 const rendererDevServerUrl = resolveTrustedRendererDevServerUrl({
     value: process.env.VITE_DEV_SERVER_URL,
     isPackaged: app.isPackaged,
@@ -39,9 +48,13 @@ const localWebSocketAccess = {
         ...(rendererDevServerUrl ? [new URL(rendererDevServerUrl).origin] : []),
     ],
 };
+const rendererWebSocketAccess = captureE2eMockWebSocketAccess(process.env) || localWebSocketAccess
 const rendererRuntimeRegistry = createRendererRuntimeRegistry(ipcMain)
 
-setupBinanceConnection({ localWebSocketAccess });
+setupBinanceConnection({
+    localWebSocketAccess,
+    futuresExecutionConfig,
+});
 
 const isWaylandSession = () => process.env.XDG_SESSION_TYPE === 'wayland' || !!process.env.WAYLAND_DISPLAY;
 
@@ -62,7 +75,9 @@ let hasInstalledDevServerCsp = false
 function createWindow() {
     const devServerUrl = rendererDevServerUrl
     const rendererUrl = devServerUrl || RENDERER_ENTRY_URL
-    const contentSecurityPolicy = createRendererContentSecurityPolicy()
+    const contentSecurityPolicy = createRendererContentSecurityPolicy({
+        localWebSocketAccess: rendererWebSocketAccess,
+    })
     if (devServerUrl && !hasInstalledDevServerCsp) {
         installRendererContentSecurityPolicyHeader(session.defaultSession, {
             rendererUrl: devServerUrl,
@@ -71,8 +86,13 @@ function createWindow() {
         hasInstalledDevServerCsp = true
     }
     const rendererRuntime = createRendererRuntime({
-        localWebSocketAccess,
+        localWebSocketAccess: rendererWebSocketAccess,
         futuresReadEnvironment: process.env.FUTURES_READ_ENVIRONMENT,
+        analyticsConfig: {
+            baseUrl: 'http://localhost:3000',
+            enabled: false,
+            authMode: 'none',
+        },
     })
     const win = new BrowserWindow({
         width: 1200,
@@ -129,7 +149,9 @@ app.whenReady().then(() => {
     installRendererAppProtocol({
         protocol,
         rootDirectory: rendererRootDirectory,
-        contentSecurityPolicy: createRendererContentSecurityPolicy(),
+        contentSecurityPolicy: createRendererContentSecurityPolicy({
+            localWebSocketAccess: rendererWebSocketAccess,
+        }),
     })
 
     createWindow()

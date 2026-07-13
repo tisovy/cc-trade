@@ -2,6 +2,7 @@ export const RENDERER_RUNTIME_IPC_CHANNEL = 'cc-trade:renderer-runtime'
 
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]'])
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{0,256}$/
+const DEFAULT_LOCAL_WEBSOCKET_PORT = 14477
 
 const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
 
@@ -16,6 +17,12 @@ const normalizeToken = (value) => {
   const token = normalizeText(value)
   return TOKEN_PATTERN.test(token) ? token : ''
 }
+
+const normalizePort = (value) => (
+  Number.isSafeInteger(value) && value >= 1 && value <= 65535
+    ? value
+    : DEFAULT_LOCAL_WEBSOCKET_PORT
+)
 
 const normalizeAnalyticsConfig = (source) => {
   if (!isRecord(source)) return null
@@ -52,6 +59,7 @@ export const createRendererRuntime = ({
     version: 1,
     localWebSocketAccess: Object.freeze({
       host: normalizeLoopbackHost(localWebSocketAccess.host),
+      port: normalizePort(localWebSocketAccess.port),
       token: normalizeToken(localWebSocketAccess.token),
       tokenParam: 'token',
     }),

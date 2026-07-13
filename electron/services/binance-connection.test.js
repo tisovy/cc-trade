@@ -29,6 +29,19 @@ const moduleMocks = vi.hoisted(() => {
                 state.websocketServerHandlers[event] = handler;
             }),
         };
+        state.executionService = {
+            start: vi.fn().mockResolvedValue(undefined),
+            shutdown: vi.fn().mockResolvedValue(undefined),
+            bindReadSession: vi.fn(() => true),
+            unbindReadSession: vi.fn(() => true),
+            disconnect: vi.fn(() => true),
+            handleSessionRequest: vi.fn(() => true),
+            handlePlaceOrder: vi.fn().mockResolvedValue(true),
+        };
+        state.executionRuntime = {
+            service: state.executionService,
+            durable: false,
+        };
         state.sendRequest = vi.fn(async (path, method) => ({
             data: vi.fn().mockResolvedValue(
                 path === '/api/v3/time' && method === 'GET'
@@ -62,6 +75,7 @@ const moduleMocks = vi.hoisted(() => {
             connected: true,
             remoteAddress: '127.0.0.1',
             sendUTF: vi.fn(),
+            drop: vi.fn(),
             close: vi.fn(() => {
                 state.rendererConnection.connected = false;
                 state.rendererHandlers.close?.();
@@ -79,6 +93,7 @@ const moduleMocks = vi.hoisted(() => {
     const Spot = vi.fn(function MockSpot() {
         return state.spotClient;
     });
+    const createExecutionRuntime = vi.fn(async () => state.executionRuntime);
 
     reset();
 
@@ -86,12 +101,14 @@ const moduleMocks = vi.hoisted(() => {
         Spot,
         WebSocketServer,
         createHttpServer,
+        createExecutionRuntime,
         makeSocket,
         reset,
         setUserDataConnection: (connection) => {
             state.userDataConnection = connection;
         },
         get connect() { return state.connect; },
+        get executionService() { return state.executionService; },
         get httpServer() { return state.httpServer; },
         get marketSocket() { return state.marketSocket; },
         get rendererConnection() { return state.rendererConnection; },
@@ -119,7 +136,12 @@ vi.mock('@binance/spot', () => ({
 vi.mock('./local-websocket-access.js', () => ({
     LOCAL_WEBSOCKET_HOST: '127.0.0.1',
     createLocalWebSocketAccess: vi.fn(() => ({ host: '127.0.0.1' })),
+    resolveLocalWebSocketPort: vi.fn((value) => value || 14477),
     validateLocalWebSocketRequest: vi.fn(() => ({ allowed: true })),
+}));
+
+vi.mock('./futures-testnet-execution-composition.js', () => ({
+    createFuturesTestnetExecutionRuntime: moduleMocks.createExecutionRuntime,
 }));
 
 const flushMicrotasks = async () => {
@@ -134,6 +156,8 @@ describe('setupBinanceConnection user-data orchestration', () => {
     let originalStderrWrite;
     let setupBinanceConnection;
     let SpotTradingAdapter;
+    let LOCAL_RENDERER_WS_MAX_FRAME_BYTES;
+    let LOCAL_RENDERER_WS_MAX_MESSAGE_BYTES;
 
     beforeEach(async () => {
         vi.resetModules();
@@ -161,7 +185,11 @@ describe('setupBinanceConnection user-data orchestration', () => {
         vi.spyOn(console, 'warn').mockImplementation(() => {});
         vi.spyOn(console, 'error').mockImplementation(() => {});
 
-        ({ setupBinanceConnection } = await import('./binance-connection.js'));
+        ({
+            setupBinanceConnection,
+            LOCAL_RENDERER_WS_MAX_FRAME_BYTES,
+            LOCAL_RENDERER_WS_MAX_MESSAGE_BYTES,
+        } = await import('./binance-connection.js'));
         ({ SpotTradingAdapter } = await import('./spot-trading-adapter.js'));
     });
 
@@ -1977,6 +2005,19 @@ describe('setupBinanceConnection user-data orchestration', () => {
         await moduleMocks.rendererHandlers.message({
             type: 'utf8',
             utf8Data: JSON.stringify({
+                request: 'sellOrder',
+                marketType: 'futures',
+                data: {
+                    marketType: 'spot',
+                    symbol: 'BTCUSDT',
+                    quantity: '0.01',
+                    price: '50000',
+                },
+            }),
+        });
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
                 action: 'subscribe',
                 marketType: 'futures',
                 channelId: 'detail-BTCUSDT-1h-forged',
@@ -1985,17 +2026,351 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 interval: '1h',
             }),
         });
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'trade.placeOrder',
+                version: 1,
+                marketType: 'futures',
+                accountId: 'default',
+                clientOrderId: 'generic-futures-place',
+                symbol: 'BTCUSDT',
+                side: 'BUY',
+                orderType: 'LIMIT',
+                timeInForce: 'GTC',
+                price: '50000',
+                quantity: '0.01',
+            }),
+        });
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'trade.cancelOrder',
+                version: 1,
+                marketType: 'futures',
+                accountId: 'default',
+                clientOrderId: 'generic-futures-cancel',
+                symbol: 'BTCUSDT',
+                orderId: '1',
+            }),
+        });
 
         expect(placeOrder).not.toHaveBeenCalled();
         expect(cancelOrder).not.toHaveBeenCalled();
         const rejections = moduleMocks.rendererConnection.sendUTF.mock.calls
             .map(([message]) => JSON.parse(message))
             .filter(payload => payload.command_rejected?.code === 'UNSUPPORTED_MARKET_TYPE');
-        expect(rejections).toHaveLength(3);
+        expect(rejections).toHaveLength(6);
         expect(rejections.map(payload => payload.command_rejected.request)).toEqual([
             'buyOrder',
             'cancelOrder',
+            'sellOrder',
             'subscribe',
+            'trade.placeOrder',
+            'trade.cancelOrder',
+        ]);
+    });
+
+    it('pins local renderer frame/message bounds and rejects malformed or oversized messages', async () => {
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1', port: 14477 },
+        });
+
+        expect(moduleMocks.WebSocketServer).toHaveBeenCalledWith(expect.objectContaining({
+            autoAcceptConnections: false,
+            maxReceivedFrameSize: LOCAL_RENDERER_WS_MAX_FRAME_BYTES,
+            maxReceivedMessageSize: LOCAL_RENDERER_WS_MAX_MESSAGE_BYTES,
+        }));
+
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+
+        await expect(moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: '{"action":',
+        })).resolves.toBeUndefined();
+        await expect(moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: '[]',
+        })).resolves.toBeUndefined();
+        await expect(moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: 'x'.repeat(LOCAL_RENDERER_WS_MAX_MESSAGE_BYTES + 1),
+        })).resolves.toBeUndefined();
+
+        expect(moduleMocks.rendererConnection.drop).toHaveBeenCalledWith(1009, 'message too large');
+    });
+
+    it('routes only the dedicated execution protocol and preserves its exact raw UTF-8 frame', async () => {
+        const spotPlaceOrder = vi.spyOn(SpotTradingAdapter.prototype, 'placeOrder');
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1', port: 14477 },
+        });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+
+        const subscribeRaw = JSON.stringify({
+            action: 'futures.execution.subscribeStatus',
+            version: 1,
+            revision: '0',
+            marketType: 'futures',
+            environment: 'testnet',
+            symbol: 'BTCUSDT',
+        });
+        await moduleMocks.rendererHandlers.message({ type: 'utf8', utf8Data: subscribeRaw });
+
+        const duplicateKeyRaw = '{"action":"futures.execution.placeOrder","action":"futures.execution.placeOrder","version":1}';
+        await moduleMocks.rendererHandlers.message({ type: 'utf8', utf8Data: duplicateKeyRaw });
+
+        const escapedDuplicateRaw = '{"action":"futures.\\u0065xecution.placeOrder","action":"trade.placeOrder","version":1,"marketType":"spot","accountId":"default","clientOrderId":"smuggled-spot","symbol":"BTCUSDT","side":"BUY","orderType":"LIMIT","timeInForce":"GTC","price":"50000","quantity":"0.01"}';
+        await moduleMocks.rendererHandlers.message({ type: 'utf8', utf8Data: escapedDuplicateRaw });
+
+        const preConversionOversizedRaw = JSON.stringify({
+            action: 'futures.execution.placeOrder',
+            padding: 'x'.repeat(4_096),
+        });
+        expect(Buffer.byteLength(preConversionOversizedRaw, 'utf8')).toBeGreaterThan(4_096);
+        expect(Buffer.byteLength(preConversionOversizedRaw, 'utf8')).toBeLessThanOrEqual(
+            LOCAL_RENDERER_WS_MAX_MESSAGE_BYTES,
+        );
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: preConversionOversizedRaw,
+        });
+
+        expect(moduleMocks.executionService.handleSessionRequest).toHaveBeenCalledOnce();
+        expect(moduleMocks.executionService.handleSessionRequest.mock.calls[0][0]).toBe(subscribeRaw);
+        expect(moduleMocks.executionService.handlePlaceOrder).toHaveBeenNthCalledWith(
+            1,
+            duplicateKeyRaw,
+            expect.objectContaining({ connectionId: expect.any(String), emit: expect.any(Function) }),
+        );
+        expect(moduleMocks.executionService.handlePlaceOrder).toHaveBeenNthCalledWith(
+            2,
+            escapedDuplicateRaw,
+            expect.objectContaining({ connectionId: expect.any(String), emit: expect.any(Function) }),
+        );
+        expect(moduleMocks.executionService.handlePlaceOrder).toHaveBeenNthCalledWith(
+            3,
+            preConversionOversizedRaw,
+            expect.objectContaining({ connectionId: expect.any(String), emit: expect.any(Function) }),
+        );
+        expect(spotPlaceOrder).not.toHaveBeenCalled();
+    });
+
+    it('rejects removed hidden action aliases and bounded action/channel envelopes', async () => {
+        vi.stubEnv('BK', '');
+        vi.stubEnv('BS', '');
+        const placeOrder = vi.spyOn(SpotTradingAdapter.prototype, 'placeOrder');
+        const cancelOrder = vi.spyOn(SpotTradingAdapter.prototype, 'cancelOrder');
+
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1', port: 14477 },
+        });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+
+        for (const payload of [
+            { action: 'order', symbol: 'BTCUSDT', side: 'BUY', quantity: '1', price: '1' },
+            { action: 'cancelOrder', symbol: 'BTCUSDT', orderId: 1 },
+            { action: 'subscribe', channelId: 'x'.repeat(129), channelType: 'mini', symbol: 'BTCUSDT', interval: '1h' },
+            Object.fromEntries([
+                ['action', 'subscribe'],
+                ['channelId', 'mini-BTCUSDT-1h'],
+                ['channelType', 'mini'],
+                ['symbol', 'BTCUSDT'],
+                ['interval', '1h'],
+                ...Array.from({ length: 28 }, (_, index) => [`extra${index}`, index]),
+            ]),
+        ]) {
+            await moduleMocks.rendererHandlers.message({
+                type: 'utf8',
+                utf8Data: JSON.stringify(payload),
+            });
+        }
+
+        for (let index = 0; index < 65; index += 1) {
+            await moduleMocks.rendererHandlers.message({
+                type: 'utf8',
+                utf8Data: JSON.stringify({
+                    action: 'subscribe',
+                    channelId: `mini-SYM${index}-1h`,
+                    channelType: 'mini',
+                    symbol: `SYM${index}`,
+                    interval: '1h',
+                }),
+            });
+        }
+
+        expect(placeOrder).not.toHaveBeenCalled();
+        expect(cancelOrder).not.toHaveBeenCalled();
+        const rejectionCodes = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message).command_rejected?.code)
+            .filter(Boolean);
+        expect(rejectionCodes).toEqual(expect.arrayContaining([
+            'UNSUPPORTED_ACTION',
+            'INVALID_CHANNEL_ACTION',
+            'INVALID_ACTION_ENVELOPE',
+            'CHANNEL_LIMIT_EXCEEDED',
+        ]));
+    });
+
+    it('runs positive typed Spot placement, cancellation, and refresh sequencing through main', async () => {
+        const events = [];
+        const makeResponse = (data) => ({ data: vi.fn().mockResolvedValue(data) });
+        moduleMocks.spotClient.restAPI.newOrder = vi.fn(async (params) => {
+            events.push('rest:newOrder');
+            return makeResponse({
+                symbol: params.symbol,
+                side: params.side,
+                type: params.type,
+                status: 'NEW',
+                orderId: 987,
+                price: params.price,
+                origQty: params.quantity,
+                executedQty: '0',
+                transactTime: Date.now(),
+            });
+        });
+        moduleMocks.spotClient.restAPI.deleteOrder = vi.fn(async (params) => {
+            events.push('rest:deleteOrder');
+            return makeResponse({
+                symbol: params.symbol,
+                side: 'BUY',
+                type: 'LIMIT',
+                status: 'CANCELED',
+                orderId: params.orderId,
+                price: '12346',
+                origQty: '99.9',
+                executedQty: '0',
+                updateTime: Date.now(),
+            });
+        });
+        moduleMocks.spotClient.restAPI.getAccount = vi.fn(async () => {
+            events.push('rest:balances');
+            return makeResponse({ balances: [{ asset: 'USDT', free: '100', locked: '0' }] });
+        });
+        moduleMocks.spotClient.restAPI.getOpenOrders = vi.fn(async () => {
+            events.push('rest:openOrders');
+            return makeResponse([]);
+        });
+        moduleMocks.spotClient.restAPI.myTrades = vi.fn(async () => {
+            events.push('rest:history');
+            return makeResponse([]);
+        });
+        moduleMocks.rendererConnection.sendUTF.mockImplementation((message) => {
+            const payload = JSON.parse(message);
+            if (payload.execution_update) events.push(`emit:${payload.execution_update.X}`);
+            if (payload.balances) events.push('emit:balances');
+            if (payload.orders) events.push('emit:orders');
+            if (payload.history) events.push('emit:history');
+        });
+
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1', port: 14477 },
+        });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await flushMicrotasks();
+        await vi.advanceTimersByTimeAsync(1_000);
+        await flushMicrotasks();
+
+        const sendCommand = async (payload) => {
+            const pending = moduleMocks.rendererHandlers.message({
+                type: 'utf8',
+                utf8Data: JSON.stringify(payload),
+            });
+            await flushMicrotasks();
+            await vi.advanceTimersByTimeAsync(2_500);
+            await pending;
+            await flushMicrotasks();
+        };
+
+        events.length = 0;
+        await sendCommand({
+            action: 'trade.placeOrder',
+            version: 1,
+            marketType: 'spot',
+            accountId: 'default',
+            clientOrderId: 'spot-place-positive',
+            symbol: 'BTCUSDT',
+            side: 'BUY',
+            orderType: 'LIMIT',
+            timeInForce: 'GTC',
+            price: '12346',
+            quantity: '99.9',
+        });
+        expect(moduleMocks.spotClient.restAPI.newOrder).toHaveBeenCalledWith({
+            symbol: 'BTCUSDT',
+            side: 'BUY',
+            type: 'LIMIT',
+            timeInForce: 'GTC',
+            quantity: '99.9',
+            price: '12346',
+            newOrderRespType: 'FULL',
+            recvWindow: 60000,
+        });
+        expect(events).toEqual([
+            'rest:newOrder',
+            'emit:NEW',
+            'rest:balances',
+            'emit:balances',
+            'rest:openOrders',
+            'emit:orders',
+            'rest:history',
+            'emit:history',
+        ]);
+
+        events.length = 0;
+        await sendCommand({
+            action: 'trade.cancelOrder',
+            version: 1,
+            marketType: 'spot',
+            accountId: 'default',
+            clientOrderId: 'spot-cancel-positive',
+            symbol: 'BTCUSDT',
+            orderId: 987,
+        });
+        expect(moduleMocks.spotClient.restAPI.deleteOrder).toHaveBeenCalledWith({
+            symbol: 'BTCUSDT',
+            recvWindow: 60000,
+            orderId: 987,
+        });
+        expect(events).toEqual([
+            'rest:deleteOrder',
+            'emit:CANCELED',
+            'rest:balances',
+            'emit:balances',
+            'rest:openOrders',
+            'emit:orders',
+            'rest:history',
+            'emit:history',
+        ]);
+
+        events.length = 0;
+        await sendCommand({
+            action: 'account.refresh',
+            version: 1,
+            marketType: 'spot',
+            accountId: 'default',
+            clientOrderId: 'spot-refresh-positive',
+            symbol: 'BTCUSDT',
+        });
+        expect(events).toEqual([
+            'rest:balances',
+            'emit:balances',
+            'rest:openOrders',
+            'emit:orders',
+            'rest:history',
+            'emit:history',
         ]);
     });
 });

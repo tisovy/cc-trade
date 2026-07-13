@@ -2,12 +2,14 @@ import { randomBytes, timingSafeEqual } from 'crypto';
 import { RENDERER_ORIGIN } from '../renderer-protocol.js';
 
 export const LOCAL_WEBSOCKET_HOST = '127.0.0.1';
+export const LOCAL_WEBSOCKET_PORT = 14477;
 export const LOCAL_WEBSOCKET_TOKEN_PARAM = 'token';
 
 const LOCAL_ORIGIN_PROTOCOLS = new Set(['http:', 'https:']);
 const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 const TOKEN_ARG = 'local-ws-token';
 const HOST_ARG = 'local-ws-host';
+const PORT_ARG = 'local-ws-port';
 const TOKEN_PARAM_ARG = 'local-ws-token-param';
 
 const normalizeValue = (value) => typeof value === 'string' ? value.trim() : '';
@@ -47,22 +49,40 @@ export const isLoopbackHostname = (hostname) => {
     return LOOPBACK_HOSTNAMES.has(normalized);
 };
 
+export const resolveLocalWebSocketPort = (
+    value = process.env.WS_PORT || process.env.WEBSOCKET_PORT || process.env.VITE_WS_PORT,
+) => {
+    const numericPort = typeof value === 'string' && value.trim() !== ''
+        ? Number(value)
+        : value;
+    return Number.isSafeInteger(numericPort) && numericPort >= 1 && numericPort <= 65535
+        ? numericPort
+        : LOCAL_WEBSOCKET_PORT;
+};
+
 export const createLocalWebSocketAccess = ({
     host = LOCAL_WEBSOCKET_HOST,
+    port = resolveLocalWebSocketPort(),
     token = randomBytes(32).toString('base64url'),
     tokenParam = LOCAL_WEBSOCKET_TOKEN_PARAM,
 } = {}) => ({
     host,
+    port: resolveLocalWebSocketPort(port),
     token,
     tokenParam,
 });
 
 export const createRendererWebSocketArguments = ({
     host = LOCAL_WEBSOCKET_HOST,
+    port = LOCAL_WEBSOCKET_PORT,
     token,
     tokenParam = LOCAL_WEBSOCKET_TOKEN_PARAM,
 } = {}) => {
-    const args = [`--${HOST_ARG}=${host}`, `--${TOKEN_PARAM_ARG}=${tokenParam}`];
+    const args = [
+        `--${HOST_ARG}=${host}`,
+        `--${PORT_ARG}=${resolveLocalWebSocketPort(port)}`,
+        `--${TOKEN_PARAM_ARG}=${tokenParam}`,
+    ];
     if (token) {
         args.push(`--${TOKEN_ARG}=${token}`);
     }

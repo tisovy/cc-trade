@@ -866,11 +866,11 @@ Acceptance:
 
 Goal: enable the smallest testnet-only futures order path without weakening the completed read-only, Spot, protocol, lifecycle, credential, or production-exclusion boundaries.
 
-The complete planning checkpoint is in [Phase 6 Testnet Futures Execution Design](./futures_phase6_testnet_execution_design.md). It is the implementation contract; this roadmap records the exit decisions and next boundary.
+The accepted, testnet-grade architecture decision is in [Phase 6 Testnet Futures Execution Design](./futures_phase6_testnet_execution_design.md). It is the normative implementation contract; this roadmap records the exit decisions and next boundary.
 
-### Phase 6 planning decision
+### Phase 6 accepted decision
 
-The first implementation will support only a regular USDⓈ-M Futures Testnet `LIMIT/GTC` order that reduces an existing one-way isolated position:
+Phase 6 supports only a regular USDⓈ-M Futures Testnet `LIMIT/GTC` order that reduces an existing one-way isolated position:
 
 - fixed `https://demo-fapi.binance.com` REST origin;
 - one-way account mode, `positionSide: "BOTH"`, and `reduceOnly: true`;
@@ -884,13 +884,15 @@ The first implementation will support only a regular USDⓈ-M Futures Testnet `L
 
 This subset is safer than an exposure-increasing order because checkpoint one intentionally has no cancellation path. Hedge mode is rejected because Binance prohibits sending `reduceOnly` in hedge mode. Opening orders, hedge reductions, cancellation, modification, conditional/algo orders, leverage/margin/position-mode changes, transfers, and every other write require separate reviews.
 
-The Phase 5 facade stays frozen. Future code must introduce:
+The Phase 5 facade stays frozen. Phase 6 consists of:
 
 - `FuturesTestnetExecutionRiskReader`, a separate exact read-only testnet preflight boundary for server time, exchange metadata including `PERCENT_PRICE`, mark, account configuration, symbol configuration, V3 position, V3 balance, and current regular/algo orders;
 - `FuturesTestnetExecutionFacade`, exposing only `placeReduceOnlyLimitGtcOrder(args)` and `queryOrderByOriginalClientOrderId(args)`;
-- `FuturesTestnetExecutionService`, owning the gate, sessions/generations, exact validation, cross-process ownership, integrity-anchored journal, state machine, reconciliation/open-order monitoring, rate admission, and safe acknowledgements.
+- one process-global `FuturesTestnetExecutionService`, owning the gate, sessions/generations, exact validation, cross-process ownership, integrity-anchored journal, state machine, reconciliation/open-order monitoring, rate admission, and safe acknowledgements.
 
 No generic SDK client, endpoint name, method, raw options, base override, request passthrough, production host, or additional write method may be exposed.
+
+The 2026-07-13 implementation amendment makes production separation structural: Phase 6 has only the compiled demo host, testnet credential capture, dedicated execution protocol, and isolated packaged/dev/E2E testnet storage namespaces. Production composition, credentials, protocol, host selection, storage, and recovery must be separately implemented and reviewed rather than added as a mode. All execution configuration and credential values are captured and deleted before the first `BrowserWindow`; E2E scrubs them and forces execution off. The original raw WebSocket frame reaches the duplicate-aware execution parser under the 4096-byte command cap, while the outer route bounds frames and connection channel count. Backend recovery is Query Order-only, never renderer-callable, and never resends the POST; the exact operator procedure is recorded in ADR section 10.6.
 
 ### Feature gate and trust boundary
 
@@ -902,7 +904,7 @@ Execution remains disabled unless every backend-owned condition passes at dispat
 - main-only captured credentials and every new execution config value, already frozen/deleted from inherited environment before `BrowserWindow`;
 - exact 1–16-symbol comma-separated allowlist grammar, canonical max-notional and positive available-balance caps, leverage cap from 1 through 3, and liquidation-distance floor of at least 1000 bps;
 - completed renderer sandbox/preload/CSP/navigation hardening and Electron single-instance plus exclusive journal ownership;
-- exact versioned command, current owned session, same execution generation/account/symbol, complete risk data no older than five seconds, and dispatch no more than one second after final validation;
+- exact versioned command, current owned session, and the same execution generation/account/symbol; exchange metadata no older than 300 seconds, account/symbol configuration no older than 30 seconds, mark/position/balance/open-order/server-time risk data no older than five seconds, and dispatch no more than one second after final validation;
 - one-way/single-asset/can-trade account, isolated/no-auto-add symbol, matching observed leverage, empty symbol orders, correct reduction, available margin state, and exact backend risk validation;
 - validated HMAC/rollback-anchored fsync-capable journal, no concurrent/accepted-open command, no unresolved unknown across credential rotation, and no active persisted rate pause/ban.
 
@@ -910,7 +912,7 @@ Mock, production-like configuration, production-only credentials, renderer marke
 
 ### Typed protocol and acknowledgements
 
-The planned strict action is `futures.execution.placeOrder`, version `1`, on a future dedicated `futures-execution` channel. It accepts exactly:
+The strict action is `futures.execution.placeOrder`, version `1`, on the dedicated `futures-execution` channel. It accepts exactly:
 
 - backend-issued 128-bit/32-lowercase-hex one-use `requestId` bound to connection/symbol/generation for 30 seconds; never renderer/Spot `Math.random`;
 - `marketType: "futures"`, `environment: "testnet"`, allowlisted symbol, and `BUY|SELL`;
@@ -943,7 +945,7 @@ Reconciliation uses only signed `GET /fapi/v1/order` with exact symbol and origi
 
 Before intent, session teardown aborts locally. After intent, teardown is not cancellation, recovery continues without a renderer, and stale generations never deliver into a newer session. If a post-intent transition cannot fsync, no new revision/ack is emitted: the last durable pending view remains, status delivery closes, and the block/repair continue until unknown can itself be durably recorded. No unpersisted terminal result is acknowledged.
 
-The journal is not considered renderer-inaccessible under the current Node-enabled Phase 5 window. Renderer sandboxing is a hard prerequisite. The future store uses separate packaged/dev/E2E namespaces, Electron single-instance and exclusive regular-file/no-symlink ownership, main-only `safeStorage` integrity key, sealed latest-hash anchor, length-framed sequence/HMAC records, SHA-256 fixed-field command digests, complete non-secret command snapshots, file and directory fsync, fail-closed corruption/rollback handling, atomic compaction, and permanent ID/digest/terminal-state tombstones. Queued-only crash records become durable local rejections; intent records become unknown. Credential mismatch never queries the wrong account or bypasses an older global unknown.
+The journal is not considered renderer-inaccessible under a Node-enabled window, so renderer sandboxing remains a hard prerequisite. The store uses separate packaged/development namespaces while E2E is execution-disabled and opens no journal. Electron single-instance plus exclusive regular-file/no-symlink ownership, a main-only `safeStorage` integrity key, sealed latest-hash anchor, length-framed sequence/HMAC records, SHA-256 fixed-field command digests, complete non-secret command snapshots, file and directory fsync, and fail-closed corruption/rollback handling protect the append-only store. Phase 6 deletes or compacts no record: permanent ID/digest/terminal-state tombstones remain in the bounded 50,000-record/16-MiB journal, and reaching either bound fails closed. Queued-only crash records become durable local rejections; intent records become unknown. Credential mismatch never queries the wrong account or bypasses an older global unknown.
 
 ### Exact financial and transport contract
 
@@ -951,7 +953,7 @@ Native `BigInt` fixed-point arithmetic will parse, compare, align, multiply, sub
 
 Backend checks include symbol allowlist/status/contract/assets, `PRICE_FILTER`, `PERCENT_PRICE`, `LOT_SIZE`, `MIN_NOTIONAL`, `MAX_NUM_ORDERS`, tick, step, min/max price and quantity, exchange minimum notional, configured and symbol max notional, leverage, margin type, account/position mode, position side/direction/quantity, reduce-only semantics, open-order absence, mark/position/balance/config freshness, configured positive available-balance buffer, and exact liquidation distance. Official percent price is side-specific; Phase 6 intentionally enforces the opposite bound too as a stricter local band. Official zero min/max bounds are disabled, but zero tick or non-positive LOT_SIZE metadata fails closed. The local path intentionally enforces minimum notional even though Binance documents a reduce-only exemption.
 
-The POST facade sends only canonical `symbol, side, type=LIMIT, timeInForce=GTC, quantity, price, positionSide=BOTH, reduceOnly=true, newClientOrderId, newOrderRespType=ACK, recvWindow=5000, timestamp, signature`. It uses `X-MBX-APIKEY`, HMAC-SHA256 over the exact transmitted pre-signature form serialization, `redirect: "error"`, exact origin/path checks, no proxy/agent/dispatcher/caller overrides, a 10-second whole-operation deadline, 64-KiB body and exact header/message bounds, and zero write retries. Every Phase 6 GET uses the shared Spot/Phase 5 IP limiter with Spot priority and `maxRetries: 0`; the full 25-weight preflight reads mark exactly once and last, begins only with no Spot waiter, and preserves 23-weight Spot headroom. Placement consumes one unit on each order-count window and zero IP weight; the app further limits placement to one per 10 seconds, five per minute, and one nonterminal command, with counters persisted from intent records. Conservative persisted `418`/`429` pauses survive restart; missing/malformed headers close admission rather than assuming capacity.
+The POST facade sends only canonical `symbol, side, type=LIMIT, timeInForce=GTC, quantity, price, positionSide=BOTH, reduceOnly=true, newClientOrderId, newOrderRespType=ACK, recvWindow=5000, timestamp, signature`. It uses `X-MBX-APIKEY`, HMAC-SHA256 over the exact transmitted pre-signature form serialization, `redirect: "error"`, exact origin/path checks, no proxy/agent/dispatcher/caller overrides, a 10-second whole-operation deadline, 64-KiB body and exact header/message bounds, and zero write retries. Every Phase 6 GET uses a process-global coordinator with a separate fixed-demo-origin quota bucket, Spot waiter priority, and `maxRetries: 0`; the unchanged CRITICAL Spot limiter remains behind its own origin bucket. The full 25-weight preflight reads mark exactly once and last, begins only with no Spot waiter, reserves its complete demo capacity, and preserves 23-weight Spot headroom. Placement consumes one unit on each order-count window and zero IP weight; the app further limits placement to one per 10 seconds, five per minute, and one nonterminal command, with counters persisted from intent records. Conservative persisted `418`/`429` pauses survive restart; missing/malformed headers close admission rather than assuming capacity.
 
 ### Official documentation and SDK review
 
@@ -978,13 +980,15 @@ Primary references: [General Information](https://developers.binance.com/docs/de
 
 ### Renderer plan
 
-Checkpoint 2 completes the renderer-isolation prerequisite without adding a renderer execution component. Production and E2E windows are Node-disabled, context-isolated, sandboxed, and served from a root-confined internal `cc-trade://renderer/index.html` protocol rather than `file:`. The compiled preload exposes only immutable runtime data required by existing behavior; navigation, redirects, subframes, webviews, and window-open are guarded, and CSP is response-header based. The custom scheme authority is local application identity, not a network hostname or production endpoint. The loopback WebSocket server accepts only that exact local origin in packaged/E2E mode (or one validated loopback dev origin) and still requires the session token. Only after the backend implementation and fake suites pass may one compact ticket appear in Futures mode, labeled `USDⓈ-M TESTNET · REDUCE ONLY`. It may expose exact quantity/price inputs and a backend risk preview, with leverage/margin as read-only assertions. It has no opening, leverage, margin, reduce-only, cancel, modify, transfer, mock, or production control; it disables on stale/incomplete/disconnected/busy/unknown state and presents revisioned backend unknown/recovery explicitly. Spot/global shortcuts and Enter never submit futures, and no execution data enters `DataContext`, browser storage, analytics, telemetry, or clipboard. Spot UI, shortcuts, LIMIT/GTC, cancellation, refresh timing/weights, and `0.999` remain unchanged.
+Reopened checkpoint-2 acceptance removes renderer-controlled `MOCK_WS_URL` routing from packaged builds. A token is attached only to the exact main-issued runtime host and port; E2E mock routing is explicit, isolated, tokenless, and execution-disabled. CSP lists reviewed exact endpoints, the loopback server bounds raw frames and per-connection channels, and hidden `action: "order"` / `action: "cancelOrder"` Spot aliases are absent. Production and E2E windows remain Node-disabled, context-isolated, sandboxed, and served from a root-confined internal `cc-trade://renderer/index.html` protocol. The compact ticket is labeled `USDⓈ-M TESTNET · REDUCE ONLY`, uses one dedicated hook outside `DataContext`, and displays only backend-owned capability, intent, pending, accepted, rejected, unknown, and recovery state. It has no opening, leverage, margin, reduce-only, cancel, modify, transfer, mock, or production control. Spot/global shortcuts and Enter never submit futures, and no execution data enters browser storage, analytics, telemetry, or clipboard. Spot UI, shortcuts, LIMIT/GTC, cancellation, refresh timing/weights, and exact `0.999` behavior remain unchanged.
 
-### Planned implementation checkpoints
+### Integrated delivery gates
+
+Items 3 through 7 are verification gates inside one integrated delivery, not independently shippable stopping points. The execution write action is registered only after the complete backend fake suite passes, and the delivery is accepted only after the final regression/security scans pass together.
 
 1. Strict command/ack schemas, native exact-decimal utility, pure risk evaluator, and deterministic tests only; no route or transport.
 2. [x] Renderer sandbox/preload/CSP/navigation hardening with complete Spot regression; still no route.
-3. Separate exact read-only `FuturesTestnetExecutionRiskReader` plus shared-IP/Spot-priority admission and generation/freshness ownership; Phase 5 frozen.
+3. Separate exact read-only `FuturesTestnetExecutionRiskReader` plus per-origin/Spot-priority coordination and generation/tiered-freshness ownership; Phase 5 frozen.
 4. Single-instance/exclusive ownership, integrity-anchored journal, status snapshots, state machine, fake-only reconciliation, and confirmed-open monitoring; register only the three reviewed read-only status/prepare actions, with no write route or POST facade.
 5. Exact two-method testnet facade with fake signing/host/redirect/deadline/weight/error tests; still no route.
 6. Deliberate installation of `futures.execution.placeOrder` as the only network-write action behind the complete gate; the three reviewed read-only actions remain, and generic typed plus legacy futures remain rejected.
@@ -993,7 +997,7 @@ Checkpoint 2 completes the renderer-isolation prerequisite without adding a rend
 
 ### Planned test matrix
 
-Deterministic fake-only tests cover default-disabled and exact config grammar; credential rotation/global block; renderer sandbox and secret/redaction sinks; production/redirect exclusion; strict resource-bounded protocol, backend IDs, revisioned status, and malformed null-identity acks; exact decimal/filter/side-specific percent/notional/leverage/margin/mode/reduce/liquidation boundaries; every reader array identity and fresh/stale/server-clock case; exact URL/signature/deadline/body/header/weights and shared Spot admission; duplicate IDs, two-process locks, journal framing/HMAC/rollback/torn writes/compaction/fsync ordering and 90-day tombstones; queued/intent/post-intent crash cases; every HTTP/body/network ambiguity, persisted bans/counters, zero POST retry, exact fast/slow reconciliation and accepted-open monitoring; reconnect/teardown/stale revisions; continued typed/legacy rejection before and after route installation; and complete Spot/UI/storage isolation. Optional testnet smoke testing is separately authorized, manual, non-default, and excluded from CI.
+Deterministic fake-only tests cover default-disabled and exact config grammar; credential rotation/global block; renderer sandbox and secret/redaction sinks; production/redirect exclusion; strict resource-bounded protocol, backend IDs, revisioned status, and malformed null-identity acks; exact decimal/filter/side-specific percent/notional/leverage/margin/mode/reduce/liquidation boundaries; every reader array identity and freshness-tier/server-clock case; exact URL/signature/deadline/body/header/weights and per-origin Spot-priority admission; duplicate IDs, two-process locks, journal framing/HMAC/rollback/torn and partial writes/fsync ordering, permanent replay identities, and journal capacity; queued/intent/post-intent crash cases; every HTTP/body/network ambiguity, persisted bans/counters, zero POST retry, exact fast/slow reconciliation and accepted-open monitoring through the 90-day query horizon; reconnect/teardown/stale revisions; continued generic typed/legacy rejection after the dedicated action is installed; and complete Spot/UI/storage isolation. Optional testnet smoke testing is separately authorized, manual, non-default, and excluded from CI.
 
 ### Checkpoint 1 implementation record (2026-07-12)
 
@@ -1048,11 +1052,13 @@ Safety invariants:
 - Teardown is never cancellation.
 - Accepted/open and unknown attempts remain backend-monitored through soft disable/restart; incompatible binary downgrade is prohibited.
 - Redirects, production origins, generic transports, and caller network options are impossible.
-- Legacy futures commands remain rejected, and existing typed futures commands remain rejected until the exact new route is deliberately installed.
+- Generic typed and every legacy futures command remain rejected; only the exact dedicated `futures.execution.placeOrder` action can reach the Phase 6 service after its backend test gate.
 - Spot behavior and ownership remain unchanged.
 - Phase 7 must use separately reviewed production composition, credentials, protocol/channel, and storage; it cannot add a production enum to Phase 6.
 
-Phase status: Implementation in progress; checkpoints 1 and 2 complete
+Phase status: **Complete (2026-07-13).**
+
+Final integrated verification passed `57` Vitest files / `2307` tests (`2` existing skips), full ESLint, production and E2E builds, all `13` Electron Playwright scenarios, circular-import checks, static route/credential/host/write/isolation scans, and an independent adversarial closure audit. Phase 7 remains the next separately reviewed boundary; Phase 6 contains no production Futures support.
 
 ## Phase 7: Guarded Production Futures Rollout
 

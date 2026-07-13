@@ -51,7 +51,7 @@ test.describe('Feature: Safe Order Reduction', () => {
             env: {
                 ...process.env,
                 NODE_ENV: 'test',
-                MOCK_WS_URL: `ws://localhost:${MOCK_PORT}`,
+                E2E_MOCK_WS_URL: `ws://localhost:${MOCK_PORT}`,
                 BK: '',
                 BS: '',
             },
@@ -59,7 +59,6 @@ test.describe('Feature: Safe Order Reduction', () => {
 
         mainWindow = await waitForAppWindow(electronApp);
         await reloadWithE2eLocalStorage(mainWindow, {
-            mockWsUrl: `ws://localhost:${MOCK_PORT}`,
             selected: 'BTCUSDT',
             interval: '1h',
         });

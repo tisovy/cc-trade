@@ -6,6 +6,7 @@ import {
   createRendererAppProtocolHandler,
   createRendererContentSecurityPolicy,
   getTrustedAnalyticsOrigin,
+  getTrustedLocalWebSocketOrigin,
   RENDERER_ENTRY_URL,
   RENDERER_PROTOCOL,
   registerRendererAppProtocolScheme,
@@ -42,15 +43,22 @@ describe('renderer application protocol', () => {
   it('creates a restrictive CSP with only loopback and the exact configured analytics origin', () => {
     const policy = createRendererContentSecurityPolicy({
       analyticsBaseUrl: 'https://analytics.example.test/v1',
+      localWebSocketAccess: { host: '127.0.0.1', port: 14477 },
     })
 
     expect(getTrustedAnalyticsOrigin('https://analytics.example.test/v1')).toBe('https://analytics.example.test')
     expect(getTrustedAnalyticsOrigin('file:///tmp/analytics')).toBeNull()
+    expect(getTrustedLocalWebSocketOrigin({ host: '127.0.0.1', port: 14477 })).toBe('ws://127.0.0.1:14477')
+    expect(getTrustedLocalWebSocketOrigin({ host: 'localhost', port: 54321 })).toBe('ws://localhost:54321')
+    expect(getTrustedLocalWebSocketOrigin({ host: 'example.com', port: 14477 })).toBeNull()
     expect(policy).toContain("default-src 'self'")
     expect(policy).toContain("frame-ancestors 'none'")
     expect(policy).toContain("script-src 'self'")
     expect(policy).toContain('connect-src')
     expect(policy).toContain('https://analytics.example.test')
+    expect(policy).toContain('ws://127.0.0.1:14477')
+    expect(policy).not.toContain('localhost:*')
+    expect(policy).not.toContain('127.0.0.1:*')
     expect(policy).not.toContain('connect-src https:')
     expect(policy).not.toContain("script-src 'unsafe-inline'")
   })

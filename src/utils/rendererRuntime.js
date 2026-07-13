@@ -1,9 +1,11 @@
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]'])
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{0,256}$/
+const DEFAULT_LOCAL_WEBSOCKET_PORT = 14477
 
 const fallbackRuntime = () => ({
   localWebSocketAccess: {
     host: '127.0.0.1',
+    port: DEFAULT_LOCAL_WEBSOCKET_PORT,
     token: '',
     tokenParam: 'token',
   },
@@ -16,12 +18,18 @@ const isRecord = (value) => value !== null && typeof value === 'object' && !Arra
 const readLocalWebSocketAccess = (source) => {
   if (!isRecord(source)) return fallbackRuntime().localWebSocketAccess
 
-  const { host, token, tokenParam } = source
-  if (!LOOPBACK_HOSTS.has(host) || typeof token !== 'string' || !TOKEN_PATTERN.test(token) || tokenParam !== 'token') {
+  const { host, port, token, tokenParam } = source
+  if (!LOOPBACK_HOSTS.has(host)
+    || !Number.isSafeInteger(port)
+    || port < 1
+    || port > 65535
+    || typeof token !== 'string'
+    || !TOKEN_PATTERN.test(token)
+    || tokenParam !== 'token') {
     return fallbackRuntime().localWebSocketAccess
   }
 
-  return { host, token, tokenParam }
+  return { host, port, token, tokenParam }
 }
 
 const readAnalyticsConfig = (source) => {

@@ -302,13 +302,6 @@ const handleChannelProtocolMessage = (payload, marketState, state, api, handlers
         case TRADING_COMMAND_ACTIONS.ACCOUNT_REFRESH:
             handlers.onTypedCommand?.(payload, api);
             break;
-        case 'order':
-            state.lastOrder = payload.data || payload;
-            handlers.onChannelOrder?.(payload, api);
-            break;
-        case 'cancelOrder':
-            handlers.onChannelCancel?.(payload, api);
-            break;
         default:
             handlers.onChannelMessage?.(payload, api);
             break;

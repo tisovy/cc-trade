@@ -5,6 +5,7 @@ import {
     getRequestToken,
     isAllowedWebSocketOrigin,
     isExpectedToken,
+    resolveLocalWebSocketPort,
     validateLocalWebSocketRequest,
 } from './local-websocket-access.js';
 import { RENDERER_ORIGIN } from '../renderer-protocol.js';
@@ -24,12 +25,22 @@ describe('local WebSocket access control', () => {
         const access = createLocalWebSocketAccess({ token: 'abc123' });
 
         expect(access.host).toBe('127.0.0.1');
+        expect(access.port).toBe(14477);
         expect(access.token).toBe('abc123');
         expect(createRendererWebSocketArguments(access)).toEqual([
             '--local-ws-host=127.0.0.1',
+            '--local-ws-port=14477',
             '--local-ws-token-param=token',
             '--local-ws-token=abc123',
         ]);
+    });
+
+    it('accepts only a valid explicit local WebSocket port', () => {
+        expect(resolveLocalWebSocketPort('54321')).toBe(54321);
+        expect(resolveLocalWebSocketPort(65535)).toBe(65535);
+        expect(resolveLocalWebSocketPort('54321junk')).toBe(14477);
+        expect(resolveLocalWebSocketPort(0)).toBe(14477);
+        expect(resolveLocalWebSocketPort(65536)).toBe(14477);
     });
 
     it('allows only the exact local renderer origin by default', () => {

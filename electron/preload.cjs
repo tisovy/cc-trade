@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron')
 const RUNTIME_IPC_CHANNEL = 'cc-trade:renderer-runtime'
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]'])
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{0,256}$/
+const DEFAULT_LOCAL_WEBSOCKET_PORT = 14477
 
 const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
 
@@ -16,6 +17,7 @@ const hasExactKeys = (value, keys) => {
 const fallbackRuntime = () => Object.freeze({
   localWebSocketAccess: Object.freeze({
     host: '127.0.0.1',
+    port: DEFAULT_LOCAL_WEBSOCKET_PORT,
     token: '',
     tokenParam: 'token',
   }),
@@ -54,17 +56,23 @@ const parseRuntime = (runtime) => {
     if (!hasExactKeys(runtime, ['version', 'localWebSocketAccess', 'futuresReadEnvironment', 'analyticsConfig'])) {
       return fallbackRuntime()
     }
-    if (runtime.version !== 1 || !hasExactKeys(runtime.localWebSocketAccess, ['host', 'token', 'tokenParam'])) {
+    if (runtime.version !== 1 || !hasExactKeys(runtime.localWebSocketAccess, ['host', 'port', 'token', 'tokenParam'])) {
       return fallbackRuntime()
     }
 
-    const { host, token, tokenParam } = runtime.localWebSocketAccess
-    if (!LOOPBACK_HOSTS.has(host) || typeof token !== 'string' || !TOKEN_PATTERN.test(token) || tokenParam !== 'token') {
+    const { host, port, token, tokenParam } = runtime.localWebSocketAccess
+    if (!LOOPBACK_HOSTS.has(host)
+      || !Number.isSafeInteger(port)
+      || port < 1
+      || port > 65535
+      || typeof token !== 'string'
+      || !TOKEN_PATTERN.test(token)
+      || tokenParam !== 'token') {
       return fallbackRuntime()
     }
 
     return Object.freeze({
-      localWebSocketAccess: Object.freeze({ host, token, tokenParam }),
+      localWebSocketAccess: Object.freeze({ host, port, token, tokenParam }),
       futuresReadEnvironment: runtime.futuresReadEnvironment === 'testnet' ? 'testnet' : 'mock',
       analyticsConfig: runtime.analyticsConfig === null ? null : normalizeAnalyticsConfig(runtime.analyticsConfig),
     })

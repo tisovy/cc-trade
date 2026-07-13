@@ -50,6 +50,21 @@ vi.mock('./hooks/useAlertContext', () => ({
   }),
 }))
 
+vi.mock('./hooks/useFuturesTestnetExecution', () => ({
+  default: () => ({
+    connected: false,
+    subscribed: false,
+    submissionLocked: false,
+    revision: null,
+    symbol: null,
+    capability: null,
+    intent: null,
+    attempt: null,
+    prepareIntent: vi.fn(() => false),
+    placeOrder: vi.fn(() => false),
+  }),
+}))
+
 vi.mock('./context/NotificationProvider', () => ({
   NotificationProvider: ({ children }) => children,
 }))
@@ -241,6 +256,7 @@ describe('App spot order payloads', () => {
 
     expect(screen.getByTestId('futures-readonly-view')).toBeInTheDocument()
     expect(screen.getByLabelText('USDⓈ-M futures read-only risk')).toBeInTheDocument()
+    expect(screen.getByLabelText('USDⓈ-M testnet reduce-only execution')).toBeInTheDocument()
     expect(screen.queryByTestId('place-spot-order')).not.toBeInTheDocument()
     expect(screen.queryByTestId('cancel-spot-order')).not.toBeInTheDocument()
     expect(mocks.send).not.toHaveBeenCalled()

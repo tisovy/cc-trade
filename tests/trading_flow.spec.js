@@ -13,6 +13,7 @@ test.describe('Trading Flow (Mocked)', () => {
     let electronApp;
     let mainWindow;
     let wss;
+    let mockRequestUrls;
     const MOCK_PORT = 54321;
 
     test.beforeAll(async () => {
@@ -28,7 +29,9 @@ test.describe('Trading Flow (Mocked)', () => {
             },
         });
 
-        wss.on('connection', (ws) => {
+        mockRequestUrls = [];
+        wss.on('connection', (ws, request) => {
+            mockRequestUrls.push(request.url);
             console.log('Mock WS Connected');
 
             const handlePlaceOrder = (payload, mockWs) => {
@@ -113,7 +116,7 @@ test.describe('Trading Flow (Mocked)', () => {
             env: {
                 ...process.env,
                 NODE_ENV: 'test',
-                MOCK_WS_URL: `ws://localhost:${MOCK_PORT}`,
+                E2E_MOCK_WS_URL: `ws://localhost:${MOCK_PORT}`,
                 BK: '', // Disable Live Binance Connection
                 BS: '', // Disable Live Binance Connection
             },
@@ -121,7 +124,6 @@ test.describe('Trading Flow (Mocked)', () => {
 
         mainWindow = await waitForAppWindow(electronApp, { pollInterval: 500 });
         await reloadWithE2eLocalStorage(mainWindow, {
-            mockWsUrl: `ws://localhost:${MOCK_PORT}`,
             selected: 'BTCUSDT',
             interval: '1h',
         });
@@ -144,6 +146,10 @@ test.describe('Trading Flow (Mocked)', () => {
     });
 
     test('should place and cancel an order', async () => {
+        await expect.poll(() => mockRequestUrls.length).toBeGreaterThan(0);
+        expect(mockRequestUrls).toEqual(expect.arrayContaining(['/']));
+        expect(mockRequestUrls.some((requestUrl) => requestUrl.includes('token='))).toBe(false);
+
         await mainWindow.keyboard.press('Escape');
         await expect(mainWindow.locator('.quick-switch-backdrop')).toBeHidden();
 

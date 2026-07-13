@@ -44,6 +44,7 @@ describe('renderer runtime preload boundary', () => {
     const runtime = createRendererRuntime({
       localWebSocketAccess: {
         host: '127.0.0.1',
+        port: 14477,
         token: 'sessionToken_123',
         tokenParam: 'unexpected',
       },
@@ -63,6 +64,7 @@ describe('renderer runtime preload boundary', () => {
       version: 1,
       localWebSocketAccess: {
         host: '127.0.0.1',
+        port: 14477,
         token: 'sessionToken_123',
         tokenParam: 'token',
       },
@@ -81,7 +83,7 @@ describe('renderer runtime preload boundary', () => {
 
   it('exposes one immutable data object and fails closed on malformed main data', () => {
     const runtime = createRendererRuntime({
-      localWebSocketAccess: { host: 'localhost', token: 'abc123' },
+      localWebSocketAccess: { host: 'localhost', port: 54321, token: 'abc123' },
       futuresReadEnvironment: 'testnet',
     })
 
@@ -89,6 +91,7 @@ describe('renderer runtime preload boundary', () => {
     expect(Object.keys(exposed)).toEqual(['ccTradeRuntime'])
     expect(exposed.ccTradeRuntime.localWebSocketAccess).toEqual({
       host: 'localhost',
+      port: 54321,
       token: 'abc123',
       tokenParam: 'token',
     })
@@ -101,6 +104,7 @@ describe('renderer runtime preload boundary', () => {
     expect(malformed.ccTradeRuntime).toEqual({
       localWebSocketAccess: {
         host: '127.0.0.1',
+        port: 14477,
         token: '',
         tokenParam: 'token',
       },
@@ -126,7 +130,7 @@ describe('renderer runtime preload boundary', () => {
     const registeredSender = { mainFrame: registeredMainFrame }
     const unregisteredSender = {}
     const runtime = createRendererRuntime({
-      localWebSocketAccess: { token: 'abc123' },
+      localWebSocketAccess: { port: 14477, token: 'abc123' },
     })
 
     registry.register(registeredSender, runtime)

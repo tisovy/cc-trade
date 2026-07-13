@@ -325,22 +325,30 @@ describe('risk ownership, identity, and freshness', () => {
         );
     });
 
-    it('accepts every resource at exactly five seconds and rejects each at five seconds plus one', () => {
+    it.each([
+        ['serverTime', 5000],
+        ['exchangeInfo', 300000],
+        ['markPrice', 5000],
+        ['accountConfig', 30000],
+        ['symbolConfig', 30000],
+        ['positions', 5000],
+        ['balance', 5000],
+        ['regularOpenOrders', 5000],
+        ['algoOpenOrders', 5000],
+    ])('applies the reviewed freshness tier to %s', (name, maximumAge) => {
         const boundary = makeInput();
-        Object.values(boundary.observations).forEach((observation) => {
-            observation.ageMs = 5000;
-        });
+        boundary.observations[name].ageMs = maximumAge;
         expect(evaluateFuturesTestnetExecutionRisk(boundary)).toEqual({ ok: true });
 
-        Object.keys(makeInput().observations).forEach((name) => {
+        {
             const input = makeInput();
-            input.observations[name].ageMs = 5001;
+            input.observations[name].ageMs = maximumAge + 1;
             expectRejected(
                 input,
                 FUTURES_TESTNET_EXECUTION_SAFE_CODES.RISK_DATA_REJECTED,
                 FUTURES_TESTNET_EXECUTION_RISK_REASONS.STALE_OR_MIXED_DATA,
             );
-        });
+        }
     });
 
     it.each([

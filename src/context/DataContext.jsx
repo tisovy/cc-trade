@@ -284,14 +284,10 @@ export const DataProvider = ({ children }) => {
   // Get notification functions (safely with fallback)
   const notifications = useNotifications();
 
-  // Resolve WS_URL at runtime to allow for mocking
-  const WS_PORT = import.meta.env.VITE_WS_PORT || 14477;
   const localWebSocketAccess = getRendererLocalWebSocketAccess();
-  // Check localStorage, window, and import.meta.env
-  const MOCK_URL = localStorage.getItem('MOCK_WS_URL') || window.MOCK_WS_URL || import.meta.env.MOCK_WS_URL;
-  const configuredWsUrl = MOCK_URL || import.meta.env.VITE_WS_URL || `ws://${localWebSocketAccess.host}:${WS_PORT}`;
-  const WS_URL = withLocalWebSocketAccess(configuredWsUrl, localWebSocketAccess);
-  console.log('Using WebSocket URL:', redactLocalWebSocketAccess(WS_URL, localWebSocketAccess.tokenParam), 'Mock:', MOCK_URL);
+  const runtimeWsUrl = `ws://${localWebSocketAccess.host}:${localWebSocketAccess.port}`;
+  const WS_URL = withLocalWebSocketAccess(runtimeWsUrl, localWebSocketAccess);
+  console.log('Using WebSocket URL:', redactLocalWebSocketAccess(WS_URL, localWebSocketAccess.tokenParam));
 
   const initialPanelState = (() => {
     const storedPanel = readStorage(STORAGE_KEYS.PANEL, null);
