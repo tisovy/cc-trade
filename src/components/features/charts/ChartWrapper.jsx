@@ -7,6 +7,7 @@ import { createChart, ColorType, CrosshairMode, LineStyle, CandlestickSeries, Hi
 import RSIPane from './RSIPane';
 import { SMA } from 'technicalindicators';
 import { precisionTruncate, formatVolumeShort } from '../../../utils/operations';
+import { buildVolumeHistogramPresentation } from '../../../utils/chartVolume';
 import { DEFAULT_PRECISION, getMinMove } from '../../../utils/precision';
 import { useDataContext } from '../../../context/DataContext';
 import { useDrawingContext } from '../../../hooks/useDrawingContext';
@@ -492,12 +493,14 @@ export const ChartWrapper = (props) => {
         if (candleSeriesRef.current && volumeSeriesRef.current && data && data.length > 0) {
             candleSeriesRef.current.setData(data);
 
-            const volumeData = data.map(d => ({
-                time: d.time,
-                value: d.volume,
-                color: d.close >= d.open ? 'rgba(38, 166, 154, 0.5)' : 'rgba(239, 83, 80, 0.5)',
-            }));
-            volumeSeriesRef.current.setData(volumeData);
+            const volumePresentation = buildVolumeHistogramPresentation(data, {
+                upColor: 'rgba(38, 166, 154, 0.5)',
+                downColor: 'rgba(239, 83, 80, 0.5)',
+            });
+            volumeSeriesRef.current.applyOptions({
+                priceFormat: volumePresentation.priceFormat,
+            });
+            volumeSeriesRef.current.setData(volumePresentation.data);
 
             const closePrices = data.map(d => d.close);
             const period = 80;
