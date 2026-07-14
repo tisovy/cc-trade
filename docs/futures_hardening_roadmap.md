@@ -1157,3 +1157,19 @@ The fake-backed Phase 7 delivery is complete and the operator has now authorized
 - require the trusted credential ceremony, visible backend identity/caps, initially engaged kill switch, and the exact dedicated ARM LIVE intent/phrase before intentional new exposure; backend operational recovery remains separate;
 - finish with full Spot/Phase 5/Phase 6/Phase 7 unit, lint, production/E2E build, Electron Playwright, circular-import, static isolation/credential/host/write scans, and GitNexus change detection against `36681f0` and `main`;
 - preserve a clean auditable commit and document that no real production request was sent by automated development or verification.
+
+## Phase 8: USDⓈ-M Futures Trading Workstation
+
+Goal: turn the guarded Testnet and Live execution pages into a complete Binance-class Futures trading workstation without merging their backend authority or weakening the completed Phase 5/6/7 safety boundaries.
+
+Status: **planned; implementation has not started.** The normative implementation sequence and functional parity matrix are in [Phase 8 USDⓈ-M Futures Trading Workstation Plan](./futures_phase8_trading_workstation_plan.md).
+
+The first visible milestone is deliberately read-only: separate blue Testnet and red Live workspaces gain a Futures symbol selector, market header, chart, gap-detecting order book and trade tape. Expanded execution follows only after the account read model is stable, Testnet is manually verified, and each new Live action receives separate authorization.
+
+Start here next session:
+
+1. Complete Phase 8.0 ADR, threat model, official endpoint/stream inventory and deterministic fake contracts.
+2. Deliver Phase 8.1 workstation shell/instrument navigation and Phase 8.2 chart/order-book/trades as one visible read-only milestone.
+3. Preserve the Phase 6 ticket and Phase 7 production safety/recovery ticket as explicit drawers until the new order composer is independently proven.
+4. Run GitNexus upstream impact before every existing-symbol edit and warn before every HIGH/CRITICAL result.
+5. Keep all automated verification fake-only with a fail-fast production-network escape guard.
