@@ -92,4 +92,25 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     expect(volumeRows[0].value).toBeLessThanOrEqual(LIGHTWEIGHT_CHARTS_MAX_SERIES_VALUE)
     expect(priceFormat.type).toBe('custom')
   })
+
+  it('formats low-price contracts from the exact exchange tick size', () => {
+    render(
+      <FuturesWorkstationChart
+        {...properties([candle(1_784_000_000_000, '0.009362')])}
+        priceTickSize="0.00000100"
+      />,
+    )
+    const { series } = chartMock.charts[0]
+    const expected = {
+      priceFormat: {
+        type: 'price',
+        precision: 6,
+        minMove: 0.000001,
+      },
+    }
+
+    expect(series[0].applyOptions).toHaveBeenCalledWith(expected)
+    expect(series[2].applyOptions).toHaveBeenCalledWith(expected)
+    expect(series[3].applyOptions).toHaveBeenCalledWith(expected)
+  })
 })

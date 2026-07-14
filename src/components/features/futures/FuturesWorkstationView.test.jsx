@@ -5,9 +5,10 @@ import FuturesTestnetWorkstation from './FuturesTestnetWorkstation.jsx'
 import FuturesProductionWorkstation from './FuturesProductionWorkstation.jsx'
 
 vi.mock('./FuturesWorkstationChart.jsx', () => ({
-  default: ({ onPricePick, drawings, alerts }) => (
+  default: ({ onPricePick, priceTickSize, drawings, alerts }) => (
     <div data-testid="mock-futures-chart">
       <button type="button" onClick={() => onPricePick('58420.25')}>Pick chart price</button>
+      <span>price tick {priceTickSize ?? 'unavailable'}</span>
       <span>drawings {drawings.length}</span>
       <span>alerts {alerts.length}</span>
     </div>
@@ -154,6 +155,7 @@ describe('pure Futures workstation presentation', () => {
     expect(screen.getByLabelText('Exact contract filters')).toHaveTextContent('Max orders200')
     expect(screen.getByLabelText('Exact contract filters')).toHaveTextContent('Max algo orders100')
     expect(screen.getByLabelText('Exact contract filters')).toHaveTextContent('Min notional5 USDT')
+    expect(screen.getByTestId('mock-futures-chart')).toHaveTextContent('price tick 0.1')
     expect(screen.getByText('u 90071992547409931234')).toBeInTheDocument()
     expect(screen.getByText('0.25')).toBeInTheDocument()
   })

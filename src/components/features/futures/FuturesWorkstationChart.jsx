@@ -51,12 +51,29 @@ const toDraftString = (value) => (
   value.toFixed(8).replace(/0+$/, '').replace(/\.$/, '')
 )
 
+const CANONICAL_NONNEGATIVE_DECIMAL = /^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/
+
+const createPriceFormat = (tickSize) => {
+  if (typeof tickSize !== 'string'
+    || tickSize.length > 64
+    || !CANONICAL_NONNEGATIVE_DECIMAL.test(tickSize)) return null
+  const minMove = Number(tickSize)
+  if (!Number.isFinite(minMove) || minMove <= 0) return null
+  const fraction = tickSize.split('.')[1]?.replace(/0+$/, '') ?? ''
+  return Object.freeze({
+    type: 'price',
+    precision: fraction.length,
+    minMove,
+  })
+}
+
 export const FuturesWorkstationChart = ({
   candles,
   markCandles,
   indexCandles,
   markPrice,
   indexPrice,
+  priceTickSize,
   drawings,
   alerts,
   onPricePick,
@@ -156,6 +173,15 @@ export const FuturesWorkstationChart = ({
       overlayLinesRef.current = []
     }
   }, [])
+
+  useEffect(() => {
+    const priceFormat = createPriceFormat(priceTickSize)
+    if (!priceFormat || !seriesRef.current) return
+    const { contractSeries, markSeries, indexSeries } = seriesRef.current
+    contractSeries.applyOptions({ priceFormat })
+    markSeries.applyOptions({ priceFormat })
+    indexSeries.applyOptions({ priceFormat })
+  }, [priceTickSize])
 
   useEffect(() => {
     if (!seriesRef.current) return

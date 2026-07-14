@@ -292,6 +292,7 @@ export const FuturesWorkstationView = ({
             indexCandles={candles?.index ?? EMPTY_ROWS}
             markPrice={header?.markPrice ?? null}
             indexPrice={header?.indexPrice ?? null}
+            priceTickSize={selectedContract?.filters.price?.tickSize ?? null}
             drawings={drawings}
             alerts={alerts}
             onPricePick={candlesState === 'live' ? pickPrice : IGNORE_PRICE_PICK}
