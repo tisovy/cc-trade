@@ -185,9 +185,9 @@ const makeStreamFrames = ({ symbol, baseCents, timeOffset }) => {
         }),
         makeCycle: (cycle, interval = '1m') => {
             const cycleTime = eventTime + (cycle * 750);
-            const updateId = 1001 + cycle;
+            const updateId = 1000 + cycle;
             const nextUpdateId = updateId + 1;
-            const drift = BigInt(cycle % 20) * 2n;
+            const drift = BigInt((cycle % 7) - 3);
             const price = BigInt(baseCents) + drift;
             const dailyMove = BigInt(baseCents) / 20n;
             return Object.freeze([

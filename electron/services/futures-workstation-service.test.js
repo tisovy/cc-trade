@@ -112,6 +112,46 @@ describe('separately composed Futures workstation services', () => {
         expect(events.at(-1)).toMatchObject({ resource: 'status', state: 'live' });
     });
 
+    it.each([
+        [
+            'Testnet',
+            createFuturesTestnetWorkstationFakeTransport,
+            createFuturesTestnetWorkstationRuntimeForTest,
+            testnetRequest,
+        ],
+        [
+            'production',
+            createFuturesProductionWorkstationFakeTransport,
+            createFuturesProductionWorkstationRuntimeForTest,
+            productionRequest,
+        ],
+    ])('keeps the %s deterministic stream LIVE across continuous depth cycles', async (
+        _label,
+        createBase,
+        createRuntime,
+        createRequest,
+    ) => {
+        const clock = createManualClock();
+        const base = createBase({ clock: clock.clock });
+        const runtime = track(createRuntime({ transport: base, clock: clock.clock }));
+        const events = [];
+        await runtime.service.handleRequest(createRequest('continuous-depth'), {
+            emit: event => events.push(event),
+        });
+
+        for (let cycle = 0; cycle < 64; cycle += 1) {
+            clock.advance(750);
+            clock.runIntervals();
+        }
+
+        expect(events.filter(event => event.resource === 'status').map(event => event.state))
+            .toEqual(['loading', 'live']);
+        expect(events.filter(event => event.resource === 'depth').at(-1).payload.lastUpdateId)
+            .toBe('1065');
+        expect(runtime.service.current.generation).toBe(1);
+        expect(clock.timeoutCount()).toBe(0);
+    });
+
     it('never invokes global fetch in either default composition', async () => {
         const originalFetch = globalThis.fetch;
         const escapedFetch = vi.fn(() => Promise.reject(new Error('network escape')));

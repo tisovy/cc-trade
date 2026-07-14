@@ -162,3 +162,44 @@ test('red Production workstation remains isolated and market widgets have no exe
         await electronApp.close();
     }
 });
+
+test('Testnet and Production workstation streams remain continuously LIVE', async () => {
+    const { electronApp, mainWindow } = await launchWorkstation();
+
+    try {
+        for (const [modeTestId, identityText] of [
+            ['market-mode-futures-testnet', 'USDⓈ-M TESTNET · SIMULATED FUNDS'],
+            ['market-mode-futures-live', 'USDⓈ-M PRODUCTION · REAL MONEY'],
+        ]) {
+            await mainWindow.getByTestId(modeTestId).click();
+            const identity = await waitForLiveWorkstation(mainWindow, identityText);
+            await identity.evaluate((element) => {
+                const observations = [];
+                const record = () => observations.push({
+                    state: element.querySelector('[role="status"]')?.textContent?.trim() ?? '',
+                    owner: element.querySelector('code')?.textContent?.trim() ?? '',
+                });
+                const observer = new MutationObserver(record);
+                record();
+                observer.observe(element, { childList: true, characterData: true, subtree: true });
+                globalThis.__futuresWorkstationStabilityProbe = { observations, observer };
+            });
+
+            await mainWindow.waitForTimeout(6_000);
+            const observations = await identity.evaluate(() => {
+                const probe = globalThis.__futuresWorkstationStabilityProbe;
+                probe?.observer?.disconnect();
+                delete globalThis.__futuresWorkstationStabilityProbe;
+                return probe?.observations ?? [];
+            });
+            expect([...new Set(observations.map(observation => observation.state))])
+                .toEqual(['LIVE']);
+            expect([...new Set(observations.map(observation => (
+                observation.owner.match(/^gen (\d+)/)?.[1] ?? ''
+            )))])
+                .toEqual(['1']);
+        }
+    } finally {
+        await electronApp.close();
+    }
+});
