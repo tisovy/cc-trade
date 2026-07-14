@@ -1,0 +1,600 @@
+import { createHmac } from 'node:crypto';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import {
+    FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS,
+    FuturesProductionExecutionFacadeError,
+    createFuturesProductionExecutionFacade,
+} from './futures-production-execution-facade.js';
+import {
+    FUTURES_PRODUCTION_EXECUTION_RESPONSE_LIMITS,
+    FuturesProductionExecutionJsonError,
+    parseFuturesProductionExecutionJson,
+    validateFuturesProductionExecutionResponseHeaders,
+} from './futures-production-execution-json.js';
+
+const clientOrderId = 'cc7-0123456789abcdef0123456789abcdef';
+const config = Object.freeze({
+    apiKey: 'production-api-key-fixture',
+    apiSecret: 'production-api-secret-fixture',
+    allowedSymbols: ['BTCUSDT'],
+});
+const limitOrder = Object.freeze({
+    symbol: 'BTCUSDT',
+    side: 'BUY',
+    quantity: '0.001',
+    price: '70000.00',
+    reduceOnly: false,
+    clientOrderId,
+});
+
+const makeResponse = (body, { status = 200, headers = {}, redirected = false } = {}) => {
+    const response = new Response(body, { status, headers });
+    if (redirected) Object.defineProperty(response, 'redirected', { value: true });
+    return response;
+};
+
+const queryOrderBody = `{
+    "symbol":"BTCUSDT",
+    "orderId":9223372036854775807,
+    "clientOrderId":"${clientOrderId}",
+    "price":"70000.00",
+    "origQty":"0.001",
+    "executedQty":"0.000",
+    "avgPrice":"0",
+    "status":"NEW",
+    "timeInForce":"GTC",
+    "type":"LIMIT",
+    "origType":"LIMIT",
+    "reduceOnly":false,
+    "closePosition":false,
+    "side":"BUY",
+    "positionSide":"BOTH",
+    "updateTime":1783814400000
+}`;
+
+const bodyFor = (url, options) => {
+    const parsed = new URL(url);
+    if (parsed.pathname === '/fapi/v1/time') return '{"serverTime":1783814400000}';
+    if (parsed.pathname === '/fapi/v1/exchangeInfo') return '{"symbols":[]}';
+    if (parsed.pathname === '/fapi/v1/premiumIndex') {
+        return '{"symbol":"BTCUSDT","markPrice":"70000.00"}';
+    }
+    if (parsed.pathname === '/fapi/v1/accountConfig') return '{"canTrade":true}';
+    if (parsed.pathname === '/fapi/v1/symbolConfig') return '[{"symbol":"BTCUSDT"}]';
+    if (parsed.pathname === '/fapi/v3/balance') return '[]';
+    if (parsed.pathname === '/fapi/v3/positionRisk') return '[]';
+    if (parsed.pathname === '/fapi/v1/openOrders') return '[]';
+    if (parsed.pathname === '/fapi/v1/openAlgoOrders') return '[]';
+    if (parsed.pathname === '/fapi/v1/order' && options.method === 'GET') {
+        return queryOrderBody;
+    }
+    if (parsed.pathname === '/fapi/v1/order' && options.method === 'POST') {
+        return `{"symbol":"BTCUSDT","orderId":9007199254740993,"clientOrderId":"${clientOrderId}","transactTime":1783814400001}`;
+    }
+    if (options.method === 'DELETE') return '{"code":200,"msg":"acknowledged"}';
+    throw new Error('unreviewed fake endpoint');
+};
+
+describe('FuturesProductionExecutionFacade', () => {
+    afterEach(() => {
+        vi.useRealTimers();
+        vi.unstubAllGlobals();
+    });
+
+    it('requires an injected transport and rejects caller network expansion', () => {
+        const productionTripwire = vi.fn(() => {
+            throw new Error('production network tripwire');
+        });
+        vi.stubGlobal('fetch', productionTripwire);
+
+        expect(() => createFuturesProductionExecutionFacade(config)).toThrow(
+            FuturesProductionExecutionFacadeError,
+        );
+        expect(() => createFuturesProductionExecutionFacade(
+            { ...config, host: 'https://example.invalid' },
+            { fetchImpl: vi.fn() },
+        )).toThrow(FuturesProductionExecutionFacadeError);
+        expect(() => createFuturesProductionExecutionFacade(config, {
+            fetchImpl: vi.fn(),
+            dispatcher: {},
+        })).toThrow(FuturesProductionExecutionFacadeError);
+        expect(productionTripwire).not.toHaveBeenCalled();
+    });
+
+    it('exposes only the reviewed explicit methods and exact production endpoints', async () => {
+        const fetchImpl = vi.fn((url, options) => Promise.resolve(makeResponse(
+            bodyFor(url, options),
+            { headers: { 'x-mbx-used-weight-1m': '1' } },
+        )));
+        const facade = createFuturesProductionExecutionFacade(config, {
+            fetchImpl,
+            now: () => 1783814400000,
+        });
+        expect(Object.keys(facade)).toEqual([
+            'getServerTime',
+            'getExchangeInfo',
+            'getMarkPrice',
+            'getAccountConfig',
+            'getSymbolConfig',
+            'getBalance',
+            'getPositionRisk',
+            'getOpenOrders',
+            'getOpenAlgoOrders',
+            'placeLimitGtcOrder',
+            'placeReduceOnlyMarketOrder',
+            'queryOrderByOriginalClientOrderId',
+            'cancelAllOpenOrders',
+            'cancelAllAlgoOpenOrders',
+        ]);
+
+        await facade.getServerTime();
+        await facade.getExchangeInfo();
+        await facade.getMarkPrice('BTCUSDT');
+        await facade.getAccountConfig();
+        await facade.getSymbolConfig('BTCUSDT');
+        await facade.getBalance();
+        await facade.getPositionRisk('BTCUSDT');
+        await facade.getOpenOrders('BTCUSDT');
+        await facade.getOpenAlgoOrders('BTCUSDT');
+        const limit = await facade.placeLimitGtcOrder(limitOrder);
+        await facade.placeReduceOnlyMarketOrder({
+            symbol: 'BTCUSDT',
+            side: 'SELL',
+            quantity: '0.001',
+            clientOrderId,
+        });
+        const query = await facade.queryOrderByOriginalClientOrderId({
+            symbol: 'BTCUSDT',
+            originalClientOrderId: clientOrderId,
+        });
+        const regularCancel = await facade.cancelAllOpenOrders({ symbol: 'BTCUSDT' });
+        await facade.cancelAllAlgoOpenOrders({ symbol: 'BTCUSDT' });
+
+        expect(limit.data.orderId).toBe('9007199254740993');
+        expect(query.data.orderId).toBe('9223372036854775807');
+        expect(regularCancel.data).toMatchObject({ acknowledged: true, code: 200 });
+        expect(limit.receipt).toEqual(expect.objectContaining({
+            endpointId: 'new-limit-gtc-order',
+            status: 200,
+            bodyDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
+            rateLimitHeaders: expect.objectContaining({ 'x-mbx-used-weight-1m': '1' }),
+        }));
+
+        const paths = fetchImpl.mock.calls.map(([url]) => new URL(url).pathname);
+        expect(paths).toEqual([
+            '/fapi/v1/time',
+            '/fapi/v1/exchangeInfo',
+            '/fapi/v1/premiumIndex',
+            '/fapi/v1/accountConfig',
+            '/fapi/v1/symbolConfig',
+            '/fapi/v3/balance',
+            '/fapi/v3/positionRisk',
+            '/fapi/v1/openOrders',
+            '/fapi/v1/openAlgoOrders',
+            '/fapi/v1/order',
+            '/fapi/v1/order',
+            '/fapi/v1/order',
+            '/fapi/v1/allOpenOrders',
+            '/fapi/v1/algoOpenOrders',
+        ]);
+        for (const [url, options] of fetchImpl.mock.calls) {
+            expect(new URL(url).origin).toBe('https://fapi.binance.com');
+            expect(options.redirect).toBe('error');
+            expect(Object.keys(options).sort()).toEqual(expect.arrayContaining([
+                'headers', 'method', 'redirect', 'signal',
+            ]));
+        }
+    });
+
+    it('signs the fixed LIMIT/GTC body in reviewed parameter order', async () => {
+        const fetchImpl = vi.fn().mockResolvedValue(makeResponse(
+            `{"symbol":"BTCUSDT","orderId":1,"clientOrderId":"${clientOrderId}"}`,
+        ));
+        const facade = createFuturesProductionExecutionFacade(config, {
+            fetchImpl,
+            now: () => 1783814400000,
+        });
+        await facade.placeLimitGtcOrder(limitOrder);
+        const [url, options] = fetchImpl.mock.calls[0];
+        expect(url).toBe('https://fapi.binance.com/fapi/v1/order');
+        const unsigned = [
+            'symbol=BTCUSDT',
+            'side=BUY',
+            'type=LIMIT',
+            'timeInForce=GTC',
+            'quantity=0.001',
+            'price=70000.00',
+            'positionSide=BOTH',
+            'reduceOnly=false',
+            `newClientOrderId=${clientOrderId}`,
+            'newOrderRespType=ACK',
+            'recvWindow=5000',
+            'timestamp=1783814400000',
+        ].join('&');
+        const signature = createHmac('sha256', config.apiSecret)
+            .update(unsigned)
+            .digest('hex');
+        expect(options).toMatchObject({
+            method: 'POST',
+            redirect: 'error',
+            headers: {
+                'X-MBX-APIKEY': config.apiKey,
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: `${unsigned}&signature=${signature}`,
+        });
+        expect(fetchImpl).toHaveBeenCalledOnce();
+    });
+
+    it('sends a distinct reduce-only MARKET child without price or time-in-force', async () => {
+        const fetchImpl = vi.fn().mockResolvedValue(makeResponse(
+            `{"symbol":"BTCUSDT","orderId":1,"clientOrderId":"${clientOrderId}"}`,
+        ));
+        const facade = createFuturesProductionExecutionFacade(config, {
+            fetchImpl,
+            now: () => 1783814400000,
+        });
+        await facade.placeReduceOnlyMarketOrder({
+            symbol: 'BTCUSDT',
+            side: 'SELL',
+            quantity: '0.001',
+            clientOrderId,
+        });
+        const unsigned = [
+            'symbol=BTCUSDT',
+            'side=SELL',
+            'type=MARKET',
+            'quantity=0.001',
+            'positionSide=BOTH',
+            'reduceOnly=true',
+            `newClientOrderId=${clientOrderId}`,
+            'newOrderRespType=ACK',
+            'recvWindow=5000',
+            'timestamp=1783814400000',
+        ].join('&');
+        const signature = 'b3b45c4eb3b8cc0eadca11c43cf86dcc6315a0de9233945641106615a61b450e';
+        expect(fetchImpl.mock.calls[0]).toEqual([
+            'https://fapi.binance.com/fapi/v1/order',
+            {
+                method: 'POST',
+                headers: {
+                    'X-MBX-APIKEY': config.apiKey,
+                    'Content-Type': 'application/x-www-form-urlencoded',
+                },
+                body: `${unsigned}&signature=${signature}`,
+                redirect: 'error',
+                signal: expect.any(AbortSignal),
+            },
+        ]);
+        expect(createHmac('sha256', config.apiSecret).update(unsigned).digest('hex'))
+            .toBe(signature);
+        const body = new URLSearchParams(fetchImpl.mock.calls[0][1].body);
+        expect(body.has('price')).toBe(false);
+        expect(body.has('timeInForce')).toBe(false);
+        expect(fetchImpl).toHaveBeenCalledOnce();
+    });
+
+    it.each([
+        {
+            label: 'Query Order',
+            invoke: facade => facade.queryOrderByOriginalClientOrderId({
+                symbol: 'BTCUSDT',
+                originalClientOrderId: clientOrderId,
+            }),
+            pathname: '/fapi/v1/order',
+            unsigned: `symbol=BTCUSDT&origClientOrderId=${clientOrderId}&recvWindow=5000&timestamp=1783814400000`,
+            signature: 'ed700b6e08e9239e622beed850e264bb20a38e62710720a2c0bc659e5c2c0036',
+            response: queryOrderBody,
+        },
+        {
+            label: 'cancel all regular orders',
+            invoke: facade => facade.cancelAllOpenOrders({ symbol: 'BTCUSDT' }),
+            pathname: '/fapi/v1/allOpenOrders',
+            unsigned: 'symbol=BTCUSDT&recvWindow=5000&timestamp=1783814400000',
+            signature: '911404f81b11d3d78d69f151428e35860f9981c132dba881367b3567c6879bc7',
+            response: '{"code":200,"msg":"acknowledged"}',
+        },
+        {
+            label: 'cancel all algo orders',
+            invoke: facade => facade.cancelAllAlgoOpenOrders({ symbol: 'BTCUSDT' }),
+            pathname: '/fapi/v1/algoOpenOrders',
+            unsigned: 'symbol=BTCUSDT&recvWindow=5000&timestamp=1783814400000',
+            signature: '911404f81b11d3d78d69f151428e35860f9981c132dba881367b3567c6879bc7',
+            response: '{"code":200,"msg":"acknowledged"}',
+        },
+    ])('transmits the exact signed $label GET/DELETE vector once', async ({
+        invoke,
+        pathname,
+        unsigned,
+        signature,
+        response,
+    }) => {
+        const fetchImpl = vi.fn().mockResolvedValue(makeResponse(response));
+        const facade = createFuturesProductionExecutionFacade(config, {
+            fetchImpl,
+            now: () => 1783814400000,
+        });
+        await invoke(facade);
+        expect(createHmac('sha256', config.apiSecret).update(unsigned).digest('hex'))
+            .toBe(signature);
+        expect(fetchImpl.mock.calls[0]).toEqual([
+            `https://fapi.binance.com${pathname}?${unsigned}&signature=${signature}`,
+            {
+                method: pathname === '/fapi/v1/order' ? 'GET' : 'DELETE',
+                headers: { 'X-MBX-APIKEY': config.apiKey },
+                redirect: 'error',
+                signal: expect.any(AbortSignal),
+            },
+        ]);
+        expect(fetchImpl).toHaveBeenCalledOnce();
+    });
+
+    it.each([
+        ['reduce-only MARKET POST', facade => facade.placeReduceOnlyMarketOrder({
+            symbol: 'BTCUSDT',
+            side: 'SELL',
+            quantity: '0.001',
+            clientOrderId,
+        })],
+        ['Query Order GET', facade => facade.queryOrderByOriginalClientOrderId({
+            symbol: 'BTCUSDT',
+            originalClientOrderId: clientOrderId,
+        })],
+        ['cancel-all regular DELETE', facade => facade.cancelAllOpenOrders({
+            symbol: 'BTCUSDT',
+        })],
+        ['cancel-all algo DELETE', facade => facade.cancelAllAlgoOpenOrders({
+            symbol: 'BTCUSDT',
+        })],
+    ])('does not retry a failed %s', async (_label, invoke) => {
+        const fetchImpl = vi.fn().mockResolvedValue(makeResponse(
+            '{"code":-1000,"msg":"unknown"}',
+            { status: 503 },
+        ));
+        const facade = createFuturesProductionExecutionFacade(config, {
+            fetchImpl,
+            now: () => 1783814400000,
+        });
+        await expect(invoke(facade)).rejects.toMatchObject({
+            kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.AMBIGUOUS,
+        });
+        expect(fetchImpl).toHaveBeenCalledOnce();
+    });
+
+    it.each([
+        ['network loss', () => Promise.reject(new Error('secret-bearing cause'))],
+        ['redirect', () => Promise.resolve(makeResponse('{}', { status: 302 }))],
+        ['redirected response', () => Promise.resolve(makeResponse('{}', { redirected: true }))],
+        ['408', () => Promise.resolve(makeResponse('{"code":-1007,"msg":"timeout"}', { status: 408 }))],
+        ['503', () => Promise.resolve(makeResponse('{"code":-1000,"msg":"unknown"}', { status: 503 }))],
+        ['malformed success', () => Promise.resolve(makeResponse('{"symbol":'))],
+        ['duplicate key', () => Promise.resolve(makeResponse('{"orderId":1,"orderId":2}'))],
+    ])('never retries an order POST after %s', async (_label, outcome) => {
+        const fetchImpl = vi.fn().mockImplementation(outcome);
+        const facade = createFuturesProductionExecutionFacade(config, {
+            fetchImpl,
+            now: () => 1,
+        });
+        await expect(facade.placeLimitGtcOrder(limitOrder)).rejects.toMatchObject({
+            kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.AMBIGUOUS,
+        });
+        expect(fetchImpl).toHaveBeenCalledOnce();
+    });
+
+    it('classifies only reviewed error pairs and keeps -2013 as Query Order not-found', async () => {
+        const rateFetch = vi.fn().mockResolvedValue(makeResponse(
+            '{"code":-1003,"msg":"bounded"}',
+            { status: 429, headers: { 'retry-after': '10' } },
+        ));
+        const rateFacade = createFuturesProductionExecutionFacade(config, {
+            fetchImpl: rateFetch,
+            now: () => 1,
+        });
+        await expect(rateFacade.placeLimitGtcOrder(limitOrder)).rejects.toMatchObject({
+            kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.RATE_LIMITED,
+            status: 429,
+            binanceCode: -1003,
+            rateLimitHeaders: expect.objectContaining({ 'retry-after': '10' }),
+        });
+
+        const queryFacade = createFuturesProductionExecutionFacade(config, {
+            fetchImpl: vi.fn().mockResolvedValue(makeResponse(
+                '{"code":-2013,"msg":"Order does not exist."}',
+                { status: 400 },
+            )),
+            now: () => 1,
+        });
+        await expect(queryFacade.queryOrderByOriginalClientOrderId({
+            symbol: 'BTCUSDT',
+            originalClientOrderId: clientOrderId,
+        })).rejects.toMatchObject({
+            kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.NOT_FOUND,
+        });
+    });
+
+    it('enforces the ten-second whole-operation deadline', async () => {
+        vi.useFakeTimers();
+        let signal;
+        const fetchImpl = vi.fn((_url, options) => {
+            signal = options.signal;
+            return new Promise(() => {});
+        });
+        const facade = createFuturesProductionExecutionFacade(config, {
+            fetchImpl,
+            now: () => 1,
+        });
+        const observed = facade.placeLimitGtcOrder(limitOrder).catch(error => error);
+        await vi.advanceTimersByTimeAsync(10_000);
+        const error = await observed;
+        expect(error).toMatchObject({
+            kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.AMBIGUOUS,
+            operation: 'placeLimitGtcOrder',
+        });
+        expect(signal.aborted).toBe(true);
+        expect(error).not.toHaveProperty('cause');
+        expect(fetchImpl).toHaveBeenCalledOnce();
+    });
+
+    it('aborts and cancels a stalled streaming body within the whole-operation deadline', async () => {
+        vi.useFakeTimers();
+        const read = vi.fn(() => new Promise(() => {}));
+        const cancel = vi.fn().mockResolvedValue(undefined);
+        let signal;
+        const fetchImpl = vi.fn((_url, options) => {
+            signal = options.signal;
+            return Promise.resolve({
+                status: 200,
+                redirected: false,
+                headers: new Headers({ 'x-mbx-used-weight-1m': '1' }),
+                body: {
+                    getReader: () => ({ read, cancel }),
+                },
+            });
+        });
+        const facade = createFuturesProductionExecutionFacade(config, {
+            fetchImpl,
+            now: () => 1,
+        });
+        const observed = facade.placeLimitGtcOrder(limitOrder).catch(error => error);
+        await vi.advanceTimersByTimeAsync(9_999);
+        expect(read).toHaveBeenCalledOnce();
+        expect(cancel).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1);
+        const error = await observed;
+        expect(error).toMatchObject({
+            kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.AMBIGUOUS,
+            operation: 'placeLimitGtcOrder',
+        });
+        expect(signal.aborted).toBe(true);
+        expect(cancel).toHaveBeenCalledOnce();
+        expect(fetchImpl).toHaveBeenCalledOnce();
+    });
+
+    it('fails closed on body, header, message, and tree resource overflow', async () => {
+        const cases = [
+            makeResponse('x'.repeat(65_537)),
+            makeResponse(
+                `{"code":-1003,"msg":"${'x'.repeat(513)}"}`,
+                { status: 429 },
+            ),
+            makeResponse(`[${Array.from({ length: 1_025 }, () => '0').join(',')}]`),
+            makeResponse('{}', {
+                headers: Object.fromEntries(
+                    Array.from({ length: 65 }, (_, index) => [`x-${index}`, '1']),
+                ),
+            }),
+        ];
+        for (const response of cases) {
+            const facade = createFuturesProductionExecutionFacade(config, {
+                fetchImpl: vi.fn().mockResolvedValue(response),
+                now: () => 1,
+            });
+            await expect(facade.placeLimitGtcOrder(limitOrder)).rejects.toMatchObject({
+                kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.AMBIGUOUS,
+            });
+        }
+    });
+
+    it('rejects expanded or malformed write arguments before transport', () => {
+        const fetchImpl = vi.fn();
+        const facade = createFuturesProductionExecutionFacade(config, { fetchImpl });
+        expect(() => facade.placeLimitGtcOrder({
+            ...limitOrder,
+            host: 'https://example.invalid',
+        })).toThrow(expect.objectContaining({
+            kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.ARGUMENT,
+        }));
+        expect(() => facade.cancelAllOpenOrders({
+            symbol: 'ETHUSDT',
+        })).toThrow(expect.objectContaining({
+            kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.ARGUMENT,
+        }));
+        expect(fetchImpl).not.toHaveBeenCalled();
+    });
+});
+
+describe('bounded production execution JSON', () => {
+    it('retains signed-int64 tokens without Number coercion', () => {
+        const parsed = parseFuturesProductionExecutionJson(
+            '{"orderId":9223372036854775807}',
+        );
+        expect(parsed.orderId.token).toBe('9223372036854775807');
+    });
+
+    it.each([
+        '{"a":1,"\\u0061":2}',
+        '{"value":1.5}',
+        '{"value":1e3}',
+        `{"value":"${'x'.repeat(4_097)}"}`,
+    ])('rejects duplicate, non-integer, or oversized JSON %s', (body) => {
+        expect(() => parseFuturesProductionExecutionJson(body))
+            .toThrow(FuturesProductionExecutionJsonError);
+    });
+
+    it('accepts the exact response-header bounds', () => {
+        expect(() => validateFuturesProductionExecutionResponseHeaders(
+            Object.fromEntries(Array.from(
+                { length: FUTURES_PRODUCTION_EXECUTION_RESPONSE_LIMITS.HEADER_COUNT },
+                (_, index) => [`x-${index}`, '1'],
+            )),
+        )).not.toThrow();
+        expect(() => validateFuturesProductionExecutionResponseHeaders({
+            exact: 'x'.repeat(
+                FUTURES_PRODUCTION_EXECUTION_RESPONSE_LIMITS.HEADER_VALUE_BYTES,
+            ),
+        })).not.toThrow();
+        expect(() => validateFuturesProductionExecutionResponseHeaders(
+            Object.fromEntries(Array.from(
+                { length: 8 },
+                (_, index) => [
+                    String(index),
+                    'x'.repeat(4_095),
+                ],
+            )),
+        )).not.toThrow();
+    });
+
+    it('stops a finite 65-item response-header iterator at item 65', () => {
+        let nextCalls = 0;
+        const headers = {
+            entries: () => ({
+                next: () => {
+                    nextCalls += 1;
+                    return nextCalls <= 65
+                        ? { done: false, value: [`x-${nextCalls}`, '1'] }
+                        : { done: true };
+                },
+            }),
+        };
+
+        expect(() => validateFuturesProductionExecutionResponseHeaders(headers))
+            .toThrow(expect.objectContaining({ code: 'RESPONSE_HEADERS_TOO_LARGE' }));
+        expect(nextCalls).toBe(65);
+    });
+
+    it('never exhausts an effectively infinite response-header iterator', () => {
+        let nextCalls = 0;
+        const headers = {
+            entries: () => ({
+                next: () => {
+                    nextCalls += 1;
+                    return { done: false, value: [`x-${nextCalls}`, '1'] };
+                },
+            }),
+        };
+
+        expect(() => validateFuturesProductionExecutionResponseHeaders(headers))
+            .toThrow(expect.objectContaining({ code: 'RESPONSE_HEADERS_TOO_LARGE' }));
+        expect(nextCalls).toBeLessThanOrEqual(65);
+    });
+
+    it.each([
+        [() => null],
+        [() => ({ next: () => null })],
+        [() => ({ next: () => ({ done: 'no', value: ['x', '1'] }) })],
+        [() => ({ next: () => ({ done: false, value: ['x'] }) })],
+    ])('rejects malformed response-header iterator protocol', (entries) => {
+        expect(() => validateFuturesProductionExecutionResponseHeaders({ entries }))
+            .toThrow(expect.objectContaining({ code: 'INVALID_RESPONSE_HEADERS' }));
+    });
+});

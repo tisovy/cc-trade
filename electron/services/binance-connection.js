@@ -54,6 +54,18 @@ import {
     isPotentialFuturesTestnetExecutionFrame,
     readFuturesTestnetExecutionAction,
 } from './futures-testnet-execution-session-protocol.js';
+import {
+    captureFuturesProductionExecutionConfig,
+} from './futures-production-execution-config.js';
+import {
+    createFuturesProductionExecutionRuntime,
+} from './futures-production-execution-composition.js';
+import {
+    FUTURES_PRODUCTION_EXECUTION_ACTIONS,
+    FUTURES_PRODUCTION_EXECUTION_COMMAND_MAX_BYTES,
+    isPotentialFuturesProductionExecutionFrame,
+    readFuturesProductionExecutionAction,
+} from './futures-production-execution-protocol.js';
 
 const LOG_LEVELS = { error: 0, warn: 1, info: 2, debug: 3 };
 const activeLogLevel = LOG_LEVELS[(process.env.LOG_LEVEL || 'info').toLowerCase()] ?? LOG_LEVELS.info;
@@ -75,6 +87,11 @@ const CHANNEL_ACTIONS = new Set([
     'enable_depth_view',
     'disable_depth_view',
 ]);
+const FUTURES_PRODUCTION_RENDERER_ACTIONS = new Set(
+    Object.values(FUTURES_PRODUCTION_EXECUTION_ACTIONS).filter(
+        action => action !== FUTURES_PRODUCTION_EXECUTION_ACTIONS.STATUS,
+    ),
+);
 const CHANNEL_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const CHANNEL_SYMBOL_PATTERN = /^[A-Z0-9_]{1,64}$/;
 const CHANNEL_INTERVAL_PATTERN = /^[A-Za-z0-9]{1,16}$/;
@@ -419,6 +436,7 @@ const rateLimiter = {
 };
 
 let processGlobalExecutionRuntimePromise = null;
+let processGlobalProductionExecutionRuntimePromise = null;
 
 // recvWindow for SIGNED REST requests. The @binance/spot lib stamps the request
 // timestamp from Date.now() at send time and does NOT set recvWindow, so it
@@ -626,12 +644,17 @@ export function setupBinanceConnection({
     futuresExecutionConfig: suppliedFuturesExecutionConfig,
     futuresExecutionKeyProtection,
     futuresExecutionStorageDirectory,
+    futuresProductionExecutionConfig: suppliedFuturesProductionExecutionConfig,
+    futuresProductionExecutionKeyProtection,
+    futuresProductionExecutionStorageDirectory,
 } = {}) {
     const APIKEY = process.env.BK;
     const APISECRET = process.env.BS;
     const futuresMode = (process.env.FUTURES_READ_MODE || 'mock').trim().toLowerCase();
     const futuresExecutionConfig = suppliedFuturesExecutionConfig
         ?? captureFuturesTestnetExecutionConfig({ futuresReadMode: futuresMode });
+    const futuresProductionExecutionConfig = suppliedFuturesProductionExecutionConfig
+        ?? captureFuturesProductionExecutionConfig({ liveAuthorized: false });
     const futuresApiKey = futuresExecutionConfig.credentials?.apiKey;
     const futuresApiSecret = futuresExecutionConfig.credentials?.apiSecret;
     const futuresMockScenario = process.env.FUTURES_READ_MOCK_SCENARIO?.trim();
@@ -656,6 +679,9 @@ export function setupBinanceConnection({
     // variables. Main captures every execution-prefixed value even earlier.
     delete process.env.FUTURES_TESTNET_API_KEY;
     delete process.env.FUTURES_TESTNET_API_SECRET;
+    delete process.env.FUTURES_PRODUCTION_API_KEY;
+    delete process.env.FUTURES_PRODUCTION_API_SECRET;
+    delete process.env.FUTURES_PRODUCTION_RECOVERY_AUTHORIZATION;
 
     const futuresTestnetIpLimiter = new RateLimiter(800, 60000, 500);
     const executionCoordinator = createFuturesTestnetExecutionCoordinator({
@@ -671,6 +697,7 @@ export function setupBinanceConnection({
         ),
     });
     activeExecutionCoordinator = executionCoordinator;
+    const futuresProductionIpLimiter = new RateLimiter(800, 60000, 500);
     if (processGlobalExecutionRuntimePromise === null) {
         processGlobalExecutionRuntimePromise = createFuturesTestnetExecutionRuntime({
             config: futuresExecutionConfig,
@@ -694,10 +721,66 @@ export function setupBinanceConnection({
         });
     }
     const executionRuntimePromise = processGlobalExecutionRuntimePromise;
+    if (processGlobalProductionExecutionRuntimePromise === null) {
+        const productionRuntimeOptions = {
+            config: futuresProductionExecutionConfig,
+            storageDirectory: futuresProductionExecutionStorageDirectory,
+            spotCoordinator: executionCoordinator,
+            getSpotAvailableWeight: () => Math.max(
+                0,
+                legacySpotRateLimiter.maxWeight - legacySpotRateLimiter.getCurrentWeight(),
+            ),
+            productionExecutor: (...args) => futuresProductionIpLimiter.execute(...args),
+            getProductionAvailableWeight: () => Math.max(
+                0,
+                futuresProductionIpLimiter.maxWeight - futuresProductionIpLimiter.getCurrentWeight(),
+            ),
+            keyProtection: futuresProductionExecutionKeyProtection,
+            fetchImpl: globalThis.fetch,
+            onInternalError: ({ phase, code }) => {
+                logger.warn(`[futures-production] ${phase} failed (${code})`);
+            },
+        };
+        processGlobalProductionExecutionRuntimePromise = createFuturesProductionExecutionRuntime(
+            productionRuntimeOptions,
+        ).catch(async (error) => {
+            logger.warn(`[futures-production] durable runtime unavailable (${error?.code || error?.name || 'unknown'})`);
+            return createFuturesProductionExecutionRuntime({
+                ...productionRuntimeOptions,
+                config: Object.freeze({
+                    ...futuresProductionExecutionConfig,
+                    enabled: false,
+                    configured: false,
+                    liveAuthorized: false,
+                    credentials: null,
+                    recoveryAuthorization: null,
+                    account: null,
+                    policy: null,
+                }),
+                storageDirectory: undefined,
+                keyProtection: undefined,
+                fetchImpl: undefined,
+                startupFailureCode: 'FUTURES_PRODUCTION_DURABLE_RUNTIME_FAILED',
+            });
+        });
+    }
+    const productionExecutionRuntimePromise = processGlobalProductionExecutionRuntimePromise;
+    let isControllerClosed = false;
+    void productionExecutionRuntimePromise.then((runtime) => {
+        if (!isControllerClosed) activeExecutionCoordinator = runtime.coordinator;
+    });
 
     const USE_MOCK = !APIKEY;
     const sharedProxyAgent = resolveProxyAgent();
-    applyLogMasking([APIKEY, APISECRET, futuresApiKey, futuresApiSecret]);
+    applyLogMasking([
+        APIKEY,
+        APISECRET,
+        futuresApiKey,
+        futuresApiSecret,
+        futuresProductionExecutionConfig.credentials?.apiKey,
+        futuresProductionExecutionConfig.credentials?.apiSecret,
+        futuresProductionExecutionConfig.recoveryAuthorization,
+    ]);
 
     logger.info(`Starting Binance Service. Mock Mode: ${USE_MOCK}`);
     logger.info(`Starting Futures Read-Only Service. Environment: ${resolvedFuturesTransportConfig.environment}`);
@@ -1714,6 +1797,40 @@ export function setupBinanceConnection({
             // Preserve the untouched UTF-8 frame for the dedicated execution
             // parsers. No generic JSON conversion may precede the 4096-byte and
             // duplicate-key checks on this route.
+            let productionExecutionAction = null;
+            if (rawFrameBytes > FUTURES_PRODUCTION_EXECUTION_COMMAND_MAX_BYTES
+                && isPotentialFuturesProductionExecutionFrame(rawUtf8Frame)) {
+                const runtime = await productionExecutionRuntimePromise;
+                await runtime.service.handleRequest(rawUtf8Frame, {
+                    connectionId: executionConnectionId,
+                    emit: payload => sendJSON(connection, payload),
+                });
+                return;
+            }
+            if (rawFrameBytes <= FUTURES_PRODUCTION_EXECUTION_COMMAND_MAX_BYTES) {
+                try {
+                    productionExecutionAction = readFuturesProductionExecutionAction(rawUtf8Frame);
+                } catch {
+                    if (isPotentialFuturesProductionExecutionFrame(rawUtf8Frame)) {
+                        const runtime = await productionExecutionRuntimePromise;
+                        await runtime.service.handleRequest(rawUtf8Frame, {
+                            connectionId: executionConnectionId,
+                            emit: payload => sendJSON(connection, payload),
+                        });
+                        return;
+                    }
+                }
+            }
+            if (FUTURES_PRODUCTION_RENDERER_ACTIONS.has(productionExecutionAction)
+                || productionExecutionAction?.startsWith('futures.production.')) {
+                const runtime = await productionExecutionRuntimePromise;
+                await runtime.service.handleRequest(rawUtf8Frame, {
+                    connectionId: executionConnectionId,
+                    emit: payload => sendJSON(connection, payload),
+                });
+                return;
+            }
+
             let executionAction = null;
             if (rawFrameBytes > FUTURES_TESTNET_EXECUTION_SESSION_MAX_BYTES
                 && isPotentialFuturesTestnetExecutionFrame(rawUtf8Frame)) {
@@ -1907,6 +2024,9 @@ export function setupBinanceConnection({
             void executionRuntimePromise.then((runtime) => {
                 runtime.service.disconnect(executionConnectionId);
             });
+            void productionExecutionRuntimePromise.then((runtime) => {
+                runtime.service.disconnect(executionConnectionId);
+            });
 
             // Cleanup this renderer's channels (market socket per-renderer)
             void channelManager.cleanup(safeDisconnect);
@@ -1946,6 +2066,7 @@ export function setupBinanceConnection({
     const close = () => {
         if (closePromise) return closePromise;
         closePromise = (async () => {
+            isControllerClosed = true;
             globalSocketsInitialized = false;
             if (tickerStallInterval) {
                 clearInterval(tickerStallInterval);
@@ -1972,11 +2093,21 @@ export function setupBinanceConnection({
                 safeDisconnect(staleUserData, 'user data stream'),
             ]);
 
-            const runtime = await executionRuntimePromise;
-            await runtime.service.shutdown();
+            const [runtime, productionRuntime] = await Promise.all([
+                executionRuntimePromise,
+                productionExecutionRuntimePromise,
+            ]);
+            await Promise.all([
+                runtime.service.shutdown(),
+                productionRuntime.service.shutdown(),
+            ]);
             activeExecutionCoordinator = null;
             if (processGlobalExecutionRuntimePromise === executionRuntimePromise) {
                 processGlobalExecutionRuntimePromise = null;
+            }
+            if (processGlobalProductionExecutionRuntimePromise
+                === productionExecutionRuntimePromise) {
+                processGlobalProductionExecutionRuntimePromise = null;
             }
             wsServer.shutDown?.();
             await new Promise((resolve) => {
@@ -2002,6 +2133,7 @@ export function setupBinanceConnection({
 
     return Object.freeze({
         executionReady: executionRuntimePromise,
+        productionExecutionReady: productionExecutionRuntimePromise,
         close,
     });
 }

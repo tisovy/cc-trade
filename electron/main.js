@@ -13,6 +13,18 @@ import {
   createElectronSafeStorageIntegrityKeyProtection,
 } from './services/futures-testnet-execution-key-protection.js'
 import {
+  captureFuturesProductionExecutionConfig,
+} from './services/futures-production-execution-config.js'
+import {
+  FUTURES_PRODUCTION_LIVE_AUTHORIZED,
+} from './services/futures-production-execution-composition.js'
+import {
+  installFuturesProductionExecutionLogSanitizer,
+} from './services/futures-production-execution-sanitizer.js'
+import {
+  createElectronSafeStorageProductionIntegrityKeyProtection,
+} from './services/futures-production-execution-key-protection.js'
+import {
   createLocalWebSocketAccess,
 } from './services/local-websocket-access.js'
 import {
@@ -42,12 +54,24 @@ registerRendererAppProtocolScheme(protocol)
 const futuresExecutionConfig = captureFuturesTestnetExecutionConfig({
   futuresReadMode: process.env.FUTURES_READ_MODE || 'mock',
 })
+const futuresProductionSecretValues = [
+  process.env.FUTURES_PRODUCTION_API_KEY,
+  process.env.FUTURES_PRODUCTION_API_SECRET,
+  process.env.FUTURES_PRODUCTION_RECOVERY_AUTHORIZATION,
+]
+const futuresProductionExecutionConfig = captureFuturesProductionExecutionConfig({
+  liveAuthorized: FUTURES_PRODUCTION_LIVE_AUTHORIZED,
+})
 installFuturesTestnetExecutionLogSanitizer({
   secretValues: [
     futuresExecutionConfig.credentials?.apiKey,
     futuresExecutionConfig.credentials?.apiSecret,
   ],
 })
+installFuturesProductionExecutionLogSanitizer({
+  secretValues: futuresProductionSecretValues,
+})
+futuresProductionSecretValues.fill(null)
 
 // The durable execution ledger has exactly one process owner. A second app
 // instance exits before opening the ledger or creating a renderer.
@@ -239,10 +263,18 @@ app.whenReady().then(async () => {
   if (!hasExclusiveExecutionOwnership) return
 
   let futuresExecutionKeyProtection = null
+  let futuresProductionExecutionKeyProtection = null
   try {
     futuresExecutionKeyProtection = createElectronSafeStorageIntegrityKeyProtection({ safeStorage })
   } catch (error) {
     console.warn('[Electron] Futures execution secure storage unavailable:', error)
+  }
+  try {
+    futuresProductionExecutionKeyProtection = (
+      createElectronSafeStorageProductionIntegrityKeyProtection({ safeStorage })
+    )
+  } catch (error) {
+    console.warn('[Electron] Futures production secure storage unavailable:', error)
   }
 
   binanceController = setupBinanceConnection({
@@ -256,8 +288,18 @@ app.whenReady().then(async () => {
         : 'futures-testnet-execution-development',
       'v1',
     ),
+    futuresProductionExecutionConfig,
+    futuresProductionExecutionKeyProtection,
+    futuresProductionExecutionStorageDirectory: path.join(
+      app.getPath('userData'),
+      app.isPackaged
+        ? 'futures-production-execution'
+        : 'futures-production-execution-development',
+      'v1',
+    ),
   })
   await binanceController.executionReady
+  await binanceController.productionExecutionReady
 
   installRendererAppProtocol({
     protocol,

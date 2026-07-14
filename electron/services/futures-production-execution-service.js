@@ -1,0 +1,3050 @@
+import {
+    createHash,
+    randomBytes as nodeRandomBytes,
+    timingSafeEqual,
+} from 'node:crypto';
+import {
+    evaluateFuturesProductionActivationGates,
+} from './futures-production-execution-activation.js';
+import {
+    FUTURES_PRODUCTION_EXECUTION_KILL_SWITCH_POLICY,
+} from './futures-production-execution-config.js';
+import {
+    absoluteExactDecimal,
+    compareExactDecimals,
+    formatExactDecimal,
+    isZeroExactDecimal,
+    parseNonNegativeExactDecimal,
+    parsePositiveExactDecimal,
+    parseSignedExactDecimal,
+} from './futures-production-execution-decimal.js';
+import {
+    FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS,
+} from './futures-production-execution-facade.js';
+import {
+    canonicalFuturesProductionUtcDay,
+    createFuturesProductionExecutionCommandDigest,
+} from './futures-production-execution-ledger.js';
+import {
+    FUTURES_PRODUCTION_EXECUTION_ACKNOWLEDGEMENTS,
+    FUTURES_PRODUCTION_EXECUTION_ACTIONS,
+    FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS,
+    FUTURES_PRODUCTION_EXECUTION_STATES,
+    createFuturesProductionExecutionStatus,
+    parseFuturesProductionExecutionCommand,
+} from './futures-production-execution-protocol.js';
+import {
+    evaluateFuturesProductionExecutionRisk,
+} from './futures-production-execution-risk.js';
+
+const INTENT_TTL_MS = 30_000;
+const FAST_RECONCILIATION_DELAYS = Object.freeze([0, 1_000, 2_000, 5_000, 10_000, 30_000]);
+const SLOW_RECONCILIATION_DELAY_MS = 5 * 60_000;
+const OPEN_MONITOR_DELAY_MS = 60_000;
+const MAX_RECOVERY_AGE_MS = 90 * 24 * 60 * 60_000;
+const UTC_DAY_MS = 24 * 60 * 60_000;
+const UTC_ROLLOVER_GUARD_MS = 15_000;
+const MAX_DISPATCH_START_DELAY_MS = 5_000;
+const BOOTSTRAP_FINGERPRINT = '0'.repeat(64);
+
+export const FUTURES_PRODUCTION_EXECUTION_SAFE_CODES = Object.freeze({
+    ENABLED: 'FUTURES_PRODUCTION_ENABLED',
+    DISABLED: 'FUTURES_PRODUCTION_DISABLED',
+    BUSY: 'FUTURES_PRODUCTION_OPERATION_BUSY',
+    COMMAND_REJECTED: 'FUTURES_PRODUCTION_COMMAND_REJECTED',
+    REVISION_REJECTED: 'FUTURES_PRODUCTION_REVISION_REJECTED',
+    INTENT_REJECTED: 'FUTURES_PRODUCTION_INTENT_REJECTED',
+    INTENT_EXPIRED: 'FUTURES_PRODUCTION_INTENT_EXPIRED',
+    GATE_REJECTED: 'FUTURES_PRODUCTION_GATE_REJECTED',
+    ORDER_REJECTED: 'FUTURES_PRODUCTION_ORDER_REJECTED',
+    ORDER_DISPATCHED: 'FUTURES_PRODUCTION_ORDER_DISPATCHED',
+    EXCHANGE_REJECTED: 'FUTURES_PRODUCTION_EXCHANGE_REJECTED',
+    RESULT_UNKNOWN: 'FUTURES_PRODUCTION_RESULT_UNKNOWN',
+    CONFIRMED_OPEN: 'FUTURES_PRODUCTION_CONFIRMED_OPEN',
+    CONFIRMED_FILLED: 'FUTURES_PRODUCTION_CONFIRMED_FILLED',
+    CONFIRMED_CANCELED: 'FUTURES_PRODUCTION_CONFIRMED_CANCELED',
+    CONFIRMED_CLOSED: 'FUTURES_PRODUCTION_CONFIRMED_CLOSED',
+    PARTIAL: 'FUTURES_PRODUCTION_PARTIAL',
+    KILL_SWITCH_ENGAGED: 'FUTURES_PRODUCTION_KILL_SWITCH_ENGAGED',
+    RECOVERY_REQUIRED: 'FUTURES_PRODUCTION_RECOVERY_REQUIRED',
+    RECOVERY_UNAVAILABLE: 'FUTURES_PRODUCTION_RECOVERY_UNAVAILABLE',
+    CREDENTIAL_ROTATION_BLOCKED: 'FUTURES_PRODUCTION_CREDENTIAL_ROTATION_BLOCKED',
+    STORAGE_FAILED: 'FUTURES_PRODUCTION_STORAGE_FAILED',
+    CANCEL_ALL_CONFIRMED: 'FUTURES_PRODUCTION_CANCEL_ALL_CONFIRMED',
+    CLOSE_POSITIONS_CONFIRMED: 'FUTURES_PRODUCTION_CLOSE_POSITIONS_CONFIRMED',
+});
+
+const PREPARE_KIND_BY_ACTION = Object.freeze({
+    [FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_ORDER_INTENT]: (
+        FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER
+    ),
+    [FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_CANCEL_ALL_OPEN_ORDERS_INTENT]: (
+        FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.CANCEL_ALL_OPEN_ORDERS
+    ),
+    [FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_CLOSE_POSITIONS_INTENT]: (
+        FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.CLOSE_POSITIONS
+    ),
+    [FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_ENGAGE_KILL_SWITCH_INTENT]: (
+        FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ENGAGE_KILL_SWITCH
+    ),
+});
+
+const FINAL_KIND_BY_ACTION = Object.freeze({
+    [FUTURES_PRODUCTION_EXECUTION_ACTIONS.PLACE_ORDER]: (
+        FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER
+    ),
+    [FUTURES_PRODUCTION_EXECUTION_ACTIONS.CANCEL_ALL_OPEN_ORDERS]: (
+        FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.CANCEL_ALL_OPEN_ORDERS
+    ),
+    [FUTURES_PRODUCTION_EXECUTION_ACTIONS.CLOSE_POSITIONS]: (
+        FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.CLOSE_POSITIONS
+    ),
+    [FUTURES_PRODUCTION_EXECUTION_ACTIONS.ENGAGE_KILL_SWITCH]: (
+        FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ENGAGE_KILL_SWITCH
+    ),
+});
+
+const OPERATIONAL_RECOVERY_ACTIONS = new Set([
+    'reconcile',
+    'engageKillSwitch',
+    'disengageKillSwitch',
+]);
+
+const ENDPOINT_IDS = Object.freeze({
+    serverTime: 'server-time',
+    exchangeInfo: 'exchange-info',
+    markPrice: 'mark-price',
+    accountConfig: 'account-config',
+    symbolConfig: 'symbol-config',
+    balance: 'balance-v3',
+    positionRisk: 'position-risk',
+    openOrders: 'open-orders',
+    openAlgoOrders: 'open-algo-orders',
+    placeLimitGtcOrder: 'new-limit-gtc-order',
+    placeReduceOnlyMarketOrder: 'new-reduce-only-market-order',
+    queryOrder: 'query-order',
+    cancelAllOpenOrders: 'cancel-all-open-orders',
+    cancelAllAlgoOpenOrders: 'cancel-all-algo-open-orders',
+});
+
+const READ_WEIGHTS = Object.freeze({
+    serverTime: 1,
+    exchangeInfo: 1,
+    markPrice: 1,
+    accountConfig: 5,
+    symbolConfig: 5,
+    balance: 5,
+    positionRisk: 5,
+    openOrders: 1,
+    openAlgoOrders: 1,
+});
+
+const TERMINAL_ORDER_STATES = new Set([
+    FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_FILLED,
+    FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_CANCELED,
+    FUTURES_PRODUCTION_EXECUTION_STATES.EXCHANGE_REJECTED,
+    FUTURES_PRODUCTION_EXECUTION_STATES.LOCALLY_REJECTED,
+]);
+
+const requireSafeTime = (value) => {
+    if (!Number.isSafeInteger(value) || value < 0) throw new Error('invalid production clock');
+    return value;
+};
+
+const createRequestId = (randomBytes) => {
+    const bytes = randomBytes(16);
+    if (!Buffer.isBuffer(bytes) || bytes.byteLength !== 16) {
+        throw new Error('invalid production randomness');
+    }
+    return bytes.toString('hex');
+};
+
+const safeErrorCode = error => (
+    typeof error?.code === 'string' && /^FUTURES_PRODUCTION_[A-Z0-9_]{1,96}$/.test(error.code)
+        ? error.code
+        : FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RESULT_UNKNOWN
+);
+
+const findSymbolEntry = (value, symbol) => {
+    const rows = Array.isArray(value) ? value : [value];
+    return rows.find(row => row?.symbol === symbol) ?? null;
+};
+
+const findFilter = (symbolInfo, filterType) => (
+    Array.isArray(symbolInfo?.filters)
+        ? symbolInfo.filters.find(filter => filter?.filterType === filterType) ?? null
+        : null
+);
+
+const verifyProductionAccountIdentity = ({ accountAlias, accountConfig, balance }) => {
+    if (accountConfig?.canTrade !== true
+        || accountConfig?.dualSidePosition !== false
+        || accountConfig?.multiAssetsMargin !== false
+        || !Array.isArray(balance)) return null;
+    const usdtBalances = balance.filter(entry => entry?.asset === 'USDT');
+    if (usdtBalances.length !== 1) return null;
+    const [usdtBalance] = usdtBalances;
+    return usdtBalance.accountAlias === accountAlias
+        && usdtBalance.marginAvailable === true
+        ? usdtBalance
+        : null;
+};
+
+const normalizeRiskSnapshot = ({ identity, symbol, observations }) => {
+    const symbolConfig = findSymbolEntry(observations.symbolConfig, symbol);
+    const position = findSymbolEntry(observations.positionRisk, symbol);
+    const balance = verifyProductionAccountIdentity({
+        accountAlias: identity?.accountAlias,
+        accountConfig: observations.accountConfig,
+        balance: observations.balance,
+    });
+    const symbolInfo = Array.isArray(observations.exchangeInfo?.symbols)
+        ? observations.exchangeInfo.symbols.find(entry => entry?.symbol === symbol)
+        : null;
+    const priceFilter = findFilter(symbolInfo, 'PRICE_FILTER');
+    const percentPriceFilter = findFilter(symbolInfo, 'PERCENT_PRICE');
+    const lotSizeFilter = findFilter(symbolInfo, 'LOT_SIZE');
+    const minNotionalFilter = findFilter(symbolInfo, 'MIN_NOTIONAL');
+    const maxNumOrdersFilter = findFilter(symbolInfo, 'MAX_NUM_ORDERS');
+    if (!balance) {
+        throw new FuturesProductionExecutionServiceError(
+            FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.GATE_REJECTED,
+        );
+    }
+    if (!symbolConfig || !position || !symbolInfo
+        || !priceFilter || !percentPriceFilter || !lotSizeFilter
+        || !minNotionalFilter || !maxNumOrdersFilter) {
+        throw new Error('incomplete production preflight');
+    }
+    return {
+        ...identity,
+        complete: true,
+        fresh: true,
+        clockRegressed: false,
+        accountConfig: {
+            canTrade: observations.accountConfig?.canTrade,
+            dualSidePosition: observations.accountConfig?.dualSidePosition,
+            multiAssetsMargin: observations.accountConfig?.multiAssetsMargin,
+        },
+        symbolConfig: {
+            symbol,
+            marginType: symbolConfig.marginType,
+            isAutoAddMargin: symbolConfig.isAutoAddMargin,
+            leverage: symbolConfig.leverage,
+            maxNotionalValue: symbolConfig.maxNotionalValue,
+        },
+        markPrice: {
+            symbol,
+            markPrice: observations.markPrice?.markPrice,
+        },
+        position: {
+            symbol,
+            positionSide: position.positionSide,
+            positionAmt: position.positionAmt,
+            liquidationPrice: position.liquidationPrice,
+            marginAsset: position.marginAsset,
+        },
+        balance: {
+            asset: 'USDT',
+            availableBalance: balance.availableBalance,
+            marginAvailable: balance.marginAvailable,
+        },
+        exchangeInfo: {
+            symbol,
+            status: symbolInfo.status,
+            contractType: symbolInfo.contractType,
+            quoteAsset: symbolInfo.quoteAsset,
+            marginAsset: symbolInfo.marginAsset,
+            supportedOrderTypes: symbolInfo.orderTypes,
+            supportedTimeInForce: symbolInfo.timeInForce,
+            priceFilter: {
+                minPrice: priceFilter.minPrice,
+                maxPrice: priceFilter.maxPrice,
+                tickSize: priceFilter.tickSize,
+            },
+            percentPriceFilter: {
+                multiplierUp: percentPriceFilter.multiplierUp,
+                multiplierDown: percentPriceFilter.multiplierDown,
+            },
+            lotSizeFilter: {
+                minQty: lotSizeFilter.minQty,
+                maxQty: lotSizeFilter.maxQty,
+                stepSize: lotSizeFilter.stepSize,
+            },
+            minNotionalUsdt: minNotionalFilter.notional,
+            maxOpenOrders: maxNumOrdersFilter.limit,
+        },
+        regularOpenOrderCount: observations.openOrders.length,
+        algoOpenOrderCount: observations.openAlgoOrders.length,
+    };
+};
+
+const stateFromOrder = (order) => {
+    if (order.status === 'FILLED') return FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_FILLED;
+    if (['CANCELED', 'EXPIRED', 'EXPIRED_IN_MATCH'].includes(order.status)) {
+        return FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_CANCELED;
+    }
+    if (['NEW', 'PARTIALLY_FILLED'].includes(order.status)) {
+        return FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_OPEN;
+    }
+    return FUTURES_PRODUCTION_EXECUTION_STATES.RESULT_UNKNOWN;
+};
+
+const exactDecimalEqual = (left, right, { allowZero = false } = {}) => {
+    try {
+        const parse = allowZero ? parseNonNegativeExactDecimal : parsePositiveExactDecimal;
+        return compareExactDecimals(parse(left), parse(right)) === 0;
+    } catch {
+        return false;
+    }
+};
+
+const durableOrderFields = draft => ({
+    symbol: draft.symbol,
+    side: draft.side,
+    orderType: draft.type,
+    timeInForce: draft.timeInForce,
+    quantity: draft.quantity,
+    price: draft.price,
+    reduceOnly: draft.reduceOnly,
+});
+
+const acknowledgementForState = state => {
+    if ([
+        FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_FILLED,
+        FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_CANCELED,
+        FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_OPEN,
+        FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_CLOSED,
+        FUTURES_PRODUCTION_EXECUTION_STATES.KILL_SWITCH_ENGAGED,
+    ].includes(state)) return FUTURES_PRODUCTION_EXECUTION_ACKNOWLEDGEMENTS.ACCEPTED;
+    if ([
+        FUTURES_PRODUCTION_EXECUTION_STATES.LOCALLY_REJECTED,
+        FUTURES_PRODUCTION_EXECUTION_STATES.EXCHANGE_REJECTED,
+    ].includes(state)) return FUTURES_PRODUCTION_EXECUTION_ACKNOWLEDGEMENTS.REJECTED;
+    if (state === FUTURES_PRODUCTION_EXECUTION_STATES.PARTIAL) {
+        return FUTURES_PRODUCTION_EXECUTION_ACKNOWLEDGEMENTS.PARTIAL;
+    }
+    if ([
+        FUTURES_PRODUCTION_EXECUTION_STATES.RESULT_UNKNOWN,
+        FUTURES_PRODUCTION_EXECUTION_STATES.RECONCILIATION_UNAVAILABLE,
+        FUTURES_PRODUCTION_EXECUTION_STATES.RECOVERY_REQUIRED,
+    ].includes(state)) return FUTURES_PRODUCTION_EXECUTION_ACKNOWLEDGEMENTS.UNKNOWN;
+    return FUTURES_PRODUCTION_EXECUTION_ACKNOWLEDGEMENTS.PENDING;
+};
+
+export class FuturesProductionExecutionServiceError extends Error {
+    constructor(code) {
+        super('Futures production execution service is unavailable');
+        this.name = 'FuturesProductionExecutionServiceError';
+        this.code = code;
+    }
+}
+
+export const createFuturesProductionExecutionService = ({
+    config,
+    credentialBinding = null,
+    ledger,
+    facade = null,
+    coordinator = null,
+    evaluateRisk = evaluateFuturesProductionExecutionRisk,
+    randomBytes = nodeRandomBytes,
+    now = Date.now,
+    setTimeoutFn = setTimeout,
+    clearTimeoutFn = clearTimeout,
+    onInternalError = () => {},
+} = {}) => {
+    if (!config || !ledger || typeof ledger.append !== 'function'
+        || typeof evaluateRisk !== 'function' || typeof randomBytes !== 'function'
+        || typeof now !== 'function') {
+        throw new FuturesProductionExecutionServiceError('INVALID_COMPOSITION');
+    }
+
+    const sessions = new Map();
+    const timers = new Set();
+    const backgroundTasks = new Set();
+    const inFlightOperations = new Set();
+    const finalCommandExecutions = new Map();
+    const generation = createRequestId(randomBytes);
+    let revision = '0';
+    let started = false;
+    let shuttingDown = false;
+    let storageHealthy = false;
+    let recoveryHealthy = true;
+    let failedClosed = false;
+    let identityValid = false;
+    let killSwitchEngaged = true;
+    let activeIntent = null;
+    let currentAttempt = null;
+    let reconciliation = null;
+    let recovery = {
+        required: false,
+        state: 'healthy',
+        code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.ENABLED,
+    };
+    let activation = {
+        enabled: false,
+        code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.DISABLED,
+        failedGate: 'operatorConfigured',
+    };
+    let mutex = false;
+    let transitionTail = Promise.resolve();
+    let activeOperation = null;
+    let lastServerTime = null;
+    let ratePauseRefreshAt = null;
+    let operationalRecoveryInProgress = false;
+    let deferredReconciliation = null;
+    let shutdownCompletion = null;
+
+    const readNow = () => requireSafeTime(now());
+    const advanceRevision = () => {
+        revision = String(BigInt(revision) + 1n);
+        return revision;
+    };
+    const account = config.configured && config.account
+        ? { alias: config.account.alias, fingerprint: config.account.fingerprint }
+        : null;
+    const policy = config.configured ? config.policy : null;
+    const identity = account && credentialBinding ? {
+        environment: 'production',
+        accountAlias: account.alias,
+        apiKeyFingerprint: account.fingerprint,
+        credentialBinding,
+        generation,
+    } : null;
+
+    const reportInternal = (phase, error) => {
+        try {
+            onInternalError({ phase, code: safeErrorCode(error) });
+        } catch {
+            // Diagnostics cannot affect the authorization boundary.
+        }
+    };
+
+    const trackInFlight = (operation) => {
+        const tracked = Promise.resolve(operation)
+            .finally(() => inFlightOperations.delete(tracked));
+        inFlightOperations.add(tracked);
+        return tracked;
+    };
+
+    const schedule = (callback, delay) => {
+        if (shuttingDown) return null;
+        const timer = setTimeoutFn(() => {
+            timers.delete(timer);
+            const task = Promise.resolve()
+                .then(callback)
+                .catch(error => reportInternal('scheduled-task', error))
+                .finally(() => backgroundTasks.delete(task));
+            backgroundTasks.add(task);
+        }, delay);
+        timers.add(timer);
+        return timer;
+    };
+
+    const getDailyState = () => {
+        const snapshot = coordinator?.getOrderAdmissionSnapshot?.()
+            ?? ledger.getOrderRateState?.()
+            ?? {};
+        const timestamp = lastServerTime ?? readNow();
+        const utcDay = canonicalFuturesProductionUtcDay(timestamp);
+        return {
+            utcDay,
+            used: snapshot.dailyReservations?.[utcDay] ?? '0',
+        };
+    };
+
+    const getCaps = () => {
+        if (!policy) return null;
+        const daily = getDailyState();
+        return {
+            allowedSymbols: [...policy.allowedSymbols],
+            maxLeverage: policy.maxLeverage,
+            maxOrderNotionalUsdt: policy.maxOrderNotionalUsdt,
+            maxDailyNotionalUsdt: policy.maxDailyNotionalUsdt,
+            minAvailableBalanceUsdt: policy.minAvailableBalanceUsdt,
+            minLiquidationDistanceBps: policy.minLiquidationDistanceBps,
+            dailyUsedNotionalUsdt: daily.used,
+            utcDay: daily.utcDay,
+        };
+    };
+
+    const capabilitySnapshot = (session) => {
+        const operational = started
+            && !shuttingDown
+            && !failedClosed
+            && activation.enabled
+            && recovery.required === false
+            && !mutex
+            && activeOperation === null;
+        const canPrepare = operational && activeIntent === null;
+        const ownsIntent = operational
+            && activeIntent !== null
+            && session !== null
+            && session !== undefined
+            && activeIntent.connectionId === session.connectionId
+            && activeIntent.expiresAt > readNow();
+        const canFinalize = kind => ownsIntent && activeIntent.kind === kind;
+        const placeOrder = canPrepare || canFinalize(
+            FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER,
+        );
+        const cancelAllOpenOrders = canPrepare || canFinalize(
+            FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.CANCEL_ALL_OPEN_ORDERS,
+        );
+        const closePositions = canPrepare || canFinalize(
+            FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.CLOSE_POSITIONS,
+        );
+        const engageKillSwitch = (canPrepare && !killSwitchEngaged) || canFinalize(
+            FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ENGAGE_KILL_SWITCH,
+        );
+        const anyCapability = placeOrder
+            || cancelAllOpenOrders
+            || closePositions
+            || engageKillSwitch;
+        return {
+            placeOrder,
+            cancelAllOpenOrders,
+            closePositions,
+            engageKillSwitch,
+            code: anyCapability ? activation.code : (
+                mutex ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.BUSY : activation.code
+            ),
+        };
+    };
+
+    const statusFor = (session) => createFuturesProductionExecutionStatus({
+        revision,
+        liveAuthorized: config.liveAuthorized === true,
+        configured: config.configured === true,
+        account,
+        caps: getCaps(),
+        killSwitch: {
+            engaged: killSwitchEngaged,
+            policy: FUTURES_PRODUCTION_EXECUTION_KILL_SWITCH_POLICY,
+        },
+        capabilities: capabilitySnapshot(session),
+        intent: activeIntent !== null
+            && session !== null
+            && session !== undefined
+            && activeIntent.connectionId === session.connectionId
+            && activeIntent.expiresAt > readNow()
+            ? {
+                requestId: activeIntent.requestId,
+                kind: activeIntent.kind,
+                revision: activeIntent.revision,
+                expiresAt: activeIntent.expiresAt,
+            }
+            : null,
+        attempt: currentAttempt,
+        reconciliation,
+        recovery,
+    });
+
+    const emitStatus = (session) => {
+        if (!session?.subscribed || typeof session.emit !== 'function') return null;
+        const status = statusFor(session);
+        session.emit(status);
+        return status;
+    };
+
+    const broadcastStatus = () => {
+        for (const session of sessions.values()) emitStatus(session);
+    };
+
+    const poison = (phase, error) => {
+        failedClosed = true;
+        storageHealthy = false;
+        recoveryHealthy = false;
+        recovery = {
+            required: true,
+            state: 'blocked',
+            code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.STORAGE_FAILED,
+        };
+        activation = {
+            enabled: false,
+            code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.STORAGE_FAILED,
+            failedGate: 'storageHealthy',
+        };
+        reportInternal(phase, error);
+        broadcastStatus();
+    };
+
+    const blockRecovery = ({
+        code = FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RECOVERY_REQUIRED,
+        reconciliationState = 'unavailable',
+    } = {}) => {
+        recoveryHealthy = false;
+        reconciliation = { required: true, state: reconciliationState, nextAttemptAt: null };
+        recovery = { required: true, state: 'blocked', code };
+        activation = { enabled: false, code, failedGate: 'recoveryHealthy' };
+        advanceRevision();
+        broadcastStatus();
+        return false;
+    };
+
+    const appendAuditNow = async (fields) => {
+        const entry = await ledger.append({
+            observedAt: readNow(),
+            accountAlias: account?.alias ?? null,
+            accountFingerprint: account?.fingerprint ?? null,
+            credentialBinding,
+            ...fields,
+        });
+        return entry;
+    };
+
+    const appendAudit = (fields) => {
+        const operation = transitionTail.then(() => appendAuditNow(fields));
+        transitionTail = operation.catch(error => poison('persistence', error));
+        return operation;
+    };
+
+    const setAttempt = async ({
+        requestId,
+        kind,
+        state,
+        code,
+        items = [],
+        eventType = 'acknowledgement',
+        category = 'command',
+        outcome = 'pending',
+        audit = {},
+    }) => {
+        await appendAudit({
+            eventType,
+            category,
+            outcome,
+            requestId,
+            operationId: requestId,
+            state,
+            code,
+            ...audit,
+        });
+        advanceRevision();
+        currentAttempt = {
+            requestId,
+            kind,
+            revision,
+            acknowledgement: acknowledgementForState(state),
+            state,
+            code,
+            observedAt: readNow(),
+            items,
+        };
+        broadcastStatus();
+        return currentAttempt;
+    };
+
+    const auditExchangeResponse = async ({
+        receipt = null,
+        error = null,
+        outcome,
+        audit = {},
+    }) => {
+        const endpointId = receipt?.endpointId ?? error?.endpointId ?? 'unknown-endpoint';
+        const detailDigest = receipt?.bodyDigest ?? error?.bodyDigest ?? null;
+        await appendAudit({
+            ...audit,
+            eventType: 'exchange_response',
+            category: 'exchange',
+            outcome,
+            endpointId,
+            detailDigest,
+            code: error ? safeErrorCode(error) : 'FUTURES_PRODUCTION_EXCHANGE_RESPONSE',
+        });
+    };
+
+    const invokeExchange = async ({ endpointId, execute, operation, audit = {} }) => {
+        await appendAudit({
+            ...audit,
+            eventType: 'exchange_request',
+            category: 'exchange',
+            outcome: 'pending',
+            endpointId,
+            code: 'FUTURES_PRODUCTION_EXCHANGE_REQUEST',
+        });
+        try {
+            const result = await execute(operation);
+            await auditExchangeResponse({
+                receipt: result.receipt,
+                outcome: 'accepted',
+                audit,
+            });
+            return result.data;
+        } catch (error) {
+            const rejected = error?.kind
+                === FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.EXCHANGE_REJECTED
+                || error?.kind === FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.AUTH_REJECTED;
+            await auditExchangeResponse({
+                error,
+                outcome: rejected ? 'rejected' : 'unknown',
+                audit,
+            }).catch(() => {});
+            if (error?.kind === FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.RATE_LIMITED) {
+                const pauseUntil = readNow() + (error.status === 418 ? 3 * 24 * 60 * 60_000 : 120_000);
+                try {
+                    await coordinator?.setOrderPauseUntil?.(pauseUntil, {
+                        eventType: 'rate_pause',
+                        category: 'rate',
+                        outcome: 'accepted',
+                        code: 'FUTURES_PRODUCTION_RATE_PAUSED',
+                    });
+                    await refreshActivation();
+                } catch (rateError) {
+                    poison('rate-pause', rateError);
+                }
+            }
+            throw error;
+        }
+    };
+
+    const executeRead = ({ lease = null, endpointId, weight, operation, audit = {} }) => (
+        invokeExchange({
+            endpointId,
+            operation,
+            audit,
+            execute: callback => (lease
+                ? lease.executeGet(callback, weight, { endpointId })
+                : coordinator.executeGet(callback, weight, { endpointId })),
+        })
+    );
+
+    const executeProduction = ({ endpointId, weight = 1, operation, audit = {} }) => (
+        invokeExchange({
+            endpointId,
+            operation,
+            audit,
+            execute: callback => coordinator.executeProduction(callback, weight, {
+                endpointId,
+                priority: 'low',
+            }),
+        })
+    );
+
+    const readFullPreflight = async (symbol, audit = {}) => {
+        const lease = await coordinator.beginPreflight();
+        try {
+            const serverTime = await executeRead({
+                lease,
+                endpointId: ENDPOINT_IDS.serverTime,
+                weight: READ_WEIGHTS.serverTime,
+                audit,
+                operation: () => facade.getServerTime(),
+            });
+            if (lastServerTime !== null && serverTime.serverTime < lastServerTime) {
+                throw new FuturesProductionExecutionServiceError('FUTURES_PRODUCTION_CLOCK_REGRESSED');
+            }
+            lastServerTime = serverTime.serverTime;
+            const exchangeInfo = await executeRead({
+                lease,
+                endpointId: ENDPOINT_IDS.exchangeInfo,
+                weight: READ_WEIGHTS.exchangeInfo,
+                audit,
+                operation: () => facade.getExchangeInfo(),
+            });
+            const markPrice = await executeRead({
+                lease,
+                endpointId: ENDPOINT_IDS.markPrice,
+                weight: READ_WEIGHTS.markPrice,
+                audit,
+                operation: () => facade.getMarkPrice(symbol),
+            });
+            const accountConfig = await executeRead({
+                lease,
+                endpointId: ENDPOINT_IDS.accountConfig,
+                weight: READ_WEIGHTS.accountConfig,
+                audit,
+                operation: () => facade.getAccountConfig(),
+            });
+            const symbolConfig = await executeRead({
+                lease,
+                endpointId: ENDPOINT_IDS.symbolConfig,
+                weight: READ_WEIGHTS.symbolConfig,
+                audit,
+                operation: () => facade.getSymbolConfig(symbol),
+            });
+            const balance = await executeRead({
+                lease,
+                endpointId: ENDPOINT_IDS.balance,
+                weight: READ_WEIGHTS.balance,
+                audit,
+                operation: () => facade.getBalance(),
+            });
+            const positionRisk = await executeRead({
+                lease,
+                endpointId: ENDPOINT_IDS.positionRisk,
+                weight: READ_WEIGHTS.positionRisk,
+                audit,
+                operation: () => facade.getPositionRisk(symbol),
+            });
+            const openOrders = await executeRead({
+                lease,
+                endpointId: ENDPOINT_IDS.openOrders,
+                weight: READ_WEIGHTS.openOrders,
+                audit,
+                operation: () => facade.getOpenOrders(symbol),
+            });
+            const openAlgoOrders = await executeRead({
+                lease,
+                endpointId: ENDPOINT_IDS.openAlgoOrders,
+                weight: READ_WEIGHTS.openAlgoOrders,
+                audit,
+                operation: () => facade.getOpenAlgoOrders(symbol),
+            });
+            const dispatchTime = await executeRead({
+                lease,
+                endpointId: ENDPOINT_IDS.serverTime,
+                weight: READ_WEIGHTS.serverTime,
+                audit,
+                operation: () => facade.getServerTime(),
+            });
+            if (dispatchTime.serverTime < serverTime.serverTime
+                || (lastServerTime !== null && dispatchTime.serverTime < lastServerTime)) {
+                throw new FuturesProductionExecutionServiceError(
+                    'FUTURES_PRODUCTION_SERVER_CLOCK_REGRESSED',
+                );
+            }
+            const millisecondsIntoUtcDay = dispatchTime.serverTime % UTC_DAY_MS;
+            if (UTC_DAY_MS - millisecondsIntoUtcDay <= UTC_ROLLOVER_GUARD_MS) {
+                throw new FuturesProductionExecutionServiceError(
+                    'FUTURES_PRODUCTION_UTC_ROLLOVER_GUARD',
+                );
+            }
+            lastServerTime = dispatchTime.serverTime;
+            return {
+                serverTime: dispatchTime.serverTime,
+                snapshot: normalizeRiskSnapshot({
+                    identity,
+                    symbol,
+                    observations: {
+                        exchangeInfo,
+                        markPrice,
+                        accountConfig,
+                        symbolConfig,
+                        balance,
+                        positionRisk,
+                        openOrders,
+                        openAlgoOrders,
+                    },
+                }),
+            };
+        } finally {
+            lease.release();
+        }
+    };
+
+    const evaluateOrder = async (draft, audit = {}) => {
+        const preflight = await readFullPreflight(draft.symbol, audit);
+        const utcDay = canonicalFuturesProductionUtcDay(preflight.serverTime);
+        const dailyState = coordinator.getOrderAdmissionSnapshot();
+        const result = evaluateRisk({
+            policy,
+            identity,
+            snapshot: preflight.snapshot,
+            draft,
+            killSwitchEngaged,
+            dailyNotionalUsed: dailyState.dailyReservations?.[utcDay] ?? '0',
+        });
+        return { result, serverTime: preflight.serverTime, utcDay, snapshot: preflight.snapshot };
+    };
+
+    const validateIdentity = async () => {
+        if (!config.enabled || !facade || !coordinator || !identity) return false;
+        const lease = await coordinator.beginPreflight();
+        try {
+            const time = await executeRead({
+                lease,
+                endpointId: ENDPOINT_IDS.serverTime,
+                weight: READ_WEIGHTS.serverTime,
+                operation: () => facade.getServerTime(),
+            });
+            if (lastServerTime !== null && time.serverTime < lastServerTime) {
+                throw new FuturesProductionExecutionServiceError(
+                    'FUTURES_PRODUCTION_SERVER_CLOCK_REGRESSED',
+                );
+            }
+            const accountConfig = await executeRead({
+                lease,
+                endpointId: ENDPOINT_IDS.accountConfig,
+                weight: READ_WEIGHTS.accountConfig,
+                operation: () => facade.getAccountConfig(),
+            });
+            const balance = await executeRead({
+                lease,
+                endpointId: ENDPOINT_IDS.balance,
+                weight: READ_WEIGHTS.balance,
+                operation: () => facade.getBalance(),
+            });
+            lastServerTime = time.serverTime;
+            return verifyProductionAccountIdentity({
+                accountAlias: identity.accountAlias,
+                accountConfig,
+                balance,
+            }) !== null;
+        } finally {
+            lease.release();
+        }
+    };
+
+    const refreshActivation = async ({ audit = true } = {}) => {
+        const activeOperations = ledger.getActiveOperations?.() ?? [];
+        const admission = coordinator?.getOrderAdmissionSnapshot?.()
+            ?? ledger.getOrderRateState?.()
+            ?? {};
+        const pauseUntil = Number.isSafeInteger(admission.pauseUntil)
+            ? admission.pauseUntil
+            : Number.MAX_SAFE_INTEGER;
+        const activationNow = readNow();
+        const noActiveRatePause = pauseUntil <= activationNow;
+        if (!noActiveRatePause && ratePauseRefreshAt !== pauseUntil) {
+            ratePauseRefreshAt = pauseUntil;
+            schedule(async () => {
+                if (ratePauseRefreshAt !== pauseUntil) return;
+                ratePauseRefreshAt = null;
+                await refreshActivation();
+            }, Math.min(pauseUntil - activationNow, 2_147_000_000));
+        } else if (noActiveRatePause) {
+            ratePauseRefreshAt = null;
+        }
+        const persistedBindings = new Set(activeOperations
+            .map(record => record.credentialBinding)
+            .filter(Boolean));
+        const credentialBindingValid = persistedBindings.size === 0
+            || (persistedBindings.size === 1 && persistedBindings.has(credentialBinding));
+        const gates = {
+            operatorConfigured: config.configured === true,
+            liveAuthorized: config.liveAuthorized === true && config.enabled === true,
+            accountIdentityValid: identityValid,
+            limitsComplete: policy !== null,
+            storageHealthy,
+            recoveryHealthy,
+            killSwitchPolicyActive: policy?.killSwitchPolicy
+                === FUTURES_PRODUCTION_EXECUTION_KILL_SWITCH_POLICY,
+            credentialBindingValid,
+            noBlockingOperation: activeOperations.length === 0 && activeOperation === null,
+            noActiveRatePause,
+        };
+        activation = evaluateFuturesProductionActivationGates(gates);
+        if (audit) {
+            for (const [gate, allowed] of Object.entries(gates)) {
+                await appendAudit({
+                    eventType: 'gate_decision',
+                    category: 'gate',
+                    outcome: allowed ? 'allowed' : 'blocked',
+                    gate,
+                    state: allowed ? 'allowed' : 'blocked',
+                    code: allowed ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.ENABLED : activation.code,
+                });
+            }
+        }
+        advanceRevision();
+        broadcastStatus();
+        return activation;
+    };
+
+    const rejectCommand = async ({
+        requestId = null,
+        kind = FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER,
+        code = FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.COMMAND_REJECTED,
+    } = {}) => {
+        const safeRequestId = /^[0-9a-f]{32}$/.test(requestId ?? '')
+            ? requestId
+            : createRequestId(randomBytes);
+        await setAttempt({
+            requestId: safeRequestId,
+            kind,
+            state: FUTURES_PRODUCTION_EXECUTION_STATES.LOCALLY_REJECTED,
+            code,
+            eventType: 'terminal_transition',
+            category: 'command',
+            outcome: 'rejected',
+        });
+        return false;
+    };
+
+    const rejectFinalCommandWithoutStateMutation = async (command, context, code) => {
+        await appendAudit({
+            eventType: 'gate_decision',
+            category: 'command',
+            outcome: 'rejected',
+            requestId: command.requestId,
+            action: command.action,
+            commandDigest: createFuturesProductionExecutionCommandDigest(command),
+            gate: 'finalCommandIdentity',
+            state: 'rejected',
+            code,
+        });
+        emitStatus(sessions.get(context.connectionId));
+        return false;
+    };
+
+    const issueIntent = async ({ command, connectionId, kind, draft = null }) => {
+        const requestId = createRequestId(randomBytes);
+        const expiresAt = readNow() + INTENT_TTL_MS;
+        const commandDigest = createFuturesProductionExecutionCommandDigest(command);
+        await appendAudit({
+            eventType: 'intent_issued',
+            category: 'intent',
+            outcome: 'allowed',
+            requestId,
+            operationId: requestId,
+            intentId: requestId,
+            action: command.action,
+            commandDigest,
+            state: 'intent_issued',
+            code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.ENABLED,
+        });
+        advanceRevision();
+        activeIntent = {
+            requestId,
+            connectionId,
+            kind,
+            draft,
+            commandDigest,
+            revision,
+            expiresAt,
+        };
+        const issuedIntent = activeIntent;
+        schedule(async () => {
+            if (activeIntent !== issuedIntent) return;
+            activeIntent = null;
+            await appendAudit({
+                eventType: 'intent_expired',
+                category: 'intent',
+                outcome: 'expired',
+                requestId: issuedIntent.requestId,
+                operationId: issuedIntent.requestId,
+                intentId: issuedIntent.requestId,
+                state: 'expired',
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.INTENT_EXPIRED,
+            });
+            advanceRevision();
+            broadcastStatus();
+        }, INTENT_TTL_MS);
+        broadcastStatus();
+        return true;
+    };
+
+    const prepareIntent = async (command, context) => {
+        const kind = PREPARE_KIND_BY_ACTION[command.action];
+        if (!kind || command.revision !== revision || activeIntent || mutex
+            || !activation.enabled || recovery.required) {
+            return rejectCommand({
+                kind: kind ?? FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER,
+                code: command.revision !== revision
+                    ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.REVISION_REJECTED
+                    : FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.GATE_REJECTED,
+            });
+        }
+        if (kind === FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ENGAGE_KILL_SWITCH
+            && killSwitchEngaged) {
+            return rejectCommand({ kind, code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.GATE_REJECTED });
+        }
+        mutex = true;
+        broadcastStatus();
+        try {
+            let draft = null;
+            if (kind === FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER) {
+                draft = {
+                    symbol: command.symbol,
+                    side: command.side,
+                    type: 'LIMIT',
+                    timeInForce: 'GTC',
+                    quantity: command.quantity,
+                    price: command.price,
+                    reduceOnly: command.reduceOnly,
+                };
+                const evaluated = await evaluateOrder(draft, {
+                    action: command.action,
+                    commandDigest: createFuturesProductionExecutionCommandDigest(command),
+                    symbol: draft.symbol,
+                });
+                if (!evaluated.result.ok) {
+                    return rejectCommand({ requestId: null, kind, code: evaluated.result.code });
+                }
+            }
+            return issueIntent({
+                command,
+                connectionId: context.connectionId,
+                kind,
+                draft,
+            });
+        } catch (error) {
+            reportInternal('prepare', error);
+            return rejectCommand({ kind, code: safeErrorCode(error) });
+        } finally {
+            mutex = false;
+            broadcastStatus();
+        }
+    };
+
+    const updateAttemptWithoutAudit = ({ requestId, kind, state, code, items = [] }) => {
+        advanceRevision();
+        currentAttempt = {
+            requestId,
+            kind,
+            revision,
+            acknowledgement: acknowledgementForState(state),
+            state,
+            code,
+            observedAt: readNow(),
+            items,
+        };
+        broadcastStatus();
+    };
+
+    const scheduleReconciliation = (operation, { index = 0, monitoring = false, slow = false } = {}) => {
+        if (shuttingDown || !operation || activeOperation !== operation) return;
+        let delay;
+        let nextIndex = index;
+        if (monitoring) {
+            delay = OPEN_MONITOR_DELAY_MS;
+        } else if (slow) {
+            delay = SLOW_RECONCILIATION_DELAY_MS;
+        } else {
+            nextIndex = Math.min(index + 1, FAST_RECONCILIATION_DELAYS.length - 1);
+            delay = FAST_RECONCILIATION_DELAYS[nextIndex]
+                - FAST_RECONCILIATION_DELAYS[index];
+        }
+        const nextAttemptAt = readNow() + delay;
+        reconciliation = { required: true, state: 'scheduled', nextAttemptAt };
+        recovery = {
+            required: true,
+            state: 'recovering',
+            code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RECOVERY_REQUIRED,
+        };
+        advanceRevision();
+        broadcastStatus();
+        schedule(
+            () => reconcileOrder(operation, { index: nextIndex, monitoring, slow }),
+            delay,
+        );
+    };
+
+    const deferReconciliationUntilOperationalRecoveryCompletes = (operation, options) => {
+        if (shuttingDown || !operation || activeOperation !== operation) return;
+        deferredReconciliation = { operation, options };
+        reconciliation = { required: true, state: 'scheduled', nextAttemptAt: null };
+        recovery = {
+            required: true,
+            state: 'recovering',
+            code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RECOVERY_REQUIRED,
+        };
+        advanceRevision();
+        broadcastStatus();
+    };
+
+    const resumeDeferredReconciliation = () => {
+        const deferred = deferredReconciliation;
+        deferredReconciliation = null;
+        if (shuttingDown || !deferred || activeOperation !== deferred.operation) return;
+        const nextAttemptAt = readNow();
+        reconciliation = { required: true, state: 'scheduled', nextAttemptAt };
+        recovery = {
+            required: true,
+            state: 'recovering',
+            code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RECOVERY_REQUIRED,
+        };
+        advanceRevision();
+        broadcastStatus();
+        schedule(
+            () => reconcileOrder(deferred.operation, deferred.options),
+            0,
+        );
+    };
+
+    const completeOperation = async () => {
+        activeOperation = null;
+        reconciliation = { required: false, state: 'confirmed', nextAttemptAt: null };
+        recovery = {
+            required: false,
+            state: 'healthy',
+            code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.ENABLED,
+        };
+        recoveryHealthy = true;
+        advanceRevision();
+        await refreshActivation({ audit: false });
+    };
+
+    const reconcileOrder = async (operation, {
+        index = 0,
+        monitoring = false,
+        slow = false,
+        allowDuringOperationalRecovery = false,
+    } = {}) => {
+        const reconciliationOptions = { index, monitoring, slow };
+        if (shuttingDown || !operation || activeOperation !== operation) return null;
+        if (operationalRecoveryInProgress && !allowDuringOperationalRecovery) {
+            deferReconciliationUntilOperationalRecoveryCompletes(
+                operation,
+                reconciliationOptions,
+            );
+            return null;
+        }
+        const age = readNow() - operation.dispatchAt;
+        if (age < 0 || age > MAX_RECOVERY_AGE_MS || operation.credentialBinding !== credentialBinding) {
+            reconciliation = { required: true, state: 'unavailable', nextAttemptAt: null };
+            recovery = {
+                required: true,
+                state: 'blocked',
+                code: operation.credentialBinding !== credentialBinding
+                    ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.CREDENTIAL_ROTATION_BLOCKED
+                    : FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RECOVERY_UNAVAILABLE,
+            };
+            await setAttempt({
+                requestId: operation.requestId,
+                kind: operation.kind,
+                state: FUTURES_PRODUCTION_EXECUTION_STATES.RECONCILIATION_UNAVAILABLE,
+                code: recovery.code,
+                eventType: 'reconciliation_result',
+                category: 'reconciliation',
+                outcome: 'unknown',
+                audit: {
+                    clientOrderId: operation.clientOrderId,
+                    commandDigest: operation.commandDigest,
+                    ...durableOrderFields(operation.draft),
+                },
+            });
+            return null;
+        }
+        reconciliation = { required: true, state: 'querying', nextAttemptAt: null };
+        broadcastStatus();
+        try {
+            const order = await invokeExchange({
+                endpointId: ENDPOINT_IDS.queryOrder,
+                audit: {
+                    requestId: operation.requestId,
+                    operationId: operation.requestId,
+                    action: operation.action
+                        ?? FUTURES_PRODUCTION_EXECUTION_ACTIONS.PLACE_ORDER,
+                    clientOrderId: operation.clientOrderId,
+                    commandDigest: operation.commandDigest,
+                    symbol: operation.symbol,
+                    ...durableOrderFields(operation.draft),
+                },
+                operation: () => facade.queryOrderByOriginalClientOrderId({
+                    symbol: operation.symbol,
+                    originalClientOrderId: operation.clientOrderId,
+                }),
+                execute: callback => coordinator.executeRecoveryQuery(callback, {
+                    endpointId: ENDPOINT_IDS.queryOrder,
+                }),
+            });
+            if (shuttingDown || activeOperation !== operation) return null;
+            if (operationalRecoveryInProgress && !allowDuringOperationalRecovery) {
+                deferReconciliationUntilOperationalRecoveryCompletes(
+                    operation,
+                    reconciliationOptions,
+                );
+                return null;
+            }
+            if (order.symbol !== operation.symbol
+                || order.clientOrderId !== operation.clientOrderId
+                || order.side !== operation.draft.side
+                || order.reduceOnly !== operation.draft.reduceOnly
+                || !exactDecimalEqual(order.originalQuantity, operation.draft.quantity)
+                || (operation.exchangeOrderId && order.orderId !== operation.exchangeOrderId)
+                || (operation.draft.type === 'LIMIT'
+                    && (order.originalType !== 'LIMIT'
+                        || order.timeInForce !== 'GTC'
+                        || !exactDecimalEqual(order.price, operation.draft.price)))
+                || (operation.draft.type === 'MARKET' && order.originalType !== 'MARKET')) {
+                throw new FuturesProductionExecutionServiceError(
+                    'FUTURES_PRODUCTION_RECONCILIATION_IDENTITY_REJECTED',
+                );
+            }
+            const state = stateFromOrder(order);
+            const digest = createHash('sha256')
+                .update(JSON.stringify({
+                    orderId: order.orderId,
+                    status: order.status,
+                    executedQuantity: order.executedQuantity,
+                    averagePrice: order.averagePrice,
+                    updateTime: order.updateTime,
+                }))
+                .digest('hex');
+            if (monitoring
+                && state === FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_OPEN
+                && digest === operation.lastOrderDigest) {
+                scheduleReconciliation(operation, { monitoring: true });
+                return order;
+            }
+            operation.lastOrderDigest = digest;
+            const code = state === FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_FILLED
+                ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.CONFIRMED_FILLED
+                : state === FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_CANCELED
+                    ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.CONFIRMED_CANCELED
+                    : state === FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_OPEN
+                        ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.CONFIRMED_OPEN
+                        : FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RESULT_UNKNOWN;
+            await setAttempt({
+                requestId: operation.requestId,
+                kind: operation.kind,
+                state,
+                code,
+                items: [{
+                    symbol: operation.symbol,
+                    outcome: state === FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_FILLED
+                        ? 'accepted'
+                        : state === FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_CANCELED
+                            ? 'canceled'
+                            : state === FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_OPEN
+                                ? 'open'
+                                : 'unknown',
+                    code,
+                }],
+                eventType: monitoring ? 'monitor_result' : 'reconciliation_result',
+                category: 'reconciliation',
+                outcome: state === FUTURES_PRODUCTION_EXECUTION_STATES.RESULT_UNKNOWN
+                    ? 'unknown'
+                    : 'confirmed',
+                audit: {
+                    clientOrderId: operation.clientOrderId,
+                    commandDigest: operation.commandDigest,
+                    exchangeOrderId: order.orderId,
+                    ...durableOrderFields(operation.draft),
+                    detailDigest: operation.lastOrderDigest,
+                },
+            });
+            if (TERMINAL_ORDER_STATES.has(state)) {
+                await completeOperation();
+            } else if (state === FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_OPEN) {
+                scheduleReconciliation(operation, { monitoring: true });
+            } else {
+                scheduleReconciliation(operation, { slow: true });
+            }
+            return order;
+        } catch (error) {
+            if (shuttingDown || activeOperation !== operation) return null;
+            if (operationalRecoveryInProgress && !allowDuringOperationalRecovery) {
+                deferReconciliationUntilOperationalRecoveryCompletes(
+                    operation,
+                    reconciliationOptions,
+                );
+                return null;
+            }
+            reportInternal('reconciliation', error);
+            if (!monitoring || currentAttempt?.state !== FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_OPEN) {
+                await setAttempt({
+                    requestId: operation.requestId,
+                    kind: operation.kind,
+                    state: FUTURES_PRODUCTION_EXECUTION_STATES.RESULT_UNKNOWN,
+                    code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RESULT_UNKNOWN,
+                    items: [{
+                        symbol: operation.symbol,
+                        outcome: 'unknown',
+                        code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RESULT_UNKNOWN,
+                    }],
+                    eventType: 'reconciliation_result',
+                    category: 'reconciliation',
+                    outcome: 'unknown',
+                    audit: {
+                        clientOrderId: operation.clientOrderId,
+                        commandDigest: operation.commandDigest,
+                        ...durableOrderFields(operation.draft),
+                    },
+                });
+            }
+            if (!slow && index + 1 < FAST_RECONCILIATION_DELAYS.length) {
+                scheduleReconciliation(operation, { index });
+            } else {
+                scheduleReconciliation(operation, { slow: true });
+            }
+            return null;
+        }
+    };
+
+    const consumeIntent = async (command, context) => {
+        const kind = FINAL_KIND_BY_ACTION[command.action];
+        const intent = activeIntent;
+        if (!kind || !intent
+            || intent.requestId !== command.requestId
+            || intent.kind !== kind
+            || intent.connectionId !== context.connectionId
+            || intent.revision !== command.revision
+            || intent.expiresAt <= readNow()) {
+            if (intent?.expiresAt <= readNow()) {
+                activeIntent = null;
+                await appendAudit({
+                    eventType: 'intent_expired',
+                    category: 'intent',
+                    outcome: 'expired',
+                    requestId: command.requestId,
+                    operationId: command.requestId,
+                    intentId: command.requestId,
+                    state: 'expired',
+                    code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.INTENT_EXPIRED,
+                });
+            }
+            return null;
+        }
+        activeIntent = null;
+        const commandDigest = createFuturesProductionExecutionCommandDigest(command);
+        await appendAudit({
+            eventType: 'intent_consumed',
+            category: 'intent',
+            outcome: 'accepted',
+            requestId: command.requestId,
+            operationId: command.requestId,
+            intentId: command.requestId,
+            action: command.action,
+            commandDigest,
+            state: 'consumed',
+            code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.ENABLED,
+        });
+        return { ...intent, commandDigest };
+    };
+
+    const placeOrder = async (command, intent) => {
+        const { draft } = intent;
+        const clientOrderId = `cc7-${command.requestId}`;
+        await setAttempt({
+            requestId: command.requestId,
+            kind: intent.kind,
+            state: FUTURES_PRODUCTION_EXECUTION_STATES.QUEUED,
+            code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.ORDER_DISPATCHED,
+            eventType: 'queued',
+            category: 'dispatch',
+            outcome: 'pending',
+            audit: {
+                action: command.action,
+                clientOrderId,
+                commandDigest: intent.commandDigest,
+                ...durableOrderFields(draft),
+            },
+        });
+
+        let evaluated;
+        try {
+            evaluated = await evaluateOrder(draft, {
+                requestId: command.requestId,
+                operationId: command.requestId,
+                action: command.action,
+                clientOrderId,
+                commandDigest: intent.commandDigest,
+                symbol: draft.symbol,
+            });
+        } catch (error) {
+            reportInternal('order-preflight', error);
+            return setAttempt({
+                requestId: command.requestId,
+                kind: intent.kind,
+                state: FUTURES_PRODUCTION_EXECUTION_STATES.LOCALLY_REJECTED,
+                code: safeErrorCode(error),
+                eventType: 'terminal_transition',
+                category: 'gate',
+                outcome: 'rejected',
+                audit: {
+                    clientOrderId,
+                    commandDigest: intent.commandDigest,
+                    ...durableOrderFields(draft),
+                },
+            });
+        }
+        if (!evaluated.result.ok) {
+            return setAttempt({
+                requestId: command.requestId,
+                kind: intent.kind,
+                state: FUTURES_PRODUCTION_EXECUTION_STATES.LOCALLY_REJECTED,
+                code: evaluated.result.code,
+                eventType: 'terminal_transition',
+                category: 'gate',
+                outcome: 'rejected',
+                audit: {
+                    clientOrderId,
+                    commandDigest: intent.commandDigest,
+                    ...durableOrderFields(draft),
+                },
+            });
+        }
+
+        let reservation;
+        try {
+            reservation = await coordinator.reserveOrderDispatch({
+                exactNotional: evaluated.result.notionalUsdt,
+                utcDay: evaluated.utcDay,
+                serverTime: evaluated.serverTime,
+                maximumDailyNotional: policy.maxDailyNotionalUsdt,
+                audit: {
+                    requestId: command.requestId,
+                    operationId: command.requestId,
+                    clientOrderId,
+                    commandDigest: intent.commandDigest,
+                    action: command.action,
+                    credentialBinding,
+                    state: 'dispatched',
+                    code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.ORDER_DISPATCHED,
+                    ...durableOrderFields(draft),
+                },
+            });
+        } catch (error) {
+            reportInternal('dispatch-reservation', error);
+            return setAttempt({
+                requestId: command.requestId,
+                kind: intent.kind,
+                state: FUTURES_PRODUCTION_EXECUTION_STATES.LOCALLY_REJECTED,
+                code: safeErrorCode(error),
+                eventType: 'terminal_transition',
+                category: 'rate',
+                outcome: 'rejected',
+                audit: {
+                    clientOrderId,
+                    commandDigest: intent.commandDigest,
+                    ...durableOrderFields(draft),
+                },
+            });
+        }
+
+        const operation = {
+            requestId: command.requestId,
+            kind: intent.kind,
+            action: command.action,
+            commandDigest: intent.commandDigest,
+            clientOrderId,
+            symbol: draft.symbol,
+            draft,
+            dispatchAt: reservation.dispatchAt,
+            credentialBinding,
+            exchangeOrderId: null,
+            lastOrderDigest: null,
+        };
+        activeOperation = operation;
+        await setAttempt({
+            requestId: command.requestId,
+            kind: intent.kind,
+            state: FUTURES_PRODUCTION_EXECUTION_STATES.DISPATCHED,
+            code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.ORDER_DISPATCHED,
+            items: [{
+                symbol: draft.symbol,
+                outcome: 'pending',
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.ORDER_DISPATCHED,
+            }],
+            eventType: 'dispatch_intent',
+            category: 'dispatch',
+            outcome: 'pending',
+            audit: {
+                action: command.action,
+                clientOrderId,
+                commandDigest: intent.commandDigest,
+                dispatchAt: operation.dispatchAt,
+                ...durableOrderFields(draft),
+            },
+        });
+        const dispatchAge = readNow() - operation.dispatchAt;
+        if (dispatchAge < 0 || dispatchAge > MAX_DISPATCH_START_DELAY_MS) {
+            await setAttempt({
+                requestId: command.requestId,
+                kind: intent.kind,
+                state: FUTURES_PRODUCTION_EXECUTION_STATES.LOCALLY_REJECTED,
+                code: 'FUTURES_PRODUCTION_DISPATCH_DEADLINE_EXCEEDED',
+                eventType: 'terminal_transition',
+                category: 'dispatch',
+                outcome: 'rejected',
+                audit: {
+                    action: command.action,
+                    clientOrderId,
+                    commandDigest: intent.commandDigest,
+                    dispatchAt: operation.dispatchAt,
+                    ...durableOrderFields(draft),
+                },
+            });
+            await completeOperation();
+            return currentAttempt;
+        }
+        try {
+            const acknowledgement = await executeProduction({
+                endpointId: ENDPOINT_IDS.placeLimitGtcOrder,
+                audit: {
+                    requestId: command.requestId,
+                    operationId: command.requestId,
+                    action: command.action,
+                    clientOrderId,
+                    commandDigest: intent.commandDigest,
+                    symbol: draft.symbol,
+                    ...durableOrderFields(draft),
+                },
+                operation: () => facade.placeLimitGtcOrder({
+                    symbol: draft.symbol,
+                    side: draft.side,
+                    quantity: draft.quantity,
+                    price: draft.price,
+                    reduceOnly: draft.reduceOnly,
+                    clientOrderId,
+                }),
+            });
+            operation.exchangeOrderId = acknowledgement.orderId;
+            await setAttempt({
+                requestId: command.requestId,
+                kind: intent.kind,
+                state: FUTURES_PRODUCTION_EXECUTION_STATES.RECONCILING,
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.ORDER_DISPATCHED,
+                items: [{
+                    symbol: draft.symbol,
+                    outcome: 'accepted',
+                    code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.ORDER_DISPATCHED,
+                }],
+                eventType: 'response_classified',
+                category: 'exchange',
+                outcome: 'accepted',
+                audit: {
+                    clientOrderId,
+                    commandDigest: intent.commandDigest,
+                    exchangeOrderId: acknowledgement.orderId,
+                    ...durableOrderFields(draft),
+                },
+            });
+        } catch (error) {
+            if (error?.kind === FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.EXCHANGE_REJECTED) {
+                await setAttempt({
+                    requestId: command.requestId,
+                    kind: intent.kind,
+                    state: FUTURES_PRODUCTION_EXECUTION_STATES.EXCHANGE_REJECTED,
+                    code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.EXCHANGE_REJECTED,
+                    items: [{
+                        symbol: draft.symbol,
+                        outcome: 'rejected',
+                        code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.EXCHANGE_REJECTED,
+                    }],
+                    eventType: 'terminal_transition',
+                    category: 'exchange',
+                    outcome: 'rejected',
+                    audit: {
+                        clientOrderId,
+                        commandDigest: intent.commandDigest,
+                        ...durableOrderFields(draft),
+                    },
+                });
+                await completeOperation();
+                return currentAttempt;
+            }
+            await setAttempt({
+                requestId: command.requestId,
+                kind: intent.kind,
+                state: FUTURES_PRODUCTION_EXECUTION_STATES.RESULT_UNKNOWN,
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RESULT_UNKNOWN,
+                items: [{
+                    symbol: draft.symbol,
+                    outcome: 'unknown',
+                    code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RESULT_UNKNOWN,
+                }],
+                eventType: 'response_classified',
+                category: 'exchange',
+                outcome: 'unknown',
+                audit: {
+                    clientOrderId,
+                    commandDigest: intent.commandDigest,
+                    ...durableOrderFields(draft),
+                },
+            });
+        }
+        await reconcileOrder(operation);
+        return currentAttempt;
+    };
+
+    const readSymbolInventories = async (symbol, audit = {}) => {
+        const regular = await executeRead({
+            endpointId: ENDPOINT_IDS.openOrders,
+            weight: READ_WEIGHTS.openOrders,
+            audit,
+            operation: () => facade.getOpenOrders(symbol),
+        });
+        const algo = await executeRead({
+            endpointId: ENDPOINT_IDS.openAlgoOrders,
+            weight: READ_WEIGHTS.openAlgoOrders,
+            audit,
+            operation: () => facade.getOpenAlgoOrders(symbol),
+        });
+        return { regular, algo };
+    };
+
+    const cancelAllOpenOrders = async (command, intent) => {
+        activeOperation = {
+            requestId: command.requestId,
+            kind: intent.kind,
+            action: command.action,
+            credentialBinding,
+            dispatchAt: readNow(),
+        };
+        await setAttempt({
+            requestId: command.requestId,
+            kind: intent.kind,
+            state: FUTURES_PRODUCTION_EXECUTION_STATES.QUEUED,
+            code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.ORDER_DISPATCHED,
+            eventType: 'cancel_all_parent',
+            category: 'safety',
+            outcome: 'pending',
+            audit: { action: command.action, commandDigest: intent.commandDigest },
+        });
+        const items = [];
+        for (const symbol of policy.allowedSymbols) {
+            const childAudit = {
+                requestId: command.requestId,
+                operationId: `${command.requestId}:${symbol}`,
+                parentOperationId: command.requestId,
+                action: command.action,
+                commandDigest: intent.commandDigest,
+                symbol,
+            };
+            let deletesAcknowledged = true;
+            for (const [endpointId, operation] of [
+                [ENDPOINT_IDS.cancelAllOpenOrders, () => facade.cancelAllOpenOrders({ symbol })],
+                [ENDPOINT_IDS.cancelAllAlgoOpenOrders, () => facade.cancelAllAlgoOpenOrders({ symbol })],
+            ]) {
+                try {
+                    await executeProduction({ endpointId, operation, audit: childAudit });
+                } catch (error) {
+                    deletesAcknowledged = false;
+                    reportInternal('cancel-all-delete', error);
+                }
+            }
+            let confirmedEmpty = false;
+            try {
+                const inventories = await readSymbolInventories(symbol, childAudit);
+                confirmedEmpty = inventories.regular.length === 0 && inventories.algo.length === 0;
+            } catch (error) {
+                reportInternal('cancel-all-reconcile', error);
+            }
+            const outcome = confirmedEmpty ? 'canceled' : 'unknown';
+            const code = confirmedEmpty
+                ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.CANCEL_ALL_CONFIRMED
+                : FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RESULT_UNKNOWN;
+            items.push({ symbol, outcome, code });
+            await appendAudit({
+                eventType: 'cancel_all_child',
+                category: 'safety',
+                outcome: confirmedEmpty ? 'confirmed' : 'unknown',
+                requestId: command.requestId,
+                operationId: `${command.requestId}:${symbol}`,
+                parentOperationId: command.requestId,
+                action: command.action,
+                commandDigest: intent.commandDigest,
+                symbol,
+                state: confirmedEmpty ? 'confirmed_empty' : 'recovery_required',
+                code,
+                safeDetail: deletesAcknowledged ? 'delete-acknowledged' : 'delete-outcome-unknown',
+            });
+        }
+        const allConfirmed = items.every(item => item.outcome === 'canceled');
+        await setAttempt({
+            requestId: command.requestId,
+            kind: intent.kind,
+            state: allConfirmed
+                ? FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_CANCELED
+                : FUTURES_PRODUCTION_EXECUTION_STATES.PARTIAL,
+            code: allConfirmed
+                ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.CANCEL_ALL_CONFIRMED
+                : FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.PARTIAL,
+            items,
+            eventType: 'cancel_all_parent',
+            category: 'safety',
+            outcome: allConfirmed ? 'confirmed' : 'partial',
+            audit: { action: command.action, commandDigest: intent.commandDigest },
+        });
+        if (allConfirmed) {
+            await completeOperation();
+        } else {
+            recoveryHealthy = false;
+            reconciliation = { required: true, state: 'unknown', nextAttemptAt: null };
+            recovery = {
+                required: true,
+                state: 'blocked',
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RECOVERY_REQUIRED,
+            };
+            activation = {
+                enabled: false,
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RECOVERY_REQUIRED,
+                failedGate: 'recoveryHealthy',
+            };
+            broadcastStatus();
+        }
+        return currentAttempt;
+    };
+
+    const queryCloseChild = async ({ operation, expectedExchangeOrderId = null }) => {
+        const audit = {
+            requestId: operation.requestId,
+            operationId: operation.requestId,
+            parentOperationId: operation.parentOperationId ?? null,
+            action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.CLOSE_POSITIONS,
+            clientOrderId: operation.clientOrderId,
+            commandDigest: operation.commandDigest,
+            symbol: operation.symbol,
+            ...durableOrderFields(operation.draft),
+        };
+        const order = await invokeExchange({
+            endpointId: ENDPOINT_IDS.queryOrder,
+            audit,
+            operation: () => facade.queryOrderByOriginalClientOrderId({
+                symbol: operation.symbol,
+                originalClientOrderId: operation.clientOrderId,
+            }),
+            execute: callback => coordinator.executeRecoveryQuery(callback, {
+                endpointId: ENDPOINT_IDS.queryOrder,
+            }),
+        });
+        if (order.symbol !== operation.symbol
+            || order.clientOrderId !== operation.clientOrderId
+            || order.side !== operation.draft.side
+            || order.originalType !== 'MARKET'
+            || order.reduceOnly !== true
+            || !exactDecimalEqual(order.originalQuantity, operation.draft.quantity)
+            || (expectedExchangeOrderId && order.orderId !== expectedExchangeOrderId)) {
+            throw new FuturesProductionExecutionServiceError(
+                'FUTURES_PRODUCTION_RECONCILIATION_IDENTITY_REJECTED',
+            );
+        }
+        if (order.status !== 'FILLED') return false;
+        const positions = await executeRead({
+            endpointId: ENDPOINT_IDS.positionRisk,
+            weight: READ_WEIGHTS.positionRisk,
+            audit,
+            operation: () => facade.getPositionRisk(operation.symbol),
+        });
+        const position = findSymbolEntry(positions, operation.symbol);
+        return position !== null
+            && isZeroExactDecimal(parseSignedExactDecimal(position.positionAmt));
+    };
+
+    const closePositions = async (command, intent) => {
+        activeOperation = {
+            requestId: command.requestId,
+            kind: intent.kind,
+            action: command.action,
+            credentialBinding,
+            dispatchAt: readNow(),
+        };
+        await setAttempt({
+            requestId: command.requestId,
+            kind: intent.kind,
+            state: FUTURES_PRODUCTION_EXECUTION_STATES.QUEUED,
+            code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.ORDER_DISPATCHED,
+            eventType: 'close_positions_parent',
+            category: 'safety',
+            outcome: 'pending',
+            audit: { action: command.action, commandDigest: intent.commandDigest },
+        });
+        const items = [];
+        for (const symbol of policy.allowedSymbols) {
+            let evaluated;
+            let draft;
+            try {
+                const preflight = await readFullPreflight(symbol, {
+                    requestId: command.requestId,
+                    operationId: command.requestId,
+                    action: command.action,
+                    commandDigest: intent.commandDigest,
+                    symbol,
+                });
+                const amount = parseSignedExactDecimal(preflight.snapshot.position.positionAmt);
+                if (isZeroExactDecimal(amount)) {
+                    items.push({
+                        symbol,
+                        outcome: 'closed',
+                        code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.CLOSE_POSITIONS_CONFIRMED,
+                    });
+                    await appendAudit({
+                        eventType: 'close_positions_child',
+                        category: 'safety',
+                        outcome: 'confirmed',
+                        requestId: command.requestId,
+                        operationId: `${command.requestId}:${symbol}`,
+                        parentOperationId: command.requestId,
+                        action: command.action,
+                        commandDigest: intent.commandDigest,
+                        symbol,
+                        state: 'confirmed_closed',
+                        code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.CLOSE_POSITIONS_CONFIRMED,
+                        safeDetail: 'already-flat',
+                    });
+                    continue;
+                }
+                draft = {
+                    symbol,
+                    side: amount.coefficient > 0n ? 'SELL' : 'BUY',
+                    type: 'MARKET',
+                    timeInForce: null,
+                    quantity: formatExactDecimal(absoluteExactDecimal(amount)),
+                    price: null,
+                    reduceOnly: true,
+                };
+                const utcDay = canonicalFuturesProductionUtcDay(preflight.serverTime);
+                const dailyState = coordinator.getOrderAdmissionSnapshot();
+                const result = evaluateRisk({
+                    policy,
+                    identity,
+                    snapshot: preflight.snapshot,
+                    draft,
+                    killSwitchEngaged,
+                    dailyNotionalUsed: dailyState.dailyReservations?.[utcDay] ?? '0',
+                });
+                evaluated = { result, serverTime: preflight.serverTime, utcDay };
+                if (!result.ok) throw new FuturesProductionExecutionServiceError(result.code);
+            } catch (error) {
+                const code = safeErrorCode(error);
+                items.push({ symbol, outcome: 'rejected', code });
+                await appendAudit({
+                    eventType: 'close_positions_child',
+                    category: 'safety',
+                    outcome: 'rejected',
+                    requestId: command.requestId,
+                    operationId: `${command.requestId}:${symbol}`,
+                    parentOperationId: command.requestId,
+                    action: command.action,
+                    commandDigest: intent.commandDigest,
+                    symbol,
+                    state: 'locally_rejected',
+                    code,
+                });
+                continue;
+            }
+
+            const childRequestId = createRequestId(randomBytes);
+            const clientOrderId = `cc7-${childRequestId}`;
+            const childDigest = createFuturesProductionExecutionCommandDigest({
+                parentRequestId: command.requestId,
+                childRequestId,
+                draft,
+            });
+            let reservation;
+            try {
+                reservation = await coordinator.reserveOrderDispatch({
+                    exactNotional: evaluated.result.notionalUsdt,
+                    utcDay: evaluated.utcDay,
+                    serverTime: evaluated.serverTime,
+                    maximumDailyNotional: policy.maxDailyNotionalUsdt,
+                    audit: {
+                        requestId: childRequestId,
+                        operationId: childRequestId,
+                        parentOperationId: command.requestId,
+                        clientOrderId,
+                        commandDigest: childDigest,
+                        action: command.action,
+                        credentialBinding,
+                        state: 'dispatched',
+                        code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.ORDER_DISPATCHED,
+                        ...durableOrderFields(draft),
+                    },
+                });
+            } catch (error) {
+                const code = safeErrorCode(error);
+                items.push({ symbol, outcome: 'rejected', code });
+                await appendAudit({
+                    eventType: 'close_positions_child',
+                    category: 'safety',
+                    outcome: 'rejected',
+                    requestId: childRequestId,
+                    operationId: childRequestId,
+                    parentOperationId: command.requestId,
+                    clientOrderId,
+                    commandDigest: childDigest,
+                    action: command.action,
+                    state: 'locally_rejected',
+                    code,
+                    ...durableOrderFields(draft),
+                });
+                continue;
+            }
+
+            const operation = {
+                requestId: childRequestId,
+                kind: intent.kind,
+                action: command.action,
+                parentOperationId: command.requestId,
+                symbol,
+                clientOrderId,
+                commandDigest: childDigest,
+                draft,
+                dispatchAt: reservation.dispatchAt,
+            };
+            await appendAudit({
+                eventType: 'dispatch_intent',
+                category: 'dispatch',
+                outcome: 'pending',
+                requestId: childRequestId,
+                operationId: childRequestId,
+                parentOperationId: command.requestId,
+                clientOrderId,
+                commandDigest: childDigest,
+                action: command.action,
+                state: 'dispatched',
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.ORDER_DISPATCHED,
+                dispatchAt: operation.dispatchAt,
+                ...durableOrderFields(draft),
+            });
+            const dispatchAge = readNow() - operation.dispatchAt;
+            if (dispatchAge < 0 || dispatchAge > MAX_DISPATCH_START_DELAY_MS) {
+                const code = 'FUTURES_PRODUCTION_DISPATCH_DEADLINE_EXCEEDED';
+                items.push({ symbol, outcome: 'rejected', code });
+                await appendAudit({
+                    eventType: 'close_positions_child',
+                    category: 'safety',
+                    outcome: 'rejected',
+                    requestId: childRequestId,
+                    operationId: childRequestId,
+                    parentOperationId: command.requestId,
+                    clientOrderId,
+                    commandDigest: childDigest,
+                    action: command.action,
+                    state: 'locally_rejected',
+                    code,
+                    dispatchAt: operation.dispatchAt,
+                    ...durableOrderFields(draft),
+                });
+                continue;
+            }
+            let exchangeOrderId = null;
+            try {
+                const acknowledgement = await executeProduction({
+                    endpointId: ENDPOINT_IDS.placeReduceOnlyMarketOrder,
+                    audit: {
+                        requestId: childRequestId,
+                        operationId: childRequestId,
+                        parentOperationId: command.requestId,
+                        action: command.action,
+                        clientOrderId,
+                        commandDigest: childDigest,
+                        symbol,
+                        dispatchAt: reservation.dispatchAt,
+                        ...durableOrderFields(draft),
+                    },
+                    operation: () => facade.placeReduceOnlyMarketOrder({
+                        symbol,
+                        side: draft.side,
+                        quantity: draft.quantity,
+                        clientOrderId,
+                    }),
+                });
+                exchangeOrderId = acknowledgement.orderId;
+            } catch (error) {
+                if (error?.kind === FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.EXCHANGE_REJECTED) {
+                    items.push({
+                        symbol,
+                        outcome: 'rejected',
+                        code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.EXCHANGE_REJECTED,
+                    });
+                    await appendAudit({
+                        eventType: 'close_positions_child',
+                        category: 'safety',
+                        outcome: 'rejected',
+                        requestId: childRequestId,
+                        operationId: childRequestId,
+                        parentOperationId: command.requestId,
+                        clientOrderId,
+                        commandDigest: childDigest,
+                        action: command.action,
+                        state: 'exchange_rejected',
+                        code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.EXCHANGE_REJECTED,
+                        ...durableOrderFields(draft),
+                    });
+                    continue;
+                }
+            }
+            let closed = false;
+            try {
+                closed = await queryCloseChild({ operation, expectedExchangeOrderId: exchangeOrderId });
+            } catch (error) {
+                reportInternal('close-position-reconcile', error);
+            }
+            const outcome = closed ? 'closed' : 'unknown';
+            const code = closed
+                ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.CLOSE_POSITIONS_CONFIRMED
+                : FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RESULT_UNKNOWN;
+            items.push({ symbol, outcome, code });
+            await appendAudit({
+                eventType: 'close_positions_child',
+                category: 'safety',
+                outcome: closed ? 'confirmed' : 'unknown',
+                requestId: childRequestId,
+                operationId: childRequestId,
+                parentOperationId: command.requestId,
+                clientOrderId,
+                commandDigest: childDigest,
+                action: command.action,
+                state: closed ? 'confirmed_closed' : 'recovery_required',
+                code,
+                exchangeOrderId,
+                ...durableOrderFields(draft),
+            });
+        }
+
+        const allClosed = items.length === policy.allowedSymbols.length
+            && items.every(item => item.outcome === 'closed');
+        await setAttempt({
+            requestId: command.requestId,
+            kind: intent.kind,
+            state: allClosed
+                ? FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_CLOSED
+                : FUTURES_PRODUCTION_EXECUTION_STATES.PARTIAL,
+            code: allClosed
+                ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.CLOSE_POSITIONS_CONFIRMED
+                : FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.PARTIAL,
+            items,
+            eventType: 'close_positions_parent',
+            category: 'safety',
+            outcome: allClosed ? 'confirmed' : 'partial',
+            audit: { action: command.action, commandDigest: intent.commandDigest },
+        });
+        if (allClosed) {
+            await completeOperation();
+        } else {
+            recoveryHealthy = false;
+            reconciliation = { required: true, state: 'unknown', nextAttemptAt: null };
+            recovery = {
+                required: true,
+                state: 'blocked',
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RECOVERY_REQUIRED,
+            };
+            activation = {
+                enabled: false,
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RECOVERY_REQUIRED,
+                failedGate: 'recoveryHealthy',
+            };
+            broadcastStatus();
+        }
+        return currentAttempt;
+    };
+
+    const engageKillSwitch = async (command, intent) => {
+        await ledger.setKillSwitch({
+            engaged: true,
+            requestId: command.requestId,
+            operationId: command.requestId,
+            intentId: command.requestId,
+            action: command.action,
+            commandDigest: intent.commandDigest,
+            accountAlias: account.alias,
+            accountFingerprint: account.fingerprint,
+            credentialBinding,
+            code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.KILL_SWITCH_ENGAGED,
+        });
+        killSwitchEngaged = true;
+        await setAttempt({
+            requestId: command.requestId,
+            kind: intent.kind,
+            state: FUTURES_PRODUCTION_EXECUTION_STATES.KILL_SWITCH_ENGAGED,
+            code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.KILL_SWITCH_ENGAGED,
+            eventType: 'acknowledgement',
+            category: 'safety',
+            outcome: 'accepted',
+            audit: { action: command.action, commandDigest: intent.commandDigest },
+        });
+        return currentAttempt;
+    };
+
+    const executeFinal = async (command, context) => {
+        const kind = FINAL_KIND_BY_ACTION[command.action];
+        const commandDigest = createFuturesProductionExecutionCommandDigest(command);
+        const existing = finalCommandExecutions.get(command.requestId);
+        if (existing) {
+            if (existing.connectionId !== context.connectionId
+                || existing.action !== command.action
+                || existing.commandDigest !== commandDigest) {
+                return rejectFinalCommandWithoutStateMutation(
+                    command,
+                    context,
+                    FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.INTENT_REJECTED,
+                );
+            }
+            const outcome = await existing.completion;
+            emitStatus(sessions.get(context.connectionId));
+            return outcome;
+        }
+        if (!kind || mutex || command.revision !== activeIntent?.revision) {
+            return rejectFinalCommandWithoutStateMutation(
+                command,
+                context,
+                mutex
+                    ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.BUSY
+                    : FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.INTENT_REJECTED,
+            );
+        }
+        let settleExecution;
+        const execution = {
+            connectionId: context.connectionId,
+            action: command.action,
+            commandDigest,
+            completed: false,
+            completion: new Promise(resolve => { settleExecution = resolve; }),
+        };
+        finalCommandExecutions.set(command.requestId, execution);
+        mutex = true;
+        broadcastStatus();
+        let outcome = false;
+        try {
+            const intent = await consumeIntent(command, context);
+            if (!intent) {
+                await rejectFinalCommandWithoutStateMutation(
+                    command,
+                    context,
+                    FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.INTENT_REJECTED,
+                );
+                return false;
+            }
+            let result;
+            if (kind === FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER) {
+                result = await placeOrder(command, intent);
+            } else if (kind === FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.CANCEL_ALL_OPEN_ORDERS) {
+                result = await cancelAllOpenOrders(command, intent);
+            } else if (kind === FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.CLOSE_POSITIONS) {
+                result = await closePositions(command, intent);
+            } else {
+                result = await engageKillSwitch(command, intent);
+            }
+            outcome = Boolean(result);
+        } catch (error) {
+            reportInternal('final-command', error);
+            if (!failedClosed) {
+                await rejectCommand({
+                    requestId: command.requestId,
+                    kind,
+                    code: safeErrorCode(error),
+                }).catch(() => {});
+            }
+        } finally {
+            execution.completed = true;
+            settleExecution(outcome);
+            if (finalCommandExecutions.size > 64) {
+                for (const [requestId, candidate] of finalCommandExecutions) {
+                    if (finalCommandExecutions.size <= 64) break;
+                    if (candidate.completed) finalCommandExecutions.delete(requestId);
+                }
+            }
+            mutex = false;
+            broadcastStatus();
+        }
+        return outcome;
+    };
+
+    const draftFromRecord = record => ({
+        symbol: record.symbol,
+        side: record.side,
+        type: record.orderType,
+        timeInForce: record.timeInForce,
+        quantity: record.quantity,
+        price: record.price,
+        reduceOnly: record.reduceOnly,
+    });
+
+    const hasDefinitiveRejectedPostEvidence = ({
+        operationId,
+        endpointId,
+        dispatchAt,
+    }) => {
+        const records = ledger.getRecords?.() ?? [];
+        let dispatchPersisted = false;
+        let requestPersisted = false;
+        for (const record of records) {
+            if ((record.operationId ?? record.requestId) !== operationId) continue;
+            if (['daily_notional_reserved', 'dispatch_intent'].includes(record.eventType)
+                && (dispatchAt == null || record.dispatchAt === dispatchAt)) {
+                dispatchPersisted = true;
+            }
+            if (dispatchPersisted
+                && record.eventType === 'exchange_request'
+                && record.endpointId === endpointId
+                && record.outcome === 'pending') {
+                requestPersisted = true;
+            }
+            if (requestPersisted
+                && record.eventType === 'exchange_response'
+                && record.endpointId === endpointId
+                && record.outcome === 'rejected') {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    const terminalizeDefinitivelyRejectedOrder = async (record, kind) => {
+        const draft = draftFromRecord(record);
+        await setAttempt({
+            requestId: record.requestId,
+            kind,
+            state: FUTURES_PRODUCTION_EXECUTION_STATES.EXCHANGE_REJECTED,
+            code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.EXCHANGE_REJECTED,
+            eventType: 'restart_recovery',
+            category: 'recovery',
+            outcome: 'rejected',
+            audit: {
+                action: record.action,
+                parentOperationId: record.parentOperationId,
+                clientOrderId: record.clientOrderId,
+                commandDigest: record.commandDigest,
+                exchangeOrderId: record.exchangeOrderId,
+                dispatchAt: record.dispatchAt,
+                ...durableOrderFields(draft),
+            },
+        });
+    };
+
+    const recoverEngagedKillSwitch = async (records) => {
+        if (records.length !== 1) return blockRecovery();
+        const [record] = records;
+        if (!killSwitchEngaged) {
+            await ledger.setKillSwitch({
+                engaged: true,
+                requestId: record.requestId,
+                operationId: record.operationId ?? record.requestId,
+                intentId: record.intentId ?? record.requestId,
+                action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.ENGAGE_KILL_SWITCH,
+                commandDigest: record.commandDigest,
+                accountAlias: account?.alias ?? null,
+                accountFingerprint: account?.fingerprint ?? null,
+                credentialBinding,
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.KILL_SWITCH_ENGAGED,
+            });
+            killSwitchEngaged = true;
+        }
+        await setAttempt({
+            requestId: record.requestId,
+            kind: FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ENGAGE_KILL_SWITCH,
+            state: FUTURES_PRODUCTION_EXECUTION_STATES.KILL_SWITCH_ENGAGED,
+            code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.KILL_SWITCH_ENGAGED,
+            eventType: 'restart_recovery',
+            category: 'recovery',
+            outcome: 'confirmed',
+            audit: {
+                action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.ENGAGE_KILL_SWITCH,
+                commandDigest: record.commandDigest,
+                intentId: record.intentId ?? record.requestId,
+            },
+        });
+        if ((ledger.getActiveOperations?.().length ?? 0) !== 0) return blockRecovery();
+        await completeOperation();
+        return true;
+    };
+
+    const recoverCancelAll = async (records) => {
+        const parent = records.find(record => record.parentOperationId === null)
+            ?? records[0];
+        const requestId = parent.parentOperationId ?? parent.requestId;
+        const items = [];
+        for (const symbol of policy.allowedSymbols) {
+            let confirmed = false;
+            try {
+                const inventories = await readSymbolInventories(symbol, {
+                    requestId,
+                    operationId: `${requestId}:${symbol}`,
+                    parentOperationId: requestId,
+                    action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.CANCEL_ALL_OPEN_ORDERS,
+                    symbol,
+                });
+                confirmed = inventories.regular.length === 0 && inventories.algo.length === 0;
+            } catch (error) {
+                reportInternal('restart-cancel-reconcile', error);
+            }
+            const code = confirmed
+                ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.CANCEL_ALL_CONFIRMED
+                : FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RESULT_UNKNOWN;
+            items.push({ symbol, outcome: confirmed ? 'canceled' : 'unknown', code });
+            await appendAudit({
+                eventType: 'restart_recovery',
+                category: 'recovery',
+                outcome: confirmed ? 'confirmed' : 'unknown',
+                requestId,
+                operationId: `${requestId}:${symbol}`,
+                parentOperationId: requestId,
+                action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.CANCEL_ALL_OPEN_ORDERS,
+                symbol,
+                state: confirmed ? 'confirmed_empty' : 'recovery_required',
+                code,
+            });
+        }
+        const complete = items.every(item => item.outcome === 'canceled');
+        await setAttempt({
+            requestId,
+            kind: FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.CANCEL_ALL_OPEN_ORDERS,
+            state: complete
+                ? FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_CANCELED
+                : FUTURES_PRODUCTION_EXECUTION_STATES.PARTIAL,
+            code: complete
+                ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.CANCEL_ALL_CONFIRMED
+                : FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.PARTIAL,
+            items,
+            eventType: 'restart_recovery',
+            category: 'recovery',
+            outcome: complete ? 'confirmed' : 'partial',
+            audit: { action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.CANCEL_ALL_OPEN_ORDERS },
+        });
+        const recovered = complete && (ledger.getActiveOperations?.().length ?? 0) === 0;
+        if (recovered) {
+            await completeOperation();
+        } else {
+            recoveryHealthy = false;
+            reconciliation = { required: true, state: 'unknown', nextAttemptAt: null };
+            recovery = {
+                required: true,
+                state: 'blocked',
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RECOVERY_REQUIRED,
+            };
+            advanceRevision();
+            broadcastStatus();
+        }
+        return recovered;
+    };
+
+    const recoverClosePositions = async (records) => {
+        const parent = records.find(record => record.parentOperationId === null)
+            ?? records[0];
+        const requestId = parent.parentOperationId ?? parent.requestId;
+        const definitivelyRejectedSymbols = new Set();
+        for (const record of records) {
+            if (!record.clientOrderId || !record.symbol || record.orderType !== 'MARKET') continue;
+            if (hasDefinitiveRejectedPostEvidence({
+                operationId: record.operationId ?? record.requestId,
+                endpointId: ENDPOINT_IDS.placeReduceOnlyMarketOrder,
+                dispatchAt: record.dispatchAt,
+            })) {
+                await terminalizeDefinitivelyRejectedOrder(
+                    record,
+                    FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.CLOSE_POSITIONS,
+                );
+                definitivelyRejectedSymbols.add(record.symbol);
+                continue;
+            }
+            try {
+                await queryCloseChild({
+                    operation: {
+                        requestId: record.requestId,
+                        parentOperationId: requestId,
+                        symbol: record.symbol,
+                        clientOrderId: record.clientOrderId,
+                        commandDigest: record.commandDigest,
+                        draft: draftFromRecord(record),
+                    },
+                    expectedExchangeOrderId: record.exchangeOrderId,
+                });
+            } catch (error) {
+                reportInternal('restart-close-query', error);
+            }
+        }
+        const items = [];
+        for (const symbol of policy.allowedSymbols) {
+            let flat = false;
+            try {
+                const positions = await executeRead({
+                    endpointId: ENDPOINT_IDS.positionRisk,
+                    weight: READ_WEIGHTS.positionRisk,
+                    audit: {
+                        requestId,
+                        operationId: requestId,
+                        action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.CLOSE_POSITIONS,
+                        symbol,
+                    },
+                    operation: () => facade.getPositionRisk(symbol),
+                });
+                const position = findSymbolEntry(positions, symbol);
+                flat = position !== null
+                    && isZeroExactDecimal(parseSignedExactDecimal(position.positionAmt));
+            } catch (error) {
+                reportInternal('restart-close-position', error);
+            }
+            const code = flat
+                ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.CLOSE_POSITIONS_CONFIRMED
+                : definitivelyRejectedSymbols.has(symbol)
+                    ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.EXCHANGE_REJECTED
+                    : FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RESULT_UNKNOWN;
+            items.push({
+                symbol,
+                outcome: flat
+                    ? 'closed'
+                    : definitivelyRejectedSymbols.has(symbol) ? 'rejected' : 'unknown',
+                code,
+            });
+            if (flat) {
+                for (const record of records.filter(item => (
+                    item.symbol === symbol
+                    && item.clientOrderId
+                    && item.orderType === 'MARKET'
+                ))) {
+                    await appendAudit({
+                        eventType: 'restart_recovery',
+                        category: 'recovery',
+                        outcome: 'confirmed',
+                        requestId: record.requestId,
+                        operationId: record.operationId ?? record.requestId,
+                        parentOperationId: requestId,
+                        clientOrderId: record.clientOrderId,
+                        commandDigest: record.commandDigest,
+                        action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.CLOSE_POSITIONS,
+                        symbol,
+                        state: 'confirmed_closed',
+                        code,
+                        exchangeOrderId: record.exchangeOrderId,
+                        ...durableOrderFields(draftFromRecord(record)),
+                    });
+                }
+            }
+        }
+        const complete = items.every(item => item.outcome === 'closed');
+        await setAttempt({
+            requestId,
+            kind: FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.CLOSE_POSITIONS,
+            state: complete
+                ? FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_CLOSED
+                : FUTURES_PRODUCTION_EXECUTION_STATES.PARTIAL,
+            code: complete
+                ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.CLOSE_POSITIONS_CONFIRMED
+                : FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.PARTIAL,
+            items,
+            eventType: 'restart_recovery',
+            category: 'recovery',
+            outcome: complete ? 'confirmed' : 'partial',
+            audit: { action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.CLOSE_POSITIONS },
+        });
+        const recovered = complete && (ledger.getActiveOperations?.().length ?? 0) === 0;
+        if (recovered) {
+            await completeOperation();
+        } else {
+            recoveryHealthy = false;
+            reconciliation = { required: true, state: 'unknown', nextAttemptAt: null };
+            recovery = {
+                required: true,
+                state: 'blocked',
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RECOVERY_REQUIRED,
+            };
+            advanceRevision();
+            broadcastStatus();
+        }
+        return recovered;
+    };
+
+    const recoverPersistedOperations = async ({ allowDuringOperationalRecovery = false } = {}) => {
+        let active = ledger.getActiveOperations?.() ?? [];
+        if (active.length === 0) return true;
+        const bindings = new Set(active.map(record => record.credentialBinding).filter(Boolean));
+        if (bindings.size !== 1 || !bindings.has(credentialBinding)) {
+            recovery = {
+                required: true,
+                state: 'blocked',
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.CREDENTIAL_ROTATION_BLOCKED,
+            };
+            recoveryHealthy = false;
+            await appendAudit({
+                eventType: 'credential_mismatch',
+                category: 'recovery',
+                outcome: 'blocked',
+                state: 'blocked',
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.CREDENTIAL_ROTATION_BLOCKED,
+            });
+            return false;
+        }
+        const prepareActions = new Set(Object.keys(PREPARE_KIND_BY_ACTION));
+        for (const record of active.filter(item => prepareActions.has(item.action))) {
+            await appendAudit({
+                eventType: 'restart_recovery',
+                category: 'recovery',
+                outcome: 'expired',
+                requestId: record.requestId,
+                operationId: record.operationId ?? record.requestId,
+                intentId: record.intentId ?? record.requestId,
+                action: record.action,
+                commandDigest: record.commandDigest,
+                state: 'expired',
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.INTENT_EXPIRED,
+            });
+        }
+        active = ledger.getActiveOperations?.() ?? [];
+        if (active.length === 0) return true;
+        const killSwitchRecords = active.filter(record => (
+            record.action === FUTURES_PRODUCTION_EXECUTION_ACTIONS.ENGAGE_KILL_SWITCH
+        ));
+        if (killSwitchRecords.length > 0) return recoverEngagedKillSwitch(killSwitchRecords);
+        const cancelRecords = active.filter(record => (
+            record.action === FUTURES_PRODUCTION_EXECUTION_ACTIONS.CANCEL_ALL_OPEN_ORDERS
+        ));
+        if (cancelRecords.length > 0) return recoverCancelAll(cancelRecords);
+        const closeRecords = active.filter(record => (
+            record.action === FUTURES_PRODUCTION_EXECUTION_ACTIONS.CLOSE_POSITIONS
+        ));
+        if (closeRecords.length > 0) return recoverClosePositions(closeRecords);
+
+        const record = active.find(item => (
+            item.action === FUTURES_PRODUCTION_EXECUTION_ACTIONS.PLACE_ORDER
+        ));
+        if (!record) {
+            await appendAudit({
+                eventType: 'restart_recovery',
+                category: 'recovery',
+                outcome: 'blocked',
+                state: 'blocked',
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RECOVERY_UNAVAILABLE,
+                safeDetail: 'unsupported-durable-operation',
+            });
+            return blockRecovery({
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RECOVERY_UNAVAILABLE,
+            });
+        }
+        if (record.dispatchAt == null) {
+            const draft = draftFromRecord(record);
+            await setAttempt({
+                requestId: record.requestId,
+                kind: FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER,
+                state: FUTURES_PRODUCTION_EXECUTION_STATES.LOCALLY_REJECTED,
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.COMMAND_REJECTED,
+                eventType: 'restart_recovery',
+                category: 'recovery',
+                outcome: 'rejected',
+                audit: {
+                    action: record.action,
+                    clientOrderId: record.clientOrderId,
+                    commandDigest: record.commandDigest,
+                    ...durableOrderFields(draft),
+                },
+            });
+            return true;
+        }
+        const draft = draftFromRecord(record);
+        if (!draft.symbol || !draft.side || !draft.type || !draft.quantity
+            || typeof draft.reduceOnly !== 'boolean' || !record.clientOrderId) {
+            await appendAudit({
+                eventType: 'restart_recovery',
+                category: 'recovery',
+                outcome: 'blocked',
+                requestId: record.requestId,
+                operationId: record.operationId ?? record.requestId,
+                action: record.action,
+                clientOrderId: record.clientOrderId,
+                commandDigest: record.commandDigest,
+                state: 'blocked',
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RECOVERY_UNAVAILABLE,
+                safeDetail: 'invalid-durable-order-contract',
+            });
+            return blockRecovery({
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RECOVERY_UNAVAILABLE,
+            });
+        }
+        if (hasDefinitiveRejectedPostEvidence({
+            operationId: record.operationId ?? record.requestId,
+            endpointId: ENDPOINT_IDS.placeLimitGtcOrder,
+            dispatchAt: record.dispatchAt,
+        })) {
+            await terminalizeDefinitivelyRejectedOrder(
+                record,
+                FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER,
+            );
+            if ((ledger.getActiveOperations?.().length ?? 0) !== 0) return blockRecovery();
+            await completeOperation();
+            return true;
+        }
+        activeOperation = {
+            requestId: record.requestId,
+            kind: FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER,
+            action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.PLACE_ORDER,
+            commandDigest: record.commandDigest,
+            clientOrderId: record.clientOrderId,
+            symbol: record.symbol,
+            draft,
+            dispatchAt: record.dispatchAt,
+            credentialBinding: record.credentialBinding,
+            exchangeOrderId: record.exchangeOrderId,
+            lastOrderDigest: null,
+        };
+        recoveryHealthy = false;
+        recovery = {
+            required: true,
+            state: 'recovering',
+            code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RECOVERY_REQUIRED,
+        };
+        updateAttemptWithoutAudit({
+            requestId: record.requestId,
+            kind: FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER,
+            state: FUTURES_PRODUCTION_EXECUTION_STATES.RECOVERING,
+            code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RECOVERY_REQUIRED,
+            items: [{
+                symbol: record.symbol,
+                outcome: 'unknown',
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RECOVERY_REQUIRED,
+            }],
+        });
+        await appendAudit({
+            eventType: 'restart_recovery',
+            category: 'recovery',
+            outcome: 'pending',
+            requestId: record.requestId,
+            operationId: record.requestId,
+            action: record.action,
+            clientOrderId: record.clientOrderId,
+            commandDigest: record.commandDigest,
+            state: 'recovering',
+            code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RECOVERY_REQUIRED,
+            ...durableOrderFields(draft),
+        });
+        await reconcileOrder(activeOperation, { allowDuringOperationalRecovery });
+        return activeOperation === null;
+    };
+
+    const start = async () => {
+        if (started) return statusFor(null);
+        try {
+            await ledger.open();
+            storageHealthy = ledger.getHealth?.().healthy !== false;
+            const replay = ledger.getReplaySnapshot?.() ?? {};
+            killSwitchEngaged = replay.killSwitchEngaged !== false;
+            const persistedRateState = ledger.getOrderRateState?.() ?? {
+                dispatchTimes: [],
+                originWeightReservations: [],
+                lastOriginWeightObservedAt: null,
+                pauseUntil: 0,
+                dailyReservations: {},
+                lastUtcDay: null,
+                lastServerTime: null,
+            };
+            coordinator?.restoreOrderState?.({
+                dispatchTimes: persistedRateState.dispatchTimes ?? [],
+                pauseUntil: persistedRateState.pauseUntil ?? 0,
+                dailyReservations: persistedRateState.dailyReservations ?? {},
+                lastUtcDay: persistedRateState.lastUtcDay ?? null,
+                lastServerTime: persistedRateState.lastServerTime ?? null,
+            });
+            coordinator?.restoreOriginWeightState?.({
+                originWeightReservations: persistedRateState.originWeightReservations ?? [],
+                lastOriginWeightObservedAt: persistedRateState.lastOriginWeightObservedAt ?? null,
+            });
+            lastServerTime = replay.lastServerTime ?? null;
+            await ledger.assertHealthy?.();
+            await appendAudit({
+                eventType: 'storage_health',
+                category: 'storage',
+                outcome: 'healthy',
+                state: 'healthy',
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.ENABLED,
+            });
+        } catch (error) {
+            poison('startup-storage', error);
+        }
+
+        if (storageHealthy && config.enabled) {
+            try {
+                const active = ledger.getActiveOperations?.() ?? [];
+                const bindings = new Set(active.map(record => record.credentialBinding).filter(Boolean));
+                const bindingMatches = bindings.size === 0
+                    || (bindings.size === 1 && bindings.has(credentialBinding));
+                identityValid = bindingMatches && await validateIdentity();
+                if (identityValid && active.length > 0) {
+                    recoveryHealthy = await recoverPersistedOperations();
+                } else if (active.length > 0) {
+                    recoveryHealthy = false;
+                    recovery = {
+                        required: true,
+                        state: 'blocked',
+                        code: bindingMatches
+                            ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RECOVERY_UNAVAILABLE
+                            : FUTURES_PRODUCTION_EXECUTION_SAFE_CODES
+                                .CREDENTIAL_ROTATION_BLOCKED,
+                    };
+                }
+            } catch (error) {
+                identityValid = false;
+                recoveryHealthy = false;
+                recovery = {
+                    required: true,
+                    state: 'blocked',
+                    code: safeErrorCode(error),
+                };
+                reportInternal('startup-recovery', error);
+            }
+        } else if (storageHealthy && (ledger.getActiveOperations?.().length ?? 0) > 0) {
+            await appendAudit({
+                eventType: 'restart_recovery',
+                category: 'recovery',
+                outcome: 'blocked',
+                state: 'blocked',
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RECOVERY_UNAVAILABLE,
+                safeDetail: 'production-runtime-disabled',
+            });
+            blockRecovery({
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RECOVERY_UNAVAILABLE,
+            });
+        }
+        started = true;
+        await refreshActivation({ audit: storageHealthy });
+        return statusFor(null);
+    };
+
+    const handleRequestNow = async (raw, context = {}) => {
+        if (!started || shuttingDown
+            || typeof context.connectionId !== 'string'
+            || !/^[0-9a-f]{32}$/.test(context.connectionId)
+            || typeof context.emit !== 'function') return false;
+        let command;
+        try {
+            command = parseFuturesProductionExecutionCommand(raw, {
+                allowedSymbols: policy?.allowedSymbols,
+            });
+        } catch {
+            await appendAudit({
+                eventType: 'received_command',
+                category: 'command',
+                outcome: 'rejected',
+                state: 'rejected',
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.COMMAND_REJECTED,
+            }).catch(() => {});
+            emitStatus(sessions.get(context.connectionId));
+            return false;
+        }
+        const isSubscription = [
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.SUBSCRIBE_STATUS,
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.UNSUBSCRIBE_STATUS,
+        ].includes(command.action);
+        const commandDigest = createFuturesProductionExecutionCommandDigest(command);
+        await appendAudit({
+            eventType: 'received_command',
+            category: 'command',
+            outcome: 'received',
+            action: command.action,
+            requestId: command.requestId ?? null,
+            operationId: command.requestId ?? null,
+            commandDigest,
+            state: 'received',
+            code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.ENABLED,
+        });
+        if ((isSubscription && command.accountFingerprint !== BOOTSTRAP_FINGERPRINT)
+            || (!isSubscription && command.accountFingerprint !== account?.fingerprint)) {
+            await appendAudit({
+                eventType: 'gate_decision',
+                category: 'command',
+                outcome: 'rejected',
+                action: command.action,
+                requestId: command.requestId ?? null,
+                commandDigest,
+                gate: 'accountFingerprint',
+                state: 'rejected',
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.COMMAND_REJECTED,
+            });
+            emitStatus(sessions.get(context.connectionId));
+            return false;
+        }
+
+        if (command.action === FUTURES_PRODUCTION_EXECUTION_ACTIONS.SUBSCRIBE_STATUS) {
+            const session = {
+                connectionId: context.connectionId,
+                emit: context.emit,
+                subscribed: true,
+            };
+            sessions.set(context.connectionId, session);
+            emitStatus(session);
+            return true;
+        }
+        if (command.action === FUTURES_PRODUCTION_EXECUTION_ACTIONS.UNSUBSCRIBE_STATUS) {
+            const session = sessions.get(context.connectionId);
+            if (session) session.subscribed = false;
+            return true;
+        }
+        const session = sessions.get(context.connectionId);
+        if (!session?.subscribed) return rejectCommand({
+            requestId: command.requestId,
+            kind: PREPARE_KIND_BY_ACTION[command.action] ?? FINAL_KIND_BY_ACTION[command.action],
+            code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.GATE_REJECTED,
+        });
+        if (PREPARE_KIND_BY_ACTION[command.action]) return prepareIntent(command, context);
+        return executeFinal(command, context);
+    };
+
+    const handleRequest = (raw, context = {}) => trackInFlight(
+        handleRequestNow(raw, context),
+    );
+
+    const disconnect = (connectionId) => {
+        const removed = sessions.delete(connectionId);
+        if (activeIntent?.connectionId === connectionId) {
+            const expired = activeIntent;
+            activeIntent = null;
+            const task = appendAudit({
+                eventType: 'intent_expired',
+                category: 'intent',
+                outcome: 'expired',
+                requestId: expired.requestId,
+                operationId: expired.requestId,
+                intentId: expired.requestId,
+                state: 'expired',
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.INTENT_EXPIRED,
+            }).then(() => {
+                advanceRevision();
+                broadcastStatus();
+            }).catch(() => {})
+                .finally(() => backgroundTasks.delete(task));
+            backgroundTasks.add(task);
+        }
+        return removed;
+    };
+
+    const authorizeRecovery = (authorization) => {
+        const expected = config.recoveryAuthorization;
+        if (typeof authorization !== 'string' || typeof expected !== 'string') return false;
+        const left = Buffer.from(authorization, 'utf8');
+        const right = Buffer.from(expected, 'utf8');
+        return left.byteLength === right.byteLength && timingSafeEqual(left, right);
+    };
+
+    const recoverOperationallyNow = async ({ authorization, action } = {}) => {
+        const authorized = authorizeRecovery(authorization);
+        const recognized = OPERATIONAL_RECOVERY_ACTIONS.has(action);
+        const safeAction = recognized
+            ? `backend.futuresProduction.${action}`
+            : 'backend.futuresProduction.invalidAction';
+        const recoveryOperationId = createRequestId(randomBytes);
+        if (!authorized || !recognized || mutex || shuttingDown || !storageHealthy
+            || backgroundTasks.size > 0) {
+            const code = !authorized || !recognized
+                ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.COMMAND_REJECTED
+                : !storageHealthy
+                    ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.STORAGE_FAILED
+                    : FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.BUSY;
+            if (storageHealthy && !shuttingDown) {
+                await appendAudit({
+                    eventType: 'operator_recovery',
+                    category: 'recovery',
+                    outcome: !authorized || !recognized ? 'rejected' : 'blocked',
+                    operationId: recoveryOperationId,
+                    action: safeAction,
+                    state: 'blocked',
+                    code,
+                }).catch(() => {});
+            }
+            return false;
+        }
+        operationalRecoveryInProgress = true;
+        mutex = true;
+        broadcastStatus();
+        try {
+            await appendAudit({
+                eventType: 'operator_recovery',
+                category: 'recovery',
+                outcome: 'pending',
+                operationId: recoveryOperationId,
+                action: safeAction,
+                state: 'pending',
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RECOVERY_REQUIRED,
+            });
+            if (action === 'reconcile') {
+                recoveryHealthy = await recoverPersistedOperations({
+                    allowDuringOperationalRecovery: true,
+                });
+                if (!recoveryHealthy) {
+                    await appendAudit({
+                        eventType: 'operator_recovery',
+                        category: 'recovery',
+                        outcome: 'blocked',
+                        operationId: recoveryOperationId,
+                        action: safeAction,
+                        state: 'blocked',
+                        code: recovery.code,
+                    });
+                    advanceRevision();
+                    await refreshActivation({ audit: false });
+                    return false;
+                }
+            } else {
+                const engaged = action === 'engageKillSwitch';
+                if (!engaged && (ledger.getActiveOperations?.().length > 0 || !recoveryHealthy)) {
+                    await appendAudit({
+                        eventType: 'operator_recovery',
+                        category: 'recovery',
+                        outcome: 'blocked',
+                        operationId: recoveryOperationId,
+                        action: safeAction,
+                        state: 'blocked',
+                        code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RECOVERY_REQUIRED,
+                    });
+                    return false;
+                }
+                await ledger.setKillSwitch({
+                    engaged,
+                    action: safeAction,
+                    code: engaged
+                        ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.KILL_SWITCH_ENGAGED
+                        : FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.ENABLED,
+                });
+                killSwitchEngaged = engaged;
+            }
+            await appendAudit({
+                eventType: 'operator_recovery',
+                category: 'recovery',
+                outcome: 'confirmed',
+                operationId: recoveryOperationId,
+                action: safeAction,
+                state: 'confirmed',
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.ENABLED,
+            });
+            advanceRevision();
+            await refreshActivation({ audit: false });
+            return true;
+        } catch (error) {
+            reportInternal('operator-recovery', error);
+            recoveryHealthy = false;
+            recovery = {
+                required: true,
+                state: 'blocked',
+                code: safeErrorCode(error),
+            };
+            await appendAudit({
+                eventType: 'operator_recovery',
+                category: 'recovery',
+                outcome: 'failed',
+                operationId: recoveryOperationId,
+                action: safeAction,
+                state: 'blocked',
+                code: recovery.code,
+            }).catch(() => {});
+            advanceRevision();
+            await refreshActivation({ audit: false }).catch(() => {});
+            return false;
+        } finally {
+            operationalRecoveryInProgress = false;
+            mutex = false;
+            broadcastStatus();
+            resumeDeferredReconciliation();
+        }
+    };
+
+    const recoverOperationally = options => trackInFlight(
+        recoverOperationallyNow(options),
+    );
+
+    const shutdown = () => {
+        if (shutdownCompletion) return shutdownCompletion;
+        shutdownCompletion = (async () => {
+            shuttingDown = true;
+            deferredReconciliation = null;
+            for (const timer of timers) clearTimeoutFn(timer);
+            timers.clear();
+            while (inFlightOperations.size > 0) {
+                await Promise.allSettled([...inFlightOperations]);
+            }
+            if (activeIntent) {
+                const expired = activeIntent;
+                activeIntent = null;
+                await appendAudit({
+                    eventType: 'intent_expired',
+                    category: 'intent',
+                    outcome: 'expired',
+                    requestId: expired.requestId,
+                    operationId: expired.requestId,
+                    intentId: expired.requestId,
+                    state: 'expired',
+                    code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.INTENT_EXPIRED,
+                    safeDetail: 'service-shutdown',
+                }).catch(() => {});
+            }
+            while (backgroundTasks.size > 0) {
+                await Promise.allSettled([...backgroundTasks]);
+            }
+            await transitionTail;
+            sessions.clear();
+            await ledger.close();
+        })();
+        return shutdownCompletion;
+    };
+
+    return Object.freeze({
+        start,
+        shutdown,
+        disconnect,
+        handleRequest,
+        handleFrame: handleRequest,
+        recoverOperationally,
+        getStatus: () => statusFor(null),
+        getCurrentAttempt: () => currentAttempt,
+        getActiveOperation: () => activeOperation,
+    });
+};

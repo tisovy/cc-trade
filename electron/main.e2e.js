@@ -8,6 +8,9 @@ import {
     captureFuturesTestnetExecutionConfig,
 } from './services/futures-testnet-execution-config.js'
 import {
+    captureFuturesProductionExecutionConfig,
+} from './services/futures-production-execution-config.js'
+import {
     createLocalWebSocketAccess,
 } from './services/local-websocket-access.js'
 import { captureE2eMockWebSocketAccess } from './e2e-websocket-route.js'
@@ -36,6 +39,10 @@ const futuresExecutionConfig = captureFuturesTestnetExecutionConfig({
     futuresReadMode: 'mock',
     forceDisabled: true,
 })
+const futuresProductionExecutionConfig = captureFuturesProductionExecutionConfig({
+    forceDisabled: true,
+    liveAuthorized: false,
+})
 
 const rendererDevServerUrl = resolveTrustedRendererDevServerUrl({
     value: process.env.VITE_DEV_SERVER_URL,
@@ -54,6 +61,7 @@ const rendererRuntimeRegistry = createRendererRuntimeRegistry(ipcMain)
 setupBinanceConnection({
     localWebSocketAccess,
     futuresExecutionConfig,
+    futuresProductionExecutionConfig,
 });
 
 const isWaylandSession = () => process.env.XDG_SESSION_TYPE === 'wayland' || !!process.env.WAYLAND_DISPLAY;
@@ -146,6 +154,17 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+    session.defaultSession.webRequest.onBeforeRequest({
+        urls: [
+            'https://fapi.binance.com/*',
+            'wss://fstream.binance.com/*',
+        ],
+    }, (details, callback) => {
+        callback({ cancel: true })
+        console.error(`[e2e] forbidden production Futures network escape: ${details.method}`)
+        setImmediate(() => app.exit(86))
+    })
+
     installRendererAppProtocol({
         protocol,
         rootDirectory: rendererRootDirectory,

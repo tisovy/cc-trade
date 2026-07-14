@@ -42,6 +42,16 @@ const moduleMocks = vi.hoisted(() => {
             service: state.executionService,
             durable: false,
         };
+        state.productionExecutionService = {
+            shutdown: vi.fn().mockResolvedValue(undefined),
+            disconnect: vi.fn(() => true),
+            handleRequest: vi.fn().mockResolvedValue(true),
+        };
+        state.productionExecutionRuntime = {
+            service: state.productionExecutionService,
+            coordinator: undefined,
+            durable: false,
+        };
         state.sendRequest = vi.fn(async (path, method) => ({
             data: vi.fn().mockResolvedValue(
                 path === '/api/v3/time' && method === 'GET'
@@ -94,6 +104,9 @@ const moduleMocks = vi.hoisted(() => {
         return state.spotClient;
     });
     const createExecutionRuntime = vi.fn(async () => state.executionRuntime);
+    const createProductionExecutionRuntime = vi.fn(
+        async () => state.productionExecutionRuntime,
+    );
 
     reset();
 
@@ -102,6 +115,7 @@ const moduleMocks = vi.hoisted(() => {
         WebSocketServer,
         createHttpServer,
         createExecutionRuntime,
+        createProductionExecutionRuntime,
         makeSocket,
         reset,
         setUserDataConnection: (connection) => {
@@ -111,6 +125,7 @@ const moduleMocks = vi.hoisted(() => {
         get executionService() { return state.executionService; },
         get httpServer() { return state.httpServer; },
         get marketSocket() { return state.marketSocket; },
+        get productionExecutionService() { return state.productionExecutionService; },
         get rendererConnection() { return state.rendererConnection; },
         get rendererHandlers() { return state.rendererHandlers; },
         get sendRequest() { return state.sendRequest; },
@@ -142,6 +157,10 @@ vi.mock('./local-websocket-access.js', () => ({
 
 vi.mock('./futures-testnet-execution-composition.js', () => ({
     createFuturesTestnetExecutionRuntime: moduleMocks.createExecutionRuntime,
+}));
+
+vi.mock('./futures-production-execution-composition.js', () => ({
+    createFuturesProductionExecutionRuntime: moduleMocks.createProductionExecutionRuntime,
 }));
 
 const flushMicrotasks = async () => {
@@ -2160,6 +2179,80 @@ describe('setupBinanceConnection user-data orchestration', () => {
             expect.objectContaining({ connectionId: expect.any(String), emit: expect.any(Function) }),
         );
         expect(spotPlaceOrder).not.toHaveBeenCalled();
+    });
+
+    it('routes production commands through only the dedicated raw protocol boundary', async () => {
+        const spotPlaceOrder = vi.spyOn(SpotTradingAdapter.prototype, 'placeOrder');
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1', port: 14477 },
+        });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+
+        const subscribeRaw = JSON.stringify({
+            action: 'futures.production.subscribeStatus',
+            version: 1,
+            revision: '0',
+            marketType: 'futures',
+            environment: 'production',
+            accountFingerprint: '0'.repeat(64),
+        });
+        const duplicateKeyRaw = '{"action":"futures.production.placeOrder","action":"trade.placeOrder","version":1,"marketType":"spot"}';
+        const escapedDuplicateRaw = '{"action":"futures.\\u0070roduction.placeOrder","action":"trade.placeOrder","version":1,"marketType":"spot"}';
+        const removedAliasRaw = JSON.stringify({
+            action: 'futures.production.executeOrder',
+            version: 1,
+            marketType: 'spot',
+        });
+        const oversizedRaw = JSON.stringify({
+            action: 'futures.production.placeOrder',
+            padding: 'x'.repeat(4_096),
+        });
+        expect(Buffer.byteLength(oversizedRaw, 'utf8')).toBeGreaterThan(4_096);
+        expect(Buffer.byteLength(oversizedRaw, 'utf8')).toBeLessThanOrEqual(
+            LOCAL_RENDERER_WS_MAX_MESSAGE_BYTES,
+        );
+
+        for (const raw of [
+            subscribeRaw,
+            duplicateKeyRaw,
+            escapedDuplicateRaw,
+            removedAliasRaw,
+            oversizedRaw,
+        ]) {
+            await moduleMocks.rendererHandlers.message({ type: 'utf8', utf8Data: raw });
+        }
+
+        expect(moduleMocks.productionExecutionService.handleRequest).toHaveBeenCalledTimes(5);
+        expect(moduleMocks.productionExecutionService.handleRequest.mock.calls.map(
+            ([raw]) => raw,
+        )).toEqual([
+            subscribeRaw,
+            duplicateKeyRaw,
+            escapedDuplicateRaw,
+            removedAliasRaw,
+            oversizedRaw,
+        ]);
+        const productionRouteOptions = moduleMocks.productionExecutionService.handleRequest
+            .mock.calls.map(([, options]) => options);
+        expect(productionRouteOptions).toEqual(productionRouteOptions.map(() => ({
+            connectionId: productionRouteOptions[0].connectionId,
+            emit: expect.any(Function),
+        })));
+        expect(moduleMocks.executionService.handleSessionRequest).not.toHaveBeenCalled();
+        expect(moduleMocks.executionService.handlePlaceOrder).not.toHaveBeenCalled();
+        expect(spotPlaceOrder).not.toHaveBeenCalled();
+
+        moduleMocks.rendererConnection.close();
+        await flushMicrotasks();
+
+        expect(moduleMocks.productionExecutionService.disconnect).toHaveBeenCalledOnce();
+        expect(moduleMocks.productionExecutionService.disconnect).toHaveBeenCalledWith(
+            productionRouteOptions[0].connectionId,
+        );
+        expect(moduleMocks.productionExecutionService.handleRequest).toHaveBeenCalledTimes(5);
     });
 
     it('rejects removed hidden action aliases and bounded action/channel envelopes', async () => {

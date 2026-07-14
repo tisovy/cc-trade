@@ -15,6 +15,7 @@ import MainView from './components/layout/MainView'
 import NotificationToast from './components/common/NotificationToast'
 import FuturesReadOnlyPanel from './components/features/futures/FuturesReadOnlyPanel'
 import FuturesTestnetExecutionTicket from './components/features/futures/FuturesTestnetExecutionTicket'
+import FuturesProductionExecutionTicket from './components/features/futures/FuturesProductionExecutionTicket'
 import { INTERVALS } from './constants'
 import { DataProvider, useDataContext } from './context/DataContext'
 import { DrawingProvider } from './context/DrawingProvider';
@@ -28,6 +29,7 @@ import {
 } from './utils/tradingCommands';
 import useFuturesReadOnly from './hooks/useFuturesReadOnly';
 import useFuturesTestnetExecution from './hooks/useFuturesTestnetExecution';
+import useFuturesProductionExecution from './hooks/useFuturesProductionExecution';
 import { getRendererFuturesReadEnvironment } from './utils/rendererRuntime';
 
 // View types
@@ -96,6 +98,10 @@ function AppShell() {
   const futuresExecution = useFuturesTestnetExecution({
     enabled: marketMode === MARKET_MODES.FUTURES,
     symbol: futuresSymbol,
+    wsConnection,
+  });
+  const futuresProductionExecution = useFuturesProductionExecution({
+    enabled: marketMode === MARKET_MODES.FUTURES,
     wsConnection,
   });
 
@@ -522,6 +528,17 @@ function AppShell() {
             state={futuresExecution}
             onPrepareIntent={futuresExecution.prepareIntent}
             onPlaceOrder={futuresExecution.placeOrder}
+          />
+          <FuturesProductionExecutionTicket
+            state={futuresProductionExecution}
+            onPrepareOrderIntent={futuresProductionExecution.prepareOrderIntent}
+            onPlaceOrder={futuresProductionExecution.placeOrder}
+            onPrepareCancelAllOpenOrdersIntent={futuresProductionExecution.prepareCancelAllOpenOrdersIntent}
+            onCancelAllOpenOrders={futuresProductionExecution.cancelAllOpenOrders}
+            onPrepareClosePositionsIntent={futuresProductionExecution.prepareClosePositionsIntent}
+            onClosePositions={futuresProductionExecution.closePositions}
+            onPrepareEngageKillSwitchIntent={futuresProductionExecution.prepareEngageKillSwitchIntent}
+            onEngageKillSwitch={futuresProductionExecution.engageKillSwitch}
           />
         </main>
       ) : (

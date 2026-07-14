@@ -1064,20 +1064,46 @@ Final integrated verification passed `57` Vitest files / `2307` tests (`2` exist
 
 Goal: allow real futures execution with hard limits and rollback.
 
-Required controls:
+The accepted architecture is in [Phase 7 Guarded Production Futures Rollout ADR](./futures_phase7_guarded_production_design.md), with its security analysis in the separate [Phase 7 Threat Model](./futures_phase7_threat_model.md). Phase 7 is one integrated delivery: the ADR, backend, durable state/audit, renderer, deterministic fake suite, and final regression/security evidence are not separately shippable stopping points.
 
-- feature flag for production futures;
-- account-level max leverage;
-- max order notional;
-- max daily notional;
-- kill switch;
-- cancel-all positions/orders affordance;
-- audit log for every command and response.
+Required production-only controls:
+
+- [x] exact explicit operator flag and acknowledgement, plus a non-environment live-authorization interlock;
+- [x] production credentials/configuration captured, sanitized, frozen, and deleted before the first `BrowserWindow`;
+- [x] fixed `https://fapi.binance.com` origin and reviewed exact endpoints with redirect rejection and no caller network options;
+- [x] exact signed account alias/API-key fingerprint/environment validation;
+- [x] complete allowlist, account-level maximum leverage, maximum order notional, gross maximum daily notional, balance, and liquidation limits;
+- [x] crash-safe exact daily reservations with deterministic UTC rollover and conservative unknown accounting;
+- [x] persistent default-engaged kill switch that blocks new exposure without claiming cancellation or closure;
+- [x] separate intent/action/state machines for ordinary order, regular+algo cancel-all, close-positions, and kill-switch engagement;
+- [x] one-use backend intents, revision binding, mutex/idempotency tombstones, durable dispatch intent, zero order-POST retry, Query Order reconciliation, confirmed-open monitoring, and restart recovery;
+- [x] separate production storage, lease, key, anchor, HMAC journal, audit schema, credential binding, counters, rate pauses, and backend-only operational recovery;
+- [x] bounded redacted durable audit events for every command, gate, intent, exchange request/response classification, reconciliation, partial outcome, kill transition, and operator recovery action;
+- [x] a production-origin quota bucket with fsynced request-weight reservations and exact restart replay around the existing Spot-priority coordinator, without changing the CRITICAL Spot limiter or the Phase 6 demo bucket;
+- [x] a dedicated `futures-production-execution` renderer channel, hook, protocol, and unmistakable `USDⓈ-M PRODUCTION · REAL ORDERS` ticket outside `DataContext`, Spot/global shortcuts, browser storage, analytics, telemetry, clipboard, and crash reporting;
+- [x] deterministic fake-only adversarial coverage plus a network-escape tripwire; no live credential, account read, order, cancellation, or close request.
+
+The reviewed ordinary order is regular one-way isolated `LIMIT/GTC`; leverage and margin are assertions, never writes. The backend classifies opening/increasing versus reduce-only exposure. The kill switch blocks only opening/increasing exposure. Cancel-all reconciles regular and algo inventories separately; close-positions issues separately journaled reduce-only MARKET children and reports exact per-position partial/unknown results. Teardown remains teardown.
+
+The normal/E2E live-authorization interlock remains false in the fake-backed delivery. A later live rollout requires the operator's separate explicit authorization, credential ceremony, audit review, and a separately committed interlock change.
+
+### Integrated implementation record (2026-07-13)
+
+- [x] Production execution is a separately named backend composition, protocol/channel, credential capture, exact-host facade, coordinator origin bucket, durable store/lease/key/anchor, service, renderer hook, and ticket. Phase 5 and Phase 6 implementation files remain byte-for-byte unchanged from `36681f0`.
+- [x] All ten backend activation gates are independently audited. Startup and every order/close preflight validate the signed production account identity, one-way/single-asset account mode, exact configured alias, and the unique USDT balance row before enabling a write path.
+- [x] Exact-decimal risk, crash-safe daily reservations, durable request-weight reservations, default-engaged persistent kill switch, idempotent dispatch, zero POST retry, Query Order reconciliation, confirmed-open monitoring, credential-rotation blocking, and explicit backend-only recovery are integrated and restart tested.
+- [x] Regular and algo cancel-all plus reduce-only close children have separate durable identities and exact per-symbol partial/unknown results. Teardown never claims cancellation or closure, and restart performs reads/reconciliation only.
+- [x] Every command, gate, intent, exchange request/response, reconciliation, partial result, safety transition, and operator recovery action is written through the bounded redacted HMAC journal; corruption, rollback, torn writes, lock contention, capacity, and crash/replay paths fail closed.
+- [x] Final fake-only validation passed `75` Vitest files / `2611` tests (`2` existing skips), full ESLint, production and E2E builds, all `13` Electron Playwright scenarios, the static production-boundary scan across `17` isolated implementation files, and the circular-import scan across `188` source files.
+- [x] Final GitNexus source analysis indexed `5684` symbols / `13548` relationships / `300` execution flows. Exact comparison with Phase 6 commit `36681f0` is CRITICAL at `49 files / 1440 symbols / 152 flows`, matching the integrated Phase 7 boundary; cumulative comparison with `main` is CRITICAL at `154 / 3816 / 282`, including inherited Phase 1–6 history. The separate frozen-file comparison for Phase 5/6 implementation and design files is empty.
+- [x] No live credential was used and no production Futures network request was sent. Normal and E2E composition force the compile-time live-authorization interlock false; live activation still requires a separate explicit authorization and code review.
 
 Acceptance:
 
 - Production futures cannot be enabled accidentally.
 - Real execution requires explicit configuration and a visible account/mode indicator.
+- Phase 5 and Phase 6 remain structurally frozen and production-independent.
+- Normal and E2E verification make zero production Futures network requests.
 
 ## UI Rollout Rules
 
@@ -1096,12 +1122,13 @@ Suggested UI order:
 4. Futures order ticket in testnet.
 5. Production futures controls after safety gates.
 
-## Start Here Next Session
+## Phase 7 Integrated Continuation
 
-Implement only Phase 6 checkpoint 3, the separate read-only execution-risk reader and shared-IP/Spot-priority admission prerequisite:
+Carry the reviewed Phase 7 ADR and threat model through one fake-backed, code-complete delivery. Do not stop after documentation, scaffolding, or an individual backend/UI checkpoint.
 
-- re-read the Phase 5 exit audit and [Phase 6 Testnet Futures Execution Design](./futures_phase6_testnet_execution_design.md), especially checkpoint 3;
-- run GitNexus upstream impact before every existing function, class, method, or component edit and report HIGH/CRITICAL results before proceeding;
-- add only the separately named read-only `FuturesTestnetExecutionRiskReader`, its injected-fake/freshness/generation ownership, and the reviewed shared-IP admission extension with Spot priority; keep the Phase 5 facade frozen;
-- keep checkpoint 1's protocol/decimal/risk modules and checkpoint 2's renderer boundary unchanged unless an independently reviewed defect requires correction;
-- do not install a futures execution route, status/prepare action, credentials/execution configuration, journal/state machine/reconciliation, POST/query facade, renderer execution ticket, endpoint call, or feature flag; keep all typed and legacy futures execution rejected.
+- keep every production composition, credential, configuration, action/channel, service, store/lock, audit, recovery, host, hook, and component separately named from Phase 5/6;
+- run GitNexus upstream impact before editing every existing symbol and report HIGH/CRITICAL results before proceeding;
+- retain the non-environment live-authorization interlock as false; deterministic injected fakes are the only permitted implementation/verification transport;
+- install the production write route only after exact config/account gates, durable audit/state, daily cap, kill switch, idempotency, ambiguity/reconciliation, cancel-all/close-position partial results, recovery, and network-escape tests pass together;
+- finish with full Spot/Phase 5/Phase 6/Phase 7 unit, lint, production/E2E build, Electron Playwright, circular-import, static isolation/credential/host/write scans, and GitNexus change detection against `36681f0` and `main`;
+- commit only the integrated delivery with a clean worktree and an explicit statement that live production activation remains disabled.
