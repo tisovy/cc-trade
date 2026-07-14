@@ -66,6 +66,18 @@ import {
     isPotentialFuturesProductionExecutionFrame,
     readFuturesProductionExecutionAction,
 } from './futures-production-execution-protocol.js';
+import {
+    createFuturesTestnetWorkstationRuntime,
+} from './futures-testnet-workstation-composition.js';
+import {
+    createFuturesProductionWorkstationRuntime,
+} from './futures-production-workstation-composition.js';
+import {
+    isPotentialFuturesTestnetWorkstationFrame,
+} from '../../src/utils/futuresTestnetWorkstationProtocol.js';
+import {
+    isPotentialFuturesProductionWorkstationFrame,
+} from '../../src/utils/futuresProductionWorkstationProtocol.js';
 
 const LOG_LEVELS = { error: 0, warn: 1, info: 2, debug: 3 };
 const activeLogLevel = LOG_LEVELS[(process.env.LOG_LEVEL || 'info').toLowerCase()] ?? LOG_LEVELS.info;
@@ -997,6 +1009,8 @@ export function setupBinanceConnection({
                 logger.warn(`[futures-read] ${resource} failed (${safeCode})`);
             },
         });
+        const futuresTestnetWorkstationRuntime = createFuturesTestnetWorkstationRuntime();
+        const futuresProductionWorkstationRuntime = createFuturesProductionWorkstationRuntime();
 
         const emitFuturesReadOnlyRejection = (data, error) => {
             const trimmedRequestId = typeof data?.requestId === 'string'
@@ -1794,6 +1808,32 @@ export function setupBinanceConnection({
                 return;
             }
 
+            // Phase 8 public-read workstations have separately named protocols
+            // and must be routed before the broader Phase 7 production prefix
+            // detector. Neither service contains an execution action.
+            if (isPotentialFuturesProductionWorkstationFrame(rawUtf8Frame)) {
+                try {
+                    await futuresProductionWorkstationRuntime.service.handleRequest(
+                        rawUtf8Frame,
+                        { emit: payload => sendJSON(connection, payload) },
+                    );
+                } catch (error) {
+                    logger.warn(`[futures-production-workstation] request rejected (${error?.code || error?.name || 'unknown'})`);
+                }
+                return;
+            }
+            if (isPotentialFuturesTestnetWorkstationFrame(rawUtf8Frame)) {
+                try {
+                    await futuresTestnetWorkstationRuntime.service.handleRequest(
+                        rawUtf8Frame,
+                        { emit: payload => sendJSON(connection, payload) },
+                    );
+                } catch (error) {
+                    logger.warn(`[futures-testnet-workstation] request rejected (${error?.code || error?.name || 'unknown'})`);
+                }
+                return;
+            }
+
             // Preserve the untouched UTF-8 frame for the dedicated execution
             // parsers. No generic JSON conversion may precede the 4096-byte and
             // duplicate-key checks on this route.
@@ -2021,6 +2061,8 @@ export function setupBinanceConnection({
             // resolve. This stops polling, stale checks, reconnects, sockets, and
             // late delivery for this renderer generation.
             futuresReadOnlyService.stop();
+            futuresTestnetWorkstationRuntime.close();
+            futuresProductionWorkstationRuntime.close();
             void executionRuntimePromise.then((runtime) => {
                 runtime.service.disconnect(executionConnectionId);
             });

@@ -1162,14 +1162,20 @@ The fake-backed Phase 7 delivery is complete and the operator has now authorized
 
 Goal: turn the guarded Testnet and Live execution pages into a complete Binance-class Futures trading workstation without merging their backend authority or weakening the completed Phase 5/6/7 safety boundaries.
 
-Status: **planned; implementation has not started.** The normative implementation sequence and functional parity matrix are in [Phase 8 USDⓈ-M Futures Trading Workstation Plan](./futures_phase8_trading_workstation_plan.md).
+Status: **Phase 8.0–8.2 complete; Phase 8.3–8.7 remain planned.** The normative implementation sequence, evidence and functional parity matrix are in [Phase 8 USDⓈ-M Futures Trading Workstation Plan](./futures_phase8_trading_workstation_plan.md). The exact public-read contract and adversarial controls are frozen in the [Phase 8 ADR](./futures_phase8_workstation_adr.md) and [Phase 8 threat model](./futures_phase8_workstation_threat_model.md).
 
 The first visible milestone is deliberately read-only: separate blue Testnet and red Live workspaces gain a Futures symbol selector, market header, chart, gap-detecting order book and trade tape. Expanded execution follows only after the account read model is stable, Testnet is manually verified, and each new Live action receives separate authorization.
 
+Phase 8.0–8.2 completion record:
+
+1. [x] Separate blue Testnet and red Production workstations now provide Futures-only discovery, exact filters/status/allowlist, complete market header, candle/volume chart, mark/index overlays, drawings/display alerts, gap-detecting snapshot-plus-diff depth and bounded aggregate trades.
+2. [x] Testnet/Production containers, hooks, protocols, channels, backend services, fixtures, transports and compositions remain separately named. Shared React pieces are immutable-props presentation only; renderer code has no Binance transport, financial browser storage or capability decision.
+3. [x] Explicit loading/stale/disconnected/resynchronizing/unavailable states, generation ownership, bounded queues/caches/timers/reconnects and deterministic fake clocks are covered adversarially. Phase 5/6 and Phase 7 surfaces remain explicit safety drawers.
+4. [x] Final fake-only evidence passed `88` Vitest files / `2781` tests (`2` established skips), ESLint, both builds, all `15` Electron Playwright scenarios with blue/red desktop+narrow screenshots, `228`-file circular scan and expanded production/workstation boundary scans (`36` and `28` isolated files).
+5. [x] No real Binance Futures request or credential was used. Both new reviewed public-read compositions remain source-pinned off, no new Live execution action was introduced, and the Phase 7 caps remain 1x / 10 USDT order / 50 USDT daily.
+
 Start here next session:
 
-1. Complete Phase 8.0 ADR, threat model, official endpoint/stream inventory and deterministic fake contracts.
-2. Deliver Phase 8.1 workstation shell/instrument navigation and Phase 8.2 chart/order-book/trades as one visible read-only milestone.
-3. Preserve the Phase 6 ticket and Phase 7 production safety/recovery ticket as explicit drawers until the new order composer is independently proven.
-4. Run GitNexus upstream impact before every existing-symbol edit and warn before every HIGH/CRITICAL result.
-5. Keep all automated verification fake-only with a fail-fast production-network escape guard.
+1. Begin Phase 8.3 with a separately reviewed private account read model; do not enable a reviewed transport or private stream without explicit authorization.
+2. Preserve the Phase 6 ticket and Phase 7 production safety/recovery ticket as explicit drawers until the later order composer is independently proven.
+3. Continue GitNexus impact/change auditing and fake-only network tripwires for every slice.

@@ -1,0 +1,634 @@
+import {
+    FUTURES_WORKSTATION_BODY_LIMITS,
+    FUTURES_WORKSTATION_JSON_LIMITS,
+    FuturesWorkstationIntegerToken,
+    parseFuturesWorkstationJson,
+    readFuturesWorkstationCount,
+    readFuturesWorkstationIdentity,
+    readFuturesWorkstationTimestamp,
+} from './futures-workstation-json.js';
+import {
+    isNonNegativeFuturesWorkstationDecimal,
+    isPositiveFuturesWorkstationDecimal,
+    subtractFuturesWorkstationDecimals,
+    toFuturesWorkstationPercent,
+} from './futures-workstation-decimal.js';
+
+export const FUTURES_WORKSTATION_MARKET_LIMITS = Object.freeze({
+    CATALOG_CONTRACTS: 512,
+    CATALOG_FRAME_CONTRACTS: 40,
+    CANDLES: 500,
+    RENDERER_CANDLES: 80,
+    TRADES: 512,
+    RENDERER_TRADES: 80,
+    DEPTH_LEVELS_PER_SIDE: 1_000,
+});
+
+export class FuturesWorkstationMarketContractError extends Error {
+    constructor(code) {
+        super('Futures workstation market-data contract was rejected');
+        this.name = 'FuturesWorkstationMarketContractError';
+        this.code = code;
+    }
+}
+
+const fail = (code) => {
+    throw new FuturesWorkstationMarketContractError(code);
+};
+
+const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+const exactKeys = (value, keys) => {
+    if (!isRecord(value)) return false;
+    const actual = Object.keys(value).sort();
+    const expected = [...keys].sort();
+    return actual.length === expected.length
+        && actual.every((key, index) => key === expected[index]);
+};
+const allowedKeys = (value, required, optional = []) => {
+    if (!isRecord(value)) return false;
+    const allowed = new Set([...required, ...optional]);
+    return required.every(key => Object.hasOwn(value, key))
+        && Object.keys(value).every(key => allowed.has(key));
+};
+const isBoundedString = (value, pattern, maximum = 64) => (
+    typeof value === 'string' && value.length <= maximum && pattern.test(value)
+);
+const isSymbol = value => isBoundedString(value, /^[A-Z0-9]{1,20}$/, 20);
+const isPair = isSymbol;
+const isStatus = value => isBoundedString(value, /^[A-Z0-9_]{1,32}$/, 32);
+const isInterval = value => ['1m', '5m', '15m', '1h', '4h', '1d'].includes(value);
+const cloneFrozen = (value) => {
+    if (Array.isArray(value)) return Object.freeze(value.map(cloneFrozen));
+    if (isRecord(value)) {
+        return Object.freeze(Object.fromEntries(
+            Object.entries(value).map(([key, entry]) => [key, cloneFrozen(entry)]),
+        ));
+    }
+    return value;
+};
+
+const readDecimal = (value, { positive = false } = {}) => {
+    try {
+        const valid = positive
+            ? isPositiveFuturesWorkstationDecimal(value)
+            : isNonNegativeFuturesWorkstationDecimal(value);
+        if (!valid) fail('INVALID_DECIMAL');
+        return value;
+    } catch (error) {
+        if (error instanceof FuturesWorkstationMarketContractError) throw error;
+        fail('INVALID_DECIMAL');
+    }
+};
+
+const readSignedDecimal = (value) => {
+    if (typeof value !== 'string'
+        || value.length > 64
+        || !/^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/.test(value)) {
+        fail('INVALID_DECIMAL');
+    }
+    return value;
+};
+
+const readIntegerToken = (value) => {
+    if (!(value instanceof FuturesWorkstationIntegerToken)) fail('INVALID_INTEGER_TOKEN');
+    return value;
+};
+
+const normalizeLevelArray = (levels) => {
+    if (!Array.isArray(levels)
+        || levels.length > FUTURES_WORKSTATION_MARKET_LIMITS.DEPTH_LEVELS_PER_SIDE) {
+        fail('INVALID_DEPTH_LEVELS');
+    }
+    return Object.freeze(levels.map((level) => {
+        if (!Array.isArray(level) || level.length !== 2) fail('INVALID_DEPTH_LEVEL');
+        return Object.freeze([
+            readDecimal(level[0], { positive: true }),
+            readDecimal(level[1]),
+        ]);
+    }));
+};
+
+const normalizeRangeFilter = (filter, fields, stepKey) => {
+    if (!exactKeys(filter, ['filterType', ...fields])) fail('INVALID_EXCHANGE_FILTER');
+    return Object.freeze({
+        min: readDecimal(filter[fields[0]]),
+        max: readDecimal(filter[fields[1]], { positive: true }),
+        [stepKey]: readDecimal(filter[fields[2]], { positive: true }),
+    });
+};
+
+const normalizeFilters = (filters) => {
+    if (!Array.isArray(filters) || filters.length > 32) fail('INVALID_EXCHANGE_FILTERS');
+    const byType = new Map();
+    for (const filter of filters) {
+        if (!isRecord(filter)
+            || typeof filter.filterType !== 'string'
+            || filter.filterType.length > 48) fail('INVALID_EXCHANGE_FILTER');
+        if (byType.has(filter.filterType)) fail('DUPLICATE_EXCHANGE_FILTER');
+        byType.set(filter.filterType, filter);
+    }
+    const price = byType.get('PRICE_FILTER');
+    const quantity = byType.get('LOT_SIZE');
+    const marketQuantity = byType.get('MARKET_LOT_SIZE');
+    const minimumNotional = byType.get('MIN_NOTIONAL') ?? byType.get('NOTIONAL');
+    if (!price || !quantity || !marketQuantity || !minimumNotional) {
+        fail('MISSING_EXCHANGE_FILTER');
+    }
+    if (!allowedKeys(minimumNotional, ['filterType'], [
+        'notional',
+        'minNotional',
+        'maxNotional',
+        'applyMinToMarket',
+        'applyMaxToMarket',
+        'avgPriceMins',
+    ])) fail('INVALID_EXCHANGE_FILTER');
+    const notional = minimumNotional.notional ?? minimumNotional.minNotional;
+    return Object.freeze({
+        price: normalizeRangeFilter(
+            price,
+            ['minPrice', 'maxPrice', 'tickSize'],
+            'tickSize',
+        ),
+        quantity: normalizeRangeFilter(
+            quantity,
+            ['minQty', 'maxQty', 'stepSize'],
+            'stepSize',
+        ),
+        marketQuantity: normalizeRangeFilter(
+            marketQuantity,
+            ['minQty', 'maxQty', 'stepSize'],
+            'stepSize',
+        ),
+        minimumNotional: readDecimal(notional),
+    });
+};
+
+const EXCHANGE_TOP_LEVEL_KEYS = Object.freeze([
+    'timezone',
+    'serverTime',
+    'futuresType',
+    'rateLimits',
+    'exchangeFilters',
+    'assets',
+    'symbols',
+]);
+
+const EXCHANGE_SYMBOL_REQUIRED_KEYS = Object.freeze([
+    'symbol',
+    'pair',
+    'contractType',
+    'status',
+    'baseAsset',
+    'quoteAsset',
+    'marginAsset',
+    'filters',
+]);
+
+const EXCHANGE_SYMBOL_OPTIONAL_KEYS = Object.freeze([
+    'deliveryDate',
+    'onboardDate',
+    'maintMarginPercent',
+    'requiredMarginPercent',
+    'pricePrecision',
+    'quantityPrecision',
+    'baseAssetPrecision',
+    'quotePrecision',
+    'underlyingType',
+    'underlyingSubType',
+    'settlePlan',
+    'triggerProtect',
+    'liquidationFee',
+    'marketTakeBound',
+    'maxMoveOrderLimitPercent',
+    'orderTypes',
+    'timeInForce',
+    'permissionSets',
+]);
+
+export const normalizeFuturesWorkstationExchangeInfo = (
+    text,
+    allowlistedSymbols,
+) => {
+    const payload = parseFuturesWorkstationJson(text, {
+        maxBytes: FUTURES_WORKSTATION_BODY_LIMITS.EXCHANGE_INFO,
+        maxDepth: 12,
+        maxNodes: 160_000,
+    });
+    if (!allowedKeys(payload, ['symbols'], EXCHANGE_TOP_LEVEL_KEYS.filter(key => key !== 'symbols'))
+        || !Array.isArray(payload.symbols)
+        || payload.symbols.length > FUTURES_WORKSTATION_MARKET_LIMITS.CATALOG_CONTRACTS
+        || !(allowlistedSymbols instanceof Set)) {
+        fail('INVALID_EXCHANGE_INFO');
+    }
+    const seen = new Set();
+    const contracts = [];
+    for (const symbol of payload.symbols) {
+        if (!allowedKeys(symbol, EXCHANGE_SYMBOL_REQUIRED_KEYS, EXCHANGE_SYMBOL_OPTIONAL_KEYS)
+            || !isSymbol(symbol.symbol)
+            || !isPair(symbol.pair)
+            || !isStatus(symbol.status)
+            || !isBoundedString(symbol.contractType, /^[A-Z0-9_]{1,32}$/, 32)
+            || !isBoundedString(symbol.baseAsset, /^[A-Z0-9]{1,16}$/, 16)
+            || !isBoundedString(symbol.quoteAsset, /^[A-Z0-9]{1,16}$/, 16)
+            || !isBoundedString(symbol.marginAsset, /^[A-Z0-9]{1,16}$/, 16)) {
+            fail('INVALID_EXCHANGE_INFO_SYMBOL');
+        }
+        if (seen.has(symbol.symbol)) fail('DUPLICATE_EXCHANGE_SYMBOL');
+        seen.add(symbol.symbol);
+        if (symbol.marginAsset !== 'USDT' || symbol.quoteAsset !== 'USDT') continue;
+        contracts.push(Object.freeze({
+            symbol: symbol.symbol,
+            pair: symbol.pair,
+            contractType: symbol.contractType,
+            status: symbol.status,
+            baseAsset: symbol.baseAsset,
+            quoteAsset: symbol.quoteAsset,
+            marginAsset: symbol.marginAsset,
+            allowlisted: allowlistedSymbols.has(symbol.symbol),
+            filters: normalizeFilters(symbol.filters),
+        }));
+    }
+    if (contracts.length === 0) fail('EMPTY_USD_M_CATALOG');
+    return Object.freeze(contracts.sort((left, right) => left.symbol.localeCompare(right.symbol)));
+};
+
+export const normalizeFuturesWorkstationDepthSnapshot = (text, expectedSymbol) => {
+    if (!isSymbol(expectedSymbol)) fail('INVALID_EXPECTED_SYMBOL');
+    const payload = parseFuturesWorkstationJson(text, {
+        maxBytes: FUTURES_WORKSTATION_BODY_LIMITS.DEPTH,
+        maxNodes: 8_192,
+    });
+    if (!exactKeys(payload, ['lastUpdateId', 'E', 'T', 'bids', 'asks'])) {
+        fail('INVALID_DEPTH_SNAPSHOT');
+    }
+    readFuturesWorkstationTimestamp(payload.E);
+    readFuturesWorkstationTimestamp(payload.T);
+    return Object.freeze({
+        lastUpdateId: readFuturesWorkstationIdentity(payload.lastUpdateId),
+        bids: normalizeLevelArray(payload.bids),
+        asks: normalizeLevelArray(payload.asks),
+    });
+};
+
+const normalizeKlineTuple = (tuple) => {
+    if (!Array.isArray(tuple) || tuple.length !== 12) fail('INVALID_KLINE_TUPLE');
+    const openTime = readFuturesWorkstationTimestamp(tuple[0]);
+    const closeTime = readFuturesWorkstationTimestamp(tuple[6]);
+    if (closeTime < openTime) fail('INVALID_KLINE_TIME');
+    readIntegerToken(tuple[8]);
+    return Object.freeze({
+        openTime,
+        closeTime,
+        open: readDecimal(tuple[1], { positive: true }),
+        high: readDecimal(tuple[2], { positive: true }),
+        low: readDecimal(tuple[3], { positive: true }),
+        close: readDecimal(tuple[4], { positive: true }),
+        volume: readDecimal(tuple[5]),
+        closed: true,
+    });
+};
+
+export const normalizeFuturesWorkstationKlines = (text) => {
+    const payload = parseFuturesWorkstationJson(text, {
+        maxBytes: FUTURES_WORKSTATION_BODY_LIMITS.KLINES,
+        maxNodes: 16_384,
+    });
+    if (!Array.isArray(payload)
+        || payload.length > FUTURES_WORKSTATION_MARKET_LIMITS.CANDLES) {
+        fail('INVALID_KLINES');
+    }
+    const seen = new Set();
+    const rows = payload.map((tuple) => {
+        const row = normalizeKlineTuple(tuple);
+        if (seen.has(row.openTime)) fail('DUPLICATE_KLINE');
+        seen.add(row.openTime);
+        return row;
+    });
+    rows.sort((left, right) => left.openTime - right.openTime);
+    return Object.freeze(rows);
+};
+
+export const normalizeFuturesWorkstationPremiumIndex = (text, expectedSymbol) => {
+    const payload = parseFuturesWorkstationJson(text, {
+        maxBytes: FUTURES_WORKSTATION_BODY_LIMITS.HEADER,
+        maxNodes: 64,
+    });
+    if (!exactKeys(payload, [
+        'symbol',
+        'markPrice',
+        'indexPrice',
+        'estimatedSettlePrice',
+        'lastFundingRate',
+        'interestRate',
+        'nextFundingTime',
+        'time',
+    ])
+        || payload.symbol !== expectedSymbol) fail('INVALID_PREMIUM_INDEX');
+    return Object.freeze({
+        markPrice: readDecimal(payload.markPrice, { positive: true }),
+        indexPrice: readDecimal(payload.indexPrice, { positive: true }),
+        fundingRate: readSignedDecimal(payload.lastFundingRate),
+        nextFundingTime: readFuturesWorkstationTimestamp(payload.nextFundingTime),
+        eventTime: readFuturesWorkstationTimestamp(payload.time),
+    });
+};
+
+export const normalizeFuturesWorkstationTicker = (text, expectedSymbol) => {
+    const payload = parseFuturesWorkstationJson(text, {
+        maxBytes: FUTURES_WORKSTATION_BODY_LIMITS.HEADER,
+        maxNodes: 64,
+    });
+    if (!exactKeys(payload, [
+        'symbol',
+        'priceChange',
+        'priceChangePercent',
+        'weightedAvgPrice',
+        'lastPrice',
+        'lastQty',
+        'openPrice',
+        'highPrice',
+        'lowPrice',
+        'volume',
+        'quoteVolume',
+        'openTime',
+        'closeTime',
+        'firstId',
+        'lastId',
+        'count',
+    ])
+        || payload.symbol !== expectedSymbol) fail('INVALID_TICKER');
+    readFuturesWorkstationTimestamp(payload.openTime);
+    const closeTime = readFuturesWorkstationTimestamp(payload.closeTime);
+    readFuturesWorkstationIdentity(payload.firstId);
+    readFuturesWorkstationIdentity(payload.lastId);
+    readFuturesWorkstationCount(payload.count);
+    return Object.freeze({
+        lastPrice: readDecimal(payload.lastPrice, { positive: true }),
+        lastQuantity: readDecimal(payload.lastQty),
+        priceChange: readSignedDecimal(payload.priceChange),
+        priceChangePercent: readSignedDecimal(payload.priceChangePercent),
+        highPrice: readDecimal(payload.highPrice, { positive: true }),
+        lowPrice: readDecimal(payload.lowPrice, { positive: true }),
+        volume: readDecimal(payload.volume),
+        quoteVolume: readDecimal(payload.quoteVolume),
+        eventTime: closeTime,
+    });
+};
+
+export const createFuturesWorkstationHeader = ({ premium, ticker, contractStatus }) => {
+    if (!isStatus(contractStatus)) fail('INVALID_CONTRACT_STATUS');
+    return Object.freeze({
+        lastPrice: ticker.lastPrice,
+        markPrice: premium.markPrice,
+        indexPrice: premium.indexPrice,
+        basis: subtractFuturesWorkstationDecimals(premium.markPrice, premium.indexPrice),
+        priceChange: ticker.priceChange,
+        priceChangePercent: ticker.priceChangePercent,
+        highPrice: ticker.highPrice,
+        lowPrice: ticker.lowPrice,
+        volume: ticker.volume,
+        quoteVolume: ticker.quoteVolume,
+        lastQuantity: ticker.lastQuantity,
+        fundingRate: premium.fundingRate,
+        fundingRatePercent: toFuturesWorkstationPercent(premium.fundingRate),
+        nextFundingTime: premium.nextFundingTime,
+        eventTime: Math.max(premium.eventTime, ticker.eventTime),
+        contractStatus,
+    });
+};
+
+const validateUsdMStreamIdentity = (payload, expectedSymbol, expectedPair) => {
+    if (payload.s !== expectedSymbol) fail('WRONG_STREAM_SYMBOL');
+    if (Object.hasOwn(payload, 'st')) {
+        if (!(payload.st instanceof FuturesWorkstationIntegerToken)
+            || payload.st.token !== '1') fail('WRONG_STREAM_MARKET_TYPE');
+    }
+    if (Object.hasOwn(payload, 'ps') && payload.ps !== expectedPair) {
+        fail('WRONG_STREAM_PAIR');
+    }
+};
+
+const normalizeStreamDepth = (payload) => {
+    if (!allowedKeys(payload, ['e', 'E', 'T', 's', 'U', 'u', 'pu', 'b', 'a'], ['ps', 'st'])
+        || payload.e !== 'depthUpdate') fail('INVALID_DEPTH_STREAM');
+    const eventTime = readFuturesWorkstationTimestamp(payload.E);
+    readFuturesWorkstationTimestamp(payload.T);
+    return Object.freeze({
+        kind: 'depth',
+        firstUpdateId: readFuturesWorkstationIdentity(payload.U),
+        finalUpdateId: readFuturesWorkstationIdentity(payload.u),
+        previousFinalUpdateId: readFuturesWorkstationIdentity(payload.pu),
+        bids: normalizeLevelArray(payload.b),
+        asks: normalizeLevelArray(payload.a),
+        eventTime,
+    });
+};
+
+const normalizeStreamTrade = (payload) => {
+    if (!allowedKeys(payload, [
+        'e', 'E', 's', 'a', 'p', 'q', 'nq', 'f', 'l', 'T', 'm',
+    ], ['st'])
+        || payload.e !== 'aggTrade'
+        || typeof payload.m !== 'boolean') fail('INVALID_TRADE_STREAM');
+    readFuturesWorkstationTimestamp(payload.E);
+    return Object.freeze({
+        kind: 'trade',
+        row: Object.freeze({
+            aggregateTradeId: readFuturesWorkstationIdentity(payload.a),
+            price: readDecimal(payload.p, { positive: true }),
+            quantity: readDecimal(payload.q),
+            normalQuantity: readDecimal(payload.nq),
+            firstTradeId: readFuturesWorkstationIdentity(payload.f),
+            lastTradeId: readFuturesWorkstationIdentity(payload.l),
+            tradeTime: readFuturesWorkstationTimestamp(payload.T),
+            buyerMaker: payload.m,
+        }),
+    });
+};
+
+const normalizeStreamKline = (payload, expectedInterval) => {
+    if (!exactKeys(payload, ['e', 'E', 's', 'k']) || payload.e !== 'kline') {
+        fail('INVALID_KLINE_STREAM');
+    }
+    readFuturesWorkstationTimestamp(payload.E);
+    const kline = payload.k;
+    if (!exactKeys(kline, [
+        't', 'T', 's', 'i', 'f', 'L', 'o', 'c', 'h', 'l', 'v', 'n', 'x', 'q', 'V', 'Q', 'B',
+    ])
+        || kline.s !== payload.s
+        || kline.i !== expectedInterval
+        || typeof kline.x !== 'boolean') fail('INVALID_KLINE_STREAM');
+    readFuturesWorkstationIdentity(kline.f);
+    readFuturesWorkstationIdentity(kline.L);
+    readFuturesWorkstationCount(kline.n);
+    return Object.freeze({
+        kind: 'kline',
+        row: Object.freeze({
+            openTime: readFuturesWorkstationTimestamp(kline.t),
+            closeTime: readFuturesWorkstationTimestamp(kline.T),
+            open: readDecimal(kline.o, { positive: true }),
+            high: readDecimal(kline.h, { positive: true }),
+            low: readDecimal(kline.l, { positive: true }),
+            close: readDecimal(kline.c, { positive: true }),
+            volume: readDecimal(kline.v),
+            closed: kline.x,
+        }),
+    });
+};
+
+const normalizeStreamMark = (payload) => {
+    if (!allowedKeys(payload, ['e', 'E', 's', 'p', 'i', 'P', 'r', 'ap', 'T'], ['st'])
+        || payload.e !== 'markPriceUpdate') fail('INVALID_MARK_STREAM');
+    return Object.freeze({
+        kind: 'mark',
+        markPrice: readDecimal(payload.p, { positive: true }),
+        indexPrice: readDecimal(payload.i, { positive: true }),
+        fundingRate: readSignedDecimal(payload.r),
+        nextFundingTime: readFuturesWorkstationTimestamp(payload.T),
+        eventTime: readFuturesWorkstationTimestamp(payload.E),
+    });
+};
+
+const normalizeStreamTicker = (payload) => {
+    if (!allowedKeys(payload, [
+        'e', 'E', 's', 'p', 'P', 'w', 'c', 'Q', 'o', 'h', 'l', 'v', 'q', 'O', 'C', 'F', 'L', 'n',
+    ], ['ps', 'st'])
+        || payload.e !== '24hrTicker') fail('INVALID_TICKER_STREAM');
+    readFuturesWorkstationTimestamp(payload.O);
+    readFuturesWorkstationIdentity(payload.F);
+    readFuturesWorkstationIdentity(payload.L);
+    readFuturesWorkstationCount(payload.n);
+    return Object.freeze({
+        kind: 'ticker',
+        lastPrice: readDecimal(payload.c, { positive: true }),
+        lastQuantity: readDecimal(payload.Q),
+        priceChange: readSignedDecimal(payload.p),
+        priceChangePercent: readSignedDecimal(payload.P),
+        highPrice: readDecimal(payload.h, { positive: true }),
+        lowPrice: readDecimal(payload.l, { positive: true }),
+        volume: readDecimal(payload.v),
+        quoteVolume: readDecimal(payload.q),
+        eventTime: Math.max(
+            readFuturesWorkstationTimestamp(payload.E),
+            readFuturesWorkstationTimestamp(payload.C),
+        ),
+    });
+};
+
+export const normalizeFuturesWorkstationStreamFrame = (
+    raw,
+    { symbol, pair, interval },
+) => {
+    if (!isSymbol(symbol) || !isPair(pair) || !isInterval(interval)) {
+        fail('INVALID_STREAM_EXPECTATION');
+    }
+    const frameBytes = Buffer.byteLength(raw, 'utf8');
+    const envelope = parseFuturesWorkstationJson(raw, {
+        maxBytes: FUTURES_WORKSTATION_JSON_LIMITS.WS_FRAME_BYTES,
+        maxNodes: 8_192,
+    });
+    if (!exactKeys(envelope, ['stream', 'data']) || typeof envelope.stream !== 'string') {
+        fail('INVALID_STREAM_ENVELOPE');
+    }
+    const lower = symbol.toLowerCase();
+    const expectedStreams = new Set([
+        `${lower}@depth@100ms`,
+        `${lower}@aggTrade`,
+        `${lower}@kline_${interval}`,
+        `${lower}@markPrice@1s`,
+        `${lower}@ticker`,
+    ]);
+    if (!expectedStreams.has(envelope.stream) || !isRecord(envelope.data)) {
+        fail('UNEXPECTED_STREAM');
+    }
+    validateUsdMStreamIdentity(envelope.data, symbol, pair);
+    let event;
+    if (envelope.stream.endsWith('@depth@100ms')) event = normalizeStreamDepth(envelope.data);
+    else if (envelope.stream.endsWith('@aggTrade')) event = normalizeStreamTrade(envelope.data);
+    else if (envelope.stream.includes('@kline_')) event = normalizeStreamKline(envelope.data, interval);
+    else if (envelope.stream.endsWith('@markPrice@1s')) event = normalizeStreamMark(envelope.data);
+    else event = normalizeStreamTicker(envelope.data);
+    return Object.freeze({ ...event, frameBytes });
+};
+
+export const updateFuturesWorkstationCandles = (current, row) => {
+    if (!Array.isArray(current)) fail('INVALID_CANDLE_CACHE');
+    const next = [...current];
+    const index = next.findIndex(entry => entry.openTime === row.openTime);
+    if (index >= 0) next[index] = row;
+    else {
+        next.push(row);
+        next.sort((left, right) => left.openTime - right.openTime);
+    }
+    return Object.freeze(next.slice(-FUTURES_WORKSTATION_MARKET_LIMITS.CANDLES));
+};
+
+export const appendFuturesWorkstationTrade = (current, row) => {
+    if (!Array.isArray(current)) fail('INVALID_TRADE_CACHE');
+    if (current.some(entry => entry.aggregateTradeId === row.aggregateTradeId)) {
+        return Object.freeze([...current]);
+    }
+    return Object.freeze([row, ...current]
+        .sort((left, right) => right.tradeTime - left.tradeTime)
+        .slice(0, FUTURES_WORKSTATION_MARKET_LIMITS.TRADES));
+};
+
+export const updateFuturesWorkstationHeader = (current, event) => {
+    if (!isRecord(current) || !isRecord(event)) fail('INVALID_HEADER_UPDATE');
+    if (event.kind === 'mark') {
+        return cloneFrozen({
+            ...current,
+            markPrice: event.markPrice,
+            indexPrice: event.indexPrice,
+            basis: subtractFuturesWorkstationDecimals(event.markPrice, event.indexPrice),
+            fundingRate: event.fundingRate,
+            fundingRatePercent: toFuturesWorkstationPercent(event.fundingRate),
+            nextFundingTime: event.nextFundingTime,
+            eventTime: Math.max(current.eventTime, event.eventTime),
+        });
+    }
+    if (event.kind === 'ticker') {
+        return cloneFrozen({
+            ...current,
+            lastPrice: event.lastPrice,
+            lastQuantity: event.lastQuantity,
+            priceChange: event.priceChange,
+            priceChangePercent: event.priceChangePercent,
+            highPrice: event.highPrice,
+            lowPrice: event.lowPrice,
+            volume: event.volume,
+            quoteVolume: event.quoteVolume,
+            eventTime: Math.max(current.eventTime, event.eventTime),
+        });
+    }
+    fail('INVALID_HEADER_UPDATE_KIND');
+};
+
+export const createFuturesWorkstationCatalogFrames = (contracts) => {
+    if (!Array.isArray(contracts)
+        || contracts.length > FUTURES_WORKSTATION_MARKET_LIMITS.CATALOG_CONTRACTS) {
+        fail('INVALID_CATALOG_CACHE');
+    }
+    const frames = [];
+    for (let offset = 0; offset < contracts.length; offset += FUTURES_WORKSTATION_MARKET_LIMITS.CATALOG_FRAME_CONTRACTS) {
+        const rows = contracts.slice(
+            offset,
+            offset + FUTURES_WORKSTATION_MARKET_LIMITS.CATALOG_FRAME_CONTRACTS,
+        );
+        frames.push(Object.freeze({
+            offset,
+            total: contracts.length,
+            complete: offset + rows.length === contracts.length,
+            contracts: Object.freeze(rows),
+        }));
+    }
+    return Object.freeze(frames);
+};
+
+export const toRendererCandleRows = rows => Object.freeze(
+    rows.slice(-FUTURES_WORKSTATION_MARKET_LIMITS.RENDERER_CANDLES),
+);
+
+export const toRendererTradeRows = rows => Object.freeze(
+    rows.slice(0, FUTURES_WORKSTATION_MARKET_LIMITS.RENDERER_TRADES),
+);

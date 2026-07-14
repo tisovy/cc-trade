@@ -13,9 +13,8 @@ import DrawingToolbar from './components/features/tools/DrawingToolbar'
 import AlertPanel from './components/features/tools/AlertPanel'
 import MainView from './components/layout/MainView'
 import NotificationToast from './components/common/NotificationToast'
-import FuturesReadOnlyPanel from './components/features/futures/FuturesReadOnlyPanel'
-import FuturesTestnetExecutionTicket from './components/features/futures/FuturesTestnetExecutionTicket'
-import FuturesProductionExecutionTicket from './components/features/futures/FuturesProductionExecutionTicket'
+import FuturesTestnetWorkstation from './components/features/futures/FuturesTestnetWorkstation'
+import FuturesProductionWorkstation from './components/features/futures/FuturesProductionWorkstation'
 import { INTERVALS } from './constants'
 import { DataProvider, useDataContext } from './context/DataContext'
 import { DrawingProvider } from './context/DrawingProvider';
@@ -556,11 +555,12 @@ function AppShell() {
           aria-label="USDⓈ-M futures testnet workspace"
         >
           <FuturesModeBanner production={false} />
-          <FuturesReadOnlyPanel state={futuresState} />
-          <FuturesTestnetExecutionTicket
-            state={futuresExecution}
-            onPrepareIntent={futuresExecution.prepareIntent}
-            onPlaceOrder={futuresExecution.placeOrder}
+          <FuturesTestnetWorkstation
+            enabled={isFuturesTestnetMode}
+            wsConnection={wsConnection}
+            sendMessage={sendMessage}
+            readOnlyState={futuresState}
+            executionState={futuresExecution}
           />
         </main>
       ) : isFuturesLiveMode ? (
@@ -570,18 +570,11 @@ function AppShell() {
           aria-label="USDⓈ-M futures live production workspace"
         >
           <FuturesModeBanner production />
-          <FuturesProductionExecutionTicket
-            state={futuresProductionExecution}
-            onPrepareOrderIntent={futuresProductionExecution.prepareOrderIntent}
-            onPlaceOrder={futuresProductionExecution.placeOrder}
-            onPrepareCancelAllOpenOrdersIntent={futuresProductionExecution.prepareCancelAllOpenOrdersIntent}
-            onCancelAllOpenOrders={futuresProductionExecution.cancelAllOpenOrders}
-            onPrepareClosePositionsIntent={futuresProductionExecution.prepareClosePositionsIntent}
-            onClosePositions={futuresProductionExecution.closePositions}
-            onPrepareEngageKillSwitchIntent={futuresProductionExecution.prepareEngageKillSwitchIntent}
-            onEngageKillSwitch={futuresProductionExecution.engageKillSwitch}
-            onPrepareDisengageKillSwitchIntent={futuresProductionExecution.prepareDisengageKillSwitchIntent}
-            onDisengageKillSwitch={futuresProductionExecution.disengageKillSwitch}
+          <FuturesProductionWorkstation
+            enabled={isFuturesLiveMode}
+            wsConnection={wsConnection}
+            sendMessage={sendMessage}
+            executionState={futuresProductionExecution}
           />
         </main>
       ) : (

@@ -1,0 +1,729 @@
+.futures-testnet-workstation,
+.futures-production-workstation {
+  --futures-accent: #2688d9;
+  --futures-accent-soft: rgba(38, 136, 217, 0.16);
+  --futures-border: rgba(69, 147, 213, 0.35);
+  --futures-shell: #07111b;
+  width: 100%;
+  min-width: 0;
+}
+
+.futures-production-workstation {
+  --futures-accent: #e34f5e;
+  --futures-accent-soft: rgba(227, 79, 94, 0.16);
+  --futures-border: rgba(227, 79, 94, 0.4);
+  --futures-shell: #17090c;
+}
+
+.futures-workstation {
+  display: grid;
+  grid-template-columns: minmax(190px, 230px) minmax(420px, 1fr) minmax(250px, 310px);
+  grid-template-rows: auto auto minmax(420px, 1fr);
+  grid-template-areas:
+    "identity identity identity"
+    "instruments header header"
+    "instruments chart depth"
+    "instruments chart trades";
+  gap: 1px;
+  min-height: 690px;
+  overflow: hidden;
+  border: 1px solid var(--futures-border);
+  border-radius: 12px;
+  background: var(--futures-border);
+  box-shadow: 0 18px 54px rgba(0, 0, 0, 0.28);
+  color: #dbe6f0;
+}
+
+.futures-workstation button,
+.futures-workstation input {
+  font: inherit;
+}
+
+.futures-workstation button {
+  color: inherit;
+}
+
+.futures-workstation-identity {
+  grid-area: identity;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 38px;
+  padding: 7px 12px;
+  background: linear-gradient(90deg, var(--futures-accent), color-mix(in srgb, var(--futures-accent) 55%, #071019));
+  color: #fff;
+  letter-spacing: 0.04em;
+}
+
+.futures-workstation-identity strong {
+  font-size: 12px;
+  letter-spacing: 0.09em;
+}
+
+.futures-workstation-identity > span:not(.futures-workstation-state) {
+  font-size: 10px;
+  font-weight: 700;
+  opacity: 0.78;
+}
+
+.futures-workstation-identity code {
+  margin-left: auto;
+  color: rgba(255, 255, 255, 0.76);
+  font-size: 10px;
+}
+
+.futures-workstation-state {
+  display: inline-flex;
+  align-items: center;
+  width: max-content;
+  min-height: 20px;
+  padding: 2px 7px;
+  border: 1px solid rgba(142, 159, 177, 0.35);
+  border-radius: 999px;
+  background: rgba(142, 159, 177, 0.12);
+  color: #b9c7d5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+}
+
+.futures-workstation-state.is-live {
+  border-color: rgba(43, 196, 138, 0.55);
+  background: rgba(43, 196, 138, 0.12);
+  color: #52dba8;
+}
+
+.futures-workstation-state.is-loading,
+.futures-workstation-state.is-resynchronizing {
+  border-color: rgba(240, 185, 11, 0.55);
+  background: rgba(240, 185, 11, 0.12);
+  color: #f0c94e;
+}
+
+.futures-workstation-state.is-stale,
+.futures-workstation-state.is-disconnected,
+.futures-workstation-state.is-unavailable {
+  border-color: rgba(239, 91, 105, 0.58);
+  background: rgba(239, 91, 105, 0.13);
+  color: #ff8490;
+}
+
+.futures-workstation-instruments,
+.futures-workstation-market-header,
+.futures-workstation-chart,
+.futures-workstation-depth,
+.futures-workstation-trades {
+  min-width: 0;
+  background: var(--futures-shell);
+}
+
+.futures-workstation-instruments {
+  grid-area: instruments;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 10px;
+  overflow: hidden;
+}
+
+.futures-workstation-section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 34px;
+}
+
+.futures-workstation-section-heading > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.futures-workstation-section-heading span {
+  color: #718399;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.futures-workstation-section-heading strong {
+  font-size: 12px;
+}
+
+.futures-workstation-section-heading > button {
+  padding: 5px 9px;
+  border: 1px solid var(--futures-border);
+  border-radius: 5px;
+  background: var(--futures-accent-soft);
+  color: #cde3f6;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.futures-workstation-search {
+  display: grid;
+  gap: 4px;
+  margin: 9px 0;
+  color: #718399;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.futures-workstation-search input {
+  width: 100%;
+  padding: 8px 9px;
+  border: 1px solid rgba(126, 143, 166, 0.25);
+  border-radius: 6px;
+  outline: 0;
+  background: #0a1723;
+  color: #e3edf6;
+  font-size: 11px;
+}
+
+.futures-workstation-search input:focus {
+  border-color: var(--futures-accent);
+  box-shadow: 0 0 0 2px var(--futures-accent-soft);
+}
+
+.futures-workstation-contract-list {
+  display: grid;
+  gap: 3px;
+  max-height: 245px;
+  overflow: auto;
+  scrollbar-color: rgba(126, 143, 166, 0.25) transparent;
+}
+
+.futures-workstation-contract {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  border: 1px solid transparent;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.futures-workstation-contract.is-selected {
+  border-color: var(--futures-accent);
+  background: var(--futures-accent-soft);
+}
+
+.futures-workstation-favorite,
+.futures-workstation-contract-select {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.futures-workstation-favorite {
+  color: #f0b90b !important;
+  font-size: 15px;
+}
+
+.futures-workstation-contract-select {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 1px 7px;
+  padding: 7px 7px 7px 2px;
+  text-align: left;
+}
+
+.futures-workstation-contract-select strong {
+  font-size: 11px;
+}
+
+.futures-workstation-contract-select span,
+.futures-workstation-contract-select small {
+  color: #718399;
+  font-size: 8px;
+}
+
+.futures-workstation-contract-select small {
+  grid-column: 1 / -1;
+  letter-spacing: 0.05em;
+}
+
+.futures-workstation .is-allowed {
+  color: #52dba8 !important;
+}
+
+.futures-workstation .is-observe-only {
+  color: #f0c94e !important;
+}
+
+.futures-workstation-contract-inspector {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(126, 143, 166, 0.18);
+  overflow: auto;
+}
+
+.futures-workstation-contract-status {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 7px;
+  font-size: 10px;
+}
+
+.futures-workstation-contract-status > :last-child {
+  grid-column: 1 / -1;
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.futures-workstation-contract-inspector > p {
+  margin: 0;
+  color: #8395a8;
+  font-size: 10px;
+}
+
+.futures-workstation-filter-row {
+  display: grid;
+  gap: 2px;
+}
+
+.futures-workstation-filter-row strong {
+  color: #718399;
+  font-size: 8px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.futures-workstation-filter-row code {
+  overflow: hidden;
+  color: #c4d0dc;
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.futures-workstation-market-header {
+  grid-area: header;
+  display: flex;
+  align-items: stretch;
+  gap: 12px;
+  padding: 9px 12px;
+  overflow-x: auto;
+}
+
+.futures-workstation-symbol-title {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 110px;
+  padding-right: 12px;
+  border-right: 1px solid rgba(126, 143, 166, 0.18);
+}
+
+.futures-workstation-symbol-title span,
+.futures-workstation-symbol-title small {
+  color: #718399;
+  font-size: 8px;
+  letter-spacing: 0.08em;
+}
+
+.futures-workstation-symbol-title strong {
+  margin: 2px 0;
+  font-size: 17px;
+}
+
+.futures-workstation-market-header dl {
+  display: grid;
+  grid-auto-columns: minmax(82px, auto);
+  grid-auto-flow: column;
+  gap: 12px;
+  align-items: center;
+  margin: 0;
+}
+
+.futures-workstation-market-header dl > div {
+  display: grid;
+  gap: 3px;
+}
+
+.futures-workstation-market-header dt {
+  color: #718399;
+  font-size: 8px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.futures-workstation-market-header dd {
+  margin: 0;
+  color: #c9d7e4;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.futures-workstation-market-header .is-primary dd {
+  color: #52dba8;
+  font-size: 15px;
+}
+
+.futures-workstation-chart {
+  grid-area: chart;
+  display: flex;
+  flex-direction: column;
+  min-height: 420px;
+  overflow: hidden;
+}
+
+.futures-workstation-chart-toolbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 8px;
+  border-bottom: 1px solid rgba(126, 143, 166, 0.15);
+  overflow-x: auto;
+}
+
+.futures-workstation-intervals,
+.futures-workstation-drawing-tools {
+  display: flex;
+  gap: 3px;
+  white-space: nowrap;
+}
+
+.futures-workstation-chart-toolbar button {
+  padding: 5px 7px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: rgba(126, 143, 166, 0.08);
+  color: #8395a8;
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.futures-workstation-chart-toolbar button:hover,
+.futures-workstation-chart-toolbar button.is-selected {
+  border-color: var(--futures-accent);
+  background: var(--futures-accent-soft);
+  color: #e5eff8;
+}
+
+.futures-workstation-chart-toolbar button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.futures-workstation-chart-frame {
+  position: relative;
+  flex: 1;
+  min-height: 360px;
+}
+
+.futures-workstation-chart-canvas {
+  position: absolute;
+  inset: 0;
+  min-width: 320px;
+  min-height: 320px;
+}
+
+.futures-workstation-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: grid;
+  place-content: center;
+  gap: 4px;
+  background: rgba(5, 12, 19, 0.72);
+  color: #d8e3ed;
+  text-align: center;
+  pointer-events: none;
+}
+
+.futures-workstation-overlay strong {
+  color: #f0c94e;
+  font-size: 12px;
+  letter-spacing: 0.12em;
+}
+
+.futures-workstation-overlay span {
+  color: #8192a4;
+  font-size: 10px;
+}
+
+.futures-workstation-local-draft {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 42px;
+  padding: 7px 10px;
+  border-top: 1px solid var(--futures-border);
+  background: var(--futures-accent-soft);
+}
+
+.futures-workstation-local-draft > div {
+  display: flex;
+  flex-direction: column;
+}
+
+.futures-workstation-local-draft span {
+  color: #718399;
+  font-size: 8px;
+  text-transform: uppercase;
+}
+
+.futures-workstation-local-draft strong {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+}
+
+.futures-workstation-local-draft code {
+  color: #f0c94e;
+  font-size: 9px;
+  font-weight: 800;
+}
+
+.futures-workstation-depth {
+  grid-area: depth;
+  min-height: 390px;
+  padding: 8px;
+  overflow: hidden;
+}
+
+.futures-workstation-book-head,
+.futures-workstation-trade-head,
+.futures-workstation-book-side button,
+.futures-workstation-trade-rows > div {
+  display: grid;
+  grid-template-columns: 1fr 0.8fr 0.9fr;
+  gap: 5px;
+  align-items: center;
+}
+
+.futures-workstation-book-head,
+.futures-workstation-trade-head {
+  padding: 6px 4px;
+  color: #617387;
+  font-size: 8px;
+  text-align: right;
+}
+
+.futures-workstation-book-side {
+  max-height: 145px;
+  overflow: hidden;
+}
+
+.futures-workstation-book-side button {
+  width: 100%;
+  padding: 2px 4px;
+  border: 0;
+  background: transparent;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 8px;
+  text-align: right;
+  cursor: pointer;
+}
+
+.futures-workstation-book-side button:hover {
+  background: var(--futures-accent-soft);
+}
+
+.futures-workstation-book-side.is-ask button span:first-child {
+  color: #ff7380;
+}
+
+.futures-workstation-book-side.is-bid button span:first-child {
+  color: #3dd69c;
+}
+
+.futures-workstation-book-side button span:not(:first-child) {
+  color: #8192a4;
+}
+
+.futures-workstation-spread {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 4px 0;
+  padding: 6px 4px;
+  border-block: 1px solid rgba(126, 143, 166, 0.13);
+  color: #718399;
+  font-size: 8px;
+}
+
+.futures-workstation-spread strong {
+  color: #e1ebf4;
+  font-size: 11px;
+}
+
+.futures-workstation-spread code {
+  margin-left: auto;
+  color: #617387;
+  font-size: 7px;
+}
+
+.futures-workstation-trades {
+  grid-area: trades;
+  min-height: 190px;
+  padding: 8px;
+  overflow: hidden;
+}
+
+.futures-workstation-trade-rows {
+  max-height: 160px;
+  overflow: auto;
+}
+
+.futures-workstation-trade-rows > div {
+  padding: 3px 4px;
+  color: #8192a4;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 8px;
+  text-align: right;
+}
+
+.futures-workstation-trade-rows .is-buy span:first-child {
+  color: #3dd69c;
+}
+
+.futures-workstation-trade-rows .is-sell span:first-child {
+  color: #ff7380;
+}
+
+.futures-workstation-empty {
+  margin: 12px 4px;
+  color: #718399;
+  font-size: 9px;
+  text-align: center;
+}
+
+.futures-workstation-safety-drawer {
+  margin-top: 10px;
+  border: 1px solid var(--futures-border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--futures-shell);
+  color: #dbe6f0;
+}
+
+.futures-workstation-safety-drawer summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--futures-accent-soft);
+  cursor: pointer;
+}
+
+.futures-workstation-safety-drawer summary strong {
+  font-size: 11px;
+}
+
+.futures-workstation-safety-drawer summary span {
+  color: #8395a8;
+  font-size: 9px;
+}
+
+.futures-workstation-safety-content {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(310px, 1fr));
+  gap: 10px;
+  padding: 10px;
+}
+
+.futures-workstation-safety-content > * {
+  min-width: 0;
+  margin: 0 !important;
+}
+
+@media (max-width: 980px) {
+  .futures-workstation {
+    grid-template-columns: minmax(170px, 205px) minmax(370px, 1fr) minmax(220px, 270px);
+  }
+
+  .futures-workstation-market-header dl {
+    gap: 8px;
+  }
+
+  .futures-workstation-drawing-tools button {
+    max-width: 105px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+}
+
+@media (max-width: 760px) {
+  .futures-workstation {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto auto minmax(390px, 56vh) auto auto;
+    grid-template-areas:
+      "identity"
+      "header"
+      "instruments"
+      "chart"
+      "depth"
+      "trades";
+    min-height: 0;
+    overflow: visible;
+  }
+
+  .futures-workstation-identity {
+    flex-wrap: wrap;
+    min-height: 52px;
+  }
+
+  .futures-workstation-identity code {
+    width: 100%;
+    margin-left: 0;
+  }
+
+  .futures-workstation-market-header {
+    flex-direction: column;
+  }
+
+  .futures-workstation-market-header dl {
+    grid-auto-columns: minmax(80px, 1fr);
+    overflow-x: auto;
+  }
+
+  .futures-workstation-instruments {
+    max-height: 360px;
+  }
+
+  .futures-workstation-contract-list {
+    max-height: 125px;
+  }
+
+  .futures-workstation-contract-inspector {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .futures-workstation-contract-status,
+  .futures-workstation-contract-inspector > p {
+    grid-column: 1 / -1;
+  }
+
+  .futures-workstation-chart-toolbar,
+  .futures-workstation-local-draft,
+  .futures-workstation-safety-drawer summary {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .futures-workstation-depth,
+  .futures-workstation-trades {
+    min-height: 280px;
+  }
+
+  .futures-workstation-book-side,
+  .futures-workstation-trade-rows {
+    max-height: 205px;
+  }
+
+  .futures-workstation-safety-content {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

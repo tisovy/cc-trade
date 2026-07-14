@@ -20,7 +20,7 @@
     "test:e2e": "npm run build:e2e && playwright test",
     "test:all": "npm run test && npm run test:e2e",
     "check:circular": "node scripts/check-circular-imports.mjs",
-    "check:futures-production": "node scripts/check-futures-production-boundaries.mjs",
+    "check:futures-production": "node scripts/check-futures-production-boundaries.mjs && node scripts/check-futures-workstation-boundaries.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

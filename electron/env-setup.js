@@ -1,4 +1,7 @@
 import { installFuturesProductionNetworkEscapeGuard } from './futures-production-network-guard.js';
+import {
+    installFuturesWorkstationNodeNetworkEscapeGuard,
+} from './futures-workstation-node-network-guard.js';
 
 // Force clear environment variables for E2E tests
 process.env.BK = '';
@@ -18,4 +21,5 @@ for (const key of Object.keys(process.env)) {
 delete process.env.MOCK_WS_URL;
 delete process.env.VITE_WS_URL;
 installFuturesProductionNetworkEscapeGuard();
+installFuturesWorkstationNodeNetworkEscapeGuard();
 console.log('E2E: Environment variables cleared');

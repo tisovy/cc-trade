@@ -287,13 +287,15 @@
 .futures-mode-view {
   min-height: 100vh;
   box-sizing: border-box;
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 500px));
-  align-items: flex-start;
-  justify-content: center;
-  gap: 12px;
+  display: block;
   padding: 72px 18px 18px;
   overflow: auto;
+}
+
+.futures-mode-view > .futures-testnet-workstation,
+.futures-mode-view > .futures-production-workstation {
+  width: min(100%, 1580px);
+  margin: 0 auto;
 }
 
 .futures-mode-view.is-testnet {
@@ -349,7 +351,6 @@
 }
 
 .futures-mode-view.is-production {
-  grid-template-columns: minmax(0, 500px);
   background:
     radial-gradient(circle at 50% 0%, rgba(148, 31, 39, 0.34), transparent 45%),
     #110607;
@@ -390,12 +391,6 @@
   box-shadow: 0 3px 18px rgba(188, 35, 47, 0.42);
 }
 
-@media (max-width: 940px) {
-  .futures-mode-view {
-    grid-template-columns: minmax(0, 500px);
-  }
-}
-
 @media (max-width: 620px) {
   .market-mode-switch button {
     padding-right: 7px;
@@ -406,5 +401,9 @@
 
   .futures-mode-banner span {
     display: none;
+  }
+
+  .futures-mode-view {
+    padding: 72px 8px 12px;
   }
 }

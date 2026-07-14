@@ -2,7 +2,7 @@
 
 Date: 2026-07-14
 
-Status: planned; implementation has not started
+Status: Phase 8.0–8.2 complete; Phase 8.3–8.7 remain planned
 
 Planning base: `dcd2260c5aed73b268a6e1f12cac2c3cb8849873` (`Add guarded UI arming for live Futures`)
 
@@ -15,6 +15,21 @@ The current Phase 7 renderer is intentionally only a guarded production executio
 “Functional parity” means equivalent core trading workflows and exchange-supported semantics, not copied Binance source code, assets, trade dress, layout pixels, private web endpoints, or undocumented behavior. The application keeps its own visual system, with unmistakable blue Testnet and red Live environments.
 
 The capability baseline is the documented Binance USDⓈ-M API surface reviewed on 2026-07-14. Every implementation slice must recheck the official contract because endpoints, order types, weights, and stream behavior can change.
+
+### Phase 8.0–8.2 implementation record (2026-07-14)
+
+- [x] The separate [Phase 8 workstation ADR](./futures_phase8_workstation_adr.md) and [threat model](./futures_phase8_workstation_threat_model.md) freeze the current official public-read HTTPS/WSS origins, routed stream paths, REST routes and weights, exact schemas, freshness thresholds, generation/revision ownership, bounds and route classification.
+- [x] Testnet and Production have separately named containers, hooks, protocols, channels, services, fixtures, transports and backend compositions. Both reviewed real transports remain source-pinned off; deterministic environment-specific fakes are the only implementation/test runtime.
+- [x] The shared React view/chart boundary is presentation-only. It receives immutable normalized resources and cannot choose an environment, host, transport, credential, protocol, capability or storage namespace. Spot `DataContext`, command builders, shortcuts and legacy aliases remain outside the Futures workstation.
+- [x] Both workspaces provide the Futures-only selector/search, allowlist/status/filter inspector, last/mark/index/exact basis/24h/funding header, funding countdown, bounded candles and volume, REST-bootstrapped mark/index overlays, drawing/display-alert tools, authoritative snapshot-plus-diff order book and bounded aggregate-trade tape.
+- [x] Depth validates the official bootstrap bridge and continuous `pu` chain, rejects gaps/duplicates/reordering/crossed books/overflow, and returns to LIVE only after resnapshot. Symbol/interval changes and reconnects use generation ownership; late owners cannot mutate the selected view.
+- [x] Loading, stale, disconnected, resynchronizing and unavailable states remain explicit. Blue/red identity is permanently visible at desktop and narrow widths. Phase 5/6 and Phase 7 tickets remain open safety drawers.
+- [x] Chart/order-book clicks create only a component-local display draft. The workstation protocols contain only subscribe/select/unsubscribe/resource actions; no Enter handler or new Live execution action exists.
+- [x] Node HTTP(S), fetch and Electron E2E tripwires terminate on a Binance Futures network escape. Expanded static scans pin exact public-read routes/hosts/options and reject credentials, writes, caller network options, renderer network/storage, Spot coupling and environment crossing.
+- [x] Final fake-only verification passed `88` Vitest files / `2781` tests with the established `2` skips, ESLint, production and E2E builds, all `15` Electron Playwright scenarios, `228`-file circular-import scan, legacy Phase 7 production scan across `36` files, and Phase 8 scan across `28` files. Four blue/red desktop/narrow screenshots were attached to Playwright evidence; `npm run e` also rendered under strict CSP through the credential-free E2E backend without the prior React-preamble black screen.
+- [x] No live credential was loaded, no real Binance Futures request was sent, the production public-read interlock remains `false`, and no production write/action family was added or enabled.
+
+Residual boundary: the reviewed public transports are compiled but disabled pending a separate operator-approved manual-read checkpoint. Contract candles stream continuously; historical mark/index overlays use the reviewed REST kline routes and current mark/index price lines use `markPrice@1s`, because the reviewed USDⓈ-M stream catalog does not define separate mark/index kline streams for this milestone.
 
 ## Scope boundary
 

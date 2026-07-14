@@ -1,0 +1,200 @@
+import { describe, expect, it } from 'vitest';
+import {
+    FUTURES_WORKSTATION_ORDER_BOOK_LIMITS,
+    FUTURES_WORKSTATION_ORDER_BOOK_PHASES,
+    FuturesWorkstationOrderBook,
+    FuturesWorkstationOrderBookError,
+} from './futures-workstation-order-book.js';
+
+const snapshot = (overrides = {}) => ({
+    lastUpdateId: '100',
+    bids: [['10.00', '2.0'], ['9.00', '3.0']],
+    asks: [['11.00', '4.0'], ['12.00', '5.0']],
+    ...overrides,
+});
+
+const delta = (overrides = {}) => ({
+    firstUpdateId: '100',
+    finalUpdateId: '101',
+    previousFinalUpdateId: '99',
+    bids: [['10.00', '2.5']],
+    asks: [['11.00', '3.5']],
+    eventTime: 1_784_000_000_000,
+    ...overrides,
+});
+
+const liveBook = () => {
+    const book = new FuturesWorkstationOrderBook();
+    book.push(delta(), 200);
+    expect(book.bootstrap(snapshot()).live).toBe(true);
+    return book;
+};
+
+describe('authoritative Futures local order book', () => {
+    it('buffers before snapshot and exposes a bounded cumulative live view', () => {
+        const book = liveBook();
+        const view = book.toRendererView();
+        expect(book.phase).toBe(FUTURES_WORKSTATION_ORDER_BOOK_PHASES.LIVE);
+        expect(view.lastUpdateId).toBe('101');
+        expect(view.bids[0]).toEqual({ price: '10', quantity: '2.5', total: '2.5' });
+        expect(view.bids[1].total).toBe('5.5');
+        expect(view.asks[0]).toEqual({ price: '11', quantity: '3.5', total: '3.5' });
+        expect(view.spread).toBe('1');
+    });
+
+    it('ignores buffered deltas entirely behind the snapshot', () => {
+        const book = new FuturesWorkstationOrderBook();
+        book.push(delta({ firstUpdateId: '90', finalUpdateId: '99' }), 100);
+        book.push(delta(), 100);
+        expect(book.bootstrap(snapshot()).live).toBe(true);
+        expect(book.toRendererView().lastUpdateId).toBe('101');
+    });
+
+    it('requires the first buffered event to bridge lastUpdateId', () => {
+        const book = new FuturesWorkstationOrderBook();
+        book.push(delta({ firstUpdateId: '101', finalUpdateId: '102' }), 100);
+        expect(book.bootstrap(snapshot())).toEqual({
+            live: false,
+            reason: 'snapshot-not-bridged',
+            resync: true,
+        });
+        expect(book.phase).toBe(FUTURES_WORKSTATION_ORDER_BOOK_PHASES.RESYNC_REQUIRED);
+    });
+
+    it('requires pu continuity while replaying the bootstrap buffer', () => {
+        const book = new FuturesWorkstationOrderBook();
+        book.push(delta(), 100);
+        book.push(delta({
+            firstUpdateId: '102',
+            finalUpdateId: '102',
+            previousFinalUpdateId: '77',
+        }), 100);
+        expect(book.bootstrap(snapshot())).toEqual({
+            live: false,
+            reason: 'buffer-gap',
+            resync: true,
+        });
+    });
+
+    it('ignores a fully duplicate live update idempotently', () => {
+        const book = liveBook();
+        expect(book.push(delta(), 100)).toEqual({ applied: false, reason: 'duplicate' });
+        expect(book.phase).toBe(FUTURES_WORKSTATION_ORDER_BOOK_PHASES.LIVE);
+    });
+
+    it('detects a live update-ID gap and refuses further display', () => {
+        const book = liveBook();
+        expect(book.push(delta({
+            firstUpdateId: '103',
+            finalUpdateId: '103',
+            previousFinalUpdateId: '102',
+        }), 100)).toEqual({ applied: false, reason: 'gap', resync: true });
+        expect(book.toRendererView()).toBeNull();
+    });
+
+    it('applies absolute quantities and accepts deletion of an absent level', () => {
+        const book = liveBook();
+        expect(book.push(delta({
+            firstUpdateId: '102',
+            finalUpdateId: '102',
+            previousFinalUpdateId: '101',
+            bids: [['10.00', '0'], ['8.00', '0']],
+            asks: [],
+        }), 100).applied).toBe(true);
+        expect(book.toRendererView().bids.map(level => level.price)).toEqual(['9']);
+    });
+
+    it('rejects reordered update ranges', () => {
+        const book = new FuturesWorkstationOrderBook();
+        expect(() => book.push(delta({ firstUpdateId: '102', finalUpdateId: '101' }), 100))
+            .toThrow(FuturesWorkstationOrderBookError);
+    });
+
+    it('rejects leading-zero and negative update identities', () => {
+        for (const finalUpdateId of ['0101', '-1', '1.0']) {
+            const book = new FuturesWorkstationOrderBook();
+            expect(() => book.push(delta({ finalUpdateId }), 100))
+                .toThrow(FuturesWorkstationOrderBookError);
+        }
+    });
+
+    it('preserves and compares update IDs beyond 2^53', () => {
+        const book = new FuturesWorkstationOrderBook();
+        book.push(delta({
+            firstUpdateId: '90071992547409931234',
+            finalUpdateId: '90071992547409931235',
+            previousFinalUpdateId: '90071992547409931233',
+        }), 100);
+        expect(book.bootstrap(snapshot({ lastUpdateId: '90071992547409931234' })).live).toBe(true);
+        expect(book.toRendererView().lastUpdateId).toBe('90071992547409931235');
+    });
+
+    it('fails closed on a crossed book', () => {
+        const book = liveBook();
+        expect(() => book.push(delta({
+            firstUpdateId: '102',
+            finalUpdateId: '102',
+            previousFinalUpdateId: '101',
+            bids: [['12', '1']],
+            asks: [],
+        }), 100)).toThrowError(expect.objectContaining({ code: 'CROSSED_ORDER_BOOK' }));
+        expect(book.phase).toBe(FUTURES_WORKSTATION_ORDER_BOOK_PHASES.RESYNC_REQUIRED);
+    });
+
+    it('rejects numerically duplicate price strings', () => {
+        const book = new FuturesWorkstationOrderBook();
+        expect(() => book.push(delta({ bids: [['10.0', '1'], ['10.00', '2']] }), 100))
+            .toThrowError(expect.objectContaining({ code: 'DUPLICATE_DEPTH_PRICE' }));
+    });
+
+    it('bounds buffered event count', () => {
+        const book = new FuturesWorkstationOrderBook();
+        for (let index = 0; index < FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.BUFFERED_EVENTS; index += 1) {
+            expect(book.push(delta(), 1).reason).toBe('buffered');
+        }
+        expect(book.push(delta(), 1)).toEqual({ applied: false, reason: 'overflow', resync: true });
+        expect(book.buffer).toHaveLength(0);
+    });
+
+    it('bounds buffered bytes independently of event count', () => {
+        const book = new FuturesWorkstationOrderBook();
+        expect(book.push(delta(), FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.BUFFERED_BYTES).reason)
+            .toBe('buffered');
+        expect(book.push(delta(), 1).resync).toBe(true);
+    });
+
+    it('retains only bounded levels and emits at most 24 per side', () => {
+        const levels = Array.from({ length: 600 }, (_, index) => [
+            `${1000 - index}.01`,
+            '1',
+        ]);
+        const book = new FuturesWorkstationOrderBook();
+        book.push(delta({ bids: [], asks: [] }), 1);
+        expect(book.bootstrap(snapshot({
+            bids: levels,
+            asks: Array.from({ length: 600 }, (_, index) => [`${1001 + index}.01`, '1']),
+        })).live).toBe(true);
+        expect(book.bids.size).toBeLessThanOrEqual(500);
+        expect(book.asks.size).toBeLessThanOrEqual(500);
+        expect(book.toRendererView().bids).toHaveLength(24);
+        expect(book.toRendererView().asks).toHaveLength(24);
+    });
+
+    it('sorts high-precision prices without Number coercion', () => {
+        const book = new FuturesWorkstationOrderBook();
+        book.push(delta({ bids: [], asks: [] }), 1);
+        expect(book.bootstrap(snapshot({
+            bids: [['9007199254740993.0001', '1'], ['9007199254740993.0002', '1']],
+            asks: [['9007199254740993.0003', '1']],
+        })).live).toBe(true);
+        expect(book.toRendererView().bids[0].price).toBe('9007199254740993.0002');
+    });
+
+    it('tears down idempotently and rejects later mutation', () => {
+        const book = liveBook();
+        book.stop();
+        book.stop();
+        expect(book.push(delta(), 100)).toEqual({ applied: false, reason: 'stopped' });
+        expect(book.toRendererView()).toBeNull();
+    });
+});
