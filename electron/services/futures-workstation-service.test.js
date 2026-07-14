@@ -128,6 +128,95 @@ describe('separately composed Futures workstation services', () => {
             createFuturesProductionWorkstationRuntimeForTest,
             productionRequest,
         ],
+    ])('waits for both %s stream handshakes before dispatching REST bootstrap', async (
+        _label,
+        createBase,
+        createRuntime,
+        createRequest,
+    ) => {
+        const base = createBase();
+        let resolveReady;
+        const ready = new Promise(resolve => { resolveReady = resolve; });
+        const bootstrap = vi.fn(options => base.bootstrap(options));
+        const transport = {
+            ...base,
+            bootstrap,
+            connect: (options) => {
+                const handle = base.connect(options);
+                return { ready, close: handle.close };
+            },
+        };
+        const runtime = track(createRuntime({ transport }));
+        const events = [];
+        const pending = runtime.service.handleRequest(createRequest('stream-ready-barrier'), {
+            emit: event => events.push(event),
+        });
+        await vi.waitFor(() => expect(resolveReady).toBeTypeOf('function'));
+        expect(bootstrap).not.toHaveBeenCalled();
+        expect(events.at(-1)).toMatchObject({ resource: 'catalog', state: 'live' });
+        resolveReady(true);
+        await pending;
+        expect(bootstrap).toHaveBeenCalledOnce();
+        expect(events.at(-1)).toMatchObject({ resource: 'status', state: 'live' });
+    });
+
+    it.each([
+        [
+            'Testnet',
+            createFuturesTestnetWorkstationFakeTransport,
+            createFuturesTestnetWorkstationRuntimeForTest,
+            testnetRequest,
+        ],
+        [
+            'production',
+            createFuturesProductionWorkstationFakeTransport,
+            createFuturesProductionWorkstationRuntimeForTest,
+            productionRequest,
+        ],
+    ])('does not strand %s in LOADING when an active bootstrap raises AbortError', async (
+        _label,
+        createBase,
+        createRuntime,
+        createRequest,
+    ) => {
+        const base = createBase();
+        const transport = {
+            ...base,
+            bootstrap: async () => {
+                const error = new Error('request deadline');
+                error.name = 'AbortError';
+                throw error;
+            },
+        };
+        const runtime = track(createRuntime({ transport }));
+        const events = [];
+        await runtime.service.handleRequest(createRequest('active-abort-error'), {
+            emit: event => events.push(event),
+        });
+        expect(events.filter(event => event.resource === 'status').map(event => event.state))
+            .toEqual(['loading', 'unavailable']);
+        expect(events.at(-1)).toMatchObject({
+            resource: 'status',
+            state: 'unavailable',
+            payload: { reasonCode: 'WORKSTATION_RESOURCE_REJECTED' },
+        });
+        expect(runtime.service.current).toBeNull();
+        expect(base.getActiveTimerCount()).toBe(0);
+    });
+
+    it.each([
+        [
+            'Testnet',
+            createFuturesTestnetWorkstationFakeTransport,
+            createFuturesTestnetWorkstationRuntimeForTest,
+            testnetRequest,
+        ],
+        [
+            'production',
+            createFuturesProductionWorkstationFakeTransport,
+            createFuturesProductionWorkstationRuntimeForTest,
+            productionRequest,
+        ],
     ])('boots %s with a catalog above the legacy 512-contract limit', async (
         _label,
         createBase,
@@ -448,7 +537,7 @@ describe('separately composed Futures workstation services', () => {
                 for (let index = 0; index < 129; index += 1) {
                     options.onMessage(trade.replace(/"a":\d+/, `"a":${1000 + index}`));
                 }
-                return { close: () => {} };
+                return { ready: Promise.resolve(true), close: () => {} };
             },
         };
         const clock = createManualClock();
@@ -560,6 +649,7 @@ describe('separately composed Futures workstation services', () => {
             connect: (options) => {
                 const handle = base.connect(options);
                 return {
+                    ready: handle.ready,
                     close: () => {
                         close();
                         handle.close();
@@ -612,6 +702,7 @@ describe('separately composed Futures workstation services', () => {
                 subscriber = options;
                 const handle = base.connect(options);
                 return {
+                    ready: handle.ready,
                     close: () => {
                         close();
                         handle.close();

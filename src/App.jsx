@@ -196,19 +196,21 @@ function AppShell() {
   }, [currentView]);
 
   // Enable/disable depth view streams based on current view
-  // Trade + depth streams are ONLY subscribed when user is actually viewing DepthView
-  // This reduces unnecessary WebSocket traffic when on MainView
+  // Spot trade + depth streams exist only while the Spot DepthView is visible.
+  // Entering either Futures workspace explicitly releases the prior Spot stream.
   useEffect(() => {
     if (!sendMessage || !wsConnection) return;
     
-    if (currentView === VIEWS.DEPTH && panel?.selected) {
+    if (marketMode === MARKET_MODES.SPOT
+      && currentView === VIEWS.DEPTH
+      && panel?.selected) {
       // Enable trade + depth streams for DepthView
       sendMessage({ action: 'enable_depth_view', symbol: panel.selected });
     } else {
-      // Disable trade + depth streams when on MainView or no symbol selected
+      // Disable when on MainView, no symbol is selected, or a Futures workspace owns the screen.
       sendMessage({ action: 'disable_depth_view' });
     }
-  }, [currentView, panel?.selected, sendMessage, wsConnection]);
+  }, [marketMode, currentView, panel?.selected, sendMessage, wsConnection]);
 
   // Switch to depth view with specific symbol/interval (from MainView or AnalyticsPanel)
   // NOTE: When coming from MainView, the slot updater handles keeping the grid in sync

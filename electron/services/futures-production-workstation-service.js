@@ -223,7 +223,22 @@ export class FuturesProductionWorkstationService {
                 onMessage: raw => this.handleStreamFrame(session, raw),
                 onDisconnect: reason => this.handleDisconnect(session, reason),
             });
-            if (session.reconnectTimer !== null) return;
+            if (!session.stream
+                || typeof session.stream.close !== 'function'
+                || typeof session.stream.ready?.then !== 'function') {
+                throw new FuturesProductionWorkstationServiceError('INVALID_STREAM_HANDLE');
+            }
+            if (session.reconnectTimer !== null) {
+                session.stream.close();
+                session.stream = null;
+                return;
+            }
+            const streamReady = await session.stream.ready;
+            if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
+            if (streamReady !== true) {
+                this.scheduleResync(session, 'SOCKET_NOT_READY');
+                return;
+            }
             const bootstrap = await this.transport.bootstrap({
                 symbol: session.symbol,
                 pair: session.pair,
@@ -282,7 +297,7 @@ export class FuturesProductionWorkstationService {
             this.emitStatus(session, FUTURES_WORKSTATION_STATES.LIVE, true, null);
             this.startFreshnessMonitor(session);
         } catch (error) {
-            if (!this.isCurrent(session) || error?.name === 'AbortError') return;
+            if (!this.isCurrent(session)) return;
             this.onInternalError({ phase: 'bootstrap', code: safeCode(error) });
             this.emitStatus(
                 session,

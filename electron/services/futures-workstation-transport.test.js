@@ -34,6 +34,7 @@ vi.mock('ws', () => {
 
 import {
     FUTURES_TESTNET_WORKSTATION_REST_ORIGIN,
+    FUTURES_TESTNET_WORKSTATION_REQUEST_LIMITS,
     FUTURES_TESTNET_WORKSTATION_ROUTES,
     FUTURES_TESTNET_WORKSTATION_WEIGHTS,
     FUTURES_TESTNET_WORKSTATION_WSS_ORIGIN,
@@ -41,6 +42,7 @@ import {
 } from './futures-testnet-workstation-transport.js';
 import {
     FUTURES_PRODUCTION_WORKSTATION_REST_ORIGIN,
+    FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS,
     FUTURES_PRODUCTION_WORKSTATION_ROUTES,
     FUTURES_PRODUCTION_WORKSTATION_WEIGHTS,
     FUTURES_PRODUCTION_WORKSTATION_WSS_ORIGIN,
@@ -196,7 +198,7 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             .toBe('1000');
         for (const path of ['/klines?', '/markPriceKlines?', '/indexPriceKlines?']) {
             expect(new URL(calls.find(call => call.url.includes(path)).url).searchParams.get('limit'))
-                .toBe('500');
+                .toBe('100');
         }
     });
 
@@ -278,6 +280,52 @@ describe('reviewed environment-specific Futures workstation transports', () => {
         expect(disconnects).toEqual(['SOCKET_ERROR']);
         connection.close();
         expect(socketMock.instances.every(socket => socket.close.mock.calls.length === 1)).toBe(true);
+    });
+
+    it.each([
+        ['Testnet', createFuturesTestnetWorkstationReviewedTransport],
+        ['production', createFuturesProductionWorkstationReviewedTransport],
+    ])('holds the %s connection readiness barrier until both routed sockets open', async (
+        _label,
+        createTransport,
+    ) => {
+        vi.useFakeTimers();
+        const connection = createTransport().connect({
+            symbol: 'BTCUSDT',
+            interval: '1m',
+            onMessage: () => {},
+            onDisconnect: () => {},
+        });
+        let settled = false;
+        void connection.ready.then(() => { settled = true; });
+        await Promise.resolve();
+        expect(settled).toBe(false);
+        socketMock.instances[0].emit('open');
+        await Promise.resolve();
+        expect(settled).toBe(false);
+        socketMock.instances[1].emit('open');
+        await expect(connection.ready).resolves.toBe(true);
+        connection.close();
+    });
+
+    it.each([
+        ['Testnet', createFuturesTestnetWorkstationReviewedTransport],
+        ['production', createFuturesProductionWorkstationReviewedTransport],
+    ])('fails the %s readiness barrier closed when a socket errors before open', async (
+        _label,
+        createTransport,
+    ) => {
+        vi.useFakeTimers();
+        const connection = createTransport().connect({
+            symbol: 'BTCUSDT',
+            interval: '1m',
+            onMessage: () => {},
+            onDisconnect: () => {},
+        });
+        socketMock.instances[0].emit('error', new Error('handshake failed'));
+        socketMock.instances[1].emit('open');
+        await expect(connection.ready).resolves.toBe(false);
+        connection.close();
     });
 
     it.each([
@@ -391,6 +439,59 @@ describe('reviewed environment-specific Futures workstation transports', () => {
     it.each([
         ['Testnet', createFuturesTestnetWorkstationReviewedTransport],
         ['production', createFuturesProductionWorkstationReviewedTransport],
+    ])('maps a %s REST deadline to an explicit terminal code', async (_label, createTransport) => {
+        vi.useFakeTimers();
+        globalThis.fetch = vi.fn((_url, { signal }) => new Promise((resolve, reject) => {
+            const abort = () => {
+                const error = new Error('aborted');
+                error.name = 'AbortError';
+                reject(error);
+            };
+            if (signal.aborted) abort();
+            else signal.addEventListener('abort', abort, { once: true });
+        }));
+        const pending = createTransport().loadExchangeInfo();
+        const result = pending.catch(error => error);
+        await vi.advanceTimersByTimeAsync(10_000);
+        await expect(result).resolves.toMatchObject({ code: 'REQUEST_DEADLINE_EXCEEDED' });
+    });
+
+    it.each([
+        ['Testnet', createFuturesTestnetWorkstationReviewedTransport],
+        ['production', createFuturesProductionWorkstationReviewedTransport],
+    ])('aborts the remaining %s bootstrap batch after its first failed request', async (
+        _label,
+        createTransport,
+    ) => {
+        const failure = new Error('first bootstrap request failed');
+        const calls = [];
+        let failFirst;
+        globalThis.fetch = vi.fn((url, { signal }) => new Promise((resolve, reject) => {
+            const call = { url: url.href, signal };
+            calls.push(call);
+            const abort = () => {
+                const error = new Error('aborted');
+                error.name = 'AbortError';
+                reject(error);
+            };
+            signal.addEventListener('abort', abort, { once: true });
+            if (calls.length === 1) failFirst = () => reject(failure);
+        }));
+        const pending = createTransport().bootstrap({
+            symbol: 'BTCUSDT',
+            pair: 'BTCUSDT',
+            interval: '1m',
+        });
+        await vi.waitFor(() => expect(calls).toHaveLength(2));
+        failFirst();
+        await expect(pending).rejects.toBe(failure);
+        await vi.waitFor(() => expect(calls[1].signal.aborted).toBe(true));
+        expect(calls).toHaveLength(2);
+    });
+
+    it.each([
+        ['Testnet', createFuturesTestnetWorkstationReviewedTransport],
+        ['production', createFuturesProductionWorkstationReviewedTransport],
     ])('fails closed before any %s dispatch when the backend proxy is invalid', async (
         _label,
         createTransport,
@@ -467,15 +568,22 @@ describe('reviewed environment-specific Futures workstation transports', () => {
     it('freezes the documented route and request-weight registries', () => {
         expect(FUTURES_TESTNET_WORKSTATION_ROUTES).toEqual(FUTURES_PRODUCTION_WORKSTATION_ROUTES);
         expect(FUTURES_TESTNET_WORKSTATION_WEIGHTS).toEqual(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS);
+        expect(FUTURES_TESTNET_WORKSTATION_REQUEST_LIMITS)
+            .toEqual(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS);
         expect(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS).toEqual({
             EXCHANGE_INFO: 1,
             DEPTH_1000: 20,
-            KLINES_500: 5,
-            MARK_KLINES_500: 5,
-            INDEX_KLINES_500: 5,
+            KLINES_100: 2,
+            MARK_KLINES_100: 2,
+            INDEX_KLINES_100: 2,
             PREMIUM_INDEX_SYMBOL: 1,
             TICKER_SYMBOL: 1,
         });
+        expect(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS).toEqual({
+            DEPTH: 1_000,
+            KLINES: 100,
+        });
         expect(Object.isFrozen(FUTURES_PRODUCTION_WORKSTATION_ROUTES)).toBe(true);
+        expect(Object.isFrozen(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS)).toBe(true);
     });
 });

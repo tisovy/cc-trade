@@ -92,6 +92,7 @@ export const createFuturesWorkstationFakeTransport = ({
             };
             signal?.addEventListener?.('abort', handleAbort, { once: true });
             return Object.freeze({
+                ready: Promise.resolve(true),
                 close: () => {
                     signal?.removeEventListener?.('abort', handleAbort);
                     close();

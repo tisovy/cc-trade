@@ -310,6 +310,10 @@ describe('App spot order payloads', () => {
     expect(mocks.futuresReadEnabled.at(-1)).toBe(false)
     expect(mocks.futuresTestnetEnabled.at(-1)).toBe(false)
     expect(mocks.futuresProductionEnabled.at(-1)).toBe(false)
+    expect(mocks.sendMessage).toHaveBeenLastCalledWith({
+      action: 'enable_depth_view',
+      symbol: 'BTCUSDT',
+    })
 
     fireEvent.click(screen.getByTestId('market-mode-futures-testnet'))
 
@@ -326,6 +330,7 @@ describe('App spot order payloads', () => {
     expect(screen.queryByTestId('place-spot-order')).not.toBeInTheDocument()
     expect(screen.queryByTestId('cancel-spot-order')).not.toBeInTheDocument()
     expect(mocks.send).not.toHaveBeenCalled()
+    expect(mocks.sendMessage).toHaveBeenLastCalledWith({ action: 'disable_depth_view' })
 
     fireEvent.keyDown(document, { key: 'B' })
     expect(screen.queryByTestId('quick-switch-modal')).not.toBeInTheDocument()
@@ -343,6 +348,7 @@ describe('App spot order payloads', () => {
     expect(mocks.futuresReadEnabled.at(-1)).toBe(false)
     expect(mocks.futuresTestnetEnabled.at(-1)).toBe(false)
     expect(mocks.futuresProductionEnabled.at(-1)).toBe(true)
+    expect(mocks.sendMessage).toHaveBeenLastCalledWith({ action: 'disable_depth_view' })
 
     fireEvent.keyDown(document, { key: 'B' })
     expect(screen.queryByTestId('quick-switch-modal')).not.toBeInTheDocument()
@@ -356,6 +362,10 @@ describe('App spot order payloads', () => {
     expect(mocks.futuresReadEnabled.at(-1)).toBe(false)
     expect(mocks.futuresTestnetEnabled.at(-1)).toBe(false)
     expect(mocks.futuresProductionEnabled.at(-1)).toBe(false)
+    expect(mocks.sendMessage).toHaveBeenLastCalledWith({
+      action: 'enable_depth_view',
+      symbol: 'BTCUSDT',
+    })
 
     fireEvent.keyDown(document, { key: 'B' })
     expect(screen.getByTestId('quick-switch-modal')).toBeInTheDocument()

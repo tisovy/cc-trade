@@ -26,11 +26,16 @@ export const FUTURES_TESTNET_WORKSTATION_ROUTES = Object.freeze({
 export const FUTURES_TESTNET_WORKSTATION_WEIGHTS = Object.freeze({
     EXCHANGE_INFO: 1,
     DEPTH_1000: 20,
-    KLINES_500: 5,
-    MARK_KLINES_500: 5,
-    INDEX_KLINES_500: 5,
+    KLINES_100: 2,
+    MARK_KLINES_100: 2,
+    INDEX_KLINES_100: 2,
     PREMIUM_INDEX_SYMBOL: 1,
     TICKER_SYMBOL: 1,
+});
+
+export const FUTURES_TESTNET_WORKSTATION_REQUEST_LIMITS = Object.freeze({
+    DEPTH: 1_000,
+    KLINES: 100,
 });
 
 const ROUTE_SET = new Set(Object.values(FUTURES_TESTNET_WORKSTATION_ROUTES));
@@ -78,15 +83,23 @@ const assertSelection = (symbol, interval) => {
 
 const withDeadline = (parentSignal, timeoutMs = 10_000) => {
     const controller = new AbortController();
-    const abort = () => controller.abort();
-    parentSignal?.addEventListener?.('abort', abort, { once: true });
-    const timer = setTimeout(abort, timeoutMs);
+    let timedOut = false;
+    const abortFromParent = () => controller.abort();
+    const expire = () => {
+        if (controller.signal.aborted) return;
+        timedOut = true;
+        controller.abort();
+    };
+    if (parentSignal?.aborted) abortFromParent();
+    else parentSignal?.addEventListener?.('abort', abortFromParent, { once: true });
+    const timer = setTimeout(expire, timeoutMs);
     timer.unref?.();
     return Object.freeze({
         signal: controller.signal,
+        didTimeout: () => timedOut,
         release: () => {
             clearTimeout(timer);
-            parentSignal?.removeEventListener?.('abort', abort);
+            parentSignal?.removeEventListener?.('abort', abortFromParent);
         },
     });
 };
@@ -186,6 +199,11 @@ const publicGet = async (pathname, parameters, bodyLimit, parentSignal, backendP
         const contentType = response.headers.get('content-type') ?? '';
         if (!contentType.toLowerCase().startsWith('application/json')) fail('INVALID_CONTENT_TYPE');
         return await readFuturesWorkstationResponseBody(response, bodyLimit, deadline.signal);
+    } catch (error) {
+        if (deadline.didTimeout()) {
+            throw new FuturesTestnetWorkstationTransportError('REQUEST_DEADLINE_EXCEEDED');
+        }
+        throw error;
     } finally {
         deadline.release();
     }
@@ -214,8 +232,18 @@ const createSocket = (url, onMessage, onDisconnect, backendProxy) => {
         ...(backendProxy.proxyAgent ? { agent: backendProxy.proxyAgent } : {}),
     });
     let closed = false;
+    let readySettled = false;
+    let settleReady;
+    const ready = new Promise((resolve) => {
+        settleReady = (value) => {
+            if (readySettled) return;
+            readySettled = true;
+            resolve(value);
+        };
+    });
     const lifetime = setTimeout(() => socket.close(1000, '24h connection rotation'), 86_400_000);
     lifetime.unref?.();
+    socket.once('open', () => settleReady(true));
     socket.on('message', (data, isBinary) => {
         if (closed) return;
         if (isBinary) {
@@ -233,18 +261,22 @@ const createSocket = (url, onMessage, onDisconnect, backendProxy) => {
         onMessage(raw);
     });
     socket.once('close', () => {
+        settleReady(false);
         if (closed) return;
         closed = true;
         clearTimeout(lifetime);
         onDisconnect('SOCKET_CLOSED');
     });
     socket.once('error', () => {
+        settleReady(false);
         if (!closed) onDisconnect('SOCKET_ERROR');
     });
     return Object.freeze({
+        ready,
         close: () => {
             if (closed) return;
             closed = true;
+            settleReady(false);
             clearTimeout(lifetime);
             socket.removeAllListeners();
             socket.close(1000, 'generation teardown');
@@ -268,22 +300,30 @@ export const createFuturesTestnetWorkstationReviewedTransport = () => {
         bootstrap: async ({ symbol, pair, interval, signal } = {}) => {
             assertSelection(symbol, interval);
             if (!PAIR_PATTERN.test(pair)) fail('INVALID_SELECTION');
-            const [
-                depthSnapshot,
-                contractKlines,
-                markKlines,
-                indexKlines,
-                premiumIndex,
-                ticker,
-            ] = await Promise.all([
-                weightedGet(FUTURES_TESTNET_WORKSTATION_WEIGHTS.DEPTH_1000, FUTURES_TESTNET_WORKSTATION_ROUTES.DEPTH, { symbol, limit: '1000' }, FUTURES_WORKSTATION_BODY_LIMITS.DEPTH, signal, backendProxy),
-                weightedGet(FUTURES_TESTNET_WORKSTATION_WEIGHTS.KLINES_500, FUTURES_TESTNET_WORKSTATION_ROUTES.KLINES, { symbol, interval, limit: '500' }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES, signal, backendProxy),
-                weightedGet(FUTURES_TESTNET_WORKSTATION_WEIGHTS.MARK_KLINES_500, FUTURES_TESTNET_WORKSTATION_ROUTES.MARK_KLINES, { symbol, interval, limit: '500' }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES, signal, backendProxy),
-                weightedGet(FUTURES_TESTNET_WORKSTATION_WEIGHTS.INDEX_KLINES_500, FUTURES_TESTNET_WORKSTATION_ROUTES.INDEX_KLINES, { pair, interval, limit: '500' }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES, signal, backendProxy),
-                weightedGet(FUTURES_TESTNET_WORKSTATION_WEIGHTS.PREMIUM_INDEX_SYMBOL, FUTURES_TESTNET_WORKSTATION_ROUTES.PREMIUM_INDEX, { symbol }, FUTURES_WORKSTATION_BODY_LIMITS.HEADER, signal, backendProxy),
-                weightedGet(FUTURES_TESTNET_WORKSTATION_WEIGHTS.TICKER_SYMBOL, FUTURES_TESTNET_WORKSTATION_ROUTES.TICKER, { symbol }, FUTURES_WORKSTATION_BODY_LIMITS.HEADER, signal, backendProxy),
-            ]);
-            return Object.freeze({ depthSnapshot, contractKlines, markKlines, indexKlines, premiumIndex, ticker });
+            const batchController = new AbortController();
+            const abortBatch = () => batchController.abort();
+            if (signal?.aborted) abortBatch();
+            else signal?.addEventListener?.('abort', abortBatch, { once: true });
+            try {
+                const [depthSnapshot, contractKlines] = await Promise.all([
+                    weightedGet(FUTURES_TESTNET_WORKSTATION_WEIGHTS.DEPTH_1000, FUTURES_TESTNET_WORKSTATION_ROUTES.DEPTH, { symbol, limit: String(FUTURES_TESTNET_WORKSTATION_REQUEST_LIMITS.DEPTH) }, FUTURES_WORKSTATION_BODY_LIMITS.DEPTH, batchController.signal, backendProxy),
+                    weightedGet(FUTURES_TESTNET_WORKSTATION_WEIGHTS.KLINES_100, FUTURES_TESTNET_WORKSTATION_ROUTES.KLINES, { symbol, interval, limit: String(FUTURES_TESTNET_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES, batchController.signal, backendProxy),
+                ]);
+                const [markKlines, indexKlines] = await Promise.all([
+                    weightedGet(FUTURES_TESTNET_WORKSTATION_WEIGHTS.MARK_KLINES_100, FUTURES_TESTNET_WORKSTATION_ROUTES.MARK_KLINES, { symbol, interval, limit: String(FUTURES_TESTNET_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES, batchController.signal, backendProxy),
+                    weightedGet(FUTURES_TESTNET_WORKSTATION_WEIGHTS.INDEX_KLINES_100, FUTURES_TESTNET_WORKSTATION_ROUTES.INDEX_KLINES, { pair, interval, limit: String(FUTURES_TESTNET_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES, batchController.signal, backendProxy),
+                ]);
+                const [premiumIndex, ticker] = await Promise.all([
+                    weightedGet(FUTURES_TESTNET_WORKSTATION_WEIGHTS.PREMIUM_INDEX_SYMBOL, FUTURES_TESTNET_WORKSTATION_ROUTES.PREMIUM_INDEX, { symbol }, FUTURES_WORKSTATION_BODY_LIMITS.HEADER, batchController.signal, backendProxy),
+                    weightedGet(FUTURES_TESTNET_WORKSTATION_WEIGHTS.TICKER_SYMBOL, FUTURES_TESTNET_WORKSTATION_ROUTES.TICKER, { symbol }, FUTURES_WORKSTATION_BODY_LIMITS.HEADER, batchController.signal, backendProxy),
+                ]);
+                return Object.freeze({ depthSnapshot, contractKlines, markKlines, indexKlines, premiumIndex, ticker });
+            } catch (error) {
+                abortBatch();
+                throw error;
+            } finally {
+                signal?.removeEventListener?.('abort', abortBatch);
+            }
         },
         connect: ({ symbol, interval, onMessage, onDisconnect, signal } = {}) => {
             assertSelection(symbol, interval);
@@ -304,6 +344,8 @@ export const createFuturesTestnetWorkstationReviewedTransport = () => {
             };
             signal?.addEventListener?.('abort', close, { once: true });
             return Object.freeze({
+                ready: Promise.all([publicSocket.ready, marketSocket.ready])
+                    .then(results => results.every(Boolean)),
                 close: () => {
                     signal?.removeEventListener?.('abort', close);
                     close();

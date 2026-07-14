@@ -47,6 +47,8 @@ The renderer is not trusted to choose environment, transport, host, capability, 
 | Book bootstrap race | deltas arrive around the REST snapshot and are applied incorrectly | bounded pre-snapshot buffer and exact first-event rule | before/during/after snapshot race tests |
 | Duplicate event | repeated delta/trade/candle corrupts quantity or rows | update-ID/idempotency checks and replacement by exact identity | duplicate tests |
 | Buffer exhaustion | burst consumes unbounded memory or starves Spot | hard byte/item limits; authoritative depth overflow discards uncertain state and resyncs, while the non-authoritative bounded tape evicts oldest pre-bootstrap rows without repeating REST bootstrap; separate rate budget | overflow/burst tests and Spot regression |
+| Bootstrap request amplification | one timed-out request leaves queued siblings running, consumes the local budget and hides the first failure behind `READ_WEIGHT_EXHAUSTED` | wait for both WSS handshakes; three fixed two-request stages; abort sibling and suppress later stages on first failure; explicit deadline code | readiness, deadline and first-failure batch-cancellation tests in both environments |
+| Cancellation confusion | an active request deadline is mistaken for intentional generation teardown and leaves the renderer permanently `loading` | only an aborted generation owner is silent; active `AbortError` and mapped deadlines terminate visibly as `unavailable` | symmetric active-AbortError state tests |
 | Malformed/schema-drift input | coercion admits floats, out-of-range uint64, COIN-M or extra data | exact-key validators including non-rendered fields and all seven filters; canonical decimal strings; unsigned-int64 identity strings; `st=1`; bounded JSON | schema and fuzz matrices |
 | Clock regression | stale data appears newer | fake monotonic clock gate; regression marks stale and starts a generation | fake-clock regression tests |
 | Reconnect optimism | reconnected socket immediately looks live while snapshot is old | stale on disconnect; authoritative REST/bootstrap required before `live` | reconnect state tests |
@@ -61,6 +63,7 @@ The renderer is not trusted to choose environment, transport, host, capability, 
 | Phase 5/6 mutation | new functionality weakens frozen services | new modules only; production closure import ban | GitNexus changes plus static isolation scan |
 | Phase 7 bypass | a new production write path appears with the workstation | Phase 8 protocols contain only read actions; endpoint registry contains only GET public routes | route/action/write scans |
 | Spot starvation/regression | Futures burst changes the CRITICAL Spot limiter or UI | separate bounded workstation budgets; existing Spot limiter untouched | Git diff/GitNexus plus full regression |
+| Hidden Spot depth ownership | switching to Futures leaves Spot trade/depth streams active behind the workspace | `marketMode` is an explicit dependency of the Spot depth effect; both Futures modes send `disable_depth_view`, returning to Spot re-enables it | App mode-switch lifecycle regression |
 
 ## Adversarial state transitions
 

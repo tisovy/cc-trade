@@ -50,7 +50,7 @@ The 2026-07-14 post-milestone checkpoint activates both reviewed public-read tra
 
 Safe development and automated verification do not select those compositions. `safe-dev`, `smoke`, `e2e` and Vitest builds source-replace each environment composition with its separately named deterministic verification composition. This is a build-time module boundary, not a renderer field, runtime enum, environment/host option or caller-supplied transport. The fail-fast network guards remain active in every verification entry.
 
-The checkpoint re-reviewed the official origins, route weights, routed WebSocket contract and local-book sequence on 2026-07-14 without making a Binance API request. The subsequent manual-acceptance correction added only backend-owned proxy tunnelling for those already frozen origins. Activating public reads and proxy support adds no credential, private read, execution action or write authority.
+The checkpoint re-reviewed the official origins, route weights, routed WebSocket contract and local-book sequence on 2026-07-14 without making a Binance API request. The subsequent manual-acceptance corrections added only backend-owned proxy tunnelling, explicit socket-readiness ownership, staged bootstrap cancellation and bounded Spot depth release for those already frozen origins. Activating public reads and proxy support adds no credential, private read, execution action or write authority.
 
 ### REST registry
 
@@ -60,13 +60,13 @@ All routes below use `GET`, require no credential and are classified `PUBLIC_REA
 |---|---|---|---|
 | `/fapi/v1/exchangeInfo` | Futures-only instrument catalog, status, assets and exact filters | none | 1 |
 | `/fapi/v1/depth` | authoritative local-book bootstrap | `symbol`, fixed `limit=1000` | 20 |
-| `/fapi/v1/klines` | contract-candle bootstrap | `symbol`, reviewed interval, fixed `limit=500` | 5 |
-| `/fapi/v1/markPriceKlines` | mark overlay bootstrap | `symbol`, reviewed interval, fixed `limit=500` | 5 |
-| `/fapi/v1/indexPriceKlines` | index overlay bootstrap | `pair`, reviewed interval, fixed `limit=500` | 5 |
+| `/fapi/v1/klines` | contract-candle bootstrap | `symbol`, reviewed interval, fixed `limit=100` | 2 |
+| `/fapi/v1/markPriceKlines` | mark overlay bootstrap | `symbol`, reviewed interval, fixed `limit=100` | 2 |
+| `/fapi/v1/indexPriceKlines` | index overlay bootstrap | `pair`, reviewed interval, fixed `limit=100` | 2 |
 | `/fapi/v1/premiumIndex` | initial mark, index and funding state | `symbol` | 1 |
 | `/fapi/v1/ticker/24hr` | initial 24-hour statistics | `symbol` | 1 |
 
-The reviewed kline limit brackets are `[1,100)=1`, `[100,500)=2`, `[500,1000]=5`, and `>1000=10`; this milestone fixes `500`, weight `5`. The reviewed depth weights are `5/10/20/50 → 2`, `100 → 5`, `500 → 10`, and `1000 → 20`; this milestone fixes `1000`, weight `20`.
+The reviewed kline limit brackets are `[1,100)=1`, `[100,500)=2`, `[500,1000]=5`, and `>1000=10`; this milestone fixes `100`, weight `2`, giving the 80-row renderer a 20-candle bootstrap margin. The reviewed depth weights are `5/10/20/50 → 2`, `100 → 5`, `500 → 10`, and `1000 → 20`; this milestone fixes the official local-book snapshot size `1000`, weight `20`.
 
 The route classifier also reserves these categories, all absent from this milestone:
 
@@ -89,7 +89,7 @@ Legacy unrouted production market paths were permanently decommissioned on 2026-
 | `/market/stream?streams=` | `<lower-symbol>@markPrice@1s` | 1 s | public read |
 | `/market/stream?streams=` | `<lower-symbol>@ticker` | 2 s | public read |
 
-The connection lifetime is bounded to 24 hours. The server sends a ping every 3 minutes and requires a pong within 10 minutes. The client budget is below the documented 10 incoming messages per second and far below 1024 streams per connection. Each generation opens at most one public depth socket and one market socket containing four streams. Symbols are lowercase in stream names and uppercase in normalized models.
+The connection lifetime is bounded to 24 hours. The server sends a ping every 3 minutes and requires a pong within 10 minutes. The client budget is below the documented 10 incoming messages per second and far below 1024 streams per connection. Each generation opens at most one public depth socket and one market socket containing four streams. Both handshakes must report open before any snapshot/candle bootstrap REST request is dispatched; an error or close before open fails the readiness barrier and enters bounded resynchronization. Symbols are lowercase in stream names and uppercase in normalized models.
 
 After the USDⓈ-M/COIN-M stream integration, normalized events require `st=1` when `st` is present. `st=2` and a mismatched `ps` are rejected. This milestone never admits a COIN-M contract.
 
@@ -120,6 +120,8 @@ Each symbol generation follows the official procedure exactly:
 7. On gap, reorder, buffer overflow, malformed update, socket loss or generation change, mark the book `resynchronizing`, discard the uncertain book and rebuild from a new snapshot before returning to `live`.
 
 Duplicates entirely behind the current update ID are ignored. A partial overlap that violates the exact first-event rule or subsequent `pu` rule is rejected. The UI never labels depth live merely because a socket is connected.
+
+The six post-handshake bootstrap reads run as three fixed stages of at most two concurrent requests: depth plus contract candles, mark plus index candles, then premium index plus ticker. A failure aborts its sibling and prevents every later stage from dispatching. A 10-second child deadline is reported as `REQUEST_DEADLINE_EXCEEDED`; only an aborted generation owner is treated as silent teardown. One attempt therefore weighs exactly `29` including exchange info, down from `38`, and a failed attempt cannot drain queued reads after its terminal cause is known.
 
 ## Immutable read-model protocols
 
