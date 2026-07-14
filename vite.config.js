@@ -1,6 +1,37 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import electron from 'vite-plugin-electron'
+import { fileURLToPath } from 'node:url'
+
+const VERIFICATION_BUILD_MODES = new Set(['e2e', 'safe-dev', 'smoke'])
+
+const verificationCompositionPath = environment => fileURLToPath(new URL(
+  `./electron/services/futures-${environment}-workstation-verification-composition.js`,
+  import.meta.url,
+))
+
+export const selectFuturesWorkstationCompositionAliases = ({
+  buildMode,
+  isVitest,
+} = {}) => {
+  const deterministic = isVitest === true || VERIFICATION_BUILD_MODES.has(buildMode)
+  if (!deterministic) return []
+  return [
+    {
+      find: /(?:^|.*\/)futures-testnet-workstation-composition\.js$/,
+      replacement: verificationCompositionPath('testnet'),
+    },
+    {
+      find: /(?:^|.*\/)futures-production-workstation-composition\.js$/,
+      replacement: verificationCompositionPath('production'),
+    },
+  ]
+}
+
+const futuresWorkstationCompositionAliases = selectFuturesWorkstationCompositionAliases({
+  buildMode: process.env.BUILD_MODE,
+  isVitest: process.env.VITEST === 'true',
+})
 
 const electronMainEntry = process.env.BUILD_MODE === 'e2e'
   ? 'electron/main.e2e.js'
@@ -13,6 +44,9 @@ const electronMainEntry = process.env.BUILD_MODE === 'e2e'
 // https://vite.dev/config/
 export default defineConfig({
   base: './',
+  resolve: {
+    alias: futuresWorkstationCompositionAliases,
+  },
   server: {
     port: 5174,
     // Electron applies the same strict script-src policy in development.
@@ -37,6 +71,9 @@ export default defineConfig({
       {
         entry: electronMainEntry,
         vite: {
+          resolve: {
+            alias: futuresWorkstationCompositionAliases,
+          },
           build: {
             lib: {
               // Playwright and package.json both launch dist-electron/main.js.

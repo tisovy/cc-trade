@@ -10,6 +10,8 @@ const TESTNET_TRANSPORT = 'electron/services/futures-testnet-workstation-transpo
 const NETWORK_GUARD = 'electron/futures-workstation-node-network-guard.js';
 const PRODUCTION_COMPOSITION = 'electron/services/futures-production-workstation-composition.js';
 const TESTNET_COMPOSITION = 'electron/services/futures-testnet-workstation-composition.js';
+const PRODUCTION_VERIFICATION_COMPOSITION = 'electron/services/futures-production-workstation-verification-composition.js';
+const TESTNET_VERIFICATION_COMPOSITION = 'electron/services/futures-testnet-workstation-verification-composition.js';
 const PRODUCTION_PROTOCOL = 'src/utils/futuresProductionWorkstationProtocol.js';
 const TESTNET_PROTOCOL = 'src/utils/futuresTestnetWorkstationProtocol.js';
 const LOCAL_WORKSTATION_CONNECTOR = 'src/hooks/useFuturesLocalWorkstationConnection.js';
@@ -100,6 +102,8 @@ for (const required of [
     NETWORK_GUARD,
     PRODUCTION_COMPOSITION,
     TESTNET_COMPOSITION,
+    PRODUCTION_VERIFICATION_COMPOSITION,
+    TESTNET_VERIFICATION_COMPOSITION,
     PRODUCTION_PROTOCOL,
     TESTNET_PROTOCOL,
     LOCAL_WORKSTATION_CONNECTOR,
@@ -192,15 +196,54 @@ for (const transportName of [PRODUCTION_TRANSPORT, TESTNET_TRANSPORT]) {
 }
 
 const productionComposition = sources.get(PRODUCTION_COMPOSITION) ?? '';
-if (!/export const FUTURES_PRODUCTION_WORKSTATION_PUBLIC_READ_AUTHORIZED\s*=\s*false\s*;/.test(productionComposition)) {
-    fail('Production workstation public-read interlock must remain source-pinned false');
+if (!/export const FUTURES_PRODUCTION_WORKSTATION_PUBLIC_READ_AUTHORIZED\s*=\s*true\s*;/.test(productionComposition)
+    || !/createFuturesProductionWorkstationReviewedTransport\(\)/.test(productionComposition)
+    || /FakeTransport|deterministic-fake/.test(productionComposition)) {
+    fail('Normal Production operator composition must be source-pinned to reviewed public reads');
 }
 const testnetComposition = sources.get(TESTNET_COMPOSITION) ?? '';
-if (!/export const FUTURES_TESTNET_WORKSTATION_REVIEWED_READ_AUTHORIZED\s*=\s*false\s*;/.test(testnetComposition)) {
-    fail('Testnet workstation reviewed-read interlock must remain source-pinned false');
+if (!/export const FUTURES_TESTNET_WORKSTATION_REVIEWED_READ_AUTHORIZED\s*=\s*true\s*;/.test(testnetComposition)
+    || !/createFuturesTestnetWorkstationReviewedTransport\(\)/.test(testnetComposition)
+    || /FakeTransport|deterministic-fake/.test(testnetComposition)) {
+    fail('Normal Testnet operator composition must be source-pinned to reviewed public reads');
 }
-if (/process\s*\.\s*env|import\s*\.\s*meta\s*\.\s*env/.test(`${productionComposition}\n${testnetComposition}`)) {
+const productionVerificationComposition = sources.get(PRODUCTION_VERIFICATION_COMPOSITION) ?? '';
+if (!/FUTURES_PRODUCTION_WORKSTATION_DETERMINISTIC_VERIFICATION\s*=\s*true\s*;/.test(productionVerificationComposition)
+    || !/createFuturesProductionWorkstationFakeTransport\(\)/.test(productionVerificationComposition)
+    || /ReviewedTransport|reviewed-public-read/.test(productionVerificationComposition)) {
+    fail('Production verification composition must be source-pinned to its deterministic fake');
+}
+const testnetVerificationComposition = sources.get(TESTNET_VERIFICATION_COMPOSITION) ?? '';
+if (!/FUTURES_TESTNET_WORKSTATION_DETERMINISTIC_VERIFICATION\s*=\s*true\s*;/.test(testnetVerificationComposition)
+    || !/createFuturesTestnetWorkstationFakeTransport\(\)/.test(testnetVerificationComposition)
+    || /ReviewedTransport|reviewed-public-read/.test(testnetVerificationComposition)) {
+    fail('Testnet verification composition must be source-pinned to its deterministic fake');
+}
+const allCompositions = [
+    productionComposition,
+    testnetComposition,
+    productionVerificationComposition,
+    testnetVerificationComposition,
+].join('\n');
+if (/process\s*\.\s*env|import\s*\.\s*meta\s*\.\s*env/.test(allCompositions)) {
     fail('A workstation transport interlock is environment-selectable');
+}
+
+const viteConfig = fs.readFileSync(path.join(ROOT, 'vite.config.js'), 'utf8');
+for (const buildMode of ['e2e', 'safe-dev', 'smoke']) {
+    if (!viteConfig.includes(`'${buildMode}'`)) {
+        fail(`Vite is missing deterministic workstation build mode ${buildMode}`);
+    }
+}
+if (!viteConfig.includes('process.env.VITEST')
+    || !/verificationCompositionPath\(['"]testnet['"]\)/.test(viteConfig)
+    || !/verificationCompositionPath\(['"]production['"]\)/.test(viteConfig)
+    || [...viteConfig.matchAll(/alias:\s*futuresWorkstationCompositionAliases/g)].length !== 2) {
+    fail('Safe, smoke, E2E and Vitest builds must resolve deterministic workstation compositions');
+}
+const vitestConfig = fs.readFileSync(path.join(ROOT, 'vitest.config.js'), 'utf8');
+if (!/selectFuturesWorkstationCompositionAliases\(\{\s*isVitest:\s*true\s*\}\)/.test(vitestConfig)) {
+    fail('Vitest must source-pin both workstation environments to deterministic compositions');
 }
 
 for (const [name, source] of sources) {

@@ -2,19 +2,16 @@ import {
     FuturesTestnetWorkstationService,
 } from './futures-testnet-workstation-service.js';
 import {
-    createFuturesTestnetWorkstationReviewedTransport,
-} from './futures-testnet-workstation-transport.js';
+    createFuturesTestnetWorkstationFakeTransport,
+} from './futures-testnet-workstation-fake-transport.js';
 
-// The normal operator composition is source-pinned to the reviewed public-read
-// transport. Safe development and automated verification replace this whole
-// composition at build time with the separately named deterministic module.
-export const FUTURES_TESTNET_WORKSTATION_REVIEWED_READ_AUTHORIZED = true;
+export const FUTURES_TESTNET_WORKSTATION_DETERMINISTIC_VERIFICATION = true;
 
 export const createFuturesTestnetWorkstationRuntime = () => {
-    const transport = createFuturesTestnetWorkstationReviewedTransport();
+    const transport = createFuturesTestnetWorkstationFakeTransport();
     const service = new FuturesTestnetWorkstationService({ transport });
     return Object.freeze({
-        mode: 'reviewed-public-read',
+        mode: 'deterministic-fake',
         transport,
         service,
         close: () => service.stop(),

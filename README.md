@@ -38,8 +38,9 @@ npm install
 # Start the Vite dev server (web mode)
 npm run dev
 
-# Start Electron with the normal operator configuration. If BK is configured,
-# this may connect to real Binance Spot market-data/account endpoints.
+# Start Electron with the normal operator configuration. This enables the
+# reviewed public-read Futures Testnet/Production transports; if BK is
+# configured, Spot may also connect to real market-data/account endpoints.
 npm run e
 
 # Start Electron persistently with credentials cleared and deterministic fakes

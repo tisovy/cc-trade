@@ -8,6 +8,7 @@ import {
   LineStyle,
   createChart,
 } from 'lightweight-charts'
+import { buildVolumeHistogramPresentation } from '../../../utils/chartVolume.js'
 
 const toSeconds = milliseconds => Math.floor(milliseconds / 1000)
 
@@ -25,16 +26,20 @@ const toCandleData = rows => rows.flatMap((row) => {
   return [{ time: toSeconds(row.openTime), open, high, low, close }]
 })
 
-const toVolumeData = rows => rows.flatMap((row) => {
+const toVolumeData = rows => buildVolumeHistogramPresentation(rows.flatMap((row) => {
   const value = toNumber(row.volume)
   const open = toNumber(row.open)
   const close = toNumber(row.close)
   if ([value, open, close].some(entry => entry === null)) return []
   return [{
     time: toSeconds(row.openTime),
-    value,
-    color: close >= open ? 'rgba(40, 190, 140, 0.42)' : 'rgba(241, 91, 105, 0.42)',
+    volume: value,
+    open,
+    close,
   }]
+}), {
+  upColor: 'rgba(40, 190, 140, 0.42)',
+  downColor: 'rgba(241, 91, 105, 0.42)',
 })
 
 const toLineData = rows => rows.flatMap((row) => {
@@ -61,6 +66,7 @@ export const FuturesWorkstationChart = ({
   const seriesRef = useRef(null)
   const overlayLinesRef = useRef([])
   const onPricePickRef = useRef(onPricePick)
+  const hasFittedContentRef = useRef(false)
 
   useEffect(() => {
     onPricePickRef.current = onPricePick
@@ -154,11 +160,18 @@ export const FuturesWorkstationChart = ({
   useEffect(() => {
     if (!seriesRef.current) return
     const contractData = toCandleData(candles)
+    const volumePresentation = toVolumeData(candles)
     seriesRef.current.contractSeries.setData(contractData)
-    seriesRef.current.volumeSeries.setData(toVolumeData(candles))
+    seriesRef.current.volumeSeries.applyOptions({
+      priceFormat: volumePresentation.priceFormat,
+    })
+    seriesRef.current.volumeSeries.setData(volumePresentation.data)
     seriesRef.current.markSeries.setData(toLineData(markCandles))
     seriesRef.current.indexSeries.setData(toLineData(indexCandles))
-    if (contractData.length > 0) chartRef.current?.timeScale().fitContent()
+    if (contractData.length > 0 && !hasFittedContentRef.current) {
+      chartRef.current?.timeScale().fitContent()
+      hasFittedContentRef.current = true
+    }
   }, [candles, indexCandles, markCandles])
 
   useEffect(() => {

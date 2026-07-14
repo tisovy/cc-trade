@@ -42,6 +42,14 @@ Official references:
 
 Origins are compile-time constants in separately named backend modules. A caller cannot provide a URL, origin, hostname, path, redirect policy, proxy, agent, dispatcher, socket factory, headers or timeout. Every HTTP response with `redirected === true` or a final URL outside the exact origin and path is rejected. Automated and E2E compositions use deterministic fakes; a network escape to any frozen Futures host is a fail-fast test error.
 
+### Public-read activation checkpoint
+
+The 2026-07-14 post-milestone checkpoint activates both reviewed public-read transports in the normal operator composition. The default `npm run e` and production build therefore use real Binance public market data after the operator opens the corresponding Futures workspace. These transports remain credential-free and expose only the frozen `GET` routes and public streams below.
+
+Safe development and automated verification do not select those compositions. `safe-dev`, `smoke`, `e2e` and Vitest builds source-replace each environment composition with its separately named deterministic verification composition. This is a build-time module boundary, not a renderer field, runtime enum, environment/host option or caller-supplied transport. The fail-fast network guards remain active in every verification entry.
+
+The checkpoint re-reviewed the official origins, route weights, routed WebSocket contract and local-book sequence on 2026-07-14 without making a Binance API request. Activating public reads adds no credential, private read, execution action or write authority.
+
 ### REST registry
 
 All routes below use `GET`, require no credential and are classified `PUBLIC_READ`. No Phase 8.0–8.2 route is a private read or write.
@@ -172,6 +180,8 @@ The shared chart renders contract candles, volume, mark and index overlays, plus
 - Direct renderer Binance sockets: rejected because CSP and renderer compromise would gain network authority and sequencing ownership.
 - Displaying a socket-connected book before snapshot continuity: rejected because connected is not authoritative.
 - Reusing chart/book clicks as Phase 7 prepare-intent actions: rejected because a market-data gesture is not explicit execution authorization.
+
+The rejection of `ChartWrapper` does not prohibit pure presentation reuse. The Futures chart uses the same bounded volume-presentation helper as Spot and follows the same viewport lifecycle rule: initial authoritative data may fit once, while subsequent stream updates never override operator pan/zoom.
 
 ## Verification obligations
 
