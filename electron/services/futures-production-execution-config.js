@@ -47,9 +47,9 @@ export const FUTURES_PRODUCTION_EXECUTION_CONFIG_CODES = Object.freeze({
 });
 
 export const FUTURES_PRODUCTION_EXECUTION_COMPILED_CEILINGS = Object.freeze({
-    maxLeverage: 3,
-    maxOrderNotionalUsdt: '10000',
-    maxDailyNotionalUsdt: '50000',
+    maxLeverage: 1,
+    maxOrderNotionalUsdt: '10',
+    maxDailyNotionalUsdt: '50',
 });
 
 const ENVIRONMENT_KEYS = Object.freeze(Object.values(FUTURES_PRODUCTION_EXECUTION_ENV_KEYS));
@@ -247,7 +247,8 @@ export const captureFuturesProductionExecutionConfig = ({
         });
     }
     const policy = unknownProductionKeys.length === 0 ? parsePolicy(captured) : null;
-    if (!policy) {
+    if (!policy
+        || policy.maxLeverage > FUTURES_PRODUCTION_EXECUTION_COMPILED_CEILINGS.maxLeverage) {
         return createDisabled({
             code: FUTURES_PRODUCTION_EXECUTION_CONFIG_CODES.CONFIG_REJECTED,
             liveAuthorized: liveAuthorized === true,

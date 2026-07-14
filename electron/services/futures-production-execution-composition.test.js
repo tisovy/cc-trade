@@ -57,9 +57,9 @@ const enabledFakeConfig = Object.freeze({
     account: Object.freeze({ alias: 'fake-account', fingerprint: 'a'.repeat(64) }),
     policy: Object.freeze({
         allowedSymbols: Object.freeze(['BTCUSDT']),
-        maxLeverage: 3,
-        maxOrderNotionalUsdt: '10000',
-        maxDailyNotionalUsdt: '50000',
+        maxLeverage: 1,
+        maxOrderNotionalUsdt: '10',
+        maxDailyNotionalUsdt: '50',
         minAvailableBalanceUsdt: '10',
         minLiquidationDistanceBps: '1000',
         killSwitchPolicy: FUTURES_PRODUCTION_EXECUTION_KILL_SWITCH_POLICY,
@@ -378,7 +378,7 @@ describe('FuturesProductionExecutionComposition', () => {
                 });
             }
             if (url.pathname === '/fapi/v1/premiumIndex') {
-                return respond({ symbol: 'BTCUSDT', markPrice: '70000' });
+                return respond({ symbol: 'BTCUSDT', markPrice: '7000' });
             }
             if (url.pathname === '/fapi/v1/accountConfig') {
                 return respond({
@@ -392,7 +392,7 @@ describe('FuturesProductionExecutionComposition', () => {
                     symbol: 'BTCUSDT',
                     marginType: 'ISOLATED',
                     isAutoAddMargin: false,
-                    leverage: 3,
+                    leverage: 1,
                     maxNotionalValue: '1000000',
                 }]);
             }
@@ -409,7 +409,7 @@ describe('FuturesProductionExecutionComposition', () => {
                     symbol: 'BTCUSDT',
                     positionSide: 'BOTH',
                     positionAmt: '1',
-                    liquidationPrice: '50000',
+                    liquidationPrice: '5000',
                     marginAsset: 'USDT',
                 }]);
             }
@@ -425,8 +425,8 @@ describe('FuturesProductionExecutionComposition', () => {
             if (url.pathname === '/fapi/v1/order' && options.method === 'GET') {
                 const clientOrderId = url.searchParams.get('origClientOrderId');
                 return respond(`{"symbol":"BTCUSDT","orderId":9223372036854775807,`
-                    + `"clientOrderId":"${clientOrderId}","price":"70000.0",`
-                    + '"origQty":"0.0010","executedQty":"0.001","avgPrice":"70000",'
+                    + `"clientOrderId":"${clientOrderId}","price":"7000.0",`
+                    + '"origQty":"0.0010","executedQty":"0.001","avgPrice":"7000",'
                     + '"status":"FILLED","timeInForce":"GTC","type":"LIMIT",'
                     + '"origType":"LIMIT","reduceOnly":true,"closePosition":false,'
                     + `"side":"SELL","positionSide":"BOTH","updateTime":${serverTime + 2}}`);
@@ -468,7 +468,7 @@ describe('FuturesProductionExecutionComposition', () => {
             symbol: 'BTCUSDT',
             side: 'SELL',
             quantity: '0.001',
-            price: '70000.0',
+            price: '7000.0',
             reduceOnly: true,
         }), context);
         const intent = emitted.at(-1).intent;
@@ -511,7 +511,7 @@ describe('FuturesProductionExecutionComposition', () => {
             );
         expect(records).toContainEqual(expect.objectContaining({
             eventType: 'daily_notional_reserved',
-            exactNotional: '70',
+            exactNotional: '7',
         }));
         expect(records).toContainEqual(expect.objectContaining({
             eventType: 'dispatch_intent',

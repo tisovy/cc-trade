@@ -56,9 +56,9 @@ const config = Object.freeze({
     account: Object.freeze({ alias: 'primary', fingerprint }),
     policy: Object.freeze({
         allowedSymbols: Object.freeze(['BTCUSDT']),
-        maxLeverage: 3,
-        maxOrderNotionalUsdt: '10000',
-        maxDailyNotionalUsdt: '50000',
+        maxLeverage: 1,
+        maxOrderNotionalUsdt: '10',
+        maxDailyNotionalUsdt: '50',
         minAvailableBalanceUsdt: '10',
         minLiquidationDistanceBps: '1000',
         killSwitchPolicy: 'v1-persistent-block-new-exposure',
@@ -69,7 +69,7 @@ class FakeLedger {
     constructor(records = [], {
         lastServerTime = null,
         pauseUntil = 0,
-        killSwitchEngaged = true,
+        killSwitchEngaged = false,
     } = {}) {
         this.records = [...records];
         this.opened = false;
@@ -140,6 +140,7 @@ class FakeLedger {
             'confirmed_closed',
             'confirmed_empty',
             'kill_switch_engaged',
+            'kill_switch_disengaged',
             'expired',
         ].includes(record.state));
     }
@@ -308,10 +309,10 @@ const createHarness = ({
     evaluateRisk = vi.fn(() => ({
         ok: true,
         classification: 'reducing',
-        notionalUsdt: '70',
+        notionalUsdt: '7',
         conservativePrice: '70000',
         dailyNotionalBeforeUsdt: '0',
-        dailyNotionalAfterUsdt: '70',
+        dailyNotionalAfterUsdt: '7',
         observedLeverage: 3,
     })),
     pauseUntil = 0,
@@ -788,6 +789,94 @@ describe('FuturesProductionExecutionService', () => {
         expect(harness.service.getStatus().killSwitch.engaged).toBe(true);
         expect(harness.coordinator.executeProduction).not.toHaveBeenCalled();
         expect(harness.service.getCurrentAttempt().state).toBe('kill_switch_engaged');
+        await harness.service.shutdown();
+    });
+
+    it('arms live only through an exact durable one-use intent and performs no exchange request', async () => {
+        const ledger = new FakeLedger([], { killSwitchEngaged: true });
+        const setKillSwitch = vi.spyOn(ledger, 'setKillSwitch');
+        const identifiers = ['0'.repeat(32), requestId];
+        const harness = createHarness({
+            ledger,
+            randomBytes: () => Buffer.from(
+                identifiers.shift() ?? '2'.repeat(32),
+                'hex',
+            ),
+        });
+        const emitted = [];
+        await harness.service.start();
+        await subscribe(harness.service, emitted);
+
+        expect(harness.service.getStatus()).toMatchObject({
+            killSwitch: { engaged: true },
+            capabilities: {
+                placeOrder: true,
+                engageKillSwitch: false,
+                disengageKillSwitch: true,
+            },
+        });
+        await expect(harness.service.handleRequest(command(
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_ORDER_INTENT,
+            harness.service.getStatus().revision,
+            {
+                symbol: 'BTCUSDT',
+                side: 'BUY',
+                quantity: '0.001',
+                price: '7000',
+                reduceOnly: false,
+            },
+        ), { connectionId, emit: value => emitted.push(value) })).resolves.toBe(false);
+        expect(harness.facade.getExchangeInfo).not.toHaveBeenCalled();
+
+        await expect(harness.service.handleRequest(command(
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_DISENGAGE_KILL_SWITCH_INTENT,
+            harness.service.getStatus().revision,
+        ), { connectionId, emit: value => emitted.push(value) })).resolves.toBe(true);
+        const intent = emitted.at(-1).intent;
+        expect(intent).toMatchObject({ kind: 'disengage_kill_switch' });
+        const final = command(
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.DISENGAGE_KILL_SWITCH,
+            intent.revision,
+            {
+                requestId: intent.requestId,
+                confirmation: FUTURES_PRODUCTION_EXECUTION_CONFIRMATIONS[
+                    FUTURES_PRODUCTION_EXECUTION_ACTIONS.DISENGAGE_KILL_SWITCH
+                ],
+            },
+        );
+        await expect(harness.service.handleRequest(final, {
+            connectionId,
+            emit: value => emitted.push(value),
+        })).resolves.toBe(true);
+        await expect(harness.service.handleRequest(final, {
+            connectionId,
+            emit: value => emitted.push(value),
+        })).resolves.toBe(true);
+
+        expect(setKillSwitch).toHaveBeenCalledOnce();
+        expect(setKillSwitch).toHaveBeenCalledWith(expect.objectContaining({
+            engaged: false,
+            requestId: intent.requestId,
+            action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.DISENGAGE_KILL_SWITCH,
+        }));
+        expect(harness.service.getStatus()).toMatchObject({
+            killSwitch: { engaged: false },
+            capabilities: {
+                placeOrder: true,
+                engageKillSwitch: true,
+                disengageKillSwitch: false,
+            },
+            attempt: {
+                state: 'kill_switch_disengaged',
+                acknowledgement: 'accepted',
+                code: 'FUTURES_PRODUCTION_LIVE_ARMED',
+            },
+        });
+        expect(harness.coordinator.executeProduction).not.toHaveBeenCalled();
+        expect(harness.place).not.toHaveBeenCalled();
+        expect(harness.placeMarket).not.toHaveBeenCalled();
+        expect(harness.facade.cancelAllOpenOrders).not.toHaveBeenCalled();
+        expect(harness.facade.cancelAllAlgoOpenOrders).not.toHaveBeenCalled();
         await harness.service.shutdown();
     });
 
@@ -1428,6 +1517,108 @@ describe('FuturesProductionExecutionService', () => {
             await harness.service.shutdown();
         },
     );
+
+    it.each([
+        ['before the durable transition', false],
+        ['after the durable transition', true],
+    ])('recovers a crashed ARM LIVE command %s without exchange writes', async (
+        _label,
+        transitioned,
+    ) => {
+        const digest = 'f'.repeat(64);
+        const records = [{
+            eventType: 'intent_consumed',
+            requestId,
+            operationId: requestId,
+            intentId: requestId,
+            action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.DISENGAGE_KILL_SWITCH,
+            commandDigest: digest,
+            credentialBinding: binding,
+            state: 'consumed',
+        }];
+        if (transitioned) {
+            records.push({
+                eventType: 'kill_switch_transition',
+                requestId,
+                operationId: requestId,
+                intentId: requestId,
+                action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.DISENGAGE_KILL_SWITCH,
+                commandDigest: digest,
+                credentialBinding: binding,
+                state: 'disengaged',
+                outcome: 'disengaged',
+            });
+        }
+        const ledger = new FakeLedger(records, { killSwitchEngaged: !transitioned });
+        const setKillSwitch = vi.spyOn(ledger, 'setKillSwitch');
+        const harness = createHarness({ ledger });
+
+        await harness.service.start();
+
+        expect(setKillSwitch).not.toHaveBeenCalled();
+        expect(ledger.killSwitchEngaged).toBe(!transitioned);
+        expect(ledger.getActiveOperations()).toEqual([]);
+        expect(harness.service.getCurrentAttempt()).toMatchObject({
+            state: transitioned ? 'kill_switch_disengaged' : 'locally_rejected',
+            acknowledgement: transitioned ? 'accepted' : 'rejected',
+            code: transitioned
+                ? 'FUTURES_PRODUCTION_LIVE_ARMED'
+                : 'FUTURES_PRODUCTION_COMMAND_REJECTED',
+        });
+        expect(harness.place).not.toHaveBeenCalled();
+        expect(harness.placeMarket).not.toHaveBeenCalled();
+        expect(harness.query).not.toHaveBeenCalled();
+        expect(harness.facade.cancelAllOpenOrders).not.toHaveBeenCalled();
+        expect(harness.facade.cancelAllAlgoOpenOrders).not.toHaveBeenCalled();
+        await harness.service.shutdown();
+    });
+
+    it('fails closed on an inconsistent durable ARM LIVE transition', async () => {
+        const digest = 'f'.repeat(64);
+        const ledger = new FakeLedger([{
+            eventType: 'intent_consumed',
+            requestId,
+            operationId: requestId,
+            intentId: requestId,
+            action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.DISENGAGE_KILL_SWITCH,
+            commandDigest: digest,
+            credentialBinding: binding,
+            state: 'consumed',
+        }, {
+            eventType: 'kill_switch_transition',
+            requestId,
+            operationId: requestId,
+            intentId: requestId,
+            action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.DISENGAGE_KILL_SWITCH,
+            commandDigest: '0'.repeat(64),
+            credentialBinding: binding,
+            state: 'disengaged',
+            outcome: 'disengaged',
+        }], { killSwitchEngaged: true });
+        const harness = createHarness({ ledger });
+
+        await harness.service.start();
+
+        expect(ledger.killSwitchEngaged).toBe(true);
+        expect(ledger.getActiveOperations()).not.toEqual([]);
+        expect(harness.service.getStatus()).toMatchObject({
+            capabilities: {
+                placeOrder: false,
+                cancelAllOpenOrders: false,
+                closePositions: false,
+                engageKillSwitch: false,
+                disengageKillSwitch: false,
+            },
+            recovery: {
+                required: true,
+                state: 'blocked',
+                code: 'FUTURES_PRODUCTION_RECOVERY_REQUIRED',
+            },
+        });
+        expect(harness.place).not.toHaveBeenCalled();
+        expect(harness.query).not.toHaveBeenCalled();
+        await harness.service.shutdown();
+    });
 
     it('terminalizes a durable definitive rejected POST response without Query or retry', async () => {
         const dispatchAt = 1_783_814_400_000;

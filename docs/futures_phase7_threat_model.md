@@ -19,7 +19,7 @@ Scope: the separately named USDⓈ-M production execution subsystem described by
 ## Trust boundaries
 
 1. Environment and deployment input are hostile until captured, parsed exactly, frozen, scrubbed, and deleted before `BrowserWindow` creation.
-2. Renderer input is hostile. The renderer has no credential, filesystem, process, generic IPC, host, transport, recovery, or kill-switch-disarm authority.
+2. Renderer input is hostile. The renderer has no credential, filesystem, process, generic IPC, host, transport, or operational-recovery authority. It may request the separately named ARM LIVE intent, but only the backend can grant, durably apply, or reject that transition.
 3. The local WebSocket is loopback/session-token protected but its frames are still hostile. Production parsing receives the original bounded UTF-8 frame before generic JSON conversion.
 4. `FuturesProductionExecutionService` is the authorization boundary for gates, intent ownership, exact risk, mutex/idempotency, state, daily caps, audit, and recovery.
 5. `FuturesProductionExecutionFacade` is the sole network capability and owns exact origin, endpoint, signing, resource limits, deadlines, redirect rejection, and zero write retry.
@@ -142,10 +142,12 @@ Controls:
 - fsync before acknowledgement and replay before capability;
 - engagement only blocks new exposure; it emits no exchange request and does not change order/position state;
 - cancel-all and close-positions are separate intent/action/state machines;
-- no renderer/IPC/HTTP disarm path; backend-only recovery authorization is required and audited;
+- routine renderer arming is isolated to `prepareDisengageKillSwitchIntent` / `disengageKillSwitch`; it requires an owning one-use intent, current revision, exact confirmation phrase, mutex/idempotency protection, every activation gate, healthy recovery, and no blocking durable operation;
+- the backend fsyncs `kill_switch_transition=disengaged` before acknowledgement; crash before that record remains engaged, while crash after it recovers the exact confirmed transition;
+- ARM LIVE sends no exchange request and cannot imply order placement, cancellation, or closure; backend-only recovery remains separately authorized and audited;
 - recovery/monitoring runs while engaged or softly disabled.
 
-Residual risk: kill-switch engagement does not protect orders placed by other applications or users. Cancel-all is the explicit exchange action and may itself be partial or unknown.
+Residual risk: an already compromised subscribed renderer can automate the visible ARM phrase once all backend activation gates are satisfied; the phrase is an accidental-action barrier, not proof of a human. The compiled 1x / 10 USDT / 50 USDT ceilings, durable daily accounting, one-use order intents, and persistent kill switch limit but do not eliminate that risk. Kill-switch engagement also does not protect orders placed by other applications or users. Cancel-all is the explicit exchange action and may itself be partial or unknown.
 
 ### Cancel-all and close-position partial failure
 

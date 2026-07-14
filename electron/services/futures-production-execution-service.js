@@ -66,6 +66,7 @@ export const FUTURES_PRODUCTION_EXECUTION_SAFE_CODES = Object.freeze({
     CONFIRMED_CLOSED: 'FUTURES_PRODUCTION_CONFIRMED_CLOSED',
     PARTIAL: 'FUTURES_PRODUCTION_PARTIAL',
     KILL_SWITCH_ENGAGED: 'FUTURES_PRODUCTION_KILL_SWITCH_ENGAGED',
+    LIVE_ARMED: 'FUTURES_PRODUCTION_LIVE_ARMED',
     RECOVERY_REQUIRED: 'FUTURES_PRODUCTION_RECOVERY_REQUIRED',
     RECOVERY_UNAVAILABLE: 'FUTURES_PRODUCTION_RECOVERY_UNAVAILABLE',
     CREDENTIAL_ROTATION_BLOCKED: 'FUTURES_PRODUCTION_CREDENTIAL_ROTATION_BLOCKED',
@@ -87,6 +88,9 @@ const PREPARE_KIND_BY_ACTION = Object.freeze({
     [FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_ENGAGE_KILL_SWITCH_INTENT]: (
         FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ENGAGE_KILL_SWITCH
     ),
+    [FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_DISENGAGE_KILL_SWITCH_INTENT]: (
+        FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.DISENGAGE_KILL_SWITCH
+    ),
 });
 
 const FINAL_KIND_BY_ACTION = Object.freeze({
@@ -101,6 +105,9 @@ const FINAL_KIND_BY_ACTION = Object.freeze({
     ),
     [FUTURES_PRODUCTION_EXECUTION_ACTIONS.ENGAGE_KILL_SWITCH]: (
         FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ENGAGE_KILL_SWITCH
+    ),
+    [FUTURES_PRODUCTION_EXECUTION_ACTIONS.DISENGAGE_KILL_SWITCH]: (
+        FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.DISENGAGE_KILL_SWITCH
     ),
 });
 
@@ -316,6 +323,7 @@ const acknowledgementForState = state => {
         FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_OPEN,
         FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_CLOSED,
         FUTURES_PRODUCTION_EXECUTION_STATES.KILL_SWITCH_ENGAGED,
+        FUTURES_PRODUCTION_EXECUTION_STATES.KILL_SWITCH_DISENGAGED,
     ].includes(state)) return FUTURES_PRODUCTION_EXECUTION_ACKNOWLEDGEMENTS.ACCEPTED;
     if ([
         FUTURES_PRODUCTION_EXECUTION_STATES.LOCALLY_REJECTED,
@@ -496,15 +504,20 @@ export const createFuturesProductionExecutionService = ({
         const engageKillSwitch = (canPrepare && !killSwitchEngaged) || canFinalize(
             FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ENGAGE_KILL_SWITCH,
         );
+        const disengageKillSwitch = (canPrepare && killSwitchEngaged) || canFinalize(
+            FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.DISENGAGE_KILL_SWITCH,
+        );
         const anyCapability = placeOrder
             || cancelAllOpenOrders
             || closePositions
-            || engageKillSwitch;
+            || engageKillSwitch
+            || disengageKillSwitch;
         return {
             placeOrder,
             cancelAllOpenOrders,
             closePositions,
             engageKillSwitch,
+            disengageKillSwitch,
             code: anyCapability ? activation.code : (
                 mutex ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.BUSY : activation.code
             ),
@@ -1039,6 +1052,15 @@ export const createFuturesProductionExecutionService = ({
             && killSwitchEngaged) {
             return rejectCommand({ kind, code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.GATE_REJECTED });
         }
+        if (kind === FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER
+            && killSwitchEngaged
+            && command.reduceOnly !== true) {
+            return rejectCommand({ kind, code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.GATE_REJECTED });
+        }
+        if (kind === FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.DISENGAGE_KILL_SWITCH
+            && !killSwitchEngaged) {
+            return rejectCommand({ kind, code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.GATE_REJECTED });
+        }
         mutex = true;
         broadcastStatus();
         try {
@@ -1073,6 +1095,7 @@ export const createFuturesProductionExecutionService = ({
             return rejectCommand({ kind, code: safeErrorCode(error) });
         } finally {
             mutex = false;
+            advanceRevision();
             broadcastStatus();
         }
     };
@@ -2130,6 +2153,41 @@ export const createFuturesProductionExecutionService = ({
         return currentAttempt;
     };
 
+    const disengageKillSwitch = async (command, intent) => {
+        const blockingOperations = (ledger.getActiveOperations?.() ?? []).filter(record => (
+            (record.operationId ?? record.requestId) !== command.requestId
+        ));
+        if (!killSwitchEngaged || !recoveryHealthy || blockingOperations.length > 0) {
+            throw new FuturesProductionExecutionServiceError(
+                FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.GATE_REJECTED,
+            );
+        }
+        await ledger.setKillSwitch({
+            engaged: false,
+            requestId: command.requestId,
+            operationId: command.requestId,
+            intentId: command.requestId,
+            action: command.action,
+            commandDigest: intent.commandDigest,
+            accountAlias: account.alias,
+            accountFingerprint: account.fingerprint,
+            credentialBinding,
+            code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.LIVE_ARMED,
+        });
+        killSwitchEngaged = false;
+        await setAttempt({
+            requestId: command.requestId,
+            kind: intent.kind,
+            state: FUTURES_PRODUCTION_EXECUTION_STATES.KILL_SWITCH_DISENGAGED,
+            code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.LIVE_ARMED,
+            eventType: 'acknowledgement',
+            category: 'safety',
+            outcome: 'accepted',
+            audit: { action: command.action, commandDigest: intent.commandDigest },
+        });
+        return currentAttempt;
+    };
+
     const executeFinal = async (command, context) => {
         const kind = FINAL_KIND_BY_ACTION[command.action];
         const commandDigest = createFuturesProductionExecutionCommandDigest(command);
@@ -2186,8 +2244,10 @@ export const createFuturesProductionExecutionService = ({
                 result = await cancelAllOpenOrders(command, intent);
             } else if (kind === FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.CLOSE_POSITIONS) {
                 result = await closePositions(command, intent);
-            } else {
+            } else if (kind === FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ENGAGE_KILL_SWITCH) {
                 result = await engageKillSwitch(command, intent);
+            } else {
+                result = await disengageKillSwitch(command, intent);
             }
             outcome = Boolean(result);
         } catch (error) {
@@ -2209,6 +2269,7 @@ export const createFuturesProductionExecutionService = ({
                 }
             }
             mutex = false;
+            advanceRevision();
             broadcastStatus();
         }
         return outcome;
@@ -2308,6 +2369,60 @@ export const createFuturesProductionExecutionService = ({
                 intentId: record.intentId ?? record.requestId,
             },
         });
+        if ((ledger.getActiveOperations?.().length ?? 0) !== 0) return blockRecovery();
+        await completeOperation();
+        return true;
+    };
+
+    const recoverDisengagedKillSwitch = async (records) => {
+        if (records.length !== 1) return blockRecovery();
+        const [record] = records;
+        const operationId = record.operationId ?? record.requestId;
+        const transitions = (ledger.getRecords?.() ?? []).filter(candidate => (
+            candidate.eventType === 'kill_switch_transition'
+            && (candidate.operationId ?? candidate.requestId) === operationId
+            && candidate.action === FUTURES_PRODUCTION_EXECUTION_ACTIONS.DISENGAGE_KILL_SWITCH
+        ));
+        if (transitions.length > 1) return blockRecovery();
+        const transition = transitions[0] ?? null;
+        if (transition === null) {
+            if (!killSwitchEngaged) return blockRecovery();
+            await setAttempt({
+                requestId: record.requestId,
+                kind: FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.DISENGAGE_KILL_SWITCH,
+                state: FUTURES_PRODUCTION_EXECUTION_STATES.LOCALLY_REJECTED,
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.COMMAND_REJECTED,
+                eventType: 'restart_recovery',
+                category: 'recovery',
+                outcome: 'rejected',
+                audit: {
+                    action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.DISENGAGE_KILL_SWITCH,
+                    commandDigest: record.commandDigest,
+                    intentId: record.intentId ?? record.requestId,
+                },
+            });
+        } else {
+            if (transition.state !== 'disengaged'
+                || transition.outcome !== 'disengaged'
+                || transition.commandDigest !== record.commandDigest) {
+                return blockRecovery();
+            }
+            if (killSwitchEngaged) return blockRecovery();
+            await setAttempt({
+                requestId: record.requestId,
+                kind: FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.DISENGAGE_KILL_SWITCH,
+                state: FUTURES_PRODUCTION_EXECUTION_STATES.KILL_SWITCH_DISENGAGED,
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.LIVE_ARMED,
+                eventType: 'restart_recovery',
+                category: 'recovery',
+                outcome: 'confirmed',
+                audit: {
+                    action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.DISENGAGE_KILL_SWITCH,
+                    commandDigest: record.commandDigest,
+                    intentId: record.intentId ?? record.requestId,
+                },
+            });
+        }
         if ((ledger.getActiveOperations?.().length ?? 0) !== 0) return blockRecovery();
         await completeOperation();
         return true;
@@ -2549,6 +2664,10 @@ export const createFuturesProductionExecutionService = ({
             record.action === FUTURES_PRODUCTION_EXECUTION_ACTIONS.ENGAGE_KILL_SWITCH
         ));
         if (killSwitchRecords.length > 0) return recoverEngagedKillSwitch(killSwitchRecords);
+        const liveArmRecords = active.filter(record => (
+            record.action === FUTURES_PRODUCTION_EXECUTION_ACTIONS.DISENGAGE_KILL_SWITCH
+        ));
+        if (liveArmRecords.length > 0) return recoverDisengagedKillSwitch(liveArmRecords);
         const cancelRecords = active.filter(record => (
             record.action === FUTURES_PRODUCTION_EXECUTION_ACTIONS.CANCEL_ALL_OPEN_ORDERS
         ));
@@ -2992,6 +3111,7 @@ export const createFuturesProductionExecutionService = ({
         } finally {
             operationalRecoveryInProgress = false;
             mutex = false;
+            advanceRevision();
             broadcastStatus();
             resumeDeferredReconciliation();
         }

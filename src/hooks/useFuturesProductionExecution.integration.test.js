@@ -24,9 +24,9 @@ const CONFIG = Object.freeze({
   account: Object.freeze({ alias: 'reviewed-production-account', fingerprint: ACCOUNT_FINGERPRINT }),
   policy: Object.freeze({
     allowedSymbols: Object.freeze(['BTCUSDT']),
-    maxLeverage: 3,
-    maxOrderNotionalUsdt: '10000',
-    maxDailyNotionalUsdt: '50000',
+    maxLeverage: 1,
+    maxOrderNotionalUsdt: '10',
+    maxDailyNotionalUsdt: '50',
     minAvailableBalanceUsdt: '10',
     minLiquidationDistanceBps: '1000',
     killSwitchPolicy: 'v1-persistent-block-new-exposure',
@@ -275,6 +275,71 @@ describe('Futures production service-to-renderer intent ownership', () => {
     } finally {
       owner.unmount()
       peer.unmount()
+      await act(async () => drainBackend(pending))
+      await service.shutdown()
+    }
+  })
+
+  it('arms a persistently locked fake backend only through one exact renderer intent', async () => {
+    const ledger = new IntegrationLedger()
+    ledger.killSwitchEngaged = true
+    const service = createService(ledger)
+    const pending = []
+    await service.start()
+    const socket = createBackendSocket({
+      service,
+      connectionId: 'e'.repeat(32),
+      pending,
+    })
+    const owner = renderHook(() => useFuturesProductionExecution({
+      enabled: true,
+      wsConnection: socket,
+    }))
+
+    try {
+      await act(async () => drainBackend(pending))
+      expect(owner.result.current.killSwitch.engaged).toBe(true)
+      expect(owner.result.current.capabilities).toMatchObject({
+        placeOrder: true,
+        engageKillSwitch: false,
+        disengageKillSwitch: true,
+      })
+
+      await act(async () => {
+        expect(owner.result.current.prepareDisengageKillSwitchIntent()).toBe(true)
+        expect(owner.result.current.prepareDisengageKillSwitchIntent()).toBe(false)
+        await drainBackend(pending)
+      })
+      expect(owner.result.current.intent).toMatchObject({ kind: 'disengage_kill_switch' })
+
+      const confirmation = FUTURES_PRODUCTION_EXECUTION_CONFIRMATIONS[
+        FUTURES_PRODUCTION_EXECUTION_ACTIONS.DISENGAGE_KILL_SWITCH
+      ]
+      act(() => {
+        expect(owner.result.current.disengageKillSwitch('ARM LIVE')).toBe(false)
+        expect(owner.result.current.disengageKillSwitch(confirmation)).toBe(true)
+        expect(owner.result.current.disengageKillSwitch(confirmation)).toBe(false)
+      })
+      await act(async () => drainBackend(pending))
+
+      expect(ledger.setKillSwitchCalls).toEqual([
+        expect.objectContaining({
+          engaged: false,
+          action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.DISENGAGE_KILL_SWITCH,
+        }),
+      ])
+      expect(owner.result.current.killSwitch.engaged).toBe(false)
+      expect(owner.result.current.capabilities).toMatchObject({
+        placeOrder: true,
+        engageKillSwitch: true,
+        disengageKillSwitch: false,
+      })
+      expect(sentActions(
+        socket,
+        FUTURES_PRODUCTION_EXECUTION_ACTIONS.DISENGAGE_KILL_SWITCH,
+      )).toHaveLength(1)
+    } finally {
+      owner.unmount()
       await act(async () => drainBackend(pending))
       await service.shutdown()
     }

@@ -1075,7 +1075,7 @@ Required production-only controls:
 - [x] complete allowlist, account-level maximum leverage, maximum order notional, gross maximum daily notional, balance, and liquidation limits;
 - [x] crash-safe exact daily reservations with deterministic UTC rollover and conservative unknown accounting;
 - [x] persistent default-engaged kill switch that blocks new exposure without claiming cancellation or closure;
-- [x] separate intent/action/state machines for ordinary order, regular+algo cancel-all, close-positions, and kill-switch engagement;
+- [x] separate intent/action/state machines for ordinary order, regular+algo cancel-all, close-positions, kill-switch engagement, and deliberate gradual-live arming;
 - [x] one-use backend intents, revision binding, mutex/idempotency tombstones, durable dispatch intent, zero order-POST retry, Query Order reconciliation, confirmed-open monitoring, and restart recovery;
 - [x] separate production storage, lease, key, anchor, HMAC journal, audit schema, credential binding, counters, rate pauses, and backend-only operational recovery;
 - [x] bounded redacted durable audit events for every command, gate, intent, exchange request/response classification, reconciliation, partial outcome, kill transition, and operator recovery action;
@@ -1111,12 +1111,23 @@ Acceptance:
 - [x] Normal production composition sets the separate non-environment live interlock true; E2E still passes `forceDisabled: true`, scrubs every production key, and terminates on a production network escape.
 - [x] Live composition accepts only process-global Node `fetch`. Caller-supplied transports remain unusable; deterministic tests retain their unforgeable fake-only authorization object.
 - [x] Production remains default-disabled and requires the exact flag, acknowledgement, credentials, full key fingerprint/account alias, complete caps, fixed kill-switch policy, healthy private durable storage, recovery, and every runtime gate.
-- [x] Added exact backend-only startup recovery for `reconcile`, `engageKillSwitch`, and `disengageKillSwitch`. The argument contains no secret, is scrubbed before `BrowserWindow`, requires the captured recovery authorization, is durably audited, and has no renderer/IPC/WebSocket disarm path.
+- [x] Added exact backend-only startup recovery for `reconcile`, `engageKillSwitch`, and `disengageKillSwitch`. The argument contains no secret, is scrubbed before `BrowserWindow`, requires the captured recovery authorization, and is durably audited. A later reviewed gradual-live amendment adds a separately named routine UI arming path; it does not expose operational recovery or its authorization.
 - [x] Added an application-level three-workspace selector without creating a backend environment enum: neutral Spot, blue Futures Testnet, and red Futures Live. Only the selected independent hook/ticket is active; Spot controls and shortcuts remain absent from both futures workspaces.
 - [x] Added the live operator runbook with the required restart boundary, exact non-secret configuration inventory, default-engaged kill switch, visible account/cap checks, and fail-closed recovery rules.
 - [x] Official Binance documentation was rechecked on 2026-07-14 for `https://fapi.binance.com`, signed `POST /fapi/v1/order`, `GET /fapi/v1/order`, both cancel-all endpoints, and unknown-execution semantics.
 - [x] Final automated verification used no live credential and sent no production Futures request. It passed `76` Vitest files / `2622` tests (`2` existing skips), full ESLint, production and E2E builds, all `13` Electron Playwright scenarios including exact blue/red CSS assertions, the production boundary scan across `18` isolated implementation files, and the circular-import scan across `190` source files.
 - [x] Final GitNexus analysis indexed `5710` nodes / `13582` edges / `338` clusters / `300` flows. The live/UI commit versus `eac0834d8780a14ada8e354fbb41408a84eab4dd` is HIGH at `15 files / 44 symbols / 7 flows`; cumulative comparison with Phase 6 `36681f0` is CRITICAL at `55 / 1464 / 154`; cumulative comparison with `main` is CRITICAL at `157 / 3834 / 282`. The Phase 5/6 implementation and Phase 6 design diff remains empty.
+
+### Phase 7 gradual-live arming amendment (2026-07-14)
+
+- [x] The operator explicitly approved opening production in small steps through the red UI.
+- [x] Compiled production ceilings were reduced to 1x maximum leverage, 10 USDT exact maximum order notional, and 50 USDT gross maximum daily notional. Configuration may be lower and cannot exceed them.
+- [x] Added distinct `prepareDisengageKillSwitchIntent` / `disengageKillSwitch` actions, intent kind, capability, exact phrase `ARM LIVE FUTURES 1X 10 USDT 50 USDT DAILY`, and terminal `kill_switch_disengaged` state. No generic Futures command or Phase 5/6 action changed.
+- [x] ARM LIVE is backend-authorized, owning-connection/revision/mutex/idempotency protected, fsynced before acknowledgement, and performs no exchange request. A raw non-reduce-only order prepare is rejected while the persistent switch is engaged; exact reduce-only safety actions remain available.
+- [x] Restart recovery distinguishes a crash before the durable transition (remain engaged and reject locally) from a crash after it (recover the exact disengaged state) without any exchange write.
+- [x] The red ticket reports `LIVE LOCKED` versus `LIVE ARMED`, blocks new-exposure order preparation while locked, retains exact reduce-only/close/cancel safety paths, prevents Enter/double submission, and keeps ARM, order, cancel-all, close-positions, and engage controls separate.
+- [x] Final fake-only validation passed `77` Vitest files / `2633` tests (`2` existing skips), full ESLint, production and E2E builds, all `13` Electron Playwright scenarios, the production boundary scan across `18` isolated implementation files, the circular-import scan across `190` source files, and `git diff --check`. No live credential was used and no production Futures request was sent.
+- [x] Final GitNexus analysis indexed `2829` nodes / `8640` edges / `321` clusters / `223` flows. The uncommitted amendment is CRITICAL at `24 files / 262 symbols / 66 affected flows`; cumulative comparison with Phase 6 `36681f0` is CRITICAL at `57 / 483 / 122`; cumulative comparison with `main` is CRITICAL at `158 / 1303 / 195`. The exact frozen Phase 5/6 implementation and Phase 6 design diff remains empty.
 
 ## UI Rollout Rules
 
@@ -1143,6 +1154,6 @@ The fake-backed Phase 7 delivery is complete and the operator has now authorized
 - run GitNexus upstream impact before editing every existing symbol and report HIGH/CRITICAL results before proceeding;
 - retain the separately reviewed non-environment live authorization as a compiled normal-composition decision; never expose it through environment, renderer, generic commands, or E2E;
 - keep automated verification fake-only and reject any test/E2E production network escape;
-- require the trusted credential ceremony, visible backend identity/caps, initially engaged kill switch, and exact backend-only recovery action before intentional new exposure;
+- require the trusted credential ceremony, visible backend identity/caps, initially engaged kill switch, and the exact dedicated ARM LIVE intent/phrase before intentional new exposure; backend operational recovery remains separate;
 - finish with full Spot/Phase 5/Phase 6/Phase 7 unit, lint, production/E2E build, Electron Playwright, circular-import, static isolation/credential/host/write scans, and GitNexus change detection against `36681f0` and `main`;
 - preserve a clean auditable commit and document that no real production request was sent by automated development or verification.

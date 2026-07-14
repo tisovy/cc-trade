@@ -4,10 +4,12 @@ import {
   compareFuturesProductionExecutionRevisions,
   createFuturesProductionExecutionCancelAllOpenOrdersRequest,
   createFuturesProductionExecutionClosePositionsRequest,
+  createFuturesProductionExecutionDisengageKillSwitchRequest,
   createFuturesProductionExecutionEngageKillSwitchRequest,
   createFuturesProductionExecutionPlaceOrderRequest,
   createFuturesProductionExecutionPrepareCancelAllOpenOrdersIntentRequest,
   createFuturesProductionExecutionPrepareClosePositionsIntentRequest,
+  createFuturesProductionExecutionPrepareDisengageKillSwitchIntentRequest,
   createFuturesProductionExecutionPrepareEngageKillSwitchIntentRequest,
   createFuturesProductionExecutionPrepareOrderIntentRequest,
   createFuturesProductionExecutionSubscribeStatusRequest,
@@ -50,6 +52,7 @@ const capabilityForIntentKind = Object.freeze({
   [FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.CANCEL_ALL_OPEN_ORDERS]: 'cancelAllOpenOrders',
   [FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.CLOSE_POSITIONS]: 'closePositions',
   [FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ENGAGE_KILL_SWITCH]: 'engageKillSwitch',
+  [FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.DISENGAGE_KILL_SWITCH]: 'disengageKillSwitch',
 })
 
 const useFuturesProductionExecution = ({
@@ -317,6 +320,17 @@ const useFuturesProductionExecution = ({
     confirmation,
   ), [finalize])
 
+  const prepareDisengageKillSwitchIntent = useCallback(() => prepare(
+    FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.DISENGAGE_KILL_SWITCH,
+    createFuturesProductionExecutionPrepareDisengageKillSwitchIntentRequest,
+  ), [prepare])
+
+  const disengageKillSwitch = useCallback((confirmation) => finalize(
+    FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.DISENGAGE_KILL_SWITCH,
+    createFuturesProductionExecutionDisengageKillSwitchRequest,
+    confirmation,
+  ), [finalize])
+
   return {
     ...state,
     prepareOrderIntent,
@@ -327,6 +341,8 @@ const useFuturesProductionExecution = ({
     closePositions,
     prepareEngageKillSwitchIntent,
     engageKillSwitch,
+    prepareDisengageKillSwitchIntent,
+    disengageKillSwitch,
   }
 }
 

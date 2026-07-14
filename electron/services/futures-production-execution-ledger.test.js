@@ -79,13 +79,42 @@ describe('Futures production execution ledger', () => {
         const directory = await makeDirectory();
         const ledger = createFuturesProductionExecutionLedger({ directory, integrityKey: key });
         await ledger.open();
+        await ledger.append(audit({
+            eventType: 'intent_consumed',
+            category: 'intent',
+            outcome: 'accepted',
+            requestId: 'arm-live-request',
+            operationId: 'arm-live-request',
+            intentId: 'arm-live-request',
+            action: 'futures.production.disengageKillSwitch',
+            commandDigest: 'd'.repeat(64),
+            state: 'consumed',
+        }));
+        expect(ledger.getActiveOperations()).toHaveLength(1);
         await ledger.setKillSwitch({
             engaged: false,
             observedAt: dayOne,
-            action: 'backend.futuresProduction.disengageKillSwitch',
-            code: 'OPERATOR_RECOVERY_AUTHORIZED',
+            requestId: 'arm-live-request',
+            operationId: 'arm-live-request',
+            intentId: 'arm-live-request',
+            action: 'futures.production.disengageKillSwitch',
+            commandDigest: 'd'.repeat(64),
+            code: 'FUTURES_PRODUCTION_LIVE_ARMED',
         });
         expect(ledger.getReplaySnapshot().killSwitch).toBe('disengaged');
+        expect(ledger.getActiveOperations()).toHaveLength(1);
+        await ledger.append(audit({
+            eventType: 'acknowledgement',
+            category: 'safety',
+            outcome: 'accepted',
+            requestId: 'arm-live-request',
+            operationId: 'arm-live-request',
+            action: 'futures.production.disengageKillSwitch',
+            commandDigest: 'd'.repeat(64),
+            state: 'kill_switch_disengaged',
+            code: 'FUTURES_PRODUCTION_LIVE_ARMED',
+        }));
+        expect(ledger.getActiveOperations()).toEqual([]);
         await ledger.setKillSwitch({
             engaged: true,
             observedAt: dayOne + 1,

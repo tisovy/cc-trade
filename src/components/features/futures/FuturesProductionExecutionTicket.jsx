@@ -78,6 +78,8 @@ const FuturesProductionExecutionTicket = ({
   onClosePositions,
   onPrepareEngageKillSwitchIntent,
   onEngageKillSwitch,
+  onPrepareDisengageKillSwitchIntent,
+  onDisengageKillSwitch,
 }) => {
   const safeState = isRecord(state) ? state : {}
   const account = isRecord(safeState.account) ? safeState.account : null
@@ -129,9 +131,12 @@ const FuturesProductionExecutionTicket = ({
     && capabilities?.[capability] === true
     && intent?.kind === kind
     && !backendLocked
+  const canPrepareOrder = canPrepare('placeOrder')
+    && hasExactOrderDraft
+    && (killSwitch?.engaged !== true || reduceOnly)
 
   const handlePrepareOrder = () => {
-    if (!canPrepare('placeOrder') || !hasExactOrderDraft) return
+    if (!canPrepareOrder) return
     claimAction(onPrepareOrderIntent, {
       symbol,
       side,
@@ -156,8 +161,10 @@ const FuturesProductionExecutionTicket = ({
           <span className="futures-production-execution-market">USDⓈ-M PRODUCTION · REAL ORDERS</span>
           <strong>{exactText(safeState.mode).toUpperCase()}</strong>
         </div>
-        <span className={`futures-production-live is-${safeState.liveAuthorized === true ? 'authorized' : 'blocked'}`}>
-          {safeState.liveAuthorized === true ? 'LIVE AUTHORIZED' : 'LIVE BLOCKED'}
+        <span className={`futures-production-live is-${safeState.liveAuthorized === true && killSwitch?.engaged === false ? 'armed' : 'blocked'}`}>
+          {safeState.liveAuthorized !== true
+            ? 'LIVE BLOCKED'
+            : killSwitch?.engaged === false ? 'LIVE ARMED' : 'LIVE LOCKED'}
         </span>
       </header>
 
@@ -256,6 +263,32 @@ const FuturesProductionExecutionTicket = ({
           </section>
         ) : null}
 
+        <section className="futures-production-action is-arm" aria-label="Arm production live trading action">
+          <h3>ARM LIVE · 1× / 10 USDT / 50 USDT DAILY</h3>
+          <p>
+            Removes only the persistent new-exposure block. It does not place, cancel, or close anything.
+          </p>
+          <button
+            type="button"
+            disabled={!canPrepare('disengageKillSwitch')}
+            onClick={() => claimAction(onPrepareDisengageKillSwitchIntent)}
+          >
+            Prepare ARM LIVE intent
+          </button>
+          {intent?.kind === FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.DISENGAGE_KILL_SWITCH ? (
+            <ConfirmationControl
+              key={intent.requestId}
+              action={FUTURES_PRODUCTION_EXECUTION_ACTIONS.DISENGAGE_KILL_SWITCH}
+              disabled={!canFinalize(
+                FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.DISENGAGE_KILL_SWITCH,
+                'disengageKillSwitch',
+              )}
+              buttonLabel="ARM LIVE FUTURES"
+              onConfirm={(confirmation) => claimAction(onDisengageKillSwitch, confirmation)}
+            />
+          ) : null}
+        </section>
+
         <section className="futures-production-action" aria-label="Production order action">
           <h3>REAL LIMIT ORDER</h3>
           <div className="futures-production-order-fields">
@@ -313,7 +346,7 @@ const FuturesProductionExecutionTicket = ({
           </div>
           <button
             type="button"
-            disabled={!canPrepare('placeOrder') || !hasExactOrderDraft}
+            disabled={!canPrepareOrder}
             onClick={handlePrepareOrder}
           >
             Prepare real order intent

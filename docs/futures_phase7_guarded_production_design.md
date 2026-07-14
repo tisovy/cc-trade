@@ -50,7 +50,7 @@ Normal composition exposes no live write capability unless every backend-owned f
 5. The configured SHA-256 API-key fingerprint matches the captured key.
 6. A signed fixed-production-origin read returns exactly the configured account alias, fingerprint binding, `canTrade: true`, one-way mode, and single-asset mode.
 7. All required limits parse exactly: unique allowlist, account maximum leverage, maximum order notional, maximum daily notional, minimum available balance, and minimum liquidation distance.
-8. The maximum leverage is no more than the compiled 3x ceiling; maximum order notional is no more than 10,000 USDT; maximum daily notional is no more than 50,000 USDT. These ceilings are not environment-overridable.
+8. The gradual-live ceilings are compiled at exactly 1x maximum leverage, 10 USDT maximum order notional, and 50 USDT gross maximum daily notional. Configuration may be lower but never higher, and these ceilings are not environment-overridable.
 9. The exact persistent kill-switch policy is `v1-persistent-block-new-exposure`; missing or unknown policy fails closed.
 10. The production storage directory, integrity key, anchor, HMAC chain, exclusive lease, audit replay, exact counters, clock state, and recovery state validate fully.
 11. The current credential binding matches every durable nonterminal record. Rotation never opens a fresh bypass namespace.
@@ -99,12 +99,13 @@ The protocol has separate two-step actions and one-use intent kinds:
 - `prepareCancelAllOpenOrdersIntent` / `cancelAllOpenOrders`
 - `prepareClosePositionsIntent` / `closePositions`
 - `prepareEngageKillSwitchIntent` / `engageKillSwitch`
+- `prepareDisengageKillSwitchIntent` / `disengageKillSwitch`
 
 Cancel-all is account-scoped over the fixed allowlist. For each symbol it invokes the reviewed regular `DELETE /fapi/v1/allOpenOrders` and algo `DELETE /fapi/v1/algoOpenOrders` endpoints independently, then queries both current-open inventories. An HTTP acknowledgement is not success; only exact empty regular and algo inventories confirm that symbol. Mixed results remain partial or unknown.
 
 Close-positions snapshots the bounded allowlist, selects exact non-zero one-way positions, and issues one reduce-only `MARKET` child per position. Every child has a deterministic production client ID, its own durable dispatch intent and daily reservation, zero POST retries, Query Order reconciliation, and a per-position result. No child success is inferred from another child. Hedge or identity ambiguity blocks the affected item.
 
-Engaging the kill switch fsyncs its state before acknowledgement. It sends no exchange request and does not invoke cancel-all or close-positions. Disengagement is backend-only operational recovery protected by the captured recovery authorization; no WebSocket, IPC, preload, renderer, typed, legacy, or HTTP action can disengage it.
+Engaging the kill switch fsyncs its state before acknowledgement. It sends no exchange request and does not invoke cancel-all or close-positions. The reviewed gradual-live amendment also permits a dedicated renderer request to disengage it only after a backend-issued one-use intent, exact current revision, owning connection, process-global mutex, exact phrase `ARM LIVE FUTURES 1X 10 USDT 50 USDT DAILY`, healthy recovery/storage, no blocking durable operation, and every activation gate. The backend fsyncs the production-only transition before returning `kill_switch_disengaged`; no exchange request, cancellation, or closure is inferred. The separately authorized backend recovery action remains available for operational recovery but is not the routine UI path.
 
 ## Ambiguous outcomes and recovery
 
@@ -160,7 +161,7 @@ The store never contains API keys/secrets, recovery authorization, signatures, s
 
 The renderer uses channel `futures-production-execution` and exact `futures.production.*` actions. It is independent of Phase 5, Phase 6, Spot commands, generic action validation, browser storage, analytics, telemetry, clipboard, crash reporting, and global shortcuts. The application-level selector has three UI-only workspace values — Spot, Futures Testnet, and Futures Live — but does not parameterize a backend service, host, credentials, protocol, storage, or transport. Testnet mounts only the Phase 5/6 panels in a blue workspace; Live mounts only the production panel in a red workspace; Spot affordances are absent from both futures branches.
 
-The compact surface is unmistakably labeled `USDⓈ-M PRODUCTION · REAL ORDERS`. It displays only backend-owned mode, live-authorization status, account alias/fingerprint, configured exact caps and UTC usage, kill-switch state, action capabilities, active intent, pending/accepted/rejected/unknown result, reconciliation, and recovery state. It uses separate controls for order, cancel-all, close-positions, and kill switch.
+The compact surface is unmistakably labeled `USDⓈ-M PRODUCTION · REAL ORDERS`. It displays only backend-owned mode, live-authorization status, account alias/fingerprint, configured exact caps and UTC usage, kill-switch state, action capabilities, active intent, pending/accepted/rejected/unknown result, reconciliation, and recovery state. It uses separate controls for ARM LIVE, order, cancel-all, close-positions, and kill-switch engagement. When the switch is engaged, the backend rejects every non-reduce-only order draft and the UI disables ordinary order preparation unless `Reduce only` is selected; exact reduce-only and separate close/cancel safety paths remain available.
 
 Every destructive action requires an action-specific typed confirmation challenge, a backend-issued one-use intent, a current revision, a synchronous hook lock, and a component-level ref guard. There is no form submit and Enter is always prevented. A stale/equal revision never unlocks submission. Partial or unknown outcomes are never styled or worded as success.
 
@@ -168,7 +169,7 @@ Every destructive action requires an action-specific typed confirmation challeng
 
 Automated development, tests, and verification continue to use deterministic backend fakes only. E2E scrubs production configuration, force-disables the service, and rejects any attempted production socket. No live account read, order, cancellation, or close request is part of automated verification.
 
-The operator supplied the required explicit live authorization on 2026-07-14. Normal composition now permits the exact process-global production transport only after every configuration, account, storage, recovery, quota, and policy gate passes. Production remains disabled when any required environment value is absent or invalid. Startup begins with the durable kill switch engaged. Disengagement and reconciliation are available only through the exact main-process startup argument `--futures-production-operator-action=<action>` and the captured backend recovery authorization. Engagement is available through either that backend action or the existing explicit production intent/confirmation UI. The argument is scrubbed before `BrowserWindow` creation, and no renderer path can disengage or reconcile.
+The operator supplied the required explicit live authorization on 2026-07-14 and then approved gradual UI arming under the compiled 1x / 10 USDT / 50 USDT ceilings. Normal composition permits the exact process-global production transport only after every configuration, account, storage, recovery, quota, and policy gate passes. Production remains disabled when any required environment value is absent or invalid. Startup begins with the durable kill switch engaged unless the intact production journal proves a prior reviewed disengagement. Routine disengagement uses only the dedicated two-step ARM LIVE action above. Reconciliation remains backend-only; backend kill-switch actions remain protected by captured recovery authorization. Startup arguments are scrubbed before `BrowserWindow` creation.
 
 The operational credential ceremony, manual account/fingerprint/cap inspection, and any real request remain operator actions, not automated delivery steps. See `docs/futures_phase7_live_operator_runbook.md`.
 

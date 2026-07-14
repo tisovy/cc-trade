@@ -111,6 +111,8 @@ vi.mock('./hooks/useFuturesProductionExecution', () => ({
       closePositions: vi.fn(() => false),
       prepareEngageKillSwitchIntent: vi.fn(() => false),
       engageKillSwitch: vi.fn(() => false),
+      prepareDisengageKillSwitchIntent: vi.fn(() => false),
+      disengageKillSwitch: vi.fn(() => false),
     }
   },
 }))

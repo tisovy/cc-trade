@@ -19,12 +19,12 @@ const createState = (overrides = {}) => ({
   account: { alias: 'reviewed-account-1', fingerprint: FINGERPRINT },
   caps: {
     allowedSymbols: ['BTCUSDT', 'ETHUSDT'],
-    maxLeverage: 3,
-    maxOrderNotionalUsdt: '10000.0000',
-    maxDailyNotionalUsdt: '50000.0000',
+    maxLeverage: 1,
+    maxOrderNotionalUsdt: '10.0000',
+    maxDailyNotionalUsdt: '50.0000',
     minAvailableBalanceUsdt: '10.0000',
     minLiquidationDistanceBps: '1000',
-    dailyUsedNotionalUsdt: '10000.000000000000000001',
+    dailyUsedNotionalUsdt: '10.000000000000000001',
     utcDay: '2026-07-13',
   },
   killSwitch: {
@@ -36,6 +36,7 @@ const createState = (overrides = {}) => ({
     cancelAllOpenOrders: true,
     closePositions: true,
     engageKillSwitch: true,
+    disengageKillSwitch: false,
     code: 'FUTURES_PRODUCTION_GATES_SATISFIED',
   },
   intent: null,
@@ -65,6 +66,8 @@ const callbacks = (overrides = {}) => ({
   onClosePositions: vi.fn(() => true),
   onPrepareEngageKillSwitchIntent: vi.fn(() => true),
   onEngageKillSwitch: vi.fn(() => true),
+  onPrepareDisengageKillSwitchIntent: vi.fn(() => true),
+  onDisengageKillSwitch: vi.fn(() => true),
   ...overrides,
 })
 
@@ -80,29 +83,90 @@ describe('FuturesProductionExecutionTicket', () => {
     renderTicket()
 
     expect(screen.getByText('USDⓈ-M PRODUCTION · REAL ORDERS')).toBeInTheDocument()
-    expect(screen.getByText('LIVE AUTHORIZED')).toBeInTheDocument()
+    expect(screen.getByText('LIVE ARMED')).toBeInTheDocument()
     expect(screen.getByText('reviewed-account-1')).toBeInTheDocument()
     expect(screen.getByText(FINGERPRINT)).toBeInTheDocument()
     expect(screen.getByText('BTCUSDT, ETHUSDT')).toBeInTheDocument()
-    expect(screen.getByText('3×')).toBeInTheDocument()
-    expect(screen.getByText('10000.0000 USDT')).toBeInTheDocument()
-    expect(screen.getByText('50000.0000 USDT')).toBeInTheDocument()
-    expect(screen.getByText('10.0000 USDT')).toBeInTheDocument()
+    expect(screen.getByText('1×')).toBeInTheDocument()
+    expect(screen.getAllByText('10.0000 USDT')).toHaveLength(2)
+    expect(screen.getByText('50.0000 USDT')).toBeInTheDocument()
     expect(screen.getByText('1000 bps')).toBeInTheDocument()
-    expect(screen.getByText('10000.000000000000000001 USDT')).toBeInTheDocument()
+    expect(screen.getByText('10.000000000000000001 USDT')).toBeInTheDocument()
     expect(screen.getByText('DISENGAGED')).toBeInTheDocument()
     expect(screen.getByLabelText('Backend production recovery')).toHaveTextContent('healthy')
     expect(screen.queryByRole('form')).not.toBeInTheDocument()
   })
 
-  it('keeps cancel-all, close-positions, and kill-switch controls explicit and separate', () => {
+  it('keeps ARM, cancel-all, close-positions, and kill-switch controls explicit and separate', () => {
     renderTicket()
 
     expect(screen.getByRole('button', { name: 'Prepare cancel-all intent' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Prepare close-positions intent' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Prepare kill-switch intent' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Prepare ARM LIVE intent' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /^Cancel and close/i })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /disengage|disable kill/i })).not.toBeInTheDocument()
+  })
+
+  it('requires the exact ARM phrase, blocks Enter and double submission, and keeps orders locked', () => {
+    const handlers = callbacks()
+    const lockedState = createState({
+      killSwitch: {
+        engaged: true,
+        policy: 'v1-persistent-block-new-exposure',
+      },
+      capabilities: {
+        placeOrder: true,
+        cancelAllOpenOrders: true,
+        closePositions: true,
+        engageKillSwitch: false,
+        disengageKillSwitch: true,
+        code: 'FUTURES_PRODUCTION_GATES_SATISFIED',
+      },
+    })
+    const { rerender } = renderTicket(lockedState, handlers)
+
+    expect(screen.getByText('LIVE LOCKED')).toBeInTheDocument()
+    const orderPrepare = screen.getByRole('button', { name: 'Prepare real order intent' })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Exact quantity' }), {
+      target: { value: '0.001' },
+    })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Exact limit price' }), {
+      target: { value: '7000' },
+    })
+    expect(orderPrepare).toBeDisabled()
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Reduce only' }))
+    expect(orderPrepare).toBeEnabled()
+    const prepare = screen.getByRole('button', { name: 'Prepare ARM LIVE intent' })
+    fireEvent.keyDown(prepare, { key: 'Enter', bubbles: true })
+    expect(handlers.onPrepareDisengageKillSwitchIntent).not.toHaveBeenCalled()
+    fireEvent.click(prepare)
+    fireEvent.click(prepare)
+    expect(handlers.onPrepareDisengageKillSwitchIntent).toHaveBeenCalledTimes(1)
+
+    rerender(
+      <FuturesProductionExecutionTicket
+        state={{
+          ...lockedState,
+          revision: '2',
+          intent: createIntent('disengage_kill_switch'),
+        }}
+        {...handlers}
+      />,
+    )
+    const confirmation = FUTURES_PRODUCTION_EXECUTION_CONFIRMATIONS[
+      'futures.production.disengageKillSwitch'
+    ]
+    const input = screen.getByRole('textbox', { name: `Type exactly: ${confirmation}` })
+    const arm = screen.getByRole('button', { name: 'ARM LIVE FUTURES' })
+    fireEvent.change(input, { target: { value: 'ARM LIVE' } })
+    expect(arm).toBeDisabled()
+    fireEvent.change(input, { target: { value: confirmation } })
+    fireEvent.keyDown(input, { key: 'Enter', bubbles: true })
+    expect(handlers.onDisengageKillSwitch).not.toHaveBeenCalled()
+    fireEvent.click(arm)
+    fireEvent.click(arm)
+    expect(handlers.onDisengageKillSwitch).toHaveBeenCalledTimes(1)
+    expect(handlers.onDisengageKillSwitch).toHaveBeenCalledWith(confirmation)
   })
 
   it('preserves exact order strings, prevents Enter, and synchronously blocks duplicate prepare', () => {
@@ -242,6 +306,7 @@ describe('FuturesProductionExecutionTicket', () => {
         cancelAllOpenOrders: false,
         closePositions: false,
         engageKillSwitch: false,
+        disengageKillSwitch: false,
         code: 'FUTURES_PRODUCTION_RECOVERY_REQUIRED',
       },
       attempt: {
@@ -326,6 +391,7 @@ describe('FuturesProductionExecutionTicket', () => {
         cancelAllOpenOrders: false,
         closePositions: false,
         engageKillSwitch: false,
+        disengageKillSwitch: false,
         code: 'FUTURES_PRODUCTION_LIVE_AUTHORIZATION_REJECTED',
       },
     }), handlers)
@@ -337,6 +403,7 @@ describe('FuturesProductionExecutionTicket', () => {
       'Prepare cancel-all intent',
       'Prepare close-positions intent',
       'Prepare kill-switch intent',
+      'Prepare ARM LIVE intent',
     ]) {
       expect(screen.getByRole('button', { name })).toBeDisabled()
     }

@@ -133,6 +133,7 @@ const TERMINAL_STATES = new Set([
     'confirmed_closed',
     'confirmed_empty',
     'kill_switch_engaged',
+    'kill_switch_disengaged',
     'expired',
 ]);
 const OPERATION_LIFECYCLE_EVENT_TYPES = new Set([

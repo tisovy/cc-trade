@@ -580,6 +580,8 @@ function AppShell() {
             onClosePositions={futuresProductionExecution.closePositions}
             onPrepareEngageKillSwitchIntent={futuresProductionExecution.prepareEngageKillSwitchIntent}
             onEngageKillSwitch={futuresProductionExecution.engageKillSwitch}
+            onPrepareDisengageKillSwitchIntent={futuresProductionExecution.prepareDisengageKillSwitchIntent}
+            onDisengageKillSwitch={futuresProductionExecution.disengageKillSwitch}
           />
         </main>
       ) : (

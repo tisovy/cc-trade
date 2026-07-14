@@ -48,9 +48,9 @@ const createStatus = (overrides = {}) => ({
   account: { alias: 'reviewed-account-1', fingerprint: FINGERPRINT },
   caps: {
     allowedSymbols: ['BTCUSDT'],
-    maxLeverage: 3,
-    maxOrderNotionalUsdt: '10000',
-    maxDailyNotionalUsdt: '50000',
+    maxLeverage: 1,
+    maxOrderNotionalUsdt: '10',
+    maxDailyNotionalUsdt: '50',
     minAvailableBalanceUsdt: '10',
     minLiquidationDistanceBps: '1000',
     dailyUsedNotionalUsdt: '0',
@@ -65,6 +65,7 @@ const createStatus = (overrides = {}) => ({
     cancelAllOpenOrders: true,
     closePositions: true,
     engageKillSwitch: true,
+    disengageKillSwitch: false,
     code: 'FUTURES_PRODUCTION_GATES_SATISFIED',
   },
   intent: null,
@@ -274,24 +275,52 @@ describe('useFuturesProductionExecution', () => {
       'futures.production.prepareEngageKillSwitchIntent',
       'futures.production.engageKillSwitch',
     ],
+    [
+      'disengage_kill_switch',
+      'prepareDisengageKillSwitchIntent',
+      'disengageKillSwitch',
+      'futures.production.prepareDisengageKillSwitchIntent',
+      'futures.production.disengageKillSwitch',
+      {
+        killSwitch: {
+          engaged: true,
+          policy: 'v1-persistent-block-new-exposure',
+        },
+        capabilities: {
+          placeOrder: false,
+          cancelAllOpenOrders: true,
+          closePositions: true,
+          engageKillSwitch: false,
+          disengageKillSwitch: true,
+          code: 'FUTURES_PRODUCTION_GATES_SATISFIED',
+        },
+      },
+    ],
   ])('keeps %s prepare and final actions distinct', (
     kind,
     prepareMethod,
     finalMethod,
     prepareAction,
     finalAction,
+    statusOverrides = {},
   ) => {
     const socket = createSocket()
     const { result } = renderHook(() => useFuturesProductionExecution({
       enabled: true,
       wsConnection: socket,
     }))
-    act(() => socket.emit('message', { data: JSON.stringify(createStatus()) }))
+    act(() => socket.emit('message', {
+      data: JSON.stringify(createStatus(statusOverrides)),
+    }))
     act(() => expect(result.current[prepareMethod]()).toBe(true))
     expect(sentMessages(socket).at(-1).action).toBe(prepareAction)
 
     act(() => socket.emit('message', {
-      data: JSON.stringify(createStatus({ revision: '2', intent: intent(kind) })),
+      data: JSON.stringify(createStatus({
+        ...statusOverrides,
+        revision: '2',
+        intent: intent(kind),
+      })),
     }))
     const confirmation = FUTURES_PRODUCTION_EXECUTION_CONFIRMATIONS[finalAction]
     act(() => expect(result.current[finalMethod](confirmation)).toBe(true))

@@ -11,10 +11,12 @@ import {
   compareFuturesProductionExecutionRevisions,
   createFuturesProductionExecutionCancelAllOpenOrdersRequest,
   createFuturesProductionExecutionClosePositionsRequest,
+  createFuturesProductionExecutionDisengageKillSwitchRequest,
   createFuturesProductionExecutionEngageKillSwitchRequest,
   createFuturesProductionExecutionPlaceOrderRequest,
   createFuturesProductionExecutionPrepareCancelAllOpenOrdersIntentRequest,
   createFuturesProductionExecutionPrepareClosePositionsIntentRequest,
+  createFuturesProductionExecutionPrepareDisengageKillSwitchIntentRequest,
   createFuturesProductionExecutionPrepareEngageKillSwitchIntentRequest,
   createFuturesProductionExecutionPrepareOrderIntentRequest,
   createFuturesProductionExecutionSubscribeStatusRequest,
@@ -47,12 +49,12 @@ const status = (overrides = {}) => ({
   account: { alias: 'reviewed-account-1', fingerprint: FINGERPRINT },
   caps: {
     allowedSymbols: ['BTCUSDT', 'ETHUSDT'],
-    maxLeverage: 3,
-    maxOrderNotionalUsdt: '10000.0000',
-    maxDailyNotionalUsdt: '50000.0000',
+    maxLeverage: 1,
+    maxOrderNotionalUsdt: '10.0000',
+    maxDailyNotionalUsdt: '50.0000',
     minAvailableBalanceUsdt: '10.0000',
     minLiquidationDistanceBps: '1000',
-    dailyUsedNotionalUsdt: '10000.000000000000000001',
+    dailyUsedNotionalUsdt: '10.000000000000000001',
     utcDay: '2026-07-13',
   },
   killSwitch: {
@@ -64,6 +66,7 @@ const status = (overrides = {}) => ({
     cancelAllOpenOrders: true,
     closePositions: true,
     engageKillSwitch: false,
+    disengageKillSwitch: false,
     code: 'FUTURES_PRODUCTION_GATES_SATISFIED',
   },
   intent: intent(FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.CLOSE_POSITIONS),
@@ -145,6 +148,8 @@ describe('production futures renderer request builders', () => {
         FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_CLOSE_POSITIONS_INTENT],
       [createFuturesProductionExecutionPrepareEngageKillSwitchIntentRequest,
         FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_ENGAGE_KILL_SWITCH_INTENT],
+      [createFuturesProductionExecutionPrepareDisengageKillSwitchIntentRequest,
+        FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_DISENGAGE_KILL_SWITCH_INTENT],
     ]
     for (const [builder, action] of builders) {
       expect(builder({ revision: '7', accountFingerprint: FINGERPRINT })).toEqual({
@@ -172,6 +177,9 @@ describe('production futures renderer request builders', () => {
       [createFuturesProductionExecutionEngageKillSwitchRequest,
         FUTURES_PRODUCTION_EXECUTION_ACTIONS.ENGAGE_KILL_SWITCH,
         FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ENGAGE_KILL_SWITCH],
+      [createFuturesProductionExecutionDisengageKillSwitchRequest,
+        FUTURES_PRODUCTION_EXECUTION_ACTIONS.DISENGAGE_KILL_SWITCH,
+        FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.DISENGAGE_KILL_SWITCH],
     ]
     for (const [builder, action, kind] of cases) {
       const request = builder({
@@ -223,6 +231,11 @@ describe('production futures renderer request builders', () => {
       accountFingerprint: FINGERPRINT,
       confirmation: 'close positions',
     })],
+    ['ARM confirmation alias', () => createFuturesProductionExecutionDisengageKillSwitchRequest({
+      intent: intent(FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.DISENGAGE_KILL_SWITCH),
+      accountFingerprint: FINGERPRINT,
+      confirmation: 'ARM LIVE',
+    })],
   ])('rejects %s without coercion', (_label, callback) => {
     expectProtocolError(callback, FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_COMMAND)
   })
@@ -254,7 +267,7 @@ describe('production futures renderer status parser', () => {
       liveAuthorized: true,
       configured: true,
       account: { alias: 'reviewed-account-1', fingerprint: FINGERPRINT },
-      caps: { dailyUsedNotionalUsdt: '10000.000000000000000001' },
+      caps: { dailyUsedNotionalUsdt: '10.000000000000000001' },
       killSwitch: { engaged: true },
     })
     expect(Object.isFrozen(parsed)).toBe(true)
@@ -302,6 +315,7 @@ describe('production futures renderer status parser', () => {
         cancelAllOpenOrders: false,
         closePositions: false,
         engageKillSwitch: false,
+        disengageKillSwitch: false,
         code: 'FUTURES_PRODUCTION_LIVE_AUTHORIZATION_REJECTED',
       },
       intent: null,
@@ -332,13 +346,21 @@ describe('production futures renderer status parser', () => {
   it('rejects impossible capability, cap, recovery, and revision combinations', () => {
     const cases = [
       status({ liveAuthorized: false }),
-      status({ caps: { ...status().caps, dailyUsedNotionalUsdt: '50000.000000000000000001' } }),
+      status({ caps: { ...status().caps, dailyUsedNotionalUsdt: '50.000000000000000001' } }),
+      status({ caps: { ...status().caps, maxLeverage: 2 } }),
+      status({ caps: { ...status().caps, maxOrderNotionalUsdt: '10.000000000000000001' } }),
+      status({ caps: { ...status().caps, maxDailyNotionalUsdt: '50.000000000000000001' } }),
       status({ caps: { ...status().caps, allowedSymbols: ['BTCUSDT', 'BTCUSDT'] } }),
       status({ caps: { ...status().caps, allowedSymbols: ['btcusdt'] } }),
       status({ caps: { ...status().caps, minAvailableBalanceUsdt: '0' } }),
       status({ caps: { ...status().caps, minLiquidationDistanceBps: '999' } }),
       status({ caps: { ...status().caps, minLiquidationDistanceBps: '10001' } }),
       status({ recovery: { required: false, state: 'blocked', code: 'FUTURES_PRODUCTION_BLOCKED' } }),
+      status({ capabilities: { ...status().capabilities, engageKillSwitch: true } }),
+      status({
+        killSwitch: { ...status().killSwitch, engaged: false },
+        capabilities: { ...status().capabilities, disengageKillSwitch: true },
+      }),
       status({ intent: { ...status().intent, revision: '9' } }),
     ]
     for (const value of cases) {

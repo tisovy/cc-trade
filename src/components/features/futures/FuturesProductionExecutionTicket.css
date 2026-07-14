@@ -56,10 +56,11 @@
   white-space: nowrap;
 }
 
-.futures-production-live.is-authorized {
+.futures-production-live.is-armed {
   border-color: #ad3b3b;
   background: #4b1515;
   color: #fff;
+  box-shadow: 0 0 10px rgba(255, 70, 70, 0.35);
 }
 
 .futures-production-execution-body {
@@ -116,6 +117,22 @@
   font-size: 9px;
   font-weight: 900;
   letter-spacing: 0.05em;
+}
+
+.futures-production-action > p {
+  margin: 0;
+  color: var(--production-muted);
+  font-size: 9px;
+  line-height: 1.4;
+}
+
+.futures-production-action.is-arm {
+  border: 2px solid #c74444;
+  background: rgba(142, 20, 20, 0.18);
+}
+
+.futures-production-action.is-arm h3 {
+  color: #ff8e8e;
 }
 
 .futures-production-card-heading {
@@ -226,7 +243,8 @@
 }
 
 .futures-production-action button.is-final,
-.futures-production-action.is-kill button {
+.futures-production-action.is-kill button,
+.futures-production-action.is-arm button {
   border-color: #a63d3d;
   background: #571b1b;
   color: #fff;

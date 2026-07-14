@@ -22,9 +22,9 @@ const validEnvironment = () => ({
         createFuturesProductionApiKeyFingerprint(API_KEY)
     ),
     [FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.ALLOWED_SYMBOLS]: 'BTCUSDT,ETHUSDT',
-    [FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MAX_LEVERAGE]: '3',
-    [FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MAX_ORDER_NOTIONAL_USDT]: '10000',
-    [FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MAX_DAILY_NOTIONAL_USDT]: '50000',
+    [FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MAX_LEVERAGE]: '1',
+    [FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MAX_ORDER_NOTIONAL_USDT]: '10',
+    [FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MAX_DAILY_NOTIONAL_USDT]: '50',
     [FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MIN_AVAILABLE_BALANCE_USDT]: '100.00',
     [FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MIN_LIQUIDATION_DISTANCE_BPS]: '1000',
     [FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.KILL_SWITCH_POLICY]: (
@@ -55,9 +55,9 @@ describe('captureFuturesProductionExecutionConfig', () => {
             },
             policy: {
                 allowedSymbols: ['BTCUSDT', 'ETHUSDT'],
-                maxLeverage: 3,
-                maxOrderNotionalUsdt: '10000',
-                maxDailyNotionalUsdt: '50000',
+                maxLeverage: 1,
+                maxOrderNotionalUsdt: '10',
+                maxDailyNotionalUsdt: '50',
                 killSwitchPolicy: FUTURES_PRODUCTION_EXECUTION_KILL_SWITCH_POLICY,
             },
         });
@@ -131,10 +131,10 @@ describe('captureFuturesProductionExecutionConfig', () => {
     it.each([
         ['duplicate symbols', FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.ALLOWED_SYMBOLS, 'BTCUSDT,BTCUSDT'],
         ['lowercase symbol', FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.ALLOWED_SYMBOLS, 'btcusdt'],
-        ['leverage above ceiling', FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MAX_LEVERAGE, '4'],
-        ['order cap above ceiling', FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MAX_ORDER_NOTIONAL_USDT, '10000.000000000000000001'],
-        ['daily cap above ceiling', FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MAX_DAILY_NOTIONAL_USDT, '50000.000000000000000001'],
-        ['order cap above daily cap', FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MAX_DAILY_NOTIONAL_USDT, '9999'],
+        ['leverage above ceiling', FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MAX_LEVERAGE, '2'],
+        ['order cap above ceiling', FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MAX_ORDER_NOTIONAL_USDT, '10.000000000000000001'],
+        ['daily cap above ceiling', FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MAX_DAILY_NOTIONAL_USDT, '50.000000000000000001'],
+        ['order cap above daily cap', FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MAX_DAILY_NOTIONAL_USDT, '9'],
         ['zero balance', FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MIN_AVAILABLE_BALANCE_USDT, '0'],
         ['liquidation below floor', FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MIN_LIQUIDATION_DISTANCE_BPS, '999'],
         ['kill policy alias', FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.KILL_SWITCH_POLICY, 'persistent'],

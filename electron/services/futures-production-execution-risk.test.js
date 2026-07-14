@@ -12,9 +12,9 @@ const credentialBinding = 'b'.repeat(64);
 const createInput = () => ({
     policy: {
         allowedSymbols: ['BTCUSDT'],
-        maxLeverage: 3,
-        maxOrderNotionalUsdt: '100',
-        maxDailyNotionalUsdt: '500',
+        maxLeverage: 1,
+        maxOrderNotionalUsdt: '10',
+        maxDailyNotionalUsdt: '50',
         minAvailableBalanceUsdt: '100',
         minLiquidationDistanceBps: '1000',
         killSwitchPolicy: 'v1-persistent-block-new-exposure',
@@ -44,12 +44,12 @@ const createInput = () => ({
             symbol: 'BTCUSDT',
             marginType: 'ISOLATED',
             isAutoAddMargin: false,
-            leverage: 3,
+            leverage: 1,
             maxNotionalValue: '1000000',
         },
         markPrice: {
             symbol: 'BTCUSDT',
-            markPrice: '100.00',
+            markPrice: '10.00',
         },
         position: {
             symbol: 'BTCUSDT',
@@ -97,7 +97,7 @@ const createInput = () => ({
         type: 'LIMIT',
         timeInForce: 'GTC',
         quantity: '1',
-        price: '100.00',
+        price: '10.00',
         reduceOnly: false,
     },
     killSwitchEngaged: false,
@@ -110,26 +110,26 @@ describe('production Futures exact risk evaluator', () => {
         expect(result).toEqual({
             ok: true,
             classification: FUTURES_PRODUCTION_EXECUTION_RISK_CLASSIFICATIONS.OPENING,
-            notionalUsdt: '100.00',
-            conservativePrice: '100.00',
+            notionalUsdt: '10.00',
+            conservativePrice: '10.00',
             dailyNotionalBeforeUsdt: '0',
-            dailyNotionalAfterUsdt: '100.00',
-            observedLeverage: 3,
+            dailyNotionalAfterUsdt: '10.00',
+            observedLeverage: 1,
         });
         expect(Object.isFrozen(result)).toBe(true);
     });
 
     it('uses max(limit, mark) and rejects one exact unit over the order cap', () => {
         const equality = createInput();
-        equality.draft.price = '99.99';
+        equality.draft.price = '9.99';
         expect(evaluateFuturesProductionExecutionRisk(equality)).toMatchObject({
             ok: true,
-            notionalUsdt: '100.00',
-            conservativePrice: '100.00',
+            notionalUsdt: '10.00',
+            conservativePrice: '10.00',
         });
 
         const over = createInput();
-        over.draft.price = '100.01';
+        over.draft.price = '10.01';
         expect(evaluateFuturesProductionExecutionRisk(over)).toEqual({
             ok: false,
             code: FUTURES_PRODUCTION_EXECUTION_RISK_CODES.ORDER_NOTIONAL_REJECTED,
@@ -139,16 +139,16 @@ describe('production Futures exact risk evaluator', () => {
 
     it('passes exact daily equality and rejects one exact unit over without mutation', () => {
         const equality = createInput();
-        equality.dailyNotionalUsed = '400';
+        equality.dailyNotionalUsed = '40';
         const before = structuredClone(equality);
         expect(evaluateFuturesProductionExecutionRisk(equality)).toMatchObject({
             ok: true,
-            dailyNotionalAfterUsdt: '500.00',
+            dailyNotionalAfterUsdt: '50.00',
         });
         expect(equality).toEqual(before);
 
         const over = createInput();
-        over.dailyNotionalUsed = '400.01';
+        over.dailyNotionalUsed = '40.01';
         expect(evaluateFuturesProductionExecutionRisk(over)).toEqual({
             ok: false,
             code: FUTURES_PRODUCTION_EXECUTION_RISK_CODES.DAILY_NOTIONAL_REJECTED,
@@ -173,7 +173,7 @@ describe('production Futures exact risk evaluator', () => {
     it('classifies increasing and rejects every non-reduce opposite-side order', () => {
         const increasing = createInput();
         increasing.snapshot.position.positionAmt = '2';
-        increasing.snapshot.position.liquidationPrice = '50';
+        increasing.snapshot.position.liquidationPrice = '5';
         expect(evaluateFuturesProductionExecutionRisk(increasing)).toMatchObject({
             ok: true,
             classification: FUTURES_PRODUCTION_EXECUTION_RISK_CLASSIFICATIONS.INCREASING,
@@ -181,7 +181,7 @@ describe('production Futures exact risk evaluator', () => {
 
         const ambiguous = createInput();
         ambiguous.snapshot.position.positionAmt = '2';
-        ambiguous.snapshot.position.liquidationPrice = '50';
+        ambiguous.snapshot.position.liquidationPrice = '5';
         ambiguous.draft.side = 'SELL';
         expect(evaluateFuturesProductionExecutionRisk(ambiguous)).toEqual({
             ok: false,
@@ -202,7 +202,7 @@ describe('production Futures exact risk evaluator', () => {
         const reducing = createInput();
         reducing.killSwitchEngaged = true;
         reducing.snapshot.position.positionAmt = '2';
-        reducing.snapshot.position.liquidationPrice = '50';
+        reducing.snapshot.position.liquidationPrice = '5';
         reducing.draft = {
             symbol: 'BTCUSDT',
             side: 'SELL',
@@ -215,7 +215,7 @@ describe('production Futures exact risk evaluator', () => {
         expect(evaluateFuturesProductionExecutionRisk(reducing)).toMatchObject({
             ok: true,
             classification: FUTURES_PRODUCTION_EXECUTION_RISK_CLASSIFICATIONS.REDUCING,
-            notionalUsdt: '100.00',
+            notionalUsdt: '10.00',
         });
     });
 
@@ -232,7 +232,7 @@ describe('production Futures exact risk evaluator', () => {
     ) => {
         const input = createInput();
         input.snapshot.position.positionAmt = amount;
-        input.snapshot.position.liquidationPrice = amount === '0' ? '0' : '50';
+        input.snapshot.position.liquidationPrice = amount === '0' ? '0' : '5';
         input.draft.side = side;
         input.draft.quantity = quantity;
         input.draft.reduceOnly = true;
@@ -245,7 +245,7 @@ describe('production Futures exact risk evaluator', () => {
 
     it('enforces account-level maximum leverage independently of exchange maximum', () => {
         const input = createInput();
-        input.policy.maxLeverage = 2;
+        input.snapshot.symbolConfig.leverage = 2;
         expect(evaluateFuturesProductionExecutionRisk(input)).toEqual({
             ok: false,
             code: FUTURES_PRODUCTION_EXECUTION_RISK_CODES.LEVERAGE_REJECTED,
@@ -255,7 +255,7 @@ describe('production Futures exact risk evaluator', () => {
 
     it('uses exact price, percent-price, lot-size, and minimum-notional filters', () => {
         const badTick = createInput();
-        badTick.draft.price = '100.001';
+        badTick.draft.price = '10.001';
         expect(evaluateFuturesProductionExecutionRisk(badTick)).toMatchObject({
             code: FUTURES_PRODUCTION_EXECUTION_RISK_CODES.ORDER_REJECTED,
             reason: FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.PRICE_FILTER,
@@ -276,8 +276,8 @@ describe('production Futures exact risk evaluator', () => {
         });
 
         const outsidePercent = createInput();
-        outsidePercent.draft.price = '120.01';
-        outsidePercent.policy.maxOrderNotionalUsdt = '10000';
+        outsidePercent.draft.price = '12.01';
+        outsidePercent.draft.quantity = '0.5';
         expect(evaluateFuturesProductionExecutionRisk(outsidePercent)).toMatchObject({
             code: FUTURES_PRODUCTION_EXECUTION_RISK_CODES.ORDER_REJECTED,
             reason: FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.PRICE_FILTER,
@@ -287,12 +287,12 @@ describe('production Futures exact risk evaluator', () => {
     it('passes exact liquidation-distance equality and rejects one unit inside', () => {
         const equality = createInput();
         equality.snapshot.position.positionAmt = '1';
-        equality.snapshot.position.liquidationPrice = '90';
+        equality.snapshot.position.liquidationPrice = '9';
         expect(evaluateFuturesProductionExecutionRisk(equality)).toMatchObject({ ok: true });
 
         const inside = createInput();
         inside.snapshot.position.positionAmt = '1';
-        inside.snapshot.position.liquidationPrice = '90.00000001';
+        inside.snapshot.position.liquidationPrice = '9.00000001';
         expect(evaluateFuturesProductionExecutionRisk(inside)).toEqual({
             ok: false,
             code: FUTURES_PRODUCTION_EXECUTION_RISK_CODES.LIQUIDATION_REJECTED,
@@ -302,8 +302,8 @@ describe('production Futures exact risk evaluator', () => {
 
     it.each([
         ['missing long liquidation', '1', '0'],
-        ['wrong-side long liquidation', '1', '110'],
-        ['wrong-side short liquidation', '-1', '90'],
+        ['wrong-side long liquidation', '1', '11'],
+        ['wrong-side short liquidation', '-1', '9'],
     ])('rejects unsafe %s state', (_label, positionAmt, liquidationPrice) => {
         const input = createInput();
         input.snapshot.position.positionAmt = positionAmt;
@@ -333,7 +333,7 @@ describe('production Futures exact risk evaluator', () => {
 
     it('rejects invalid hard policy, accessor fields, extra fields, and numeric decimals', () => {
         const overHardLimit = createInput();
-        overHardLimit.policy.maxOrderNotionalUsdt = '10000.01';
+        overHardLimit.policy.maxOrderNotionalUsdt = '10.000000000000000001';
         expect(evaluateFuturesProductionExecutionRisk(overHardLimit)).toMatchObject({
             code: FUTURES_PRODUCTION_EXECUTION_RISK_CODES.POLICY_REJECTED,
         });
@@ -341,7 +341,7 @@ describe('production Futures exact risk evaluator', () => {
         const accessor = createInput();
         Object.defineProperty(accessor.policy, 'maxLeverage', {
             enumerable: true,
-            get: () => 3,
+            get: () => 1,
         });
         expect(evaluateFuturesProductionExecutionRisk(accessor)).toMatchObject({
             code: FUTURES_PRODUCTION_EXECUTION_RISK_CODES.POLICY_REJECTED,

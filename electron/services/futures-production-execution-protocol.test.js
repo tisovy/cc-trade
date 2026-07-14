@@ -65,12 +65,12 @@ const createStatusInput = (overrides = {}) => ({
     account: { alias: 'reviewed-account-1', fingerprint: FINGERPRINT },
     caps: {
         allowedSymbols: ['BTCUSDT', 'ETHUSDT'],
-        maxLeverage: 3,
-        maxOrderNotionalUsdt: '10000.0000',
-        maxDailyNotionalUsdt: '50000.0000',
+        maxLeverage: 1,
+        maxOrderNotionalUsdt: '10.0000',
+        maxDailyNotionalUsdt: '50.0000',
         minAvailableBalanceUsdt: '10.0000',
         minLiquidationDistanceBps: '1000',
-        dailyUsedNotionalUsdt: '10000.000000000000000001',
+        dailyUsedNotionalUsdt: '10.000000000000000001',
         utcDay: '2026-07-13',
     },
     killSwitch: {
@@ -82,6 +82,7 @@ const createStatusInput = (overrides = {}) => ({
         cancelAllOpenOrders: true,
         closePositions: true,
         engageKillSwitch: false,
+        disengageKillSwitch: false,
         code: 'FUTURES_PRODUCTION_GATES_SATISFIED',
     },
     intent: {
@@ -118,6 +119,7 @@ describe('production futures command protocol', () => {
         FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_CANCEL_ALL_OPEN_ORDERS_INTENT,
         FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_CLOSE_POSITIONS_INTENT,
         FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_ENGAGE_KILL_SWITCH_INTENT,
+        FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_DISENGAGE_KILL_SWITCH_INTENT,
     ])('parses exact production-only fixed-identity action %s', (action) => {
         const command = baseCommand(action);
         expect(parseFuturesProductionExecutionCommand(JSON.stringify(command), {
@@ -148,6 +150,7 @@ describe('production futures command protocol', () => {
         FUTURES_PRODUCTION_EXECUTION_ACTIONS.CANCEL_ALL_OPEN_ORDERS,
         FUTURES_PRODUCTION_EXECUTION_ACTIONS.CLOSE_POSITIONS,
         FUTURES_PRODUCTION_EXECUTION_ACTIONS.ENGAGE_KILL_SWITCH,
+        FUTURES_PRODUCTION_EXECUTION_ACTIONS.DISENGAGE_KILL_SWITCH,
     ])('parses exact one-use final action %s without mutable financial fields', (action) => {
         const command = finalCommand(action);
         expect(parseFuturesProductionExecutionCommand(JSON.stringify(command), {
@@ -258,7 +261,7 @@ describe('production futures backend-owned status protocol', () => {
             liveAuthorized: true,
             configured: true,
             account: { alias: 'reviewed-account-1', fingerprint: FINGERPRINT },
-            caps: { dailyUsedNotionalUsdt: '10000.000000000000000001' },
+            caps: { dailyUsedNotionalUsdt: '10.000000000000000001' },
             killSwitch: { engaged: true },
             recovery: { required: false, state: 'healthy' },
         });
@@ -279,6 +282,7 @@ describe('production futures backend-owned status protocol', () => {
                 cancelAllOpenOrders: false,
                 closePositions: false,
                 engageKillSwitch: false,
+                disengageKillSwitch: false,
                 code: 'FUTURES_PRODUCTION_LIVE_AUTHORIZATION_REJECTED',
             },
             intent: null,
@@ -337,18 +341,38 @@ describe('production futures backend-owned status protocol', () => {
         expectProtocolError(() => createFuturesProductionExecutionStatus(createStatusInput({
             caps: {
                 ...createStatusInput().caps,
-                dailyUsedNotionalUsdt: '50000.000000000000000001',
+                dailyUsedNotionalUsdt: '50.000000000000000001',
             },
         })), FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS);
         for (const invalidCaps of [
             { ...createStatusInput().caps, allowedSymbols: ['BTCUSDT', 'BTCUSDT'] },
             { ...createStatusInput().caps, allowedSymbols: ['btcusdt'] },
+            { ...createStatusInput().caps, maxLeverage: 2 },
+            { ...createStatusInput().caps, maxOrderNotionalUsdt: '10.000000000000000001' },
+            { ...createStatusInput().caps, maxDailyNotionalUsdt: '50.000000000000000001' },
             { ...createStatusInput().caps, minAvailableBalanceUsdt: '0' },
             { ...createStatusInput().caps, minLiquidationDistanceBps: '999' },
             { ...createStatusInput().caps, minLiquidationDistanceBps: '10001' },
         ]) {
             expectProtocolError(
                 () => createFuturesProductionExecutionStatus(createStatusInput({ caps: invalidCaps })),
+                FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS,
+            );
+        }
+        for (const input of [
+            createStatusInput({
+                capabilities: { ...createStatusInput().capabilities, engageKillSwitch: true },
+            }),
+            createStatusInput({
+                killSwitch: { ...createStatusInput().killSwitch, engaged: false },
+                capabilities: {
+                    ...createStatusInput().capabilities,
+                    disengageKillSwitch: true,
+                },
+            }),
+        ]) {
+            expectProtocolError(
+                () => createFuturesProductionExecutionStatus(input),
                 FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS,
             );
         }

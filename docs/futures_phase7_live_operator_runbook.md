@@ -22,9 +22,9 @@ FUTURES_PRODUCTION_EXECUTION_OPERATOR_ACKNOWLEDGEMENT=I_UNDERSTAND_REAL_USDT_FUT
 FUTURES_PRODUCTION_EXECUTION_ACCOUNT_ALIAS=<exact signed Binance account alias>
 FUTURES_PRODUCTION_EXECUTION_API_KEY_FINGERPRINT=<lowercase SHA-256 of the exact API key>
 FUTURES_PRODUCTION_EXECUTION_ALLOWED_SYMBOLS=BTCUSDT
-FUTURES_PRODUCTION_EXECUTION_MAX_LEVERAGE=<1..3>
-FUTURES_PRODUCTION_EXECUTION_MAX_ORDER_NOTIONAL_USDT=<exact positive decimal, max 10000>
-FUTURES_PRODUCTION_EXECUTION_MAX_DAILY_NOTIONAL_USDT=<exact positive decimal, max 50000>
+FUTURES_PRODUCTION_EXECUTION_MAX_LEVERAGE=1
+FUTURES_PRODUCTION_EXECUTION_MAX_ORDER_NOTIONAL_USDT=<exact positive decimal, max 10>
+FUTURES_PRODUCTION_EXECUTION_MAX_DAILY_NOTIONAL_USDT=<exact positive decimal, max 50>
 FUTURES_PRODUCTION_EXECUTION_MIN_AVAILABLE_BALANCE_USDT=<exact positive decimal>
 FUTURES_PRODUCTION_EXECUTION_MIN_LIQUIDATION_DISTANCE_BPS=<1000..10000>
 FUTURES_PRODUCTION_EXECUTION_KILL_SWITCH_POLICY=v1-persistent-block-new-exposure
@@ -47,18 +47,13 @@ Unknown `FUTURES_PRODUCTION_*` keys, alternate spelling, whitespace, coercion, a
 2. **Testnet launch:** configure Phase 5/6 exactly as documented in `futures_phase6_testnet_execution_design.md`, still without any production values. Select blue `Futures Testnet`; verify that Spot controls disappear and only read-only/testnet execution panels exist.
 3. **Stop the app completely.** Production configuration is captured once before the first `BrowserWindow`; it is not hot-loaded.
 4. **Live readiness launch:** inject the complete production environment through the trusted launcher and start normally, with no operator-action argument. A valid live configuration performs exact signed production identity/recovery GETs during startup. It does not place, cancel, or close an order automatically. The persistent kill switch starts engaged.
-5. Select red `Futures Live`. Verify the backend-owned account alias and full key fingerprint, allowlist, leverage/order/daily caps, UTC usage, `LIVE AUTHORIZED`, recovery state, and `KILL SWITCH ENGAGED`. The Phase 5 read-only and Phase 6 testnet tickets must not be present.
+5. Select red `Futures Live`. Verify the backend-owned account alias and full key fingerprint, allowlist, leverage/order/daily caps, UTC usage, `CONFIGURED`, `LIVE LOCKED`, healthy recovery, and `KILL SWITCH ENGAGED`. The Phase 5 read-only and Phase 6 testnet tickets must not be present.
 6. Resolve any rejected identity, storage, recovery, rate-pause, credential-binding, or cap state before proceeding. Do not bypass it by deleting state or rotating to a fresh directory.
-7. Only after the displayed identity/caps are approved, stop and relaunch with the exact backend-only action below if opening exposure is intentionally required:
-
-   ```sh
-   ./node_modules/.bin/electron dist-electron/main.js \
-     --futures-production-operator-action=disengageKillSwitch
-   ```
-
-   The action contains no secret, is removed from `process.argv` before the renderer exists, requires the captured recovery authorization, is durably audited, and fails startup if blocked. The only other accepted values are `engageKillSwitch` and `reconcile`.
-8. Return to the red workspace and verify `KILL SWITCH DISENGAGED`. Every real order, cancel-all, close-positions, and kill-switch action still requires its own backend one-use intent and exact typed confirmation. Never interpret an acknowledgement, partial result, timeout, or unknown result as a completed safety action.
+7. Only after the displayed identity and exact 1x / 10 USDT / 50 USDT caps are approved, click `Prepare ARM LIVE intent`. Type exactly `ARM LIVE FUTURES 1X 10 USDT 50 USDT DAILY`, then click `ARM LIVE FUTURES`. Enter never submits. The backend must report `LIVE ARMED`, `KILL SWITCH DISENGAGED`, and `kill_switch_disengaged`; the UI does not place, cancel, or close anything during arming.
+8. Every real order, cancel-all, close-positions, and kill-switch action still requires its own backend one-use intent and exact typed confirmation. Never interpret an acknowledgement, partial result, timeout, or unknown result as a completed safety action. At the 10 USDT ceiling, exchange quantity/minimum-notional filters may make an allowlisted symbol unavailable; that is a local rejection, not a reason to bypass or raise a cap without a new review.
 9. Re-engage the kill switch from its dedicated production UI action or by a reviewed backend startup action. Engaging it blocks new exposure; it does not imply cancellation or closure.
+
+The backend `--futures-production-operator-action=disengageKillSwitch` path remains an authorized operational-recovery mechanism, not the normal arming workflow. `reconcile` remains backend-only.
 
 ## Failure and recovery
 

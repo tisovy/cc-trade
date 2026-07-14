@@ -4,7 +4,10 @@ import {
     parseNonNegativeExactDecimal,
     parsePositiveExactDecimal,
 } from './futures-production-execution-decimal.js';
-import { FUTURES_PRODUCTION_EXECUTION_KILL_SWITCH_POLICY } from './futures-production-execution-config.js';
+import {
+    FUTURES_PRODUCTION_EXECUTION_COMPILED_CEILINGS,
+    FUTURES_PRODUCTION_EXECUTION_KILL_SWITCH_POLICY,
+} from './futures-production-execution-config.js';
 
 export const FUTURES_PRODUCTION_EXECUTION_PROTOCOL_VERSION = 1;
 export const FUTURES_PRODUCTION_EXECUTION_CHANNEL_ID = 'futures-production-execution';
@@ -28,6 +31,10 @@ export const FUTURES_PRODUCTION_EXECUTION_ACTIONS = Object.freeze({
         'futures.production.prepareEngageKillSwitchIntent'
     ),
     ENGAGE_KILL_SWITCH: 'futures.production.engageKillSwitch',
+    PREPARE_DISENGAGE_KILL_SWITCH_INTENT: (
+        'futures.production.prepareDisengageKillSwitchIntent'
+    ),
+    DISENGAGE_KILL_SWITCH: 'futures.production.disengageKillSwitch',
     STATUS: 'futures.production.status',
 });
 
@@ -36,6 +43,7 @@ export const FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS = Object.freeze({
     CANCEL_ALL_OPEN_ORDERS: 'cancel_all_open_orders',
     CLOSE_POSITIONS: 'close_positions',
     ENGAGE_KILL_SWITCH: 'engage_kill_switch',
+    DISENGAGE_KILL_SWITCH: 'disengage_kill_switch',
 });
 
 export const FUTURES_PRODUCTION_EXECUTION_CONFIRMATIONS = Object.freeze({
@@ -48,6 +56,9 @@ export const FUTURES_PRODUCTION_EXECUTION_CONFIRMATIONS = Object.freeze({
     ),
     [FUTURES_PRODUCTION_EXECUTION_ACTIONS.ENGAGE_KILL_SWITCH]: (
         'ENGAGE REAL FUTURES KILL SWITCH'
+    ),
+    [FUTURES_PRODUCTION_EXECUTION_ACTIONS.DISENGAGE_KILL_SWITCH]: (
+        'ARM LIVE FUTURES 1X 10 USDT 50 USDT DAILY'
     ),
 });
 
@@ -73,6 +84,7 @@ export const FUTURES_PRODUCTION_EXECUTION_STATES = Object.freeze({
     CONFIRMED_CANCELED: 'confirmed_canceled',
     CONFIRMED_CLOSED: 'confirmed_closed',
     KILL_SWITCH_ENGAGED: 'kill_switch_engaged',
+    KILL_SWITCH_DISENGAGED: 'kill_switch_disengaged',
     PARTIAL: 'partial',
     RECONCILIATION_UNAVAILABLE: 'reconciliation_unavailable',
     RECOVERY_REQUIRED: 'recovery_required',
@@ -165,6 +177,7 @@ const CAPABILITY_FIELDS = Object.freeze([
     'cancelAllOpenOrders',
     'closePositions',
     'engageKillSwitch',
+    'disengageKillSwitch',
     'code',
 ]);
 const INTENT_FIELDS = Object.freeze(['requestId', 'kind', 'revision', 'expiresAt']);
@@ -187,6 +200,7 @@ const PREPARE_ACTIONS = new Set([
     FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_CANCEL_ALL_OPEN_ORDERS_INTENT,
     FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_CLOSE_POSITIONS_INTENT,
     FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_ENGAGE_KILL_SWITCH_INTENT,
+    FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_DISENGAGE_KILL_SWITCH_INTENT,
 ]);
 const SESSION_ACTIONS = new Set([
     FUTURES_PRODUCTION_EXECUTION_ACTIONS.SUBSCRIBE_STATUS,
@@ -640,7 +654,7 @@ const normalizeCaps = (value) => {
     const allowedSymbols = normalizeCapSymbols(caps.allowedSymbols);
     if (!Number.isSafeInteger(caps.maxLeverage)
         || caps.maxLeverage < 1
-        || caps.maxLeverage > 3
+        || caps.maxLeverage > FUTURES_PRODUCTION_EXECUTION_COMPILED_CEILINGS.maxLeverage
         || typeof caps.minLiquidationDistanceBps !== 'string'
         || !/^[1-9][0-9]{3,4}$/.test(caps.minLiquidationDistanceBps)
         || BigInt(caps.minLiquidationDistanceBps) < 1000n
@@ -653,7 +667,20 @@ const normalizeCaps = (value) => {
         const daily = parsePositiveExactDecimal(caps.maxDailyNotionalUsdt);
         parsePositiveExactDecimal(caps.minAvailableBalanceUsdt);
         const used = parseNonNegativeExactDecimal(caps.dailyUsedNotionalUsdt);
-        if (compareExactDecimals(used, daily) > 0 || compareExactDecimals(order, daily) > 0) {
+        if (compareExactDecimals(
+            order,
+            parsePositiveExactDecimal(
+                FUTURES_PRODUCTION_EXECUTION_COMPILED_CEILINGS.maxOrderNotionalUsdt,
+            ),
+        ) > 0
+            || compareExactDecimals(
+                daily,
+                parsePositiveExactDecimal(
+                    FUTURES_PRODUCTION_EXECUTION_COMPILED_CEILINGS.maxDailyNotionalUsdt,
+                ),
+            ) > 0
+            || compareExactDecimals(used, daily) > 0
+            || compareExactDecimals(order, daily) > 0) {
             fail(FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS);
         }
     } catch (error) {
@@ -686,7 +713,7 @@ const normalizeCapabilities = (value) => {
         CAPABILITY_FIELDS,
         FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS,
     );
-    if (CAPABILITY_FIELDS.slice(0, 4).some((field) => typeof capabilities[field] !== 'boolean')
+    if (CAPABILITY_FIELDS.slice(0, -1).some((field) => typeof capabilities[field] !== 'boolean')
         || typeof capabilities.code !== 'string'
         || !SAFE_CODE_PATTERN.test(capabilities.code)) {
         fail(FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS);
@@ -756,6 +783,7 @@ const validateAttemptMatrix = (acknowledgement, state) => {
         states.CONFIRMED_CANCELED,
         states.CONFIRMED_CLOSED,
         states.KILL_SWITCH_ENGAGED,
+        states.KILL_SWITCH_DISENGAGED,
     ]);
     const unknownStates = new Set([
         states.RESULT_UNKNOWN,
@@ -856,7 +884,7 @@ const normalizeStatusObject = (value) => {
     const attempt = normalizeAttempt(status.attempt);
     const reconciliation = normalizeReconciliation(status.reconciliation);
     const recovery = normalizeRecovery(status.recovery);
-    const anyCapability = CAPABILITY_FIELDS.slice(0, 4).some((field) => capabilities[field]);
+    const anyCapability = CAPABILITY_FIELDS.slice(0, -1).some((field) => capabilities[field]);
     if ((status.configured && (account === null || caps === null))
         || (!status.configured && (account !== null || caps !== null))
         || (anyCapability && (!status.liveAuthorized
@@ -864,6 +892,8 @@ const normalizeStatusObject = (value) => {
             || recovery.required
             || account === null
             || caps === null))
+        || (capabilities.engageKillSwitch && killSwitch.engaged)
+        || (capabilities.disengageKillSwitch && !killSwitch.engaged)
         || (intent !== null
             && compareFuturesProductionExecutionRevisions(intent.revision, status.revision) > 0)
         || (attempt !== null
