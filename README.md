@@ -38,8 +38,15 @@ npm install
 # Start the Vite dev server (web mode)
 npm run dev
 
-# Start with Electron
+# Start Electron with the normal operator configuration. If BK is configured,
+# this may connect to real Binance Spot market-data/account endpoints.
 npm run e
+
+# Start Electron persistently with credentials cleared and deterministic fakes
+npm run e:safe
+
+# Run the bounded fake-only Electron readiness smoke (exits automatically)
+npm run e:smoke
 ```
 
 The app will be available at `http://localhost:5174` in web mode.

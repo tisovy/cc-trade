@@ -328,11 +328,18 @@ const safeDevMain = fs.existsSync(safeDevMainPath) ? fs.readFileSync(safeDevMain
 const smokeMainPath = path.join(ROOT, 'electron/main.smoke.js');
 const smokeMain = fs.existsSync(smokeMainPath) ? fs.readFileSync(smokeMainPath, 'utf8') : '';
 const exactSafeDevMain = /^import '\.\/env-setup\.js'\s+await import\('\.\/main\.js'\)\s*$/;
-if (!/\bBUILD_MODE=safe-dev\b/.test(packageManifest.scripts?.e ?? '')
-    || /\bBUILD_MODE=smoke\b/.test(packageManifest.scripts?.e ?? '')
+const interactiveElectronScript = packageManifest.scripts?.e ?? '';
+const safeDevElectronScript = packageManifest.scripts?.['e:safe'] ?? '';
+if (/\bBUILD_MODE\s*=/.test(interactiveElectronScript)
+    || !/\bVITE_DEV_SERVER_URL=http:\/\/localhost:5174\b/.test(interactiveElectronScript)
+    || !/\bvite\b/.test(interactiveElectronScript)) {
+    fail('npm run e must use the normal persistent Electron entry for operator Spot data');
+}
+if (!/\bBUILD_MODE=safe-dev\b/.test(safeDevElectronScript)
+    || /\bBUILD_MODE=smoke\b/.test(safeDevElectronScript)
     || !exactSafeDevMain.test(safeDevMain)
     || /\b(?:SAFE_SMOKE|app\.quit)\b/.test(safeDevMain)) {
-    fail('npm run e must use the fake-only persistent Electron entry without a smoke exit');
+    fail('npm run e:safe must use the fake-only persistent Electron entry without a smoke exit');
 }
 if (!/\bBUILD_MODE=smoke\b/.test(packageManifest.scripts?.['e:smoke'] ?? '')
     || /\bBUILD_MODE=safe-dev\b/.test(packageManifest.scripts?.['e:smoke'] ?? '')
@@ -345,6 +352,9 @@ if (!/\bBUILD_MODE=smoke\b/.test(packageManifest.scripts?.['e:smoke'] ?? '')
 }
 
 const viteConfig = fs.readFileSync(path.join(ROOT, 'vite.config.js'), 'utf8');
+if (!/\?\s*['"]electron\/main\.safe-dev\.js['"]\s*:\s*['"]electron\/main\.js['"]/.test(viteConfig)) {
+    fail('Vite must map the default no-BUILD_MODE launch to the normal Electron main entry');
+}
 if (!/BUILD_MODE\s*===\s*['"]safe-dev['"]\s*\?\s*['"]electron\/main\.safe-dev\.js['"]/.test(viteConfig)) {
     fail('Vite must map safe-dev mode to the persistent fake-only Electron entry');
 }
