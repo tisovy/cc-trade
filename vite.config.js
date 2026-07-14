@@ -6,7 +6,9 @@ const electronMainEntry = process.env.BUILD_MODE === 'e2e'
   ? 'electron/main.e2e.js'
   : process.env.BUILD_MODE === 'smoke'
     ? 'electron/main.smoke.js'
-    : 'electron/main.js'
+    : process.env.BUILD_MODE === 'safe-dev'
+      ? 'electron/main.safe-dev.js'
+      : 'electron/main.js'
 
 // https://vite.dev/config/
 export default defineConfig({

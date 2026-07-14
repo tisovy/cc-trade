@@ -323,18 +323,34 @@ if (!phase8LocalConnector.includes(exactLocalUrlSource)
 }
 
 const packageManifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+const safeDevMainPath = path.join(ROOT, 'electron/main.safe-dev.js');
+const safeDevMain = fs.existsSync(safeDevMainPath) ? fs.readFileSync(safeDevMainPath, 'utf8') : '';
 const smokeMainPath = path.join(ROOT, 'electron/main.smoke.js');
 const smokeMain = fs.existsSync(smokeMainPath) ? fs.readFileSync(smokeMainPath, 'utf8') : '';
-if (!/\bBUILD_MODE=smoke\b/.test(packageManifest.scripts?.e ?? '')
+const exactSafeDevMain = /^import '\.\/env-setup\.js'\s+await import\('\.\/main\.js'\)\s*$/;
+if (!/\bBUILD_MODE=safe-dev\b/.test(packageManifest.scripts?.e ?? '')
+    || /\bBUILD_MODE=smoke\b/.test(packageManifest.scripts?.e ?? '')
+    || !exactSafeDevMain.test(safeDevMain)
+    || /\b(?:SAFE_SMOKE|app\.quit)\b/.test(safeDevMain)) {
+    fail('npm run e must use the fake-only persistent Electron entry without a smoke exit');
+}
+if (!/\bBUILD_MODE=smoke\b/.test(packageManifest.scripts?.['e:smoke'] ?? '')
+    || /\bBUILD_MODE=safe-dev\b/.test(packageManifest.scripts?.['e:smoke'] ?? '')
     || !smokeMain.trimStart().startsWith("import './env-setup.js'")
     || !smokeMain.includes("await import('./main.js')")
     || !smokeMain.includes('SAFE_SMOKE_READY')
     || !smokeMain.includes('authenticatedLoopback: true')
     || !smokeMain.includes('reactRootRendered: true')) {
-    fail('npm run e must load the production UI only after fake-only environment/network setup');
+    fail('npm run e:smoke must verify the production UI after fake-only environment/network setup');
 }
 
 const viteConfig = fs.readFileSync(path.join(ROOT, 'vite.config.js'), 'utf8');
+if (!/BUILD_MODE\s*===\s*['"]safe-dev['"]\s*\?\s*['"]electron\/main\.safe-dev\.js['"]/.test(viteConfig)) {
+    fail('Vite must map safe-dev mode to the persistent fake-only Electron entry');
+}
+if (!/BUILD_MODE\s*===\s*['"]smoke['"]\s*\?\s*['"]electron\/main\.smoke\.js['"]/.test(viteConfig)) {
+    fail('Vite must map smoke mode only to the bounded Electron smoke entry');
+}
 if (!/input:\s*['"]electron\/preload\.cjs['"]/.test(viteConfig)
     || !/format:\s*['"]cjs['"]/.test(viteConfig)
     || !/inlineDynamicImports:\s*true/.test(viteConfig)

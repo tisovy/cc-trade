@@ -3,7 +3,8 @@ import {
     installFuturesWorkstationNodeNetworkEscapeGuard,
 } from './futures-workstation-node-network-guard.js';
 
-// Force-clear credentials and network overrides for automated verification.
+// Force-clear credentials and network overrides for safe local launch and
+// automated verification.
 process.env.BK = '';
 process.env.BS = '';
 process.env.FUTURES_READ_MODE = 'mock';
