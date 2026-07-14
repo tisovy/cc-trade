@@ -190,8 +190,24 @@ for (const transportName of [PRODUCTION_TRANSPORT, TESTNET_TRANSPORT]) {
         || !/perMessageDeflate\s*:\s*false/.test(source)) {
         fail(`${transportName} does not pin the reviewed bounded WebSocket options`);
     }
-    if (/\b(?:headers|body|credentials|mode|cache|referrer|agent|dispatcher|proxy|socketFactory)\s*:/.test(source)) {
+    if (/\b(?:headers|body|credentials|mode|cache|referrer|dispatcher|proxy|socketFactory)\s*:/.test(source)) {
         fail(`${transportName} contains caller-controlled or credential-bearing network options`);
+    }
+    const fixedAgentAssignments = [...source.matchAll(/\bagent\s*:/g)].length;
+    const fixedProxyRequests = [...source.matchAll(/\bhttps\.request\s*\(/g)].length;
+    const environmentResolver = transportName === PRODUCTION_TRANSPORT
+        ? 'resolveProductionBackendProxy'
+        : 'resolveTestnetBackendProxy';
+    if (fixedAgentAssignments !== 2
+        || fixedProxyRequests !== 1
+        || !source.includes('agent: proxyAgent')
+        || !source.includes('{ agent: backendProxy.proxyAgent }')
+        || !source.includes('maxHeaderSize: FUTURES_WORKSTATION_JSON_LIMITS.HEADER_AGGREGATE_BYTES')
+        || !source.includes("errorCode: 'INVALID_PROXY_CONFIGURATION'")
+        || !source.includes(`const ${environmentResolver} = () =>`)
+        || !source.includes(`const backendProxy = ${environmentResolver}();`)
+        || !/createFutures(?:Production|Testnet)WorkstationReviewedTransport\s*=\s*\(\)\s*=>/.test(source)) {
+        fail(`${transportName} does not isolate its fixed backend-owned proxy agent`);
     }
 }
 

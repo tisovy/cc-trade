@@ -1,4 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
+import https from 'node:https';
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { FUTURES_TESTNET_WORKSTATION_FIXTURE } from './futures-testnet-workstation-fixtures.js';
 import { FUTURES_PRODUCTION_WORKSTATION_FIXTURE } from './futures-production-workstation-fixtures.js';
 
@@ -46,6 +48,26 @@ import {
 } from './futures-production-workstation-transport.js';
 
 const originalFetch = globalThis.fetch;
+const PROXY_ENVIRONMENT_KEYS = Object.freeze([
+    'https_proxy',
+    'HTTPS_PROXY',
+    'http_proxy',
+    'HTTP_PROXY',
+]);
+const originalProxyEnvironment = Object.freeze(Object.fromEntries(
+    PROXY_ENVIRONMENT_KEYS.map(key => [key, process.env[key]]),
+));
+for (const key of PROXY_ENVIRONMENT_KEYS) delete process.env[key];
+
+const restoreProxyEnvironment = () => {
+    for (const key of PROXY_ENVIRONMENT_KEYS) {
+        const original = originalProxyEnvironment[key];
+        if (original === undefined) delete process.env[key];
+        else process.env[key] = original;
+    }
+};
+
+afterAll(restoreProxyEnvironment);
 
 const responseFor = (url, fixture, overrides = {}) => {
     const parsed = new URL(url);
@@ -70,6 +92,33 @@ const responseFor = (url, fixture, overrides = {}) => {
         text: async () => text,
         ...overrides,
     };
+};
+
+const installProxyRequest = ({
+    body,
+    statusCode = 200,
+    headers = { 'content-type': 'application/json' },
+} = {}) => {
+    const calls = [];
+    vi.spyOn(https, 'request').mockImplementation((url, options, onResponse) => {
+        const request = new EventEmitter();
+        const response = new EventEmitter();
+        response.statusCode = statusCode;
+        response.headers = headers;
+        response.resume = vi.fn();
+        response.destroy = vi.fn();
+        request.end = vi.fn(() => {
+            onResponse(response);
+            queueMicrotask(() => {
+                if (statusCode !== 200) return;
+                response.emit('data', Buffer.from(body));
+                response.emit('end');
+            });
+        });
+        calls.push({ url, options, request, response });
+        return request;
+    });
+    return calls;
 };
 
 beforeEach(() => {
@@ -229,6 +278,115 @@ describe('reviewed environment-specific Futures workstation transports', () => {
         expect(disconnects).toEqual(['SOCKET_ERROR']);
         connection.close();
         expect(socketMock.instances.every(socket => socket.close.mock.calls.length === 1)).toBe(true);
+    });
+
+    it.each([
+        [
+            'Testnet',
+            createFuturesTestnetWorkstationReviewedTransport,
+            FUTURES_TESTNET_WORKSTATION_REST_ORIGIN,
+            FUTURES_TESTNET_WORKSTATION_WSS_ORIGIN,
+            FUTURES_TESTNET_WORKSTATION_FIXTURE,
+        ],
+        [
+            'production',
+            createFuturesProductionWorkstationReviewedTransport,
+            FUTURES_PRODUCTION_WORKSTATION_REST_ORIGIN,
+            FUTURES_PRODUCTION_WORKSTATION_WSS_ORIGIN,
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE,
+        ],
+    ])('routes %s REST and WSS through one backend-owned proxy agent', async (
+        _label,
+        createTransport,
+        restOrigin,
+        wssOrigin,
+        fixture,
+    ) => {
+        process.env.https_proxy = 'http://127.0.0.1:1080';
+        try {
+            globalThis.fetch = vi.fn();
+            const proxyCalls = installProxyRequest({ body: fixture.catalog });
+            const transport = createTransport();
+            await transport.loadExchangeInfo({
+                proxy: 'http://attacker.invalid',
+                dispatcher: {},
+                agent: {},
+            });
+            const connection = transport.connect({
+                symbol: 'BTCUSDT',
+                interval: '1m',
+                proxy: 'http://attacker.invalid',
+                agent: {},
+                onMessage: () => {},
+                onDisconnect: () => {},
+            });
+            expect(globalThis.fetch).not.toHaveBeenCalled();
+            expect(proxyCalls).toHaveLength(1);
+            expect(proxyCalls[0].url.href).toBe(`${restOrigin}/fapi/v1/exchangeInfo`);
+            expect(proxyCalls[0].options).toMatchObject({
+                method: 'GET',
+                maxHeaderSize: 16_384,
+            });
+            expect(proxyCalls[0].options.agent).toBeTruthy();
+            expect(proxyCalls[0].options.signal).toBeInstanceOf(AbortSignal);
+            expect(socketMock.instances).toHaveLength(2);
+            expect(socketMock.instances.every(socket => new URL(socket.url).origin === wssOrigin))
+                .toBe(true);
+            expect(socketMock.instances.every(
+                socket => socket.options.agent === proxyCalls[0].options.agent,
+            )).toBe(true);
+            expect(JSON.stringify(transport)).not.toContain('127.0.0.1');
+            const destroy = vi.spyOn(proxyCalls[0].options.agent, 'destroy');
+            connection.close();
+            transport.close();
+            expect(destroy).toHaveBeenCalledOnce();
+        } finally {
+            delete process.env.https_proxy;
+        }
+    });
+
+    it.each([
+        ['Testnet', createFuturesTestnetWorkstationReviewedTransport],
+        ['production', createFuturesProductionWorkstationReviewedTransport],
+    ])('fails closed before any %s dispatch when the backend proxy is invalid', async (
+        _label,
+        createTransport,
+    ) => {
+        process.env.https_proxy = 'ftp://127.0.0.1:1080';
+        try {
+            globalThis.fetch = vi.fn();
+            const transport = createTransport();
+            await expect(transport.loadExchangeInfo()).rejects.toMatchObject({
+                code: 'INVALID_PROXY_CONFIGURATION',
+            });
+            expect(() => transport.connect({
+                symbol: 'BTCUSDT',
+                interval: '1m',
+                onMessage: () => {},
+                onDisconnect: () => {},
+            })).toThrowError(expect.objectContaining({ code: 'INVALID_PROXY_CONFIGURATION' }));
+            expect(globalThis.fetch).not.toHaveBeenCalled();
+            expect(socketMock.instances).toHaveLength(0);
+        } finally {
+            delete process.env.https_proxy;
+        }
+    });
+
+    it('rejects redirects and oversized bodies on the production proxy path', async () => {
+        process.env.https_proxy = 'http://127.0.0.1:1080';
+        try {
+            globalThis.fetch = vi.fn();
+            installProxyRequest({ body: '', statusCode: 302, headers: { location: 'https://example.com' } });
+            await expect(createFuturesProductionWorkstationReviewedTransport().loadExchangeInfo())
+                .rejects.toMatchObject({ code: 'REDIRECT_REJECTED' });
+
+            vi.restoreAllMocks();
+            installProxyRequest({ body: 'x'.repeat((2 * 1024 * 1024) + 1) });
+            await expect(createFuturesProductionWorkstationReviewedTransport().loadExchangeInfo())
+                .rejects.toMatchObject({ code: 'RESPONSE_BODY_TOO_LARGE' });
+        } finally {
+            delete process.env.https_proxy;
+        }
     });
 
     it.each([

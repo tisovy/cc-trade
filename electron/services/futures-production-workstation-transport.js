@@ -1,3 +1,6 @@
+import https from 'node:https';
+import { HttpsProxyAgent } from 'https-proxy-agent';
+import { SocksProxyAgent } from 'socks-proxy-agent';
 import WebSocket from 'ws';
 import {
     FUTURES_WORKSTATION_BODY_LIMITS,
@@ -34,6 +37,7 @@ const ROUTE_SET = new Set(Object.values(FUTURES_PRODUCTION_WORKSTATION_ROUTES));
 const PUBLIC_READ_BUDGET = new FuturesWorkstationReadBudget();
 const SYMBOL_PATTERN = /^[A-Z0-9]{1,20}$/;
 const INTERVALS = new Set(['1m', '5m', '15m', '1h', '4h', '1d']);
+const PROXY_PROTOCOLS = new Set(['http:', 'https:', 'socks:', 'socks4:', 'socks4a:', 'socks5:', 'socks5h:']);
 
 export class FuturesProductionWorkstationTransportError extends Error {
     constructor(code) {
@@ -45,6 +49,26 @@ export class FuturesProductionWorkstationTransportError extends Error {
 
 const fail = (code) => {
     throw new FuturesProductionWorkstationTransportError(code);
+};
+
+const resolveProductionBackendProxy = () => {
+    const proxyUrl = process.env.https_proxy
+        || process.env.HTTPS_PROXY
+        || process.env.http_proxy
+        || process.env.HTTP_PROXY;
+    if (!proxyUrl) return Object.freeze({ proxyAgent: null, errorCode: null });
+    try {
+        const parsed = new URL(proxyUrl);
+        if (!PROXY_PROTOCOLS.has(parsed.protocol) || !parsed.hostname) {
+            return Object.freeze({ proxyAgent: null, errorCode: 'INVALID_PROXY_CONFIGURATION' });
+        }
+        const agent = parsed.protocol.startsWith('socks')
+            ? new SocksProxyAgent(proxyUrl, { keepAlive: false })
+            : new HttpsProxyAgent(proxyUrl, { keepAlive: false });
+        return Object.freeze({ proxyAgent: agent, errorCode: null });
+    } catch {
+        return Object.freeze({ proxyAgent: null, errorCode: 'INVALID_PROXY_CONFIGURATION' });
+    }
 };
 
 const assertSelection = (symbol, interval) => {
@@ -76,10 +100,80 @@ const buildUrl = (pathname, parameters = {}) => {
     return url;
 };
 
-const publicGet = async (pathname, parameters, bodyLimit, parentSignal) => {
+const readProductionProxyResponseBody = (response, bodyLimit) => new Promise((resolve, reject) => {
+    const chunks = [];
+    let total = 0;
+    let settled = false;
+    const rejectOnce = (error) => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+    };
+    response.on('data', (chunk) => {
+        if (settled) return;
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        total += bytes.byteLength;
+        if (total > bodyLimit) {
+            response.destroy();
+            rejectOnce(new FuturesProductionWorkstationTransportError('RESPONSE_BODY_TOO_LARGE'));
+            return;
+        }
+        chunks.push(bytes);
+    });
+    response.once('aborted', () => {
+        rejectOnce(new FuturesProductionWorkstationTransportError('RESPONSE_ABORTED'));
+    });
+    response.once('error', rejectOnce);
+    response.once('end', () => {
+        if (settled) return;
+        try {
+            const text = new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, total));
+            settled = true;
+            resolve(text);
+        } catch {
+            rejectOnce(new FuturesProductionWorkstationTransportError('INVALID_JSON_ENCODING'));
+        }
+    });
+});
+
+const publicGetThroughProductionProxy = (url, bodyLimit, signal, proxyAgent) => new Promise((resolve, reject) => {
+    const request = https.request(url, {
+        method: 'GET',
+        agent: proxyAgent,
+        signal,
+        maxHeaderSize: FUTURES_WORKSTATION_JSON_LIMITS.HEADER_AGGREGATE_BYTES,
+    }, (response) => {
+        try {
+            if (response.statusCode >= 300 && response.statusCode < 400) fail('REDIRECT_REJECTED');
+            if (response.statusCode !== 200) fail('HTTP_REJECTED');
+            const headers = new Headers(response.headers);
+            validateFuturesWorkstationResponseHeaders(headers);
+            const contentType = headers.get('content-type') ?? '';
+            if (!contentType.toLowerCase().startsWith('application/json')) fail('INVALID_CONTENT_TYPE');
+        } catch (error) {
+            response.resume();
+            reject(error);
+            return;
+        }
+        readProductionProxyResponseBody(response, bodyLimit).then(resolve, reject);
+    });
+    request.once('error', reject);
+    request.end();
+});
+
+const publicGet = async (pathname, parameters, bodyLimit, parentSignal, backendProxy) => {
     const url = buildUrl(pathname, parameters);
     const deadline = withDeadline(parentSignal);
     try {
+        if (backendProxy.errorCode) fail(backendProxy.errorCode);
+        if (backendProxy.proxyAgent) {
+            return await publicGetThroughProductionProxy(
+                url,
+                bodyLimit,
+                deadline.signal,
+                backendProxy.proxyAgent,
+            );
+        }
         const response = await globalThis.fetch(url, {
             method: 'GET',
             redirect: 'error',
@@ -96,25 +190,27 @@ const publicGet = async (pathname, parameters, bodyLimit, parentSignal) => {
     }
 };
 
-const weightedGet = (weight, pathname, parameters, bodyLimit, signal) => (
+const weightedGet = (weight, pathname, parameters, bodyLimit, signal, backendProxy) => (
     PUBLIC_READ_BUDGET.execute(
         weight,
-        () => publicGet(pathname, parameters, bodyLimit, signal),
+        () => publicGet(pathname, parameters, bodyLimit, signal, backendProxy),
         { signal },
     )
 );
 
-const createSocket = (url, onMessage, onDisconnect) => {
+const createSocket = (url, onMessage, onDisconnect, backendProxy) => {
     const parsed = new URL(url);
     if (parsed.origin !== FUTURES_PRODUCTION_WORKSTATION_WSS_ORIGIN
         || !['/public/stream', '/market/stream'].includes(parsed.pathname)) {
         fail('WSS_ORIGIN_ESCAPE');
     }
+    if (backendProxy.errorCode) fail(backendProxy.errorCode);
     const socket = new WebSocket(url, {
         followRedirects: false,
         handshakeTimeout: 10_000,
         maxPayload: FUTURES_WORKSTATION_JSON_LIMITS.WS_FRAME_BYTES,
         perMessageDeflate: false,
+        ...(backendProxy.proxyAgent ? { agent: backendProxy.proxyAgent } : {}),
     });
     let closed = false;
     const lifetime = setTimeout(() => socket.close(1000, '24h connection rotation'), 86_400_000);
@@ -155,60 +251,64 @@ const createSocket = (url, onMessage, onDisconnect) => {
     });
 };
 
-export const createFuturesProductionWorkstationReviewedTransport = () => Object.freeze({
-    kind: 'reviewed-production-public-read',
-    now: () => Date.now(),
-    loadExchangeInfo: ({ signal } = {}) => weightedGet(
-        FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.EXCHANGE_INFO,
-        FUTURES_PRODUCTION_WORKSTATION_ROUTES.EXCHANGE_INFO,
-        {},
-        FUTURES_WORKSTATION_BODY_LIMITS.EXCHANGE_INFO,
-        signal,
-    ),
-    bootstrap: async ({ symbol, pair, interval, signal } = {}) => {
-        assertSelection(symbol, interval);
-        if (!SYMBOL_PATTERN.test(pair)) fail('INVALID_SELECTION');
-        const [
-            depthSnapshot,
-            contractKlines,
-            markKlines,
-            indexKlines,
-            premiumIndex,
-            ticker,
-        ] = await Promise.all([
-            weightedGet(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.DEPTH_1000, FUTURES_PRODUCTION_WORKSTATION_ROUTES.DEPTH, { symbol, limit: '1000' }, FUTURES_WORKSTATION_BODY_LIMITS.DEPTH, signal),
-            weightedGet(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.KLINES_500, FUTURES_PRODUCTION_WORKSTATION_ROUTES.KLINES, { symbol, interval, limit: '500' }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES, signal),
-            weightedGet(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.MARK_KLINES_500, FUTURES_PRODUCTION_WORKSTATION_ROUTES.MARK_KLINES, { symbol, interval, limit: '500' }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES, signal),
-            weightedGet(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.INDEX_KLINES_500, FUTURES_PRODUCTION_WORKSTATION_ROUTES.INDEX_KLINES, { pair, interval, limit: '500' }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES, signal),
-            weightedGet(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.PREMIUM_INDEX_SYMBOL, FUTURES_PRODUCTION_WORKSTATION_ROUTES.PREMIUM_INDEX, { symbol }, FUTURES_WORKSTATION_BODY_LIMITS.HEADER, signal),
-            weightedGet(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.TICKER_SYMBOL, FUTURES_PRODUCTION_WORKSTATION_ROUTES.TICKER, { symbol }, FUTURES_WORKSTATION_BODY_LIMITS.HEADER, signal),
-        ]);
-        return Object.freeze({ depthSnapshot, contractKlines, markKlines, indexKlines, premiumIndex, ticker });
-    },
-    connect: ({ symbol, interval, onMessage, onDisconnect, signal } = {}) => {
-        assertSelection(symbol, interval);
-        if (typeof onMessage !== 'function' || typeof onDisconnect !== 'function') fail('INVALID_SUBSCRIBER');
-        const lower = symbol.toLowerCase();
-        const publicUrl = `${FUTURES_PRODUCTION_WORKSTATION_WSS_ORIGIN}/public/stream?streams=${lower}@depth@100ms`;
-        const marketUrl = `${FUTURES_PRODUCTION_WORKSTATION_WSS_ORIGIN}/market/stream?streams=${[
-            `${lower}@aggTrade`,
-            `${lower}@kline_${interval}`,
-            `${lower}@markPrice@1s`,
-            `${lower}@ticker`,
-        ].join('/')}`;
-        const publicSocket = createSocket(publicUrl, onMessage, onDisconnect);
-        const marketSocket = createSocket(marketUrl, onMessage, onDisconnect);
-        const close = () => {
-            publicSocket.close();
-            marketSocket.close();
-        };
-        signal?.addEventListener?.('abort', close, { once: true });
-        return Object.freeze({
-            close: () => {
-                signal?.removeEventListener?.('abort', close);
-                close();
-            },
-        });
-    },
-    close: () => {},
-});
+export const createFuturesProductionWorkstationReviewedTransport = () => {
+    const backendProxy = resolveProductionBackendProxy();
+    return Object.freeze({
+        kind: 'reviewed-production-public-read',
+        now: () => Date.now(),
+        loadExchangeInfo: ({ signal } = {}) => weightedGet(
+            FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.EXCHANGE_INFO,
+            FUTURES_PRODUCTION_WORKSTATION_ROUTES.EXCHANGE_INFO,
+            {},
+            FUTURES_WORKSTATION_BODY_LIMITS.EXCHANGE_INFO,
+            signal,
+            backendProxy,
+        ),
+        bootstrap: async ({ symbol, pair, interval, signal } = {}) => {
+            assertSelection(symbol, interval);
+            if (!SYMBOL_PATTERN.test(pair)) fail('INVALID_SELECTION');
+            const [
+                depthSnapshot,
+                contractKlines,
+                markKlines,
+                indexKlines,
+                premiumIndex,
+                ticker,
+            ] = await Promise.all([
+                weightedGet(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.DEPTH_1000, FUTURES_PRODUCTION_WORKSTATION_ROUTES.DEPTH, { symbol, limit: '1000' }, FUTURES_WORKSTATION_BODY_LIMITS.DEPTH, signal, backendProxy),
+                weightedGet(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.KLINES_500, FUTURES_PRODUCTION_WORKSTATION_ROUTES.KLINES, { symbol, interval, limit: '500' }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES, signal, backendProxy),
+                weightedGet(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.MARK_KLINES_500, FUTURES_PRODUCTION_WORKSTATION_ROUTES.MARK_KLINES, { symbol, interval, limit: '500' }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES, signal, backendProxy),
+                weightedGet(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.INDEX_KLINES_500, FUTURES_PRODUCTION_WORKSTATION_ROUTES.INDEX_KLINES, { pair, interval, limit: '500' }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES, signal, backendProxy),
+                weightedGet(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.PREMIUM_INDEX_SYMBOL, FUTURES_PRODUCTION_WORKSTATION_ROUTES.PREMIUM_INDEX, { symbol }, FUTURES_WORKSTATION_BODY_LIMITS.HEADER, signal, backendProxy),
+                weightedGet(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.TICKER_SYMBOL, FUTURES_PRODUCTION_WORKSTATION_ROUTES.TICKER, { symbol }, FUTURES_WORKSTATION_BODY_LIMITS.HEADER, signal, backendProxy),
+            ]);
+            return Object.freeze({ depthSnapshot, contractKlines, markKlines, indexKlines, premiumIndex, ticker });
+        },
+        connect: ({ symbol, interval, onMessage, onDisconnect, signal } = {}) => {
+            assertSelection(symbol, interval);
+            if (typeof onMessage !== 'function' || typeof onDisconnect !== 'function') fail('INVALID_SUBSCRIBER');
+            const lower = symbol.toLowerCase();
+            const publicUrl = `${FUTURES_PRODUCTION_WORKSTATION_WSS_ORIGIN}/public/stream?streams=${lower}@depth@100ms`;
+            const marketUrl = `${FUTURES_PRODUCTION_WORKSTATION_WSS_ORIGIN}/market/stream?streams=${[
+                `${lower}@aggTrade`,
+                `${lower}@kline_${interval}`,
+                `${lower}@markPrice@1s`,
+                `${lower}@ticker`,
+            ].join('/')}`;
+            const publicSocket = createSocket(publicUrl, onMessage, onDisconnect, backendProxy);
+            const marketSocket = createSocket(marketUrl, onMessage, onDisconnect, backendProxy);
+            const close = () => {
+                publicSocket.close();
+                marketSocket.close();
+            };
+            signal?.addEventListener?.('abort', close, { once: true });
+            return Object.freeze({
+                close: () => {
+                    signal?.removeEventListener?.('abort', close);
+                    close();
+                },
+            });
+        },
+        close: () => backendProxy.proxyAgent?.destroy?.(),
+    });
+};

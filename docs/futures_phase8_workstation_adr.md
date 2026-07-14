@@ -42,13 +42,15 @@ Official references:
 
 Origins are compile-time constants in separately named backend modules. A caller cannot provide a URL, origin, hostname, path, redirect policy, proxy, agent, dispatcher, socket factory, headers or timeout. Every HTTP response with `redirected === true` or a final URL outside the exact origin and path is rejected. Automated and E2E compositions use deterministic fakes; a network escape to any frozen Futures host is a fail-fast test error.
 
+An operator-configured `HTTPS_PROXY`/`https_proxy` (falling back to `HTTP_PROXY`/`http_proxy`) is backend process configuration, not a workstation request option. Each reviewed environment transport independently resolves one bounded non-keepalive HTTP(S) or SOCKS tunnel agent and uses that same private agent for its exact HTTPS origin and routed WSS origin. The proxy cannot replace the Binance URL, TLS target, route, redirect policy, headers or timeout, and it is never returned through the read model. Unsupported or malformed proxy configuration fails closed as `INVALID_PROXY_CONFIGURATION`; transport teardown destroys the agent. This explicit Node transport ownership is required because Electron `session.setProxy()` configures Chromium traffic and does not configure the main-process `globalThis.fetch` or `ws` client used here.
+
 ### Public-read activation checkpoint
 
 The 2026-07-14 post-milestone checkpoint activates both reviewed public-read transports in the normal operator composition. The default `npm run e` and production build therefore use real Binance public market data after the operator opens the corresponding Futures workspace. These transports remain credential-free and expose only the frozen `GET` routes and public streams below.
 
 Safe development and automated verification do not select those compositions. `safe-dev`, `smoke`, `e2e` and Vitest builds source-replace each environment composition with its separately named deterministic verification composition. This is a build-time module boundary, not a renderer field, runtime enum, environment/host option or caller-supplied transport. The fail-fast network guards remain active in every verification entry.
 
-The checkpoint re-reviewed the official origins, route weights, routed WebSocket contract and local-book sequence on 2026-07-14 without making a Binance API request. Activating public reads adds no credential, private read, execution action or write authority.
+The checkpoint re-reviewed the official origins, route weights, routed WebSocket contract and local-book sequence on 2026-07-14 without making a Binance API request. The subsequent manual-acceptance correction added only backend-owned proxy tunnelling for those already frozen origins. Activating public reads and proxy support adds no credential, private read, execution action or write authority.
 
 ### REST registry
 

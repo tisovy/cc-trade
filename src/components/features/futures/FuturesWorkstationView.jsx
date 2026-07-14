@@ -132,6 +132,11 @@ export const FuturesWorkstationView = ({
         <span>PUBLIC MARKET DATA · READ ONLY</span>
         <StateBadge state={aggregateState} />
         <code>gen {state.generation || '—'} · rev {state.revision || '—'}</code>
+        {state.reasonCode ? (
+          <code className="futures-workstation-reason" aria-label="Futures workstation reason">
+            reason {state.reasonCode}
+          </code>
+        ) : null}
       </div>
 
       <aside className="futures-workstation-instruments" aria-label="USDⓈ-M contract selector">

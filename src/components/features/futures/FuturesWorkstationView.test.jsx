@@ -246,6 +246,17 @@ describe('pure Futures workstation presentation', () => {
     },
   )
 
+  it('shows the normalized backend reason for an unavailable workstation', () => {
+    renderView({
+      state: createState({
+        status: 'unavailable',
+        reasonCode: 'INVALID_PROXY_CONFIGURATION',
+      }),
+    })
+    expect(screen.getByLabelText('Futures workstation reason'))
+      .toHaveTextContent('reason INVALID_PROXY_CONFIGURATION')
+  })
+
   it('lets aggregate recovery state override cached LIVE widgets and blocks stale drafting', () => {
     const state = createState({ status: 'resynchronizing' })
     renderView({ state })
