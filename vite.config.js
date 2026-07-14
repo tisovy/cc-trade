@@ -6,7 +6,11 @@ import electron from 'vite-plugin-electron'
 export default defineConfig({
   base: './',
   server: {
-    port: 5174
+    port: 5174,
+    // Electron applies the same strict script-src policy in development.
+    // React Fast Refresh injects an inline preamble that this policy must
+    // reject, so keep HMR off instead of weakening the renderer CSP.
+    hmr: false,
   },
   define: {
     // Expose only non-secret analytics env vars to browser
