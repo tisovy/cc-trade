@@ -16,7 +16,7 @@ import {
 } from './futures-workstation-decimal.js';
 
 export const FUTURES_WORKSTATION_MARKET_LIMITS = Object.freeze({
-    CATALOG_CONTRACTS: 512,
+    CATALOG_CONTRACTS: 1_024,
     CATALOG_FRAME_CONTRACTS: 8,
     CANDLES: 500,
     RENDERER_CANDLES: 80,
@@ -54,8 +54,12 @@ const allowedKeys = (value, required, optional = []) => {
 const isBoundedString = (value, pattern, maximum = 64) => (
     typeof value === 'string' && value.length <= maximum && pattern.test(value)
 );
-const isSymbol = value => isBoundedString(value, /^[A-Z0-9]{1,20}$/, 20);
-const isPair = isSymbol;
+const isSymbol = value => isBoundedString(
+    value,
+    /^(?:[A-Z0-9]{1,20}|[A-Z0-9]{1,13}_[0-9]{6})$/,
+    20,
+);
+const isPair = value => isBoundedString(value, /^[A-Z0-9]{1,20}$/, 20);
 const isStatus = value => isBoundedString(value, /^[A-Z0-9_]{1,32}$/, 32);
 const isInterval = value => ['1m', '5m', '15m', '1h', '4h', '1d'].includes(value);
 const cloneFrozen = (value) => {

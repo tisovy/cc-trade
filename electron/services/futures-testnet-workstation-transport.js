@@ -35,7 +35,8 @@ export const FUTURES_TESTNET_WORKSTATION_WEIGHTS = Object.freeze({
 
 const ROUTE_SET = new Set(Object.values(FUTURES_TESTNET_WORKSTATION_ROUTES));
 const PUBLIC_READ_BUDGET = new FuturesWorkstationReadBudget();
-const SYMBOL_PATTERN = /^[A-Z0-9]{1,20}$/;
+const SYMBOL_PATTERN = /^(?:[A-Z0-9]{1,20}|[A-Z0-9]{1,13}_[0-9]{6})$/;
+const PAIR_PATTERN = /^[A-Z0-9]{1,20}$/;
 const INTERVALS = new Set(['1m', '5m', '15m', '1h', '4h', '1d']);
 const PROXY_PROTOCOLS = new Set(['http:', 'https:', 'socks:', 'socks4:', 'socks4a:', 'socks5:', 'socks5h:']);
 
@@ -266,7 +267,7 @@ export const createFuturesTestnetWorkstationReviewedTransport = () => {
         ),
         bootstrap: async ({ symbol, pair, interval, signal } = {}) => {
             assertSelection(symbol, interval);
-            if (!SYMBOL_PATTERN.test(pair)) fail('INVALID_SELECTION');
+            if (!PAIR_PATTERN.test(pair)) fail('INVALID_SELECTION');
             const [
                 depthSnapshot,
                 contractKlines,

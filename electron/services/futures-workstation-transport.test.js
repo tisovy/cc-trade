@@ -284,6 +284,49 @@ describe('reviewed environment-specific Futures workstation transports', () => {
         [
             'Testnet',
             createFuturesTestnetWorkstationReviewedTransport,
+            FUTURES_TESTNET_WORKSTATION_WSS_ORIGIN,
+        ],
+        [
+            'production',
+            createFuturesProductionWorkstationReviewedTransport,
+            FUTURES_PRODUCTION_WORKSTATION_WSS_ORIGIN,
+        ],
+    ])('constructs exact %s WSS paths for a dated delivery contract', (
+        _label,
+        createTransport,
+        origin,
+    ) => {
+        vi.useFakeTimers();
+        const connection = createTransport().connect({
+            symbol: 'BTCUSDT_260925',
+            interval: '1m',
+            onMessage: () => {},
+            onDisconnect: () => {},
+        });
+        expect(socketMock.instances.map(socket => socket.url)).toEqual([
+            `${origin}/public/stream?streams=btcusdt_260925@depth@100ms`,
+            `${origin}/market/stream?streams=btcusdt_260925@aggTrade/btcusdt_260925@kline_1m/btcusdt_260925@markPrice@1s/btcusdt_260925@ticker`,
+        ]);
+        connection.close();
+    });
+
+    it.each([
+        ['Testnet', createFuturesTestnetWorkstationReviewedTransport],
+        ['production', createFuturesProductionWorkstationReviewedTransport],
+    ])('rejects a delivery-shaped %s pair before REST dispatch', async (_label, createTransport) => {
+        globalThis.fetch = vi.fn();
+        await expect(createTransport().bootstrap({
+            symbol: 'BTCUSDT_260925',
+            pair: 'BTCUSDT_260925',
+            interval: '1m',
+        })).rejects.toMatchObject({ code: 'INVALID_SELECTION' });
+        expect(globalThis.fetch).not.toHaveBeenCalled();
+    });
+
+    it.each([
+        [
+            'Testnet',
+            createFuturesTestnetWorkstationReviewedTransport,
             FUTURES_TESTNET_WORKSTATION_REST_ORIGIN,
             FUTURES_TESTNET_WORKSTATION_WSS_ORIGIN,
             FUTURES_TESTNET_WORKSTATION_FIXTURE,

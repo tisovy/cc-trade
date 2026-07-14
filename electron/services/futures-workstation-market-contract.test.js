@@ -73,6 +73,69 @@ describe('official Futures workstation market schemas', () => {
         expect(catalog.some(contract => contract.symbol === 'BTCUSD')).toBe(false);
     });
 
+    it('accepts the bounded current catalog above the legacy 512-contract limit', () => {
+        const source = JSON.parse(FUTURES_TESTNET_WORKSTATION_FIXTURE.catalog);
+        const seed = source.symbols[0];
+        source.symbols = Array.from({ length: 600 }, (_, index) => {
+            const baseAsset = `A${String(index).padStart(4, '0')}`;
+            return {
+                ...seed,
+                symbol: `${baseAsset}USDT`,
+                pair: `${baseAsset}USDT`,
+                baseAsset,
+            };
+        });
+        const catalog = normalizeFuturesWorkstationExchangeInfo(
+            JSON.stringify(source),
+            new Set(['A0000USDT']),
+        );
+        expect(catalog).toHaveLength(600);
+        expect(catalog[0]).toMatchObject({ symbol: 'A0000USDT', allowlisted: true });
+    });
+
+    it('rejects a catalog above the revised 1024-contract bound', () => {
+        const source = JSON.parse(FUTURES_TESTNET_WORKSTATION_FIXTURE.catalog);
+        const seed = source.symbols[0];
+        source.symbols = Array.from({ length: 1_025 }, (_, index) => {
+            const baseAsset = `A${String(index).padStart(4, '0')}`;
+            return {
+                ...seed,
+                symbol: `${baseAsset}USDT`,
+                pair: `${baseAsset}USDT`,
+                baseAsset,
+            };
+        });
+        expect(() => normalizeFuturesWorkstationExchangeInfo(
+            JSON.stringify(source),
+            new Set(),
+        )).toThrowError(expect.objectContaining({ code: 'INVALID_EXCHANGE_INFO' }));
+    });
+
+    it('accepts the official dated delivery-symbol grammar without widening pair grammar', () => {
+        const source = JSON.parse(FUTURES_TESTNET_WORKSTATION_FIXTURE.catalog);
+        source.symbols[0] = {
+            ...source.symbols[0],
+            symbol: 'BTCUSDT_260925',
+            pair: 'BTCUSDT',
+            contractType: 'CURRENT_QUARTER',
+        };
+        const catalog = normalizeFuturesWorkstationExchangeInfo(
+            JSON.stringify(source),
+            new Set(['BTCUSDT_260925']),
+        );
+        expect(catalog.find(contract => contract.symbol === 'BTCUSDT_260925')).toMatchObject({
+            pair: 'BTCUSDT',
+            contractType: 'CURRENT_QUARTER',
+            allowlisted: true,
+        });
+
+        source.symbols[0].pair = 'BTCUSDT_260925';
+        expect(() => normalizeFuturesWorkstationExchangeInfo(
+            JSON.stringify(source),
+            new Set(),
+        )).toThrowError(expect.objectContaining({ code: 'INVALID_EXCHANGE_INFO_SYMBOL' }));
+    });
+
     it.each(['BTCUSDT', 'ETHUSDT', 'SOLUSDT'])(
         'normalizes bounded %s snapshots, candles and headers',
         (symbol) => {
@@ -99,6 +162,18 @@ describe('official Futures workstation market schemas', () => {
             frame,
             expectation('BTCUSDT', '5m'),
         ).kind)).toEqual(['depth', 'trade', 'kline', 'mark', 'ticker']);
+    });
+
+    it('normalizes a dated delivery-contract stream identity exactly', () => {
+        const raw = fixtureFor('BTCUSDT').streams.bridgeDepth
+            .replace('btcusdt@depth@100ms', 'btcusdt_260925@depth@100ms')
+            .replace('"s":"BTCUSDT"', '"s":"BTCUSDT_260925"');
+        const event = normalizeFuturesWorkstationStreamFrame(raw, {
+            symbol: 'BTCUSDT_260925',
+            pair: 'BTCUSDT',
+            interval: '1m',
+        });
+        expect(event).toMatchObject({ kind: 'depth', finalUpdateId: '1001' });
     });
 
     it('preserves unquoted int64 stream identities beyond 2^53', () => {
@@ -368,7 +443,7 @@ describe('official Futures workstation market schemas', () => {
             observedAt: 1_784_000_000_000,
             payload: {
                 offset: 0,
-                total: 512,
+                total: 1_024,
                 complete: false,
                 contracts: Array.from({ length: 8 }, () => maximumContract),
             },

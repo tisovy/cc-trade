@@ -1,5 +1,5 @@
 export const FUTURES_WORKSTATION_MARKET_TYPE = 'USD_M_FUTURES'
-export const FUTURES_WORKSTATION_PROTOCOL_VERSION = '2'
+export const FUTURES_WORKSTATION_PROTOCOL_VERSION = '3'
 export const FUTURES_WORKSTATION_REQUEST_MAX_BYTES = 1_024
 export const FUTURES_WORKSTATION_EVENT_MAX_BYTES = 15 * 1_024
 export const FUTURES_WORKSTATION_UINT64_MAX = '18446744073709551615'
@@ -34,7 +34,8 @@ export const FUTURES_WORKSTATION_STATES = Object.freeze({
 const RESOURCE_VALUES = new Set(Object.values(FUTURES_WORKSTATION_RESOURCES))
 const STATE_VALUES = new Set(Object.values(FUTURES_WORKSTATION_STATES))
 const INTERVAL_VALUES = new Set(FUTURES_WORKSTATION_INTERVALS)
-const SYMBOL_PATTERN = /^[A-Z0-9]{1,20}$/
+const SYMBOL_PATTERN = /^(?:[A-Z0-9]{1,20}|[A-Z0-9]{1,13}_[0-9]{6})$/
+const PAIR_PATTERN = /^[A-Z0-9]{1,20}$/
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{1,96}$/
 const UNSIGNED_INTEGER_PATTERN = /^(?:0|[1-9][0-9]*)$/
 const DECIMAL_PATTERN = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/
@@ -334,7 +335,8 @@ const validateContract = (value) => (
     'filters',
   ])
   && isFuturesWorkstationSymbol(value.symbol)
-  && isFuturesWorkstationSymbol(value.pair)
+  && typeof value.pair === 'string'
+  && PAIR_PATTERN.test(value.pair)
   && typeof value.contractType === 'string'
   && value.contractType.length > 0
   && value.contractType.length <= 32
@@ -369,7 +371,7 @@ const validateCatalog = (value) => (
   && value.offset >= 0
   && Number.isSafeInteger(value.total)
   && value.total >= 0
-  && value.total <= 512
+  && value.total <= 1_024
   && typeof value.complete === 'boolean'
   && Array.isArray(value.contracts)
   && value.contracts.length <= 8

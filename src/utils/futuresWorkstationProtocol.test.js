@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  FUTURES_WORKSTATION_PROTOCOL_VERSION,
   FUTURES_WORKSTATION_RESOURCES,
   FUTURES_WORKSTATION_STATES,
   FuturesWorkstationProtocolError,
@@ -128,6 +129,10 @@ const createEventValues = resource => ({
 })
 
 describe('Futures workstation environment-specific protocols', () => {
+  it('uses protocol revision 3 for the bounded catalog and dated symbol grammar', () => {
+    expect(FUTURES_WORKSTATION_PROTOCOL_VERSION).toBe('3')
+  })
+
   it.each([
     ['subscribe', createFuturesTestnetWorkstationSubscribeRequest, FUTURES_TESTNET_WORKSTATION_ACTIONS.SUBSCRIBE],
     ['symbol', createFuturesTestnetWorkstationSelectSymbolRequest, FUTURES_TESTNET_WORKSTATION_ACTIONS.SELECT_SYMBOL],
@@ -180,6 +185,35 @@ describe('Futures workstation environment-specific protocols', () => {
       })).toThrow(FuturesWorkstationProtocolError)
     },
   )
+
+  it('round-trips an official dated delivery-contract symbol in both environments', () => {
+    const delivery = { ...requestValues, symbol: 'BTCUSDT_260925' }
+    const testnet = createFuturesTestnetWorkstationSubscribeRequest(delivery)
+    const production = createFuturesProductionWorkstationSubscribeRequest(delivery)
+    expect(readFuturesTestnetWorkstationRequest(JSON.stringify(testnet))).toEqual(testnet)
+    expect(readFuturesProductionWorkstationRequest(JSON.stringify(production))).toEqual(production)
+  })
+
+  it.each(['BTCUSDT_BAD', 'BTCUSDT_26092', 'BTCUSDT_260925_', '_BTCUSDT260925'])(
+    'rejects malformed dated symbol %s',
+    (symbol) => {
+      expect(() => createFuturesTestnetWorkstationSubscribeRequest({
+        ...requestValues,
+        symbol,
+      })).toThrow(FuturesWorkstationProtocolError)
+    },
+  )
+
+  it('accepts exactly 1024 catalog rows and rejects 1025', () => {
+    expect(() => createFuturesProductionWorkstationEvent({
+      ...createEventValues('catalog'),
+      payload: { ...payloads.catalog, total: 1_024, complete: false },
+    })).not.toThrow()
+    expect(() => createFuturesProductionWorkstationEvent({
+      ...createEventValues('catalog'),
+      payload: { ...payloads.catalog, total: 1_025, complete: false },
+    })).toThrow(FuturesWorkstationProtocolError)
+  })
 
   it.each(['3m', '1M', '60m', '', '1m '])('rejects an unreviewed interval %s', (interval) => {
     expect(() => createFuturesTestnetWorkstationSubscribeRequest({

@@ -125,6 +125,56 @@ describe('separately composed Futures workstation services', () => {
             createFuturesProductionWorkstationRuntimeForTest,
             productionRequest,
         ],
+    ])('boots %s with a catalog above the legacy 512-contract limit', async (
+        _label,
+        createBase,
+        createRuntime,
+        createRequest,
+    ) => {
+        const source = JSON.parse(FUTURES_TESTNET_WORKSTATION_FIXTURE.catalog);
+        const seed = source.symbols[0];
+        source.symbols = [
+            seed,
+            ...Array.from({ length: 599 }, (_, index) => {
+                const baseAsset = `A${String(index + 1).padStart(4, '0')}`;
+                return {
+                    ...seed,
+                    symbol: `${baseAsset}USDT`,
+                    pair: `${baseAsset}USDT`,
+                    baseAsset,
+                };
+            }),
+        ];
+        const base = createBase();
+        const runtime = track(createRuntime({
+            transport: {
+                ...base,
+                loadExchangeInfo: async () => JSON.stringify(source),
+            },
+        }));
+        const events = [];
+        await runtime.service.handleRequest(createRequest('large-catalog'), {
+            emit: event => events.push(event),
+        });
+        const catalogFrames = events.filter(event => event.resource === 'catalog');
+        expect(catalogFrames).toHaveLength(75);
+        expect(catalogFrames.at(-1).payload).toMatchObject({ total: 600, complete: true });
+        expect(events.at(-1)).toMatchObject({ resource: 'status', state: 'live' });
+    });
+
+    it.each([
+        [
+            'Testnet',
+            createFuturesTestnetWorkstationFakeTransport,
+            createFuturesTestnetWorkstationRuntimeForTest,
+            testnetRequest,
+        ],
+        [
+            'production',
+            createFuturesProductionWorkstationFakeTransport,
+            createFuturesProductionWorkstationRuntimeForTest,
+            productionRequest,
+        ],
     ])('keeps the %s deterministic stream LIVE across continuous depth cycles', async (
         _label,
         createBase,

@@ -128,7 +128,7 @@ The two renderer protocols have fixed identities and cannot parse one another:
 | Property | Testnet | Production |
 |---|---|---|
 | channel | `futures-testnet-workstation` | `futures-production-workstation` |
-| protocol version | `2` | `2` |
+| protocol version | `3` | `3` |
 | market type | `USD_M_FUTURES` | `USD_M_FUTURES` |
 | environment | `TESTNET` | `PRODUCTION` |
 | subscribe action | `futures.testnet.workstation.subscribe` | `futures.production.workstation.subscribe` |
@@ -136,9 +136,9 @@ The two renderer protocols have fixed identities and cannot parse one another:
 | interval action | `futures.testnet.workstation.select-interval` | `futures.production.workstation.select-interval` |
 | unsubscribe action | `futures.testnet.workstation.unsubscribe` | `futures.production.workstation.unsubscribe` |
 
-Requests have exact keys, a maximum UTF-8 length of 1024 bytes, an opaque request ID no longer than 96 bytes, an allowlisted symbol no longer than 20 ASCII bytes and one of `1m,5m,15m,1h,4h,1d`. Requests have no host, URL, credential, account, execution, order, side, quantity, notional, leverage or network-option field.
+Requests have exact keys, a maximum UTF-8 length of 1024 bytes, an opaque request ID no longer than 96 bytes, an allowlisted symbol no longer than 20 ASCII bytes and one of `1m,5m,15m,1h,4h,1d`. A symbol is either 1–20 uppercase alphanumeric bytes or an uppercase alphanumeric prefix followed by the exact dated-delivery suffix `_YYMMDD`, with the same 20-byte total bound. A pair remains 1–20 uppercase alphanumeric bytes and never accepts the delivery suffix. Requests have no host, URL, credential, account, execution, order, side, quantity, notional, leverage or network-option field.
 
-Every emitted resource event contains the exact channel identity, protocol version, environment, request ID, symbol, generation, monotonically increasing revision, resource kind, lifecycle state, observation time and immutable payload. Protocol version `2` records the post-milestone audit corrections: the complete seven-filter catalog, canonical unsigned-int64 identities and generation-wide non-live resource transitions. The renderer accepts only the active request/generation, increasing revisions and an exact schema. A model from one channel cannot be reused on the other.
+Every emitted resource event contains the exact channel identity, protocol version, environment, request ID, symbol, generation, monotonically increasing revision, resource kind, lifecycle state, observation time and immutable payload. Protocol version `3` retains the version-2 filter/int64/non-live corrections and records the manual-acceptance compatibility correction: a 1024-contract catalog bound and exact dated-delivery symbol grammar. The renderer accepts only the active request/generation, increasing revisions and an exact schema. A model from one channel cannot be reused on the other.
 
 Resource kinds are `catalog`, `header`, `candles`, `depth`, `trades` and `status`. Lifecycle states are `loading`, `live`, `stale`, `disconnected`, `resynchronizing` and `unavailable`. A new generation clears every prior-generation resource. Disconnect, resynchronization and terminal failure transition every cached resource out of `live`; only new authoritative resource events can restore `live`.
 
@@ -154,7 +154,7 @@ All authority and memory are bounded:
 | exchange-info body | 2 MiB | n/a | 24 h |
 | depth body | 512 KiB | n/a | bootstrap only |
 | kline body | 1 MiB | n/a | bootstrap only |
-| catalog | 512 contracts / 8 per 15 KiB frame | 128 filtered rows | 24 h |
+| catalog | 1024 contracts / 8 per 15 KiB frame | 128 filtered rows | 24 h |
 | candles per series | 500 | 80 | 2 stream periods or 5 s minimum |
 | depth levels per side | 1000 snapshot / 500 retained | 24 | 3 s |
 | buffered depth events | 2048 events / 8 MiB | n/a | bootstrap deadline 10 s |
