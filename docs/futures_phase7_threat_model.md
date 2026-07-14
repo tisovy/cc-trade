@@ -35,18 +35,18 @@ Threats:
 
 - missing values, `TRUE`, whitespace, inherited shell aliases, unknown production-prefixed values, or testnet configuration enables production;
 - renderer state, a query string, localStorage, preload data, or a generic command enables production;
-- a complete environment configuration unexpectedly performs a live request during this delivery.
+- a complete environment configuration performs a live request before the operator understands startup behavior.
 
 Controls:
 
 - exact ASCII flag and acknowledgement, complete hard-limit grammar, unknown-key rejection, independent credential/account identity checks, healthy storage/recovery, and active kill-switch policy;
 - separately named production capture before the first window; E2E force-disable and scrubbing;
-- non-environment compiled live-authorization interlock remains false;
-- no global-fetch fallback is composed when the interlock is false;
+- the non-environment compiled live-authorization interlock was enabled only after explicit operator authorization and is still combined with every exact environment/account/storage/recovery gate;
+- live composition accepts only the process-global Node `fetch`; a supplied transport, fake authority forgery, or E2E environment cannot resolve live I/O;
 - deterministic tests inject fakes through a test-only composition seam;
 - every gate combination is exhaustively tested and audited.
 
-Residual risk: a later authorized code change can enable live composition. That change requires explicit operator authorization and review; environment input alone cannot perform it in this delivery.
+Residual risk: a fully valid live configuration now performs signed production identity/recovery reads during application startup, before a renderer workspace is selected. Operators who require a strict Spot → Testnet → Live sequence must omit all production configuration for the first launch and restart with the reviewed production configuration only after testnet verification. Writes still require a renderer subscription, backend intent, exact confirmation, current revision, and all dispatch gates.
 
 ### Wrong account or environment
 
@@ -243,14 +243,14 @@ Residual risk: static checks are not formal proof. Code review, deterministic te
 
 ## Security acceptance
 
-The fake-backed Phase 7 delivery is acceptable only when:
+The live-authorized Phase 7 delivery is acceptable only when:
 
-- every activation-gate combination fails except the fully satisfied fake-authorized case;
-- normal/E2E composition cannot resolve a production network capability;
+- every activation-gate combination fails except the fully satisfied live-authorized or explicitly fake-authorized test case;
+- normal composition resolves only process-global `fetch`, while E2E cannot resolve a production network capability;
 - every order POST ambiguity produces zero retries and durable unknown recovery;
 - exact cap/concurrency/rollover/crash boundaries pass;
 - kill-switch, cancel-all, and close-position states remain distinct under every partial outcome;
 - audit corruption/disclosure tests fail closed;
 - Spot priority and all Phase 5/6 regressions pass;
 - full unit, lint, production/E2E build, Playwright, circular-import, static isolation, and GitNexus change audits pass;
-- the committed handoff states that live production activation remains disabled.
+- automated validation performs no production request and manual live use remains an explicit operator action with visible red production state.

@@ -29,14 +29,33 @@ describe('Electron futures production execution composition boundaries', () => {
     expect(crashHandler).toBeLessThan(window)
   })
 
-  it('keeps the non-environment live interlock false and production storage separate', () => {
-    expect(composition).toContain('FUTURES_PRODUCTION_LIVE_AUTHORIZED = false')
+  it('authorizes the reviewed live interlock while keeping production storage separate', () => {
+    expect(composition).toContain('FUTURES_PRODUCTION_LIVE_AUTHORIZED = true')
+    expect(composition).toContain('&& isGlobalFetch(fetchImpl)')
     expect(composition).not.toContain('fetchImpl = globalThis.fetch')
     expect(productionMain).toContain("'futures-production-execution'")
     expect(productionMain).toContain("'futures-testnet-execution'")
     expect(productionMain).toContain('await binanceController.productionExecutionReady')
     expect(productionMain.indexOf('await binanceController.productionExecutionReady'))
       .toBeLessThan(productionMain.indexOf('  createWindow()'))
+  })
+
+  it('captures backend-only operator recovery before the window and fails closed', () => {
+    const capture = productionMain.indexOf('captureFuturesProductionOperatorStartupAction()')
+    const rejection = productionMain.indexOf('throw new Error(futuresProductionOperatorStartup.code)')
+    const setup = productionMain.indexOf('binanceController = setupBinanceConnection({')
+    const ready = productionMain.indexOf(
+      'const futuresProductionRuntime = await binanceController.productionExecutionReady',
+    )
+    const recovery = productionMain.indexOf('futuresProductionRuntime.recoverOperationally({')
+    const window = productionMain.indexOf('  createWindow()')
+    expect(capture).toBeGreaterThan(-1)
+    expect(rejection).toBeGreaterThan(capture)
+    expect(setup).toBeGreaterThan(rejection)
+    expect(ready).toBeGreaterThan(capture)
+    expect(recovery).toBeGreaterThan(ready)
+    expect(window).toBeGreaterThan(recovery)
+    expect(productionMain).toContain("throw new Error('FUTURES_PRODUCTION_OPERATOR_ACTION_BLOCKED')")
   })
 
   it('scrubs and force-disables E2E production while blocking exact production sockets', () => {

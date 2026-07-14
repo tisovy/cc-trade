@@ -18,7 +18,7 @@ import {
     createFuturesProductionExecutionService,
 } from './futures-production-execution-service.js';
 
-export const FUTURES_PRODUCTION_LIVE_AUTHORIZED = false;
+export const FUTURES_PRODUCTION_LIVE_AUTHORIZED = true;
 
 const KEY_FILE = 'integrity-key.sealed';
 const MAX_SEALED_KEY_BYTES = 16 * 1024;
@@ -227,7 +227,7 @@ export const createFuturesProductionExecutionRuntime = async ({
     const memoryLedger = createMemoryLedger({ startupFailureCode });
     const canUseLiveTransport = FUTURES_PRODUCTION_LIVE_AUTHORIZED === true
         && config?.liveAuthorized === true
-        && typeof fetchImpl === 'function';
+        && isGlobalFetch(fetchImpl);
     const authorizedFakeFetch = isFakeAuthorization(fakeTransportAuthorization, fetchImpl);
     const canUseFakeTransport = typeof authorizedFakeFetch === 'function';
     const networkFetch = canUseFakeTransport

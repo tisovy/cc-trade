@@ -80,8 +80,8 @@ describe('FuturesProductionExecutionComposition', () => {
         )).toThrow('available only to tests');
     });
 
-    it('keeps the compiled live authorization false and never falls back to global fetch', async () => {
-        expect(FUTURES_PRODUCTION_LIVE_AUTHORIZED).toBe(false);
+    it('authorizes reviewed live composition while disabled config still cannot dispatch', async () => {
+        expect(FUTURES_PRODUCTION_LIVE_AUTHORIZED).toBe(true);
         const fetchImpl = vi.fn(() => {
             throw new Error('network must remain unreachable');
         });
@@ -103,6 +103,82 @@ describe('FuturesProductionExecutionComposition', () => {
         });
         expect(fetchImpl).not.toHaveBeenCalled();
         await runtime.service.shutdown();
+    });
+
+    it('rejects caller-supplied live transports and accepts only process-global fetch', async () => {
+        const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-trade-prod-live-gate-'));
+        directories.push(directory);
+        const identityResponse = async (input) => {
+            const url = new URL(input);
+            expect(url.origin).toBe('https://fapi.binance.com');
+            if (url.pathname === '/fapi/v1/time') {
+                return new Response(JSON.stringify({ serverTime: 1_768_435_200_000 }), {
+                    status: 200,
+                    headers: { 'content-type': 'application/json' },
+                });
+            }
+            if (url.pathname === '/fapi/v1/accountConfig') {
+                return new Response(JSON.stringify({
+                    canTrade: true,
+                    dualSidePosition: false,
+                    multiAssetsMargin: false,
+                }), {
+                    status: 200,
+                    headers: { 'content-type': 'application/json' },
+                });
+            }
+            if (url.pathname === '/fapi/v3/balance') {
+                return new Response(JSON.stringify([{
+                    accountAlias: 'fake-account',
+                    asset: 'USDT',
+                    availableBalance: '1000',
+                    marginAvailable: true,
+                }]), {
+                    status: 200,
+                    headers: { 'content-type': 'application/json' },
+                });
+            }
+            throw new Error('unreviewed deterministic route');
+        };
+        const keyProtection = {
+            generate: () => Buffer.alloc(32, 6),
+            seal: key => Buffer.from(key),
+            open: sealed => Buffer.from(sealed),
+        };
+        const callerFetch = vi.fn(identityResponse);
+        const rejected = await createFuturesProductionExecutionRuntime({
+            config: enabledFakeConfig,
+            storageDirectory: directory,
+            ...coordinatorOptions,
+            keyProtection,
+            fetchImpl: callerFetch,
+        });
+        expect(rejected).toMatchObject({ durable: false, fakeBacked: false });
+        expect(rejected.service.getStatus()).toMatchObject({
+            liveAuthorized: false,
+            configured: true,
+        });
+        expect(callerFetch).not.toHaveBeenCalled();
+        await rejected.service.shutdown();
+
+        const processGlobalFetch = vi.fn(identityResponse);
+        vi.stubGlobal('fetch', processGlobalFetch);
+        const live = await createFuturesProductionExecutionRuntime({
+            config: enabledFakeConfig,
+            storageDirectory: directory,
+            ...coordinatorOptions,
+            keyProtection,
+            fetchImpl: globalThis.fetch,
+        });
+        expect(live).toMatchObject({ durable: true, fakeBacked: false });
+        expect(live.service.getStatus()).toMatchObject({
+            liveAuthorized: true,
+            configured: true,
+            account: { alias: 'fake-account', fingerprint: 'a'.repeat(64) },
+            killSwitch: { engaged: true },
+        });
+        expect(processGlobalFetch).toHaveBeenCalledTimes(3);
+        await live.service.shutdown();
     });
 
     it('surfaces a durable-runtime startup failure as blocked recovery', async () => {
@@ -167,7 +243,7 @@ describe('FuturesProductionExecutionComposition', () => {
         });
         vi.stubGlobal('fetch', substitutedGlobalFetch);
         const substitutedRuntime = await createFuturesProductionExecutionRuntime({
-            config: enabledFakeConfig,
+            config: Object.freeze({ ...enabledFakeConfig, liveAuthorized: false }),
             ...coordinatorOptions,
             fetchImpl: substitutedGlobalFetch,
             fakeTransportAuthorization: authorization,
@@ -186,7 +262,7 @@ describe('FuturesProductionExecutionComposition', () => {
         await substitutedRuntime.service.shutdown();
     });
 
-    it('allows only an explicit deterministic fake authorization to compose enabled code', async () => {
+    it('keeps explicit deterministic fake authorization available only to tests', async () => {
         const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-trade-prod-fake-'));
         directories.push(directory);
         const fetchImpl = vi.fn(async (input) => {

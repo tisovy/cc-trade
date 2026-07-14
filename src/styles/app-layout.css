@@ -195,22 +195,177 @@
   cursor: pointer;
 }
 
+.market-mode-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.market-mode-indicator {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #555;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
 .market-mode-switch button:hover {
   color: #d0d0d0;
 }
 
-.market-mode-switch button.active {
+.market-mode-switch button.is-spot.active {
   background: #173d39;
   color: #c6fce1;
 }
 
-.futures-readonly-view {
+.market-mode-switch button.is-spot.active .market-mode-indicator {
+  background: #48c69b;
+  box-shadow: 0 0 7px rgba(72, 198, 155, 0.75);
+}
+
+.market-mode-switch button.is-testnet.active {
+  background: #123a60;
+  color: #d7efff;
+}
+
+.market-mode-switch button.is-testnet.active .market-mode-indicator {
+  background: #55b7ff;
+  box-shadow: 0 0 8px rgba(85, 183, 255, 0.9);
+}
+
+.market-mode-switch button.is-production.active {
+  background: #651c22;
+  color: #fff0f0;
+}
+
+.market-mode-switch button.is-production.active .market-mode-indicator {
+  background: #ff5964;
+  box-shadow: 0 0 9px rgba(255, 89, 100, 0.95);
+}
+
+.futures-mode-view {
   min-height: 100vh;
   box-sizing: border-box;
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 500px));
   align-items: flex-start;
   justify-content: center;
-  padding: 52px 18px 18px;
-  background: #080808;
+  gap: 12px;
+  padding: 72px 18px 18px;
   overflow: auto;
+}
+
+.futures-mode-view.is-testnet {
+  background:
+    radial-gradient(circle at 50% 0%, rgba(24, 91, 151, 0.32), transparent 42%),
+    #07111b;
+}
+
+.futures-mode-view.is-testnet .futures-testnet-execution-ticket {
+  --execution-border: #2f72ad;
+  --execution-muted: #91abc2;
+  --execution-warning: #67bcff;
+  background: #0b1723;
+  color: #e9f5ff;
+}
+
+.futures-mode-view.is-testnet .futures-testnet-execution-header {
+  background: #102a42;
+}
+
+.futures-mode-view.is-testnet .futures-testnet-execution-capability {
+  border-color: #376f9d;
+}
+
+.futures-mode-view.is-testnet .futures-testnet-execution-backend-state code,
+.futures-mode-view.is-testnet .futures-testnet-execution-intent code {
+  color: #d5e9f8;
+}
+
+.futures-mode-view.is-testnet .futures-testnet-execution-fixed-facts dd {
+  color: #e7f4ff;
+}
+
+.futures-mode-view.is-testnet .futures-testnet-execution-intent,
+.futures-mode-view.is-testnet .futures-testnet-execution-attempt {
+  border-color: #294d6b;
+}
+
+.futures-mode-view.is-testnet .futures-testnet-execution-attempt.is-pending {
+  border-color: #397fb6;
+}
+
+.futures-mode-view.is-testnet .futures-testnet-execution-fields input {
+  border-color: #315b7d;
+  background: #07111a;
+  color: #e9f5ff;
+}
+
+.futures-mode-view.is-testnet .futures-testnet-execution-actions button {
+  border-color: #356b98;
+  background: #123759;
+  color: #d8efff;
+}
+
+.futures-mode-view.is-production {
+  grid-template-columns: minmax(0, 500px);
+  background:
+    radial-gradient(circle at 50% 0%, rgba(148, 31, 39, 0.34), transparent 45%),
+    #110607;
+}
+
+.futures-mode-banner {
+  position: fixed;
+  top: 45px;
+  left: 50%;
+  z-index: 110;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transform: translateX(-50%);
+  border: 1px solid;
+  border-radius: 999px;
+  padding: 4px 11px;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  box-shadow: 0 3px 15px rgba(0, 0, 0, 0.45);
+}
+
+.futures-mode-banner strong {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+
+.futures-mode-banner.is-testnet {
+  border-color: #317fbe;
+  background: #104475;
+  color: #d9f2ff;
+}
+
+.futures-mode-banner.is-production {
+  border-color: #d3414c;
+  background: #731c25;
+  color: #fff;
+  box-shadow: 0 3px 18px rgba(188, 35, 47, 0.42);
+}
+
+@media (max-width: 940px) {
+  .futures-mode-view {
+    grid-template-columns: minmax(0, 500px);
+  }
+}
+
+@media (max-width: 620px) {
+  .market-mode-switch {
+    right: 6px;
+  }
+
+  .market-mode-switch button {
+    padding: 5px 6px;
+    font-size: 9px;
+  }
+
+  .futures-mode-banner span {
+    display: none;
+  }
 }

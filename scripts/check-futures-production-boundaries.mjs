@@ -326,11 +326,14 @@ if (fs.existsSync(compositionPath)) {
     const declarations = [...composition.matchAll(
         /\b(?:export\s+)?const\s+FUTURES_PRODUCTION_LIVE_AUTHORIZED\s*=\s*(true|false)\s*;/g,
     )];
-    if (declarations.length !== 1 || declarations[0][1] !== 'false') {
-        fail('The non-environment production live-authorization interlock is not false');
+    if (declarations.length !== 1 || declarations[0][1] !== 'true') {
+        fail('The reviewed non-environment production live-authorization interlock is not true');
     }
     if (!/canUseLiveTransport\s*=\s*FUTURES_PRODUCTION_LIVE_AUTHORIZED\s*===\s*true\s*&&\s*config\?\.liveAuthorized\s*===\s*true/.test(composition)) {
         fail('Production composition does not require both compiled and captured live gates');
+    }
+    if (!/config\?\.liveAuthorized\s*===\s*true\s*&&\s*isGlobalFetch\(fetchImpl\)/.test(composition)) {
+        fail('Production live composition accepts a caller-supplied transport');
     }
     for (const file of productionExecutionImplementationFiles) {
         const name = relative(file);

@@ -25,6 +25,9 @@ import {
   createElectronSafeStorageProductionIntegrityKeyProtection,
 } from './services/futures-production-execution-key-protection.js'
 import {
+  captureFuturesProductionOperatorStartupAction,
+} from './services/futures-production-operator-startup.js'
+import {
   createLocalWebSocketAccess,
 } from './services/local-websocket-access.js'
 import {
@@ -62,6 +65,7 @@ const futuresProductionSecretValues = [
 const futuresProductionExecutionConfig = captureFuturesProductionExecutionConfig({
   liveAuthorized: FUTURES_PRODUCTION_LIVE_AUTHORIZED,
 })
+const futuresProductionOperatorStartup = captureFuturesProductionOperatorStartupAction()
 installFuturesTestnetExecutionLogSanitizer({
   secretValues: [
     futuresExecutionConfig.credentials?.apiKey,
@@ -261,6 +265,10 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   if (!hasExclusiveExecutionOwnership) return
+  if (futuresProductionOperatorStartup.requested
+    && !futuresProductionOperatorStartup.valid) {
+    throw new Error(futuresProductionOperatorStartup.code)
+  }
 
   let futuresExecutionKeyProtection = null
   let futuresProductionExecutionKeyProtection = null
@@ -299,7 +307,16 @@ app.whenReady().then(async () => {
     ),
   })
   await binanceController.executionReady
-  await binanceController.productionExecutionReady
+  const futuresProductionRuntime = await binanceController.productionExecutionReady
+  if (futuresProductionOperatorStartup.requested) {
+    const recovered = await futuresProductionRuntime.recoverOperationally({
+      authorization: futuresProductionExecutionConfig.recoveryAuthorization,
+      action: futuresProductionOperatorStartup.action,
+    })
+    if (!recovered) {
+      throw new Error('FUTURES_PRODUCTION_OPERATOR_ACTION_BLOCKED')
+    }
+  }
 
   installRendererAppProtocol({
     protocol,

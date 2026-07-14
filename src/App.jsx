@@ -40,33 +40,60 @@ const VIEWS = {
 
 const MARKET_MODES = Object.freeze({
   SPOT: 'spot',
-  FUTURES: 'futures',
+  FUTURES_TESTNET: 'futures-testnet',
+  FUTURES_LIVE: 'futures-live',
 });
 
 const DEFAULT_FUTURES_SYMBOL = 'BTCUSDT';
 const CONFIGURED_FUTURES_ENVIRONMENT = getRendererFuturesReadEnvironment();
 
-const MarketModeSwitch = ({ mode, environment, onChange }) => (
+const MARKET_MODE_OPTIONS = Object.freeze([
+  Object.freeze({
+    mode: MARKET_MODES.SPOT,
+    label: 'Spot',
+    testId: 'market-mode-spot',
+    tone: 'spot',
+  }),
+  Object.freeze({
+    mode: MARKET_MODES.FUTURES_TESTNET,
+    label: 'Futures Testnet',
+    testId: 'market-mode-futures-testnet',
+    tone: 'testnet',
+  }),
+  Object.freeze({
+    mode: MARKET_MODES.FUTURES_LIVE,
+    label: 'Futures Live',
+    testId: 'market-mode-futures-live',
+    tone: 'production',
+  }),
+]);
+
+const MarketModeSwitch = ({ mode, onChange }) => (
   <div className="market-mode-switch" role="group" aria-label="Market mode">
-    <button
-      type="button"
-      className={mode === MARKET_MODES.SPOT ? 'active' : ''}
-      data-testid="market-mode-spot"
-      aria-pressed={mode === MARKET_MODES.SPOT}
-      onClick={() => onChange(MARKET_MODES.SPOT)}
-    >
-      Spot
-    </button>
-    <button
-      type="button"
-      className={mode === MARKET_MODES.FUTURES ? 'active' : ''}
-      data-testid="market-mode-futures"
-      aria-pressed={mode === MARKET_MODES.FUTURES}
-      onClick={() => onChange(MARKET_MODES.FUTURES)}
-    >
-      Futures{environment ? ` · ${environment.toUpperCase()}` : ''}
-    </button>
+    {MARKET_MODE_OPTIONS.map((option) => (
+      <button
+        type="button"
+        className={`market-mode-option is-${option.tone}${mode === option.mode ? ' active' : ''}`}
+        data-testid={option.testId}
+        aria-pressed={mode === option.mode}
+        onClick={() => onChange(option.mode)}
+        key={option.mode}
+      >
+        <span className="market-mode-indicator" aria-hidden="true" />
+        {option.label}
+      </button>
+    ))}
   </div>
+);
+
+const FuturesModeBanner = ({ production }) => (
+  <header
+    className={`futures-mode-banner is-${production ? 'production' : 'testnet'}`}
+    data-testid={production ? 'futures-live-banner' : 'futures-testnet-banner'}
+  >
+    <strong>{production ? 'USDⓈ-M FUTURES LIVE' : 'USDⓈ-M FUTURES TESTNET'}</strong>
+    <span>{production ? 'REAL MONEY · PRODUCTION' : 'SIMULATED FUNDS · TESTNET'}</span>
+  </header>
 );
 
 function AppShell() {
@@ -88,20 +115,22 @@ function AppShell() {
   const [quickSwitch, setQuickSwitch] = useState({ visible: false, mode: 'pair', query: '', selectedIndex: 0 });
   const [marketMode, setMarketMode] = useState(MARKET_MODES.SPOT);
   const [futuresSymbol] = useState(DEFAULT_FUTURES_SYMBOL);
+  const isFuturesTestnetMode = marketMode === MARKET_MODES.FUTURES_TESTNET;
+  const isFuturesLiveMode = marketMode === MARKET_MODES.FUTURES_LIVE;
   const futuresState = useFuturesReadOnly({
-    enabled: marketMode === MARKET_MODES.FUTURES,
+    enabled: isFuturesTestnetMode,
     symbol: futuresSymbol,
     environment: CONFIGURED_FUTURES_ENVIRONMENT,
     wsConnection,
     sendMessage,
   });
   const futuresExecution = useFuturesTestnetExecution({
-    enabled: marketMode === MARKET_MODES.FUTURES,
+    enabled: isFuturesTestnetMode,
     symbol: futuresSymbol,
     wsConnection,
   });
   const futuresProductionExecution = useFuturesProductionExecution({
-    enabled: marketMode === MARKET_MODES.FUTURES,
+    enabled: isFuturesLiveMode,
     wsConnection,
   });
 
@@ -517,18 +546,30 @@ function AppShell() {
     <div className={`App market-mode-${marketMode}`}>
       <MarketModeSwitch
         mode={marketMode}
-        environment={futuresState.environment}
         onChange={handleMarketModeChange}
       />
 
-      {marketMode === MARKET_MODES.FUTURES ? (
-        <main className="futures-readonly-view" data-testid="futures-readonly-view">
+      {isFuturesTestnetMode ? (
+        <main
+          className="futures-mode-view is-testnet"
+          data-testid="futures-testnet-view"
+          aria-label="USDⓈ-M futures testnet workspace"
+        >
+          <FuturesModeBanner production={false} />
           <FuturesReadOnlyPanel state={futuresState} />
           <FuturesTestnetExecutionTicket
             state={futuresExecution}
             onPrepareIntent={futuresExecution.prepareIntent}
             onPlaceOrder={futuresExecution.placeOrder}
           />
+        </main>
+      ) : isFuturesLiveMode ? (
+        <main
+          className="futures-mode-view is-production"
+          data-testid="futures-live-view"
+          aria-label="USDⓈ-M futures live production workspace"
+        >
+          <FuturesModeBanner production />
           <FuturesProductionExecutionTicket
             state={futuresProductionExecution}
             onPrepareOrderIntent={futuresProductionExecution.prepareOrderIntent}

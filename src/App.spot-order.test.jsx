@@ -18,6 +18,9 @@ const mocks = vi.hoisted(() => ({
   sendMessage: vi.fn(),
   handlePanelUpdate: vi.fn(),
   checkPriceAlerts: vi.fn(),
+  futuresReadEnabled: [],
+  futuresTestnetEnabled: [],
+  futuresProductionEnabled: [],
 }))
 
 vi.mock('./context/DataContext', () => ({
@@ -51,18 +54,65 @@ vi.mock('./hooks/useAlertContext', () => ({
 }))
 
 vi.mock('./hooks/useFuturesTestnetExecution', () => ({
-  default: () => ({
-    connected: false,
-    subscribed: false,
-    submissionLocked: false,
-    revision: null,
-    symbol: null,
-    capability: null,
-    intent: null,
-    attempt: null,
-    prepareIntent: vi.fn(() => false),
-    placeOrder: vi.fn(() => false),
-  }),
+  default: ({ enabled }) => {
+    mocks.futuresTestnetEnabled.push(enabled)
+    return {
+      connected: false,
+      subscribed: false,
+      submissionLocked: false,
+      revision: null,
+      symbol: null,
+      capability: null,
+      intent: null,
+      attempt: null,
+      prepareIntent: vi.fn(() => false),
+      placeOrder: vi.fn(() => false),
+    }
+  },
+}))
+
+vi.mock('./hooks/useFuturesReadOnly', () => ({
+  default: ({ enabled }) => {
+    mocks.futuresReadEnabled.push(enabled)
+    return {
+      status: 'idle',
+      environment: 'mock',
+      symbol: null,
+      errorCode: null,
+      resources: {},
+    }
+  },
+}))
+
+vi.mock('./hooks/useFuturesProductionExecution', () => ({
+  default: ({ enabled }) => {
+    mocks.futuresProductionEnabled.push(enabled)
+    return {
+      connected: false,
+      subscribed: false,
+      submissionLocked: false,
+      revision: null,
+      mode: null,
+      liveAuthorized: null,
+      configured: null,
+      account: null,
+      caps: null,
+      killSwitch: null,
+      capabilities: null,
+      intent: null,
+      attempt: null,
+      reconciliation: null,
+      recovery: null,
+      prepareOrderIntent: vi.fn(() => false),
+      placeOrder: vi.fn(() => false),
+      prepareCancelAllOpenOrdersIntent: vi.fn(() => false),
+      cancelAllOpenOrders: vi.fn(() => false),
+      prepareClosePositionsIntent: vi.fn(() => false),
+      closePositions: vi.fn(() => false),
+      prepareEngageKillSwitchIntent: vi.fn(() => false),
+      engageKillSwitch: vi.fn(() => false),
+    }
+  },
 }))
 
 vi.mock('./context/NotificationProvider', () => ({
@@ -151,6 +201,9 @@ describe('App spot order payloads', () => {
     mocks.sendMessage.mockClear()
     mocks.handlePanelUpdate.mockClear()
     mocks.checkPriceAlerts.mockClear()
+    mocks.futuresReadEnabled.length = 0
+    mocks.futuresTestnetEnabled.length = 0
+    mocks.futuresProductionEnabled.length = 0
   })
 
   afterEach(() => {
@@ -250,13 +303,24 @@ describe('App spot order payloads', () => {
 
     expect(screen.getByTestId('place-spot-order')).toBeInTheDocument()
     expect(screen.getByTestId('cancel-spot-order')).toBeInTheDocument()
-    expect(screen.getByTestId('market-mode-futures')).toHaveTextContent('Futures · MOCK')
+    expect(screen.getByTestId('market-mode-futures-testnet')).toHaveTextContent('Futures Testnet')
+    expect(screen.getByTestId('market-mode-futures-live')).toHaveTextContent('Futures Live')
+    expect(mocks.futuresReadEnabled.at(-1)).toBe(false)
+    expect(mocks.futuresTestnetEnabled.at(-1)).toBe(false)
+    expect(mocks.futuresProductionEnabled.at(-1)).toBe(false)
 
-    fireEvent.click(screen.getByTestId('market-mode-futures'))
+    fireEvent.click(screen.getByTestId('market-mode-futures-testnet'))
 
-    expect(screen.getByTestId('futures-readonly-view')).toBeInTheDocument()
+    expect(screen.getByTestId('futures-testnet-view')).toBeInTheDocument()
+    expect(screen.getByTestId('futures-testnet-banner')).toHaveTextContent(
+      'USDⓈ-M FUTURES TESTNETSIMULATED FUNDS · TESTNET',
+    )
     expect(screen.getByLabelText('USDⓈ-M futures read-only risk')).toBeInTheDocument()
     expect(screen.getByLabelText('USDⓈ-M testnet reduce-only execution')).toBeInTheDocument()
+    expect(screen.queryByLabelText('USDⓈ-M production real-order execution')).not.toBeInTheDocument()
+    expect(mocks.futuresReadEnabled.at(-1)).toBe(true)
+    expect(mocks.futuresTestnetEnabled.at(-1)).toBe(true)
+    expect(mocks.futuresProductionEnabled.at(-1)).toBe(false)
     expect(screen.queryByTestId('place-spot-order')).not.toBeInTheDocument()
     expect(screen.queryByTestId('cancel-spot-order')).not.toBeInTheDocument()
     expect(mocks.send).not.toHaveBeenCalled()
@@ -264,11 +328,32 @@ describe('App spot order payloads', () => {
     fireEvent.keyDown(document, { key: 'B' })
     expect(screen.queryByTestId('quick-switch-modal')).not.toBeInTheDocument()
 
+    fireEvent.click(screen.getByTestId('market-mode-futures-live'))
+
+    expect(screen.getByTestId('futures-live-view')).toBeInTheDocument()
+    expect(screen.getByTestId('futures-live-banner')).toHaveTextContent(
+      'USDⓈ-M FUTURES LIVEREAL MONEY · PRODUCTION',
+    )
+    expect(screen.getByLabelText('USDⓈ-M production real-order execution')).toBeInTheDocument()
+    expect(screen.queryByLabelText('USDⓈ-M futures read-only risk')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('USDⓈ-M testnet reduce-only execution')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('place-spot-order')).not.toBeInTheDocument()
+    expect(mocks.futuresReadEnabled.at(-1)).toBe(false)
+    expect(mocks.futuresTestnetEnabled.at(-1)).toBe(false)
+    expect(mocks.futuresProductionEnabled.at(-1)).toBe(true)
+
+    fireEvent.keyDown(document, { key: 'B' })
+    expect(screen.queryByTestId('quick-switch-modal')).not.toBeInTheDocument()
+
     fireEvent.click(screen.getByTestId('market-mode-spot'))
 
-    expect(screen.queryByTestId('futures-readonly-view')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('futures-testnet-view')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('futures-live-view')).not.toBeInTheDocument()
     expect(screen.getByTestId('place-spot-order')).toBeInTheDocument()
     expect(screen.getByTestId('cancel-spot-order')).toBeInTheDocument()
+    expect(mocks.futuresReadEnabled.at(-1)).toBe(false)
+    expect(mocks.futuresTestnetEnabled.at(-1)).toBe(false)
+    expect(mocks.futuresProductionEnabled.at(-1)).toBe(false)
 
     fireEvent.keyDown(document, { key: 'B' })
     expect(screen.getByTestId('quick-switch-modal')).toBeInTheDocument()

@@ -1085,7 +1085,7 @@ Required production-only controls:
 
 The reviewed ordinary order is regular one-way isolated `LIMIT/GTC`; leverage and margin are assertions, never writes. The backend classifies opening/increasing versus reduce-only exposure. The kill switch blocks only opening/increasing exposure. Cancel-all reconciles regular and algo inventories separately; close-positions issues separately journaled reduce-only MARKET children and reports exact per-position partial/unknown results. Teardown remains teardown.
 
-The normal/E2E live-authorization interlock remains false in the fake-backed delivery. A later live rollout requires the operator's separate explicit authorization, credential ceremony, audit review, and a separately committed interlock change.
+The initial fake-backed commit retained the normal/E2E live-authorization interlock as false. The separate 2026-07-14 authorization enables only normal composition; E2E remains force-disabled, automated verification remains fake-only, and manual live use still requires the trusted credential ceremony and every backend gate.
 
 ### Integrated implementation record (2026-07-13)
 
@@ -1096,14 +1096,27 @@ The normal/E2E live-authorization interlock remains false in the fake-backed del
 - [x] Every command, gate, intent, exchange request/response, reconciliation, partial result, safety transition, and operator recovery action is written through the bounded redacted HMAC journal; corruption, rollback, torn writes, lock contention, capacity, and crash/replay paths fail closed.
 - [x] Final fake-only validation passed `75` Vitest files / `2611` tests (`2` existing skips), full ESLint, production and E2E builds, all `13` Electron Playwright scenarios, the static production-boundary scan across `17` isolated implementation files, and the circular-import scan across `188` source files.
 - [x] Final GitNexus source analysis indexed `5684` symbols / `13548` relationships / `300` execution flows. Exact comparison with Phase 6 commit `36681f0` is CRITICAL at `49 files / 1440 symbols / 152 flows`, matching the integrated Phase 7 boundary; cumulative comparison with `main` is CRITICAL at `154 / 3816 / 282`, including inherited Phase 1–6 history. The separate frozen-file comparison for Phase 5/6 implementation and design files is empty.
-- [x] No live credential was used and no production Futures network request was sent. Normal and E2E composition force the compile-time live-authorization interlock false; live activation still requires a separate explicit authorization and code review.
+- [x] The initial Phase 7 delivery used no live credential and sent no production Futures request. Commit `eac0834d8780a14ada8e354fbb41408a84eab4dd` retained the compile-time live interlock as false pending separate authorization.
 
 Acceptance:
 
 - Production futures cannot be enabled accidentally.
 - Real execution requires explicit configuration and a visible account/mode indicator.
 - Phase 5 and Phase 6 remain structurally frozen and production-independent.
-- Normal and E2E verification make zero production Futures network requests.
+- Automated normal-build tests and E2E verification make zero production Futures network requests; E2E remains force-disabled.
+
+### Phase 7 live authorization record (2026-07-14)
+
+- [x] The operator explicitly authorized live production implementation and manual verification after checking Spot and testnet.
+- [x] Normal production composition sets the separate non-environment live interlock true; E2E still passes `forceDisabled: true`, scrubs every production key, and terminates on a production network escape.
+- [x] Live composition accepts only process-global Node `fetch`. Caller-supplied transports remain unusable; deterministic tests retain their unforgeable fake-only authorization object.
+- [x] Production remains default-disabled and requires the exact flag, acknowledgement, credentials, full key fingerprint/account alias, complete caps, fixed kill-switch policy, healthy private durable storage, recovery, and every runtime gate.
+- [x] Added exact backend-only startup recovery for `reconcile`, `engageKillSwitch`, and `disengageKillSwitch`. The argument contains no secret, is scrubbed before `BrowserWindow`, requires the captured recovery authorization, is durably audited, and has no renderer/IPC/WebSocket disarm path.
+- [x] Added an application-level three-workspace selector without creating a backend environment enum: neutral Spot, blue Futures Testnet, and red Futures Live. Only the selected independent hook/ticket is active; Spot controls and shortcuts remain absent from both futures workspaces.
+- [x] Added the live operator runbook with the required restart boundary, exact non-secret configuration inventory, default-engaged kill switch, visible account/cap checks, and fail-closed recovery rules.
+- [x] Official Binance documentation was rechecked on 2026-07-14 for `https://fapi.binance.com`, signed `POST /fapi/v1/order`, `GET /fapi/v1/order`, both cancel-all endpoints, and unknown-execution semantics.
+- [x] Final automated verification used no live credential and sent no production Futures request. It passed `76` Vitest files / `2622` tests (`2` existing skips), full ESLint, production and E2E builds, all `13` Electron Playwright scenarios including exact blue/red CSS assertions, the production boundary scan across `18` isolated implementation files, and the circular-import scan across `190` source files.
+- [x] Final GitNexus analysis indexed `5710` nodes / `13582` edges / `338` clusters / `300` flows. The live/UI commit versus `eac0834d8780a14ada8e354fbb41408a84eab4dd` is HIGH at `15 files / 44 symbols / 7 flows`; cumulative comparison with Phase 6 `36681f0` is CRITICAL at `55 / 1464 / 154`; cumulative comparison with `main` is CRITICAL at `157 / 3834 / 282`. The Phase 5/6 implementation and Phase 6 design diff remains empty.
 
 ## UI Rollout Rules
 
@@ -1122,13 +1135,14 @@ Suggested UI order:
 4. Futures order ticket in testnet.
 5. Production futures controls after safety gates.
 
-## Phase 7 Integrated Continuation
+## Phase 7 Live Operations Continuation
 
-Carry the reviewed Phase 7 ADR and threat model through one fake-backed, code-complete delivery. Do not stop after documentation, scaffolding, or an individual backend/UI checkpoint.
+The fake-backed Phase 7 delivery is complete and the operator has now authorized normal live composition. Continue only through explicit operational review; do not merge production into Phase 5/6 or convert their boundaries into a mode enum.
 
 - keep every production composition, credential, configuration, action/channel, service, store/lock, audit, recovery, host, hook, and component separately named from Phase 5/6;
 - run GitNexus upstream impact before editing every existing symbol and report HIGH/CRITICAL results before proceeding;
-- retain the non-environment live-authorization interlock as false; deterministic injected fakes are the only permitted implementation/verification transport;
-- install the production write route only after exact config/account gates, durable audit/state, daily cap, kill switch, idempotency, ambiguity/reconciliation, cancel-all/close-position partial results, recovery, and network-escape tests pass together;
+- retain the separately reviewed non-environment live authorization as a compiled normal-composition decision; never expose it through environment, renderer, generic commands, or E2E;
+- keep automated verification fake-only and reject any test/E2E production network escape;
+- require the trusted credential ceremony, visible backend identity/caps, initially engaged kill switch, and exact backend-only recovery action before intentional new exposure;
 - finish with full Spot/Phase 5/Phase 6/Phase 7 unit, lint, production/E2E build, Electron Playwright, circular-import, static isolation/credential/host/write scans, and GitNexus change detection against `36681f0` and `main`;
-- commit only the integrated delivery with a clean worktree and an explicit statement that live production activation remains disabled.
+- preserve a clean auditable commit and document that no real production request was sent by automated development or verification.

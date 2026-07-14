@@ -2,7 +2,7 @@
 
 Date: 2026-07-13
 
-Status: accepted for fake-backed implementation; live production activation is not authorized
+Status: accepted; fake-backed implementation completed 2026-07-13 and live production composition explicitly authorized 2026-07-14
 
 Base: `36681f07f447e5bfb0d3b4ce30642326b55a89df` (`Complete Futures testnet execution Phase 6`)
 
@@ -12,7 +12,7 @@ Phase 7 is a new production-only subsystem. It does not add an environment enum,
 
 The implementation uses separately named production configuration, credentials, account identity, coordinator, transport, protocol/actions, service, storage/locks, audit records, recovery, renderer hook, and UI. The only reviewed network origin is the compiled constant `https://fapi.binance.com`. No caller can provide a host, URL, method, path, headers, agent, dispatcher, proxy, redirect policy, timeout, retry count, timestamp, signature, or raw request options.
 
-This delivery intentionally retains a non-environment live-authorization interlock set to false in normal and E2E composition. Deterministic tests inject a fake transport and an explicit test-only authorization object. Changing the normal interlock or running a real account verification requires a later commit and the operator's separate explicit authorization. An otherwise complete environment configuration cannot reach production in this delivery.
+The initial delivery intentionally retained a non-environment live-authorization interlock set to false. On 2026-07-14 the operator explicitly authorized a separately reviewed live activation commit. Normal composition now sets that non-environment interlock to true, while configuration remains exact, disabled by default, and independently gated. Live composition accepts only the process-global Node `fetch`; a caller-supplied transport is rejected. Deterministic tests retain the explicit fake-only authorization seam, and E2E remains force-disabled with a production-network escape guard.
 
 ## Boundary inventory
 
@@ -45,7 +45,7 @@ Normal composition exposes no live write capability unless every backend-owned f
 
 1. The exact operator flag is ASCII `true`; there is no trimming, case folding, numeric/boolean coercion, alias, or default enablement.
 2. The exact operator acknowledgement is `I_UNDERSTAND_REAL_USDT_FUTURES`.
-3. The compiled live-authorization interlock is separately approved. It remains false in this delivery.
+3. The compiled live-authorization interlock is separately approved and true only in normal production composition. It is not an environment option, mode enum, renderer value, or E2E capability.
 4. Production API key, API secret, and backend-only recovery authorization are bounded visible ASCII, captured and deleted before the first `BrowserWindow`.
 5. The configured SHA-256 API-key fingerprint matches the captured key.
 6. A signed fixed-production-origin read returns exactly the configured account alias, fingerprint binding, `canTrade: true`, one-way mode, and single-asset mode.
@@ -158,7 +158,7 @@ The store never contains API keys/secrets, recovery authorization, signatures, s
 
 ## Renderer contract
 
-The renderer uses channel `futures-production-execution` and exact `futures.production.*` actions. It is independent of `DataContext`, Phase 5, Phase 6, Spot commands, generic action validation, browser storage, analytics, telemetry, clipboard, crash reporting, and global shortcuts.
+The renderer uses channel `futures-production-execution` and exact `futures.production.*` actions. It is independent of Phase 5, Phase 6, Spot commands, generic action validation, browser storage, analytics, telemetry, clipboard, crash reporting, and global shortcuts. The application-level selector has three UI-only workspace values — Spot, Futures Testnet, and Futures Live — but does not parameterize a backend service, host, credentials, protocol, storage, or transport. Testnet mounts only the Phase 5/6 panels in a blue workspace; Live mounts only the production panel in a red workspace; Spot affordances are absent from both futures branches.
 
 The compact surface is unmistakably labeled `USDⓈ-M PRODUCTION · REAL ORDERS`. It displays only backend-owned mode, live-authorization status, account alias/fingerprint, configured exact caps and UTC usage, kill-switch state, action capabilities, active intent, pending/accepted/rejected/unknown result, reconciliation, and recovery state. It uses separate controls for order, cancel-all, close-positions, and kill switch.
 
@@ -166,13 +166,15 @@ Every destructive action requires an action-specific typed confirmation challeng
 
 ## Live authorization and rollout
 
-The complete automated delivery uses deterministic backend fakes only. Normal and E2E composition scrub production credentials/configuration, retain the live interlock as false, and reject any attempted Binance socket. No live account read, order, cancellation, or close request is part of development, tests, or verification.
+Automated development, tests, and verification continue to use deterministic backend fakes only. E2E scrubs production configuration, force-disables the service, and rejects any attempted production socket. No live account read, order, cancellation, or close request is part of automated verification.
 
-A later live rollout requires a new explicit authorization, a clean audit review, a production credential ceremony, confirmation of the configured account alias/fingerprint and limits, an initially engaged kill switch, and a separately committed change to the non-environment live interlock. That later authorization is not implied by this ADR.
+The operator supplied the required explicit live authorization on 2026-07-14. Normal composition now permits the exact process-global production transport only after every configuration, account, storage, recovery, quota, and policy gate passes. Production remains disabled when any required environment value is absent or invalid. Startup begins with the durable kill switch engaged. Disengagement and reconciliation are available only through the exact main-process startup argument `--futures-production-operator-action=<action>` and the captured backend recovery authorization. Engagement is available through either that backend action or the existing explicit production intent/confirmation UI. The argument is scrubbed before `BrowserWindow` creation, and no renderer path can disengage or reconcile.
+
+The operational credential ceremony, manual account/fingerprint/cap inspection, and any real request remain operator actions, not automated delivery steps. See `docs/futures_phase7_live_operator_runbook.md`.
 
 ## Official contract review
 
-Reviewed on 2026-07-13 using public Binance documentation only. The product General Info identifies the production REST base as `https://fapi.binance.com`, requires signed HMAC requests and warns that timeout/unknown responses may have executed. Current catalog entries identify New Order as `POST /fapi/v1/order`, Query Order as `GET /fapi/v1/order`, regular cancel-all as `DELETE /fapi/v1/allOpenOrders`, algo cancel-all as `DELETE /fapi/v1/algoOpenOrders`, V3 balance as `GET /fapi/v3/balance`, account configuration as `GET /fapi/v1/accountConfig`, symbol configuration as `GET /fapi/v1/symbolConfig`, and V3 position risk as `GET /fapi/v3/positionRisk`.
+Reviewed on 2026-07-13 and rechecked on 2026-07-14 using public Binance documentation only. The product General Info identifies the production REST base as `https://fapi.binance.com`, requires signed HMAC requests and warns that timeout/unknown responses may have executed. Current catalog entries identify New Order as `POST /fapi/v1/order`, Query Order as `GET /fapi/v1/order`, regular cancel-all as `DELETE /fapi/v1/allOpenOrders`, algo cancel-all as `DELETE /fapi/v1/algoOpenOrders`, V3 balance as `GET /fapi/v3/balance`, account configuration as `GET /fapi/v1/accountConfig`, symbol configuration as `GET /fapi/v1/symbolConfig`, and V3 position risk as `GET /fapi/v3/positionRisk`.
 
 Primary references:
 
