@@ -120,7 +120,14 @@ const createSocket = (url, onMessage, onDisconnect) => {
     const lifetime = setTimeout(() => socket.close(1000, '24h connection rotation'), 86_400_000);
     lifetime.unref?.();
     socket.on('message', (data, isBinary) => {
-        if (closed || isBinary) return;
+        if (closed) return;
+        if (isBinary) {
+            closed = true;
+            clearTimeout(lifetime);
+            onDisconnect('BINARY_FRAME_REJECTED');
+            socket.close(1003, 'binary frame rejected');
+            return;
+        }
         const raw = typeof data === 'string' ? data : data.toString('utf8');
         if (Buffer.byteLength(raw, 'utf8') > FUTURES_WORKSTATION_JSON_LIMITS.WS_FRAME_BYTES) {
             socket.close(1009, 'frame too large');

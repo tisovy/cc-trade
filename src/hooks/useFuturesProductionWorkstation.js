@@ -9,6 +9,7 @@ import {
 } from '../utils/futuresProductionWorkstationProtocol.js'
 import {
   applyFuturesWorkstationEvent,
+  transitionFuturesWorkstationConnectionState,
 } from '../utils/futuresWorkstationProtocolShared.js'
 
 let requestSequence = 0
@@ -116,19 +117,19 @@ const useFuturesProductionWorkstation = ({
     }
     const handleClose = () => {
       if (!owned()) return
-      setState(previousState => Object.freeze({
-        ...previousState,
-        status: 'disconnected',
-        reasonCode: 'LOCAL_CONNECTION_CLOSED',
-      }))
+      setState(previousState => transitionFuturesWorkstationConnectionState(
+        previousState,
+        'disconnected',
+        'LOCAL_CONNECTION_CLOSED',
+      ))
     }
     const handleError = () => {
       if (!owned()) return
-      setState(previousState => Object.freeze({
-        ...previousState,
-        status: 'unavailable',
-        reasonCode: 'LOCAL_CONNECTION_ERROR',
-      }))
+      setState(previousState => transitionFuturesWorkstationConnectionState(
+        previousState,
+        'unavailable',
+        'LOCAL_CONNECTION_ERROR',
+      ))
     }
 
     wsConnection.addEventListener('message', handleMessage)

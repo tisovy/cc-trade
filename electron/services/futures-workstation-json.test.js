@@ -12,12 +12,22 @@ import {
 describe('bounded Futures workstation JSON and HTTP boundary', () => {
     it('preserves every integer token without Number coercion', () => {
         const parsed = parseFuturesWorkstationJson(
-            '{"id":900719925474099312345,"time":1784000000000}',
+            '{"id":18446744073709551615,"time":1784000000000}',
             { maxBytes: 100 },
         );
         expect(parsed.id).toBeInstanceOf(FuturesWorkstationIntegerToken);
-        expect(readFuturesWorkstationIdentity(parsed.id)).toBe('900719925474099312345');
+        expect(readFuturesWorkstationIdentity(parsed.id)).toBe('18446744073709551615');
         expect(readFuturesWorkstationTimestamp(parsed.time)).toBe(1_784_000_000_000);
+    });
+
+    it('rejects an identity above unsigned int64 while preserving the raw parser boundary', () => {
+        const parsed = parseFuturesWorkstationJson(
+            '{"id":18446744073709551616}',
+            { maxBytes: 100 },
+        );
+        expect(parsed.id).toBeInstanceOf(FuturesWorkstationIntegerToken);
+        expect(() => readFuturesWorkstationIdentity(parsed.id))
+            .toThrowError(expect.objectContaining({ code: 'INVALID_INTEGER_IDENTITY' }));
     });
 
     it.each([

@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import useFuturesTestnetWorkstationConnection from '../../../hooks/useFuturesTestnetWorkstationConnection.js'
 import useFuturesTestnetWorkstation from '../../../hooks/useFuturesTestnetWorkstation.js'
 import FuturesReadOnlyPanel from './FuturesReadOnlyPanel.jsx'
 import FuturesTestnetExecutionTicket from './FuturesTestnetExecutionTicket.jsx'
@@ -6,13 +7,12 @@ import FuturesWorkstationView from './FuturesWorkstationView.jsx'
 
 export const FuturesTestnetWorkstation = ({
   enabled,
-  wsConnection,
-  sendMessage,
   readOnlyState,
   executionState,
 }) => {
   const [symbol, setSymbol] = useState('BTCUSDT')
   const [interval, setInterval] = useState('1m')
+  const { wsConnection, sendMessage } = useFuturesTestnetWorkstationConnection({ enabled })
   const workstationState = useFuturesTestnetWorkstation({
     enabled,
     symbol,
@@ -24,6 +24,7 @@ export const FuturesTestnetWorkstation = ({
   return (
     <div className="futures-testnet-workstation" data-testid="futures-testnet-workstation">
       <FuturesWorkstationView
+        key={`${symbol}:${interval}`}
         identity="USDⓈ-M TESTNET · SIMULATED FUNDS"
         state={workstationState}
         selectedSymbol={symbol}

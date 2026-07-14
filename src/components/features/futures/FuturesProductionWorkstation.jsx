@@ -1,16 +1,16 @@
 import { useState } from 'react'
+import useFuturesProductionWorkstationConnection from '../../../hooks/useFuturesProductionWorkstationConnection.js'
 import useFuturesProductionWorkstation from '../../../hooks/useFuturesProductionWorkstation.js'
 import FuturesProductionExecutionTicket from './FuturesProductionExecutionTicket.jsx'
 import FuturesWorkstationView from './FuturesWorkstationView.jsx'
 
 export const FuturesProductionWorkstation = ({
   enabled,
-  wsConnection,
-  sendMessage,
   executionState,
 }) => {
   const [symbol, setSymbol] = useState('BTCUSDT')
   const [interval, setInterval] = useState('1m')
+  const { wsConnection, sendMessage } = useFuturesProductionWorkstationConnection({ enabled })
   const workstationState = useFuturesProductionWorkstation({
     enabled,
     symbol,
@@ -22,6 +22,7 @@ export const FuturesProductionWorkstation = ({
   return (
     <div className="futures-production-workstation" data-testid="futures-production-workstation">
       <FuturesWorkstationView
+        key={`${symbol}:${interval}`}
         identity="USDⓈ-M PRODUCTION · REAL MONEY"
         state={workstationState}
         selectedSymbol={symbol}

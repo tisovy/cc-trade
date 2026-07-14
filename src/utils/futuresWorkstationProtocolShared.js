@@ -1,7 +1,8 @@
 export const FUTURES_WORKSTATION_MARKET_TYPE = 'USD_M_FUTURES'
-export const FUTURES_WORKSTATION_PROTOCOL_VERSION = '1'
+export const FUTURES_WORKSTATION_PROTOCOL_VERSION = '2'
 export const FUTURES_WORKSTATION_REQUEST_MAX_BYTES = 1_024
 export const FUTURES_WORKSTATION_EVENT_MAX_BYTES = 15 * 1_024
+export const FUTURES_WORKSTATION_UINT64_MAX = '18446744073709551615'
 
 export const FUTURES_WORKSTATION_INTERVALS = Object.freeze([
   '1m',
@@ -37,6 +38,12 @@ const SYMBOL_PATTERN = /^[A-Z0-9]{1,20}$/
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{1,96}$/
 const UNSIGNED_INTEGER_PATTERN = /^(?:0|[1-9][0-9]*)$/
 const DECIMAL_PATTERN = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/
+const NONNEGATIVE_DECIMAL_PATTERN = /^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/
+const NON_LIVE_RESOURCE_STATES = new Set([
+  FUTURES_WORKSTATION_STATES.DISCONNECTED,
+  FUTURES_WORKSTATION_STATES.RESYNCHRONIZING,
+  FUTURES_WORKSTATION_STATES.UNAVAILABLE,
+])
 
 export class FuturesWorkstationProtocolError extends Error {
   constructor(code) {
@@ -70,8 +77,10 @@ export const isCanonicalFuturesDecimal = value => (
 
 export const isCanonicalFuturesIdentity = value => (
   typeof value === 'string'
-  && value.length <= 40
   && UNSIGNED_INTEGER_PATTERN.test(value)
+  && (value.length < FUTURES_WORKSTATION_UINT64_MAX.length
+    || (value.length === FUTURES_WORKSTATION_UINT64_MAX.length
+      && value <= FUTURES_WORKSTATION_UINT64_MAX))
 )
 
 export const isFuturesWorkstationSymbol = value => (
@@ -276,12 +285,40 @@ export const freezeFuturesWorkstationValue = (value) => {
   return value
 }
 
-const validateRangeFilter = (value, stepKey) => (
+const isCanonicalNonnegativeFuturesDecimal = value => (
+  typeof value === 'string'
+  && value.length <= 64
+  && NONNEGATIVE_DECIMAL_PATTERN.test(value)
+)
+
+const isCanonicalPositiveFuturesDecimal = value => (
+  isCanonicalNonnegativeFuturesDecimal(value)
+  && !/^0(?:\.0+)?$/.test(value)
+)
+
+const validateRangeFilter = (value, stepKey, allowDisabled) => (
   value === null
   || (hasExactFuturesWorkstationKeys(value, ['min', 'max', stepKey])
-    && isCanonicalFuturesDecimal(value.min)
-    && isCanonicalFuturesDecimal(value.max)
-    && isCanonicalFuturesDecimal(value[stepKey]))
+    && isCanonicalNonnegativeFuturesDecimal(value.min)
+    && (allowDisabled
+      ? isCanonicalNonnegativeFuturesDecimal(value.max)
+      : isCanonicalPositiveFuturesDecimal(value.max))
+    && (allowDisabled
+      ? isCanonicalNonnegativeFuturesDecimal(value[stepKey])
+      : isCanonicalPositiveFuturesDecimal(value[stepKey])))
+)
+
+const validatePercentPriceFilter = value => (
+  hasExactFuturesWorkstationKeys(value, [
+    'multiplierUp',
+    'multiplierDown',
+    'multiplierDecimal',
+  ])
+  && isCanonicalPositiveFuturesDecimal(value.multiplierUp)
+  && isCanonicalPositiveFuturesDecimal(value.multiplierDown)
+  && Number.isSafeInteger(value.multiplierDecimal)
+  && value.multiplierDecimal >= 0
+  && value.multiplierDecimal <= 18
 )
 
 const validateContract = (value) => (
@@ -312,13 +349,18 @@ const validateContract = (value) => (
     'price',
     'quantity',
     'marketQuantity',
+    'percentPrice',
+    'maximumOrders',
+    'maximumAlgoOrders',
     'minimumNotional',
   ])
-  && validateRangeFilter(value.filters.price, 'tickSize')
-  && validateRangeFilter(value.filters.quantity, 'stepSize')
-  && validateRangeFilter(value.filters.marketQuantity, 'stepSize')
-  && (value.filters.minimumNotional === null
-    || isCanonicalFuturesDecimal(value.filters.minimumNotional))
+  && validateRangeFilter(value.filters.price, 'tickSize', true)
+  && validateRangeFilter(value.filters.quantity, 'stepSize', false)
+  && validateRangeFilter(value.filters.marketQuantity, 'stepSize', false)
+  && validatePercentPriceFilter(value.filters.percentPrice)
+  && isPositiveSafeInteger(value.filters.maximumOrders)
+  && isPositiveSafeInteger(value.filters.maximumAlgoOrders)
+  && isCanonicalNonnegativeFuturesDecimal(value.filters.minimumNotional)
 )
 
 const validateCatalog = (value) => (
@@ -330,7 +372,7 @@ const validateCatalog = (value) => (
   && value.total <= 512
   && typeof value.complete === 'boolean'
   && Array.isArray(value.contracts)
-  && value.contracts.length <= 40
+  && value.contracts.length <= 8
   && value.contracts.every(validateContract)
 )
 
@@ -597,12 +639,71 @@ export const createFuturesWorkstationEvent = ({
   eventType,
 })
 
+const createEmptyFuturesWorkstationResources = () => ({
+  status: null,
+  catalog: null,
+  header: null,
+  candles: null,
+  depth: null,
+  trades: null,
+})
+
+const transitionFuturesWorkstationResources = (resources, nextState, observedAt) => (
+  Object.freeze(Object.fromEntries(
+    Object.entries(resources).map(([resource, value]) => [
+      resource,
+      value === null
+        ? null
+        : Object.freeze({
+          ...value,
+          state: nextState,
+          ...(observedAt === undefined ? {} : { observedAt }),
+        }),
+    ]),
+  ))
+)
+
+export const transitionFuturesWorkstationConnectionState = (state, status, reasonCode) => {
+  if (![FUTURES_WORKSTATION_STATES.DISCONNECTED, FUTURES_WORKSTATION_STATES.UNAVAILABLE]
+    .includes(status)
+    || !isReasonCode(reasonCode)) {
+    fail('INVALID_CONNECTION_TRANSITION')
+  }
+  const resources = transitionFuturesWorkstationResources(state.resources, status)
+  return Object.freeze({
+    ...state,
+    status,
+    reasonCode,
+    resources: Object.freeze({
+      ...resources,
+      status: Object.freeze({
+        connected: false,
+        reasonCode,
+        state: status,
+        observedAt: state.observedAt,
+      }),
+    }),
+  })
+}
+
 export const applyFuturesWorkstationEvent = (state, event) => {
-  const nextResources = { ...state.resources }
+  const generationChanged = event.generation > state.generation
+  const generationResources = generationChanged
+    ? createEmptyFuturesWorkstationResources()
+    : state.resources
+  const baseResources = event.resource === FUTURES_WORKSTATION_RESOURCES.STATUS
+    && NON_LIVE_RESOURCE_STATES.has(event.state)
+    ? transitionFuturesWorkstationResources(
+      generationResources,
+      event.state,
+      event.observedAt,
+    )
+    : generationResources
+  const nextResources = { ...baseResources }
   if (event.resource === FUTURES_WORKSTATION_RESOURCES.CATALOG) {
     const previousContracts = event.payload.offset === 0
       ? []
-      : (state.resources.catalog?.contracts ?? [])
+      : (baseResources.catalog?.contracts ?? [])
     nextResources.catalog = Object.freeze({
       ...event.payload,
       contracts: Object.freeze([...previousContracts, ...event.payload.contracts]),
@@ -610,7 +711,7 @@ export const applyFuturesWorkstationEvent = (state, event) => {
       observedAt: event.observedAt,
     })
   } else if (event.resource === FUTURES_WORKSTATION_RESOURCES.CANDLES) {
-    const previous = state.resources.candles ?? Object.freeze({
+    const previous = baseResources.candles ?? Object.freeze({
       interval: event.payload.interval,
       contract: Object.freeze([]),
       mark: Object.freeze([]),
@@ -633,7 +734,9 @@ export const applyFuturesWorkstationEvent = (state, event) => {
 
   const statusState = event.resource === FUTURES_WORKSTATION_RESOURCES.STATUS
     ? event.state
-    : state.status
+    : generationChanged
+      ? FUTURES_WORKSTATION_STATES.LOADING
+      : state.status
   return Object.freeze({
     ...state,
     status: statusState,

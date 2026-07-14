@@ -18,6 +18,13 @@ const filters = Object.freeze({
   price: Object.freeze({ min: '0.1', max: '1000000', tickSize: '0.1' }),
   quantity: Object.freeze({ min: '0.001', max: '1000', stepSize: '0.001' }),
   marketQuantity: Object.freeze({ min: '0.001', max: '100', stepSize: '0.001' }),
+  percentPrice: Object.freeze({
+    multiplierUp: '1.1500',
+    multiplierDown: '0.8500',
+    multiplierDecimal: 4,
+  }),
+  maximumOrders: 200,
+  maximumAlgoOrders: 100,
   minimumNotional: '5',
 })
 
@@ -141,6 +148,11 @@ describe('pure Futures workstation presentation', () => {
     expect(screen.getByLabelText('Futures market header')).toHaveTextContent('58419.99')
     expect(screen.getByLabelText('Futures market header')).toHaveTextContent('58418.75')
     expect(screen.getByLabelText('Exact contract filters')).toHaveTextContent('tickSize 0.1')
+    expect(screen.getByLabelText('Exact contract filters')).toHaveTextContent(
+      'Percent price0.8500 → 1.1500 · decimals 4',
+    )
+    expect(screen.getByLabelText('Exact contract filters')).toHaveTextContent('Max orders200')
+    expect(screen.getByLabelText('Exact contract filters')).toHaveTextContent('Max algo orders100')
     expect(screen.getByLabelText('Exact contract filters')).toHaveTextContent('Min notional5 USDT')
     expect(screen.getByText('u 90071992547409931234')).toBeInTheDocument()
     expect(screen.getByText('0.25')).toBeInTheDocument()
@@ -233,6 +245,44 @@ describe('pure Futures workstation presentation', () => {
         .toBeInTheDocument()
     },
   )
+
+  it('lets aggregate recovery state override cached LIVE widgets and blocks stale drafting', () => {
+    const state = createState({ status: 'resynchronizing' })
+    renderView({ state })
+    fireEvent.click(screen.getByRole('button', { name: 'Pick chart price' }))
+    expect(screen.getByLabelText('Local non-executable price draft'))
+      .toHaveTextContent('Pick chart or book price')
+    expect(screen.getByRole('button', { name: /^58420\.50/ })).toBeDisabled()
+    expect(screen.getByText('RESYNCHRONIZING', { selector: '.futures-workstation-overlay strong' }))
+      .toBeInTheDocument()
+  })
+
+  it('resets display-only drafts, drawings, alerts and paused tape on selection ownership change', () => {
+    const properties = {
+      identity: 'USDⓈ-M TESTNET · SIMULATED FUNDS',
+      state: createState(),
+      selectedInterval: '1m',
+      onSymbolChange: () => {},
+      onIntervalChange: () => {},
+    }
+    const { rerender } = render(
+      <FuturesWorkstationView key="BTCUSDT:1m" {...properties} selectedSymbol="BTCUSDT" />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Pick chart price' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Horizontal drawing' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Pick chart price' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add display alert' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Pause' }))
+
+    rerender(
+      <FuturesWorkstationView key="ETHUSDT:1m" {...properties} selectedSymbol="ETHUSDT" />,
+    )
+    expect(screen.getByLabelText('Local non-executable price draft'))
+      .toHaveTextContent('Pick chart or book price')
+    expect(screen.getByTestId('mock-futures-chart')).toHaveTextContent('drawings 0')
+    expect(screen.getByTestId('mock-futures-chart')).toHaveTextContent('alerts 0')
+    expect(screen.getByRole('button', { name: 'Pause' })).toBeInTheDocument()
+  })
 })
 
 const testnetExecutionState = Object.freeze({

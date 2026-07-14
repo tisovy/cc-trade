@@ -12,6 +12,7 @@ const PRODUCTION_COMPOSITION = 'electron/services/futures-production-workstation
 const TESTNET_COMPOSITION = 'electron/services/futures-testnet-workstation-composition.js';
 const PRODUCTION_PROTOCOL = 'src/utils/futuresProductionWorkstationProtocol.js';
 const TESTNET_PROTOCOL = 'src/utils/futuresTestnetWorkstationProtocol.js';
+const LOCAL_WORKSTATION_CONNECTOR = 'src/hooks/useFuturesLocalWorkstationConnection.js';
 
 const EXACT_ORIGINS = Object.freeze(new Map([
     ['https://fapi.binance.com', PRODUCTION_TRANSPORT],
@@ -101,6 +102,7 @@ for (const required of [
     TESTNET_COMPOSITION,
     PRODUCTION_PROTOCOL,
     TESTNET_PROTOCOL,
+    LOCAL_WORKSTATION_CONNECTOR,
 ]) {
     if (!workstationNames.has(required)) fail(`Missing required isolated workstation module ${required}`);
 }
@@ -121,6 +123,7 @@ for (const [origin, owner] of EXACT_ORIGINS) {
 for (const [name, source] of sources) {
     const isReviewedTransport = name === PRODUCTION_TRANSPORT || name === TESTNET_TRANSPORT;
     const isNetworkGuard = name === NETWORK_GUARD;
+    const isLocalWorkstationConnector = name === LOCAL_WORKSTATION_CONNECTOR;
 
     for (const specifier of readModuleSpecifiers(source)) {
         if (NETWORK_MODULES.has(topLevelModule(specifier))
@@ -132,6 +135,7 @@ for (const [name, source] of sources) {
 
     if (!isReviewedTransport
         && !isNetworkGuard
+        && !isLocalWorkstationConnector
         && /\b(?:globalThis\s*\.\s*)?fetch\s*\(|\bnew\s+(?:globalThis\s*\.\s*)?WebSocket\s*\(|\bXMLHttpRequest\s*\(|\bEventSource\s*\(/.test(source)) {
         fail(`${name} creates a network transport outside a reviewed backend transport`);
     }
@@ -243,8 +247,32 @@ const rendererForbidden = Object.freeze([
 ]);
 for (const [name, source] of rendererSources) {
     for (const [label, pattern] of rendererForbidden) {
+        if (name === LOCAL_WORKSTATION_CONNECTOR && label === 'renderer network') continue;
         if (pattern.test(source)) fail(`${name} references forbidden ${label}`);
     }
+}
+
+const localWorkstationConnector = sources.get(LOCAL_WORKSTATION_CONNECTOR) ?? '';
+const exactLocalUrlSource = '`ws://${host}:${access.port}`';
+const connectorWithoutExactLocalUrl = localWorkstationConnector.replace(exactLocalUrlSource, '');
+if (!localWorkstationConnector.includes(exactLocalUrlSource)
+    || connectorWithoutExactLocalUrl.includes(exactLocalUrlSource)
+    || /\b(?:https?|wss?):\/\//i.test(connectorWithoutExactLocalUrl)
+    || /\b(?:fetch|XMLHttpRequest|EventSource)\s*\(|\bnavigator\s*\.\s*sendBeacon\s*\(/.test(localWorkstationConnector)
+    || !/globalThis\.ccTradeRuntime\?\.localWebSocketAccess/.test(localWorkstationConnector)
+    || !/LOOPBACK_HOSTS\.has\(access\.host\)/.test(localWorkstationConnector)
+    || !/access\.tokenParam !== ['"]token['"]/.test(localWorkstationConnector)
+    || !/const useFuturesLocalWorkstationConnection = \(\{ enabled \}\) =>/.test(localWorkstationConnector)
+    || [...localWorkstationConnector.matchAll(/new\s+globalThis\.WebSocket\s*\(/g)].length !== 1
+    || !/CONNECT_TIMEOUT_MS:\s*10_000/.test(localWorkstationConnector)
+    || !/RECONNECT_ATTEMPTS:\s*8/.test(localWorkstationConnector)
+    || !/FUTURES_WORKSTATION_REQUEST_MAX_BYTES/.test(localWorkstationConnector)) {
+    fail('The reviewed renderer connector must own one exact bounded loopback WebSocket');
+}
+
+const appSource = fs.readFileSync(path.join(ROOT, 'src/App.jsx'), 'utf8');
+if (/<Futures(?:Production|Testnet)Workstation[\s\S]{0,400}\b(?:wsConnection|sendMessage)=/.test(appSource)) {
+    fail('AppShell passes the Spot DataContext transport into a Futures workstation container');
 }
 
 for (const pureView of [

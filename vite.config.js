@@ -2,6 +2,12 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import electron from 'vite-plugin-electron'
 
+const electronMainEntry = process.env.BUILD_MODE === 'e2e'
+  ? 'electron/main.e2e.js'
+  : process.env.BUILD_MODE === 'smoke'
+    ? 'electron/main.smoke.js'
+    : 'electron/main.js'
+
 // https://vite.dev/config/
 export default defineConfig({
   base: './',
@@ -27,7 +33,7 @@ export default defineConfig({
     react(),
     electron([
       {
-        entry: process.env.BUILD_MODE === 'e2e' ? 'electron/main.e2e.js' : 'electron/main.js',
+        entry: electronMainEntry,
         vite: {
           build: {
             lib: {
@@ -39,15 +45,16 @@ export default defineConfig({
         },
       },
       {
-        entry: 'electron/preload.cjs',
         vite: {
           build: {
-            lib: {
-              formats: ['cjs'],
-              fileName: () => 'preload.cjs',
-            },
             rollupOptions: {
+              input: 'electron/preload.cjs',
               external: ['electron'],
+              output: {
+                format: 'cjs',
+                inlineDynamicImports: true,
+                entryFileNames: 'preload.cjs',
+              },
             },
           },
         },

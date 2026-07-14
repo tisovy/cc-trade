@@ -231,6 +231,24 @@ describe('reviewed environment-specific Futures workstation transports', () => {
         expect(socketMock.instances.every(socket => socket.close.mock.calls.length === 1)).toBe(true);
     });
 
+    it.each([
+        ['Testnet', createFuturesTestnetWorkstationReviewedTransport],
+        ['production', createFuturesProductionWorkstationReviewedTransport],
+    ])('rejects a binary %s market frame immediately', (_label, createTransport) => {
+        vi.useFakeTimers();
+        const disconnects = [];
+        createTransport().connect({
+            symbol: 'BTCUSDT',
+            interval: '1m',
+            onMessage: () => {},
+            onDisconnect: reason => disconnects.push(reason),
+        });
+        socketMock.instances[1].emit('message', Buffer.from([0xff]), true);
+        expect(disconnects).toEqual(['BINARY_FRAME_REJECTED']);
+        expect(socketMock.instances[1].close)
+            .toHaveBeenCalledWith(1003, 'binary frame rejected');
+    });
+
     it('closes a reviewed WSS connection at the fixed 24-hour lifetime', () => {
         vi.useFakeTimers();
         const transport = createFuturesProductionWorkstationReviewedTransport();

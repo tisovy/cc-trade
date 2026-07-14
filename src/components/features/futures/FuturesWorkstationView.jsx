@@ -4,6 +4,7 @@ import FuturesWorkstationChart from './FuturesWorkstationChart.jsx'
 import './FuturesWorkstation.css'
 
 const EMPTY_ROWS = Object.freeze([])
+const IGNORE_PRICE_PICK = () => {}
 
 const formatTime = (timestamp) => {
   if (!Number.isSafeInteger(timestamp)) return '—'
@@ -65,6 +66,14 @@ export const FuturesWorkstationView = ({
   const depth = resources.depth
   const liveTrades = resources.trades?.rows ?? EMPTY_ROWS
   const selectedContract = contracts.find(contract => contract.symbol === selectedSymbol) ?? null
+  const aggregateState = state.status === 'idle' ? 'loading' : state.status
+  const resourceState = resource => aggregateState === 'live'
+    ? (resource?.state ?? 'loading')
+    : aggregateState
+  const catalogState = resourceState(resources.catalog)
+  const candlesState = resourceState(candles)
+  const depthState = resourceState(depth)
+  const tradesState = resourceState(resources.trades)
 
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1_000)
@@ -115,7 +124,6 @@ export const FuturesWorkstationView = ({
   }, [liveTrades, tapePaused])
 
   const displayedTrades = tapePaused ? pausedTrades : liveTrades
-  const aggregateState = state.status === 'idle' ? 'loading' : state.status
 
   return (
     <section className="futures-workstation" aria-label={`${identity} read-only market workstation`}>
@@ -132,7 +140,7 @@ export const FuturesWorkstationView = ({
             <span>Contracts</span>
             <strong>USDⓈ-M only</strong>
           </div>
-          <StateBadge state={resources.catalog?.state ?? aggregateState} />
+          <StateBadge state={catalogState} />
         </div>
         <label className="futures-workstation-search">
           <span>Search symbol</span>
@@ -191,6 +199,24 @@ export const FuturesWorkstationView = ({
             <FilterRow name="Quantity" filter={selectedContract.filters.quantity} stepLabel="stepSize" />
             <FilterRow name="Market qty" filter={selectedContract.filters.marketQuantity} stepLabel="stepSize" />
             <div className="futures-workstation-filter-row">
+              <strong>Percent price</strong>
+              <code>
+                {selectedContract.filters.percentPrice.multiplierDown}
+                {' → '}
+                {selectedContract.filters.percentPrice.multiplierUp}
+                {' · decimals '}
+                {selectedContract.filters.percentPrice.multiplierDecimal}
+              </code>
+            </div>
+            <div className="futures-workstation-filter-row">
+              <strong>Max orders</strong>
+              <code>{selectedContract.filters.maximumOrders}</code>
+            </div>
+            <div className="futures-workstation-filter-row">
+              <strong>Max algo orders</strong>
+              <code>{selectedContract.filters.maximumAlgoOrders}</code>
+            </div>
+            <div className="futures-workstation-filter-row">
               <strong>Min notional</strong>
               <code>{selectedContract.filters.minimumNotional ?? 'Unavailable'} USDT</code>
             </div>
@@ -200,7 +226,7 @@ export const FuturesWorkstationView = ({
 
       <header className="futures-workstation-market-header" aria-label="Futures market header">
         <div className="futures-workstation-symbol-title">
-          <span>PERPETUAL</span>
+          <span>{selectedContract?.contractType ?? 'CONTRACT'}</span>
           <strong>{selectedSymbol}</strong>
           <small>{selectedContract?.status ?? 'LOADING'}</small>
         </div>
@@ -218,7 +244,7 @@ export const FuturesWorkstationView = ({
         </dl>
       </header>
 
-      <main className="futures-workstation-chart" data-state={candles?.state ?? aggregateState}>
+      <main className="futures-workstation-chart" data-state={candlesState}>
         <div className="futures-workstation-chart-toolbar">
           <div className="futures-workstation-intervals" role="group" aria-label="Chart interval">
             {FUTURES_WORKSTATION_INTERVALS.map(interval => (
@@ -238,6 +264,7 @@ export const FuturesWorkstationView = ({
               type="button"
               className={drawingMode ? 'is-selected' : ''}
               aria-pressed={drawingMode}
+              disabled={candlesState !== 'live'}
               onClick={() => setDrawingMode(previous => !previous)}
             >
               Horizontal drawing
@@ -245,7 +272,7 @@ export const FuturesWorkstationView = ({
             <button type="button" onClick={() => setDrawings(EMPTY_ROWS)} disabled={drawings.length === 0}>
               Clear drawings
             </button>
-            <button type="button" onClick={addDisplayAlert} disabled={!draftPrice}>
+            <button type="button" onClick={addDisplayAlert} disabled={!draftPrice || candlesState !== 'live'}>
               Add display alert
             </button>
             <button type="button" onClick={() => setAlerts(EMPTY_ROWS)} disabled={alerts.length === 0}>
@@ -262,11 +289,11 @@ export const FuturesWorkstationView = ({
             indexPrice={header?.indexPrice ?? null}
             drawings={drawings}
             alerts={alerts}
-            onPricePick={pickPrice}
+            onPricePick={candlesState === 'live' ? pickPrice : IGNORE_PRICE_PICK}
           />
-          {candles?.state !== 'live' ? (
-            <div className={`futures-workstation-overlay is-${candles?.state ?? aggregateState}`}>
-              <strong>{(candles?.state ?? aggregateState).toUpperCase()}</strong>
+          {candlesState !== 'live' ? (
+            <div className={`futures-workstation-overlay is-${candlesState}`}>
+              <strong>{candlesState.toUpperCase()}</strong>
               <span>Chart remains read-only until authoritative data is live.</span>
             </div>
           ) : null}
@@ -280,15 +307,20 @@ export const FuturesWorkstationView = ({
         </div>
       </main>
 
-      <aside className="futures-workstation-depth" data-state={depth?.state ?? aggregateState}>
+      <aside className="futures-workstation-depth" data-state={depthState}>
         <div className="futures-workstation-section-heading">
           <div><span>Order book</span><strong>Snapshot + diff</strong></div>
-          <StateBadge state={depth?.state ?? aggregateState} />
+          <StateBadge state={depthState} />
         </div>
         <div className="futures-workstation-book-head"><span>Price</span><span>Qty</span><span>Total</span></div>
         <div className="futures-workstation-book-side is-ask">
           {[...(depth?.asks ?? EMPTY_ROWS)].reverse().map(level => (
-            <button type="button" key={`ask-${level.price}`} onClick={() => pickPrice(level.price)}>
+            <button
+              type="button"
+              key={`ask-${level.price}`}
+              disabled={depthState !== 'live'}
+              onClick={() => pickPrice(level.price)}
+            >
               <span>{level.price}</span><span>{level.quantity}</span><span>{level.total}</span>
             </button>
           ))}
@@ -298,14 +330,19 @@ export const FuturesWorkstationView = ({
         </div>
         <div className="futures-workstation-book-side is-bid">
           {(depth?.bids ?? EMPTY_ROWS).map(level => (
-            <button type="button" key={`bid-${level.price}`} onClick={() => pickPrice(level.price)}>
+            <button
+              type="button"
+              key={`bid-${level.price}`}
+              disabled={depthState !== 'live'}
+              onClick={() => pickPrice(level.price)}
+            >
               <span>{level.price}</span><span>{level.quantity}</span><span>{level.total}</span>
             </button>
           ))}
         </div>
       </aside>
 
-      <aside className="futures-workstation-trades" data-state={resources.trades?.state ?? aggregateState}>
+      <aside className="futures-workstation-trades" data-state={tradesState}>
         <div className="futures-workstation-section-heading">
           <div><span>Aggregate trades</span><strong>Bounded tape</strong></div>
           <button type="button" onClick={toggleTape}>

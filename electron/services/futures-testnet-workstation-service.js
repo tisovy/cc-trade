@@ -282,6 +282,7 @@ export class FuturesTestnetWorkstationService {
             for (const event of session.pendingEvents) this.applyStreamEvent(session, event);
             session.pendingEvents = [];
             if (!this.isCurrent(session)) return;
+            session.reconnectAttempt = 0;
             this.emitStatus(session, FUTURES_WORKSTATION_STATES.LIVE, true, null);
             this.startFreshnessMonitor(session);
         } catch (error) {
@@ -293,6 +294,7 @@ export class FuturesTestnetWorkstationService {
                 false,
                 safeCode(error),
             );
+            this.haltSession(session);
         }
     }
 
@@ -453,6 +455,7 @@ export class FuturesTestnetWorkstationService {
                 false,
                 'RECONNECT_EXHAUSTED',
             );
+            this.haltSession(session);
             return;
         }
         this.emitStatus(
@@ -481,6 +484,24 @@ export class FuturesTestnetWorkstationService {
             if (this.isCurrent(session)) void this.startGeneration(request, emit, attempt);
         }, delay);
         session.reconnectTimer?.unref?.();
+    }
+
+    haltSession(session) {
+        if (this.current !== session) return;
+        this.current = null;
+        session.stream?.close?.();
+        session.stream = null;
+        session.abortController.abort();
+        session.orderBook.stop();
+        if (session.freshnessTimer !== null) {
+            this.clock.clearInterval(session.freshnessTimer);
+            session.freshnessTimer = null;
+        }
+        if (session.reconnectTimer !== null) {
+            this.clock.clearTimeout(session.reconnectTimer);
+            session.reconnectTimer = null;
+        }
+        session.pendingEvents = [];
     }
 
     stopCurrent() {

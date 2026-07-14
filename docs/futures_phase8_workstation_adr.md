@@ -29,6 +29,7 @@ Official references:
 - [WebSocket connection contract](https://developers.binance.com/en/docs/products/derivatives-trading-usds-futures/websocket-market-streams/Connect)
 - [WebSocket routing migration](https://developers.binance.com/en/docs/products/derivatives-trading-usds-futures/websocket-market-streams/Important-WebSocket-Change-Notice)
 - [Local order-book procedure](https://developers.binance.com/en/docs/products/derivatives-trading-usds-futures/websocket-market-streams/How-to-manage-a-local-order-book-correctly)
+- [USDⓈ-M common definitions and exact symbol filters](https://developers.binance.com/en/docs/products/derivatives-trading-usds-futures/common-definition)
 - [REST market-data catalog](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/rest-api/market-data)
 - [WebSocket market-stream catalog](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/websocket-api/public)
 
@@ -94,6 +95,8 @@ The backend accepts only exact bounded objects after the combined-stream `{strea
 
 Unknown event kinds, unsafe integers, floating-point identities, non-canonical decimal strings, extra nesting, malformed JSON, oversized frames and schema drift never update the visible model. They transition the affected resource to stale/resynchronizing or unavailable according to the recovery table below.
 
+All seven current USDⓈ-M symbol filters are normalized and displayed: `PRICE_FILTER`, `LOT_SIZE`, `MARKET_LOT_SIZE`, `MAX_NUM_ORDERS`, `MAX_NUM_ALGO_ORDERS`, `PERCENT_PRICE` and `MIN_NOTIONAL`. Unknown, missing or duplicate filter kinds fail closed. The three `PRICE_FILTER` decimal fields may be zero exactly as documented; quantity maxima and step sizes remain positive. Frozen-but-unrendered fields in REST klines, premium index, 24-hour ticker, stream klines, mark price and ticker messages are validated before the message can update any visible field.
+
 ## Order-book sequencing decision
 
 Each symbol generation follows the official procedure exactly:
@@ -115,7 +118,7 @@ The two renderer protocols have fixed identities and cannot parse one another:
 | Property | Testnet | Production |
 |---|---|---|
 | channel | `futures-testnet-workstation` | `futures-production-workstation` |
-| protocol version | `1` | `1` |
+| protocol version | `2` | `2` |
 | market type | `USD_M_FUTURES` | `USD_M_FUTURES` |
 | environment | `TESTNET` | `PRODUCTION` |
 | subscribe action | `futures.testnet.workstation.subscribe` | `futures.production.workstation.subscribe` |
@@ -125,9 +128,9 @@ The two renderer protocols have fixed identities and cannot parse one another:
 
 Requests have exact keys, a maximum UTF-8 length of 1024 bytes, an opaque request ID no longer than 96 bytes, an allowlisted symbol no longer than 20 ASCII bytes and one of `1m,5m,15m,1h,4h,1d`. Requests have no host, URL, credential, account, execution, order, side, quantity, notional, leverage or network-option field.
 
-Every emitted resource event contains the exact channel identity, protocol version, environment, request ID, symbol, generation, monotonically increasing revision, resource kind, lifecycle state, observation time and immutable payload. The renderer accepts only the active request/generation, increasing revisions and an exact schema. A model from one channel cannot be reused on the other.
+Every emitted resource event contains the exact channel identity, protocol version, environment, request ID, symbol, generation, monotonically increasing revision, resource kind, lifecycle state, observation time and immutable payload. Protocol version `2` records the post-milestone audit corrections: the complete seven-filter catalog, canonical unsigned-int64 identities and generation-wide non-live resource transitions. The renderer accepts only the active request/generation, increasing revisions and an exact schema. A model from one channel cannot be reused on the other.
 
-Resource kinds are `catalog`, `header`, `candles`, `depth`, `trades` and `status`. Lifecycle states are `loading`, `live`, `stale`, `disconnected`, `resynchronizing` and `unavailable`. Reconnect immediately marks cached resources stale; only new authoritative bootstraps can restore `live`.
+Resource kinds are `catalog`, `header`, `candles`, `depth`, `trades` and `status`. Lifecycle states are `loading`, `live`, `stale`, `disconnected`, `resynchronizing` and `unavailable`. A new generation clears every prior-generation resource. Disconnect, resynchronization and terminal failure transition every cached resource out of `live`; only new authoritative resource events can restore `live`.
 
 ## Ownership, clocks and bounds
 
@@ -141,7 +144,7 @@ All authority and memory are bounded:
 | exchange-info body | 2 MiB | n/a | 24 h |
 | depth body | 512 KiB | n/a | bootstrap only |
 | kline body | 1 MiB | n/a | bootstrap only |
-| catalog | 512 contracts | 128 filtered rows | 24 h |
+| catalog | 512 contracts / 8 per 15 KiB frame | 128 filtered rows | 24 h |
 | candles per series | 500 | 80 | 2 stream periods or 5 s minimum |
 | depth levels per side | 1000 snapshot / 500 retained | 24 | 3 s |
 | buffered depth events | 2048 events / 8 MiB | n/a | bootstrap deadline 10 s |
@@ -149,9 +152,9 @@ All authority and memory are bounded:
 | outbound resource frame | 15 KiB | 15 KiB | immediate rejection |
 | pending renderer events | 128 | 128 | overflow forces resync |
 | timers per generation | 8 | 2 | teardown owned |
-| reconnect attempts | 8, exponential 500 ms–30 s | n/a | then unavailable |
+| reconnect attempts | 8, exponential 500 ms–30 s | 8, exponential 250 ms–5 s | then unavailable |
 
-The backend owns generation, transport, authoritative snapshot, continuity state, reconnect budget and freshness. The renderer owns only the currently accepted immutable display model, search text, selected UI tab, pause state for the tape, local price draft, local drawing coordinates and local alert drafts. No financial state is persisted in browser storage.
+The backend owns generation, Binance transport, authoritative snapshot, continuity state, reconnect budget and freshness. Each separately named environment container owns a narrow Phase 8 hook backed by one shared, environment-neutral loopback connector. That connector reads only the main-process-injected loopback host/port/token, accepts no caller URL or network option, limits requests to 1024 bytes, expires a pending handshake after 10 seconds and never connects to Binance. It is not sourced from Spot `DataContext`. The renderer otherwise owns only the currently accepted immutable display model, search text, selected UI tab, pause state for the tape, local price draft, local drawing coordinates and local alert drafts. No financial state is persisted in browser storage.
 
 Production and Testnet use separate injected fake clocks in tests. Clock regression never decreases `observedAt`; it marks the affected resource stale and requires a new generation. Production fake time and Testnet fake time are independent.
 

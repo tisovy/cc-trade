@@ -8,6 +8,7 @@ import {
     readFuturesWorkstationTimestamp,
 } from './futures-workstation-json.js';
 import {
+    compareFuturesWorkstationDecimals,
     isNonNegativeFuturesWorkstationDecimal,
     isPositiveFuturesWorkstationDecimal,
     subtractFuturesWorkstationDecimals,
@@ -16,7 +17,7 @@ import {
 
 export const FUTURES_WORKSTATION_MARKET_LIMITS = Object.freeze({
     CATALOG_CONTRACTS: 512,
-    CATALOG_FRAME_CONTRACTS: 40,
+    CATALOG_FRAME_CONTRACTS: 8,
     CANDLES: 500,
     RENDERER_CANDLES: 80,
     TRADES: 512,
@@ -94,6 +95,13 @@ const readIntegerToken = (value) => {
     return value;
 };
 
+const readOrderedIdentityPair = (firstValue, lastValue, code) => {
+    const first = readFuturesWorkstationIdentity(firstValue);
+    const last = readFuturesWorkstationIdentity(lastValue);
+    if (BigInt(first) > BigInt(last)) fail(code);
+    return Object.freeze({ first, last });
+};
+
 const normalizeLevelArray = (levels) => {
     if (!Array.isArray(levels)
         || levels.length > FUTURES_WORKSTATION_MARKET_LIMITS.DEPTH_LEVELS_PER_SIDE) {
@@ -108,46 +116,77 @@ const normalizeLevelArray = (levels) => {
     }));
 };
 
-const normalizeRangeFilter = (filter, fields, stepKey) => {
+const normalizeRangeFilter = (filter, fields, stepKey, allowDisabled = false) => {
     if (!exactKeys(filter, ['filterType', ...fields])) fail('INVALID_EXCHANGE_FILTER');
     return Object.freeze({
         min: readDecimal(filter[fields[0]]),
-        max: readDecimal(filter[fields[1]], { positive: true }),
-        [stepKey]: readDecimal(filter[fields[2]], { positive: true }),
+        max: readDecimal(filter[fields[1]], { positive: !allowDisabled }),
+        [stepKey]: readDecimal(filter[fields[2]], { positive: !allowDisabled }),
+    });
+};
+
+const normalizeLimitFilter = (filter) => {
+    if (!exactKeys(filter, ['filterType', 'limit'])) fail('INVALID_EXCHANGE_FILTER');
+    const limit = readFuturesWorkstationCount(filter.limit);
+    if (limit === 0) fail('INVALID_EXCHANGE_FILTER');
+    return limit;
+};
+
+const normalizePercentPriceFilter = (filter) => {
+    if (!exactKeys(filter, [
+        'filterType',
+        'multiplierUp',
+        'multiplierDown',
+        'multiplierDecimal',
+    ])) fail('INVALID_EXCHANGE_FILTER');
+    const multiplierDecimal = readFuturesWorkstationCount(filter.multiplierDecimal, 18);
+    return Object.freeze({
+        multiplierUp: readDecimal(filter.multiplierUp, { positive: true }),
+        multiplierDown: readDecimal(filter.multiplierDown, { positive: true }),
+        multiplierDecimal,
     });
 };
 
 const normalizeFilters = (filters) => {
     if (!Array.isArray(filters) || filters.length > 32) fail('INVALID_EXCHANGE_FILTERS');
+    const reviewedTypes = new Set([
+        'PRICE_FILTER',
+        'LOT_SIZE',
+        'MARKET_LOT_SIZE',
+        'MAX_NUM_ORDERS',
+        'MAX_NUM_ALGO_ORDERS',
+        'PERCENT_PRICE',
+        'MIN_NOTIONAL',
+    ]);
     const byType = new Map();
     for (const filter of filters) {
         if (!isRecord(filter)
             || typeof filter.filterType !== 'string'
-            || filter.filterType.length > 48) fail('INVALID_EXCHANGE_FILTER');
+            || !reviewedTypes.has(filter.filterType)) fail('INVALID_EXCHANGE_FILTER');
         if (byType.has(filter.filterType)) fail('DUPLICATE_EXCHANGE_FILTER');
         byType.set(filter.filterType, filter);
     }
     const price = byType.get('PRICE_FILTER');
     const quantity = byType.get('LOT_SIZE');
     const marketQuantity = byType.get('MARKET_LOT_SIZE');
-    const minimumNotional = byType.get('MIN_NOTIONAL') ?? byType.get('NOTIONAL');
-    if (!price || !quantity || !marketQuantity || !minimumNotional) {
+    const maximumOrders = byType.get('MAX_NUM_ORDERS');
+    const maximumAlgoOrders = byType.get('MAX_NUM_ALGO_ORDERS');
+    const percentPrice = byType.get('PERCENT_PRICE');
+    const minimumNotional = byType.get('MIN_NOTIONAL');
+    if (!price || !quantity || !marketQuantity || !maximumOrders
+        || !maximumAlgoOrders || !percentPrice || !minimumNotional
+        || byType.size !== reviewedTypes.size) {
         fail('MISSING_EXCHANGE_FILTER');
     }
-    if (!allowedKeys(minimumNotional, ['filterType'], [
-        'notional',
-        'minNotional',
-        'maxNotional',
-        'applyMinToMarket',
-        'applyMaxToMarket',
-        'avgPriceMins',
-    ])) fail('INVALID_EXCHANGE_FILTER');
-    const notional = minimumNotional.notional ?? minimumNotional.minNotional;
+    if (!exactKeys(minimumNotional, ['filterType', 'notional'])) {
+        fail('INVALID_EXCHANGE_FILTER');
+    }
     return Object.freeze({
         price: normalizeRangeFilter(
             price,
             ['minPrice', 'maxPrice', 'tickSize'],
             'tickSize',
+            true,
         ),
         quantity: normalizeRangeFilter(
             quantity,
@@ -159,7 +198,10 @@ const normalizeFilters = (filters) => {
             ['minQty', 'maxQty', 'stepSize'],
             'stepSize',
         ),
-        minimumNotional: readDecimal(notional),
+        percentPrice: normalizePercentPriceFilter(percentPrice),
+        maximumOrders: normalizeLimitFilter(maximumOrders),
+        maximumAlgoOrders: normalizeLimitFilter(maximumAlgoOrders),
+        minimumNotional: readDecimal(minimumNotional.notional),
     });
 };
 
@@ -276,13 +318,29 @@ const normalizeKlineTuple = (tuple) => {
     const closeTime = readFuturesWorkstationTimestamp(tuple[6]);
     if (closeTime < openTime) fail('INVALID_KLINE_TIME');
     readIntegerToken(tuple[8]);
+    readFuturesWorkstationCount(tuple[8]);
+    readDecimal(tuple[7]);
+    readDecimal(tuple[9]);
+    readDecimal(tuple[10]);
+    readDecimal(tuple[11]);
+    const open = readDecimal(tuple[1], { positive: true });
+    const high = readDecimal(tuple[2], { positive: true });
+    const low = readDecimal(tuple[3], { positive: true });
+    const close = readDecimal(tuple[4], { positive: true });
+    if (compareFuturesWorkstationDecimals(high, low) < 0
+        || compareFuturesWorkstationDecimals(high, open) < 0
+        || compareFuturesWorkstationDecimals(high, close) < 0
+        || compareFuturesWorkstationDecimals(low, open) > 0
+        || compareFuturesWorkstationDecimals(low, close) > 0) {
+        fail('INVALID_KLINE_PRICE_RANGE');
+    }
     return Object.freeze({
         openTime,
         closeTime,
-        open: readDecimal(tuple[1], { positive: true }),
-        high: readDecimal(tuple[2], { positive: true }),
-        low: readDecimal(tuple[3], { positive: true }),
-        close: readDecimal(tuple[4], { positive: true }),
+        open,
+        high,
+        low,
+        close,
         volume: readDecimal(tuple[5]),
         closed: true,
     });
@@ -324,6 +382,8 @@ export const normalizeFuturesWorkstationPremiumIndex = (text, expectedSymbol) =>
         'time',
     ])
         || payload.symbol !== expectedSymbol) fail('INVALID_PREMIUM_INDEX');
+    readDecimal(payload.estimatedSettlePrice);
+    readSignedDecimal(payload.interestRate);
     return Object.freeze({
         markPrice: readDecimal(payload.markPrice, { positive: true }),
         indexPrice: readDecimal(payload.indexPrice, { positive: true }),
@@ -357,10 +417,12 @@ export const normalizeFuturesWorkstationTicker = (text, expectedSymbol) => {
         'count',
     ])
         || payload.symbol !== expectedSymbol) fail('INVALID_TICKER');
-    readFuturesWorkstationTimestamp(payload.openTime);
+    const openTime = readFuturesWorkstationTimestamp(payload.openTime);
     const closeTime = readFuturesWorkstationTimestamp(payload.closeTime);
-    readFuturesWorkstationIdentity(payload.firstId);
-    readFuturesWorkstationIdentity(payload.lastId);
+    if (closeTime < openTime) fail('INVALID_TICKER_TIME');
+    readDecimal(payload.weightedAvgPrice, { positive: true });
+    readDecimal(payload.openPrice, { positive: true });
+    readOrderedIdentityPair(payload.firstId, payload.lastId, 'INVALID_TICKER_ID_RANGE');
     readFuturesWorkstationCount(payload.count);
     return Object.freeze({
         lastPrice: readDecimal(payload.lastPrice, { positive: true }),
@@ -431,6 +493,7 @@ const normalizeStreamTrade = (payload) => {
         || payload.e !== 'aggTrade'
         || typeof payload.m !== 'boolean') fail('INVALID_TRADE_STREAM');
     readFuturesWorkstationTimestamp(payload.E);
+    const tradeIds = readOrderedIdentityPair(payload.f, payload.l, 'INVALID_TRADE_ID_RANGE');
     return Object.freeze({
         kind: 'trade',
         row: Object.freeze({
@@ -438,8 +501,8 @@ const normalizeStreamTrade = (payload) => {
             price: readDecimal(payload.p, { positive: true }),
             quantity: readDecimal(payload.q),
             normalQuantity: readDecimal(payload.nq),
-            firstTradeId: readFuturesWorkstationIdentity(payload.f),
-            lastTradeId: readFuturesWorkstationIdentity(payload.l),
+            firstTradeId: tradeIds.first,
+            lastTradeId: tradeIds.last,
             tradeTime: readFuturesWorkstationTimestamp(payload.T),
             buyerMaker: payload.m,
         }),
@@ -458,18 +521,35 @@ const normalizeStreamKline = (payload, expectedInterval) => {
         || kline.s !== payload.s
         || kline.i !== expectedInterval
         || typeof kline.x !== 'boolean') fail('INVALID_KLINE_STREAM');
-    readFuturesWorkstationIdentity(kline.f);
-    readFuturesWorkstationIdentity(kline.L);
+    readOrderedIdentityPair(kline.f, kline.L, 'INVALID_KLINE_ID_RANGE');
     readFuturesWorkstationCount(kline.n);
+    readDecimal(kline.q);
+    readDecimal(kline.V);
+    readDecimal(kline.Q);
+    readDecimal(kline.B);
+    const openTime = readFuturesWorkstationTimestamp(kline.t);
+    const closeTime = readFuturesWorkstationTimestamp(kline.T);
+    if (closeTime < openTime) fail('INVALID_KLINE_TIME');
+    const open = readDecimal(kline.o, { positive: true });
+    const high = readDecimal(kline.h, { positive: true });
+    const low = readDecimal(kline.l, { positive: true });
+    const close = readDecimal(kline.c, { positive: true });
+    if (compareFuturesWorkstationDecimals(high, low) < 0
+        || compareFuturesWorkstationDecimals(high, open) < 0
+        || compareFuturesWorkstationDecimals(high, close) < 0
+        || compareFuturesWorkstationDecimals(low, open) > 0
+        || compareFuturesWorkstationDecimals(low, close) > 0) {
+        fail('INVALID_KLINE_PRICE_RANGE');
+    }
     return Object.freeze({
         kind: 'kline',
         row: Object.freeze({
-            openTime: readFuturesWorkstationTimestamp(kline.t),
-            closeTime: readFuturesWorkstationTimestamp(kline.T),
-            open: readDecimal(kline.o, { positive: true }),
-            high: readDecimal(kline.h, { positive: true }),
-            low: readDecimal(kline.l, { positive: true }),
-            close: readDecimal(kline.c, { positive: true }),
+            openTime,
+            closeTime,
+            open,
+            high,
+            low,
+            close,
             volume: readDecimal(kline.v),
             closed: kline.x,
         }),
@@ -479,6 +559,8 @@ const normalizeStreamKline = (payload, expectedInterval) => {
 const normalizeStreamMark = (payload) => {
     if (!allowedKeys(payload, ['e', 'E', 's', 'p', 'i', 'P', 'r', 'ap', 'T'], ['st'])
         || payload.e !== 'markPriceUpdate') fail('INVALID_MARK_STREAM');
+    readDecimal(payload.P);
+    readDecimal(payload.ap);
     return Object.freeze({
         kind: 'mark',
         markPrice: readDecimal(payload.p, { positive: true }),
@@ -494,10 +576,13 @@ const normalizeStreamTicker = (payload) => {
         'e', 'E', 's', 'p', 'P', 'w', 'c', 'Q', 'o', 'h', 'l', 'v', 'q', 'O', 'C', 'F', 'L', 'n',
     ], ['ps', 'st'])
         || payload.e !== '24hrTicker') fail('INVALID_TICKER_STREAM');
-    readFuturesWorkstationTimestamp(payload.O);
-    readFuturesWorkstationIdentity(payload.F);
-    readFuturesWorkstationIdentity(payload.L);
+    const openTime = readFuturesWorkstationTimestamp(payload.O);
+    const closeTime = readFuturesWorkstationTimestamp(payload.C);
+    if (closeTime < openTime) fail('INVALID_TICKER_TIME');
+    readOrderedIdentityPair(payload.F, payload.L, 'INVALID_TICKER_ID_RANGE');
     readFuturesWorkstationCount(payload.n);
+    readDecimal(payload.w, { positive: true });
+    readDecimal(payload.o, { positive: true });
     return Object.freeze({
         kind: 'ticker',
         lastPrice: readDecimal(payload.c, { positive: true }),
@@ -510,7 +595,7 @@ const normalizeStreamTicker = (payload) => {
         quoteVolume: readDecimal(payload.q),
         eventTime: Math.max(
             readFuturesWorkstationTimestamp(payload.E),
-            readFuturesWorkstationTimestamp(payload.C),
+            closeTime,
         ),
     });
 };

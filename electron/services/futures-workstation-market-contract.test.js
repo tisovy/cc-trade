@@ -1,4 +1,10 @@
 import { describe, expect, it } from 'vitest';
+import {
+    FUTURES_WORKSTATION_EVENT_MAX_BYTES,
+} from '../../src/utils/futuresWorkstationProtocolShared.js';
+import {
+    createFuturesProductionWorkstationEvent,
+} from '../../src/utils/futuresProductionWorkstationProtocol.js';
 import { FUTURES_TESTNET_WORKSTATION_FIXTURE } from './futures-testnet-workstation-fixtures.js';
 import {
     FUTURES_WORKSTATION_MARKET_LIMITS,
@@ -38,6 +44,13 @@ describe('official Futures workstation market schemas', () => {
             price: { min: '0.10', max: '10000000.00000000', tickSize: '0.10' },
             quantity: { min: '0.001', max: '1000000.00000000', stepSize: '0.001' },
             marketQuantity: { min: '0.001', max: '100000.00000000', stepSize: '0.001' },
+            percentPrice: {
+                multiplierUp: '1.1500',
+                multiplierDown: '0.8500',
+                multiplierDecimal: 4,
+            },
+            maximumOrders: 200,
+            maximumAlgoOrders: 100,
             minimumNotional: '5.00000000',
         });
         expect(Object.isFrozen(catalog)).toBe(true);
@@ -90,11 +103,69 @@ describe('official Futures workstation market schemas', () => {
 
     it('preserves unquoted int64 stream identities beyond 2^53', () => {
         const tradeFrame = fixtureFor('BTCUSDT').streams.makeCycle(1)[1];
-        const unsafeIdentity = '900719925474099312345';
+        const unsafeIdentity = '18446744073709551615';
         const raw = tradeFrame.replace(/"a":\d+/, `"a":${unsafeIdentity}`);
         const event = normalizeFuturesWorkstationStreamFrame(raw, expectation());
         expect(event.row.aggregateTradeId).toBe(unsafeIdentity);
         expect(typeof event.row.aggregateTradeId).toBe('string');
+    });
+
+    it('validates every frozen-but-unrendered REST schema field', () => {
+        const fixture = fixtureFor('BTCUSDT');
+        for (const index of [7, 8, 9, 10, 11]) {
+            const kline = JSON.parse(fixture.contractKlines);
+            kline[0][index] = true;
+            expect(() => normalizeFuturesWorkstationKlines(JSON.stringify(kline)))
+                .toThrow(FuturesWorkstationMarketContractError);
+        }
+        for (const field of ['estimatedSettlePrice', 'interestRate']) {
+            const premium = JSON.parse(fixture.premiumIndex);
+            premium[field] = null;
+            expect(() => normalizeFuturesWorkstationPremiumIndex(
+                JSON.stringify(premium),
+                'BTCUSDT',
+            )).toThrow(FuturesWorkstationMarketContractError);
+        }
+        for (const field of ['weightedAvgPrice', 'openPrice']) {
+            const ticker = JSON.parse(fixture.ticker);
+            ticker[field] = false;
+            expect(() => normalizeFuturesWorkstationTicker(JSON.stringify(ticker), 'BTCUSDT'))
+                .toThrow(FuturesWorkstationMarketContractError);
+        }
+        const ticker = JSON.parse(fixture.ticker);
+        ticker.firstId = 20;
+        ticker.lastId = 19;
+        expect(() => normalizeFuturesWorkstationTicker(JSON.stringify(ticker), 'BTCUSDT'))
+            .toThrowError(expect.objectContaining({ code: 'INVALID_TICKER_ID_RANGE' }));
+    });
+
+    it('validates every frozen-but-unrendered stream field and identity range', () => {
+        const frames = fixtureFor('BTCUSDT').streams.makeCycle(1);
+        const corrupt = [
+            [1, payload => { payload.data.f = 20; payload.data.l = 19; }],
+            [2, payload => { payload.data.k.f = 20; payload.data.k.L = 19; }],
+            ...['q', 'V', 'Q', 'B'].map(field => [
+                2,
+                payload => { payload.data.k[field] = false; },
+            ]),
+            ...['P', 'ap'].map(field => [
+                3,
+                payload => { payload.data[field] = null; },
+            ]),
+            ...['w', 'o'].map(field => [
+                4,
+                payload => { payload.data[field] = false; },
+            ]),
+            [4, payload => { payload.data.F = 20; payload.data.L = 19; }],
+        ];
+        for (const [frameIndex, mutate] of corrupt) {
+            const payload = JSON.parse(frames[frameIndex]);
+            mutate(payload);
+            expect(() => normalizeFuturesWorkstationStreamFrame(
+                JSON.stringify(payload),
+                expectation(),
+            )).toThrow(FuturesWorkstationMarketContractError);
+        }
     });
 
     it.each([
@@ -149,6 +220,19 @@ describe('official Futures workstation market schemas', () => {
         source.symbols.push(source.symbols[0]);
         expect(() => normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source), new Set()))
             .toThrowError(expect.objectContaining({ code: 'DUPLICATE_EXCHANGE_SYMBOL' }));
+    });
+
+    it('accepts officially disabled price bounds and rejects unreviewed filters', () => {
+        const source = JSON.parse(FUTURES_TESTNET_WORKSTATION_FIXTURE.catalog);
+        const price = source.symbols[0].filters.find(filter => filter.filterType === 'PRICE_FILTER');
+        price.maxPrice = '0';
+        price.tickSize = '0';
+        const catalog = normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source), new Set());
+        expect(catalog[0].filters.price).toMatchObject({ max: '0', tickSize: '0' });
+
+        source.symbols[0].filters.push({ filterType: 'UNREVIEWED_FILTER', value: '1' });
+        expect(() => normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source), new Set()))
+            .toThrowError(expect.objectContaining({ code: 'INVALID_EXCHANGE_FILTER' }));
     });
 
     it('rejects wrong-symbol REST header data', () => {
@@ -233,8 +317,63 @@ describe('official Futures workstation market schemas', () => {
             pair: `A${String(index).padStart(3, '0')}USDT`,
         }));
         const frames = createFuturesWorkstationCatalogFrames(contracts);
-        expect(frames.map(frame => frame.contracts.length)).toEqual([40, 40, 15]);
+        expect(frames.map(frame => frame.contracts.length)).toEqual([
+            8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 8, 7,
+        ]);
         expect(frames.at(-1).complete).toBe(true);
         expect(frames.at(-1).total).toBe(95);
+        for (const [index, frame] of frames.entries()) {
+            const event = createFuturesProductionWorkstationEvent({
+                requestId: 'catalog-frame-bound',
+                symbol: 'BTCUSDT',
+                generation: 1,
+                revision: index + 1,
+                resource: 'catalog',
+                state: 'live',
+                observedAt: 1_784_000_000_000,
+                payload: frame,
+            });
+            expect(Buffer.byteLength(JSON.stringify(event), 'utf8'))
+                .toBeLessThanOrEqual(FUTURES_WORKSTATION_EVENT_MAX_BYTES);
+        }
+        const maximumDecimal = '9'.repeat(64);
+        const maximumContract = {
+            ...seed,
+            symbol: 'A'.repeat(20),
+            pair: 'B'.repeat(20),
+            contractType: 'C'.repeat(32),
+            status: 'S'.repeat(32),
+            baseAsset: 'D'.repeat(16),
+            filters: {
+                price: { min: maximumDecimal, max: maximumDecimal, tickSize: maximumDecimal },
+                quantity: { min: maximumDecimal, max: maximumDecimal, stepSize: maximumDecimal },
+                marketQuantity: { min: maximumDecimal, max: maximumDecimal, stepSize: maximumDecimal },
+                percentPrice: {
+                    multiplierUp: maximumDecimal,
+                    multiplierDown: maximumDecimal,
+                    multiplierDecimal: 18,
+                },
+                maximumOrders: Number.MAX_SAFE_INTEGER,
+                maximumAlgoOrders: Number.MAX_SAFE_INTEGER,
+                minimumNotional: maximumDecimal,
+            },
+        };
+        const maximumEvent = createFuturesProductionWorkstationEvent({
+            requestId: 'catalog-frame-worst-case',
+            symbol: 'BTCUSDT',
+            generation: 1,
+            revision: 1,
+            resource: 'catalog',
+            state: 'live',
+            observedAt: 1_784_000_000_000,
+            payload: {
+                offset: 0,
+                total: 512,
+                complete: false,
+                contracts: Array.from({ length: 8 }, () => maximumContract),
+            },
+        });
+        expect(Buffer.byteLength(JSON.stringify(maximumEvent), 'utf8'))
+            .toBeLessThanOrEqual(FUTURES_WORKSTATION_EVENT_MAX_BYTES);
     });
 });

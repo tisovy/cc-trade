@@ -61,6 +61,35 @@ describe('authoritative Futures local order book', () => {
         expect(book.phase).toBe(FUTURES_WORKSTATION_ORDER_BOOK_PHASES.RESYNC_REQUIRED);
     });
 
+    it('rejects a future buffered event even when a later reordered event bridges the snapshot', () => {
+        const book = new FuturesWorkstationOrderBook();
+        book.push(delta({
+            firstUpdateId: '102',
+            finalUpdateId: '102',
+            previousFinalUpdateId: '101',
+        }), 100);
+        book.push(delta(), 100);
+        expect(book.bootstrap(snapshot())).toEqual({
+            live: false,
+            reason: 'snapshot-not-bridged',
+            resync: true,
+        });
+        expect(book.toRendererView()).toBeNull();
+    });
+
+    it('ignores a duplicate inside the bootstrap buffer before checking pu continuity', () => {
+        const book = new FuturesWorkstationOrderBook();
+        book.push(delta(), 100);
+        book.push(delta({ previousFinalUpdateId: '77' }), 100);
+        book.push(delta({
+            firstUpdateId: '102',
+            finalUpdateId: '102',
+            previousFinalUpdateId: '101',
+        }), 100);
+        expect(book.bootstrap(snapshot()).live).toBe(true);
+        expect(book.toRendererView().lastUpdateId).toBe('102');
+    });
+
     it('requires pu continuity while replaying the bootstrap buffer', () => {
         const book = new FuturesWorkstationOrderBook();
         book.push(delta(), 100);
@@ -121,12 +150,18 @@ describe('authoritative Futures local order book', () => {
     it('preserves and compares update IDs beyond 2^53', () => {
         const book = new FuturesWorkstationOrderBook();
         book.push(delta({
-            firstUpdateId: '90071992547409931234',
-            finalUpdateId: '90071992547409931235',
-            previousFinalUpdateId: '90071992547409931233',
+            firstUpdateId: '9007199254740993',
+            finalUpdateId: '9007199254740994',
+            previousFinalUpdateId: '9007199254740992',
         }), 100);
-        expect(book.bootstrap(snapshot({ lastUpdateId: '90071992547409931234' })).live).toBe(true);
-        expect(book.toRendererView().lastUpdateId).toBe('90071992547409931235');
+        expect(book.bootstrap(snapshot({ lastUpdateId: '9007199254740993' })).live).toBe(true);
+        expect(book.toRendererView().lastUpdateId).toBe('9007199254740994');
+    });
+
+    it('rejects update IDs outside unsigned int64', () => {
+        const book = new FuturesWorkstationOrderBook();
+        expect(() => book.push(delta({ finalUpdateId: '18446744073709551616' }), 100))
+            .toThrowError(expect.objectContaining({ code: 'INVALID_UPDATE_ID' }));
     });
 
     it('fails closed on a crossed book', () => {

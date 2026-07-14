@@ -1,3 +1,7 @@
+import {
+    FUTURES_WORKSTATION_UINT64_MAX,
+} from '../../src/utils/futuresWorkstationProtocolShared.js';
+
 export const FUTURES_WORKSTATION_JSON_LIMITS = Object.freeze({
     WS_FRAME_BYTES: 64 * 1024,
     HEADER_COUNT: 64,
@@ -279,7 +283,10 @@ export const validateFuturesWorkstationResponseHeaders = (headers) => {
 
 export const readFuturesWorkstationIdentity = (value) => {
     if (!(value instanceof FuturesWorkstationIntegerToken)
-        || !/^(?:0|[1-9][0-9]*)$/.test(value.token)) {
+        || !/^(?:0|[1-9][0-9]*)$/.test(value.token)
+        || value.token.length > FUTURES_WORKSTATION_UINT64_MAX.length
+        || (value.token.length === FUTURES_WORKSTATION_UINT64_MAX.length
+            && value.token > FUTURES_WORKSTATION_UINT64_MAX)) {
         fail('INVALID_INTEGER_IDENTITY');
     }
     return value.token;

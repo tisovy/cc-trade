@@ -114,6 +114,7 @@ const sourceFiles = [
     ...walk(path.join(ROOT, 'src')),
 ].filter(file => /\.(?:c?js|mjs|jsx)$/.test(file));
 const implementationSourceFiles = sourceFiles.filter(file => !/\.test\.[^.]+$/.test(file));
+const PHASE8_LOCAL_WORKSTATION_CONNECTOR = 'src/hooks/useFuturesLocalWorkstationConnection.js';
 const implementationSourceSet = new Set(implementationSourceFiles);
 const namedProductionImplementationFiles = implementationSourceFiles.filter(file => (
     /futures-production|FuturesProduction/.test(file)
@@ -295,8 +296,51 @@ for (const file of rendererProductionFiles) {
     const name = relative(file);
     const source = fs.readFileSync(file, 'utf8');
     for (const { label, pattern } of rendererForbiddenPatterns) {
+        if (name === PHASE8_LOCAL_WORKSTATION_CONNECTOR
+            && ['renderer-owned network transport', 'production host or route'].includes(label)) {
+            continue;
+        }
         if (pattern.test(source)) fail(`${name} references forbidden ${label}`);
     }
+}
+
+const phase8LocalConnectorPath = path.join(ROOT, PHASE8_LOCAL_WORKSTATION_CONNECTOR);
+const phase8LocalConnector = fs.existsSync(phase8LocalConnectorPath)
+    ? fs.readFileSync(phase8LocalConnectorPath, 'utf8')
+    : '';
+const exactLocalUrlSource = '`ws://${host}:${access.port}`';
+const connectorWithoutExactLocalUrl = phase8LocalConnector.replace(exactLocalUrlSource, '');
+if (!phase8LocalConnector.includes(exactLocalUrlSource)
+    || connectorWithoutExactLocalUrl.includes(exactLocalUrlSource)
+    || /\b(?:https?|wss?):\/\//i.test(connectorWithoutExactLocalUrl)
+    || /\b(?:fetch|XMLHttpRequest|EventSource)\s*\(|\bnavigator\s*\.\s*sendBeacon\s*\(/.test(phase8LocalConnector)
+    || [...phase8LocalConnector.matchAll(/new\s+globalThis\.WebSocket\s*\(/g)].length !== 1
+    || !/LOOPBACK_HOSTS\.has\(access\.host\)/.test(phase8LocalConnector)
+    || !/CONNECT_TIMEOUT_MS:\s*10_000/.test(phase8LocalConnector)
+    || !/FUTURES_WORKSTATION_REQUEST_MAX_BYTES/.test(phase8LocalConnector)
+    || /(?:fapi|fstream)\.binance\.com|\/fapi\//i.test(phase8LocalConnector)) {
+    fail('Phase 8 production view may use only its exact bounded loopback connector');
+}
+
+const packageManifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+const smokeMainPath = path.join(ROOT, 'electron/main.smoke.js');
+const smokeMain = fs.existsSync(smokeMainPath) ? fs.readFileSync(smokeMainPath, 'utf8') : '';
+if (!/\bBUILD_MODE=smoke\b/.test(packageManifest.scripts?.e ?? '')
+    || !smokeMain.trimStart().startsWith("import './env-setup.js'")
+    || !smokeMain.includes("await import('./main.js')")
+    || !smokeMain.includes('SAFE_SMOKE_READY')
+    || !smokeMain.includes('authenticatedLoopback: true')
+    || !smokeMain.includes('reactRootRendered: true')) {
+    fail('npm run e must load the production UI only after fake-only environment/network setup');
+}
+
+const viteConfig = fs.readFileSync(path.join(ROOT, 'vite.config.js'), 'utf8');
+if (!/input:\s*['"]electron\/preload\.cjs['"]/.test(viteConfig)
+    || !/format:\s*['"]cjs['"]/.test(viteConfig)
+    || !/inlineDynamicImports:\s*true/.test(viteConfig)
+    || !/entryFileNames:\s*['"]preload\.cjs['"]/.test(viteConfig)
+    || /formats:\s*\[\s*['"]cjs['"]\s*\]/.test(viteConfig)) {
+    fail('Electron preload must have one non-racing CommonJS output in development and builds');
 }
 
 for (const isolatedPath of ['src/context/DataContext.jsx', 'src/utils/tradingCommands.js']) {

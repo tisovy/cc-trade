@@ -6,6 +6,9 @@ import {
     normalizeFuturesWorkstationDecimal,
     subtractFuturesWorkstationDecimals,
 } from './futures-workstation-decimal.js';
+import {
+    FUTURES_WORKSTATION_UINT64_MAX,
+} from '../../src/utils/futuresWorkstationProtocolShared.js';
 
 export const FUTURES_WORKSTATION_ORDER_BOOK_LIMITS = Object.freeze({
     SNAPSHOT_LEVELS_PER_SIDE: 1_000,
@@ -35,7 +38,11 @@ const fail = (code) => {
 };
 
 const readUpdateId = (value) => {
-    if (typeof value !== 'string' || !/^(?:0|[1-9][0-9]*)$/.test(value)) {
+    if (typeof value !== 'string'
+        || !/^(?:0|[1-9][0-9]*)$/.test(value)
+        || value.length > FUTURES_WORKSTATION_UINT64_MAX.length
+        || (value.length === FUTURES_WORKSTATION_UINT64_MAX.length
+            && value > FUTURES_WORKSTATION_UINT64_MAX)) {
         fail('INVALID_UPDATE_ID');
     }
     return BigInt(value);
@@ -198,11 +205,10 @@ export class FuturesWorkstationOrderBook {
         }
         const snapshot = validateSnapshot(rawSnapshot);
         const retained = this.buffer.filter(delta => delta.finalUpdateIdBigInt >= snapshot.lastUpdateId);
-        const firstIndex = retained.findIndex(delta => (
-            delta.firstUpdateIdBigInt <= snapshot.lastUpdateId
-            && delta.finalUpdateIdBigInt >= snapshot.lastUpdateId
-        ));
-        if (firstIndex < 0) {
+        const first = retained[0];
+        if (!first
+            || first.firstUpdateIdBigInt > snapshot.lastUpdateId
+            || first.finalUpdateIdBigInt < snapshot.lastUpdateId) {
             this.phase = FUTURES_WORKSTATION_ORDER_BOOK_PHASES.RESYNC_REQUIRED;
             this.buffer = [];
             this.bufferedBytes = 0;
@@ -212,10 +218,9 @@ export class FuturesWorkstationOrderBook {
         applyLevels(this.bids, snapshot.bids);
         applyLevels(this.asks, snapshot.asks);
         this.lastUpdateId = snapshot.lastUpdateId;
-        const applicable = retained.slice(firstIndex);
-        for (let index = 0; index < applicable.length; index += 1) {
-            const delta = applicable[index];
-            if (index > 0 && delta.previousFinalUpdateIdBigInt !== this.lastUpdateId) {
+        for (const delta of retained) {
+            if (delta.finalUpdateIdBigInt <= this.lastUpdateId) continue;
+            if (delta !== first && delta.previousFinalUpdateIdBigInt !== this.lastUpdateId) {
                 this.phase = FUTURES_WORKSTATION_ORDER_BOOK_PHASES.RESYNC_REQUIRED;
                 this.bids.clear();
                 this.asks.clear();
@@ -223,7 +228,6 @@ export class FuturesWorkstationOrderBook {
                 this.bufferedBytes = 0;
                 return Object.freeze({ live: false, reason: 'buffer-gap', resync: true });
             }
-            if (delta.finalUpdateIdBigInt <= this.lastUpdateId) continue;
             this.applyDelta(delta);
         }
         this.phase = FUTURES_WORKSTATION_ORDER_BOOK_PHASES.LIVE;

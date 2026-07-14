@@ -123,6 +123,11 @@ describe('Testnet workstation hook ownership', () => {
       status: 'disconnected',
       reasonCode: 'LOCAL_CONNECTION_CLOSED',
     })
+    expect(result.current.resources.status).toMatchObject({
+      connected: false,
+      state: 'disconnected',
+      reasonCode: 'LOCAL_CONNECTION_CLOSED',
+    })
 
     const rejected = renderHook(props => useFuturesTestnetWorkstation(props), {
       initialProps: defaultProps(new LocalSocket(), vi.fn(() => false)),

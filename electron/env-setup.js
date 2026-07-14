@@ -3,7 +3,7 @@ import {
     installFuturesWorkstationNodeNetworkEscapeGuard,
 } from './futures-workstation-node-network-guard.js';
 
-// Force clear environment variables for E2E tests
+// Force-clear credentials and network overrides for automated verification.
 process.env.BK = '';
 process.env.BS = '';
 process.env.FUTURES_READ_MODE = 'mock';
@@ -22,4 +22,4 @@ delete process.env.MOCK_WS_URL;
 delete process.env.VITE_WS_URL;
 installFuturesProductionNetworkEscapeGuard();
 installFuturesWorkstationNodeNetworkEscapeGuard();
-console.log('E2E: Environment variables cleared');
+console.log('Verification: credentials and network overrides cleared');

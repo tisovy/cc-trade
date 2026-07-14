@@ -557,8 +557,6 @@ function AppShell() {
           <FuturesModeBanner production={false} />
           <FuturesTestnetWorkstation
             enabled={isFuturesTestnetMode}
-            wsConnection={wsConnection}
-            sendMessage={sendMessage}
             readOnlyState={futuresState}
             executionState={futuresExecution}
           />
@@ -572,8 +570,6 @@ function AppShell() {
           <FuturesModeBanner production />
           <FuturesProductionWorkstation
             enabled={isFuturesLiveMode}
-            wsConnection={wsConnection}
-            sendMessage={sendMessage}
             executionState={futuresProductionExecution}
           />
         </main>

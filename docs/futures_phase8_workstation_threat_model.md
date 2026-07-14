@@ -38,7 +38,7 @@ The renderer is not trusted to choose environment, transport, host, capability, 
 | Environment confusion | Production data/action is shown under blue Testnet identity or vice versa | distinct channels, protocols, containers and CSS roots; exact environment validation; permanent banner at every width | cross-channel rejection and desktop/narrow screenshots |
 | Host substitution | Caller supplies alternate Binance, proxy, redirect or DNS-like URL | compile-time exact origins and paths; no caller network options; redirect and final-URL rejection | route/host scan and transport tests |
 | Automated production escape | a fake-backed test unexpectedly reaches Binance | fail-fast fetch/WebSocket tripwire plus E2E session guard; fake compositions are explicit | escape-guard tests and zero-attempt assertion |
-| Renderer network authority | compromised renderer opens Binance directly | CSP plus static scan; no `fetch`, `WebSocket`, URL or host in Futures renderer closure | renderer scan and bundle scan |
+| Renderer network authority | compromised renderer opens Binance directly | CSP plus static scan; exactly one bounded loopback connector with runtime-owned access and no caller URL; no Binance `fetch`, socket, URL or host in the renderer closure | renderer scan, connector tests and bundle scan |
 | Protocol confusion | Testnet request is accepted by production service or generic action aliases a Futures command | exact channel/action/version/environment keys; no generic Futures handler | bidirectional confusion tests |
 | Execution smuggling | chart/book/tape gesture or Enter creates an execution intent | local draft callback only; forbidden execution fields in read protocol; no generic Enter listener | click/key tests and action-spy assertions |
 | Late symbol event | delayed BTC event mutates an ETH view | monotonic backend generation and renderer request/generation ownership | rapid switch and teardown tests |
@@ -46,7 +46,7 @@ The renderer is not trusted to choose environment, transport, host, capability, 
 | Book bootstrap race | deltas arrive around the REST snapshot and are applied incorrectly | bounded pre-snapshot buffer and exact first-event rule | before/during/after snapshot race tests |
 | Duplicate event | repeated delta/trade/candle corrupts quantity or rows | update-ID/idempotency checks and replacement by exact identity | duplicate tests |
 | Buffer exhaustion | burst consumes unbounded memory or starves Spot | hard byte/item limits; overflow discards uncertain state and resyncs; separate rate budget | overflow/burst tests and Spot regression |
-| Malformed/schema-drift input | coercion admits floats, unsafe int64, COIN-M or extra data | exact-key validators; canonical decimal strings; identity strings; `st=1`; bounded JSON | schema and fuzz matrices |
+| Malformed/schema-drift input | coercion admits floats, out-of-range uint64, COIN-M or extra data | exact-key validators including non-rendered fields and all seven filters; canonical decimal strings; unsigned-int64 identity strings; `st=1`; bounded JSON | schema and fuzz matrices |
 | Clock regression | stale data appears newer | fake monotonic clock gate; regression marks stale and starts a generation | fake-clock regression tests |
 | Reconnect optimism | reconnected socket immediately looks live while snapshot is old | stale on disconnect; authoritative REST/bootstrap required before `live` | reconnect state tests |
 | Partial resource failure | header is live while depth failed but whole screen looks healthy | per-resource state and timestamps plus aggregate status | UI state matrix |
@@ -54,7 +54,7 @@ The renderer is not trusted to choose environment, transport, host, capability, 
 | Financial precision loss | decimal or int64 is converted through JavaScript `Number` | canonical decimal strings and decimal-string comparisons; identities are strings | boundary tests with >2^53 IDs |
 | Stale renderer replay | an old event with valid channel overwrites a later revision | active request ID, generation and strictly increasing revision checks | duplicate/out-of-order renderer tests |
 | Multiple-window cross-talk | one window's symbol generation mutates another | service instance and request ownership per renderer connection | two-session isolation tests |
-| Timer/socket leak | symbol churn leaves old reconnects or sockets active | generation-owned abort, timer registry and idempotent stop | fake-timer teardown tests |
+| Timer/socket leak | symbol churn or terminal bootstrap leaves old reconnects or sockets active | generation-owned abort, terminal halt, reset reconnect budget, bounded local handshake/reconnect timers and idempotent stop | fake-timer teardown tests |
 | UI truncation | narrow layout hides environment identity or state | sticky full-width banner and duplicated environment label inside workspace rail | narrow Playwright screenshot/assertion |
 | Shared presentation escalation | pure component imports authority later | production closure static scan forbids network, storage, environment and execution protocols | `check:futures-production` expansion |
 | Phase 5/6 mutation | new functionality weakens frozen services | new modules only; production closure import ban | GitNexus changes plus static isolation scan |
@@ -63,9 +63,9 @@ The renderer is not trusted to choose environment, transport, host, capability, 
 
 ## Adversarial state transitions
 
-The only healthy path for a symbol generation is:
+The initial healthy path for a symbol generation is:
 
-`loading → resynchronizing → live`
+`loading → live`
 
 Permitted degradation paths are:
 
@@ -85,7 +85,7 @@ The implementation must reject or safely degrade when an attacker:
 - supplies an undocumented interval or an `environment`, `host`, `url`, `headers`, `proxy`, `agent` or credential field;
 - switches symbols repeatedly while old REST promises and sockets resolve late;
 - gives a snapshot `lastUpdateId` above all buffered deltas;
-- sends `U/u/pu` as numbers, negative strings, leading-zero identities or values above `2^53`;
+- sends `U/u/pu` as strings with signs, leading zeros or values above unsigned-int64; valid identities above `2^53` remain lossless strings;
 - sends an internally crossed book, duplicate prices, noncanonical decimals or zero/negative prices;
 - floods more than the depth/trade/candle/frame/queue budget;
 - sends `st=2`, a mismatched `s`/`ps`, or a combined-stream name for another symbol;

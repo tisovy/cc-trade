@@ -5,10 +5,14 @@ import {
 } from './futures-testnet-workstation-composition.js';
 import {
     createFuturesProductionWorkstationRuntime,
+    createFuturesProductionWorkstationRuntimeForTest,
 } from './futures-production-workstation-composition.js';
 import {
     createFuturesTestnetWorkstationFakeTransport,
 } from './futures-testnet-workstation-fake-transport.js';
+import {
+    createFuturesProductionWorkstationFakeTransport,
+} from './futures-production-workstation-fake-transport.js';
 import {
     FUTURES_TESTNET_WORKSTATION_FIXTURE,
 } from './futures-testnet-workstation-fixtures.js';
@@ -347,6 +351,139 @@ describe('separately composed Futures workstation services', () => {
         clock.runTimeouts();
         expect(events).toHaveLength(count);
         expect(base.getActiveTimerCount()).toBe(0);
+    });
+
+    it.each([
+        [
+            'Testnet',
+            createFuturesTestnetWorkstationFakeTransport,
+            createFuturesTestnetWorkstationRuntimeForTest,
+            testnetRequest,
+        ],
+        [
+            'production',
+            createFuturesProductionWorkstationFakeTransport,
+            createFuturesProductionWorkstationRuntimeForTest,
+            productionRequest,
+        ],
+    ])('closes the %s stream and timers when bootstrap becomes terminal', async (
+        _label,
+        createBase,
+        createRuntime,
+        createRequest,
+    ) => {
+        const clock = createManualClock();
+        const base = createBase({ clock: clock.clock });
+        const close = vi.fn();
+        const transport = {
+            ...base,
+            connect: (options) => {
+                const handle = base.connect(options);
+                return {
+                    close: () => {
+                        close();
+                        handle.close();
+                    },
+                };
+            },
+            bootstrap: async (options) => ({
+                ...await base.bootstrap(options),
+                premiumIndex: '{}',
+            }),
+        };
+        const runtime = track(createRuntime({ transport, clock: clock.clock }));
+        const events = [];
+        await runtime.service.handleRequest(createRequest('terminal-bootstrap'), {
+            emit: event => events.push(event),
+        });
+        expect(events.at(-1)).toMatchObject({ resource: 'status', state: 'unavailable' });
+        expect(close).toHaveBeenCalledOnce();
+        expect(runtime.service.current).toBeNull();
+        expect(clock.intervalCount()).toBe(0);
+        expect(base.getActiveTimerCount()).toBe(0);
+    });
+
+    it.each([
+        [
+            'Testnet',
+            createFuturesTestnetWorkstationFakeTransport,
+            createFuturesTestnetWorkstationRuntimeForTest,
+            testnetRequest,
+        ],
+        [
+            'production',
+            createFuturesProductionWorkstationFakeTransport,
+            createFuturesProductionWorkstationRuntimeForTest,
+            productionRequest,
+        ],
+    ])('halts the %s session when reconnect attempts are exhausted', async (
+        _label,
+        createBase,
+        createRuntime,
+        createRequest,
+    ) => {
+        const clock = createManualClock();
+        const base = createBase({ clock: clock.clock });
+        const close = vi.fn();
+        let subscriber;
+        const transport = {
+            ...base,
+            connect: (options) => {
+                subscriber = options;
+                const handle = base.connect(options);
+                return {
+                    close: () => {
+                        close();
+                        handle.close();
+                    },
+                };
+            },
+        };
+        const runtime = track(createRuntime({ transport, clock: clock.clock }));
+        const events = [];
+        await runtime.service.handleRequest(createRequest('terminal-reconnect'), {
+            emit: event => events.push(event),
+        });
+        runtime.service.current.reconnectAttempt = Number.MAX_SAFE_INTEGER;
+        subscriber.onDisconnect('SOCKET_DISCONNECTED');
+        expect(events.at(-1)).toMatchObject({
+            resource: 'status',
+            state: 'unavailable',
+            payload: { reasonCode: 'RECONNECT_EXHAUSTED' },
+        });
+        expect(close).toHaveBeenCalledOnce();
+        expect(runtime.service.current).toBeNull();
+        expect(clock.intervalCount()).toBe(0);
+        expect(base.getActiveTimerCount()).toBe(0);
+    });
+
+    it.each([
+        [
+            'Testnet',
+            createFuturesTestnetWorkstationFakeTransport,
+            createFuturesTestnetWorkstationRuntimeForTest,
+            createFuturesTestnetWorkstationSubscribeRequest,
+        ],
+        [
+            'production',
+            createFuturesProductionWorkstationFakeTransport,
+            createFuturesProductionWorkstationRuntimeForTest,
+            createFuturesProductionWorkstationSubscribeRequest,
+        ],
+    ])('resets the %s reconnect counter after an authoritative rebuild', async (
+        _label,
+        createBase,
+        createRuntime,
+        createRequest,
+    ) => {
+        const base = createBase();
+        const runtime = track(createRuntime({ transport: base }));
+        await runtime.service.startGeneration(createRequest({
+            requestId: 'reconnect-counter-reset',
+            symbol: 'BTCUSDT',
+            interval: '1m',
+        }), () => {}, 7);
+        expect(runtime.service.current.reconnectAttempt).toBe(0);
     });
 
     it('never emits credential, signature, private response or write fields', async () => {

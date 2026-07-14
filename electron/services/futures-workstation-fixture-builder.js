@@ -42,6 +42,16 @@ const makeFilters = (tickSize, stepSize, minimumNotional) => ([
         filterType: 'MAX_NUM_ORDERS',
         limit: 200,
     },
+    {
+        filterType: 'MAX_NUM_ALGO_ORDERS',
+        limit: 100,
+    },
+    {
+        filterType: 'PERCENT_PRICE',
+        multiplierUp: '1.1500',
+        multiplierDown: '0.8500',
+        multiplierDecimal: 4,
+    },
 ]);
 
 const makeSymbol = ({ symbol, baseAsset, tickSize, stepSize }) => ({

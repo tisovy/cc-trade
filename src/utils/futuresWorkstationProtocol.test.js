@@ -33,6 +33,13 @@ const filters = Object.freeze({
   price: Object.freeze({ min: '0.1', max: '1000000', tickSize: '0.1' }),
   quantity: Object.freeze({ min: '0.001', max: '1000', stepSize: '0.001' }),
   marketQuantity: Object.freeze({ min: '0.001', max: '100', stepSize: '0.001' }),
+  percentPrice: Object.freeze({
+    multiplierUp: '1.1500',
+    multiplierDown: '0.8500',
+    multiplierDecimal: 4,
+  }),
+  maximumOrders: 200,
+  maximumAlgoOrders: 100,
   minimumNotional: '5',
 })
 
@@ -90,19 +97,19 @@ const payloads = Object.freeze({
     })]),
   }),
   [FUTURES_WORKSTATION_RESOURCES.DEPTH]: Object.freeze({
-    lastUpdateId: '90071992547409931234',
+    lastUpdateId: '9007199254740993',
     bids: Object.freeze([Object.freeze({ price: '58420', quantity: '2', total: '2' })]),
     asks: Object.freeze([Object.freeze({ price: '58421', quantity: '3', total: '3' })]),
     spread: '1',
   }),
   [FUTURES_WORKSTATION_RESOURCES.TRADES]: Object.freeze({
     rows: Object.freeze([Object.freeze({
-      aggregateTradeId: '90071992547409931235',
+      aggregateTradeId: '9007199254740994',
       price: '58420.5',
       quantity: '0.25',
       normalQuantity: '0.25',
-      firstTradeId: '90071992547409931236',
-      lastTradeId: '90071992547409931236',
+      firstTradeId: '9007199254740995',
+      lastTradeId: '9007199254740995',
       tradeTime: 1_784_000_000_000,
       buyerMaker: false,
     })]),
@@ -225,8 +232,15 @@ describe('Futures workstation environment-specific protocols', () => {
   it('preserves lossless int64 identities as strings', () => {
     const event = createFuturesProductionWorkstationEvent(createEventValues('trades'))
     const parsed = parseFuturesProductionWorkstationEvent(JSON.stringify(event))
-    expect(parsed.payload.rows[0].aggregateTradeId).toBe('90071992547409931235')
+    expect(parsed.payload.rows[0].aggregateTradeId).toBe('9007199254740994')
     expect(typeof parsed.payload.rows[0].aggregateTradeId).toBe('string')
+  })
+
+  it('rejects renderer identities outside unsigned int64', () => {
+    expect(() => createFuturesProductionWorkstationEvent({
+      ...createEventValues('depth'),
+      payload: { ...payloads.depth, lastUpdateId: '18446744073709551616' },
+    })).toThrow(FuturesWorkstationProtocolError)
   })
 
   it('rejects invalid resource payloads and noncanonical decimals', () => {
@@ -266,5 +280,52 @@ describe('Futures workstation environment-specific protocols', () => {
     expect(next.resources.candles.contract).toHaveLength(1)
     expect(next.resources.candles.mark).toHaveLength(1)
     expect(next.resources.candles.index).toEqual([])
+  })
+
+  it('clears prior-generation resources and marks cached data non-live during resync', () => {
+    const initial = Object.freeze({
+      status: 'live',
+      symbol: 'BTCUSDT',
+      generation: 1,
+      revision: 9,
+      observedAt: 1_784_000_000_000,
+      resources: Object.freeze({
+        status: Object.freeze({ connected: true, reasonCode: null, state: 'live' }),
+        catalog: null,
+        header: Object.freeze({ ...payloads.header, state: 'live' }),
+        candles: null,
+        depth: Object.freeze({ ...payloads.depth, state: 'live' }),
+        trades: null,
+      }),
+    })
+    const loading = createFuturesTestnetWorkstationEvent({
+      ...createEventValues('status'),
+      generation: 2,
+      state: 'loading',
+      payload: { connected: false, reasonCode: null },
+    })
+    const reset = applyFuturesWorkstationEvent(initial, loading)
+    expect(reset.resources.header).toBeNull()
+    expect(reset.resources.depth).toBeNull()
+
+    const header = createFuturesTestnetWorkstationEvent({
+      ...createEventValues('header'),
+      generation: 2,
+      revision: 2,
+    })
+    const resynchronizing = createFuturesTestnetWorkstationEvent({
+      ...createEventValues('status'),
+      generation: 2,
+      revision: 3,
+      state: 'resynchronizing',
+      payload: { connected: false, reasonCode: 'DEPTH_SEQUENCE_GAP' },
+    })
+    const transitioned = applyFuturesWorkstationEvent(
+      applyFuturesWorkstationEvent(reset, header),
+      resynchronizing,
+    )
+    expect(transitioned.status).toBe('resynchronizing')
+    expect(transitioned.resources.header.state).toBe('resynchronizing')
+    expect(transitioned.resources.header.observedAt).toBe(resynchronizing.observedAt)
   })
 })

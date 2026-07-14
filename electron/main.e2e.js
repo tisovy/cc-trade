@@ -105,6 +105,8 @@ function createWindow() {
     const win = new BrowserWindow({
         width: 1200,
         height: 800,
+        // Keep host-desktop keystrokes out while retaining compositor-backed screenshots.
+        focusable: false,
         webPreferences: createSecureRendererWebPreferences({
             preload: path.join(__dirname, 'preload.cjs'),
         }),
