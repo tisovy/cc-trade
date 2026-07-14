@@ -445,7 +445,39 @@ describe('official Futures workstation market schemas', () => {
             });
         }
         expect(rows).toHaveLength(FUTURES_WORKSTATION_MARKET_LIMITS.TRADES);
-        expect(toRendererTradeRows(rows)).toHaveLength(80);
+        expect(toRendererTradeRows(rows)).toHaveLength(
+            FUTURES_WORKSTATION_MARKET_LIMITS.RENDERER_TRADES,
+        );
+    });
+
+    it('keeps a maximum-width aggregate-trade page within the outbound frame bound', () => {
+        const maximumDecimal = '9'.repeat(64);
+        const maximumIdentity = 18_446_744_073_709_551_615n;
+        const rows = Array.from(
+            { length: FUTURES_WORKSTATION_MARKET_LIMITS.RENDERER_TRADES },
+            (_, index) => Object.freeze({
+                aggregateTradeId: (maximumIdentity - BigInt(index)).toString(),
+                price: maximumDecimal,
+                quantity: maximumDecimal,
+                normalQuantity: maximumDecimal,
+                firstTradeId: (maximumIdentity - BigInt(index)).toString(),
+                lastTradeId: maximumIdentity.toString(),
+                tradeTime: Number.MAX_SAFE_INTEGER - index,
+                buyerMaker: index % 2 === 0,
+            }),
+        );
+        const event = createFuturesProductionWorkstationEvent({
+            requestId: 'r'.repeat(96),
+            symbol: 'S'.repeat(20),
+            generation: Number.MAX_SAFE_INTEGER,
+            revision: Number.MAX_SAFE_INTEGER,
+            resource: 'trades',
+            state: 'live',
+            observedAt: Number.MAX_SAFE_INTEGER,
+            payload: { rows },
+        });
+        expect(Buffer.byteLength(JSON.stringify(event), 'utf8'))
+            .toBeLessThanOrEqual(FUTURES_WORKSTATION_EVENT_MAX_BYTES);
     });
 
     it('updates mark and ticker header fields independently', () => {

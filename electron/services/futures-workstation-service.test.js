@@ -17,6 +17,9 @@ import {
     FUTURES_TESTNET_WORKSTATION_FIXTURE,
 } from './futures-testnet-workstation-fixtures.js';
 import {
+    FUTURES_PRODUCTION_WORKSTATION_FIXTURE,
+} from './futures-production-workstation-fixtures.js';
+import {
     createFuturesTestnetWorkstationSubscribeRequest,
     createFuturesTestnetWorkstationUnsubscribeRequest,
 } from '../../src/utils/futuresTestnetWorkstationProtocol.js';
@@ -414,13 +417,34 @@ describe('separately composed Futures workstation services', () => {
         expect(events.at(-1)).toMatchObject({ state: 'resynchronizing' });
     });
 
-    it('bounds non-depth events during bootstrap and resynchronizes on overflow', async () => {
-        const base = createFuturesTestnetWorkstationFakeTransport();
-        const trade = FUTURES_TESTNET_WORKSTATION_FIXTURE.symbols.BTCUSDT.streams.makeCycle(1)[1];
+    it.each([
+        [
+            'Testnet',
+            createFuturesTestnetWorkstationFakeTransport,
+            createFuturesTestnetWorkstationRuntimeForTest,
+            testnetRequest,
+            FUTURES_TESTNET_WORKSTATION_FIXTURE,
+        ],
+        [
+            'production',
+            createFuturesProductionWorkstationFakeTransport,
+            createFuturesProductionWorkstationRuntimeForTest,
+            productionRequest,
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE,
+        ],
+    ])('bounds a pre-bootstrap %s trade burst by evicting old tape rows without resync', async (
+        _label,
+        createBase,
+        createRuntime,
+        createRequest,
+        fixture,
+    ) => {
+        const base = createBase();
+        const trade = fixture.symbols.BTCUSDT.streams.makeCycle(1)[1];
         const transport = {
             ...base,
             connect: (options) => {
-                options.onMessage(FUTURES_TESTNET_WORKSTATION_FIXTURE.symbols.BTCUSDT.streams.bridgeDepth);
+                options.onMessage(fixture.symbols.BTCUSDT.streams.bridgeDepth);
                 for (let index = 0; index < 129; index += 1) {
                     options.onMessage(trade.replace(/"a":\d+/, `"a":${1000 + index}`));
                 }
@@ -428,19 +452,23 @@ describe('separately composed Futures workstation services', () => {
             },
         };
         const clock = createManualClock();
-        const runtime = track(createFuturesTestnetWorkstationRuntimeForTest({
+        const runtime = track(createRuntime({
             transport,
             clock: clock.clock,
         }));
         const events = [];
-        await runtime.service.handleRequest(testnetRequest('queue-overflow'), {
+        await runtime.service.handleRequest(createRequest('bounded-trade-burst'), {
             emit: event => events.push(event),
         });
-        expect(events.at(-1)).toMatchObject({
-            state: 'resynchronizing',
-            payload: { reasonCode: 'STREAM_QUEUE_OVERFLOW' },
-        });
-        expect(clock.timeoutCount()).toBe(1);
+        expect(events.at(-1)).toMatchObject({ resource: 'status', state: 'live' });
+        expect(events.some(event => event.state === 'resynchronizing')).toBe(false);
+        expect(clock.timeoutCount()).toBe(0);
+        expect(runtime.service.current.pendingEvents).toHaveLength(0);
+        expect(runtime.service.current.trades).toHaveLength(128);
+        const tape = events.filter(event => event.resource === 'trades').at(-1).payload.rows;
+        expect(tape).toHaveLength(32);
+        expect(tape[0].aggregateTradeId).toBe('1128');
+        expect(tape.some(row => row.aggregateTradeId === '1000')).toBe(false);
     });
 
     it('marks individual resources stale on deterministic freshness deadlines', async () => {

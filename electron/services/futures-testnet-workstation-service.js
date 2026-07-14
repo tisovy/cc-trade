@@ -352,8 +352,7 @@ export class FuturesTestnetWorkstationService {
             }
             if (!session.bootstrapped) {
                 if (session.pendingEvents.length >= FUTURES_TESTNET_WORKSTATION_FRESHNESS.PENDING_EVENTS) {
-                    this.scheduleResync(session, 'STREAM_QUEUE_OVERFLOW');
-                    return;
+                    session.pendingEvents.shift();
                 }
                 session.pendingEvents.push(event);
                 return;
