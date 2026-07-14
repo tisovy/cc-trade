@@ -219,7 +219,7 @@ export const FuturesWorkstationView = ({
             </div>
             <div className="futures-workstation-filter-row">
               <strong>Max algo orders</strong>
-              <code>{selectedContract.filters.maximumAlgoOrders}</code>
+              <code>{selectedContract.filters.maximumAlgoOrders ?? 'Unavailable'}</code>
             </div>
             <div className="futures-workstation-filter-row">
               <strong>Min notional</strong>

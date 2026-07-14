@@ -129,8 +129,41 @@ const createEventValues = resource => ({
 })
 
 describe('Futures workstation environment-specific protocols', () => {
-  it('uses protocol revision 3 for the bounded catalog and dated symbol grammar', () => {
-    expect(FUTURES_WORKSTATION_PROTOCOL_VERSION).toBe('3')
+  it('uses protocol revision 4 for current catalog filter availability', () => {
+    expect(FUTURES_WORKSTATION_PROTOCOL_VERSION).toBe('4')
+  })
+
+  it('preserves an unavailable per-symbol algo limit instead of inventing one', () => {
+    const contract = payloads.catalog.contracts[0]
+    expect(() => createFuturesProductionWorkstationEvent({
+      ...createEventValues('catalog'),
+      payload: {
+        ...payloads.catalog,
+        contracts: [{
+          ...contract,
+          filters: { ...contract.filters, maximumAlgoOrders: null },
+        }],
+      },
+    })).not.toThrow()
+  })
+
+  it.each([
+    ['negative max orders', { maximumOrders: -1 }],
+    ['missing max orders', { maximumOrders: null }],
+    ['zero legacy algo orders', { maximumAlgoOrders: 0 }],
+    ['negative legacy algo orders', { maximumAlgoOrders: -1 }],
+  ])('rejects %s in a catalog filter projection', (_label, filterOverride) => {
+    const contract = payloads.catalog.contracts[0]
+    expect(() => createFuturesProductionWorkstationEvent({
+      ...createEventValues('catalog'),
+      payload: {
+        ...payloads.catalog,
+        contracts: [{
+          ...contract,
+          filters: { ...contract.filters, ...filterOverride },
+        }],
+      },
+    })).toThrow(FuturesWorkstationProtocolError)
   })
 
   it.each([

@@ -1,5 +1,5 @@
 export const FUTURES_WORKSTATION_MARKET_TYPE = 'USD_M_FUTURES'
-export const FUTURES_WORKSTATION_PROTOCOL_VERSION = '3'
+export const FUTURES_WORKSTATION_PROTOCOL_VERSION = '4'
 export const FUTURES_WORKSTATION_REQUEST_MAX_BYTES = 1_024
 export const FUTURES_WORKSTATION_EVENT_MAX_BYTES = 15 * 1_024
 export const FUTURES_WORKSTATION_UINT64_MAX = '18446744073709551615'
@@ -360,8 +360,10 @@ const validateContract = (value) => (
   && validateRangeFilter(value.filters.quantity, 'stepSize', false)
   && validateRangeFilter(value.filters.marketQuantity, 'stepSize', false)
   && validatePercentPriceFilter(value.filters.percentPrice)
-  && isPositiveSafeInteger(value.filters.maximumOrders)
-  && isPositiveSafeInteger(value.filters.maximumAlgoOrders)
+  && Number.isSafeInteger(value.filters.maximumOrders)
+  && value.filters.maximumOrders >= 0
+  && (value.filters.maximumAlgoOrders === null
+    || isPositiveSafeInteger(value.filters.maximumAlgoOrders))
   && isCanonicalNonnegativeFuturesDecimal(value.filters.minimumNotional)
 )
 

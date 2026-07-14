@@ -136,6 +136,98 @@ describe('official Futures workstation market schemas', () => {
         )).toThrowError(expect.objectContaining({ code: 'INVALID_EXCHANGE_INFO_SYMBOL' }));
     });
 
+    it('normalizes the current post-algo-migration catalog without widening workstation symbols', () => {
+        const source = JSON.parse(FUTURES_TESTNET_WORKSTATION_FIXTURE.catalog);
+        for (const symbol of source.symbols) {
+            symbol.maxMoveOrderLimit = 1_000;
+            symbol.filters = symbol.filters.filter(
+                filter => filter.filterType !== 'MAX_NUM_ALGO_ORDERS',
+            );
+            symbol.filters.find(
+                filter => filter.filterType === 'PERCENT_PRICE',
+            ).multiplierDecimal = '4';
+            symbol.filters.push({
+                filterType: 'POSITION_RISK_CONTROL',
+                positionControlSide: 'NONE',
+            });
+        }
+        source.symbols[0].filters.find(
+            filter => filter.filterType === 'MAX_NUM_ORDERS',
+        ).limit = 0;
+        source.symbols.push({
+            ...source.symbols[0],
+            symbol: 'BTCUSDT_260626',
+            pair: 'BTCUSDT',
+            contractType: 'CURRENT_QUARTER DELIVERING',
+            status: 'DELIVERING',
+        });
+        source.symbols.push({
+            ...source.symbols[0],
+            symbol: '测试测试USDT',
+            pair: '测试测试USDT',
+            baseAsset: '测试测试',
+        });
+
+        const catalog = normalizeFuturesWorkstationExchangeInfo(
+            JSON.stringify(source),
+            new Set(['BTCUSDT']),
+        );
+
+        expect(catalog.map(contract => contract.symbol)).toEqual([
+            'BTCUSDT',
+            'BTCUSDT_260626',
+            'ETHUSDT',
+            'SOLUSDT',
+        ]);
+        expect(catalog.find(contract => contract.symbol === 'BTCUSDT')).toMatchObject({
+            allowlisted: true,
+            filters: { maximumOrders: 0, maximumAlgoOrders: null },
+        });
+        expect(catalog.find(contract => contract.symbol === 'BTCUSDT_260626')).toMatchObject({
+            contractType: 'CURRENT_QUARTER DELIVERING',
+            status: 'DELIVERING',
+        });
+        expect(catalog.some(contract => contract.symbol === '测试测试USDT')).toBe(false);
+    });
+
+    it('rejects malformed current filter metadata and the superseded symbol field name', () => {
+        const source = JSON.parse(FUTURES_TESTNET_WORKSTATION_FIXTURE.catalog);
+        const symbol = source.symbols[0];
+        symbol.filters = symbol.filters.filter(
+            filter => filter.filterType !== 'MAX_NUM_ALGO_ORDERS',
+        );
+        symbol.filters.push({
+            filterType: 'POSITION_RISK_CONTROL',
+            positionControlSide: 'NONE',
+            unreviewed: true,
+        });
+        expect(() => normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source), new Set()))
+            .toThrowError(expect.objectContaining({ code: 'INVALID_EXCHANGE_FILTER' }));
+
+        symbol.filters.at(-1).unreviewed = undefined;
+        delete symbol.filters.at(-1).unreviewed;
+        symbol.maxMoveOrderLimitPercent = 1_000;
+        expect(() => normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source), new Set()))
+            .toThrowError(expect.objectContaining({ code: 'INVALID_EXCHANGE_INFO_SYMBOL' }));
+
+        delete symbol.maxMoveOrderLimitPercent;
+        symbol.maxMoveOrderLimit = '1000';
+        expect(() => normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source), new Set()))
+            .toThrowError(expect.objectContaining({ code: 'INVALID_INTEGER_IDENTITY' }));
+    });
+
+    it.each(['04', '+4', '4.0', '19', ''])(
+        'rejects non-canonical current multiplierDecimal %s',
+        (multiplierDecimal) => {
+            const source = JSON.parse(FUTURES_TESTNET_WORKSTATION_FIXTURE.catalog);
+            source.symbols[0].filters.find(
+                filter => filter.filterType === 'PERCENT_PRICE',
+            ).multiplierDecimal = multiplierDecimal;
+            expect(() => normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source), new Set()))
+                .toThrowError(expect.objectContaining({ code: 'INVALID_EXCHANGE_FILTER' }));
+        },
+    );
+
     it.each(['BTCUSDT', 'ETHUSDT', 'SOLUSDT'])(
         'normalizes bounded %s snapshots, candles and headers',
         (symbol) => {

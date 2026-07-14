@@ -158,6 +158,34 @@ describe('pure Futures workstation presentation', () => {
     expect(screen.getByText('0.25')).toBeInTheDocument()
   })
 
+  it('renders a removed per-symbol algo limit as unavailable', () => {
+    const state = createState()
+    const unavailableContract = {
+      ...state.resources.catalog.contracts[0],
+      filters: {
+        ...state.resources.catalog.contracts[0].filters,
+        maximumAlgoOrders: null,
+      },
+    }
+    renderView({
+      state: {
+        ...state,
+        resources: {
+          ...state.resources,
+          catalog: {
+            ...state.resources.catalog,
+            contracts: [unavailableContract],
+            total: 1,
+          },
+        },
+      },
+    })
+
+    expect(screen.getByLabelText('Exact contract filters')).toHaveTextContent(
+      'Max algo ordersUnavailable',
+    )
+  })
+
   it('searches USDⓈ-M contracts and exposes allowlist state without selecting on Enter', () => {
     const { onSymbolChange, onIntervalChange } = renderView()
     const search = screen.getByLabelText('Search Futures contracts')

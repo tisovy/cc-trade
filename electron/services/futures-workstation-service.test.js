@@ -175,6 +175,68 @@ describe('separately composed Futures workstation services', () => {
             createFuturesProductionWorkstationRuntimeForTest,
             productionRequest,
         ],
+    ])('boots %s with the current catalog schema and no per-symbol algo limit', async (
+        _label,
+        createBase,
+        createRuntime,
+        createRequest,
+    ) => {
+        const source = JSON.parse(FUTURES_TESTNET_WORKSTATION_FIXTURE.catalog);
+        for (const symbol of source.symbols) {
+            symbol.maxMoveOrderLimit = 1_000;
+            symbol.filters = symbol.filters.filter(
+                filter => filter.filterType !== 'MAX_NUM_ALGO_ORDERS',
+            );
+            symbol.filters.find(
+                filter => filter.filterType === 'PERCENT_PRICE',
+            ).multiplierDecimal = '4';
+            symbol.filters.push({
+                filterType: 'POSITION_RISK_CONTROL',
+                positionControlSide: 'NONE',
+            });
+        }
+        source.symbols[0].filters.find(
+            filter => filter.filterType === 'MAX_NUM_ORDERS',
+        ).limit = 0;
+        source.symbols.push({
+            ...source.symbols[0],
+            symbol: '测试测试USDT',
+            pair: '测试测试USDT',
+            baseAsset: '测试测试',
+        });
+        const base = createBase();
+        const runtime = track(createRuntime({
+            transport: {
+                ...base,
+                loadExchangeInfo: async () => JSON.stringify(source),
+            },
+        }));
+        const events = [];
+
+        await runtime.service.handleRequest(createRequest('current-catalog'), {
+            emit: event => events.push(event),
+        });
+
+        const catalog = events.find(event => event.resource === 'catalog');
+        expect(catalog.payload).toMatchObject({ total: 3, complete: true });
+        expect(catalog.payload.contracts[0].filters.maximumOrders).toBe(0);
+        expect(catalog.payload.contracts[0].filters.maximumAlgoOrders).toBeNull();
+        expect(events.at(-1)).toMatchObject({ resource: 'status', state: 'live' });
+    });
+
+    it.each([
+        [
+            'Testnet',
+            createFuturesTestnetWorkstationFakeTransport,
+            createFuturesTestnetWorkstationRuntimeForTest,
+            testnetRequest,
+        ],
+        [
+            'production',
+            createFuturesProductionWorkstationFakeTransport,
+            createFuturesProductionWorkstationRuntimeForTest,
+            productionRequest,
+        ],
     ])('keeps the %s deterministic stream LIVE across continuous depth cycles', async (
         _label,
         createBase,

@@ -61,6 +61,13 @@ const isSymbol = value => isBoundedString(
 );
 const isPair = value => isBoundedString(value, /^[A-Z0-9]{1,20}$/, 20);
 const isStatus = value => isBoundedString(value, /^[A-Z0-9_]{1,32}$/, 32);
+const isExchangeIdentity = (value, maximum, allowDeliverySuffix = false) => {
+    if (typeof value !== 'string' || Array.from(value).length > maximum) return false;
+    const pattern = allowDeliverySuffix
+        ? /^(?:[\p{L}\p{N}]{1,20}|[\p{L}\p{N}]{1,13}_[0-9]{6})$/u
+        : /^[\p{L}\p{N}]+$/u;
+    return pattern.test(value);
+};
 const isInterval = value => ['1m', '5m', '15m', '1h', '4h', '1d'].includes(value);
 const cloneFrozen = (value) => {
     if (Array.isArray(value)) return Object.freeze(value.map(cloneFrozen));
@@ -129,10 +136,10 @@ const normalizeRangeFilter = (filter, fields, stepKey, allowDisabled = false) =>
     });
 };
 
-const normalizeLimitFilter = (filter) => {
+const normalizeLimitFilter = (filter, allowZero = false) => {
     if (!exactKeys(filter, ['filterType', 'limit'])) fail('INVALID_EXCHANGE_FILTER');
     const limit = readFuturesWorkstationCount(filter.limit);
-    if (limit === 0) fail('INVALID_EXCHANGE_FILTER');
+    if (!allowZero && limit === 0) fail('INVALID_EXCHANGE_FILTER');
     return limit;
 };
 
@@ -143,7 +150,16 @@ const normalizePercentPriceFilter = (filter) => {
         'multiplierDown',
         'multiplierDecimal',
     ])) fail('INVALID_EXCHANGE_FILTER');
-    const multiplierDecimal = readFuturesWorkstationCount(filter.multiplierDecimal, 18);
+    let multiplierDecimal;
+    if (typeof filter.multiplierDecimal === 'string') {
+        if (!/^(?:0|[1-9][0-9]?)$/.test(filter.multiplierDecimal)) {
+            fail('INVALID_EXCHANGE_FILTER');
+        }
+        multiplierDecimal = Number(filter.multiplierDecimal);
+        if (multiplierDecimal > 18) fail('INVALID_EXCHANGE_FILTER');
+    } else {
+        multiplierDecimal = readFuturesWorkstationCount(filter.multiplierDecimal, 18);
+    }
     return Object.freeze({
         multiplierUp: readDecimal(filter.multiplierUp, { positive: true }),
         multiplierDown: readDecimal(filter.multiplierDown, { positive: true }),
@@ -161,6 +177,7 @@ const normalizeFilters = (filters) => {
         'MAX_NUM_ALGO_ORDERS',
         'PERCENT_PRICE',
         'MIN_NOTIONAL',
+        'POSITION_RISK_CONTROL',
     ]);
     const byType = new Map();
     for (const filter of filters) {
@@ -177,12 +194,17 @@ const normalizeFilters = (filters) => {
     const maximumAlgoOrders = byType.get('MAX_NUM_ALGO_ORDERS');
     const percentPrice = byType.get('PERCENT_PRICE');
     const minimumNotional = byType.get('MIN_NOTIONAL');
+    const positionRiskControl = byType.get('POSITION_RISK_CONTROL');
     if (!price || !quantity || !marketQuantity || !maximumOrders
-        || !maximumAlgoOrders || !percentPrice || !minimumNotional
-        || byType.size !== reviewedTypes.size) {
+        || !percentPrice || !minimumNotional) {
         fail('MISSING_EXCHANGE_FILTER');
     }
     if (!exactKeys(minimumNotional, ['filterType', 'notional'])) {
+        fail('INVALID_EXCHANGE_FILTER');
+    }
+    if (positionRiskControl
+        && (!exactKeys(positionRiskControl, ['filterType', 'positionControlSide'])
+            || !isStatus(positionRiskControl.positionControlSide))) {
         fail('INVALID_EXCHANGE_FILTER');
     }
     return Object.freeze({
@@ -203,8 +225,10 @@ const normalizeFilters = (filters) => {
             'stepSize',
         ),
         percentPrice: normalizePercentPriceFilter(percentPrice),
-        maximumOrders: normalizeLimitFilter(maximumOrders),
-        maximumAlgoOrders: normalizeLimitFilter(maximumAlgoOrders),
+        maximumOrders: normalizeLimitFilter(maximumOrders, true),
+        maximumAlgoOrders: maximumAlgoOrders
+            ? normalizeLimitFilter(maximumAlgoOrders)
+            : null,
         minimumNotional: readDecimal(minimumNotional.notional),
     });
 };
@@ -245,10 +269,23 @@ const EXCHANGE_SYMBOL_OPTIONAL_KEYS = Object.freeze([
     'triggerProtect',
     'liquidationFee',
     'marketTakeBound',
-    'maxMoveOrderLimitPercent',
+    'maxMoveOrderLimit',
     'orderTypes',
     'timeInForce',
     'permissionSets',
+]);
+
+const EXCHANGE_CONTRACT_TYPES = new Set([
+    'PERPETUAL',
+    'CURRENT_MONTH',
+    'NEXT_MONTH',
+    'CURRENT_QUARTER',
+    'NEXT_QUARTER',
+    'PERPETUAL_DELIVERING',
+    'CURRENT_WEEK',
+    'NEXT_WEEK',
+    'TRADIFI_PERPETUAL',
+    'CURRENT_QUARTER DELIVERING',
 ]);
 
 export const normalizeFuturesWorkstationExchangeInfo = (
@@ -270,18 +307,24 @@ export const normalizeFuturesWorkstationExchangeInfo = (
     const contracts = [];
     for (const symbol of payload.symbols) {
         if (!allowedKeys(symbol, EXCHANGE_SYMBOL_REQUIRED_KEYS, EXCHANGE_SYMBOL_OPTIONAL_KEYS)
-            || !isSymbol(symbol.symbol)
-            || !isPair(symbol.pair)
+            || !isExchangeIdentity(symbol.symbol, 20, true)
+            || !isExchangeIdentity(symbol.pair, 20)
             || !isStatus(symbol.status)
-            || !isBoundedString(symbol.contractType, /^[A-Z0-9_]{1,32}$/, 32)
-            || !isBoundedString(symbol.baseAsset, /^[A-Z0-9]{1,16}$/, 16)
-            || !isBoundedString(symbol.quoteAsset, /^[A-Z0-9]{1,16}$/, 16)
-            || !isBoundedString(symbol.marginAsset, /^[A-Z0-9]{1,16}$/, 16)) {
+            || !EXCHANGE_CONTRACT_TYPES.has(symbol.contractType)
+            || !isExchangeIdentity(symbol.baseAsset, 16)
+            || !isExchangeIdentity(symbol.quoteAsset, 16)
+            || !isExchangeIdentity(symbol.marginAsset, 16)) {
             fail('INVALID_EXCHANGE_INFO_SYMBOL');
+        }
+        if (Object.hasOwn(symbol, 'maxMoveOrderLimit')) {
+            readFuturesWorkstationCount(symbol.maxMoveOrderLimit);
         }
         if (seen.has(symbol.symbol)) fail('DUPLICATE_EXCHANGE_SYMBOL');
         seen.add(symbol.symbol);
         if (symbol.marginAsset !== 'USDT' || symbol.quoteAsset !== 'USDT') continue;
+        if (!isSymbol(symbol.symbol)
+            || !isPair(symbol.pair)
+            || !isBoundedString(symbol.baseAsset, /^[A-Z0-9]{1,16}$/, 16)) continue;
         contracts.push(Object.freeze({
             symbol: symbol.symbol,
             pair: symbol.pair,
