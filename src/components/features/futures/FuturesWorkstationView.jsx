@@ -5,6 +5,7 @@ import './FuturesWorkstation.css'
 
 const EMPTY_ROWS = Object.freeze([])
 const IGNORE_PRICE_PICK = () => {}
+const VISIBLE_DEPTH_LEVELS_PER_SIDE = 10
 
 const formatTime = (timestamp) => {
   if (!Number.isSafeInteger(timestamp)) return '—'
@@ -124,6 +125,11 @@ export const FuturesWorkstationView = ({
   }, [liveTrades, tapePaused])
 
   const displayedTrades = tapePaused ? pausedTrades : liveTrades
+  const visibleAsks = [...(depth?.asks ?? EMPTY_ROWS)]
+    .slice(0, VISIBLE_DEPTH_LEVELS_PER_SIDE)
+    .reverse()
+  const visibleBids = (depth?.bids ?? EMPTY_ROWS)
+    .slice(0, VISIBLE_DEPTH_LEVELS_PER_SIDE)
 
   return (
     <section className="futures-workstation" aria-label={`${identity} read-only market workstation`}>
@@ -320,7 +326,7 @@ export const FuturesWorkstationView = ({
         </div>
         <div className="futures-workstation-book-head"><span>Price</span><span>Qty</span><span>Total</span></div>
         <div className="futures-workstation-book-side is-ask">
-          {[...(depth?.asks ?? EMPTY_ROWS)].reverse().map(level => (
+          {visibleAsks.map(level => (
             <button
               type="button"
               key={`ask-${level.price}`}
@@ -335,7 +341,7 @@ export const FuturesWorkstationView = ({
           <span>Spread</span><strong>{depth?.spread ?? '—'}</strong><code>u {depth?.lastUpdateId ?? '—'}</code>
         </div>
         <div className="futures-workstation-book-side is-bid">
-          {(depth?.bids ?? EMPTY_ROWS).map(level => (
+          {visibleBids.map(level => (
             <button
               type="button"
               key={`bid-${level.price}`}

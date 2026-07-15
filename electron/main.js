@@ -30,6 +30,7 @@ import {
 import {
   createLocalWebSocketAccess,
 } from './services/local-websocket-access.js'
+import { configureLinuxSafeStorageBackend } from './linux-safe-storage-backend.js'
 import {
   createRendererRuntime,
   createRendererRuntimeRegistry,
@@ -48,6 +49,10 @@ import {
   registerRendererAppProtocolScheme,
   resolveTrustedRendererDevServerUrl,
 } from './renderer-protocol.js'
+
+if (configureLinuxSafeStorageBackend({ app })) {
+  console.log('[Electron] Hyprland safeStorage backend pinned to gnome-libsecret')
+}
 
 registerRendererAppProtocolScheme(protocol)
 

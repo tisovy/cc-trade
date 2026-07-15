@@ -41,6 +41,12 @@ printf %s "$FUTURES_PRODUCTION_API_KEY" | sha256sum
 
 Unknown `FUTURES_PRODUCTION_*` keys, alternate spelling, whitespace, coercion, an alias/fingerprint mismatch, incomplete caps, or a ceiling violation disable production.
 
+### Linux safeStorage readiness
+
+Production execution also requires Electron `safeStorage` to report an encrypted OS-backed backend. The application rejects Electron's `basic_text` fallback and never enables plaintext key protection. On Hyprland, which Electron does not currently recognize as a desktop with an automatic password-store mapping, the main process pins the official `gnome-libsecret` backend before `app.ready`; an explicit operator `--password-store` selection is not overwritten. The local Secret Service must be installed, running and unlocked. See the current official [Electron safeStorage backend contract](https://www.electronjs.org/docs/latest/api/safe-storage#safestoragegetselectedstoragebackend-linux).
+
+If the startup log still reports `SAFE_STORAGE_UNAVAILABLE` or `UNSAFE_STORAGE_BACKEND`, stop before Live arming. Do not use `--password-store=basic`, `safeStorage.setUsePlainTextEncryption(true)`, an unreviewed key file or a new storage namespace as a workaround.
+
 ## Manual verification sequence
 
 1. **Spot launch:** start without any `FUTURES_PRODUCTION_*` values. Keep the selector on neutral `Spot` and verify the established Spot workflow.

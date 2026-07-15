@@ -504,9 +504,17 @@
 .futures-workstation-book-side button,
 .futures-workstation-trade-rows > div {
   display: grid;
-  grid-template-columns: 1fr 0.8fr 0.9fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 0.8fr) minmax(0, 0.9fr);
   gap: 5px;
   align-items: center;
+}
+
+.futures-workstation-book-head > span,
+.futures-workstation-book-side button > span {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .futures-workstation-book-head,
@@ -518,17 +526,19 @@
 }
 
 .futures-workstation-book-side {
-  max-height: 145px;
+  max-height: 140px;
   overflow: hidden;
 }
 
 .futures-workstation-book-side button {
   width: 100%;
-  padding: 2px 4px;
+  height: 14px;
+  padding: 0 4px;
   border: 0;
   background: transparent;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 8px;
+  line-height: 14px;
   text-align: right;
   cursor: pointer;
 }
@@ -724,7 +734,6 @@
     min-height: 280px;
   }
 
-  .futures-workstation-book-side,
   .futures-workstation-trade-rows {
     max-height: 205px;
   }

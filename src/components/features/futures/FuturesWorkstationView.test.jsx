@@ -160,6 +160,50 @@ describe('pure Futures workstation presentation', () => {
     expect(screen.getByText('0.25')).toBeInTheDocument()
   })
 
+  it('shows the ten nearest exact depth levels as complete one-line rows', () => {
+    const state = createState()
+    const asks = Object.freeze(Array.from({ length: 14 }, (_, index) => Object.freeze({
+      price: `0.0095${String(11 + index).padStart(2, '0')}`,
+      quantity: String(100_000 + index),
+      total: String((index + 1) * 100_000),
+    })))
+    const bids = Object.freeze(Array.from({ length: 14 }, (_, index) => Object.freeze({
+      price: `0.0094${String(99 - index).padStart(2, '0')}`,
+      quantity: String(200_000 + index),
+      total: String((index + 1) * 200_000),
+    })))
+    const { container } = renderView({
+      state: createState({
+        resources: Object.freeze({
+          ...state.resources,
+          depth: Object.freeze({
+            ...state.resources.depth,
+            asks,
+            bids,
+            spread: '0.000003',
+          }),
+        }),
+      }),
+    })
+
+    const askRows = [...container.querySelectorAll('.futures-workstation-book-side.is-ask button')]
+    const bidRows = [...container.querySelectorAll('.futures-workstation-book-side.is-bid button')]
+    expect(askRows).toHaveLength(10)
+    expect(bidRows).toHaveLength(10)
+    expect(askRows.map(row => row.children[0].textContent)).toEqual([
+      '0.009520', '0.009519', '0.009518', '0.009517', '0.009516',
+      '0.009515', '0.009514', '0.009513', '0.009512', '0.009511',
+    ])
+    expect(bidRows.map(row => row.children[0].textContent)).toEqual([
+      '0.009499', '0.009498', '0.009497', '0.009496', '0.009495',
+      '0.009494', '0.009493', '0.009492', '0.009491', '0.009490',
+    ])
+    expect(askRows.every(row => row.children.length === 3)).toBe(true)
+    expect(bidRows.every(row => row.children.length === 3)).toBe(true)
+    expect(container).not.toHaveTextContent('0.009521')
+    expect(container).not.toHaveTextContent('0.009489')
+  })
+
   it('renders a removed per-symbol algo limit as unavailable', () => {
     const state = createState()
     const unavailableContract = {
