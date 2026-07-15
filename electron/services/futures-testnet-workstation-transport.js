@@ -26,20 +26,20 @@ export const FUTURES_TESTNET_WORKSTATION_ROUTES = Object.freeze({
 export const FUTURES_TESTNET_WORKSTATION_WEIGHTS = Object.freeze({
     EXCHANGE_INFO: 1,
     DEPTH_1000: 20,
-    KLINES_100: 2,
-    MARK_KLINES_100: 2,
-    INDEX_KLINES_100: 2,
+    KLINES_99: 1,
+    MARK_KLINES_99: 1,
+    INDEX_KLINES_99: 1,
     PREMIUM_INDEX_SYMBOL: 1,
     TICKER_SYMBOL: 1,
 });
 
 export const FUTURES_TESTNET_WORKSTATION_REQUEST_LIMITS = Object.freeze({
     DEPTH: 1_000,
-    KLINES: 100,
+    KLINES: 99,
 });
 
 const ROUTE_SET = new Set(Object.values(FUTURES_TESTNET_WORKSTATION_ROUTES));
-const PUBLIC_READ_BUDGET = new FuturesWorkstationReadBudget();
+const PUBLIC_READ_BUDGET = new FuturesWorkstationReadBudget({ maximumConcurrent: 1 });
 const SYMBOL_PATTERN = /^(?:[A-Z0-9]{1,20}|[A-Z0-9]{1,13}_[0-9]{6})$/;
 const PAIR_PATTERN = /^[A-Z0-9]{1,20}$/;
 const INTERVALS = new Set(['1m', '5m', '15m', '1h', '4h', '1d']);
@@ -69,8 +69,16 @@ const resolveTestnetBackendProxy = () => {
             return Object.freeze({ proxyAgent: null, errorCode: 'INVALID_PROXY_CONFIGURATION' });
         }
         const agent = parsed.protocol.startsWith('socks')
-            ? new SocksProxyAgent(proxyUrl, { keepAlive: false })
-            : new HttpsProxyAgent(proxyUrl, { keepAlive: false });
+            ? new SocksProxyAgent(proxyUrl, {
+                keepAlive: true,
+                maxSockets: 2,
+                maxFreeSockets: 1,
+            })
+            : new HttpsProxyAgent(proxyUrl, {
+                keepAlive: true,
+                maxSockets: 2,
+                maxFreeSockets: 1,
+            });
         return Object.freeze({ proxyAgent: agent, errorCode: null });
     } catch {
         return Object.freeze({ proxyAgent: null, errorCode: 'INVALID_PROXY_CONFIGURATION' });
@@ -305,18 +313,12 @@ export const createFuturesTestnetWorkstationReviewedTransport = () => {
             if (signal?.aborted) abortBatch();
             else signal?.addEventListener?.('abort', abortBatch, { once: true });
             try {
-                const [depthSnapshot, contractKlines] = await Promise.all([
-                    weightedGet(FUTURES_TESTNET_WORKSTATION_WEIGHTS.DEPTH_1000, FUTURES_TESTNET_WORKSTATION_ROUTES.DEPTH, { symbol, limit: String(FUTURES_TESTNET_WORKSTATION_REQUEST_LIMITS.DEPTH) }, FUTURES_WORKSTATION_BODY_LIMITS.DEPTH, batchController.signal, backendProxy),
-                    weightedGet(FUTURES_TESTNET_WORKSTATION_WEIGHTS.KLINES_100, FUTURES_TESTNET_WORKSTATION_ROUTES.KLINES, { symbol, interval, limit: String(FUTURES_TESTNET_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES, batchController.signal, backendProxy),
-                ]);
-                const [markKlines, indexKlines] = await Promise.all([
-                    weightedGet(FUTURES_TESTNET_WORKSTATION_WEIGHTS.MARK_KLINES_100, FUTURES_TESTNET_WORKSTATION_ROUTES.MARK_KLINES, { symbol, interval, limit: String(FUTURES_TESTNET_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES, batchController.signal, backendProxy),
-                    weightedGet(FUTURES_TESTNET_WORKSTATION_WEIGHTS.INDEX_KLINES_100, FUTURES_TESTNET_WORKSTATION_ROUTES.INDEX_KLINES, { pair, interval, limit: String(FUTURES_TESTNET_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES, batchController.signal, backendProxy),
-                ]);
-                const [premiumIndex, ticker] = await Promise.all([
-                    weightedGet(FUTURES_TESTNET_WORKSTATION_WEIGHTS.PREMIUM_INDEX_SYMBOL, FUTURES_TESTNET_WORKSTATION_ROUTES.PREMIUM_INDEX, { symbol }, FUTURES_WORKSTATION_BODY_LIMITS.HEADER, batchController.signal, backendProxy),
-                    weightedGet(FUTURES_TESTNET_WORKSTATION_WEIGHTS.TICKER_SYMBOL, FUTURES_TESTNET_WORKSTATION_ROUTES.TICKER, { symbol }, FUTURES_WORKSTATION_BODY_LIMITS.HEADER, batchController.signal, backendProxy),
-                ]);
+                const depthSnapshot = await weightedGet(FUTURES_TESTNET_WORKSTATION_WEIGHTS.DEPTH_1000, FUTURES_TESTNET_WORKSTATION_ROUTES.DEPTH, { symbol, limit: String(FUTURES_TESTNET_WORKSTATION_REQUEST_LIMITS.DEPTH) }, FUTURES_WORKSTATION_BODY_LIMITS.DEPTH, batchController.signal, backendProxy);
+                const contractKlines = await weightedGet(FUTURES_TESTNET_WORKSTATION_WEIGHTS.KLINES_99, FUTURES_TESTNET_WORKSTATION_ROUTES.KLINES, { symbol, interval, limit: String(FUTURES_TESTNET_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES, batchController.signal, backendProxy);
+                const markKlines = await weightedGet(FUTURES_TESTNET_WORKSTATION_WEIGHTS.MARK_KLINES_99, FUTURES_TESTNET_WORKSTATION_ROUTES.MARK_KLINES, { symbol, interval, limit: String(FUTURES_TESTNET_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES, batchController.signal, backendProxy);
+                const indexKlines = await weightedGet(FUTURES_TESTNET_WORKSTATION_WEIGHTS.INDEX_KLINES_99, FUTURES_TESTNET_WORKSTATION_ROUTES.INDEX_KLINES, { pair, interval, limit: String(FUTURES_TESTNET_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES, batchController.signal, backendProxy);
+                const premiumIndex = await weightedGet(FUTURES_TESTNET_WORKSTATION_WEIGHTS.PREMIUM_INDEX_SYMBOL, FUTURES_TESTNET_WORKSTATION_ROUTES.PREMIUM_INDEX, { symbol }, FUTURES_WORKSTATION_BODY_LIMITS.HEADER, batchController.signal, backendProxy);
+                const ticker = await weightedGet(FUTURES_TESTNET_WORKSTATION_WEIGHTS.TICKER_SYMBOL, FUTURES_TESTNET_WORKSTATION_ROUTES.TICKER, { symbol }, FUTURES_WORKSTATION_BODY_LIMITS.HEADER, batchController.signal, backendProxy);
                 return Object.freeze({ depthSnapshot, contractKlines, markKlines, indexKlines, premiumIndex, ticker });
             } catch (error) {
                 abortBatch();

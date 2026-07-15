@@ -198,7 +198,7 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             .toBe('1000');
         for (const path of ['/klines?', '/markPriceKlines?', '/indexPriceKlines?']) {
             expect(new URL(calls.find(call => call.url.includes(path)).url).searchParams.get('limit'))
-                .toBe('100');
+                .toBe('99');
         }
     });
 
@@ -419,6 +419,11 @@ describe('reviewed environment-specific Futures workstation transports', () => {
                 maxHeaderSize: 16_384,
             });
             expect(proxyCalls[0].options.agent).toBeTruthy();
+            expect(proxyCalls[0].options.agent).toMatchObject({
+                keepAlive: true,
+                maxSockets: 2,
+                maxFreeSockets: 1,
+            });
             expect(proxyCalls[0].options.signal).toBeInstanceOf(AbortSignal);
             expect(socketMock.instances).toHaveLength(2);
             expect(socketMock.instances.every(socket => new URL(socket.url).origin === wssOrigin))
@@ -459,7 +464,7 @@ describe('reviewed environment-specific Futures workstation transports', () => {
     it.each([
         ['Testnet', createFuturesTestnetWorkstationReviewedTransport],
         ['production', createFuturesProductionWorkstationReviewedTransport],
-    ])('aborts the remaining %s bootstrap batch after its first failed request', async (
+    ])('keeps %s bootstrap REST single-flight and cancels queued reads after failure', async (
         _label,
         createTransport,
     ) => {
@@ -482,11 +487,11 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             pair: 'BTCUSDT',
             interval: '1m',
         });
-        await vi.waitFor(() => expect(calls).toHaveLength(2));
+        await vi.waitFor(() => expect(calls).toHaveLength(1));
         failFirst();
         await expect(pending).rejects.toBe(failure);
-        await vi.waitFor(() => expect(calls[1].signal.aborted).toBe(true));
-        expect(calls).toHaveLength(2);
+        await Promise.resolve();
+        expect(calls).toHaveLength(1);
     });
 
     it.each([
@@ -573,15 +578,17 @@ describe('reviewed environment-specific Futures workstation transports', () => {
         expect(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS).toEqual({
             EXCHANGE_INFO: 1,
             DEPTH_1000: 20,
-            KLINES_100: 2,
-            MARK_KLINES_100: 2,
-            INDEX_KLINES_100: 2,
+            KLINES_99: 1,
+            MARK_KLINES_99: 1,
+            INDEX_KLINES_99: 1,
             PREMIUM_INDEX_SYMBOL: 1,
             TICKER_SYMBOL: 1,
         });
+        expect(Object.values(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS)
+            .reduce((total, weight) => total + weight, 0)).toBe(26);
         expect(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS).toEqual({
             DEPTH: 1_000,
-            KLINES: 100,
+            KLINES: 99,
         });
         expect(Object.isFrozen(FUTURES_PRODUCTION_WORKSTATION_ROUTES)).toBe(true);
         expect(Object.isFrozen(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS)).toBe(true);

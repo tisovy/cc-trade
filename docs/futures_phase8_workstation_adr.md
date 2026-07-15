@@ -42,7 +42,7 @@ Official references:
 
 Origins are compile-time constants in separately named backend modules. A caller cannot provide a URL, origin, hostname, path, redirect policy, proxy, agent, dispatcher, socket factory, headers or timeout. Every HTTP response with `redirected === true` or a final URL outside the exact origin and path is rejected. Automated and E2E compositions use deterministic fakes; a network escape to any frozen Futures host is a fail-fast test error.
 
-An operator-configured `HTTPS_PROXY`/`https_proxy` (falling back to `HTTP_PROXY`/`http_proxy`) is backend process configuration, not a workstation request option. Each reviewed environment transport independently resolves one bounded non-keepalive HTTP(S) or SOCKS tunnel agent and uses that same private agent for its exact HTTPS origin and routed WSS origin. The proxy cannot replace the Binance URL, TLS target, route, redirect policy, headers or timeout, and it is never returned through the read model. Unsupported or malformed proxy configuration fails closed as `INVALID_PROXY_CONFIGURATION`; transport teardown destroys the agent. This explicit Node transport ownership is required because Electron `session.setProxy()` configures Chromium traffic and does not configure the main-process `globalThis.fetch` or `ws` client used here.
+An operator-configured `HTTPS_PROXY`/`https_proxy` (falling back to `HTTP_PROXY`/`http_proxy`) is backend process configuration, not a workstation request option. Each reviewed environment transport independently resolves one bounded HTTP(S) or SOCKS tunnel agent and uses that same private agent for its exact HTTPS origin and routed WSS origin. The agent permits at most two sockets, retains at most one idle socket and serializes workstation REST reads so the catalog and bootstrap can reuse one established proxy/TLS path instead of opening a CONNECT tunnel per endpoint. The proxy cannot replace the Binance URL, TLS target, route, redirect policy, headers or timeout, and it is never returned through the read model. Unsupported or malformed proxy configuration fails closed as `INVALID_PROXY_CONFIGURATION`; transport teardown destroys the agent. This explicit Node transport ownership is required because Electron `session.setProxy()` configures Chromium traffic and does not configure the main-process `globalThis.fetch` or `ws` client used here.
 
 ### Public-read activation checkpoint
 
@@ -60,13 +60,13 @@ All routes below use `GET`, require no credential and are classified `PUBLIC_REA
 |---|---|---|---|
 | `/fapi/v1/exchangeInfo` | Futures-only instrument catalog, status, assets and exact filters | none | 1 |
 | `/fapi/v1/depth` | authoritative local-book bootstrap | `symbol`, fixed `limit=1000` | 20 |
-| `/fapi/v1/klines` | contract-candle bootstrap | `symbol`, reviewed interval, fixed `limit=100` | 2 |
-| `/fapi/v1/markPriceKlines` | mark overlay bootstrap | `symbol`, reviewed interval, fixed `limit=100` | 2 |
-| `/fapi/v1/indexPriceKlines` | index overlay bootstrap | `pair`, reviewed interval, fixed `limit=100` | 2 |
+| `/fapi/v1/klines` | contract-candle bootstrap | `symbol`, reviewed interval, fixed `limit=99` | 1 |
+| `/fapi/v1/markPriceKlines` | mark overlay bootstrap | `symbol`, reviewed interval, fixed `limit=99` | 1 |
+| `/fapi/v1/indexPriceKlines` | index overlay bootstrap | `pair`, reviewed interval, fixed `limit=99` | 1 |
 | `/fapi/v1/premiumIndex` | initial mark, index and funding state | `symbol` | 1 |
 | `/fapi/v1/ticker/24hr` | initial 24-hour statistics | `symbol` | 1 |
 
-The reviewed kline limit brackets are `[1,100)=1`, `[100,500)=2`, `[500,1000]=5`, and `>1000=10`; this milestone fixes `100`, weight `2`, giving the 80-row renderer a 20-candle bootstrap margin. The reviewed depth weights are `5/10/20/50 → 2`, `100 → 5`, `500 → 10`, and `1000 → 20`; this milestone fixes the official local-book snapshot size `1000`, weight `20`.
+The reviewed kline limit brackets are `[1,100)=1`, `[100,500)=2`, `[500,1000]=5`, and `>1000=10`; this milestone fixes `99`, weight `1`, giving the 80-row renderer a 19-candle bootstrap margin. The reviewed depth weights are `5/10/20/50 → 2`, `100 → 5`, `500 → 10`, and `1000 → 20`; this milestone keeps the official local-book snapshot size `1000`, weight `20`.
 
 The route classifier also reserves these categories, all absent from this milestone:
 
@@ -121,7 +121,7 @@ Each symbol generation follows the official procedure exactly:
 
 Duplicates entirely behind the current update ID are ignored. A partial overlap that violates the exact first-event rule or subsequent `pu` rule is rejected. The UI never labels depth live merely because a socket is connected.
 
-The six post-handshake bootstrap reads run as three fixed stages of at most two concurrent requests: depth plus contract candles, mark plus index candles, then premium index plus ticker. A failure aborts its sibling and prevents every later stage from dispatching. A 10-second child deadline is reported as `REQUEST_DEADLINE_EXCEEDED`; only an aborted generation owner is treated as silent teardown. One attempt therefore weighs exactly `29` including exchange info, down from `38`, and a failed attempt cannot drain queued reads after its terminal cause is known.
+The six post-handshake bootstrap reads run in one fixed sequence: depth, contract candles, mark candles, index candles, premium index, then ticker. No later request promise exists until the preceding request succeeds. With backend-owned keep-alive, successful requests can reuse the same bounded proxy/TLS connection. A failure therefore prevents every later request from dispatching without a cancellation race. A 10-second child deadline is reported as `REQUEST_DEADLINE_EXCEEDED`; only an aborted generation owner is treated as silent teardown. One attempt weighs exactly `26` including exchange info, down from `29`, and a failed attempt cannot drain queued reads after its terminal cause is known.
 
 ## Immutable read-model protocols
 
