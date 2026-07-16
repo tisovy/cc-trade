@@ -4,6 +4,11 @@ Date: 2026-07-14
 
 Status: Phase 8.0–8.2 complete; Phase 8.3–8.7 remain planned
 
+Historical status: Testnet-dependent items were cancelled on 2026-07-16 when
+Futures Testnet was retired. They remain below as planning history and are not
+an active implementation backlog. The current Live-only direction is recorded
+in [the retirement/performance plan](./futures_live_performance_and_testnet_retirement_plan.md).
+
 Planning base: `dcd2260c5aed73b268a6e1f12cac2c3cb8849873` (`Add guarded UI arming for live Futures`)
 
 ## Outcome

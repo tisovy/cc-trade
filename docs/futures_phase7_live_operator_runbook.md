@@ -2,6 +2,10 @@
 
 Date: 2026-07-14
 
+Updated: 2026-07-16 — Futures Testnet is retired. This is now a Spot → stopped
+process → Futures Live runbook; legacy `FUTURES_TESTNET_*` and `FUTURES_READ_*`
+values are scrubbed and cannot enable a Testnet runtime.
+
 This runbook covers manual USDⓈ-M production verification after the operator's explicit live authorization. Automated tests and development verification must still use deterministic fakes and must never send a production request.
 
 ## Non-negotiable boundaries
@@ -9,7 +13,7 @@ This runbook covers manual USDⓈ-M production verification after the operator's
 - Never commit credentials, put literal credentials in command-line arguments, paste them into the renderer, or store them in `.env` inside the repository.
 - Use a dedicated USDⓈ-M key with the narrowest exchange permissions and external IP restrictions available. Withdrawal permission is not required by this application.
 - Never delete or replace `futures-production-execution/v1` to clear a block. The journal, anchor, key, counter, unknown-outcome, and kill-switch state are one safety unit.
-- Production is the red `Futures Live` workspace. Testnet is the blue `Futures Testnet` workspace. The selector changes only which independently composed UI/channel is mounted; it never changes a backend host or credential mode.
+- Production is the red `Futures Live` workspace. The only other workspace is neutral `Spot`; no Testnet selector, channel, credential mode, or backend composition remains active.
 - E2E always force-disables production and installs a production-network escape guard.
 
 ## Required secure process environment
@@ -49,15 +53,14 @@ If the startup log still reports `SAFE_STORAGE_UNAVAILABLE` or `UNSAFE_STORAGE_B
 
 ## Manual verification sequence
 
-1. **Spot launch:** start without any `FUTURES_PRODUCTION_*` values. Keep the selector on neutral `Spot` and verify the established Spot workflow.
-2. **Testnet launch:** configure Phase 5/6 exactly as documented in `futures_phase6_testnet_execution_design.md`, still without any production values. Select blue `Futures Testnet`; verify that Spot controls disappear and only read-only/testnet execution panels exist.
-3. **Stop the app completely.** Production configuration is captured once before the first `BrowserWindow`; it is not hot-loaded.
-4. **Live readiness launch:** inject the complete production environment through the trusted launcher and start normally, with no operator-action argument. A valid live configuration performs exact signed production identity/recovery GETs during startup. It does not place, cancel, or close an order automatically. The persistent kill switch starts engaged.
-5. Select red `Futures Live`. Verify the backend-owned account alias and full key fingerprint, allowlist, leverage/order/daily caps, UTC usage, `CONFIGURED`, `LIVE LOCKED`, healthy recovery, and `KILL SWITCH ENGAGED`. The Phase 5 read-only and Phase 6 testnet tickets must not be present.
-6. Resolve any rejected identity, storage, recovery, rate-pause, credential-binding, or cap state before proceeding. Do not bypass it by deleting state or rotating to a fresh directory.
-7. Only after the displayed identity and exact 1x / 10 USDT / 50 USDT caps are approved, click `Prepare ARM LIVE intent`. Type exactly `ARM LIVE FUTURES 1X 10 USDT 50 USDT DAILY`, then click `ARM LIVE FUTURES`. Enter never submits. The backend must report `LIVE ARMED`, `KILL SWITCH DISENGAGED`, and `kill_switch_disengaged`; the UI does not place, cancel, or close anything during arming.
-8. Every real order, cancel-all, close-positions, and kill-switch action still requires its own backend one-use intent and exact typed confirmation. Never interpret an acknowledgement, partial result, timeout, or unknown result as a completed safety action. At the 10 USDT ceiling, exchange quantity/minimum-notional filters may make an allowlisted symbol unavailable; that is a local rejection, not a reason to bypass or raise a cap without a new review.
-9. Re-engage the kill switch from its dedicated production UI action or by a reviewed backend startup action. Engaging it blocks new exposure; it does not imply cancellation or closure.
+1. **Spot launch:** start without any `FUTURES_PRODUCTION_*` values. Keep the selector on neutral `Spot` and verify the established Spot workflow. Remove obsolete `FUTURES_TESTNET_*` and `FUTURES_READ_*` values from the trusted launcher rather than relying on runtime scrubbing.
+2. **Stop the app completely.** Production configuration is captured once before the first `BrowserWindow`; it is not hot-loaded.
+3. **Live readiness launch:** inject the complete production environment through the trusted launcher and start normally, with no operator-action argument. A valid live configuration performs exact signed production identity/recovery GETs during startup. It does not place, cancel, or close an order automatically. The persistent kill switch starts engaged.
+4. Select red `Futures Live`. Verify the backend-owned account alias and full key fingerprint, allowlist, leverage/order/daily caps, UTC usage, `CONFIGURED`, `LIVE LOCKED`, healthy recovery, and `KILL SWITCH ENGAGED`. No retired Phase 5/6/Testnet ticket may be present.
+5. Resolve any rejected identity, storage, recovery, rate-pause, credential-binding, or cap state before proceeding. Do not bypass it by deleting state or rotating to a fresh directory.
+6. Only after the displayed identity and exact 1x / 10 USDT / 50 USDT caps are approved, click `Prepare ARM LIVE intent`. Type exactly `ARM LIVE FUTURES 1X 10 USDT 50 USDT DAILY`, then click `ARM LIVE FUTURES`. Enter never submits. The backend must report `LIVE ARMED`, `KILL SWITCH DISENGAGED`, and `kill_switch_disengaged`; the UI does not place, cancel, or close anything during arming.
+7. Every real order, cancel-all, close-positions, and kill-switch action still requires its own backend one-use intent and exact typed confirmation. Never interpret an acknowledgement, partial result, timeout, or unknown result as a completed safety action. At the 10 USDT ceiling, exchange quantity/minimum-notional filters may make an allowlisted symbol unavailable; that is a local rejection, not a reason to bypass or raise a cap without a new review.
+8. Re-engage the kill switch from its dedicated production UI action or by a reviewed backend startup action. Engaging it blocks new exposure; it does not imply cancellation or closure.
 
 The backend `--futures-production-operator-action=disengageKillSwitch` path remains an authorized operational-recovery mechanism, not the normal arming workflow. `reconcile` remains backend-only.
 

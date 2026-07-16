@@ -39,7 +39,7 @@ npm install
 npm run dev
 
 # Start Electron with the normal operator configuration. This enables the
-# reviewed public-read Futures Testnet/Production transports; if BK is
+# reviewed public-read Futures Production transport; if BK is
 # configured, Spot may also connect to real market-data/account endpoints.
 npm run e
 
@@ -51,6 +51,10 @@ npm run e:smoke
 ```
 
 The app will be available at `http://localhost:5174` in web mode.
+
+Futures Testnet was retired on 2026-07-16 and is not part of the runtime or
+verification build. Its recovery manifest is in
+[`archive/futures-testnet/`](archive/futures-testnet/README.md).
 
 ## Environment Variables
 
@@ -74,7 +78,7 @@ If you create a `.env` file locally, keep it untracked (already covered by `.git
 # Build for production
 npm run build
 
-# Build Electron distributables
+# Build Electron distributables (runs a fresh production build first)
 npm run dist
 ```
 

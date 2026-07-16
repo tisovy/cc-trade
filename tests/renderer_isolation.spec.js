@@ -54,10 +54,9 @@ test('uses a sandboxed renderer with only the narrow runtime bridge', async () =
             require: 'undefined',
             buffer: 'undefined',
             electron: 'undefined',
-            runtimeKeys: ['analyticsConfig', 'futuresReadEnvironment', 'localWebSocketAccess'],
+            runtimeKeys: ['analyticsConfig', 'localWebSocketAccess'],
             runtimeValueTypes: {
                 analyticsConfig: 'object',
-                futuresReadEnvironment: 'string',
                 localWebSocketAccess: 'object',
             },
         });

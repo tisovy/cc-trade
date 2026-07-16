@@ -13,7 +13,6 @@ import DrawingToolbar from './components/features/tools/DrawingToolbar'
 import AlertPanel from './components/features/tools/AlertPanel'
 import MainView from './components/layout/MainView'
 import NotificationToast from './components/common/NotificationToast'
-import FuturesTestnetWorkstation from './components/features/futures/FuturesTestnetWorkstation'
 import FuturesProductionWorkstation from './components/features/futures/FuturesProductionWorkstation'
 import { INTERVALS } from './constants'
 import { DataProvider, useDataContext } from './context/DataContext'
@@ -26,10 +25,7 @@ import {
   createSpotCancelOrderCommand,
   createSpotPlaceOrderCommand,
 } from './utils/tradingCommands';
-import useFuturesReadOnly from './hooks/useFuturesReadOnly';
-import useFuturesTestnetExecution from './hooks/useFuturesTestnetExecution';
 import useFuturesProductionExecution from './hooks/useFuturesProductionExecution';
-import { getRendererFuturesReadEnvironment } from './utils/rendererRuntime';
 
 // View types
 const VIEWS = {
@@ -39,12 +35,8 @@ const VIEWS = {
 
 const MARKET_MODES = Object.freeze({
   SPOT: 'spot',
-  FUTURES_TESTNET: 'futures-testnet',
   FUTURES_LIVE: 'futures-live',
 });
-
-const DEFAULT_FUTURES_SYMBOL = 'BTCUSDT';
-const CONFIGURED_FUTURES_ENVIRONMENT = getRendererFuturesReadEnvironment();
 
 const MARKET_MODE_OPTIONS = Object.freeze([
   Object.freeze({
@@ -52,12 +44,6 @@ const MARKET_MODE_OPTIONS = Object.freeze([
     label: 'Spot',
     testId: 'market-mode-spot',
     tone: 'spot',
-  }),
-  Object.freeze({
-    mode: MARKET_MODES.FUTURES_TESTNET,
-    label: 'Futures Testnet',
-    testId: 'market-mode-futures-testnet',
-    tone: 'testnet',
   }),
   Object.freeze({
     mode: MARKET_MODES.FUTURES_LIVE,
@@ -85,13 +71,13 @@ const MarketModeSwitch = ({ mode, onChange }) => (
   </div>
 );
 
-const FuturesModeBanner = ({ production }) => (
+const FuturesModeBanner = () => (
   <header
-    className={`futures-mode-banner is-${production ? 'production' : 'testnet'}`}
-    data-testid={production ? 'futures-live-banner' : 'futures-testnet-banner'}
+    className="futures-mode-banner is-production"
+    data-testid="futures-live-banner"
   >
-    <strong>{production ? 'USDⓈ-M FUTURES LIVE' : 'USDⓈ-M FUTURES TESTNET'}</strong>
-    <span>{production ? 'REAL MONEY · PRODUCTION' : 'SIMULATED FUNDS · TESTNET'}</span>
+    <strong>USDⓈ-M FUTURES LIVE</strong>
+    <span>REAL MONEY · PRODUCTION</span>
   </header>
 );
 
@@ -113,21 +99,7 @@ function AppShell() {
   const [alertInitialPrice, setAlertInitialPrice] = useState(null);
   const [quickSwitch, setQuickSwitch] = useState({ visible: false, mode: 'pair', query: '', selectedIndex: 0 });
   const [marketMode, setMarketMode] = useState(MARKET_MODES.SPOT);
-  const [futuresSymbol] = useState(DEFAULT_FUTURES_SYMBOL);
-  const isFuturesTestnetMode = marketMode === MARKET_MODES.FUTURES_TESTNET;
   const isFuturesLiveMode = marketMode === MARKET_MODES.FUTURES_LIVE;
-  const futuresState = useFuturesReadOnly({
-    enabled: isFuturesTestnetMode,
-    symbol: futuresSymbol,
-    environment: CONFIGURED_FUTURES_ENVIRONMENT,
-    wsConnection,
-    sendMessage,
-  });
-  const futuresExecution = useFuturesTestnetExecution({
-    enabled: isFuturesTestnetMode,
-    symbol: futuresSymbol,
-    wsConnection,
-  });
   const futuresProductionExecution = useFuturesProductionExecution({
     enabled: isFuturesLiveMode,
     wsConnection,
@@ -550,26 +522,13 @@ function AppShell() {
         onChange={handleMarketModeChange}
       />
 
-      {isFuturesTestnetMode ? (
-        <main
-          className="futures-mode-view is-testnet"
-          data-testid="futures-testnet-view"
-          aria-label="USDⓈ-M futures testnet workspace"
-        >
-          <FuturesModeBanner production={false} />
-          <FuturesTestnetWorkstation
-            enabled={isFuturesTestnetMode}
-            readOnlyState={futuresState}
-            executionState={futuresExecution}
-          />
-        </main>
-      ) : isFuturesLiveMode ? (
+      {isFuturesLiveMode ? (
         <main
           className="futures-mode-view is-production"
           data-testid="futures-live-view"
           aria-label="USDⓈ-M futures live production workspace"
         >
-          <FuturesModeBanner production />
+          <FuturesModeBanner />
           <FuturesProductionWorkstation
             enabled={isFuturesLiveMode}
             executionState={futuresProductionExecution}

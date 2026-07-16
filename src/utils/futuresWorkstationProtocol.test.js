@@ -8,18 +8,12 @@ import {
   parseBoundedFuturesWorkstationJson,
 } from './futuresWorkstationProtocolShared.js'
 import {
-  FUTURES_TESTNET_WORKSTATION_ACTIONS,
-  createFuturesTestnetWorkstationEvent,
-  createFuturesTestnetWorkstationSelectIntervalRequest,
-  createFuturesTestnetWorkstationSelectSymbolRequest,
-  createFuturesTestnetWorkstationSubscribeRequest,
-  createFuturesTestnetWorkstationUnsubscribeRequest,
-  parseFuturesTestnetWorkstationEvent,
-  readFuturesTestnetWorkstationRequest,
-} from './futuresTestnetWorkstationProtocol.js'
-import {
+  FUTURES_PRODUCTION_WORKSTATION_ACTIONS,
   createFuturesProductionWorkstationEvent,
+  createFuturesProductionWorkstationSelectIntervalRequest,
+  createFuturesProductionWorkstationSelectSymbolRequest,
   createFuturesProductionWorkstationSubscribeRequest,
+  createFuturesProductionWorkstationUnsubscribeRequest,
   parseFuturesProductionWorkstationEvent,
   readFuturesProductionWorkstationRequest,
 } from './futuresProductionWorkstationProtocol.js'
@@ -167,22 +161,22 @@ describe('Futures workstation environment-specific protocols', () => {
   })
 
   it.each([
-    ['subscribe', createFuturesTestnetWorkstationSubscribeRequest, FUTURES_TESTNET_WORKSTATION_ACTIONS.SUBSCRIBE],
-    ['symbol', createFuturesTestnetWorkstationSelectSymbolRequest, FUTURES_TESTNET_WORKSTATION_ACTIONS.SELECT_SYMBOL],
-    ['interval', createFuturesTestnetWorkstationSelectIntervalRequest, FUTURES_TESTNET_WORKSTATION_ACTIONS.SELECT_INTERVAL],
-  ])('round-trips the exact Testnet %s action', (_label, create, action) => {
+    ['subscribe', createFuturesProductionWorkstationSubscribeRequest, FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SUBSCRIBE],
+    ['symbol', createFuturesProductionWorkstationSelectSymbolRequest, FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SELECT_SYMBOL],
+    ['interval', createFuturesProductionWorkstationSelectIntervalRequest, FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SELECT_INTERVAL],
+  ])('round-trips the exact production %s action', (_label, create, action) => {
     const request = create(requestValues)
-    expect(readFuturesTestnetWorkstationRequest(JSON.stringify(request))).toEqual(request)
+    expect(readFuturesProductionWorkstationRequest(JSON.stringify(request))).toEqual(request)
     expect(request.action).toBe(action)
     expect(Object.isFrozen(request)).toBe(true)
   })
 
   it('uses an exact smaller unsubscribe shape', () => {
-    const request = createFuturesTestnetWorkstationUnsubscribeRequest({
+    const request = createFuturesProductionWorkstationUnsubscribeRequest({
       requestId: requestValues.requestId,
     })
     expect(request).not.toHaveProperty('symbol')
-    expect(readFuturesTestnetWorkstationRequest(JSON.stringify(request))).toEqual(request)
+    expect(readFuturesProductionWorkstationRequest(JSON.stringify(request))).toEqual(request)
   })
 
   it('rejects extra request fields including network and execution authority', () => {
@@ -194,17 +188,17 @@ describe('Futures workstation environment-specific protocols', () => {
       { environmentOption: 'PRODUCTION' },
     ]) {
       const raw = JSON.stringify({
-        ...createFuturesTestnetWorkstationSubscribeRequest(requestValues),
+        ...createFuturesProductionWorkstationSubscribeRequest(requestValues),
         ...extra,
       })
-      expect(() => readFuturesTestnetWorkstationRequest(raw)).toThrow(FuturesWorkstationProtocolError)
+      expect(() => readFuturesProductionWorkstationRequest(raw)).toThrow(FuturesWorkstationProtocolError)
     }
   })
 
   it('rejects duplicate keys before object materialization', () => {
-    const raw = JSON.stringify(createFuturesTestnetWorkstationSubscribeRequest(requestValues))
+    const raw = JSON.stringify(createFuturesProductionWorkstationSubscribeRequest(requestValues))
       .replace('"symbol":"BTCUSDT"', '"symbol":"BTCUSDT","symbol":"ETHUSDT"')
-    expect(() => readFuturesTestnetWorkstationRequest(raw)).toThrowError(
+    expect(() => readFuturesProductionWorkstationRequest(raw)).toThrowError(
       expect.objectContaining({ code: 'DUPLICATE_JSON_KEY' }),
     )
   })
@@ -212,25 +206,23 @@ describe('Futures workstation environment-specific protocols', () => {
   it.each(['btcusdt', ' BTCUSDT', 'BTC/USDT', 'A'.repeat(21)])(
     'rejects malformed symbol %s',
     (symbol) => {
-      expect(() => createFuturesTestnetWorkstationSubscribeRequest({
+      expect(() => createFuturesProductionWorkstationSubscribeRequest({
         ...requestValues,
         symbol,
       })).toThrow(FuturesWorkstationProtocolError)
     },
   )
 
-  it('round-trips an official dated delivery-contract symbol in both environments', () => {
+  it('round-trips an official dated delivery-contract symbol', () => {
     const delivery = { ...requestValues, symbol: 'BTCUSDT_260925' }
-    const testnet = createFuturesTestnetWorkstationSubscribeRequest(delivery)
     const production = createFuturesProductionWorkstationSubscribeRequest(delivery)
-    expect(readFuturesTestnetWorkstationRequest(JSON.stringify(testnet))).toEqual(testnet)
     expect(readFuturesProductionWorkstationRequest(JSON.stringify(production))).toEqual(production)
   })
 
   it.each(['BTCUSDT_BAD', 'BTCUSDT_26092', 'BTCUSDT_260925_', '_BTCUSDT260925'])(
     'rejects malformed dated symbol %s',
     (symbol) => {
-      expect(() => createFuturesTestnetWorkstationSubscribeRequest({
+      expect(() => createFuturesProductionWorkstationSubscribeRequest({
         ...requestValues,
         symbol,
       })).toThrow(FuturesWorkstationProtocolError)
@@ -249,15 +241,15 @@ describe('Futures workstation environment-specific protocols', () => {
   })
 
   it.each(['3m', '1M', '60m', '', '1m '])('rejects an unreviewed interval %s', (interval) => {
-    expect(() => createFuturesTestnetWorkstationSubscribeRequest({
+    expect(() => createFuturesProductionWorkstationSubscribeRequest({
       ...requestValues,
       interval,
     })).toThrow(FuturesWorkstationProtocolError)
   })
 
   it('rejects oversized request frames before parsing', () => {
-    const request = JSON.stringify(createFuturesTestnetWorkstationSubscribeRequest(requestValues))
-    expect(() => readFuturesTestnetWorkstationRequest(`${request}${' '.repeat(1_024)}`))
+    const request = JSON.stringify(createFuturesProductionWorkstationSubscribeRequest(requestValues))
+    expect(() => readFuturesProductionWorkstationRequest(`${request}${' '.repeat(1_024)}`))
       .toThrowError(expect.objectContaining({ code: 'INVALID_JSON_ENCODING' }))
   })
 
@@ -269,31 +261,26 @@ describe('Futures workstation environment-specific protocols', () => {
   })
 
   it.each(Object.values(FUTURES_WORKSTATION_RESOURCES))(
-    'round-trips immutable Testnet and production %s events',
+    'round-trips immutable production %s events',
     (resource) => {
-      const testnet = createFuturesTestnetWorkstationEvent(createEventValues(resource))
       const production = createFuturesProductionWorkstationEvent(createEventValues(resource))
-      expect(parseFuturesTestnetWorkstationEvent(JSON.stringify(testnet))).toEqual(testnet)
       expect(parseFuturesProductionWorkstationEvent(JSON.stringify(production))).toEqual(production)
-      expect(Object.isFrozen(testnet.payload)).toBe(true)
       expect(Object.isFrozen(production.payload)).toBe(true)
     },
   )
 
-  it('rejects Testnet/production protocol confusion in both directions', () => {
-    const testnetRequest = createFuturesTestnetWorkstationSubscribeRequest(requestValues)
+  it('rejects retired environment identities on the production protocol', () => {
     const productionRequest = createFuturesProductionWorkstationSubscribeRequest(requestValues)
-    expect(() => readFuturesProductionWorkstationRequest(JSON.stringify(testnetRequest)))
-      .toThrow(FuturesWorkstationProtocolError)
-    expect(() => readFuturesTestnetWorkstationRequest(JSON.stringify(productionRequest)))
-      .toThrow(FuturesWorkstationProtocolError)
+    expect(() => readFuturesProductionWorkstationRequest(JSON.stringify({
+      ...productionRequest,
+      environment: 'TESTNET',
+    }))).toThrow(FuturesWorkstationProtocolError)
 
-    const testnetEvent = createFuturesTestnetWorkstationEvent(createEventValues('status'))
     const productionEvent = createFuturesProductionWorkstationEvent(createEventValues('status'))
-    expect(() => parseFuturesProductionWorkstationEvent(JSON.stringify(testnetEvent)))
-      .toThrow(FuturesWorkstationProtocolError)
-    expect(() => parseFuturesTestnetWorkstationEvent(JSON.stringify(productionEvent)))
-      .toThrow(FuturesWorkstationProtocolError)
+    expect(() => parseFuturesProductionWorkstationEvent(JSON.stringify({
+      ...productionEvent,
+      environment: 'TESTNET',
+    }))).toThrow(FuturesWorkstationProtocolError)
   })
 
   it('preserves lossless int64 identities as strings', () => {
@@ -337,8 +324,8 @@ describe('Futures workstation environment-specific protocols', () => {
         trades: null,
       }),
     })
-    const contract = createFuturesTestnetWorkstationEvent(createEventValues('candles'))
-    const mark = createFuturesTestnetWorkstationEvent({
+    const contract = createFuturesProductionWorkstationEvent(createEventValues('candles'))
+    const mark = createFuturesProductionWorkstationEvent({
       ...createEventValues('candles'),
       revision: 2,
       payload: { ...payloads.candles, series: 'mark' },
@@ -365,7 +352,7 @@ describe('Futures workstation environment-specific protocols', () => {
         trades: null,
       }),
     })
-    const loading = createFuturesTestnetWorkstationEvent({
+    const loading = createFuturesProductionWorkstationEvent({
       ...createEventValues('status'),
       generation: 2,
       state: 'loading',
@@ -375,12 +362,12 @@ describe('Futures workstation environment-specific protocols', () => {
     expect(reset.resources.header).toBeNull()
     expect(reset.resources.depth).toBeNull()
 
-    const header = createFuturesTestnetWorkstationEvent({
+    const header = createFuturesProductionWorkstationEvent({
       ...createEventValues('header'),
       generation: 2,
       revision: 2,
     })
-    const resynchronizing = createFuturesTestnetWorkstationEvent({
+    const resynchronizing = createFuturesProductionWorkstationEvent({
       ...createEventValues('status'),
       generation: 2,
       revision: 3,

@@ -6,21 +6,15 @@ const ROOT = process.cwd();
 const failures = [];
 
 const PRODUCTION_TRANSPORT = 'electron/services/futures-production-workstation-transport.js';
-const TESTNET_TRANSPORT = 'electron/services/futures-testnet-workstation-transport.js';
 const NETWORK_GUARD = 'electron/futures-workstation-node-network-guard.js';
 const PRODUCTION_COMPOSITION = 'electron/services/futures-production-workstation-composition.js';
-const TESTNET_COMPOSITION = 'electron/services/futures-testnet-workstation-composition.js';
 const PRODUCTION_VERIFICATION_COMPOSITION = 'electron/services/futures-production-workstation-verification-composition.js';
-const TESTNET_VERIFICATION_COMPOSITION = 'electron/services/futures-testnet-workstation-verification-composition.js';
 const PRODUCTION_PROTOCOL = 'src/utils/futuresProductionWorkstationProtocol.js';
-const TESTNET_PROTOCOL = 'src/utils/futuresTestnetWorkstationProtocol.js';
 const LOCAL_WORKSTATION_CONNECTOR = 'src/hooks/useFuturesLocalWorkstationConnection.js';
 
 const EXACT_ORIGINS = Object.freeze(new Map([
     ['https://fapi.binance.com', PRODUCTION_TRANSPORT],
     ['wss://fstream.binance.com', PRODUCTION_TRANSPORT],
-    ['https://demo-fapi.binance.com', TESTNET_TRANSPORT],
-    ['wss://demo-fstream.binance.com', TESTNET_TRANSPORT],
 ]));
 const REVIEWED_PUBLIC_READ_ROUTES = Object.freeze(new Set([
     '/fapi/v1/exchangeInfo',
@@ -98,14 +92,10 @@ const sources = new Map(workstationFiles.map(file => [relative(file), fs.readFil
 
 for (const required of [
     PRODUCTION_TRANSPORT,
-    TESTNET_TRANSPORT,
     NETWORK_GUARD,
     PRODUCTION_COMPOSITION,
-    TESTNET_COMPOSITION,
     PRODUCTION_VERIFICATION_COMPOSITION,
-    TESTNET_VERIFICATION_COMPOSITION,
     PRODUCTION_PROTOCOL,
-    TESTNET_PROTOCOL,
     LOCAL_WORKSTATION_CONNECTOR,
 ]) {
     if (!workstationNames.has(required)) fail(`Missing required isolated workstation module ${required}`);
@@ -125,7 +115,7 @@ for (const [origin, owner] of EXACT_ORIGINS) {
 }
 
 for (const [name, source] of sources) {
-    const isReviewedTransport = name === PRODUCTION_TRANSPORT || name === TESTNET_TRANSPORT;
+    const isReviewedTransport = name === PRODUCTION_TRANSPORT;
     const isNetworkGuard = name === NETWORK_GUARD;
     const isLocalWorkstationConnector = name === LOCAL_WORKSTATION_CONNECTOR;
 
@@ -157,7 +147,7 @@ for (const [name, source] of sources) {
     }
 }
 
-for (const transportName of [PRODUCTION_TRANSPORT, TESTNET_TRANSPORT]) {
+for (const transportName of [PRODUCTION_TRANSPORT]) {
     const source = sources.get(transportName) ?? '';
     const routes = new Set([...source.matchAll(/\/fapi\/v\d+\/[A-Za-z0-9._/-]+/g)].map(match => match[0]));
     if (routes.size !== REVIEWED_PUBLIC_READ_ROUTES.size
@@ -195,9 +185,7 @@ for (const transportName of [PRODUCTION_TRANSPORT, TESTNET_TRANSPORT]) {
     }
     const fixedAgentAssignments = [...source.matchAll(/\bagent\s*:/g)].length;
     const fixedProxyRequests = [...source.matchAll(/\bhttps\.request\s*\(/g)].length;
-    const environmentResolver = transportName === PRODUCTION_TRANSPORT
-        ? 'resolveProductionBackendProxy'
-        : 'resolveTestnetBackendProxy';
+    const environmentResolver = 'resolveProductionBackendProxy';
     if (fixedAgentAssignments !== 2
         || fixedProxyRequests !== 1
         || !source.includes('agent: proxyAgent')
@@ -206,22 +194,16 @@ for (const transportName of [PRODUCTION_TRANSPORT, TESTNET_TRANSPORT]) {
         || !source.includes("errorCode: 'INVALID_PROXY_CONFIGURATION'")
         || !source.includes(`const ${environmentResolver} = () =>`)
         || !source.includes(`const backendProxy = ${environmentResolver}();`)
-        || !/createFutures(?:Production|Testnet)WorkstationReviewedTransport\s*=\s*\(\)\s*=>/.test(source)) {
+        || !/createFuturesProductionWorkstationReviewedTransport\s*=/.test(source)) {
         fail(`${transportName} does not isolate its fixed backend-owned proxy agent`);
     }
 }
 
 const productionComposition = sources.get(PRODUCTION_COMPOSITION) ?? '';
 if (!/export const FUTURES_PRODUCTION_WORKSTATION_PUBLIC_READ_AUTHORIZED\s*=\s*true\s*;/.test(productionComposition)
-    || !/createFuturesProductionWorkstationReviewedTransport\(\)/.test(productionComposition)
+    || !/createFuturesProductionWorkstationReviewedTransport\(\{ onTiming \}\)/.test(productionComposition)
     || /FakeTransport|deterministic-fake/.test(productionComposition)) {
     fail('Normal Production operator composition must be source-pinned to reviewed public reads');
-}
-const testnetComposition = sources.get(TESTNET_COMPOSITION) ?? '';
-if (!/export const FUTURES_TESTNET_WORKSTATION_REVIEWED_READ_AUTHORIZED\s*=\s*true\s*;/.test(testnetComposition)
-    || !/createFuturesTestnetWorkstationReviewedTransport\(\)/.test(testnetComposition)
-    || /FakeTransport|deterministic-fake/.test(testnetComposition)) {
-    fail('Normal Testnet operator composition must be source-pinned to reviewed public reads');
 }
 const productionVerificationComposition = sources.get(PRODUCTION_VERIFICATION_COMPOSITION) ?? '';
 if (!/FUTURES_PRODUCTION_WORKSTATION_DETERMINISTIC_VERIFICATION\s*=\s*true\s*;/.test(productionVerificationComposition)
@@ -229,17 +211,9 @@ if (!/FUTURES_PRODUCTION_WORKSTATION_DETERMINISTIC_VERIFICATION\s*=\s*true\s*;/.
     || /ReviewedTransport|reviewed-public-read/.test(productionVerificationComposition)) {
     fail('Production verification composition must be source-pinned to its deterministic fake');
 }
-const testnetVerificationComposition = sources.get(TESTNET_VERIFICATION_COMPOSITION) ?? '';
-if (!/FUTURES_TESTNET_WORKSTATION_DETERMINISTIC_VERIFICATION\s*=\s*true\s*;/.test(testnetVerificationComposition)
-    || !/createFuturesTestnetWorkstationFakeTransport\(\)/.test(testnetVerificationComposition)
-    || /ReviewedTransport|reviewed-public-read/.test(testnetVerificationComposition)) {
-    fail('Testnet verification composition must be source-pinned to its deterministic fake');
-}
 const allCompositions = [
     productionComposition,
-    testnetComposition,
     productionVerificationComposition,
-    testnetVerificationComposition,
 ].join('\n');
 if (/process\s*\.\s*env|import\s*\.\s*meta\s*\.\s*env/.test(allCompositions)) {
     fail('A workstation transport interlock is environment-selectable');
@@ -252,7 +226,6 @@ for (const buildMode of ['e2e', 'safe-dev', 'smoke']) {
     }
 }
 if (!viteConfig.includes('process.env.VITEST')
-    || !/verificationCompositionPath\(['"]testnet['"]\)/.test(viteConfig)
     || !/verificationCompositionPath\(['"]production['"]\)/.test(viteConfig)
     || [...viteConfig.matchAll(/alias:\s*futuresWorkstationCompositionAliases/g)].length !== 2) {
     fail('Safe, smoke, E2E and Vitest builds must resolve deterministic workstation compositions');
@@ -265,26 +238,17 @@ if (!/selectFuturesWorkstationCompositionAliases\(\{\s*isVitest:\s*true\s*\}\)/.
 for (const [name, source] of sources) {
     if (/futures-production-workstation|FuturesProductionWorkstation/.test(name)
         && /futures[-_]?testnet|FuturesTestnet|futures[-_]?readonly|FuturesReadOnly|testnet[-_]?execution/i.test(source)) {
-        fail(`${name} crosses the frozen Production/Testnet/Phase 5/6 boundary`);
-    }
-    if (/futures-testnet-workstation|FuturesTestnetWorkstation/.test(name)
-        && /futures[-_]?production|FuturesProduction/i.test(source)) {
-        fail(`${name} crosses the Testnet/Production boundary`);
+        fail(`${name} references a retired Testnet/Phase 5/6 boundary`);
     }
 }
 
 const productionProtocol = sources.get(PRODUCTION_PROTOCOL) ?? '';
-const testnetProtocol = sources.get(TESTNET_PROTOCOL) ?? '';
 if (!productionProtocol.includes("'futures-production-workstation'")
     || productionProtocol.includes("'futures-testnet-workstation'")) {
     fail('Production workstation protocol does not own one exact isolated channel');
 }
-if (!testnetProtocol.includes("'futures-testnet-workstation'")
-    || testnetProtocol.includes("'futures-production-workstation'")) {
-    fail('Testnet workstation protocol does not own one exact isolated channel');
-}
-for (const [name, source] of [[PRODUCTION_PROTOCOL, productionProtocol], [TESTNET_PROTOCOL, testnetProtocol]]) {
-    const actions = [...source.matchAll(/['"]futures\.(?:production|testnet)\.workstation\.([a-z-]+)['"]/g)]
+for (const [name, source] of [[PRODUCTION_PROTOCOL, productionProtocol]]) {
+    const actions = [...source.matchAll(/['"]futures\.production\.workstation\.([a-z-]+)['"]/g)]
         .map(match => match[1]);
     const allowed = new Set(['resource', 'subscribe', 'select-symbol', 'select-interval', 'unsubscribe']);
     if (actions.length !== 5 || actions.some(action => !allowed.has(action))) {
@@ -339,7 +303,7 @@ for (const pureView of [
     'src/components/features/futures/FuturesWorkstationChart.jsx',
 ]) {
     const source = sources.get(pureView) ?? '';
-    if (/useFutures(?:Production|Testnet)Workstation|sendMessage|wsConnection|\.workstation\.(?:subscribe|select|unsubscribe)/.test(source)) {
+    if (/useFuturesProductionWorkstation|sendMessage|wsConnection|\.workstation\.(?:subscribe|select|unsubscribe)/.test(source)) {
         fail(`${pureView} is not a pure normalized-props presentation boundary`);
     }
     if (/\bonKeyDown\s*=|addEventListener\s*\(\s*['"]keydown['"]/.test(source)) {

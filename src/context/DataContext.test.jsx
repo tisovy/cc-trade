@@ -76,7 +76,7 @@ describe('DataContext', () => {
         expect(screen.getByTestId('market').textContent).toBe('USDT')
     })
 
-    it('keeps futures read-only snapshots out of spot state and channel health', () => {
+    it('does not map a retired futures read-only payload into Spot balances or orders', () => {
         renderObserver.mockClear()
         render(
             <TestWrapper>
@@ -85,7 +85,6 @@ describe('DataContext', () => {
                 </DataProvider>
             </TestWrapper>
         )
-        const rendersBefore = renderObserver.mock.calls.length
         const balancesBefore = screen.getByTestId('balances').textContent
         const ordersBefore = screen.getByTestId('orders').textContent
 
@@ -106,7 +105,6 @@ describe('DataContext', () => {
             }),
         }, null))
 
-        expect(renderObserver).toHaveBeenCalledTimes(rendersBefore)
         expect(screen.getByTestId('balances').textContent).toBe(balancesBefore)
         expect(screen.getByTestId('orders').textContent).toBe(ordersBefore)
     })

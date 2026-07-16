@@ -5,7 +5,7 @@ import {
 import {
     createFuturesProductionWorkstationEvent,
 } from '../../src/utils/futuresProductionWorkstationProtocol.js';
-import { FUTURES_TESTNET_WORKSTATION_FIXTURE } from './futures-testnet-workstation-fixtures.js';
+import { FUTURES_PRODUCTION_WORKSTATION_FIXTURE } from './futures-production-workstation-fixtures.js';
 import {
     FUTURES_WORKSTATION_MARKET_LIMITS,
     FuturesWorkstationMarketContractError,
@@ -24,7 +24,7 @@ import {
     updateFuturesWorkstationHeader,
 } from './futures-workstation-market-contract.js';
 
-const fixtureFor = symbol => FUTURES_TESTNET_WORKSTATION_FIXTURE.symbols[symbol];
+const fixtureFor = symbol => FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols[symbol];
 const expectation = (symbol = 'BTCUSDT', interval = '1m') => ({
     symbol,
     pair: symbol,
@@ -34,7 +34,7 @@ const expectation = (symbol = 'BTCUSDT', interval = '1m') => ({
 describe('official Futures workstation market schemas', () => {
     it('normalizes a USDⓈ-M-only catalog with exact filters and allowlist state', () => {
         const catalog = normalizeFuturesWorkstationExchangeInfo(
-            FUTURES_TESTNET_WORKSTATION_FIXTURE.catalog,
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE.catalog,
             new Set(['BTCUSDT']),
         );
         expect(catalog.map(contract => contract.symbol)).toEqual(['BTCUSDT', 'ETHUSDT', 'SOLUSDT']);
@@ -58,7 +58,7 @@ describe('official Futures workstation market schemas', () => {
     });
 
     it('excludes non-USDT contracts from the catalog', () => {
-        const source = JSON.parse(FUTURES_TESTNET_WORKSTATION_FIXTURE.catalog);
+        const source = JSON.parse(FUTURES_PRODUCTION_WORKSTATION_FIXTURE.catalog);
         source.symbols.push({
             ...source.symbols[0],
             symbol: 'BTCUSD',
@@ -74,7 +74,7 @@ describe('official Futures workstation market schemas', () => {
     });
 
     it('accepts the bounded current catalog above the legacy 512-contract limit', () => {
-        const source = JSON.parse(FUTURES_TESTNET_WORKSTATION_FIXTURE.catalog);
+        const source = JSON.parse(FUTURES_PRODUCTION_WORKSTATION_FIXTURE.catalog);
         const seed = source.symbols[0];
         source.symbols = Array.from({ length: 600 }, (_, index) => {
             const baseAsset = `A${String(index).padStart(4, '0')}`;
@@ -94,7 +94,7 @@ describe('official Futures workstation market schemas', () => {
     });
 
     it('rejects a catalog above the revised 1024-contract bound', () => {
-        const source = JSON.parse(FUTURES_TESTNET_WORKSTATION_FIXTURE.catalog);
+        const source = JSON.parse(FUTURES_PRODUCTION_WORKSTATION_FIXTURE.catalog);
         const seed = source.symbols[0];
         source.symbols = Array.from({ length: 1_025 }, (_, index) => {
             const baseAsset = `A${String(index).padStart(4, '0')}`;
@@ -112,7 +112,7 @@ describe('official Futures workstation market schemas', () => {
     });
 
     it('accepts the official dated delivery-symbol grammar without widening pair grammar', () => {
-        const source = JSON.parse(FUTURES_TESTNET_WORKSTATION_FIXTURE.catalog);
+        const source = JSON.parse(FUTURES_PRODUCTION_WORKSTATION_FIXTURE.catalog);
         source.symbols[0] = {
             ...source.symbols[0],
             symbol: 'BTCUSDT_260925',
@@ -137,7 +137,7 @@ describe('official Futures workstation market schemas', () => {
     });
 
     it('normalizes the current post-algo-migration catalog without widening workstation symbols', () => {
-        const source = JSON.parse(FUTURES_TESTNET_WORKSTATION_FIXTURE.catalog);
+        const source = JSON.parse(FUTURES_PRODUCTION_WORKSTATION_FIXTURE.catalog);
         for (const symbol of source.symbols) {
             symbol.maxMoveOrderLimit = 1_000;
             symbol.filters = symbol.filters.filter(
@@ -191,7 +191,7 @@ describe('official Futures workstation market schemas', () => {
     });
 
     it('rejects malformed current filter metadata and the superseded symbol field name', () => {
-        const source = JSON.parse(FUTURES_TESTNET_WORKSTATION_FIXTURE.catalog);
+        const source = JSON.parse(FUTURES_PRODUCTION_WORKSTATION_FIXTURE.catalog);
         const symbol = source.symbols[0];
         symbol.filters = symbol.filters.filter(
             filter => filter.filterType !== 'MAX_NUM_ALGO_ORDERS',
@@ -219,7 +219,7 @@ describe('official Futures workstation market schemas', () => {
     it.each(['04', '+4', '4.0', '19', ''])(
         'rejects non-canonical current multiplierDecimal %s',
         (multiplierDecimal) => {
-            const source = JSON.parse(FUTURES_TESTNET_WORKSTATION_FIXTURE.catalog);
+            const source = JSON.parse(FUTURES_PRODUCTION_WORKSTATION_FIXTURE.catalog);
             source.symbols[0].filters.find(
                 filter => filter.filterType === 'PERCENT_PRICE',
             ).multiplierDecimal = multiplierDecimal;
@@ -379,7 +379,7 @@ describe('official Futures workstation market schemas', () => {
     });
 
     it('rejects catalog schema drift and duplicate symbols', () => {
-        const source = JSON.parse(FUTURES_TESTNET_WORKSTATION_FIXTURE.catalog);
+        const source = JSON.parse(FUTURES_PRODUCTION_WORKSTATION_FIXTURE.catalog);
         source.unreviewed = true;
         expect(() => normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source), new Set()))
             .toThrow(FuturesWorkstationMarketContractError);
@@ -390,7 +390,7 @@ describe('official Futures workstation market schemas', () => {
     });
 
     it('accepts officially disabled price bounds and rejects unreviewed filters', () => {
-        const source = JSON.parse(FUTURES_TESTNET_WORKSTATION_FIXTURE.catalog);
+        const source = JSON.parse(FUTURES_PRODUCTION_WORKSTATION_FIXTURE.catalog);
         const price = source.symbols[0].filters.find(filter => filter.filterType === 'PRICE_FILTER');
         price.maxPrice = '0';
         price.tickSize = '0';
@@ -507,7 +507,7 @@ describe('official Futures workstation market schemas', () => {
 
     it('chunks a large catalog into bounded renderer frames', () => {
         const seed = normalizeFuturesWorkstationExchangeInfo(
-            FUTURES_TESTNET_WORKSTATION_FIXTURE.catalog,
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE.catalog,
             new Set(['BTCUSDT']),
         )[0];
         const contracts = Array.from({ length: 95 }, (_, index) => ({

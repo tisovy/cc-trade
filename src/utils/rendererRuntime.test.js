@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   getRendererAnalyticsConfig,
-  getRendererFuturesReadEnvironment,
   getRendererRuntime,
 } from './rendererRuntime'
 import { getRendererLocalWebSocketAccess } from './localWebSocketAccess'
@@ -19,7 +18,6 @@ describe('renderer runtime bridge reader', () => {
         token: 'sessionToken_123',
         tokenParam: 'token',
       },
-      futuresReadEnvironment: 'testnet',
       analyticsConfig: {
         baseUrl: 'https://analytics.example.test',
         key: 'public-key',
@@ -37,7 +35,6 @@ describe('renderer runtime bridge reader', () => {
         token: 'sessionToken_123',
         tokenParam: 'token',
       },
-      futuresReadEnvironment: 'testnet',
       analyticsConfig: {
         baseUrl: 'https://analytics.example.test',
         key: 'public-key',
@@ -53,7 +50,6 @@ describe('renderer runtime bridge reader', () => {
       token: 'sessionToken_123',
       tokenParam: 'token',
     })
-    expect(getRendererFuturesReadEnvironment()).toBe('testnet')
     expect(getRendererAnalyticsConfig()).toMatchObject({ baseUrl: 'https://analytics.example.test' })
   })
 
@@ -65,7 +61,6 @@ describe('renderer runtime bridge reader', () => {
         token: 'sessionToken_123',
         tokenParam: 'token',
       },
-      futuresReadEnvironment: 'production',
       analyticsConfig: { secret: 'not-exposed' },
     })
 
@@ -76,7 +71,6 @@ describe('renderer runtime bridge reader', () => {
         token: '',
         tokenParam: 'token',
       },
-      futuresReadEnvironment: 'mock',
       analyticsConfig: null,
     })
   })

@@ -4,6 +4,12 @@ Date: 2026-07-14
 
 Status: accepted for the Phase 8.0–8.2 milestone
 
+Historical status: superseded in part on 2026-07-16. Futures Testnet and the
+Phase 5/6 runtime were retired; Testnet statements below are preserved only as
+the original milestone record. See
+[the retirement plan](./futures_live_performance_and_testnet_retirement_plan.md)
+and [`archive/futures-testnet/`](../archive/futures-testnet/README.md).
+
 Planning checkpoint: `b597f67fd61f3b4bb8e4ccd6bf4d2cd8e6e19fc5`
 
 Production execution base: `dcd2260c5aed73b268a6e1f12cac2c3cb8849873`

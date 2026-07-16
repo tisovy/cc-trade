@@ -6,6 +6,11 @@ Audit base: `32c3a28a68c097f05571e4aebee6afba2a44597c`
 
 Planning checkpoint: `b597f67fd61f3b4bb8e4ccd6bf4d2cd8e6e19fc5`
 
+Historical status: this audit describes the pre-retirement two-environment
+implementation. Futures Testnet was removed from active source and builds on
+2026-07-16; the original evidence is intentionally left unchanged. See
+[`archive/futures-testnet/`](../archive/futures-testnet/README.md).
+
 Scope: the complete Phase 8.0–8.2 read-only workstation, its Production/Testnet isolation, and non-regression gates around Spot and the frozen Phase 5/6/7 systems. This is not a re-certification or redesign of the already frozen Phase 5/6/7 execution kernels.
 
 ## Method

@@ -27,7 +27,6 @@ import {
   redactLocalWebSocketAccess,
   withLocalWebSocketAccess,
 } from '../utils/localWebSocketAccess';
-import { FUTURES_READ_CHANNEL_ID } from '../utils/futuresReadOnlyProtocol';
 
 
 
@@ -1156,11 +1155,6 @@ export const DataProvider = ({ children }) => {
     } catch {
       return;
     }
-
-    // Futures read-only owns an independent listener and state boundary. Do not
-    // let its snapshots create generic spot channel-health entries or touch any
-    // spot cache/account state.
-    if (rawMessage.channelId === FUTURES_READ_CHANNEL_ID) return;
 
     // Check if this is a channel-format message
     if (isChannelMessage(rawMessage)) {

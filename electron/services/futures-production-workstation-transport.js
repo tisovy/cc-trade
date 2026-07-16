@@ -38,8 +38,19 @@ export const FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS = Object.freeze({
     KLINES: 99,
 });
 
+export const FUTURES_PRODUCTION_WORKSTATION_EXCHANGE_INFO_CACHE_TTL_MS = 5 * 60_000;
+export const FUTURES_PRODUCTION_WORKSTATION_BOOTSTRAP_CONCURRENCY = 3;
+
 const ROUTE_SET = new Set(Object.values(FUTURES_PRODUCTION_WORKSTATION_ROUTES));
-const PUBLIC_READ_BUDGET = new FuturesWorkstationReadBudget({ maximumConcurrent: 1 });
+const PUBLIC_READ_BUDGET = new FuturesWorkstationReadBudget({
+    maximumConcurrent: FUTURES_PRODUCTION_WORKSTATION_BOOTSTRAP_CONCURRENCY,
+});
+const EXCHANGE_INFO_CACHE = {
+    fetchIdentity: null,
+    value: null,
+    expiresAt: 0,
+    inFlight: null,
+};
 const SYMBOL_PATTERN = /^(?:[A-Z0-9]{1,20}|[A-Z0-9]{1,13}_[0-9]{6})$/;
 const PAIR_PATTERN = /^[A-Z0-9]{1,20}$/;
 const INTERVALS = new Set(['1m', '5m', '15m', '1h', '4h', '1d']);
@@ -55,6 +66,40 @@ export class FuturesProductionWorkstationTransportError extends Error {
 
 const fail = (code) => {
     throw new FuturesProductionWorkstationTransportError(code);
+};
+
+const emitTiming = (onTiming, phase, startedAt, outcome, cache = null) => {
+    const durationMs = Math.max(0, Date.now() - startedAt);
+    try {
+        onTiming(Object.freeze({ phase, durationMs, outcome, cache }));
+    } catch {
+        // Diagnostics are observational and cannot affect market-data delivery.
+    }
+};
+
+const waitForSharedExchangeInfo = (promise, signal) => {
+    if (!signal) return promise;
+    if (signal.aborted) {
+        return Promise.reject(new FuturesProductionWorkstationTransportError('REQUEST_ABORTED'));
+    }
+    return new Promise((resolve, reject) => {
+        let settled = false;
+        const finish = (callback, value) => {
+            if (settled) return;
+            settled = true;
+            signal.removeEventListener?.('abort', abort);
+            callback(value);
+        };
+        const abort = () => finish(
+            reject,
+            new FuturesProductionWorkstationTransportError('REQUEST_ABORTED'),
+        );
+        signal.addEventListener?.('abort', abort, { once: true });
+        promise.then(
+            value => finish(resolve, value),
+            error => finish(reject, error),
+        );
+    });
 };
 
 const resolveProductionBackendProxy = () => {
@@ -217,10 +262,21 @@ const publicGet = async (pathname, parameters, bodyLimit, parentSignal, backendP
     }
 };
 
-const weightedGet = (weight, pathname, parameters, bodyLimit, signal, backendProxy) => (
+const weightedGet = (
+    weight,
+    pathname,
+    parameters,
+    bodyLimit,
+    signal,
+    backendProxy,
+    onFailure,
+) => (
     PUBLIC_READ_BUDGET.execute(
         weight,
-        () => publicGet(pathname, parameters, bodyLimit, signal, backendProxy),
+        () => publicGet(pathname, parameters, bodyLimit, signal, backendProxy).catch((error) => {
+            onFailure?.(error);
+            throw error;
+        }),
         { signal },
     )
 );
@@ -292,39 +348,130 @@ const createSocket = (url, onMessage, onDisconnect, backendProxy) => {
     });
 };
 
-export const createFuturesProductionWorkstationReviewedTransport = () => {
+export const createFuturesProductionWorkstationReviewedTransport = ({
+    onTiming = () => {},
+} = {}) => {
+    if (typeof onTiming !== 'function') fail('INVALID_TIMING_REPORTER');
     const backendProxy = resolveProductionBackendProxy();
+    const timedWeightedGet = async (phase, ...args) => {
+        const startedAt = Date.now();
+        let outcome = 'ok';
+        try {
+            return await weightedGet(...args);
+        } catch (error) {
+            outcome = 'error';
+            throw error;
+        } finally {
+            emitTiming(onTiming, phase, startedAt, outcome);
+        }
+    };
+    const loadExchangeInfo = async ({ signal } = {}) => {
+        if (backendProxy.errorCode) fail(backendProxy.errorCode);
+        const startedAt = Date.now();
+        if (signal?.aborted) {
+            emitTiming(onTiming, 'exchange-info', startedAt, 'error');
+            throw new FuturesProductionWorkstationTransportError('REQUEST_ABORTED');
+        }
+        const fetchIdentity = globalThis.fetch;
+        if (EXCHANGE_INFO_CACHE.fetchIdentity !== fetchIdentity) {
+            EXCHANGE_INFO_CACHE.fetchIdentity = fetchIdentity;
+            EXCHANGE_INFO_CACHE.value = null;
+            EXCHANGE_INFO_CACHE.expiresAt = 0;
+            EXCHANGE_INFO_CACHE.inFlight = null;
+        }
+        const waitAndReport = (promise, cache) => waitForSharedExchangeInfo(
+            promise,
+            signal,
+        ).then(
+            (value) => {
+                emitTiming(onTiming, 'exchange-info', startedAt, 'ok', cache);
+                return value;
+            },
+            (error) => {
+                emitTiming(onTiming, 'exchange-info', startedAt, 'error', cache);
+                throw error;
+            },
+        );
+        if (EXCHANGE_INFO_CACHE.value !== null
+            && startedAt < EXCHANGE_INFO_CACHE.expiresAt) {
+            return waitAndReport(
+                Promise.resolve(EXCHANGE_INFO_CACHE.value),
+                'hit',
+            );
+        }
+
+        let cache = 'shared';
+        if (EXCHANGE_INFO_CACHE.inFlight === null) {
+            cache = 'miss';
+            const pending = weightedGet(
+                FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.EXCHANGE_INFO,
+                FUTURES_PRODUCTION_WORKSTATION_ROUTES.EXCHANGE_INFO,
+                {},
+                FUTURES_WORKSTATION_BODY_LIMITS.EXCHANGE_INFO,
+                undefined,
+                backendProxy,
+            ).then((value) => {
+                if (EXCHANGE_INFO_CACHE.fetchIdentity === fetchIdentity) {
+                    EXCHANGE_INFO_CACHE.value = value;
+                    EXCHANGE_INFO_CACHE.expiresAt = Date.now()
+                        + FUTURES_PRODUCTION_WORKSTATION_EXCHANGE_INFO_CACHE_TTL_MS;
+                }
+                return value;
+            });
+            EXCHANGE_INFO_CACHE.inFlight = pending;
+            void pending.then(
+                () => {
+                    if (EXCHANGE_INFO_CACHE.inFlight === pending) {
+                        EXCHANGE_INFO_CACHE.inFlight = null;
+                    }
+                },
+                () => {
+                    if (EXCHANGE_INFO_CACHE.inFlight === pending) {
+                        EXCHANGE_INFO_CACHE.inFlight = null;
+                    }
+                },
+            );
+        }
+        return waitAndReport(EXCHANGE_INFO_CACHE.inFlight, cache);
+    };
     return Object.freeze({
         kind: 'reviewed-production-public-read',
         now: () => Date.now(),
-        loadExchangeInfo: ({ signal } = {}) => weightedGet(
-            FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.EXCHANGE_INFO,
-            FUTURES_PRODUCTION_WORKSTATION_ROUTES.EXCHANGE_INFO,
-            {},
-            FUTURES_WORKSTATION_BODY_LIMITS.EXCHANGE_INFO,
-            signal,
-            backendProxy,
-        ),
+        loadExchangeInfo,
         bootstrap: async ({ symbol, pair, interval, signal } = {}) => {
             assertSelection(symbol, interval);
             if (!PAIR_PATTERN.test(pair)) fail('INVALID_SELECTION');
             const batchController = new AbortController();
-            const abortBatch = () => batchController.abort();
+            let batchFailure = null;
+            const abortBatch = (error) => {
+                if (error instanceof Error && batchFailure === null) batchFailure = error;
+                batchController.abort();
+            };
+            const abortFromParent = () => abortBatch();
             if (signal?.aborted) abortBatch();
-            else signal?.addEventListener?.('abort', abortBatch, { once: true });
+            else signal?.addEventListener?.('abort', abortFromParent, { once: true });
             try {
-                const depthSnapshot = await weightedGet(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.DEPTH_1000, FUTURES_PRODUCTION_WORKSTATION_ROUTES.DEPTH, { symbol, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.DEPTH) }, FUTURES_WORKSTATION_BODY_LIMITS.DEPTH, batchController.signal, backendProxy);
-                const contractKlines = await weightedGet(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.KLINES_99, FUTURES_PRODUCTION_WORKSTATION_ROUTES.KLINES, { symbol, interval, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES, batchController.signal, backendProxy);
-                const markKlines = await weightedGet(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.MARK_KLINES_99, FUTURES_PRODUCTION_WORKSTATION_ROUTES.MARK_KLINES, { symbol, interval, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES, batchController.signal, backendProxy);
-                const indexKlines = await weightedGet(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.INDEX_KLINES_99, FUTURES_PRODUCTION_WORKSTATION_ROUTES.INDEX_KLINES, { pair, interval, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES, batchController.signal, backendProxy);
-                const premiumIndex = await weightedGet(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.PREMIUM_INDEX_SYMBOL, FUTURES_PRODUCTION_WORKSTATION_ROUTES.PREMIUM_INDEX, { symbol }, FUTURES_WORKSTATION_BODY_LIMITS.HEADER, batchController.signal, backendProxy);
-                const ticker = await weightedGet(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.TICKER_SYMBOL, FUTURES_PRODUCTION_WORKSTATION_ROUTES.TICKER, { symbol }, FUTURES_WORKSTATION_BODY_LIMITS.HEADER, batchController.signal, backendProxy);
+                const [
+                    depthSnapshot,
+                    contractKlines,
+                    markKlines,
+                    indexKlines,
+                    premiumIndex,
+                    ticker,
+                ] = await Promise.all([
+                    timedWeightedGet('depth', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.DEPTH_1000, FUTURES_PRODUCTION_WORKSTATION_ROUTES.DEPTH, { symbol, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.DEPTH) }, FUTURES_WORKSTATION_BODY_LIMITS.DEPTH, batchController.signal, backendProxy, abortBatch),
+                    timedWeightedGet('contract-klines', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.KLINES_99, FUTURES_PRODUCTION_WORKSTATION_ROUTES.KLINES, { symbol, interval, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES, batchController.signal, backendProxy, abortBatch),
+                    timedWeightedGet('mark-klines', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.MARK_KLINES_99, FUTURES_PRODUCTION_WORKSTATION_ROUTES.MARK_KLINES, { symbol, interval, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES, batchController.signal, backendProxy, abortBatch),
+                    timedWeightedGet('index-klines', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.INDEX_KLINES_99, FUTURES_PRODUCTION_WORKSTATION_ROUTES.INDEX_KLINES, { pair, interval, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES, batchController.signal, backendProxy, abortBatch),
+                    timedWeightedGet('premium-index', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.PREMIUM_INDEX_SYMBOL, FUTURES_PRODUCTION_WORKSTATION_ROUTES.PREMIUM_INDEX, { symbol }, FUTURES_WORKSTATION_BODY_LIMITS.HEADER, batchController.signal, backendProxy, abortBatch),
+                    timedWeightedGet('ticker', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.TICKER_SYMBOL, FUTURES_PRODUCTION_WORKSTATION_ROUTES.TICKER, { symbol }, FUTURES_WORKSTATION_BODY_LIMITS.HEADER, batchController.signal, backendProxy, abortBatch),
+                ]);
                 return Object.freeze({ depthSnapshot, contractKlines, markKlines, indexKlines, premiumIndex, ticker });
             } catch (error) {
                 abortBatch();
-                throw error;
+                throw batchFailure ?? error;
             } finally {
-                signal?.removeEventListener?.('abort', abortBatch);
+                signal?.removeEventListener?.('abort', abortFromParent);
             }
         },
         connect: ({ symbol, interval, onMessage, onDisconnect, signal } = {}) => {
@@ -340,6 +487,7 @@ export const createFuturesProductionWorkstationReviewedTransport = () => {
             ].join('/')}`;
             const publicSocket = createSocket(publicUrl, onMessage, onDisconnect, backendProxy);
             const marketSocket = createSocket(marketUrl, onMessage, onDisconnect, backendProxy);
+            const startedAt = Date.now();
             const close = () => {
                 publicSocket.close();
                 marketSocket.close();
@@ -347,7 +495,11 @@ export const createFuturesProductionWorkstationReviewedTransport = () => {
             signal?.addEventListener?.('abort', close, { once: true });
             return Object.freeze({
                 ready: Promise.all([publicSocket.ready, marketSocket.ready])
-                    .then(results => results.every(Boolean)),
+                    .then((results) => {
+                        const ready = results.every(Boolean);
+                        emitTiming(onTiming, 'upstream-streams', startedAt, ready ? 'ok' : 'error');
+                        return ready;
+                    }),
                 close: () => {
                     signal?.removeEventListener?.('abort', close);
                     close();

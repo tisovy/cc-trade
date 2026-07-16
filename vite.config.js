@@ -18,10 +18,6 @@ export const selectFuturesWorkstationCompositionAliases = ({
   if (!deterministic) return []
   return [
     {
-      find: /(?:^|.*\/)futures-testnet-workstation-composition\.js$/,
-      replacement: verificationCompositionPath('testnet'),
-    },
-    {
       find: /(?:^|.*\/)futures-production-workstation-composition\.js$/,
       replacement: verificationCompositionPath('production'),
     },

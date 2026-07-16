@@ -4,15 +4,6 @@ import { fileURLToPath } from 'url'
 import { shouldOpenDevTools } from './devtools.js'
 import { setupBinanceConnection } from './services/binance-connection.js'
 import {
-  captureFuturesTestnetExecutionConfig,
-} from './services/futures-testnet-execution-config.js'
-import {
-  installFuturesTestnetExecutionLogSanitizer,
-} from './services/futures-testnet-execution-sanitizer.js'
-import {
-  createElectronSafeStorageIntegrityKeyProtection,
-} from './services/futures-testnet-execution-key-protection.js'
-import {
   captureFuturesProductionExecutionConfig,
 } from './services/futures-production-execution-config.js'
 import {
@@ -56,12 +47,13 @@ if (configureLinuxSafeStorageBackend({ app })) {
 
 registerRendererAppProtocolScheme(protocol)
 
-// Capture and remove every execution credential/config value before any
-// BrowserWindow can exist. The captured object never crosses the main-process
-// boundary.
-const futuresExecutionConfig = captureFuturesTestnetExecutionConfig({
-  futuresReadMode: process.env.FUTURES_READ_MODE || 'mock',
-})
+// Futures Testnet is retired. Scrub every legacy Testnet/read variable before a
+// BrowserWindow can exist; no Testnet value is captured or composed at runtime.
+for (const key of Object.keys(process.env)) {
+  if (key.startsWith('FUTURES_TESTNET_') || key.startsWith('FUTURES_READ_')) {
+    delete process.env[key]
+  }
+}
 const futuresProductionSecretValues = [
   process.env.FUTURES_PRODUCTION_API_KEY,
   process.env.FUTURES_PRODUCTION_API_SECRET,
@@ -71,12 +63,6 @@ const futuresProductionExecutionConfig = captureFuturesProductionExecutionConfig
   liveAuthorized: FUTURES_PRODUCTION_LIVE_AUTHORIZED,
 })
 const futuresProductionOperatorStartup = captureFuturesProductionOperatorStartupAction()
-installFuturesTestnetExecutionLogSanitizer({
-  secretValues: [
-    futuresExecutionConfig.credentials?.apiKey,
-    futuresExecutionConfig.credentials?.apiSecret,
-  ],
-})
 installFuturesProductionExecutionLogSanitizer({
   secretValues: futuresProductionSecretValues,
 })
@@ -214,7 +200,6 @@ function createWindow() {
   }
   const rendererRuntime = createRendererRuntime({
     localWebSocketAccess,
-    futuresReadEnvironment: process.env.FUTURES_READ_ENVIRONMENT,
     analyticsConfig,
   })
   const win = new BrowserWindow({
@@ -275,13 +260,7 @@ app.whenReady().then(async () => {
     throw new Error(futuresProductionOperatorStartup.code)
   }
 
-  let futuresExecutionKeyProtection = null
   let futuresProductionExecutionKeyProtection = null
-  try {
-    futuresExecutionKeyProtection = createElectronSafeStorageIntegrityKeyProtection({ safeStorage })
-  } catch (error) {
-    console.warn('[Electron] Futures execution secure storage unavailable:', error)
-  }
   try {
     futuresProductionExecutionKeyProtection = (
       createElectronSafeStorageProductionIntegrityKeyProtection({ safeStorage })
@@ -292,15 +271,6 @@ app.whenReady().then(async () => {
 
   binanceController = setupBinanceConnection({
     localWebSocketAccess,
-    futuresExecutionConfig,
-    futuresExecutionKeyProtection,
-    futuresExecutionStorageDirectory: path.join(
-      app.getPath('userData'),
-      app.isPackaged
-        ? 'futures-testnet-execution'
-        : 'futures-testnet-execution-development',
-      'v1',
-    ),
     futuresProductionExecutionConfig,
     futuresProductionExecutionKeyProtection,
     futuresProductionExecutionStorageDirectory: path.join(
@@ -311,7 +281,6 @@ app.whenReady().then(async () => {
       'v1',
     ),
   })
-  await binanceController.executionReady
   const futuresProductionRuntime = await binanceController.productionExecutionReady
   if (futuresProductionOperatorStartup.requested) {
     const recovered = await futuresProductionRuntime.recoverOperationally({

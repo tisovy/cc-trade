@@ -4,6 +4,10 @@ Date: 2026-07-13
 
 Status: accepted; fake-backed implementation completed 2026-07-13 and live production composition explicitly authorized 2026-07-14
 
+Historical adjacency note: references to Phase 5/6 or Testnet describe the
+architecture at acceptance time. Those runtimes were retired on 2026-07-16;
+the Production subsystem remains active and separately composed.
+
 Base: `36681f07f447e5bfb0d3b4ce30642326b55a89df` (`Complete Futures testnet execution Phase 6`)
 
 ## Decision
@@ -16,13 +20,19 @@ The initial delivery intentionally retained a non-environment live-authorization
 
 ## Boundary inventory
 
-The frozen boundaries remain authoritative:
+At ADR acceptance, the adjacent boundaries were:
 
 - Phase 5 remains `futures-readonly`, with only its fixed mock/testnet read facade and renderer panel.
 - Phase 6 remains `futures-execution`, testnet credentials, `cc6-` identities, demo host, testnet ledger, testnet recovery, and the reduce-only ticket.
 - Generic typed trading commands continue to accept Spot only. Every legacy futures command remains rejected.
 - The existing CRITICAL Spot `RateLimiter` implementation is unchanged.
 - Production does not import a Phase 5/6 service, facade, protocol, ledger, risk reader, composition, renderer hook, or component.
+
+As of 2026-07-16, Phase 5/6 and Futures Testnet are retired rather than frozen
+runtime neighbors. Their paths are recoverable only through the archive
+manifest. The active invariant is stronger: Production imports none of those
+retired paths, and legacy Testnet/read frames fail closed before generic
+renderer routing.
 
 Production owns these independently named modules:
 

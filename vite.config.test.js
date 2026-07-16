@@ -20,18 +20,16 @@ describe('Vite Electron development configuration', () => {
     (buildMode) => {
       const aliases = selectFuturesWorkstationCompositionAliases({ buildMode })
 
-      expect(aliases).toHaveLength(2)
-      expect(aliases.map(alias => alias.replacement)).toEqual(expect.arrayContaining([
-        expect.stringContaining('futures-testnet-workstation-verification-composition.js'),
-        expect.stringContaining('futures-production-workstation-verification-composition.js'),
-      ]))
+      expect(aliases).toHaveLength(1)
+      expect(aliases[0].replacement)
+        .toContain('futures-production-workstation-verification-composition.js')
     },
   )
 
   it('pins Vitest to deterministic workstations without a runtime mode option', () => {
     const aliases = selectFuturesWorkstationCompositionAliases({ isVitest: true })
 
-    expect(aliases).toHaveLength(2)
-    expect(config.resolve.alias).toHaveLength(2)
+    expect(aliases).toHaveLength(1)
+    expect(config.resolve.alias).toHaveLength(1)
   })
 })

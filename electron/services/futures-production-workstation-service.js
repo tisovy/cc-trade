@@ -64,7 +64,12 @@ const safeCode = error => (
 );
 
 export class FuturesProductionWorkstationService {
-    constructor({ transport, clock = systemClock, onInternalError = () => {} } = {}) {
+    constructor({
+        transport,
+        clock = systemClock,
+        onInternalError = () => {},
+        onTiming = () => {},
+    } = {}) {
         if (!transport
             || typeof transport.loadExchangeInfo !== 'function'
             || typeof transport.bootstrap !== 'function'
@@ -75,12 +80,14 @@ export class FuturesProductionWorkstationService {
             || typeof clock.clearInterval !== 'function'
             || typeof clock.setTimeout !== 'function'
             || typeof clock.clearTimeout !== 'function'
-            || typeof onInternalError !== 'function') {
+            || typeof onInternalError !== 'function'
+            || typeof onTiming !== 'function') {
             throw new FuturesProductionWorkstationServiceError('INVALID_SERVICE_COMPOSITION');
         }
         this.transport = transport;
         this.clock = clock;
         this.onInternalError = onInternalError;
+        this.onTiming = onTiming;
         this.generation = 0;
         this.current = null;
         this.stopped = false;
@@ -148,6 +155,24 @@ export class FuturesProductionWorkstationService {
         );
     }
 
+    emitAggregateTiming(session, outcome) {
+        try {
+            const finishedAt = this.clock.now();
+            const durationMs = Number.isSafeInteger(finishedAt)
+                && Number.isSafeInteger(session.startedAt)
+                ? Math.max(0, finishedAt - session.startedAt)
+                : 0;
+            this.onTiming(Object.freeze({
+                phase: 'aggregate-ready',
+                durationMs,
+                outcome,
+                cache: null,
+            }));
+        } catch {
+            // Diagnostics are observational and cannot affect market-data delivery.
+        }
+    }
+
     async startGeneration(request, emit, reconnectAttempt) {
         this.stopCurrent();
         this.generation += 1;
@@ -182,6 +207,7 @@ export class FuturesProductionWorkstationService {
             staleResources: new Set(),
             lastClock: 0,
             clockRegressed: false,
+            startedAt: this.clock.now(),
         };
         this.current = session;
         this.emitStatus(session, FUTURES_WORKSTATION_STATES.LOADING, false, null);
@@ -295,9 +321,11 @@ export class FuturesProductionWorkstationService {
             if (!this.isCurrent(session)) return;
             session.reconnectAttempt = 0;
             this.emitStatus(session, FUTURES_WORKSTATION_STATES.LIVE, true, null);
+            this.emitAggregateTiming(session, 'ok');
             this.startFreshnessMonitor(session);
         } catch (error) {
             if (!this.isCurrent(session)) return;
+            this.emitAggregateTiming(session, 'error');
             this.onInternalError({ phase: 'bootstrap', code: safeCode(error) });
             this.emitStatus(
                 session,

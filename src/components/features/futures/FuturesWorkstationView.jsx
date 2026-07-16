@@ -68,9 +68,7 @@ export const FuturesWorkstationView = ({
   const liveTrades = resources.trades?.rows ?? EMPTY_ROWS
   const selectedContract = contracts.find(contract => contract.symbol === selectedSymbol) ?? null
   const aggregateState = state.status === 'idle' ? 'loading' : state.status
-  const resourceState = resource => aggregateState === 'live'
-    ? (resource?.state ?? 'loading')
-    : aggregateState
+  const resourceState = resource => resource?.state ?? aggregateState
   const catalogState = resourceState(resources.catalog)
   const candlesState = resourceState(candles)
   const depthState = resourceState(depth)

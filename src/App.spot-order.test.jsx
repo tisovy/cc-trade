@@ -18,8 +18,6 @@ const mocks = vi.hoisted(() => ({
   sendMessage: vi.fn(),
   handlePanelUpdate: vi.fn(),
   checkPriceAlerts: vi.fn(),
-  futuresReadEnabled: [],
-  futuresTestnetEnabled: [],
   futuresProductionEnabled: [],
 }))
 
@@ -51,37 +49,6 @@ vi.mock('./hooks/useAlertContext', () => ({
     triggeredAlerts: [],
     checkPriceAlerts: mocks.checkPriceAlerts,
   }),
-}))
-
-vi.mock('./hooks/useFuturesTestnetExecution', () => ({
-  default: ({ enabled }) => {
-    mocks.futuresTestnetEnabled.push(enabled)
-    return {
-      connected: false,
-      subscribed: false,
-      submissionLocked: false,
-      revision: null,
-      symbol: null,
-      capability: null,
-      intent: null,
-      attempt: null,
-      prepareIntent: vi.fn(() => false),
-      placeOrder: vi.fn(() => false),
-    }
-  },
-}))
-
-vi.mock('./hooks/useFuturesReadOnly', () => ({
-  default: ({ enabled }) => {
-    mocks.futuresReadEnabled.push(enabled)
-    return {
-      status: 'idle',
-      environment: 'mock',
-      symbol: null,
-      errorCode: null,
-      resources: {},
-    }
-  },
 }))
 
 vi.mock('./hooks/useFuturesProductionExecution', () => ({
@@ -203,8 +170,6 @@ describe('App spot order payloads', () => {
     mocks.sendMessage.mockClear()
     mocks.handlePanelUpdate.mockClear()
     mocks.checkPriceAlerts.mockClear()
-    mocks.futuresReadEnabled.length = 0
-    mocks.futuresTestnetEnabled.length = 0
     mocks.futuresProductionEnabled.length = 0
   })
 
@@ -289,7 +254,7 @@ describe('App spot order payloads', () => {
     })
   })
 
-  it('unmounts every spot execution affordance in futures mode and restores spot unchanged', () => {
+  it('exposes only Futures Live, unmounts spot execution there, and restores spot unchanged', () => {
     mocks.order = {
       symbol: 'BTCUSDT',
       side: 'BUY',
@@ -305,35 +270,13 @@ describe('App spot order payloads', () => {
 
     expect(screen.getByTestId('place-spot-order')).toBeInTheDocument()
     expect(screen.getByTestId('cancel-spot-order')).toBeInTheDocument()
-    expect(screen.getByTestId('market-mode-futures-testnet')).toHaveTextContent('Futures Testnet')
+    expect(screen.queryByTestId('market-mode-futures-testnet')).not.toBeInTheDocument()
     expect(screen.getByTestId('market-mode-futures-live')).toHaveTextContent('Futures Live')
-    expect(mocks.futuresReadEnabled.at(-1)).toBe(false)
-    expect(mocks.futuresTestnetEnabled.at(-1)).toBe(false)
     expect(mocks.futuresProductionEnabled.at(-1)).toBe(false)
     expect(mocks.sendMessage).toHaveBeenLastCalledWith({
       action: 'enable_depth_view',
       symbol: 'BTCUSDT',
     })
-
-    fireEvent.click(screen.getByTestId('market-mode-futures-testnet'))
-
-    expect(screen.getByTestId('futures-testnet-view')).toBeInTheDocument()
-    expect(screen.getByTestId('futures-testnet-banner')).toHaveTextContent(
-      'USDⓈ-M FUTURES TESTNETSIMULATED FUNDS · TESTNET',
-    )
-    expect(screen.getByLabelText('USDⓈ-M futures read-only risk')).toBeInTheDocument()
-    expect(screen.getByLabelText('USDⓈ-M testnet reduce-only execution')).toBeInTheDocument()
-    expect(screen.queryByLabelText('USDⓈ-M production real-order execution')).not.toBeInTheDocument()
-    expect(mocks.futuresReadEnabled.at(-1)).toBe(true)
-    expect(mocks.futuresTestnetEnabled.at(-1)).toBe(true)
-    expect(mocks.futuresProductionEnabled.at(-1)).toBe(false)
-    expect(screen.queryByTestId('place-spot-order')).not.toBeInTheDocument()
-    expect(screen.queryByTestId('cancel-spot-order')).not.toBeInTheDocument()
-    expect(mocks.send).not.toHaveBeenCalled()
-    expect(mocks.sendMessage).toHaveBeenLastCalledWith({ action: 'disable_depth_view' })
-
-    fireEvent.keyDown(document, { key: 'B' })
-    expect(screen.queryByTestId('quick-switch-modal')).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByTestId('market-mode-futures-live'))
 
@@ -342,11 +285,7 @@ describe('App spot order payloads', () => {
       'USDⓈ-M FUTURES LIVEREAL MONEY · PRODUCTION',
     )
     expect(screen.getByLabelText('USDⓈ-M production real-order execution')).toBeInTheDocument()
-    expect(screen.queryByLabelText('USDⓈ-M futures read-only risk')).not.toBeInTheDocument()
-    expect(screen.queryByLabelText('USDⓈ-M testnet reduce-only execution')).not.toBeInTheDocument()
     expect(screen.queryByTestId('place-spot-order')).not.toBeInTheDocument()
-    expect(mocks.futuresReadEnabled.at(-1)).toBe(false)
-    expect(mocks.futuresTestnetEnabled.at(-1)).toBe(false)
     expect(mocks.futuresProductionEnabled.at(-1)).toBe(true)
     expect(mocks.sendMessage).toHaveBeenLastCalledWith({ action: 'disable_depth_view' })
 
@@ -355,12 +294,9 @@ describe('App spot order payloads', () => {
 
     fireEvent.click(screen.getByTestId('market-mode-spot'))
 
-    expect(screen.queryByTestId('futures-testnet-view')).not.toBeInTheDocument()
     expect(screen.queryByTestId('futures-live-view')).not.toBeInTheDocument()
     expect(screen.getByTestId('place-spot-order')).toBeInTheDocument()
     expect(screen.getByTestId('cancel-spot-order')).toBeInTheDocument()
-    expect(mocks.futuresReadEnabled.at(-1)).toBe(false)
-    expect(mocks.futuresTestnetEnabled.at(-1)).toBe(false)
     expect(mocks.futuresProductionEnabled.at(-1)).toBe(false)
     expect(mocks.sendMessage).toHaveBeenLastCalledWith({
       action: 'enable_depth_view',

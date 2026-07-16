@@ -245,10 +245,7 @@ for (const file of sourceFiles.filter(file => !/\.test\.[^.]+$/.test(file))) {
     const source = fs.readFileSync(file, 'utf8');
     for (const endpoint of reviewedWritePaths) {
         if (source.includes(endpoint)
-            && ![
-                'electron/services/futures-production-execution-facade.js',
-                'electron/services/futures-testnet-execution-facade.js',
-            ].includes(name)) {
+            && name !== 'electron/services/futures-production-execution-facade.js') {
             fail(`${name} contains production write endpoint ${endpoint}`);
         }
     }

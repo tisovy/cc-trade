@@ -10,9 +10,9 @@ import {
 // composition at build time with the separately named deterministic module.
 export const FUTURES_PRODUCTION_WORKSTATION_PUBLIC_READ_AUTHORIZED = true;
 
-export const createFuturesProductionWorkstationRuntime = () => {
-    const transport = createFuturesProductionWorkstationReviewedTransport();
-    const service = new FuturesProductionWorkstationService({ transport });
+export const createFuturesProductionWorkstationRuntime = ({ onTiming } = {}) => {
+    const transport = createFuturesProductionWorkstationReviewedTransport({ onTiming });
+    const service = new FuturesProductionWorkstationService({ transport, onTiming });
     return Object.freeze({
         mode: 'reviewed-public-read',
         transport,
@@ -25,11 +25,13 @@ export const createFuturesProductionWorkstationRuntimeForTest = ({
     transport,
     clock,
     onInternalError,
+    onTiming,
 } = {}) => {
     const service = new FuturesProductionWorkstationService({
         transport,
         ...(clock ? { clock } : {}),
         ...(onInternalError ? { onInternalError } : {}),
+        ...(onTiming ? { onTiming } : {}),
     });
     return Object.freeze({ transport, service, close: () => service.stop() });
 };

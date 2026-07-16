@@ -4,6 +4,9 @@ Date: 2026-07-13
 
 Scope: the separately named USDⓈ-M production execution subsystem described by the Phase 7 ADR. Phase 5 and Phase 6 are frozen adjacent trust domains, not production dependencies.
 
+Update (2026-07-16): Phase 5/6 and Futures Testnet were retired. References to
+them below are historical threat-boundary evidence, not an active workflow.
+
 ## Assets
 
 - production USDⓈ-M account funds and positions;
@@ -14,7 +17,7 @@ Scope: the separately named USDⓈ-M production execution subsystem described by
 - durable daily-notional reservations, rate pauses, kill-switch state, dispatch states, reconciliation ownership, and audit history;
 - integrity key, rollback anchor, journal lease, and storage namespace;
 - renderer/backend session identity and revision ordering;
-- Spot priority and the frozen Phase 5/6 boundaries.
+- Spot priority and the fail-closed boundary around retired Phase 5/6 protocols.
 
 ## Trust boundaries
 
@@ -46,7 +49,7 @@ Controls:
 - deterministic tests inject fakes through a test-only composition seam;
 - every gate combination is exhaustively tested and audited.
 
-Residual risk: a fully valid live configuration now performs signed production identity/recovery reads during application startup, before a renderer workspace is selected. Operators who require a strict Spot → Testnet → Live sequence must omit all production configuration for the first launch and restart with the reviewed production configuration only after testnet verification. Writes still require a renderer subscription, backend intent, exact confirmation, current revision, and all dispatch gates.
+Residual risk: a fully valid live configuration performs signed production identity/recovery reads during application startup, before a renderer workspace is selected. Operators who require a Spot verification checkpoint must omit all production configuration for the first launch, stop the application completely, and restart with the reviewed production configuration only after Spot verification. Futures Testnet is not an available checkpoint. Writes still require a renderer subscription, backend intent, exact confirmation, current revision, and all dispatch gates.
 
 ### Wrong account or environment
 
@@ -224,7 +227,7 @@ Controls:
 - production writes do not use the Spot retry wrapper;
 - unchanged high-cycle open monitoring does not append duplicate audit state.
 
-Residual risk: production and testnet reads can coexist on different origins. CPU/disk pressure is still process-wide; the global production mutex, bounded work, and Spot admission checks limit but do not eliminate scheduling jitter.
+Residual risk: Production public reads, signed production execution reads, and Spot work still share process CPU/disk scheduling. The global production mutex, bounded work, and Spot admission checks limit but do not eliminate scheduling jitter.
 
 ### Supply-chain or boundary regression
 
@@ -234,11 +237,11 @@ Threats:
 
 Controls:
 
-- inverse static isolation scans for production/testnet hosts, names, imports, actions, credentials, writes, and storage namespaces;
-- frozen-boundary diff checks against `36681f0` for Phase 5/6 modules;
+- inverse static isolation scans for production hosts plus retired Testnet names, imports, actions, credentials, writes, and storage namespaces;
+- an immutable archive manifest for the retired Phase 5/6 paths, with no active imports or build aliases;
 - circular-import checks;
 - exact facade export-surface tests;
-- full Spot/Phase 5/Phase 6 unit and E2E regression;
+- full Spot, Production execution, Production workstation, and E2E regression;
 - GitNexus upstream impact before existing-symbol edits and change detection before commit.
 
 Residual risk: static checks are not formal proof. Code review, deterministic tests, dependency review, and operational authorization remain required.

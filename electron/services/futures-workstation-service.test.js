@@ -1,30 +1,17 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-    createFuturesTestnetWorkstationRuntime,
-    createFuturesTestnetWorkstationRuntimeForTest,
-} from './futures-testnet-workstation-composition.js';
-import {
     createFuturesProductionWorkstationRuntime,
     createFuturesProductionWorkstationRuntimeForTest,
 } from './futures-production-workstation-composition.js';
 import {
-    createFuturesTestnetWorkstationFakeTransport,
-} from './futures-testnet-workstation-fake-transport.js';
-import {
     createFuturesProductionWorkstationFakeTransport,
 } from './futures-production-workstation-fake-transport.js';
-import {
-    FUTURES_TESTNET_WORKSTATION_FIXTURE,
-} from './futures-testnet-workstation-fixtures.js';
 import {
     FUTURES_PRODUCTION_WORKSTATION_FIXTURE,
 } from './futures-production-workstation-fixtures.js';
 import {
-    createFuturesTestnetWorkstationSubscribeRequest,
-    createFuturesTestnetWorkstationUnsubscribeRequest,
-} from '../../src/utils/futuresTestnetWorkstationProtocol.js';
-import {
     createFuturesProductionWorkstationSubscribeRequest,
+    createFuturesProductionWorkstationUnsubscribeRequest,
 } from '../../src/utils/futuresProductionWorkstationProtocol.js';
 
 const runtimes = [];
@@ -33,10 +20,6 @@ afterEach(() => {
     while (runtimes.length) runtimes.pop().close();
     vi.restoreAllMocks();
 });
-
-const testnetRequest = (requestId, symbol = 'BTCUSDT', interval = '1m') => JSON.stringify(
-    createFuturesTestnetWorkstationSubscribeRequest({ requestId, symbol, interval }),
-);
 
 const productionRequest = (requestId, symbol = 'BTCUSDT', interval = '1m') => JSON.stringify(
     createFuturesProductionWorkstationSubscribeRequest({ requestId, symbol, interval }),
@@ -81,27 +64,8 @@ const createManualClock = (initial = 1_784_000_001_000) => {
     };
 };
 
-describe('separately composed Futures workstation services', () => {
-    it('boots Testnet through catalog, snapshot, overlays, depth and tape before LIVE', async () => {
-        const runtime = track(createFuturesTestnetWorkstationRuntime());
-        const events = [];
-        await runtime.service.handleRequest(testnetRequest('service-testnet-1'), {
-            emit: event => events.push(event),
-        });
-
-        expect(runtime.mode).toBe('deterministic-fake');
-        expect(events.filter(event => event.resource === 'status').map(event => event.state))
-            .toEqual(['loading', 'live']);
-        expect([...new Set(events.map(event => event.resource))]).toEqual([
-            'status', 'catalog', 'header', 'candles', 'depth', 'trades',
-        ]);
-        expect(events.filter(event => event.resource === 'candles').map(event => event.payload.series))
-            .toEqual(['contract', 'mark', 'index']);
-        expect(events.find(event => event.resource === 'depth').payload.lastUpdateId).toBe('1001');
-        expect(events.every((event, index) => event.revision === index + 1)).toBe(true);
-    });
-
-    it('boots production on a distinct channel, environment and deterministic fixture', async () => {
+describe('production Futures workstation service', () => {
+    it('boots production through catalog, streams, snapshot and widgets before LIVE', async () => {
         const runtime = track(createFuturesProductionWorkstationRuntime());
         const events = [];
         await runtime.service.handleRequest(productionRequest('service-production-1'), {
@@ -115,13 +79,40 @@ describe('separately composed Futures workstation services', () => {
         expect(events.at(-1)).toMatchObject({ resource: 'status', state: 'live' });
     });
 
+    it('reports a bounded aggregate-ready duration without exposing market payloads', async () => {
+        const manual = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport();
+        const timings = [];
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock: manual.clock,
+            onTiming: timing => timings.push(timing),
+            transport: {
+                ...base,
+                loadExchangeInfo: async (options) => {
+                    manual.advance(20);
+                    return base.loadExchangeInfo(options);
+                },
+                bootstrap: async (options) => {
+                    manual.advance(30);
+                    return base.bootstrap(options);
+                },
+            },
+        }));
+
+        await runtime.service.handleRequest(productionRequest('aggregate-timing'), {
+            emit: () => {},
+        });
+
+        expect(timings).toEqual([{
+            phase: 'aggregate-ready',
+            durationMs: 50,
+            outcome: 'ok',
+            cache: null,
+        }]);
+        expect(JSON.stringify(timings)).not.toMatch(/BTCUSDT|price|payload|url|credential/i);
+    });
+
     it.each([
-        [
-            'Testnet',
-            createFuturesTestnetWorkstationFakeTransport,
-            createFuturesTestnetWorkstationRuntimeForTest,
-            testnetRequest,
-        ],
         [
             'production',
             createFuturesProductionWorkstationFakeTransport,
@@ -162,12 +153,6 @@ describe('separately composed Futures workstation services', () => {
 
     it.each([
         [
-            'Testnet',
-            createFuturesTestnetWorkstationFakeTransport,
-            createFuturesTestnetWorkstationRuntimeForTest,
-            testnetRequest,
-        ],
-        [
             'production',
             createFuturesProductionWorkstationFakeTransport,
             createFuturesProductionWorkstationRuntimeForTest,
@@ -206,12 +191,6 @@ describe('separately composed Futures workstation services', () => {
 
     it.each([
         [
-            'Testnet',
-            createFuturesTestnetWorkstationFakeTransport,
-            createFuturesTestnetWorkstationRuntimeForTest,
-            testnetRequest,
-        ],
-        [
             'production',
             createFuturesProductionWorkstationFakeTransport,
             createFuturesProductionWorkstationRuntimeForTest,
@@ -223,7 +202,7 @@ describe('separately composed Futures workstation services', () => {
         createRuntime,
         createRequest,
     ) => {
-        const source = JSON.parse(FUTURES_TESTNET_WORKSTATION_FIXTURE.catalog);
+        const source = JSON.parse(FUTURES_PRODUCTION_WORKSTATION_FIXTURE.catalog);
         const seed = source.symbols[0];
         source.symbols = [
             seed,
@@ -256,12 +235,6 @@ describe('separately composed Futures workstation services', () => {
 
     it.each([
         [
-            'Testnet',
-            createFuturesTestnetWorkstationFakeTransport,
-            createFuturesTestnetWorkstationRuntimeForTest,
-            testnetRequest,
-        ],
-        [
             'production',
             createFuturesProductionWorkstationFakeTransport,
             createFuturesProductionWorkstationRuntimeForTest,
@@ -273,7 +246,7 @@ describe('separately composed Futures workstation services', () => {
         createRuntime,
         createRequest,
     ) => {
-        const source = JSON.parse(FUTURES_TESTNET_WORKSTATION_FIXTURE.catalog);
+        const source = JSON.parse(FUTURES_PRODUCTION_WORKSTATION_FIXTURE.catalog);
         for (const symbol of source.symbols) {
             symbol.maxMoveOrderLimit = 1_000;
             symbol.filters = symbol.filters.filter(
@@ -318,12 +291,6 @@ describe('separately composed Futures workstation services', () => {
 
     it.each([
         [
-            'Testnet',
-            createFuturesTestnetWorkstationFakeTransport,
-            createFuturesTestnetWorkstationRuntimeForTest,
-            testnetRequest,
-        ],
-        [
             'production',
             createFuturesProductionWorkstationFakeTransport,
             createFuturesProductionWorkstationRuntimeForTest,
@@ -356,14 +323,12 @@ describe('separately composed Futures workstation services', () => {
         expect(clock.timeoutCount()).toBe(0);
     });
 
-    it('never invokes global fetch in either default composition', async () => {
+    it('never invokes global fetch in the deterministic production composition', async () => {
         const originalFetch = globalThis.fetch;
         const escapedFetch = vi.fn(() => Promise.reject(new Error('network escape')));
         globalThis.fetch = escapedFetch;
         try {
-            const blue = track(createFuturesTestnetWorkstationRuntime());
             const red = track(createFuturesProductionWorkstationRuntime());
-            await blue.service.handleRequest(testnetRequest('no-network-blue'), { emit: () => {} });
             await red.service.handleRequest(productionRequest('no-network-red'), { emit: () => {} });
             expect(escapedFetch).not.toHaveBeenCalled();
         } finally {
@@ -375,12 +340,12 @@ describe('separately composed Futures workstation services', () => {
         ['ETHUSDT', '5m'],
         ['SOLUSDT', '4h'],
     ])('switches to %s/%s with a new backend generation', async (symbol, interval) => {
-        const runtime = track(createFuturesTestnetWorkstationRuntime());
+        const runtime = track(createFuturesProductionWorkstationRuntime());
         const events = [];
-        await runtime.service.handleRequest(testnetRequest('switch-first'), {
+        await runtime.service.handleRequest(productionRequest('switch-first'), {
             emit: event => events.push(event),
         });
-        await runtime.service.handleRequest(testnetRequest('switch-next', symbol, interval), {
+        await runtime.service.handleRequest(productionRequest('switch-next', symbol, interval), {
             emit: event => events.push(event),
         });
         const switched = events.filter(event => event.requestId === 'switch-next');
@@ -392,39 +357,39 @@ describe('separately composed Futures workstation services', () => {
     });
 
     it('drops a late bootstrap from the prior symbol generation', async () => {
-        const base = createFuturesTestnetWorkstationFakeTransport();
+        const base = createFuturesProductionWorkstationFakeTransport();
         const deferred = new Map();
         const transport = {
             ...base,
             bootstrap: ({ symbol }) => new Promise(resolve => deferred.set(symbol, resolve)),
         };
-        const runtime = track(createFuturesTestnetWorkstationRuntimeForTest({ transport }));
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({ transport }));
         const oldEvents = [];
         const newEvents = [];
-        const first = runtime.service.handleRequest(testnetRequest('late-old', 'BTCUSDT'), {
+        const first = runtime.service.handleRequest(productionRequest('late-old', 'BTCUSDT'), {
             emit: event => oldEvents.push(event),
         });
         await vi.waitFor(() => expect(deferred.has('BTCUSDT')).toBe(true));
-        const second = runtime.service.handleRequest(testnetRequest('late-new', 'ETHUSDT'), {
+        const second = runtime.service.handleRequest(productionRequest('late-new', 'ETHUSDT'), {
             emit: event => newEvents.push(event),
         });
         await vi.waitFor(() => expect(deferred.has('ETHUSDT')).toBe(true));
         deferred.get('ETHUSDT')({
-            depthSnapshot: FUTURES_TESTNET_WORKSTATION_FIXTURE.symbols.ETHUSDT.depthSnapshot,
-            contractKlines: FUTURES_TESTNET_WORKSTATION_FIXTURE.symbols.ETHUSDT.contractKlines,
-            markKlines: FUTURES_TESTNET_WORKSTATION_FIXTURE.symbols.ETHUSDT.markKlines,
-            indexKlines: FUTURES_TESTNET_WORKSTATION_FIXTURE.symbols.ETHUSDT.indexKlines,
-            premiumIndex: FUTURES_TESTNET_WORKSTATION_FIXTURE.symbols.ETHUSDT.premiumIndex,
-            ticker: FUTURES_TESTNET_WORKSTATION_FIXTURE.symbols.ETHUSDT.ticker,
+            depthSnapshot: FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.ETHUSDT.depthSnapshot,
+            contractKlines: FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.ETHUSDT.contractKlines,
+            markKlines: FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.ETHUSDT.markKlines,
+            indexKlines: FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.ETHUSDT.indexKlines,
+            premiumIndex: FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.ETHUSDT.premiumIndex,
+            ticker: FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.ETHUSDT.ticker,
         });
         await second;
         deferred.get('BTCUSDT')({
-            depthSnapshot: FUTURES_TESTNET_WORKSTATION_FIXTURE.symbols.BTCUSDT.depthSnapshot,
-            contractKlines: FUTURES_TESTNET_WORKSTATION_FIXTURE.symbols.BTCUSDT.contractKlines,
-            markKlines: FUTURES_TESTNET_WORKSTATION_FIXTURE.symbols.BTCUSDT.markKlines,
-            indexKlines: FUTURES_TESTNET_WORKSTATION_FIXTURE.symbols.BTCUSDT.indexKlines,
-            premiumIndex: FUTURES_TESTNET_WORKSTATION_FIXTURE.symbols.BTCUSDT.premiumIndex,
-            ticker: FUTURES_TESTNET_WORKSTATION_FIXTURE.symbols.BTCUSDT.ticker,
+            depthSnapshot: FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.depthSnapshot,
+            contractKlines: FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.contractKlines,
+            markKlines: FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.markKlines,
+            indexKlines: FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.indexKlines,
+            premiumIndex: FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.premiumIndex,
+            ticker: FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.ticker,
         });
         await first;
         expect(oldEvents.some(event => event.resource === 'status' && event.state === 'live')).toBe(false);
@@ -433,7 +398,7 @@ describe('separately composed Futures workstation services', () => {
     });
 
     it('detects a live depth gap and enters resynchronizing before rebuilding', async () => {
-        const base = createFuturesTestnetWorkstationFakeTransport();
+        const base = createFuturesProductionWorkstationFakeTransport();
         let subscriber;
         const transport = {
             ...base,
@@ -443,15 +408,15 @@ describe('separately composed Futures workstation services', () => {
             },
         };
         const clock = createManualClock();
-        const runtime = track(createFuturesTestnetWorkstationRuntimeForTest({
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
             transport,
             clock: clock.clock,
         }));
         const events = [];
-        await runtime.service.handleRequest(testnetRequest('depth-gap'), {
+        await runtime.service.handleRequest(productionRequest('depth-gap'), {
             emit: event => events.push(event),
         });
-        subscriber.onMessage(FUTURES_TESTNET_WORKSTATION_FIXTURE.symbols.BTCUSDT.streams.makeCycle(2)[0]);
+        subscriber.onMessage(FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.streams.makeCycle(2)[0]);
         expect(events.at(-1)).toMatchObject({
             resource: 'status',
             state: 'resynchronizing',
@@ -461,7 +426,7 @@ describe('separately composed Futures workstation services', () => {
     });
 
     it('ignores a duplicate depth update without revising visible state', async () => {
-        const base = createFuturesTestnetWorkstationFakeTransport();
+        const base = createFuturesProductionWorkstationFakeTransport();
         let subscriber;
         const transport = {
             ...base,
@@ -470,18 +435,18 @@ describe('separately composed Futures workstation services', () => {
                 return base.connect(options);
             },
         };
-        const runtime = track(createFuturesTestnetWorkstationRuntimeForTest({ transport }));
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({ transport }));
         const events = [];
-        await runtime.service.handleRequest(testnetRequest('depth-duplicate'), {
+        await runtime.service.handleRequest(productionRequest('depth-duplicate'), {
             emit: event => events.push(event),
         });
         const count = events.length;
-        subscriber.onMessage(FUTURES_TESTNET_WORKSTATION_FIXTURE.symbols.BTCUSDT.streams.bridgeDepth);
+        subscriber.onMessage(FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.streams.bridgeDepth);
         expect(events).toHaveLength(count);
     });
 
     it('treats malformed stream data as uncertain and schedules resync', async () => {
-        const base = createFuturesTestnetWorkstationFakeTransport();
+        const base = createFuturesProductionWorkstationFakeTransport();
         let subscriber;
         const transport = {
             ...base,
@@ -492,13 +457,13 @@ describe('separately composed Futures workstation services', () => {
         };
         const clock = createManualClock();
         const failures = [];
-        const runtime = track(createFuturesTestnetWorkstationRuntimeForTest({
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
             transport,
             clock: clock.clock,
             onInternalError: failure => failures.push(failure),
         }));
         const events = [];
-        await runtime.service.handleRequest(testnetRequest('malformed-frame'), {
+        await runtime.service.handleRequest(productionRequest('malformed-frame'), {
             emit: event => events.push(event),
         });
         subscriber.onMessage('{"stream":"btcusdt@aggTrade","data":');
@@ -507,13 +472,6 @@ describe('separately composed Futures workstation services', () => {
     });
 
     it.each([
-        [
-            'Testnet',
-            createFuturesTestnetWorkstationFakeTransport,
-            createFuturesTestnetWorkstationRuntimeForTest,
-            testnetRequest,
-            FUTURES_TESTNET_WORKSTATION_FIXTURE,
-        ],
         [
             'production',
             createFuturesProductionWorkstationFakeTransport,
@@ -561,14 +519,14 @@ describe('separately composed Futures workstation services', () => {
     });
 
     it('marks individual resources stale on deterministic freshness deadlines', async () => {
-        const base = createFuturesTestnetWorkstationFakeTransport();
+        const base = createFuturesProductionWorkstationFakeTransport();
         const clock = createManualClock();
-        const runtime = track(createFuturesTestnetWorkstationRuntimeForTest({
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
             transport: base,
             clock: clock.clock,
         }));
         const events = [];
-        await runtime.service.handleRequest(testnetRequest('stale-resources'), {
+        await runtime.service.handleRequest(productionRequest('stale-resources'), {
             emit: event => events.push(event),
         });
         clock.advance(6_001);
@@ -578,14 +536,14 @@ describe('separately composed Futures workstation services', () => {
     });
 
     it('detects clock regression and emits a monotonic resynchronizing revision', async () => {
-        const base = createFuturesTestnetWorkstationFakeTransport();
+        const base = createFuturesProductionWorkstationFakeTransport();
         const clock = createManualClock();
-        const runtime = track(createFuturesTestnetWorkstationRuntimeForTest({
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
             transport: base,
             clock: clock.clock,
         }));
         const events = [];
-        await runtime.service.handleRequest(testnetRequest('clock-regression'), {
+        await runtime.service.handleRequest(productionRequest('clock-regression'), {
             emit: event => events.push(event),
         });
         const lastObserved = events.at(-1).observedAt;
@@ -599,19 +557,19 @@ describe('separately composed Futures workstation services', () => {
     });
 
     it('tears down timers and rejects late events after unsubscribe', async () => {
-        const base = createFuturesTestnetWorkstationFakeTransport();
+        const base = createFuturesProductionWorkstationFakeTransport();
         const clock = createManualClock();
-        const runtime = track(createFuturesTestnetWorkstationRuntimeForTest({
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
             transport: base,
             clock: clock.clock,
         }));
         const events = [];
-        await runtime.service.handleRequest(testnetRequest('unsubscribe-owner'), {
+        await runtime.service.handleRequest(productionRequest('unsubscribe-owner'), {
             emit: event => events.push(event),
         });
         expect(clock.intervalCount()).toBe(1);
         await runtime.service.handleRequest(JSON.stringify(
-            createFuturesTestnetWorkstationUnsubscribeRequest({ requestId: 'unsubscribe-owner' }),
+            createFuturesProductionWorkstationUnsubscribeRequest({ requestId: 'unsubscribe-owner' }),
         ), { emit: event => events.push(event) });
         const count = events.length;
         expect(clock.intervalCount()).toBe(0);
@@ -623,12 +581,6 @@ describe('separately composed Futures workstation services', () => {
     });
 
     it.each([
-        [
-            'Testnet',
-            createFuturesTestnetWorkstationFakeTransport,
-            createFuturesTestnetWorkstationRuntimeForTest,
-            testnetRequest,
-        ],
         [
             'production',
             createFuturesProductionWorkstationFakeTransport,
@@ -674,12 +626,6 @@ describe('separately composed Futures workstation services', () => {
     });
 
     it.each([
-        [
-            'Testnet',
-            createFuturesTestnetWorkstationFakeTransport,
-            createFuturesTestnetWorkstationRuntimeForTest,
-            testnetRequest,
-        ],
         [
             'production',
             createFuturesProductionWorkstationFakeTransport,
@@ -730,12 +676,6 @@ describe('separately composed Futures workstation services', () => {
 
     it.each([
         [
-            'Testnet',
-            createFuturesTestnetWorkstationFakeTransport,
-            createFuturesTestnetWorkstationRuntimeForTest,
-            createFuturesTestnetWorkstationSubscribeRequest,
-        ],
-        [
             'production',
             createFuturesProductionWorkstationFakeTransport,
             createFuturesProductionWorkstationRuntimeForTest,
@@ -758,12 +698,8 @@ describe('separately composed Futures workstation services', () => {
     });
 
     it('never emits credential, signature, private response or write fields', async () => {
-        const blue = track(createFuturesTestnetWorkstationRuntime());
         const red = track(createFuturesProductionWorkstationRuntime());
         const events = [];
-        await blue.service.handleRequest(testnetRequest('secret-scan-blue'), {
-            emit: event => events.push(event),
-        });
         await red.service.handleRequest(productionRequest('secret-scan-red'), {
             emit: event => events.push(event),
         });

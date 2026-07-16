@@ -1,7 +1,6 @@
 import { EventEmitter } from 'node:events';
 import https from 'node:https';
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { FUTURES_TESTNET_WORKSTATION_FIXTURE } from './futures-testnet-workstation-fixtures.js';
 import { FUTURES_PRODUCTION_WORKSTATION_FIXTURE } from './futures-production-workstation-fixtures.js';
 
 const socketMock = vi.hoisted(() => ({ instances: [] }));
@@ -33,14 +32,8 @@ vi.mock('ws', () => {
 });
 
 import {
-    FUTURES_TESTNET_WORKSTATION_REST_ORIGIN,
-    FUTURES_TESTNET_WORKSTATION_REQUEST_LIMITS,
-    FUTURES_TESTNET_WORKSTATION_ROUTES,
-    FUTURES_TESTNET_WORKSTATION_WEIGHTS,
-    FUTURES_TESTNET_WORKSTATION_WSS_ORIGIN,
-    createFuturesTestnetWorkstationReviewedTransport,
-} from './futures-testnet-workstation-transport.js';
-import {
+    FUTURES_PRODUCTION_WORKSTATION_BOOTSTRAP_CONCURRENCY,
+    FUTURES_PRODUCTION_WORKSTATION_EXCHANGE_INFO_CACHE_TTL_MS,
     FUTURES_PRODUCTION_WORKSTATION_REST_ORIGIN,
     FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS,
     FUTURES_PRODUCTION_WORKSTATION_ROUTES,
@@ -135,12 +128,6 @@ afterEach(() => {
 
 describe('reviewed environment-specific Futures workstation transports', () => {
     it.each([
-        [
-            'Testnet',
-            createFuturesTestnetWorkstationReviewedTransport,
-            FUTURES_TESTNET_WORKSTATION_REST_ORIGIN,
-            FUTURES_TESTNET_WORKSTATION_FIXTURE,
-        ],
         [
             'production',
             createFuturesProductionWorkstationReviewedTransport,
@@ -237,11 +224,6 @@ describe('reviewed environment-specific Futures workstation transports', () => {
 
     it.each([
         [
-            'Testnet',
-            createFuturesTestnetWorkstationReviewedTransport,
-            FUTURES_TESTNET_WORKSTATION_WSS_ORIGIN,
-        ],
-        [
             'production',
             createFuturesProductionWorkstationReviewedTransport,
             FUTURES_PRODUCTION_WORKSTATION_WSS_ORIGIN,
@@ -283,7 +265,6 @@ describe('reviewed environment-specific Futures workstation transports', () => {
     });
 
     it.each([
-        ['Testnet', createFuturesTestnetWorkstationReviewedTransport],
         ['production', createFuturesProductionWorkstationReviewedTransport],
     ])('holds the %s connection readiness barrier until both routed sockets open', async (
         _label,
@@ -309,7 +290,6 @@ describe('reviewed environment-specific Futures workstation transports', () => {
     });
 
     it.each([
-        ['Testnet', createFuturesTestnetWorkstationReviewedTransport],
         ['production', createFuturesProductionWorkstationReviewedTransport],
     ])('fails the %s readiness barrier closed when a socket errors before open', async (
         _label,
@@ -329,11 +309,6 @@ describe('reviewed environment-specific Futures workstation transports', () => {
     });
 
     it.each([
-        [
-            'Testnet',
-            createFuturesTestnetWorkstationReviewedTransport,
-            FUTURES_TESTNET_WORKSTATION_WSS_ORIGIN,
-        ],
         [
             'production',
             createFuturesProductionWorkstationReviewedTransport,
@@ -359,7 +334,6 @@ describe('reviewed environment-specific Futures workstation transports', () => {
     });
 
     it.each([
-        ['Testnet', createFuturesTestnetWorkstationReviewedTransport],
         ['production', createFuturesProductionWorkstationReviewedTransport],
     ])('rejects a delivery-shaped %s pair before REST dispatch', async (_label, createTransport) => {
         globalThis.fetch = vi.fn();
@@ -372,13 +346,6 @@ describe('reviewed environment-specific Futures workstation transports', () => {
     });
 
     it.each([
-        [
-            'Testnet',
-            createFuturesTestnetWorkstationReviewedTransport,
-            FUTURES_TESTNET_WORKSTATION_REST_ORIGIN,
-            FUTURES_TESTNET_WORKSTATION_WSS_ORIGIN,
-            FUTURES_TESTNET_WORKSTATION_FIXTURE,
-        ],
         [
             'production',
             createFuturesProductionWorkstationReviewedTransport,
@@ -442,7 +409,6 @@ describe('reviewed environment-specific Futures workstation transports', () => {
     });
 
     it.each([
-        ['Testnet', createFuturesTestnetWorkstationReviewedTransport],
         ['production', createFuturesProductionWorkstationReviewedTransport],
     ])('maps a %s REST deadline to an explicit terminal code', async (_label, createTransport) => {
         vi.useFakeTimers();
@@ -461,13 +427,7 @@ describe('reviewed environment-specific Futures workstation transports', () => {
         await expect(result).resolves.toMatchObject({ code: 'REQUEST_DEADLINE_EXCEEDED' });
     });
 
-    it.each([
-        ['Testnet', createFuturesTestnetWorkstationReviewedTransport],
-        ['production', createFuturesProductionWorkstationReviewedTransport],
-    ])('keeps %s bootstrap REST single-flight and cancels queued reads after failure', async (
-        _label,
-        createTransport,
-    ) => {
+    it('keeps production bootstrap REST bounded and cancels queued reads after failure', async () => {
         const failure = new Error('first bootstrap request failed');
         const calls = [];
         let failFirst;
@@ -482,20 +442,116 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             signal.addEventListener('abort', abort, { once: true });
             if (calls.length === 1) failFirst = () => reject(failure);
         }));
-        const pending = createTransport().bootstrap({
+        const pending = createFuturesProductionWorkstationReviewedTransport().bootstrap({
             symbol: 'BTCUSDT',
             pair: 'BTCUSDT',
             interval: '1m',
         });
-        await vi.waitFor(() => expect(calls).toHaveLength(1));
+        await vi.waitFor(() => expect(calls).toHaveLength(
+            FUTURES_PRODUCTION_WORKSTATION_BOOTSTRAP_CONCURRENCY,
+        ));
         failFirst();
         await expect(pending).rejects.toBe(failure);
         await Promise.resolve();
-        expect(calls).toHaveLength(1);
+        expect(calls).toHaveLength(FUTURES_PRODUCTION_WORKSTATION_BOOTSTRAP_CONCURRENCY);
+    });
+
+    it('deduplicates concurrent exchange-info reads and serves the warm production cache', async () => {
+        const timings = [];
+        globalThis.fetch = vi.fn(async url => responseFor(
+            url.href,
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE,
+        ));
+        const firstTransport = createFuturesProductionWorkstationReviewedTransport({
+            onTiming: timing => timings.push(timing),
+        });
+        const secondTransport = createFuturesProductionWorkstationReviewedTransport({
+            onTiming: timing => timings.push(timing),
+        });
+
+        const [first, shared] = await Promise.all([
+            firstTransport.loadExchangeInfo(),
+            secondTransport.loadExchangeInfo(),
+        ]);
+        const warm = await firstTransport.loadExchangeInfo();
+
+        expect(first).toBe(FUTURES_PRODUCTION_WORKSTATION_FIXTURE.catalog);
+        expect(shared).toBe(first);
+        expect(warm).toBe(first);
+        expect(globalThis.fetch).toHaveBeenCalledOnce();
+        expect(timings.map(timing => timing.cache).sort()).toEqual(['hit', 'miss', 'shared']);
+        expect(timings.every(timing => Object.keys(timing).sort().join(',')
+            === 'cache,durationMs,outcome,phase')).toBe(true);
+    });
+
+    it('does not dispatch exchange-info for an already-aborted caller', async () => {
+        const timings = [];
+        globalThis.fetch = vi.fn(async url => responseFor(
+            url.href,
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE,
+        ));
+        const transport = createFuturesProductionWorkstationReviewedTransport({
+            onTiming: timing => timings.push(timing),
+        });
+        const controller = new AbortController();
+        controller.abort();
+
+        await expect(transport.loadExchangeInfo({ signal: controller.signal }))
+            .rejects.toMatchObject({ code: 'REQUEST_ABORTED' });
+        expect(globalThis.fetch).not.toHaveBeenCalled();
+        expect(timings).toHaveLength(1);
+        expect(timings[0]).toMatchObject({
+            phase: 'exchange-info',
+            outcome: 'error',
+            cache: null,
+        });
+        expect(timings[0].durationMs).toBeGreaterThanOrEqual(0);
+    });
+
+    it('reports a warm-cache caller abort without invalidating the shared value', async () => {
+        const timings = [];
+        globalThis.fetch = vi.fn(async url => responseFor(
+            url.href,
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE,
+        ));
+        const transport = createFuturesProductionWorkstationReviewedTransport({
+            onTiming: timing => timings.push(timing),
+        });
+        await transport.loadExchangeInfo();
+        const controller = new AbortController();
+        const aborted = transport.loadExchangeInfo({ signal: controller.signal });
+        controller.abort();
+
+        await expect(aborted).rejects.toMatchObject({ code: 'REQUEST_ABORTED' });
+        await expect(transport.loadExchangeInfo()).resolves.toBe(
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE.catalog,
+        );
+        expect(globalThis.fetch).toHaveBeenCalledOnce();
+        expect(timings.at(-2)).toMatchObject({ cache: 'hit', outcome: 'error' });
+        expect(timings.at(-1)).toMatchObject({ cache: 'hit', outcome: 'ok' });
+    });
+
+    it('refreshes exchange-info after the bounded production cache TTL', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-07-16T12:00:00.000Z'));
+        globalThis.fetch = vi.fn(async url => responseFor(
+            url.href,
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE,
+        ));
+        const transport = createFuturesProductionWorkstationReviewedTransport();
+
+        await transport.loadExchangeInfo();
+        await transport.loadExchangeInfo();
+        expect(globalThis.fetch).toHaveBeenCalledOnce();
+
+        await vi.advanceTimersByTimeAsync(
+            FUTURES_PRODUCTION_WORKSTATION_EXCHANGE_INFO_CACHE_TTL_MS + 1,
+        );
+        await transport.loadExchangeInfo();
+        expect(globalThis.fetch).toHaveBeenCalledTimes(2);
     });
 
     it.each([
-        ['Testnet', createFuturesTestnetWorkstationReviewedTransport],
         ['production', createFuturesProductionWorkstationReviewedTransport],
     ])('fails closed before any %s dispatch when the backend proxy is invalid', async (
         _label,
@@ -539,7 +595,6 @@ describe('reviewed environment-specific Futures workstation transports', () => {
     });
 
     it.each([
-        ['Testnet', createFuturesTestnetWorkstationReviewedTransport],
         ['production', createFuturesProductionWorkstationReviewedTransport],
     ])('rejects a binary %s market frame immediately', (_label, createTransport) => {
         vi.useFakeTimers();
@@ -571,10 +626,6 @@ describe('reviewed environment-specific Futures workstation transports', () => {
     });
 
     it('freezes the documented route and request-weight registries', () => {
-        expect(FUTURES_TESTNET_WORKSTATION_ROUTES).toEqual(FUTURES_PRODUCTION_WORKSTATION_ROUTES);
-        expect(FUTURES_TESTNET_WORKSTATION_WEIGHTS).toEqual(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS);
-        expect(FUTURES_TESTNET_WORKSTATION_REQUEST_LIMITS)
-            .toEqual(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS);
         expect(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS).toEqual({
             EXCHANGE_INFO: 1,
             DEPTH_1000: 20,
@@ -592,5 +643,6 @@ describe('reviewed environment-specific Futures workstation transports', () => {
         });
         expect(Object.isFrozen(FUTURES_PRODUCTION_WORKSTATION_ROUTES)).toBe(true);
         expect(Object.isFrozen(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS)).toBe(true);
+        expect(FUTURES_PRODUCTION_WORKSTATION_BOOTSTRAP_CONCURRENCY).toBe(3);
     });
 });

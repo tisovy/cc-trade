@@ -1,7 +1,6 @@
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import FuturesWorkstationView from './FuturesWorkstationView.jsx'
-import FuturesTestnetWorkstation from './FuturesTestnetWorkstation.jsx'
 import FuturesProductionWorkstation from './FuturesProductionWorkstation.jsx'
 
 vi.mock('./FuturesWorkstationChart.jsx', () => ({
@@ -54,7 +53,7 @@ const trade = (id, price = '58420.25') => Object.freeze({
 
 const createState = (overrides = {}) => Object.freeze({
   status: 'live',
-  environment: 'TESTNET',
+  environment: 'PRODUCTION',
   symbol: 'BTCUSDT',
   interval: '1m',
   requestId: 'ui-request',
@@ -125,7 +124,7 @@ const renderView = (properties = {}) => {
   const onIntervalChange = vi.fn()
   const result = render(
     <FuturesWorkstationView
-      identity="USDⓈ-M TESTNET · SIMULATED FUNDS"
+      identity="USDⓈ-M PRODUCTION · REAL MONEY"
       state={createState()}
       selectedSymbol="BTCUSDT"
       selectedInterval="1m"
@@ -143,7 +142,7 @@ describe('pure Futures workstation presentation', () => {
   it('renders identity, exact market context, filters, book and bounded tape', () => {
     renderView()
     expect(screen.getByTestId('futures-workstation-identity')).toHaveTextContent(
-      'USDⓈ-M TESTNET · SIMULATED FUNDSPUBLIC MARKET DATA · READ ONLYLIVEgen 7 · rev 42',
+      'USDⓈ-M PRODUCTION · REAL MONEYPUBLIC MARKET DATA · READ ONLYLIVEgen 7 · rev 42',
     )
     expect(screen.getByLabelText('Futures market header')).toHaveTextContent('58420.25')
     expect(screen.getByLabelText('Futures market header')).toHaveTextContent('58419.99')
@@ -286,7 +285,7 @@ describe('pure Futures workstation presentation', () => {
     })
     rerender(
       <FuturesWorkstationView
-        identity="USDⓈ-M TESTNET · SIMULATED FUNDS"
+        identity="USDⓈ-M PRODUCTION · REAL MONEY"
         state={nextState}
         selectedSymbol="BTCUSDT"
         selectedInterval="1m"
@@ -331,27 +330,28 @@ describe('pure Futures workstation presentation', () => {
       .toHaveTextContent('reason INVALID_PROXY_CONFIGURATION')
   })
 
-  it('lets aggregate recovery state override cached LIVE widgets and blocks stale drafting', () => {
+  it('keeps independently live widgets usable while aggregate recovery remains visible', () => {
     const state = createState({ status: 'resynchronizing' })
     renderView({ state })
     fireEvent.click(screen.getByRole('button', { name: 'Pick chart price' }))
     expect(screen.getByLabelText('Local non-executable price draft'))
-      .toHaveTextContent('Pick chart or book price')
-    expect(screen.getByRole('button', { name: /^58420\.50/ })).toBeDisabled()
-    expect(screen.getByText('RESYNCHRONIZING', { selector: '.futures-workstation-overlay strong' }))
-      .toBeInTheDocument()
+      .toHaveTextContent('58420.25')
+    expect(screen.getByRole('button', { name: /^58420\.50/ })).toBeEnabled()
+    expect(screen.queryByText('RESYNCHRONIZING', { selector: '.futures-workstation-overlay strong' }))
+      .not.toBeInTheDocument()
+    expect(screen.getByTestId('futures-workstation-identity')).toHaveTextContent('RESYNCHRONIZING')
   })
 
   it('resets display-only drafts, drawings, alerts and paused tape on selection ownership change', () => {
     const properties = {
-      identity: 'USDⓈ-M TESTNET · SIMULATED FUNDS',
+      identity: 'USDⓈ-M PRODUCTION · REAL MONEY',
       state: createState(),
       selectedInterval: '1m',
       onSymbolChange: () => {},
       onIntervalChange: () => {},
     }
     const { rerender } = render(
-      <FuturesWorkstationView key="BTCUSDT:1m" {...properties} selectedSymbol="BTCUSDT" />,
+      <FuturesWorkstationView key="BTCUSDT" {...properties} selectedSymbol="BTCUSDT" />,
     )
     fireEvent.click(screen.getByRole('button', { name: 'Pick chart price' }))
     fireEvent.click(screen.getByRole('button', { name: 'Horizontal drawing' }))
@@ -360,7 +360,7 @@ describe('pure Futures workstation presentation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Pause' }))
 
     rerender(
-      <FuturesWorkstationView key="ETHUSDT:1m" {...properties} selectedSymbol="ETHUSDT" />,
+      <FuturesWorkstationView key="ETHUSDT" {...properties} selectedSymbol="ETHUSDT" />,
     )
     expect(screen.getByLabelText('Local non-executable price draft'))
       .toHaveTextContent('Pick chart or book price')
@@ -368,19 +368,6 @@ describe('pure Futures workstation presentation', () => {
     expect(screen.getByTestId('mock-futures-chart')).toHaveTextContent('alerts 0')
     expect(screen.getByRole('button', { name: 'Pause' })).toBeInTheDocument()
   })
-})
-
-const testnetExecutionState = Object.freeze({
-  connected: false,
-  subscribed: false,
-  submissionLocked: false,
-  revision: null,
-  symbol: null,
-  capability: null,
-  intent: null,
-  attempt: null,
-  prepareIntent: vi.fn(() => false),
-  placeOrder: vi.fn(() => false),
 })
 
 const productionExecutionState = Object.freeze({
@@ -411,22 +398,7 @@ const productionExecutionState = Object.freeze({
   disengageKillSwitch: vi.fn(() => false),
 })
 
-describe('environment-specific workstation containers', () => {
-  it('retains the Phase 5/6 surfaces in an explicit blue safety drawer', () => {
-    render(
-      <FuturesTestnetWorkstation
-        enabled={false}
-        wsConnection={null}
-        sendMessage={() => false}
-        readOnlyState={{ status: 'idle', environment: 'mock', symbol: null, resources: {} }}
-        executionState={testnetExecutionState}
-      />,
-    )
-    expect(screen.getByText('Phase 5/6 safety drawer')).toBeInTheDocument()
-    expect(screen.getByLabelText('USDⓈ-M futures read-only risk')).toBeInTheDocument()
-    expect(screen.getByLabelText('USDⓈ-M testnet reduce-only execution')).toBeInTheDocument()
-  })
-
+describe('production workstation container', () => {
   it('retains Phase 7 caps and recovery in an explicit red safety drawer', () => {
     render(
       <FuturesProductionWorkstation

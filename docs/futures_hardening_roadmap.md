@@ -2,6 +2,11 @@
 
 This document is the implementation roadmap for stabilizing the current spot terminal and adding futures support safely.
 
+> Retirement addendum (2026-07-16): Futures Testnet and the Phase 5/6 runtime
+> are archived and no longer form an active product or verification path.
+> Historical Testnet sections below are retained for traceability. Current work
+> follows the [Live performance and Testnet retirement plan](./futures_live_performance_and_testnet_retirement_plan.md).
+
 ## Guardrails
 
 - Do not change the existing `0.999` quantity reduction behavior unless explicitly approved later.
@@ -866,7 +871,10 @@ Acceptance:
 
 Goal: enable the smallest testnet-only futures order path without weakening the completed read-only, Spot, protocol, lifecycle, credential, or production-exclusion boundaries.
 
-The accepted, testnet-grade architecture decision is in [Phase 6 Testnet Futures Execution Design](./futures_phase6_testnet_execution_design.md). It is the normative implementation contract; this roadmap records the exit decisions and next boundary.
+The former testnet-grade architecture decision was stored at
+`docs/futures_phase6_testnet_execution_design.md`. It is no longer normative;
+the exact historical file can be recovered from the revision recorded in the
+[Testnet archive manifest](../archive/futures-testnet/MANIFEST.md).
 
 ### Phase 6 accepted decision
 

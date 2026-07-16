@@ -48,7 +48,6 @@ describe('renderer runtime preload boundary', () => {
         token: 'sessionToken_123',
         tokenParam: 'unexpected',
       },
-      futuresReadEnvironment: 'testnet',
       analyticsConfig: {
         baseUrl: 'https://analytics.example.test',
         key: 'public-key',
@@ -68,7 +67,6 @@ describe('renderer runtime preload boundary', () => {
         token: 'sessionToken_123',
         tokenParam: 'token',
       },
-      futuresReadEnvironment: 'testnet',
       analyticsConfig: {
         baseUrl: 'https://analytics.example.test',
         key: 'public-key',
@@ -84,7 +82,6 @@ describe('renderer runtime preload boundary', () => {
   it('exposes one immutable data object and fails closed on malformed main data', () => {
     const runtime = createRendererRuntime({
       localWebSocketAccess: { host: 'localhost', port: 54321, token: 'abc123' },
-      futuresReadEnvironment: 'testnet',
     })
 
     const { exposed, channels } = runPreload(runtime)
@@ -95,7 +92,6 @@ describe('renderer runtime preload boundary', () => {
       token: 'abc123',
       tokenParam: 'token',
     })
-    expect(exposed.ccTradeRuntime.futuresReadEnvironment).toBe('testnet')
     expect(Object.isFrozen(exposed.ccTradeRuntime)).toBe(true)
     expect(Object.isFrozen(exposed.ccTradeRuntime.localWebSocketAccess)).toBe(true)
     expect(channels).toEqual([RENDERER_RUNTIME_IPC_CHANNEL])
@@ -108,7 +104,6 @@ describe('renderer runtime preload boundary', () => {
         token: '',
         tokenParam: 'token',
       },
-      futuresReadEnvironment: 'mock',
       analyticsConfig: null,
     })
   })

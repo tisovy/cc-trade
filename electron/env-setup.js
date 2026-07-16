@@ -7,12 +7,8 @@ import {
 // automated verification.
 process.env.BK = '';
 process.env.BS = '';
-process.env.FUTURES_READ_MODE = 'mock';
-process.env.FUTURES_READ_MOCK_SCENARIO = 'one-way';
-delete process.env.FUTURES_TESTNET_API_KEY;
-delete process.env.FUTURES_TESTNET_API_SECRET;
 for (const key of Object.keys(process.env)) {
-    if (key.startsWith('FUTURES_TESTNET_EXECUTION_')) {
+    if (key.startsWith('FUTURES_TESTNET_') || key.startsWith('FUTURES_READ_')) {
         delete process.env[key];
     }
     if (key.startsWith('FUTURES_PRODUCTION_')) {

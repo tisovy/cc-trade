@@ -9,7 +9,6 @@ const fallbackRuntime = () => ({
     token: '',
     tokenParam: 'token',
   },
-  futuresReadEnvironment: 'mock',
   analyticsConfig: null,
 })
 
@@ -52,11 +51,8 @@ export const getRendererRuntime = () => {
 
   return {
     localWebSocketAccess: readLocalWebSocketAccess(runtime.localWebSocketAccess),
-    futuresReadEnvironment: runtime.futuresReadEnvironment === 'testnet' ? 'testnet' : 'mock',
     analyticsConfig: readAnalyticsConfig(runtime.analyticsConfig),
   }
 }
-
-export const getRendererFuturesReadEnvironment = () => getRendererRuntime().futuresReadEnvironment
 
 export const getRendererAnalyticsConfig = () => getRendererRuntime().analyticsConfig

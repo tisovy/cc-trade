@@ -29,19 +29,6 @@ const moduleMocks = vi.hoisted(() => {
                 state.websocketServerHandlers[event] = handler;
             }),
         };
-        state.executionService = {
-            start: vi.fn().mockResolvedValue(undefined),
-            shutdown: vi.fn().mockResolvedValue(undefined),
-            bindReadSession: vi.fn(() => true),
-            unbindReadSession: vi.fn(() => true),
-            disconnect: vi.fn(() => true),
-            handleSessionRequest: vi.fn(() => true),
-            handlePlaceOrder: vi.fn().mockResolvedValue(true),
-        };
-        state.executionRuntime = {
-            service: state.executionService,
-            durable: false,
-        };
         state.productionExecutionService = {
             shutdown: vi.fn().mockResolvedValue(undefined),
             disconnect: vi.fn(() => true),
@@ -103,7 +90,6 @@ const moduleMocks = vi.hoisted(() => {
     const Spot = vi.fn(function MockSpot() {
         return state.spotClient;
     });
-    const createExecutionRuntime = vi.fn(async () => state.executionRuntime);
     const createProductionExecutionRuntime = vi.fn(
         async () => state.productionExecutionRuntime,
     );
@@ -114,7 +100,6 @@ const moduleMocks = vi.hoisted(() => {
         Spot,
         WebSocketServer,
         createHttpServer,
-        createExecutionRuntime,
         createProductionExecutionRuntime,
         makeSocket,
         reset,
@@ -122,7 +107,6 @@ const moduleMocks = vi.hoisted(() => {
             state.userDataConnection = connection;
         },
         get connect() { return state.connect; },
-        get executionService() { return state.executionService; },
         get httpServer() { return state.httpServer; },
         get marketSocket() { return state.marketSocket; },
         get productionExecutionService() { return state.productionExecutionService; },
@@ -155,10 +139,6 @@ vi.mock('./local-websocket-access.js', () => ({
     validateLocalWebSocketRequest: vi.fn(() => ({ allowed: true })),
 }));
 
-vi.mock('./futures-testnet-execution-composition.js', () => ({
-    createFuturesTestnetExecutionRuntime: moduleMocks.createExecutionRuntime,
-}));
-
 vi.mock('./futures-production-execution-composition.js', () => ({
     createFuturesProductionExecutionRuntime: moduleMocks.createProductionExecutionRuntime,
 }));
@@ -188,9 +168,6 @@ describe('setupBinanceConnection user-data orchestration', () => {
         vi.stubEnv('BS', 'test-api-secret');
         vi.stubEnv('WS_PORT', '14477');
         vi.stubEnv('LOG_LEVEL', 'info');
-        vi.stubEnv('FUTURES_READ_MODE', 'mock');
-        vi.stubEnv('FUTURES_READ_MOCK_SCENARIO', 'one-way');
-        vi.stubEnv('FUTURES_READ_ENVIRONMENT', '');
         vi.stubEnv('https_proxy', '');
         vi.stubEnv('HTTPS_PROXY', '');
         vi.stubEnv('http_proxy', '');
@@ -1861,117 +1838,13 @@ describe('setupBinanceConnection user-data orchestration', () => {
         }
     });
 
-    it('routes versioned mock futures snapshots separately and tears their lifecycle down', async () => {
-        vi.stubEnv('BK', '');
-        vi.stubEnv('BS', '');
-        vi.stubEnv('FUTURES_READ_MODE', 'mock');
-
-        setupBinanceConnection({
-            localWebSocketAccess: { host: '127.0.0.1' },
-        });
-
-        const request = {
-            origin: 'http://localhost:5174',
-            accept: vi.fn(() => moduleMocks.rendererConnection),
-        };
-        moduleMocks.websocketServerHandlers.request(request);
-
-        const subscribe = {
-            action: 'futures.read.subscribe',
-            version: 1,
-            marketType: 'futures',
-            requestId: 'futures-service-test-1',
-            symbol: 'BTCUSDT',
-        };
-        await moduleMocks.rendererHandlers.message({
-            type: 'utf8',
-            utf8Data: JSON.stringify(subscribe),
-        });
-        await vi.advanceTimersByTimeAsync(1_000);
-        await flushMicrotasks();
-
-        const payloads = moduleMocks.rendererConnection.sendUTF.mock.calls
-            .map(([message]) => JSON.parse(message));
-        const futuresSnapshots = payloads.filter((payload) => (
-            payload.channelId === 'futures-readonly' && payload.type === 'snapshot'
-        ));
-        const latestSnapshot = futuresSnapshots.at(-1);
-
-        expect(latestSnapshot).toMatchObject({
-            version: 1,
-            marketType: 'futures',
-            requestId: 'futures-service-test-1',
-            symbol: 'BTCUSDT',
-            environment: 'mock',
-            payload: {
-                symbol: 'BTCUSDT',
-                environment: 'mock',
-                connected: true,
-            },
-        });
-        expect(latestSnapshot.payload.resources.positions.data).toEqual([
-            expect.objectContaining({
-                marketType: 'futures',
-                symbol: 'BTCUSDT',
-                unRealizedProfit: expect.any(String),
-                liquidationPrice: expect.any(String),
-            }),
-        ]);
-        expect(latestSnapshot.payload.resources).not.toHaveProperty('balances');
-        expect(latestSnapshot).not.toHaveProperty('orders');
-
-        const snapshotCountBeforeClose = futuresSnapshots.length;
-        moduleMocks.rendererConnection.close();
-        await vi.advanceTimersByTimeAsync(35_000);
-        await flushMicrotasks();
-
-        const snapshotsAfterClose = moduleMocks.rendererConnection.sendUTF.mock.calls
-            .map(([message]) => JSON.parse(message))
-            .filter((payload) => (
-                payload.channelId === 'futures-readonly' && payload.type === 'snapshot'
-            ));
-        expect(snapshotsAfterClose).toHaveLength(snapshotCountBeforeClose);
-    });
-
-    it('emits a safe rejection when an invalid futures request id cannot be echoed', async () => {
-        setupBinanceConnection({
-            localWebSocketAccess: { host: '127.0.0.1' },
-        });
-        moduleMocks.websocketServerHandlers.request({
-            origin: 'http://localhost:5174',
-            accept: vi.fn(() => moduleMocks.rendererConnection),
-        });
-
-        await moduleMocks.rendererHandlers.message({
-            type: 'utf8',
-            utf8Data: JSON.stringify({
-                action: 'futures.read.subscribe',
-                version: 1,
-                marketType: 'futures',
-                requestId: '   ',
-                symbol: 'BTCUSDT',
-            }),
-        });
-
-        const rejection = moduleMocks.rendererConnection.sendUTF.mock.calls
-            .map(([message]) => JSON.parse(message))
-            .find(payload => payload.type === 'rejection');
-        expect(rejection).toMatchObject({
-            channelId: 'futures-readonly',
-            requestId: 'invalid-futures-read-request',
-            symbol: 'BTCUSDT',
-            environment: 'mock',
-            payload: {
-                code: 'FUTURES_READ_INVALID_REQUEST_ID',
-                message: 'Futures read-only request rejected',
-            },
-        });
-    });
-
-    it('consumes separate testnet credentials before a renderer can observe process.env', () => {
+    it('scrubs every retired Testnet and read-only environment value before renderer access', () => {
         vi.stubEnv('FUTURES_READ_MODE', 'testnet');
+        vi.stubEnv('FUTURES_READ_ENVIRONMENT', 'testnet');
+        vi.stubEnv('FUTURES_READ_MOCK_SCENARIO', 'one-way');
         vi.stubEnv('FUTURES_TESTNET_API_KEY', 'futures-testnet-key');
         vi.stubEnv('FUTURES_TESTNET_API_SECRET', 'futures-testnet-secret');
+        vi.stubEnv('FUTURES_TESTNET_EXECUTION_ENABLED', 'true');
 
         setupBinanceConnection({
             localWebSocketAccess: { host: '127.0.0.1' },
@@ -1979,7 +1852,10 @@ describe('setupBinanceConnection user-data orchestration', () => {
 
         expect(process.env.FUTURES_TESTNET_API_KEY).toBeUndefined();
         expect(process.env.FUTURES_TESTNET_API_SECRET).toBeUndefined();
-        expect(process.env.FUTURES_READ_ENVIRONMENT).toBe('testnet');
+        expect(process.env.FUTURES_TESTNET_EXECUTION_ENABLED).toBeUndefined();
+        expect(process.env.FUTURES_READ_MODE).toBeUndefined();
+        expect(process.env.FUTURES_READ_ENVIRONMENT).toBeUndefined();
+        expect(process.env.FUTURES_READ_MOCK_SCENARIO).toBeUndefined();
         expect(process.env.BK).toBe('test-api-key');
         expect(process.env.BS).toBe('test-api-secret');
     });
@@ -2122,7 +1998,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(moduleMocks.rendererConnection.drop).toHaveBeenCalledWith(1009, 'message too large');
     });
 
-    it('routes only the dedicated execution protocol and preserves its exact raw UTF-8 frame', async () => {
+    it('does not route retired Testnet/read-only protocols to Production or Spot', async () => {
         const spotPlaceOrder = vi.spyOn(SpotTradingAdapter.prototype, 'placeOrder');
         setupBinanceConnection({
             localWebSocketAccess: { host: '127.0.0.1', port: 14477 },
@@ -2140,14 +2016,12 @@ describe('setupBinanceConnection user-data orchestration', () => {
             environment: 'testnet',
             symbol: 'BTCUSDT',
         });
-        await moduleMocks.rendererHandlers.message({ type: 'utf8', utf8Data: subscribeRaw });
-
         const duplicateKeyRaw = '{"action":"futures.execution.placeOrder","action":"futures.execution.placeOrder","version":1}';
-        await moduleMocks.rendererHandlers.message({ type: 'utf8', utf8Data: duplicateKeyRaw });
-
         const escapedDuplicateRaw = '{"action":"futures.\\u0065xecution.placeOrder","action":"trade.placeOrder","version":1,"marketType":"spot","accountId":"default","clientOrderId":"smuggled-spot","symbol":"BTCUSDT","side":"BUY","orderType":"LIMIT","timeInForce":"GTC","price":"50000","quantity":"0.01"}';
-        await moduleMocks.rendererHandlers.message({ type: 'utf8', utf8Data: escapedDuplicateRaw });
-
+        const readOnlySmuggleRaw = '{"action":"futures.read.subscribe","action":"trade.placeOrder","version":1,"marketType":"spot","accountId":"default","clientOrderId":"smuggled-read","symbol":"BTCUSDT","side":"BUY","orderType":"LIMIT","timeInForce":"GTC","price":"50000","quantity":"0.01"}';
+        const escapedReadOnlySmuggleRaw = '{"action":"futures.\\u0072ead.subscribe","action":"trade.placeOrder","version":1,"marketType":"spot","accountId":"default","clientOrderId":"smuggled-escaped-read","symbol":"BTCUSDT","side":"BUY","orderType":"LIMIT","timeInForce":"GTC","price":"50000","quantity":"0.01"}';
+        const testnetWorkstationSmuggleRaw = '{"action":"futures.testnet.workstation.subscribe","action":"trade.placeOrder","version":1,"marketType":"spot","accountId":"default","clientOrderId":"smuggled-testnet","symbol":"BTCUSDT","side":"BUY","orderType":"LIMIT","timeInForce":"GTC","price":"50000","quantity":"0.01"}';
+        const retiredChannelSmuggleRaw = '{"channelId":"futures-testnet-workstation","action":"trade.placeOrder","version":1,"marketType":"spot","accountId":"default","clientOrderId":"smuggled-channel","symbol":"BTCUSDT","side":"BUY","orderType":"LIMIT","timeInForce":"GTC","price":"50000","quantity":"0.01"}';
         const preConversionOversizedRaw = JSON.stringify({
             action: 'futures.execution.placeOrder',
             padding: 'x'.repeat(4_096),
@@ -2156,28 +2030,20 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(Buffer.byteLength(preConversionOversizedRaw, 'utf8')).toBeLessThanOrEqual(
             LOCAL_RENDERER_WS_MAX_MESSAGE_BYTES,
         );
-        await moduleMocks.rendererHandlers.message({
-            type: 'utf8',
-            utf8Data: preConversionOversizedRaw,
-        });
-
-        expect(moduleMocks.executionService.handleSessionRequest).toHaveBeenCalledOnce();
-        expect(moduleMocks.executionService.handleSessionRequest.mock.calls[0][0]).toBe(subscribeRaw);
-        expect(moduleMocks.executionService.handlePlaceOrder).toHaveBeenNthCalledWith(
-            1,
+        for (const raw of [
+            subscribeRaw,
             duplicateKeyRaw,
-            expect.objectContaining({ connectionId: expect.any(String), emit: expect.any(Function) }),
-        );
-        expect(moduleMocks.executionService.handlePlaceOrder).toHaveBeenNthCalledWith(
-            2,
             escapedDuplicateRaw,
-            expect.objectContaining({ connectionId: expect.any(String), emit: expect.any(Function) }),
-        );
-        expect(moduleMocks.executionService.handlePlaceOrder).toHaveBeenNthCalledWith(
-            3,
+            readOnlySmuggleRaw,
+            escapedReadOnlySmuggleRaw,
+            testnetWorkstationSmuggleRaw,
+            retiredChannelSmuggleRaw,
             preConversionOversizedRaw,
-            expect.objectContaining({ connectionId: expect.any(String), emit: expect.any(Function) }),
-        );
+        ]) {
+            await moduleMocks.rendererHandlers.message({ type: 'utf8', utf8Data: raw });
+        }
+
+        expect(moduleMocks.productionExecutionService.handleRequest).not.toHaveBeenCalled();
         expect(spotPlaceOrder).not.toHaveBeenCalled();
     });
 
@@ -2241,8 +2107,6 @@ describe('setupBinanceConnection user-data orchestration', () => {
             connectionId: productionRouteOptions[0].connectionId,
             emit: expect.any(Function),
         })));
-        expect(moduleMocks.executionService.handleSessionRequest).not.toHaveBeenCalled();
-        expect(moduleMocks.executionService.handlePlaceOrder).not.toHaveBeenCalled();
         expect(spotPlaceOrder).not.toHaveBeenCalled();
 
         moduleMocks.rendererConnection.close();

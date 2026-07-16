@@ -21,7 +21,6 @@ const fallbackRuntime = () => Object.freeze({
     token: '',
     tokenParam: 'token',
   }),
-  futuresReadEnvironment: 'mock',
   analyticsConfig: null,
 })
 
@@ -53,7 +52,7 @@ const normalizeAnalyticsConfig = (source) => {
 
 const parseRuntime = (runtime) => {
   try {
-    if (!hasExactKeys(runtime, ['version', 'localWebSocketAccess', 'futuresReadEnvironment', 'analyticsConfig'])) {
+    if (!hasExactKeys(runtime, ['version', 'localWebSocketAccess', 'analyticsConfig'])) {
       return fallbackRuntime()
     }
     if (runtime.version !== 1 || !hasExactKeys(runtime.localWebSocketAccess, ['host', 'port', 'token', 'tokenParam'])) {
@@ -73,7 +72,6 @@ const parseRuntime = (runtime) => {
 
     return Object.freeze({
       localWebSocketAccess: Object.freeze({ host, port, token, tokenParam }),
-      futuresReadEnvironment: runtime.futuresReadEnvironment === 'testnet' ? 'testnet' : 'mock',
       analyticsConfig: runtime.analyticsConfig === null ? null : normalizeAnalyticsConfig(runtime.analyticsConfig),
     })
   } catch {

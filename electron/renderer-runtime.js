@@ -52,7 +52,6 @@ const normalizeAnalyticsConfig = (source) => {
 
 export const createRendererRuntime = ({
   localWebSocketAccess = {},
-  futuresReadEnvironment,
   analyticsConfig,
 } = {}) => {
   return Object.freeze({
@@ -63,7 +62,6 @@ export const createRendererRuntime = ({
       token: normalizeToken(localWebSocketAccess.token),
       tokenParam: 'token',
     }),
-    futuresReadEnvironment: futuresReadEnvironment === 'testnet' ? 'testnet' : 'mock',
     analyticsConfig: normalizeAnalyticsConfig(analyticsConfig),
   })
 }

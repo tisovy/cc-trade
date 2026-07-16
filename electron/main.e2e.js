@@ -5,9 +5,6 @@ import { fileURLToPath } from 'url'
 import { shouldOpenDevTools } from './devtools.js'
 import { setupBinanceConnection } from './services/binance-connection.js'
 import {
-    captureFuturesTestnetExecutionConfig,
-} from './services/futures-testnet-execution-config.js'
-import {
     captureFuturesProductionExecutionConfig,
 } from './services/futures-production-execution-config.js'
 import {
@@ -35,10 +32,6 @@ import {
 
 registerRendererAppProtocolScheme(protocol)
 
-const futuresExecutionConfig = captureFuturesTestnetExecutionConfig({
-    futuresReadMode: 'mock',
-    forceDisabled: true,
-})
 const futuresProductionExecutionConfig = captureFuturesProductionExecutionConfig({
     forceDisabled: true,
     liveAuthorized: false,
@@ -60,7 +53,6 @@ const rendererRuntimeRegistry = createRendererRuntimeRegistry(ipcMain)
 
 setupBinanceConnection({
     localWebSocketAccess,
-    futuresExecutionConfig,
     futuresProductionExecutionConfig,
 });
 
@@ -95,7 +87,6 @@ function createWindow() {
     }
     const rendererRuntime = createRendererRuntime({
         localWebSocketAccess: rendererWebSocketAccess,
-        futuresReadEnvironment: process.env.FUTURES_READ_ENVIRONMENT,
         analyticsConfig: {
             baseUrl: 'http://localhost:3000',
             enabled: false,

@@ -23,37 +23,7 @@ import {
     buildSpotMockOrderPlacementExecutionReport,
     runSpotAccountRefreshOperations,
 } from './spot-trading-adapter.js';
-import { FuturesTradingAdapter } from './futures-trading-adapter.js';
-import { createFuturesReadOnlyService } from './futures-readonly-service.js';
-import {
-    createFuturesReadOnlyTransport,
-    resolveFuturesReadOnlyTransportConfig,
-} from './futures-readonly-transport.js';
-import {
-    FUTURES_READ_ACTIONS,
-    FUTURES_READ_RESPONSE_TYPES,
-    createFuturesReadOnlyResponse,
-    isFuturesReadOnlyAction,
-} from '../../src/utils/futuresReadOnlyProtocol.js';
 import { TRADING_COMMAND_ACTIONS } from '../../src/utils/tradingCommands.js';
-import {
-    captureFuturesTestnetExecutionConfig,
-} from './futures-testnet-execution-config.js';
-import {
-    createFuturesTestnetExecutionCoordinator,
-} from './futures-testnet-execution-coordinator.js';
-import {
-    createFuturesTestnetExecutionRuntime,
-} from './futures-testnet-execution-composition.js';
-import {
-    FUTURES_TESTNET_EXECUTION_ACTION,
-} from './futures-testnet-execution-protocol.js';
-import {
-    FUTURES_TESTNET_EXECUTION_SESSION_ACTIONS,
-    FUTURES_TESTNET_EXECUTION_SESSION_MAX_BYTES,
-    isPotentialFuturesTestnetExecutionFrame,
-    readFuturesTestnetExecutionAction,
-} from './futures-testnet-execution-session-protocol.js';
 import {
     captureFuturesProductionExecutionConfig,
 } from './futures-production-execution-config.js';
@@ -67,14 +37,8 @@ import {
     readFuturesProductionExecutionAction,
 } from './futures-production-execution-protocol.js';
 import {
-    createFuturesTestnetWorkstationRuntime,
-} from './futures-testnet-workstation-composition.js';
-import {
     createFuturesProductionWorkstationRuntime,
 } from './futures-production-workstation-composition.js';
-import {
-    isPotentialFuturesTestnetWorkstationFrame,
-} from '../../src/utils/futuresTestnetWorkstationProtocol.js';
 import {
     isPotentialFuturesProductionWorkstationFrame,
 } from '../../src/utils/futuresProductionWorkstationProtocol.js';
@@ -118,7 +82,6 @@ const validateRendererActionEnvelope = (data, channelManager) => {
     }
 
     const isKnownAction = CHANNEL_ACTIONS.has(data.action)
-        || isFuturesReadOnlyAction(data.action)
         || Object.values(TRADING_COMMAND_ACTIONS).includes(data.action);
     if (!isKnownAction) {
         return { code: 'UNSUPPORTED_ACTION', message: 'action is not supported' };
@@ -433,8 +396,9 @@ export class RateLimiter {
     }
 }
 
-// The established Spot limiter remains unchanged. A coordinator wraps its public
-// execute boundary and owns a distinct quota bucket for the fixed demo origin.
+// The established Spot limiter remains unchanged. The Production coordinator
+// wraps its public execute boundary and owns a distinct fixed-production-origin
+// quota bucket while preserving Spot admission priority.
 const legacySpotRateLimiter = new RateLimiter(800, 60000, 500);
 let activeExecutionCoordinator = null;
 const rateLimiter = {
@@ -447,7 +411,6 @@ const rateLimiter = {
         : legacySpotRateLimiter.execute(...args),
 };
 
-let processGlobalExecutionRuntimePromise = null;
 let processGlobalProductionExecutionRuntimePromise = null;
 
 // recvWindow for SIGNED REST requests. The @binance/spot lib stamps the request
@@ -653,91 +616,34 @@ const safeDisconnect = async (socket, label) => {
 
 export function setupBinanceConnection({
     localWebSocketAccess = createLocalWebSocketAccess(),
-    futuresExecutionConfig: suppliedFuturesExecutionConfig,
-    futuresExecutionKeyProtection,
-    futuresExecutionStorageDirectory,
     futuresProductionExecutionConfig: suppliedFuturesProductionExecutionConfig,
     futuresProductionExecutionKeyProtection,
     futuresProductionExecutionStorageDirectory,
 } = {}) {
     const APIKEY = process.env.BK;
     const APISECRET = process.env.BS;
-    const futuresMode = (process.env.FUTURES_READ_MODE || 'mock').trim().toLowerCase();
-    const futuresExecutionConfig = suppliedFuturesExecutionConfig
-        ?? captureFuturesTestnetExecutionConfig({ futuresReadMode: futuresMode });
     const futuresProductionExecutionConfig = suppliedFuturesProductionExecutionConfig
         ?? captureFuturesProductionExecutionConfig({ liveAuthorized: false });
-    const futuresApiKey = futuresExecutionConfig.credentials?.apiKey;
-    const futuresApiSecret = futuresExecutionConfig.credentials?.apiSecret;
-    const futuresMockScenario = process.env.FUTURES_READ_MOCK_SCENARIO?.trim();
-    const futuresTransportConfig = futuresMode === 'mock'
-        ? {
-            mode: 'mock',
-            ...(futuresMockScenario ? { mockScenario: futuresMockScenario } : {}),
+    // Direct service composition (including tests) also retires and scrubs the
+    // complete legacy Testnet/read surface before any renderer can connect.
+    for (const key of Object.keys(process.env)) {
+        if (key.startsWith('FUTURES_TESTNET_') || key.startsWith('FUTURES_READ_')) {
+            delete process.env[key];
         }
-        : {
-            mode: futuresMode,
-            apiKey: futuresApiKey,
-            apiSecret: futuresApiSecret,
-        };
-    const resolvedFuturesTransportConfig = resolveFuturesReadOnlyTransportConfig(
-        futuresTransportConfig,
-    );
-    // This non-secret renderer-visible value drives truthful MOCK/TESTNET status
-    // before the first snapshot or while the local socket is disconnected.
-    process.env.FUTURES_READ_ENVIRONMENT = resolvedFuturesTransportConfig.environment;
-
-    // A direct service composition (including tests) still scrubs credential
-    // variables. Main captures every execution-prefixed value even earlier.
-    delete process.env.FUTURES_TESTNET_API_KEY;
-    delete process.env.FUTURES_TESTNET_API_SECRET;
+    }
     delete process.env.FUTURES_PRODUCTION_API_KEY;
     delete process.env.FUTURES_PRODUCTION_API_SECRET;
     delete process.env.FUTURES_PRODUCTION_RECOVERY_AUTHORIZATION;
 
-    const futuresTestnetIpLimiter = new RateLimiter(800, 60000, 500);
-    const executionCoordinator = createFuturesTestnetExecutionCoordinator({
-        legacySpotExecutor: (...args) => legacySpotRateLimiter.execute(...args),
-        getLegacySpotAvailableWeight: () => Math.max(
-            0,
-            legacySpotRateLimiter.maxWeight - legacySpotRateLimiter.getCurrentWeight(),
-        ),
-        futuresTestnetExecutor: (...args) => futuresTestnetIpLimiter.execute(...args),
-        getFuturesTestnetAvailableWeight: () => Math.max(
-            0,
-            futuresTestnetIpLimiter.maxWeight - futuresTestnetIpLimiter.getCurrentWeight(),
-        ),
+    const productionSpotCoordinator = Object.freeze({
+        executeSpot: (...args) => legacySpotRateLimiter.execute(...args),
     });
-    activeExecutionCoordinator = executionCoordinator;
     const futuresProductionIpLimiter = new RateLimiter(800, 60000, 500);
-    if (processGlobalExecutionRuntimePromise === null) {
-        processGlobalExecutionRuntimePromise = createFuturesTestnetExecutionRuntime({
-            config: futuresExecutionConfig,
-            storageDirectory: futuresExecutionStorageDirectory,
-            coordinator: executionCoordinator,
-            keyProtection: futuresExecutionKeyProtection,
-            onInternalError: ({ phase, code }) => {
-                logger.warn(`[futures-execution] ${phase} failed (${code})`);
-            },
-        }).catch(async (error) => {
-            logger.warn(`[futures-execution] durable runtime unavailable (${error?.code || error?.name || 'unknown'})`);
-            return createFuturesTestnetExecutionRuntime({
-                config: Object.freeze({
-                    ...futuresExecutionConfig,
-                    enabled: false,
-                    code: 'FUTURES_EXECUTION_DISABLED',
-                    credentials: null,
-                }),
-                coordinator: null,
-            });
-        });
-    }
-    const executionRuntimePromise = processGlobalExecutionRuntimePromise;
     if (processGlobalProductionExecutionRuntimePromise === null) {
         const productionRuntimeOptions = {
             config: futuresProductionExecutionConfig,
             storageDirectory: futuresProductionExecutionStorageDirectory,
-            spotCoordinator: executionCoordinator,
+            spotCoordinator: productionSpotCoordinator,
             getSpotAvailableWeight: () => Math.max(
                 0,
                 legacySpotRateLimiter.maxWeight - legacySpotRateLimiter.getCurrentWeight(),
@@ -787,15 +693,12 @@ export function setupBinanceConnection({
     applyLogMasking([
         APIKEY,
         APISECRET,
-        futuresApiKey,
-        futuresApiSecret,
         futuresProductionExecutionConfig.credentials?.apiKey,
         futuresProductionExecutionConfig.credentials?.apiSecret,
         futuresProductionExecutionConfig.recoveryAuthorization,
     ]);
 
     logger.info(`Starting Binance Service. Mock Mode: ${USE_MOCK}`);
-    logger.info(`Starting Futures Read-Only Service. Environment: ${resolvedFuturesTransportConfig.environment}`);
 
     let client;
     let spotTradingAdapter = null;
@@ -991,53 +894,14 @@ export function setupBinanceConnection({
         // Channel manager for this connection (each renderer has its own channels)
         const channelManager = new ChannelManager(logger);
         const marketStreamManager = channelManager.getMarketStreamManager();
-        const futuresReadOnlyTransport = createFuturesReadOnlyTransport(
-            futuresTransportConfig,
-        );
-        const futuresReadOnlyAdapter = new FuturesTradingAdapter({
-            transport: futuresReadOnlyTransport,
-        });
-        const futuresReadOnlyService = createFuturesReadOnlyService({
-            adapter: futuresReadOnlyAdapter,
-            transport: futuresReadOnlyTransport,
-            environment: resolvedFuturesTransportConfig.environment,
-            executeRead: (operation, weight, { signal, maxRetries = 0 } = {}) => (
-                rateLimiter.execute(operation, weight, maxRetries, { signal })
-            ),
-            onInternalError: ({ resource, error }) => {
-                const safeCode = error?.code ?? error?.status ?? error?.name ?? 'unknown';
-                logger.warn(`[futures-read] ${resource} failed (${safeCode})`);
+        const futuresProductionWorkstationRuntime = createFuturesProductionWorkstationRuntime({
+            onTiming: ({ phase, durationMs, outcome, cache }) => {
+                logger.info(
+                    `[futures-production-workstation:timing] ${phase} ${durationMs}ms ${outcome}`
+                    + (cache === null ? '' : ` cache=${cache}`),
+                );
             },
         });
-        const futuresTestnetWorkstationRuntime = createFuturesTestnetWorkstationRuntime();
-        const futuresProductionWorkstationRuntime = createFuturesProductionWorkstationRuntime();
-
-        const emitFuturesReadOnlyRejection = (data, error) => {
-            const trimmedRequestId = typeof data?.requestId === 'string'
-                ? data.requestId.trim()
-                : '';
-            const requestId = trimmedRequestId
-                ? trimmedRequestId
-                : 'invalid-futures-read-request';
-            const symbol = typeof data?.symbol === 'string'
-                && /^[A-Z0-9_]{1,64}$/.test(data.symbol)
-                ? data.symbol
-                : null;
-            const code = typeof error?.code === 'string'
-                ? error.code
-                : 'FUTURES_READ_REQUEST_REJECTED';
-            const rejection = createFuturesReadOnlyResponse({
-                requestId,
-                type: FUTURES_READ_RESPONSE_TYPES.REJECTION,
-                symbol,
-                environment: resolvedFuturesTransportConfig.environment,
-                payload: {
-                    code,
-                    message: 'Futures read-only request rejected',
-                },
-            });
-            sendJSON(connection, rejection);
-        };
 
         const emitSpotRefreshOperation = async (operation) => {
             const payload = await operation.loadPayload();
@@ -1808,9 +1672,20 @@ export function setupBinanceConnection({
                 return;
             }
 
-            // Phase 8 public-read workstations have separately named protocols
-            // and must be routed before the broader Phase 7 production prefix
-            // detector. Neither service contains an execution action.
+            const decodedRoutingEscapes = rawUtf8Frame.replace(
+                /\\u([0-9a-fA-F]{4})/g,
+                (_match, digits) => String.fromCharCode(Number.parseInt(digits, 16)),
+            );
+            if (decodedRoutingEscapes.includes('futures.execution.')
+                || decodedRoutingEscapes.includes('futures.read.')
+                || decodedRoutingEscapes.includes('futures.testnet.')
+                || decodedRoutingEscapes.includes('futures-testnet-workstation')) {
+                logger.warn('Rejected retired Futures Testnet/read-only renderer protocol');
+                return;
+            }
+
+            // The production public-read workstation is routed before the broader
+            // production execution prefix detector. It contains no execution action.
             if (isPotentialFuturesProductionWorkstationFrame(rawUtf8Frame)) {
                 try {
                     await futuresProductionWorkstationRuntime.service.handleRequest(
@@ -1819,17 +1694,6 @@ export function setupBinanceConnection({
                     );
                 } catch (error) {
                     logger.warn(`[futures-production-workstation] request rejected (${error?.code || error?.name || 'unknown'})`);
-                }
-                return;
-            }
-            if (isPotentialFuturesTestnetWorkstationFrame(rawUtf8Frame)) {
-                try {
-                    await futuresTestnetWorkstationRuntime.service.handleRequest(
-                        rawUtf8Frame,
-                        { emit: payload => sendJSON(connection, payload) },
-                    );
-                } catch (error) {
-                    logger.warn(`[futures-testnet-workstation] request rejected (${error?.code || error?.name || 'unknown'})`);
                 }
                 return;
             }
@@ -1871,51 +1735,6 @@ export function setupBinanceConnection({
                 return;
             }
 
-            let executionAction = null;
-            if (rawFrameBytes > FUTURES_TESTNET_EXECUTION_SESSION_MAX_BYTES
-                && isPotentialFuturesTestnetExecutionFrame(rawUtf8Frame)) {
-                const runtime = await executionRuntimePromise;
-                await runtime.service.handlePlaceOrder(rawUtf8Frame, {
-                    connectionId: executionConnectionId,
-                    emit: payload => sendJSON(connection, payload),
-                });
-                return;
-            }
-            if (rawFrameBytes <= FUTURES_TESTNET_EXECUTION_SESSION_MAX_BYTES) {
-                try {
-                    executionAction = readFuturesTestnetExecutionAction(rawUtf8Frame);
-                } catch {
-                    if (isPotentialFuturesTestnetExecutionFrame(rawUtf8Frame)) {
-                        const runtime = await executionRuntimePromise;
-                        await runtime.service.handlePlaceOrder(rawUtf8Frame, {
-                            connectionId: executionConnectionId,
-                            emit: payload => sendJSON(connection, payload),
-                        });
-                        return;
-                    }
-                }
-            }
-            if (executionAction === FUTURES_TESTNET_EXECUTION_ACTION) {
-                const runtime = await executionRuntimePromise;
-                await runtime.service.handlePlaceOrder(rawUtf8Frame, {
-                    connectionId: executionConnectionId,
-                    emit: payload => sendJSON(connection, payload),
-                });
-                return;
-            }
-            if ([
-                FUTURES_TESTNET_EXECUTION_SESSION_ACTIONS.SUBSCRIBE_STATUS,
-                FUTURES_TESTNET_EXECUTION_SESSION_ACTIONS.UNSUBSCRIBE_STATUS,
-                FUTURES_TESTNET_EXECUTION_SESSION_ACTIONS.PREPARE_INTENT,
-            ].includes(executionAction)) {
-                const runtime = await executionRuntimePromise;
-                await runtime.service.handleSessionRequest(rawUtf8Frame, {
-                    connectionId: executionConnectionId,
-                    emit: payload => sendJSON(connection, payload),
-                });
-                return;
-            }
-
             let data;
             try {
                 data = JSON.parse(rawUtf8Frame);
@@ -1939,27 +1758,6 @@ export function setupBinanceConnection({
                         envelopeError.code,
                         envelopeError.message,
                     ));
-                    return;
-                }
-                if (isFuturesReadOnlyAction(data.action)) {
-                    try {
-                        futuresReadOnlyService.handleRequest(
-                            data,
-                            (response) => sendJSON(connection, response),
-                        );
-                        const runtime = await executionRuntimePromise;
-                        if (data.action === FUTURES_READ_ACTIONS.SUBSCRIBE) {
-                            runtime.service.bindReadSession({
-                                connectionId: executionConnectionId,
-                                symbol: data.symbol,
-                                environment: resolvedFuturesTransportConfig.environment,
-                            });
-                        } else if (data.action === FUTURES_READ_ACTIONS.UNSUBSCRIBE) {
-                            runtime.service.unbindReadSession(executionConnectionId);
-                        }
-                    } catch (error) {
-                        emitFuturesReadOnlyRejection(data, error);
-                    }
                     return;
                 }
                 switch (data.action) {
@@ -2057,15 +1855,9 @@ export function setupBinanceConnection({
             // Remove this renderer from tracking
             rendererConnections.delete(connection);
 
-            // Invalidate futures ownership before any asynchronous teardown can
-            // resolve. This stops polling, stale checks, reconnects, sockets, and
-            // late delivery for this renderer generation.
-            futuresReadOnlyService.stop();
-            futuresTestnetWorkstationRuntime.close();
+            // Invalidate production Futures ownership before asynchronous teardown
+            // can resolve. This stops reconnects, sockets, and late delivery.
             futuresProductionWorkstationRuntime.close();
-            void executionRuntimePromise.then((runtime) => {
-                runtime.service.disconnect(executionConnectionId);
-            });
             void productionExecutionRuntimePromise.then((runtime) => {
                 runtime.service.disconnect(executionConnectionId);
             });
@@ -2135,18 +1927,9 @@ export function setupBinanceConnection({
                 safeDisconnect(staleUserData, 'user data stream'),
             ]);
 
-            const [runtime, productionRuntime] = await Promise.all([
-                executionRuntimePromise,
-                productionExecutionRuntimePromise,
-            ]);
-            await Promise.all([
-                runtime.service.shutdown(),
-                productionRuntime.service.shutdown(),
-            ]);
+            const productionRuntime = await productionExecutionRuntimePromise;
+            await productionRuntime.service.shutdown();
             activeExecutionCoordinator = null;
-            if (processGlobalExecutionRuntimePromise === executionRuntimePromise) {
-                processGlobalExecutionRuntimePromise = null;
-            }
             if (processGlobalProductionExecutionRuntimePromise
                 === productionExecutionRuntimePromise) {
                 processGlobalProductionExecutionRuntimePromise = null;
@@ -2174,7 +1957,6 @@ export function setupBinanceConnection({
     };
 
     return Object.freeze({
-        executionReady: executionRuntimePromise,
         productionExecutionReady: productionExecutionRuntimePromise,
         close,
     });

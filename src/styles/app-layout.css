@@ -252,22 +252,6 @@
   box-shadow: 0 0 7px rgba(72, 198, 155, 0.75);
 }
 
-.market-mode-switch button.is-testnet {
-  border-color: #2d6290;
-  background: #0d253a;
-  color: #91b6d3;
-}
-
-.market-mode-switch button.is-testnet.active {
-  background: #10456f;
-  color: #d7efff;
-}
-
-.market-mode-switch button.is-testnet.active .market-mode-indicator {
-  background: #55b7ff;
-  box-shadow: 0 0 8px rgba(85, 183, 255, 0.9);
-}
-
 .market-mode-switch button.is-production {
   border-color: #84323a;
   background: #321014;
@@ -292,62 +276,9 @@
   overflow: auto;
 }
 
-.futures-mode-view > .futures-testnet-workstation,
 .futures-mode-view > .futures-production-workstation {
   width: min(100%, 1580px);
   margin: 0 auto;
-}
-
-.futures-mode-view.is-testnet {
-  background:
-    radial-gradient(circle at 50% 0%, rgba(24, 91, 151, 0.32), transparent 42%),
-    #07111b;
-}
-
-.futures-mode-view.is-testnet .futures-testnet-execution-ticket {
-  --execution-border: #2f72ad;
-  --execution-muted: #91abc2;
-  --execution-warning: #67bcff;
-  background: #0b1723;
-  color: #e9f5ff;
-}
-
-.futures-mode-view.is-testnet .futures-testnet-execution-header {
-  background: #102a42;
-}
-
-.futures-mode-view.is-testnet .futures-testnet-execution-capability {
-  border-color: #376f9d;
-}
-
-.futures-mode-view.is-testnet .futures-testnet-execution-backend-state code,
-.futures-mode-view.is-testnet .futures-testnet-execution-intent code {
-  color: #d5e9f8;
-}
-
-.futures-mode-view.is-testnet .futures-testnet-execution-fixed-facts dd {
-  color: #e7f4ff;
-}
-
-.futures-mode-view.is-testnet .futures-testnet-execution-intent,
-.futures-mode-view.is-testnet .futures-testnet-execution-attempt {
-  border-color: #294d6b;
-}
-
-.futures-mode-view.is-testnet .futures-testnet-execution-attempt.is-pending {
-  border-color: #397fb6;
-}
-
-.futures-mode-view.is-testnet .futures-testnet-execution-fields input {
-  border-color: #315b7d;
-  background: #07111a;
-  color: #e9f5ff;
-}
-
-.futures-mode-view.is-testnet .futures-testnet-execution-actions button {
-  border-color: #356b98;
-  background: #123759;
-  color: #d8efff;
 }
 
 .futures-mode-view.is-production {
@@ -376,12 +307,6 @@
 .futures-mode-banner strong {
   font-size: 10px;
   letter-spacing: 0.08em;
-}
-
-.futures-mode-banner.is-testnet {
-  border-color: #317fbe;
-  background: #104475;
-  color: #d9f2ff;
 }
 
 .futures-mode-banner.is-production {

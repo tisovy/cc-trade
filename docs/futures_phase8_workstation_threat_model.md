@@ -4,6 +4,11 @@ Date: 2026-07-14
 
 Status: accepted for implementation
 
+Historical status: superseded in part on 2026-07-16 by retirement of Futures
+Testnet. The Testnet trust boundaries below document the former system and are
+not active runtime guarantees. See
+[the retirement plan](./futures_live_performance_and_testnet_retirement_plan.md).
+
 Related ADR: `docs/futures_phase8_workstation_adr.md`
 
 ## Assets and safety properties

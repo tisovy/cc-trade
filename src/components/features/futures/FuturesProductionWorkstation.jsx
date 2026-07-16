@@ -22,7 +22,7 @@ export const FuturesProductionWorkstation = ({
   return (
     <div className="futures-production-workstation" data-testid="futures-production-workstation">
       <FuturesWorkstationView
-        key={`${symbol}:${interval}`}
+        key={symbol}
         identity="USDⓈ-M PRODUCTION · REAL MONEY"
         state={workstationState}
         selectedSymbol={symbol}
