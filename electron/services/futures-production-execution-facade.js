@@ -7,6 +7,7 @@ import {
 import {
     FUTURES_PRODUCTION_EXECUTION_EXCHANGE_INFO_RESPONSE_LIMITS,
     FUTURES_PRODUCTION_EXECUTION_RESPONSE_LIMITS,
+    FuturesProductionExecutionDecimalToken,
     FuturesProductionExecutionIntegerToken,
     parseFuturesProductionExecutionJson,
     readFuturesProductionExecutionIntegerToken,
@@ -332,6 +333,12 @@ const normalizeReadData = (body, { operation, symbol = null }) => {
         }
     } else if (operation === 'balance') {
         if (!Array.isArray(converted)) throw new Error('invalid balance');
+    } else if (operation === 'allPositionRisk') {
+        if (!Array.isArray(converted)
+            || converted.some(row => typeof row?.symbol !== 'string'
+                || !SYMBOL_PATTERN.test(row.symbol))) {
+            throw new Error('invalid position inventory');
+        }
     } else if (operation === 'positionRisk'
         || operation === 'openOrders'
         || operation === 'openAlgoOrders') {
@@ -372,8 +379,8 @@ const normalizeQueryOrder = (body, expected) => {
     const source = requireResponseObject(body);
     if (source.symbol !== expected.symbol
         || source.clientOrderId !== expected.originalClientOrderId
-        || source.positionSide !== 'BOTH'
-        || typeof source.reduceOnly !== 'boolean'
+        || source.positionSide !== expected.positionSide
+        || source.reduceOnly !== false
         || (source.closePosition !== undefined && source.closePosition !== false)) {
         throw new Error('invalid query order identity');
     }
@@ -416,6 +423,52 @@ const normalizeQueryOrder = (body, expected) => {
     });
 };
 
+const normalizeModifyOrderAcknowledgement = (body, expected) => {
+    const source = requireResponseObject(body);
+    if (source.symbol !== expected.symbol
+        || source.clientOrderId !== expected.originalClientOrderId
+        || source.positionSide !== expected.positionSide
+        || source.reduceOnly !== false
+        || source.closePosition !== false) {
+        throw new Error('invalid modify order acknowledgement identity');
+    }
+    const orderId = readFuturesProductionExecutionIntegerToken(source.orderId, {
+        minimum: 1n,
+        maximum: MAX_SIGNED_INT64,
+    }).token;
+    const updateTime = Number(readFuturesProductionExecutionIntegerToken(source.updateTime, {
+        minimum: 0n,
+        maximum: MAX_SAFE_INTEGER,
+    }).parsed);
+    const stringFields = [
+        'side', 'type', 'origType', 'timeInForce', 'status',
+        'origQty', 'executedQty', 'price',
+    ];
+    if (stringFields.some(field => typeof source[field] !== 'string')) {
+        throw new Error('invalid modify order acknowledgement fields');
+    }
+    parsePositiveExactDecimal(source.origQty);
+    parseNonNegativeExactDecimal(source.executedQty);
+    parsePositiveExactDecimal(source.price);
+    return Object.freeze({
+        symbol: source.symbol,
+        clientOrderId: source.clientOrderId,
+        orderId,
+        side: source.side,
+        positionSide: source.positionSide,
+        type: source.type,
+        originalType: source.origType,
+        timeInForce: source.timeInForce,
+        status: source.status,
+        originalQuantity: source.origQty,
+        executedQuantity: source.executedQty,
+        price: source.price,
+        reduceOnly: source.reduceOnly,
+        closePosition: source.closePosition,
+        updateTime,
+    });
+};
+
 const normalizeCancelAcknowledgement = (body) => {
     const source = requireResponseObject(body);
     const keys = Reflect.ownKeys(source);
@@ -437,6 +490,71 @@ const normalizeCancelAcknowledgement = (body) => {
         code: Number(code),
         messageDigest: createHash('sha256').update(source.msg, 'utf8').digest('hex'),
     });
+};
+
+const normalizeMarginAcknowledgement = (body, expected) => {
+    const source = requireResponseObject(body);
+    const keys = Reflect.ownKeys(source);
+    const code = readFuturesProductionExecutionIntegerToken(source.code, {
+        minimum: 200n,
+        maximum: 200n,
+    }).parsed;
+    const type = readFuturesProductionExecutionIntegerToken(source.type, {
+        minimum: BigInt(expected.type),
+        maximum: BigInt(expected.type),
+    }).parsed;
+    const amount = typeof source.amount === 'string'
+        ? source.amount
+        : source.amount instanceof FuturesProductionExecutionDecimalToken
+            ? source.amount.token
+            : readFuturesProductionExecutionIntegerToken(source.amount, {
+                minimum: 1n,
+                maximum: MAX_SAFE_INTEGER,
+            }).token;
+    parsePositiveExactDecimal(amount);
+    if (keys.length !== 4
+        || !['amount', 'code', 'msg', 'type'].every(key => keys.includes(key))
+        || typeof source.msg !== 'string'
+        || source.msg.length === 0
+        || Buffer.byteLength(source.msg, 'utf8')
+            > FUTURES_PRODUCTION_EXECUTION_RESPONSE_LIMITS.MESSAGE_BYTES) {
+        throw new Error('invalid position margin acknowledgement');
+    }
+    return Object.freeze({
+        acknowledged: true,
+        code: Number(code),
+        type: Number(type),
+        amount,
+        messageDigest: createHash('sha256').update(source.msg, 'utf8').digest('hex'),
+    });
+};
+
+const normalizeMarginHistory = (body, expected) => {
+    const rows = convertWireValue(body);
+    if (!Array.isArray(rows)) throw new Error('invalid position margin history');
+    const normalized = rows.map((row) => {
+        if (!row || typeof row !== 'object' || Array.isArray(row)
+            || row.symbol !== expected.symbol
+            || ![1, 2].includes(row.type)
+            || row.deltaType !== 'USER_ADJUST'
+            || typeof row.amount !== 'string'
+            || row.asset !== 'USDT'
+            || !Number.isSafeInteger(row.time)
+            || row.time < 0
+            || !['LONG', 'SHORT'].includes(row.positionSide)) {
+            throw new Error('invalid position margin history row');
+        }
+        parsePositiveExactDecimal(row.amount);
+        return {
+            symbol: row.symbol,
+            type: row.type,
+            amount: row.amount,
+            asset: row.asset,
+            time: row.time,
+            positionSide: row.positionSide,
+        };
+    });
+    return deepFreeze(normalized);
 };
 
 const createReceipt = ({ operation, endpointId, status, bodyDigest, rateLimitHeaders }) => (
@@ -470,12 +588,13 @@ export const createFuturesProductionExecutionFacade = (config, dependencies) => 
         signed,
         expected = null,
         responseLimits = FUTURES_PRODUCTION_EXECUTION_RESPONSE_LIMITS,
+        allowDecimalNumbers = false,
         normalize,
     }) => {
         const form = signed
             ? appendSignedParameters(entries, adjustedTimestamp(), apiSecret)
             : new URLSearchParams(entries);
-        const usesBody = method === 'POST';
+        const usesBody = method === 'POST' || method === 'PUT';
         const base = `${FUTURES_PRODUCTION_EXECUTION_REST_ORIGIN}${pathname}`;
         const url = usesBody || form.size === 0 ? base : `${base}?${form.toString()}`;
         assertFixedUrl(url, pathname);
@@ -531,7 +650,11 @@ export const createFuturesProductionExecutionFacade = (config, dependencies) => 
             ]);
             let body;
             try {
-                body = parseFuturesProductionExecutionJson(text, responseLimits);
+                body = parseFuturesProductionExecutionJson(
+                    text,
+                    responseLimits,
+                    allowDecimalNumbers,
+                );
             } catch {
                 throw new FuturesProductionExecutionFacadeError({
                     kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.AMBIGUOUS,
@@ -673,6 +796,14 @@ export const createFuturesProductionExecutionFacade = (config, dependencies) => 
         pathname: '/fapi/v3/positionRisk',
         symbolValue: symbol,
     });
+    const getAllPositionRisk = () => execute({
+        operation: 'allPositionRisk',
+        endpointId: 'position-risk',
+        pathname: '/fapi/v3/positionRisk',
+        method: 'GET',
+        signed: true,
+        normalize: body => normalizeReadData(body, { operation: 'allPositionRisk' }),
+    });
     const getOpenOrders = symbol => signedSymbolRead({
         operation: 'openOrders',
         endpointId: 'open-orders',
@@ -695,14 +826,80 @@ export const createFuturesProductionExecutionFacade = (config, dependencies) => 
         normalize: body => normalizeReadData(body, { operation: 'balance' }),
     });
 
+    const modifyIsolatedPositionMargin = (value) => {
+        const operation = 'modifyIsolatedPositionMargin';
+        const args = readExactDataProperties(value, [
+            'symbol', 'positionSide', 'marginAction', 'amount',
+        ], operation);
+        const symbol = requireSymbol(args.symbol, allowedSymbols, operation);
+        if (!['LONG', 'SHORT'].includes(args.positionSide)
+            || !['ADD', 'REDUCE'].includes(args.marginAction)) {
+            throw argumentError(operation);
+        }
+        parsePositiveExactDecimal(args.amount);
+        const type = args.marginAction === 'ADD' ? 1 : 2;
+        return execute({
+            operation,
+            endpointId: 'modify-isolated-position-margin',
+            pathname: '/fapi/v1/positionMargin',
+            method: 'POST',
+            signed: true,
+            entries: [
+                ['symbol', symbol],
+                ['amount', args.amount],
+                ['type', String(type)],
+                ['positionSide', args.positionSide],
+            ],
+            expected: { type },
+            allowDecimalNumbers: true,
+            normalize: normalizeMarginAcknowledgement,
+        });
+    };
+
+    const getPositionMarginHistory = (value) => {
+        const operation = 'getPositionMarginHistory';
+        const args = readExactDataProperties(value, [
+            'symbol', 'positionSide', 'marginAction', 'startTime',
+        ], operation);
+        const symbol = requireSymbol(args.symbol, allowedSymbols, operation);
+        if (!['LONG', 'SHORT'].includes(args.positionSide)
+            || !['ADD', 'REDUCE'].includes(args.marginAction)
+            || !Number.isSafeInteger(args.startTime)
+            || args.startTime < 0) {
+            throw argumentError(operation);
+        }
+        const type = args.marginAction === 'ADD' ? '1' : '2';
+        return execute({
+            operation,
+            endpointId: 'position-margin-history',
+            pathname: '/fapi/v1/positionMargin/history',
+            method: 'GET',
+            signed: true,
+            entries: [
+                ['symbol', symbol],
+                ['type', type],
+                ['startTime', String(args.startTime)],
+                ['limit', '100'],
+            ],
+            expected: { symbol },
+            normalize: normalizeMarginHistory,
+        });
+    };
+
     const placeLimitGtcOrder = (value) => {
         const operation = 'placeLimitGtcOrder';
         const args = readExactDataProperties(value, [
-            'symbol', 'side', 'quantity', 'price', 'reduceOnly', 'clientOrderId',
+            'symbol', 'side', 'positionSide', 'positionEffect',
+            'quantity', 'price', 'clientOrderId',
         ], operation);
         const symbol = requireSymbol(args.symbol, allowedSymbols, operation);
         if (!['BUY', 'SELL'].includes(args.side)
-            || typeof args.reduceOnly !== 'boolean'
+            || !['LONG', 'SHORT'].includes(args.positionSide)
+            || !['ENTRY', 'EXIT'].includes(args.positionEffect)
+            || (args.positionSide === 'LONG'
+                && args.side !== (args.positionEffect === 'ENTRY' ? 'BUY' : 'SELL'))
+            || (args.positionSide === 'SHORT'
+                && args.side !== (args.positionEffect === 'ENTRY' ? 'SELL' : 'BUY'))
             || typeof args.clientOrderId !== 'string'
             || !CLIENT_ID_PATTERN.test(args.clientOrderId)) throw argumentError(operation);
         parsePositiveExactDecimal(args.quantity);
@@ -720,8 +917,7 @@ export const createFuturesProductionExecutionFacade = (config, dependencies) => 
                 ['timeInForce', 'GTC'],
                 ['quantity', args.quantity],
                 ['price', args.price],
-                ['positionSide', 'BOTH'],
-                ['reduceOnly', String(args.reduceOnly)],
+                ['positionSide', args.positionSide],
                 ['newClientOrderId', args.clientOrderId],
                 ['newOrderRespType', 'ACK'],
             ],
@@ -730,19 +926,21 @@ export const createFuturesProductionExecutionFacade = (config, dependencies) => 
         });
     };
 
-    const placeReduceOnlyMarketOrder = (value) => {
-        const operation = 'placeReduceOnlyMarketOrder';
+    const placeHedgeMarketExitOrder = (value) => {
+        const operation = 'placeHedgeMarketExitOrder';
         const args = readExactDataProperties(value, [
-            'symbol', 'side', 'quantity', 'clientOrderId',
+            'symbol', 'side', 'positionSide', 'quantity', 'clientOrderId',
         ], operation);
         const symbol = requireSymbol(args.symbol, allowedSymbols, operation);
-        if (!['BUY', 'SELL'].includes(args.side)
+        const expectedSide = args.positionSide === 'LONG' ? 'SELL' : 'BUY';
+        if (!['LONG', 'SHORT'].includes(args.positionSide)
+            || args.side !== expectedSide
             || typeof args.clientOrderId !== 'string'
             || !CLIENT_ID_PATTERN.test(args.clientOrderId)) throw argumentError(operation);
         parsePositiveExactDecimal(args.quantity);
         return execute({
             operation,
-            endpointId: 'new-reduce-only-market-order',
+            endpointId: 'new-hedge-market-exit-order',
             pathname: '/fapi/v1/order',
             method: 'POST',
             signed: true,
@@ -751,8 +949,7 @@ export const createFuturesProductionExecutionFacade = (config, dependencies) => 
                 ['side', args.side],
                 ['type', 'MARKET'],
                 ['quantity', args.quantity],
-                ['positionSide', 'BOTH'],
-                ['reduceOnly', 'true'],
+                ['positionSide', args.positionSide],
                 ['newClientOrderId', args.clientOrderId],
                 ['newOrderRespType', 'ACK'],
             ],
@@ -761,13 +958,48 @@ export const createFuturesProductionExecutionFacade = (config, dependencies) => 
         });
     };
 
+    const modifyLimitOrder = (value) => {
+        const operation = 'modifyLimitOrder';
+        const args = readExactDataProperties(value, [
+            'symbol', 'side', 'positionSide', 'quantity', 'price', 'clientOrderId',
+        ], operation);
+        const symbol = requireSymbol(args.symbol, allowedSymbols, operation);
+        if (!['BUY', 'SELL'].includes(args.side)
+            || !['LONG', 'SHORT'].includes(args.positionSide)
+            || typeof args.clientOrderId !== 'string'
+            || !CLIENT_ID_PATTERN.test(args.clientOrderId)) throw argumentError(operation);
+        parsePositiveExactDecimal(args.quantity);
+        parsePositiveExactDecimal(args.price);
+        return execute({
+            operation,
+            endpointId: 'modify-limit-order',
+            pathname: '/fapi/v1/order',
+            method: 'PUT',
+            signed: true,
+            entries: [
+                ['symbol', symbol],
+                ['side', args.side],
+                ['quantity', args.quantity],
+                ['price', args.price],
+                ['origClientOrderId', args.clientOrderId],
+            ],
+            expected: {
+                symbol,
+                positionSide: args.positionSide,
+                originalClientOrderId: args.clientOrderId,
+            },
+            normalize: normalizeModifyOrderAcknowledgement,
+        });
+    };
+
     const queryOrderByOriginalClientOrderId = (value) => {
         const operation = 'queryOrder';
         const args = readExactDataProperties(value, [
-            'symbol', 'originalClientOrderId',
+            'symbol', 'positionSide', 'originalClientOrderId',
         ], operation);
         const symbol = requireSymbol(args.symbol, allowedSymbols, operation);
-        if (typeof args.originalClientOrderId !== 'string'
+        if (!['LONG', 'SHORT'].includes(args.positionSide)
+            || typeof args.originalClientOrderId !== 'string'
             || !CLIENT_ID_PATTERN.test(args.originalClientOrderId)) {
             throw argumentError(operation);
         }
@@ -781,7 +1013,11 @@ export const createFuturesProductionExecutionFacade = (config, dependencies) => 
                 ['symbol', symbol],
                 ['origClientOrderId', args.originalClientOrderId],
             ],
-            expected: { symbol, originalClientOrderId: args.originalClientOrderId },
+            expected: {
+                symbol,
+                positionSide: args.positionSide,
+                originalClientOrderId: args.originalClientOrderId,
+            },
             normalize: normalizeQueryOrder,
         });
     };
@@ -820,10 +1056,14 @@ export const createFuturesProductionExecutionFacade = (config, dependencies) => 
         getSymbolConfig,
         getBalance,
         getPositionRisk,
+        getAllPositionRisk,
         getOpenOrders,
         getOpenAlgoOrders,
+        getPositionMarginHistory,
+        modifyIsolatedPositionMargin,
         placeLimitGtcOrder,
-        placeReduceOnlyMarketOrder,
+        placeHedgeMarketExitOrder,
+        modifyLimitOrder,
         queryOrderByOriginalClientOrderId,
         cancelAllOpenOrders,
         cancelAllAlgoOpenOrders,

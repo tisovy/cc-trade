@@ -47,7 +47,7 @@ const MARKET_MODE_OPTIONS = Object.freeze([
   }),
   Object.freeze({
     mode: MARKET_MODES.FUTURES_LIVE,
-    label: 'Futures Live',
+    label: 'Futures',
     testId: 'market-mode-futures-live',
     tone: 'production',
   }),
@@ -76,7 +76,7 @@ const FuturesModeBanner = () => (
     className="futures-mode-banner is-production"
     data-testid="futures-live-banner"
   >
-    <strong>USDⓈ-M FUTURES LIVE</strong>
+    <strong>USDⓈ-M FUTURES</strong>
     <span>REAL MONEY · PRODUCTION</span>
   </header>
 );
@@ -526,7 +526,7 @@ function AppShell() {
         <main
           className="futures-mode-view is-production"
           data-testid="futures-live-view"
-          aria-label="USDⓈ-M futures live production workspace"
+          aria-label="USDⓈ-M Futures production workspace"
         >
           <FuturesModeBanner />
           <FuturesProductionWorkstation

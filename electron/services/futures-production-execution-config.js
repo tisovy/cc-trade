@@ -47,7 +47,7 @@ export const FUTURES_PRODUCTION_EXECUTION_CONFIG_CODES = Object.freeze({
 });
 
 export const FUTURES_PRODUCTION_EXECUTION_COMPILED_CEILINGS = Object.freeze({
-    maxLeverage: 1,
+    maxLeverage: 2,
     maxOrderNotionalUsdt: '10',
     maxDailyNotionalUsdt: '50',
 });
@@ -168,7 +168,9 @@ const parsePolicy = (captured) => {
         || compareExactDecimals(orderMaximum, dailyMaximum) > 0) return null;
 
     const leverageText = captured[FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MAX_LEVERAGE];
-    if (!/^[1-3]$/.test(leverageText ?? '')) return null;
+    if (leverageText !== String(FUTURES_PRODUCTION_EXECUTION_COMPILED_CEILINGS.maxLeverage)) {
+        return null;
+    }
 
     const liquidationText = captured[
         FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MIN_LIQUIDATION_DISTANCE_BPS

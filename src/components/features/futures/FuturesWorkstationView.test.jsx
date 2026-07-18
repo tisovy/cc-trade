@@ -4,10 +4,14 @@ import FuturesWorkstationView from './FuturesWorkstationView.jsx'
 import FuturesProductionWorkstation from './FuturesProductionWorkstation.jsx'
 
 vi.mock('./FuturesWorkstationChart.jsx', () => ({
-  default: ({ onPricePick, priceTickSize, drawings, alerts }) => (
+  default: ({ onPricePick, onTradingGesture, priceTickSize, draftPrice, drawings, alerts }) => (
     <div data-testid="mock-futures-chart">
       <button type="button" onClick={() => onPricePick('58420.25')}>Pick chart price</button>
+      <button type="button" onClick={() => onTradingGesture?.({
+        side: 'BUY', positionSide: 'LONG', positionEffect: 'ENTRY', price: '58420.25', source: 'chart',
+      })}>Chart LONG shortcut</button>
       <span>price tick {priceTickSize ?? 'unavailable'}</span>
+      <span>draft {draftPrice ?? 'none'}</span>
       <span>drawings {drawings.length}</span>
       <span>alerts {alerts.length}</span>
     </div>
@@ -142,7 +146,7 @@ describe('pure Futures workstation presentation', () => {
   it('renders identity, exact market context, filters, book and bounded tape', () => {
     renderView()
     expect(screen.getByTestId('futures-workstation-identity')).toHaveTextContent(
-      'USDⓈ-M PRODUCTION · REAL MONEYPUBLIC MARKET DATA · READ ONLYLIVEgen 7 · rev 42',
+      'USDⓈ-M PRODUCTION · REAL MONEYPUBLIC MARKET DATA · LIVE EXECUTIONLIVEgen 7 · rev 42',
     )
     expect(screen.getByLabelText('Futures market header')).toHaveTextContent('58420.25')
     expect(screen.getByLabelText('Futures market header')).toHaveTextContent('58419.99')
@@ -252,12 +256,12 @@ describe('pure Futures workstation presentation', () => {
     expect(onIntervalChange).toHaveBeenCalledWith('5m')
   })
 
-  it('turns chart and book clicks into a local non-executable draft only', () => {
+  it('turns chart and book clicks into a shared limit-price draft', () => {
     const { onSymbolChange, onIntervalChange } = renderView()
     fireEvent.click(screen.getByRole('button', { name: 'Pick chart price' }))
-    expect(screen.getByLabelText('Local non-executable price draft')).toHaveTextContent('58420.25')
-    expect(screen.getByLabelText('Local non-executable price draft')).toHaveTextContent(
-      'DISPLAY ONLY · NO INTENT · NO SUBMIT',
+    expect(screen.getByLabelText('Futures limit price draft')).toHaveTextContent('58420.25')
+    expect(screen.getByLabelText('Futures limit price draft')).toHaveTextContent(
+      'DRAFT · INTENT + CONFIRMATION REQUIRED',
     )
     fireEvent.click(screen.getByRole('button', { name: 'Horizontal drawing' }))
     fireEvent.click(screen.getByRole('button', { name: 'Pick chart price' }))
@@ -265,9 +269,39 @@ describe('pure Futures workstation presentation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Add display alert' }))
     expect(screen.getByTestId('mock-futures-chart')).toHaveTextContent('alerts 1')
     fireEvent.click(screen.getByRole('button', { name: /^58420\.50/ }))
-    expect(screen.getByLabelText('Local non-executable price draft')).toHaveTextContent('58420.50')
+    expect(screen.getByLabelText('Futures limit price draft')).toHaveTextContent('58420.50')
     expect(onSymbolChange).not.toHaveBeenCalled()
     expect(onIntervalChange).not.toHaveBeenCalled()
+  })
+
+  it('maps exact order-book double-click gestures without bypassing the parent intent handler', () => {
+    const onTradingGesture = vi.fn()
+    renderView({ onTradingGesture })
+    const ask = screen.getByRole('button', { name: /^58420\.50/ })
+    const bid = screen.getByRole('button', { name: /^58420\.00/ })
+
+    fireEvent.click(bid, { altKey: true, button: 0 })
+    fireEvent.click(bid, { ctrlKey: true, button: 0 })
+    expect(onTradingGesture).not.toHaveBeenCalled()
+    fireEvent.click(bid, { ctrlKey: true, button: 0 })
+    expect(onTradingGesture).toHaveBeenLastCalledWith({
+      side: 'BUY',
+      positionSide: 'SHORT',
+      positionEffect: 'EXIT',
+      label: 'Exit SHORT',
+      price: '58420.00',
+      source: 'order-book',
+    })
+
+    const callsBeforeRightClick = onTradingGesture.mock.calls.length
+    fireEvent.contextMenu(ask, { altKey: true, button: 2 })
+    fireEvent.contextMenu(ask, { ctrlKey: true, button: 2 })
+    expect(onTradingGesture).toHaveBeenCalledTimes(callsBeforeRightClick)
+    fireEvent.contextMenu(ask, { altKey: true, button: 2 })
+    fireEvent.contextMenu(ask, { altKey: true, button: 2 })
+    expect(onTradingGesture).toHaveBeenLastCalledWith(expect.objectContaining({
+      side: 'SELL', positionSide: 'LONG', positionEffect: 'EXIT', price: '58420.50',
+    }))
   })
 
   it('freezes the displayed tape while backend rows continue to change', () => {
@@ -334,7 +368,7 @@ describe('pure Futures workstation presentation', () => {
     const state = createState({ status: 'resynchronizing' })
     renderView({ state })
     fireEvent.click(screen.getByRole('button', { name: 'Pick chart price' }))
-    expect(screen.getByLabelText('Local non-executable price draft'))
+    expect(screen.getByLabelText('Futures limit price draft'))
       .toHaveTextContent('58420.25')
     expect(screen.getByRole('button', { name: /^58420\.50/ })).toBeEnabled()
     expect(screen.queryByText('RESYNCHRONIZING', { selector: '.futures-workstation-overlay strong' }))
@@ -362,7 +396,7 @@ describe('pure Futures workstation presentation', () => {
     rerender(
       <FuturesWorkstationView key="ETHUSDT" {...properties} selectedSymbol="ETHUSDT" />,
     )
-    expect(screen.getByLabelText('Local non-executable price draft'))
+    expect(screen.getByLabelText('Futures limit price draft'))
       .toHaveTextContent('Pick chart or book price')
     expect(screen.getByTestId('mock-futures-chart')).toHaveTextContent('drawings 0')
     expect(screen.getByTestId('mock-futures-chart')).toHaveTextContent('alerts 0')
@@ -399,7 +433,7 @@ const productionExecutionState = Object.freeze({
 })
 
 describe('production workstation container', () => {
-  it('retains Phase 7 caps and recovery in an explicit red safety drawer', () => {
+  it('places the Hedge isolated 2x ticket in the market rail and removes the old drawer', () => {
     render(
       <FuturesProductionWorkstation
         enabled={false}
@@ -408,8 +442,9 @@ describe('production workstation container', () => {
         executionState={productionExecutionState}
       />,
     )
-    expect(screen.getByText('Phase 7 production safety drawer')).toBeInTheDocument()
-    expect(screen.getByText('1x · 10 USDT/order · 50 USDT/day · durable recovery')).toBeInTheDocument()
+    expect(screen.queryByText('Phase 7 production safety drawer')).not.toBeInTheDocument()
+    expect(screen.getByText('ISOLATED · 2× · HEDGE')).toBeInTheDocument()
+    expect(screen.getByText('Advanced safety')).toBeInTheDocument()
     expect(screen.getByLabelText('USDⓈ-M production real-order execution')).toBeInTheDocument()
   })
 })

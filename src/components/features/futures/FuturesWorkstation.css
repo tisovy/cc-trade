@@ -132,7 +132,7 @@
   flex-direction: column;
   min-height: 0;
   padding: 10px;
-  overflow: hidden;
+  overflow: auto;
 }
 
 .futures-workstation-section-heading {
@@ -201,9 +201,14 @@
 .futures-workstation-contract-list {
   display: grid;
   gap: 3px;
-  max-height: 245px;
+  max-height: 180px;
   overflow: auto;
   scrollbar-color: rgba(126, 143, 166, 0.25) transparent;
+}
+
+.futures-workstation-instruments > .futures-production-execution-ticket {
+  margin-top: 10px;
+  flex: 0 0 auto;
 }
 
 .futures-workstation-contract {
@@ -269,6 +274,13 @@
   padding-top: 10px;
   border-top: 1px solid rgba(126, 143, 166, 0.18);
   overflow: auto;
+}
+
+.futures-workstation-contract-inspector > summary {
+  color: #8193a5;
+  font-size: 9px;
+  font-weight: 800;
+  cursor: pointer;
 }
 
 .futures-workstation-contract-status {
@@ -427,11 +439,63 @@
   min-height: 360px;
 }
 
+.futures-workstation-chart-canvas-shell {
+  position: absolute;
+  inset: 0;
+}
+
 .futures-workstation-chart-canvas {
   position: absolute;
   inset: 0;
   min-width: 320px;
   min-height: 320px;
+}
+
+.futures-workstation-owned-order-layer {
+  position: absolute;
+  inset: 0 72px 0 0;
+  z-index: 3;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.futures-workstation-owned-order {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  height: 22px;
+  padding: 0 6px;
+  transform: translateY(-50%);
+  border: 0;
+  border-top: 2px solid currentColor;
+  border-radius: 0;
+  background: transparent;
+  color: #2bc48a;
+  font: inherit;
+  cursor: ns-resize;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.futures-workstation-owned-order.is-short {
+  color: #ef5b69;
+}
+
+.futures-workstation-owned-order span,
+.futures-workstation-owned-order strong {
+  padding: 2px 5px;
+  border-radius: 3px;
+  background: rgba(5, 12, 19, 0.9);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+}
+
+.futures-workstation-owned-order strong {
+  font-family: var(--font-mono, monospace);
 }
 
 .futures-workstation-overlay {

@@ -142,11 +142,12 @@ const LOT_SIZE_FIELDS = Object.freeze(['minQty', 'maxQty', 'stepSize']);
 const DRAFT_FIELDS = Object.freeze([
     'symbol',
     'side',
+    'positionSide',
+    'positionEffect',
     'type',
     'timeInForce',
     'quantity',
     'price',
-    'reduceOnly',
 ]);
 
 const SYMBOL_PATTERN = /^[A-Z0-9]{2,20}$/;
@@ -230,9 +231,7 @@ const parsePolicy = (value) => {
     const maxDailyNotional = parsePositiveExactDecimal(policy.maxDailyNotionalUsdt);
     const minAvailableBalance = parsePositiveExactDecimal(policy.minAvailableBalanceUsdt);
     if (!Number.isSafeInteger(policy.maxLeverage)
-        || policy.maxLeverage < 1
-        || policy.maxLeverage
-            > FUTURES_PRODUCTION_EXECUTION_COMPILED_CEILINGS.maxLeverage
+        || policy.maxLeverage !== FUTURES_PRODUCTION_EXECUTION_COMPILED_CEILINGS.maxLeverage
         || compareExactDecimals(maxOrderNotional, HARD_MAX_ORDER_NOTIONAL) > 0
         || compareExactDecimals(maxDailyNotional, HARD_MAX_DAILY_NOTIONAL) > 0
         || typeof policy.minLiquidationDistanceBps !== 'string'
@@ -391,8 +390,14 @@ const parseDraft = (value) => {
     if (typeof draft.symbol !== 'string'
         || !SYMBOL_PATTERN.test(draft.symbol)
         || !['BUY', 'SELL'].includes(draft.side)
+        || !['LONG', 'SHORT'].includes(draft.positionSide)
+        || !['ENTRY', 'EXIT'].includes(draft.positionEffect)
+        || (draft.positionSide === 'LONG'
+            && draft.side !== (draft.positionEffect === 'ENTRY' ? 'BUY' : 'SELL'))
+        || (draft.positionSide === 'SHORT'
+            && draft.side !== (draft.positionEffect === 'ENTRY' ? 'SELL' : 'BUY'))
         || !['LIMIT', 'MARKET'].includes(draft.type)
-        || typeof draft.reduceOnly !== 'boolean') throw new RiskInputError();
+    ) throw new RiskInputError();
     const quantity = parsePositiveExactDecimal(draft.quantity);
     let price = null;
     if (draft.type === 'LIMIT') {
@@ -400,7 +405,7 @@ const parseDraft = (value) => {
         price = parsePositiveExactDecimal(draft.price);
     } else if (draft.timeInForce !== null
         || draft.price !== null
-        || draft.reduceOnly !== true) {
+        || draft.positionEffect !== 'EXIT') {
         throw new RiskInputError();
     }
     return Object.freeze({ ...draft, quantity, parsedPrice: price });
@@ -408,18 +413,20 @@ const parseDraft = (value) => {
 
 const classifyExposure = (draft, positionAmount) => {
     const positionIsZero = isZeroExactDecimal(positionAmount);
-    const positionIsLong = positionAmount.coefficient > 0n;
-    const sideIncreases = positionIsLong ? draft.side === 'BUY' : draft.side === 'SELL';
-    if (draft.reduceOnly) {
-        if (positionIsZero || sideIncreases) return null;
+    const signMatchesLeg = positionIsZero
+        || (draft.positionSide === 'LONG'
+            ? positionAmount.coefficient > 0n
+            : positionAmount.coefficient < 0n);
+    if (!signMatchesLeg) return null;
+    if (draft.positionEffect === 'EXIT') {
+        if (positionIsZero) return null;
         if (compareExactDecimals(draft.quantity, absoluteExactDecimal(positionAmount)) > 0) {
             return null;
         }
         return FUTURES_PRODUCTION_EXECUTION_RISK_CLASSIFICATIONS.REDUCING;
     }
     if (positionIsZero) return FUTURES_PRODUCTION_EXECUTION_RISK_CLASSIFICATIONS.OPENING;
-    if (sideIncreases) return FUTURES_PRODUCTION_EXECUTION_RISK_CLASSIFICATIONS.INCREASING;
-    return null;
+    return FUTURES_PRODUCTION_EXECUTION_RISK_CLASSIFICATIONS.INCREASING;
 };
 
 const hasRequiredSymbolState = (policy, snapshot, draft) => {
@@ -435,7 +442,7 @@ const hasRequiredSymbolState = (policy, snapshot, draft) => {
         && exchange.quoteAsset === 'USDT'
         && exchange.marginAsset === 'USDT'
         && snapshot.position.marginAsset === 'USDT'
-        && snapshot.position.positionSide === 'BOTH'
+        && snapshot.position.positionSide === draft.positionSide
         && snapshot.symbolConfig.marginType === 'ISOLATED'
         && snapshot.symbolConfig.isAutoAddMargin === false
         && exchange.supportedOrderTypes.includes('LIMIT')
@@ -532,7 +539,7 @@ export const evaluateFuturesProductionExecutionRisk = (value) => {
     }
 
     if (snapshot.accountConfig.canTrade !== true
-        || snapshot.accountConfig.dualSidePosition !== false
+        || snapshot.accountConfig.dualSidePosition !== true
         || snapshot.accountConfig.multiAssetsMargin !== false
         || snapshot.balance.asset !== 'USDT'
         || snapshot.balance.marginAvailable !== true) {
@@ -547,9 +554,9 @@ export const evaluateFuturesProductionExecutionRisk = (value) => {
             FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.SYMBOL_STATE,
         );
     }
-    if (snapshot.symbolConfig.leverage > policy.maxLeverage
+    if (snapshot.symbolConfig.leverage !== policy.maxLeverage
         || snapshot.symbolConfig.leverage
-            > FUTURES_PRODUCTION_EXECUTION_COMPILED_CEILINGS.maxLeverage) {
+            !== FUTURES_PRODUCTION_EXECUTION_COMPILED_CEILINGS.maxLeverage) {
         return reject(
             FUTURES_PRODUCTION_EXECUTION_RISK_CODES.LEVERAGE_REJECTED,
             FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.LEVERAGE_STATE,

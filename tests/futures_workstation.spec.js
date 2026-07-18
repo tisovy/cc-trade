@@ -21,7 +21,7 @@ const attachScreenshot = async (mainWindow, testInfo, name) => {
 const waitForLiveWorkstation = async (mainWindow, identityText) => {
     const identity = mainWindow.getByTestId('futures-workstation-identity');
     await expect(identity).toContainText(identityText);
-    await expect(identity).toContainText('PUBLIC MARKET DATA · READ ONLY');
+    await expect(identity).toContainText('PUBLIC MARKET DATA · LIVE EXECUTION');
     await expect(identity).toContainText('LIVE');
     return identity;
 };
@@ -41,9 +41,12 @@ test('red Production workstation remains isolated and market widgets have no exe
         );
         expect(accent).toBe('#e34f5e');
         await expect(mainWindow.getByLabel('USDⓈ-M production real-order execution')).toBeVisible();
-        await expect(mainWindow.locator('.futures-workstation-safety-drawer summary')).toContainText(
-            '1x · 10 USDT/order · 50 USDT/day',
-        );
+        await expect(mainWindow.locator('.futures-workstation-safety-drawer')).toHaveCount(0);
+        await expect(mainWindow.locator('.futures-production-execution-header strong'))
+            .toContainText('ISOLATED · 2× · HEDGE');
+        const advancedSafety = mainWindow.locator('.futures-production-advanced-safety');
+        await expect(advancedSafety.locator('summary')).toContainText('Advanced safety');
+        await expect(advancedSafety).not.toHaveAttribute('open', '');
         const productionLast = await mainWindow.getByText('Last', { exact: true })
             .locator('..')
             .locator('dd')
@@ -59,9 +62,14 @@ test('red Production workstation remains isolated and market widgets have no exe
             .getByRole('button', { name: '5m', exact: true }))
             .toHaveAttribute('aria-pressed', 'true');
 
-        const marketActionNames = await mainWindow.locator('.futures-workstation button').evaluateAll(
-            buttons => buttons.map(button => button.textContent?.trim() ?? ''),
-        );
+        const marketActionNames = await mainWindow.locator([
+            '.futures-workstation-market-header button',
+            '.futures-workstation-chart button',
+            '.futures-workstation-depth button',
+            '.futures-workstation-trades button',
+        ].join(', ')).evaluateAll(buttons => (
+            buttons.map(button => button.textContent?.trim() ?? '')
+        ));
         expect(marketActionNames.join('\n')).not.toMatch(
             /place|submit|cancel all|close positions|kill switch|prepare.*intent/i,
         );
@@ -74,9 +82,9 @@ test('red Production workstation remains isolated and market widgets have no exe
 
         const ask = mainWindow.locator('.futures-workstation-book-side.is-ask button').first();
         await ask.click();
-        const draft = mainWindow.getByLabel('Local non-executable price draft');
+        const draft = mainWindow.getByLabel('Futures limit price draft');
         await expect(draft).toContainText(
-            'DISPLAY ONLY · NO INTENT · NO SUBMIT',
+            'DRAFT · INTENT + CONFIRMATION REQUIRED',
         );
         await expect(mainWindow.getByLabel('Backend production intent')).toHaveCount(0);
         const ownerBeforeSymbolSwitch = await identity.locator('code').textContent();

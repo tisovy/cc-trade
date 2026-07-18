@@ -21,9 +21,10 @@ const config = Object.freeze({
 const limitOrder = Object.freeze({
     symbol: 'BTCUSDT',
     side: 'BUY',
+    positionSide: 'LONG',
+    positionEffect: 'ENTRY',
     quantity: '0.001',
     price: '70000.00',
-    reduceOnly: false,
     clientOrderId,
 });
 
@@ -48,7 +49,7 @@ const queryOrderBody = `{
     "reduceOnly":false,
     "closePosition":false,
     "side":"BUY",
-    "positionSide":"BOTH",
+    "positionSide":"LONG",
     "updateTime":1783814400000
 }`;
 
@@ -65,7 +66,14 @@ const bodyFor = (url, options) => {
     if (parsed.pathname === '/fapi/v3/positionRisk') return '[]';
     if (parsed.pathname === '/fapi/v1/openOrders') return '[]';
     if (parsed.pathname === '/fapi/v1/openAlgoOrders') return '[]';
+    if (parsed.pathname === '/fapi/v1/positionMargin/history') return '[]';
+    if (parsed.pathname === '/fapi/v1/positionMargin' && options.method === 'POST') {
+        return '{"amount":"1.5","code":200,"msg":"success","type":1}';
+    }
     if (parsed.pathname === '/fapi/v1/order' && options.method === 'GET') {
+        return queryOrderBody;
+    }
+    if (parsed.pathname === '/fapi/v1/order' && options.method === 'PUT') {
         return queryOrderBody;
     }
     if (parsed.pathname === '/fapi/v1/order' && options.method === 'POST') {
@@ -118,10 +126,14 @@ describe('FuturesProductionExecutionFacade', () => {
             'getSymbolConfig',
             'getBalance',
             'getPositionRisk',
+            'getAllPositionRisk',
             'getOpenOrders',
             'getOpenAlgoOrders',
+            'getPositionMarginHistory',
+            'modifyIsolatedPositionMargin',
             'placeLimitGtcOrder',
-            'placeReduceOnlyMarketOrder',
+            'placeHedgeMarketExitOrder',
+            'modifyLimitOrder',
             'queryOrderByOriginalClientOrderId',
             'cancelAllOpenOrders',
             'cancelAllAlgoOpenOrders',
@@ -134,17 +146,40 @@ describe('FuturesProductionExecutionFacade', () => {
         await facade.getSymbolConfig('BTCUSDT');
         await facade.getBalance();
         await facade.getPositionRisk('BTCUSDT');
+        await facade.getAllPositionRisk();
         await facade.getOpenOrders('BTCUSDT');
         await facade.getOpenAlgoOrders('BTCUSDT');
+        await facade.getPositionMarginHistory({
+            symbol: 'BTCUSDT',
+            positionSide: 'LONG',
+            marginAction: 'ADD',
+            startTime: 1783814400000,
+        });
+        await facade.modifyIsolatedPositionMargin({
+            symbol: 'BTCUSDT',
+            positionSide: 'LONG',
+            marginAction: 'ADD',
+            amount: '1.5',
+        });
         const limit = await facade.placeLimitGtcOrder(limitOrder);
-        await facade.placeReduceOnlyMarketOrder({
+        await facade.placeHedgeMarketExitOrder({
             symbol: 'BTCUSDT',
             side: 'SELL',
+            positionSide: 'LONG',
             quantity: '0.001',
+            clientOrderId,
+        });
+        await facade.modifyLimitOrder({
+            symbol: 'BTCUSDT',
+            side: 'BUY',
+            positionSide: 'LONG',
+            quantity: '0.001',
+            price: '70000.00',
             clientOrderId,
         });
         const query = await facade.queryOrderByOriginalClientOrderId({
             symbol: 'BTCUSDT',
+            positionSide: 'LONG',
             originalClientOrderId: clientOrderId,
         });
         const regularCancel = await facade.cancelAllOpenOrders({ symbol: 'BTCUSDT' });
@@ -169,14 +204,20 @@ describe('FuturesProductionExecutionFacade', () => {
             '/fapi/v1/symbolConfig',
             '/fapi/v3/balance',
             '/fapi/v3/positionRisk',
+            '/fapi/v3/positionRisk',
             '/fapi/v1/openOrders',
             '/fapi/v1/openAlgoOrders',
+            '/fapi/v1/positionMargin/history',
+            '/fapi/v1/positionMargin',
+            '/fapi/v1/order',
             '/fapi/v1/order',
             '/fapi/v1/order',
             '/fapi/v1/order',
             '/fapi/v1/allOpenOrders',
             '/fapi/v1/algoOpenOrders',
         ]);
+        expect(new URL(fetchImpl.mock.calls[6][0]).searchParams.get('symbol')).toBe('BTCUSDT');
+        expect(new URL(fetchImpl.mock.calls[7][0]).searchParams.has('symbol')).toBe(false);
         for (const [url, options] of fetchImpl.mock.calls) {
             expect(new URL(url).origin).toBe('https://fapi.binance.com');
             expect(options.redirect).toBe('error');
@@ -204,8 +245,7 @@ describe('FuturesProductionExecutionFacade', () => {
             'timeInForce=GTC',
             'quantity=0.001',
             'price=70000.00',
-            'positionSide=BOTH',
-            'reduceOnly=false',
+            'positionSide=LONG',
             `newClientOrderId=${clientOrderId}`,
             'newOrderRespType=ACK',
             'recvWindow=5000',
@@ -226,7 +266,91 @@ describe('FuturesProductionExecutionFacade', () => {
         expect(fetchImpl).toHaveBeenCalledOnce();
     });
 
-    it('sends a distinct reduce-only MARKET child without price or time-in-force', async () => {
+    it('sends one exact Hedge isolated-margin POST with no retry or caller URL expansion', async () => {
+        const fetchImpl = vi.fn().mockResolvedValue(makeResponse(
+            '{"amount":5.25,"code":200,"msg":"success","type":2}',
+        ));
+        const facade = createFuturesProductionExecutionFacade(config, {
+            fetchImpl,
+            now: () => 1783814400000,
+        });
+        const response = await facade.modifyIsolatedPositionMargin({
+            symbol: 'BTCUSDT',
+            positionSide: 'SHORT',
+            marginAction: 'REDUCE',
+            amount: '5.25',
+        });
+
+        expect(fetchImpl).toHaveBeenCalledTimes(1);
+        const [url, options] = fetchImpl.mock.calls[0];
+        expect(url).toBe('https://fapi.binance.com/fapi/v1/positionMargin');
+        expect(options.method).toBe('POST');
+        const body = new URLSearchParams(options.body);
+        expect([...body.keys()]).toEqual([
+            'symbol', 'amount', 'type', 'positionSide', 'recvWindow', 'timestamp', 'signature',
+        ]);
+        expect(Object.fromEntries(body)).toMatchObject({
+            symbol: 'BTCUSDT',
+            amount: '5.25',
+            type: '2',
+            positionSide: 'SHORT',
+            recvWindow: '5000',
+            timestamp: '1783814400000',
+        });
+        expect(response.data).toMatchObject({
+            acknowledged: true,
+            type: 2,
+            amount: '5.25',
+        });
+    });
+
+    it('sends one exact owned LIMIT amendment PUT and preserves immutable identity', async () => {
+        const modifiedBody = queryOrderBody
+            .replaceAll('70000.00', '70100.10')
+            .replace('    "avgPrice":"0",\n', '');
+        const fetchImpl = vi.fn().mockResolvedValue(makeResponse(modifiedBody));
+        const facade = createFuturesProductionExecutionFacade(config, {
+            fetchImpl,
+            now: () => 1783814400000,
+        });
+        const response = await facade.modifyLimitOrder({
+            symbol: 'BTCUSDT',
+            side: 'BUY',
+            positionSide: 'LONG',
+            quantity: '0.001',
+            price: '70100.10',
+            clientOrderId,
+        });
+
+        expect(fetchImpl).toHaveBeenCalledOnce();
+        const [url, options] = fetchImpl.mock.calls[0];
+        expect(url).toBe('https://fapi.binance.com/fapi/v1/order');
+        expect(options.method).toBe('PUT');
+        expect(options.headers['Content-Type']).toBe('application/x-www-form-urlencoded');
+        const body = new URLSearchParams(options.body);
+        expect([...body.keys()]).toEqual([
+            'symbol', 'side', 'quantity', 'price', 'origClientOrderId',
+            'recvWindow', 'timestamp', 'signature',
+        ]);
+        expect(Object.fromEntries(body)).toMatchObject({
+            symbol: 'BTCUSDT',
+            side: 'BUY',
+            quantity: '0.001',
+            price: '70100.10',
+            origClientOrderId: clientOrderId,
+            recvWindow: '5000',
+            timestamp: '1783814400000',
+        });
+        expect(response.data).toMatchObject({
+            orderId: '9223372036854775807',
+            clientOrderId,
+            price: '70100.10',
+            originalQuantity: '0.001',
+            positionSide: 'LONG',
+        });
+    });
+
+    it('sends a distinct Hedge LONG exit MARKET child without forbidden reduceOnly', async () => {
         const fetchImpl = vi.fn().mockResolvedValue(makeResponse(
             `{"symbol":"BTCUSDT","orderId":1,"clientOrderId":"${clientOrderId}"}`,
         ));
@@ -234,9 +358,10 @@ describe('FuturesProductionExecutionFacade', () => {
             fetchImpl,
             now: () => 1783814400000,
         });
-        await facade.placeReduceOnlyMarketOrder({
+        await facade.placeHedgeMarketExitOrder({
             symbol: 'BTCUSDT',
             side: 'SELL',
+            positionSide: 'LONG',
             quantity: '0.001',
             clientOrderId,
         });
@@ -245,14 +370,13 @@ describe('FuturesProductionExecutionFacade', () => {
             'side=SELL',
             'type=MARKET',
             'quantity=0.001',
-            'positionSide=BOTH',
-            'reduceOnly=true',
+            'positionSide=LONG',
             `newClientOrderId=${clientOrderId}`,
             'newOrderRespType=ACK',
             'recvWindow=5000',
             'timestamp=1783814400000',
         ].join('&');
-        const signature = 'b3b45c4eb3b8cc0eadca11c43cf86dcc6315a0de9233945641106615a61b450e';
+        const signature = '627c765b8a367c2046a71999c7d646ebfc6abf6be67037883e78df3849ca7af1';
         expect(fetchImpl.mock.calls[0]).toEqual([
             'https://fapi.binance.com/fapi/v1/order',
             {
@@ -271,6 +395,7 @@ describe('FuturesProductionExecutionFacade', () => {
         const body = new URLSearchParams(fetchImpl.mock.calls[0][1].body);
         expect(body.has('price')).toBe(false);
         expect(body.has('timeInForce')).toBe(false);
+        expect(body.has('reduceOnly')).toBe(false);
         expect(fetchImpl).toHaveBeenCalledOnce();
     });
 
@@ -279,6 +404,7 @@ describe('FuturesProductionExecutionFacade', () => {
             label: 'Query Order',
             invoke: facade => facade.queryOrderByOriginalClientOrderId({
                 symbol: 'BTCUSDT',
+                positionSide: 'LONG',
                 originalClientOrderId: clientOrderId,
             }),
             pathname: '/fapi/v1/order',
@@ -330,14 +456,16 @@ describe('FuturesProductionExecutionFacade', () => {
     });
 
     it.each([
-        ['reduce-only MARKET POST', facade => facade.placeReduceOnlyMarketOrder({
+        ['Hedge MARKET exit POST', facade => facade.placeHedgeMarketExitOrder({
             symbol: 'BTCUSDT',
             side: 'SELL',
+            positionSide: 'LONG',
             quantity: '0.001',
             clientOrderId,
         })],
         ['Query Order GET', facade => facade.queryOrderByOriginalClientOrderId({
             symbol: 'BTCUSDT',
+            positionSide: 'LONG',
             originalClientOrderId: clientOrderId,
         })],
         ['cancel-all regular DELETE', facade => facade.cancelAllOpenOrders({
@@ -406,6 +534,7 @@ describe('FuturesProductionExecutionFacade', () => {
         });
         await expect(queryFacade.queryOrderByOriginalClientOrderId({
             symbol: 'BTCUSDT',
+            positionSide: 'LONG',
             originalClientOrderId: clientOrderId,
         })).rejects.toMatchObject({
             kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.NOT_FOUND,

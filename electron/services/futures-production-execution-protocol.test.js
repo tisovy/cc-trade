@@ -39,9 +39,32 @@ const prepareOrder = (overrides = {}) => baseCommand(
     {
         symbol: 'BTCUSDT',
         side: 'BUY',
+        positionSide: 'LONG',
+        positionEffect: 'ENTRY',
         quantity: '0.0100',
         price: '60000.1200',
-        reduceOnly: false,
+        ...overrides,
+    },
+);
+
+const prepareMargin = (overrides = {}) => baseCommand(
+    FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_MARGIN_ADJUSTMENT_INTENT,
+    {
+        symbol: 'BTCUSDT',
+        positionSide: 'LONG',
+        marginAction: 'ADD',
+        amount: '5.25',
+        ...overrides,
+    },
+);
+
+const prepareAmendment = (overrides = {}) => baseCommand(
+    FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_ORDER_AMENDMENT_INTENT,
+    {
+        symbol: 'BTCUSDT',
+        positionSide: 'LONG',
+        clientOrderId: `cc7-${REQUEST_ID}`,
+        price: '60100.1',
         ...overrides,
     },
 );
@@ -65,7 +88,7 @@ const createStatusInput = (overrides = {}) => ({
     account: { alias: 'reviewed-account-1', fingerprint: FINGERPRINT },
     caps: {
         allowedSymbols: ['BTCUSDT', 'ETHUSDT'],
-        maxLeverage: 1,
+        maxLeverage: 2,
         maxOrderNotionalUsdt: '10.0000',
         maxDailyNotionalUsdt: '50.0000',
         minAvailableBalanceUsdt: '10.0000',
@@ -79,6 +102,8 @@ const createStatusInput = (overrides = {}) => ({
     },
     capabilities: {
         placeOrder: false,
+        adjustMargin: false,
+        amendOrder: false,
         cancelAllOpenOrders: true,
         closePositions: true,
         engageKillSwitch: false,
@@ -98,6 +123,24 @@ const createStatusInput = (overrides = {}) => ({
         state: 'healthy',
         code: 'FUTURES_PRODUCTION_RECOVERY_HEALTHY',
     },
+    portfolio: {
+        state: 'live',
+        observedAt: 1_783_957_600_000,
+        positions: [{
+            symbol: 'BTCUSDT',
+            positionSide: 'LONG',
+            quantity: '0.01',
+            entryPrice: '60000',
+            markPrice: '61000',
+            notionalUsdt: '610',
+            unrealizedPnlUsdt: '10',
+            isolatedMarginUsdt: '300',
+            liquidationPrice: '30000',
+            leverage: 2,
+            marginType: 'ISOLATED',
+        }],
+        openOrders: [],
+    },
     ...overrides,
 });
 
@@ -116,6 +159,7 @@ describe('production futures command protocol', () => {
     it.each([
         FUTURES_PRODUCTION_EXECUTION_ACTIONS.SUBSCRIBE_STATUS,
         FUTURES_PRODUCTION_EXECUTION_ACTIONS.UNSUBSCRIBE_STATUS,
+        FUTURES_PRODUCTION_EXECUTION_ACTIONS.REFRESH_PORTFOLIO,
         FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_CANCEL_ALL_OPEN_ORDERS_INTENT,
         FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_CLOSE_POSITIONS_INTENT,
         FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_ENGAGE_KILL_SWITCH_INTENT,
@@ -138,15 +182,47 @@ describe('production futures command protocol', () => {
         })).toEqual(prepareOrder());
         expect(parseFuturesProductionExecutionCommand(JSON.stringify(prepareOrder({
             side: 'SELL',
-            reduceOnly: true,
+            positionEffect: 'EXIT',
         })), {
             accountFingerprint: FINGERPRINT,
             allowedSymbols: ['BTCUSDT'],
-        })).toMatchObject({ side: 'SELL', reduceOnly: true });
+        })).toMatchObject({ side: 'SELL', positionSide: 'LONG', positionEffect: 'EXIT' });
+    });
+
+    it('parses an exact isolated-margin leg draft only at prepare time', () => {
+        expect(parseFuturesProductionExecutionCommand(JSON.stringify(prepareMargin()), {
+            accountFingerprint: FINGERPRINT,
+            allowedSymbols: ['BTCUSDT'],
+        })).toEqual(prepareMargin());
+        expectProtocolError(() => parseFuturesProductionExecutionCommand(JSON.stringify(
+            prepareMargin({ marginAction: 'REMOVE' }),
+        )), FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_ORDER_DRAFT);
+    });
+
+    it('parses an exact owned LIMIT amendment draft and its one-use final action', () => {
+        expect(parseFuturesProductionExecutionCommand(JSON.stringify(prepareAmendment()), {
+            accountFingerprint: FINGERPRINT,
+            allowedSymbols: ['BTCUSDT'],
+        })).toEqual(prepareAmendment());
+        expect(parseFuturesProductionExecutionCommand(JSON.stringify(finalCommand(
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.AMEND_ORDER,
+        )), {
+            accountFingerprint: FINGERPRINT,
+        })).toMatchObject({
+            action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.AMEND_ORDER,
+            confirmation: 'MOVE REAL FUTURES ORDER',
+        });
+        expectProtocolError(() => parseFuturesProductionExecutionCommand(JSON.stringify(
+            prepareAmendment({ clientOrderId: `manual-${REQUEST_ID}` }),
+        ), {
+            accountFingerprint: FINGERPRINT,
+            allowedSymbols: ['BTCUSDT'],
+        }), FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_ORDER_DRAFT);
     });
 
     it.each([
         FUTURES_PRODUCTION_EXECUTION_ACTIONS.PLACE_ORDER,
+        FUTURES_PRODUCTION_EXECUTION_ACTIONS.ADJUST_ISOLATED_MARGIN,
         FUTURES_PRODUCTION_EXECUTION_ACTIONS.CANCEL_ALL_OPEN_ORDERS,
         FUTURES_PRODUCTION_EXECUTION_ACTIONS.CLOSE_POSITIONS,
         FUTURES_PRODUCTION_EXECUTION_ACTIONS.ENGAGE_KILL_SWITCH,
@@ -190,6 +266,8 @@ describe('production futures command protocol', () => {
         ['account drift', prepareOrder({ accountFingerprint: 'b'.repeat(64) }), FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_IDENTITY],
         ['noncanonical revision', prepareOrder({ revision: '07' }), FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_REVISION],
         ['float quantity', prepareOrder({ quantity: '1e-3' }), FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_ORDER_DRAFT],
+        ['ambiguous Hedge side', prepareOrder({ side: 'SELL' }), FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_ORDER_DRAFT],
+        ['one-way position side', prepareOrder({ positionSide: 'BOTH' }), FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_ORDER_DRAFT],
         ['wrong symbol', prepareOrder({ symbol: 'ETHUSDT' }), FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_ORDER_DRAFT],
         ['mutable extra field', { ...finalCommand(FUTURES_PRODUCTION_EXECUTION_ACTIONS.PLACE_ORDER), price: '1' }, FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_FIELDS],
         ['wrong confirmation', finalCommand(FUTURES_PRODUCTION_EXECUTION_ACTIONS.PLACE_ORDER, { confirmation: 'place order' }), FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_CONFIRMATION],
@@ -241,6 +319,7 @@ describe('production futures command protocol', () => {
             FUTURES_PRODUCTION_EXECUTION_ACTIONS.SUBSCRIBE_STATUS,
         ))).toBe(true);
         expect(hasExactFuturesProductionExecutionSessionRequestFields(prepareOrder())).toBe(true);
+        expect(hasExactFuturesProductionExecutionSessionRequestFields(prepareMargin())).toBe(true);
         expect(hasExactFuturesProductionExecutionSessionRequestFields({
             ...prepareOrder(),
             host: 'https://example.invalid',
@@ -279,6 +358,8 @@ describe('production futures backend-owned status protocol', () => {
             caps: null,
             capabilities: {
                 placeOrder: false,
+                adjustMargin: false,
+                amendOrder: false,
                 cancelAllOpenOrders: false,
                 closePositions: false,
                 engageKillSwitch: false,
@@ -347,7 +428,8 @@ describe('production futures backend-owned status protocol', () => {
         for (const invalidCaps of [
             { ...createStatusInput().caps, allowedSymbols: ['BTCUSDT', 'BTCUSDT'] },
             { ...createStatusInput().caps, allowedSymbols: ['btcusdt'] },
-            { ...createStatusInput().caps, maxLeverage: 2 },
+            { ...createStatusInput().caps, maxLeverage: 1 },
+            { ...createStatusInput().caps, maxLeverage: 3 },
             { ...createStatusInput().caps, maxOrderNotionalUsdt: '10.000000000000000001' },
             { ...createStatusInput().caps, maxDailyNotionalUsdt: '50.000000000000000001' },
             { ...createStatusInput().caps, minAvailableBalanceUsdt: '0' },

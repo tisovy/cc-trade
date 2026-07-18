@@ -38,7 +38,7 @@ const createSocket = (readyState = 1) => {
 const createStatus = (overrides = {}) => ({
   channelId: 'futures-production-execution',
   action: 'futures.production.status',
-  version: 1,
+  version: 2,
   revision: '1',
   marketType: 'futures',
   environment: 'production',
@@ -48,7 +48,7 @@ const createStatus = (overrides = {}) => ({
   account: { alias: 'reviewed-account-1', fingerprint: FINGERPRINT },
   caps: {
     allowedSymbols: ['BTCUSDT'],
-    maxLeverage: 1,
+    maxLeverage: 2,
     maxOrderNotionalUsdt: '10',
     maxDailyNotionalUsdt: '50',
     minAvailableBalanceUsdt: '10',
@@ -62,6 +62,8 @@ const createStatus = (overrides = {}) => ({
   },
   capabilities: {
     placeOrder: true,
+    adjustMargin: false,
+    amendOrder: false,
     cancelAllOpenOrders: true,
     closePositions: true,
     engageKillSwitch: true,
@@ -75,6 +77,12 @@ const createStatus = (overrides = {}) => ({
     required: false,
     state: 'healthy',
     code: 'FUTURES_PRODUCTION_RECOVERY_HEALTHY',
+  },
+  portfolio: {
+    state: 'live',
+    observedAt: 1_783_957_600_000,
+    positions: [],
+    openOrders: [],
   },
   ...overrides,
 })
@@ -110,7 +118,7 @@ describe('useFuturesProductionExecution', () => {
     expect(result.current).toMatchObject({ connected: true, subscribed: true, revision: null })
     expect(sentMessages(socket)).toEqual([{
       action: 'futures.production.subscribeStatus',
-      version: 1,
+      version: 2,
       revision: '0',
       marketType: 'futures',
       environment: 'production',
@@ -120,7 +128,7 @@ describe('useFuturesProductionExecution', () => {
     unmount()
     expect(sentMessages(socket)[1]).toEqual({
       action: 'futures.production.unsubscribeStatus',
-      version: 1,
+      version: 2,
       revision: '0',
       marketType: 'futures',
       environment: 'production',
@@ -181,16 +189,18 @@ describe('useFuturesProductionExecution', () => {
       expect(result.current.prepareOrderIntent({
         symbol: 'BTCUSDT',
         side: 'SELL',
+        positionSide: 'LONG',
+        positionEffect: 'EXIT',
         quantity: '0.0100',
         price: '60000.1200',
-        reduceOnly: true,
       })).toBe(true)
       expect(result.current.prepareOrderIntent({
         symbol: 'ETHUSDT',
         side: 'BUY',
+        positionSide: 'LONG',
+        positionEffect: 'ENTRY',
         quantity: '1',
         price: '1',
-        reduceOnly: false,
       })).toBe(false)
     })
 
@@ -198,18 +208,141 @@ describe('useFuturesProductionExecution', () => {
       action === 'futures.production.prepareOrderIntent'
     ))).toEqual([{
       action: 'futures.production.prepareOrderIntent',
-      version: 1,
+      version: 2,
       revision: '1',
       marketType: 'futures',
       environment: 'production',
       accountFingerprint: FINGERPRINT,
       symbol: 'BTCUSDT',
       side: 'SELL',
+      positionSide: 'LONG',
+      positionEffect: 'EXIT',
       quantity: '0.0100',
       price: '60000.1200',
-      reduceOnly: true,
     }])
     expect(result.current.submissionLocked).toBe(true)
+  })
+
+  it('requests the private portfolio explicitly without mutable financial fields', () => {
+    const socket = createSocket()
+    const { result } = renderHook(() => useFuturesProductionExecution({
+      enabled: true,
+      wsConnection: socket,
+    }))
+    act(() => socket.emit('message', { data: JSON.stringify(createStatus()) }))
+
+    act(() => {
+      expect(result.current.refreshPortfolio()).toBe(true)
+      expect(result.current.refreshPortfolio()).toBe(false)
+    })
+    expect(sentMessages(socket).at(-1)).toEqual({
+      action: 'futures.production.refreshPortfolio',
+      version: 2,
+      revision: '1',
+      marketType: 'futures',
+      environment: 'production',
+      accountFingerprint: FINGERPRINT,
+    })
+  })
+
+  it('keeps isolated-margin draft in prepare and finalizes only the one-use identity', () => {
+    const socket = createSocket()
+    const { result } = renderHook(() => useFuturesProductionExecution({
+      enabled: true,
+      wsConnection: socket,
+    }))
+    const marginCapabilities = {
+      ...createStatus().capabilities,
+      adjustMargin: true,
+    }
+    act(() => socket.emit('message', {
+      data: JSON.stringify(createStatus({ capabilities: marginCapabilities })),
+    }))
+    act(() => expect(result.current.prepareMarginAdjustment({
+      symbol: 'BTCUSDT',
+      positionSide: 'LONG',
+      marginAction: 'ADD',
+      amount: '5.25',
+    })).toBe(true))
+    expect(sentMessages(socket).at(-1)).toMatchObject({
+      action: 'futures.production.prepareMarginAdjustmentIntent',
+      symbol: 'BTCUSDT',
+      positionSide: 'LONG',
+      marginAction: 'ADD',
+      amount: '5.25',
+    })
+
+    act(() => socket.emit('message', {
+      data: JSON.stringify(createStatus({
+        revision: '2',
+        capabilities: marginCapabilities,
+        intent: intent('margin_adjustment'),
+      })),
+    }))
+    const confirmation = FUTURES_PRODUCTION_EXECUTION_CONFIRMATIONS[
+      'futures.production.adjustIsolatedMargin'
+    ]
+    act(() => expect(result.current.adjustMargin(confirmation)).toBe(true))
+    expect(sentMessages(socket).at(-1)).toEqual({
+      action: 'futures.production.adjustIsolatedMargin',
+      version: 2,
+      revision: '2',
+      requestId: REQUEST_ID,
+      marketType: 'futures',
+      environment: 'production',
+      accountFingerprint: FINGERPRINT,
+      confirmation,
+    })
+  })
+
+  it('keeps owned-order target price in prepare and finalizes amendment by identity only', () => {
+    const socket = createSocket()
+    const { result } = renderHook(() => useFuturesProductionExecution({
+      enabled: true,
+      wsConnection: socket,
+    }))
+    const amendmentCapabilities = {
+      ...createStatus().capabilities,
+      amendOrder: true,
+    }
+    act(() => socket.emit('message', {
+      data: JSON.stringify(createStatus({ capabilities: amendmentCapabilities })),
+    }))
+    act(() => expect(result.current.prepareOrderAmendment({
+      symbol: 'BTCUSDT',
+      positionSide: 'LONG',
+      clientOrderId: `cc7-${REQUEST_ID}`,
+      price: '60100.1',
+    })).toBe(true))
+    expect(sentMessages(socket).at(-1)).toMatchObject({
+      action: 'futures.production.prepareOrderAmendmentIntent',
+      symbol: 'BTCUSDT',
+      positionSide: 'LONG',
+      clientOrderId: `cc7-${REQUEST_ID}`,
+      price: '60100.1',
+    })
+
+    act(() => socket.emit('message', {
+      data: JSON.stringify(createStatus({
+        revision: '2',
+        capabilities: amendmentCapabilities,
+        intent: intent('order_amendment'),
+      })),
+    }))
+    const confirmation = FUTURES_PRODUCTION_EXECUTION_CONFIRMATIONS[
+      'futures.production.amendOrder'
+    ]
+    act(() => expect(result.current.amendOrder(confirmation)).toBe(true))
+    expect(sentMessages(socket).at(-1)).toEqual({
+      action: 'futures.production.amendOrder',
+      version: 2,
+      revision: '2',
+      requestId: REQUEST_ID,
+      marketType: 'futures',
+      environment: 'production',
+      accountFingerprint: FINGERPRINT,
+      confirmation,
+    })
   })
 
   it('sends a one-use final order without mutable values and does not unlock on equal status', () => {
@@ -236,7 +369,7 @@ describe('useFuturesProductionExecution', () => {
     const orders = sentMessages(socket).filter(({ action }) => action === 'futures.production.placeOrder')
     expect(orders).toEqual([{
       action: 'futures.production.placeOrder',
-      version: 1,
+      version: 2,
       revision: '2',
       requestId: REQUEST_ID,
       marketType: 'futures',
@@ -288,6 +421,8 @@ describe('useFuturesProductionExecution', () => {
         },
         capabilities: {
           placeOrder: false,
+          adjustMargin: false,
+          amendOrder: false,
           cancelAllOpenOrders: true,
           closePositions: true,
           engageKillSwitch: false,
@@ -342,9 +477,10 @@ describe('useFuturesProductionExecution', () => {
     act(() => expect(result.current.prepareOrderIntent({
       symbol: 'BTCUSDT',
       side: 'BUY',
+      positionSide: 'LONG',
+      positionEffect: 'ENTRY',
       quantity: '1e-2',
       price: '60000',
-      reduceOnly: false,
     })).toBe(false))
 
     expect(result.current.submissionLocked).toBe(false)

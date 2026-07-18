@@ -1,28 +1,67 @@
-import { useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   FUTURES_PRODUCTION_EXECUTION_ACKNOWLEDGEMENTS,
   FUTURES_PRODUCTION_EXECUTION_ACTIONS,
   FUTURES_PRODUCTION_EXECUTION_CONFIRMATIONS,
   FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS,
 } from '../../../utils/futuresProductionExecutionProtocol.js'
+import {
+  calculateFuturesEntryBudget,
+  calculateFuturesExitBudget,
+  calculateFuturesNotionalForPercent,
+  calculateFuturesNotionalPercent,
+  deriveFuturesLimitOrderDraft,
+  isFuturesDraftAmountWithinBudget,
+  normalizeFuturesDraftPrice,
+} from '../../../utils/futuresOrderDraft.js'
 import './FuturesProductionExecutionTicket.css'
 
 const EXACT_POSITIVE_DECIMAL = /^(?:[1-9][0-9]*|0\.[0-9]*[1-9][0-9]*|[1-9][0-9]*\.[0-9]+)$/
 const SYMBOL = /^[A-Z0-9]{2,20}$/
+const OWNED_CLIENT_ORDER_ID = /^cc7-[0-9a-f]{32}$/
+const SIZE_ANCHORS = Object.freeze([0, 25, 50, 75, 100])
+const ORDER_ACTIONS = Object.freeze([
+  Object.freeze({
+    key: 'LONG_ENTRY', side: 'BUY', positionSide: 'LONG', positionEffect: 'ENTRY', label: 'Enter LONG',
+  }),
+  Object.freeze({
+    key: 'LONG_EXIT', side: 'SELL', positionSide: 'LONG', positionEffect: 'EXIT', label: 'Exit LONG',
+  }),
+  Object.freeze({
+    key: 'SHORT_ENTRY', side: 'SELL', positionSide: 'SHORT', positionEffect: 'ENTRY', label: 'Enter SHORT',
+  }),
+  Object.freeze({
+    key: 'SHORT_EXIT', side: 'BUY', positionSide: 'SHORT', positionEffect: 'EXIT', label: 'Exit SHORT',
+  }),
+])
 
-const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
-const exactText = (value) => typeof value === 'string' && value.length > 0 ? value : '—'
-const exactSymbolList = (value) => Array.isArray(value)
-  && value.length > 0
-  && value.every((symbol) => typeof symbol === 'string' && SYMBOL.test(symbol))
-  ? value.join(', ')
-  : '—'
-
-const isExactPositiveDecimal = (value) => {
+const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+const exactText = value => typeof value === 'string' && value.length > 0 ? value : '—'
+const isExactPositiveDecimal = value => {
   if (typeof value !== 'string' || value.length > 42 || !EXACT_POSITIVE_DECIMAL.test(value)) return false
   const [integer, fraction = ''] = value.split('.')
   return integer.length + fraction.length <= 40 && fraction.length <= 18
 }
+
+const deriveTicketDraft = ({
+  notionalUsdt,
+  price,
+  tickSize,
+  stepSize,
+  minQuantity,
+  maxQuantity,
+  minNotionalUsdt,
+  leverage,
+}) => deriveFuturesLimitOrderDraft({
+  notionalUsdt,
+  price,
+  tickSize,
+  stepSize,
+  minQuantity,
+  maxQuantity,
+  minNotionalUsdt,
+  leverage,
+})
 
 const blockEnterActivation = (event) => {
   if (event.key !== 'Enter') return
@@ -30,16 +69,9 @@ const blockEnterActivation = (event) => {
   event.stopPropagation()
 }
 
-const ConfirmationControl = ({
-  action,
-  disabled,
-  buttonLabel,
-  onConfirm,
-}) => {
+const ConfirmationControl = ({ action, disabled, buttonLabel, onConfirm }) => {
   const [confirmation, setConfirmation] = useState('')
   const exactConfirmation = FUTURES_PRODUCTION_EXECUTION_CONFIRMATIONS[action]
-  const matches = confirmation === exactConfirmation
-
   return (
     <div className="futures-production-confirmation">
       <label>
@@ -51,14 +83,14 @@ const ConfirmationControl = ({
           spellCheck="false"
           maxLength={exactConfirmation.length}
           value={confirmation}
-          onChange={(event) => setConfirmation(event.target.value)}
+          onChange={event => setConfirmation(event.target.value)}
           onKeyDown={blockEnterActivation}
         />
       </label>
       <button
         type="button"
         className="is-final"
-        disabled={disabled || !matches}
+        disabled={disabled || confirmation !== exactConfirmation}
         onClick={() => onConfirm(confirmation)}
         onKeyDown={blockEnterActivation}
       >
@@ -70,6 +102,12 @@ const ConfirmationControl = ({
 
 const FuturesProductionExecutionTicket = ({
   state,
+  selectedSymbol = 'BTCUSDT',
+  selectedContract = null,
+  draftPrice = null,
+  gestureRequest = null,
+  orderAmendRequest = null,
+  onDraftPriceChange,
   onPrepareOrderIntent,
   onPlaceOrder,
   onPrepareCancelAllOpenOrdersIntent,
@@ -80,6 +118,11 @@ const FuturesProductionExecutionTicket = ({
   onEngageKillSwitch,
   onPrepareDisengageKillSwitchIntent,
   onDisengageKillSwitch,
+  onRefreshPortfolio,
+  onPrepareMarginAdjustment,
+  onAdjustMargin,
+  onPrepareOrderAmendment,
+  onAmendOrder,
 }) => {
   const safeState = isRecord(state) ? state : {}
   const account = isRecord(safeState.account) ? safeState.account : null
@@ -88,25 +131,93 @@ const FuturesProductionExecutionTicket = ({
   const capabilities = isRecord(safeState.capabilities) ? safeState.capabilities : null
   const intent = isRecord(safeState.intent) ? safeState.intent : null
   const attempt = isRecord(safeState.attempt) ? safeState.attempt : null
-  const reconciliation = isRecord(safeState.reconciliation) ? safeState.reconciliation : null
   const recovery = isRecord(safeState.recovery) ? safeState.recovery : null
-  const [symbol, setSymbol] = useState('BTCUSDT')
-  const [side, setSide] = useState('BUY')
-  const [quantity, setQuantity] = useState('')
-  const [price, setPrice] = useState('')
-  const [reduceOnly, setReduceOnly] = useState(false)
+  const portfolio = isRecord(safeState.portfolio) ? safeState.portfolio : null
+  const positions = Array.isArray(portfolio?.positions) ? portfolio.positions : []
+  const [tab, setTab] = useState('order')
+  const [actionKey, setActionKey] = useState('LONG_ENTRY')
+  const [sizePercent, setSizePercent] = useState(25)
+  const [customNotionalUsdt, setCustomNotionalUsdt] = useState(null)
+  const [localPrice, setLocalPrice] = useState('')
+  const [manualGestureSelectionId, setManualGestureSelectionId] = useState(null)
+  const [marginSelection, setMarginSelection] = useState(null)
+  const [marginAmount, setMarginAmount] = useState('')
   const actionGuardRef = useRef({ key: null, locked: false })
+  const handledGestureRef = useRef(null)
+  const handledOrderAmendmentRef = useRef(null)
+  const gestureAction = ORDER_ACTIONS.find(candidate => (
+    candidate.side === gestureRequest?.side
+    && candidate.positionSide === gestureRequest?.positionSide
+    && candidate.positionEffect === gestureRequest?.positionEffect
+  )) ?? null
+  const gestureOwnsSelection = gestureAction !== null
+    && manualGestureSelectionId !== gestureRequest?.id
+  const activeAction = gestureOwnsSelection
+    ? gestureAction
+    : ORDER_ACTIONS.find(action => action.key === actionKey) ?? ORDER_ACTIONS[0]
+  const price = typeof draftPrice === 'string' ? draftPrice : localPrice
   const backendRevision = typeof safeState.revision === 'string' ? safeState.revision : null
   const intentId = typeof intent?.requestId === 'string' ? intent.requestId : null
   const guardKey = `${backendRevision ?? ''}:${intentId ?? ''}`
   const transportReady = safeState.connected === true && safeState.subscribed === true
   const backendLocked = safeState.submissionLocked === true
-  const hasExactOrderDraft = SYMBOL.test(symbol)
-    && ['BUY', 'SELL'].includes(side)
-    && isExactPositiveDecimal(quantity)
-    && isExactPositiveDecimal(price)
+  const gestureCanPrepare = transportReady
+    && capabilities?.placeOrder === true
+    && intent === null
+    && !backendLocked
+  const amendmentCanPrepare = transportReady
+    && capabilities?.amendOrder === true
+    && intent === null
+    && !backendLocked
+  const entryBudget = calculateFuturesEntryBudget({
+    maximumOrderNotionalUsdt: caps?.maxOrderNotionalUsdt,
+    maximumDailyNotionalUsdt: caps?.maxDailyNotionalUsdt,
+    dailyUsedNotionalUsdt: caps?.dailyUsedNotionalUsdt,
+  })
+  const selectedPosition = positions.find(position => (
+    position.symbol === selectedSymbol
+    && position.positionSide === activeAction.positionSide
+  )) ?? null
+  const exitBudget = calculateFuturesExitBudget({
+    positionQuantity: selectedPosition?.quantity,
+    price,
+    tickSize: selectedContract?.filters?.price?.tickSize,
+    maximumOrderNotionalUsdt: caps?.maxOrderNotionalUsdt,
+    maximumDailyNotionalUsdt: caps?.maxDailyNotionalUsdt,
+    dailyUsedNotionalUsdt: caps?.dailyUsedNotionalUsdt,
+  })
+  const sizingBudget = activeAction.positionEffect === 'EXIT' ? exitBudget : entryBudget
+  const notionalUsdt = customNotionalUsdt
+    ?? calculateFuturesNotionalForPercent(sizingBudget, sizePercent)
+    ?? ''
+  const tickSize = selectedContract?.filters?.price?.tickSize
+  const stepSize = selectedContract?.filters?.quantity?.stepSize
+  const minQuantity = selectedContract?.filters?.quantity?.min
+  const maxQuantity = selectedContract?.filters?.quantity?.max
+  const minNotionalUsdt = selectedContract?.filters?.minimumNotional
+  const leverage = caps?.maxLeverage
+  const normalizedAmendmentPrice = typeof orderAmendRequest?.price === 'string'
+    ? normalizeFuturesDraftPrice(orderAmendRequest.price, tickSize)
+    : null
 
-  const claimAction = (callback, payload) => {
+  const updatePrice = useCallback((nextPrice) => {
+    if (typeof onDraftPriceChange === 'function') onDraftPriceChange(nextPrice)
+    else setLocalPrice(nextPrice)
+  }, [onDraftPriceChange])
+
+  const deriveDraft = candidatePrice => deriveTicketDraft({
+    notionalUsdt,
+    price: candidatePrice,
+    tickSize,
+    stepSize,
+    minQuantity,
+    maxQuantity,
+    minNotionalUsdt,
+    leverage,
+  })
+  const orderDraft = deriveDraft(price)
+
+  const claimAction = useCallback((callback, payload) => {
     if (typeof callback !== 'function') return false
     if (actionGuardRef.current.key !== guardKey) {
       actionGuardRef.current = { key: guardKey, locked: false }
@@ -121,9 +232,9 @@ const FuturesProductionExecutionTicket = ({
     }
     if (!accepted) actionGuardRef.current.locked = false
     return accepted
-  }
+  }, [guardKey])
 
-  const canPrepare = (capability) => transportReady
+  const canPrepare = capability => transportReady
     && capabilities?.[capability] === true
     && intent === null
     && !backendLocked
@@ -131,24 +242,142 @@ const FuturesProductionExecutionTicket = ({
     && capabilities?.[capability] === true
     && intent?.kind === kind
     && !backendLocked
-  const canPrepareOrder = canPrepare('placeOrder')
-    && hasExactOrderDraft
-    && (killSwitch?.engaged !== true || reduceOnly)
+  const canPrepareAction = (action, candidateDraft = orderDraft) => canPrepare('placeOrder')
+    && SYMBOL.test(selectedSymbol)
+    && candidateDraft.ok
+    && isExactPositiveDecimal(notionalUsdt)
+    && isFuturesDraftAmountWithinBudget(notionalUsdt, sizingBudget)
+    && (killSwitch?.engaged !== true || action.positionEffect === 'EXIT')
 
-  const handlePrepareOrder = () => {
-    if (!canPrepareOrder) return
-    claimAction(onPrepareOrderIntent, {
-      symbol,
-      side,
-      quantity,
-      price,
-      reduceOnly,
+  const prepareAction = (action, candidatePrice = price) => {
+    const candidateDraft = candidatePrice === price ? orderDraft : deriveDraft(candidatePrice)
+    if (!canPrepareAction(action, candidateDraft)) return false
+    return claimAction(onPrepareOrderIntent, {
+      symbol: selectedSymbol,
+      side: action.side,
+      positionSide: action.positionSide,
+      positionEffect: action.positionEffect,
+      quantity: candidateDraft.quantity,
+      price: candidateDraft.price,
     })
   }
 
-  const attemptAcknowledgement = exactText(attempt?.acknowledgement)
+  useEffect(() => {
+    const gestureId = gestureRequest?.id
+    if (gestureId === null || gestureId === undefined || handledGestureRef.current === gestureId) return
+    if (!gestureAction || typeof gestureRequest.price !== 'string') return
+    if (!isExactPositiveDecimal(notionalUsdt)) return
+    handledGestureRef.current = gestureId
+    const candidateDraft = deriveTicketDraft({
+      notionalUsdt,
+      price: gestureRequest.price,
+      tickSize,
+      stepSize,
+      minQuantity,
+      maxQuantity,
+      minNotionalUsdt,
+      leverage,
+    })
+    if (!gestureCanPrepare
+      || !SYMBOL.test(selectedSymbol)
+      || !candidateDraft.ok
+      || (killSwitch?.engaged === true && gestureAction.positionEffect !== 'EXIT')) return
+    claimAction(onPrepareOrderIntent, {
+      symbol: selectedSymbol,
+      side: gestureAction.side,
+      positionSide: gestureAction.positionSide,
+      positionEffect: gestureAction.positionEffect,
+      quantity: candidateDraft.quantity,
+      price: candidateDraft.price,
+    })
+  }, [
+    claimAction,
+    gestureAction,
+    gestureRequest,
+    killSwitch?.engaged,
+    notionalUsdt,
+    tickSize,
+    stepSize,
+    minQuantity,
+    maxQuantity,
+    minNotionalUsdt,
+    leverage,
+    onPrepareOrderIntent,
+    selectedSymbol,
+    gestureCanPrepare,
+  ])
+
+  useEffect(() => {
+    const amendmentId = orderAmendRequest?.id
+    if (amendmentId === null
+      || amendmentId === undefined
+      || handledOrderAmendmentRef.current === amendmentId) return
+    handledOrderAmendmentRef.current = amendmentId
+    if (!amendmentCanPrepare
+      || orderAmendRequest.symbol !== selectedSymbol
+      || !['LONG', 'SHORT'].includes(orderAmendRequest.positionSide)
+      || typeof orderAmendRequest.clientOrderId !== 'string'
+      || !OWNED_CLIENT_ORDER_ID.test(orderAmendRequest.clientOrderId)
+      || !isExactPositiveDecimal(normalizedAmendmentPrice)) return
+    claimAction(onPrepareOrderAmendment, {
+      symbol: orderAmendRequest.symbol,
+      positionSide: orderAmendRequest.positionSide,
+      clientOrderId: orderAmendRequest.clientOrderId,
+      price: normalizedAmendmentPrice,
+    })
+  }, [
+    amendmentCanPrepare,
+    claimAction,
+    onPrepareOrderAmendment,
+    orderAmendRequest,
+    normalizedAmendmentPrice,
+    selectedSymbol,
+  ])
+
+  const handleNotionalChange = value => {
+    setCustomNotionalUsdt(value)
+    setSizePercent(calculateFuturesNotionalPercent(value, sizingBudget) ?? 0)
+  }
+
+  const selectSizePercent = value => {
+    setCustomNotionalUsdt(null)
+    setSizePercent(value)
+  }
+
+  const selectAction = key => {
+    setManualGestureSelectionId(gestureRequest?.id ?? null)
+    setCustomNotionalUsdt(null)
+    setActionKey(key)
+  }
+
+  const draftReason = !price
+    ? 'Pick a chart or order-book price'
+      : !sizingBudget || sizingBudget === '0'
+      ? 'Daily/order budget exhausted'
+      : orderDraft.ok ? null : orderDraft.reason
   const isUnknown = attempt?.acknowledgement === FUTURES_PRODUCTION_EXECUTION_ACKNOWLEDGEMENTS.UNKNOWN
   const isPartial = attempt?.acknowledgement === FUTURES_PRODUCTION_EXECUTION_ACKNOWLEDGEMENTS.PARTIAL
+  const marginCanPrepare = canPrepare('adjustMargin')
+    && isRecord(marginSelection)
+    && isExactPositiveDecimal(marginAmount)
+    && !(killSwitch?.engaged === true && marginSelection.marginAction === 'REDUCE')
+
+  const selectMarginAdjustment = (position, marginAction) => {
+    setMarginSelection({
+      symbol: position.symbol,
+      positionSide: position.positionSide,
+      marginAction,
+    })
+    setMarginAmount('')
+  }
+
+  const prepareMarginAdjustment = () => {
+    if (!marginCanPrepare) return false
+    return claimAction(onPrepareMarginAdjustment, {
+      ...marginSelection,
+      amount: marginAmount,
+    })
+  }
 
   return (
     <aside
@@ -158,278 +387,238 @@ const FuturesProductionExecutionTicket = ({
     >
       <header className="futures-production-execution-header">
         <div>
-          <span className="futures-production-execution-market">USDⓈ-M PRODUCTION · REAL ORDERS</span>
-          <strong>{exactText(safeState.mode).toUpperCase()}</strong>
+          <span className="futures-production-execution-market">FUTURES · USDⓈ-M</span>
+          <strong>ISOLATED · 2× · HEDGE</strong>
         </div>
         <span className={`futures-production-live is-${safeState.liveAuthorized === true && killSwitch?.engaged === false ? 'armed' : 'blocked'}`}>
-          {safeState.liveAuthorized !== true
-            ? 'LIVE BLOCKED'
-            : killSwitch?.engaged === false ? 'LIVE ARMED' : 'LIVE LOCKED'}
+          {safeState.liveAuthorized !== true ? 'BLOCKED' : killSwitch?.engaged === false ? 'ARMED' : 'LOCKED'}
         </span>
       </header>
 
+      <div className="futures-production-tabs" role="tablist" aria-label="Futures trading rail tabs">
+        <button type="button" role="tab" aria-selected={tab === 'order'} onClick={() => setTab('order')}>Order</button>
+        <button type="button" role="tab" aria-selected={tab === 'positions'} onClick={() => setTab('positions')}>Positions</button>
+      </div>
+
       <div className="futures-production-execution-body">
-        <dl className="futures-production-status-grid" aria-label="Backend production identity and mode">
-          <div><dt>Configuration</dt><dd>{safeState.configured === true ? 'CONFIGURED' : 'DISABLED'}</dd></div>
-          <div><dt>Account alias</dt><dd>{exactText(account?.alias)}</dd></div>
-          <div className="is-wide"><dt>Account fingerprint</dt><dd>{exactText(account?.fingerprint)}</dd></div>
-        </dl>
-
-        <dl className="futures-production-status-grid" aria-label="Backend production caps">
-          <div className="is-wide"><dt>Allowed symbols</dt><dd>{exactSymbolList(caps?.allowedSymbols)}</dd></div>
-          <div><dt>Maximum leverage</dt><dd>{caps ? `${caps.maxLeverage}×` : '—'}</dd></div>
-          <div><dt>Maximum order notional</dt><dd>{caps ? `${caps.maxOrderNotionalUsdt} USDT` : '—'}</dd></div>
-          <div><dt>Maximum daily notional</dt><dd>{caps ? `${caps.maxDailyNotionalUsdt} USDT` : '—'}</dd></div>
-          <div><dt>Minimum available balance</dt><dd>{caps ? `${caps.minAvailableBalanceUsdt} USDT` : '—'}</dd></div>
-          <div><dt>Minimum liquidation distance</dt><dd>{caps ? `${caps.minLiquidationDistanceBps} bps` : '—'}</dd></div>
-          <div><dt>Daily used · {exactText(caps?.utcDay)} UTC</dt><dd>{caps ? `${caps.dailyUsedNotionalUsdt} USDT` : '—'}</dd></div>
-        </dl>
-
-        <dl className="futures-production-status-grid" aria-label="Backend kill switch">
-          <div><dt>Kill switch</dt><dd>{killSwitch?.engaged === true ? 'ENGAGED' : killSwitch ? 'DISENGAGED' : '—'}</dd></div>
-          <div><dt>Kill policy</dt><dd>{exactText(killSwitch?.policy)}</dd></div>
-        </dl>
-
-        {intent ? (
-          <section className="futures-production-backend-card" aria-label="Backend production intent">
-            <strong>ONE-USE INTENT</strong>
-            <dl>
-              <div><dt>Kind</dt><dd>{exactText(intent.kind)}</dd></div>
-              <div><dt>Request</dt><dd>{exactText(intent.requestId)}</dd></div>
-              <div><dt>Revision</dt><dd>{exactText(intent.revision)}</dd></div>
-              <div><dt>Expires</dt><dd>{String(intent.expiresAt)}</dd></div>
-            </dl>
-          </section>
-        ) : null}
-
-        {attempt ? (
-          <section
-            className={`futures-production-backend-card futures-production-attempt is-${attempt.acknowledgement}`}
-            aria-label="Backend production attempt"
-          >
-            <div className="futures-production-card-heading">
-              <strong>{attemptAcknowledgement.toUpperCase()}</strong>
-              <code>{exactText(attempt.state)}</code>
+        {tab === 'order' ? (
+          <section className="futures-production-action is-order" aria-label="Production order action">
+            <div className="futures-production-ticket-symbol">
+              <span>Symbol</span><strong>{selectedSymbol}</strong><code>{activeAction.label}</code>
             </div>
-            <dl>
-              <div><dt>Kind</dt><dd>{exactText(attempt.kind)}</dd></div>
-              <div><dt>Request</dt><dd>{exactText(attempt.requestId)}</dd></div>
-              <div><dt>Code</dt><dd>{exactText(attempt.code)}</dd></div>
-              <div><dt>Observed</dt><dd>{String(attempt.observedAt)}</dd></div>
-            </dl>
-            {Array.isArray(attempt.items) && attempt.items.length > 0 ? (
-              <ul aria-label="Backend production item outcomes">
-                {attempt.items.map((item, index) => (
-                  <li key={`${item.symbol ?? 'account'}:${index}`}>
-                    <code>{exactText(item.symbol)}</code>
-                    <strong>{exactText(item.outcome).toUpperCase()}</strong>
-                    <small>{exactText(item.code)}</small>
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-            {isUnknown ? (
-              <p className="futures-production-non-success" role="status">
-                UNKNOWN — not success or rejection. Backend reconciliation and recovery own the outcome.
-              </p>
-            ) : null}
-            {isPartial ? (
-              <p className="futures-production-non-success" role="status">
-                PARTIAL — incomplete and never treated as success. Review every backend item outcome.
-              </p>
-            ) : null}
-          </section>
-        ) : null}
-
-        {reconciliation ? (
-          <section className="futures-production-backend-card" aria-label="Backend production reconciliation">
-            <strong>RECONCILIATION</strong>
-            <dl>
-              <div><dt>Required</dt><dd>{reconciliation.required ? 'YES' : 'NO'}</dd></div>
-              <div><dt>State</dt><dd>{exactText(reconciliation.state)}</dd></div>
-              <div><dt>Next attempt</dt><dd>{reconciliation.nextAttemptAt ?? '—'}</dd></div>
-            </dl>
-          </section>
-        ) : null}
-
-        {recovery ? (
-          <section className="futures-production-backend-card" aria-label="Backend production recovery">
-            <strong>RECOVERY</strong>
-            <dl>
-              <div><dt>Required</dt><dd>{recovery.required ? 'YES' : 'NO'}</dd></div>
-              <div><dt>State</dt><dd>{exactText(recovery.state)}</dd></div>
-              <div><dt>Code</dt><dd>{exactText(recovery.code)}</dd></div>
-            </dl>
-          </section>
-        ) : null}
-
-        <section className="futures-production-action is-arm" aria-label="Arm production live trading action">
-          <h3>ARM LIVE · 1× / 10 USDT / 50 USDT DAILY</h3>
-          <p>
-            Removes only the persistent new-exposure block. It does not place, cancel, or close anything.
-          </p>
-          <button
-            type="button"
-            disabled={!canPrepare('disengageKillSwitch')}
-            onClick={() => claimAction(onPrepareDisengageKillSwitchIntent)}
-          >
-            Prepare ARM LIVE intent
-          </button>
-          {intent?.kind === FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.DISENGAGE_KILL_SWITCH ? (
-            <ConfirmationControl
-              key={intent.requestId}
-              action={FUTURES_PRODUCTION_EXECUTION_ACTIONS.DISENGAGE_KILL_SWITCH}
-              disabled={!canFinalize(
-                FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.DISENGAGE_KILL_SWITCH,
-                'disengageKillSwitch',
-              )}
-              buttonLabel="ARM LIVE FUTURES"
-              onConfirm={(confirmation) => claimAction(onDisengageKillSwitch, confirmation)}
-            />
-          ) : null}
-        </section>
-
-        <section className="futures-production-action" aria-label="Production order action">
-          <h3>REAL LIMIT ORDER</h3>
-          <div className="futures-production-order-fields">
+            <div className="futures-production-intent-grid" role="group" aria-label="Hedge order intent">
+              {ORDER_ACTIONS.map(action => (
+                <button
+                  type="button"
+                  key={action.key}
+                  className={`${action.positionSide === 'LONG' ? 'is-long' : 'is-short'}${activeAction.key === action.key ? ' is-selected' : ''}`}
+                  aria-pressed={activeAction.key === action.key}
+                  onClick={() => selectAction(action.key)}
+                >
+                  {action.label}
+                </button>
+              ))}
+            </div>
             <label>
-              <span>Symbol</span>
+              <span>Limit price</span>
               <input
-                type="text"
-                autoComplete="off"
-                autoCapitalize="characters"
-                spellCheck="false"
-                maxLength={20}
-                value={symbol}
-                onChange={(event) => setSymbol(event.target.value.toUpperCase())}
-              />
-            </label>
-            <label>
-              <span>Side</span>
-              <select value={side} onChange={(event) => setSide(event.target.value)}>
-                <option value="BUY">BUY</option>
-                <option value="SELL">SELL</option>
-              </select>
-            </label>
-            <label>
-              <span>Exact quantity</span>
-              <input
+                aria-label="Exact limit price"
                 type="text"
                 inputMode="decimal"
-                autoComplete="off"
-                spellCheck="false"
-                maxLength={42}
-                value={quantity}
-                onChange={(event) => setQuantity(event.target.value)}
-              />
-            </label>
-            <label>
-              <span>Exact limit price</span>
-              <input
-                type="text"
-                inputMode="decimal"
-                autoComplete="off"
-                spellCheck="false"
-                maxLength={42}
                 value={price}
-                onChange={(event) => setPrice(event.target.value)}
+                onChange={event => updatePrice(event.target.value)}
               />
             </label>
-            <label className="futures-production-checkbox">
+            <label>
+              <span>Order notional, USDT</span>
               <input
-                type="checkbox"
-                checked={reduceOnly}
-                onChange={(event) => setReduceOnly(event.target.checked)}
+                aria-label="Order notional USDT"
+                type="text"
+                inputMode="decimal"
+                value={notionalUsdt}
+                onChange={event => handleNotionalChange(event.target.value)}
               />
-              <span>Reduce only</span>
             </label>
-          </div>
-          <button
-            type="button"
-            disabled={!canPrepareOrder}
-            onClick={handlePrepareOrder}
-          >
-            Prepare real order intent
-          </button>
-          {intent?.kind === FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER ? (
-            <ConfirmationControl
-              key={intent.requestId}
-              action={FUTURES_PRODUCTION_EXECUTION_ACTIONS.PLACE_ORDER}
-              disabled={!canFinalize(FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER, 'placeOrder')}
-              buttonLabel="Place real futures order"
-              onConfirm={(confirmation) => claimAction(onPlaceOrder, confirmation)}
-            />
-          ) : null}
-        </section>
+            <label className="futures-production-size-slider">
+              <span>Size <strong>{sizePercent}%</strong></span>
+              <input
+                aria-label="Order size percent"
+                type="range"
+                min="0"
+                max="100"
+                step="1"
+                value={sizePercent}
+                onChange={event => selectSizePercent(Number(event.target.value))}
+              />
+            </label>
+            <div className="futures-production-size-anchors" aria-label="Order size anchors">
+              {SIZE_ANCHORS.map(value => (
+                <button type="button" key={value} onClick={() => selectSizePercent(value)}>{value}%</button>
+              ))}
+            </div>
+            <dl className="futures-production-order-summary">
+              <div><dt>Price</dt><dd>{orderDraft.ok ? orderDraft.price : exactText(price)}</dd></div>
+              <div><dt>Quantity</dt><dd>{orderDraft.ok ? orderDraft.quantity : '—'}</dd></div>
+              <div><dt>Notional</dt><dd>{orderDraft.ok ? `${orderDraft.notionalUsdt} USDT` : '—'}</dd></div>
+              <div><dt>Est. margin</dt><dd>{orderDraft.ok ? `${orderDraft.estimatedMarginUsdt} USDT` : '—'}</dd></div>
+              <div><dt>{activeAction.positionEffect === 'EXIT' ? 'Leg/cap budget' : 'Safe budget'}</dt><dd>{sizingBudget ? `${sizingBudget} USDT` : '—'}</dd></div>
+            </dl>
+            {draftReason ? <p className="futures-production-draft-reason" role="status">{draftReason}</p> : null}
+            <p className="futures-production-shortcuts">
+              Alt: double-left LONG in, double-right LONG out · Ctrl: double-right SHORT in, double-left SHORT out
+            </p>
+            <p className="futures-production-shortcuts">
+              Hold Ctrl or Alt and drag an owned chart order to prepare a move.
+            </p>
+            {orderAmendRequest ? (
+              <div className="futures-production-order-amendment" role="status">
+                <span>Move {orderAmendRequest.positionSide} order</span>
+                <strong>{normalizedAmendmentPrice ?? orderAmendRequest.price}</strong>
+                <code>{orderAmendRequest.clientOrderId}</code>
+              </div>
+            ) : null}
+            <button type="button" disabled={!canPrepareAction(activeAction)} onClick={() => prepareAction(activeAction)}>
+              Prepare {activeAction.label}
+            </button>
+            {intent?.kind === FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER ? (
+              <ConfirmationControl
+                key={intent.requestId}
+                action={FUTURES_PRODUCTION_EXECUTION_ACTIONS.PLACE_ORDER}
+                disabled={!canFinalize(FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER, 'placeOrder')}
+                buttonLabel="Place real futures order"
+                onConfirm={confirmation => claimAction(onPlaceOrder, confirmation)}
+              />
+            ) : null}
+            {intent?.kind === FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER_AMENDMENT ? (
+              <ConfirmationControl
+                key={intent.requestId}
+                action={FUTURES_PRODUCTION_EXECUTION_ACTIONS.AMEND_ORDER}
+                disabled={!canFinalize(
+                  FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER_AMENDMENT,
+                  'amendOrder',
+                )}
+                buttonLabel="Move real futures order"
+                onConfirm={confirmation => claimAction(onAmendOrder, confirmation)}
+              />
+            ) : null}
+          </section>
+        ) : (
+          <section className="futures-production-positions" role="tabpanel" aria-label="Hedge positions">
+            <button
+              type="button"
+              disabled={!transportReady || backendLocked || typeof onRefreshPortfolio !== 'function'}
+              onClick={() => claimAction(onRefreshPortfolio)}
+            >
+              Refresh positions &amp; orders
+            </button>
+            {portfolio?.state !== 'live' ? (
+              <p role="status">Private positions are {portfolio?.state ?? 'unavailable'}.</p>
+            ) : positions.length === 0 ? <p>No open LONG or SHORT positions.</p> : positions.map(position => (
+              <article key={`${position.symbol}:${position.positionSide}`}>
+                <header><strong>{position.symbol}</strong><span>{position.positionSide}</span></header>
+                <dl>
+                  <div><dt>Qty</dt><dd>{exactText(position.quantity)}</dd></div>
+                  <div><dt>Margin</dt><dd>{exactText(position.isolatedMarginUsdt)} USDT</dd></div>
+                  <div><dt>UPnL</dt><dd>{exactText(position.unrealizedPnlUsdt)} USDT</dd></div>
+                  <div><dt>Liq.</dt><dd>{exactText(position.liquidationPrice)}</dd></div>
+                </dl>
+                <div>
+                  <button
+                    type="button"
+                    disabled={capabilities?.adjustMargin !== true || typeof onPrepareMarginAdjustment !== 'function'}
+                    onClick={() => selectMarginAdjustment(position, 'ADD')}
+                  >
+                    Add margin
+                  </button>
+                  <button
+                    type="button"
+                    disabled={killSwitch?.engaged === true || capabilities?.adjustMargin !== true || typeof onPrepareMarginAdjustment !== 'function'}
+                    onClick={() => selectMarginAdjustment(position, 'REDUCE')}
+                  >
+                    Reduce margin
+                  </button>
+                </div>
+              </article>
+            ))}
+            {isRecord(marginSelection) ? (
+              <section className="futures-production-margin-adjustment" aria-label="Isolated margin adjustment">
+                <strong>
+                  {marginSelection.marginAction} {marginSelection.symbol} {marginSelection.positionSide}
+                </strong>
+                <label>
+                  <span>Amount, USDT</span>
+                  <input
+                    aria-label="Isolated margin amount USDT"
+                    type="text"
+                    inputMode="decimal"
+                    value={marginAmount}
+                    onChange={event => setMarginAmount(event.target.value)}
+                  />
+                </label>
+                <p>Per-action safety cap: {exactText(caps?.maxOrderNotionalUsdt)} USDT</p>
+                <button type="button" disabled={!marginCanPrepare} onClick={prepareMarginAdjustment}>
+                  Prepare {marginSelection.marginAction.toLowerCase()} margin
+                </button>
+                {intent?.kind === FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.MARGIN_ADJUSTMENT ? (
+                  <ConfirmationControl
+                    key={intent.requestId}
+                    action={FUTURES_PRODUCTION_EXECUTION_ACTIONS.ADJUST_ISOLATED_MARGIN}
+                    disabled={!canFinalize(FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.MARGIN_ADJUSTMENT, 'adjustMargin')}
+                    buttonLabel="Adjust real isolated margin"
+                    onConfirm={confirmation => claimAction(onAdjustMargin, confirmation)}
+                  />
+                ) : null}
+              </section>
+            ) : null}
+          </section>
+        )}
 
-        <section className="futures-production-action" aria-label="Cancel all production open orders action">
-          <h3>CANCEL ALL OPEN ORDERS</h3>
-          <button
-            type="button"
-            disabled={!canPrepare('cancelAllOpenOrders')}
-            onClick={() => claimAction(onPrepareCancelAllOpenOrdersIntent)}
-          >
-            Prepare cancel-all intent
-          </button>
+        {(attempt || recovery?.required) ? (
+          <section className={`futures-production-backend-card is-${attempt?.acknowledgement ?? 'recovery'}`} aria-label="Backend production attempt">
+            <strong>{exactText(attempt?.acknowledgement ?? recovery?.state).toUpperCase()}</strong>
+            <code>{exactText(attempt?.state ?? recovery?.code)}</code>
+            {(isUnknown || isPartial) ? <p role="status">Not success. Backend reconciliation remains authoritative.</p> : null}
+          </section>
+        ) : null}
+
+        <details className="futures-production-advanced-safety">
+          <summary>Advanced safety</summary>
+          <dl className="futures-production-status-grid" aria-label="Backend production identity and mode">
+            <div><dt>Account</dt><dd>{exactText(account?.alias)}</dd></div>
+            <div><dt>Fingerprint</dt><dd>{exactText(account?.fingerprint)}</dd></div>
+            <div><dt>Daily used</dt><dd>{caps ? `${caps.dailyUsedNotionalUsdt} USDT` : '—'}</dd></div>
+            <div><dt>Recovery</dt><dd>{exactText(recovery?.state)}</dd></div>
+          </dl>
+          <section className="futures-production-action is-arm">
+            <h3>ARM LIVE · HEDGE / ISOLATED / 2×</h3>
+            <button type="button" disabled={!canPrepare('disengageKillSwitch')} onClick={() => claimAction(onPrepareDisengageKillSwitchIntent)}>
+              Prepare ARM LIVE intent
+            </button>
+            {intent?.kind === FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.DISENGAGE_KILL_SWITCH ? (
+              <ConfirmationControl
+                key={intent.requestId}
+                action={FUTURES_PRODUCTION_EXECUTION_ACTIONS.DISENGAGE_KILL_SWITCH}
+                disabled={!canFinalize(FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.DISENGAGE_KILL_SWITCH, 'disengageKillSwitch')}
+                buttonLabel="ARM LIVE FUTURES"
+                onConfirm={confirmation => claimAction(onDisengageKillSwitch, confirmation)}
+              />
+            ) : null}
+          </section>
+          <section className="futures-production-safety-actions">
+            <button type="button" disabled={!canPrepare('cancelAllOpenOrders')} onClick={() => claimAction(onPrepareCancelAllOpenOrdersIntent)}>Prepare cancel-all</button>
+            <button type="button" disabled={!canPrepare('closePositions')} onClick={() => claimAction(onPrepareClosePositionsIntent)}>Prepare close-all</button>
+            <button type="button" disabled={!canPrepare('engageKillSwitch')} onClick={() => claimAction(onPrepareEngageKillSwitchIntent)}>Prepare kill switch</button>
+          </section>
           {intent?.kind === FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.CANCEL_ALL_OPEN_ORDERS ? (
-            <ConfirmationControl
-              key={intent.requestId}
-              action={FUTURES_PRODUCTION_EXECUTION_ACTIONS.CANCEL_ALL_OPEN_ORDERS}
-              disabled={!canFinalize(
-                FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.CANCEL_ALL_OPEN_ORDERS,
-                'cancelAllOpenOrders',
-              )}
-              buttonLabel="Cancel all real futures orders"
-              onConfirm={(confirmation) => claimAction(onCancelAllOpenOrders, confirmation)}
-            />
+            <ConfirmationControl key={intent.requestId} action={FUTURES_PRODUCTION_EXECUTION_ACTIONS.CANCEL_ALL_OPEN_ORDERS} disabled={!canFinalize(FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.CANCEL_ALL_OPEN_ORDERS, 'cancelAllOpenOrders')} buttonLabel="Cancel all real futures orders" onConfirm={confirmation => claimAction(onCancelAllOpenOrders, confirmation)} />
           ) : null}
-        </section>
-
-        <section className="futures-production-action" aria-label="Close all production positions action">
-          <h3>REDUCE / CLOSE POSITIONS</h3>
-          <button
-            type="button"
-            disabled={!canPrepare('closePositions')}
-            onClick={() => claimAction(onPrepareClosePositionsIntent)}
-          >
-            Prepare close-positions intent
-          </button>
           {intent?.kind === FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.CLOSE_POSITIONS ? (
-            <ConfirmationControl
-              key={intent.requestId}
-              action={FUTURES_PRODUCTION_EXECUTION_ACTIONS.CLOSE_POSITIONS}
-              disabled={!canFinalize(
-                FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.CLOSE_POSITIONS,
-                'closePositions',
-              )}
-              buttonLabel="Close all real futures positions"
-              onConfirm={(confirmation) => claimAction(onClosePositions, confirmation)}
-            />
+            <ConfirmationControl key={intent.requestId} action={FUTURES_PRODUCTION_EXECUTION_ACTIONS.CLOSE_POSITIONS} disabled={!canFinalize(FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.CLOSE_POSITIONS, 'closePositions')} buttonLabel="Close all real futures positions" onConfirm={confirmation => claimAction(onClosePositions, confirmation)} />
           ) : null}
-        </section>
-
-        <section className="futures-production-action is-kill" aria-label="Production kill switch action">
-          <h3>ENGAGE KILL SWITCH</h3>
-          <button
-            type="button"
-            disabled={!canPrepare('engageKillSwitch')}
-            onClick={() => claimAction(onPrepareEngageKillSwitchIntent)}
-          >
-            Prepare kill-switch intent
-          </button>
           {intent?.kind === FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ENGAGE_KILL_SWITCH ? (
-            <ConfirmationControl
-              key={intent.requestId}
-              action={FUTURES_PRODUCTION_EXECUTION_ACTIONS.ENGAGE_KILL_SWITCH}
-              disabled={!canFinalize(
-                FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ENGAGE_KILL_SWITCH,
-                'engageKillSwitch',
-              )}
-              buttonLabel="Engage real futures kill switch"
-              onConfirm={(confirmation) => claimAction(onEngageKillSwitch, confirmation)}
-            />
+            <ConfirmationControl key={intent.requestId} action={FUTURES_PRODUCTION_EXECUTION_ACTIONS.ENGAGE_KILL_SWITCH} disabled={!canFinalize(FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ENGAGE_KILL_SWITCH, 'engageKillSwitch')} buttonLabel="Engage real futures kill switch" onConfirm={confirmation => claimAction(onEngageKillSwitch, confirmation)} />
           ) : null}
-        </section>
+        </details>
       </div>
     </aside>
   )

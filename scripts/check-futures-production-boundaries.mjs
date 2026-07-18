@@ -27,6 +27,8 @@ const REVIEWED_PRODUCTION_ROUTES = Object.freeze(new Set([
     '/fapi/v1/openOrders',
     '/fapi/v1/openAlgoOrders',
     '/fapi/v1/order',
+    '/fapi/v1/positionMargin',
+    '/fapi/v1/positionMargin/history',
     '/fapi/v1/allOpenOrders',
     '/fapi/v1/algoOpenOrders',
 ]));
@@ -237,6 +239,7 @@ if (fs.existsSync(configPath)) {
 
 const reviewedWritePaths = [
     '/fapi/v1/order',
+    '/fapi/v1/positionMargin',
     '/fapi/v1/allOpenOrders',
     '/fapi/v1/algoOpenOrders',
 ];

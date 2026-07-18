@@ -56,7 +56,7 @@ const config = Object.freeze({
     account: Object.freeze({ alias: 'primary', fingerprint }),
     policy: Object.freeze({
         allowedSymbols: Object.freeze(['BTCUSDT']),
-        maxLeverage: 1,
+        maxLeverage: 2,
         maxOrderNotionalUsdt: '10',
         maxDailyNotionalUsdt: '50',
         minAvailableBalanceUsdt: '10',
@@ -138,6 +138,8 @@ class FakeLedger {
             'confirmed_filled',
             'confirmed_canceled',
             'confirmed_closed',
+            'confirmed_margin_adjusted',
+            'confirmed_order_amended',
             'confirmed_empty',
             'kill_switch_engaged',
             'kill_switch_disengaged',
@@ -188,7 +190,7 @@ const twoSymbolExchangeInfo = Object.freeze({
 
 const validProductionAccountConfig = () => ({
     canTrade: true,
-    dualSidePosition: false,
+    dualSidePosition: true,
     multiAssetsMargin: false,
 });
 
@@ -220,8 +222,8 @@ const productionIdentityGateCases = [
         balance: [validProductionBalance()[0], validProductionBalance()[0]],
     },
     {
-        name: 'hedge mode',
-        accountConfig: { ...validProductionAccountConfig(), dualSidePosition: true },
+        name: 'one-way mode',
+        accountConfig: { ...validProductionAccountConfig(), dualSidePosition: false },
         balance: validProductionBalance(),
     },
     {
@@ -246,7 +248,7 @@ const order = (overrides = {}) => ({
     clientOrderId: `cc7-${requestId}`,
     orderId: '9223372036854775807',
     side: 'SELL',
-    positionSide: 'BOTH',
+    positionSide: 'LONG',
     type: 'LIMIT',
     originalType: 'LIMIT',
     timeInForce: 'GTC',
@@ -255,7 +257,7 @@ const order = (overrides = {}) => ({
     executedQuantity: '0.001',
     averagePrice: '70000',
     price: '70000.0',
-    reduceOnly: true,
+    reduceOnly: false,
     closePosition: false,
     updateTime: 1_783_814_400_123,
     ...overrides,
@@ -272,7 +274,7 @@ const createHarness = ({
     })),
     getServerTime = null,
     accountConfig = vi.fn().mockResolvedValue(result('account-config', {
-        canTrade: true, dualSidePosition: false, multiAssetsMargin: false,
+        canTrade: true, dualSidePosition: true, multiAssetsMargin: false,
     })),
     balance = vi.fn().mockResolvedValue(result('balance-v3', [{
         accountAlias: 'primary', asset: 'USDT', availableBalance: '1000', marginAvailable: true,
@@ -283,25 +285,83 @@ const createHarness = ({
     })),
     symbolConfig = vi.fn(symbol => result('symbol-config', [{
         symbol, marginType: 'ISOLATED', isAutoAddMargin: false,
-        leverage: 3, maxNotionalValue: '1000000',
+        leverage: 2, maxNotionalValue: '1000000',
     }])),
     query = vi.fn().mockResolvedValue(result('query-order', order())),
-    positionRisk = vi.fn().mockResolvedValue(result('position-risk', [{
-        symbol: 'BTCUSDT',
-        positionSide: 'BOTH',
-        positionAmt: '1',
-        liquidationPrice: '50000',
-        marginAsset: 'USDT',
-    }])),
+    positionRisk = vi.fn().mockResolvedValue(result('position-risk', [
+        {
+            symbol: 'BTCUSDT',
+            positionSide: 'LONG',
+            positionAmt: '1',
+            liquidationPrice: '50000',
+            isolatedMargin: '35000',
+            marginAsset: 'USDT',
+        },
+        {
+            symbol: 'BTCUSDT',
+            positionSide: 'SHORT',
+            positionAmt: '0',
+            liquidationPrice: '0',
+            isolatedMargin: '0',
+            marginAsset: 'USDT',
+        },
+    ])),
+    allPositionRisk = vi.fn().mockResolvedValue(result('position-risk', [
+        {
+            symbol: 'BTCUSDT',
+            positionSide: 'LONG',
+            positionAmt: '1',
+            entryPrice: '60000',
+            markPrice: '70000',
+            notional: '70000',
+            unRealizedProfit: '10000',
+            isolatedMargin: '35000',
+            liquidationPrice: '50000',
+            leverage: '2',
+            marginType: 'isolated',
+            marginAsset: 'USDT',
+        },
+        {
+            symbol: 'BTCUSDT',
+            positionSide: 'SHORT',
+            positionAmt: '0',
+            entryPrice: '0',
+            markPrice: '70000',
+            notional: '0',
+            unRealizedProfit: '0',
+            isolatedMargin: '0',
+            liquidationPrice: '0',
+            leverage: '2',
+            marginType: 'isolated',
+            marginAsset: 'USDT',
+        },
+    ])),
     openOrders = vi.fn().mockResolvedValue(result('open-orders', [])),
     openAlgoOrders = vi.fn().mockResolvedValue(result('open-algo-orders', [])),
+    marginHistory = vi.fn().mockResolvedValue(result('position-margin-history', [])),
+    modifyMargin = vi.fn().mockResolvedValue(result('modify-isolated-position-margin', {
+        acknowledged: true,
+        code: 200,
+        type: 1,
+        amount: '5',
+    })),
+    modifyOrder = vi.fn((args) => Promise.resolve(result('modify-limit-order', order({
+        clientOrderId: args.clientOrderId,
+        side: args.side,
+        positionSide: args.positionSide,
+        status: 'NEW',
+        originalQuantity: args.quantity,
+        executedQuantity: '0',
+        averagePrice: '0',
+        price: args.price,
+    })))),
     cancelRegular = vi.fn().mockResolvedValue(result('cancel-all-open-orders', {
         acknowledged: true,
     })),
     cancelAlgo = vi.fn().mockResolvedValue(result('cancel-all-algo-open-orders', {
         acknowledged: true,
     })),
-    placeMarket = vi.fn().mockResolvedValue(result('new-reduce-only-market-order', {
+    placeMarket = vi.fn().mockResolvedValue(result('new-hedge-market-exit-order', {
         symbol: 'BTCUSDT',
         clientOrderId: `cc7-${requestId}`,
         orderId: '9223372036854775806',
@@ -313,7 +373,7 @@ const createHarness = ({
         conservativePrice: '70000',
         dailyNotionalBeforeUsdt: '0',
         dailyNotionalAfterUsdt: '7',
-        observedLeverage: 3,
+        observedLeverage: 2,
     })),
     pauseUntil = 0,
     timers = [],
@@ -331,10 +391,14 @@ const createHarness = ({
         getSymbolConfig: symbolConfig,
         getBalance: balance,
         getPositionRisk: positionRisk,
+        getAllPositionRisk: allPositionRisk,
         getOpenOrders: openOrders,
         getOpenAlgoOrders: openAlgoOrders,
+        getPositionMarginHistory: marginHistory,
+        modifyIsolatedPositionMargin: modifyMargin,
+        modifyLimitOrder: modifyOrder,
         placeLimitGtcOrder: place,
-        placeReduceOnlyMarketOrder: placeMarket,
+        placeHedgeMarketExitOrder: placeMarket,
         queryOrderByOriginalClientOrderId: query,
         cancelAllOpenOrders: cancelRegular,
         cancelAllAlgoOpenOrders: cancelAlgo,
@@ -391,6 +455,7 @@ const createHarness = ({
         coordinator,
         place,
         placeMarket,
+        modifyOrder,
         query,
         evaluateRisk,
         timers,
@@ -400,7 +465,7 @@ const createHarness = ({
 
 const command = (action, revision, extra = {}) => JSON.stringify({
     action,
-    version: 1,
+    version: 2,
     revision,
     marketType: 'futures',
     environment: 'production',
@@ -410,7 +475,7 @@ const command = (action, revision, extra = {}) => JSON.stringify({
 
 const subscribe = async (service, emitted) => service.handleRequest(JSON.stringify({
     action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.SUBSCRIBE_STATUS,
-    version: 1,
+    version: 2,
     revision: '0',
     marketType: 'futures',
     environment: 'production',
@@ -422,12 +487,461 @@ const prepareOrder = async (service, emitted) => {
     await service.handleRequest(command(
         FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_ORDER_INTENT,
         revision,
-        { symbol: 'BTCUSDT', side: 'SELL', quantity: '0.001', price: '70000.0', reduceOnly: true },
+        {
+            symbol: 'BTCUSDT',
+            side: 'SELL',
+            positionSide: 'LONG',
+            positionEffect: 'EXIT',
+            quantity: '0.001',
+            price: '70000.0',
+        },
     ), { connectionId, emit: value => emitted.push(value) });
     return emitted.at(-1).intent;
 };
 
+const ownedOpenOrder = (overrides = {}) => ({
+    symbol: 'BTCUSDT',
+    orderId: '9223372036854775807',
+    clientOrderId: `cc7-${requestId}`,
+    side: 'SELL',
+    positionSide: 'LONG',
+    price: '70000.0',
+    origQty: '0.0010',
+    executedQty: '0',
+    status: 'NEW',
+    type: 'LIMIT',
+    timeInForce: 'GTC',
+    reduceOnly: false,
+    closePosition: false,
+    ...overrides,
+});
+
 describe('FuturesProductionExecutionService', () => {
+    it('refreshes a bounded private portfolio only on explicit demand and omits foreign orders', async () => {
+        const ownedOrder = {
+            symbol: 'BTCUSDT',
+            orderId: '9223372036854775807',
+            clientOrderId: `cc7-${requestId}`,
+            side: 'BUY',
+            positionSide: 'LONG',
+            price: '65000',
+            origQty: '0.01',
+            executedQty: '0',
+            status: 'NEW',
+            type: 'LIMIT',
+            timeInForce: 'GTC',
+            reduceOnly: false,
+            closePosition: false,
+        };
+        const foreignOrder = { ...ownedOrder, orderId: '2', clientOrderId: 'manual-order' };
+        const openOrders = vi.fn().mockResolvedValue(result(
+            'open-orders',
+            [foreignOrder, ownedOrder],
+        ));
+        const harness = createHarness({ openOrders });
+        const emitted = [];
+
+        await harness.service.start();
+        expect(harness.service.getStatus().portfolio).toEqual({
+            state: 'unavailable', observedAt: null, positions: [], openOrders: [],
+        });
+        expect(harness.facade.getAllPositionRisk).not.toHaveBeenCalled();
+        await subscribe(harness.service, emitted);
+        await harness.service.handleRequest(command(
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.REFRESH_PORTFOLIO,
+            emitted.at(-1).revision,
+        ), { connectionId, emit: value => emitted.push(value) });
+
+        expect(harness.facade.getAllPositionRisk).toHaveBeenCalledTimes(1);
+        expect(openOrders).toHaveBeenCalledTimes(1);
+        expect(emitted.at(-1).portfolio).toMatchObject({
+            state: 'live',
+            positions: [{
+                symbol: 'BTCUSDT',
+                positionSide: 'LONG',
+                quantity: '1',
+                leverage: 2,
+                marginType: 'ISOLATED',
+            }],
+            openOrders: [{
+                clientOrderId: `cc7-${requestId}`,
+                positionEffect: 'ENTRY',
+            }],
+        });
+        expect(emitted.at(-1).portfolio.openOrders).toHaveLength(1);
+        await harness.service.shutdown();
+    });
+
+    it.each(['acknowledged', 'ambiguous-after-accept'])(
+        '%s owned LIMIT amendment sends one PUT and confirms the exact new price by query',
+        async (mode) => {
+            let currentPrice = '70000.0';
+            const openOrders = vi.fn().mockResolvedValue(result(
+                'open-orders',
+                [ownedOpenOrder()],
+            ));
+            const query = vi.fn(() => Promise.resolve(result('query-order', order({
+                status: 'NEW',
+                executedQuantity: '0',
+                averagePrice: '0',
+                price: currentPrice,
+            }))));
+            const modifyOrder = vi.fn((args) => {
+                currentPrice = args.price;
+                if (mode === 'ambiguous-after-accept') {
+                    return Promise.reject(new FuturesProductionExecutionFacadeError({
+                        kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.AMBIGUOUS,
+                        operation: 'modifyLimitOrder',
+                        endpointId: 'modify-limit-order',
+                    }));
+                }
+                return Promise.resolve(result('modify-limit-order', order({
+                    status: 'NEW',
+                    executedQuantity: '0',
+                    averagePrice: '0',
+                    price: args.price,
+                })));
+            });
+            const harness = createHarness({ openOrders, query, modifyOrder });
+            const emitted = [];
+
+            await harness.service.start();
+            await subscribe(harness.service, emitted);
+            await harness.service.handleRequest(command(
+                FUTURES_PRODUCTION_EXECUTION_ACTIONS.REFRESH_PORTFOLIO,
+                emitted.at(-1).revision,
+            ), { connectionId, emit: value => emitted.push(value) });
+            expect(emitted.at(-1).capabilities.amendOrder).toBe(true);
+            await harness.service.handleRequest(command(
+                FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_ORDER_AMENDMENT_INTENT,
+                emitted.at(-1).revision,
+                {
+                    symbol: 'BTCUSDT',
+                    positionSide: 'LONG',
+                    clientOrderId: `cc7-${requestId}`,
+                    price: '70100.1',
+                },
+            ), { connectionId, emit: value => emitted.push(value) });
+            const amendmentIntent = emitted.at(-1).intent;
+            expect(amendmentIntent.kind).toBe('order_amendment');
+            await harness.service.handleRequest(command(
+                FUTURES_PRODUCTION_EXECUTION_ACTIONS.AMEND_ORDER,
+                amendmentIntent.revision,
+                {
+                    requestId: amendmentIntent.requestId,
+                    confirmation: FUTURES_PRODUCTION_EXECUTION_CONFIRMATIONS[
+                        FUTURES_PRODUCTION_EXECUTION_ACTIONS.AMEND_ORDER
+                    ],
+                },
+            ), { connectionId, emit: value => emitted.push(value) });
+
+            expect(modifyOrder).toHaveBeenCalledExactlyOnceWith({
+                symbol: 'BTCUSDT',
+                side: 'SELL',
+                positionSide: 'LONG',
+                quantity: '0.0010',
+                price: '70100.1',
+                clientOrderId: `cc7-${requestId}`,
+            });
+            expect(query).toHaveBeenCalledTimes(3);
+            expect(harness.service.getCurrentAttempt()).toMatchObject({
+                kind: 'order_amendment',
+                acknowledgement: 'accepted',
+                state: 'confirmed_order_amended',
+                code: 'FUTURES_PRODUCTION_ORDER_AMENDED',
+                items: [{ symbol: 'BTCUSDT', outcome: 'amended' }],
+            });
+            expect(harness.service.getStatus().portfolio.openOrders[0].price).toBe('70100.1');
+            expect(harness.ledger.records.filter(record => (
+                record.eventType === 'exchange_request'
+                && record.endpointId === 'modify-limit-order'
+            ))).toHaveLength(1);
+            await harness.service.shutdown();
+        },
+    );
+
+    it('recovers an accepted ambiguous LIMIT amendment after restart by query only', async () => {
+        let currentPrice = '70000.0';
+        let queryCount = 0;
+        const query = vi.fn(() => {
+            queryCount += 1;
+            if (queryCount === 3) {
+                return Promise.reject(new FuturesProductionExecutionFacadeError({
+                    kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.NOT_FOUND,
+                    operation: 'queryOrder',
+                    endpointId: 'query-order',
+                }));
+            }
+            return Promise.resolve(result('query-order', order({
+                status: 'NEW',
+                executedQuantity: '0',
+                averagePrice: '0',
+                price: currentPrice,
+            })));
+        });
+        const modifyOrder = vi.fn((args) => {
+            currentPrice = args.price;
+            return Promise.reject(new FuturesProductionExecutionFacadeError({
+                kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.AMBIGUOUS,
+                operation: 'modifyLimitOrder',
+                endpointId: 'modify-limit-order',
+            }));
+        });
+        const first = createHarness({
+            openOrders: vi.fn().mockResolvedValue(result('open-orders', [ownedOpenOrder()])),
+            query,
+            modifyOrder,
+        });
+        const emitted = [];
+        await first.service.start();
+        await subscribe(first.service, emitted);
+        await first.service.handleRequest(command(
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.REFRESH_PORTFOLIO,
+            emitted.at(-1).revision,
+        ), { connectionId, emit: value => emitted.push(value) });
+        await first.service.handleRequest(command(
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_ORDER_AMENDMENT_INTENT,
+            emitted.at(-1).revision,
+            {
+                symbol: 'BTCUSDT',
+                positionSide: 'LONG',
+                clientOrderId: `cc7-${requestId}`,
+                price: '70100.1',
+            },
+        ), { connectionId, emit: value => emitted.push(value) });
+        const amendmentIntent = emitted.at(-1).intent;
+        await first.service.handleRequest(command(
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.AMEND_ORDER,
+            amendmentIntent.revision,
+            {
+                requestId: amendmentIntent.requestId,
+                confirmation: FUTURES_PRODUCTION_EXECUTION_CONFIRMATIONS[
+                    FUTURES_PRODUCTION_EXECUTION_ACTIONS.AMEND_ORDER
+                ],
+            },
+        ), { connectionId, emit: value => emitted.push(value) });
+        expect(modifyOrder).toHaveBeenCalledOnce();
+        expect(first.service.getCurrentAttempt().state).toBe('result_unknown');
+        await first.service.shutdown();
+
+        const restartPutTripwire = vi.fn(() => {
+            throw new Error('restart must never repeat an amendment PUT');
+        });
+        const recoveryQuery = vi.fn().mockResolvedValue(result('query-order', order({
+            status: 'NEW',
+            executedQuantity: '0',
+            averagePrice: '0',
+            price: currentPrice,
+        })));
+        const second = createHarness({
+            ledger: first.ledger,
+            query: recoveryQuery,
+            modifyOrder: restartPutTripwire,
+        });
+        second.setClock(1_783_814_500_000);
+        await second.service.start();
+
+        expect(restartPutTripwire).not.toHaveBeenCalled();
+        expect(recoveryQuery).toHaveBeenCalledOnce();
+        expect(second.service.getCurrentAttempt()).toMatchObject({
+            kind: 'order_amendment',
+            acknowledgement: 'accepted',
+            state: 'confirmed_order_amended',
+        });
+        expect(second.ledger.getActiveOperations()).toEqual([]);
+        await second.service.shutdown();
+    });
+
+    it.each(['acknowledged', 'ambiguous-after-accept'])('%s margin POST is sent once and confirmed by exact history plus leg margin', async (mode) => {
+        let adjusted = false;
+        const positionRisk = vi.fn(symbol => result('position-risk', [
+            {
+                symbol,
+                positionSide: 'LONG',
+                positionAmt: '1',
+                liquidationPrice: '50000',
+                isolatedMargin: adjusted ? '35005' : '35000',
+                marginAsset: 'USDT',
+            },
+            {
+                symbol,
+                positionSide: 'SHORT',
+                positionAmt: '0',
+                liquidationPrice: '0',
+                isolatedMargin: '0',
+                marginAsset: 'USDT',
+            },
+        ]));
+        const marginHistory = vi.fn().mockResolvedValue(result('position-margin-history', [{
+            symbol: 'BTCUSDT',
+            type: 1,
+            amount: '5',
+            asset: 'USDT',
+            time: 1_783_814_500_000,
+            positionSide: 'LONG',
+        }]));
+        const modifyMargin = vi.fn(() => {
+            adjusted = true;
+            if (mode === 'ambiguous-after-accept') {
+                return Promise.reject(new FuturesProductionExecutionFacadeError({
+                    kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.AMBIGUOUS,
+                    endpointId: 'modify-isolated-position-margin',
+                }));
+            }
+            return Promise.resolve(result('modify-isolated-position-margin', {
+                acknowledged: true,
+                code: 200,
+                type: 1,
+                amount: '5',
+            }));
+        });
+        const harness = createHarness({
+            positionRisk,
+            marginHistory,
+            modifyMargin,
+        });
+        const emitted = [];
+
+        await harness.service.start();
+        await subscribe(harness.service, emitted);
+        await harness.service.handleRequest(command(
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.REFRESH_PORTFOLIO,
+            emitted.at(-1).revision,
+        ), { connectionId, emit: value => emitted.push(value) });
+        expect(emitted.at(-1).capabilities.adjustMargin).toBe(true);
+        await harness.service.handleRequest(command(
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_MARGIN_ADJUSTMENT_INTENT,
+            emitted.at(-1).revision,
+            {
+                symbol: 'BTCUSDT',
+                positionSide: 'LONG',
+                marginAction: 'ADD',
+                amount: '5',
+            },
+        ), { connectionId, emit: value => emitted.push(value) });
+        const intent = emitted.at(-1).intent;
+        expect(intent.kind).toBe('margin_adjustment');
+        await harness.service.handleRequest(command(
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.ADJUST_ISOLATED_MARGIN,
+            intent.revision,
+            {
+                requestId: intent.requestId,
+                confirmation: 'ADJUST REAL FUTURES ISOLATED MARGIN',
+            },
+        ), { connectionId, emit: value => emitted.push(value) });
+
+        expect(modifyMargin).toHaveBeenCalledTimes(1);
+        expect(marginHistory).toHaveBeenCalledTimes(1);
+        expect(harness.service.getCurrentAttempt()).toMatchObject({
+            kind: 'margin_adjustment',
+            acknowledgement: 'accepted',
+            state: 'confirmed_margin_adjusted',
+            code: 'FUTURES_PRODUCTION_MARGIN_ADJUSTED',
+        });
+        expect(harness.service.getStatus().portfolio.positions[0].isolatedMarginUsdt)
+            .toBe('35005');
+        const marginDispatches = harness.ledger.records.filter(record => (
+            record.eventType === 'dispatch_intent'
+            && record.action === FUTURES_PRODUCTION_EXECUTION_ACTIONS.ADJUST_ISOLATED_MARGIN
+        ));
+        expect(marginDispatches).toEqual([expect.objectContaining({
+            marginAction: 'ADD',
+            amount: '5',
+            marginBefore: '35000',
+        })]);
+        await harness.service.shutdown();
+    });
+
+    it('recovers an ambiguous isolated-margin POST after restart by GET only', async () => {
+        let adjusted = false;
+        const positionRisk = vi.fn(symbol => result('position-risk', [
+            {
+                symbol,
+                positionSide: 'LONG',
+                positionAmt: '1',
+                liquidationPrice: '50000',
+                isolatedMargin: adjusted ? '35005' : '35000',
+                marginAsset: 'USDT',
+            },
+            {
+                symbol,
+                positionSide: 'SHORT',
+                positionAmt: '0',
+                liquidationPrice: '0',
+                isolatedMargin: '0',
+                marginAsset: 'USDT',
+            },
+        ]));
+        const modifyMargin = vi.fn(() => {
+            adjusted = true;
+            return Promise.reject(new FuturesProductionExecutionFacadeError({
+                kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.AMBIGUOUS,
+                endpointId: 'modify-isolated-position-margin',
+            }));
+        });
+        const first = createHarness({
+            positionRisk,
+            modifyMargin,
+            marginHistory: vi.fn().mockResolvedValue(result('position-margin-history', [])),
+        });
+        const emitted = [];
+        await first.service.start();
+        await subscribe(first.service, emitted);
+        await first.service.handleRequest(command(
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.REFRESH_PORTFOLIO,
+            emitted.at(-1).revision,
+        ), { connectionId, emit: value => emitted.push(value) });
+        await first.service.handleRequest(command(
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_MARGIN_ADJUSTMENT_INTENT,
+            emitted.at(-1).revision,
+            {
+                symbol: 'BTCUSDT', positionSide: 'LONG', marginAction: 'ADD', amount: '5',
+            },
+        ), { connectionId, emit: value => emitted.push(value) });
+        const intent = emitted.at(-1).intent;
+        await first.service.handleRequest(command(
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.ADJUST_ISOLATED_MARGIN,
+            intent.revision,
+            {
+                requestId: intent.requestId,
+                confirmation: 'ADJUST REAL FUTURES ISOLATED MARGIN',
+            },
+        ), { connectionId, emit: value => emitted.push(value) });
+        expect(modifyMargin).toHaveBeenCalledTimes(1);
+        expect(first.service.getCurrentAttempt()).toMatchObject({
+            acknowledgement: 'unknown',
+            state: 'result_unknown',
+        });
+        await first.service.shutdown();
+
+        const restartModify = vi.fn();
+        const restarted = createHarness({
+            ledger: first.ledger,
+            positionRisk,
+            modifyMargin: restartModify,
+            marginHistory: vi.fn().mockResolvedValue(result('position-margin-history', [{
+                symbol: 'BTCUSDT',
+                type: 1,
+                amount: '5',
+                asset: 'USDT',
+                time: 1_783_814_500_000,
+                positionSide: 'LONG',
+            }])),
+        });
+        restarted.setClock(1_783_814_450_000);
+        await restarted.service.start();
+
+        expect(restartModify).not.toHaveBeenCalled();
+        expect(restarted.coordinator.executeProduction).not.toHaveBeenCalled();
+        expect(restarted.service.getCurrentAttempt()).toMatchObject({
+            requestId: intent.requestId,
+            acknowledgement: 'accepted',
+            state: 'confirmed_margin_adjusted',
+        });
+        expect(first.ledger.getActiveOperations()).toEqual([]);
+        await restarted.service.shutdown();
+    });
+
     it('durably audits every startup activation gate exactly once', async () => {
         const harness = createHarness();
 
@@ -501,7 +1015,7 @@ describe('FuturesProductionExecutionService', () => {
         const peerEmitted = [];
         await disconnectHarness.service.handleRequest(JSON.stringify({
             action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.SUBSCRIBE_STATUS,
-            version: 1,
+            version: 2,
             revision: '0',
             marketType: 'futures',
             environment: 'production',
@@ -511,8 +1025,8 @@ describe('FuturesProductionExecutionService', () => {
             FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_ORDER_INTENT,
             peerEmitted.at(-1).revision,
             {
-                symbol: 'BTCUSDT', side: 'SELL', quantity: '0.001',
-                price: '70000.0', reduceOnly: true,
+                symbol: 'BTCUSDT', side: 'SELL', positionSide: 'LONG',
+                positionEffect: 'EXIT', quantity: '0.001', price: '70000.0',
             },
         ), { connectionId: peerConnectionId, emit: value => peerEmitted.push(value) });
 
@@ -631,8 +1145,8 @@ describe('FuturesProductionExecutionService', () => {
                 },
             ), { connectionId, emit: value => emitted.push(value) });
 
-            expect(getAccountConfig).toHaveBeenCalledTimes(2);
-            expect(getBalance).toHaveBeenCalledTimes(2);
+            expect(getAccountConfig).toHaveBeenCalledTimes(3);
+            expect(getBalance).toHaveBeenCalledTimes(3);
             expect(harness.evaluateRisk).not.toHaveBeenCalled();
             expect(harness.coordinator.reserveOrderDispatch).not.toHaveBeenCalled();
             expect(harness.coordinator.executeProduction).not.toHaveBeenCalled();
@@ -757,7 +1271,7 @@ describe('FuturesProductionExecutionService', () => {
         ), { connectionId, emit: value => emitted.push(value) });
         expect(harness.facade.cancelAllOpenOrders).toHaveBeenCalledOnce();
         expect(harness.facade.cancelAllAlgoOpenOrders).toHaveBeenCalledOnce();
-        expect(harness.facade.placeReduceOnlyMarketOrder).not.toHaveBeenCalled();
+        expect(harness.facade.placeHedgeMarketExitOrder).not.toHaveBeenCalled();
         expect(harness.service.getCurrentAttempt().state).toBe('confirmed_canceled');
         await harness.service.shutdown();
     });
@@ -821,9 +1335,10 @@ describe('FuturesProductionExecutionService', () => {
             {
                 symbol: 'BTCUSDT',
                 side: 'BUY',
+                positionSide: 'LONG',
+                positionEffect: 'ENTRY',
                 quantity: '0.001',
                 price: '7000',
-                reduceOnly: false,
             },
         ), { connectionId, emit: value => emitted.push(value) })).resolves.toBe(false);
         expect(harness.facade.getExchangeInfo).not.toHaveBeenCalled();
@@ -932,7 +1447,7 @@ describe('FuturesProductionExecutionService', () => {
         const otherEmitted = [];
         await harness.service.handleRequest(JSON.stringify({
             action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.SUBSCRIBE_STATUS,
-            version: 1,
+            version: 2,
             revision: '0',
             marketType: 'futures',
             environment: 'production',
@@ -1022,8 +1537,8 @@ describe('FuturesProductionExecutionService', () => {
         const placeMarket = vi.fn().mockRejectedValue(
             new FuturesProductionExecutionFacadeError({
                 kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.AMBIGUOUS,
-                operation: 'placeReduceOnlyMarketOrder',
-                endpointId: 'new-reduce-only-market-order',
+                operation: 'placeHedgeMarketExitOrder',
+                endpointId: 'new-hedge-market-exit-order',
             }),
         );
         const query = vi.fn().mockRejectedValue(new FuturesProductionExecutionFacadeError({
@@ -1074,7 +1589,7 @@ describe('FuturesProductionExecutionService', () => {
         ));
         const exchangeRequestIndex = harness.ledger.records.findIndex(record => (
             record.eventType === 'exchange_request'
-            && record.endpointId === 'new-reduce-only-market-order'
+            && record.endpointId === 'new-hedge-market-exit-order'
         ));
         expect(reservationIndex).toBeGreaterThanOrEqual(0);
         expect(dispatchIndex).toBeGreaterThan(reservationIndex);
@@ -1227,18 +1742,27 @@ describe('FuturesProductionExecutionService', () => {
             identifiers.shift() ?? 'f'.repeat(32),
             'hex',
         ));
-        const positionRisk = vi.fn(symbol => result('position-risk', [{
-            symbol,
-            positionSide: 'BOTH',
-            positionAmt: symbol === 'BTCUSDT' ? '0' : '2.000',
-            liquidationPrice: symbol === 'BTCUSDT' ? '0' : '2000',
-            marginAsset: 'USDT',
-        }]));
+        const positionRisk = vi.fn(symbol => result('position-risk', [
+            {
+                symbol,
+                positionSide: 'LONG',
+                positionAmt: symbol === 'BTCUSDT' ? '0' : '2.000',
+                liquidationPrice: symbol === 'BTCUSDT' ? '0' : '2000',
+                marginAsset: 'USDT',
+            },
+            {
+                symbol,
+                positionSide: 'SHORT',
+                positionAmt: '0',
+                liquidationPrice: '0',
+                marginAsset: 'USDT',
+            },
+        ]));
         const placeMarket = vi.fn().mockRejectedValue(
             new FuturesProductionExecutionFacadeError({
                 kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.AMBIGUOUS,
-                operation: 'placeReduceOnlyMarketOrder',
-                endpointId: 'new-reduce-only-market-order',
+                operation: 'placeHedgeMarketExitOrder',
+                endpointId: 'new-hedge-market-exit-order',
             }),
         );
         const query = vi.fn().mockRejectedValue(new FuturesProductionExecutionFacadeError({
@@ -1278,6 +1802,7 @@ describe('FuturesProductionExecutionService', () => {
         expect(placeMarket).toHaveBeenCalledWith({
             symbol: 'ETHUSDT',
             side: 'SELL',
+            positionSide: 'LONG',
             quantity: '2.000',
             clientOrderId: `cc7-${childRequestId}`,
         });
@@ -1299,9 +1824,19 @@ describe('FuturesProductionExecutionService', () => {
         ))).toEqual([
             expect.objectContaining({
                 requestId,
-                operationId: `${requestId}:BTCUSDT`,
+                operationId: `${requestId}:BTCUSDT:LONG`,
                 parentOperationId: requestId,
                 symbol: 'BTCUSDT',
+                positionSide: 'LONG',
+                state: 'confirmed_closed',
+                safeDetail: 'already-flat',
+            }),
+            expect.objectContaining({
+                requestId,
+                operationId: `${requestId}:BTCUSDT:SHORT`,
+                parentOperationId: requestId,
+                symbol: 'BTCUSDT',
+                positionSide: 'SHORT',
                 state: 'confirmed_closed',
                 safeDetail: 'already-flat',
             }),
@@ -1311,8 +1846,18 @@ describe('FuturesProductionExecutionService', () => {
                 parentOperationId: requestId,
                 clientOrderId: `cc7-${childRequestId}`,
                 symbol: 'ETHUSDT',
+                positionSide: 'LONG',
                 quantity: '2.000',
                 state: 'recovery_required',
+            }),
+            expect.objectContaining({
+                requestId,
+                operationId: `${requestId}:ETHUSDT:SHORT`,
+                parentOperationId: requestId,
+                symbol: 'ETHUSDT',
+                positionSide: 'SHORT',
+                state: 'confirmed_closed',
+                safeDetail: 'already-flat',
             }),
         ]);
         expect(harness.ledger.records.filter(record => (
@@ -1328,13 +1873,22 @@ describe('FuturesProductionExecutionService', () => {
         ]);
         await harness.service.shutdown();
 
-        const restartPositionRisk = vi.fn(symbol => result('position-risk', [{
-            symbol,
-            positionSide: 'BOTH',
-            positionAmt: symbol === 'BTCUSDT' ? '0' : '2.000',
-            liquidationPrice: symbol === 'BTCUSDT' ? '0' : '2000',
-            marginAsset: 'USDT',
-        }]));
+        const restartPositionRisk = vi.fn(symbol => result('position-risk', [
+            {
+                symbol,
+                positionSide: 'LONG',
+                positionAmt: symbol === 'BTCUSDT' ? '0' : '2.000',
+                liquidationPrice: symbol === 'BTCUSDT' ? '0' : '2000',
+                marginAsset: 'USDT',
+            },
+            {
+                symbol,
+                positionSide: 'SHORT',
+                positionAmt: '0',
+                liquidationPrice: '0',
+                marginAsset: 'USDT',
+            },
+        ]));
         const restartQuery = vi.fn().mockRejectedValue(
             new FuturesProductionExecutionFacadeError({
                 kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.NOT_FOUND,
@@ -1390,11 +1944,12 @@ describe('FuturesProductionExecutionService', () => {
             dispatchAt: 1_783_814_400_000,
             symbol: 'BTCUSDT',
             side: 'SELL',
+            positionSide: 'LONG',
+            positionEffect: 'EXIT',
             orderType: 'LIMIT',
             timeInForce: 'GTC',
             quantity: '0.001',
             price: '70000.0',
-            reduceOnly: true,
             exchangeOrderId: '9223372036854775807',
         }]);
         const harness = createHarness({ ledger });
@@ -1430,11 +1985,12 @@ describe('FuturesProductionExecutionService', () => {
                 dispatchAt,
                 symbol: 'BTCUSDT',
                 side: 'SELL',
+                positionSide: 'LONG',
+                positionEffect: 'EXIT',
                 orderType: 'LIMIT',
                 timeInForce: 'GTC',
                 quantity: '0.001',
                 price: '70000',
-                reduceOnly: true,
             },
             {
                 eventType: 'reconciliation_result',
@@ -1635,11 +2191,12 @@ describe('FuturesProductionExecutionService', () => {
                 dispatchAt,
                 symbol: 'BTCUSDT',
                 side: 'SELL',
+                positionSide: 'LONG',
+                positionEffect: 'EXIT',
                 orderType: 'LIMIT',
                 timeInForce: 'GTC',
                 quantity: '0.001',
                 price: '70000',
-                reduceOnly: true,
             },
             {
                 eventType: 'exchange_request',
@@ -1682,11 +2239,12 @@ describe('FuturesProductionExecutionService', () => {
             dispatchAt: 1_783_814_400_000,
             symbol: 'BTCUSDT',
             side: 'SELL',
+            positionSide: 'LONG',
+            positionEffect: 'EXIT',
             orderType: 'LIMIT',
             timeInForce: 'GTC',
             quantity: '0.001',
             price: '70000',
-            reduceOnly: true,
         }]);
         const runtimeConfig = Object.freeze({
             ...config,
@@ -1727,11 +2285,12 @@ describe('FuturesProductionExecutionService', () => {
             dispatchAt: 1_783_814_400_000,
             symbol: 'BTCUSDT',
             side: 'SELL',
+            positionSide: 'LONG',
+            positionEffect: 'EXIT',
             orderType: 'LIMIT',
             timeInForce: 'GTC',
             quantity: '0.001',
             price: '70000.0',
-            reduceOnly: true,
         }]);
         const harness = createHarness({ ledger });
 
@@ -1926,11 +2485,12 @@ describe('FuturesProductionExecutionService', () => {
                 dispatchAt: 1_783_814_400_001,
                 symbol: 'BTCUSDT',
                 side: 'SELL',
+                positionSide: 'LONG',
+                positionEffect: 'EXIT',
                 orderType: 'MARKET',
                 timeInForce: null,
                 quantity: '1',
                 price: null,
-                reduceOnly: true,
                 exchangeOrderId: '9223372036854775807',
             },
         ]);
@@ -1941,13 +2501,22 @@ describe('FuturesProductionExecutionService', () => {
             originalQuantity: '1.0',
             price: '0',
         })));
-        const positionRisk = vi.fn().mockResolvedValue(result('position-risk', [{
-            symbol: 'BTCUSDT',
-            positionSide: 'BOTH',
-            positionAmt: '0.000',
-            liquidationPrice: '0',
-            marginAsset: 'USDT',
-        }]));
+        const positionRisk = vi.fn().mockResolvedValue(result('position-risk', [
+            {
+                symbol: 'BTCUSDT',
+                positionSide: 'LONG',
+                positionAmt: '0.000',
+                liquidationPrice: '0',
+                marginAsset: 'USDT',
+            },
+            {
+                symbol: 'BTCUSDT',
+                positionSide: 'SHORT',
+                positionAmt: '0.000',
+                liquidationPrice: '0',
+                marginAsset: 'USDT',
+            },
+        ]));
         const harness = createHarness({ ledger, query, positionRisk });
 
         await harness.service.start();

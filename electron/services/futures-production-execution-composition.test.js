@@ -57,7 +57,7 @@ const enabledFakeConfig = Object.freeze({
     account: Object.freeze({ alias: 'fake-account', fingerprint: 'a'.repeat(64) }),
     policy: Object.freeze({
         allowedSymbols: Object.freeze(['BTCUSDT']),
-        maxLeverage: 1,
+        maxLeverage: 2,
         maxOrderNotionalUsdt: '10',
         maxDailyNotionalUsdt: '50',
         minAvailableBalanceUsdt: '10',
@@ -120,7 +120,7 @@ describe('FuturesProductionExecutionComposition', () => {
             if (url.pathname === '/fapi/v1/accountConfig') {
                 return new Response(JSON.stringify({
                     canTrade: true,
-                    dualSidePosition: false,
+                    dualSidePosition: true,
                     multiAssetsMargin: false,
                 }), {
                     status: 200,
@@ -277,7 +277,7 @@ describe('FuturesProductionExecutionComposition', () => {
             if (url.pathname === '/fapi/v1/accountConfig') {
                 return new Response(JSON.stringify({
                     canTrade: true,
-                    dualSidePosition: false,
+                    dualSidePosition: true,
                     multiAssetsMargin: false,
                 }), {
                     status: 200,
@@ -322,7 +322,7 @@ describe('FuturesProductionExecutionComposition', () => {
         await runtime.service.shutdown();
     });
 
-    it('executes one complete reduce-only order through the real fake-backed composition', async () => {
+    it('executes one complete Hedge LONG exit through the real fake-backed composition', async () => {
         const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-trade-prod-composed-'));
         directories.push(directory);
         const integrityKey = Buffer.alloc(32, 11);
@@ -383,7 +383,7 @@ describe('FuturesProductionExecutionComposition', () => {
             if (url.pathname === '/fapi/v1/accountConfig') {
                 return respond({
                     canTrade: true,
-                    dualSidePosition: false,
+                    dualSidePosition: true,
                     multiAssetsMargin: false,
                 });
             }
@@ -392,7 +392,7 @@ describe('FuturesProductionExecutionComposition', () => {
                     symbol: 'BTCUSDT',
                     marginType: 'ISOLATED',
                     isAutoAddMargin: false,
-                    leverage: 1,
+                    leverage: 2,
                     maxNotionalValue: '1000000',
                 }]);
             }
@@ -407,7 +407,7 @@ describe('FuturesProductionExecutionComposition', () => {
             if (url.pathname === '/fapi/v3/positionRisk') {
                 return respond([{
                     symbol: 'BTCUSDT',
-                    positionSide: 'BOTH',
+                    positionSide: 'LONG',
                     positionAmt: '1',
                     liquidationPrice: '5000',
                     marginAsset: 'USDT',
@@ -428,8 +428,8 @@ describe('FuturesProductionExecutionComposition', () => {
                     + `"clientOrderId":"${clientOrderId}","price":"7000.0",`
                     + '"origQty":"0.0010","executedQty":"0.001","avgPrice":"7000",'
                     + '"status":"FILLED","timeInForce":"GTC","type":"LIMIT",'
-                    + '"origType":"LIMIT","reduceOnly":true,"closePosition":false,'
-                    + `"side":"SELL","positionSide":"BOTH","updateTime":${serverTime + 2}}`);
+                    + '"origType":"LIMIT","reduceOnly":false,"closePosition":false,'
+                    + `"side":"SELL","positionSide":"LONG","updateTime":${serverTime + 2}}`);
             }
             throw new Error(`unreviewed fake route: ${options.method} ${url.pathname}`);
         });
@@ -452,7 +452,7 @@ describe('FuturesProductionExecutionComposition', () => {
         const context = { connectionId, emit: value => emitted.push(value) };
         await runtime.service.handleRequest(JSON.stringify({
             action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.SUBSCRIBE_STATUS,
-            version: 1,
+            version: 2,
             revision: '0',
             marketType: 'futures',
             environment: 'production',
@@ -460,22 +460,23 @@ describe('FuturesProductionExecutionComposition', () => {
         }), context);
         await runtime.service.handleRequest(JSON.stringify({
             action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_ORDER_INTENT,
-            version: 1,
+            version: 2,
             revision: emitted.at(-1).revision,
             marketType: 'futures',
             environment: 'production',
             accountFingerprint: enabledFakeConfig.account.fingerprint,
             symbol: 'BTCUSDT',
             side: 'SELL',
+            positionSide: 'LONG',
+            positionEffect: 'EXIT',
             quantity: '0.001',
             price: '7000.0',
-            reduceOnly: true,
         }), context);
         const intent = emitted.at(-1).intent;
         expect(intent).toMatchObject({ kind: 'order' });
         await expect(runtime.service.handleRequest(JSON.stringify({
             action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.PLACE_ORDER,
-            version: 1,
+            version: 2,
             revision: intent.revision,
             marketType: 'futures',
             environment: 'production',
@@ -546,7 +547,7 @@ describe('FuturesProductionExecutionComposition', () => {
             if (url.pathname === '/fapi/v1/accountConfig') {
                 return new Response(JSON.stringify({
                     canTrade: true,
-                    dualSidePosition: false,
+                    dualSidePosition: true,
                     multiAssetsMargin: false,
                 }), {
                     status: 200,

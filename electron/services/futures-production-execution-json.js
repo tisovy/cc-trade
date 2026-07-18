@@ -32,6 +32,13 @@ export class FuturesProductionExecutionIntegerToken {
     }
 }
 
+export class FuturesProductionExecutionDecimalToken {
+    constructor(token) {
+        this.token = token;
+        Object.freeze(this);
+    }
+}
+
 const fail = (code) => {
     throw new FuturesProductionExecutionJsonError(code);
 };
@@ -60,8 +67,13 @@ const hasOnlyUnicodeScalars = (value) => {
     return true;
 };
 
-export const parseFuturesProductionExecutionJson = (text, limits) => {
+export const parseFuturesProductionExecutionJson = (
+    text,
+    limits,
+    allowDecimalNumbers = false,
+) => {
     const responseLimits = resolveResponseLimits(limits);
+    if (typeof allowDecimalNumbers !== 'boolean') fail('INVALID_RESPONSE_NUMBER_PROFILE');
     if (typeof text !== 'string'
         || Buffer.byteLength(text, 'utf8') > responseLimits.BODY_BYTES
         || !hasOnlyUnicodeScalars(text)) {
@@ -132,7 +144,17 @@ export const parseFuturesProductionExecutionJson = (text, limits) => {
             if (!/^[1-9]$/.test(text[cursor] ?? '')) fail('INVALID_RESPONSE_JSON');
             while (/^[0-9]$/.test(text[cursor] ?? '')) cursor += 1;
         }
-        if (['.', 'e', 'E'].includes(text[cursor])) fail('INVALID_RESPONSE_JSON');
+        if (text[cursor] === '.') {
+            if (!allowDecimalNumbers) fail('INVALID_RESPONSE_JSON');
+            cursor += 1;
+            const fractionStart = cursor;
+            while (/^[0-9]$/.test(text[cursor] ?? '')) cursor += 1;
+            if (cursor === fractionStart || ['e', 'E'].includes(text[cursor])) {
+                fail('INVALID_RESPONSE_JSON');
+            }
+            return new FuturesProductionExecutionDecimalToken(text.slice(start, cursor));
+        }
+        if (['e', 'E'].includes(text[cursor])) fail('INVALID_RESPONSE_JSON');
         return new FuturesProductionExecutionIntegerToken(text.slice(start, cursor));
     };
     const parseObject = (depth) => {

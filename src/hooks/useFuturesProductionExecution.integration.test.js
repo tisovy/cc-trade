@@ -24,7 +24,7 @@ const CONFIG = Object.freeze({
   account: Object.freeze({ alias: 'reviewed-production-account', fingerprint: ACCOUNT_FINGERPRINT }),
   policy: Object.freeze({
     allowedSymbols: Object.freeze(['BTCUSDT']),
-    maxLeverage: 1,
+    maxLeverage: 2,
     maxOrderNotionalUsdt: '10',
     maxDailyNotionalUsdt: '50',
     minAvailableBalanceUsdt: '10',
@@ -112,7 +112,7 @@ const createService = (ledger) => {
     })),
     getAccountConfig: vi.fn().mockResolvedValue(result('account-config', {
       canTrade: true,
-      dualSidePosition: false,
+      dualSidePosition: true,
       multiAssetsMargin: false,
     })),
     getBalance: vi.fn().mockResolvedValue(result('balance', [{

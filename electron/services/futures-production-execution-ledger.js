@@ -81,10 +81,15 @@ const AUDIT_FIELDS = Object.freeze([
     'credentialBinding',
     'symbol',
     'side',
+    'positionSide',
+    'positionEffect',
     'orderType',
     'timeInForce',
     'quantity',
     'price',
+    'marginAction',
+    'amount',
+    'marginBefore',
     'reduceOnly',
     'exchangeOrderId',
     'gate',
@@ -118,8 +123,12 @@ const RATE_COUNTER_ENDPOINT_IDS = new Set([
     'position-risk',
     'open-orders',
     'open-algo-orders',
+    'position-margin-history',
+    'modify-isolated-position-margin',
+    'modify-limit-order',
     'new-limit-gtc-order',
     'new-reduce-only-market-order',
+    'new-hedge-market-exit-order',
     'query-order',
     'cancel-all-open-orders',
     'cancel-all-algo-open-orders',
@@ -131,6 +140,8 @@ const TERMINAL_STATES = new Set([
     'confirmed_filled',
     'confirmed_canceled',
     'confirmed_closed',
+    'confirmed_margin_adjusted',
+    'confirmed_order_amended',
     'confirmed_empty',
     'kill_switch_engaged',
     'kill_switch_disengaged',
@@ -391,6 +402,12 @@ export const createFuturesProductionExecutionAuditRecord = (
     if (record.side !== null && !['BUY', 'SELL'].includes(record.side)) {
         fail('INVALID_AUDIT_RECORD');
     }
+    if (record.positionSide !== null && !['LONG', 'SHORT'].includes(record.positionSide)) {
+        fail('INVALID_AUDIT_RECORD');
+    }
+    if (record.positionEffect !== null && !['ENTRY', 'EXIT'].includes(record.positionEffect)) {
+        fail('INVALID_AUDIT_RECORD');
+    }
     if (record.orderType !== null && !['LIMIT', 'MARKET'].includes(record.orderType)) {
         fail('INVALID_AUDIT_RECORD');
     }
@@ -399,6 +416,11 @@ export const createFuturesProductionExecutionAuditRecord = (
     }
     if (record.quantity !== null) parseExactDecimal(record.quantity, { positive: true });
     if (record.price !== null) parseExactDecimal(record.price);
+    if (record.marginAction !== null && !['ADD', 'REDUCE'].includes(record.marginAction)) {
+        fail('INVALID_AUDIT_RECORD');
+    }
+    if (record.amount !== null) parseExactDecimal(record.amount, { positive: true });
+    if (record.marginBefore !== null) parseExactDecimal(record.marginBefore);
     if (record.reduceOnly !== null && typeof record.reduceOnly !== 'boolean') {
         fail('INVALID_AUDIT_RECORD');
     }

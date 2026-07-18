@@ -10,6 +10,8 @@ import {
   FuturesProductionExecutionRendererProtocolError,
   compareFuturesProductionExecutionRevisions,
   createFuturesProductionExecutionCancelAllOpenOrdersRequest,
+  createFuturesProductionExecutionAdjustIsolatedMarginRequest,
+  createFuturesProductionExecutionAmendOrderRequest,
   createFuturesProductionExecutionClosePositionsRequest,
   createFuturesProductionExecutionDisengageKillSwitchRequest,
   createFuturesProductionExecutionEngageKillSwitchRequest,
@@ -19,6 +21,9 @@ import {
   createFuturesProductionExecutionPrepareDisengageKillSwitchIntentRequest,
   createFuturesProductionExecutionPrepareEngageKillSwitchIntentRequest,
   createFuturesProductionExecutionPrepareOrderIntentRequest,
+  createFuturesProductionExecutionPrepareMarginAdjustmentIntentRequest,
+  createFuturesProductionExecutionPrepareOrderAmendmentIntentRequest,
+  createFuturesProductionExecutionRefreshPortfolioRequest,
   createFuturesProductionExecutionSubscribeStatusRequest,
   createFuturesProductionExecutionUnsubscribeStatusRequest,
   hasExactFuturesProductionExecutionSessionRequestFields,
@@ -39,7 +44,7 @@ const intent = (kind, overrides = {}) => ({
 const status = (overrides = {}) => ({
   channelId: FUTURES_PRODUCTION_EXECUTION_CHANNEL_ID,
   action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.STATUS,
-  version: 1,
+  version: 2,
   revision: '8',
   marketType: 'futures',
   environment: 'production',
@@ -49,7 +54,7 @@ const status = (overrides = {}) => ({
   account: { alias: 'reviewed-account-1', fingerprint: FINGERPRINT },
   caps: {
     allowedSymbols: ['BTCUSDT', 'ETHUSDT'],
-    maxLeverage: 1,
+    maxLeverage: 2,
     maxOrderNotionalUsdt: '10.0000',
     maxDailyNotionalUsdt: '50.0000',
     minAvailableBalanceUsdt: '10.0000',
@@ -63,6 +68,8 @@ const status = (overrides = {}) => ({
   },
   capabilities: {
     placeOrder: false,
+    adjustMargin: false,
+    amendOrder: false,
     cancelAllOpenOrders: true,
     closePositions: true,
     engageKillSwitch: false,
@@ -76,6 +83,24 @@ const status = (overrides = {}) => ({
     required: false,
     state: 'healthy',
     code: 'FUTURES_PRODUCTION_RECOVERY_HEALTHY',
+  },
+  portfolio: {
+    state: 'live',
+    observedAt: 1_783_957_600_000,
+    positions: [{
+      symbol: 'BTCUSDT',
+      positionSide: 'SHORT',
+      quantity: '0.01',
+      entryPrice: '60000',
+      markPrice: '59000',
+      notionalUsdt: '590',
+      unrealizedPnlUsdt: '10',
+      isolatedMarginUsdt: '300',
+      liquidationPrice: '90000',
+      leverage: 2,
+      marginType: 'ISOLATED',
+    }],
+    openOrders: [],
   },
   ...overrides,
 })
@@ -94,7 +119,7 @@ const expectProtocolError = (callback, code) => {
 describe('production futures renderer request builders', () => {
   it('creates exact subscribe and unsubscribe requests on the dedicated channel contract', () => {
     const expected = {
-      version: 1,
+      version: 2,
       revision: '0',
       marketType: 'futures',
       environment: 'production',
@@ -112,6 +137,14 @@ describe('production futures renderer request builders', () => {
       action: 'futures.production.unsubscribeStatus',
       ...expected,
     })
+    expect(createFuturesProductionExecutionRefreshPortfolioRequest({
+      revision: '7',
+      accountFingerprint: FINGERPRINT,
+    })).toEqual({
+      action: 'futures.production.refreshPortfolio',
+      ...expected,
+      revision: '7',
+    })
   })
 
   it('creates the only request that carries a mutable financial draft', () => {
@@ -120,24 +153,75 @@ describe('production futures renderer request builders', () => {
       accountFingerprint: FINGERPRINT,
       symbol: 'BTCUSDT',
       side: 'SELL',
+      positionSide: 'LONG',
+      positionEffect: 'EXIT',
       quantity: '0.0100',
       price: '60000.1200',
-      reduceOnly: true,
     })
     expect(request).toEqual({
       action: 'futures.production.prepareOrderIntent',
-      version: 1,
+      version: 2,
       revision: '7',
       marketType: 'futures',
       environment: 'production',
       accountFingerprint: FINGERPRINT,
       symbol: 'BTCUSDT',
       side: 'SELL',
+      positionSide: 'LONG',
+      positionEffect: 'EXIT',
       quantity: '0.0100',
       price: '60000.1200',
-      reduceOnly: true,
     })
     expect(Object.isFrozen(request)).toBe(true)
+  })
+
+  it('creates a bounded isolated-margin leg draft without placing it', () => {
+    const request = createFuturesProductionExecutionPrepareMarginAdjustmentIntentRequest({
+      revision: '7',
+      accountFingerprint: FINGERPRINT,
+      symbol: 'BTCUSDT',
+      positionSide: 'SHORT',
+      marginAction: 'REDUCE',
+      amount: '5.25',
+    })
+    expect(request).toMatchObject({
+      action: 'futures.production.prepareMarginAdjustmentIntent',
+      positionSide: 'SHORT',
+      marginAction: 'REDUCE',
+      amount: '5.25',
+    })
+    expect(Object.isFrozen(request)).toBe(true)
+  })
+
+  it('creates an exact owned-order amendment prepare/final pair', () => {
+    const prepare = createFuturesProductionExecutionPrepareOrderAmendmentIntentRequest({
+      revision: '8',
+      accountFingerprint: FINGERPRINT,
+      symbol: 'BTCUSDT',
+      positionSide: 'LONG',
+      clientOrderId: `cc7-${REQUEST_ID}`,
+      price: '60100.1',
+    })
+    expect(prepare).toEqual({
+      action: 'futures.production.prepareOrderAmendmentIntent',
+      version: 2,
+      revision: '8',
+      marketType: 'futures',
+      environment: 'production',
+      accountFingerprint: FINGERPRINT,
+      symbol: 'BTCUSDT',
+      positionSide: 'LONG',
+      clientOrderId: `cc7-${REQUEST_ID}`,
+      price: '60100.1',
+    })
+    expect(createFuturesProductionExecutionAmendOrderRequest({
+      intent: intent(FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER_AMENDMENT),
+      accountFingerprint: FINGERPRINT,
+      confirmation: 'MOVE REAL FUTURES ORDER',
+    })).toMatchObject({
+      action: 'futures.production.amendOrder',
+      confirmation: 'MOVE REAL FUTURES ORDER',
+    })
   })
 
   it('creates distinct fixed-identity prepare requests for every safety action', () => {
@@ -154,7 +238,7 @@ describe('production futures renderer request builders', () => {
     for (const [builder, action] of builders) {
       expect(builder({ revision: '7', accountFingerprint: FINGERPRINT })).toEqual({
         action,
-        version: 1,
+        version: 2,
         revision: '7',
         marketType: 'futures',
         environment: 'production',
@@ -168,6 +252,9 @@ describe('production futures renderer request builders', () => {
       [createFuturesProductionExecutionPlaceOrderRequest,
         FUTURES_PRODUCTION_EXECUTION_ACTIONS.PLACE_ORDER,
         FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER],
+      [createFuturesProductionExecutionAdjustIsolatedMarginRequest,
+        FUTURES_PRODUCTION_EXECUTION_ACTIONS.ADJUST_ISOLATED_MARGIN,
+        FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.MARGIN_ADJUSTMENT],
       [createFuturesProductionExecutionCancelAllOpenOrdersRequest,
         FUTURES_PRODUCTION_EXECUTION_ACTIONS.CANCEL_ALL_OPEN_ORDERS,
         FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.CANCEL_ALL_OPEN_ORDERS],
@@ -189,7 +276,7 @@ describe('production futures renderer request builders', () => {
       })
       expect(request).toEqual({
         action,
-        version: 1,
+        version: 2,
         revision: '8',
         requestId: REQUEST_ID,
         marketType: 'futures',
@@ -207,17 +294,19 @@ describe('production futures renderer request builders', () => {
       accountFingerprint: FINGERPRINT,
       symbol: 'btcusdt',
       side: 'BUY',
+      positionSide: 'LONG',
+      positionEffect: 'ENTRY',
       quantity: '1',
       price: '1',
-      reduceOnly: false,
     })],
     ['float quantity', () => createFuturesProductionExecutionPrepareOrderIntentRequest({
       accountFingerprint: FINGERPRINT,
       symbol: 'BTCUSDT',
       side: 'BUY',
+      positionSide: 'LONG',
+      positionEffect: 'ENTRY',
       quantity: '1e-3',
       price: '1',
-      reduceOnly: false,
     })],
     ['wrong intent kind', () => createFuturesProductionExecutionPlaceOrderRequest({
       intent: intent(FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.CLOSE_POSITIONS),
@@ -245,9 +334,10 @@ describe('production futures renderer request builders', () => {
       accountFingerprint: FINGERPRINT,
       symbol: 'BTCUSDT',
       side: 'BUY',
+      positionSide: 'LONG',
+      positionEffect: 'ENTRY',
       quantity: '1',
       price: '1',
-      reduceOnly: false,
     })
     expect(hasExactFuturesProductionExecutionSessionRequestFields(request)).toBe(true)
     expect(hasExactFuturesProductionExecutionSessionRequestFields({
@@ -312,6 +402,8 @@ describe('production futures renderer status parser', () => {
       caps: null,
       capabilities: {
         placeOrder: false,
+        adjustMargin: false,
+        amendOrder: false,
         cancelAllOpenOrders: false,
         closePositions: false,
         engageKillSwitch: false,
@@ -347,7 +439,7 @@ describe('production futures renderer status parser', () => {
     const cases = [
       status({ liveAuthorized: false }),
       status({ caps: { ...status().caps, dailyUsedNotionalUsdt: '50.000000000000000001' } }),
-      status({ caps: { ...status().caps, maxLeverage: 2 } }),
+      status({ caps: { ...status().caps, maxLeverage: 1 } }),
       status({ caps: { ...status().caps, maxOrderNotionalUsdt: '10.000000000000000001' } }),
       status({ caps: { ...status().caps, maxDailyNotionalUsdt: '50.000000000000000001' } }),
       status({ caps: { ...status().caps, allowedSymbols: ['BTCUSDT', 'BTCUSDT'] } }),

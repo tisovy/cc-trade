@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { FUTURES_WORKSTATION_INTERVALS } from '../../../utils/futuresWorkstationProtocolShared.js'
+import { resolveFuturesTradingGesture } from '../../../utils/futuresTradingGestures.js'
 import FuturesWorkstationChart from './FuturesWorkstationChart.jsx'
 import './FuturesWorkstation.css'
 
@@ -27,6 +28,15 @@ const formatCountdown = (target, now) => {
 
 const displayPercent = value => value ? `${value}%` : '—'
 
+const FundingCountdown = ({ target }) => {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1_000)
+    return () => clearInterval(timer)
+  }, [])
+  return <dd>{formatCountdown(target, now)}</dd>
+}
+
 const StateBadge = ({ state }) => (
   <span className={`futures-workstation-state is-${state ?? 'loading'}`} role="status">
     {(state ?? 'loading').toUpperCase()}
@@ -47,18 +57,26 @@ export const FuturesWorkstationView = ({
   state,
   selectedSymbol,
   selectedInterval,
+  draftPrice,
+  ownedOrders = EMPTY_ROWS,
+  tradingRail,
+  onDraftPriceChange,
+  onTradingGesture,
+  onOrderDrag,
   onSymbolChange,
   onIntervalChange,
 }) => {
   const [search, setSearch] = useState('')
   const [favorites, setFavorites] = useState(() => new Set(['BTCUSDT']))
-  const [draftPrice, setDraftPrice] = useState(null)
+  const [localDraftPrice, setLocalDraftPrice] = useState(null)
   const [drawingMode, setDrawingMode] = useState(false)
   const [drawings, setDrawings] = useState(EMPTY_ROWS)
   const [alerts, setAlerts] = useState(EMPTY_ROWS)
   const [tapePaused, setTapePaused] = useState(false)
   const [pausedTrades, setPausedTrades] = useState(EMPTY_ROWS)
-  const [now, setNow] = useState(() => Date.now())
+  const lastBookLeftClickRef = useRef({ at: 0, price: null, modifier: null })
+  const lastBookRightClickRef = useRef({ at: 0, price: null, modifier: null })
+  const selectedDraftPrice = draftPrice === undefined ? localDraftPrice : draftPrice
 
   const resources = state.resources
   const contracts = resources.catalog?.contracts ?? EMPTY_ROWS
@@ -74,11 +92,6 @@ export const FuturesWorkstationView = ({
   const depthState = resourceState(depth)
   const tradesState = resourceState(resources.trades)
 
-  useEffect(() => {
-    const timer = setInterval(() => setNow(Date.now()), 1_000)
-    return () => clearInterval(timer)
-  }, [])
-
   const visibleContracts = useMemo(() => {
     const query = search.trim().toUpperCase()
     return contracts
@@ -91,14 +104,75 @@ export const FuturesWorkstationView = ({
   }, [contracts, favorites, search])
 
   const pickPrice = useCallback((price) => {
-    setDraftPrice(price)
+    if (typeof onDraftPriceChange === 'function') onDraftPriceChange(price)
+    else setLocalDraftPrice(price)
     if (drawingMode) {
       setDrawings(previous => Object.freeze([
         ...previous.slice(-15),
         Object.freeze({ id: `drawing-${previous.length + 1}`, price }),
       ]))
     }
-  }, [drawingMode])
+  }, [drawingMode, onDraftPriceChange])
+
+  const emitBookGesture = useCallback((event, button, price) => {
+    const gesture = resolveFuturesTradingGesture({
+      button,
+      altKey: event.altKey,
+      ctrlKey: event.ctrlKey,
+      metaKey: event.metaKey,
+      shiftKey: event.shiftKey,
+    })
+    if (!gesture) return false
+    event.preventDefault()
+    event.stopPropagation()
+    onTradingGesture?.({ ...gesture, price, source: 'order-book' })
+    return true
+  }, [onTradingGesture])
+
+  const handleBookContextMenu = useCallback((event, price) => {
+    const gesture = resolveFuturesTradingGesture({
+      button: 'right',
+      altKey: event.altKey,
+      ctrlKey: event.ctrlKey,
+      metaKey: event.metaKey,
+      shiftKey: event.shiftKey,
+    })
+    if (!gesture) return
+    event.preventDefault()
+    const modifier = event.altKey ? 'alt' : 'ctrl'
+    const current = { at: Date.now(), price, modifier }
+    const previous = lastBookRightClickRef.current
+    lastBookRightClickRef.current = current
+    if (current.at - previous.at > 350
+      || previous.price !== price
+      || previous.modifier !== modifier) return
+    lastBookRightClickRef.current = { at: 0, price: null, modifier: null }
+    emitBookGesture(event, 'right', price)
+  }, [emitBookGesture])
+
+  const handleBookClick = useCallback((event, price) => {
+    pickPrice(price)
+    const gesture = resolveFuturesTradingGesture({
+      button: 'left',
+      altKey: event.altKey,
+      ctrlKey: event.ctrlKey,
+      metaKey: event.metaKey,
+      shiftKey: event.shiftKey,
+    })
+    if (!gesture) {
+      lastBookLeftClickRef.current = { at: 0, price: null, modifier: null }
+      return
+    }
+    const modifier = event.altKey ? 'alt' : 'ctrl'
+    const current = { at: Date.now(), price, modifier }
+    const previous = lastBookLeftClickRef.current
+    lastBookLeftClickRef.current = current
+    if (current.at - previous.at > 350
+      || previous.price !== price
+      || previous.modifier !== modifier) return
+    lastBookLeftClickRef.current = { at: 0, price: null, modifier: null }
+    emitBookGesture(event, 'left', price)
+  }, [emitBookGesture, pickPrice])
 
   const toggleFavorite = useCallback((symbol) => {
     setFavorites((previous) => {
@@ -110,12 +184,12 @@ export const FuturesWorkstationView = ({
   }, [])
 
   const addDisplayAlert = useCallback(() => {
-    if (!draftPrice) return
+    if (!selectedDraftPrice) return
     setAlerts(previous => Object.freeze([
       ...previous.slice(-15),
-      Object.freeze({ id: `alert-${previous.length + 1}`, price: draftPrice }),
+      Object.freeze({ id: `alert-${previous.length + 1}`, price: selectedDraftPrice }),
     ]))
-  }, [draftPrice])
+  }, [selectedDraftPrice])
 
   const toggleTape = useCallback(() => {
     if (!tapePaused) setPausedTrades(liveTrades)
@@ -130,10 +204,10 @@ export const FuturesWorkstationView = ({
     .slice(0, VISIBLE_DEPTH_LEVELS_PER_SIDE)
 
   return (
-    <section className="futures-workstation" aria-label={`${identity} read-only market workstation`}>
+    <section className="futures-workstation" aria-label={`${identity} live trading workstation`}>
       <div className="futures-workstation-identity" data-testid="futures-workstation-identity">
         <strong>{identity}</strong>
-        <span>PUBLIC MARKET DATA · READ ONLY</span>
+        <span>PUBLIC MARKET DATA · LIVE EXECUTION</span>
         <StateBadge state={aggregateState} />
         <code>gen {state.generation || '—'} · rev {state.revision || '—'}</code>
         {state.reasonCode ? (
@@ -194,8 +268,10 @@ export const FuturesWorkstationView = ({
             <p className="futures-workstation-empty">No matching USDⓈ-M contract.</p>
           ) : null}
         </div>
+        {tradingRail}
         {selectedContract ? (
-          <section className="futures-workstation-contract-inspector" aria-label="Exact contract filters">
+          <details className="futures-workstation-contract-inspector" aria-label="Exact contract filters">
+            <summary>Contract filters</summary>
             <div className="futures-workstation-contract-status">
               <span>Status</span>
               <strong>{selectedContract.status}</strong>
@@ -229,7 +305,7 @@ export const FuturesWorkstationView = ({
               <strong>Min notional</strong>
               <code>{selectedContract.filters.minimumNotional ?? 'Unavailable'} USDT</code>
             </div>
-          </section>
+          </details>
         ) : null}
       </aside>
 
@@ -249,7 +325,7 @@ export const FuturesWorkstationView = ({
           <div><dt>24h low</dt><dd>{header?.lowPrice ?? '—'}</dd></div>
           <div><dt>24h volume</dt><dd>{header?.volume ?? '—'}</dd></div>
           <div><dt>Funding</dt><dd>{displayPercent(header?.fundingRatePercent)}</dd></div>
-          <div><dt>Next funding</dt><dd>{formatCountdown(header?.nextFundingTime, now)}</dd></div>
+          <div><dt>Next funding</dt><FundingCountdown target={header?.nextFundingTime} /></div>
         </dl>
       </header>
 
@@ -281,7 +357,7 @@ export const FuturesWorkstationView = ({
             <button type="button" onClick={() => setDrawings(EMPTY_ROWS)} disabled={drawings.length === 0}>
               Clear drawings
             </button>
-            <button type="button" onClick={addDisplayAlert} disabled={!draftPrice || candlesState !== 'live'}>
+            <button type="button" onClick={addDisplayAlert} disabled={!selectedDraftPrice || candlesState !== 'live'}>
               Add display alert
             </button>
             <button type="button" onClick={() => setAlerts(EMPTY_ROWS)} disabled={alerts.length === 0}>
@@ -297,9 +373,13 @@ export const FuturesWorkstationView = ({
             markPrice={header?.markPrice ?? null}
             indexPrice={header?.indexPrice ?? null}
             priceTickSize={selectedContract?.filters.price?.tickSize ?? null}
+            draftPrice={selectedDraftPrice}
             drawings={drawings}
             alerts={alerts}
+            ownedOrders={ownedOrders}
             onPricePick={candlesState === 'live' ? pickPrice : IGNORE_PRICE_PICK}
+            onTradingGesture={candlesState === 'live' ? onTradingGesture : undefined}
+            onOrderDrag={candlesState === 'live' ? onOrderDrag : undefined}
           />
           {candlesState !== 'live' ? (
             <div className={`futures-workstation-overlay is-${candlesState}`}>
@@ -308,12 +388,12 @@ export const FuturesWorkstationView = ({
             </div>
           ) : null}
         </div>
-        <div className="futures-workstation-local-draft" aria-label="Local non-executable price draft">
+        <div className="futures-workstation-local-draft" aria-label="Futures limit price draft">
           <div>
-            <span>Local price draft</span>
-            <strong>{draftPrice ?? 'Pick chart or book price'}</strong>
+            <span>Limit price</span>
+            <strong>{selectedDraftPrice ?? 'Pick chart or book price'}</strong>
           </div>
-          <code>DISPLAY ONLY · NO INTENT · NO SUBMIT</code>
+          <code>DRAFT · INTENT + CONFIRMATION REQUIRED</code>
         </div>
       </main>
 
@@ -329,7 +409,8 @@ export const FuturesWorkstationView = ({
               type="button"
               key={`ask-${level.price}`}
               disabled={depthState !== 'live'}
-              onClick={() => pickPrice(level.price)}
+              onClick={event => handleBookClick(event, level.price)}
+              onContextMenu={event => handleBookContextMenu(event, level.price)}
             >
               <span>{level.price}</span><span>{level.quantity}</span><span>{level.total}</span>
             </button>
@@ -344,7 +425,8 @@ export const FuturesWorkstationView = ({
               type="button"
               key={`bid-${level.price}`}
               disabled={depthState !== 'live'}
-              onClick={() => pickPrice(level.price)}
+              onClick={event => handleBookClick(event, level.price)}
+              onContextMenu={event => handleBookContextMenu(event, level.price)}
             >
               <span>{level.price}</span><span>{level.quantity}</span><span>{level.total}</span>
             </button>

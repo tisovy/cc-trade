@@ -22,7 +22,7 @@ const validEnvironment = () => ({
         createFuturesProductionApiKeyFingerprint(API_KEY)
     ),
     [FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.ALLOWED_SYMBOLS]: 'BTCUSDT,ETHUSDT',
-    [FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MAX_LEVERAGE]: '1',
+    [FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MAX_LEVERAGE]: '2',
     [FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MAX_ORDER_NOTIONAL_USDT]: '10',
     [FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MAX_DAILY_NOTIONAL_USDT]: '50',
     [FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MIN_AVAILABLE_BALANCE_USDT]: '100.00',
@@ -55,7 +55,7 @@ describe('captureFuturesProductionExecutionConfig', () => {
             },
             policy: {
                 allowedSymbols: ['BTCUSDT', 'ETHUSDT'],
-                maxLeverage: 1,
+                maxLeverage: 2,
                 maxOrderNotionalUsdt: '10',
                 maxDailyNotionalUsdt: '50',
                 killSwitchPolicy: FUTURES_PRODUCTION_EXECUTION_KILL_SWITCH_POLICY,
@@ -131,7 +131,8 @@ describe('captureFuturesProductionExecutionConfig', () => {
     it.each([
         ['duplicate symbols', FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.ALLOWED_SYMBOLS, 'BTCUSDT,BTCUSDT'],
         ['lowercase symbol', FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.ALLOWED_SYMBOLS, 'btcusdt'],
-        ['leverage above ceiling', FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MAX_LEVERAGE, '2'],
+        ['leverage below compiled profile', FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MAX_LEVERAGE, '1'],
+        ['leverage above ceiling', FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MAX_LEVERAGE, '3'],
         ['order cap above ceiling', FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MAX_ORDER_NOTIONAL_USDT, '10.000000000000000001'],
         ['daily cap above ceiling', FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MAX_DAILY_NOTIONAL_USDT, '50.000000000000000001'],
         ['order cap above daily cap', FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MAX_DAILY_NOTIONAL_USDT, '9'],

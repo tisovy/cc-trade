@@ -12,7 +12,7 @@ const credentialBinding = 'b'.repeat(64);
 const createInput = () => ({
     policy: {
         allowedSymbols: ['BTCUSDT'],
-        maxLeverage: 1,
+        maxLeverage: 2,
         maxOrderNotionalUsdt: '10',
         maxDailyNotionalUsdt: '50',
         minAvailableBalanceUsdt: '100',
@@ -37,14 +37,14 @@ const createInput = () => ({
         clockRegressed: false,
         accountConfig: {
             canTrade: true,
-            dualSidePosition: false,
+            dualSidePosition: true,
             multiAssetsMargin: false,
         },
         symbolConfig: {
             symbol: 'BTCUSDT',
             marginType: 'ISOLATED',
             isAutoAddMargin: false,
-            leverage: 1,
+            leverage: 2,
             maxNotionalValue: '1000000',
         },
         markPrice: {
@@ -53,7 +53,7 @@ const createInput = () => ({
         },
         position: {
             symbol: 'BTCUSDT',
-            positionSide: 'BOTH',
+            positionSide: 'LONG',
             positionAmt: '0',
             liquidationPrice: '0',
             marginAsset: 'USDT',
@@ -94,17 +94,45 @@ const createInput = () => ({
     draft: {
         symbol: 'BTCUSDT',
         side: 'BUY',
+        positionSide: 'LONG',
+        positionEffect: 'ENTRY',
         type: 'LIMIT',
         timeInForce: 'GTC',
         quantity: '1',
         price: '10.00',
-        reduceOnly: false,
     },
     killSwitchEngaged: false,
     dailyNotionalUsed: '0',
 });
 
 describe('production Futures exact risk evaluator', () => {
+    it.each([
+        ['LONG entry', 'LONG', 'ENTRY', 'BUY', '0', '0', FUTURES_PRODUCTION_EXECUTION_RISK_CLASSIFICATIONS.OPENING],
+        ['LONG exit', 'LONG', 'EXIT', 'SELL', '1', '5', FUTURES_PRODUCTION_EXECUTION_RISK_CLASSIFICATIONS.REDUCING],
+        ['SHORT entry', 'SHORT', 'ENTRY', 'SELL', '0', '0', FUTURES_PRODUCTION_EXECUTION_RISK_CLASSIFICATIONS.OPENING],
+        ['SHORT exit', 'SHORT', 'EXIT', 'BUY', '-1', '15', FUTURES_PRODUCTION_EXECUTION_RISK_CLASSIFICATIONS.REDUCING],
+    ])('classifies the exact Hedge Mode matrix: %s', (
+        _label,
+        positionSide,
+        positionEffect,
+        side,
+        positionAmt,
+        liquidationPrice,
+        classification,
+    ) => {
+        const input = createInput();
+        input.snapshot.position.positionSide = positionSide;
+        input.snapshot.position.positionAmt = positionAmt;
+        input.snapshot.position.liquidationPrice = liquidationPrice;
+        input.draft.positionSide = positionSide;
+        input.draft.positionEffect = positionEffect;
+        input.draft.side = side;
+        expect(evaluateFuturesProductionExecutionRisk(input)).toMatchObject({
+            ok: true,
+            classification,
+        });
+    });
+
     it('accepts an exact-cap opening order and returns only backend classification facts', () => {
         const result = evaluateFuturesProductionExecutionRisk(createInput());
         expect(result).toEqual({
@@ -114,7 +142,7 @@ describe('production Futures exact risk evaluator', () => {
             conservativePrice: '10.00',
             dailyNotionalBeforeUsdt: '0',
             dailyNotionalAfterUsdt: '10.00',
-            observedLeverage: 1,
+            observedLeverage: 2,
         });
         expect(Object.isFrozen(result)).toBe(true);
     });
@@ -170,7 +198,7 @@ describe('production Futures exact risk evaluator', () => {
         });
     });
 
-    it('classifies increasing and rejects every non-reduce opposite-side order', () => {
+    it('classifies increasing and rejects a side/effect mismatch before exposure evaluation', () => {
         const increasing = createInput();
         increasing.snapshot.position.positionAmt = '2';
         increasing.snapshot.position.liquidationPrice = '5';
@@ -185,8 +213,8 @@ describe('production Futures exact risk evaluator', () => {
         ambiguous.draft.side = 'SELL';
         expect(evaluateFuturesProductionExecutionRisk(ambiguous)).toEqual({
             ok: false,
-            code: FUTURES_PRODUCTION_EXECUTION_RISK_CODES.CLASSIFICATION_REJECTED,
-            reason: FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.EXPOSURE_AMBIGUOUS,
+            code: FUTURES_PRODUCTION_EXECUTION_RISK_CODES.ORDER_REJECTED,
+            reason: FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.ORDER_SCHEMA,
         });
     });
 
@@ -206,11 +234,12 @@ describe('production Futures exact risk evaluator', () => {
         reducing.draft = {
             symbol: 'BTCUSDT',
             side: 'SELL',
+            positionSide: 'LONG',
+            positionEffect: 'EXIT',
             type: 'MARKET',
             timeInForce: null,
             quantity: '1',
             price: null,
-            reduceOnly: true,
         };
         expect(evaluateFuturesProductionExecutionRisk(reducing)).toMatchObject({
             ok: true,
@@ -220,22 +249,24 @@ describe('production Futures exact risk evaluator', () => {
     });
 
     it.each([
-        ['zero position', '0', 'SELL', '1'],
-        ['wrong side', '2', 'BUY', '1'],
-        ['over reduction', '2', 'SELL', '2.001'],
-        ['short wrong side', '-2', 'SELL', '1'],
-    ])('rejects ambiguous reduce-only classification: %s', (
+        ['zero LONG leg', 'LONG', '0', 'SELL', '1'],
+        ['over LONG exit', 'LONG', '2', 'SELL', '2.001'],
+        ['wrong-sign SHORT leg', 'SHORT', '2', 'BUY', '1'],
+    ])('rejects ambiguous Hedge Mode exit classification: %s', (
         _label,
+        positionSide,
         amount,
         side,
         quantity,
     ) => {
         const input = createInput();
         input.snapshot.position.positionAmt = amount;
+        input.snapshot.position.positionSide = positionSide;
         input.snapshot.position.liquidationPrice = amount === '0' ? '0' : '5';
         input.draft.side = side;
+        input.draft.positionSide = positionSide;
+        input.draft.positionEffect = 'EXIT';
         input.draft.quantity = quantity;
-        input.draft.reduceOnly = true;
         expect(evaluateFuturesProductionExecutionRisk(input)).toEqual({
             ok: false,
             code: FUTURES_PRODUCTION_EXECUTION_RISK_CODES.CLASSIFICATION_REJECTED,
@@ -243,9 +274,9 @@ describe('production Futures exact risk evaluator', () => {
         });
     });
 
-    it('enforces account-level maximum leverage independently of exchange maximum', () => {
+    it('requires exactly isolated 2x even when the exchange permits another leverage', () => {
         const input = createInput();
-        input.snapshot.symbolConfig.leverage = 2;
+        input.snapshot.symbolConfig.leverage = 1;
         expect(evaluateFuturesProductionExecutionRisk(input)).toEqual({
             ok: false,
             code: FUTURES_PRODUCTION_EXECUTION_RISK_CODES.LEVERAGE_REJECTED,
@@ -308,7 +339,11 @@ describe('production Futures exact risk evaluator', () => {
         const input = createInput();
         input.snapshot.position.positionAmt = positionAmt;
         input.snapshot.position.liquidationPrice = liquidationPrice;
-        input.draft.side = positionAmt.startsWith('-') ? 'SELL' : 'BUY';
+        if (positionAmt.startsWith('-')) {
+            input.snapshot.position.positionSide = 'SHORT';
+            input.draft.positionSide = 'SHORT';
+            input.draft.side = 'SELL';
+        }
         expect(evaluateFuturesProductionExecutionRisk(input)).toEqual({
             ok: false,
             code: FUTURES_PRODUCTION_EXECUTION_RISK_CODES.LIQUIDATION_REJECTED,
@@ -318,7 +353,7 @@ describe('production Futures exact risk evaluator', () => {
 
     it.each([
         ['canTrade', input => { input.snapshot.accountConfig.canTrade = false; }],
-        ['hedge mode', input => { input.snapshot.accountConfig.dualSidePosition = true; }],
+        ['one-way mode', input => { input.snapshot.accountConfig.dualSidePosition = false; }],
         ['multi asset', input => { input.snapshot.accountConfig.multiAssetsMargin = true; }],
         ['cross margin', input => { input.snapshot.symbolConfig.marginType = 'CROSSED'; }],
         ['auto add', input => { input.snapshot.symbolConfig.isAutoAddMargin = true; }],
@@ -341,7 +376,7 @@ describe('production Futures exact risk evaluator', () => {
         const accessor = createInput();
         Object.defineProperty(accessor.policy, 'maxLeverage', {
             enumerable: true,
-            get: () => 1,
+            get: () => 2,
         });
         expect(evaluateFuturesProductionExecutionRisk(accessor)).toMatchObject({
             code: FUTURES_PRODUCTION_EXECUTION_RISK_CODES.POLICY_REJECTED,

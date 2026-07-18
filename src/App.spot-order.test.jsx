@@ -254,7 +254,7 @@ describe('App spot order payloads', () => {
     })
   })
 
-  it('exposes only Futures Live, unmounts spot execution there, and restores spot unchanged', () => {
+  it('exposes only Futures, unmounts spot execution there, and restores spot unchanged', () => {
     mocks.order = {
       symbol: 'BTCUSDT',
       side: 'BUY',
@@ -271,7 +271,7 @@ describe('App spot order payloads', () => {
     expect(screen.getByTestId('place-spot-order')).toBeInTheDocument()
     expect(screen.getByTestId('cancel-spot-order')).toBeInTheDocument()
     expect(screen.queryByTestId('market-mode-futures-testnet')).not.toBeInTheDocument()
-    expect(screen.getByTestId('market-mode-futures-live')).toHaveTextContent('Futures Live')
+    expect(screen.getByTestId('market-mode-futures-live')).toHaveTextContent('Futures')
     expect(mocks.futuresProductionEnabled.at(-1)).toBe(false)
     expect(mocks.sendMessage).toHaveBeenLastCalledWith({
       action: 'enable_depth_view',
@@ -282,7 +282,7 @@ describe('App spot order payloads', () => {
 
     expect(screen.getByTestId('futures-live-view')).toBeInTheDocument()
     expect(screen.getByTestId('futures-live-banner')).toHaveTextContent(
-      'USDⓈ-M FUTURES LIVEREAL MONEY · PRODUCTION',
+      'USDⓈ-M FUTURESREAL MONEY · PRODUCTION',
     )
     expect(screen.getByLabelText('USDⓈ-M production real-order execution')).toBeInTheDocument()
     expect(screen.queryByTestId('place-spot-order')).not.toBeInTheDocument()

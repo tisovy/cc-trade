@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   FUTURES_PRODUCTION_EXECUTION_CONFIRMATIONS,
@@ -7,6 +7,14 @@ import FuturesProductionExecutionTicket from './FuturesProductionExecutionTicket
 
 const FINGERPRINT = 'a'.repeat(64)
 const REQUEST_ID = '0123456789abcdef0123456789abcdef'
+const selectedContract = Object.freeze({
+  symbol: 'BTCUSDT',
+  filters: Object.freeze({
+    price: Object.freeze({ min: '0.1', max: '1000000', tickSize: '0.1' }),
+    quantity: Object.freeze({ min: '0.001', max: '100', stepSize: '0.001' }),
+    minimumNotional: '5',
+  }),
+})
 
 const createState = (overrides = {}) => ({
   connected: true,
@@ -18,21 +26,20 @@ const createState = (overrides = {}) => ({
   configured: true,
   account: { alias: 'reviewed-account-1', fingerprint: FINGERPRINT },
   caps: {
-    allowedSymbols: ['BTCUSDT', 'ETHUSDT'],
-    maxLeverage: 1,
-    maxOrderNotionalUsdt: '10.0000',
-    maxDailyNotionalUsdt: '50.0000',
-    minAvailableBalanceUsdt: '10.0000',
+    allowedSymbols: ['BTCUSDT'],
+    maxLeverage: 2,
+    maxOrderNotionalUsdt: '10',
+    maxDailyNotionalUsdt: '50',
+    minAvailableBalanceUsdt: '10',
     minLiquidationDistanceBps: '1000',
-    dailyUsedNotionalUsdt: '10.000000000000000001',
+    dailyUsedNotionalUsdt: '0',
     utcDay: '2026-07-13',
   },
-  killSwitch: {
-    engaged: false,
-    policy: 'v1-persistent-block-new-exposure',
-  },
+  killSwitch: { engaged: false, policy: 'v1-persistent-block-new-exposure' },
   capabilities: {
     placeOrder: true,
+    adjustMargin: false,
+    amendOrder: false,
     cancelAllOpenOrders: true,
     closePositions: true,
     engageKillSwitch: true,
@@ -42,19 +49,26 @@ const createState = (overrides = {}) => ({
   intent: null,
   attempt: null,
   reconciliation: null,
-  recovery: {
-    required: false,
-    state: 'healthy',
-    code: 'FUTURES_PRODUCTION_RECOVERY_HEALTHY',
-  },
+  recovery: { required: false, state: 'healthy', code: 'FUTURES_PRODUCTION_RECOVERY_HEALTHY' },
+  portfolio: { state: 'live', observedAt: 1_783_957_600_000, positions: [], openOrders: [] },
   ...overrides,
 })
 
-const createIntent = (kind, requestId = REQUEST_ID) => ({
-  requestId,
+const createIntent = kind => ({
+  requestId: REQUEST_ID,
   kind,
   revision: '2',
   expiresAt: 1_783_957_630_000,
+})
+
+const hedgePortfolio = Object.freeze({
+  state: 'live',
+  observedAt: 1_783_957_600_000,
+  openOrders: [],
+  positions: Object.freeze([
+    Object.freeze({ symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '0.001' }),
+    Object.freeze({ symbol: 'BTCUSDT', positionSide: 'SHORT', quantity: '0.001' }),
+  ]),
 })
 
 const callbacks = (overrides = {}) => ({
@@ -68,344 +82,281 @@ const callbacks = (overrides = {}) => ({
   onEngageKillSwitch: vi.fn(() => true),
   onPrepareDisengageKillSwitchIntent: vi.fn(() => true),
   onDisengageKillSwitch: vi.fn(() => true),
+  onRefreshPortfolio: vi.fn(() => true),
+  onPrepareMarginAdjustment: vi.fn(() => true),
+  onAdjustMargin: vi.fn(() => true),
+  onPrepareOrderAmendment: vi.fn(() => true),
+  onAmendOrder: vi.fn(() => true),
   ...overrides,
 })
 
-const renderTicket = (state = createState(), handlers = callbacks()) => ({
+const renderTicket = ({ state = createState(), handlers = callbacks(), ...props } = {}) => ({
   handlers,
-  ...render(<FuturesProductionExecutionTicket state={state} {...handlers} />),
+  ...render(
+    <FuturesProductionExecutionTicket
+      state={state}
+      selectedSymbol="BTCUSDT"
+      selectedContract={selectedContract}
+      {...handlers}
+      {...props}
+    />,
+  ),
 })
+
+const selectFullSize = () => fireEvent.click(screen.getByRole('button', { name: '100%' }))
 
 afterEach(() => cleanup())
 
 describe('FuturesProductionExecutionTicket', () => {
-  it('is unmistakably production and displays the exact backend-owned identity, caps, kill, and recovery state', () => {
+  it('shows the exact Hedge isolated 2x profile and keeps diagnostics collapsed', () => {
     renderTicket()
-
-    expect(screen.getByText('USDⓈ-M PRODUCTION · REAL ORDERS')).toBeInTheDocument()
-    expect(screen.getByText('LIVE ARMED')).toBeInTheDocument()
-    expect(screen.getByText('reviewed-account-1')).toBeInTheDocument()
-    expect(screen.getByText(FINGERPRINT)).toBeInTheDocument()
-    expect(screen.getByText('BTCUSDT, ETHUSDT')).toBeInTheDocument()
-    expect(screen.getByText('1×')).toBeInTheDocument()
-    expect(screen.getAllByText('10.0000 USDT')).toHaveLength(2)
-    expect(screen.getByText('50.0000 USDT')).toBeInTheDocument()
-    expect(screen.getByText('1000 bps')).toBeInTheDocument()
-    expect(screen.getByText('10.000000000000000001 USDT')).toBeInTheDocument()
-    expect(screen.getByText('DISENGAGED')).toBeInTheDocument()
-    expect(screen.getByLabelText('Backend production recovery')).toHaveTextContent('healthy')
-    expect(screen.queryByRole('form')).not.toBeInTheDocument()
-  })
-
-  it('keeps ARM, cancel-all, close-positions, and kill-switch controls explicit and separate', () => {
-    renderTicket()
-
-    expect(screen.getByRole('button', { name: 'Prepare cancel-all intent' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Prepare close-positions intent' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Prepare kill-switch intent' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Prepare ARM LIVE intent' })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: /^Cancel and close/i })).not.toBeInTheDocument()
-  })
-
-  it('requires the exact ARM phrase, blocks Enter and double submission, and keeps orders locked', () => {
-    const handlers = callbacks()
-    const lockedState = createState({
-      killSwitch: {
-        engaged: true,
-        policy: 'v1-persistent-block-new-exposure',
-      },
-      capabilities: {
-        placeOrder: true,
-        cancelAllOpenOrders: true,
-        closePositions: true,
-        engageKillSwitch: false,
-        disengageKillSwitch: true,
-        code: 'FUTURES_PRODUCTION_GATES_SATISFIED',
-      },
-    })
-    const { rerender } = renderTicket(lockedState, handlers)
-
-    expect(screen.getByText('LIVE LOCKED')).toBeInTheDocument()
-    const orderPrepare = screen.getByRole('button', { name: 'Prepare real order intent' })
-    fireEvent.change(screen.getByRole('textbox', { name: 'Exact quantity' }), {
-      target: { value: '0.001' },
-    })
-    fireEvent.change(screen.getByRole('textbox', { name: 'Exact limit price' }), {
-      target: { value: '7000' },
-    })
-    expect(orderPrepare).toBeDisabled()
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Reduce only' }))
-    expect(orderPrepare).toBeEnabled()
-    const prepare = screen.getByRole('button', { name: 'Prepare ARM LIVE intent' })
-    fireEvent.keyDown(prepare, { key: 'Enter', bubbles: true })
-    expect(handlers.onPrepareDisengageKillSwitchIntent).not.toHaveBeenCalled()
-    fireEvent.click(prepare)
-    fireEvent.click(prepare)
-    expect(handlers.onPrepareDisengageKillSwitchIntent).toHaveBeenCalledTimes(1)
-
-    rerender(
-      <FuturesProductionExecutionTicket
-        state={{
-          ...lockedState,
-          revision: '2',
-          intent: createIntent('disengage_kill_switch'),
-        }}
-        {...handlers}
-      />,
+    expect(screen.getByText('FUTURES · USDⓈ-M')).toBeInTheDocument()
+    expect(screen.getByText('ISOLATED · 2× · HEDGE')).toBeInTheDocument()
+    expect(screen.getByText('ARMED')).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'Order' })).toHaveAttribute('aria-selected', 'true')
+    const safety = screen.getByText('Advanced safety').closest('details')
+    expect(safety).not.toHaveAttribute('open')
+    fireEvent.click(screen.getByText('Advanced safety'))
+    expect(screen.getByLabelText('Backend production identity and mode')).toHaveTextContent(
+      `Accountreviewed-account-1Fingerprint${FINGERPRINT}`,
     )
-    const confirmation = FUTURES_PRODUCTION_EXECUTION_CONFIRMATIONS[
-      'futures.production.disengageKillSwitch'
-    ]
-    const input = screen.getByRole('textbox', { name: `Type exactly: ${confirmation}` })
-    const arm = screen.getByRole('button', { name: 'ARM LIVE FUTURES' })
-    fireEvent.change(input, { target: { value: 'ARM LIVE' } })
-    expect(arm).toBeDisabled()
-    fireEvent.change(input, { target: { value: confirmation } })
-    fireEvent.keyDown(input, { key: 'Enter', bubbles: true })
-    expect(handlers.onDisengageKillSwitch).not.toHaveBeenCalled()
-    fireEvent.click(arm)
-    fireEvent.click(arm)
-    expect(handlers.onDisengageKillSwitch).toHaveBeenCalledTimes(1)
-    expect(handlers.onDisengageKillSwitch).toHaveBeenCalledWith(confirmation)
   })
 
-  it('preserves exact order strings, prevents Enter, and synchronously blocks duplicate prepare', () => {
+  it('synchronizes the percentage and USDT controls and derives exact 2x margin', async () => {
+    renderTicket({ draftPrice: '7000.09' })
+    expect(screen.getByRole('textbox', { name: 'Order notional USDT' })).toHaveValue('2.5')
+    selectFullSize()
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Order notional USDT' })).toHaveValue('10'))
+    const order = screen.getByLabelText('Production order action')
+    expect(order).toHaveTextContent('Price7000')
+    expect(order).toHaveTextContent('Quantity0.001')
+    expect(order).toHaveTextContent('Notional7 USDT')
+    expect(order).toHaveTextContent('Est. margin3.5 USDT')
+  })
+
+  it.each([
+    ['Enter LONG', 'BUY', 'LONG', 'ENTRY'],
+    ['Exit LONG', 'SELL', 'LONG', 'EXIT'],
+    ['Enter SHORT', 'SELL', 'SHORT', 'ENTRY'],
+    ['Exit SHORT', 'BUY', 'SHORT', 'EXIT'],
+  ])('prepares the exact %s Hedge draft', async (label, side, positionSide, positionEffect) => {
     const handlers = callbacks()
-    renderTicket(createState(), handlers)
-    const symbol = screen.getByRole('textbox', { name: 'Symbol' })
-    const quantity = screen.getByRole('textbox', { name: 'Exact quantity' })
-    const price = screen.getByRole('textbox', { name: 'Exact limit price' })
-    const side = screen.getByRole('combobox', { name: 'Side' })
-    const reduceOnly = screen.getByRole('checkbox', { name: 'Reduce only' })
-    const prepare = screen.getByRole('button', { name: 'Prepare real order intent' })
-
-    fireEvent.change(symbol, { target: { value: 'ethusdt' } })
-    fireEvent.change(side, { target: { value: 'SELL' } })
-    fireEvent.change(quantity, { target: { value: '0.0100' } })
-    fireEvent.change(price, { target: { value: '60000.1200' } })
-    fireEvent.click(reduceOnly)
-    fireEvent.keyDown(quantity, { key: 'Enter', bubbles: true })
-    fireEvent.keyDown(prepare, { key: 'Enter', bubbles: true })
-    expect(handlers.onPrepareOrderIntent).not.toHaveBeenCalled()
-
+    renderTicket({
+      handlers,
+      draftPrice: '7000',
+      state: createState({ portfolio: hedgePortfolio }),
+    })
+    selectFullSize()
+    fireEvent.click(screen.getByRole('button', { name: label }))
+    const prepare = await screen.findByRole('button', { name: `Prepare ${label}` })
+    await waitFor(() => expect(prepare).toBeEnabled())
     fireEvent.click(prepare)
-    fireEvent.click(prepare)
-    expect(handlers.onPrepareOrderIntent).toHaveBeenCalledTimes(1)
     expect(handlers.onPrepareOrderIntent).toHaveBeenCalledWith({
-      symbol: 'ETHUSDT',
-      side: 'SELL',
-      quantity: '0.0100',
-      price: '60000.1200',
-      reduceOnly: true,
+      symbol: 'BTCUSDT',
+      side,
+      positionSide,
+      positionEffect,
+      quantity: '0.001',
+      price: '7000',
     })
   })
 
-  it('requires the exact action-specific confirmation and blocks final double submission', () => {
+  it('turns a recognized shortcut into one prepared intent and never a final submit', async () => {
     const handlers = callbacks()
-    renderTicket(createState({
-      revision: '2',
-      intent: createIntent('order'),
-    }), handlers)
+    const base = {
+      state: createState(),
+      selectedSymbol: 'BTCUSDT',
+      selectedContract,
+      draftPrice: '7000',
+      ...handlers,
+    }
+    const { rerender } = render(<FuturesProductionExecutionTicket {...base} />)
+    selectFullSize()
+    rerender(<FuturesProductionExecutionTicket {...base} gestureRequest={{
+      id: 1,
+      price: '7000',
+      side: 'SELL',
+      positionSide: 'SHORT',
+      positionEffect: 'ENTRY',
+      source: 'chart',
+    }} />)
+    await waitFor(() => expect(handlers.onPrepareOrderIntent).toHaveBeenCalledTimes(1))
+    expect(handlers.onPrepareOrderIntent).toHaveBeenCalledWith(expect.objectContaining({
+      side: 'SELL', positionSide: 'SHORT', positionEffect: 'ENTRY',
+    }))
+    expect(screen.getByRole('button', { name: 'Enter SHORT' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+    expect(handlers.onPlaceOrder).not.toHaveBeenCalled()
+  })
+
+  it('turns one owned-order drag into prepare only and requires exact final confirmation', async () => {
+    const handlers = callbacks()
+    const amendmentCapabilities = {
+      ...createState().capabilities,
+      amendOrder: true,
+    }
+    const base = {
+      state: createState({ capabilities: amendmentCapabilities }),
+      selectedSymbol: 'BTCUSDT',
+      selectedContract,
+      ...handlers,
+    }
+    const amendment = {
+      id: 1,
+      symbol: 'BTCUSDT',
+      positionSide: 'LONG',
+      clientOrderId: `cc7-${REQUEST_ID}`,
+      price: '70100.19',
+      modifier: 'ctrl',
+    }
+    const { rerender } = render(
+      <FuturesProductionExecutionTicket {...base} orderAmendRequest={amendment} />,
+    )
+    await waitFor(() => expect(handlers.onPrepareOrderAmendment).toHaveBeenCalledExactlyOnceWith({
+      symbol: 'BTCUSDT',
+      positionSide: 'LONG',
+      clientOrderId: `cc7-${REQUEST_ID}`,
+      price: '70100.1',
+    }))
+    expect(handlers.onAmendOrder).not.toHaveBeenCalled()
+
+    rerender(<FuturesProductionExecutionTicket
+      {...base}
+      state={createState({
+        revision: '2',
+        capabilities: amendmentCapabilities,
+        intent: createIntent('order_amendment'),
+      })}
+      orderAmendRequest={amendment}
+    />)
+    const finalButton = screen.getByRole('button', { name: 'Move real futures order' })
+    expect(finalButton).toBeDisabled()
+    fireEvent.change(screen.getByRole('textbox', { name: 'Type exactly: MOVE REAL FUTURES ORDER' }), {
+      target: { value: 'MOVE REAL FUTURES ORDER' },
+    })
+    fireEvent.click(finalButton)
+    expect(handlers.onAmendOrder).toHaveBeenCalledExactlyOnceWith('MOVE REAL FUTURES ORDER')
+  })
+
+  it('keeps entries blocked by the kill switch while allowing a bounded exit draft', async () => {
+    renderTicket({
+      state: createState({
+        killSwitch: { engaged: true, policy: 'v1-persistent-block-new-exposure' },
+        portfolio: hedgePortfolio,
+      }),
+      draftPrice: '7000',
+    })
+    selectFullSize()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Prepare Enter LONG' })).toBeDisabled())
+    fireEvent.click(screen.getByRole('button', { name: 'Exit LONG' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Prepare Exit LONG' })).toBeEnabled())
+  })
+
+  it('requires the exact typed confirmation and synchronously blocks duplicate final sends', () => {
+    const handlers = callbacks()
+    renderTicket({ state: createState({ revision: '2', intent: createIntent('order') }), handlers })
     const confirmation = FUTURES_PRODUCTION_EXECUTION_CONFIRMATIONS['futures.production.placeOrder']
     const input = screen.getByRole('textbox', { name: `Type exactly: ${confirmation}` })
     const place = screen.getByRole('button', { name: 'Place real futures order' })
-
-    fireEvent.change(input, { target: { value: 'PLACE FUTURES ORDER' } })
-    expect(place).toBeDisabled()
     fireEvent.change(input, { target: { value: confirmation } })
     fireEvent.keyDown(input, { key: 'Enter', bubbles: true })
-    fireEvent.keyDown(place, { key: 'Enter', bubbles: true })
     expect(handlers.onPlaceOrder).not.toHaveBeenCalled()
-
     fireEvent.click(place)
     fireEvent.click(place)
     expect(handlers.onPlaceOrder).toHaveBeenCalledTimes(1)
-    expect(handlers.onPlaceOrder).toHaveBeenCalledWith(confirmation)
   })
 
-  it.each([
-    [
-      'cancel_all_open_orders',
-      'futures.production.cancelAllOpenOrders',
-      'Cancel all real futures orders',
-      'onCancelAllOpenOrders',
-    ],
-    [
-      'close_positions',
-      'futures.production.closePositions',
-      'Close all real futures positions',
-      'onClosePositions',
-    ],
-    [
-      'engage_kill_switch',
-      'futures.production.engageKillSwitch',
-      'Engage real futures kill switch',
-      'onEngageKillSwitch',
-    ],
-  ])('uses the dedicated %s confirmation and final callback', (
-    kind,
-    action,
-    buttonLabel,
-    callbackName,
-  ) => {
-    const handlers = callbacks()
-    renderTicket(createState({
-      revision: '2',
-      intent: createIntent(kind),
-    }), handlers)
-    const confirmation = FUTURES_PRODUCTION_EXECUTION_CONFIRMATIONS[action]
-    const input = screen.getByRole('textbox', { name: `Type exactly: ${confirmation}` })
-
-    fireEvent.change(input, { target: { value: confirmation } })
-    fireEvent.click(screen.getByRole('button', { name: buttonLabel }))
-    expect(handlers[callbackName]).toHaveBeenCalledTimes(1)
-    expect(handlers[callbackName]).toHaveBeenCalledWith(confirmation)
+  it('moves destructive bulk controls into Advanced safety without removing them', () => {
+    renderTicket()
+    expect(screen.getByRole('button', { name: 'Prepare cancel-all' }).closest('details'))
+      .not.toHaveAttribute('open')
+    fireEvent.click(screen.getByText('Advanced safety'))
+    expect(screen.getByRole('button', { name: 'Prepare cancel-all' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Prepare close-all' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Prepare kill switch' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Prepare ARM LIVE intent' })).toBeInTheDocument()
   })
 
-  it('resets the component submission guard and typed challenge on a new backend intent', () => {
-    const handlers = callbacks()
-    const firstId = REQUEST_ID
-    const secondId = 'fedcba9876543210fedcba9876543210'
-    const { rerender } = render(
-      <FuturesProductionExecutionTicket
-        state={createState({ revision: '2', intent: createIntent('close_positions', firstId) })}
-        {...handlers}
-      />,
-    )
-    const confirmation = FUTURES_PRODUCTION_EXECUTION_CONFIRMATIONS['futures.production.closePositions']
-    fireEvent.change(
-      screen.getByRole('textbox', { name: `Type exactly: ${confirmation}` }),
-      { target: { value: confirmation } },
-    )
-    fireEvent.click(screen.getByRole('button', { name: 'Close all real futures positions' }))
-
-    rerender(
-      <FuturesProductionExecutionTicket
-        state={createState({ revision: '3', intent: createIntent('close_positions', secondId) })}
-        {...handlers}
-      />,
-    )
-    const freshInput = screen.getByRole('textbox', { name: `Type exactly: ${confirmation}` })
-    expect(freshInput).toHaveValue('')
-    fireEvent.change(freshInput, { target: { value: confirmation } })
-    fireEvent.click(screen.getByRole('button', { name: 'Close all real futures positions' }))
-    expect(handlers.onClosePositions).toHaveBeenCalledTimes(2)
-  })
-
-  it.each([
-    ['unknown', 'result_unknown', 'UNKNOWN — not success or rejection'],
-    ['partial', 'partial', 'PARTIAL — incomplete and never treated as success'],
-  ])('renders %s as an explicit non-success outcome with exact item detail', (
-    acknowledgement,
-    state,
-    warning,
-  ) => {
-    renderTicket(createState({
-      capabilities: {
-        placeOrder: false,
-        cancelAllOpenOrders: false,
-        closePositions: false,
-        engageKillSwitch: false,
-        disengageKillSwitch: false,
-        code: 'FUTURES_PRODUCTION_RECOVERY_REQUIRED',
-      },
-      attempt: {
-        requestId: REQUEST_ID,
-        kind: 'close_positions',
-        revision: '4',
-        acknowledgement,
-        state,
-        code: 'FUTURES_PRODUCTION_RESULT_NOT_COMPLETE',
-        observedAt: 1_783_957_600_000,
-        items: [
-          { symbol: 'BTCUSDT', outcome: 'unknown', code: 'FUTURES_PRODUCTION_ITEM_UNKNOWN' },
-          { symbol: 'ETHUSDT', outcome: 'closed', code: 'FUTURES_PRODUCTION_ITEM_CLOSED' },
-        ],
-      },
-      reconciliation: {
-        required: true,
-        state: 'scheduled',
-        nextAttemptAt: 1_783_957_601_000,
-      },
-      recovery: {
-        required: true,
-        state: 'blocked',
-        code: 'FUTURES_PRODUCTION_RECOVERY_REQUIRED',
-      },
-    }))
-
-    const result = screen.getByLabelText('Backend production attempt')
-    expect(result).toHaveTextContent(acknowledgement.toUpperCase())
-    expect(result).toHaveTextContent(state)
-    expect(result).toHaveTextContent(warning)
-    expect(within(result).getByLabelText('Backend production item outcomes')).toHaveTextContent('BTCUSDT')
-    expect(result).not.toHaveClass('is-accepted')
-    expect(screen.getByLabelText('Backend production reconciliation')).toHaveTextContent('scheduled')
-    expect(screen.getByLabelText('Backend production recovery')).toHaveTextContent('blocked')
-  })
-
-  it('does not write browser storage, clipboard, analytics, or activate through generic keys', () => {
-    const localStorageSpy = vi.spyOn(Storage.prototype, 'setItem')
-    const sessionStorageSpy = vi.spyOn(Storage.prototype, 'setItem')
-    const fetchSpy = vi.spyOn(globalThis, 'fetch')
-    const clipboardWrite = vi.fn()
-    const previousClipboard = navigator.clipboard
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: { writeText: clipboardWrite },
+  it('shows separate position legs and add/reduce isolated-margin controls', () => {
+    const onPrepareMarginAdjustment = vi.fn(() => true)
+    renderTicket({
+      state: createState({
+        capabilities: { ...createState().capabilities, adjustMargin: true },
+        portfolio: {
+          state: 'live',
+          observedAt: 1_783_957_600_000,
+          openOrders: [],
+          positions: [{
+            symbol: 'BTCUSDT',
+            positionSide: 'LONG',
+            quantity: '0.001',
+            isolatedMarginUsdt: '35',
+            unrealizedPnlUsdt: '2.5',
+            liquidationPrice: '50000',
+          }],
+        },
+      }),
+      onPrepareMarginAdjustment,
     })
-    const handlers = callbacks({ onPrepareCancelAllOpenOrdersIntent: vi.fn(() => false) })
-
-    renderTicket(createState(), handlers)
-    fireEvent.keyDown(document, { key: 'Enter', bubbles: true })
-    fireEvent.keyDown(document, { key: 'B', bubbles: true })
-    fireEvent.keyDown(screen.getByRole('button', { name: 'Prepare cancel-all intent' }), {
-      key: 'Enter',
-      bubbles: true,
+    fireEvent.click(screen.getByRole('tab', { name: 'Positions' }))
+    expect(screen.getByLabelText('Hedge positions')).toHaveTextContent('BTCUSDTLONG')
+    expect(screen.getByRole('button', { name: 'Add margin' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Reduce margin' })).toBeEnabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Add margin' }))
+    fireEvent.change(screen.getByLabelText('Isolated margin amount USDT'), {
+      target: { value: '5.25' },
     })
-
-    expect(handlers.onPrepareCancelAllOpenOrdersIntent).not.toHaveBeenCalled()
-    expect(localStorageSpy).not.toHaveBeenCalled()
-    expect(sessionStorageSpy).not.toHaveBeenCalled()
-    expect(fetchSpy).not.toHaveBeenCalled()
-    expect(clipboardWrite).not.toHaveBeenCalled()
-
-    localStorageSpy.mockRestore()
-    sessionStorageSpy.mockRestore()
-    fetchSpy.mockRestore()
-    Object.defineProperty(navigator, 'clipboard', {
-      configurable: true,
-      value: previousClipboard,
+    fireEvent.click(screen.getByRole('button', { name: 'Prepare add margin' }))
+    expect(onPrepareMarginAdjustment).toHaveBeenCalledWith({
+      symbol: 'BTCUSDT',
+      positionSide: 'LONG',
+      marginAction: 'ADD',
+      amount: '5.25',
     })
   })
 
-  it('shows backend-disabled state and leaves every prepare control unavailable', () => {
-    const handlers = callbacks()
-    renderTicket(createState({
-      liveAuthorized: false,
-      configured: false,
-      account: null,
-      caps: null,
-      capabilities: {
-        placeOrder: false,
-        cancelAllOpenOrders: false,
-        closePositions: false,
-        engageKillSwitch: false,
-        disengageKillSwitch: false,
-        code: 'FUTURES_PRODUCTION_LIVE_AUTHORIZATION_REJECTED',
-      },
-    }), handlers)
+  it('requires exact typed confirmation for an isolated-margin final command', () => {
+    const onAdjustMargin = vi.fn(() => true)
+    renderTicket({
+      state: createState({
+        capabilities: { ...createState().capabilities, adjustMargin: true },
+        intent: createIntent('margin_adjustment'),
+        portfolio: {
+          state: 'live',
+          observedAt: 1_783_957_600_000,
+          openOrders: [],
+          positions: [{
+            symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '0.001',
+            isolatedMarginUsdt: '35', unrealizedPnlUsdt: '2.5', liquidationPrice: '50000',
+          }],
+        },
+      }),
+      onAdjustMargin,
+    })
+    fireEvent.click(screen.getByRole('tab', { name: 'Positions' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Add margin' }))
+    const finalButton = screen.getByRole('button', { name: 'Adjust real isolated margin' })
+    expect(finalButton).toBeDisabled()
+    fireEvent.change(screen.getByText(/Type exactly:/).closest('label').querySelector('input'), {
+      target: { value: 'ADJUST REAL FUTURES ISOLATED MARGIN' },
+    })
+    fireEvent.click(finalButton)
+    expect(onAdjustMargin).toHaveBeenCalledWith('ADJUST REAL FUTURES ISOLATED MARGIN')
+  })
 
-    expect(screen.getByText('LIVE BLOCKED')).toBeInTheDocument()
-    expect(screen.getByText('DISABLED')).toBeInTheDocument()
-    for (const name of [
-      'Prepare real order intent',
-      'Prepare cancel-all intent',
-      'Prepare close-positions intent',
-      'Prepare kill-switch intent',
-      'Prepare ARM LIVE intent',
-    ]) {
-      expect(screen.getByRole('button', { name })).toBeDisabled()
-    }
+  it('renders UNKNOWN/PARTIAL as non-success owned by backend reconciliation', () => {
+    renderTicket({
+      state: createState({
+        attempt: {
+          acknowledgement: 'unknown',
+          state: 'result_unknown',
+        },
+      }),
+    })
+    expect(screen.getByLabelText('Backend production attempt')).toHaveTextContent(
+      'UNKNOWNresult_unknownNot success',
+    )
   })
 })

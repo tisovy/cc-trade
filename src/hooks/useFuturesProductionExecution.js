@@ -3,6 +3,8 @@ import {
   FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS,
   compareFuturesProductionExecutionRevisions,
   createFuturesProductionExecutionCancelAllOpenOrdersRequest,
+  createFuturesProductionExecutionAdjustIsolatedMarginRequest,
+  createFuturesProductionExecutionAmendOrderRequest,
   createFuturesProductionExecutionClosePositionsRequest,
   createFuturesProductionExecutionDisengageKillSwitchRequest,
   createFuturesProductionExecutionEngageKillSwitchRequest,
@@ -12,6 +14,9 @@ import {
   createFuturesProductionExecutionPrepareDisengageKillSwitchIntentRequest,
   createFuturesProductionExecutionPrepareEngageKillSwitchIntentRequest,
   createFuturesProductionExecutionPrepareOrderIntentRequest,
+  createFuturesProductionExecutionPrepareMarginAdjustmentIntentRequest,
+  createFuturesProductionExecutionPrepareOrderAmendmentIntentRequest,
+  createFuturesProductionExecutionRefreshPortfolioRequest,
   createFuturesProductionExecutionSubscribeStatusRequest,
   createFuturesProductionExecutionUnsubscribeStatusRequest,
   parseFuturesProductionExecutionStatus,
@@ -45,10 +50,13 @@ const createLifecycleState = ({ enabled, connection }) => ({
   attempt: null,
   reconciliation: null,
   recovery: null,
+  portfolio: null,
 })
 
 const capabilityForIntentKind = Object.freeze({
   [FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER]: 'placeOrder',
+  [FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.MARGIN_ADJUSTMENT]: 'adjustMargin',
+  [FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER_AMENDMENT]: 'amendOrder',
   [FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.CANCEL_ALL_OPEN_ORDERS]: 'cancelAllOpenOrders',
   [FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.CLOSE_POSITIONS]: 'closePositions',
   [FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ENGAGE_KILL_SWITCH]: 'engageKillSwitch',
@@ -145,6 +153,7 @@ const useFuturesProductionExecution = ({
         attempt: status.attempt,
         reconciliation: status.reconciliation,
         recovery: status.recovery,
+        portfolio: status.portfolio,
       })
     }
 
@@ -275,9 +284,10 @@ const useFuturesProductionExecution = ({
       ...identity,
       symbol: draft?.symbol,
       side: draft?.side,
+      positionSide: draft?.positionSide,
+      positionEffect: draft?.positionEffect,
       quantity: draft?.quantity,
       price: draft?.price,
-      reduceOnly: draft?.reduceOnly,
     }),
   ), [prepare])
 
@@ -286,6 +296,50 @@ const useFuturesProductionExecution = ({
     createFuturesProductionExecutionPlaceOrderRequest,
     confirmation,
   ), [finalize])
+
+  const prepareMarginAdjustment = useCallback((draft) => prepare(
+    FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.MARGIN_ADJUSTMENT,
+    identity => createFuturesProductionExecutionPrepareMarginAdjustmentIntentRequest({
+      ...identity,
+      symbol: draft?.symbol,
+      positionSide: draft?.positionSide,
+      marginAction: draft?.marginAction,
+      amount: draft?.amount,
+    }),
+  ), [prepare])
+
+  const adjustMargin = useCallback((confirmation) => finalize(
+    FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.MARGIN_ADJUSTMENT,
+    createFuturesProductionExecutionAdjustIsolatedMarginRequest,
+    confirmation,
+  ), [finalize])
+
+  const prepareOrderAmendment = useCallback((draft) => prepare(
+    FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER_AMENDMENT,
+    identity => createFuturesProductionExecutionPrepareOrderAmendmentIntentRequest({
+      ...identity,
+      symbol: draft?.symbol,
+      positionSide: draft?.positionSide,
+      clientOrderId: draft?.clientOrderId,
+      price: draft?.price,
+    }),
+  ), [prepare])
+
+  const amendOrder = useCallback((confirmation) => finalize(
+    FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER_AMENDMENT,
+    createFuturesProductionExecutionAmendOrderRequest,
+    confirmation,
+  ), [finalize])
+
+  const refreshPortfolio = useCallback(() => {
+    const snapshot = snapshotRef.current
+    const accountFingerprint = snapshot?.account?.fingerprint
+    if (typeof accountFingerprint !== 'string') return false
+    return sendGuardedRequest(() => createFuturesProductionExecutionRefreshPortfolioRequest({
+      revision: snapshot.revision,
+      accountFingerprint,
+    }))
+  }, [sendGuardedRequest])
 
   const prepareCancelAllOpenOrdersIntent = useCallback(() => prepare(
     FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.CANCEL_ALL_OPEN_ORDERS,
@@ -333,8 +387,13 @@ const useFuturesProductionExecution = ({
 
   return {
     ...state,
+    refreshPortfolio,
     prepareOrderIntent,
     placeOrder,
+    prepareMarginAdjustment,
+    adjustMargin,
+    prepareOrderAmendment,
+    amendOrder,
     prepareCancelAllOpenOrdersIntent,
     cancelAllOpenOrders,
     prepareClosePositionsIntent,
