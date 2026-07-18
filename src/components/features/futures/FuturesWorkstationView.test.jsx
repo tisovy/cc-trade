@@ -140,7 +140,10 @@ const renderView = (properties = {}) => {
   return { ...result, onSymbolChange, onIntervalChange }
 }
 
-afterEach(() => vi.clearAllMocks())
+afterEach(() => {
+  vi.clearAllMocks()
+  vi.unstubAllGlobals()
+})
 
 describe('pure Futures workstation presentation', () => {
   it('renders identity, exact market context, filters, book and bounded tape', () => {
@@ -420,8 +423,14 @@ const productionExecutionState = Object.freeze({
   attempt: null,
   reconciliation: null,
   recovery: null,
+  portfolio: null,
+  refreshPortfolio: vi.fn(() => false),
   prepareOrderIntent: vi.fn(() => false),
   placeOrder: vi.fn(() => false),
+  prepareMarginAdjustment: vi.fn(() => false),
+  adjustMargin: vi.fn(() => false),
+  prepareOrderAmendment: vi.fn(() => false),
+  amendOrder: vi.fn(() => false),
   prepareCancelAllOpenOrdersIntent: vi.fn(() => false),
   cancelAllOpenOrders: vi.fn(() => false),
   prepareClosePositionsIntent: vi.fn(() => false),
@@ -446,5 +455,52 @@ describe('production workstation container', () => {
     expect(screen.getByText('ISOLATED · 2× · HEDGE')).toBeInTheDocument()
     expect(screen.getByText('Advanced safety')).toBeInTheDocument()
     expect(screen.getByLabelText('USDⓈ-M production real-order execution')).toBeInTheDocument()
+  })
+
+  it('loads current positions and orders once when the private execution channel becomes ready', () => {
+    vi.stubGlobal('WebSocket', undefined)
+    const refreshPortfolio = vi.fn(() => true)
+    render(
+      <FuturesProductionWorkstation
+        enabled
+        executionState={{
+          ...productionExecutionState,
+          connected: true,
+          subscribed: true,
+          revision: '1',
+          account: { fingerprint: 'a'.repeat(64) },
+          portfolio: { state: 'unavailable', positions: [], openOrders: [] },
+          refreshPortfolio,
+        }}
+      />,
+    )
+    expect(refreshPortfolio).toHaveBeenCalledTimes(1)
+  })
+
+  it('refreshes the current-order snapshot once after a confirmed mutation', () => {
+    vi.stubGlobal('WebSocket', undefined)
+    const refreshPortfolio = vi.fn(() => true)
+    const baseExecutionState = {
+      ...productionExecutionState,
+      connected: true,
+      subscribed: true,
+      revision: '1',
+      account: { fingerprint: 'a'.repeat(64) },
+      portfolio: { state: 'live', positions: [], openOrders: [] },
+      refreshPortfolio,
+    }
+    const { rerender } = render(
+      <FuturesProductionWorkstation enabled executionState={baseExecutionState} />,
+    )
+    expect(refreshPortfolio).not.toHaveBeenCalled()
+
+    const confirmed = {
+      ...baseExecutionState,
+      attempt: { requestId: '0123456789abcdef0123456789abcdef', state: 'confirmed_open' },
+    }
+    rerender(<FuturesProductionWorkstation enabled executionState={confirmed} />)
+    expect(refreshPortfolio).toHaveBeenCalledTimes(1)
+    rerender(<FuturesProductionWorkstation enabled executionState={confirmed} />)
+    expect(refreshPortfolio).toHaveBeenCalledTimes(1)
   })
 })

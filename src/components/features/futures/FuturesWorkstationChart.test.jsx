@@ -121,6 +121,27 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     expect(series[3].applyOptions).toHaveBeenCalledWith(expected)
   })
 
+  it('shows a selected price only on the scale without a white LIMIT stripe', () => {
+    render(
+      <FuturesWorkstationChart
+        {...properties([candle(1_784_000_000_000)])}
+        draftPrice="58425.1"
+      />,
+    )
+    expect(chartMock.charts[0].series[0].createPriceLine).toHaveBeenCalledWith(
+      expect.objectContaining({
+        price: 58425.1,
+        color: '#f0b90b',
+        lineVisible: false,
+        axisLabelVisible: true,
+        title: '',
+      }),
+    )
+    expect(chartMock.charts[0].series[0].createPriceLine).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'LIMIT' }),
+    )
+  })
+
   it('shows Shift price/percent/time measurement and clears it on Shift release', () => {
     render(
       <FuturesWorkstationChart

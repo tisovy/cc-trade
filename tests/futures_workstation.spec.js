@@ -40,7 +40,19 @@ test('red Production workstation remains isolated and market widgets have no exe
             element => getComputedStyle(element).getPropertyValue('--futures-accent').trim(),
         );
         expect(accent).toBe('#e34f5e');
-        await expect(mainWindow.getByLabel('USDⓈ-M production real-order execution')).toBeVisible();
+        const tradingRail = mainWindow.getByLabel('USDⓈ-M production real-order execution');
+        await expect(tradingRail).toBeVisible();
+        await expect(tradingRail.getByRole('tab', { name: 'Trade' }))
+            .toHaveAttribute('aria-selected', 'true');
+        await expect(tradingRail.getByRole('tab', { name: /^Orders 0$/ })).toBeVisible();
+        await expect(tradingRail.getByRole('button', {
+            name: /Enter LONG|Exit LONG|Enter SHORT|Exit SHORT/i,
+        })).toHaveCount(0);
+        await expect(tradingRail.getByRole('slider', { name: 'Order size percent' }))
+            .toBeDisabled();
+        await expect(tradingRail).toContainText(
+            'Live sizing limits are unavailable — execution is blocked',
+        );
         await expect(mainWindow.locator('.futures-workstation-safety-drawer')).toHaveCount(0);
         await expect(mainWindow.locator('.futures-production-execution-header strong'))
             .toContainText('ISOLATED · 2× · HEDGE');

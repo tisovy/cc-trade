@@ -71,6 +71,21 @@ const hedgePortfolio = Object.freeze({
   ]),
 })
 
+const ownedOrder = Object.freeze({
+  symbol: 'BTCUSDT',
+  orderId: '123456789',
+  clientOrderId: `cc7-${REQUEST_ID}`,
+  side: 'SELL',
+  positionSide: 'LONG',
+  positionEffect: 'EXIT',
+  price: '7000',
+  originalQuantity: '0.002',
+  executedQuantity: '0.001',
+  status: 'PARTIALLY_FILLED',
+  type: 'LIMIT',
+  timeInForce: 'GTC',
+})
+
 const callbacks = (overrides = {}) => ({
   onPrepareOrderIntent: vi.fn(() => true),
   onPlaceOrder: vi.fn(() => true),
@@ -113,7 +128,9 @@ describe('FuturesProductionExecutionTicket', () => {
     expect(screen.getByText('FUTURES · USDⓈ-M')).toBeInTheDocument()
     expect(screen.getByText('ISOLATED · 2× · HEDGE')).toBeInTheDocument()
     expect(screen.getByText('ARMED')).toBeInTheDocument()
-    expect(screen.getByRole('tab', { name: 'Order' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('tab', { name: 'Trade' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.queryByRole('button', { name: /Enter LONG|Exit LONG|Enter SHORT|Exit SHORT/i }))
+      .not.toBeInTheDocument()
     const safety = screen.getByText('Advanced safety').closest('details')
     expect(safety).not.toHaveAttribute('open')
     fireEvent.click(screen.getByText('Advanced safety'))
@@ -125,40 +142,56 @@ describe('FuturesProductionExecutionTicket', () => {
   it('synchronizes the percentage and USDT controls and derives exact 2x margin', async () => {
     renderTicket({ draftPrice: '7000.09' })
     expect(screen.getByRole('textbox', { name: 'Order notional USDT' })).toHaveValue('2.5')
-    selectFullSize()
+    fireEvent.change(screen.getByRole('slider', { name: 'Order size percent' }), {
+      target: { value: '100' },
+    })
     await waitFor(() => expect(screen.getByRole('textbox', { name: 'Order notional USDT' })).toHaveValue('10'))
-    const order = screen.getByLabelText('Production order action')
+    const order = screen.getByLabelText('Futures gesture trading controls')
+    expect(order).toHaveTextContent('100%10 USDT')
     expect(order).toHaveTextContent('Price7000')
     expect(order).toHaveTextContent('Quantity0.001')
-    expect(order).toHaveTextContent('Notional7 USDT')
     expect(order).toHaveTextContent('Est. margin3.5 USDT')
   })
 
   it.each([
-    ['Enter LONG', 'BUY', 'LONG', 'ENTRY'],
-    ['Exit LONG', 'SELL', 'LONG', 'EXIT'],
-    ['Enter SHORT', 'SELL', 'SHORT', 'ENTRY'],
-    ['Exit SHORT', 'BUY', 'SHORT', 'EXIT'],
-  ])('prepares the exact %s Hedge draft', async (label, side, positionSide, positionEffect) => {
+    ['LONG entry', 'BUY', 'LONG', 'ENTRY'],
+    ['LONG exit', 'SELL', 'LONG', 'EXIT'],
+    ['SHORT entry', 'SELL', 'SHORT', 'ENTRY'],
+    ['SHORT exit', 'BUY', 'SHORT', 'EXIT'],
+  ])('prepares the exact %s Hedge draft only from its gesture', async (
+    label,
+    side,
+    positionSide,
+    positionEffect,
+  ) => {
     const handlers = callbacks()
-    renderTicket({
-      handlers,
-      draftPrice: '7000',
+    const base = {
       state: createState({ portfolio: hedgePortfolio }),
-    })
+      selectedSymbol: 'BTCUSDT',
+      selectedContract,
+      draftPrice: '7000',
+      ...handlers,
+    }
+    const { rerender } = render(<FuturesProductionExecutionTicket {...base} />)
     selectFullSize()
-    fireEvent.click(screen.getByRole('button', { name: label }))
-    const prepare = await screen.findByRole('button', { name: `Prepare ${label}` })
-    await waitFor(() => expect(prepare).toBeEnabled())
-    fireEvent.click(prepare)
-    expect(handlers.onPrepareOrderIntent).toHaveBeenCalledWith({
+    rerender(<FuturesProductionExecutionTicket {...base} gestureRequest={{
+      id: 1,
+      price: '7000',
+      side,
+      positionSide,
+      positionEffect,
+      source: 'chart',
+    }} />)
+    await waitFor(() => expect(handlers.onPrepareOrderIntent).toHaveBeenCalledExactlyOnceWith({
       symbol: 'BTCUSDT',
       side,
       positionSide,
       positionEffect,
       quantity: '0.001',
       price: '7000',
-    })
+    }))
+    expect(screen.getByText(label, { selector: 'code' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: new RegExp(label, 'i') })).not.toBeInTheDocument()
   })
 
   it('turns a recognized shortcut into one prepared intent and never a final submit', async () => {
@@ -184,10 +217,7 @@ describe('FuturesProductionExecutionTicket', () => {
     expect(handlers.onPrepareOrderIntent).toHaveBeenCalledWith(expect.objectContaining({
       side: 'SELL', positionSide: 'SHORT', positionEffect: 'ENTRY',
     }))
-    expect(screen.getByRole('button', { name: 'Enter SHORT' })).toHaveAttribute(
-      'aria-pressed',
-      'true',
-    )
+    expect(screen.getByText('SHORT entry', { selector: 'code' })).toBeInTheDocument()
     expect(handlers.onPlaceOrder).not.toHaveBeenCalled()
   })
 
@@ -241,17 +271,64 @@ describe('FuturesProductionExecutionTicket', () => {
   })
 
   it('keeps entries blocked by the kill switch while allowing a bounded exit draft', async () => {
-    renderTicket({
+    const handlers = callbacks()
+    const base = {
       state: createState({
         killSwitch: { engaged: true, policy: 'v1-persistent-block-new-exposure' },
         portfolio: hedgePortfolio,
       }),
+      selectedSymbol: 'BTCUSDT',
+      selectedContract,
+      draftPrice: '7000',
+      ...handlers,
+    }
+    const { rerender } = render(<FuturesProductionExecutionTicket {...base} />)
+    selectFullSize()
+    rerender(<FuturesProductionExecutionTicket {...base} gestureRequest={{
+      id: 1,
+      price: '7000',
+      side: 'BUY',
+      positionSide: 'LONG',
+      positionEffect: 'ENTRY',
+      source: 'chart',
+    }} />)
+    await waitFor(() => expect(handlers.onPrepareOrderIntent).not.toHaveBeenCalled())
+    rerender(<FuturesProductionExecutionTicket {...base} gestureRequest={{
+      id: 2,
+      price: '7000',
+      side: 'SELL',
+      positionSide: 'LONG',
+      positionEffect: 'EXIT',
+      source: 'chart',
+    }} />)
+    await waitFor(() => expect(handlers.onPrepareOrderIntent).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ positionSide: 'LONG', positionEffect: 'EXIT' }),
+    ))
+  })
+
+  it('disables sizing honestly when live limits are unavailable instead of looking broken', () => {
+    renderTicket({
+      state: createState({ caps: null, liveAuthorized: false }),
       draftPrice: '7000',
     })
-    selectFullSize()
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Prepare Enter LONG' })).toBeDisabled())
-    fireEvent.click(screen.getByRole('button', { name: 'Exit LONG' }))
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Prepare Exit LONG' })).toBeEnabled())
+    expect(screen.getByRole('slider', { name: 'Order size percent' })).toBeDisabled()
+    expect(screen.getByRole('textbox', { name: 'Order notional USDT' })).toBeDisabled()
+    expect(screen.getByText('Live sizing limits are unavailable — execution is blocked'))
+      .toBeInTheDocument()
+  })
+
+  it('shows current orders in a dedicated tab with exact fill and price data', () => {
+    renderTicket({
+      state: createState({
+        portfolio: { ...hedgePortfolio, openOrders: [ownedOrder] },
+      }),
+    })
+    fireEvent.click(screen.getByRole('tab', { name: /^Orders 1$/ }))
+    const orders = screen.getByLabelText('Current Futures orders')
+    expect(orders).toHaveTextContent('BTCUSDTLONG EXITPARTIALLY_FILLED')
+    expect(orders).toHaveTextContent('Price7000')
+    expect(orders).toHaveTextContent('Filled0.001 / 0.002')
+    expect(screen.getByRole('button', { name: 'Refresh positions and orders' })).toBeEnabled()
   })
 
   it('requires the exact typed confirmation and synchronously blocks duplicate final sends', () => {
@@ -300,7 +377,7 @@ describe('FuturesProductionExecutionTicket', () => {
       }),
       onPrepareMarginAdjustment,
     })
-    fireEvent.click(screen.getByRole('tab', { name: 'Positions' }))
+    fireEvent.click(screen.getByRole('tab', { name: /^Positions 1$/ }))
     expect(screen.getByLabelText('Hedge positions')).toHaveTextContent('BTCUSDTLONG')
     expect(screen.getByRole('button', { name: 'Add margin' })).toBeEnabled()
     expect(screen.getByRole('button', { name: 'Reduce margin' })).toBeEnabled()
@@ -335,7 +412,7 @@ describe('FuturesProductionExecutionTicket', () => {
       }),
       onAdjustMargin,
     })
-    fireEvent.click(screen.getByRole('tab', { name: 'Positions' }))
+    fireEvent.click(screen.getByRole('tab', { name: /^Positions 1$/ }))
     fireEvent.click(screen.getByRole('button', { name: 'Add margin' }))
     const finalButton = screen.getByRole('button', { name: 'Adjust real isolated margin' })
     expect(finalButton).toBeDisabled()

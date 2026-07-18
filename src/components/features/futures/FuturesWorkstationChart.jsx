@@ -414,11 +414,12 @@ export const FuturesWorkstationChart = ({
       nextLines.push(series.createPriceLine({ price, ...options }))
     }
     addLine(draftPrice, {
-      color: '#f4f7fb',
+      color: '#f0b90b',
       lineWidth: 1,
-      lineStyle: LineStyle.Dashed,
+      lineStyle: LineStyle.Dotted,
+      lineVisible: false,
       axisLabelVisible: true,
-      title: 'LIMIT',
+      title: '',
     })
     addLine(markPrice, {
       color: '#f0b90b',

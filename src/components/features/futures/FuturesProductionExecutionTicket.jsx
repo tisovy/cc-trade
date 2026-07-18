@@ -22,16 +22,16 @@ const OWNED_CLIENT_ORDER_ID = /^cc7-[0-9a-f]{32}$/
 const SIZE_ANCHORS = Object.freeze([0, 25, 50, 75, 100])
 const ORDER_ACTIONS = Object.freeze([
   Object.freeze({
-    key: 'LONG_ENTRY', side: 'BUY', positionSide: 'LONG', positionEffect: 'ENTRY', label: 'Enter LONG',
+    key: 'LONG_ENTRY', side: 'BUY', positionSide: 'LONG', positionEffect: 'ENTRY', label: 'LONG entry',
   }),
   Object.freeze({
-    key: 'LONG_EXIT', side: 'SELL', positionSide: 'LONG', positionEffect: 'EXIT', label: 'Exit LONG',
+    key: 'LONG_EXIT', side: 'SELL', positionSide: 'LONG', positionEffect: 'EXIT', label: 'LONG exit',
   }),
   Object.freeze({
-    key: 'SHORT_ENTRY', side: 'SELL', positionSide: 'SHORT', positionEffect: 'ENTRY', label: 'Enter SHORT',
+    key: 'SHORT_ENTRY', side: 'SELL', positionSide: 'SHORT', positionEffect: 'ENTRY', label: 'SHORT entry',
   }),
   Object.freeze({
-    key: 'SHORT_EXIT', side: 'BUY', positionSide: 'SHORT', positionEffect: 'EXIT', label: 'Exit SHORT',
+    key: 'SHORT_EXIT', side: 'BUY', positionSide: 'SHORT', positionEffect: 'EXIT', label: 'SHORT exit',
   }),
 ])
 
@@ -134,12 +134,11 @@ const FuturesProductionExecutionTicket = ({
   const recovery = isRecord(safeState.recovery) ? safeState.recovery : null
   const portfolio = isRecord(safeState.portfolio) ? safeState.portfolio : null
   const positions = Array.isArray(portfolio?.positions) ? portfolio.positions : []
-  const [tab, setTab] = useState('order')
-  const [actionKey, setActionKey] = useState('LONG_ENTRY')
+  const openOrders = Array.isArray(portfolio?.openOrders) ? portfolio.openOrders : []
+  const [tab, setTab] = useState('trade')
   const [sizePercent, setSizePercent] = useState(25)
   const [customNotionalUsdt, setCustomNotionalUsdt] = useState(null)
   const [localPrice, setLocalPrice] = useState('')
-  const [manualGestureSelectionId, setManualGestureSelectionId] = useState(null)
   const [marginSelection, setMarginSelection] = useState(null)
   const [marginAmount, setMarginAmount] = useState('')
   const actionGuardRef = useRef({ key: null, locked: false })
@@ -150,11 +149,7 @@ const FuturesProductionExecutionTicket = ({
     && candidate.positionSide === gestureRequest?.positionSide
     && candidate.positionEffect === gestureRequest?.positionEffect
   )) ?? null
-  const gestureOwnsSelection = gestureAction !== null
-    && manualGestureSelectionId !== gestureRequest?.id
-  const activeAction = gestureOwnsSelection
-    ? gestureAction
-    : ORDER_ACTIONS.find(action => action.key === actionKey) ?? ORDER_ACTIONS[0]
+  const activeAction = gestureAction ?? ORDER_ACTIONS[0]
   const price = typeof draftPrice === 'string' ? draftPrice : localPrice
   const backendRevision = typeof safeState.revision === 'string' ? safeState.revision : null
   const intentId = typeof intent?.requestId === 'string' ? intent.requestId : null
@@ -187,6 +182,10 @@ const FuturesProductionExecutionTicket = ({
     dailyUsedNotionalUsdt: caps?.dailyUsedNotionalUsdt,
   })
   const sizingBudget = activeAction.positionEffect === 'EXIT' ? exitBudget : entryBudget
+  const sizingReady = typeof sizingBudget === 'string'
+    && sizingBudget !== '0'
+    && isExactPositiveDecimal(sizingBudget)
+  const displayedSizePercent = sizingReady ? sizePercent : 0
   const notionalUsdt = customNotionalUsdt
     ?? calculateFuturesNotionalForPercent(sizingBudget, sizePercent)
     ?? ''
@@ -242,26 +241,6 @@ const FuturesProductionExecutionTicket = ({
     && capabilities?.[capability] === true
     && intent?.kind === kind
     && !backendLocked
-  const canPrepareAction = (action, candidateDraft = orderDraft) => canPrepare('placeOrder')
-    && SYMBOL.test(selectedSymbol)
-    && candidateDraft.ok
-    && isExactPositiveDecimal(notionalUsdt)
-    && isFuturesDraftAmountWithinBudget(notionalUsdt, sizingBudget)
-    && (killSwitch?.engaged !== true || action.positionEffect === 'EXIT')
-
-  const prepareAction = (action, candidatePrice = price) => {
-    const candidateDraft = candidatePrice === price ? orderDraft : deriveDraft(candidatePrice)
-    if (!canPrepareAction(action, candidateDraft)) return false
-    return claimAction(onPrepareOrderIntent, {
-      symbol: selectedSymbol,
-      side: action.side,
-      positionSide: action.positionSide,
-      positionEffect: action.positionEffect,
-      quantity: candidateDraft.quantity,
-      price: candidateDraft.price,
-    })
-  }
-
   useEffect(() => {
     const gestureId = gestureRequest?.id
     if (gestureId === null || gestureId === undefined || handledGestureRef.current === gestureId) return
@@ -281,6 +260,7 @@ const FuturesProductionExecutionTicket = ({
     if (!gestureCanPrepare
       || !SYMBOL.test(selectedSymbol)
       || !candidateDraft.ok
+      || !isFuturesDraftAmountWithinBudget(notionalUsdt, sizingBudget)
       || (killSwitch?.engaged === true && gestureAction.positionEffect !== 'EXIT')) return
     claimAction(onPrepareOrderIntent, {
       symbol: selectedSymbol,
@@ -302,6 +282,7 @@ const FuturesProductionExecutionTicket = ({
     maxQuantity,
     minNotionalUsdt,
     leverage,
+    sizingBudget,
     onPrepareOrderIntent,
     selectedSymbol,
     gestureCanPrepare,
@@ -344,16 +325,14 @@ const FuturesProductionExecutionTicket = ({
     setSizePercent(value)
   }
 
-  const selectAction = key => {
-    setManualGestureSelectionId(gestureRequest?.id ?? null)
-    setCustomNotionalUsdt(null)
-    setActionKey(key)
-  }
-
-  const draftReason = !price
-    ? 'Pick a chart or order-book price'
-      : !sizingBudget || sizingBudget === '0'
-      ? 'Daily/order budget exhausted'
+  const draftReason = !caps
+      ? 'Live sizing limits are unavailable — execution is blocked'
+      : !sizingReady
+      ? activeAction.positionEffect === 'EXIT'
+        ? `No open ${activeAction.positionSide} leg is available for this exit`
+        : 'Daily/order budget is exhausted'
+      : !price
+      ? 'Pick a chart or order-book price'
       : orderDraft.ok ? null : orderDraft.reason
   const isUnknown = attempt?.acknowledgement === FUTURES_PRODUCTION_EXECUTION_ACKNOWLEDGEMENTS.UNKNOWN
   const isPartial = attempt?.acknowledgement === FUTURES_PRODUCTION_EXECUTION_ACKNOWLEDGEMENTS.PARTIAL
@@ -396,80 +375,95 @@ const FuturesProductionExecutionTicket = ({
       </header>
 
       <div className="futures-production-tabs" role="tablist" aria-label="Futures trading rail tabs">
-        <button type="button" role="tab" aria-selected={tab === 'order'} onClick={() => setTab('order')}>Order</button>
-        <button type="button" role="tab" aria-selected={tab === 'positions'} onClick={() => setTab('positions')}>Positions</button>
+        <button type="button" role="tab" aria-selected={tab === 'trade'} onClick={() => setTab('trade')}>Trade</button>
+        <button type="button" role="tab" aria-selected={tab === 'orders'} onClick={() => setTab('orders')}>
+          Orders <span>{openOrders.length}</span>
+        </button>
+        <button type="button" role="tab" aria-selected={tab === 'positions'} onClick={() => setTab('positions')}>
+          Positions <span>{positions.length}</span>
+        </button>
       </div>
 
       <div className="futures-production-execution-body">
-        {tab === 'order' ? (
-          <section className="futures-production-action is-order" aria-label="Production order action">
+        {tab === 'trade' ? (
+          <section className="futures-production-action is-order" aria-label="Futures gesture trading controls">
             <div className="futures-production-ticket-symbol">
-              <span>Symbol</span><strong>{selectedSymbol}</strong><code>{activeAction.label}</code>
+              <span>Gesture trading</span>
+              <strong>{selectedSymbol}</strong>
+              <code className={gestureAction ? `is-${gestureAction.positionSide.toLowerCase()}` : ''}>
+                {gestureAction ? gestureAction.label : 'Awaiting shortcut'}
+              </code>
             </div>
-            <div className="futures-production-intent-grid" role="group" aria-label="Hedge order intent">
-              {ORDER_ACTIONS.map(action => (
-                <button
-                  type="button"
-                  key={action.key}
-                  className={`${action.positionSide === 'LONG' ? 'is-long' : 'is-short'}${activeAction.key === action.key ? ' is-selected' : ''}`}
-                  aria-pressed={activeAction.key === action.key}
-                  onClick={() => selectAction(action.key)}
-                >
-                  {action.label}
-                </button>
-              ))}
-            </div>
-            <label>
-              <span>Limit price</span>
+            <label className="futures-production-price-field">
+              <span>Selected price</span>
               <input
                 aria-label="Exact limit price"
                 type="text"
                 inputMode="decimal"
+                placeholder="Click chart or order book"
                 value={price}
                 onChange={event => updatePrice(event.target.value)}
               />
             </label>
-            <label>
-              <span>Order notional, USDT</span>
-              <input
-                aria-label="Order notional USDT"
-                type="text"
-                inputMode="decimal"
-                value={notionalUsdt}
-                onChange={event => handleNotionalChange(event.target.value)}
-              />
-            </label>
             <label className="futures-production-size-slider">
-              <span>Size <strong>{sizePercent}%</strong></span>
+              <span>
+                <span>Size</span>
+                <output aria-live="polite">
+                  <strong>{sizingReady ? `${sizePercent}%` : '—%'}</strong>
+                  <b>{notionalUsdt ? `${notionalUsdt} USDT` : '— USDT'}</b>
+                </output>
+              </span>
               <input
                 aria-label="Order size percent"
                 type="range"
                 min="0"
                 max="100"
                 step="1"
-                value={sizePercent}
+                value={displayedSizePercent}
+                disabled={!sizingReady}
+                style={{ '--futures-size-fill': `${displayedSizePercent}%` }}
                 onChange={event => selectSizePercent(Number(event.target.value))}
               />
             </label>
             <div className="futures-production-size-anchors" aria-label="Order size anchors">
               {SIZE_ANCHORS.map(value => (
-                <button type="button" key={value} onClick={() => selectSizePercent(value)}>{value}%</button>
+                <button
+                  type="button"
+                  key={value}
+                  className={sizingReady && sizePercent === value ? 'is-selected' : ''}
+                  disabled={!sizingReady}
+                  onClick={() => selectSizePercent(value)}
+                >
+                  {value}%
+                </button>
               ))}
             </div>
+            <label className="futures-production-notional-field">
+              <span>Notional, USDT</span>
+              <input
+                aria-label="Order notional USDT"
+                type="text"
+                inputMode="decimal"
+                placeholder="—"
+                disabled={!sizingReady}
+                value={notionalUsdt}
+                onChange={event => handleNotionalChange(event.target.value)}
+              />
+            </label>
             <dl className="futures-production-order-summary">
               <div><dt>Price</dt><dd>{orderDraft.ok ? orderDraft.price : exactText(price)}</dd></div>
               <div><dt>Quantity</dt><dd>{orderDraft.ok ? orderDraft.quantity : '—'}</dd></div>
-              <div><dt>Notional</dt><dd>{orderDraft.ok ? `${orderDraft.notionalUsdt} USDT` : '—'}</dd></div>
               <div><dt>Est. margin</dt><dd>{orderDraft.ok ? `${orderDraft.estimatedMarginUsdt} USDT` : '—'}</dd></div>
-              <div><dt>{activeAction.positionEffect === 'EXIT' ? 'Leg/cap budget' : 'Safe budget'}</dt><dd>{sizingBudget ? `${sizingBudget} USDT` : '—'}</dd></div>
+              <div><dt>{activeAction.positionEffect === 'EXIT' ? `${activeAction.positionSide} leg` : 'Safe limit'}</dt><dd>{sizingBudget ? `${sizingBudget} USDT` : '—'}</dd></div>
             </dl>
             {draftReason ? <p className="futures-production-draft-reason" role="status">{draftReason}</p> : null}
-            <p className="futures-production-shortcuts">
-              Alt: double-left LONG in, double-right LONG out · Ctrl: double-right SHORT in, double-left SHORT out
-            </p>
-            <p className="futures-production-shortcuts">
-              Hold Ctrl or Alt and drag an owned chart order to prepare a move.
-            </p>
+            <div className="futures-production-shortcuts" aria-label="Futures mouse shortcuts">
+              <span><kbd>Alt</kbd><b>×2 left</b><em>LONG entry</em></span>
+              <span><kbd>Alt</kbd><b>×2 right</b><em>LONG exit</em></span>
+              <span><kbd>Ctrl</kbd><b>×2 right</b><em>SHORT entry</em></span>
+              <span><kbd>Ctrl</kbd><b>×2 left</b><em>SHORT exit</em></span>
+              <small>Ctrl/Alt + drag an order line to move it</small>
+            </div>
             {orderAmendRequest ? (
               <div className="futures-production-order-amendment" role="status">
                 <span>Move {orderAmendRequest.positionSide} order</span>
@@ -477,17 +471,18 @@ const FuturesProductionExecutionTicket = ({
                 <code>{orderAmendRequest.clientOrderId}</code>
               </div>
             ) : null}
-            <button type="button" disabled={!canPrepareAction(activeAction)} onClick={() => prepareAction(activeAction)}>
-              Prepare {activeAction.label}
-            </button>
             {intent?.kind === FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER ? (
-              <ConfirmationControl
-                key={intent.requestId}
-                action={FUTURES_PRODUCTION_EXECUTION_ACTIONS.PLACE_ORDER}
-                disabled={!canFinalize(FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER, 'placeOrder')}
-                buttonLabel="Place real futures order"
-                onConfirm={confirmation => claimAction(onPlaceOrder, confirmation)}
-              />
+              <section className={`futures-production-gesture-confirmation is-${activeAction.positionSide.toLowerCase()}`} aria-label="Prepared Futures gesture">
+                <header><span>Prepared gesture</span><strong>{activeAction.label}</strong></header>
+                <p>{orderDraft.ok ? `${orderDraft.quantity} ${selectedSymbol} @ ${orderDraft.price}` : selectedSymbol}</p>
+                <ConfirmationControl
+                  key={intent.requestId}
+                  action={FUTURES_PRODUCTION_EXECUTION_ACTIONS.PLACE_ORDER}
+                  disabled={!canFinalize(FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER, 'placeOrder')}
+                  buttonLabel="Place real futures order"
+                  onConfirm={confirmation => claimAction(onPlaceOrder, confirmation)}
+                />
+              </section>
             ) : null}
             {intent?.kind === FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER_AMENDMENT ? (
               <ConfirmationControl
@@ -502,19 +497,60 @@ const FuturesProductionExecutionTicket = ({
               />
             ) : null}
           </section>
+        ) : tab === 'orders' ? (
+          <section className="futures-production-orders" role="tabpanel" aria-label="Current Futures orders">
+            <header className="futures-production-portfolio-heading">
+              <div><strong>Open orders</strong><span>{openOrders.length} app-owned</span></div>
+              <button
+                type="button"
+                aria-label="Refresh positions and orders"
+                title="Refresh positions and orders"
+                disabled={!transportReady || backendLocked || typeof onRefreshPortfolio !== 'function'}
+                onClick={() => claimAction(onRefreshPortfolio)}
+              >
+                ↻
+              </button>
+            </header>
+            {portfolio?.state !== 'live' ? (
+              <p role="status">Current orders are {portfolio?.state ?? 'loading'}.</p>
+            ) : openOrders.length === 0 ? <p>No current app-owned orders.</p> : openOrders.map(order => (
+              <article
+                className={`${order.symbol === selectedSymbol ? 'is-current-symbol' : ''} is-${order.positionSide.toLowerCase()}`}
+                key={order.clientOrderId}
+              >
+                <header>
+                  <div><strong>{order.symbol}</strong><span>{order.positionSide} {order.positionEffect}</span></div>
+                  <code>{order.status}</code>
+                </header>
+                <dl>
+                  <div><dt>Price</dt><dd>{order.price}</dd></div>
+                  <div><dt>Filled</dt><dd>{order.executedQuantity} / {order.originalQuantity}</dd></div>
+                </dl>
+                <small>{order.symbol === selectedSymbol ? 'Ctrl/Alt + drag its chart line to move' : 'Select this symbol to show its chart line'}</small>
+              </article>
+            ))}
+          </section>
         ) : (
           <section className="futures-production-positions" role="tabpanel" aria-label="Hedge positions">
-            <button
-              type="button"
-              disabled={!transportReady || backendLocked || typeof onRefreshPortfolio !== 'function'}
-              onClick={() => claimAction(onRefreshPortfolio)}
-            >
-              Refresh positions &amp; orders
-            </button>
+            <header className="futures-production-portfolio-heading">
+              <div><strong>Hedge positions</strong><span>{positions.length} open legs</span></div>
+              <button
+                type="button"
+                aria-label="Refresh positions and orders"
+                title="Refresh positions and orders"
+                disabled={!transportReady || backendLocked || typeof onRefreshPortfolio !== 'function'}
+                onClick={() => claimAction(onRefreshPortfolio)}
+              >
+                ↻
+              </button>
+            </header>
             {portfolio?.state !== 'live' ? (
               <p role="status">Private positions are {portfolio?.state ?? 'unavailable'}.</p>
             ) : positions.length === 0 ? <p>No open LONG or SHORT positions.</p> : positions.map(position => (
-              <article key={`${position.symbol}:${position.positionSide}`}>
+              <article
+                className={`is-${position.positionSide.toLowerCase()}`}
+                key={`${position.symbol}:${position.positionSide}`}
+              >
                 <header><strong>{position.symbol}</strong><span>{position.positionSide}</span></header>
                 <dl>
                   <div><dt>Qty</dt><dd>{exactText(position.quantity)}</dd></div>
