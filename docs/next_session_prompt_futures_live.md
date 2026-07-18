@@ -3,10 +3,11 @@
 Скопируй следующий блок в новую сессию:
 
 ```text
-Работаем в /home/me/work/trade_ui_latest. Вывод Futures Testnet из runtime и
-ускорение Futures Live уже закоммичены в текущей ветке. Сначала проверь
-`git status` и последние commit'ы, не откатывай завершённую работу, затем
-прочитай AGENTS.md и:
+Работаем только в `master` в основном checkout `/home/me/work/trade_ui_latest`.
+Не создавай другие ветки и дополнительные Git worktree. Вывод Futures Testnet
+из runtime и ускорение Futures Live уже закоммичены в `master`. Сначала проверь
+`git branch --show-current`, `git status`, `git worktree list` и последние
+commit'ы, не откатывай завершённую работу, затем прочитай AGENTS.md и:
 
 - docs/futures_live_performance_and_testnet_retirement_plan.md
 - archive/futures-testnet/README.md
@@ -34,7 +35,7 @@
 - для незнакомого потока используй query/context;
 - перед изменением каждого существующего symbol запускай upstream impact и
   сообщай blast radius; при HIGH/CRITICAL остановись и предупреди до правки;
-- после любых правок запусти detect_changes(scope="compare", base_ref="main")
+- после любых правок запусти detect_changes(scope="compare", base_ref="master")
   и сопоставь каждый затронутый flow с ожидаемым scope.
 
 Текущий реализованный контракт:

@@ -34,6 +34,10 @@ npm install
 
 ## Development
 
+All development and integration work is committed directly to `master`. Do not
+create feature branches or additional Git worktrees for this repository. See
+[Repository workflow](docs/repository_workflow.md) for the mandatory checks.
+
 ```bash
 # Start the Vite dev server (web mode)
 npm run dev

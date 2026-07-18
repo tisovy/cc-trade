@@ -5,6 +5,7 @@ Each file focuses on a specific aspect so we can keep implementation notes, quir
 
 | Document | Scope |
 | --- | --- |
+| `repository_workflow.md` | Mandatory single-branch policy: work only on `master` in the primary checkout. |
 | `architecture.md` | High-level system overview (runtime stack, build targets, data flow). |
 | `components.md` | UI components, props/contracts, and any migration caveats. |
 | `backend.md` | Electron main process, WebSocket bridge, and Binance integration workflows. |
@@ -14,4 +15,3 @@ Each file focuses on a specific aspect so we can keep implementation notes, quir
 | `tests.md` | Testing strategy (unit/integration/e2e) and coverage goals. |
 
 > When adding a new feature or uncovering a regression, please update the relevant doc alongside the code change. This keeps the next engineer (and future you) in sync with reality. 
-

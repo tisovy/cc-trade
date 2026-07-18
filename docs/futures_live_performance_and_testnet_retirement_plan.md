@@ -174,10 +174,12 @@ or response bodies.
 
 ### GitNexus final scope
 
-The required `detect_changes(scope="compare", base_ref="main")` is branch-wide
-and reports `162` files, `1191` indexed symbols, `163` processes, `CRITICAL`.
-That comparison includes the complete pre-existing Futures branch because
-`main` predates it; it is not an isolated estimate of this work.
+The historical audit used `detect_changes(scope="compare", base_ref="main")`
+before this repository adopted its `master`-only policy. It reported `162`
+files, `1191` indexed symbols, `163` processes, `CRITICAL` because the legacy
+`main` ref predated the complete Futures work; it was not an isolated estimate
+of this phase. All current and future comparisons must use `base_ref="master"`
+as required by [Repository workflow](repository_workflow.md).
 
 The final pre-commit `detect_changes(scope="staged")` comparison against `HEAD`
 reports `116` indexed files, `394` indexed symbols, `30` processes, `CRITICAL`.

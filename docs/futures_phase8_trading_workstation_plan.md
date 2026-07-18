@@ -330,7 +330,7 @@ Phase 8 is complete when:
 - unknown, partial, stale, disconnected and recovery states are visible and never styled as success;
 - sustained market/account streams remain bounded and recover exactly after gaps, reconnect, restart and teardown;
 - automated verification proves zero escaped production network requests;
-- the worktree is clean and each reviewed slice has a traceable commit, test record, GitNexus impact report and residual-risk note.
+- the working tree is clean and each reviewed slice has a traceable commit, test record, GitNexus impact report and residual-risk note.
 
 ## Start here next
 
