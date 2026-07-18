@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { createEvent, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import FuturesWorkstationView from './FuturesWorkstationView.jsx'
 import FuturesProductionWorkstation from './FuturesProductionWorkstation.jsx'
@@ -264,7 +264,7 @@ describe('pure Futures workstation presentation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Pick chart price' }))
     expect(screen.getByLabelText('Futures limit price draft')).toHaveTextContent('58420.25')
     expect(screen.getByLabelText('Futures limit price draft')).toHaveTextContent(
-      'DRAFT · INTENT + CONFIRMATION REQUIRED',
+      'DRAFT · VERIFIED SHORTCUT EXECUTION',
     )
     fireEvent.click(screen.getByRole('button', { name: 'Horizontal drawing' }))
     fireEvent.click(screen.getByRole('button', { name: 'Pick chart price' }))
@@ -297,13 +297,34 @@ describe('pure Futures workstation presentation', () => {
     })
 
     const callsBeforeRightClick = onTradingGesture.mock.calls.length
-    fireEvent.contextMenu(ask, { altKey: true, button: 2 })
-    fireEvent.contextMenu(ask, { ctrlKey: true, button: 2 })
+    const unsupportedRightClick = createEvent.contextMenu(ask, { button: 2 })
+    fireEvent(ask, unsupportedRightClick)
+    expect(unsupportedRightClick.defaultPrevented).toBe(false)
+
+    const firstSupportedRightClick = createEvent.contextMenu(ask, { altKey: true, button: 2 })
+    fireEvent(ask, firstSupportedRightClick)
+    expect(firstSupportedRightClick.defaultPrevented).toBe(true)
     expect(onTradingGesture).toHaveBeenCalledTimes(callsBeforeRightClick)
-    fireEvent.contextMenu(ask, { altKey: true, button: 2 })
-    fireEvent.contextMenu(ask, { altKey: true, button: 2 })
+
+    const recognizedRightClick = createEvent.contextMenu(ask, { altKey: true, button: 2 })
+    fireEvent(ask, recognizedRightClick)
+    expect(recognizedRightClick.defaultPrevented).toBe(true)
     expect(onTradingGesture).toHaveBeenLastCalledWith(expect.objectContaining({
       side: 'SELL', positionSide: 'LONG', positionEffect: 'EXIT', price: '58420.50',
+    }))
+
+    const callsBeforeCtrlRightClick = onTradingGesture.mock.calls.length
+    const firstCtrlRightClick = createEvent.contextMenu(bid, { ctrlKey: true, button: 2 })
+    fireEvent(bid, firstCtrlRightClick)
+    expect(firstCtrlRightClick.defaultPrevented).toBe(true)
+    expect(onTradingGesture).toHaveBeenCalledTimes(callsBeforeCtrlRightClick)
+
+    const recognizedCtrlRightClick = createEvent.contextMenu(bid, { ctrlKey: true, button: 2 })
+    fireEvent(bid, recognizedCtrlRightClick)
+    expect(recognizedCtrlRightClick.defaultPrevented).toBe(true)
+    expect(onTradingGesture).toHaveBeenCalledTimes(callsBeforeCtrlRightClick + 1)
+    expect(onTradingGesture).toHaveBeenLastCalledWith(expect.objectContaining({
+      side: 'SELL', positionSide: 'SHORT', positionEffect: 'ENTRY', price: '58420.00',
     }))
   })
 
@@ -388,7 +409,7 @@ describe('pure Futures workstation presentation', () => {
       onIntervalChange: () => {},
     }
     const { rerender } = render(
-      <FuturesWorkstationView key="BTCUSDT" {...properties} selectedSymbol="BTCUSDT" />,
+      <FuturesWorkstationView {...properties} selectedSymbol="BTCUSDT" />,
     )
     fireEvent.click(screen.getByRole('button', { name: 'Pick chart price' }))
     fireEvent.click(screen.getByRole('button', { name: 'Horizontal drawing' }))
@@ -397,13 +418,56 @@ describe('pure Futures workstation presentation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Pause' }))
 
     rerender(
-      <FuturesWorkstationView key="ETHUSDT" {...properties} selectedSymbol="ETHUSDT" />,
+      <FuturesWorkstationView
+        {...properties}
+        state={createState({ symbol: 'ETHUSDT' })}
+        selectedSymbol="ETHUSDT"
+      />,
     )
     expect(screen.getByLabelText('Futures limit price draft'))
       .toHaveTextContent('Pick chart or book price')
     expect(screen.getByTestId('mock-futures-chart')).toHaveTextContent('drawings 0')
     expect(screen.getByTestId('mock-futures-chart')).toHaveTextContent('alerts 0')
     expect(screen.getByRole('button', { name: 'Pause' })).toBeInTheDocument()
+  })
+
+  it('never combines order-book click candidates across symbol ownership', () => {
+    const onTradingGesture = vi.fn()
+    const properties = {
+      identity: 'USDⓈ-M PRODUCTION · REAL MONEY',
+      state: createState(),
+      selectedInterval: '1m',
+      onTradingGesture,
+      onSymbolChange: () => {},
+      onIntervalChange: () => {},
+    }
+    const { rerender } = render(
+      <FuturesWorkstationView {...properties} selectedSymbol="BTCUSDT" />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /^58420\.00/ }), { altKey: true })
+    fireEvent.contextMenu(screen.getByRole('button', { name: /^58420\.50/ }), { altKey: true })
+
+    rerender(
+      <FuturesWorkstationView
+        {...properties}
+        state={createState({ symbol: 'ETHUSDT' })}
+        selectedSymbol="ETHUSDT"
+      />,
+    )
+    const bid = screen.getByRole('button', { name: /^58420\.00/ })
+    const ask = screen.getByRole('button', { name: /^58420\.50/ })
+    fireEvent.click(bid, { altKey: true })
+    fireEvent.contextMenu(ask, { altKey: true })
+    expect(onTradingGesture).not.toHaveBeenCalled()
+
+    fireEvent.click(bid, { altKey: true })
+    fireEvent.contextMenu(ask, { altKey: true })
+    expect(onTradingGesture).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      positionSide: 'LONG', positionEffect: 'ENTRY', source: 'order-book', price: '58420.00',
+    }))
+    expect(onTradingGesture).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      positionSide: 'LONG', positionEffect: 'EXIT', source: 'order-book', price: '58420.50',
+    }))
   })
 })
 
@@ -442,7 +506,7 @@ const productionExecutionState = Object.freeze({
 })
 
 describe('production workstation container', () => {
-  it('places the Hedge isolated 2x ticket in the market rail and removes the old drawer', () => {
+  it('places the symbol-config-aware Hedge ticket in the market rail and removes the old drawer', () => {
     render(
       <FuturesProductionWorkstation
         enabled={false}
@@ -452,12 +516,12 @@ describe('production workstation container', () => {
       />,
     )
     expect(screen.queryByText('Phase 7 production safety drawer')).not.toBeInTheDocument()
-    expect(screen.getByText('ISOLATED · 2× · HEDGE')).toBeInTheDocument()
+    expect(screen.getByText('CONFIG SYNC · HEDGE')).toBeInTheDocument()
     expect(screen.getByText('Advanced safety')).toBeInTheDocument()
     expect(screen.getByLabelText('USDⓈ-M production real-order execution')).toBeInTheDocument()
   })
 
-  it('loads current positions and orders once when the private execution channel becomes ready', () => {
+  it('does not duplicate the backend authoritative portfolio bootstrap in the renderer', () => {
     vi.stubGlobal('WebSocket', undefined)
     const refreshPortfolio = vi.fn(() => true)
     render(
@@ -474,10 +538,10 @@ describe('production workstation container', () => {
         }}
       />,
     )
-    expect(refreshPortfolio).toHaveBeenCalledTimes(1)
+    expect(refreshPortfolio).not.toHaveBeenCalled()
   })
 
-  it('refreshes the current-order snapshot once after a confirmed mutation', () => {
+  it('does not duplicate authoritative stream reconciliation after a confirmed mutation', () => {
     vi.stubGlobal('WebSocket', undefined)
     const refreshPortfolio = vi.fn(() => true)
     const baseExecutionState = {
@@ -499,8 +563,8 @@ describe('production workstation container', () => {
       attempt: { requestId: '0123456789abcdef0123456789abcdef', state: 'confirmed_open' },
     }
     rerender(<FuturesProductionWorkstation enabled executionState={confirmed} />)
-    expect(refreshPortfolio).toHaveBeenCalledTimes(1)
+    expect(refreshPortfolio).not.toHaveBeenCalled()
     rerender(<FuturesProductionWorkstation enabled executionState={confirmed} />)
-    expect(refreshPortfolio).toHaveBeenCalledTimes(1)
+    expect(refreshPortfolio).not.toHaveBeenCalled()
   })
 })

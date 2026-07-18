@@ -88,6 +88,20 @@ const defaultProps = (socket, sendMessage, overrides = {}) => ({
   ...overrides,
 })
 
+const emitCatalog = (socket, request, symbols, overrides = {}) => {
+  socket.emitMessage(createFuturesProductionWorkstationEvent(eventValues(request.requestId, {
+    symbol: request.symbol,
+    resource: 'catalog',
+    payload: Object.freeze({
+      offset: 0,
+      total: symbols.length,
+      complete: true,
+      contracts: Object.freeze(symbols.map(contract)),
+    }),
+    ...overrides,
+  })))
+}
+
 describe('production workstation hook isolation', () => {
   it('uses only the production channel and ignores events for another request owner', () => {
     const socket = new LocalSocket()
@@ -106,6 +120,26 @@ describe('production workstation hook isolation', () => {
       eventValues(request.requestId),
     )))
     expect(result.current.status).toBe('live')
+  })
+
+  it('does not duplicate the shared market subscription on an identical rerender', () => {
+    const socket = new LocalSocket()
+    const sendMessage = vi.fn(() => true)
+    const { rerender, unmount } = renderHook(
+      props => useFuturesProductionWorkstation(props),
+      { initialProps: defaultProps(socket, sendMessage) },
+    )
+
+    rerender(defaultProps(socket, sendMessage))
+    expect(sendMessage.mock.calls.map(([message]) => message.action)).toEqual([
+      FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SUBSCRIBE,
+    ])
+
+    unmount()
+    expect(sendMessage.mock.calls.map(([message]) => message.action)).toEqual([
+      FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SUBSCRIBE,
+      FUTURES_PRODUCTION_WORKSTATION_ACTIONS.UNSUBSCRIBE,
+    ])
   })
 
   it('uses production symbol and interval actions and drops late events from the old owner', () => {
@@ -129,6 +163,120 @@ describe('production workstation hook isolation', () => {
     expect(sendMessage).toHaveBeenCalledTimes(3)
     expect(sendMessage.mock.calls.at(-1)[0].action)
       .toBe(FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SELECT_INTERVAL)
+  })
+
+  it('starts a fresh subscription when the shared socket identity changes', () => {
+    const firstSocket = new LocalSocket()
+    const secondSocket = new LocalSocket()
+    const sendMessage = vi.fn(() => true)
+    const { rerender } = renderHook(props => useFuturesProductionWorkstation(props), {
+      initialProps: defaultProps(firstSocket, sendMessage),
+    })
+    expect(sendMessage.mock.calls.at(-1)[0].action)
+      .toBe(FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SUBSCRIBE)
+
+    rerender(defaultProps(secondSocket, sendMessage))
+
+    expect(sendMessage.mock.calls.at(-1)[0]).toMatchObject({
+      action: FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SUBSCRIBE,
+      symbol: 'BTCUSDT',
+      interval: '1m',
+    })
+  })
+
+  it('retains the last valid Contracts catalog through A → B → C and rejects stale owners', () => {
+    const socket = new LocalSocket()
+    const sendMessage = vi.fn(() => true)
+    const { result, rerender } = renderHook(props => useFuturesProductionWorkstation(props), {
+      initialProps: defaultProps(socket, sendMessage),
+    })
+    const requestA = sendMessage.mock.calls.at(-1)[0]
+    act(() => emitCatalog(socket, requestA, ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']))
+    expect(result.current.resources.catalog.contracts).toHaveLength(3)
+
+    rerender(defaultProps(socket, sendMessage, { symbol: 'ETHUSDT' }))
+    const requestB = sendMessage.mock.calls.at(-1)[0]
+    expect(result.current.resources.catalog.contracts).toHaveLength(3)
+    act(() => socket.emitMessage(createFuturesProductionWorkstationEvent(
+      eventValues(requestB.requestId, {
+        generation: 2,
+        state: 'loading',
+        payload: Object.freeze({ connected: false, reasonCode: null }),
+      }),
+    )))
+    expect(result.current.resources.catalog.contracts).toHaveLength(3)
+    rerender(defaultProps(socket, sendMessage, { symbol: 'SOLUSDT' }))
+    const requestC = sendMessage.mock.calls.at(-1)[0]
+    expect(result.current.resources.catalog.contracts).toHaveLength(3)
+    act(() => socket.emitMessage(createFuturesProductionWorkstationEvent(
+      eventValues(requestC.requestId, {
+        generation: 3,
+        state: 'loading',
+        payload: Object.freeze({ connected: false, reasonCode: null }),
+      }),
+    )))
+    expect(result.current.resources.catalog.contracts).toHaveLength(3)
+
+    act(() => emitCatalog(socket, requestA, ['BTCUSDT'], { generation: 7 }))
+    act(() => emitCatalog(socket, requestB, ['ETHUSDT'], { generation: 8 }))
+    expect(result.current.symbol).toBe('SOLUSDT')
+    expect(result.current.resources.catalog.contracts.map(item => item.symbol))
+      .toEqual(['BTCUSDT', 'ETHUSDT', 'SOLUSDT'])
+
+    act(() => emitCatalog(socket, requestC, ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'], {
+      generation: 9,
+    }))
+    expect(result.current.resources.catalog.contracts).toHaveLength(3)
+  })
+
+  it('retains Contracts through a transient error and recovers the current generation', () => {
+    const socket = new LocalSocket()
+    const sendMessage = vi.fn(() => true)
+    const { result } = renderHook(props => useFuturesProductionWorkstation(props), {
+      initialProps: defaultProps(socket, sendMessage),
+    })
+    const request = sendMessage.mock.calls[0][0]
+    act(() => emitCatalog(socket, request, ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']))
+
+    act(() => socket.emitMessage(createFuturesProductionWorkstationEvent(
+      eventValues(request.requestId, {
+        revision: 2,
+        resource: 'status',
+        state: 'resynchronizing',
+        payload: Object.freeze({
+          connected: false,
+          reasonCode: 'TRANSIENT_BOOTSTRAP_FAILURE',
+        }),
+      }),
+    )))
+    expect(result.current).toMatchObject({
+      status: 'resynchronizing',
+      reasonCode: 'TRANSIENT_BOOTSTRAP_FAILURE',
+    })
+    expect(result.current.resources.catalog.contracts).toHaveLength(3)
+
+    act(() => emitCatalog(socket, request, ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'], {
+      generation: 2,
+      revision: 1,
+    }))
+    act(() => socket.emitMessage(createFuturesProductionWorkstationEvent(
+      eventValues(request.requestId, {
+        generation: 2,
+        revision: 2,
+        resource: 'status',
+        state: 'live',
+      }),
+    )))
+    expect(result.current.status).toBe('live')
+    expect(result.current.reasonCode).toBeNull()
+    expect(result.current.resources.catalog.contracts.map(item => item.symbol))
+      .toEqual(['BTCUSDT', 'ETHUSDT', 'SOLUSDT'])
+
+    act(() => emitCatalog(socket, request, ['BTCUSDT'], {
+      generation: 1,
+      revision: 99,
+    }))
+    expect(result.current.resources.catalog.contracts).toHaveLength(3)
   })
 
   it('keeps same-symbol resources visible as stale while a new interval generation loads', () => {

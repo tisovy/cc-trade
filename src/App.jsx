@@ -532,6 +532,8 @@ function AppShell() {
           <FuturesProductionWorkstation
             enabled={isFuturesLiveMode}
             executionState={futuresProductionExecution}
+            wsConnection={wsConnection}
+            sendMessage={sendMessage}
           />
         </main>
       ) : (

@@ -1,22 +1,13 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import useFuturesProductionWorkstationConnection from '../../../hooks/useFuturesProductionWorkstationConnection.js'
+import { useCallback, useRef, useState } from 'react'
 import useFuturesProductionWorkstation from '../../../hooks/useFuturesProductionWorkstation.js'
-import { FUTURES_PRODUCTION_EXECUTION_STATES } from '../../../utils/futuresProductionExecutionProtocol.js'
 import FuturesProductionExecutionTicket from './FuturesProductionExecutionTicket.jsx'
 import FuturesWorkstationView from './FuturesWorkstationView.jsx'
-
-const PORTFOLIO_MUTATION_STATES = new Set([
-  FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_OPEN,
-  FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_FILLED,
-  FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_CANCELED,
-  FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_CLOSED,
-  FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_MARGIN_ADJUSTED,
-  FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_ORDER_AMENDED,
-])
 
 export const FuturesProductionWorkstation = ({
   enabled,
   executionState,
+  wsConnection,
+  sendMessage,
 }) => {
   const [symbol, setSymbol] = useState('BTCUSDT')
   const [interval, setInterval] = useState('1m')
@@ -25,9 +16,6 @@ export const FuturesProductionWorkstation = ({
   const [orderAmendRequest, setOrderAmendRequest] = useState(null)
   const gestureSequenceRef = useRef(0)
   const amendmentSequenceRef = useRef(0)
-  const initialPortfolioRefreshRef = useRef(null)
-  const mutationPortfolioRefreshRef = useRef(executionState?.attempt?.requestId ?? null)
-  const { wsConnection, sendMessage } = useFuturesProductionWorkstationConnection({ enabled })
   const workstationState = useFuturesProductionWorkstation({
     enabled,
     symbol,
@@ -38,49 +26,6 @@ export const FuturesProductionWorkstation = ({
   const selectedContract = workstationState.resources.catalog?.contracts?.find(
     contract => contract.symbol === symbol,
   ) ?? null
-
-  useEffect(() => {
-    const fingerprint = executionState?.account?.fingerprint
-    const refreshPortfolio = executionState?.refreshPortfolio
-    if (!enabled
-      || executionState?.connected !== true
-      || executionState?.subscribed !== true
-      || executionState?.submissionLocked === true
-      || typeof fingerprint !== 'string'
-      || typeof refreshPortfolio !== 'function'
-      || executionState?.portfolio?.state === 'live'
-      || executionState?.portfolio?.state === 'truncated'
-      || initialPortfolioRefreshRef.current === fingerprint) return
-    if (refreshPortfolio() === true) initialPortfolioRefreshRef.current = fingerprint
-  }, [
-    enabled,
-    executionState?.account?.fingerprint,
-    executionState?.connected,
-    executionState?.portfolio?.state,
-    executionState?.refreshPortfolio,
-    executionState?.submissionLocked,
-    executionState?.subscribed,
-  ])
-
-  useEffect(() => {
-    const attempt = executionState?.attempt
-    const requestId = attempt?.requestId
-    const refreshPortfolio = executionState?.refreshPortfolio
-    if (typeof requestId !== 'string'
-      || !PORTFOLIO_MUTATION_STATES.has(attempt?.state)
-      || mutationPortfolioRefreshRef.current === requestId
-      || executionState?.connected !== true
-      || executionState?.subscribed !== true
-      || executionState?.submissionLocked === true
-      || typeof refreshPortfolio !== 'function') return
-    if (refreshPortfolio() === true) mutationPortfolioRefreshRef.current = requestId
-  }, [
-    executionState?.attempt,
-    executionState?.connected,
-    executionState?.refreshPortfolio,
-    executionState?.submissionLocked,
-    executionState?.subscribed,
-  ])
 
   const handleSymbolChange = useCallback((nextSymbol) => {
     setDraftPrice(null)
@@ -135,7 +80,6 @@ export const FuturesProductionWorkstation = ({
   return (
     <div className="futures-production-workstation" data-testid="futures-production-workstation">
       <FuturesWorkstationView
-        key={symbol}
         identity="USDⓈ-M PRODUCTION · REAL MONEY"
         state={workstationState}
         selectedSymbol={symbol}

@@ -74,9 +74,22 @@ export const FuturesWorkstationView = ({
   const [alerts, setAlerts] = useState(EMPTY_ROWS)
   const [tapePaused, setTapePaused] = useState(false)
   const [pausedTrades, setPausedTrades] = useState(EMPTY_ROWS)
-  const lastBookLeftClickRef = useRef({ at: 0, price: null, modifier: null })
-  const lastBookRightClickRef = useRef({ at: 0, price: null, modifier: null })
+  const lastBookLeftClickRef = useRef({ at: 0, price: null, modifier: null, symbol: null })
+  const lastBookRightClickRef = useRef({ at: 0, price: null, modifier: null, symbol: null })
   const selectedDraftPrice = draftPrice === undefined ? localDraftPrice : draftPrice
+
+  useEffect(() => {
+    lastBookLeftClickRef.current = { at: 0, price: null, modifier: null, symbol: null }
+    lastBookRightClickRef.current = { at: 0, price: null, modifier: null, symbol: null }
+    // These controls are display-only and belong to one selected-symbol owner.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setLocalDraftPrice(null)
+    setDrawingMode(false)
+    setDrawings(EMPTY_ROWS)
+    setAlerts(EMPTY_ROWS)
+    setTapePaused(false)
+    setPausedTrades(EMPTY_ROWS)
+  }, [selectedSymbol])
 
   const resources = state.resources
   const contracts = resources.catalog?.contracts ?? EMPTY_ROWS
@@ -137,18 +150,22 @@ export const FuturesWorkstationView = ({
       metaKey: event.metaKey,
       shiftKey: event.shiftKey,
     })
-    if (!gesture) return
+    if (!gesture) {
+      lastBookRightClickRef.current = { at: 0, price: null, modifier: null, symbol: null }
+      return
+    }
     event.preventDefault()
     const modifier = event.altKey ? 'alt' : 'ctrl'
-    const current = { at: Date.now(), price, modifier }
+    const current = { at: Date.now(), price, modifier, symbol: selectedSymbol }
     const previous = lastBookRightClickRef.current
     lastBookRightClickRef.current = current
     if (current.at - previous.at > 350
       || previous.price !== price
-      || previous.modifier !== modifier) return
-    lastBookRightClickRef.current = { at: 0, price: null, modifier: null }
+      || previous.modifier !== modifier
+      || previous.symbol !== selectedSymbol) return
+    lastBookRightClickRef.current = { at: 0, price: null, modifier: null, symbol: null }
     emitBookGesture(event, 'right', price)
-  }, [emitBookGesture])
+  }, [emitBookGesture, selectedSymbol])
 
   const handleBookClick = useCallback((event, price) => {
     pickPrice(price)
@@ -160,19 +177,20 @@ export const FuturesWorkstationView = ({
       shiftKey: event.shiftKey,
     })
     if (!gesture) {
-      lastBookLeftClickRef.current = { at: 0, price: null, modifier: null }
+      lastBookLeftClickRef.current = { at: 0, price: null, modifier: null, symbol: null }
       return
     }
     const modifier = event.altKey ? 'alt' : 'ctrl'
-    const current = { at: Date.now(), price, modifier }
+    const current = { at: Date.now(), price, modifier, symbol: selectedSymbol }
     const previous = lastBookLeftClickRef.current
     lastBookLeftClickRef.current = current
     if (current.at - previous.at > 350
       || previous.price !== price
-      || previous.modifier !== modifier) return
-    lastBookLeftClickRef.current = { at: 0, price: null, modifier: null }
+      || previous.modifier !== modifier
+      || previous.symbol !== selectedSymbol) return
+    lastBookLeftClickRef.current = { at: 0, price: null, modifier: null, symbol: null }
     emitBookGesture(event, 'left', price)
-  }, [emitBookGesture, pickPrice])
+  }, [emitBookGesture, pickPrice, selectedSymbol])
 
   const toggleFavorite = useCallback((symbol) => {
     setFavorites((previous) => {
@@ -367,6 +385,7 @@ export const FuturesWorkstationView = ({
         </div>
         <div className="futures-workstation-chart-frame">
           <FuturesWorkstationChart
+            symbol={selectedSymbol}
             candles={candles?.contract ?? EMPTY_ROWS}
             markCandles={candles?.mark ?? EMPTY_ROWS}
             indexCandles={candles?.index ?? EMPTY_ROWS}
@@ -393,7 +412,7 @@ export const FuturesWorkstationView = ({
             <span>Limit price</span>
             <strong>{selectedDraftPrice ?? 'Pick chart or book price'}</strong>
           </div>
-          <code>DRAFT · INTENT + CONFIRMATION REQUIRED</code>
+          <code>DRAFT · VERIFIED SHORTCUT EXECUTION</code>
         </div>
       </main>
 

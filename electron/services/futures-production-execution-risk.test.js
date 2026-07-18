@@ -147,6 +147,67 @@ describe('production Futures exact risk evaluator', () => {
         expect(Object.isFrozen(result)).toBe(true);
     });
 
+    it('keeps a verified reducing exit available at exhausted caps and distressed balance', () => {
+        const reducing = createInput();
+        reducing.policy.maxOrderNotionalUsdt = '1';
+        reducing.snapshot.symbolConfig.maxNotionalValue = '1';
+        reducing.snapshot.balance.availableBalance = '0';
+        reducing.snapshot.position.positionAmt = '2';
+        reducing.snapshot.position.liquidationPrice = '9.99';
+        reducing.draft = {
+            symbol: 'BTCUSDT',
+            side: 'SELL',
+            positionSide: 'LONG',
+            positionEffect: 'EXIT',
+            type: 'MARKET',
+            timeInForce: null,
+            quantity: '1',
+            price: null,
+        };
+        reducing.dailyNotionalUsed = '50';
+
+        expect(evaluateFuturesProductionExecutionRisk(reducing)).toMatchObject({
+            ok: true,
+            classification: FUTURES_PRODUCTION_EXECUTION_RISK_CLASSIFICATIONS.REDUCING,
+            notionalUsdt: '10.00',
+            dailyNotionalBeforeUsdt: '50',
+            dailyNotionalAfterUsdt: '50',
+        });
+    });
+
+    it('allows only a reducing exit from a legacy cross high-leverage leg', () => {
+        const reducing = createInput();
+        reducing.snapshot.symbolConfig.marginType = 'CROSSED';
+        reducing.snapshot.symbolConfig.isAutoAddMargin = true;
+        reducing.snapshot.symbolConfig.leverage = 20;
+        reducing.snapshot.position.positionAmt = '2';
+        reducing.draft = {
+            symbol: 'BTCUSDT',
+            side: 'SELL',
+            positionSide: 'LONG',
+            positionEffect: 'EXIT',
+            type: 'LIMIT',
+            timeInForce: 'GTC',
+            quantity: '1',
+            price: '10.00',
+        };
+        expect(evaluateFuturesProductionExecutionRisk(reducing)).toMatchObject({
+            ok: true,
+            classification: FUTURES_PRODUCTION_EXECUTION_RISK_CLASSIFICATIONS.REDUCING,
+            observedLeverage: 20,
+        });
+
+        const increasing = createInput();
+        increasing.snapshot.symbolConfig.marginType = 'CROSSED';
+        increasing.snapshot.symbolConfig.isAutoAddMargin = true;
+        increasing.snapshot.symbolConfig.leverage = 20;
+        increasing.snapshot.position.positionAmt = '2';
+        expect(evaluateFuturesProductionExecutionRisk(increasing)).toMatchObject({
+            ok: false,
+            code: FUTURES_PRODUCTION_EXECUTION_RISK_CODES.SYMBOL_REJECTED,
+        });
+    });
+
     it('uses max(limit, mark) and rejects one exact unit over the order cap', () => {
         const equality = createInput();
         equality.draft.price = '9.99';
@@ -184,13 +245,17 @@ describe('production Futures exact risk evaluator', () => {
         });
     });
 
-    it('passes exact minimum available balance equality and rejects one smallest unit below', () => {
+    it('keeps the exact post-margin balance reserve and rejects one smallest unit below', () => {
         const equality = createInput();
-        equality.snapshot.balance.availableBalance = '100.00000000';
+        equality.snapshot.balance.availableBalance = '105.00000000';
         expect(evaluateFuturesProductionExecutionRisk(equality)).toMatchObject({ ok: true });
 
+        const above = createInput();
+        above.snapshot.balance.availableBalance = '105.00000001';
+        expect(evaluateFuturesProductionExecutionRisk(above)).toMatchObject({ ok: true });
+
         const below = createInput();
-        below.snapshot.balance.availableBalance = '99.99999999';
+        below.snapshot.balance.availableBalance = '104.99999999';
         expect(evaluateFuturesProductionExecutionRisk(below)).toEqual({
             ok: false,
             code: FUTURES_PRODUCTION_EXECUTION_RISK_CODES.BALANCE_REJECTED,

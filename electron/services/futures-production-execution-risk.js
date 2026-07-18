@@ -429,9 +429,11 @@ const classifyExposure = (draft, positionAmount) => {
     return FUTURES_PRODUCTION_EXECUTION_RISK_CLASSIFICATIONS.INCREASING;
 };
 
-const hasRequiredSymbolState = (policy, snapshot, draft) => {
+const hasRequiredSymbolState = (policy, snapshot, draft, classification) => {
     const symbol = draft.symbol;
     const exchange = snapshot.exchangeInfo;
+    const requiresEntryConfiguration = classification
+        !== FUTURES_PRODUCTION_EXECUTION_RISK_CLASSIFICATIONS.REDUCING;
     return policy.allowedSymbols.includes(symbol)
         && snapshot.symbolConfig.symbol === symbol
         && snapshot.markPrice.symbol === symbol
@@ -443,8 +445,10 @@ const hasRequiredSymbolState = (policy, snapshot, draft) => {
         && exchange.marginAsset === 'USDT'
         && snapshot.position.marginAsset === 'USDT'
         && snapshot.position.positionSide === draft.positionSide
-        && snapshot.symbolConfig.marginType === 'ISOLATED'
-        && snapshot.symbolConfig.isAutoAddMargin === false
+        && (!requiresEntryConfiguration || (
+            snapshot.symbolConfig.marginType === 'ISOLATED'
+            && snapshot.symbolConfig.isAutoAddMargin === false
+        ))
         && exchange.supportedOrderTypes.includes('LIMIT')
         && exchange.supportedOrderTypes.includes('MARKET')
         && exchange.supportedTimeInForce.includes('GTC');
@@ -548,15 +552,23 @@ export const evaluateFuturesProductionExecutionRisk = (value) => {
             FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.ACCOUNT_STATE,
         );
     }
-    if (!hasRequiredSymbolState(policy, snapshot, draft)) {
+    const classification = classifyExposure(draft, snapshot.position.amount);
+    if (classification === null) {
+        return reject(
+            FUTURES_PRODUCTION_EXECUTION_RISK_CODES.CLASSIFICATION_REJECTED,
+            FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.EXPOSURE_AMBIGUOUS,
+        );
+    }
+    if (!hasRequiredSymbolState(policy, snapshot, draft, classification)) {
         return reject(
             FUTURES_PRODUCTION_EXECUTION_RISK_CODES.SYMBOL_REJECTED,
             FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.SYMBOL_STATE,
         );
     }
-    if (snapshot.symbolConfig.leverage !== policy.maxLeverage
+    if (classification !== FUTURES_PRODUCTION_EXECUTION_RISK_CLASSIFICATIONS.REDUCING
+        && (snapshot.symbolConfig.leverage !== policy.maxLeverage
         || snapshot.symbolConfig.leverage
-            !== FUTURES_PRODUCTION_EXECUTION_COMPILED_CEILINGS.maxLeverage) {
+            !== FUTURES_PRODUCTION_EXECUTION_COMPILED_CEILINGS.maxLeverage)) {
         return reject(
             FUTURES_PRODUCTION_EXECUTION_RISK_CODES.LEVERAGE_REJECTED,
             FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.LEVERAGE_STATE,
@@ -573,13 +585,6 @@ export const evaluateFuturesProductionExecutionRisk = (value) => {
         );
     }
 
-    const classification = classifyExposure(draft, snapshot.position.amount);
-    if (classification === null) {
-        return reject(
-            FUTURES_PRODUCTION_EXECUTION_RISK_CODES.CLASSIFICATION_REJECTED,
-            FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.EXPOSURE_AMBIGUOUS,
-        );
-    }
     if (input.killSwitchEngaged
         && classification !== FUTURES_PRODUCTION_EXECUTION_RISK_CLASSIFICATIONS.REDUCING) {
         return reject(
@@ -598,31 +603,49 @@ export const evaluateFuturesProductionExecutionRisk = (value) => {
             FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.MINIMUM_NOTIONAL,
         );
     }
-    if (compareExactDecimals(notional, policy.maxOrderNotional) > 0
-        || compareExactDecimals(notional, snapshot.symbolConfig.maxNotionalValue) > 0) {
+    const increasesExposure = (
+        classification !== FUTURES_PRODUCTION_EXECUTION_RISK_CLASSIFICATIONS.REDUCING
+    );
+    let nextDailyNotional = dailyNotionalUsed;
+    if (increasesExposure
+        && (compareExactDecimals(notional, policy.maxOrderNotional) > 0
+            || compareExactDecimals(notional, snapshot.symbolConfig.maxNotionalValue) > 0)) {
         return reject(
             FUTURES_PRODUCTION_EXECUTION_RISK_CODES.ORDER_NOTIONAL_REJECTED,
             FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.MAXIMUM_ORDER_NOTIONAL,
         );
     }
-    const nextDailyNotional = addExactDecimals(dailyNotionalUsed, notional);
-    if (compareExactDecimals(nextDailyNotional, policy.maxDailyNotional) > 0) {
-        return reject(
-            FUTURES_PRODUCTION_EXECUTION_RISK_CODES.DAILY_NOTIONAL_REJECTED,
-            FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.MAXIMUM_DAILY_NOTIONAL,
+    if (increasesExposure) {
+        nextDailyNotional = addExactDecimals(dailyNotionalUsed, notional);
+        if (compareExactDecimals(nextDailyNotional, policy.maxDailyNotional) > 0) {
+            return reject(
+                FUTURES_PRODUCTION_EXECUTION_RISK_CODES.DAILY_NOTIONAL_REJECTED,
+                FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.MAXIMUM_DAILY_NOTIONAL,
+            );
+        }
+        const availableBalanceComparison = compareExactDecimals(
+            snapshot.balance.availableBalance,
+            policy.minAvailableBalance,
         );
-    }
-    if (compareExactDecimals(
-        snapshot.balance.availableBalance,
-        policy.minAvailableBalance,
-    ) < 0) {
-        return reject(
-            FUTURES_PRODUCTION_EXECUTION_RISK_CODES.BALANCE_REJECTED,
-            FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.AVAILABLE_BALANCE,
-        );
+        const balanceNotionalCapacity = availableBalanceComparison >= 0
+            ? multiplyExactDecimals(
+                subtractExactDecimals(
+                    snapshot.balance.availableBalance,
+                    policy.minAvailableBalance,
+                ),
+                parsePositiveExactDecimal(String(snapshot.symbolConfig.leverage)),
+            )
+            : null;
+        if (availableBalanceComparison < 0
+            || compareExactDecimals(notional, balanceNotionalCapacity) > 0) {
+            return reject(
+                FUTURES_PRODUCTION_EXECUTION_RISK_CODES.BALANCE_REJECTED,
+                FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.AVAILABLE_BALANCE,
+            );
+        }
     }
 
-    if (!isZeroExactDecimal(snapshot.position.amount)) {
+    if (increasesExposure && !isZeroExactDecimal(snapshot.position.amount)) {
         const positionIsLong = snapshot.position.amount.coefficient > 0n;
         const liquidationComparison = compareExactDecimals(
             snapshot.position.liquidationPrice,

@@ -15,7 +15,9 @@ const FUTURES_PRODUCTION_COMPOSITION = (
     'electron/services/futures-production-execution-composition.js'
 );
 const REVIEWED_PRODUCTION_ORIGIN = 'https://fapi.binance.com';
+const REVIEWED_PRODUCTION_WS_ORIGIN = 'wss://fstream.binance.com';
 const REVIEWED_PRODUCTION_HOST = 'fapi.binance.com';
+const REVIEWED_PRODUCTION_WS_HOST = 'fstream.binance.com';
 const REVIEWED_PRODUCTION_ROUTES = Object.freeze(new Set([
     '/fapi/v1/time',
     '/fapi/v1/exchangeInfo',
@@ -25,6 +27,7 @@ const REVIEWED_PRODUCTION_ROUTES = Object.freeze(new Set([
     '/fapi/v3/balance',
     '/fapi/v3/positionRisk',
     '/fapi/v1/openOrders',
+    '/fapi/v1/listenKey',
     '/fapi/v1/openAlgoOrders',
     '/fapi/v1/order',
     '/fapi/v1/positionMargin',
@@ -154,13 +157,15 @@ for (const file of productionExecutionImplementationFiles) {
     const source = fs.readFileSync(file, 'utf8');
 
     for (const specifier of readModuleSpecifiers(source)) {
-        if (isAlternateTransportModule(specifier)) {
+        if (isAlternateTransportModule(specifier)
+            && !(name === FUTURES_PRODUCTION_FACADE && specifier === 'ws')) {
             fail(`${name} imports alternate network transport ${specifier}`);
         }
     }
 
     if (/import\s*\{[^}]*\bnet\b[^}]*\}\s*from\s*['"]electron['"]/s.test(source)
-        || /\b(?:new\s+)?(?:globalThis\s*\.\s*)?(?:WebSocket|XMLHttpRequest|EventSource)\s*\(/.test(source)
+        || (name !== FUTURES_PRODUCTION_FACADE
+            && /\b(?:new\s+)?(?:globalThis\s*\.\s*)?(?:WebSocket|XMLHttpRequest|EventSource)\s*\(/.test(source))
         || /\bnavigator\s*\.\s*sendBeacon\s*\(/.test(source)
         || /\b(?:https?|http2|tls|net)\s*\.\s*(?:request|get|connect|createConnection|createServer)\s*\(/.test(source)) {
         fail(`${name} creates an alternate HTTP, TLS, net, or WebSocket transport`);
@@ -172,13 +177,13 @@ for (const file of productionExecutionImplementationFiles) {
     }
 
     for (const match of source.matchAll(/\b(?:https?|wss?):\/\/[^'"`\s)<>\]}]+/gi)) {
-        if (match[0] !== REVIEWED_PRODUCTION_ORIGIN) {
+        if (![REVIEWED_PRODUCTION_ORIGIN, REVIEWED_PRODUCTION_WS_ORIGIN].includes(match[0])) {
             fail(`${name} contains an unreviewed production origin: ${match[0]}`);
         }
     }
     for (const match of source.matchAll(/\b(?:[a-z0-9-]+\.)+binance\.com\b/gi)) {
         const host = match[0].toLowerCase();
-        if (host !== REVIEWED_PRODUCTION_HOST) {
+        if (![REVIEWED_PRODUCTION_HOST, REVIEWED_PRODUCTION_WS_HOST].includes(host)) {
             fail(`${name} contains an unreviewed Binance host: ${host}`);
         } else {
             reviewedHostLocations.push(name);
@@ -193,9 +198,9 @@ for (const file of productionExecutionImplementationFiles) {
     }
 }
 
-if (reviewedHostLocations.length !== 1
-    || reviewedHostLocations[0] !== FUTURES_PRODUCTION_CONFIG) {
-    fail('The exact production host must appear once, only in the production config module');
+if (reviewedHostLocations.length !== 2
+    || reviewedHostLocations.some(location => location !== FUTURES_PRODUCTION_CONFIG)) {
+    fail('The exact production REST/WS hosts must appear only in the production config module');
 }
 
 const facadePath = path.join(ROOT, FUTURES_PRODUCTION_FACADE);
@@ -231,6 +236,9 @@ if (fs.existsSync(configPath)) {
     const config = fs.readFileSync(configPath, 'utf8');
     if (!/export const FUTURES_PRODUCTION_EXECUTION_REST_ORIGIN\s*=\s*['"]https:\/\/fapi\.binance\.com['"]\s*;/.test(config)) {
         fail('Production config does not declare the exact reviewed HTTPS origin');
+    }
+    if (!/export const FUTURES_PRODUCTION_EXECUTION_WS_ORIGIN\s*=\s*['"]wss:\/\/fstream\.binance\.com['"]\s*;/.test(config)) {
+        fail('Production config does not declare the exact reviewed WSS origin');
     }
     if (/['"]FUTURES_PRODUCTION_(?:EXECUTION_)?LIVE_AUTH(?:ORIZED|ORIZATION)['"]/.test(config)) {
         fail('Production config exposes the compiled live interlock through the environment');

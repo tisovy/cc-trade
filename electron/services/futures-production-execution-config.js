@@ -9,6 +9,7 @@ import {
 } from './futures-production-execution-decimal.js';
 
 export const FUTURES_PRODUCTION_EXECUTION_REST_ORIGIN = 'https://fapi.binance.com';
+export const FUTURES_PRODUCTION_EXECUTION_WS_ORIGIN = 'wss://fstream.binance.com';
 export const FUTURES_PRODUCTION_EXECUTION_OPERATOR_ACKNOWLEDGEMENT = (
     'I_UNDERSTAND_REAL_USDT_FUTURES'
 );

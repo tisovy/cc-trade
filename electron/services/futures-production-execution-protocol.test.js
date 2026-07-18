@@ -88,6 +88,20 @@ const createStatusInput = (overrides = {}) => ({
     account: { alias: 'reviewed-account-1', fingerprint: FINGERPRINT },
     caps: {
         allowedSymbols: ['BTCUSDT', 'ETHUSDT'],
+        symbolConfigurations: [
+            {
+                symbol: 'BTCUSDT',
+                marginType: 'ISOLATED',
+                leverage: 2,
+                isAutoAddMargin: false,
+            },
+            {
+                symbol: 'ETHUSDT',
+                marginType: 'CROSSED',
+                leverage: 20,
+                isAutoAddMargin: true,
+            },
+        ],
         maxLeverage: 2,
         maxOrderNotionalUsdt: '10.0000',
         maxDailyNotionalUsdt: '50.0000',
@@ -126,6 +140,9 @@ const createStatusInput = (overrides = {}) => ({
     portfolio: {
         state: 'live',
         observedAt: 1_783_957_600_000,
+        availableBalanceUsdt: '250.5',
+        syncState: 'live',
+        syncCode: null,
         positions: [{
             symbol: 'BTCUSDT',
             positionSide: 'LONG',
@@ -141,6 +158,26 @@ const createStatusInput = (overrides = {}) => ({
         }],
         openOrders: [],
     },
+    ...overrides,
+});
+
+const portfolioOrder = (overrides = {}) => ({
+    symbol: 'BTCUSDT',
+    orderKind: 'REGULAR',
+    orderId: '42',
+    clientOrderId: 'external-order',
+    side: 'SELL',
+    positionSide: 'LONG',
+    positionEffect: 'EXIT',
+    price: '61000',
+    originalQuantity: '0.01',
+    executedQuantity: '0.001',
+    status: 'PARTIALLY_FILLED',
+    type: 'LIMIT',
+    timeInForce: 'RPI',
+    isAppOwned: false,
+    updateTime: 1_783_957_600_001,
+    syncState: 'synced',
     ...overrides,
 });
 
@@ -347,7 +384,26 @@ describe('production futures backend-owned status protocol', () => {
         expect(Object.isFrozen(parsed)).toBe(true);
         expect(Object.isFrozen(parsed.caps)).toBe(true);
         expect(Object.isFrozen(parsed.caps.allowedSymbols)).toBe(true);
+        expect(Object.isFrozen(parsed.caps.symbolConfigurations)).toBe(true);
+        expect(Object.isFrozen(parsed.caps.symbolConfigurations[0])).toBe(true);
         expect(Object.isFrozen(parsed.intent)).toBe(true);
+    });
+
+    it('allows symbol configuration bootstrap to be empty or partial', () => {
+        const input = createStatusInput();
+        const empty = createFuturesProductionExecutionStatus(createStatusInput({
+            caps: { ...input.caps, symbolConfigurations: [] },
+        }));
+        const partial = createFuturesProductionExecutionStatus(createStatusInput({
+            caps: {
+                ...input.caps,
+                symbolConfigurations: [input.caps.symbolConfigurations[0]],
+            },
+        }));
+        expect(empty.caps.symbolConfigurations).toEqual([]);
+        expect(partial.caps.symbolConfigurations).toEqual([
+            input.caps.symbolConfigurations[0],
+        ]);
     });
 
     it('represents disabled production without exposing account or configured caps', () => {
@@ -403,6 +459,64 @@ describe('production futures backend-owned status protocol', () => {
         expect(status.attempt).toMatchObject({ acknowledgement, state });
     });
 
+    it('preserves portfolio truth and namespaces regular/algo order identities', () => {
+        const input = createStatusInput();
+        const created = createFuturesProductionExecutionStatus(createStatusInput({
+            portfolio: {
+                ...input.portfolio,
+                positions: [{
+                    ...input.portfolio.positions[0],
+                    leverage: 20,
+                    marginType: 'CROSSED',
+                    isolatedMarginUsdt: '0',
+                }],
+                openOrders: [
+                    portfolioOrder(),
+                    portfolioOrder({
+                        orderKind: 'ALGO',
+                        status: 'TRIGGERING',
+                        type: 'STOP_MARKET',
+                        timeInForce: 'GTE_GTC',
+                        price: '0',
+                        originalQuantity: '0',
+                        executedQuantity: '0',
+                    }),
+                ],
+            },
+        }));
+        expect(created.portfolio.positions[0]).toMatchObject({
+            leverage: 20,
+            marginType: 'CROSSED',
+        });
+        expect(created.portfolio.openOrders).toHaveLength(2);
+        expect(created.portfolio.openOrders[0]).toMatchObject({
+            orderKind: 'REGULAR', status: 'PARTIALLY_FILLED', timeInForce: 'RPI',
+        });
+        expect(created.portfolio.openOrders[1]).toMatchObject({
+            orderKind: 'ALGO', status: 'TRIGGERING', type: 'STOP_MARKET',
+            price: '0', originalQuantity: '0',
+        });
+    });
+
+    it('rejects order-kind/status mismatches and duplicates within one namespace', () => {
+        const input = createStatusInput();
+        for (const order of [
+            portfolioOrder({ orderKind: 'REGULAR', status: 'TRIGGERING' }),
+            portfolioOrder({ orderKind: 'ALGO', status: 'PARTIALLY_FILLED' }),
+            portfolioOrder({ orderKind: 'UNKNOWN' }),
+        ]) {
+            expectProtocolError(() => createFuturesProductionExecutionStatus(createStatusInput({
+                portfolio: { ...input.portfolio, openOrders: [order] },
+            })), FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS);
+        }
+        expectProtocolError(() => createFuturesProductionExecutionStatus(createStatusInput({
+            portfolio: {
+                ...input.portfolio,
+                openOrders: [portfolioOrder(), portfolioOrder()],
+            },
+        })), FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS);
+    });
+
     it('rejects status duplicate keys, extra fields, impossible capabilities, and cap overflow', () => {
         const status = createFuturesProductionExecutionStatus(createStatusInput());
         expectProtocolError(
@@ -428,6 +542,29 @@ describe('production futures backend-owned status protocol', () => {
         for (const invalidCaps of [
             { ...createStatusInput().caps, allowedSymbols: ['BTCUSDT', 'BTCUSDT'] },
             { ...createStatusInput().caps, allowedSymbols: ['btcusdt'] },
+            {
+                ...createStatusInput().caps,
+                symbolConfigurations: [
+                    createStatusInput().caps.symbolConfigurations[0],
+                    createStatusInput().caps.symbolConfigurations[0],
+                ],
+            },
+            {
+                ...createStatusInput().caps,
+                symbolConfigurations: [{
+                    symbol: 'XRPUSDT',
+                    marginType: 'ISOLATED',
+                    leverage: 2,
+                    isAutoAddMargin: false,
+                }],
+            },
+            {
+                ...createStatusInput().caps,
+                symbolConfigurations: [{
+                    ...createStatusInput().caps.symbolConfigurations[0],
+                    leverage: 126,
+                }],
+            },
             { ...createStatusInput().caps, maxLeverage: 1 },
             { ...createStatusInput().caps, maxLeverage: 3 },
             { ...createStatusInput().caps, maxOrderNotionalUsdt: '10.000000000000000001' },

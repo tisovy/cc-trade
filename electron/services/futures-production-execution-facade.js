@@ -1,11 +1,16 @@
 import { createHash, createHmac } from 'node:crypto';
-import { FUTURES_PRODUCTION_EXECUTION_REST_ORIGIN } from './futures-production-execution-config.js';
+import WebSocket from 'ws';
+import {
+    FUTURES_PRODUCTION_EXECUTION_REST_ORIGIN,
+    FUTURES_PRODUCTION_EXECUTION_WS_ORIGIN,
+} from './futures-production-execution-config.js';
 import {
     parseNonNegativeExactDecimal,
     parsePositiveExactDecimal,
 } from './futures-production-execution-decimal.js';
 import {
     FUTURES_PRODUCTION_EXECUTION_EXCHANGE_INFO_RESPONSE_LIMITS,
+    FUTURES_PRODUCTION_EXECUTION_INVENTORY_RESPONSE_LIMITS,
     FUTURES_PRODUCTION_EXECUTION_RESPONSE_LIMITS,
     FuturesProductionExecutionDecimalToken,
     FuturesProductionExecutionIntegerToken,
@@ -17,10 +22,13 @@ import {
 
 const SIGNED_RECV_WINDOW = '5000';
 const OPERATION_DEADLINE_MS = 10_000;
+const USER_DATA_STREAM_MAX_BYTES = 64 * 1024;
 const MAX_SIGNED_INT64 = 9_223_372_036_854_775_807n;
 const MAX_SAFE_INTEGER = 9_007_199_254_740_991n;
 const SYMBOL_PATTERN = /^[A-Z0-9]{2,20}$/;
 const CLIENT_ID_PATTERN = /^cc7-[0-9a-f]{32}$/;
+const EXCHANGE_CLIENT_ID_PATTERN = /^[.A-Z:/a-z0-9_-]{1,36}$/;
+const LISTEN_KEY_PATTERN = /^[A-Za-z0-9_-]{20,256}$/;
 const VISIBLE_ASCII_PATTERN = /^[\x21-\x7e]{1,128}$/;
 const LOSSLESS_ID_FIELDS = new Set(['orderId', 'algoId']);
 const RATE_LIMITED_HTTP_STATUSES = new Set([418, 429]);
@@ -200,6 +208,31 @@ const assertFixedUrl = (url, pathname) => {
         || parsed.hash) throw argumentError();
 };
 
+const USER_DATA_STREAM_EVENTS = Object.freeze([
+    'ORDER_TRADE_UPDATE',
+    'ALGO_UPDATE',
+    'ACCOUNT_UPDATE',
+    'ACCOUNT_CONFIG_UPDATE',
+    'listenKeyExpired',
+]);
+const USER_DATA_STREAM_EVENTS_QUERY = USER_DATA_STREAM_EVENTS.join('/');
+
+const assertFixedUserDataStreamUrl = (url, listenKey) => {
+    const parsed = new URL(url);
+    const query = [...parsed.searchParams.entries()];
+    if (parsed.protocol !== 'wss:'
+        || parsed.origin !== FUTURES_PRODUCTION_EXECUTION_WS_ORIGIN
+        || parsed.pathname !== '/private/ws'
+        || query.length !== 2
+        || query[0]?.[0] !== 'listenKey'
+        || query[0]?.[1] !== listenKey
+        || query[1]?.[0] !== 'events'
+        || query[1]?.[1] !== USER_DATA_STREAM_EVENTS_QUERY
+        || parsed.username
+        || parsed.password
+        || parsed.hash) throw argumentError('connectUserDataStream');
+};
+
 const deepFreeze = (value) => {
     if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
         Reflect.ownKeys(value).forEach(key => deepFreeze(value[key]));
@@ -308,6 +341,25 @@ const normalizeServerTime = (body) => {
     return Object.freeze({ serverTime: Number(parsed) });
 };
 
+const normalizeListenKey = (body) => {
+    const source = requireResponseObject(convertWireValue(body));
+    if (Reflect.ownKeys(source).length !== 1
+        || !Object.hasOwn(source, 'listenKey')
+        || typeof source.listenKey !== 'string'
+        || !LISTEN_KEY_PATTERN.test(source.listenKey)) {
+        throw new Error('invalid Futures user-data listen key');
+    }
+    return Object.freeze({ listenKey: source.listenKey });
+};
+
+const normalizeEmptyAcknowledgement = (body) => {
+    const source = requireResponseObject(convertWireValue(body));
+    if (Reflect.ownKeys(source).length !== 0) {
+        throw new Error('invalid Futures user-data acknowledgement');
+    }
+    return Object.freeze({ acknowledged: true });
+};
+
 const normalizeReadData = (body, { operation, symbol = null }) => {
     const converted = convertWireValue(body);
     if (operation === 'exchangeInfo') {
@@ -331,6 +383,12 @@ const normalizeReadData = (body, { operation, symbol = null }) => {
         if (rows.length !== 1 || rows[0]?.symbol !== symbol) {
             throw new Error('invalid symbol config');
         }
+    } else if (operation === 'allSymbolConfig') {
+        if (!Array.isArray(converted)
+            || converted.some(row => typeof row?.symbol !== 'string'
+                || !SYMBOL_PATTERN.test(row.symbol))) {
+            throw new Error('invalid symbol configuration inventory');
+        }
     } else if (operation === 'balance') {
         if (!Array.isArray(converted)) throw new Error('invalid balance');
     } else if (operation === 'allPositionRisk') {
@@ -338,6 +396,13 @@ const normalizeReadData = (body, { operation, symbol = null }) => {
             || converted.some(row => typeof row?.symbol !== 'string'
                 || !SYMBOL_PATTERN.test(row.symbol))) {
             throw new Error('invalid position inventory');
+        }
+    } else if (operation === 'allOpenOrders'
+        || operation === 'allOpenAlgoOrders') {
+        if (!Array.isArray(converted)
+            || converted.some(row => typeof row?.symbol !== 'string'
+                || !SYMBOL_PATTERN.test(row.symbol))) {
+            throw new Error('invalid all-symbol order inventory');
         }
     } else if (operation === 'positionRisk'
         || operation === 'openOrders'
@@ -586,9 +651,11 @@ export const createFuturesProductionExecutionFacade = (config, dependencies) => 
         method,
         entries = [],
         signed,
+        apiKeyRequired = false,
         expected = null,
         responseLimits = FUTURES_PRODUCTION_EXECUTION_RESPONSE_LIMITS,
         allowDecimalNumbers = false,
+        allowEmptySuccessBody = false,
         normalize,
     }) => {
         const form = signed
@@ -619,7 +686,7 @@ export const createFuturesProductionExecutionFacade = (config, dependencies) => 
             const request = {
                 method,
                 headers: {
-                    ...(signed ? { 'X-MBX-APIKEY': apiKey } : {}),
+                    ...(signed || apiKeyRequired ? { 'X-MBX-APIKEY': apiKey } : {}),
                     ...(usesBody
                         ? { 'Content-Type': 'application/x-www-form-urlencoded' }
                         : {}),
@@ -649,21 +716,28 @@ export const createFuturesProductionExecutionFacade = (config, dependencies) => 
                 deadline,
             ]);
             let body;
-            try {
-                body = parseFuturesProductionExecutionJson(
-                    text,
-                    responseLimits,
-                    allowDecimalNumbers,
-                );
-            } catch {
-                throw new FuturesProductionExecutionFacadeError({
-                    kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.AMBIGUOUS,
-                    operation,
-                    endpointId,
-                    status,
-                    rateLimitHeaders,
-                    bodyDigest: digest,
-                });
+            if (allowEmptySuccessBody === true
+                && text.length === 0
+                && status >= 200
+                && status < 300) {
+                body = Object.create(null);
+            } else {
+                try {
+                    body = parseFuturesProductionExecutionJson(
+                        text,
+                        responseLimits,
+                        allowDecimalNumbers,
+                    );
+                } catch {
+                    throw new FuturesProductionExecutionFacadeError({
+                        kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.AMBIGUOUS,
+                        operation,
+                        endpointId,
+                        status,
+                        rateLimitHeaders,
+                        bodyDigest: digest,
+                    });
+                }
             }
             const binanceError = readBinanceError(body);
             if (status < 200 || status >= 300 || binanceError !== null) {
@@ -747,6 +821,111 @@ export const createFuturesProductionExecutionFacade = (config, dependencies) => 
         normalize: body => normalizeReadData(body, { operation: 'exchangeInfo' }),
     });
 
+    const startUserDataStream = () => execute({
+        operation: 'startUserDataStream',
+        endpointId: 'user-data-stream-start',
+        pathname: '/fapi/v1/listenKey',
+        method: 'POST',
+        signed: false,
+        apiKeyRequired: true,
+        normalize: normalizeListenKey,
+    });
+
+    const keepAliveUserDataStream = () => execute({
+        operation: 'keepAliveUserDataStream',
+        endpointId: 'user-data-stream-keepalive',
+        pathname: '/fapi/v1/listenKey',
+        method: 'PUT',
+        signed: false,
+        apiKeyRequired: true,
+        normalize: normalizeListenKey,
+    });
+
+    const closeUserDataStream = () => execute({
+        operation: 'closeUserDataStream',
+        endpointId: 'user-data-stream-close',
+        pathname: '/fapi/v1/listenKey',
+        method: 'DELETE',
+        signed: false,
+        apiKeyRequired: true,
+        allowEmptySuccessBody: true,
+        normalize: normalizeEmptyAcknowledgement,
+    });
+
+    const connectUserDataStream = (value) => {
+        const args = readExactDataProperties(
+            value,
+            ['listenKey', 'onMessage', 'onDisconnect'],
+            'connectUserDataStream',
+        );
+        if (typeof args.listenKey !== 'string'
+            || !LISTEN_KEY_PATTERN.test(args.listenKey)
+            || typeof args.onMessage !== 'function'
+            || typeof args.onDisconnect !== 'function') {
+            throw argumentError('connectUserDataStream');
+        }
+        const streamUrl = new URL('/private/ws', FUTURES_PRODUCTION_EXECUTION_WS_ORIGIN);
+        streamUrl.searchParams.set('listenKey', args.listenKey);
+        streamUrl.searchParams.set('events', USER_DATA_STREAM_EVENTS_QUERY);
+        const url = streamUrl.toString();
+        assertFixedUserDataStreamUrl(url, args.listenKey);
+        const socket = new WebSocket(url, {
+            followRedirects: false,
+            handshakeTimeout: OPERATION_DEADLINE_MS,
+            maxPayload: USER_DATA_STREAM_MAX_BYTES,
+            perMessageDeflate: false,
+        });
+        let closed = false;
+        let opened = false;
+        let settleReady;
+        let rejectReady;
+        const ready = new Promise((resolve, reject) => {
+            settleReady = resolve;
+            rejectReady = reject;
+        });
+        const streamError = () => new FuturesProductionExecutionFacadeError({
+            kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.AMBIGUOUS,
+            operation: 'connectUserDataStream',
+            endpointId: 'user-data-stream-websocket',
+        });
+        socket.once('open', () => {
+            if (closed) return;
+            opened = true;
+            settleReady(true);
+        });
+        socket.on('message', (data, isBinary) => {
+            if (closed) return;
+            const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data);
+            if (isBinary === true || bytes.byteLength > USER_DATA_STREAM_MAX_BYTES) {
+                try { socket.close(1009, 'unsupported frame'); } catch { /* terminal */ }
+                return;
+            }
+            try {
+                args.onMessage(bytes.toString('utf8'));
+            } catch {
+                try { socket.close(1008, 'invalid event'); } catch { /* terminal */ }
+            }
+        });
+        socket.once('error', () => {
+            if (!opened) rejectReady(streamError());
+        });
+        socket.once('close', () => {
+            if (closed) return;
+            closed = true;
+            if (!opened) rejectReady(streamError());
+            args.onDisconnect('FUTURES_PRODUCTION_ACCOUNT_STREAM_DISCONNECTED');
+        });
+        return Object.freeze({
+            ready,
+            close: () => {
+                if (closed) return;
+                closed = true;
+                if (!opened) rejectReady(streamError());
+                try { socket.close(1000, 'service shutdown'); } catch { /* terminal */ }
+            },
+        });
+    };
+
     const getMarkPrice = (symbolValue) => {
         const symbol = requireSymbol(symbolValue, allowedSymbols, 'markPrice');
         return execute({
@@ -790,6 +969,15 @@ export const createFuturesProductionExecutionFacade = (config, dependencies) => 
         pathname: '/fapi/v1/symbolConfig',
         symbolValue: symbol,
     });
+    const getAllSymbolConfig = () => execute({
+        operation: 'allSymbolConfig',
+        endpointId: 'all-symbol-config',
+        pathname: '/fapi/v1/symbolConfig',
+        method: 'GET',
+        signed: true,
+        responseLimits: FUTURES_PRODUCTION_EXECUTION_INVENTORY_RESPONSE_LIMITS,
+        normalize: body => normalizeReadData(body, { operation: 'allSymbolConfig' }),
+    });
     const getPositionRisk = symbol => signedSymbolRead({
         operation: 'positionRisk',
         endpointId: 'position-risk',
@@ -802,6 +990,7 @@ export const createFuturesProductionExecutionFacade = (config, dependencies) => 
         pathname: '/fapi/v3/positionRisk',
         method: 'GET',
         signed: true,
+        responseLimits: FUTURES_PRODUCTION_EXECUTION_INVENTORY_RESPONSE_LIMITS,
         normalize: body => normalizeReadData(body, { operation: 'allPositionRisk' }),
     });
     const getOpenOrders = symbol => signedSymbolRead({
@@ -810,11 +999,29 @@ export const createFuturesProductionExecutionFacade = (config, dependencies) => 
         pathname: '/fapi/v1/openOrders',
         symbolValue: symbol,
     });
+    const getAllOpenOrders = () => execute({
+        operation: 'allOpenOrders',
+        endpointId: 'all-open-orders',
+        pathname: '/fapi/v1/openOrders',
+        method: 'GET',
+        signed: true,
+        responseLimits: FUTURES_PRODUCTION_EXECUTION_INVENTORY_RESPONSE_LIMITS,
+        normalize: body => normalizeReadData(body, { operation: 'allOpenOrders' }),
+    });
     const getOpenAlgoOrders = symbol => signedSymbolRead({
         operation: 'openAlgoOrders',
         endpointId: 'open-algo-orders',
         pathname: '/fapi/v1/openAlgoOrders',
         symbolValue: symbol,
+    });
+    const getAllOpenAlgoOrders = () => execute({
+        operation: 'allOpenAlgoOrders',
+        endpointId: 'all-open-algo-orders',
+        pathname: '/fapi/v1/openAlgoOrders',
+        method: 'GET',
+        signed: true,
+        responseLimits: FUTURES_PRODUCTION_EXECUTION_INVENTORY_RESPONSE_LIMITS,
+        normalize: body => normalizeReadData(body, { operation: 'allOpenAlgoOrders' }),
     });
 
     const getBalance = () => execute({
@@ -967,7 +1174,7 @@ export const createFuturesProductionExecutionFacade = (config, dependencies) => 
         if (!['BUY', 'SELL'].includes(args.side)
             || !['LONG', 'SHORT'].includes(args.positionSide)
             || typeof args.clientOrderId !== 'string'
-            || !CLIENT_ID_PATTERN.test(args.clientOrderId)) throw argumentError(operation);
+            || !EXCHANGE_CLIENT_ID_PATTERN.test(args.clientOrderId)) throw argumentError(operation);
         parsePositiveExactDecimal(args.quantity);
         parsePositiveExactDecimal(args.price);
         return execute({
@@ -1000,7 +1207,7 @@ export const createFuturesProductionExecutionFacade = (config, dependencies) => 
         const symbol = requireSymbol(args.symbol, allowedSymbols, operation);
         if (!['LONG', 'SHORT'].includes(args.positionSide)
             || typeof args.originalClientOrderId !== 'string'
-            || !CLIENT_ID_PATTERN.test(args.originalClientOrderId)) {
+            || !EXCHANGE_CLIENT_ID_PATTERN.test(args.originalClientOrderId)) {
             throw argumentError(operation);
         }
         return execute({
@@ -1050,15 +1257,22 @@ export const createFuturesProductionExecutionFacade = (config, dependencies) => 
 
     return Object.freeze({
         getServerTime,
+        startUserDataStream,
+        keepAliveUserDataStream,
+        closeUserDataStream,
+        connectUserDataStream,
         getExchangeInfo,
         getMarkPrice,
         getAccountConfig,
         getSymbolConfig,
+        getAllSymbolConfig,
         getBalance,
         getPositionRisk,
         getAllPositionRisk,
         getOpenOrders,
+        getAllOpenOrders,
         getOpenAlgoOrders,
+        getAllOpenAlgoOrders,
         getPositionMarginHistory,
         modifyIsolatedPositionMargin,
         placeLimitGtcOrder,

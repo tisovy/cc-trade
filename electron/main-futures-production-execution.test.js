@@ -37,8 +37,21 @@ describe('Electron futures production execution composition boundaries', () => {
     expect(productionMain).not.toContain("'futures-testnet-execution'")
     expect(productionMain).toContain("key.startsWith('FUTURES_TESTNET_')")
     expect(productionMain).toContain('await binanceController.productionExecutionReady')
-    expect(productionMain.indexOf('await binanceController.productionExecutionReady'))
-      .toBeLessThan(productionMain.indexOf('  createWindow()'))
+    expect(productionMain).toContain('if (futuresProductionOperatorStartup.requested) {')
+  })
+
+  it('does not gate the ordinary BrowserWindow on private execution startup', () => {
+    const guardedRecovery = productionMain.match(
+      /if \(futuresProductionOperatorStartup\.requested\) \{([\s\S]*?)\n {2}\}/,
+    )
+    expect(guardedRecovery).not.toBeNull()
+    expect(guardedRecovery[1]).toContain(
+      'await binanceController.productionExecutionReady',
+    )
+    expect(productionMain.replace(guardedRecovery[0], ''))
+      .not.toContain('await binanceController.productionExecutionReady')
+    expect(productionMain.indexOf('  createWindow()'))
+      .toBeGreaterThan(productionMain.indexOf(guardedRecovery[0]))
   })
 
   it('captures backend-only operator recovery before the window and fails closed', () => {

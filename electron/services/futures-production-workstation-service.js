@@ -327,13 +327,7 @@ export class FuturesProductionWorkstationService {
             if (!this.isCurrent(session)) return;
             this.emitAggregateTiming(session, 'error');
             this.onInternalError({ phase: 'bootstrap', code: safeCode(error) });
-            this.emitStatus(
-                session,
-                FUTURES_WORKSTATION_STATES.UNAVAILABLE,
-                false,
-                safeCode(error),
-            );
-            this.haltSession(session);
+            this.scheduleResync(session, safeCode(error));
         }
     }
 

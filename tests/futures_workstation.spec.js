@@ -26,7 +26,7 @@ const waitForLiveWorkstation = async (mainWindow, identityText) => {
     return identity;
 };
 
-test('red Production workstation remains isolated and market widgets have no execution action', async ({ browserName: _browserName }, testInfo) => {
+test('Futures Live is ready, keeps contracts visible and executes only mocked gestures', async ({ browserName: _browserName }, testInfo) => {
     const { electronApp, mainWindow } = await launchWorkstation();
 
     try {
@@ -44,15 +44,16 @@ test('red Production workstation remains isolated and market widgets have no exe
         await expect(tradingRail).toBeVisible();
         await expect(tradingRail.getByRole('tab', { name: 'Trade' }))
             .toHaveAttribute('aria-selected', 'true');
-        await expect(tradingRail.getByRole('tab', { name: /^Orders 0$/ })).toBeVisible();
+        await expect(tradingRail.locator('.futures-production-readiness')).toContainText('READY');
+        await expect(tradingRail.locator('.futures-production-readiness'))
+            .toContainText('Gesture execution ready');
+        await expect(tradingRail.getByRole('tab', { name: /^Orders 1$/ })).toBeVisible();
+        await expect(mainWindow.getByText('Gesture trading', { exact: true })).toHaveCount(0);
         await expect(tradingRail.getByRole('button', {
             name: /Enter LONG|Exit LONG|Enter SHORT|Exit SHORT/i,
         })).toHaveCount(0);
-        await expect(tradingRail.getByRole('slider', { name: 'Order size percent' }))
-            .toBeDisabled();
-        await expect(tradingRail).toContainText(
-            'Live sizing limits are unavailable — execution is blocked',
-        );
+        const sizeSlider = tradingRail.getByRole('slider', { name: 'Order size percent' });
+        await expect(sizeSlider).toBeEnabled();
         await expect(mainWindow.locator('.futures-workstation-safety-drawer')).toHaveCount(0);
         await expect(mainWindow.locator('.futures-production-execution-header strong'))
             .toContainText('ISOLATED · 2× · HEDGE');
@@ -65,11 +66,90 @@ test('red Production workstation remains isolated and market widgets have no exe
             .textContent();
         expect(productionLast).toMatch(/^\d+(?:\.\d+)?$/);
 
+        await tradingRail.getByRole('tab', { name: /^Orders 1$/ }).click();
+        const currentOrders = tradingRail.getByLabel('Current Futures orders');
+        await expect(currentOrders).toContainText('BTCUSDT');
+        await expect(currentOrders).toContainText('BUY · LONG');
+        await expect(currentOrders).toContainText('LIMIT');
+        await expect(currentOrders).toContainText('58445.00');
+        await expect(currentOrders).toContainText('NEW');
+        await expect(currentOrders).toContainText('Original qty');
+        await expect(currentOrders).toContainText('Filled qty');
+        await expect(currentOrders).toContainText('0.004');
+        await tradingRail.getByRole('tab', { name: 'Trade' }).click();
+
+        const externalOrderLine = mainWindow.getByRole('button', {
+            name: /Move LONG ENTRY order at 58445\.00 with Ctrl or Alt drag/,
+        });
+        await expect(externalOrderLine).toBeVisible();
+        const lineBox = await externalOrderLine.boundingBox();
+        expect(lineBox).not.toBeNull();
+        await mainWindow.keyboard.down('Control');
+        await mainWindow.mouse.move(
+            lineBox.x + (lineBox.width / 2),
+            lineBox.y + (lineBox.height / 2),
+        );
+        await mainWindow.mouse.down();
+        await mainWindow.mouse.move(
+            lineBox.x + (lineBox.width / 2),
+            lineBox.y + (lineBox.height / 2) + 28,
+            { steps: 4 },
+        );
+        await mainWindow.mouse.up();
+        await mainWindow.keyboard.up('Control');
+        await expect(externalOrderLine).toHaveCount(0);
+        const movedExternalOrderLine = mainWindow.locator('.futures-workstation-owned-order');
+        await expect(movedExternalOrderLine).toHaveCount(1);
+        await expect(movedExternalOrderLine).toBeVisible();
+        await expect(movedExternalOrderLine).not.toHaveAttribute('aria-label', /at 58445\.00/);
+        await expect(tradingRail.getByRole('tab', { name: /^Orders 1$/ })).toBeVisible();
+
+        const btcAsk = mainWindow.locator('.futures-workstation-book-side.is-ask button').first();
+        await btcAsk.click();
+        await sizeSlider.fill('100');
+        await expect(tradingRail.locator('.futures-production-size-slider output'))
+            .toContainText('100%');
+        await expect(tradingRail.getByLabel('Order notional USDT')).toHaveValue('10');
+        await expect(tradingRail.locator('.futures-production-draft-reason'))
+            .toContainText('below the Binance minimum quantity');
+        await expect(tradingRail.locator('.futures-production-order-summary'))
+            .toContainText('Safe limit10 USDT');
+
+        const contractList = mainWindow.locator('.futures-workstation-contract-list');
+        await expect(contractList).toBeVisible();
+        const initialContractListBox = await contractList.boundingBox();
+        expect(initialContractListBox).not.toBeNull();
+        expect(initialContractListBox.width).toBeGreaterThan(100);
+        expect(initialContractListBox.height).toBeGreaterThan(100);
+        const selectContract = symbol => contractList
+            .locator('.futures-workstation-contract-select')
+            .filter({ hasText: symbol });
+        await selectContract('ETHUSDT').click();
+        await expect(mainWindow.getByLabel('Futures market header')).toContainText('ETHUSDT');
+        const ask = mainWindow.locator('.futures-workstation-book-side.is-ask button').first();
+        await ask.click();
+        await sizeSlider.fill('100');
+        await expect(tradingRail.locator('.futures-production-size-slider output'))
+            .toContainText('100%');
+        await expect(tradingRail.getByLabel('Order notional USDT')).toHaveValue('10');
+        const orderSummary = tradingRail.locator('.futures-production-order-summary');
+        await expect(orderSummary).toContainText('Quantity');
+        await expect(orderSummary).toContainText('Est. margin');
+        expect(await orderSummary.textContent()).not.toMatch(/Quantity—|Est\. margin—/);
+
+        await ask.dblclick({ modifiers: ['Alt'] });
+        await expect(tradingRail.getByRole('tab', { name: /^Orders 1$/ })).toBeVisible();
+
+        const generationBeforeInterval = Number(
+            (await identity.locator('code').textContent())?.match(/^gen (\d+)/)?.[1],
+        );
         await mainWindow.locator('.futures-production-workstation')
             .getByRole('button', { name: '5m', exact: true })
             .click();
         await expect(identity).toContainText('LIVE');
-        await expect(identity.locator('code')).toContainText('gen 2');
+        await expect.poll(async () => Number(
+            (await identity.locator('code').textContent())?.match(/^gen (\d+)/)?.[1],
+        )).toBe(generationBeforeInterval + 1);
         await expect(mainWindow.locator('.futures-production-workstation')
             .getByRole('button', { name: '5m', exact: true }))
             .toHaveAttribute('aria-pressed', 'true');
@@ -86,26 +166,45 @@ test('red Production workstation remains isolated and market widgets have no exe
             /place|submit|cancel all|close positions|kill switch|prepare.*intent/i,
         );
 
-        const search = mainWindow.getByLabel('Search Futures contracts');
-        await search.fill('ETH');
-        await search.press('Enter');
-        await expect(mainWindow.getByLabel('Futures market header')).toContainText('BTCUSDT');
-        await expect(mainWindow.getByLabel('Backend production intent')).toHaveCount(0);
-
-        const ask = mainWindow.locator('.futures-workstation-book-side.is-ask button').first();
-        await ask.click();
-        const draft = mainWindow.getByLabel('Futures limit price draft');
-        await expect(draft).toContainText(
-            'DRAFT · INTENT + CONFIRMATION REQUIRED',
-        );
-        await expect(mainWindow.getByLabel('Backend production intent')).toHaveCount(0);
-        const ownerBeforeSymbolSwitch = await identity.locator('code').textContent();
-        await mainWindow.getByRole('button', { name: /^ETHUSDT/ }).click();
-        await expect(mainWindow.getByLabel('Futures market header')).toContainText('ETHUSDT');
+        await expect(contractList.locator('.futures-workstation-contract')).toHaveCount(3);
+        await contractList.evaluate((element) => {
+            const samples = [];
+            const record = () => samples.push(
+                element.querySelectorAll('.futures-workstation-contract').length,
+            );
+            const observer = new MutationObserver(record);
+            record();
+            observer.observe(element, { childList: true, subtree: true });
+            globalThis.__futuresContractsProbe = { samples, observer };
+        });
+        await selectContract('BTCUSDT').click();
+        await selectContract('ETHUSDT').click();
+        await selectContract('SOLUSDT').click();
+        await expect(mainWindow.getByLabel('Futures market header')).toContainText('SOLUSDT');
         await expect(identity).toContainText('LIVE');
-        await expect(identity.locator('code')).not.toHaveText(ownerBeforeSymbolSwitch);
-        await expect(draft).toContainText('Pick chart or book price');
-        await attachScreenshot(mainWindow, testInfo, 'red-production-desktop');
+        await mainWindow.waitForTimeout(250);
+        const contractSamples = await contractList.evaluate(() => {
+            const probe = globalThis.__futuresContractsProbe;
+            probe?.observer?.disconnect();
+            delete globalThis.__futuresContractsProbe;
+            return probe?.samples ?? [];
+        });
+        expect(contractSamples.length).toBeGreaterThan(0);
+        expect(Math.min(...contractSamples)).toBeGreaterThan(0);
+        const contractRows = contractList.locator('.futures-workstation-contract');
+        await expect(contractRows).toHaveCount(3);
+        expect(await contractRows.evaluateAll(rows => rows.map((row) => {
+            const bounds = row.getBoundingClientRect();
+            return bounds.width > 0 && bounds.height > 0;
+        }))).toEqual([true, true, true]);
+        await selectContract('BTCUSDT').click();
+        await expect(mainWindow.getByLabel('Futures market header')).toContainText('BTCUSDT');
+
+        const chart = mainWindow.getByTestId('futures-workstation-chart');
+        await expect(chart).not.toContainText(/\bLIMIT\b/);
+        await expect(mainWindow.locator('.futures-workstation-chart [aria-label*="LIMIT"]'))
+            .toHaveCount(0);
+        await attachScreenshot(mainWindow, testInfo, 'futures-ready-desktop');
 
         await mainWindow.setViewportSize({ width: 540, height: 760 });
         await expect(identity).toBeInViewport();
@@ -114,7 +213,61 @@ test('red Production workstation remains isolated and market widgets have no exe
             document.documentElement.scrollWidth > document.documentElement.clientWidth
         ));
         expect(hasHorizontalOverflow).toBe(false);
-        await attachScreenshot(mainWindow, testInfo, 'red-production-narrow');
+        await attachScreenshot(mainWindow, testInfo, 'futures-ready-narrow');
+    } finally {
+        await electronApp.close();
+    }
+});
+
+test('Ctrl and Alt double-right gestures bypass the native menu exactly once', async () => {
+    const { electronApp, mainWindow } = await launchWorkstation();
+
+    try {
+        await mainWindow.getByTestId('market-mode-futures-live').click();
+        await waitForLiveWorkstation(mainWindow, 'USDⓈ-M PRODUCTION · REAL MONEY');
+        const tradingRail = mainWindow.getByLabel('USDⓈ-M production real-order execution');
+        await expect(tradingRail.locator('.futures-production-readiness')).toContainText('READY');
+        await electronApp.evaluate(({ BrowserWindow }) => {
+            const [window] = BrowserWindow.getAllWindows();
+            if (!window) throw new Error('Missing Futures E2E BrowserWindow');
+            window.webContents.__futuresNativeContextMenuCount = 0;
+            window.webContents.on('context-menu', () => {
+                window.webContents.__futuresNativeContextMenuCount += 1;
+            });
+        });
+
+        const chart = mainWindow.getByTestId('futures-workstation-chart');
+        await chart.dblclick({
+            button: 'right',
+            modifiers: ['Alt'],
+            position: { x: 220, y: 130 },
+        });
+        await expect(tradingRail.locator('.futures-production-ticket-symbol code'))
+            .toHaveText('LONG exit');
+        await expect(tradingRail.getByLabel('Exact limit price')).not.toHaveValue('');
+        await expect(tradingRail.locator('.futures-production-order-summary'))
+            .toContainText('LONG leg');
+
+        const contractList = mainWindow.locator('.futures-workstation-contract-list');
+        await contractList.locator('.futures-workstation-contract-select')
+            .filter({ hasText: 'ETHUSDT' })
+            .click();
+        await expect(mainWindow.getByLabel('Futures market header')).toContainText('ETHUSDT');
+        await expect(mainWindow.locator('.futures-workstation-chart-frame .futures-workstation-overlay'))
+            .toHaveCount(0);
+        const sizeSlider = tradingRail.getByRole('slider', { name: 'Order size percent' });
+        await sizeSlider.fill('100');
+        const bid = mainWindow.locator('.futures-workstation-book-side.is-bid button').first();
+        await bid.dblclick({ button: 'right', modifiers: ['Control'] });
+        await expect(tradingRail.locator('.futures-production-ticket-symbol code'))
+            .toHaveText('SHORT entry');
+        await expect(tradingRail.getByRole('tab', { name: /^Orders 1$/ })).toBeVisible();
+
+        const nativeContextMenuCount = await electronApp.evaluate(({ BrowserWindow }) => {
+            const [window] = BrowserWindow.getAllWindows();
+            return window?.webContents.__futuresNativeContextMenuCount ?? -1;
+        });
+        expect(nativeContextMenuCount).toBe(0);
     } finally {
         await electronApp.close();
     }

@@ -27,6 +27,9 @@ const createState = (overrides = {}) => ({
   account: { alias: 'reviewed-account-1', fingerprint: FINGERPRINT },
   caps: {
     allowedSymbols: ['BTCUSDT'],
+    symbolConfigurations: [{
+      symbol: 'BTCUSDT', marginType: 'ISOLATED', leverage: 2, isAutoAddMargin: false,
+    }],
     maxLeverage: 2,
     maxOrderNotionalUsdt: '10',
     maxDailyNotionalUsdt: '50',
@@ -50,7 +53,15 @@ const createState = (overrides = {}) => ({
   attempt: null,
   reconciliation: null,
   recovery: { required: false, state: 'healthy', code: 'FUTURES_PRODUCTION_RECOVERY_HEALTHY' },
-  portfolio: { state: 'live', observedAt: 1_783_957_600_000, positions: [], openOrders: [] },
+  portfolio: {
+    state: 'live',
+    syncState: 'live',
+    syncCode: 'FUTURES_PRODUCTION_USER_STREAM_LIVE',
+    observedAt: 1_783_957_600_000,
+    availableBalanceUsdt: '15',
+    positions: [],
+    openOrders: [],
+  },
   ...overrides,
 })
 
@@ -63,18 +74,28 @@ const createIntent = kind => ({
 
 const hedgePortfolio = Object.freeze({
   state: 'live',
+  syncState: 'live',
+  syncCode: 'FUTURES_PRODUCTION_USER_STREAM_LIVE',
   observedAt: 1_783_957_600_000,
+  availableBalanceUsdt: '15',
   openOrders: [],
   positions: Object.freeze([
-    Object.freeze({ symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '0.001' }),
-    Object.freeze({ symbol: 'BTCUSDT', positionSide: 'SHORT', quantity: '0.001' }),
+    Object.freeze({
+      symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '0.001',
+      marginType: 'ISOLATED', leverage: 2,
+    }),
+    Object.freeze({
+      symbol: 'BTCUSDT', positionSide: 'SHORT', quantity: '0.001',
+      marginType: 'ISOLATED', leverage: 2,
+    }),
   ]),
 })
 
-const ownedOrder = Object.freeze({
+const externalOrder = Object.freeze({
   symbol: 'BTCUSDT',
+  orderKind: 'REGULAR',
   orderId: '123456789',
-  clientOrderId: `cc7-${REQUEST_ID}`,
+  clientOrderId: 'external-mobile-order-42',
   side: 'SELL',
   positionSide: 'LONG',
   positionEffect: 'EXIT',
@@ -84,6 +105,9 @@ const ownedOrder = Object.freeze({
   status: 'PARTIALLY_FILLED',
   type: 'LIMIT',
   timeInForce: 'GTC',
+  isAppOwned: false,
+  updateTime: 1_783_957_600_000,
+  syncState: 'synced',
 })
 
 const callbacks = (overrides = {}) => ({
@@ -127,9 +151,13 @@ describe('FuturesProductionExecutionTicket', () => {
     renderTicket()
     expect(screen.getByText('FUTURES · USDⓈ-M')).toBeInTheDocument()
     expect(screen.getByText('ISOLATED · 2× · HEDGE')).toBeInTheDocument()
-    expect(screen.getByText('ARMED')).toBeInTheDocument()
+    expect(screen.getByText('READY')).toBeInTheDocument()
+    expect(screen.getByText('Gesture execution ready.')).toBeInTheDocument()
     expect(screen.getByRole('tab', { name: 'Trade' })).toHaveAttribute('aria-selected', 'true')
     expect(screen.queryByRole('button', { name: /Enter LONG|Exit LONG|Enter SHORT|Exit SHORT/i }))
+      .not.toBeInTheDocument()
+    expect(screen.queryByText(/Gesture trading/i)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Place real futures order|Move real futures order/i }))
       .not.toBeInTheDocument()
     const safety = screen.getByText('Advanced safety').closest('details')
     expect(safety).not.toHaveAttribute('open')
@@ -139,6 +167,107 @@ describe('FuturesProductionExecutionTicket', () => {
     )
   })
 
+  it.each([
+    { symbolConfigurations: [], label: 'CONFIG', reason: 'BTCUSDT Futures configuration is pending' },
+    {
+      symbolConfigurations: [{
+        symbol: 'BTCUSDT', marginType: 'CROSSED', leverage: 2, isAutoAddMargin: false,
+      }],
+      label: 'MARGIN',
+      reason: 'BTCUSDT uses Cross margin',
+    },
+    {
+      symbolConfigurations: [{
+        symbol: 'BTCUSDT', marginType: 'ISOLATED', leverage: 2, isAutoAddMargin: true,
+      }],
+      label: 'AUTO ADD',
+      reason: 'BTCUSDT auto-add margin is enabled',
+    },
+    {
+      symbolConfigurations: [{
+        symbol: 'BTCUSDT', marginType: 'ISOLATED', leverage: 20, isAutoAddMargin: false,
+      }],
+      label: 'LEVERAGE',
+      reason: 'BTCUSDT leverage is 20×',
+    },
+  ])('explains an actionable $label symbol-configuration gate', ({
+    symbolConfigurations,
+    label,
+    reason,
+  }) => {
+    renderTicket({
+      state: createState({
+        caps: { ...createState().caps, symbolConfigurations },
+      }),
+    })
+    expect(screen.getByText(label)).toBeInTheDocument()
+    expect(screen.getAllByText(new RegExp(reason)).length).toBeGreaterThan(0)
+  })
+
+  it('becomes gesture-ready when the selected Binance symbol configuration arrives', () => {
+    const baseCaps = createState().caps
+    const { rerender } = render(
+      <FuturesProductionExecutionTicket
+        state={createState({ caps: { ...baseCaps, symbolConfigurations: [] } })}
+        selectedSymbol="BTCUSDT"
+        selectedContract={selectedContract}
+      />,
+    )
+    expect(screen.getByText('CONFIG')).toBeInTheDocument()
+    rerender(<FuturesProductionExecutionTicket
+      state={createState()}
+      selectedSymbol="BTCUSDT"
+      selectedContract={selectedContract}
+    />)
+    expect(screen.getByText('READY')).toBeInTheDocument()
+  })
+
+  it('does not report READY when Binance contract filters are unavailable', () => {
+    renderTicket({ selectedContract: null })
+    expect(screen.getByText('METADATA')).toBeInTheDocument()
+    expect(screen.getByText('Binance symbol metadata is unavailable — retry the contract refresh.'))
+      .toBeInTheDocument()
+    expect(screen.queryByText('READY')).not.toBeInTheDocument()
+  })
+
+  it('shows an actionable account reason after Binance rejects private identity', () => {
+    renderTicket({
+      state: createState({
+        capabilities: {
+          ...createState().capabilities,
+          placeOrder: false,
+          code: 'FUTURES_PRODUCTION_ACCOUNT_IDENTITY_REJECTED',
+        },
+      }),
+    })
+    expect(screen.getByText('ACCOUNT')).toBeInTheDocument()
+    expect(screen.getByText(/verify Futures API access, Hedge Mode, and single-asset margin/))
+      .toBeInTheDocument()
+  })
+
+  it('explains and blocks a selected symbol outside the execution allowlist', async () => {
+    const handlers = callbacks()
+    renderTicket({
+      handlers,
+      selectedSymbol: 'ETHUSDT',
+      draftPrice: '3500',
+      gestureRequest: {
+        id: 1,
+        side: 'BUY',
+        positionSide: 'LONG',
+        positionEffect: 'ENTRY',
+        price: '3500',
+      },
+    })
+
+    expect(screen.getByText('SYMBOL')).toBeInTheDocument()
+    expect(screen.getByText(
+      'ETHUSDT is not enabled for live execution — select an allowed contract.',
+    )).toBeInTheDocument()
+    expect(screen.getByRole('slider', { name: 'Order size percent' })).toBeDisabled()
+    await waitFor(() => expect(handlers.onPrepareOrderIntent).not.toHaveBeenCalled())
+  })
+
   it('synchronizes the percentage and USDT controls and derives exact 2x margin', async () => {
     renderTicket({ draftPrice: '7000.09' })
     expect(screen.getByRole('textbox', { name: 'Order notional USDT' })).toHaveValue('2.5')
@@ -146,11 +275,35 @@ describe('FuturesProductionExecutionTicket', () => {
       target: { value: '100' },
     })
     await waitFor(() => expect(screen.getByRole('textbox', { name: 'Order notional USDT' })).toHaveValue('10'))
-    const order = screen.getByLabelText('Futures gesture trading controls')
+    const order = screen.getByLabelText('Futures order size and shortcuts')
     expect(order).toHaveTextContent('100%10 USDT')
     expect(order).toHaveTextContent('Price7000')
     expect(order).toHaveTextContent('Quantity0.001')
     expect(order).toHaveTextContent('Est. margin3.5 USDT')
+    expect(order).toHaveTextContent('Available15 USDT')
+  })
+
+  it('immediately rebases percent, USDT, quantity, and margin on available account balance', async () => {
+    renderTicket({
+      state: createState({
+        portfolio: {
+          ...createState().portfolio,
+          availableBalanceUsdt: '13.5',
+        },
+      }),
+      draftPrice: '7000.09',
+    })
+    expect(screen.getByRole('textbox', { name: 'Order notional USDT' })).toHaveValue('1.75')
+    fireEvent.change(screen.getByRole('slider', { name: 'Order size percent' }), {
+      target: { value: '100' },
+    })
+    await waitFor(() => expect(screen.getByRole('textbox', { name: 'Order notional USDT' })).toHaveValue('7'))
+    const order = screen.getByLabelText('Futures order size and shortcuts')
+    expect(order).toHaveTextContent('100%7 USDT')
+    expect(order).toHaveTextContent('Quantity0.001')
+    expect(order).toHaveTextContent('Est. margin3.5 USDT')
+    expect(order).toHaveTextContent('Available13.5 USDT')
+    expect(order).toHaveTextContent('Safe limit7 USDT')
   })
 
   it.each([
@@ -158,7 +311,7 @@ describe('FuturesProductionExecutionTicket', () => {
     ['LONG exit', 'SELL', 'LONG', 'EXIT'],
     ['SHORT entry', 'SELL', 'SHORT', 'ENTRY'],
     ['SHORT exit', 'BUY', 'SHORT', 'EXIT'],
-  ])('prepares the exact %s Hedge draft only from its gesture', async (
+  ])('prepares and automatically finalizes the exact %s Hedge draft once', async (
     label,
     side,
     positionSide,
@@ -174,14 +327,15 @@ describe('FuturesProductionExecutionTicket', () => {
     }
     const { rerender } = render(<FuturesProductionExecutionTicket {...base} />)
     selectFullSize()
-    rerender(<FuturesProductionExecutionTicket {...base} gestureRequest={{
+    const gestureRequest = {
       id: 1,
       price: '7000',
       side,
       positionSide,
       positionEffect,
       source: 'chart',
-    }} />)
+    }
+    rerender(<FuturesProductionExecutionTicket {...base} gestureRequest={gestureRequest} />)
     await waitFor(() => expect(handlers.onPrepareOrderIntent).toHaveBeenCalledExactlyOnceWith({
       symbol: 'BTCUSDT',
       side,
@@ -192,36 +346,88 @@ describe('FuturesProductionExecutionTicket', () => {
     }))
     expect(screen.getByText(label, { selector: 'code' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: new RegExp(label, 'i') })).not.toBeInTheDocument()
+    rerender(<FuturesProductionExecutionTicket
+      {...base}
+      state={createState({
+        revision: '2',
+        portfolio: hedgePortfolio,
+        intent: createIntent('order'),
+      })}
+      gestureRequest={gestureRequest}
+    />)
+    const confirmation = FUTURES_PRODUCTION_EXECUTION_CONFIRMATIONS['futures.production.placeOrder']
+    await waitFor(() => expect(handlers.onPlaceOrder).toHaveBeenCalledExactlyOnceWith(confirmation))
+    rerender(<FuturesProductionExecutionTicket
+      {...base}
+      state={createState({
+        revision: '2',
+        portfolio: hedgePortfolio,
+        intent: createIntent('order'),
+      })}
+      gestureRequest={gestureRequest}
+    />)
+    expect(handlers.onPlaceOrder).toHaveBeenCalledTimes(1)
   })
 
-  it('turns a recognized shortcut into one prepared intent and never a final submit', async () => {
+  it('never auto-finalizes an order intent that did not originate from a recognized shortcut', async () => {
     const handlers = callbacks()
+    renderTicket({
+      state: createState({ revision: '2', intent: createIntent('order') }),
+      handlers,
+      draftPrice: '7000',
+    })
+    await waitFor(() => expect(handlers.onPrepareOrderIntent).not.toHaveBeenCalled())
+    expect(handlers.onPlaceOrder).not.toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: 'Place real futures order' })).not.toBeInTheDocument()
+  })
+
+  it('does not finalize a delayed gesture intent after the selected pair changes', async () => {
+    const handlers = callbacks()
+    const initialState = createState()
+    const multiSymbolCaps = {
+      ...initialState.caps,
+      allowedSymbols: ['BTCUSDT', 'ETHUSDT'],
+      symbolConfigurations: [
+        ...initialState.caps.symbolConfigurations,
+        { symbol: 'ETHUSDT', marginType: 'ISOLATED', leverage: 2, isAutoAddMargin: false },
+      ],
+    }
     const base = {
-      state: createState(),
+      state: createState({ caps: multiSymbolCaps }),
       selectedSymbol: 'BTCUSDT',
       selectedContract,
       draftPrice: '7000',
       ...handlers,
     }
-    const { rerender } = render(<FuturesProductionExecutionTicket {...base} />)
-    selectFullSize()
-    rerender(<FuturesProductionExecutionTicket {...base} gestureRequest={{
-      id: 1,
+    const gestureRequest = {
+      id: 91,
       price: '7000',
-      side: 'SELL',
-      positionSide: 'SHORT',
+      side: 'BUY',
+      positionSide: 'LONG',
       positionEffect: 'ENTRY',
       source: 'chart',
-    }} />)
-    await waitFor(() => expect(handlers.onPrepareOrderIntent).toHaveBeenCalledTimes(1))
-    expect(handlers.onPrepareOrderIntent).toHaveBeenCalledWith(expect.objectContaining({
-      side: 'SELL', positionSide: 'SHORT', positionEffect: 'ENTRY',
-    }))
-    expect(screen.getByText('SHORT entry', { selector: 'code' })).toBeInTheDocument()
+    }
+    const { rerender } = render(<FuturesProductionExecutionTicket {...base} />)
+    selectFullSize()
+    rerender(<FuturesProductionExecutionTicket {...base} gestureRequest={gestureRequest} />)
+    await waitFor(() => expect(handlers.onPrepareOrderIntent).toHaveBeenCalledOnce())
+
+    rerender(<FuturesProductionExecutionTicket
+      {...base}
+      state={createState({
+        revision: '2',
+        caps: multiSymbolCaps,
+        intent: createIntent('order'),
+      })}
+      selectedSymbol="ETHUSDT"
+      selectedContract={{ ...selectedContract, symbol: 'ETHUSDT' }}
+      gestureRequest={null}
+    />)
+
     expect(handlers.onPlaceOrder).not.toHaveBeenCalled()
   })
 
-  it('turns one owned-order drag into prepare only and requires exact final confirmation', async () => {
+  it('automatically prepares and finalizes one external-order drag without duplicate sends', async () => {
     const handlers = callbacks()
     const amendmentCapabilities = {
       ...createState().capabilities,
@@ -237,7 +443,7 @@ describe('FuturesProductionExecutionTicket', () => {
       id: 1,
       symbol: 'BTCUSDT',
       positionSide: 'LONG',
-      clientOrderId: `cc7-${REQUEST_ID}`,
+      clientOrderId: 'external-mobile-order-42',
       price: '70100.19',
       modifier: 'ctrl',
     }
@@ -247,7 +453,7 @@ describe('FuturesProductionExecutionTicket', () => {
     await waitFor(() => expect(handlers.onPrepareOrderAmendment).toHaveBeenCalledExactlyOnceWith({
       symbol: 'BTCUSDT',
       positionSide: 'LONG',
-      clientOrderId: `cc7-${REQUEST_ID}`,
+      clientOrderId: 'external-mobile-order-42',
       price: '70100.1',
     }))
     expect(handlers.onAmendOrder).not.toHaveBeenCalled()
@@ -261,13 +467,70 @@ describe('FuturesProductionExecutionTicket', () => {
       })}
       orderAmendRequest={amendment}
     />)
-    const finalButton = screen.getByRole('button', { name: 'Move real futures order' })
-    expect(finalButton).toBeDisabled()
-    fireEvent.change(screen.getByRole('textbox', { name: 'Type exactly: MOVE REAL FUTURES ORDER' }), {
-      target: { value: 'MOVE REAL FUTURES ORDER' },
-    })
-    fireEvent.click(finalButton)
-    expect(handlers.onAmendOrder).toHaveBeenCalledExactlyOnceWith('MOVE REAL FUTURES ORDER')
+    await waitFor(() => expect(handlers.onAmendOrder).toHaveBeenCalledExactlyOnceWith(
+      'MOVE REAL FUTURES ORDER',
+    ))
+    rerender(<FuturesProductionExecutionTicket
+      {...base}
+      state={createState({
+        revision: '2',
+        capabilities: amendmentCapabilities,
+        intent: createIntent('order_amendment'),
+      })}
+      orderAmendRequest={amendment}
+    />)
+    expect(handlers.onAmendOrder).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('button', { name: 'Move real futures order' })).not.toBeInTheDocument()
+  })
+
+  it('does not finalize a delayed amendment intent after the selected pair changes', async () => {
+    const handlers = callbacks()
+    const initialState = createState()
+    const amendmentCapabilities = {
+      ...initialState.capabilities,
+      amendOrder: true,
+    }
+    const multiSymbolCaps = {
+      ...initialState.caps,
+      allowedSymbols: ['BTCUSDT', 'ETHUSDT'],
+      symbolConfigurations: [
+        ...initialState.caps.symbolConfigurations,
+        { symbol: 'ETHUSDT', marginType: 'ISOLATED', leverage: 2, isAutoAddMargin: false },
+      ],
+    }
+    const amendment = {
+      id: 92,
+      symbol: 'BTCUSDT',
+      positionSide: 'LONG',
+      clientOrderId: 'external-delayed-amendment',
+      price: '70100.19',
+      modifier: 'alt',
+    }
+    const base = {
+      state: createState({ caps: multiSymbolCaps, capabilities: amendmentCapabilities }),
+      selectedSymbol: 'BTCUSDT',
+      selectedContract,
+      ...handlers,
+    }
+    const { rerender } = render(
+      <FuturesProductionExecutionTicket {...base} orderAmendRequest={amendment} />,
+    )
+    await waitFor(() => expect(handlers.onPrepareOrderAmendment).toHaveBeenCalledOnce())
+
+    rerender(<FuturesProductionExecutionTicket
+      {...base}
+      state={createState({
+        revision: '2',
+        caps: multiSymbolCaps,
+        capabilities: amendmentCapabilities,
+        intent: createIntent('order_amendment'),
+      })}
+      selectedSymbol="ETHUSDT"
+      selectedContract={{ ...selectedContract, symbol: 'ETHUSDT' }}
+      orderAmendRequest={null}
+    />)
+
+    expect(handlers.onAmendOrder).not.toHaveBeenCalled()
   })
 
   it('keeps entries blocked by the kill switch while allowing a bounded exit draft', async () => {
@@ -306,43 +569,150 @@ describe('FuturesProductionExecutionTicket', () => {
     ))
   })
 
-  it('disables sizing honestly when live limits are unavailable instead of looking broken', () => {
+  it('allows a bounded exit but no entry for a legacy cross high-leverage leg', async () => {
+    const handlers = callbacks()
+    const legacyCaps = {
+      ...createState().caps,
+      symbolConfigurations: [{
+        symbol: 'BTCUSDT', marginType: 'CROSSED', leverage: 20, isAutoAddMargin: true,
+      }],
+    }
+    const legacyPortfolio = {
+      ...hedgePortfolio,
+      positions: hedgePortfolio.positions.map(position => ({
+        ...position,
+        marginType: 'CROSSED',
+        leverage: 20,
+      })),
+    }
+    const base = {
+      state: createState({ caps: legacyCaps, portfolio: legacyPortfolio }),
+      selectedSymbol: 'BTCUSDT',
+      selectedContract,
+      draftPrice: '7000',
+      ...handlers,
+    }
+    const { rerender } = render(<FuturesProductionExecutionTicket {...base} />)
+    selectFullSize()
+    rerender(<FuturesProductionExecutionTicket {...base} gestureRequest={{
+      id: 1,
+      price: '7000',
+      side: 'BUY',
+      positionSide: 'LONG',
+      positionEffect: 'ENTRY',
+      source: 'chart',
+    }} />)
+    await waitFor(() => expect(handlers.onPrepareOrderIntent).not.toHaveBeenCalled())
+
+    rerender(<FuturesProductionExecutionTicket {...base} gestureRequest={{
+      id: 2,
+      price: '7000',
+      side: 'SELL',
+      positionSide: 'LONG',
+      positionEffect: 'EXIT',
+      source: 'chart',
+    }} />)
+    await waitFor(() => expect(handlers.onPrepareOrderIntent).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ positionEffect: 'EXIT', positionSide: 'LONG' }),
+    ))
+    expect(screen.getByText('READY')).toBeInTheDocument()
+  })
+
+  it('disables sizing with the exact missing private input and replaces generic blocked status', () => {
     renderTicket({
-      state: createState({ caps: null, liveAuthorized: false }),
+      state: createState({
+        portfolio: {
+          ...createState().portfolio,
+          availableBalanceUsdt: undefined,
+        },
+      }),
       draftPrice: '7000',
     })
     expect(screen.getByRole('slider', { name: 'Order size percent' })).toBeDisabled()
     expect(screen.getByRole('textbox', { name: 'Order notional USDT' })).toBeDisabled()
-    expect(screen.getByText('Live sizing limits are unavailable — execution is blocked'))
+    expect(screen.getByText('Available Futures balance is unavailable — wait for private account sync'))
       .toBeInTheDocument()
+    expect(screen.getByText('BALANCE')).toBeInTheDocument()
+    expect(screen.getByText('Available Futures balance is pending — wait for private account sync.'))
+      .toBeInTheDocument()
+    expect(screen.queryByText('BLOCKED')).not.toBeInTheDocument()
   })
 
-  it('shows current orders in a dedicated tab with exact fill and price data', () => {
+  it('shows a compact actionable setup reason when Futures account access is unavailable', () => {
+    renderTicket({
+      state: createState({ configured: false, liveAuthorized: false, account: null }),
+    })
+    expect(screen.getByText('SETUP')).toBeInTheDocument()
+    expect(screen.getByText('Futures account access is unavailable — configure the reviewed account.'))
+      .toBeInTheDocument()
+    expect(screen.queryByText('BLOCKED')).not.toBeInTheDocument()
+  })
+
+  it('shows pre-existing external orders with complete active-order fields', () => {
     renderTicket({
       state: createState({
-        portfolio: { ...hedgePortfolio, openOrders: [ownedOrder] },
+        portfolio: { ...hedgePortfolio, openOrders: [externalOrder] },
       }),
     })
     fireEvent.click(screen.getByRole('tab', { name: /^Orders 1$/ }))
     const orders = screen.getByLabelText('Current Futures orders')
-    expect(orders).toHaveTextContent('BTCUSDTLONG EXITPARTIALLY_FILLED')
+    expect(orders).toHaveTextContent('1 active')
+    expect(orders).not.toHaveTextContent('app-owned')
+    expect(orders).toHaveTextContent('BTCUSDTSELL · LONGPARTIALLY_FILLED')
+    expect(orders).toHaveTextContent('TypeLIMIT')
     expect(orders).toHaveTextContent('Price7000')
-    expect(orders).toHaveTextContent('Filled0.001 / 0.002')
+    expect(orders).toHaveTextContent('Original qty0.002')
+    expect(orders).toHaveTextContent('Filled qty0.001')
     expect(screen.getByRole('button', { name: 'Refresh positions and orders' })).toBeEnabled()
   })
 
-  it('requires the exact typed confirmation and synchronously blocks duplicate final sends', () => {
+  it('shows only the selected symbol inventory without filtering external ownership', () => {
+    renderTicket({
+      state: createState({
+        portfolio: {
+          ...hedgePortfolio,
+          openOrders: [
+            externalOrder,
+            {
+              ...externalOrder,
+              symbol: 'ETHUSDT',
+              orderId: '987654321',
+              clientOrderId: 'external-eth-order',
+            },
+          ],
+        },
+      }),
+    })
+    fireEvent.click(screen.getByRole('tab', { name: /^Orders 1$/ }))
+    expect(screen.getByLabelText('Current Futures orders')).toHaveTextContent('BTCUSDT')
+    expect(screen.getByLabelText('Current Futures orders')).not.toHaveTextContent('ETHUSDT')
+  })
+
+  it('retains last confirmed active orders while the private stream resynchronizes', () => {
+    renderTicket({
+      state: createState({
+        portfolio: {
+          ...hedgePortfolio,
+          syncState: 'resyncing',
+          syncCode: 'FUTURES_PRODUCTION_USER_STREAM_RECONNECTING',
+          openOrders: [externalOrder],
+        },
+      }),
+    })
+    fireEvent.click(screen.getByRole('tab', { name: /^Orders 1$/ }))
+    expect(screen.getByText('Active orders are resyncing; last confirmed rows are retained.'))
+      .toBeInTheDocument()
+    expect(screen.getByLabelText('Current Futures orders')).toHaveTextContent(
+      'BTCUSDTSELL · LONGPARTIALLY_FILLED',
+    )
+  })
+
+  it('does not expose manual order confirmation controls for a server order intent', () => {
     const handlers = callbacks()
     renderTicket({ state: createState({ revision: '2', intent: createIntent('order') }), handlers })
-    const confirmation = FUTURES_PRODUCTION_EXECUTION_CONFIRMATIONS['futures.production.placeOrder']
-    const input = screen.getByRole('textbox', { name: `Type exactly: ${confirmation}` })
-    const place = screen.getByRole('button', { name: 'Place real futures order' })
-    fireEvent.change(input, { target: { value: confirmation } })
-    fireEvent.keyDown(input, { key: 'Enter', bubbles: true })
+    expect(screen.queryByText(/Type exactly: PLACE REAL FUTURES ORDER/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Place real futures order' })).not.toBeInTheDocument()
     expect(handlers.onPlaceOrder).not.toHaveBeenCalled()
-    fireEvent.click(place)
-    fireEvent.click(place)
-    expect(handlers.onPlaceOrder).toHaveBeenCalledTimes(1)
   })
 
   it('moves destructive bulk controls into Advanced safety without removing them', () => {
@@ -369,6 +739,8 @@ describe('FuturesProductionExecutionTicket', () => {
             symbol: 'BTCUSDT',
             positionSide: 'LONG',
             quantity: '0.001',
+            marginType: 'ISOLATED',
+            leverage: 2,
             isolatedMarginUsdt: '35',
             unrealizedPnlUsdt: '2.5',
             liquidationPrice: '50000',
@@ -394,6 +766,27 @@ describe('FuturesProductionExecutionTicket', () => {
     })
   })
 
+  it('does not offer isolated-margin mutations for a cross-margin position', () => {
+    renderTicket({
+      state: createState({
+        capabilities: { ...createState().capabilities, adjustMargin: true },
+        portfolio: {
+          ...hedgePortfolio,
+          positions: [{
+            ...hedgePortfolio.positions[0],
+            marginType: 'CROSSED',
+            leverage: 20,
+            isolatedMarginUsdt: '0',
+          }],
+        },
+      }),
+    })
+    fireEvent.click(screen.getByRole('tab', { name: /^Positions 1$/ }))
+    expect(screen.getByRole('button', { name: 'Add margin' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Reduce margin' })).toBeDisabled()
+    expect(screen.getByLabelText('Hedge positions')).toHaveTextContent('CROSSED · 20×')
+  })
+
   it('requires exact typed confirmation for an isolated-margin final command', () => {
     const onAdjustMargin = vi.fn(() => true)
     renderTicket({
@@ -406,6 +799,7 @@ describe('FuturesProductionExecutionTicket', () => {
           openOrders: [],
           positions: [{
             symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '0.001',
+            marginType: 'ISOLATED', leverage: 2,
             isolatedMarginUsdt: '35', unrealizedPnlUsdt: '2.5', liquidationPrice: '50000',
           }],
         },

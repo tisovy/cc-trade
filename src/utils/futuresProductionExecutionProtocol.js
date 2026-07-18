@@ -1,8 +1,8 @@
-export const FUTURES_PRODUCTION_EXECUTION_PROTOCOL_VERSION = 2
+export const FUTURES_PRODUCTION_EXECUTION_PROTOCOL_VERSION = 3
 export const FUTURES_PRODUCTION_EXECUTION_CHANNEL_ID = 'futures-production-execution'
 export const FUTURES_PRODUCTION_EXECUTION_MARKET_TYPE = 'futures'
 export const FUTURES_PRODUCTION_EXECUTION_ENVIRONMENT = 'production'
-export const FUTURES_PRODUCTION_EXECUTION_STATUS_MAX_BYTES = 16384
+export const FUTURES_PRODUCTION_EXECUTION_STATUS_MAX_BYTES = 2 * 1024 * 1024
 
 const FUTURES_PRODUCTION_EXECUTION_RENDERER_CEILINGS = Object.freeze({
   maxLeverage: 2,
@@ -125,9 +125,13 @@ const STATUS_FIELDS = Object.freeze([
 const ACCOUNT_FIELDS = Object.freeze(['alias', 'fingerprint'])
 const CAPS_FIELDS = Object.freeze([
   'allowedSymbols',
+  'symbolConfigurations',
   'maxLeverage', 'maxOrderNotionalUsdt', 'maxDailyNotionalUsdt',
   'minAvailableBalanceUsdt', 'minLiquidationDistanceBps',
   'dailyUsedNotionalUsdt', 'utcDay',
+])
+const SYMBOL_CONFIGURATION_FIELDS = Object.freeze([
+  'symbol', 'marginType', 'leverage', 'isAutoAddMargin',
 ])
 const KILL_SWITCH_FIELDS = Object.freeze(['engaged', 'policy'])
 const CAPABILITY_FIELDS = Object.freeze([
@@ -141,29 +145,36 @@ const ATTEMPT_FIELDS = Object.freeze([
 const ATTEMPT_ITEM_FIELDS = Object.freeze(['symbol', 'outcome', 'code'])
 const RECONCILIATION_FIELDS = Object.freeze(['required', 'state', 'nextAttemptAt'])
 const RECOVERY_FIELDS = Object.freeze(['required', 'state', 'code'])
-const PORTFOLIO_FIELDS = Object.freeze(['state', 'observedAt', 'positions', 'openOrders'])
+const PORTFOLIO_FIELDS = Object.freeze([
+  'state', 'observedAt', 'availableBalanceUsdt', 'syncState', 'syncCode',
+  'positions', 'openOrders',
+])
 const POSITION_FIELDS = Object.freeze([
   'symbol', 'positionSide', 'quantity', 'entryPrice', 'markPrice', 'notionalUsdt',
   'unrealizedPnlUsdt', 'isolatedMarginUsdt', 'liquidationPrice', 'leverage', 'marginType',
 ])
 const OPEN_ORDER_FIELDS = Object.freeze([
-  'symbol', 'orderId', 'clientOrderId', 'side', 'positionSide', 'positionEffect',
+  'symbol', 'orderKind', 'orderId', 'clientOrderId', 'side', 'positionSide', 'positionEffect',
   'price', 'originalQuantity', 'executedQuantity', 'status', 'type', 'timeInForce',
+  'isAppOwned', 'updateTime', 'syncState',
 ])
 const REQUEST_ID_PATTERN = /^[0-9a-f]{32}$/
 const REVISION_PATTERN = /^(0|[1-9][0-9]*)$/
 const FINGERPRINT_PATTERN = /^[0-9a-f]{64}$/
 const SYMBOL_PATTERN = /^[A-Z0-9]{2,20}$/
 const ORDER_ID_PATTERN = /^[1-9][0-9]{0,18}$/
+const CLIENT_ORDER_ID_PATTERN = /^[.A-Z:/a-z0-9_-]{1,36}$/
 const OWNED_CLIENT_ORDER_ID_PATTERN = /^cc7-[0-9a-f]{32}$/
+const ORDER_TYPE_PATTERN = /^[A-Z][A-Z0-9_]{0,31}$/
+const TIME_IN_FORCE_PATTERN = /^(?:GTC|IOC|FOK|GTX|GTD|GTE_GTC|RPI)$/
 const SAFE_CODE_PATTERN = /^FUTURES_PRODUCTION_[A-Z0-9_]{1,64}$/
 const POSITIVE_DECIMAL_PATTERN = /^(?:[1-9][0-9]*|0\.[0-9]*[1-9][0-9]*|[1-9][0-9]*\.[0-9]+)$/
 const NON_NEGATIVE_DECIMAL_PATTERN = /^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/
 const SIGNED_DECIMAL_PATTERN = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/
 const INTENT_KIND_SET = new Set(Object.values(FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS))
-const MAX_JSON_NODES = 1024
+const MAX_JSON_NODES = 40_000
 const MAX_JSON_STRING_BYTES = 512
-const MAX_PORTFOLIO_ITEMS = 16
+const MAX_PORTFOLIO_ITEMS = 2_048
 const KILL_SWITCH_POLICY = 'v1-persistent-block-new-exposure'
 
 const FINAL_KIND_BY_ACTION = Object.freeze({
@@ -585,7 +596,7 @@ export const createFuturesProductionExecutionPrepareOrderAmendmentIntentRequest 
     || !SYMBOL_PATTERN.test(symbol)
     || !['LONG', 'SHORT'].includes(positionSide)
     || typeof clientOrderId !== 'string'
-    || !OWNED_CLIENT_ORDER_ID_PATTERN.test(clientOrderId)
+    || !CLIENT_ORDER_ID_PATTERN.test(clientOrderId)
     || !requirePositiveDecimal(price)) {
     fail(FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_COMMAND)
   }
@@ -751,6 +762,46 @@ const normalizeCapSymbols = (value) => {
   return Object.freeze(symbols)
 }
 
+const normalizeSymbolConfigurations = (value, allowedSymbols) => {
+  if (!Array.isArray(value)
+    || Object.getPrototypeOf(value) !== Array.prototype
+    || value.length > 16) {
+    fail(FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS)
+  }
+  const allowed = new Set(allowedSymbols)
+  const unique = new Set()
+  const configurations = []
+  for (let index = 0; index < value.length; index += 1) {
+    const descriptor = Object.getOwnPropertyDescriptor(value, String(index))
+    if (!descriptor
+      || descriptor.enumerable !== true
+      || !Object.hasOwn(descriptor, 'value')) {
+      fail(FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS)
+    }
+    const configuration = readExactFields(
+      descriptor.value,
+      SYMBOL_CONFIGURATION_FIELDS,
+      FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS,
+    )
+    if (typeof configuration.symbol !== 'string'
+      || !allowed.has(configuration.symbol)
+      || unique.has(configuration.symbol)
+      || !['ISOLATED', 'CROSSED'].includes(configuration.marginType)
+      || !Number.isSafeInteger(configuration.leverage)
+      || configuration.leverage < 1
+      || configuration.leverage > 125
+      || typeof configuration.isAutoAddMargin !== 'boolean') {
+      fail(FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS)
+    }
+    unique.add(configuration.symbol)
+    configurations.push(freezeFields(SYMBOL_CONFIGURATION_FIELDS, configuration))
+  }
+  if (Reflect.ownKeys(value).length !== configurations.length + 1) {
+    fail(FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS)
+  }
+  return Object.freeze(configurations)
+}
+
 const normalizeCaps = (value) => {
   if (value === null) return null
   const caps = readExactFields(
@@ -759,6 +810,10 @@ const normalizeCaps = (value) => {
     FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS,
   )
   const allowedSymbols = normalizeCapSymbols(caps.allowedSymbols)
+  const symbolConfigurations = normalizeSymbolConfigurations(
+    caps.symbolConfigurations,
+    allowedSymbols,
+  )
   if (!Number.isSafeInteger(caps.maxLeverage)
     || caps.maxLeverage !== FUTURES_PRODUCTION_EXECUTION_RENDERER_CEILINGS.maxLeverage
     || !requirePositiveDecimal(caps.maxOrderNotionalUsdt)
@@ -782,7 +837,7 @@ const normalizeCaps = (value) => {
     || !isCanonicalUtcDay(caps.utcDay)) {
     fail(FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS)
   }
-  return freezeFields(CAPS_FIELDS, { ...caps, allowedSymbols })
+  return freezeFields(CAPS_FIELDS, { ...caps, allowedSymbols, symbolConfigurations })
 }
 
 const normalizeKillSwitch = (value) => {
@@ -968,8 +1023,10 @@ const normalizePortfolioPosition = (value) => {
   if (typeof position.symbol !== 'string'
     || !SYMBOL_PATTERN.test(position.symbol)
     || !['LONG', 'SHORT'].includes(position.positionSide)
-    || position.leverage !== FUTURES_PRODUCTION_EXECUTION_RENDERER_CEILINGS.maxLeverage
-    || position.marginType !== 'ISOLATED') {
+    || !Number.isSafeInteger(position.leverage)
+    || position.leverage < 1
+    || position.leverage > 125
+    || !['ISOLATED', 'CROSSED'].includes(position.marginType)) {
     fail(FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS)
   }
   requirePortfolioDecimal(position.quantity, requirePositiveDecimal)
@@ -991,22 +1048,33 @@ const normalizePortfolioOrder = (value) => {
   const expectedEffect = order.positionSide === 'LONG'
     ? (order.side === 'BUY' ? 'ENTRY' : 'EXIT')
     : (order.side === 'SELL' ? 'ENTRY' : 'EXIT')
+  const validStatuses = order.orderKind === 'REGULAR'
+    ? ['NEW', 'PARTIALLY_FILLED']
+    : ['NEW', 'TRIGGERING']
   if (typeof order.symbol !== 'string'
     || !SYMBOL_PATTERN.test(order.symbol)
+    || !['REGULAR', 'ALGO'].includes(order.orderKind)
     || typeof order.orderId !== 'string'
     || !ORDER_ID_PATTERN.test(order.orderId)
     || typeof order.clientOrderId !== 'string'
-    || !OWNED_CLIENT_ORDER_ID_PATTERN.test(order.clientOrderId)
+    || !CLIENT_ORDER_ID_PATTERN.test(order.clientOrderId)
     || !['BUY', 'SELL'].includes(order.side)
     || !['LONG', 'SHORT'].includes(order.positionSide)
     || order.positionEffect !== expectedEffect
-    || !['NEW', 'PARTIALLY_FILLED'].includes(order.status)
-    || order.type !== 'LIMIT'
-    || order.timeInForce !== 'GTC') {
+    || !validStatuses.includes(order.status)
+    || typeof order.type !== 'string'
+    || !ORDER_TYPE_PATTERN.test(order.type)
+    || typeof order.timeInForce !== 'string'
+    || !TIME_IN_FORCE_PATTERN.test(order.timeInForce)
+    || typeof order.isAppOwned !== 'boolean'
+    || order.isAppOwned !== OWNED_CLIENT_ORDER_ID_PATTERN.test(order.clientOrderId)
+    || !Number.isSafeInteger(order.updateTime)
+    || order.updateTime < 0
+    || !['synced', 'stale', 'pending'].includes(order.syncState)) {
     fail(FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS)
   }
-  requirePortfolioDecimal(order.price, requirePositiveDecimal)
-  requirePortfolioDecimal(order.originalQuantity, requirePositiveDecimal)
+  requirePortfolioDecimal(order.price, requireNonNegativeDecimal)
+  requirePortfolioDecimal(order.originalQuantity, requireNonNegativeDecimal)
   requirePortfolioDecimal(order.executedQuantity, requireNonNegativeDecimal)
   return freezeFields(OPEN_ORDER_FIELDS, order)
 }
@@ -1017,26 +1085,46 @@ const normalizePortfolio = (value) => {
     PORTFOLIO_FIELDS,
     FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS,
   )
-  if (!['live', 'unavailable', 'truncated'].includes(portfolio.state)
+  if (!['live', 'stale', 'unavailable', 'truncated'].includes(portfolio.state)
     || (portfolio.observedAt !== null
-      && (!Number.isSafeInteger(portfolio.observedAt) || portfolio.observedAt < 0))) {
+      && (!Number.isSafeInteger(portfolio.observedAt) || portfolio.observedAt < 0))
+    || (portfolio.availableBalanceUsdt !== null
+      && typeof portfolio.availableBalanceUsdt !== 'string')
+    || !['idle', 'syncing', 'resyncing', 'live', 'degraded'].includes(portfolio.syncState)
+    || (portfolio.syncCode !== null
+      && (typeof portfolio.syncCode !== 'string' || !SAFE_CODE_PATTERN.test(portfolio.syncCode)))) {
     fail(FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS)
+  }
+  if (portfolio.availableBalanceUsdt !== null) {
+    requirePortfolioDecimal(portfolio.availableBalanceUsdt, requireNonNegativeDecimal)
   }
   const positions = normalizeDensePortfolioArray(portfolio.positions, normalizePortfolioPosition)
   const openOrders = normalizeDensePortfolioArray(portfolio.openOrders, normalizePortfolioOrder)
   const positionKeys = new Set(positions.map(position => `${position.symbol}:${position.positionSide}`))
-  const orderIds = new Set(openOrders.map(order => order.orderId))
-  const clientOrderIds = new Set(openOrders.map(order => order.clientOrderId))
+  const orderIds = new Set(openOrders.map(order => (
+    `${order.symbol}:${order.orderKind}:${order.orderId}`
+  )))
+  const clientOrderIds = new Set(openOrders.map(order => (
+    `${order.symbol}:${order.orderKind}:${order.clientOrderId}`
+  )))
   if (positionKeys.size !== positions.length
     || orderIds.size !== openOrders.length
     || clientOrderIds.size !== openOrders.length
-    || (portfolio.state === 'live' && portfolio.observedAt === null)
-    || (portfolio.state !== 'live' && (positions.length !== 0 || openOrders.length !== 0))) {
+    || (portfolio.state === 'live'
+      && (portfolio.observedAt === null || portfolio.availableBalanceUsdt === null))
+    || (portfolio.state === 'unavailable'
+      && (portfolio.observedAt !== null
+        || portfolio.availableBalanceUsdt !== null
+        || positions.length !== 0
+        || openOrders.length !== 0))) {
     fail(FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS)
   }
   return Object.freeze({
     state: portfolio.state,
     observedAt: portfolio.observedAt,
+    availableBalanceUsdt: portfolio.availableBalanceUsdt,
+    syncState: portfolio.syncState,
+    syncCode: portfolio.syncCode,
     positions,
     openOrders,
   })

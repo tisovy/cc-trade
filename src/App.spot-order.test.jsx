@@ -19,6 +19,7 @@ const mocks = vi.hoisted(() => ({
   handlePanelUpdate: vi.fn(),
   checkPriceAlerts: vi.fn(),
   futuresProductionEnabled: [],
+  futuresProductionState: null,
 }))
 
 vi.mock('./context/DataContext', () => ({
@@ -80,6 +81,7 @@ vi.mock('./hooks/useFuturesProductionExecution', () => ({
       engageKillSwitch: vi.fn(() => false),
       prepareDisengageKillSwitchIntent: vi.fn(() => false),
       disengageKillSwitch: vi.fn(() => false),
+      ...(mocks.futuresProductionState ?? {}),
     }
   },
 }))
@@ -163,6 +165,13 @@ describe('App spot order payloads', () => {
   beforeEach(() => {
     originalWebSocket = globalThis.WebSocket
     globalThis.WebSocket = { OPEN: 1 }
+    vi.stubGlobal('matchMedia', vi.fn(() => ({
+      matches: false,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    })))
     localStorageMock.clear()
     mocks.order = null
     mocks.cancelOrder = null
@@ -171,11 +180,13 @@ describe('App spot order payloads', () => {
     mocks.handlePanelUpdate.mockClear()
     mocks.checkPriceAlerts.mockClear()
     mocks.futuresProductionEnabled.length = 0
+    mocks.futuresProductionState = null
   })
 
   afterEach(() => {
     cleanup()
     globalThis.WebSocket = originalWebSocket
+    vi.unstubAllGlobals()
     localStorageMock.clear()
   })
 
@@ -334,5 +345,25 @@ describe('App spot order payloads', () => {
         orderId: 12345,
       },
     ])
+  })
+
+  it('renders the Futures shell immediately while private execution remains pending', () => {
+    mocks.futuresProductionState = {
+      connected: true,
+      subscribed: false,
+    }
+
+    render(<App />)
+    fireEvent.click(screen.getByTestId('market-mode-futures-live'))
+
+    expect(screen.getByTestId('futures-live-banner')).toHaveTextContent('USDⓈ-M FUTURES')
+    expect(screen.getByTestId('futures-production-workstation')).toBeInTheDocument()
+    expect(screen.getByTestId('futures-workstation-chart')).toBeInTheDocument()
+    expect(screen.getByText('Contracts', { selector: '.futures-workstation-section-heading span' }))
+      .toBeInTheDocument()
+    expect(screen.getByLabelText('USDⓈ-M production real-order execution'))
+      .toHaveTextContent('SYNCLoading private Futures account state')
+    expect(screen.getByRole('slider', { name: 'Order size percent' })).toBeDisabled()
+    expect(screen.queryByText('BLOCKED', { exact: true })).not.toBeInTheDocument()
   })
 })

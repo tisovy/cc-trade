@@ -485,6 +485,14 @@
   color: #ef5b69;
 }
 
+.futures-workstation-owned-order.is-algo {
+  border-top-style: dashed;
+  opacity: 0.72;
+  cursor: default;
+  pointer-events: none;
+  touch-action: auto;
+}
+
 .futures-workstation-owned-order span,
 .futures-workstation-owned-order strong {
   padding: 2px 5px;

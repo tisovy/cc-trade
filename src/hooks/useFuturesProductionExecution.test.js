@@ -38,7 +38,7 @@ const createSocket = (readyState = 1) => {
 const createStatus = (overrides = {}) => ({
   channelId: 'futures-production-execution',
   action: 'futures.production.status',
-  version: 2,
+  version: 3,
   revision: '1',
   marketType: 'futures',
   environment: 'production',
@@ -48,6 +48,9 @@ const createStatus = (overrides = {}) => ({
   account: { alias: 'reviewed-account-1', fingerprint: FINGERPRINT },
   caps: {
     allowedSymbols: ['BTCUSDT'],
+    symbolConfigurations: [{
+      symbol: 'BTCUSDT', marginType: 'ISOLATED', leverage: 2, isAutoAddMargin: false,
+    }],
     maxLeverage: 2,
     maxOrderNotionalUsdt: '10',
     maxDailyNotionalUsdt: '50',
@@ -81,6 +84,9 @@ const createStatus = (overrides = {}) => ({
   portfolio: {
     state: 'live',
     observedAt: 1_783_957_600_000,
+    availableBalanceUsdt: '250.5',
+    syncState: 'live',
+    syncCode: null,
     positions: [],
     openOrders: [],
   },
@@ -110,25 +116,28 @@ describe('useFuturesProductionExecution', () => {
 
   it('bootstraps only status ownership with the non-account sentinel and tears down without cancellation', () => {
     const socket = createSocket()
-    const { result, unmount } = renderHook(() => useFuturesProductionExecution({
-      enabled: true,
-      wsConnection: socket,
-    }))
+    const { result, rerender, unmount } = renderHook(
+      properties => useFuturesProductionExecution(properties),
+      { initialProps: { enabled: true, wsConnection: socket } },
+    )
 
     expect(result.current).toMatchObject({ connected: true, subscribed: true, revision: null })
     expect(sentMessages(socket)).toEqual([{
       action: 'futures.production.subscribeStatus',
-      version: 2,
+      version: 3,
       revision: '0',
       marketType: 'futures',
       environment: 'production',
       accountFingerprint: BOOTSTRAP_ACCOUNT_FINGERPRINT,
     }])
 
+    rerender({ enabled: true, wsConnection: socket })
+    expect(sentMessages(socket)).toHaveLength(1)
+
     unmount()
     expect(sentMessages(socket)[1]).toEqual({
       action: 'futures.production.unsubscribeStatus',
-      version: 2,
+      version: 3,
       revision: '0',
       marketType: 'futures',
       environment: 'production',
@@ -208,7 +217,7 @@ describe('useFuturesProductionExecution', () => {
       action === 'futures.production.prepareOrderIntent'
     ))).toEqual([{
       action: 'futures.production.prepareOrderIntent',
-      version: 2,
+      version: 3,
       revision: '1',
       marketType: 'futures',
       environment: 'production',
@@ -237,7 +246,7 @@ describe('useFuturesProductionExecution', () => {
     })
     expect(sentMessages(socket).at(-1)).toEqual({
       action: 'futures.production.refreshPortfolio',
-      version: 2,
+      version: 3,
       revision: '1',
       marketType: 'futures',
       environment: 'production',
@@ -285,7 +294,7 @@ describe('useFuturesProductionExecution', () => {
     act(() => expect(result.current.adjustMargin(confirmation)).toBe(true))
     expect(sentMessages(socket).at(-1)).toEqual({
       action: 'futures.production.adjustIsolatedMargin',
-      version: 2,
+      version: 3,
       revision: '2',
       requestId: REQUEST_ID,
       marketType: 'futures',
@@ -335,7 +344,7 @@ describe('useFuturesProductionExecution', () => {
     act(() => expect(result.current.amendOrder(confirmation)).toBe(true))
     expect(sentMessages(socket).at(-1)).toEqual({
       action: 'futures.production.amendOrder',
-      version: 2,
+      version: 3,
       revision: '2',
       requestId: REQUEST_ID,
       marketType: 'futures',
@@ -369,7 +378,7 @@ describe('useFuturesProductionExecution', () => {
     const orders = sentMessages(socket).filter(({ action }) => action === 'futures.production.placeOrder')
     expect(orders).toEqual([{
       action: 'futures.production.placeOrder',
-      version: 2,
+      version: 3,
       revision: '2',
       requestId: REQUEST_ID,
       marketType: 'futures',

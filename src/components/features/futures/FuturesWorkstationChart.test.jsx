@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { createEvent, fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { LIGHTWEIGHT_CHARTS_MAX_SERIES_VALUE } from '../../../utils/chartVolume.js'
 import FuturesWorkstationChart from './FuturesWorkstationChart.jsx'
@@ -163,6 +163,27 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     expect(document.querySelector('.measurement-info-box')).not.toBeInTheDocument()
   })
 
+  it('clears a Shift measurement on symbol change without remounting the chart', () => {
+    const candles = [candle(1_784_000_000_000)]
+    const { rerender } = render(
+      <FuturesWorkstationChart {...properties(candles)} symbol="BTCUSDT" priceTickSize="0.1" />,
+    )
+    const canvas = screen.getByTestId('futures-workstation-chart')
+    canvas.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 320, height: 320, right: 320, bottom: 320,
+    })
+    fireEvent.mouseMove(canvas, { clientX: 20, clientY: 100, shiftKey: true })
+    fireEvent.mouseMove(canvas, { clientX: 60, clientY: 80, shiftKey: true })
+    expect(document.querySelector('.measurement-info-box')).toBeInTheDocument()
+
+    rerender(
+      <FuturesWorkstationChart {...properties(candles)} symbol="ETHUSDT" priceTickSize="0.1" />,
+    )
+
+    expect(document.querySelector('.measurement-info-box')).not.toBeInTheDocument()
+    expect(chartMock.charts).toHaveLength(1)
+  })
+
   it('maps exact chart double-click modifiers and keeps Shift combinations inert', () => {
     const props = properties([candle(1_784_000_000_000)])
     render(<FuturesWorkstationChart {...props} />)
@@ -185,13 +206,62 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     })
 
     const callsBeforeRightClick = props.onTradingGesture.mock.calls.length
-    fireEvent.contextMenu(canvas, { clientX: 50, clientY: 120, altKey: true, button: 2 })
-    fireEvent.contextMenu(canvas, { clientX: 50, clientY: 120, ctrlKey: true, button: 2 })
+    const unsupportedRightClick = createEvent.contextMenu(canvas, {
+      clientX: 50, clientY: 120, button: 2,
+    })
+    fireEvent(canvas, unsupportedRightClick)
+    expect(unsupportedRightClick.defaultPrevented).toBe(false)
+
+    const firstSupportedRightClick = createEvent.contextMenu(canvas, {
+      clientX: 50, clientY: 120, ctrlKey: true, button: 2,
+    })
+    fireEvent(canvas, firstSupportedRightClick)
+    expect(firstSupportedRightClick.defaultPrevented).toBe(true)
     expect(props.onTradingGesture).toHaveBeenCalledTimes(callsBeforeRightClick)
-    fireEvent.contextMenu(canvas, { clientX: 50, clientY: 120, ctrlKey: true, button: 2 })
+
+    const recognizedRightClick = createEvent.contextMenu(canvas, {
+      clientX: 50, clientY: 120, ctrlKey: true, button: 2,
+    })
+    fireEvent(canvas, recognizedRightClick)
+    expect(recognizedRightClick.defaultPrevented).toBe(true)
     expect(props.onTradingGesture).toHaveBeenLastCalledWith(expect.objectContaining({
       side: 'SELL', positionSide: 'SHORT', positionEffect: 'ENTRY', price: '59880',
     }))
+
+    const callsBeforeAltRightClick = props.onTradingGesture.mock.calls.length
+    const firstAltRightClick = createEvent.contextMenu(canvas, {
+      clientX: 70, clientY: 140, altKey: true, button: 2,
+    })
+    fireEvent(canvas, firstAltRightClick)
+    expect(firstAltRightClick.defaultPrevented).toBe(true)
+    expect(props.onTradingGesture).toHaveBeenCalledTimes(callsBeforeAltRightClick)
+
+    const recognizedAltRightClick = createEvent.contextMenu(canvas, {
+      clientX: 70, clientY: 140, altKey: true, button: 2,
+    })
+    fireEvent(canvas, recognizedAltRightClick)
+    expect(recognizedAltRightClick.defaultPrevented).toBe(true)
+    expect(props.onTradingGesture).toHaveBeenCalledTimes(callsBeforeAltRightClick + 1)
+    expect(props.onTradingGesture).toHaveBeenLastCalledWith(expect.objectContaining({
+      side: 'SELL', positionSide: 'LONG', positionEffect: 'EXIT', price: '59860',
+    }))
+
+    const strayAltCandidate = createEvent.contextMenu(canvas, {
+      clientX: 70, clientY: 140, altKey: true, button: 2,
+    })
+    fireEvent(canvas, strayAltCandidate)
+    expect(strayAltCandidate.defaultPrevented).toBe(true)
+    const ordinaryRightClick = createEvent.contextMenu(canvas, {
+      clientX: 70, clientY: 140, button: 2,
+    })
+    fireEvent(canvas, ordinaryRightClick)
+    expect(ordinaryRightClick.defaultPrevented).toBe(false)
+    const nextAltCandidate = createEvent.contextMenu(canvas, {
+      clientX: 70, clientY: 140, altKey: true, button: 2,
+    })
+    fireEvent(canvas, nextAltCandidate)
+    expect(props.onTradingGesture).toHaveBeenCalledTimes(callsBeforeAltRightClick + 1)
+
     const calls = props.onTradingGesture.mock.calls.length
     fireEvent.click(canvas, {
       clientX: 40, clientY: 100, altKey: true, shiftKey: true, button: 0,
@@ -207,6 +277,8 @@ describe('FuturesWorkstationChart viewport ownership', () => {
       ...properties([candle(1_784_000_000_000)]),
       ownedOrders: [{
         symbol: 'BTCUSDT',
+        orderKind: 'REGULAR',
+        orderId: '71',
         clientOrderId: 'cc7-0123456789abcdef0123456789abcdef',
         positionSide: 'LONG',
         positionEffect: 'EXIT',
@@ -235,5 +307,116 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     expect(chartMock.charts[0].series[0].createPriceLine).toHaveBeenCalledWith(
       expect.objectContaining({ price: 59900, title: 'LONG EXIT' }),
     )
+    const orderContextMenu = createEvent.contextMenu(order, { button: 2 })
+    fireEvent(order, orderContextMenu)
+    expect(orderContextMenu.defaultPrevented).toBe(false)
+  })
+
+  it('emits one Alt-drag amendment draft on release', async () => {
+    const props = {
+      ...properties([candle(1_784_000_000_000)]),
+      ownedOrders: [{
+        symbol: 'BTCUSDT',
+        orderKind: 'REGULAR',
+        orderId: '72',
+        clientOrderId: 'cc7-0123456789abcdef0123456789abcdef',
+        positionSide: 'LONG',
+        positionEffect: 'EXIT',
+        price: '59900',
+      }],
+    }
+    render(<FuturesWorkstationChart {...props} />)
+    const canvas = screen.getByTestId('futures-workstation-chart')
+    canvas.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 320, height: 320, right: 320, bottom: 320,
+    })
+    const order = await screen.findByRole('button', {
+      name: 'Move LONG EXIT order at 59900 with Ctrl or Alt drag',
+    })
+    fireEvent.pointerDown(order, { pointerId: 8, button: 0, altKey: true })
+    fireEvent.pointerMove(order, { pointerId: 8, clientY: 80, altKey: true })
+    fireEvent.pointerUp(order, { pointerId: 8, clientY: 80, altKey: true })
+
+    expect(props.onOrderDrag).toHaveBeenCalledExactlyOnceWith({
+      symbol: 'BTCUSDT',
+      positionSide: 'LONG',
+      clientOrderId: 'cc7-0123456789abcdef0123456789abcdef',
+      price: '59920',
+      modifier: 'alt',
+    })
+  })
+
+  it('keeps REGULAR and ALGO rows distinct when Binance reuses a client order id', async () => {
+    const sharedClientOrderId = 'shared-client-order-id'
+    const props = {
+      ...properties([candle(1_784_000_000_000)]),
+      ownedOrders: [{
+        symbol: 'BTCUSDT',
+        orderKind: 'REGULAR',
+        orderId: '81',
+        clientOrderId: sharedClientOrderId,
+        positionSide: 'LONG',
+        positionEffect: 'EXIT',
+        price: '59900',
+      }, {
+        symbol: 'BTCUSDT',
+        orderKind: 'ALGO',
+        orderId: '82',
+        clientOrderId: sharedClientOrderId,
+        positionSide: 'SHORT',
+        positionEffect: 'ENTRY',
+        price: '59850',
+      }],
+    }
+    render(<FuturesWorkstationChart {...props} />)
+    const canvas = screen.getByTestId('futures-workstation-chart')
+    canvas.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 320, height: 320, right: 320, bottom: 320,
+    })
+    const regularOrder = await screen.findByRole('button', {
+      name: 'Move LONG EXIT order at 59900 with Ctrl or Alt drag',
+    })
+    const algoOrder = screen.getByRole('note', {
+      name: 'ALGO SHORT ENTRY order at 59850; price is managed by Binance and is not draggable',
+    })
+
+    fireEvent.pointerDown(regularOrder, { pointerId: 9, button: 0, ctrlKey: true })
+    fireEvent.pointerMove(regularOrder, { pointerId: 9, clientY: 80, ctrlKey: true })
+
+    expect(regularOrder).toHaveTextContent('59920')
+    expect(algoOrder).toHaveTextContent('59850')
+
+    fireEvent.pointerUp(regularOrder, { pointerId: 9, clientY: 80, ctrlKey: true })
+    expect(props.onOrderDrag).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      clientOrderId: sharedClientOrderId,
+      price: '59920',
+    }))
+  })
+
+  it('renders ALGO orders as non-draggable Binance-managed notes', async () => {
+    const props = {
+      ...properties([candle(1_784_000_000_000)]),
+      ownedOrders: [{
+        symbol: 'BTCUSDT',
+        orderKind: 'ALGO',
+        orderId: '91',
+        clientOrderId: 'conditional-order-id',
+        positionSide: 'LONG',
+        positionEffect: 'EXIT',
+        price: '59900',
+      }],
+    }
+    render(<FuturesWorkstationChart {...props} />)
+    const algoOrder = await screen.findByRole('note', {
+      name: 'ALGO LONG EXIT order at 59900; price is managed by Binance and is not draggable',
+    })
+
+    fireEvent.pointerDown(algoOrder, { pointerId: 10, button: 0, altKey: true })
+    fireEvent.pointerMove(algoOrder, { pointerId: 10, clientY: 80, altKey: true })
+    fireEvent.pointerUp(algoOrder, { pointerId: 10, clientY: 80, altKey: true })
+
+    expect(algoOrder).toHaveTextContent('ALGO · LONG EXIT59900')
+    expect(props.onOrderDrag).not.toHaveBeenCalled()
+    expect(screen.queryByRole('button')).not.toBeInTheDocument()
   })
 })

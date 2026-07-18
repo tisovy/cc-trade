@@ -619,6 +619,7 @@ export function setupBinanceConnection({
     futuresProductionExecutionConfig: suppliedFuturesProductionExecutionConfig,
     futuresProductionExecutionKeyProtection,
     futuresProductionExecutionStorageDirectory,
+    futuresProductionExecutionRuntime: suppliedFuturesProductionExecutionRuntime,
 } = {}) {
     const APIKEY = process.env.BK;
     const APISECRET = process.env.BS;
@@ -639,7 +640,23 @@ export function setupBinanceConnection({
         executeSpot: (...args) => legacySpotRateLimiter.execute(...args),
     });
     const futuresProductionIpLimiter = new RateLimiter(800, 60000, 500);
-    if (processGlobalProductionExecutionRuntimePromise === null) {
+    if (suppliedFuturesProductionExecutionRuntime !== undefined
+        && (!suppliedFuturesProductionExecutionRuntime
+            || typeof suppliedFuturesProductionExecutionRuntime !== 'object'
+            || suppliedFuturesProductionExecutionRuntime.mode !== 'e2e-in-memory-only'
+            || suppliedFuturesProductionExecutionRuntime.coordinator !== null
+            || !Object.isFrozen(suppliedFuturesProductionExecutionRuntime)
+            || typeof suppliedFuturesProductionExecutionRuntime.service?.handleRequest !== 'function'
+            || typeof suppliedFuturesProductionExecutionRuntime.service?.disconnect !== 'function'
+            || typeof suppliedFuturesProductionExecutionRuntime.service?.shutdown !== 'function'
+            || futuresProductionExecutionConfig.enabled !== false
+            || futuresProductionExecutionConfig.configured !== false
+            || futuresProductionExecutionConfig.liveAuthorized !== false
+            || futuresProductionExecutionConfig.credentials !== null)) {
+        throw new TypeError('Injected Futures production execution runtime is invalid');
+    }
+    if (suppliedFuturesProductionExecutionRuntime === undefined
+        && processGlobalProductionExecutionRuntimePromise === null) {
         const productionRuntimeOptions = {
             config: futuresProductionExecutionConfig,
             storageDirectory: futuresProductionExecutionStorageDirectory,
@@ -682,10 +699,14 @@ export function setupBinanceConnection({
             });
         });
     }
-    const productionExecutionRuntimePromise = processGlobalProductionExecutionRuntimePromise;
+    const productionExecutionRuntimePromise = suppliedFuturesProductionExecutionRuntime === undefined
+        ? processGlobalProductionExecutionRuntimePromise
+        : Promise.resolve(suppliedFuturesProductionExecutionRuntime);
     let isControllerClosed = false;
     void productionExecutionRuntimePromise.then((runtime) => {
-        if (!isControllerClosed) activeExecutionCoordinator = runtime.coordinator;
+        if (!isControllerClosed && runtime.coordinator !== null) {
+            activeExecutionCoordinator = runtime.coordinator;
+        }
     });
 
     const USE_MOCK = !APIKEY;

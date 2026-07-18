@@ -98,13 +98,23 @@ const useFuturesProductionWorkstation = ({
       || typeof wsConnection?.addEventListener !== 'function'
       || typeof wsConnection?.removeEventListener !== 'function'
       || typeof sendMessage !== 'function') {
-      setState(createState({ status: 'disconnected', symbol, interval }))
+      selectionRef.current = null
+      setState(previousState => Object.freeze({
+        ...createState({ status: 'disconnected', symbol, interval }),
+        resources: Object.freeze({
+          ...emptyResources(),
+          catalog: previousState.resources.catalog,
+        }),
+      }))
       return () => { active = false }
     }
 
     const requestId = createRequestId()
     catalogBufferRef.current = null
-    const previous = selectionRef.current
+    const previousSelection = selectionRef.current
+    const previous = previousSelection?.connection === wsConnection
+      ? previousSelection
+      : null
     const intervalOnlyChange = previous !== null
       && previous.symbol === symbol
       && previous.interval !== interval
@@ -113,10 +123,25 @@ const useFuturesProductionWorkstation = ({
       : previous.symbol !== symbol
         ? createFuturesProductionWorkstationSelectSymbolRequest
         : createFuturesProductionWorkstationSelectIntervalRequest
-    selectionRef.current = Object.freeze({ symbol, interval })
+    selectionRef.current = Object.freeze({ connection: wsConnection, symbol, interval })
     setState((previousState) => {
+      if (previous === null) {
+        return Object.freeze({
+          ...createState({ status: 'loading', symbol, interval, requestId }),
+          resources: Object.freeze({
+            ...emptyResources(),
+            catalog: previousState.resources.catalog,
+          }),
+        })
+      }
       if (!intervalOnlyChange) {
-        return createState({ status: 'loading', symbol, interval, requestId })
+        return Object.freeze({
+          ...createState({ status: 'loading', symbol, interval, requestId }),
+          resources: Object.freeze({
+            ...emptyResources(),
+            catalog: previousState.resources.catalog,
+          }),
+        })
       }
       const markStale = resource => resource === null
         ? null
@@ -188,12 +213,13 @@ const useFuturesProductionWorkstation = ({
         if (message.generation === previousState.generation
           && message.revision <= previousState.revision) return previousState
         const next = applyFuturesWorkstationEvent(previousState, message)
-        const resources = intervalOnlyChange
-          && message.resource === 'status'
+        const preservesCatalog = message.resource === 'status'
           && message.state === 'loading'
+        const resources = preservesCatalog
           ? Object.freeze({
-              ...previousState.resources,
+              ...(intervalOnlyChange ? previousState.resources : next.resources),
               status: next.resources.status,
+              catalog: previousState.resources.catalog,
             })
           : next.resources
         return Object.freeze({
@@ -231,12 +257,18 @@ const useFuturesProductionWorkstation = ({
       sent = false
     }
     if (!sent && owned()) {
-      setState(createState({
-        status: 'unavailable',
-        symbol,
-        interval,
-        requestId,
-        reasonCode: 'LOCAL_SUBSCRIBE_REJECTED',
+      setState(previousState => Object.freeze({
+        ...createState({
+          status: 'unavailable',
+          symbol,
+          interval,
+          requestId,
+          reasonCode: 'LOCAL_SUBSCRIBE_REJECTED',
+        }),
+        resources: Object.freeze({
+          ...emptyResources(),
+          catalog: previousState.resources.catalog,
+        }),
       }))
     } else if (sent) {
       activeSubscriptionRef.current = Object.freeze({ requestId, sendMessage })

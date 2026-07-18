@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
     FUTURES_PRODUCTION_EXECUTION_COORDINATOR_ERROR_CODES,
+    FUTURES_PRODUCTION_EXECUTION_COORDINATOR_LIMITS,
     FUTURES_PRODUCTION_EXECUTION_ENDPOINT_IDS,
     FUTURES_PRODUCTION_EXECUTION_ENDPOINT_WEIGHTS,
     FUTURES_PRODUCTION_EXECUTION_REST_ORIGIN,
@@ -148,6 +149,24 @@ describe('FuturesProductionExecutionCoordinator', () => {
         expect(FUTURES_PRODUCTION_EXECUTION_REST_ORIGIN).toBe('https://fapi.binance.com');
     });
 
+    it('admits the exact all-symbol inventory weight without expanding the reviewed ceiling', async () => {
+        const harness = createHarness();
+        await expect(harness.coordinator.executeGet(() => 'all orders', 40, {
+            endpointId: 'all-open-orders',
+        })).resolves.toBe('all orders');
+        expect(FUTURES_PRODUCTION_EXECUTION_COORDINATOR_LIMITS.preflightWeight).toBe(40);
+        expect(harness.persistOriginWeightReservation).toHaveBeenCalledExactlyOnceWith({
+            endpointId: 'all-open-orders',
+            observedAt: expect.any(Number),
+            requestWeight: 40,
+        });
+        await expect(harness.coordinator.executeGet(() => 'forbidden', 41, {
+            endpointId: 'all-open-orders',
+        })).rejects.toMatchObject({
+            code: FUTURES_PRODUCTION_EXECUTION_COORDINATOR_ERROR_CODES.INVALID_ARGUMENTS,
+        });
+    });
+
     it('accepts only the exact reviewed endpoint identifiers', async () => {
         expect(FUTURES_PRODUCTION_EXECUTION_ENDPOINT_IDS).toEqual([
             'server-time',
@@ -155,10 +174,16 @@ describe('FuturesProductionExecutionCoordinator', () => {
             'mark-price',
             'account-config',
             'symbol-config',
+            'all-symbol-config',
             'balance-v3',
             'position-risk',
             'open-orders',
+            'all-open-orders',
+            'user-data-stream-start',
+            'user-data-stream-keepalive',
+            'user-data-stream-close',
             'open-algo-orders',
+            'all-open-algo-orders',
             'position-margin-history',
             'modify-isolated-position-margin',
             'modify-limit-order',
@@ -174,10 +199,16 @@ describe('FuturesProductionExecutionCoordinator', () => {
             'mark-price': 1,
             'account-config': 5,
             'symbol-config': 5,
+            'all-symbol-config': 5,
             'balance-v3': 5,
             'position-risk': 5,
             'open-orders': 1,
+            'all-open-orders': 40,
+            'user-data-stream-start': 1,
+            'user-data-stream-keepalive': 1,
+            'user-data-stream-close': 1,
             'open-algo-orders': 1,
+            'all-open-algo-orders': 40,
             'position-margin-history': 1,
             'modify-isolated-position-margin': 1,
             'modify-limit-order': 1,
@@ -416,7 +447,7 @@ describe('FuturesProductionExecutionCoordinator', () => {
         const blocked = createHarness({
             originBucket: new FuturesProductionExecutionOriginBucket({
                 now: Date.now,
-                initialOriginWeightReservations: [{ observedAt: 40_000, requestWeight: 775 }],
+                initialOriginWeightReservations: [{ observedAt: 40_000, requestWeight: 761 }],
                 initialLastOriginWeightObservedAt: 40_000,
             }),
         });
@@ -432,7 +463,7 @@ describe('FuturesProductionExecutionCoordinator', () => {
         const exact = createHarness({
             originBucket: new FuturesProductionExecutionOriginBucket({
                 now: Date.now,
-                initialOriginWeightReservations: [{ observedAt: 50_000, requestWeight: 774 }],
+                initialOriginWeightReservations: [{ observedAt: 50_000, requestWeight: 760 }],
                 initialLastOriginWeightObservedAt: 50_000,
             }),
         });
@@ -521,6 +552,37 @@ describe('FuturesProductionExecutionCoordinator', () => {
         expect(harness.coordinator.getOrderAdmissionSnapshot()).toMatchObject({
             dispatchTimes: [dayOne],
             dailyReservations: { '2026-07-13': '60' },
+        });
+    });
+
+    it('counts a verified reducing exit for order-rate admission without consuming daily notional', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(dayOne);
+        const harness = createHarness();
+        await harness.coordinator.reserveOrderDispatch({
+            exactNotional: '0',
+            utcDay: '2026-07-13',
+            serverTime: dayOne,
+            maximumDailyNotional: '100',
+            audit: { requestId: 'exit-one', positionEffect: 'EXIT' },
+        });
+
+        expect(harness.persistOrderReservation).toHaveBeenCalledWith(expect.objectContaining({
+            exactNotional: '0',
+            positionEffect: 'EXIT',
+        }));
+        expect(harness.coordinator.getOrderAdmissionSnapshot()).toMatchObject({
+            dispatchTimes: [dayOne],
+            dailyReservations: { '2026-07-13': '0' },
+        });
+        await expect(harness.coordinator.reserveOrderDispatch({
+            exactNotional: '0',
+            utcDay: '2026-07-13',
+            serverTime: dayOne,
+            maximumDailyNotional: '100',
+            audit: { requestId: 'not-an-exit', positionEffect: 'ENTRY' },
+        })).rejects.toMatchObject({
+            code: FUTURES_PRODUCTION_EXECUTION_COORDINATOR_ERROR_CODES.INVALID_ARGUMENTS,
         });
     });
 

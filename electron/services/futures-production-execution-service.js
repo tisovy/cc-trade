@@ -24,6 +24,11 @@ import {
     FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS,
 } from './futures-production-execution-facade.js';
 import {
+    FuturesProductionExecutionIntegerToken,
+    parseFuturesProductionExecutionJson,
+    readFuturesProductionExecutionIntegerToken,
+} from './futures-production-execution-json.js';
+import {
     canonicalFuturesProductionUtcDay,
     createFuturesProductionExecutionCommandDigest,
 } from './futures-production-execution-ledger.js';
@@ -36,8 +41,24 @@ import {
     parseFuturesProductionExecutionCommand,
 } from './futures-production-execution-protocol.js';
 import {
+    FUTURES_PRODUCTION_EXECUTION_RISK_CLASSIFICATIONS,
     evaluateFuturesProductionExecutionRisk,
 } from './futures-production-execution-risk.js';
+import {
+    FUTURES_OPEN_ORDER_SYNC_STATES,
+    applyFuturesAcceptedAmendProjection,
+    applyFuturesAcceptedCreateProjection,
+    applyFuturesAlgoUpdate,
+    applyFuturesAuthoritativeOrderResult,
+    applyFuturesOrderTradeUpdate,
+    beginFuturesOpenOrdersSnapshot,
+    completeFuturesOpenOrdersSnapshot,
+    createFuturesOpenOrdersReconciliationState,
+    failFuturesOpenOrdersPendingCancel,
+    failFuturesOpenOrdersSnapshot,
+    markFuturesOpenOrdersPendingCancel,
+    removeFuturesOpenOrdersForSymbols,
+} from './futures-production-open-orders-reconciler.js';
 
 const INTENT_TTL_MS = 30_000;
 const FAST_RECONCILIATION_DELAYS = Object.freeze([0, 1_000, 2_000, 5_000, 10_000, 30_000]);
@@ -49,9 +70,12 @@ const UTC_DAY_MS = 24 * 60 * 60_000;
 const UTC_ROLLOVER_GUARD_MS = 15_000;
 const MAX_DISPATCH_START_DELAY_MS = 5_000;
 const BOOTSTRAP_FINGERPRINT = '0'.repeat(64);
-const MAX_PORTFOLIO_ITEMS = 16;
-const MAX_PORTFOLIO_BYTES = 10_240;
-const OWNED_CLIENT_ORDER_ID_PATTERN = /^cc7-[0-9a-f]{32}$/;
+const MAX_PORTFOLIO_ITEMS = 2_048;
+const MAX_PORTFOLIO_BYTES = 1_572_864;
+const CLIENT_ORDER_ID_PATTERN = /^[.A-Z:/a-z0-9_-]{1,36}$/;
+const USER_DATA_KEEPALIVE_MS = 30 * 60_000;
+const USER_DATA_RECONNECT_DELAYS_MS = Object.freeze([1_000, 5_000, 15_000, 60_000]);
+const IDENTITY_SNAPSHOT_REUSE_MS = 5_000;
 
 export const FUTURES_PRODUCTION_EXECUTION_SAFE_CODES = Object.freeze({
     ENABLED: 'FUTURES_PRODUCTION_ENABLED',
@@ -143,10 +167,16 @@ const ENDPOINT_IDS = Object.freeze({
     markPrice: 'mark-price',
     accountConfig: 'account-config',
     symbolConfig: 'symbol-config',
+    allSymbolConfig: 'all-symbol-config',
     balance: 'balance-v3',
     positionRisk: 'position-risk',
     openOrders: 'open-orders',
+    allOpenOrders: 'all-open-orders',
+    userDataStreamStart: 'user-data-stream-start',
+    userDataStreamKeepAlive: 'user-data-stream-keepalive',
+    userDataStreamClose: 'user-data-stream-close',
     openAlgoOrders: 'open-algo-orders',
+    allOpenAlgoOrders: 'all-open-algo-orders',
     positionMarginHistory: 'position-margin-history',
     modifyIsolatedPositionMargin: 'modify-isolated-position-margin',
     modifyLimitOrder: 'modify-limit-order',
@@ -163,10 +193,16 @@ const READ_WEIGHTS = Object.freeze({
     markPrice: 1,
     accountConfig: 5,
     symbolConfig: 5,
+    allSymbolConfig: 5,
     balance: 5,
     positionRisk: 5,
     openOrders: 1,
+    allOpenOrders: 40,
+    userDataStreamStart: 1,
+    userDataStreamKeepAlive: 1,
+    userDataStreamClose: 1,
     openAlgoOrders: 1,
+    allOpenAlgoOrders: 40,
     positionMarginHistory: 1,
     queryOrder: 1,
 });
@@ -197,6 +233,28 @@ const safeErrorCode = error => (
         ? error.code
         : FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RESULT_UNKNOWN
 );
+
+const convertUserDataStreamValue = (value, field = '') => {
+    if (value instanceof FuturesProductionExecutionIntegerToken) {
+        const { parsed, token } = readFuturesProductionExecutionIntegerToken(value);
+        if (field === 'i' || field === 'aid') return token;
+        if (parsed < 0n || parsed > BigInt(Number.MAX_SAFE_INTEGER)) {
+            throw new Error('unsafe Futures user-data integer');
+        }
+        return Number(parsed);
+    }
+    if (Array.isArray(value)) {
+        return value.map(entry => convertUserDataStreamValue(entry));
+    }
+    if (value !== null && typeof value === 'object') {
+        const result = Object.create(null);
+        for (const [key, entry] of Object.entries(value)) {
+            result[key] = convertUserDataStreamValue(entry, key);
+        }
+        return result;
+    }
+    return value;
+};
 
 const findSymbolEntry = (value, symbol) => {
     const rows = Array.isArray(value) ? value : [value];
@@ -339,27 +397,45 @@ const exactDecimalEqual = (left, right, { allowZero = false } = {}) => {
     }
 };
 
-const normalizePortfolioSnapshot = ({ allowedSymbols, observedAt, positionRisk, openOrders }) => {
+const normalizePortfolioSnapshot = ({
+    availableBalanceUsdt,
+    observedAt,
+    positionRisk,
+    orderReconciliation,
+    state = 'live',
+    syncCode = null,
+}) => {
     if (!Array.isArray(positionRisk)
-        || !Array.isArray(openOrders)
+        || !Array.isArray(orderReconciliation?.orders)
+        || !Object.values(FUTURES_OPEN_ORDER_SYNC_STATES).includes(orderReconciliation.syncState)
+        || !['live', 'stale'].includes(state)
+        || (availableBalanceUsdt !== null && typeof availableBalanceUsdt !== 'string')
         || !Number.isSafeInteger(observedAt)
         || observedAt < 0) {
         throw new Error('invalid production portfolio snapshot');
     }
-    const allowed = new Set(allowedSymbols);
+    if (availableBalanceUsdt !== null) parseNonNegativeExactDecimal(availableBalanceUsdt);
     const positions = [];
     const positionKeys = new Set();
     for (const row of positionRisk) {
-        if (!allowed.has(row?.symbol)) continue;
-        if (!['LONG', 'SHORT'].includes(row.positionSide)) {
+        if (typeof row?.symbol !== 'string'
+            || !/^[A-Z0-9]{2,20}$/.test(row.symbol)
+            || !['LONG', 'SHORT'].includes(row.positionSide)) {
             throw new Error('invalid production hedge position');
         }
         const signedQuantity = parseSignedExactDecimal(row.positionAmt);
         if (isZeroExactDecimal(signedQuantity)) continue;
+        const leverage = Number(row.leverage);
+        const marginToken = String(row.marginType).toUpperCase();
+        const marginType = marginToken === 'ISOLATED'
+            ? 'ISOLATED'
+            : ['CROSS', 'CROSSED'].includes(marginToken) ? 'CROSSED' : null;
         if ((row.positionSide === 'LONG' && signedQuantity.coefficient < 0n)
             || (row.positionSide === 'SHORT' && signedQuantity.coefficient > 0n)
-            || !['2', 2].includes(row.leverage)
-            || String(row.marginType).toLowerCase() !== 'isolated') {
+            || !Number.isSafeInteger(leverage)
+            || leverage < 1
+            || leverage > 125
+            || marginType === null) {
             throw new Error('invalid production hedge position configuration');
         }
         const key = `${row.symbol}:${row.positionSide}`;
@@ -385,73 +461,76 @@ const normalizePortfolioSnapshot = ({ allowedSymbols, observedAt, positionRisk, 
             unrealizedPnlUsdt: row.unRealizedProfit,
             isolatedMarginUsdt: row.isolatedMargin,
             liquidationPrice: row.liquidationPrice,
-            leverage: 2,
-            marginType: 'ISOLATED',
+            leverage,
+            marginType,
         });
     }
 
-    const ownedOrders = [];
+    const normalizedOrders = [];
     const orderIds = new Set();
     const clientOrderIds = new Set();
-    for (const row of openOrders) {
-        if (!allowed.has(row?.symbol)) continue;
-        if (typeof row.clientOrderId !== 'string') {
-            throw new Error('invalid production order identity');
+    for (const row of orderReconciliation.orders) {
+        const orderKey = `${row.symbol}:${row.orderKind}:${row.orderId}`;
+        const clientOrderKey = `${row.symbol}:${row.orderKind}:${row.clientOrderId}`;
+        if (orderIds.has(orderKey) || clientOrderIds.has(clientOrderKey)) {
+            throw new Error('duplicate production order');
         }
-        if (!OWNED_CLIENT_ORDER_ID_PATTERN.test(row.clientOrderId)) {
-            if (row.clientOrderId.startsWith('cc7-')) {
-                throw new Error('invalid owned production order identity');
-            }
-            continue;
-        }
-        const expectedEffect = row.positionSide === 'LONG'
-            ? (row.side === 'BUY' ? 'ENTRY' : 'EXIT')
-            : (row.side === 'SELL' ? 'ENTRY' : 'EXIT');
-        if (typeof row.orderId !== 'string'
-            || !/^[1-9][0-9]{0,18}$/.test(row.orderId)
-            || !['BUY', 'SELL'].includes(row.side)
-            || !['LONG', 'SHORT'].includes(row.positionSide)
-            || !['NEW', 'PARTIALLY_FILLED'].includes(row.status)
-            || row.type !== 'LIMIT'
-            || row.timeInForce !== 'GTC'
-            || row.reduceOnly !== false
-            || row.closePosition !== false
-            || orderIds.has(row.orderId)
-            || clientOrderIds.has(row.clientOrderId)) {
-            throw new Error('invalid owned production order');
-        }
-        parsePositiveExactDecimal(row.price);
-        parsePositiveExactDecimal(row.origQty);
-        parseNonNegativeExactDecimal(row.executedQty);
-        orderIds.add(row.orderId);
-        clientOrderIds.add(row.clientOrderId);
-        ownedOrders.push({
+        orderIds.add(orderKey);
+        clientOrderIds.add(clientOrderKey);
+        normalizedOrders.push({
             symbol: row.symbol,
+            orderKind: row.orderKind,
             orderId: row.orderId,
             clientOrderId: row.clientOrderId,
             side: row.side,
             positionSide: row.positionSide,
-            positionEffect: expectedEffect,
+            positionEffect: row.positionEffect,
             price: row.price,
-            originalQuantity: row.origQty,
-            executedQuantity: row.executedQty,
+            originalQuantity: row.originalQuantity,
+            executedQuantity: row.filledQuantity,
             status: row.status,
             type: row.type,
             timeInForce: row.timeInForce,
+            isAppOwned: row.isAppOwned,
+            updateTime: row.updateTime,
+            syncState: row.syncState,
         });
     }
 
     positions.sort((left, right) => (
         `${left.symbol}:${left.positionSide}`.localeCompare(`${right.symbol}:${right.positionSide}`)
     ));
-    ownedOrders.sort((left, right) => left.clientOrderId.localeCompare(right.clientOrderId));
+    normalizedOrders.sort((left, right) => (
+        `${left.symbol}:${left.orderKind}:${left.orderId}`.localeCompare(
+            `${right.symbol}:${right.orderKind}:${right.orderId}`,
+        )
+    ));
     const exceedsBounds = positions.length > MAX_PORTFOLIO_ITEMS
-        || ownedOrders.length > MAX_PORTFOLIO_ITEMS
-        || Buffer.byteLength(JSON.stringify({ positions, openOrders: ownedOrders }), 'utf8')
+        || normalizedOrders.length > MAX_PORTFOLIO_ITEMS
+        || Buffer.byteLength(JSON.stringify({ positions, openOrders: normalizedOrders }), 'utf8')
             > MAX_PORTFOLIO_BYTES;
+    const projectedSyncCode = syncCode === null
+        ? null
+        : `FUTURES_PRODUCTION_OPEN_ORDERS_${syncCode}`;
     return exceedsBounds
-        ? { state: 'truncated', observedAt, positions: [], openOrders: [] }
-        : { state: 'live', observedAt, positions, openOrders: ownedOrders };
+        ? {
+            state: 'truncated',
+            observedAt,
+            availableBalanceUsdt,
+            syncState: orderReconciliation.syncState,
+            syncCode: projectedSyncCode,
+            positions: [],
+            openOrders: [],
+        }
+        : {
+            state,
+            observedAt,
+            availableBalanceUsdt,
+            syncState: orderReconciliation.syncState,
+            syncCode: projectedSyncCode,
+            positions,
+            openOrders: normalizedOrders,
+        };
 };
 
 const durableOrderFields = draft => ({
@@ -545,9 +624,34 @@ export const createFuturesProductionExecutionService = ({
     let portfolio = {
         state: 'unavailable',
         observedAt: null,
+        availableBalanceUsdt: null,
+        syncState: FUTURES_OPEN_ORDER_SYNC_STATES.IDLE,
+        syncCode: 'FUTURES_PRODUCTION_ACCOUNT_UNAVAILABLE',
         positions: [],
         openOrders: [],
     };
+    let openOrdersReconciliation = createFuturesOpenOrdersReconciliationState();
+    let latestPositionRisk = [];
+    let latestAvailableBalanceUsdt = null;
+    let latestAccountConfig = null;
+    let latestSymbolConfigurations = [];
+    let identityBootstrapSnapshot = null;
+    let portfolioRefreshPromise = null;
+    let portfolioRetryTimer = null;
+    let identityRetryTimer = null;
+    let identityRetryAttempt = 0;
+    let userDataStreamGeneration = 0;
+    let userDataStreamHandle = null;
+    let userDataStreamLive = false;
+    let userDataListenKey = null;
+    let userDataKeepAliveTimer = null;
+    let userDataReconnectTimer = null;
+    let userDataReconnectAttempt = 0;
+    let lastOwnedPortfolioSnapshotGeneration = null;
+    let accountUpdateRefreshTimer = null;
+    let accountStateRefreshPromise = null;
+    let accountUpdateRefreshPending = false;
+    let accountUpdateNeedsConfigurationRefresh = false;
     let reconciliation = null;
     let recovery = {
         required: false,
@@ -614,6 +718,21 @@ export const createFuturesProductionExecutionService = ({
         return timer;
     };
 
+    const cancelScheduled = (timer) => {
+        if (timer === null) return;
+        clearTimeoutFn(timer);
+        timers.delete(timer);
+    };
+
+    const runBackground = (phase, operation) => {
+        const task = Promise.resolve()
+            .then(operation)
+            .catch(error => reportInternal(phase, error))
+            .finally(() => backgroundTasks.delete(task));
+        backgroundTasks.add(task);
+        return task;
+    };
+
     const getDailyState = () => {
         const snapshot = coordinator?.getOrderAdmissionSnapshot?.()
             ?? ledger.getOrderRateState?.()
@@ -629,8 +748,29 @@ export const createFuturesProductionExecutionService = ({
     const getCaps = () => {
         if (!policy) return null;
         const daily = getDailyState();
+        const symbolConfigurations = policy.allowedSymbols.map(symbol => {
+            const configuration = findSymbolEntry(latestSymbolConfigurations, symbol);
+            if (!configuration) return null;
+            const marginToken = String(configuration.marginType).toUpperCase();
+            const marginType = marginToken === 'ISOLATED'
+                ? 'ISOLATED'
+                : ['CROSS', 'CROSSED'].includes(marginToken) ? 'CROSSED' : null;
+            const leverage = Number(configuration.leverage);
+            if (marginType === null
+                || !Number.isSafeInteger(leverage)
+                || leverage < 1
+                || leverage > 125
+                || typeof configuration.isAutoAddMargin !== 'boolean') return null;
+            return {
+                symbol,
+                marginType,
+                leverage,
+                isAutoAddMargin: configuration.isAutoAddMargin,
+            };
+        }).filter(Boolean);
         return {
             allowedSymbols: [...policy.allowedSymbols],
+            symbolConfigurations,
             maxLeverage: policy.maxLeverage,
             maxOrderNotionalUsdt: policy.maxOrderNotionalUsdt,
             maxDailyNotionalUsdt: policy.maxDailyNotionalUsdt,
@@ -666,6 +806,7 @@ export const createFuturesProductionExecutionService = ({
             || canFinalize(FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.MARGIN_ADJUSTMENT);
         const amendOrder = (canPrepare
             && portfolio.state === 'live'
+            && portfolio.syncState === FUTURES_OPEN_ORDER_SYNC_STATES.LIVE
             && portfolio.openOrders.length > 0)
             || canFinalize(FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER_AMENDMENT);
         const cancelAllOpenOrders = canPrepare || canFinalize(
@@ -911,18 +1052,243 @@ export const createFuturesProductionExecutionService = ({
         })
     );
 
-    const refreshPortfolio = async () => {
+    const projectCurrentPortfolio = ({ state = 'stale', syncCode = null } = {}) => {
+        const observedAt = Math.max(
+            portfolio.observedAt ?? 0,
+            openOrdersReconciliation.observedAt ?? 0,
+            openOrdersReconciliation.snapshotStartedAt ?? 0,
+        );
+        portfolio = normalizePortfolioSnapshot({
+            allowedSymbols: policy?.allowedSymbols ?? [],
+            availableBalanceUsdt: latestAvailableBalanceUsdt,
+            observedAt,
+            positionRisk: latestPositionRisk,
+            orderReconciliation: openOrdersReconciliation,
+            state,
+            syncCode: syncCode ?? (
+                openOrdersReconciliation.syncState === FUTURES_OPEN_ORDER_SYNC_STATES.LIVE
+                    ? null
+                    : openOrdersReconciliation.errorCode ?? 'SNAPSHOT_UNAVAILABLE'
+            ),
+        });
+        return portfolio;
+    };
+
+    const schedulePortfolioRetry = () => {
+        if (shuttingDown || !identityValid || portfolioRetryTimer !== null) return;
+        portfolioRetryTimer = schedule(async () => {
+            portfolioRetryTimer = null;
+            await refreshPortfolio();
+        }, 2_000);
+    };
+
+    const refreshPortfolioNow = async () => {
         if (!identityValid || !policy || !facade || !coordinator) {
             portfolio = {
                 state: 'unavailable',
                 observedAt: null,
+                availableBalanceUsdt: null,
+                syncState: openOrdersReconciliation.syncState,
+                syncCode: 'FUTURES_PRODUCTION_ACCOUNT_UNAVAILABLE',
                 positions: [],
                 openOrders: [],
             };
             return portfolio;
         }
-        const lease = await coordinator.beginPreflight();
+        const snapshotStreamGeneration = userDataStreamGeneration;
+        const snapshotStartedWithLiveStream = userDataStreamLive;
+        openOrdersReconciliation = beginFuturesOpenOrdersSnapshot(
+            openOrdersReconciliation,
+            { startedAt: readNow() },
+        );
+        projectCurrentPortfolio({
+            state: portfolio.state === 'live' ? 'live' : 'stale',
+        });
+        advanceRevision();
+        broadcastStatus();
+        const snapshotId = openOrdersReconciliation.activeSnapshotId;
+        let lease = null;
+        let accountIdentityRejected = false;
         try {
+            lease = await coordinator.beginPreflight();
+            const cachedIdentity = identityBootstrapSnapshot !== null
+                && readNow() - identityBootstrapSnapshot.observedAt <= IDENTITY_SNAPSHOT_REUSE_MS
+                ? identityBootstrapSnapshot
+                : null;
+            identityBootstrapSnapshot = null;
+            const serverTime = cachedIdentity === null
+                ? await executeRead({
+                    lease,
+                    endpointId: ENDPOINT_IDS.serverTime,
+                    weight: READ_WEIGHTS.serverTime,
+                    operation: () => facade.getServerTime(),
+                })
+                : { serverTime: cachedIdentity.serverTime };
+            if (lastServerTime !== null && serverTime.serverTime < lastServerTime) {
+                throw new FuturesProductionExecutionServiceError(
+                    'FUTURES_PRODUCTION_SERVER_CLOCK_REGRESSED',
+                );
+            }
+            const accountConfig = cachedIdentity === null
+                ? await executeRead({
+                    lease,
+                    endpointId: ENDPOINT_IDS.accountConfig,
+                    weight: READ_WEIGHTS.accountConfig,
+                    operation: () => facade.getAccountConfig(),
+                })
+                : cachedIdentity.accountConfig;
+            const balance = cachedIdentity === null
+                ? await executeRead({
+                    lease,
+                    endpointId: ENDPOINT_IDS.balance,
+                    weight: READ_WEIGHTS.balance,
+                    operation: () => facade.getBalance(),
+                })
+                : null;
+            const positionRisk = await executeRead({
+                lease,
+                endpointId: ENDPOINT_IDS.positionRisk,
+                weight: READ_WEIGHTS.positionRisk,
+                operation: () => facade.getAllPositionRisk(),
+            });
+            const symbolConfigurations = await executeRead({
+                lease,
+                endpointId: ENDPOINT_IDS.allSymbolConfig,
+                weight: READ_WEIGHTS.allSymbolConfig,
+                operation: () => facade.getAllSymbolConfig(),
+            });
+            lease.release();
+            lease = null;
+            const openOrders = await executeRead({
+                endpointId: ENDPOINT_IDS.allOpenOrders,
+                weight: READ_WEIGHTS.allOpenOrders,
+                operation: () => facade.getAllOpenOrders(),
+            });
+            const openAlgoOrders = await executeRead({
+                endpointId: ENDPOINT_IDS.allOpenAlgoOrders,
+                weight: READ_WEIGHTS.allOpenAlgoOrders,
+                operation: () => facade.getAllOpenAlgoOrders(),
+            });
+            const verifiedBalance = cachedIdentity === null
+                ? verifyProductionAccountIdentity({
+                    accountAlias: identity?.accountAlias,
+                    accountConfig,
+                    balance,
+                })
+                : { availableBalance: cachedIdentity.availableBalanceUsdt };
+            if (!verifiedBalance) {
+                accountIdentityRejected = true;
+                throw new FuturesProductionExecutionServiceError(
+                    FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.GATE_REJECTED,
+                );
+            }
+            lastServerTime = serverTime.serverTime;
+            openOrdersReconciliation = completeFuturesOpenOrdersSnapshot(
+                openOrdersReconciliation,
+                {
+                    snapshotId,
+                    rows: [...openOrders, ...openAlgoOrders],
+                    completedAt: serverTime.serverTime,
+                },
+            );
+            latestPositionRisk = positionRisk;
+            latestAvailableBalanceUsdt = verifiedBalance.availableBalance;
+            latestAccountConfig = accountConfig;
+            latestSymbolConfigurations = symbolConfigurations;
+            const snapshotOwnsLiveStream = snapshotStartedWithLiveStream
+                && userDataStreamLive
+                && snapshotStreamGeneration === userDataStreamGeneration;
+            if (!snapshotOwnsLiveStream) {
+                openOrdersReconciliation = beginFuturesOpenOrdersSnapshot(
+                    openOrdersReconciliation,
+                    { startedAt: serverTime.serverTime },
+                );
+                openOrdersReconciliation = failFuturesOpenOrdersSnapshot(
+                    openOrdersReconciliation,
+                    {
+                        snapshotId: openOrdersReconciliation.activeSnapshotId,
+                        errorCode: 'ACCOUNT_STREAM_UNAVAILABLE',
+                    },
+                );
+            }
+            portfolio = normalizePortfolioSnapshot({
+                allowedSymbols: policy.allowedSymbols,
+                availableBalanceUsdt: latestAvailableBalanceUsdt,
+                observedAt: serverTime.serverTime,
+                positionRisk,
+                orderReconciliation: openOrdersReconciliation,
+                state: snapshotOwnsLiveStream ? 'live' : 'stale',
+                syncCode: snapshotOwnsLiveStream ? null : 'ACCOUNT_STREAM_UNAVAILABLE',
+            });
+            if (snapshotOwnsLiveStream) {
+                lastOwnedPortfolioSnapshotGeneration = snapshotStreamGeneration;
+            }
+            cancelScheduled(portfolioRetryTimer);
+            portfolioRetryTimer = null;
+            advanceRevision();
+            broadcastStatus();
+            return portfolio;
+        } catch (error) {
+            const identityRejected = accountIdentityRejected
+                || error?.kind === FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.AUTH_REJECTED;
+            const snapshotErrorCode = identityRejected
+                ? 'ACCOUNT_IDENTITY_REJECTED'
+                : 'SNAPSHOT_UNAVAILABLE';
+            openOrdersReconciliation = failFuturesOpenOrdersSnapshot(
+                openOrdersReconciliation,
+                { snapshotId, errorCode: snapshotErrorCode },
+            );
+            projectCurrentPortfolio({ state: 'stale', syncCode: snapshotErrorCode });
+            reportInternal('portfolio-refresh', error);
+            if (identityRejected) {
+                identityValid = false;
+                identityBootstrapSnapshot = null;
+                latestAccountConfig = null;
+                userDataStreamLive = false;
+                userDataStreamGeneration += 1;
+                cancelScheduled(userDataKeepAliveTimer);
+                userDataKeepAliveTimer = null;
+                cancelScheduled(userDataReconnectTimer);
+                userDataReconnectTimer = null;
+                closeCurrentUserDataSocket();
+                userDataListenKey = null;
+                await refreshActivation({ audit: false });
+                scheduleIdentityRetry();
+            }
+            advanceRevision();
+            broadcastStatus();
+            schedulePortfolioRetry();
+            return portfolio;
+        } finally {
+            lease?.release();
+        }
+    };
+
+    const refreshPortfolio = () => {
+        if (portfolioRefreshPromise !== null) return portfolioRefreshPromise;
+        portfolioRefreshPromise = (async () => {
+            const activeAccountStateRefresh = accountStateRefreshPromise;
+            if (activeAccountStateRefresh !== null) await activeAccountStateRefresh;
+            return refreshPortfolioNow();
+        })()
+            .finally(() => {
+                portfolioRefreshPromise = null;
+            });
+        return portfolioRefreshPromise;
+    };
+
+    const closeCurrentUserDataSocket = () => {
+        const handle = userDataStreamHandle;
+        userDataStreamHandle = null;
+        handle?.close();
+    };
+
+    const refreshAccountStateNow = async ({ refreshConfiguration = false } = {}) => {
+        if (!identityValid || !policy || !facade || !coordinator) return portfolio;
+        let lease = null;
+        let accountIdentityRejected = false;
+        try {
+            lease = await coordinator.beginPreflight();
             const serverTime = await executeRead({
                 lease,
                 endpointId: ENDPOINT_IDS.serverTime,
@@ -934,40 +1300,296 @@ export const createFuturesProductionExecutionService = ({
                     'FUTURES_PRODUCTION_SERVER_CLOCK_REGRESSED',
                 );
             }
+            const requiresConfiguration = refreshConfiguration
+                || latestAccountConfig === null
+                || latestSymbolConfigurations.length === 0;
+            const accountConfig = requiresConfiguration
+                ? await executeRead({
+                    lease,
+                    endpointId: ENDPOINT_IDS.accountConfig,
+                    weight: READ_WEIGHTS.accountConfig,
+                    operation: () => facade.getAccountConfig(),
+                })
+                : latestAccountConfig;
+            const balance = await executeRead({
+                lease,
+                endpointId: ENDPOINT_IDS.balance,
+                weight: READ_WEIGHTS.balance,
+                operation: () => facade.getBalance(),
+            });
             const positionRisk = await executeRead({
                 lease,
                 endpointId: ENDPOINT_IDS.positionRisk,
                 weight: READ_WEIGHTS.positionRisk,
                 operation: () => facade.getAllPositionRisk(),
             });
-            const openOrderGroups = [];
-            for (const symbol of policy.allowedSymbols) {
-                openOrderGroups.push(await executeRead({
+            const symbolConfigurations = requiresConfiguration
+                ? await executeRead({
                     lease,
-                    endpointId: ENDPOINT_IDS.openOrders,
-                    weight: READ_WEIGHTS.openOrders,
-                    operation: () => facade.getOpenOrders(symbol),
-                }));
+                    endpointId: ENDPOINT_IDS.allSymbolConfig,
+                    weight: READ_WEIGHTS.allSymbolConfig,
+                    operation: () => facade.getAllSymbolConfig(),
+                })
+                : latestSymbolConfigurations;
+            const verifiedBalance = verifyProductionAccountIdentity({
+                accountAlias: identity?.accountAlias,
+                accountConfig,
+                balance,
+            });
+            if (!verifiedBalance) {
+                accountIdentityRejected = true;
+                throw new FuturesProductionExecutionServiceError(
+                    FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.GATE_REJECTED,
+                );
             }
             lastServerTime = serverTime.serverTime;
-            portfolio = normalizePortfolioSnapshot({
-                allowedSymbols: policy.allowedSymbols,
-                observedAt: serverTime.serverTime,
-                positionRisk,
-                openOrders: openOrderGroups.flat(),
+            latestAccountConfig = accountConfig;
+            latestAvailableBalanceUsdt = verifiedBalance.availableBalance;
+            latestPositionRisk = positionRisk;
+            latestSymbolConfigurations = symbolConfigurations;
+            projectCurrentPortfolio({
+                state: userDataStreamLive ? 'live' : 'stale',
+                syncCode: userDataStreamLive ? null : 'ACCOUNT_STREAM_UNAVAILABLE',
             });
+            advanceRevision();
+            broadcastStatus();
             return portfolio;
         } catch (error) {
-            portfolio = {
-                state: 'unavailable',
-                observedAt: null,
-                positions: [],
-                openOrders: [],
-            };
-            reportInternal('portfolio-refresh', error);
+            const identityRejected = accountIdentityRejected
+                || error?.kind === FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.AUTH_REJECTED;
+            const refreshCode = identityRejected
+                ? 'ACCOUNT_IDENTITY_REJECTED'
+                : 'ACCOUNT_STATE_REFRESH_UNAVAILABLE';
+            reportInternal('account-state-refresh', error);
+            projectCurrentPortfolio({ state: 'stale', syncCode: refreshCode });
+            if (identityRejected) {
+                identityValid = false;
+                identityBootstrapSnapshot = null;
+                latestAccountConfig = null;
+                userDataStreamLive = false;
+                userDataStreamGeneration += 1;
+                cancelScheduled(userDataKeepAliveTimer);
+                userDataKeepAliveTimer = null;
+                cancelScheduled(userDataReconnectTimer);
+                userDataReconnectTimer = null;
+                closeCurrentUserDataSocket();
+                userDataListenKey = null;
+                await refreshActivation({ audit: false });
+                scheduleIdentityRetry();
+            } else {
+                schedulePortfolioRetry();
+            }
+            advanceRevision();
+            broadcastStatus();
             return portfolio;
         } finally {
-            lease.release();
+            lease?.release();
+        }
+    };
+
+    const flushAccountStateRefresh = () => {
+        if (accountStateRefreshPromise !== null) return accountStateRefreshPromise;
+        accountStateRefreshPromise = (async () => {
+            const activePortfolioRefresh = portfolioRefreshPromise;
+            if (activePortfolioRefresh !== null) await activePortfolioRefresh;
+            while (!shuttingDown && identityValid && accountUpdateRefreshPending) {
+                const refreshConfiguration = accountUpdateNeedsConfigurationRefresh;
+                accountUpdateRefreshPending = false;
+                accountUpdateNeedsConfigurationRefresh = false;
+                await refreshAccountStateNow({ refreshConfiguration });
+            }
+            if (!identityValid) {
+                accountUpdateRefreshPending = false;
+                accountUpdateNeedsConfigurationRefresh = false;
+            }
+        })().finally(() => {
+            accountStateRefreshPromise = null;
+        });
+        return accountStateRefreshPromise;
+    };
+
+    const markAccountStreamDegraded = (code = 'ACCOUNT_STREAM_UNAVAILABLE') => {
+        userDataStreamLive = false;
+        if (openOrdersReconciliation.activeSnapshotId === null) {
+            openOrdersReconciliation = beginFuturesOpenOrdersSnapshot(
+                openOrdersReconciliation,
+                { startedAt: readNow() },
+            );
+        }
+        openOrdersReconciliation = failFuturesOpenOrdersSnapshot(
+            openOrdersReconciliation,
+            {
+                snapshotId: openOrdersReconciliation.activeSnapshotId,
+                errorCode: code,
+            },
+        );
+        projectCurrentPortfolio({ state: 'stale', syncCode: code });
+        advanceRevision();
+        broadcastStatus();
+    };
+
+    const scheduleUserDataReconnect = (
+        code = 'ACCOUNT_STREAM_UNAVAILABLE',
+        expectedGeneration = userDataStreamGeneration,
+    ) => {
+        if (shuttingDown || expectedGeneration !== userDataStreamGeneration) return;
+        cancelScheduled(userDataKeepAliveTimer);
+        userDataKeepAliveTimer = null;
+        closeCurrentUserDataSocket();
+        markAccountStreamDegraded(code);
+        if (userDataReconnectTimer !== null) return;
+        const delay = USER_DATA_RECONNECT_DELAYS_MS[Math.min(
+            userDataReconnectAttempt,
+            USER_DATA_RECONNECT_DELAYS_MS.length - 1,
+        )];
+        userDataReconnectAttempt += 1;
+        userDataReconnectTimer = schedule(async () => {
+            userDataReconnectTimer = null;
+            await startUserDataStream();
+        }, delay);
+    };
+
+    const scheduleUserDataKeepAlive = (expectedGeneration) => {
+        cancelScheduled(userDataKeepAliveTimer);
+        userDataKeepAliveTimer = schedule(async () => {
+            userDataKeepAliveTimer = null;
+            if (shuttingDown || expectedGeneration !== userDataStreamGeneration) return;
+            try {
+                const renewedStream = await executeRead({
+                    endpointId: ENDPOINT_IDS.userDataStreamKeepAlive,
+                    weight: READ_WEIGHTS.userDataStreamKeepAlive,
+                    operation: () => facade.keepAliveUserDataStream(),
+                });
+                if (renewedStream.listenKey !== userDataListenKey) {
+                    throw new FuturesProductionExecutionServiceError(
+                        'FUTURES_PRODUCTION_ACCOUNT_STREAM_KEY_MISMATCH',
+                    );
+                }
+                scheduleUserDataKeepAlive(expectedGeneration);
+            } catch (error) {
+                reportInternal('account-stream-keepalive', error);
+                scheduleUserDataReconnect('ACCOUNT_STREAM_UNAVAILABLE', expectedGeneration);
+            }
+        }, USER_DATA_KEEPALIVE_MS);
+    };
+
+    const handleUserDataStreamMessage = (raw, expectedGeneration) => {
+        if (shuttingDown || expectedGeneration !== userDataStreamGeneration) return;
+        let event;
+        try {
+            event = convertUserDataStreamValue(parseFuturesProductionExecutionJson(raw));
+        } catch (error) {
+            reportInternal('account-stream-frame', error);
+            scheduleUserDataReconnect('ACCOUNT_STREAM_INVALID_EVENT', expectedGeneration);
+            return;
+        }
+        if (event?.e === 'ORDER_TRADE_UPDATE') {
+            try {
+                openOrdersReconciliation = applyFuturesOrderTradeUpdate(
+                    openOrdersReconciliation,
+                    event,
+                );
+                projectCurrentPortfolio({
+                    state: portfolio.state === 'live' ? 'live' : 'stale',
+                });
+                advanceRevision();
+                broadcastStatus();
+            } catch (error) {
+                reportInternal('account-stream-order', error);
+                scheduleUserDataReconnect('ACCOUNT_STREAM_INVALID_EVENT', expectedGeneration);
+            }
+            return;
+        }
+        if (event?.e === 'ALGO_UPDATE') {
+            try {
+                openOrdersReconciliation = applyFuturesAlgoUpdate(
+                    openOrdersReconciliation,
+                    event,
+                );
+                projectCurrentPortfolio({
+                    state: portfolio.state === 'live' ? 'live' : 'stale',
+                });
+                advanceRevision();
+                broadcastStatus();
+            } catch (error) {
+                reportInternal('account-stream-algo-order', error);
+                scheduleUserDataReconnect('ACCOUNT_STREAM_INVALID_EVENT', expectedGeneration);
+            }
+            return;
+        }
+        if (event?.e === 'ACCOUNT_UPDATE' || event?.e === 'ACCOUNT_CONFIG_UPDATE') {
+            accountUpdateRefreshPending = true;
+            if (event.e === 'ACCOUNT_CONFIG_UPDATE') {
+                accountUpdateNeedsConfigurationRefresh = true;
+            }
+            if (accountUpdateRefreshTimer !== null || accountStateRefreshPromise !== null) return;
+            accountUpdateRefreshTimer = schedule(async () => {
+                accountUpdateRefreshTimer = null;
+                await flushAccountStateRefresh();
+            }, 100);
+            return;
+        }
+        if (event?.e === 'listenKeyExpired') {
+            scheduleUserDataReconnect('ACCOUNT_STREAM_EXPIRED', expectedGeneration);
+        }
+    };
+
+    const startUserDataStream = async () => {
+        if (shuttingDown || !identityValid || !facade || !coordinator) return false;
+        cancelScheduled(userDataReconnectTimer);
+        userDataReconnectTimer = null;
+        const streamGeneration = userDataStreamGeneration + 1;
+        userDataStreamGeneration = streamGeneration;
+        userDataStreamLive = false;
+        closeCurrentUserDataSocket();
+        try {
+            const startedStream = await executeRead({
+                endpointId: ENDPOINT_IDS.userDataStreamStart,
+                weight: READ_WEIGHTS.userDataStreamStart,
+                operation: () => facade.startUserDataStream(),
+            });
+            if (shuttingDown) {
+                userDataListenKey = startedStream.listenKey;
+                return false;
+            }
+            if (streamGeneration !== userDataStreamGeneration) return false;
+            userDataListenKey = startedStream.listenKey;
+            const handle = facade.connectUserDataStream({
+                listenKey: userDataListenKey,
+                onMessage: raw => handleUserDataStreamMessage(raw, streamGeneration),
+                onDisconnect: () => scheduleUserDataReconnect(
+                    'ACCOUNT_STREAM_UNAVAILABLE',
+                    streamGeneration,
+                ),
+            });
+            userDataStreamHandle = handle;
+            await handle.ready;
+            if (shuttingDown || streamGeneration !== userDataStreamGeneration) {
+                handle.close();
+                return false;
+            }
+            userDataStreamLive = true;
+            userDataReconnectAttempt = 0;
+            scheduleUserDataKeepAlive(streamGeneration);
+            const snapshotStartedBeforeStreamReady = portfolioRefreshPromise;
+            if (snapshotStartedBeforeStreamReady !== null) {
+                await snapshotStartedBeforeStreamReady;
+            }
+            if (shuttingDown
+                || streamGeneration !== userDataStreamGeneration
+                || !userDataStreamLive) return false;
+            if (lastOwnedPortfolioSnapshotGeneration !== streamGeneration) {
+                await refreshPortfolio();
+            }
+            return !shuttingDown
+                && streamGeneration === userDataStreamGeneration
+                && userDataStreamLive;
+        } catch (error) {
+            if (shuttingDown || streamGeneration !== userDataStreamGeneration) return false;
+            reportInternal('account-stream-connect', error);
+            scheduleUserDataReconnect('ACCOUNT_STREAM_UNAVAILABLE', streamGeneration);
+            await refreshPortfolio();
+            return false;
         }
     };
 
@@ -1240,7 +1862,7 @@ export const createFuturesProductionExecutionService = ({
         if (!policy.allowedSymbols.includes(symbol)
             || !['LONG', 'SHORT'].includes(positionSide)
             || typeof clientOrderId !== 'string'
-            || !OWNED_CLIENT_ORDER_ID_PATTERN.test(clientOrderId)) {
+            || !CLIENT_ORDER_ID_PATTERN.test(clientOrderId)) {
             throw new FuturesProductionExecutionServiceError(
                 FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.GATE_REJECTED,
             );
@@ -1343,11 +1965,20 @@ export const createFuturesProductionExecutionService = ({
                 operation: () => facade.getBalance(),
             });
             lastServerTime = time.serverTime;
-            return verifyProductionAccountIdentity({
+            const verifiedBalance = verifyProductionAccountIdentity({
                 accountAlias: identity.accountAlias,
                 accountConfig,
                 balance,
-            }) !== null;
+            });
+            if (verifiedBalance === null) return false;
+            latestAvailableBalanceUsdt = verifiedBalance.availableBalance;
+            identityBootstrapSnapshot = {
+                serverTime: time.serverTime,
+                availableBalanceUsdt: verifiedBalance.availableBalance,
+                accountConfig,
+                observedAt: readNow(),
+            };
+            return true;
         } finally {
             lease.release();
         }
@@ -1523,6 +2154,7 @@ export const createFuturesProductionExecutionService = ({
         }
         if (kind === FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER_AMENDMENT
             && (portfolio.state !== 'live'
+                || portfolio.syncState !== FUTURES_OPEN_ORDER_SYNC_STATES.LIVE
                 || !portfolio.openOrders.some(order => (
                     order.symbol === command.symbol
                     && order.positionSide === command.positionSide
@@ -1808,40 +2440,13 @@ export const createFuturesProductionExecutionService = ({
                 return order;
             }
             operation.lastOrderDigest = digest;
-            if (operation.kind === FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER_AMENDMENT
-                && portfolio.state === 'live') {
-                const matchingOrders = portfolio.openOrders.filter(item => (
-                    item.clientOrderId === operation.clientOrderId
-                ));
-                if (matchingOrders.length === 1) {
-                    const openOrders = state
-                        === FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_ORDER_AMENDED
-                        ? portfolio.openOrders.map(item => (
-                            item.clientOrderId === operation.clientOrderId
-                                ? {
-                                    ...item,
-                                    price: order.price,
-                                    originalQuantity: order.originalQuantity,
-                                    executedQuantity: order.executedQuantity,
-                                    status: order.status,
-                                }
-                                : item
-                        ))
-                        : [
-                            FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_FILLED,
-                            FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_CANCELED,
-                        ].includes(state)
-                            ? portfolio.openOrders.filter(item => (
-                                item.clientOrderId !== operation.clientOrderId
-                            ))
-                            : portfolio.openOrders;
-                    portfolio = {
-                        ...portfolio,
-                        observedAt: Math.max(portfolio.observedAt, order.updateTime),
-                        openOrders,
-                    };
-                }
-            }
+            openOrdersReconciliation = applyFuturesAuthoritativeOrderResult(
+                openOrdersReconciliation,
+                order,
+            );
+            projectCurrentPortfolio({
+                state: portfolio.state === 'live' ? 'live' : 'stale',
+            });
             const code = state === FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_FILLED
                 ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.CONFIRMED_FILLED
                 : state === FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_CANCELED
@@ -2038,7 +2643,10 @@ export const createFuturesProductionExecutionService = ({
         let reservation;
         try {
             reservation = await coordinator.reserveOrderDispatch({
-                exactNotional: evaluated.result.notionalUsdt,
+                exactNotional: evaluated.result.classification
+                    === FUTURES_PRODUCTION_EXECUTION_RISK_CLASSIFICATIONS.REDUCING
+                    ? '0'
+                    : evaluated.result.notionalUsdt,
                 utcDay: evaluated.utcDay,
                 serverTime: evaluated.serverTime,
                 maximumDailyNotional: policy.maxDailyNotionalUsdt,
@@ -2151,6 +2759,37 @@ export const createFuturesProductionExecutionService = ({
                 }),
             });
             operation.exchangeOrderId = acknowledgement.orderId;
+            if (acknowledgement.symbol === draft.symbol
+                && acknowledgement.clientOrderId === clientOrderId
+                && Number.isSafeInteger(acknowledgement.transactTime)
+                && acknowledgement.transactTime >= 0) {
+                try {
+                    openOrdersReconciliation = applyFuturesAcceptedCreateProjection(
+                        openOrdersReconciliation,
+                        {
+                            symbol: acknowledgement.symbol,
+                            clientOrderId: acknowledgement.clientOrderId,
+                            orderId: acknowledgement.orderId,
+                            side: draft.side,
+                            positionSide: draft.positionSide,
+                            type: 'LIMIT',
+                            timeInForce: 'GTC',
+                            status: 'NEW',
+                            originalQuantity: draft.quantity,
+                            executedQuantity: '0',
+                            price: draft.price,
+                            reduceOnly: false,
+                            closePosition: false,
+                            updateTime: acknowledgement.transactTime,
+                        },
+                    );
+                    projectCurrentPortfolio({
+                        state: portfolio.state === 'live' ? 'live' : 'stale',
+                    });
+                } catch (projectionError) {
+                    reportInternal('order-create-projection', projectionError);
+                }
+            }
             await setAttempt({
                 requestId: command.requestId,
                 kind: intent.kind,
@@ -2299,7 +2938,10 @@ export const createFuturesProductionExecutionService = ({
         let reservation;
         try {
             reservation = await coordinator.reserveOrderDispatch({
-                exactNotional: evaluated.result.notionalUsdt,
+                exactNotional: evaluated.result.classification
+                    === FUTURES_PRODUCTION_EXECUTION_RISK_CLASSIFICATIONS.REDUCING
+                    ? '0'
+                    : evaluated.result.notionalUsdt,
                 utcDay: evaluated.utcDay,
                 serverTime: evaluated.serverTime,
                 maximumDailyNotional: policy.maxDailyNotionalUsdt,
@@ -2429,6 +3071,17 @@ export const createFuturesProductionExecutionService = ({
                     FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RESULT_UNKNOWN,
                 );
             }
+            try {
+                openOrdersReconciliation = applyFuturesAcceptedAmendProjection(
+                    openOrdersReconciliation,
+                    acknowledgement,
+                );
+                projectCurrentPortfolio({
+                    state: portfolio.state === 'live' ? 'live' : 'stale',
+                });
+            } catch (projectionError) {
+                reportInternal('order-amend-projection', projectionError);
+            }
             await setAttempt({
                 requestId: command.requestId,
                 kind: intent.kind,
@@ -2501,6 +3154,18 @@ export const createFuturesProductionExecutionService = ({
     };
 
     const readSymbolInventories = async (symbol, audit = {}) => {
+        const serverTime = await executeRead({
+            endpointId: ENDPOINT_IDS.serverTime,
+            weight: READ_WEIGHTS.serverTime,
+            audit,
+            operation: () => facade.getServerTime(),
+        });
+        if (lastServerTime !== null && serverTime.serverTime < lastServerTime) {
+            throw new FuturesProductionExecutionServiceError(
+                'FUTURES_PRODUCTION_SERVER_CLOCK_REGRESSED',
+            );
+        }
+        lastServerTime = serverTime.serverTime;
         const regular = await executeRead({
             endpointId: ENDPOINT_IDS.openOrders,
             weight: READ_WEIGHTS.openOrders,
@@ -2513,7 +3178,7 @@ export const createFuturesProductionExecutionService = ({
             audit,
             operation: () => facade.getOpenAlgoOrders(symbol),
         });
-        return { regular, algo };
+        return { regular, algo, observedAt: serverTime.serverTime };
     };
 
     const cancelAllOpenOrders = async (command, intent) => {
@@ -2556,12 +3221,52 @@ export const createFuturesProductionExecutionService = ({
                     reportInternal('cancel-all-delete', error);
                 }
             }
+            let cancelProjectionRequestedAt = null;
+            if (deletesAcknowledged) {
+                cancelProjectionRequestedAt = readNow();
+                const projected = markFuturesOpenOrdersPendingCancel(
+                    openOrdersReconciliation,
+                    { symbol, requestedAt: cancelProjectionRequestedAt },
+                );
+                if (projected !== openOrdersReconciliation) {
+                    openOrdersReconciliation = projected;
+                    projectCurrentPortfolio({
+                        state: portfolio.state === 'live' ? 'live' : 'stale',
+                        syncCode: userDataStreamLive ? null : 'ACCOUNT_STREAM_UNAVAILABLE',
+                    });
+                    advanceRevision();
+                    broadcastStatus();
+                }
+            }
             let confirmedEmpty = false;
+            let reconciliationObservedAt = null;
             try {
                 const inventories = await readSymbolInventories(symbol, childAudit);
                 confirmedEmpty = inventories.regular.length === 0 && inventories.algo.length === 0;
+                reconciliationObservedAt = inventories.observedAt;
             } catch (error) {
                 reportInternal('cancel-all-reconcile', error);
+            }
+            const projectionObservedAt = reconciliationObservedAt ?? readNow();
+            const projected = confirmedEmpty
+                ? removeFuturesOpenOrdersForSymbols(openOrdersReconciliation, {
+                    symbols: [symbol],
+                    confirmedAt: projectionObservedAt,
+                })
+                : cancelProjectionRequestedAt === null
+                    ? openOrdersReconciliation
+                    : failFuturesOpenOrdersPendingCancel(openOrdersReconciliation, {
+                        symbol,
+                        failedAt: projectionObservedAt,
+                    });
+            if (projected !== openOrdersReconciliation) {
+                openOrdersReconciliation = projected;
+                projectCurrentPortfolio({
+                    state: confirmedEmpty && userDataStreamLive ? 'live' : 'stale',
+                    syncCode: userDataStreamLive ? null : 'ACCOUNT_STREAM_UNAVAILABLE',
+                });
+                advanceRevision();
+                broadcastStatus();
             }
             const outcome = confirmedEmpty ? 'canceled' : 'unknown';
             const code = confirmedEmpty
@@ -2666,8 +3371,18 @@ export const createFuturesProductionExecutionService = ({
             operation.symbol,
             operation.draft.positionSide,
         );
-        return position !== null
+        const confirmedFlat = position !== null
             && isZeroExactDecimal(parseSignedExactDecimal(position.positionAmt));
+        if (confirmedFlat) {
+            latestPositionRisk = [
+                ...latestPositionRisk.filter(row => row?.symbol !== operation.symbol),
+                ...positions,
+            ];
+            projectCurrentPortfolio({
+                state: portfolio.state === 'live' ? 'live' : 'stale',
+            });
+        }
+        return confirmedFlat;
     };
 
     const closePositionLeg = async ({ command, intent, symbol, positionSide }) => {
@@ -2755,7 +3470,10 @@ export const createFuturesProductionExecutionService = ({
         let reservation;
         try {
             reservation = await coordinator.reserveOrderDispatch({
-                exactNotional: evaluated.result.notionalUsdt,
+                exactNotional: evaluated.result.classification
+                    === FUTURES_PRODUCTION_EXECUTION_RISK_CLASSIFICATIONS.REDUCING
+                    ? '0'
+                    : evaluated.result.notionalUsdt,
                 utcDay: evaluated.utcDay,
                 serverTime: evaluated.serverTime,
                 maximumDailyNotional: policy.maxDailyNotionalUsdt,
@@ -4138,6 +4856,86 @@ export const createFuturesProductionExecutionService = ({
         return activeOperation === null;
     };
 
+    const scheduleIdentityRetry = () => {
+        if (shuttingDown || !config.enabled || identityRetryTimer !== null) return;
+        const delay = USER_DATA_RECONNECT_DELAYS_MS[Math.min(
+            identityRetryAttempt,
+            USER_DATA_RECONNECT_DELAYS_MS.length - 1,
+        )];
+        identityRetryAttempt += 1;
+        identityRetryTimer = schedule(async () => {
+            identityRetryTimer = null;
+            await initializePrivateAccount();
+        }, delay);
+    };
+
+    const initializePrivateAccount = async () => {
+        if (shuttingDown || !storageHealthy || !config.enabled) return false;
+        const active = ledger.getActiveOperations?.() ?? [];
+        const bindings = new Set(active.map(record => record.credentialBinding).filter(Boolean));
+        const bindingMatches = bindings.size === 0
+            || (bindings.size === 1 && bindings.has(credentialBinding));
+        if (!bindingMatches) {
+            identityValid = false;
+            recoveryHealthy = false;
+            recovery = {
+                required: true,
+                state: 'blocked',
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.CREDENTIAL_ROTATION_BLOCKED,
+            };
+            await refreshActivation({ audit: false });
+            return false;
+        }
+        try {
+            identityValid = await validateIdentity();
+            if (!identityValid) {
+                throw new FuturesProductionExecutionServiceError(
+                    FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.GATE_REJECTED,
+                );
+            }
+            cancelScheduled(identityRetryTimer);
+            identityRetryTimer = null;
+            identityRetryAttempt = 0;
+            if (active.length > 0) {
+                recoveryHealthy = await recoverPersistedOperations();
+            } else {
+                recoveryHealthy = true;
+                recovery = {
+                    required: false,
+                    state: 'healthy',
+                    code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.ENABLED,
+                };
+            }
+            await refreshActivation({ audit: false });
+            if (recoveryHealthy) {
+                runBackground('account-stream-bootstrap', startUserDataStream);
+            }
+            return recoveryHealthy;
+        } catch (error) {
+            identityValid = false;
+            identityBootstrapSnapshot = null;
+            if (active.length > 0) {
+                recoveryHealthy = false;
+                recovery = {
+                    required: true,
+                    state: 'blocked',
+                    code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RECOVERY_UNAVAILABLE,
+                };
+            } else {
+                recoveryHealthy = true;
+                recovery = {
+                    required: false,
+                    state: 'healthy',
+                    code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.ENABLED,
+                };
+            }
+            reportInternal('private-account-bootstrap', error);
+            await refreshActivation({ audit: false });
+            scheduleIdentityRetry();
+            return false;
+        }
+    };
+
     const start = async () => {
         if (started) return statusFor(null);
         try {
@@ -4178,37 +4976,8 @@ export const createFuturesProductionExecutionService = ({
             poison('startup-storage', error);
         }
 
-        if (storageHealthy && config.enabled) {
-            try {
-                const active = ledger.getActiveOperations?.() ?? [];
-                const bindings = new Set(active.map(record => record.credentialBinding).filter(Boolean));
-                const bindingMatches = bindings.size === 0
-                    || (bindings.size === 1 && bindings.has(credentialBinding));
-                identityValid = bindingMatches && await validateIdentity();
-                if (identityValid && active.length > 0) {
-                    recoveryHealthy = await recoverPersistedOperations();
-                } else if (active.length > 0) {
-                    recoveryHealthy = false;
-                    recovery = {
-                        required: true,
-                        state: 'blocked',
-                        code: bindingMatches
-                            ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RECOVERY_UNAVAILABLE
-                            : FUTURES_PRODUCTION_EXECUTION_SAFE_CODES
-                                .CREDENTIAL_ROTATION_BLOCKED,
-                    };
-                }
-            } catch (error) {
-                identityValid = false;
-                recoveryHealthy = false;
-                recovery = {
-                    required: true,
-                    state: 'blocked',
-                    code: safeErrorCode(error),
-                };
-                reportInternal('startup-recovery', error);
-            }
-        } else if (storageHealthy && (ledger.getActiveOperations?.().length ?? 0) > 0) {
+        if (storageHealthy && !config.enabled
+            && (ledger.getActiveOperations?.().length ?? 0) > 0) {
             await appendAudit({
                 eventType: 'restart_recovery',
                 category: 'recovery',
@@ -4223,6 +4992,9 @@ export const createFuturesProductionExecutionService = ({
         }
         started = true;
         await refreshActivation({ audit: storageHealthy });
+        if (storageHealthy && config.enabled) {
+            await initializePrivateAccount();
+        }
         return statusFor(null);
     };
 
@@ -4478,6 +5250,15 @@ export const createFuturesProductionExecutionService = ({
         shutdownCompletion = (async () => {
             shuttingDown = true;
             deferredReconciliation = null;
+            userDataStreamGeneration += 1;
+            closeCurrentUserDataSocket();
+            identityRetryTimer = null;
+            portfolioRetryTimer = null;
+            userDataKeepAliveTimer = null;
+            userDataReconnectTimer = null;
+            accountUpdateRefreshTimer = null;
+            accountUpdateRefreshPending = false;
+            accountUpdateNeedsConfigurationRefresh = false;
             for (const timer of timers) clearTimeoutFn(timer);
             timers.clear();
             while (inFlightOperations.size > 0) {
@@ -4500,6 +5281,15 @@ export const createFuturesProductionExecutionService = ({
             }
             while (backgroundTasks.size > 0) {
                 await Promise.allSettled([...backgroundTasks]);
+            }
+            if (userDataListenKey !== null
+                && typeof facade?.closeUserDataStream === 'function') {
+                await executeRead({
+                    endpointId: ENDPOINT_IDS.userDataStreamClose,
+                    weight: READ_WEIGHTS.userDataStreamClose,
+                    operation: () => facade.closeUserDataStream(),
+                }).catch(error => reportInternal('account-stream-close', error));
+                userDataListenKey = null;
             }
             await transitionTail;
             sessions.clear();

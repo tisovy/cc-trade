@@ -56,39 +56,47 @@ export const calculateFuturesEntryBudget = ({
   maximumOrderNotionalUsdt,
   maximumDailyNotionalUsdt,
   dailyUsedNotionalUsdt,
+  availableBalanceUsdt,
+  minimumAvailableBalanceUsdt,
+  leverage,
 } = {}) => {
   const orderMaximum = parseDecimalAtoms(maximumOrderNotionalUsdt, { positive: true })
   const dailyMaximum = parseDecimalAtoms(maximumDailyNotionalUsdt, { positive: true })
   const dailyUsed = parseDecimalAtoms(dailyUsedNotionalUsdt)
   if (orderMaximum === null || dailyMaximum === null || dailyUsed === null) return null
   const dailyRemaining = dailyUsed >= dailyMaximum ? 0n : dailyMaximum - dailyUsed
-  return formatDecimalAtoms(orderMaximum < dailyRemaining ? orderMaximum : dailyRemaining)
+  const policyBudget = orderMaximum < dailyRemaining ? orderMaximum : dailyRemaining
+  const hasAccountSizingInputs = availableBalanceUsdt !== undefined
+    || minimumAvailableBalanceUsdt !== undefined
+    || leverage !== undefined
+  if (!hasAccountSizingInputs) return formatDecimalAtoms(policyBudget)
+
+  const availableBalance = parseDecimalAtoms(availableBalanceUsdt)
+  const minimumAvailableBalance = parseDecimalAtoms(minimumAvailableBalanceUsdt)
+  if (availableBalance === null
+    || minimumAvailableBalance === null
+    || !Number.isSafeInteger(leverage)
+    || leverage <= 0) return null
+  const availableMargin = availableBalance > minimumAvailableBalance
+    ? availableBalance - minimumAvailableBalance
+    : 0n
+  const balanceBudget = availableMargin * BigInt(leverage)
+  return formatDecimalAtoms(policyBudget < balanceBudget ? policyBudget : balanceBudget)
 }
 
 export const calculateFuturesExitBudget = ({
   positionQuantity,
   price,
   tickSize,
-  maximumOrderNotionalUsdt,
-  maximumDailyNotionalUsdt,
-  dailyUsedNotionalUsdt,
 } = {}) => {
   const quantityAtoms = parseDecimalAtoms(positionQuantity, { positive: true })
   const normalizedPrice = normalizeFuturesDraftPrice(price, tickSize)
   const priceAtoms = normalizedPrice === null
     ? null
     : parseDecimalAtoms(normalizedPrice, { positive: true })
-  const safeBudget = calculateFuturesEntryBudget({
-    maximumOrderNotionalUsdt,
-    maximumDailyNotionalUsdt,
-    dailyUsedNotionalUsdt,
-  })
-  const safeBudgetAtoms = parseDecimalAtoms(safeBudget)
-  if (quantityAtoms === null || priceAtoms === null || safeBudgetAtoms === null) return null
+  if (quantityAtoms === null || priceAtoms === null) return null
   const positionNotionalAtoms = (quantityAtoms * priceAtoms) / SCALE
-  return formatDecimalAtoms(
-    positionNotionalAtoms < safeBudgetAtoms ? positionNotionalAtoms : safeBudgetAtoms,
-  )
+  return formatDecimalAtoms(positionNotionalAtoms)
 }
 
 export const isFuturesDraftAmountWithinBudget = (amount, budget) => {

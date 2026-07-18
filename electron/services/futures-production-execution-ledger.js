@@ -119,10 +119,16 @@ const RATE_COUNTER_ENDPOINT_IDS = new Set([
     'mark-price',
     'account-config',
     'symbol-config',
+    'all-symbol-config',
     'balance-v3',
     'position-risk',
     'open-orders',
+    'all-open-orders',
+    'user-data-stream-start',
+    'user-data-stream-keepalive',
+    'user-data-stream-close',
     'open-algo-orders',
+    'all-open-algo-orders',
     'position-margin-history',
     'modify-isolated-position-margin',
     'modify-limit-order',
@@ -462,7 +468,9 @@ export const createFuturesProductionExecutionAuditRecord = (
             || (record.operationId === null
                 && record.requestId === null
                 && record.clientOrderId === null)
-            || compareFuturesProductionExactDecimals(record.exactNotional, '0') <= 0
+            || compareFuturesProductionExactDecimals(record.exactNotional, '0') < 0
+            || (compareFuturesProductionExactDecimals(record.exactNotional, '0') === 0
+                && record.positionEffect !== 'EXIT')
             || canonicalFuturesProductionUtcDay(record.serverTime) !== record.utcDay) {
             fail('INVALID_DAILY_RESERVATION');
         }
@@ -1106,7 +1114,12 @@ export const createFuturesProductionExecutionLedger = ({
             validateUtcDay(utcDay);
             if (canonicalFuturesProductionUtcDay(serverTime) !== utcDay) fail('INVALID_UTC_DAY');
             const increment = normalizeFuturesProductionExactDecimal(exactNotional);
-            parseExactDecimal(increment, { positive: true });
+            parseExactDecimal(increment);
+            if (compareFuturesProductionExactDecimals(increment, '0') < 0
+                || (compareFuturesProductionExactDecimals(increment, '0') === 0
+                    && auditFields.positionEffect !== 'EXIT')) {
+                fail('INVALID_DAILY_RESERVATION');
+            }
             const maximum = normalizeFuturesProductionExactDecimal(maximumDailyNotional);
             parseExactDecimal(maximum, { positive: true });
             const snapshot = replayRecords(records, { serverTime });

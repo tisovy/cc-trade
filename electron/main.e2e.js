@@ -12,6 +12,9 @@ import {
 } from './services/local-websocket-access.js'
 import { captureE2eMockWebSocketAccess } from './e2e-websocket-route.js'
 import {
+    createE2eFuturesProductionExecutionRuntime,
+} from './e2e-futures-production-execution-runtime.js'
+import {
     createRendererRuntime,
     createRendererRuntimeRegistry,
 } from './renderer-runtime.js'
@@ -50,11 +53,36 @@ const localWebSocketAccess = {
 };
 const rendererWebSocketAccess = captureE2eMockWebSocketAccess(process.env) || localWebSocketAccess
 const rendererRuntimeRegistry = createRendererRuntimeRegistry(ipcMain)
+const futuresProductionExecutionRuntime = createE2eFuturesProductionExecutionRuntime()
 
-setupBinanceConnection({
+const processFetch = globalThis.fetch?.bind(globalThis)
+globalThis.fetch = async (input, init) => {
+    const rawUrl = typeof input === 'string' || input instanceof URL
+        ? input.toString()
+        : input?.url
+    let target = null
+    try {
+        target = typeof rawUrl === 'string' ? new URL(rawUrl) : null
+    } catch {
+        target = null
+    }
+    if (target?.hostname === 'fapi.binance.com'
+        || target?.hostname === 'fstream.binance.com') {
+        console.error(`[e2e] forbidden main-process Futures network escape: ${target.hostname}`)
+        setImmediate(() => app.exit(86))
+        throw new Error('E2E Futures network escape blocked')
+    }
+    if (typeof processFetch !== 'function') throw new Error('Fetch is unavailable')
+    return processFetch(input, init)
+}
+
+const binanceController = setupBinanceConnection({
     localWebSocketAccess,
     futuresProductionExecutionConfig,
+    futuresProductionExecutionRuntime,
 });
+let hasCompletedBinanceShutdown = false
+let binanceShutdownPromise = null
 
 const isWaylandSession = () => process.env.XDG_SESSION_TYPE === 'wayland' || !!process.env.WAYLAND_DISPLAY;
 
@@ -178,5 +206,18 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') {
         app.quit()
+    }
+})
+
+app.on('before-quit', (event) => {
+    if (hasCompletedBinanceShutdown) return
+    event.preventDefault()
+    if (binanceShutdownPromise === null) {
+        binanceShutdownPromise = binanceController.close()
+            .catch(error => console.error('[e2e] local Binance controller shutdown failed', error))
+            .finally(() => {
+                hasCompletedBinanceShutdown = true
+                app.quit()
+            })
     }
 })

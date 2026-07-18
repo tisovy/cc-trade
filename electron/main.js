@@ -281,8 +281,8 @@ app.whenReady().then(async () => {
       'v1',
     ),
   })
-  const futuresProductionRuntime = await binanceController.productionExecutionReady
   if (futuresProductionOperatorStartup.requested) {
+    const futuresProductionRuntime = await binanceController.productionExecutionReady
     const recovered = await futuresProductionRuntime.recoverOperationally({
       authorization: futuresProductionExecutionConfig.recoveryAuthorization,
       action: futuresProductionOperatorStartup.action,

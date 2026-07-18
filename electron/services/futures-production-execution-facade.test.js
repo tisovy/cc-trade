@@ -6,6 +6,7 @@ import {
     createFuturesProductionExecutionFacade,
 } from './futures-production-execution-facade.js';
 import {
+    FUTURES_PRODUCTION_EXECUTION_INVENTORY_RESPONSE_LIMITS,
     FUTURES_PRODUCTION_EXECUTION_RESPONSE_LIMITS,
     FuturesProductionExecutionJsonError,
     parseFuturesProductionExecutionJson,
@@ -55,6 +56,11 @@ const queryOrderBody = `{
 
 const bodyFor = (url, options) => {
     const parsed = new URL(url);
+    if (parsed.pathname === '/fapi/v1/listenKey') {
+        return options.method === 'DELETE'
+            ? ''
+            : '{"listenKey":"futures-listen-key-0123456789abcdef"}';
+    }
     if (parsed.pathname === '/fapi/v1/time') return '{"serverTime":1783814400000}';
     if (parsed.pathname === '/fapi/v1/exchangeInfo') return '{"symbols":[]}';
     if (parsed.pathname === '/fapi/v1/premiumIndex') {
@@ -120,15 +126,22 @@ describe('FuturesProductionExecutionFacade', () => {
         });
         expect(Object.keys(facade)).toEqual([
             'getServerTime',
+            'startUserDataStream',
+            'keepAliveUserDataStream',
+            'closeUserDataStream',
+            'connectUserDataStream',
             'getExchangeInfo',
             'getMarkPrice',
             'getAccountConfig',
             'getSymbolConfig',
+            'getAllSymbolConfig',
             'getBalance',
             'getPositionRisk',
             'getAllPositionRisk',
             'getOpenOrders',
+            'getAllOpenOrders',
             'getOpenAlgoOrders',
+            'getAllOpenAlgoOrders',
             'getPositionMarginHistory',
             'modifyIsolatedPositionMargin',
             'placeLimitGtcOrder',
@@ -140,15 +153,21 @@ describe('FuturesProductionExecutionFacade', () => {
         ]);
 
         await facade.getServerTime();
+        await facade.startUserDataStream();
+        await facade.keepAliveUserDataStream();
+        await facade.closeUserDataStream();
         await facade.getExchangeInfo();
         await facade.getMarkPrice('BTCUSDT');
         await facade.getAccountConfig();
         await facade.getSymbolConfig('BTCUSDT');
+        await facade.getAllSymbolConfig();
         await facade.getBalance();
         await facade.getPositionRisk('BTCUSDT');
         await facade.getAllPositionRisk();
         await facade.getOpenOrders('BTCUSDT');
+        await facade.getAllOpenOrders();
         await facade.getOpenAlgoOrders('BTCUSDT');
+        await facade.getAllOpenAlgoOrders();
         await facade.getPositionMarginHistory({
             symbol: 'BTCUSDT',
             positionSide: 'LONG',
@@ -198,14 +217,20 @@ describe('FuturesProductionExecutionFacade', () => {
         const paths = fetchImpl.mock.calls.map(([url]) => new URL(url).pathname);
         expect(paths).toEqual([
             '/fapi/v1/time',
+            '/fapi/v1/listenKey',
+            '/fapi/v1/listenKey',
+            '/fapi/v1/listenKey',
             '/fapi/v1/exchangeInfo',
             '/fapi/v1/premiumIndex',
             '/fapi/v1/accountConfig',
+            '/fapi/v1/symbolConfig',
             '/fapi/v1/symbolConfig',
             '/fapi/v3/balance',
             '/fapi/v3/positionRisk',
             '/fapi/v3/positionRisk',
             '/fapi/v1/openOrders',
+            '/fapi/v1/openOrders',
+            '/fapi/v1/openAlgoOrders',
             '/fapi/v1/openAlgoOrders',
             '/fapi/v1/positionMargin/history',
             '/fapi/v1/positionMargin',
@@ -216,8 +241,14 @@ describe('FuturesProductionExecutionFacade', () => {
             '/fapi/v1/allOpenOrders',
             '/fapi/v1/algoOpenOrders',
         ]);
-        expect(new URL(fetchImpl.mock.calls[6][0]).searchParams.get('symbol')).toBe('BTCUSDT');
-        expect(new URL(fetchImpl.mock.calls[7][0]).searchParams.has('symbol')).toBe(false);
+        expect(new URL(fetchImpl.mock.calls[7][0]).searchParams.get('symbol')).toBe('BTCUSDT');
+        expect(new URL(fetchImpl.mock.calls[8][0]).searchParams.has('symbol')).toBe(false);
+        expect(new URL(fetchImpl.mock.calls[10][0]).searchParams.get('symbol')).toBe('BTCUSDT');
+        expect(new URL(fetchImpl.mock.calls[11][0]).searchParams.has('symbol')).toBe(false);
+        expect(new URL(fetchImpl.mock.calls[12][0]).searchParams.get('symbol')).toBe('BTCUSDT');
+        expect(new URL(fetchImpl.mock.calls[13][0]).searchParams.has('symbol')).toBe(false);
+        expect(new URL(fetchImpl.mock.calls[14][0]).searchParams.get('symbol')).toBe('BTCUSDT');
+        expect(new URL(fetchImpl.mock.calls[15][0]).searchParams.has('symbol')).toBe(false);
         for (const [url, options] of fetchImpl.mock.calls) {
             expect(new URL(url).origin).toBe('https://fapi.binance.com');
             expect(options.redirect).toBe('error');
@@ -225,6 +256,236 @@ describe('FuturesProductionExecutionFacade', () => {
                 'headers', 'method', 'redirect', 'signal',
             ]));
         }
+    });
+
+    it('signs and normalizes each all-symbol inventory without a symbol query', async () => {
+        const responses = new Map([
+            ['/fapi/v1/symbolConfig', JSON.stringify([{
+                symbol: 'BTCUSDT',
+                marginType: 'ISOLATED',
+                leverage: 2,
+                isAutoAddMargin: 'false',
+            }])],
+            ['/fapi/v1/openOrders', `[{"symbol":"BTCUSDT","orderId":9223372036854775807,"clientOrderId":"external-order"}]`],
+            ['/fapi/v1/openAlgoOrders', `[{"symbol":"BTCUSDT","algoId":9223372036854775806,"clientAlgoId":"external-algo"}]`],
+        ]);
+        const fetchImpl = vi.fn(async (url) => makeResponse(
+            responses.get(new URL(url).pathname),
+        ));
+        const facade = createFuturesProductionExecutionFacade(config, {
+            fetchImpl,
+            now: () => 1783814400000,
+        });
+
+        const results = await Promise.all([
+            facade.getAllSymbolConfig(),
+            facade.getAllOpenOrders(),
+            facade.getAllOpenAlgoOrders(),
+        ]);
+
+        expect(results[0].data).toEqual([{
+            symbol: 'BTCUSDT',
+            marginType: 'ISOLATED',
+            leverage: 2,
+            isAutoAddMargin: 'false',
+        }]);
+        expect(results[1].data[0].orderId).toBe('9223372036854775807');
+        expect(results[2].data[0].algoId).toBe('9223372036854775806');
+        expect(results.map(result => result.receipt.endpointId)).toEqual([
+            'all-symbol-config',
+            'all-open-orders',
+            'all-open-algo-orders',
+        ]);
+        for (const result of results) {
+            expect(Object.isFrozen(result.data)).toBe(true);
+            expect(Object.isFrozen(result.data[0])).toBe(true);
+        }
+        const unsigned = 'recvWindow=5000&timestamp=1783814400000';
+        const signature = createHmac('sha256', config.apiSecret).update(unsigned).digest('hex');
+        expect(fetchImpl.mock.calls.map(([url, options]) => ({
+            pathname: new URL(url).pathname,
+            search: new URL(url).search.slice(1),
+            method: options.method,
+        }))).toEqual([
+            {
+                pathname: '/fapi/v1/symbolConfig',
+                search: `${unsigned}&signature=${signature}`,
+                method: 'GET',
+            },
+            {
+                pathname: '/fapi/v1/openOrders',
+                search: `${unsigned}&signature=${signature}`,
+                method: 'GET',
+            },
+            {
+                pathname: '/fapi/v1/openAlgoOrders',
+                search: `${unsigned}&signature=${signature}`,
+                method: 'GET',
+            },
+        ]);
+        for (const [url] of fetchImpl.mock.calls) {
+            expect(new URL(url).searchParams.has('symbol')).toBe(false);
+        }
+    });
+
+    it.each([
+        ['symbol configuration', 'getAllSymbolConfig', 'all-symbol-config', '[{"symbol":"btcusdt"}]'],
+        ['regular orders', 'getAllOpenOrders', 'all-open-orders', '[{"orderId":1}]'],
+        ['algo orders', 'getAllOpenAlgoOrders', 'all-open-algo-orders', '{}'],
+    ])('rejects malformed all-symbol %s inventory', async (
+        _label,
+        method,
+        endpointId,
+        body,
+    ) => {
+        const fetchImpl = vi.fn().mockResolvedValue(makeResponse(body));
+        const facade = createFuturesProductionExecutionFacade(config, {
+            fetchImpl,
+            now: () => 1783814400000,
+        });
+        await expect(facade[method]()).rejects.toMatchObject({
+            kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.AMBIGUOUS,
+            endpointId,
+        });
+        expect(fetchImpl).toHaveBeenCalledOnce();
+    });
+
+    it('uses API-key-only listenKey requests without HMAC signing', async () => {
+        const fetchImpl = vi.fn((url, options) => Promise.resolve(makeResponse(
+            bodyFor(url, options),
+        )));
+        const facade = createFuturesProductionExecutionFacade(config, {
+            fetchImpl,
+            now: () => 1783814400000,
+        });
+
+        await expect(facade.startUserDataStream()).resolves.toMatchObject({
+            data: { listenKey: 'futures-listen-key-0123456789abcdef' },
+        });
+        await expect(facade.keepAliveUserDataStream()).resolves.toMatchObject({
+            data: { listenKey: 'futures-listen-key-0123456789abcdef' },
+        });
+        await expect(facade.closeUserDataStream()).resolves.toMatchObject({
+            data: { acknowledged: true },
+        });
+
+        expect(fetchImpl.mock.calls.map(([, options]) => options.method))
+            .toEqual(['POST', 'PUT', 'DELETE']);
+        for (const [url, options] of fetchImpl.mock.calls) {
+            expect(url).toBe('https://fapi.binance.com/fapi/v1/listenKey');
+            expect(options.headers['X-MBX-APIKEY']).toBe(config.apiKey);
+            expect(`${url}\n${options.body ?? ''}`).not.toMatch(/signature|timestamp|recvWindow/);
+        }
+    });
+
+    it('accepts only an exact empty 2xx body for the listenKey close endpoint', async () => {
+        const fetchImpl = vi.fn()
+            .mockResolvedValueOnce(makeResponse(''))
+            .mockResolvedValueOnce(makeResponse(''))
+            .mockResolvedValueOnce(makeResponse(' '))
+            .mockResolvedValueOnce(makeResponse('', { status: 400 }));
+        const facade = createFuturesProductionExecutionFacade(config, {
+            fetchImpl,
+            now: () => 1783814400000,
+        });
+
+        await expect(facade.keepAliveUserDataStream()).rejects.toMatchObject({
+            kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.AMBIGUOUS,
+            endpointId: 'user-data-stream-keepalive',
+        });
+        await expect(facade.closeUserDataStream()).resolves.toMatchObject({
+            data: { acknowledged: true },
+        });
+        await expect(facade.closeUserDataStream()).rejects.toMatchObject({
+            kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.AMBIGUOUS,
+            endpointId: 'user-data-stream-close',
+        });
+        await expect(facade.closeUserDataStream()).rejects.toMatchObject({
+            kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.AMBIGUOUS,
+            endpointId: 'user-data-stream-close',
+            status: 400,
+        });
+    });
+
+    it.each([
+        ['symbol configuration', 'getAllSymbolConfig', index => ({
+            symbol: `S${index}USDT`,
+            marginType: 'ISOLATED',
+            leverage: 2,
+            isAutoAddMargin: 'false',
+        })],
+        ['position risk', 'getAllPositionRisk', index => ({
+            symbol: `S${index}USDT`,
+            positionSide: 'BOTH',
+            positionAmt: '0.000',
+            entryPrice: '0.00000000',
+            breakEvenPrice: '0.00000000',
+            markPrice: '70000.00000000',
+            unrealizedProfit: '0.00000000',
+            liquidationPrice: '0',
+            isolatedMargin: '0',
+            notional: '0',
+            marginAsset: 'USDT',
+            isolatedWallet: '0',
+            initialMargin: '0',
+            maintMargin: '0',
+            positionInitialMargin: '0',
+            openOrderInitialMargin: '0',
+            adl: 0,
+            bidNotional: '0',
+            askNotional: '0',
+            updateTime: 1783814400000,
+        })],
+        ['regular open orders', 'getAllOpenOrders', index => ({
+            symbol: `S${index}USDT`,
+            orderId: index + 1,
+            clientOrderId: `external-${index}`,
+            price: '70000.00',
+            origQty: '0.001',
+            executedQty: '0.000',
+            status: 'NEW',
+            timeInForce: 'GTC',
+            type: 'LIMIT',
+            side: 'BUY',
+            positionSide: 'LONG',
+            updateTime: 1783814400000,
+        })],
+        ['algo open orders', 'getAllOpenAlgoOrders', index => ({
+            symbol: `S${index}USDT`,
+            algoId: index + 1,
+            clientAlgoId: `external-algo-${index}`,
+            algoStatus: 'NEW',
+            orderType: 'STOP_MARKET',
+            quantity: '0.001',
+            triggerPrice: '69000.00',
+            side: 'SELL',
+            positionSide: 'LONG',
+            createTime: 1783814400000,
+            updateTime: 1783814400000,
+        })],
+    ])('accepts a realistic >64 KiB all-symbol %s inventory', async (
+        _label,
+        method,
+        createRow,
+    ) => {
+        const rows = Array.from({ length: 1_000 }, (_, index) => createRow(index));
+        const body = JSON.stringify(rows);
+        expect(Buffer.byteLength(body, 'utf8')).toBeGreaterThan(
+            FUTURES_PRODUCTION_EXECUTION_RESPONSE_LIMITS.BODY_BYTES,
+        );
+        expect(Buffer.byteLength(body, 'utf8')).toBeLessThan(
+            FUTURES_PRODUCTION_EXECUTION_INVENTORY_RESPONSE_LIMITS.BODY_BYTES,
+        );
+        const fetchImpl = vi.fn().mockResolvedValue(makeResponse(body));
+        const facade = createFuturesProductionExecutionFacade(config, {
+            fetchImpl,
+            now: () => 1783814400000,
+        });
+
+        const result = await facade[method]();
+        expect(result.data).toHaveLength(rows.length);
+        expect(result.data[999].symbol).toBe('S999USDT');
+        expect(fetchImpl).toHaveBeenCalledOnce();
     });
 
     it('signs the fixed LIMIT/GTC body in reviewed parameter order', async () => {
@@ -348,6 +609,42 @@ describe('FuturesProductionExecutionFacade', () => {
             originalQuantity: '0.001',
             positionSide: 'LONG',
         });
+    });
+
+    it('amends and queries a pre-existing external Binance order by client ID', async () => {
+        const externalClientOrderId = 'external-order-20260718';
+        const queriedExternalOrderBody = queryOrderBody
+            .replaceAll(clientOrderId, externalClientOrderId)
+            .replaceAll('70000.00', '70100.10');
+        const modifiedExternalOrderBody = queriedExternalOrderBody
+            .replace('    "avgPrice":"0",\n', '');
+        const fetchImpl = vi.fn().mockImplementation(async (_url, options) => makeResponse(
+            options.method === 'PUT' ? modifiedExternalOrderBody : queriedExternalOrderBody,
+        ));
+        const facade = createFuturesProductionExecutionFacade(config, {
+            fetchImpl,
+            now: () => 1783814400000,
+        });
+
+        await facade.modifyLimitOrder({
+            symbol: 'BTCUSDT',
+            side: 'BUY',
+            positionSide: 'LONG',
+            quantity: '0.001',
+            price: '70100.10',
+            clientOrderId: externalClientOrderId,
+        });
+        await facade.queryOrderByOriginalClientOrderId({
+            symbol: 'BTCUSDT',
+            positionSide: 'LONG',
+            originalClientOrderId: externalClientOrderId,
+        });
+
+        expect(fetchImpl).toHaveBeenCalledTimes(2);
+        expect(new URLSearchParams(fetchImpl.mock.calls[0][1].body).get('origClientOrderId'))
+            .toBe(externalClientOrderId);
+        expect(new URL(fetchImpl.mock.calls[1][0]).searchParams.get('origClientOrderId'))
+            .toBe(externalClientOrderId);
     });
 
     it('sends a distinct Hedge LONG exit MARKET child without forbidden reduceOnly', async () => {
@@ -658,6 +955,23 @@ describe('bounded production execution JSON', () => {
     ])('rejects duplicate, non-integer, or oversized JSON %s', (body) => {
         expect(() => parseFuturesProductionExecutionJson(body))
             .toThrow(FuturesProductionExecutionJsonError);
+    });
+
+    it.each([
+        `{"value":"${'x'.repeat(
+            FUTURES_PRODUCTION_EXECUTION_INVENTORY_RESPONSE_LIMITS.BODY_BYTES,
+        )}"}`,
+        `[${Array.from(
+            { length: FUTURES_PRODUCTION_EXECUTION_INVENTORY_RESPONSE_LIMITS.JSON_NODES },
+            () => '0',
+        ).join(',')}]`,
+        '[[[[[[[[[[0]]]]]]]]]]',
+        `{"value":"${'x'.repeat(4_097)}"}`,
+    ])('retains body, node, depth, and string caps in the inventory profile', (body) => {
+        expect(() => parseFuturesProductionExecutionJson(
+            body,
+            FUTURES_PRODUCTION_EXECUTION_INVENTORY_RESPONSE_LIMITS,
+        )).toThrow(FuturesProductionExecutionJsonError);
     });
 
     it('accepts the exact response-header bounds', () => {

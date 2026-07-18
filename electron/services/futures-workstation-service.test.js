@@ -179,14 +179,13 @@ describe('production Futures workstation service', () => {
             emit: event => events.push(event),
         });
         expect(events.filter(event => event.resource === 'status').map(event => event.state))
-            .toEqual(['loading', 'unavailable']);
+            .toEqual(['loading', 'resynchronizing']);
         expect(events.at(-1)).toMatchObject({
             resource: 'status',
-            state: 'unavailable',
+            state: 'resynchronizing',
             payload: { reasonCode: 'WORKSTATION_RESOURCE_REJECTED' },
         });
-        expect(runtime.service.current).toBeNull();
-        expect(base.getActiveTimerCount()).toBe(0);
+        expect(runtime.service.current).not.toBeNull();
     });
 
     it.each([
@@ -587,7 +586,7 @@ describe('production Futures workstation service', () => {
             createFuturesProductionWorkstationRuntimeForTest,
             productionRequest,
         ],
-    ])('closes the %s stream and timers when bootstrap becomes terminal', async (
+    ])('closes the failed %s stream and schedules an automatic bootstrap recovery', async (
         _label,
         createBase,
         createRuntime,
@@ -618,11 +617,46 @@ describe('production Futures workstation service', () => {
         await runtime.service.handleRequest(createRequest('terminal-bootstrap'), {
             emit: event => events.push(event),
         });
-        expect(events.at(-1)).toMatchObject({ resource: 'status', state: 'unavailable' });
+        expect(events.at(-1)).toMatchObject({
+            resource: 'status',
+            state: 'resynchronizing',
+            payload: { reasonCode: 'INVALID_PREMIUM_INDEX' },
+        });
         expect(close).toHaveBeenCalledOnce();
-        expect(runtime.service.current).toBeNull();
+        expect(runtime.service.current).not.toBeNull();
         expect(clock.intervalCount()).toBe(0);
+        expect(clock.timeoutCount()).toBe(1);
         expect(base.getActiveTimerCount()).toBe(0);
+    });
+
+    it('recovers automatically after a transient production bootstrap error', async () => {
+        const clock = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport({ clock: clock.clock });
+        let bootstrapAttempts = 0;
+        const transport = {
+            ...base,
+            bootstrap: async (options) => {
+                bootstrapAttempts += 1;
+                if (bootstrapAttempts === 1) throw new Error('temporary bootstrap failure');
+                return base.bootstrap(options);
+            },
+        };
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            transport,
+            clock: clock.clock,
+        }));
+        const events = [];
+        await runtime.service.handleRequest(productionRequest('automatic-bootstrap-recovery'), {
+            emit: event => events.push(event),
+        });
+        expect(events.at(-1)).toMatchObject({ resource: 'status', state: 'resynchronizing' });
+        expect(clock.timeoutCount()).toBe(1);
+
+        clock.runTimeouts();
+        await vi.waitFor(() => {
+            expect(events.at(-1)).toMatchObject({ resource: 'status', state: 'live' });
+        });
+        expect(bootstrapAttempts).toBe(2);
     });
 
     it.each([

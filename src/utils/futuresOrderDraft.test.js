@@ -37,7 +37,34 @@ describe('futuresOrderDraft', () => {
     })).toBe('0')
   })
 
-  it('bounds an exit slider by the exact selected Hedge leg and compiled caps', () => {
+  it('bounds new exposure by authoritative available balance, reserve, and leverage', () => {
+    expect(calculateFuturesEntryBudget({
+      maximumOrderNotionalUsdt: '100',
+      maximumDailyNotionalUsdt: '500',
+      dailyUsedNotionalUsdt: '0',
+      availableBalanceUsdt: '18.75',
+      minimumAvailableBalanceUsdt: '10',
+      leverage: 2,
+    })).toBe('17.5')
+    expect(calculateFuturesEntryBudget({
+      maximumOrderNotionalUsdt: '100',
+      maximumDailyNotionalUsdt: '500',
+      dailyUsedNotionalUsdt: '0',
+      availableBalanceUsdt: '10',
+      minimumAvailableBalanceUsdt: '10',
+      leverage: 2,
+    })).toBe('0')
+    expect(calculateFuturesEntryBudget({
+      maximumOrderNotionalUsdt: '100',
+      maximumDailyNotionalUsdt: '500',
+      dailyUsedNotionalUsdt: '0',
+      availableBalanceUsdt: undefined,
+      minimumAvailableBalanceUsdt: '10',
+      leverage: 2,
+    })).toBeNull()
+  })
+
+  it('bounds an exit slider by the exact selected Hedge leg, not entry exposure caps', () => {
     expect(calculateFuturesExitBudget({
       positionQuantity: '0.001',
       price: '7000.09',
@@ -53,9 +80,9 @@ describe('futuresOrderDraft', () => {
       maximumOrderNotionalUsdt: '10',
       maximumDailyNotionalUsdt: '50',
       dailyUsedNotionalUsdt: '45',
-    })).toBe('5')
-    expect(isFuturesDraftAmountWithinBudget('5', '5')).toBe(true)
-    expect(isFuturesDraftAmountWithinBudget('5.000000000000000001', '5')).toBe(false)
+    })).toBe('7000')
+    expect(isFuturesDraftAmountWithinBudget('7000', '7000')).toBe(true)
+    expect(isFuturesDraftAmountWithinBudget('7000.000000000000000001', '7000')).toBe(false)
   })
 
   it('derives quantity down to step size and reports exact notional and 2x margin', () => {

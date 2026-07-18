@@ -17,6 +17,12 @@ export const FUTURES_PRODUCTION_EXECUTION_EXCHANGE_INFO_RESPONSE_LIMITS = Object
     JSON_NODES: 131_072,
 });
 
+export const FUTURES_PRODUCTION_EXECUTION_INVENTORY_RESPONSE_LIMITS = Object.freeze({
+    ...FUTURES_PRODUCTION_EXECUTION_RESPONSE_LIMITS,
+    BODY_BYTES: 2_097_152,
+    JSON_NODES: 40_000,
+});
+
 export class FuturesProductionExecutionJsonError extends Error {
     constructor(code) {
         super('Futures production execution response was rejected');
@@ -49,6 +55,9 @@ const resolveResponseLimits = (limits) => {
     }
     if (limits === FUTURES_PRODUCTION_EXECUTION_EXCHANGE_INFO_RESPONSE_LIMITS) {
         return FUTURES_PRODUCTION_EXECUTION_EXCHANGE_INFO_RESPONSE_LIMITS;
+    }
+    if (limits === FUTURES_PRODUCTION_EXECUTION_INVENTORY_RESPONSE_LIMITS) {
+        return FUTURES_PRODUCTION_EXECUTION_INVENTORY_RESPONSE_LIMITS;
     }
     fail('INVALID_RESPONSE_LIMIT_PROFILE');
 };

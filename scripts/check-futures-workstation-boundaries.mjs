@@ -11,6 +11,9 @@ const PRODUCTION_COMPOSITION = 'electron/services/futures-production-workstation
 const PRODUCTION_VERIFICATION_COMPOSITION = 'electron/services/futures-production-workstation-verification-composition.js';
 const PRODUCTION_PROTOCOL = 'src/utils/futuresProductionWorkstationProtocol.js';
 const LOCAL_WORKSTATION_CONNECTOR = 'src/hooks/useFuturesLocalWorkstationConnection.js';
+const PRODUCTION_WORKSTATION_CONTAINER = (
+    'src/components/features/futures/FuturesProductionWorkstation.jsx'
+);
 
 const EXACT_ORIGINS = Object.freeze(new Map([
     ['https://fapi.binance.com', PRODUCTION_TRANSPORT],
@@ -294,8 +297,13 @@ if (!localWorkstationConnector.includes(exactLocalUrlSource)
 }
 
 const appSource = fs.readFileSync(path.join(ROOT, 'src/App.jsx'), 'utf8');
-if (/<Futures(?:Production|Testnet)Workstation[\s\S]{0,400}\b(?:wsConnection|sendMessage)=/.test(appSource)) {
-    fail('AppShell passes the Spot DataContext transport into a Futures workstation container');
+const productionWorkstationContainer = sources.get(PRODUCTION_WORKSTATION_CONTAINER) ?? '';
+if (!/useFuturesProductionExecution\(\{\s*enabled:\s*isFuturesLiveMode,\s*wsConnection,\s*\}\)/.test(appSource)
+    || !/<FuturesProductionWorkstation\s+enabled=\{isFuturesLiveMode\}\s+executionState=\{futuresProductionExecution\}\s+wsConnection=\{wsConnection\}\s+sendMessage=\{sendMessage\}\s*\/>/.test(appSource)
+    || !/export const FuturesProductionWorkstation = \(\{\s*enabled,\s*executionState,\s*wsConnection,\s*sendMessage,\s*\}\) =>/.test(productionWorkstationContainer)
+    || !/useFuturesProductionWorkstation\(\{\s*enabled,\s*symbol,\s*interval,\s*wsConnection,\s*sendMessage,\s*\}\)/.test(productionWorkstationContainer)
+    || /useFutures(?:Local|Production)WorkstationConnection/.test(productionWorkstationContainer)) {
+    fail('Futures public data and execution must multiplex the exact AppShell loopback transport without a second renderer socket');
 }
 
 for (const pureView of [

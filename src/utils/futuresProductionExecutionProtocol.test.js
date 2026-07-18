@@ -6,6 +6,7 @@ import {
   FUTURES_PRODUCTION_EXECUTION_CONFIRMATIONS,
   FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS,
   FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES,
+  FUTURES_PRODUCTION_EXECUTION_STATUS_MAX_BYTES,
   FUTURES_PRODUCTION_EXECUTION_STATES,
   FuturesProductionExecutionRendererProtocolError,
   compareFuturesProductionExecutionRevisions,
@@ -44,7 +45,7 @@ const intent = (kind, overrides = {}) => ({
 const status = (overrides = {}) => ({
   channelId: FUTURES_PRODUCTION_EXECUTION_CHANNEL_ID,
   action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.STATUS,
-  version: 2,
+  version: 3,
   revision: '8',
   marketType: 'futures',
   environment: 'production',
@@ -54,6 +55,20 @@ const status = (overrides = {}) => ({
   account: { alias: 'reviewed-account-1', fingerprint: FINGERPRINT },
   caps: {
     allowedSymbols: ['BTCUSDT', 'ETHUSDT'],
+    symbolConfigurations: [
+      {
+        symbol: 'BTCUSDT',
+        marginType: 'ISOLATED',
+        leverage: 2,
+        isAutoAddMargin: false,
+      },
+      {
+        symbol: 'ETHUSDT',
+        marginType: 'CROSSED',
+        leverage: 20,
+        isAutoAddMargin: true,
+      },
+    ],
     maxLeverage: 2,
     maxOrderNotionalUsdt: '10.0000',
     maxDailyNotionalUsdt: '50.0000',
@@ -87,6 +102,9 @@ const status = (overrides = {}) => ({
   portfolio: {
     state: 'live',
     observedAt: 1_783_957_600_000,
+    availableBalanceUsdt: '250.5',
+    syncState: 'live',
+    syncCode: null,
     positions: [{
       symbol: 'BTCUSDT',
       positionSide: 'SHORT',
@@ -105,6 +123,26 @@ const status = (overrides = {}) => ({
   ...overrides,
 })
 
+const portfolioOrder = (overrides = {}) => ({
+  symbol: 'BTCUSDT',
+  orderKind: 'REGULAR',
+  orderId: '42',
+  clientOrderId: 'external-order',
+  side: 'SELL',
+  positionSide: 'LONG',
+  positionEffect: 'EXIT',
+  price: '61000',
+  originalQuantity: '0.01',
+  executedQuantity: '0.001',
+  status: 'PARTIALLY_FILLED',
+  type: 'LIMIT',
+  timeInForce: 'RPI',
+  isAppOwned: false,
+  updateTime: 1_783_957_600_001,
+  syncState: 'synced',
+  ...overrides,
+})
+
 const expectProtocolError = (callback, code) => {
   try {
     callback()
@@ -119,7 +157,7 @@ const expectProtocolError = (callback, code) => {
 describe('production futures renderer request builders', () => {
   it('creates exact subscribe and unsubscribe requests on the dedicated channel contract', () => {
     const expected = {
-      version: 2,
+      version: 3,
       revision: '0',
       marketType: 'futures',
       environment: 'production',
@@ -160,7 +198,7 @@ describe('production futures renderer request builders', () => {
     })
     expect(request).toEqual({
       action: 'futures.production.prepareOrderIntent',
-      version: 2,
+      version: 3,
       revision: '7',
       marketType: 'futures',
       environment: 'production',
@@ -204,7 +242,7 @@ describe('production futures renderer request builders', () => {
     })
     expect(prepare).toEqual({
       action: 'futures.production.prepareOrderAmendmentIntent',
-      version: 2,
+      version: 3,
       revision: '8',
       marketType: 'futures',
       environment: 'production',
@@ -238,7 +276,7 @@ describe('production futures renderer request builders', () => {
     for (const [builder, action] of builders) {
       expect(builder({ revision: '7', accountFingerprint: FINGERPRINT })).toEqual({
         action,
-        version: 2,
+        version: 3,
         revision: '7',
         marketType: 'futures',
         environment: 'production',
@@ -276,7 +314,7 @@ describe('production futures renderer request builders', () => {
       })
       expect(request).toEqual({
         action,
-        version: 2,
+        version: 3,
         revision: '8',
         requestId: REQUEST_ID,
         marketType: 'futures',
@@ -363,7 +401,26 @@ describe('production futures renderer status parser', () => {
     expect(Object.isFrozen(parsed)).toBe(true)
     expect(Object.isFrozen(parsed.caps)).toBe(true)
     expect(Object.isFrozen(parsed.caps.allowedSymbols)).toBe(true)
+    expect(Object.isFrozen(parsed.caps.symbolConfigurations)).toBe(true)
+    expect(Object.isFrozen(parsed.caps.symbolConfigurations[0])).toBe(true)
     expect(Object.isFrozen(parsed.intent)).toBe(true)
+  })
+
+  it('allows symbol configuration bootstrap to be empty or partial', () => {
+    const input = status()
+    const empty = parseFuturesProductionExecutionStatus(JSON.stringify(status({
+      caps: { ...input.caps, symbolConfigurations: [] },
+    })))
+    const partial = parseFuturesProductionExecutionStatus(JSON.stringify(status({
+      caps: {
+        ...input.caps,
+        symbolConfigurations: [input.caps.symbolConfigurations[0]],
+      },
+    })))
+    expect(empty.caps.symbolConfigurations).toEqual([])
+    expect(partial.caps.symbolConfigurations).toEqual([
+      input.caps.symbolConfigurations[0],
+    ])
   })
 
   it.each([
@@ -420,6 +477,70 @@ describe('production futures renderer status parser', () => {
     })
   })
 
+  it('parses portfolio truth and namespaces regular/algo order identities', () => {
+    const input = status()
+    const parsed = parseFuturesProductionExecutionStatus(JSON.stringify(status({
+      portfolio: {
+        ...input.portfolio,
+        positions: [{
+          ...input.portfolio.positions[0],
+          leverage: 20,
+          marginType: 'CROSSED',
+          isolatedMarginUsdt: '0',
+        }],
+        openOrders: [
+          portfolioOrder(),
+          portfolioOrder({
+            orderKind: 'ALGO',
+            status: 'TRIGGERING',
+            type: 'STOP_MARKET',
+            timeInForce: 'GTE_GTC',
+            price: '0',
+            originalQuantity: '0',
+            executedQuantity: '0',
+          }),
+        ],
+      },
+    })))
+    expect(parsed.portfolio.positions[0]).toMatchObject({
+      leverage: 20,
+      marginType: 'CROSSED',
+    })
+    expect(parsed.portfolio.openOrders).toHaveLength(2)
+    expect(parsed.portfolio.openOrders[0]).toMatchObject({
+      orderKind: 'REGULAR', status: 'PARTIALLY_FILLED', timeInForce: 'RPI',
+    })
+    expect(parsed.portfolio.openOrders[1]).toMatchObject({
+      orderKind: 'ALGO', status: 'TRIGGERING', type: 'STOP_MARKET',
+      price: '0', originalQuantity: '0',
+    })
+  })
+
+  it('rejects order-kind/status mismatches and duplicates within one namespace', () => {
+    const input = status()
+    for (const order of [
+      portfolioOrder({ orderKind: 'REGULAR', status: 'TRIGGERING' }),
+      portfolioOrder({ orderKind: 'ALGO', status: 'PARTIALLY_FILLED' }),
+      portfolioOrder({ orderKind: 'UNKNOWN' }),
+    ]) {
+      expectProtocolError(
+        () => parseFuturesProductionExecutionStatus(JSON.stringify(status({
+          portfolio: { ...input.portfolio, openOrders: [order] },
+        }))),
+        FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS,
+      )
+    }
+    expectProtocolError(
+      () => parseFuturesProductionExecutionStatus(JSON.stringify(status({
+        portfolio: {
+          ...input.portfolio,
+          openOrders: [portfolioOrder(), portfolioOrder()],
+        },
+      }))),
+      FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS,
+    )
+  })
+
   it('rejects duplicate keys before JSON collapse and rejects extra fields', () => {
     const raw = JSON.stringify(status()).replace(
       '"revision":"8"',
@@ -444,6 +565,35 @@ describe('production futures renderer status parser', () => {
       status({ caps: { ...status().caps, maxDailyNotionalUsdt: '50.000000000000000001' } }),
       status({ caps: { ...status().caps, allowedSymbols: ['BTCUSDT', 'BTCUSDT'] } }),
       status({ caps: { ...status().caps, allowedSymbols: ['btcusdt'] } }),
+      status({
+        caps: {
+          ...status().caps,
+          symbolConfigurations: [
+            status().caps.symbolConfigurations[0],
+            status().caps.symbolConfigurations[0],
+          ],
+        },
+      }),
+      status({
+        caps: {
+          ...status().caps,
+          symbolConfigurations: [{
+            symbol: 'XRPUSDT',
+            marginType: 'ISOLATED',
+            leverage: 2,
+            isAutoAddMargin: false,
+          }],
+        },
+      }),
+      status({
+        caps: {
+          ...status().caps,
+          symbolConfigurations: [{
+            ...status().caps.symbolConfigurations[0],
+            leverage: 126,
+          }],
+        },
+      }),
       status({ caps: { ...status().caps, minAvailableBalanceUsdt: '0' } }),
       status({ caps: { ...status().caps, minLiquidationDistanceBps: '999' } }),
       status({ caps: { ...status().caps, minLiquidationDistanceBps: '10001' } }),
@@ -469,7 +619,9 @@ describe('production futures renderer status parser', () => {
       FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_MESSAGE,
     )
     expectProtocolError(
-      () => parseFuturesProductionExecutionStatus(`{"padding":"${'x'.repeat(16384)}"}`),
+      () => parseFuturesProductionExecutionStatus(
+        `{"padding":"${'x'.repeat(FUTURES_PRODUCTION_EXECUTION_STATUS_MAX_BYTES)}"}`,
+      ),
       FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.MESSAGE_TOO_LARGE,
     )
   })

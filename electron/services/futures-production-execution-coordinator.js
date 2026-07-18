@@ -12,7 +12,7 @@ export { FUTURES_PRODUCTION_EXECUTION_REST_ORIGIN };
 
 export const FUTURES_PRODUCTION_EXECUTION_COORDINATOR_LIMITS = Object.freeze({
     spotHeadroomWeight: 23,
-    preflightWeight: 26,
+    preflightWeight: 40,
     preflightAdmissionMs: 1_000,
     admissionPollMs: 10,
     maximumTenSecondOrders: 1,
@@ -29,10 +29,16 @@ export const FUTURES_PRODUCTION_EXECUTION_ENDPOINT_IDS = Object.freeze([
     'mark-price',
     'account-config',
     'symbol-config',
+    'all-symbol-config',
     'balance-v3',
     'position-risk',
     'open-orders',
+    'all-open-orders',
+    'user-data-stream-start',
+    'user-data-stream-keepalive',
+    'user-data-stream-close',
     'open-algo-orders',
+    'all-open-algo-orders',
     'position-margin-history',
     'modify-isolated-position-margin',
     'modify-limit-order',
@@ -49,10 +55,16 @@ export const FUTURES_PRODUCTION_EXECUTION_ENDPOINT_WEIGHTS = Object.freeze({
     'mark-price': 1,
     'account-config': 5,
     'symbol-config': 5,
+    'all-symbol-config': 5,
     'balance-v3': 5,
     'position-risk': 5,
     'open-orders': 1,
+    'all-open-orders': 40,
+    'user-data-stream-start': 1,
+    'user-data-stream-keepalive': 1,
+    'user-data-stream-close': 1,
     'open-algo-orders': 1,
+    'all-open-algo-orders': 40,
     'position-margin-history': 1,
     'modify-isolated-position-margin': 1,
     'modify-limit-order': 1,
@@ -588,7 +600,13 @@ export class FuturesProductionExecutionOrderBucket {
         return this.snapshot();
     }
 
-    prepareReservation({ exactNotional, utcDay, serverTime, maximumDailyNotional }) {
+    prepareReservation({
+        exactNotional,
+        utcDay,
+        serverTime,
+        maximumDailyNotional,
+        positionEffect = null,
+    }) {
         let increment;
         let maximum;
         try {
@@ -600,11 +618,13 @@ export class FuturesProductionExecutionOrderBucket {
                 'Exact daily notional arguments are invalid',
             );
         }
-        if (compareFuturesProductionExactDecimals(increment, '0') <= 0
+        const incrementComparison = compareFuturesProductionExactDecimals(increment, '0');
+        if (incrementComparison < 0
+            || (incrementComparison === 0 && positionEffect !== 'EXIT')
             || compareFuturesProductionExactDecimals(maximum, '0') <= 0) {
             fail(
                 FUTURES_PRODUCTION_EXECUTION_COORDINATOR_ERROR_CODES.INVALID_ARGUMENTS,
-                'Exact daily notional arguments must be positive',
+                'Exact daily notional must be positive except for a verified reducing exit',
             );
         }
         let canonicalDay;
@@ -1047,7 +1067,10 @@ export class FuturesProductionExecutionCoordinator {
             );
         }
         const operation = this.persistenceTail.then(async () => {
-            const prepared = this.orderBucket.prepareReservation(options);
+            const prepared = this.orderBucket.prepareReservation({
+                ...options,
+                positionEffect: options.audit?.positionEffect ?? null,
+            });
             try {
                 await this.persistOrderReservation(Object.freeze({
                     ...(options.audit ?? {}),

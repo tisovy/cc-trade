@@ -409,7 +409,14 @@ describe('FuturesProductionExecutionComposition', () => {
                     symbol: 'BTCUSDT',
                     positionSide: 'LONG',
                     positionAmt: '1',
+                    entryPrice: '6000',
+                    markPrice: '7000',
+                    notional: '7000',
+                    unRealizedProfit: '1000',
+                    isolatedMargin: '3500',
                     liquidationPrice: '5000',
+                    leverage: '2',
+                    marginType: 'isolated',
                     marginAsset: 'USDT',
                 }]);
             }
@@ -452,15 +459,23 @@ describe('FuturesProductionExecutionComposition', () => {
         const context = { connectionId, emit: value => emitted.push(value) };
         await runtime.service.handleRequest(JSON.stringify({
             action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.SUBSCRIBE_STATUS,
-            version: 2,
+            version: 3,
             revision: '0',
             marketType: 'futures',
             environment: 'production',
             accountFingerprint: '0'.repeat(64),
         }), context);
+        await expect(runtime.service.handleRequest(JSON.stringify({
+            action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.REFRESH_PORTFOLIO,
+            version: 3,
+            revision: emitted.at(-1).revision,
+            marketType: 'futures',
+            environment: 'production',
+            accountFingerprint: enabledFakeConfig.account.fingerprint,
+        }), context)).resolves.toBe(true);
         await runtime.service.handleRequest(JSON.stringify({
             action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_ORDER_INTENT,
-            version: 2,
+            version: 3,
             revision: emitted.at(-1).revision,
             marketType: 'futures',
             environment: 'production',
@@ -476,7 +491,7 @@ describe('FuturesProductionExecutionComposition', () => {
         expect(intent).toMatchObject({ kind: 'order' });
         await expect(runtime.service.handleRequest(JSON.stringify({
             action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.PLACE_ORDER,
-            version: 2,
+            version: 3,
             revision: intent.revision,
             marketType: 'futures',
             environment: 'production',
@@ -510,9 +525,32 @@ describe('FuturesProductionExecutionComposition', () => {
                 records.filter(record => record.eventType === 'rate_counter')
                     .map(record => record.endpointId),
             );
+        expect(records).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                eventType: 'rate_counter',
+                endpointId: 'user-data-stream-start',
+                requestWeight: 1,
+            }),
+            expect.objectContaining({
+                eventType: 'rate_counter',
+                endpointId: 'all-symbol-config',
+                requestWeight: 5,
+            }),
+            expect.objectContaining({
+                eventType: 'rate_counter',
+                endpointId: 'all-open-orders',
+                requestWeight: 40,
+            }),
+            expect.objectContaining({
+                eventType: 'rate_counter',
+                endpointId: 'all-open-algo-orders',
+                requestWeight: 40,
+            }),
+        ]));
         expect(records).toContainEqual(expect.objectContaining({
             eventType: 'daily_notional_reserved',
-            exactNotional: '7',
+            exactNotional: '0',
+            positionEffect: 'EXIT',
         }));
         expect(records).toContainEqual(expect.objectContaining({
             eventType: 'dispatch_intent',
@@ -580,25 +618,32 @@ describe('FuturesProductionExecutionComposition', () => {
         });
         expect(firstFetch).toHaveBeenCalledTimes(3);
 
-        for (let index = 0; index < 152; index += 1) {
+        let reservedWeight = first.coordinator.getOriginWeightAdmissionSnapshot()
+            .originWeightReservations.reduce(
+                (sum, reservation) => sum + reservation.requestWeight,
+                0,
+            );
+        while (reservedWeight + 5 <= 761) {
             await first.coordinator.executeGet(
                 async () => true,
                 5,
                 { endpointId: 'account-config' },
             );
+            reservedWeight += 5;
         }
-        for (let index = 0; index < 4; index += 1) {
+        while (reservedWeight < 761) {
             await first.coordinator.executeGet(
                 async () => true,
                 1,
                 { endpointId: 'server-time' },
             );
+            reservedWeight += 1;
         }
         const firstSnapshot = first.coordinator.getOriginWeightAdmissionSnapshot();
         expect(firstSnapshot.originWeightReservations.reduce(
             (sum, reservation) => sum + reservation.requestWeight,
             0,
-        )).toBe(775);
+        )).toBe(761);
         await first.service.shutdown();
 
         const restartFetch = createFakeFetch();
@@ -616,7 +661,7 @@ describe('FuturesProductionExecutionComposition', () => {
             .originWeightReservations.reduce(
                 (sum, reservation) => sum + reservation.requestWeight,
                 0,
-            )).toBe(775);
+        )).toBe(761);
         expect(restartFetch).not.toHaveBeenCalled();
         expect(restarted.service.getStatus()).toMatchObject({
             capabilities: {

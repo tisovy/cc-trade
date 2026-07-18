@@ -18,7 +18,7 @@ import './FuturesProductionExecutionTicket.css'
 
 const EXACT_POSITIVE_DECIMAL = /^(?:[1-9][0-9]*|0\.[0-9]*[1-9][0-9]*|[1-9][0-9]*\.[0-9]+)$/
 const SYMBOL = /^[A-Z0-9]{2,20}$/
-const OWNED_CLIENT_ORDER_ID = /^cc7-[0-9a-f]{32}$/
+const BINANCE_CLIENT_ORDER_ID = /^[.A-Z:/a-z0-9_-]{1,36}$/
 const SIZE_ANCHORS = Object.freeze([0, 25, 50, 75, 100])
 const ORDER_ACTIONS = Object.freeze([
   Object.freeze({
@@ -37,10 +37,111 @@ const ORDER_ACTIONS = Object.freeze([
 
 const isRecord = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const exactText = value => typeof value === 'string' && value.length > 0 ? value : '—'
+const DRAFT_REASON_MESSAGES = Object.freeze({
+  INVALID_DRAFT_INPUT: 'Price or Binance symbol filters are unavailable',
+  BELOW_MINIMUM_QUANTITY: 'Size is below the Binance minimum quantity',
+  ABOVE_MAXIMUM_QUANTITY: 'Size is above the Binance maximum quantity',
+  BELOW_MINIMUM_NOTIONAL: 'Size is below the Binance minimum notional',
+})
 const isExactPositiveDecimal = value => {
   if (typeof value !== 'string' || value.length > 42 || !EXACT_POSITIVE_DECIMAL.test(value)) return false
   const [integer, fraction = ''] = value.split('.')
   return integer.length + fraction.length <= 40 && fraction.length <= 18
+}
+
+const deriveExecutionReadiness = ({
+  account,
+  backendLocked,
+  capabilities,
+  caps,
+  killSwitch,
+  portfolio,
+  recovery,
+  safeState,
+  symbolConfiguration,
+  hasSymbolMetadata,
+  positionEffect,
+  selectedSymbol,
+  transportReady,
+}) => {
+  const capabilityCode = exactText(capabilities?.code)
+  if (safeState.connected !== true) return Object.freeze({
+    tone: 'attention', label: 'OFFLINE', reason: 'Execution connection unavailable — reconnect the local backend.',
+  })
+  if (safeState.subscribed !== true) return Object.freeze({
+    tone: 'loading', label: 'SYNC', reason: 'Loading private Futures account state…',
+  })
+  if (safeState.configured !== true) return Object.freeze({
+    tone: 'attention', label: 'SETUP', reason: 'Futures account access is unavailable — configure the reviewed account.',
+  })
+  if (!account) return Object.freeze({
+    tone: 'loading', label: 'VERIFY', reason: 'Verifying Futures account configuration…',
+  })
+  if (recovery?.required === true) return Object.freeze({
+    tone: 'attention', label: 'RESYNC', reason: 'Private account recovery is required — wait for a safe resync.',
+  })
+  if (!caps) return Object.freeze({
+    tone: 'attention', label: 'LIMITS', reason: 'Trading limits are unavailable — refresh private account state.',
+  })
+  if (!Array.isArray(caps.allowedSymbols) || !caps.allowedSymbols.includes(selectedSymbol)) {
+    return Object.freeze({
+      tone: 'attention',
+      label: 'SYMBOL',
+      reason: `${selectedSymbol} is not enabled for live execution — select an allowed contract.`,
+    })
+  }
+  if (!symbolConfiguration) return Object.freeze({
+    tone: 'loading', label: 'CONFIG', reason: `${selectedSymbol} Futures configuration is pending — waiting for Binance symbol settings.`,
+  })
+  if (positionEffect !== 'EXIT' && symbolConfiguration.marginType !== 'ISOLATED') return Object.freeze({
+    tone: 'attention', label: 'MARGIN', reason: `${selectedSymbol} uses Cross margin — switch it to Isolated on Binance.`,
+  })
+  if (positionEffect !== 'EXIT' && symbolConfiguration.isAutoAddMargin !== false) return Object.freeze({
+    tone: 'attention', label: 'AUTO ADD', reason: `${selectedSymbol} auto-add margin is enabled — disable it on Binance.`,
+  })
+  if (positionEffect !== 'EXIT' && symbolConfiguration.leverage !== caps.maxLeverage) return Object.freeze({
+    tone: 'attention', label: 'LEVERAGE', reason: `${selectedSymbol} leverage is ${symbolConfiguration.leverage}× — set it to ${caps.maxLeverage}× on Binance.`,
+  })
+  if (safeState.liveAuthorized !== true) return Object.freeze({
+    tone: 'attention', label: 'LOCKED', reason: 'Live Futures execution is disabled in the production configuration.',
+  })
+  if (capabilityCode.includes('ACCOUNT_IDENTITY_REJECTED')) return Object.freeze({
+    tone: 'attention', label: 'ACCOUNT', reason: 'Binance rejected the Futures account identity or mode — verify Futures API access, Hedge Mode, and single-asset margin.',
+  })
+  if (!hasSymbolMetadata) return Object.freeze({
+    tone: 'attention', label: 'METADATA', reason: 'Binance symbol metadata is unavailable — retry the contract refresh.',
+  })
+  if (typeof portfolio?.availableBalanceUsdt !== 'string') return Object.freeze({
+    tone: 'loading', label: 'BALANCE', reason: 'Available Futures balance is pending — wait for private account sync.',
+  })
+  if (backendLocked) return Object.freeze({
+    tone: 'loading', label: 'SENDING', reason: 'An execution request is awaiting an authoritative result.',
+  })
+  if (killSwitch?.engaged === true) return Object.freeze({
+    tone: 'attention', label: 'LOCKED', reason: 'New exposure is locked — use Advanced safety to arm execution.',
+  })
+  if (transportReady && capabilities?.placeOrder === true) {
+    const ordersResyncing = typeof portfolio?.syncState === 'string'
+      && !['live', 'synced'].includes(portfolio.syncState)
+    return Object.freeze({
+      tone: 'ready',
+      label: 'READY',
+      reason: ordersResyncing
+        ? 'Execution ready; active orders are safely resynchronizing.'
+        : 'Gesture execution ready.',
+    })
+  }
+  if (['syncing', 'resyncing', 'degraded'].includes(portfolio?.syncState)) {
+    return Object.freeze({
+      tone: 'loading', label: 'RESYNC', reason: 'Private order stream unavailable — waiting for REST resync.',
+    })
+  }
+  if (capabilityCode.includes('OPERATION_BUSY')) return Object.freeze({
+    tone: 'loading', label: 'BUSY', reason: 'Another Futures operation is still in progress.',
+  })
+  return Object.freeze({
+    tone: 'attention', label: 'CHECK', reason: `Execution checks are incomplete (${capabilityCode}).`,
+  })
 }
 
 const deriveTicketDraft = ({
@@ -134,7 +235,11 @@ const FuturesProductionExecutionTicket = ({
   const recovery = isRecord(safeState.recovery) ? safeState.recovery : null
   const portfolio = isRecord(safeState.portfolio) ? safeState.portfolio : null
   const positions = Array.isArray(portfolio?.positions) ? portfolio.positions : []
-  const openOrders = Array.isArray(portfolio?.openOrders) ? portfolio.openOrders : []
+  const allOpenOrders = Array.isArray(portfolio?.openOrders) ? portfolio.openOrders : []
+  const openOrders = allOpenOrders.filter(order => order.symbol === selectedSymbol)
+  const portfolioSyncState = typeof portfolio?.syncState === 'string'
+    ? portfolio.syncState
+    : portfolio?.state
   const [tab, setTab] = useState('trade')
   const [sizePercent, setSizePercent] = useState(25)
   const [customNotionalUsdt, setCustomNotionalUsdt] = useState(null)
@@ -144,6 +249,9 @@ const FuturesProductionExecutionTicket = ({
   const actionGuardRef = useRef({ key: null, locked: false })
   const handledGestureRef = useRef(null)
   const handledOrderAmendmentRef = useRef(null)
+  const pendingGestureRef = useRef(null)
+  const pendingOrderAmendmentRef = useRef(null)
+  const finalizedAutomaticIntentsRef = useRef(new Set())
   const gestureAction = ORDER_ACTIONS.find(candidate => (
     candidate.side === gestureRequest?.side
     && candidate.positionSide === gestureRequest?.positionSide
@@ -156,19 +264,36 @@ const FuturesProductionExecutionTicket = ({
   const guardKey = `${backendRevision ?? ''}:${intentId ?? ''}`
   const transportReady = safeState.connected === true && safeState.subscribed === true
   const backendLocked = safeState.submissionLocked === true
+  const symbolExecutionAllowed = Array.isArray(caps?.allowedSymbols)
+    && caps.allowedSymbols.includes(selectedSymbol)
+  const symbolConfiguration = Array.isArray(caps?.symbolConfigurations)
+    ? caps.symbolConfigurations.find(configuration => configuration.symbol === selectedSymbol) ?? null
+    : null
+  const symbolExecutionConfigured = symbolConfiguration?.marginType === 'ISOLATED'
+    && symbolConfiguration?.isAutoAddMargin === false
+    && symbolConfiguration?.leverage === caps?.maxLeverage
+  const symbolConfigurationAllowsGesture = Boolean(symbolConfiguration)
+    && (activeAction.positionEffect === 'EXIT' || symbolExecutionConfigured)
   const gestureCanPrepare = transportReady
+    && symbolExecutionAllowed
+    && symbolConfigurationAllowsGesture
     && capabilities?.placeOrder === true
     && intent === null
     && !backendLocked
   const amendmentCanPrepare = transportReady
+    && symbolExecutionAllowed
+    && symbolExecutionConfigured
     && capabilities?.amendOrder === true
     && intent === null
     && !backendLocked
-  const entryBudget = calculateFuturesEntryBudget({
+  const entryBudget = symbolExecutionAllowed ? calculateFuturesEntryBudget({
     maximumOrderNotionalUsdt: caps?.maxOrderNotionalUsdt,
     maximumDailyNotionalUsdt: caps?.maxDailyNotionalUsdt,
     dailyUsedNotionalUsdt: caps?.dailyUsedNotionalUsdt,
-  })
+    availableBalanceUsdt: portfolio?.availableBalanceUsdt,
+    minimumAvailableBalanceUsdt: caps?.minAvailableBalanceUsdt,
+    leverage: caps?.maxLeverage,
+  }) : null
   const selectedPosition = positions.find(position => (
     position.symbol === selectedSymbol
     && position.positionSide === activeAction.positionSide
@@ -194,10 +319,30 @@ const FuturesProductionExecutionTicket = ({
   const minQuantity = selectedContract?.filters?.quantity?.min
   const maxQuantity = selectedContract?.filters?.quantity?.max
   const minNotionalUsdt = selectedContract?.filters?.minimumNotional
-  const leverage = caps?.maxLeverage
+  const leverage = symbolConfiguration?.leverage
+  const hasSymbolSizingMetadata = isExactPositiveDecimal(tickSize)
+    && isExactPositiveDecimal(stepSize)
+    && isExactPositiveDecimal(minQuantity)
+    && isExactPositiveDecimal(maxQuantity)
+    && isExactPositiveDecimal(minNotionalUsdt)
   const normalizedAmendmentPrice = typeof orderAmendRequest?.price === 'string'
     ? normalizeFuturesDraftPrice(orderAmendRequest.price, tickSize)
     : null
+  const readiness = deriveExecutionReadiness({
+    account,
+    backendLocked,
+    capabilities,
+    caps,
+    killSwitch,
+    portfolio,
+    recovery,
+    safeState,
+    symbolConfiguration,
+    hasSymbolMetadata: Boolean(selectedContract) && hasSymbolSizingMetadata,
+    positionEffect: activeAction.positionEffect,
+    selectedSymbol,
+    transportReady,
+  })
 
   const updatePrice = useCallback((nextPrice) => {
     if (typeof onDraftPriceChange === 'function') onDraftPriceChange(nextPrice)
@@ -242,6 +387,11 @@ const FuturesProductionExecutionTicket = ({
     && intent?.kind === kind
     && !backendLocked
   useEffect(() => {
+    pendingGestureRef.current = null
+    pendingOrderAmendmentRef.current = null
+    actionGuardRef.current = { key: null, locked: false }
+  }, [selectedSymbol])
+  useEffect(() => {
     const gestureId = gestureRequest?.id
     if (gestureId === null || gestureId === undefined || handledGestureRef.current === gestureId) return
     if (!gestureAction || typeof gestureRequest.price !== 'string') return
@@ -262,13 +412,19 @@ const FuturesProductionExecutionTicket = ({
       || !candidateDraft.ok
       || !isFuturesDraftAmountWithinBudget(notionalUsdt, sizingBudget)
       || (killSwitch?.engaged === true && gestureAction.positionEffect !== 'EXIT')) return
-    claimAction(onPrepareOrderIntent, {
+    const accepted = claimAction(onPrepareOrderIntent, {
       symbol: selectedSymbol,
       side: gestureAction.side,
       positionSide: gestureAction.positionSide,
       positionEffect: gestureAction.positionEffect,
       quantity: candidateDraft.quantity,
       price: candidateDraft.price,
+    })
+    if (accepted) pendingGestureRef.current = Object.freeze({
+      gestureId,
+      label: gestureAction.label,
+      positionSide: gestureAction.positionSide,
+      symbol: selectedSymbol,
     })
   }, [
     claimAction,
@@ -298,13 +454,19 @@ const FuturesProductionExecutionTicket = ({
       || orderAmendRequest.symbol !== selectedSymbol
       || !['LONG', 'SHORT'].includes(orderAmendRequest.positionSide)
       || typeof orderAmendRequest.clientOrderId !== 'string'
-      || !OWNED_CLIENT_ORDER_ID.test(orderAmendRequest.clientOrderId)
+      || !BINANCE_CLIENT_ORDER_ID.test(orderAmendRequest.clientOrderId)
       || !isExactPositiveDecimal(normalizedAmendmentPrice)) return
-    claimAction(onPrepareOrderAmendment, {
+    const accepted = claimAction(onPrepareOrderAmendment, {
       symbol: orderAmendRequest.symbol,
       positionSide: orderAmendRequest.positionSide,
       clientOrderId: orderAmendRequest.clientOrderId,
       price: normalizedAmendmentPrice,
+    })
+    if (accepted) pendingOrderAmendmentRef.current = Object.freeze({
+      amendmentId,
+      clientOrderId: orderAmendRequest.clientOrderId,
+      positionSide: orderAmendRequest.positionSide,
+      symbol: orderAmendRequest.symbol,
     })
   }, [
     amendmentCanPrepare,
@@ -313,6 +475,53 @@ const FuturesProductionExecutionTicket = ({
     orderAmendRequest,
     normalizedAmendmentPrice,
     selectedSymbol,
+  ])
+
+  useEffect(() => {
+    const intentRequestId = intent?.requestId
+    if (typeof intentRequestId !== 'string'
+      || finalizedAutomaticIntentsRef.current.has(intentRequestId)
+      || !transportReady
+      || backendLocked) return
+
+    let pending = null
+    let capability = null
+    let confirmation = null
+    let finalize = null
+    if (intent.kind === FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER) {
+      pending = pendingGestureRef.current
+      capability = capabilities?.placeOrder
+      confirmation = FUTURES_PRODUCTION_EXECUTION_CONFIRMATIONS[
+        FUTURES_PRODUCTION_EXECUTION_ACTIONS.PLACE_ORDER
+      ]
+      finalize = onPlaceOrder
+    } else if (intent.kind === FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER_AMENDMENT) {
+      pending = pendingOrderAmendmentRef.current
+      capability = capabilities?.amendOrder
+      confirmation = FUTURES_PRODUCTION_EXECUTION_CONFIRMATIONS[
+        FUTURES_PRODUCTION_EXECUTION_ACTIONS.AMEND_ORDER
+      ]
+      finalize = onAmendOrder
+    }
+    if (!pending
+      || pending.symbol !== selectedSymbol
+      || capability !== true
+      || typeof finalize !== 'function') return
+
+    const finalized = finalizedAutomaticIntentsRef.current
+    finalized.add(intentRequestId)
+    if (finalized.size > 32) finalized.delete(finalized.values().next().value)
+    claimAction(finalize, confirmation)
+  }, [
+    backendLocked,
+    capabilities?.amendOrder,
+    capabilities?.placeOrder,
+    claimAction,
+    intent,
+    onAmendOrder,
+    onPlaceOrder,
+    selectedSymbol,
+    transportReady,
   ])
 
   const handleNotionalChange = value => {
@@ -325,19 +534,41 @@ const FuturesProductionExecutionTicket = ({
     setSizePercent(value)
   }
 
+  const amountWithinBudget = isFuturesDraftAmountWithinBudget(notionalUsdt, sizingBudget)
   const draftReason = !caps
-      ? 'Live sizing limits are unavailable — execution is blocked'
-      : !sizingReady
-      ? activeAction.positionEffect === 'EXIT'
-        ? `No open ${activeAction.positionSide} leg is available for this exit`
-        : 'Daily/order budget is exhausted'
-      : !price
-      ? 'Pick a chart or order-book price'
-      : orderDraft.ok ? null : orderDraft.reason
+    ? 'Trading limits are unavailable — refresh private account state'
+    : !symbolExecutionAllowed
+    ? `${selectedSymbol} is not enabled for live execution — select an allowed contract`
+    : !symbolConfiguration
+    ? `${selectedSymbol} Futures configuration is unavailable — wait for account sync`
+    : !symbolConfigurationAllowsGesture
+    ? readiness.reason
+    : !selectedContract || !hasSymbolSizingMetadata
+    ? 'Binance symbol metadata is unavailable — retry the contract refresh'
+    : activeAction.positionEffect === 'ENTRY' && typeof portfolio?.availableBalanceUsdt !== 'string'
+    ? 'Available Futures balance is unavailable — wait for private account sync'
+    : activeAction.positionEffect === 'EXIT' && !selectedPosition
+    ? `No open ${activeAction.positionSide} leg is available for this exit`
+    : !price
+    ? 'Pick a chart or order-book price'
+    : !sizingReady
+    ? activeAction.positionEffect === 'ENTRY'
+      ? 'No available USDT remains after the safety reserve and policy limits'
+      : `The ${activeAction.positionSide} position size cannot be calculated`
+    : !isExactPositiveDecimal(notionalUsdt)
+    ? 'Choose an order size above 0%'
+    : !amountWithinBudget
+    ? 'Order size exceeds the available balance or position limit'
+    : orderDraft.ok ? null : DRAFT_REASON_MESSAGES[orderDraft.reason] ?? orderDraft.reason
   const isUnknown = attempt?.acknowledgement === FUTURES_PRODUCTION_EXECUTION_ACKNOWLEDGEMENTS.UNKNOWN
   const isPartial = attempt?.acknowledgement === FUTURES_PRODUCTION_EXECUTION_ACKNOWLEDGEMENTS.PARTIAL
   const marginCanPrepare = canPrepare('adjustMargin')
     && isRecord(marginSelection)
+    && positions.some(position => (
+      position.symbol === marginSelection.symbol
+      && position.positionSide === marginSelection.positionSide
+      && position.marginType === 'ISOLATED'
+    ))
     && isExactPositiveDecimal(marginAmount)
     && !(killSwitch?.engaged === true && marginSelection.marginAction === 'REDUCE')
 
@@ -367,11 +598,16 @@ const FuturesProductionExecutionTicket = ({
       <header className="futures-production-execution-header">
         <div>
           <span className="futures-production-execution-market">FUTURES · USDⓈ-M</span>
-          <strong>ISOLATED · 2× · HEDGE</strong>
+          <strong>
+            {symbolConfiguration
+              ? `${symbolConfiguration.marginType} · ${symbolConfiguration.leverage}× · HEDGE`
+              : 'CONFIG SYNC · HEDGE'}
+          </strong>
         </div>
-        <span className={`futures-production-live is-${safeState.liveAuthorized === true && killSwitch?.engaged === false ? 'armed' : 'blocked'}`}>
-          {safeState.liveAuthorized !== true ? 'BLOCKED' : killSwitch?.engaged === false ? 'ARMED' : 'LOCKED'}
-        </span>
+        <div className="futures-production-readiness">
+          <span className={`futures-production-live is-${readiness.tone}`}>{readiness.label}</span>
+          <small role="status">{readiness.reason}</small>
+        </div>
       </header>
 
       <div className="futures-production-tabs" role="tablist" aria-label="Futures trading rail tabs">
@@ -386,9 +622,8 @@ const FuturesProductionExecutionTicket = ({
 
       <div className="futures-production-execution-body">
         {tab === 'trade' ? (
-          <section className="futures-production-action is-order" aria-label="Futures gesture trading controls">
+          <section className="futures-production-action is-order" aria-label="Futures order size and shortcuts">
             <div className="futures-production-ticket-symbol">
-              <span>Gesture trading</span>
               <strong>{selectedSymbol}</strong>
               <code className={gestureAction ? `is-${gestureAction.positionSide.toLowerCase()}` : ''}>
                 {gestureAction ? gestureAction.label : 'Awaiting shortcut'}
@@ -454,6 +689,7 @@ const FuturesProductionExecutionTicket = ({
               <div><dt>Price</dt><dd>{orderDraft.ok ? orderDraft.price : exactText(price)}</dd></div>
               <div><dt>Quantity</dt><dd>{orderDraft.ok ? orderDraft.quantity : '—'}</dd></div>
               <div><dt>Est. margin</dt><dd>{orderDraft.ok ? `${orderDraft.estimatedMarginUsdt} USDT` : '—'}</dd></div>
+              <div><dt>Available</dt><dd>{portfolio?.availableBalanceUsdt ? `${portfolio.availableBalanceUsdt} USDT` : '—'}</dd></div>
               <div><dt>{activeAction.positionEffect === 'EXIT' ? `${activeAction.positionSide} leg` : 'Safe limit'}</dt><dd>{sizingBudget ? `${sizingBudget} USDT` : '—'}</dd></div>
             </dl>
             {draftReason ? <p className="futures-production-draft-reason" role="status">{draftReason}</p> : null}
@@ -475,32 +711,19 @@ const FuturesProductionExecutionTicket = ({
               <section className={`futures-production-gesture-confirmation is-${activeAction.positionSide.toLowerCase()}`} aria-label="Prepared Futures gesture">
                 <header><span>Prepared gesture</span><strong>{activeAction.label}</strong></header>
                 <p>{orderDraft.ok ? `${orderDraft.quantity} ${selectedSymbol} @ ${orderDraft.price}` : selectedSymbol}</p>
-                <ConfirmationControl
-                  key={intent.requestId}
-                  action={FUTURES_PRODUCTION_EXECUTION_ACTIONS.PLACE_ORDER}
-                  disabled={!canFinalize(FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER, 'placeOrder')}
-                  buttonLabel="Place real futures order"
-                  onConfirm={confirmation => claimAction(onPlaceOrder, confirmation)}
-                />
+                <p role="status">Verified shortcut intent · automatic submission is server-authoritative.</p>
               </section>
             ) : null}
             {intent?.kind === FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER_AMENDMENT ? (
-              <ConfirmationControl
-                key={intent.requestId}
-                action={FUTURES_PRODUCTION_EXECUTION_ACTIONS.AMEND_ORDER}
-                disabled={!canFinalize(
-                  FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.ORDER_AMENDMENT,
-                  'amendOrder',
-                )}
-                buttonLabel="Move real futures order"
-                onConfirm={confirmation => claimAction(onAmendOrder, confirmation)}
-              />
+              <p className="futures-production-automatic-command" role="status">
+                Verified drag intent · automatic amendment is server-authoritative.
+              </p>
             ) : null}
           </section>
         ) : tab === 'orders' ? (
           <section className="futures-production-orders" role="tabpanel" aria-label="Current Futures orders">
             <header className="futures-production-portfolio-heading">
-              <div><strong>Open orders</strong><span>{openOrders.length} app-owned</span></div>
+              <div><strong>Open orders</strong><span>{openOrders.length} active</span></div>
               <button
                 type="button"
                 aria-label="Refresh positions and orders"
@@ -511,22 +734,27 @@ const FuturesProductionExecutionTicket = ({
                 ↻
               </button>
             </header>
-            {portfolio?.state !== 'live' ? (
-              <p role="status">Current orders are {portfolio?.state ?? 'loading'}.</p>
-            ) : openOrders.length === 0 ? <p>No current app-owned orders.</p> : openOrders.map(order => (
+            {portfolioSyncState !== 'live' ? (
+              <p role="status">Active orders are {portfolioSyncState ?? 'loading'}; last confirmed rows are retained.</p>
+            ) : null}
+            {openOrders.length === 0 ? <p>No active Futures orders.</p> : openOrders.map(order => (
               <article
                 className={`${order.symbol === selectedSymbol ? 'is-current-symbol' : ''} is-${order.positionSide.toLowerCase()}`}
-                key={order.clientOrderId}
+                key={`${order.symbol}:${order.orderKind}:${order.orderId}:${order.clientOrderId}`}
               >
                 <header>
-                  <div><strong>{order.symbol}</strong><span>{order.positionSide} {order.positionEffect}</span></div>
-                  <code>{order.status}</code>
+                  <div><strong>{order.symbol}</strong><span>{order.side} · {order.positionSide}</span></div>
+                  <code>
+                    {order.status}{order.syncState ? ` · ${order.syncState.toUpperCase()}` : ''}
+                  </code>
                 </header>
                 <dl>
+                  <div><dt>Type</dt><dd>{order.orderKind === 'ALGO' ? `ALGO · ${order.type}` : order.type}</dd></div>
                   <div><dt>Price</dt><dd>{order.price}</dd></div>
-                  <div><dt>Filled</dt><dd>{order.executedQuantity} / {order.originalQuantity}</dd></div>
+                  <div><dt>Original qty</dt><dd>{order.originalQuantity}</dd></div>
+                  <div><dt>Filled qty</dt><dd>{order.executedQuantity}</dd></div>
                 </dl>
-                <small>{order.symbol === selectedSymbol ? 'Ctrl/Alt + drag its chart line to move' : 'Select this symbol to show its chart line'}</small>
+                <small>{order.orderKind === 'REGULAR' ? 'Ctrl/Alt + drag its chart line to move' : 'Managed by Binance conditional-order API'}</small>
               </article>
             ))}
           </section>
@@ -545,8 +773,9 @@ const FuturesProductionExecutionTicket = ({
               </button>
             </header>
             {portfolio?.state !== 'live' ? (
-              <p role="status">Private positions are {portfolio?.state ?? 'unavailable'}.</p>
-            ) : positions.length === 0 ? <p>No open LONG or SHORT positions.</p> : positions.map(position => (
+              <p role="status">Private positions are {portfolio?.state ?? 'unavailable'}; last confirmed legs are retained.</p>
+            ) : null}
+            {positions.length === 0 ? <p>No open LONG or SHORT positions.</p> : positions.map(position => (
               <article
                 className={`is-${position.positionSide.toLowerCase()}`}
                 key={`${position.symbol}:${position.positionSide}`}
@@ -554,21 +783,22 @@ const FuturesProductionExecutionTicket = ({
                 <header><strong>{position.symbol}</strong><span>{position.positionSide}</span></header>
                 <dl>
                   <div><dt>Qty</dt><dd>{exactText(position.quantity)}</dd></div>
-                  <div><dt>Margin</dt><dd>{exactText(position.isolatedMarginUsdt)} USDT</dd></div>
+                  <div><dt>Margin</dt><dd>{position.marginType} · {position.leverage}×</dd></div>
+                  <div><dt>Isolated</dt><dd>{position.marginType === 'ISOLATED' ? `${exactText(position.isolatedMarginUsdt)} USDT` : '—'}</dd></div>
                   <div><dt>UPnL</dt><dd>{exactText(position.unrealizedPnlUsdt)} USDT</dd></div>
                   <div><dt>Liq.</dt><dd>{exactText(position.liquidationPrice)}</dd></div>
                 </dl>
                 <div>
                   <button
                     type="button"
-                    disabled={capabilities?.adjustMargin !== true || typeof onPrepareMarginAdjustment !== 'function'}
+                    disabled={position.marginType !== 'ISOLATED' || capabilities?.adjustMargin !== true || typeof onPrepareMarginAdjustment !== 'function'}
                     onClick={() => selectMarginAdjustment(position, 'ADD')}
                   >
                     Add margin
                   </button>
                   <button
                     type="button"
-                    disabled={killSwitch?.engaged === true || capabilities?.adjustMargin !== true || typeof onPrepareMarginAdjustment !== 'function'}
+                    disabled={position.marginType !== 'ISOLATED' || killSwitch?.engaged === true || capabilities?.adjustMargin !== true || typeof onPrepareMarginAdjustment !== 'function'}
                     onClick={() => selectMarginAdjustment(position, 'REDUCE')}
                   >
                     Reduce margin
@@ -626,7 +856,11 @@ const FuturesProductionExecutionTicket = ({
             <div><dt>Recovery</dt><dd>{exactText(recovery?.state)}</dd></div>
           </dl>
           <section className="futures-production-action is-arm">
-            <h3>ARM LIVE · HEDGE / ISOLATED / 2×</h3>
+            <h3>
+              ARM LIVE · HEDGE / {symbolConfiguration
+                ? `${symbolConfiguration.marginType} / ${symbolConfiguration.leverage}×`
+                : 'CONFIG SYNC'}
+            </h3>
             <button type="button" disabled={!canPrepare('disengageKillSwitch')} onClick={() => claimAction(onPrepareDisengageKillSwitchIntent)}>
               Prepare ARM LIVE intent
             </button>

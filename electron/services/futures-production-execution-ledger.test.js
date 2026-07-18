@@ -165,6 +165,37 @@ describe('Futures production execution ledger', () => {
         await ledger.close();
     });
 
+    it('persists a verified reducing dispatch without increasing the daily exposure counter', async () => {
+        const directory = await makeDirectory();
+        const ledger = createFuturesProductionExecutionLedger({ directory, integrityKey: key });
+        await ledger.open();
+        await ledger.reserveDailyNotional({
+            utcDay: '2026-07-13',
+            serverTime: dayOne,
+            exactNotional: '0',
+            maximumDailyNotional: '100',
+            dispatchAt: dayOne,
+            requestId: 'reducing-exit',
+            operationId: 'reducing-exit',
+            action: 'futures.production.placeOrder',
+            positionEffect: 'EXIT',
+        });
+        expect(ledger.getReplaySnapshot()).toMatchObject({
+            dailyReservations: { '2026-07-13': '0' },
+            dispatchTimes: [dayOne],
+        });
+        await expect(ledger.reserveDailyNotional({
+            utcDay: '2026-07-13',
+            serverTime: dayOne,
+            exactNotional: '0',
+            maximumDailyNotional: '100',
+            dispatchAt: dayOne + 1,
+            requestId: 'invalid-zero-entry',
+            positionEffect: 'ENTRY',
+        })).rejects.toMatchObject({ code: 'INVALID_DAILY_RESERVATION' });
+        await ledger.close();
+    });
+
     it('serializes concurrent gross reservations and never refunds rejected capacity', async () => {
         const directory = await makeDirectory();
         const ledger = createFuturesProductionExecutionLedger({ directory, integrityKey: key });
@@ -421,6 +452,19 @@ describe('Futures production execution ledger', () => {
             ...validRateRecord,
             endpointId: null,
         })).toThrowError(expect.objectContaining({ code: 'INVALID_AUDIT_RECORD' }));
+        for (const endpointId of [
+            'user-data-stream-start',
+            'user-data-stream-keepalive',
+            'user-data-stream-close',
+            'all-symbol-config',
+            'all-open-orders',
+            'all-open-algo-orders',
+        ]) {
+            expect(createFuturesProductionExecutionAuditRecord({
+                ...validRateRecord,
+                endpointId,
+            })).toMatchObject({ endpointId, requestWeight: 1 });
+        }
         expect(() => createFuturesProductionExecutionAuditRecord({
             ...validRateRecord,
             endpointId: 'caller-controlled-endpoint',

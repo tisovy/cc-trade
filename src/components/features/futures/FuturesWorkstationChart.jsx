@@ -92,7 +92,12 @@ const rememberRows = rows => rows.length === 0 ? null : Object.freeze({
   length: rows.length,
 })
 
+const futuresOrderIdentity = order => (
+  `${order?.symbol}:${order?.orderKind}:${order?.orderId}:${order?.clientOrderId}`
+)
+
 export const FuturesWorkstationChart = ({
+  symbol,
   candles,
   markCandles,
   indexCandles,
@@ -114,6 +119,7 @@ export const FuturesWorkstationChart = ({
   const onPricePickRef = useRef(onPricePick)
   const onTradingGestureRef = useRef(onTradingGesture)
   const onOrderDragRef = useRef(onOrderDrag)
+  const symbolRef = useRef(symbol)
   const hasFittedContentRef = useRef(false)
   const rowStateRef = useRef({ contract: null, mark: null, index: null })
   const measurementRef = useRef(null)
@@ -136,6 +142,16 @@ export const FuturesWorkstationChart = ({
   useEffect(() => {
     onOrderDragRef.current = onOrderDrag
   }, [onOrderDrag])
+
+  useEffect(() => {
+    symbolRef.current = symbol
+    hasFittedContentRef.current = false
+    rowStateRef.current = { contract: null, mark: null, index: null }
+    lastLeftClickRef.current = { at: 0, x: 0, y: 0, modifier: null }
+    lastRightClickRef.current = { at: 0, x: 0, y: 0, modifier: null }
+    orderDragRef.current = null
+    measurementRef.current = null
+  }, [symbol])
 
   const cancelMeasurement = useCallback(() => {
     measurementRef.current = null
@@ -271,7 +287,10 @@ export const FuturesWorkstationChart = ({
         metaKey: event.metaKey,
         shiftKey: event.shiftKey,
       })
-      if (!intent || !isFuturesTradingGestureTarget(event.target)) return
+      if (!intent || !isFuturesTradingGestureTarget(event.target)) {
+        lastRightClickRef.current = { at: 0, x: 0, y: 0, modifier: null }
+        return
+      }
       event.preventDefault()
       const modifier = event.altKey ? 'alt' : 'ctrl'
       const current = {
@@ -301,13 +320,16 @@ export const FuturesWorkstationChart = ({
         deltaTime = point.time - start.time
       }
       setMeasurement({
-        startX: start.x,
-        currentX: point.x,
-        startY: start.y,
-        currentY: point.y,
-        deltaPrice,
-        deltaPercent: start.price === 0 ? 0 : (deltaPrice / start.price) * 100,
-        deltaTime,
+        symbol: symbolRef.current,
+        projection: {
+          startX: start.x,
+          currentX: point.x,
+          startY: start.y,
+          currentY: point.y,
+          deltaPrice,
+          deltaPercent: start.price === 0 ? 0 : (deltaPrice / start.price) * 100,
+          deltaTime,
+        },
       })
     }
     const handleKeyUp = (event) => {
@@ -454,7 +476,7 @@ export const FuturesWorkstationChart = ({
       lineWidth: 2,
       lineStyle: LineStyle.Solid,
       axisLabelVisible: true,
-      title: `${order.positionSide} ${order.positionEffect}`,
+      title: `${order.orderKind === 'ALGO' ? 'ALGO ' : ''}${order.positionSide} ${order.positionEffect}`,
     }))
     overlayLinesRef.current = nextLines
   }, [alerts, draftPrice, drawings, indexPrice, markPrice, ownedOrders])
@@ -476,7 +498,7 @@ export const FuturesWorkstationChart = ({
         })
       setOrderCoordinates((previous) => {
         const unchanged = previous.length === next.length && previous.every((entry, index) => (
-          entry.order.clientOrderId === next[index].order.clientOrderId
+          futuresOrderIdentity(entry.order) === futuresOrderIdentity(next[index].order)
           && entry.order.price === next[index].order.price
           && entry.y === next[index].y
         ))
@@ -492,7 +514,8 @@ export const FuturesWorkstationChart = ({
   }, [candles, containerSize.height, ownedOrders])
 
   const beginOrderDrag = useCallback((event, order) => {
-    if (event.button !== 0
+    if (order?.orderKind !== 'REGULAR'
+      || event.button !== 0
       || event.metaKey
       || event.shiftKey
       || event.altKey === event.ctrlKey) return
@@ -503,10 +526,15 @@ export const FuturesWorkstationChart = ({
       pointerId: event.pointerId,
       modifier,
       order,
+      orderIdentity: futuresOrderIdentity(order),
       price: order.price,
     }
     event.currentTarget.setPointerCapture?.(event.pointerId)
-    setOrderDragPreview({ clientOrderId: order.clientOrderId, price: order.price, y: null })
+    setOrderDragPreview({
+      orderIdentity: futuresOrderIdentity(order),
+      price: order.price,
+      y: null,
+    })
   }, [])
 
   const moveOrderDrag = useCallback((event) => {
@@ -522,7 +550,7 @@ export const FuturesWorkstationChart = ({
     event.preventDefault()
     event.stopPropagation()
     setOrderDragPreview({
-      clientOrderId: drag.order.clientOrderId,
+      orderIdentity: drag.orderIdentity,
       price: drag.price,
       y,
     })
@@ -539,7 +567,7 @@ export const FuturesWorkstationChart = ({
       ? event.altKey && !event.ctrlKey
       : event.ctrlKey && !event.altKey
     const changed = toNumber(drag.price) !== toNumber(drag.order.price)
-    if (!canceled && modifierHeld && changed) {
+    if (!canceled && drag.order.orderKind === 'REGULAR' && modifierHeld && changed) {
       onOrderDragRef.current?.({
         symbol: drag.order.symbol,
         positionSide: drag.order.positionSide,
@@ -567,32 +595,50 @@ export const FuturesWorkstationChart = ({
         aria-label="Futures candlestick chart with volume, mark and index overlays"
       />
       <MeasurementOverlay
-        projection={measurement}
+        projection={measurement && measurement.symbol === symbol ? measurement.projection : null}
         containerSize={containerSize}
         precision={measurementPrecision}
       />
       <div className="futures-workstation-owned-order-layer" aria-label="Owned Futures orders">
         {orderCoordinates.map(({ order, y }) => {
-          const preview = orderDragPreview?.clientOrderId === order.clientOrderId
+          const orderIdentity = futuresOrderIdentity(order)
+          const preview = orderDragPreview?.orderIdentity === orderIdentity
             ? orderDragPreview
             : null
           const top = preview?.y ?? y
           const displayedPrice = preview?.price ?? order.price
+          const content = (
+            <>
+              <span>{order.orderKind === 'ALGO' ? 'ALGO · ' : ''}{order.positionSide} {order.positionEffect}</span>
+              <strong>{displayedPrice}</strong>
+            </>
+          )
+          if (order.orderKind === 'ALGO') {
+            return (
+              <div
+                className={`futures-workstation-owned-order is-${order.positionSide.toLowerCase()} is-algo`}
+                key={orderIdentity}
+                style={{ top: `${top}px` }}
+                role="note"
+                aria-label={`ALGO ${order.positionSide} ${order.positionEffect} order at ${order.price}; price is managed by Binance and is not draggable`}
+              >
+                {content}
+              </div>
+            )
+          }
           return (
             <button
               type="button"
               className={`futures-workstation-owned-order is-${order.positionSide.toLowerCase()}`}
-              key={order.clientOrderId}
+              key={orderIdentity}
               style={{ top: `${top}px` }}
               aria-label={`Move ${order.positionSide} ${order.positionEffect} order at ${order.price} with Ctrl or Alt drag`}
               onPointerDown={event => beginOrderDrag(event, order)}
               onPointerMove={moveOrderDrag}
               onPointerUp={event => finishOrderDrag(event)}
               onPointerCancel={event => finishOrderDrag(event, true)}
-              onContextMenu={event => event.preventDefault()}
             >
-              <span>{order.positionSide} {order.positionEffect}</span>
-              <strong>{displayedPrice}</strong>
+              {content}
             </button>
           )
         })}
