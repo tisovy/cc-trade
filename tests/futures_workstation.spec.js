@@ -22,7 +22,7 @@ const waitForLiveWorkstation = async (mainWindow, identityText) => {
     const identity = mainWindow.getByTestId('futures-workstation-identity');
     await expect(identity).toContainText(identityText);
     await expect(identity).toContainText('PUBLIC MARKET DATA · LIVE EXECUTION');
-    await expect(identity).toContainText('LIVE');
+    await expect(identity.getByRole('status')).toHaveText('LIVE');
     return identity;
 };
 
@@ -146,7 +146,7 @@ test('Futures Live is ready, keeps contracts visible and executes only mocked ge
         await mainWindow.locator('.futures-production-workstation')
             .getByRole('button', { name: '5m', exact: true })
             .click();
-        await expect(identity).toContainText('LIVE');
+        await expect(identity.getByRole('status')).toHaveText('LIVE');
         await expect.poll(async () => Number(
             (await identity.locator('code').textContent())?.match(/^gen (\d+)/)?.[1],
         )).toBe(generationBeforeInterval + 1);
@@ -169,28 +169,64 @@ test('Futures Live is ready, keeps contracts visible and executes only mocked ge
         await expect(contractList.locator('.futures-workstation-contract')).toHaveCount(3);
         await contractList.evaluate((element) => {
             const samples = [];
-            const record = () => samples.push(
-                element.querySelectorAll('.futures-workstation-contract').length,
-            );
+            const record = () => {
+                const bounds = element.getBoundingClientRect();
+                const style = getComputedStyle(element);
+                const rows = [...element.querySelectorAll('.futures-workstation-contract')];
+                samples.push({
+                    count: rows.length,
+                    width: bounds.width,
+                    height: bounds.height,
+                    display: style.display,
+                    visibility: style.visibility,
+                    rowGeometry: rows.map((row) => {
+                        const rowBounds = row.getBoundingClientRect();
+                        return rowBounds.width > 0 && rowBounds.height > 0;
+                    }),
+                });
+            };
             const observer = new MutationObserver(record);
+            const resizeObserver = new ResizeObserver(record);
+            let animationFrame = 0;
+            const sampleFrame = () => {
+                record();
+                animationFrame = requestAnimationFrame(sampleFrame);
+            };
             record();
             observer.observe(element, { childList: true, subtree: true });
-            globalThis.__futuresContractsProbe = { samples, observer };
+            resizeObserver.observe(element);
+            animationFrame = requestAnimationFrame(sampleFrame);
+            globalThis.__futuresContractsProbe = {
+                samples,
+                observer,
+                resizeObserver,
+                get animationFrame() { return animationFrame; },
+            };
         });
         await selectContract('BTCUSDT').click();
         await selectContract('ETHUSDT').click();
         await selectContract('SOLUSDT').click();
         await expect(mainWindow.getByLabel('Futures market header')).toContainText('SOLUSDT');
-        await expect(identity).toContainText('LIVE');
+        await expect(identity.getByRole('status')).toHaveText('LIVE');
         await mainWindow.waitForTimeout(250);
         const contractSamples = await contractList.evaluate(() => {
             const probe = globalThis.__futuresContractsProbe;
             probe?.observer?.disconnect();
+            probe?.resizeObserver?.disconnect();
+            if (probe?.animationFrame) cancelAnimationFrame(probe.animationFrame);
             delete globalThis.__futuresContractsProbe;
             return probe?.samples ?? [];
         });
         expect(contractSamples.length).toBeGreaterThan(0);
-        expect(Math.min(...contractSamples)).toBeGreaterThan(0);
+        expect(contractSamples.every(sample => (
+            sample.count > 0
+            && sample.width > 100
+            && sample.height > 100
+            && sample.display !== 'none'
+            && sample.visibility === 'visible'
+            && sample.rowGeometry.length === sample.count
+            && sample.rowGeometry.every(Boolean)
+        ))).toBe(true);
         const contractRows = contractList.locator('.futures-workstation-contract');
         await expect(contractRows).toHaveCount(3);
         expect(await contractRows.evaluateAll(rows => rows.map((row) => {
@@ -213,6 +249,52 @@ test('Futures Live is ready, keeps contracts visible and executes only mocked ge
             document.documentElement.scrollWidth > document.documentElement.clientWidth
         ));
         expect(hasHorizontalOverflow).toBe(false);
+        await expect(contractRows).toHaveCount(3);
+        const narrowContractsGeometry = await contractList.evaluate((element) => {
+            const panel = element.closest('.futures-workstation-instruments');
+            const ticket = panel?.querySelector('.futures-production-execution-ticket');
+            const listBounds = element.getBoundingClientRect();
+            const panelBounds = panel?.getBoundingClientRect();
+            const ticketBounds = ticket?.getBoundingClientRect();
+            const rows = [...element.querySelectorAll('.futures-workstation-contract')];
+            const visibleRows = rows.filter((row) => {
+                const bounds = row.getBoundingClientRect();
+                const style = getComputedStyle(row);
+                return bounds.width > 0
+                    && bounds.height > 0
+                    && bounds.bottom > listBounds.top
+                    && bounds.top < listBounds.bottom
+                    && style.display !== 'none'
+                    && style.visibility === 'visible';
+            });
+            return {
+                listWidth: listBounds.width,
+                listHeight: listBounds.height,
+                rowCount: rows.length,
+                visibleRowCount: visibleRows.length,
+                panelHeight: panelBounds?.height ?? 0,
+                panelScrollHeight: panel?.scrollHeight ?? 0,
+                panelClientHeight: panel?.clientHeight ?? 0,
+                ticketWidth: ticketBounds?.width ?? 0,
+                ticketHeight: ticketBounds?.height ?? 0,
+                ticketIntersectsPanel: Boolean(panelBounds && ticketBounds
+                    && ticketBounds.bottom > panelBounds.top
+                    && ticketBounds.top < panelBounds.bottom),
+            };
+        });
+        expect(narrowContractsGeometry).toMatchObject({
+            rowCount: 3,
+            ticketIntersectsPanel: true,
+        });
+        expect(narrowContractsGeometry.listWidth).toBeGreaterThan(300);
+        expect(narrowContractsGeometry.listHeight).toBeGreaterThanOrEqual(110);
+        expect(narrowContractsGeometry.listHeight).toBeLessThanOrEqual(114);
+        expect(narrowContractsGeometry.visibleRowCount).toBeGreaterThanOrEqual(2);
+        expect(narrowContractsGeometry.panelHeight).toBeLessThanOrEqual(361);
+        expect(narrowContractsGeometry.panelScrollHeight)
+            .toBeGreaterThan(narrowContractsGeometry.panelClientHeight);
+        expect(narrowContractsGeometry.ticketWidth).toBeGreaterThan(300);
+        expect(narrowContractsGeometry.ticketHeight).toBeGreaterThan(0);
         await attachScreenshot(mainWindow, testInfo, 'futures-ready-narrow');
     } finally {
         await electronApp.close();

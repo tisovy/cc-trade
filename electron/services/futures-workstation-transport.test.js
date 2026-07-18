@@ -189,6 +189,79 @@ describe('reviewed environment-specific Futures workstation transports', () => {
         }
     });
 
+    it('delivers completed bootstrap resources progressively with the same six REST reads', async () => {
+        const deliveries = [];
+        let resolveTicker;
+        globalThis.fetch = vi.fn((url) => {
+            if (url.pathname === FUTURES_PRODUCTION_WORKSTATION_ROUTES.TICKER) {
+                return new Promise((resolve) => {
+                    resolveTicker = () => resolve(responseFor(
+                        url.href,
+                        FUTURES_PRODUCTION_WORKSTATION_FIXTURE,
+                    ));
+                });
+            }
+            return Promise.resolve(responseFor(
+                url.href,
+                FUTURES_PRODUCTION_WORKSTATION_FIXTURE,
+            ));
+        });
+        let settled = false;
+        const pending = createFuturesProductionWorkstationReviewedTransport().bootstrap({
+            symbol: 'BTCUSDT',
+            pair: 'BTCUSDT',
+            interval: '1m',
+            onBootstrapResource: delivery => deliveries.push(delivery),
+        });
+        void pending.finally(() => { settled = true; });
+
+        await vi.waitFor(() => {
+            expect(resolveTicker).toBeTypeOf('function');
+            expect(deliveries).toHaveLength(5);
+        });
+        expect(settled).toBe(false);
+        expect(deliveries.map(delivery => delivery.resource)).not.toContain('ticker');
+        expect(deliveries.every(Object.isFrozen)).toBe(true);
+
+        resolveTicker();
+        const aggregate = await pending;
+        expect(Object.keys(aggregate).sort()).toEqual(
+            deliveries.map(delivery => delivery.resource).sort(),
+        );
+        expect(new Set(deliveries.map(delivery => delivery.resource)).size).toBe(6);
+        expect(globalThis.fetch).toHaveBeenCalledTimes(6);
+    });
+
+    it('accepts bounded Unicode identities only on the public workstation transport', async () => {
+        const symbol = '测试测试USDT';
+        globalThis.fetch = vi.fn();
+        const transport = createFuturesProductionWorkstationReviewedTransport();
+        const controller = new AbortController();
+        controller.abort();
+
+        await expect(transport.bootstrap({
+            symbol,
+            pair: symbol,
+            interval: '1m',
+            signal: controller.signal,
+        })).rejects.toMatchObject({ code: 'READ_OPERATION_ABORTED' });
+        expect(globalThis.fetch).not.toHaveBeenCalled();
+
+        const connection = transport.connect({
+            symbol,
+            interval: '1m',
+            onMessage: () => {},
+            onDisconnect: () => {},
+        });
+        const lower = symbol.toLowerCase();
+        expect(socketMock.instances.map(socket => socket.url)).toEqual([
+            `${FUTURES_PRODUCTION_WORKSTATION_WSS_ORIGIN}/public/stream?streams=${lower}@depth@100ms`,
+            `${FUTURES_PRODUCTION_WORKSTATION_WSS_ORIGIN}/market/stream?streams=${lower}@aggTrade/${lower}@kline_1m/${lower}@markPrice@1s/${lower}@ticker`,
+        ]);
+        connection.close();
+        transport.close();
+    });
+
     it.each([
         ['redirect flag', { redirected: true }, 'REDIRECT_REJECTED'],
         ['alternate final URL', { url: 'https://example.com/fapi/v1/exchangeInfo' }, 'REDIRECT_REJECTED'],
@@ -456,6 +529,45 @@ describe('reviewed environment-specific Futures workstation transports', () => {
         expect(calls).toHaveLength(FUTURES_PRODUCTION_WORKSTATION_BOOTSTRAP_CONCURRENCY);
     });
 
+    it('aborts active and queued reads when a progressive resource observer rejects data', async () => {
+        const observerFailure = new Error('bootstrap normalizer rejected data');
+        const calls = [];
+        let resolveFirst;
+        globalThis.fetch = vi.fn((url, { signal }) => new Promise((resolve, reject) => {
+            calls.push({ url, signal });
+            const abort = () => {
+                const error = new Error('aborted');
+                error.name = 'AbortError';
+                reject(error);
+            };
+            signal.addEventListener('abort', abort, { once: true });
+            if (calls.length === 1) {
+                resolveFirst = () => resolve(responseFor(
+                    url.href,
+                    FUTURES_PRODUCTION_WORKSTATION_FIXTURE,
+                ));
+            }
+        }));
+        const observer = vi.fn(() => { throw observerFailure; });
+        const pending = createFuturesProductionWorkstationReviewedTransport().bootstrap({
+            symbol: 'BTCUSDT',
+            pair: 'BTCUSDT',
+            interval: '1m',
+            onBootstrapResource: observer,
+        });
+
+        await vi.waitFor(() => expect(calls).toHaveLength(
+            FUTURES_PRODUCTION_WORKSTATION_BOOTSTRAP_CONCURRENCY,
+        ));
+        resolveFirst();
+        await expect(pending).rejects.toBe(observerFailure);
+        await Promise.resolve();
+        expect(observer).toHaveBeenCalledOnce();
+        expect(calls).toHaveLength(FUTURES_PRODUCTION_WORKSTATION_BOOTSTRAP_CONCURRENCY);
+        expect(calls[0].signal.aborted).toBe(false);
+        expect(calls.slice(1).every(call => call.signal.aborted)).toBe(true);
+    });
+
     it('deduplicates concurrent exchange-info reads and serves the warm production cache', async () => {
         const timings = [];
         globalThis.fetch = vi.fn(async url => responseFor(
@@ -637,6 +749,9 @@ describe('reviewed environment-specific Futures workstation transports', () => {
         });
         expect(Object.values(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS)
             .reduce((total, weight) => total + weight, 0)).toBe(26);
+        expect(Object.entries(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS)
+            .filter(([name]) => name !== 'EXCHANGE_INFO')
+            .reduce((total, [, weight]) => total + weight, 0)).toBe(25);
         expect(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS).toEqual({
             DEPTH: 1_000,
             KLINES: 99,

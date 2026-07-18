@@ -131,7 +131,9 @@ describe('useFuturesProductionExecution', () => {
       accountFingerprint: BOOTSTRAP_ACCOUNT_FINGERPRINT,
     }])
 
+    const stableSnapshot = result.current
     rerender({ enabled: true, wsConnection: socket })
+    expect(result.current).toBe(stableSnapshot)
     expect(sentMessages(socket)).toHaveLength(1)
 
     unmount()

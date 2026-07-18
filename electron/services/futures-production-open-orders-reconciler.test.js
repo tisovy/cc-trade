@@ -188,6 +188,31 @@ describe('Futures production open-order reconciliation', () => {
             .toMatchObject({ orderKind: 'REGULAR', timeInForce: 'RPI' });
     });
 
+    it('keeps ASCII, Unicode, and delivery identities in one authoritative snapshot', () => {
+        const state = syncSnapshot([
+            restOrder({ orderId: '1', clientOrderId: 'btc-order' }),
+            restOrder({
+                symbol: '币安人生USDT',
+                orderId: '2',
+                clientOrderId: 'unicode-order',
+            }),
+            restOrder({
+                symbol: 'BTCUSDT_250926',
+                orderId: '3',
+                clientOrderId: 'delivery-order',
+            }),
+        ]);
+
+        expect(state.orders).toEqual(expect.arrayContaining([
+            expect.objectContaining({ key: 'BTCUSDT:1' }),
+            expect.objectContaining({ key: '币安人生USDT:2' }),
+            expect.objectContaining({ key: 'BTCUSDT_250926:3' }),
+        ]));
+        expect(() => normalizeFuturesRestOpenOrder(restOrder({
+            symbol: 'биткоинUSDT',
+        }))).toThrowError(expect.objectContaining({ code: 'INVALID_REST_OPEN_ORDER' }));
+    });
+
     it('accepts the reviewed 2,048 combined-order capacity and rejects one row over it', () => {
         const rows = Array.from({ length: 2_048 }, (_, index) => restOrder({
             orderId: String(index + 1),
@@ -471,6 +496,7 @@ describe('Futures production open-order reconciliation', () => {
         ]);
         state = markFuturesOpenOrdersPendingCancel(state, {
             symbol: 'BTCUSDT',
+            orderKeys: ['BTCUSDT:10'],
             requestedAt: 1_783_814_400_700,
         });
         expect(state.orders).toEqual(expect.arrayContaining([
@@ -480,6 +506,7 @@ describe('Futures production open-order reconciliation', () => {
 
         state = failFuturesOpenOrdersPendingCancel(state, {
             symbol: 'BTCUSDT',
+            orderKeys: ['BTCUSDT:10'],
             failedAt: 1_783_814_400_800,
         });
         expect(state.orders).toEqual(expect.arrayContaining([
@@ -496,6 +523,7 @@ describe('Futures production open-order reconciliation', () => {
         })]);
         state = markFuturesOpenOrdersPendingCancel(state, {
             symbol: 'BTCUSDT',
+            orderKeys: ['BTCUSDT:12'],
             requestedAt: 1_700_000_000_000,
         });
         expect(state.orders).toEqual([
@@ -504,16 +532,19 @@ describe('Futures production open-order reconciliation', () => {
 
         state = failFuturesOpenOrdersPendingCancel(state, {
             symbol: 'BTCUSDT',
+            orderKeys: ['BTCUSDT:12'],
             failedAt: 1_700_000_000_001,
         });
         expect(state.orders[0].syncState).toBe('stale');
 
         state = markFuturesOpenOrdersPendingCancel(state, {
             symbol: 'BTCUSDT',
+            orderKeys: ['BTCUSDT:12'],
             requestedAt: 1_700_000_000_002,
         });
         state = removeFuturesOpenOrdersForSymbols(state, {
             symbols: ['BTCUSDT'],
+            orderKeys: ['BTCUSDT:12'],
             confirmedAt: 1_900_000_000_001,
         });
         expect(state.orders).toEqual([]);
@@ -589,6 +620,7 @@ describe('Futures production open-order reconciliation', () => {
         ]);
         state = removeFuturesOpenOrdersForSymbols(state, {
             symbols: ['BTCUSDT'],
+            orderKeys: ['BTCUSDT:1'],
             confirmedAt: 1_783_814_400_500,
         });
         expect(state.orders).toEqual([
@@ -617,6 +649,43 @@ describe('Futures production open-order reconciliation', () => {
         expect(state.orders).toEqual([
             expect.objectContaining({ symbol: 'ETHUSDT', orderId: '2' }),
         ]);
+    });
+
+    it('removes only pre-dispatch identities and preserves an equal-time new stream order', () => {
+        const confirmedAt = 1_783_814_400_500;
+        let state = syncSnapshot([restOrder({
+            orderId: '1',
+            clientOrderId: 'cancel-target',
+        })]);
+        const orderKeys = state.orders.map(order => order.key);
+        state = applyFuturesOrderTradeUpdate(state, orderTradeUpdate({
+            T: confirmedAt,
+            E: confirmedAt,
+        }, {
+            i: '2',
+            c: 'arrived-after-cancel',
+            X: 'NEW',
+            x: 'NEW',
+            z: '0',
+            T: confirmedAt,
+        }));
+
+        state = removeFuturesOpenOrdersForSymbols(state, {
+            symbols: ['BTCUSDT'],
+            orderKeys,
+            confirmedAt,
+        });
+
+        expect(state.orders).toEqual([
+            expect.objectContaining({
+                key: 'BTCUSDT:2',
+                clientOrderId: 'arrived-after-cancel',
+            }),
+        ]);
+        expect(state.tombstones).toContainEqual(expect.objectContaining({
+            key: 'BTCUSDT:1',
+            status: 'CANCELED',
+        }));
     });
 
     it('keeps terminal tombstones across later resyncs but permits a new orderId', () => {

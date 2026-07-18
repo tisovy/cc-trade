@@ -54,20 +54,24 @@ const allowedKeys = (value, required, optional = []) => {
 const isBoundedString = (value, pattern, maximum = 64) => (
     typeof value === 'string' && value.length <= maximum && pattern.test(value)
 );
-const isSymbol = value => isBoundedString(
-    value,
-    /^(?:[A-Z0-9]{1,20}|[A-Z0-9]{1,13}_[0-9]{6})$/,
-    20,
+const EXCHANGE_IDENTITY_MAX_BYTES = 64;
+const EXCHANGE_IDENTITY_CHARACTERS = '[\\p{Lu}\\p{Lt}\\p{Lo}\\p{N}]';
+const EXCHANGE_SYMBOL_PATTERN = new RegExp(
+    `^(?:${EXCHANGE_IDENTITY_CHARACTERS}{1,20}|${EXCHANGE_IDENTITY_CHARACTERS}{1,13}_[0-9]{6})$`,
+    'u',
 );
-const isPair = value => isBoundedString(value, /^[A-Z0-9]{1,20}$/, 20);
+const EXCHANGE_PAIR_PATTERN = new RegExp(`^${EXCHANGE_IDENTITY_CHARACTERS}{1,20}$`, 'u');
+const ASCII_EXECUTION_SYMBOL_PATTERN = /^(?:[A-Z0-9]{1,20}|[A-Z0-9]{1,13}_[0-9]{6})$/;
 const isStatus = value => isBoundedString(value, /^[A-Z0-9_]{1,32}$/, 32);
 const isExchangeIdentity = (value, maximum, allowDeliverySuffix = false) => {
-    if (typeof value !== 'string' || Array.from(value).length > maximum) return false;
-    const pattern = allowDeliverySuffix
-        ? /^(?:[\p{L}\p{N}]{1,20}|[\p{L}\p{N}]{1,13}_[0-9]{6})$/u
-        : /^[\p{L}\p{N}]+$/u;
+    if (typeof value !== 'string'
+        || Array.from(value).length > maximum
+        || Buffer.byteLength(value, 'utf8') > EXCHANGE_IDENTITY_MAX_BYTES) return false;
+    const pattern = allowDeliverySuffix ? EXCHANGE_SYMBOL_PATTERN : EXCHANGE_PAIR_PATTERN;
     return pattern.test(value);
 };
+const isSymbol = value => isExchangeIdentity(value, 20, true);
+const isPair = value => isExchangeIdentity(value, 20);
 const isInterval = value => ['1m', '5m', '15m', '1h', '4h', '1d'].includes(value);
 const cloneFrozen = (value) => {
     if (Array.isArray(value)) return Object.freeze(value.map(cloneFrozen));
@@ -322,9 +326,6 @@ export const normalizeFuturesWorkstationExchangeInfo = (
         if (seen.has(symbol.symbol)) fail('DUPLICATE_EXCHANGE_SYMBOL');
         seen.add(symbol.symbol);
         if (symbol.marginAsset !== 'USDT' || symbol.quoteAsset !== 'USDT') continue;
-        if (!isSymbol(symbol.symbol)
-            || !isPair(symbol.pair)
-            || !isBoundedString(symbol.baseAsset, /^[A-Z0-9]{1,16}$/, 16)) continue;
         contracts.push(Object.freeze({
             symbol: symbol.symbol,
             pair: symbol.pair,
@@ -333,7 +334,8 @@ export const normalizeFuturesWorkstationExchangeInfo = (
             baseAsset: symbol.baseAsset,
             quoteAsset: symbol.quoteAsset,
             marginAsset: symbol.marginAsset,
-            allowlisted: allowlistedSymbols.has(symbol.symbol),
+            allowlisted: ASCII_EXECUTION_SYMBOL_PATTERN.test(symbol.symbol)
+                && allowlistedSymbols.has(symbol.symbol),
             filters: normalizeFilters(symbol.filters),
         }));
     }

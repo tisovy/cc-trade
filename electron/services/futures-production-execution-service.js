@@ -73,8 +73,11 @@ const BOOTSTRAP_FINGERPRINT = '0'.repeat(64);
 const MAX_PORTFOLIO_ITEMS = 2_048;
 const MAX_PORTFOLIO_BYTES = 1_572_864;
 const CLIENT_ORDER_ID_PATTERN = /^[.A-Z:/a-z0-9_-]{1,36}$/;
+const EXCHANGE_SYMBOL_PATTERN = /^[\p{Lu}\p{Lt}\p{Lo}\p{N}]{2,64}(?:_[0-9]{6})?$/u;
+const MAX_EXCHANGE_SYMBOL_BYTES = 256;
 const USER_DATA_KEEPALIVE_MS = 30 * 60_000;
 const USER_DATA_RECONNECT_DELAYS_MS = Object.freeze([1_000, 5_000, 15_000, 60_000]);
+const ACCOUNT_STATE_RETRY_DELAY_MS = 2_000;
 const IDENTITY_SNAPSHOT_REUSE_MS = 5_000;
 
 export const FUTURES_PRODUCTION_EXECUTION_SAFE_CODES = Object.freeze({
@@ -209,6 +212,7 @@ const READ_WEIGHTS = Object.freeze({
 
 const TERMINAL_ORDER_STATES = new Set([
     FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_ORDER_AMENDED,
+    FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_OPEN,
     FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_FILLED,
     FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_CANCELED,
     FUTURES_PRODUCTION_EXECUTION_STATES.EXCHANGE_REJECTED,
@@ -302,6 +306,7 @@ const normalizeRiskSnapshot = ({ identity, symbol, positionSide, observations })
     const priceFilter = findFilter(symbolInfo, 'PRICE_FILTER');
     const percentPriceFilter = findFilter(symbolInfo, 'PERCENT_PRICE');
     const lotSizeFilter = findFilter(symbolInfo, 'LOT_SIZE');
+    const marketLotSizeFilter = findFilter(symbolInfo, 'MARKET_LOT_SIZE');
     const minNotionalFilter = findFilter(symbolInfo, 'MIN_NOTIONAL');
     const maxNumOrdersFilter = findFilter(symbolInfo, 'MAX_NUM_ORDERS');
     if (!balance) {
@@ -310,7 +315,7 @@ const normalizeRiskSnapshot = ({ identity, symbol, positionSide, observations })
         );
     }
     if (!symbolConfig || !position || !symbolInfo
-        || !priceFilter || !percentPriceFilter || !lotSizeFilter
+        || !priceFilter || !percentPriceFilter || !lotSizeFilter || !marketLotSizeFilter
         || !minNotionalFilter || !maxNumOrdersFilter) {
         throw new Error('incomplete production preflight');
     }
@@ -369,6 +374,11 @@ const normalizeRiskSnapshot = ({ identity, symbol, positionSide, observations })
                 maxQty: lotSizeFilter.maxQty,
                 stepSize: lotSizeFilter.stepSize,
             },
+            marketLotSizeFilter: {
+                minQty: marketLotSizeFilter.minQty,
+                maxQty: marketLotSizeFilter.maxQty,
+                stepSize: marketLotSizeFilter.stepSize,
+            },
             minNotionalUsdt: minNotionalFilter.notional,
             maxOpenOrders: maxNumOrdersFilter.limit,
         },
@@ -385,6 +395,9 @@ const stateFromOrder = (order) => {
     if (['NEW', 'PARTIALLY_FILLED'].includes(order.status)) {
         return FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_OPEN;
     }
+    if (order.status === 'REJECTED') {
+        return FUTURES_PRODUCTION_EXECUTION_STATES.EXCHANGE_REJECTED;
+    }
     return FUTURES_PRODUCTION_EXECUTION_STATES.RESULT_UNKNOWN;
 };
 
@@ -396,6 +409,13 @@ const exactDecimalEqual = (left, right, { allowZero = false } = {}) => {
         return false;
     }
 };
+
+const isExchangeSymbol = value => (
+    typeof value === 'string'
+    && Buffer.byteLength(value, 'utf8') <= MAX_EXCHANGE_SYMBOL_BYTES
+    && !/[a-z]/.test(value)
+    && EXCHANGE_SYMBOL_PATTERN.test(value)
+);
 
 const normalizePortfolioSnapshot = ({
     availableBalanceUsdt,
@@ -418,8 +438,7 @@ const normalizePortfolioSnapshot = ({
     const positions = [];
     const positionKeys = new Set();
     for (const row of positionRisk) {
-        if (typeof row?.symbol !== 'string'
-            || !/^[A-Z0-9]{2,20}$/.test(row.symbol)
+        if (!isExchangeSymbol(row?.symbol)
             || !['LONG', 'SHORT'].includes(row.positionSide)) {
             throw new Error('invalid production hedge position');
         }
@@ -511,7 +530,9 @@ const normalizePortfolioSnapshot = ({
             > MAX_PORTFOLIO_BYTES;
     const projectedSyncCode = syncCode === null
         ? null
-        : `FUTURES_PRODUCTION_OPEN_ORDERS_${syncCode}`;
+        : syncCode.startsWith('ACCOUNT_')
+            ? `FUTURES_PRODUCTION_${syncCode}`
+            : `FUTURES_PRODUCTION_OPEN_ORDERS_${syncCode}`;
     return exceedsBounds
         ? {
             state: 'truncated',
@@ -1284,7 +1305,7 @@ export const createFuturesProductionExecutionService = ({
     };
 
     const refreshAccountStateNow = async ({ refreshConfiguration = false } = {}) => {
-        if (!identityValid || !policy || !facade || !coordinator) return portfolio;
+        if (!identityValid || !policy || !facade || !coordinator) return false;
         let lease = null;
         let accountIdentityRejected = false;
         try {
@@ -1353,7 +1374,7 @@ export const createFuturesProductionExecutionService = ({
             });
             advanceRevision();
             broadcastStatus();
-            return portfolio;
+            return true;
         } catch (error) {
             const identityRejected = accountIdentityRejected
                 || error?.kind === FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.AUTH_REJECTED;
@@ -1376,12 +1397,10 @@ export const createFuturesProductionExecutionService = ({
                 userDataListenKey = null;
                 await refreshActivation({ audit: false });
                 scheduleIdentityRetry();
-            } else {
-                schedulePortfolioRetry();
             }
             advanceRevision();
             broadcastStatus();
-            return portfolio;
+            return false;
         } finally {
             lease?.release();
         }
@@ -1396,7 +1415,18 @@ export const createFuturesProductionExecutionService = ({
                 const refreshConfiguration = accountUpdateNeedsConfigurationRefresh;
                 accountUpdateRefreshPending = false;
                 accountUpdateNeedsConfigurationRefresh = false;
-                await refreshAccountStateNow({ refreshConfiguration });
+                const refreshed = await refreshAccountStateNow({ refreshConfiguration });
+                if (!refreshed && identityValid && !shuttingDown) {
+                    accountUpdateRefreshPending = true;
+                    accountUpdateNeedsConfigurationRefresh ||= refreshConfiguration;
+                    if (accountUpdateRefreshTimer === null) {
+                        accountUpdateRefreshTimer = schedule(async () => {
+                            accountUpdateRefreshTimer = null;
+                            await flushAccountStateRefresh();
+                        }, ACCOUNT_STATE_RETRY_DELAY_MS);
+                    }
+                    break;
+                }
             }
             if (!identityValid) {
                 accountUpdateRefreshPending = false;
@@ -1899,6 +1929,10 @@ export const createFuturesProductionExecutionService = ({
         const positionEffect = positionSide === 'LONG'
             ? (current.side === 'BUY' ? 'ENTRY' : 'EXIT')
             : (current.side === 'SELL' ? 'ENTRY' : 'EXIT');
+        const remainingQuantity = subtractExactDecimals(
+            originalQuantity,
+            executedQuantity,
+        );
         const draft = {
             symbol,
             side: current.side,
@@ -1908,6 +1942,10 @@ export const createFuturesProductionExecutionService = ({
             timeInForce: 'GTC',
             quantity: current.originalQuantity,
             price,
+        };
+        const riskDraft = {
+            ...draft,
+            riskQuantity: formatExactDecimal(remainingQuantity),
         };
         const preflight = await readFullPreflight(symbol, positionSide, audit);
         const utcDay = canonicalFuturesProductionUtcDay(preflight.serverTime);
@@ -1923,7 +1961,7 @@ export const createFuturesProductionExecutionService = ({
             policy,
             identity,
             snapshot,
-            draft,
+            draft: riskDraft,
             killSwitchEngaged,
             dailyNotionalUsed: dailyState.dailyReservations?.[utcDay] ?? '0',
         });
@@ -2433,12 +2471,6 @@ export const createFuturesProductionExecutionService = ({
                     updateTime: order.updateTime,
                 }))
                 .digest('hex');
-            if (monitoring
-                && state === FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_OPEN
-                && digest === operation.lastOrderDigest) {
-                scheduleReconciliation(operation, { monitoring: true });
-                return order;
-            }
             operation.lastOrderDigest = digest;
             openOrdersReconciliation = applyFuturesAuthoritativeOrderResult(
                 openOrdersReconciliation,
@@ -2455,7 +2487,9 @@ export const createFuturesProductionExecutionService = ({
                         ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.CONFIRMED_OPEN
                         : state === FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_ORDER_AMENDED
                             ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.ORDER_AMENDED
-                        : FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RESULT_UNKNOWN;
+                            : state === FUTURES_PRODUCTION_EXECUTION_STATES.EXCHANGE_REJECTED
+                                ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.EXCHANGE_REJECTED
+                                : FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RESULT_UNKNOWN;
             await setAttempt({
                 requestId: operation.requestId,
                 kind: operation.kind,
@@ -2472,14 +2506,19 @@ export const createFuturesProductionExecutionService = ({
                                 : state
                                     === FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_ORDER_AMENDED
                                     ? 'amended'
-                                : 'unknown',
+                                    : state
+                                        === FUTURES_PRODUCTION_EXECUTION_STATES.EXCHANGE_REJECTED
+                                        ? 'rejected'
+                                        : 'unknown',
                     code,
                 }],
                 eventType: monitoring ? 'monitor_result' : 'reconciliation_result',
                 category: 'reconciliation',
                 outcome: state === FUTURES_PRODUCTION_EXECUTION_STATES.RESULT_UNKNOWN
                     ? 'unknown'
-                    : 'confirmed',
+                    : state === FUTURES_PRODUCTION_EXECUTION_STATES.EXCHANGE_REJECTED
+                        ? 'rejected'
+                        : 'confirmed',
                 audit: {
                     clientOrderId: operation.clientOrderId,
                     commandDigest: operation.commandDigest,
@@ -2490,8 +2529,6 @@ export const createFuturesProductionExecutionService = ({
             });
             if (TERMINAL_ORDER_STATES.has(state)) {
                 await completeOperation();
-            } else if (state === FUTURES_PRODUCTION_EXECUTION_STATES.CONFIRMED_OPEN) {
-                scheduleReconciliation(operation, { monitoring: true });
             } else {
                 scheduleReconciliation(operation, { slow: true });
             }
@@ -3201,6 +3238,10 @@ export const createFuturesProductionExecutionService = ({
         });
         const items = [];
         for (const symbol of policy.allowedSymbols) {
+            const cancelTargetOrderKeys = [...new Set([
+                ...openOrdersReconciliation.orders,
+                ...openOrdersReconciliation.bufferedEvents.map(entry => entry.order),
+            ].filter(order => order.symbol === symbol).map(order => order.key))];
             const childAudit = {
                 requestId: command.requestId,
                 operationId: `${command.requestId}:${symbol}`,
@@ -3226,7 +3267,11 @@ export const createFuturesProductionExecutionService = ({
                 cancelProjectionRequestedAt = readNow();
                 const projected = markFuturesOpenOrdersPendingCancel(
                     openOrdersReconciliation,
-                    { symbol, requestedAt: cancelProjectionRequestedAt },
+                    {
+                        symbol,
+                        orderKeys: cancelTargetOrderKeys,
+                        requestedAt: cancelProjectionRequestedAt,
+                    },
                 );
                 if (projected !== openOrdersReconciliation) {
                     openOrdersReconciliation = projected;
@@ -3251,12 +3296,14 @@ export const createFuturesProductionExecutionService = ({
             const projected = confirmedEmpty
                 ? removeFuturesOpenOrdersForSymbols(openOrdersReconciliation, {
                     symbols: [symbol],
+                    orderKeys: cancelTargetOrderKeys,
                     confirmedAt: projectionObservedAt,
                 })
                 : cancelProjectionRequestedAt === null
                     ? openOrdersReconciliation
                     : failFuturesOpenOrdersPendingCancel(openOrdersReconciliation, {
                         symbol,
+                        orderKeys: cancelTargetOrderKeys,
                         failedAt: projectionObservedAt,
                     });
             if (projected !== openOrdersReconciliation) {
@@ -3880,20 +3927,31 @@ export const createFuturesProductionExecutionService = ({
                     { allowZero: true },
                 );
             if (confirmed) {
-                if (portfolio.state === 'live') {
+                const refreshedPositions = new Map(positions.map(candidate => ([
+                    `${candidate?.symbol}:${candidate?.positionSide}`,
+                    candidate,
+                ])));
+                latestPositionRisk = latestPositionRisk.map((candidate) => {
+                    const key = `${candidate?.symbol}:${candidate?.positionSide}`;
+                    const refreshed = refreshedPositions.get(key);
+                    if (!refreshed) return candidate;
+                    refreshedPositions.delete(key);
+                    return { ...candidate, ...refreshed };
+                });
+                latestPositionRisk.push(...refreshedPositions.values());
+                try {
+                    projectCurrentPortfolio({
+                        state: portfolio.state === 'live' ? 'live' : 'stale',
+                    });
                     portfolio = {
                         ...portfolio,
-                        observedAt: exactHistory[0].time,
-                        positions: portfolio.positions.map(candidate => (
-                            candidate.symbol === operation.draft.symbol
-                                && candidate.positionSide === operation.draft.positionSide
-                                ? {
-                                    ...candidate,
-                                    isolatedMarginUsdt: position.isolatedMargin,
-                                }
-                                : candidate
-                        )),
+                        observedAt: Math.max(
+                            portfolio.observedAt ?? 0,
+                            exactHistory[0].time,
+                        ),
                     };
+                } catch (error) {
+                    reportInternal('margin-portfolio-projection', error);
                 }
                 await setAttempt({
                     requestId: operation.requestId,

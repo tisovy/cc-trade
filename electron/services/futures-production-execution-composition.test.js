@@ -371,6 +371,12 @@ describe('FuturesProductionExecutionComposition', () => {
                                 maxQty: '100',
                                 stepSize: '0.001',
                             },
+                            {
+                                filterType: 'MARKET_LOT_SIZE',
+                                minQty: '0.001',
+                                maxQty: '100',
+                                stepSize: '0.001',
+                            },
                             { filterType: 'MIN_NOTIONAL', notional: '5' },
                             { filterType: 'MAX_NUM_ORDERS', limit: 20 },
                         ],

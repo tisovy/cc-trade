@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   FUTURES_PRODUCTION_WORKSTATION_ENVIRONMENT,
   createFuturesProductionWorkstationSelectIntervalRequest,
@@ -59,14 +59,36 @@ const useFuturesProductionWorkstation = ({
   const catalogBufferRef = useRef(null)
   const activeSubscriptionRef = useRef(null)
   const ownerRef = useRef(0)
+  const [retryNonce, setRetryNonce] = useState(0)
   const [state, setState] = useState(() => createState({
     status: enabled && isOpenSocket(wsConnection) ? 'loading' : enabled ? 'disconnected' : 'idle',
     symbol,
     interval,
   }))
 
+  const retry = useCallback(() => {
+    const activeSubscription = activeSubscriptionRef.current
+    if (activeSubscription !== null) {
+      try {
+        activeSubscription.sendMessage(
+          createFuturesProductionWorkstationUnsubscribeRequest({
+            requestId: activeSubscription.requestId,
+          }),
+        )
+      } catch {
+        // A terminal backend owner may already be gone; the new request still owns recovery.
+      }
+    }
+    selectionRef.current = null
+    catalogBufferRef.current = null
+    activeSubscriptionRef.current = null
+    setRetryNonce(previous => previous + 1)
+  }, [])
+
   useEffect(() => () => {
     const activeSubscription = activeSubscriptionRef.current
+    selectionRef.current = null
+    catalogBufferRef.current = null
     activeSubscriptionRef.current = null
     if (activeSubscription === null) return
     try {
@@ -281,9 +303,9 @@ const useFuturesProductionWorkstation = ({
       wsConnection.removeEventListener('close', handleClose)
       wsConnection.removeEventListener('error', handleError)
     }
-  }, [enabled, interval, sendMessage, symbol, wsConnection])
+  }, [enabled, interval, retryNonce, sendMessage, symbol, wsConnection])
 
-  return state
+  return { ...state, retry }
 }
 
 export default useFuturesProductionWorkstation

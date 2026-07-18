@@ -133,6 +133,7 @@ const EXCHANGE_INFO_FIELDS = Object.freeze([
     'priceFilter',
     'percentPriceFilter',
     'lotSizeFilter',
+    'marketLotSizeFilter',
     'minNotionalUsdt',
     'maxOpenOrders',
 ]);
@@ -149,6 +150,7 @@ const DRAFT_FIELDS = Object.freeze([
     'quantity',
     'price',
 ]);
+const AMENDMENT_DRAFT_FIELDS = Object.freeze([...DRAFT_FIELDS, 'riskQuantity']);
 
 const SYMBOL_PATTERN = /^[A-Z0-9]{2,20}$/;
 const ACCOUNT_ALIAS_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -290,6 +292,10 @@ const parseSnapshot = (value, identity) => {
         PERCENT_PRICE_FIELDS,
     );
     const lotSizeFilter = readExactDataProperties(exchangeInfo.lotSizeFilter, LOT_SIZE_FIELDS);
+    const marketLotSizeFilter = readExactDataProperties(
+        exchangeInfo.marketLotSizeFilter,
+        LOT_SIZE_FIELDS,
+    );
 
     if (typeof accountConfig.canTrade !== 'boolean'
         || typeof accountConfig.dualSidePosition !== 'boolean'
@@ -366,6 +372,11 @@ const parseSnapshot = (value, identity) => {
                 maxQty: parsePositiveExactDecimal(lotSizeFilter.maxQty),
                 stepSize: parsePositiveExactDecimal(lotSizeFilter.stepSize),
             },
+            marketLotSizeFilter: {
+                minQty: parsePositiveExactDecimal(marketLotSizeFilter.minQty),
+                maxQty: parsePositiveExactDecimal(marketLotSizeFilter.maxQty),
+                stepSize: parsePositiveExactDecimal(marketLotSizeFilter.stepSize),
+            },
         },
     };
     if (compareExactDecimals(
@@ -375,6 +386,10 @@ const parseSnapshot = (value, identity) => {
         || compareExactDecimals(
             parsed.exchangeInfo.lotSizeFilter.minQty,
             parsed.exchangeInfo.lotSizeFilter.maxQty,
+        ) > 0
+        || compareExactDecimals(
+            parsed.exchangeInfo.marketLotSizeFilter.minQty,
+            parsed.exchangeInfo.marketLotSizeFilter.maxQty,
         ) > 0
         || (isPositiveExactDecimal(parsed.exchangeInfo.priceFilter.minPrice)
             && isPositiveExactDecimal(parsed.exchangeInfo.priceFilter.maxPrice)
@@ -386,7 +401,12 @@ const parseSnapshot = (value, identity) => {
 };
 
 const parseDraft = (value) => {
-    const draft = readExactDataProperties(value, DRAFT_FIELDS);
+    let draft;
+    try {
+        draft = readExactDataProperties(value, DRAFT_FIELDS);
+    } catch {
+        draft = readExactDataProperties(value, AMENDMENT_DRAFT_FIELDS);
+    }
     if (typeof draft.symbol !== 'string'
         || !SYMBOL_PATTERN.test(draft.symbol)
         || !['BUY', 'SELL'].includes(draft.side)
@@ -399,6 +419,9 @@ const parseDraft = (value) => {
         || !['LIMIT', 'MARKET'].includes(draft.type)
     ) throw new RiskInputError();
     const quantity = parsePositiveExactDecimal(draft.quantity);
+    const riskQuantity = draft.riskQuantity === undefined
+        ? quantity
+        : parsePositiveExactDecimal(draft.riskQuantity);
     let price = null;
     if (draft.type === 'LIMIT') {
         if (draft.timeInForce !== 'GTC' || draft.price === null) throw new RiskInputError();
@@ -408,7 +431,7 @@ const parseDraft = (value) => {
         || draft.positionEffect !== 'EXIT') {
         throw new RiskInputError();
     }
-    return Object.freeze({ ...draft, quantity, parsedPrice: price });
+    return Object.freeze({ ...draft, quantity, riskQuantity, parsedPrice: price });
 };
 
 const classifyExposure = (draft, positionAmount) => {
@@ -420,7 +443,7 @@ const classifyExposure = (draft, positionAmount) => {
     if (!signMatchesLeg) return null;
     if (draft.positionEffect === 'EXIT') {
         if (positionIsZero) return null;
-        if (compareExactDecimals(draft.quantity, absoluteExactDecimal(positionAmount)) > 0) {
+        if (compareExactDecimals(draft.riskQuantity, absoluteExactDecimal(positionAmount)) > 0) {
             return null;
         }
         return FUTURES_PRODUCTION_EXECUTION_RISK_CLASSIFICATIONS.REDUCING;
@@ -456,10 +479,17 @@ const hasRequiredSymbolState = (policy, snapshot, draft, classification) => {
 
 const validatePriceAndQuantity = (snapshot, draft) => {
     const { exchangeInfo, markPrice } = snapshot;
-    const { lotSizeFilter, priceFilter, percentPriceFilter } = exchangeInfo;
-    if (compareExactDecimals(draft.quantity, lotSizeFilter.minQty) < 0
-        || compareExactDecimals(draft.quantity, lotSizeFilter.maxQty) > 0
-        || !isExactIncrement(draft.quantity, lotSizeFilter.stepSize, lotSizeFilter.minQty)) {
+    const { priceFilter, percentPriceFilter } = exchangeInfo;
+    const quantityFilter = draft.type === 'MARKET'
+        ? exchangeInfo.marketLotSizeFilter
+        : exchangeInfo.lotSizeFilter;
+    if (compareExactDecimals(draft.quantity, quantityFilter.minQty) < 0
+        || compareExactDecimals(draft.quantity, quantityFilter.maxQty) > 0
+        || !isExactIncrement(
+            draft.quantity,
+            quantityFilter.stepSize,
+            quantityFilter.minQty,
+        )) {
         return reject(
             FUTURES_PRODUCTION_EXECUTION_RISK_CODES.ORDER_REJECTED,
             FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.QUANTITY_FILTER,
@@ -478,8 +508,8 @@ const validatePriceAndQuantity = (snapshot, draft) => {
     }
     const lower = multiplyExactDecimals(markPrice.parsed, percentPriceFilter.multiplierDown);
     const upper = multiplyExactDecimals(markPrice.parsed, percentPriceFilter.multiplierUp);
-    if (compareExactDecimals(draft.parsedPrice, lower) < 0
-        || compareExactDecimals(draft.parsedPrice, upper) > 0) {
+    if ((draft.side === 'BUY' && compareExactDecimals(draft.parsedPrice, upper) > 0)
+        || (draft.side === 'SELL' && compareExactDecimals(draft.parsedPrice, lower) < 0)) {
         return reject(
             FUTURES_PRODUCTION_EXECUTION_RISK_CODES.ORDER_REJECTED,
             FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.PRICE_FILTER,
@@ -578,7 +608,8 @@ export const evaluateFuturesProductionExecutionRisk = (value) => {
     const filterRejection = validatePriceAndQuantity(snapshot, draft);
     if (filterRejection) return filterRejection;
     if (draft.type === 'LIMIT'
-        && snapshot.source.regularOpenOrderCount >= snapshot.exchangeInfo.maxOpenOrders) {
+        && snapshot.source.regularOpenOrderCount + snapshot.source.algoOpenOrderCount
+            >= snapshot.exchangeInfo.maxOpenOrders) {
         return reject(
             FUTURES_PRODUCTION_EXECUTION_RISK_CODES.ORDER_REJECTED,
             FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.OPEN_ORDER_LIMIT,
@@ -593,16 +624,20 @@ export const evaluateFuturesProductionExecutionRisk = (value) => {
         );
     }
 
-    const conservativePrice = draft.type === 'LIMIT'
-        ? maxExactDecimal(draft.parsedPrice, snapshot.markPrice.parsed)
+    const filterPrice = draft.type === 'LIMIT'
+        ? draft.parsedPrice
         : snapshot.markPrice.parsed;
-    const notional = multiplyExactDecimals(draft.quantity, conservativePrice);
-    if (compareExactDecimals(notional, snapshot.exchangeInfo.minNotional) < 0) {
+    const filterNotional = multiplyExactDecimals(draft.quantity, filterPrice);
+    if (compareExactDecimals(filterNotional, snapshot.exchangeInfo.minNotional) < 0) {
         return reject(
             FUTURES_PRODUCTION_EXECUTION_RISK_CODES.ORDER_NOTIONAL_REJECTED,
             FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.MINIMUM_NOTIONAL,
         );
     }
+    const conservativePrice = draft.type === 'LIMIT'
+        ? maxExactDecimal(draft.parsedPrice, snapshot.markPrice.parsed)
+        : snapshot.markPrice.parsed;
+    const notional = multiplyExactDecimals(draft.riskQuantity, conservativePrice);
     const increasesExposure = (
         classification !== FUTURES_PRODUCTION_EXECUTION_RISK_CLASSIFICATIONS.REDUCING
     );

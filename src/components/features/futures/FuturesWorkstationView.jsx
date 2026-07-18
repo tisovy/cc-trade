@@ -63,6 +63,7 @@ export const FuturesWorkstationView = ({
   onDraftPriceChange,
   onTradingGesture,
   onOrderDrag,
+  onRetry,
   onSymbolChange,
   onIntervalChange,
 }) => {
@@ -92,18 +93,26 @@ export const FuturesWorkstationView = ({
   }, [selectedSymbol])
 
   const resources = state.resources
+  const selectionOwned = state.symbol === selectedSymbol
   const contracts = resources.catalog?.contracts ?? EMPTY_ROWS
-  const header = resources.header
-  const candles = resources.candles
-  const depth = resources.depth
-  const liveTrades = resources.trades?.rows ?? EMPTY_ROWS
+  const header = selectionOwned ? resources.header : null
+  const candles = selectionOwned ? resources.candles : null
+  const depth = selectionOwned ? resources.depth : null
+  const trades = selectionOwned ? resources.trades : null
+  const liveTrades = trades?.rows ?? EMPTY_ROWS
   const selectedContract = contracts.find(contract => contract.symbol === selectedSymbol) ?? null
-  const aggregateState = state.status === 'idle' ? 'loading' : state.status
+  const aggregateState = !selectionOwned || state.status === 'idle' ? 'loading' : state.status
   const resourceState = resource => resource?.state ?? aggregateState
-  const catalogState = resourceState(resources.catalog)
+  const contractsUnavailable = selectionOwned && state.status === 'unavailable'
+  const catalogState = contractsUnavailable ? 'unavailable' : resourceState(resources.catalog)
   const candlesState = resourceState(candles)
   const depthState = resourceState(depth)
-  const tradesState = resourceState(resources.trades)
+  const tradesState = resourceState(trades)
+  const contractsUnavailableMessage = state.reasonCode === 'RECONNECT_EXHAUSTED'
+    ? 'Contracts stream stopped after repeated reconnect failures.'
+    : state.reasonCode === 'LOCAL_SUBSCRIBE_REJECTED'
+      ? 'Contracts subscription was rejected by the local connection.'
+      : 'Contracts are unavailable. Fix the reported connection issue, then retry.'
 
   const visibleContracts = useMemo(() => {
     const query = search.trim().toUpperCase()
@@ -228,7 +237,7 @@ export const FuturesWorkstationView = ({
         <span>PUBLIC MARKET DATA · LIVE EXECUTION</span>
         <StateBadge state={aggregateState} />
         <code>gen {state.generation || '—'} · rev {state.revision || '—'}</code>
-        {state.reasonCode ? (
+        {selectionOwned && state.reasonCode ? (
           <code className="futures-workstation-reason" aria-label="Futures workstation reason">
             reason {state.reasonCode}
           </code>
@@ -282,10 +291,16 @@ export const FuturesWorkstationView = ({
               </button>
             </div>
           ))}
-          {visibleContracts.length === 0 ? (
+          {visibleContracts.length === 0 && !contractsUnavailable ? (
             <p className="futures-workstation-empty">No matching USDⓈ-M contract.</p>
           ) : null}
         </div>
+        {contractsUnavailable ? (
+          <div className="futures-workstation-contract-retry" role="alert">
+            <span>{contractsUnavailableMessage}</span>
+            <button type="button" disabled={typeof onRetry !== 'function'} onClick={onRetry}>Retry</button>
+          </div>
+        ) : null}
         {tradingRail}
         {selectedContract ? (
           <details className="futures-workstation-contract-inspector" aria-label="Exact contract filters">

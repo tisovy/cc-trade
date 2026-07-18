@@ -51,8 +51,9 @@ const EXCHANGE_INFO_CACHE = {
     expiresAt: 0,
     inFlight: null,
 };
-const SYMBOL_PATTERN = /^(?:[A-Z0-9]{1,20}|[A-Z0-9]{1,13}_[0-9]{6})$/;
-const PAIR_PATTERN = /^[A-Z0-9]{1,20}$/;
+const SYMBOL_PATTERN = /^(?:[\p{Lu}\p{Lt}\p{Lo}\p{N}]{1,20}|[\p{Lu}\p{Lt}\p{Lo}\p{N}]{1,13}_[0-9]{6})$/u;
+const PAIR_PATTERN = /^[\p{Lu}\p{Lt}\p{Lo}\p{N}]{1,20}$/u;
+const EXCHANGE_IDENTITY_MAX_BYTES = 64;
 const INTERVALS = new Set(['1m', '5m', '15m', '1h', '4h', '1d']);
 const PROXY_PROTOCOLS = new Set(['http:', 'https:', 'socks:', 'socks4:', 'socks4a:', 'socks5:', 'socks5h:']);
 
@@ -130,8 +131,15 @@ const resolveProductionBackendProxy = () => {
     }
 };
 
+const isBoundedExchangeIdentity = (value, pattern) => (
+    typeof value === 'string'
+    && Buffer.byteLength(value, 'utf8') <= EXCHANGE_IDENTITY_MAX_BYTES
+    && pattern.test(value)
+);
+
 const assertSelection = (symbol, interval) => {
-    if (!SYMBOL_PATTERN.test(symbol) || !INTERVALS.has(interval)) fail('INVALID_SELECTION');
+    if (!isBoundedExchangeIdentity(symbol, SYMBOL_PATTERN)
+        || !INTERVALS.has(interval)) fail('INVALID_SELECTION');
 };
 
 const withDeadline = (parentSignal, timeoutMs = 10_000) => {
@@ -270,13 +278,16 @@ const weightedGet = (
     signal,
     backendProxy,
     onFailure,
+    onSuccess,
 ) => (
     PUBLIC_READ_BUDGET.execute(
         weight,
-        () => publicGet(pathname, parameters, bodyLimit, signal, backendProxy).catch((error) => {
-            onFailure?.(error);
-            throw error;
-        }),
+        () => publicGet(pathname, parameters, bodyLimit, signal, backendProxy)
+            .then(value => (onSuccess ? onSuccess(value) : value))
+            .catch((error) => {
+                onFailure?.(error);
+                throw error;
+            }),
         { signal },
     )
 );
@@ -438,9 +449,17 @@ export const createFuturesProductionWorkstationReviewedTransport = ({
         kind: 'reviewed-production-public-read',
         now: () => Date.now(),
         loadExchangeInfo,
-        bootstrap: async ({ symbol, pair, interval, signal } = {}) => {
+        bootstrap: async ({
+            symbol,
+            pair,
+            interval,
+            signal,
+            onBootstrapResource,
+        } = {}) => {
             assertSelection(symbol, interval);
-            if (!PAIR_PATTERN.test(pair)) fail('INVALID_SELECTION');
+            if (!isBoundedExchangeIdentity(pair, PAIR_PATTERN)) fail('INVALID_SELECTION');
+            if (onBootstrapResource !== undefined
+                && typeof onBootstrapResource !== 'function') fail('INVALID_BOOTSTRAP_OBSERVER');
             const batchController = new AbortController();
             let batchFailure = null;
             const abortBatch = (error) => {
@@ -450,6 +469,30 @@ export const createFuturesProductionWorkstationReviewedTransport = ({
             const abortFromParent = () => abortBatch();
             if (signal?.aborted) abortBatch();
             else signal?.addEventListener?.('abort', abortFromParent, { once: true });
+            const deliver = (resource, value) => {
+                if (onBootstrapResource) {
+                    onBootstrapResource(Object.freeze({ resource, value }));
+                }
+                return value;
+            };
+            const readResource = (
+                resource,
+                phase,
+                weight,
+                pathname,
+                parameters,
+                bodyLimit,
+            ) => timedWeightedGet(
+                phase,
+                weight,
+                pathname,
+                parameters,
+                bodyLimit,
+                batchController.signal,
+                backendProxy,
+                abortBatch,
+                value => deliver(resource, value),
+            );
             try {
                 const [
                     depthSnapshot,
@@ -459,12 +502,12 @@ export const createFuturesProductionWorkstationReviewedTransport = ({
                     premiumIndex,
                     ticker,
                 ] = await Promise.all([
-                    timedWeightedGet('depth', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.DEPTH_1000, FUTURES_PRODUCTION_WORKSTATION_ROUTES.DEPTH, { symbol, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.DEPTH) }, FUTURES_WORKSTATION_BODY_LIMITS.DEPTH, batchController.signal, backendProxy, abortBatch),
-                    timedWeightedGet('contract-klines', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.KLINES_99, FUTURES_PRODUCTION_WORKSTATION_ROUTES.KLINES, { symbol, interval, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES, batchController.signal, backendProxy, abortBatch),
-                    timedWeightedGet('mark-klines', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.MARK_KLINES_99, FUTURES_PRODUCTION_WORKSTATION_ROUTES.MARK_KLINES, { symbol, interval, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES, batchController.signal, backendProxy, abortBatch),
-                    timedWeightedGet('index-klines', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.INDEX_KLINES_99, FUTURES_PRODUCTION_WORKSTATION_ROUTES.INDEX_KLINES, { pair, interval, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES, batchController.signal, backendProxy, abortBatch),
-                    timedWeightedGet('premium-index', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.PREMIUM_INDEX_SYMBOL, FUTURES_PRODUCTION_WORKSTATION_ROUTES.PREMIUM_INDEX, { symbol }, FUTURES_WORKSTATION_BODY_LIMITS.HEADER, batchController.signal, backendProxy, abortBatch),
-                    timedWeightedGet('ticker', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.TICKER_SYMBOL, FUTURES_PRODUCTION_WORKSTATION_ROUTES.TICKER, { symbol }, FUTURES_WORKSTATION_BODY_LIMITS.HEADER, batchController.signal, backendProxy, abortBatch),
+                    readResource('depthSnapshot', 'depth', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.DEPTH_1000, FUTURES_PRODUCTION_WORKSTATION_ROUTES.DEPTH, { symbol, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.DEPTH) }, FUTURES_WORKSTATION_BODY_LIMITS.DEPTH),
+                    readResource('contractKlines', 'contract-klines', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.KLINES_99, FUTURES_PRODUCTION_WORKSTATION_ROUTES.KLINES, { symbol, interval, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES),
+                    readResource('markKlines', 'mark-klines', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.MARK_KLINES_99, FUTURES_PRODUCTION_WORKSTATION_ROUTES.MARK_KLINES, { symbol, interval, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES),
+                    readResource('indexKlines', 'index-klines', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.INDEX_KLINES_99, FUTURES_PRODUCTION_WORKSTATION_ROUTES.INDEX_KLINES, { pair, interval, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES),
+                    readResource('premiumIndex', 'premium-index', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.PREMIUM_INDEX_SYMBOL, FUTURES_PRODUCTION_WORKSTATION_ROUTES.PREMIUM_INDEX, { symbol }, FUTURES_WORKSTATION_BODY_LIMITS.HEADER),
+                    readResource('ticker', 'ticker', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.TICKER_SYMBOL, FUTURES_PRODUCTION_WORKSTATION_ROUTES.TICKER, { symbol }, FUTURES_WORKSTATION_BODY_LIMITS.HEADER),
                 ]);
                 return Object.freeze({ depthSnapshot, contractKlines, markKlines, indexKlines, premiumIndex, ticker });
             } catch (error) {

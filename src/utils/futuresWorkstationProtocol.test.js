@@ -219,6 +219,41 @@ describe('Futures workstation environment-specific protocols', () => {
     expect(readFuturesProductionWorkstationRequest(JSON.stringify(production))).toEqual(production)
   })
 
+  it('round-trips a bounded Unicode public symbol and keeps it observe-only', () => {
+    const symbol = '测试测试USDT'
+    const request = createFuturesProductionWorkstationSubscribeRequest({
+      ...requestValues,
+      symbol,
+    })
+    expect(readFuturesProductionWorkstationRequest(JSON.stringify(request))).toEqual(request)
+
+    const contract = payloads.catalog.contracts[0]
+    expect(() => createFuturesProductionWorkstationEvent({
+      ...createEventValues('catalog'),
+      symbol,
+      payload: {
+        ...payloads.catalog,
+        contracts: [{
+          ...contract,
+          symbol,
+          pair: symbol,
+          baseAsset: '测试测试',
+          allowlisted: false,
+        }],
+      },
+    })).not.toThrow()
+  })
+
+  it.each([
+    `${'测'.repeat(17)}USDT`,
+    `${'\u{20000}'.repeat(16)}USDT`,
+  ])('rejects an over-bound Unicode public symbol %s', (symbol) => {
+    expect(() => createFuturesProductionWorkstationSubscribeRequest({
+      ...requestValues,
+      symbol,
+    })).toThrow(FuturesWorkstationProtocolError)
+  })
+
   it.each(['BTCUSDT_BAD', 'BTCUSDT_26092', 'BTCUSDT_260925_', '_BTCUSDT260925'])(
     'rejects malformed dated symbol %s',
     (symbol) => {

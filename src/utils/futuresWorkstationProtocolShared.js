@@ -34,8 +34,14 @@ export const FUTURES_WORKSTATION_STATES = Object.freeze({
 const RESOURCE_VALUES = new Set(Object.values(FUTURES_WORKSTATION_RESOURCES))
 const STATE_VALUES = new Set(Object.values(FUTURES_WORKSTATION_STATES))
 const INTERVAL_VALUES = new Set(FUTURES_WORKSTATION_INTERVALS)
-const SYMBOL_PATTERN = /^(?:[A-Z0-9]{1,20}|[A-Z0-9]{1,13}_[0-9]{6})$/
-const PAIR_PATTERN = /^[A-Z0-9]{1,20}$/
+const EXCHANGE_IDENTITY_MAX_BYTES = 64
+const UTF8_ENCODER = new TextEncoder()
+const EXCHANGE_IDENTITY_CHARACTERS = '[\\p{Lu}\\p{Lt}\\p{Lo}\\p{N}]'
+const SYMBOL_PATTERN = new RegExp(
+  `^(?:${EXCHANGE_IDENTITY_CHARACTERS}{1,20}|${EXCHANGE_IDENTITY_CHARACTERS}{1,13}_[0-9]{6})$`,
+  'u',
+)
+const PAIR_PATTERN = new RegExp(`^${EXCHANGE_IDENTITY_CHARACTERS}{1,20}$`, 'u')
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{1,96}$/
 const UNSIGNED_INTEGER_PATTERN = /^(?:0|[1-9][0-9]*)$/
 const DECIMAL_PATTERN = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/
@@ -84,8 +90,15 @@ export const isCanonicalFuturesIdentity = value => (
       && value <= FUTURES_WORKSTATION_UINT64_MAX))
 )
 
+const isBoundedFuturesWorkstationExchangeIdentity = (value, pattern, maximum) => (
+  typeof value === 'string'
+  && Array.from(value).length <= maximum
+  && UTF8_ENCODER.encode(value).byteLength <= EXCHANGE_IDENTITY_MAX_BYTES
+  && pattern.test(value)
+)
+
 export const isFuturesWorkstationSymbol = value => (
-  typeof value === 'string' && SYMBOL_PATTERN.test(value)
+  isBoundedFuturesWorkstationExchangeIdentity(value, SYMBOL_PATTERN, 20)
 )
 
 export const isFuturesWorkstationInterval = value => INTERVAL_VALUES.has(value)
@@ -335,16 +348,15 @@ const validateContract = (value) => (
     'filters',
   ])
   && isFuturesWorkstationSymbol(value.symbol)
-  && typeof value.pair === 'string'
-  && PAIR_PATTERN.test(value.pair)
+  && isBoundedFuturesWorkstationExchangeIdentity(value.pair, PAIR_PATTERN, 20)
   && typeof value.contractType === 'string'
   && value.contractType.length > 0
   && value.contractType.length <= 32
   && typeof value.status === 'string'
   && value.status.length > 0
   && value.status.length <= 32
-  && /^[A-Z0-9]{1,16}$/.test(value.baseAsset)
-  && /^[A-Z0-9]{1,16}$/.test(value.quoteAsset)
+  && isBoundedFuturesWorkstationExchangeIdentity(value.baseAsset, PAIR_PATTERN, 16)
+  && isBoundedFuturesWorkstationExchangeIdentity(value.quoteAsset, PAIR_PATTERN, 16)
   && value.marginAsset === 'USDT'
   && typeof value.allowlisted === 'boolean'
   && hasExactFuturesWorkstationKeys(value.filters, [

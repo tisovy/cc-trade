@@ -338,14 +338,7 @@ describe('Futures production execution ledger', () => {
             exchangeOrderId: '9223372036854775807',
             state: 'confirmed_open',
         }));
-        expect(ledger.getActiveOperations()).toEqual([
-            expect.objectContaining({
-                state: 'confirmed_open',
-                dispatchAt: dayOne,
-                clientOrderId: 'cc7-order-active',
-                exchangeOrderId: '9223372036854775807',
-            }),
-        ]);
+        expect(ledger.getActiveOperations()).toEqual([]);
         await ledger.append(audit({
             eventType: 'reconciliation_result',
             category: 'reconciliation',

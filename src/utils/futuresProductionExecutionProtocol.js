@@ -162,6 +162,8 @@ const REQUEST_ID_PATTERN = /^[0-9a-f]{32}$/
 const REVISION_PATTERN = /^(0|[1-9][0-9]*)$/
 const FINGERPRINT_PATTERN = /^[0-9a-f]{64}$/
 const SYMBOL_PATTERN = /^[A-Z0-9]{2,20}$/
+const EXCHANGE_SYMBOL_PATTERN = /^[\p{Lu}\p{Lt}\p{Lo}\p{N}]{2,64}(?:_[0-9]{6})?$/u
+const MAX_EXCHANGE_SYMBOL_BYTES = 256
 const ORDER_ID_PATTERN = /^[1-9][0-9]{0,18}$/
 const CLIENT_ORDER_ID_PATTERN = /^[.A-Z:/a-z0-9_-]{1,36}$/
 const OWNED_CLIENT_ORDER_ID_PATTERN = /^cc7-[0-9a-f]{32}$/
@@ -1014,14 +1016,19 @@ const requirePortfolioDecimal = (value, predicate) => {
   return value
 }
 
+const isExchangeSymbol = value => (
+  typeof value === 'string'
+  && new TextEncoder().encode(value).byteLength <= MAX_EXCHANGE_SYMBOL_BYTES
+  && EXCHANGE_SYMBOL_PATTERN.test(value)
+)
+
 const normalizePortfolioPosition = (value) => {
   const position = readExactFields(
     value,
     POSITION_FIELDS,
     FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS,
   )
-  if (typeof position.symbol !== 'string'
-    || !SYMBOL_PATTERN.test(position.symbol)
+  if (!isExchangeSymbol(position.symbol)
     || !['LONG', 'SHORT'].includes(position.positionSide)
     || !Number.isSafeInteger(position.leverage)
     || position.leverage < 1
@@ -1051,8 +1058,7 @@ const normalizePortfolioOrder = (value) => {
   const validStatuses = order.orderKind === 'REGULAR'
     ? ['NEW', 'PARTIALLY_FILLED']
     : ['NEW', 'TRIGGERING']
-  if (typeof order.symbol !== 'string'
-    || !SYMBOL_PATTERN.test(order.symbol)
+  if (!isExchangeSymbol(order.symbol)
     || !['REGULAR', 'ALGO'].includes(order.orderKind)
     || typeof order.orderId !== 'string'
     || !ORDER_ID_PATTERN.test(order.orderId)

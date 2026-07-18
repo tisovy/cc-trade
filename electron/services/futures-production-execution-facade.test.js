@@ -328,6 +328,38 @@ describe('FuturesProductionExecutionFacade', () => {
         }
     });
 
+    it('accepts bounded Unicode and delivery symbols only on exchange inventory ingress', async () => {
+        const rows = [
+            { symbol: 'BTCUSDT', orderId: '1' },
+            { symbol: '币安人生USDT', orderId: '2' },
+            { symbol: 'BTCUSDT_250926', orderId: '3' },
+        ];
+        const fetchImpl = vi.fn().mockResolvedValue(makeResponse(JSON.stringify(rows)));
+        const facade = createFuturesProductionExecutionFacade(config, {
+            fetchImpl,
+            now: () => 1783814400000,
+        });
+
+        await expect(facade.getAllOpenOrders()).resolves.toMatchObject({ data: rows });
+        expect(() => facade.getOpenOrders('币安人生USDT')).toThrow(
+            FuturesProductionExecutionFacadeError,
+        );
+        expect(() => facade.getOpenOrders('BTCUSDT_250926')).toThrow(
+            FuturesProductionExecutionFacadeError,
+        );
+        expect(fetchImpl).toHaveBeenCalledOnce();
+
+        const lowercaseFacade = createFuturesProductionExecutionFacade(config, {
+            fetchImpl: vi.fn().mockResolvedValue(makeResponse(
+                '[{"symbol":"биткоинUSDT","orderId":4}]',
+            )),
+            now: () => 1783814400000,
+        });
+        await expect(lowercaseFacade.getAllOpenOrders()).rejects.toMatchObject({
+            kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.AMBIGUOUS,
+        });
+    });
+
     it.each([
         ['symbol configuration', 'getAllSymbolConfig', 'all-symbol-config', '[{"symbol":"btcusdt"}]'],
         ['regular orders', 'getAllOpenOrders', 'all-open-orders', '[{"orderId":1}]'],
@@ -835,6 +867,30 @@ describe('FuturesProductionExecutionFacade', () => {
             originalClientOrderId: clientOrderId,
         })).rejects.toMatchObject({
             kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.NOT_FOUND,
+        });
+
+        const rejectedFacade = createFuturesProductionExecutionFacade(config, {
+            fetchImpl: vi.fn().mockResolvedValue(makeResponse(
+                '{"code":-4131,"msg":"The counterparty best price does not meet the PERCENT_PRICE filter limit."}',
+                { status: 400 },
+            )),
+            now: () => 1,
+        });
+        await expect(rejectedFacade.placeLimitGtcOrder(limitOrder)).rejects.toMatchObject({
+            kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.EXCHANGE_REJECTED,
+            binanceCode: -4131,
+        });
+
+        const ambiguousFacade = createFuturesProductionExecutionFacade(config, {
+            fetchImpl: vi.fn().mockResolvedValue(makeResponse(
+                '{"code":-1006,"msg":"An unexpected response was received from the message bus."}',
+                { status: 400 },
+            )),
+            now: () => 1,
+        });
+        await expect(ambiguousFacade.placeLimitGtcOrder(limitOrder)).rejects.toMatchObject({
+            kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.AMBIGUOUS,
+            binanceCode: -1006,
         });
     });
 

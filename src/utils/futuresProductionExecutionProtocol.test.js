@@ -516,6 +516,63 @@ describe('production futures renderer status parser', () => {
     })
   })
 
+  it('accepts bounded Unicode and delivery symbols only on authoritative portfolio ingress', () => {
+    const input = status()
+    const unicodeSymbol = '東京USDT'
+    const deliverySymbol = 'BTCUSDT_260925'
+    const parsed = parseFuturesProductionExecutionStatus(JSON.stringify(status({
+      portfolio: {
+        ...input.portfolio,
+        positions: [{
+          ...input.portfolio.positions[0],
+          symbol: unicodeSymbol,
+        }],
+        openOrders: [
+          portfolioOrder({
+            symbol: unicodeSymbol,
+            clientOrderId: 'external-unicode-order',
+          }),
+          portfolioOrder({
+            symbol: deliverySymbol,
+            orderId: '43',
+            clientOrderId: 'external-delivery-order',
+          }),
+        ],
+      },
+    })))
+
+    expect(parsed.portfolio.positions[0].symbol).toBe(unicodeSymbol)
+    expect(parsed.portfolio.openOrders.map(order => order.symbol))
+      .toEqual([unicodeSymbol, deliverySymbol])
+    expectProtocolError(() => createFuturesProductionExecutionPrepareOrderIntentRequest({
+      revision: '7',
+      accountFingerprint: FINGERPRINT,
+      symbol: unicodeSymbol,
+      side: 'BUY',
+      positionSide: 'LONG',
+      positionEffect: 'ENTRY',
+      quantity: '0.001',
+      price: '60000',
+    }), FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_COMMAND)
+
+    for (const symbol of [
+      'btcUSDT',
+      'A\u030ABTCUSDT',
+      'BTCUSDT_26092',
+      `${'𠀀'.repeat(64)}_260925`,
+    ]) {
+      expectProtocolError(
+        () => parseFuturesProductionExecutionStatus(JSON.stringify(status({
+          portfolio: {
+            ...input.portfolio,
+            positions: [{ ...input.portfolio.positions[0], symbol }],
+          },
+        }))),
+        FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS,
+      )
+    }
+  })
+
   it('rejects order-kind/status mismatches and duplicates within one namespace', () => {
     const input = status()
     for (const order of [

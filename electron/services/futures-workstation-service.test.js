@@ -151,6 +151,92 @@ describe('production Futures workstation service', () => {
         expect(events.at(-1)).toMatchObject({ resource: 'status', state: 'live' });
     });
 
+    it('publishes ready bootstrap groups without crossing header, depth or aggregate barriers', async () => {
+        const base = createFuturesProductionWorkstationFakeTransport();
+        const fixture = FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT;
+        let bootstrapOptions;
+        let resolveBootstrap;
+        const transport = {
+            ...base,
+            bootstrap: options => new Promise((resolve) => {
+                bootstrapOptions = options;
+                resolveBootstrap = resolve;
+            }),
+        };
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({ transport }));
+        const events = [];
+        const pending = runtime.service.handleRequest(productionRequest('progressive-bootstrap'), {
+            emit: event => events.push(event),
+        });
+        await vi.waitFor(() => expect(bootstrapOptions).toBeTruthy());
+        const deliver = resource => bootstrapOptions.onBootstrapResource(Object.freeze({
+            resource,
+            value: fixture[resource],
+        }));
+
+        deliver('contractKlines');
+        expect(events.filter(event => event.resource === 'candles')).toHaveLength(1);
+        expect(events.at(-1)).toMatchObject({
+            resource: 'candles',
+            state: 'live',
+            payload: { series: 'contract' },
+        });
+        expect(events.filter(event => event.resource === 'status').map(event => event.state))
+            .toEqual(['loading']);
+
+        deliver('premiumIndex');
+        expect(events.some(event => event.resource === 'header')).toBe(false);
+        deliver('ticker');
+        expect(events.filter(event => event.resource === 'header')).toHaveLength(1);
+
+        deliver('depthSnapshot');
+        expect(events.some(event => event.resource === 'depth')).toBe(false);
+        deliver('markKlines');
+        deliver('indexKlines');
+        expect(events.filter(event => event.resource === 'status').map(event => event.state))
+            .toEqual(['loading']);
+
+        resolveBootstrap(Object.freeze({
+            depthSnapshot: fixture.depthSnapshot,
+            contractKlines: fixture.contractKlines,
+            markKlines: fixture.markKlines,
+            indexKlines: fixture.indexKlines,
+            premiumIndex: fixture.premiumIndex,
+            ticker: fixture.ticker,
+        }));
+        await pending;
+
+        expect(events.filter(event => event.resource === 'candles')
+            .map(event => event.payload.series).sort()).toEqual(['contract', 'index', 'mark']);
+        expect(events.filter(event => event.resource === 'header')).toHaveLength(1);
+        expect(events.filter(event => event.resource === 'depth')).toHaveLength(1);
+        expect(events.filter(event => event.resource === 'status').map(event => event.state))
+            .toEqual(['loading', 'live']);
+    });
+
+    it('never exposes a depth snapshot that lacks a buffered stream bridge', async () => {
+        const base = createFuturesProductionWorkstationFakeTransport();
+        const close = vi.fn();
+        const transport = {
+            ...base,
+            connect: () => ({ ready: Promise.resolve(true), close }),
+        };
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({ transport }));
+        const events = [];
+
+        await runtime.service.handleRequest(productionRequest('depth-snapshot-barrier'), {
+            emit: event => events.push(event),
+        });
+
+        expect(events.some(event => event.resource === 'depth')).toBe(false);
+        expect(events.at(-1)).toMatchObject({
+            resource: 'status',
+            state: 'resynchronizing',
+            payload: { reasonCode: 'DEPTH_BOOTSTRAP_GAP' },
+        });
+        expect(close).toHaveBeenCalledOnce();
+    });
+
     it.each([
         [
             'production',
@@ -282,9 +368,14 @@ describe('production Futures workstation service', () => {
         });
 
         const catalog = events.find(event => event.resource === 'catalog');
-        expect(catalog.payload).toMatchObject({ total: 3, complete: true });
+        expect(catalog.payload).toMatchObject({ total: 4, complete: true });
         expect(catalog.payload.contracts[0].filters.maximumOrders).toBe(0);
         expect(catalog.payload.contracts[0].filters.maximumAlgoOrders).toBeNull();
+        expect(events.flatMap(event => event.resource === 'catalog'
+            ? event.payload.contracts
+            : []).find(contract => contract.symbol === '测试测试USDT')).toMatchObject({
+            allowlisted: false,
+        });
         expect(events.at(-1)).toMatchObject({ resource: 'status', state: 'live' });
     });
 
@@ -360,7 +451,10 @@ describe('production Futures workstation service', () => {
         const deferred = new Map();
         const transport = {
             ...base,
-            bootstrap: ({ symbol }) => new Promise(resolve => deferred.set(symbol, resolve)),
+            bootstrap: options => new Promise(resolve => deferred.set(options.symbol, {
+                resolve,
+                onBootstrapResource: options.onBootstrapResource,
+            })),
         };
         const runtime = track(createFuturesProductionWorkstationRuntimeForTest({ transport }));
         const oldEvents = [];
@@ -373,7 +467,16 @@ describe('production Futures workstation service', () => {
             emit: event => newEvents.push(event),
         });
         await vi.waitFor(() => expect(deferred.has('ETHUSDT')).toBe(true));
-        deferred.get('ETHUSDT')({
+        deferred.get('BTCUSDT').onBootstrapResource({
+            resource: 'contractKlines',
+            value: FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.contractKlines,
+        });
+        deferred.get('BTCUSDT').onBootstrapResource({
+            resource: 'premiumIndex',
+            value: FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.premiumIndex,
+        });
+        expect(oldEvents.some(event => ['candles', 'header'].includes(event.resource))).toBe(false);
+        deferred.get('ETHUSDT').resolve({
             depthSnapshot: FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.ETHUSDT.depthSnapshot,
             contractKlines: FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.ETHUSDT.contractKlines,
             markKlines: FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.ETHUSDT.markKlines,
@@ -382,7 +485,7 @@ describe('production Futures workstation service', () => {
             ticker: FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.ETHUSDT.ticker,
         });
         await second;
-        deferred.get('BTCUSDT')({
+        deferred.get('BTCUSDT').resolve({
             depthSnapshot: FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.depthSnapshot,
             contractKlines: FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.contractKlines,
             markKlines: FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.markKlines,
@@ -392,7 +495,8 @@ describe('production Futures workstation service', () => {
         });
         await first;
         expect(oldEvents.some(event => event.resource === 'status' && event.state === 'live')).toBe(false);
-        expect(oldEvents.some(event => ['header', 'depth', 'trades'].includes(event.resource))).toBe(false);
+        expect(oldEvents.some(event => ['header', 'candles', 'depth', 'trades'].includes(event.resource)))
+            .toBe(false);
         expect(newEvents.at(-1)).toMatchObject({ symbol: 'ETHUSDT', state: 'live' });
     });
 

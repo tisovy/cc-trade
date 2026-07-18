@@ -26,6 +26,8 @@ const USER_DATA_STREAM_MAX_BYTES = 64 * 1024;
 const MAX_SIGNED_INT64 = 9_223_372_036_854_775_807n;
 const MAX_SAFE_INTEGER = 9_007_199_254_740_991n;
 const SYMBOL_PATTERN = /^[A-Z0-9]{2,20}$/;
+const EXCHANGE_SYMBOL_PATTERN = /^[\p{Lu}\p{Lt}\p{Lo}\p{N}]{2,64}(?:_[0-9]{6})?$/u;
+const MAX_EXCHANGE_SYMBOL_BYTES = 256;
 const CLIENT_ID_PATTERN = /^cc7-[0-9a-f]{32}$/;
 const EXCHANGE_CLIENT_ID_PATTERN = /^[.A-Z:/a-z0-9_-]{1,36}$/;
 const LISTEN_KEY_PATTERN = /^[A-Za-z0-9_-]{20,256}$/;
@@ -42,10 +44,19 @@ const EXCHANGE_REJECTED_BINANCE_CODES = new Set([
     -1120, -1121, -1125, -1127, -1128, -1130, -1136,
     -2010, -2018, -2019, -2020, -2021, -2022, -2023, -2024,
     -2025, -2026, -2027, -2028,
-    -4002, -4004, -4005, -4013, -4014, -4015, -4016, -4023,
-    -4024, -4028, -4031, -4046, -4047, -4048, -4060, -4061,
-    -4062, -4118, -4120, -4140, -4141, -4164,
+    -4000, -4002, -4004, -4005, -4013, -4014, -4015, -4016, -4023,
+    -4024, -4028, -4031, -4046, -4047, -4048, -4049, -4050,
+    -4051, -4054, -4055, -4060, -4061, -4062, -4087, -4088,
+    -4105, -4106, -4107, -4109, -4118, -4120, -4131, -4140,
+    -4141, -4164, -4189, -4192,
 ]);
+
+const isExchangeSymbol = value => (
+    typeof value === 'string'
+    && Buffer.byteLength(value, 'utf8') <= MAX_EXCHANGE_SYMBOL_BYTES
+    && !/[a-z]/.test(value)
+    && EXCHANGE_SYMBOL_PATTERN.test(value)
+);
 
 export const FUTURES_PRODUCTION_EXECUTION_FACADE_LIMITS = Object.freeze({
     OPERATION_DEADLINE_MS,
@@ -385,23 +396,20 @@ const normalizeReadData = (body, { operation, symbol = null }) => {
         }
     } else if (operation === 'allSymbolConfig') {
         if (!Array.isArray(converted)
-            || converted.some(row => typeof row?.symbol !== 'string'
-                || !SYMBOL_PATTERN.test(row.symbol))) {
+            || converted.some(row => !isExchangeSymbol(row?.symbol))) {
             throw new Error('invalid symbol configuration inventory');
         }
     } else if (operation === 'balance') {
         if (!Array.isArray(converted)) throw new Error('invalid balance');
     } else if (operation === 'allPositionRisk') {
         if (!Array.isArray(converted)
-            || converted.some(row => typeof row?.symbol !== 'string'
-                || !SYMBOL_PATTERN.test(row.symbol))) {
+            || converted.some(row => !isExchangeSymbol(row?.symbol))) {
             throw new Error('invalid position inventory');
         }
     } else if (operation === 'allOpenOrders'
         || operation === 'allOpenAlgoOrders') {
         if (!Array.isArray(converted)
-            || converted.some(row => typeof row?.symbol !== 'string'
-                || !SYMBOL_PATTERN.test(row.symbol))) {
+            || converted.some(row => !isExchangeSymbol(row?.symbol))) {
             throw new Error('invalid all-symbol order inventory');
         }
     } else if (operation === 'positionRisk'

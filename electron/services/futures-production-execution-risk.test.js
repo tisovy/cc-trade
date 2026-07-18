@@ -85,6 +85,11 @@ const createInput = () => ({
                 maxQty: '100',
                 stepSize: '0.001',
             },
+            marketLotSizeFilter: {
+                minQty: '0.001',
+                maxQty: '100',
+                stepSize: '0.001',
+            },
             minNotionalUsdt: '5',
             maxOpenOrders: 10,
         },
@@ -377,6 +382,114 @@ describe('production Futures exact risk evaluator', () => {
         expect(evaluateFuturesProductionExecutionRisk(outsidePercent)).toMatchObject({
             code: FUTURES_PRODUCTION_EXECUTION_RISK_CODES.ORDER_REJECTED,
             reason: FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.PRICE_FILTER,
+        });
+    });
+
+    it('uses MARKET_LOT_SIZE only for MARKET orders', () => {
+        const rejectedMarket = createInput();
+        rejectedMarket.draft = {
+            ...rejectedMarket.draft,
+            side: 'SELL',
+            positionEffect: 'EXIT',
+            type: 'MARKET',
+            timeInForce: null,
+            price: null,
+        };
+        rejectedMarket.snapshot.position.positionAmt = '2';
+        rejectedMarket.snapshot.position.liquidationPrice = '5';
+        rejectedMarket.snapshot.exchangeInfo.marketLotSizeFilter.minQty = '2';
+        expect(evaluateFuturesProductionExecutionRisk(rejectedMarket)).toMatchObject({
+            ok: false,
+            reason: FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.QUANTITY_FILTER,
+        });
+
+        const acceptedMarket = createInput();
+        acceptedMarket.draft = {
+            ...acceptedMarket.draft,
+            side: 'SELL',
+            positionEffect: 'EXIT',
+            type: 'MARKET',
+            timeInForce: null,
+            price: null,
+        };
+        acceptedMarket.snapshot.position.positionAmt = '2';
+        acceptedMarket.snapshot.position.liquidationPrice = '5';
+        acceptedMarket.snapshot.exchangeInfo.lotSizeFilter.maxQty = '0.5';
+        expect(evaluateFuturesProductionExecutionRisk(acceptedMarket)).toMatchObject({
+            ok: true,
+        });
+    });
+
+    it('applies PERCENT_PRICE in the Binance side-aware direction', () => {
+        const lowBuy = createInput();
+        lowBuy.draft.price = '7.99';
+        expect(evaluateFuturesProductionExecutionRisk(lowBuy)).toMatchObject({ ok: true });
+
+        const highSell = createInput();
+        highSell.snapshot.position.positionSide = 'SHORT';
+        highSell.draft = {
+            ...highSell.draft,
+            side: 'SELL',
+            positionSide: 'SHORT',
+            price: '12.01',
+            quantity: '0.5',
+        };
+        expect(evaluateFuturesProductionExecutionRisk(highSell)).toMatchObject({ ok: true });
+
+        const lowSell = structuredClone(highSell);
+        lowSell.draft.price = '7.99';
+        expect(evaluateFuturesProductionExecutionRisk(lowSell)).toMatchObject({
+            ok: false,
+            reason: FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.PRICE_FILTER,
+        });
+    });
+
+    it('uses exact LIMIT price for MIN_NOTIONAL and combines regular plus algo count', () => {
+        const lowLimit = createInput();
+        lowLimit.draft.price = '1.00';
+        expect(evaluateFuturesProductionExecutionRisk(lowLimit)).toMatchObject({
+            ok: false,
+            reason: FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.MINIMUM_NOTIONAL,
+        });
+
+        const atCombinedLimit = createInput();
+        atCombinedLimit.snapshot.regularOpenOrderCount = 9;
+        atCombinedLimit.snapshot.algoOpenOrderCount = 1;
+        expect(evaluateFuturesProductionExecutionRisk(atCombinedLimit)).toMatchObject({
+            ok: false,
+            reason: FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.OPEN_ORDER_LIMIT,
+        });
+    });
+
+    it('validates amendment TOTAL quantity but evaluates exposure and policy on REMAINING', () => {
+        const amendment = createInput();
+        amendment.policy.maxOrderNotionalUsdt = '1';
+        amendment.snapshot.position.positionAmt = '0.05';
+        amendment.snapshot.position.liquidationPrice = '5';
+        amendment.snapshot.exchangeInfo.lotSizeFilter.minQty = '0.1';
+        amendment.snapshot.exchangeInfo.minNotionalUsdt = '5';
+        amendment.draft = {
+            symbol: 'BTCUSDT',
+            side: 'SELL',
+            positionSide: 'LONG',
+            positionEffect: 'EXIT',
+            type: 'LIMIT',
+            timeInForce: 'GTC',
+            quantity: '1',
+            riskQuantity: '0.05',
+            price: '10.00',
+        };
+
+        expect(evaluateFuturesProductionExecutionRisk(amendment)).toMatchObject({
+            ok: true,
+            classification: FUTURES_PRODUCTION_EXECUTION_RISK_CLASSIFICATIONS.REDUCING,
+            notionalUsdt: '0.5000',
+        });
+
+        amendment.draft.riskQuantity = '0.051';
+        expect(evaluateFuturesProductionExecutionRisk(amendment)).toMatchObject({
+            ok: false,
+            reason: FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.EXPOSURE_AMBIGUOUS,
         });
     });
 

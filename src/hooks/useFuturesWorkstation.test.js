@@ -142,6 +142,50 @@ describe('production workstation hook isolation', () => {
     ])
   })
 
+  it('replays StrictMode with a fresh subscription owner and no interval selection', () => {
+    const socket = new LocalSocket()
+    const sendMessage = vi.fn(() => true)
+    const { result, rerender, unmount } = renderHook(
+      props => useFuturesProductionWorkstation(props),
+      {
+        initialProps: defaultProps(socket, sendMessage),
+        reactStrictMode: true,
+      },
+    )
+    const [firstRequest, firstUnsubscribe, replayRequest] = sendMessage.mock.calls
+      .map(([message]) => message)
+
+    expect([firstRequest.action, firstUnsubscribe.action, replayRequest.action]).toEqual([
+      FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SUBSCRIBE,
+      FUTURES_PRODUCTION_WORKSTATION_ACTIONS.UNSUBSCRIBE,
+      FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SUBSCRIBE,
+    ])
+    expect(firstUnsubscribe.requestId).toBe(firstRequest.requestId)
+    expect(replayRequest.requestId).not.toBe(firstRequest.requestId)
+    expect(result.current.requestId).toBe(replayRequest.requestId)
+
+    rerender(defaultProps(socket, sendMessage))
+    expect(sendMessage).toHaveBeenCalledTimes(3)
+
+    act(() => socket.emitMessage(createFuturesProductionWorkstationEvent(
+      eventValues(firstRequest.requestId, { generation: 99, revision: 99 }),
+    )))
+    expect(result.current).toMatchObject({
+      requestId: replayRequest.requestId,
+      status: 'loading',
+    })
+    act(() => socket.emitMessage(createFuturesProductionWorkstationEvent(
+      eventValues(replayRequest.requestId),
+    )))
+    expect(result.current.status).toBe('live')
+
+    unmount()
+    expect(sendMessage.mock.calls.at(-1)[0]).toMatchObject({
+      action: FUTURES_PRODUCTION_WORKSTATION_ACTIONS.UNSUBSCRIBE,
+      requestId: replayRequest.requestId,
+    })
+  })
+
   it('uses production symbol and interval actions and drops late events from the old owner', () => {
     const socket = new LocalSocket()
     const sendMessage = vi.fn(() => true)
@@ -277,6 +321,69 @@ describe('production workstation hook isolation', () => {
       revision: 99,
     }))
     expect(result.current.resources.catalog.contracts).toHaveLength(3)
+  })
+
+  it('retains Contracts and creates a fresh subscription owner on terminal Retry', () => {
+    const socket = new LocalSocket()
+    const sendMessage = vi.fn(() => true)
+    const { result, unmount } = renderHook(props => useFuturesProductionWorkstation(props), {
+      initialProps: defaultProps(socket, sendMessage),
+    })
+    const firstRequest = sendMessage.mock.calls[0][0]
+    act(() => emitCatalog(socket, firstRequest, ['BTCUSDT', 'ETHUSDT', 'SOLUSDT']))
+    act(() => socket.emitMessage(createFuturesProductionWorkstationEvent(
+      eventValues(firstRequest.requestId, {
+        revision: 2,
+        resource: 'status',
+        state: 'unavailable',
+        payload: Object.freeze({
+          connected: false,
+          reasonCode: 'RECONNECT_EXHAUSTED',
+        }),
+      }),
+    )))
+    expect(result.current).toMatchObject({
+      status: 'unavailable',
+      reasonCode: 'RECONNECT_EXHAUSTED',
+    })
+
+    act(() => result.current.retry())
+
+    const retryRequest = sendMessage.mock.calls.at(-1)[0]
+    expect(sendMessage.mock.calls.map(([message]) => message.action)).toEqual([
+      FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SUBSCRIBE,
+      FUTURES_PRODUCTION_WORKSTATION_ACTIONS.UNSUBSCRIBE,
+      FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SUBSCRIBE,
+    ])
+    expect(sendMessage.mock.calls[1][0]).toMatchObject({
+      action: FUTURES_PRODUCTION_WORKSTATION_ACTIONS.UNSUBSCRIBE,
+      requestId: firstRequest.requestId,
+    })
+    expect(retryRequest).toMatchObject({
+      action: FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SUBSCRIBE,
+      symbol: 'BTCUSDT',
+      interval: '1m',
+    })
+    expect(retryRequest.requestId).not.toBe(firstRequest.requestId)
+    expect(result.current.status).toBe('loading')
+    expect(result.current.resources.catalog.contracts).toHaveLength(3)
+
+    act(() => socket.emitMessage(createFuturesProductionWorkstationEvent(
+      eventValues(firstRequest.requestId, {
+        generation: 99,
+        revision: 99,
+      }),
+    )))
+    expect(result.current).toMatchObject({
+      requestId: retryRequest.requestId,
+      status: 'loading',
+    })
+    unmount()
+    expect(sendMessage.mock.calls
+      .map(([message]) => message)
+      .filter(message => message.action === FUTURES_PRODUCTION_WORKSTATION_ACTIONS.UNSUBSCRIBE)
+      .map(message => message.requestId))
+      .toEqual([firstRequest.requestId, retryRequest.requestId])
   })
 
   it('keeps same-symbol resources visible as stale while a new interval generation loads', () => {

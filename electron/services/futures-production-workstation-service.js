@@ -196,6 +196,9 @@ export class FuturesProductionWorkstationService {
             contracts: Object.freeze([]),
             contract: null,
             header: null,
+            bootstrapDepthSnapshot: null,
+            bootstrapPremium: null,
+            bootstrapTicker: null,
             candles: Object.freeze([]),
             markCandles: Object.freeze([]),
             indexCandles: Object.freeze([]),
@@ -265,60 +268,98 @@ export class FuturesProductionWorkstationService {
                 this.scheduleResync(session, 'SOCKET_NOT_READY');
                 return;
             }
+            const deliveredBootstrapResources = new Set();
+            const deliverBootstrapResource = ({ resource, value } = {}) => {
+                if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
+                if (deliveredBootstrapResources.has(resource)) return;
+                if (resource === 'depthSnapshot') {
+                    session.bootstrapDepthSnapshot = normalizeFuturesWorkstationDepthSnapshot(
+                        value,
+                        session.symbol,
+                    );
+                } else if (resource === 'contractKlines') {
+                    session.candles = normalizeFuturesWorkstationKlines(value);
+                    session.lastCandlesAt = this.observedNow(session);
+                    this.emitCandleSeries(session, 'contract', session.candles);
+                } else if (resource === 'markKlines') {
+                    session.markCandles = normalizeFuturesWorkstationKlines(value);
+                    session.lastCandlesAt = this.observedNow(session);
+                    this.emitCandleSeries(session, 'mark', session.markCandles);
+                } else if (resource === 'indexKlines') {
+                    session.indexCandles = normalizeFuturesWorkstationKlines(value);
+                    session.lastCandlesAt = this.observedNow(session);
+                    this.emitCandleSeries(session, 'index', session.indexCandles);
+                } else if (resource === 'premiumIndex') {
+                    session.bootstrapPremium = normalizeFuturesWorkstationPremiumIndex(
+                        value,
+                        session.symbol,
+                    );
+                } else if (resource === 'ticker') {
+                    session.bootstrapTicker = normalizeFuturesWorkstationTicker(
+                        value,
+                        session.symbol,
+                    );
+                } else {
+                    throw new FuturesProductionWorkstationServiceError(
+                        'UNKNOWN_BOOTSTRAP_RESOURCE',
+                    );
+                }
+                deliveredBootstrapResources.add(resource);
+                if (session.header === null
+                    && session.bootstrapPremium !== null
+                    && session.bootstrapTicker !== null) {
+                    session.header = createFuturesWorkstationHeader({
+                        premium: session.bootstrapPremium,
+                        ticker: session.bootstrapTicker,
+                        contractStatus: session.contract.status,
+                    });
+                    session.lastHeaderAt = this.observedNow(session);
+                    this.emitResource(
+                        session,
+                        FUTURES_WORKSTATION_RESOURCES.HEADER,
+                        FUTURES_WORKSTATION_STATES.LIVE,
+                        session.header,
+                    );
+                }
+            };
             const bootstrap = await this.transport.bootstrap({
                 symbol: session.symbol,
                 pair: session.pair,
                 interval: session.interval,
                 signal: session.abortController.signal,
+                onBootstrapResource: deliverBootstrapResource,
             });
             if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
-            const depthSnapshot = normalizeFuturesWorkstationDepthSnapshot(
-                bootstrap.depthSnapshot,
-                session.symbol,
-            );
-            const bookResult = session.orderBook.bootstrap(depthSnapshot);
-            if (!bookResult.live) {
-                this.scheduleResync(session, 'DEPTH_BOOTSTRAP_GAP');
-                return;
+            for (const resource of [
+                'depthSnapshot',
+                'contractKlines',
+                'markKlines',
+                'indexKlines',
+                'premiumIndex',
+                'ticker',
+            ]) {
+                deliverBootstrapResource({ resource, value: bootstrap?.[resource] });
             }
-            session.candles = normalizeFuturesWorkstationKlines(bootstrap.contractKlines);
-            session.markCandles = normalizeFuturesWorkstationKlines(bootstrap.markKlines);
-            session.indexCandles = normalizeFuturesWorkstationKlines(bootstrap.indexKlines);
-            const premium = normalizeFuturesWorkstationPremiumIndex(
-                bootstrap.premiumIndex,
-                session.symbol,
-            );
-            const ticker = normalizeFuturesWorkstationTicker(bootstrap.ticker, session.symbol);
-            session.header = createFuturesWorkstationHeader({
-                premium,
-                ticker,
-                contractStatus: session.contract.status,
-            });
+            const bookResult = session.orderBook.bootstrap(session.bootstrapDepthSnapshot);
+            if (!bookResult.live) {
+                throw new FuturesProductionWorkstationServiceError('DEPTH_BOOTSTRAP_GAP');
+            }
             session.bootstrapped = true;
             const now = this.observedNow(session);
             session.lastHeaderAt = now;
             session.lastCandlesAt = now;
             session.lastDepthAt = now;
             session.lastTradesAt = now;
-            this.emitResource(
-                session,
-                FUTURES_WORKSTATION_RESOURCES.HEADER,
-                FUTURES_WORKSTATION_STATES.LIVE,
-                session.header,
-            );
-            this.emitCandleSeries(session, 'contract', session.candles);
-            this.emitCandleSeries(session, 'mark', session.markCandles);
-            this.emitCandleSeries(session, 'index', session.indexCandles);
+            this.emitTrades(session);
+            for (const event of session.pendingEvents) this.applyStreamEvent(session, event);
+            session.pendingEvents = [];
+            if (!this.isCurrent(session)) return;
             this.emitResource(
                 session,
                 FUTURES_WORKSTATION_RESOURCES.DEPTH,
                 FUTURES_WORKSTATION_STATES.LIVE,
                 session.orderBook.toRendererView(),
             );
-            this.emitTrades(session);
-            for (const event of session.pendingEvents) this.applyStreamEvent(session, event);
-            session.pendingEvents = [];
-            if (!this.isCurrent(session)) return;
             session.reconnectAttempt = 0;
             this.emitStatus(session, FUTURES_WORKSTATION_STATES.LIVE, true, null);
             this.emitAggregateTiming(session, 'ok');

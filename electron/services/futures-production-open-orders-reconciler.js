@@ -1,4 +1,6 @@
-const SYMBOL_PATTERN = /^[A-Z0-9]{2,20}$/;
+const EXECUTION_SYMBOL_PATTERN = /^[A-Z0-9]{2,20}$/;
+const EXCHANGE_SYMBOL_PATTERN = /^[\p{Lu}\p{Lt}\p{Lo}\p{N}]{2,64}(?:_[0-9]{6})?$/u;
+const MAX_EXCHANGE_SYMBOL_BYTES = 256;
 const CLIENT_ORDER_ID_PATTERN = /^[.A-Z:/a-z0-9_-]{1,36}$/;
 const APP_OWNED_CLIENT_ORDER_ID_PATTERN = /^cc7-[0-9a-f]{32}$/;
 const ORDER_TYPE_PATTERN = /^[A-Z][A-Z0-9_]{0,31}$/;
@@ -77,6 +79,14 @@ const requirePattern = (value, pattern, code) => {
     return value;
 };
 
+const requireExchangeSymbol = (value, code) => {
+    if (typeof value !== 'string'
+        || Buffer.byteLength(value, 'utf8') > MAX_EXCHANGE_SYMBOL_BYTES
+        || /[a-z]/.test(value)
+        || !EXCHANGE_SYMBOL_PATTERN.test(value)) fail(code);
+    return value;
+};
+
 const requireBoolean = (value, code, fallback = undefined) => {
     if (value === undefined && fallback !== undefined) return fallback;
     if (typeof value !== 'boolean') fail(code);
@@ -122,6 +132,23 @@ const requireDenseArray = (value, maximum, code) => {
     return value;
 };
 
+const requireCancelOrderKeys = (value, selectedSymbols, code) => {
+    const orderKeys = requireDenseArray(value, MAX_ORDERS, code);
+    const selectedOrderKeys = new Set();
+    for (const orderKey of orderKeys) {
+        if (typeof orderKey !== 'string'
+            || selectedOrderKeys.has(orderKey)
+            || ![...selectedSymbols].some(symbol => {
+                if (!orderKey.startsWith(`${symbol}:`)) return false;
+                return /^(?:ALGO:)?[1-9][0-9]{0,18}$/.test(
+                    orderKey.slice(symbol.length + 1),
+                );
+            })) fail(code);
+        selectedOrderKeys.add(orderKey);
+    }
+    return selectedOrderKeys;
+};
+
 const positionEffectFor = (positionSide, side) => {
     if (positionSide === 'LONG') return side === 'BUY' ? 'ENTRY' : 'EXIT';
     if (positionSide === 'SHORT') return side === 'SELL' ? 'ENTRY' : 'EXIT';
@@ -133,7 +160,7 @@ export const createFuturesOpenOrderKey = (
     orderIdValue,
     orderKindValue = 'REGULAR',
 ) => {
-    const symbol = requirePattern(symbolValue, SYMBOL_PATTERN, 'INVALID_ORDER_IDENTITY');
+    const symbol = requireExchangeSymbol(symbolValue, 'INVALID_ORDER_IDENTITY');
     const orderId = requireOrderId(orderIdValue, 'INVALID_ORDER_IDENTITY');
     const orderKind = requireEnum(orderKindValue, ORDER_KINDS, 'INVALID_ORDER_IDENTITY');
     return orderKind === 'REGULAR' ? `${symbol}:${orderId}` : `${symbol}:ALGO:${orderId}`;
@@ -144,7 +171,7 @@ export const createFuturesClientOrderKey = (
     clientOrderIdValue,
     orderKindValue = 'REGULAR',
 ) => {
-    const symbol = requirePattern(symbolValue, SYMBOL_PATTERN, 'INVALID_ORDER_IDENTITY');
+    const symbol = requireExchangeSymbol(symbolValue, 'INVALID_ORDER_IDENTITY');
     const clientOrderId = requirePattern(
         clientOrderIdValue,
         CLIENT_ORDER_ID_PATTERN,
@@ -208,7 +235,7 @@ const normalizeSharedOrderFields = ({
     code,
 }) => {
     const normalizedOrderKind = requireEnum(orderKind, ORDER_KINDS, code);
-    const symbol = requirePattern(field('symbol'), SYMBOL_PATTERN, code);
+    const symbol = requireExchangeSymbol(field('symbol'), code);
     const orderId = requireOrderId(field('orderId'), code);
     const clientOrderId = requirePattern(field('clientOrderId'), CLIENT_ORDER_ID_PATTERN, code);
     const side = requireEnum(field('side'), SIDES, code);
@@ -924,12 +951,17 @@ export const failFuturesOpenOrdersSnapshot = (
 
 const updateSymbolPendingState = (
     stateValue,
-    { symbol: symbolValue, observedAt, from, to },
+    { symbol: symbolValue, orderKeys, observedAt, from, to },
 ) => {
     const state = requireState(stateValue);
     const symbol = requirePattern(
         symbolValue,
-        SYMBOL_PATTERN,
+        EXECUTION_SYMBOL_PATTERN,
+        'INVALID_CANCEL_PROJECTION',
+    );
+    const selectedOrderKeys = requireCancelOrderKeys(
+        orderKeys,
+        new Set([symbol]),
         'INVALID_CANCEL_PROJECTION',
     );
     requireTimestamp(observedAt, 'INVALID_CANCEL_PROJECTION');
@@ -938,6 +970,7 @@ const updateSymbolPendingState = (
     let changed = false;
     const orders = state.orders.map((order) => {
         if (order.symbol !== symbol
+            || !selectedOrderKeys.has(order.key)
             || !sourceStates.has(order.syncState)) return order;
         if (!Number.isSafeInteger(nextSequence) || nextSequence < 1) {
             fail('INVALID_RECONCILIATION_STATE');
@@ -958,9 +991,10 @@ const updateSymbolPendingState = (
 
 export const markFuturesOpenOrdersPendingCancel = (
     stateValue,
-    { symbol, requestedAt } = {},
+    { symbol, orderKeys, requestedAt } = {},
 ) => updateSymbolPendingState(stateValue, {
     symbol,
+    orderKeys,
     observedAt: requestedAt,
     from: ['synced', 'stale'],
     to: 'pending',
@@ -968,9 +1002,10 @@ export const markFuturesOpenOrdersPendingCancel = (
 
 export const failFuturesOpenOrdersPendingCancel = (
     stateValue,
-    { symbol, failedAt } = {},
+    { symbol, orderKeys, failedAt } = {},
 ) => updateSymbolPendingState(stateValue, {
     symbol,
+    orderKeys,
     observedAt: failedAt,
     from: ['pending'],
     to: 'stale',
@@ -978,7 +1013,7 @@ export const failFuturesOpenOrdersPendingCancel = (
 
 export const removeFuturesOpenOrdersForSymbols = (
     stateValue,
-    { symbols: symbolsValue, confirmedAt } = {},
+    { symbols: symbolsValue, orderKeys: orderKeysValue, confirmedAt } = {},
 ) => {
     const state = requireState(stateValue);
     const symbols = requireDenseArray(
@@ -992,16 +1027,22 @@ export const removeFuturesOpenOrdersForSymbols = (
     for (const symbolValue of symbols) {
         const symbol = requirePattern(
             symbolValue,
-            SYMBOL_PATTERN,
+            EXECUTION_SYMBOL_PATTERN,
             'INVALID_CANCEL_CONFIRMATION',
         );
         if (selected.has(symbol)) fail('INVALID_CANCEL_CONFIRMATION');
         selected.add(symbol);
     }
 
+    const selectedOrderKeys = requireCancelOrderKeys(
+        orderKeysValue,
+        selected,
+        'INVALID_CANCEL_CONFIRMATION',
+    );
+
     const canceled = new Map();
     const rememberCanceled = (order) => {
-        if (!selected.has(order.symbol) || order.updateTime > confirmedAt) return;
+        if (!selectedOrderKeys.has(order.key) || order.updateTime > confirmedAt) return;
         const existing = canceled.get(order.key);
         if (!existing || order.updateTime > existing.updateTime) canceled.set(order.key, order);
     };
@@ -1026,11 +1067,11 @@ export const removeFuturesOpenOrdersForSymbols = (
         ...state,
         observedAt: Math.max(state.observedAt ?? 0, confirmedAt),
         orders: state.orders.filter(order => (
-            !selected.has(order.symbol) || order.updateTime > confirmedAt
+            !selectedOrderKeys.has(order.key) || order.updateTime > confirmedAt
         )),
         tombstones: boundedTombstones(tombstones.values()),
         bufferedEvents: state.bufferedEvents.filter(entry => (
-            !selected.has(entry.order.symbol) || entry.order.updateTime > confirmedAt
+            !selectedOrderKeys.has(entry.order.key) || entry.order.updateTime > confirmedAt
         )),
         nextSequence,
     });

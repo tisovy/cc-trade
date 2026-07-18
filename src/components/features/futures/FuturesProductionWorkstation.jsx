@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from 'react'
+import { memo, useCallback, useMemo, useRef, useState } from 'react'
 import useFuturesProductionWorkstation from '../../../hooks/useFuturesProductionWorkstation.js'
 import FuturesProductionExecutionTicket from './FuturesProductionExecutionTicket.jsx'
 import FuturesWorkstationView from './FuturesWorkstationView.jsx'
@@ -46,9 +46,12 @@ export const FuturesProductionWorkstation = ({
     setOrderAmendRequest({ ...amendment, id: amendmentSequenceRef.current })
   }, [])
 
-  const ownedOrders = Array.isArray(executionState?.portfolio?.openOrders)
-    ? executionState.portfolio.openOrders.filter(order => order.symbol === symbol)
-    : []
+  const portfolioOpenOrders = executionState?.portfolio?.openOrders
+  const ownedOrders = useMemo(() => (
+    Array.isArray(portfolioOpenOrders)
+      ? portfolioOpenOrders.filter(order => order.symbol === symbol)
+      : []
+  ), [portfolioOpenOrders, symbol])
 
   const tradingRail = (
     <FuturesProductionExecutionTicket
@@ -90,6 +93,7 @@ export const FuturesProductionWorkstation = ({
         onDraftPriceChange={setDraftPrice}
         onTradingGesture={handleTradingGesture}
         onOrderDrag={handleOrderDrag}
+        onRetry={workstationState.retry}
         onSymbolChange={handleSymbolChange}
         onIntervalChange={setInterval}
       />
@@ -97,4 +101,7 @@ export const FuturesProductionWorkstation = ({
   )
 }
 
-export default FuturesProductionWorkstation
+const MemoizedFuturesProductionWorkstation = memo(FuturesProductionWorkstation)
+MemoizedFuturesProductionWorkstation.displayName = 'FuturesProductionWorkstation'
+
+export default MemoizedFuturesProductionWorkstation

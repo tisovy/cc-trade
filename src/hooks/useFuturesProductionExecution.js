@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS,
   compareFuturesProductionExecutionRevisions,
@@ -385,7 +385,7 @@ const useFuturesProductionExecution = ({
     confirmation,
   ), [finalize])
 
-  return {
+  return useMemo(() => ({
     ...state,
     refreshPortfolio,
     prepareOrderIntent,
@@ -402,7 +402,24 @@ const useFuturesProductionExecution = ({
     engageKillSwitch,
     prepareDisengageKillSwitchIntent,
     disengageKillSwitch,
-  }
+  }), [
+    adjustMargin,
+    amendOrder,
+    cancelAllOpenOrders,
+    closePositions,
+    disengageKillSwitch,
+    engageKillSwitch,
+    placeOrder,
+    prepareCancelAllOpenOrdersIntent,
+    prepareClosePositionsIntent,
+    prepareDisengageKillSwitchIntent,
+    prepareEngageKillSwitchIntent,
+    prepareMarginAdjustment,
+    prepareOrderAmendment,
+    prepareOrderIntent,
+    refreshPortfolio,
+    state,
+  ])
 }
 
 export default useFuturesProductionExecution

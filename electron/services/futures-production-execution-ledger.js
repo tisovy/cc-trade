@@ -143,6 +143,7 @@ const SAFE_DETAIL_FORBIDDEN = /(?:authorization|api[-_ ]?key|api[-_ ]?secret|sig
 const TERMINAL_STATES = new Set([
     'locally_rejected',
     'exchange_rejected',
+    'confirmed_open',
     'confirmed_filled',
     'confirmed_canceled',
     'confirmed_closed',

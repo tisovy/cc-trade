@@ -1,7 +1,9 @@
-import { createEvent, fireEvent, render, screen } from '@testing-library/react'
+import { act, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { LIGHTWEIGHT_CHARTS_MAX_SERIES_VALUE } from '../../../utils/chartVolume.js'
-import FuturesWorkstationChart from './FuturesWorkstationChart.jsx'
+import FuturesWorkstationChart, {
+  FuturesWorkstationChart as UnmemoizedFuturesWorkstationChart,
+} from './FuturesWorkstationChart.jsx'
 
 const chartMock = vi.hoisted(() => ({ charts: [] }))
 
@@ -13,10 +15,20 @@ vi.mock('lightweight-charts', () => ({
   LineSeries: 'LineSeries',
   LineStyle: { Dashed: 'Dashed', Dotted: 'Dotted', Solid: 'Solid' },
   createChart: vi.fn(() => {
+    const visibleLogicalRangeListeners = new Set()
     const timeScale = {
       coordinateToLogical: vi.fn(value => value),
       coordinateToTime: vi.fn(value => value),
       fitContent: vi.fn(),
+      subscribeVisibleLogicalRangeChange: vi.fn((listener) => {
+        visibleLogicalRangeListeners.add(listener)
+      }),
+      unsubscribeVisibleLogicalRangeChange: vi.fn((listener) => {
+        visibleLogicalRangeListeners.delete(listener)
+      }),
+      emitVisibleLogicalRangeChange: () => {
+        visibleLogicalRangeListeners.forEach(listener => listener(null))
+      },
     }
     const series = []
     const chart = {
@@ -73,6 +85,10 @@ beforeEach(() => {
 })
 
 describe('FuturesWorkstationChart viewport ownership', () => {
+  it('memoizes the default renderer boundary while retaining the named unit surface', () => {
+    expect(FuturesWorkstationChart.type).toBe(UnmemoizedFuturesWorkstationChart)
+  })
+
   it('fits the first authoritative candle set once and preserves user pan on stream updates', () => {
     const initial = [candle(1_784_000_000_000)]
     const { rerender } = render(<FuturesWorkstationChart {...properties(initial)} />)
@@ -344,6 +360,85 @@ describe('FuturesWorkstationChart viewport ownership', () => {
       price: '59920',
       modifier: 'alt',
     })
+  })
+
+  it('separates same-price regular order handles so each remains independently draggable', async () => {
+    const props = {
+      ...properties([candle(1_784_000_000_000)]),
+      ownedOrders: [{
+        symbol: 'BTCUSDT',
+        orderKind: 'REGULAR',
+        orderId: '101',
+        clientOrderId: 'first-same-price-order',
+        positionSide: 'LONG',
+        positionEffect: 'EXIT',
+        price: '59900',
+      }, {
+        symbol: 'BTCUSDT',
+        orderKind: 'REGULAR',
+        orderId: '102',
+        clientOrderId: 'second-same-price-order',
+        positionSide: 'SHORT',
+        positionEffect: 'ENTRY',
+        price: '59900',
+      }],
+    }
+    render(<FuturesWorkstationChart {...props} />)
+    const canvas = screen.getByTestId('futures-workstation-chart')
+    canvas.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 320, height: 320, right: 320, bottom: 320,
+    })
+    const first = await screen.findByRole('button', {
+      name: 'Move LONG EXIT order at 59900 with Ctrl or Alt drag',
+    })
+    const second = await screen.findByRole('button', {
+      name: 'Move SHORT ENTRY order at 59900 with Ctrl or Alt drag',
+    })
+    await waitFor(() => expect(first.style.top).not.toBe(second.style.top))
+
+    fireEvent.pointerDown(first, { pointerId: 11, button: 0, ctrlKey: true })
+    fireEvent.pointerMove(first, { pointerId: 11, clientY: 80, ctrlKey: true })
+    fireEvent.pointerUp(first, { pointerId: 11, clientY: 80, ctrlKey: true })
+    fireEvent.pointerDown(second, { pointerId: 12, button: 0, altKey: true })
+    fireEvent.pointerMove(second, { pointerId: 12, clientY: 70, altKey: true })
+    fireEvent.pointerUp(second, { pointerId: 12, clientY: 70, altKey: true })
+
+    expect(props.onOrderDrag).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      clientOrderId: 'first-same-price-order',
+      modifier: 'ctrl',
+      price: '59920',
+    }))
+    expect(props.onOrderDrag).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      clientOrderId: 'second-same-price-order',
+      modifier: 'alt',
+      price: '59930',
+    }))
+  })
+
+  it('refreshes order handle coordinates when the visible chart range changes', async () => {
+    const props = {
+      ...properties([candle(1_784_000_000_000)]),
+      ownedOrders: [{
+        symbol: 'BTCUSDT',
+        orderKind: 'REGULAR',
+        orderId: '103',
+        clientOrderId: 'viewport-order',
+        positionSide: 'LONG',
+        positionEffect: 'EXIT',
+        price: '59900',
+      }],
+    }
+    render(<FuturesWorkstationChart {...props} />)
+    const order = await screen.findByRole('button', {
+      name: 'Move LONG EXIT order at 59900 with Ctrl or Alt drag',
+    })
+    await waitFor(() => expect(order).toHaveStyle({ top: '100px' }))
+    const chart = chartMock.charts[0]
+    chart.series[0].priceToCoordinate.mockImplementation(price => 59_950 - price)
+
+    act(() => chart.timeScale().emitVisibleLogicalRangeChange())
+
+    await waitFor(() => expect(order).toHaveStyle({ top: '50px' }))
   })
 
   it('keeps REGULAR and ALGO rows distinct when Binance reuses a client order id', async () => {

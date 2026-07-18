@@ -3,7 +3,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   FUTURES_PRODUCTION_EXECUTION_CONFIRMATIONS,
 } from '../../../utils/futuresProductionExecutionProtocol.js'
-import FuturesProductionExecutionTicket from './FuturesProductionExecutionTicket.jsx'
+import FuturesProductionExecutionTicket, {
+  FuturesProductionExecutionTicket as UnmemoizedFuturesProductionExecutionTicket,
+} from './FuturesProductionExecutionTicket.jsx'
 
 const FINGERPRINT = 'a'.repeat(64)
 const REQUEST_ID = '0123456789abcdef0123456789abcdef'
@@ -147,6 +149,10 @@ const selectFullSize = () => fireEvent.click(screen.getByRole('button', { name: 
 afterEach(() => cleanup())
 
 describe('FuturesProductionExecutionTicket', () => {
+  it('memoizes the default renderer boundary while retaining the named unit surface', () => {
+    expect(FuturesProductionExecutionTicket.type).toBe(UnmemoizedFuturesProductionExecutionTicket)
+  })
+
   it('shows the exact Hedge isolated 2x profile and keeps diagnostics collapsed', () => {
     renderTicket()
     expect(screen.getByText('FUTURES · USDⓈ-M')).toBeInTheDocument()
@@ -304,6 +310,43 @@ describe('FuturesProductionExecutionTicket', () => {
     expect(order).toHaveTextContent('Est. margin3.5 USDT')
     expect(order).toHaveTextContent('Available13.5 USDT')
     expect(order).toHaveTextContent('Safe limit7 USDT')
+  })
+
+  it('keeps a custom USDT size linked to an authoritative budget change', async () => {
+    const handlers = callbacks()
+    const base = {
+      selectedSymbol: 'BTCUSDT',
+      selectedContract,
+      draftPrice: '1000',
+      ...handlers,
+    }
+    const { rerender } = render(
+      <FuturesProductionExecutionTicket {...base} state={createState()} />,
+    )
+    fireEvent.change(screen.getByRole('textbox', { name: 'Order notional USDT' }), {
+      target: { value: '5' },
+    })
+    expect(screen.getByRole('slider', { name: 'Order size percent' })).toHaveValue('50')
+    expect(screen.getByLabelText('Futures order size and shortcuts')).toHaveTextContent('50%5 USDT')
+
+    rerender(<FuturesProductionExecutionTicket
+      {...base}
+      state={createState({
+        portfolio: {
+          ...createState().portfolio,
+          availableBalanceUsdt: '14',
+        },
+      })}
+    />)
+
+    await waitFor(() => {
+      expect(screen.getByRole('slider', { name: 'Order size percent' })).toHaveValue('62')
+    })
+    const order = screen.getByLabelText('Futures order size and shortcuts')
+    expect(order).toHaveTextContent('62%5 USDT')
+    expect(order).toHaveTextContent('Quantity0.005')
+    expect(order).toHaveTextContent('Est. margin2.5 USDT')
+    expect(order).toHaveTextContent('Safe limit8 USDT')
   })
 
   it.each([
@@ -546,6 +589,8 @@ describe('FuturesProductionExecutionTicket', () => {
       ...handlers,
     }
     const { rerender } = render(<FuturesProductionExecutionTicket {...base} />)
+    expect(screen.getByText('LOCKED')).toBeInTheDocument()
+    expect(screen.getByText(/New exposure is locked/)).toBeInTheDocument()
     selectFullSize()
     rerender(<FuturesProductionExecutionTicket {...base} gestureRequest={{
       id: 1,
@@ -564,6 +609,8 @@ describe('FuturesProductionExecutionTicket', () => {
       positionEffect: 'EXIT',
       source: 'chart',
     }} />)
+    expect(screen.getByText('READY')).toBeInTheDocument()
+    expect(screen.queryByText(/New exposure is locked/)).not.toBeInTheDocument()
     await waitFor(() => expect(handlers.onPrepareOrderIntent).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ positionSide: 'LONG', positionEffect: 'EXIT' }),
     ))
@@ -616,6 +663,43 @@ describe('FuturesProductionExecutionTicket', () => {
       expect.objectContaining({ positionEffect: 'EXIT', positionSide: 'LONG' }),
     ))
     expect(screen.getByText('READY')).toBeInTheDocument()
+  })
+
+  it('keeps a bounded EXIT ready when available balance is temporarily absent', async () => {
+    const handlers = callbacks()
+    const portfolio = {
+      ...hedgePortfolio,
+      availableBalanceUsdt: undefined,
+      positions: hedgePortfolio.positions.map(position => ({
+        ...position,
+        quantity: '0.004',
+      })),
+    }
+    renderTicket({
+      state: createState({ portfolio }),
+      handlers,
+      draftPrice: '7000',
+      gestureRequest: {
+        id: 301,
+        price: '7000',
+        side: 'SELL',
+        positionSide: 'LONG',
+        positionEffect: 'EXIT',
+        source: 'chart',
+      },
+    })
+
+    expect(screen.getByText('READY')).toBeInTheDocument()
+    expect(screen.queryByText('BALANCE')).not.toBeInTheDocument()
+    expect(screen.getByRole('slider', { name: 'Order size percent' })).toBeEnabled()
+    await waitFor(() => expect(handlers.onPrepareOrderIntent).toHaveBeenCalledExactlyOnceWith({
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      positionSide: 'LONG',
+      positionEffect: 'EXIT',
+      quantity: '0.001',
+      price: '7000',
+    }))
   })
 
   it('disables sizing with the exact missing private input and replaces generic blocked status', () => {

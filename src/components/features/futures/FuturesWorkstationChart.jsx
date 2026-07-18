@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   CandlestickSeries,
   ColorType,
@@ -58,6 +58,9 @@ const toDraftString = (value) => (
 )
 
 const CANONICAL_NONNEGATIVE_DECIMAL = /^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/
+const ORDER_HANDLE_HALF_HEIGHT = 11
+const ORDER_HANDLE_GAP = 24
+const NOOP_ORDER_COORDINATE_REFRESH = () => {}
 
 const createPriceFormat = (tickSize) => {
   if (typeof tickSize !== 'string'
@@ -96,6 +99,40 @@ const futuresOrderIdentity = order => (
   `${order?.symbol}:${order?.orderKind}:${order?.orderId}:${order?.clientOrderId}`
 )
 
+const layoutOrderCoordinates = (entries, height) => {
+  if (entries.length === 0 || height <= 0) return []
+  const top = Math.min(ORDER_HANDLE_HALF_HEIGHT, height / 2)
+  const bottom = Math.max(top, height - ORDER_HANDLE_HALF_HEIGHT)
+  const gap = entries.length <= 1
+    ? 0
+    : Math.min(ORDER_HANDLE_GAP, (bottom - top) / (entries.length - 1))
+  const placed = entries
+    .map((entry, originalIndex) => ({
+      ...entry,
+      anchorY: entry.y,
+      originalIndex,
+      y: Math.max(top, Math.min(bottom, entry.y)),
+    }))
+    .sort((left, right) => (
+      left.y - right.y
+      || futuresOrderIdentity(left.order).localeCompare(futuresOrderIdentity(right.order))
+    ))
+
+  for (let index = 1; index < placed.length; index += 1) {
+    placed[index].y = Math.max(placed[index].y, placed[index - 1].y + gap)
+  }
+  if (placed.at(-1).y > bottom) {
+    placed[placed.length - 1].y = bottom
+    for (let index = placed.length - 2; index >= 0; index -= 1) {
+      placed[index].y = Math.min(placed[index].y, placed[index + 1].y - gap)
+    }
+  }
+
+  return placed
+    .sort((left, right) => left.originalIndex - right.originalIndex)
+    .map(({ originalIndex: _originalIndex, ...entry }) => entry)
+}
+
 export const FuturesWorkstationChart = ({
   symbol,
   candles,
@@ -126,6 +163,7 @@ export const FuturesWorkstationChart = ({
   const lastLeftClickRef = useRef({ at: 0, x: 0, y: 0, modifier: null })
   const lastRightClickRef = useRef({ at: 0, x: 0, y: 0, modifier: null })
   const orderDragRef = useRef(null)
+  const requestOrderCoordinateRefreshRef = useRef(NOOP_ORDER_COORDINATE_REFRESH)
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 })
   const [measurement, setMeasurement] = useState(null)
   const [orderCoordinates, setOrderCoordinates] = useState([])
@@ -305,7 +343,11 @@ export const FuturesWorkstationChart = ({
       lastRightClickRef.current = { at: 0, x: 0, y: 0, modifier: null }
       emitTradingGesture(event, 'right')
     }
+    const handleViewportChange = () => {
+      requestOrderCoordinateRefreshRef.current()
+    }
     const handleMouseMove = (event) => {
+      handleViewportChange()
       if (!event.shiftKey) {
         if (measurementRef.current) cancelMeasurement()
         return
@@ -335,10 +377,13 @@ export const FuturesWorkstationChart = ({
     const handleKeyUp = (event) => {
       if (event.key === 'Shift' || event.key === 'Escape') cancelMeasurement()
     }
+    const timeScale = chart.timeScale()
     chart.subscribeClick(handleClick)
+    timeScale.subscribeVisibleLogicalRangeChange?.(handleViewportChange)
     container.addEventListener('click', handleLeftClick)
     container.addEventListener('contextmenu', handleContextMenu)
     container.addEventListener('mousemove', handleMouseMove)
+    container.addEventListener('wheel', handleViewportChange, { passive: true })
     container.addEventListener('mouseleave', cancelMeasurement)
     globalThis.addEventListener?.('keyup', handleKeyUp)
     chartRef.current = chart
@@ -367,8 +412,10 @@ export const FuturesWorkstationChart = ({
       container.removeEventListener('click', handleLeftClick)
       container.removeEventListener('contextmenu', handleContextMenu)
       container.removeEventListener('mousemove', handleMouseMove)
+      container.removeEventListener('wheel', handleViewportChange)
       container.removeEventListener('mouseleave', cancelMeasurement)
       chart.unsubscribeClick(handleClick)
+      timeScale.unsubscribeVisibleLogicalRangeChange?.(handleViewportChange)
       chart.remove()
       chartRef.current = null
       seriesRef.current = null
@@ -423,6 +470,7 @@ export const FuturesWorkstationChart = ({
       chartRef.current?.timeScale().fitContent()
       hasFittedContentRef.current = true
     }
+    requestOrderCoordinateRefreshRef.current()
   }, [candles, indexCandles, markCandles])
 
   useEffect(() => {
@@ -479,12 +527,15 @@ export const FuturesWorkstationChart = ({
       title: `${order.orderKind === 'ALGO' ? 'ALGO ' : ''}${order.positionSide} ${order.positionEffect}`,
     }))
     overlayLinesRef.current = nextLines
+    requestOrderCoordinateRefreshRef.current()
   }, [alerts, draftPrice, drawings, indexPrice, markPrice, ownedOrders])
 
   useEffect(() => {
+    let pending = null
     const updateCoordinates = () => {
+      pending = null
       const series = seriesRef.current?.contractSeries
-      const next = !series || typeof series.priceToCoordinate !== 'function'
+      const coordinates = !series || typeof series.priceToCoordinate !== 'function'
         ? []
         : ownedOrders.flatMap((order) => {
           const price = toNumber(order?.price)
@@ -496,22 +547,42 @@ export const FuturesWorkstationChart = ({
             ? [{ order, y }]
             : []
         })
+      const next = layoutOrderCoordinates(coordinates, containerSize.height)
       setOrderCoordinates((previous) => {
         const unchanged = previous.length === next.length && previous.every((entry, index) => (
           futuresOrderIdentity(entry.order) === futuresOrderIdentity(next[index].order)
           && entry.order.price === next[index].order.price
+          && entry.anchorY === next[index].anchorY
           && entry.y === next[index].y
         ))
         return unchanged ? previous : next
       })
     }
-    if (typeof globalThis.requestAnimationFrame === 'function') {
-      const frame = globalThis.requestAnimationFrame(updateCoordinates)
-      return () => globalThis.cancelAnimationFrame?.(frame)
+    const scheduleUpdate = () => {
+      if (pending !== null) return
+      if (typeof globalThis.requestAnimationFrame === 'function') {
+        pending = Object.freeze({
+          kind: 'frame',
+          id: globalThis.requestAnimationFrame(updateCoordinates),
+        })
+        return
+      }
+      pending = Object.freeze({
+        kind: 'timer',
+        id: globalThis.setTimeout(updateCoordinates, 0),
+      })
     }
-    const timer = globalThis.setTimeout(updateCoordinates, 0)
-    return () => globalThis.clearTimeout(timer)
-  }, [candles, containerSize.height, ownedOrders])
+    requestOrderCoordinateRefreshRef.current = scheduleUpdate
+    scheduleUpdate()
+    return () => {
+      if (requestOrderCoordinateRefreshRef.current === scheduleUpdate) {
+        requestOrderCoordinateRefreshRef.current = NOOP_ORDER_COORDINATE_REFRESH
+      }
+      if (pending?.kind === 'frame') globalThis.cancelAnimationFrame?.(pending.id)
+      if (pending?.kind === 'timer') globalThis.clearTimeout(pending.id)
+      pending = null
+    }
+  }, [candles, containerSize.height, indexCandles, markCandles, ownedOrders])
 
   const beginOrderDrag = useCallback((event, order) => {
     if (order?.orderKind !== 'REGULAR'
@@ -600,13 +671,14 @@ export const FuturesWorkstationChart = ({
         precision={measurementPrecision}
       />
       <div className="futures-workstation-owned-order-layer" aria-label="Owned Futures orders">
-        {orderCoordinates.map(({ order, y }) => {
+        {orderCoordinates.map(({ order, y, anchorY }) => {
           const orderIdentity = futuresOrderIdentity(order)
           const preview = orderDragPreview?.orderIdentity === orderIdentity
             ? orderDragPreview
             : null
           const top = preview?.y ?? y
           const displayedPrice = preview?.price ?? order.price
+          const displaced = preview === null && Math.abs(anchorY - y) > 0.5
           const content = (
             <>
               <span>{order.orderKind === 'ALGO' ? 'ALGO · ' : ''}{order.positionSide} {order.positionEffect}</span>
@@ -616,9 +688,10 @@ export const FuturesWorkstationChart = ({
           if (order.orderKind === 'ALGO') {
             return (
               <div
-                className={`futures-workstation-owned-order is-${order.positionSide.toLowerCase()} is-algo`}
+                className={`futures-workstation-owned-order is-${order.positionSide.toLowerCase()} is-algo${displaced ? ' is-displaced' : ''}`}
                 key={orderIdentity}
                 style={{ top: `${top}px` }}
+                data-anchor-y={anchorY}
                 role="note"
                 aria-label={`ALGO ${order.positionSide} ${order.positionEffect} order at ${order.price}; price is managed by Binance and is not draggable`}
               >
@@ -629,9 +702,10 @@ export const FuturesWorkstationChart = ({
           return (
             <button
               type="button"
-              className={`futures-workstation-owned-order is-${order.positionSide.toLowerCase()}`}
+              className={`futures-workstation-owned-order is-${order.positionSide.toLowerCase()}${displaced ? ' is-displaced' : ''}`}
               key={orderIdentity}
               style={{ top: `${top}px` }}
+              data-anchor-y={anchorY}
               aria-label={`Move ${order.positionSide} ${order.positionEffect} order at ${order.price} with Ctrl or Alt drag`}
               onPointerDown={event => beginOrderDrag(event, order)}
               onPointerMove={moveOrderDrag}
@@ -647,4 +721,7 @@ export const FuturesWorkstationChart = ({
   )
 }
 
-export default FuturesWorkstationChart
+const MemoizedFuturesWorkstationChart = memo(FuturesWorkstationChart)
+MemoizedFuturesWorkstationChart.displayName = 'FuturesWorkstationChart'
+
+export default MemoizedFuturesWorkstationChart

@@ -136,7 +136,7 @@ describe('official Futures workstation market schemas', () => {
         )).toThrowError(expect.objectContaining({ code: 'INVALID_EXCHANGE_INFO_SYMBOL' }));
     });
 
-    it('normalizes the current post-algo-migration catalog without widening workstation symbols', () => {
+    it('normalizes current metadata and bounded Unicode public symbols without execution authority', () => {
         const source = JSON.parse(FUTURES_PRODUCTION_WORKSTATION_FIXTURE.catalog);
         for (const symbol of source.symbols) {
             symbol.maxMoveOrderLimit = 1_000;
@@ -170,7 +170,7 @@ describe('official Futures workstation market schemas', () => {
 
         const catalog = normalizeFuturesWorkstationExchangeInfo(
             JSON.stringify(source),
-            new Set(['BTCUSDT']),
+            new Set(['BTCUSDT', '测试测试USDT']),
         );
 
         expect(catalog.map(contract => contract.symbol)).toEqual([
@@ -178,6 +178,7 @@ describe('official Futures workstation market schemas', () => {
             'BTCUSDT_260626',
             'ETHUSDT',
             'SOLUSDT',
+            '测试测试USDT',
         ]);
         expect(catalog.find(contract => contract.symbol === 'BTCUSDT')).toMatchObject({
             allowlisted: true,
@@ -187,7 +188,37 @@ describe('official Futures workstation market schemas', () => {
             contractType: 'CURRENT_QUARTER DELIVERING',
             status: 'DELIVERING',
         });
-        expect(catalog.some(contract => contract.symbol === '测试测试USDT')).toBe(false);
+        expect(catalog.find(contract => contract.symbol === '测试测试USDT')).toMatchObject({
+            pair: '测试测试USDT',
+            baseAsset: '测试测试',
+            allowlisted: false,
+        });
+    });
+
+    it('rejects Unicode exchange identities outside scalar and UTF-8 byte bounds', () => {
+        const source = JSON.parse(FUTURES_PRODUCTION_WORKSTATION_FIXTURE.catalog);
+        source.symbols[0] = {
+            ...source.symbols[0],
+            symbol: `${'测'.repeat(17)}USDT`,
+            pair: `${'测'.repeat(17)}USDT`,
+            baseAsset: '测'.repeat(17),
+        };
+        expect(() => normalizeFuturesWorkstationExchangeInfo(
+            JSON.stringify(source),
+            new Set(),
+        )).toThrowError(expect.objectContaining({ code: 'INVALID_EXCHANGE_INFO_SYMBOL' }));
+
+        const fourByteLetter = '\u{20000}';
+        source.symbols[0] = {
+            ...source.symbols[0],
+            symbol: `${fourByteLetter.repeat(16)}USDT`,
+            pair: `${fourByteLetter.repeat(16)}USDT`,
+            baseAsset: fourByteLetter.repeat(16),
+        };
+        expect(() => normalizeFuturesWorkstationExchangeInfo(
+            JSON.stringify(source),
+            new Set(),
+        )).toThrowError(expect.objectContaining({ code: 'INVALID_EXCHANGE_INFO_SYMBOL' }));
     });
 
     it('rejects malformed current filter metadata and the superseded symbol field name', () => {

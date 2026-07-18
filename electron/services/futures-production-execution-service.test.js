@@ -139,6 +139,7 @@ class FakeLedger {
         return [...latest.values()].filter(record => ![
             'locally_rejected',
             'exchange_rejected',
+            'confirmed_open',
             'confirmed_filled',
             'confirmed_canceled',
             'confirmed_closed',
@@ -165,6 +166,7 @@ const exchangeInfo = {
             { filterType: 'PRICE_FILTER', minPrice: '1', maxPrice: '1000000', tickSize: '0.1' },
             { filterType: 'PERCENT_PRICE', multiplierUp: '2', multiplierDown: '0.5' },
             { filterType: 'LOT_SIZE', minQty: '0.001', maxQty: '100', stepSize: '0.001' },
+            { filterType: 'MARKET_LOT_SIZE', minQty: '0.001', maxQty: '100', stepSize: '0.001' },
             { filterType: 'MIN_NOTIONAL', notional: '5' },
             { filterType: 'MAX_NUM_ORDERS', limit: 20 },
         ],
@@ -720,6 +722,36 @@ describe('FuturesProductionExecutionService', () => {
         await harness.service.shutdown();
     });
 
+    it('keeps a BTC order beside Unicode and delivery external orders in one snapshot', async () => {
+        const allOpenOrders = vi.fn().mockResolvedValue(result('all-open-orders', [
+            ownedOpenOrder({ orderId: '1', clientOrderId: 'btc-external' }),
+            ownedOpenOrder({
+                symbol: '币安人生USDT',
+                orderId: '2',
+                clientOrderId: 'unicode-external',
+            }),
+            ownedOpenOrder({
+                symbol: 'BTCUSDT_250926',
+                orderId: '3',
+                clientOrderId: 'delivery-external',
+            }),
+        ]));
+        const harness = createHarness({ allOpenOrders });
+
+        await harness.service.start();
+        await waitForPortfolioBootstrap(harness.service);
+
+        expect(harness.service.getStatus().portfolio.openOrders).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({ symbol: 'BTCUSDT', orderId: '1' }),
+                expect.objectContaining({ symbol: '币安人生USDT', orderId: '2' }),
+                expect.objectContaining({ symbol: 'BTCUSDT_250926', orderId: '3' }),
+            ]),
+        );
+        expect(harness.service.getStatus().portfolio.state).toBe('live');
+        await harness.service.shutdown();
+    });
+
     it('schedules reconnect before a slow REST snapshot after private socket failure', async () => {
         let resolveOpenOrders;
         const slowOpenOrders = new Promise(resolve => { resolveOpenOrders = resolve; });
@@ -740,7 +772,7 @@ describe('FuturesProductionExecutionService', () => {
             expect(harness.service.getStatus().portfolio).toMatchObject({
                 state: 'stale',
                 syncState: 'degraded',
-                syncCode: 'FUTURES_PRODUCTION_OPEN_ORDERS_ACCOUNT_STREAM_UNAVAILABLE',
+                    syncCode: 'FUTURES_PRODUCTION_ACCOUNT_STREAM_UNAVAILABLE',
                 openOrders: [expect.objectContaining({
                     clientOrderId: 'external-offline-order',
                     syncState: 'stale',
@@ -1120,6 +1152,57 @@ describe('FuturesProductionExecutionService', () => {
         await harness.service.shutdown();
     });
 
+    it('retries a failed targeted account refresh without a full order resnapshot', async () => {
+        let streamCallbacks = null;
+        let rejectNextBalance = false;
+        const balance = vi.fn(() => {
+            if (rejectNextBalance) {
+                rejectNextBalance = false;
+                return Promise.reject(new Error('targeted balance unavailable'));
+            }
+            return Promise.resolve(result('balance-v3', validProductionBalance()));
+        });
+        const allOpenOrders = vi.fn().mockResolvedValue(result('all-open-orders', []));
+        const allOpenAlgoOrders = vi.fn().mockResolvedValue(result('all-open-algo-orders', []));
+        const connectUserDataStream = vi.fn((callbacks) => {
+            streamCallbacks = callbacks;
+            return { ready: Promise.resolve(true), close: vi.fn() };
+        });
+        const harness = createHarness({
+            allOpenAlgoOrders,
+            allOpenOrders,
+            balance,
+            connectUserDataStream,
+        });
+
+        await harness.service.start();
+        await waitForPortfolioBootstrap(harness.service);
+        const baselineBalance = balance.mock.calls.length;
+        const baselineRegular = allOpenOrders.mock.calls.length;
+        const baselineAlgo = allOpenAlgoOrders.mock.calls.length;
+        rejectNextBalance = true;
+
+        streamCallbacks.onMessage(JSON.stringify({ e: 'ACCOUNT_UPDATE' }));
+        const eventTimer = [...harness.timers].reverse().find(timer => timer.delay === 100);
+        eventTimer.callback();
+        await vi.waitFor(() => expect(balance).toHaveBeenCalledTimes(baselineBalance + 1));
+        expect(harness.service.getStatus().portfolio).toMatchObject({
+            state: 'stale',
+            syncCode: 'FUTURES_PRODUCTION_ACCOUNT_STATE_REFRESH_UNAVAILABLE',
+        });
+        expect(allOpenOrders).toHaveBeenCalledTimes(baselineRegular);
+        expect(allOpenAlgoOrders).toHaveBeenCalledTimes(baselineAlgo);
+
+        const targetedRetry = [...harness.timers].reverse().find(timer => timer.delay === 2_000);
+        expect(targetedRetry).toBeDefined();
+        targetedRetry.callback();
+        await vi.waitFor(() => expect(balance).toHaveBeenCalledTimes(baselineBalance + 2));
+        await vi.waitFor(() => expect(harness.service.getStatus().portfolio.state).toBe('live'));
+        expect(allOpenOrders).toHaveBeenCalledTimes(baselineRegular);
+        expect(allOpenAlgoOrders).toHaveBeenCalledTimes(baselineAlgo);
+        await harness.service.shutdown();
+    });
+
     it('keeps amendment disabled when targeted account refresh follows a failed order snapshot', async () => {
         let streamCallbacks = null;
         const externalOrder = ownedOpenOrder({
@@ -1372,7 +1455,7 @@ describe('FuturesProductionExecutionService', () => {
             },
             portfolio: {
                 state: 'stale',
-                syncCode: 'FUTURES_PRODUCTION_OPEN_ORDERS_ACCOUNT_IDENTITY_REJECTED',
+                syncCode: 'FUTURES_PRODUCTION_ACCOUNT_IDENTITY_REJECTED',
             },
         });
         expect(harness.coordinator.executeProduction).not.toHaveBeenCalled();
@@ -1473,6 +1556,112 @@ describe('FuturesProductionExecutionService', () => {
             await harness.service.shutdown();
         },
     );
+
+    it('amends a partial fill with TOTAL exchange quantity and REMAINING risk quantity', async () => {
+        let currentPrice = '70000.0';
+        const openOrders = vi.fn().mockResolvedValue(result('open-orders', [ownedOpenOrder({
+            origQty: '1.000',
+            executedQty: '0.950',
+            status: 'PARTIALLY_FILLED',
+        })]));
+        const query = vi.fn(() => Promise.resolve(result('query-order', order({
+            status: 'PARTIALLY_FILLED',
+            originalQuantity: '1.000',
+            executedQuantity: '0.950',
+            averagePrice: '70000',
+            price: currentPrice,
+        }))));
+        const modifyOrder = vi.fn((args) => {
+            currentPrice = args.price;
+            return Promise.resolve(result('modify-limit-order', order({
+                status: 'PARTIALLY_FILLED',
+                originalQuantity: args.quantity,
+                executedQuantity: '0.950',
+                averagePrice: '70000',
+                price: args.price,
+            })));
+        });
+        const openAlgoOrders = vi.fn().mockResolvedValue(result(
+            'open-algo-orders',
+            [externalAlgoOrder()],
+        ));
+        const positionRisk = vi.fn(symbol => result('position-risk', [
+            {
+                symbol,
+                positionSide: 'LONG',
+                positionAmt: '0.050',
+                liquidationPrice: '50000',
+                isolatedMargin: '35000',
+                marginAsset: 'USDT',
+            },
+            {
+                symbol,
+                positionSide: 'SHORT',
+                positionAmt: '0',
+                liquidationPrice: '0',
+                isolatedMargin: '0',
+                marginAsset: 'USDT',
+            },
+        ]));
+        const exchangeInfoAtLimit = structuredClone(exchangeInfo);
+        exchangeInfoAtLimit.symbols[0].filters.find(
+            filter => filter.filterType === 'MAX_NUM_ORDERS',
+        ).limit = 2;
+        const evaluateRisk = vi.fn(evaluateFuturesProductionExecutionRisk);
+        const harness = createHarness({
+            evaluateRisk,
+            exchangeInfoValue: exchangeInfoAtLimit,
+            modifyOrder,
+            openAlgoOrders,
+            openOrders,
+            positionRisk,
+            query,
+        });
+        const emitted = [];
+
+        await harness.service.start();
+        await subscribe(harness.service, emitted);
+        await waitForPortfolioBootstrap(harness.service);
+        await harness.service.handleRequest(command(
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_ORDER_AMENDMENT_INTENT,
+            harness.service.getStatus().revision,
+            {
+                symbol: 'BTCUSDT',
+                positionSide: 'LONG',
+                clientOrderId: `cc7-${requestId}`,
+                price: '70100.0',
+            },
+        ), { connectionId, emit: value => emitted.push(value) });
+        const intent = emitted.at(-1).intent;
+        await harness.service.handleRequest(command(
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.AMEND_ORDER,
+            intent.revision,
+            {
+                requestId: intent.requestId,
+                confirmation: FUTURES_PRODUCTION_EXECUTION_CONFIRMATIONS[
+                    FUTURES_PRODUCTION_EXECUTION_ACTIONS.AMEND_ORDER
+                ],
+            },
+        ), { connectionId, emit: value => emitted.push(value) });
+
+        expect(modifyOrder).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+            quantity: '1.000',
+            price: '70100.0',
+        }));
+        expect(evaluateRisk).toHaveBeenCalled();
+        expect(evaluateRisk.mock.calls.every(([input]) => (
+            input.draft.quantity === '1.000' && input.draft.riskQuantity === '0.050'
+        ))).toBe(true);
+        expect(evaluateRisk.mock.calls.every(([input]) => (
+            input.snapshot.regularOpenOrderCount === 0
+            && input.snapshot.algoOpenOrderCount === 1
+        ))).toBe(true);
+        expect(harness.service.getCurrentAttempt()).toMatchObject({
+            state: 'confirmed_order_amended',
+            acknowledgement: 'accepted',
+        });
+        await harness.service.shutdown();
+    });
 
     it('publishes a validated amendment price as pending until equal-time query confirmation', async () => {
         let queryCount = 0;
@@ -1651,6 +1840,7 @@ describe('FuturesProductionExecutionService', () => {
 
     it.each(['acknowledged', 'ambiguous-after-accept'])('%s margin POST is sent once and confirmed by exact history plus leg margin', async (mode) => {
         let adjusted = false;
+        let streamCallbacks = null;
         const positionRisk = vi.fn(symbol => result('position-risk', [
             {
                 symbol,
@@ -1692,7 +1882,12 @@ describe('FuturesProductionExecutionService', () => {
                 amount: '5',
             }));
         });
+        const connectUserDataStream = vi.fn((callbacks) => {
+            streamCallbacks = callbacks;
+            return { ready: Promise.resolve(true), close: vi.fn() };
+        });
         const harness = createHarness({
+            connectUserDataStream,
             positionRisk,
             marginHistory,
             modifyMargin,
@@ -1736,6 +1931,30 @@ describe('FuturesProductionExecutionService', () => {
             state: 'confirmed_margin_adjusted',
             code: 'FUTURES_PRODUCTION_MARGIN_ADJUSTED',
         });
+        expect(harness.service.getStatus().portfolio.positions[0].isolatedMarginUsdt)
+            .toBe('35005');
+        streamCallbacks.onMessage(JSON.stringify({
+            e: 'ORDER_TRADE_UPDATE',
+            E: 1_783_814_500_001,
+            T: 1_783_814_500_001,
+            o: {
+                s: 'BTCUSDT',
+                i: 7,
+                c: 'margin-projection-check',
+                S: 'BUY',
+                ps: 'LONG',
+                o: 'LIMIT',
+                f: 'GTC',
+                p: '65000',
+                q: '0.01',
+                z: '0',
+                x: 'NEW',
+                X: 'NEW',
+                R: false,
+                cp: false,
+                T: 1_783_814_500_001,
+            },
+        }));
         expect(harness.service.getStatus().portfolio.positions[0].isolatedMarginUsdt)
             .toBe('35005');
         const marginDispatches = harness.ledger.records.filter(record => (
@@ -2208,6 +2427,16 @@ describe('FuturesProductionExecutionService', () => {
         expect(openOrders).toHaveBeenCalledTimes(3);
         for (let index = 0; index < 10; index += 1) await Promise.resolve();
         expect(openOrders).toHaveBeenCalledTimes(3);
+        expect(harness.service.getCurrentAttempt()).toMatchObject({
+            state: 'confirmed_open',
+            acknowledgement: 'accepted',
+        });
+        expect(harness.service.getStatus()).toMatchObject({
+            recovery: { required: false, state: 'healthy' },
+            capabilities: { placeOrder: true },
+        });
+        expect(harness.ledger.getActiveOperations()).toEqual([]);
+        expect(harness.timers.some(timer => timer.delay === 60_000)).toBe(false);
         await harness.service.shutdown();
     });
 
@@ -2295,9 +2524,14 @@ describe('FuturesProductionExecutionService', () => {
         await final;
         expect(harness.service.getStatus().portfolio.openOrders).toEqual([]);
         expect(harness.service.getCurrentAttempt()).toMatchObject({
-            state: 'result_unknown',
-            acknowledgement: 'unknown',
+            state: 'exchange_rejected',
+            acknowledgement: 'rejected',
         });
+        expect(harness.service.getStatus()).toMatchObject({
+            recovery: { required: false, state: 'healthy' },
+            capabilities: { placeOrder: true },
+        });
+        expect(harness.ledger.getActiveOperations()).toEqual([]);
         await harness.service.shutdown();
     });
 
@@ -2366,6 +2600,83 @@ describe('FuturesProductionExecutionService', () => {
         expect(harness.facade.cancelAllAlgoOpenOrders).toHaveBeenCalledOnce();
         expect(harness.facade.placeHedgeMarketExitOrder).not.toHaveBeenCalled();
         expect(harness.service.getCurrentAttempt().state).toBe('confirmed_canceled');
+        await harness.service.shutdown();
+    });
+
+    it('preserves a new private-stream order that arrives inside cancel-all', async () => {
+        let streamCallbacks = null;
+        const oldOrder = ownedOpenOrder({
+            orderId: '1',
+            clientOrderId: 'cancel-target',
+            updateTime: 1_783_814_400_000,
+        });
+        const allOpenOrders = vi.fn().mockResolvedValue(result(
+            'all-open-orders',
+            [oldOrder],
+        ));
+        const openOrders = vi.fn().mockResolvedValue(result('open-orders', []));
+        const connectUserDataStream = vi.fn((callbacks) => {
+            streamCallbacks = callbacks;
+            return { ready: Promise.resolve(true), close: vi.fn() };
+        });
+        const cancelRegular = vi.fn(() => {
+            streamCallbacks.onMessage(JSON.stringify({
+                e: 'ORDER_TRADE_UPDATE',
+                E: 1_783_814_400_001,
+                T: 1_783_814_400_001,
+                o: {
+                    s: 'BTCUSDT',
+                    i: 2,
+                    c: 'arrived-during-cancel',
+                    S: 'BUY',
+                    ps: 'LONG',
+                    o: 'LIMIT',
+                    f: 'GTC',
+                    p: '65000',
+                    q: '0.01',
+                    z: '0',
+                    x: 'NEW',
+                    X: 'NEW',
+                    R: false,
+                    cp: false,
+                    T: 1_783_814_400_001,
+                },
+            }));
+            return Promise.resolve(result('cancel-all-open-orders', { acknowledged: true }));
+        });
+        const harness = createHarness({
+            allOpenOrders,
+            cancelRegular,
+            connectUserDataStream,
+            openOrders,
+        });
+        const emitted = [];
+
+        await harness.service.start();
+        await subscribe(harness.service, emitted);
+        await waitForPortfolioBootstrap(harness.service);
+        await harness.service.handleRequest(command(
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_CANCEL_ALL_OPEN_ORDERS_INTENT,
+            harness.service.getStatus().revision,
+        ), { connectionId, emit: value => emitted.push(value) });
+        const intent = emitted.at(-1).intent;
+        await harness.service.handleRequest(command(
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.CANCEL_ALL_OPEN_ORDERS,
+            intent.revision,
+            {
+                requestId: intent.requestId,
+                confirmation: FUTURES_PRODUCTION_EXECUTION_CONFIRMATIONS[
+                    FUTURES_PRODUCTION_EXECUTION_ACTIONS.CANCEL_ALL_OPEN_ORDERS
+                ],
+            },
+        ), { connectionId, emit: value => emitted.push(value) });
+
+        expect(harness.service.getStatus().portfolio.openOrders).toEqual([
+            expect.objectContaining({
+                orderId: '2',
+                clientOrderId: 'arrived-during-cancel',
+            }),
+        ]);
         await harness.service.shutdown();
     });
 
@@ -3252,7 +3563,7 @@ describe('FuturesProductionExecutionService', () => {
         await harness.service.shutdown();
     });
 
-    it('resumes confirmed-open monitoring after restart until an exact terminal result', async () => {
+    it('treats a persisted confirmed-open order as terminal without blocking restart', async () => {
         const dispatchAt = 1_783_814_400_000;
         const ledger = new FakeLedger([
             {
@@ -3283,40 +3594,21 @@ describe('FuturesProductionExecutionService', () => {
                 exchangeOrderId: '9223372036854775807',
             },
         ]);
-        const query = vi.fn()
-            .mockResolvedValueOnce(result('query-order', order({ status: 'NEW' })))
-            .mockResolvedValueOnce(result('query-order', order({ status: 'FILLED' })));
+        const query = vi.fn();
         const timers = [];
         const harness = createHarness({ ledger, query, timers });
 
         await harness.service.start();
 
         expect(harness.place).not.toHaveBeenCalled();
-        expect(query).toHaveBeenCalledOnce();
-        expect(harness.service.getCurrentAttempt()).toMatchObject({ state: 'confirmed_open' });
+        expect(query).not.toHaveBeenCalled();
+        expect(harness.service.getCurrentAttempt()).toBeNull();
         expect(harness.service.getStatus().recovery).toMatchObject({
-            required: true,
-            state: 'recovering',
+            required: false,
+            state: 'healthy',
         });
-        const monitor = timers.find(timer => timer.delay === 60_000);
-        expect(monitor).toBeDefined();
-
-        monitor.callback();
-        for (let index = 0; index < 20 && query.mock.calls.length < 2; index += 1) {
-            await Promise.resolve();
-        }
-        for (let index = 0; index < 20
-            && harness.service.getCurrentAttempt()?.state !== 'confirmed_filled'; index += 1) {
-            await Promise.resolve();
-        }
-
-        expect(query).toHaveBeenCalledTimes(2);
-        expect(harness.service.getCurrentAttempt()).toMatchObject({ state: 'confirmed_filled' });
         expect(ledger.getActiveOperations()).toEqual([]);
-        expect(ledger.records).toContainEqual(expect.objectContaining({
-            eventType: 'monitor_result',
-            state: 'confirmed_filled',
-        }));
+        expect(timers.some(timer => timer.delay === 60_000)).toBe(false);
         await harness.service.shutdown();
     });
 

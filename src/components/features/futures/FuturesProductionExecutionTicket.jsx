@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import {
   FUTURES_PRODUCTION_EXECUTION_ACKNOWLEDGEMENTS,
   FUTURES_PRODUCTION_EXECUTION_ACTIONS,
@@ -111,13 +111,14 @@ const deriveExecutionReadiness = ({
   if (!hasSymbolMetadata) return Object.freeze({
     tone: 'attention', label: 'METADATA', reason: 'Binance symbol metadata is unavailable — retry the contract refresh.',
   })
-  if (typeof portfolio?.availableBalanceUsdt !== 'string') return Object.freeze({
+  if (positionEffect !== 'EXIT'
+    && typeof portfolio?.availableBalanceUsdt !== 'string') return Object.freeze({
     tone: 'loading', label: 'BALANCE', reason: 'Available Futures balance is pending — wait for private account sync.',
   })
   if (backendLocked) return Object.freeze({
     tone: 'loading', label: 'SENDING', reason: 'An execution request is awaiting an authoritative result.',
   })
-  if (killSwitch?.engaged === true) return Object.freeze({
+  if (killSwitch?.engaged === true && positionEffect !== 'EXIT') return Object.freeze({
     tone: 'attention', label: 'LOCKED', reason: 'New exposure is locked — use Advanced safety to arm execution.',
   })
   if (transportReady && capabilities?.placeOrder === true) {
@@ -310,10 +311,13 @@ const FuturesProductionExecutionTicket = ({
   const sizingReady = typeof sizingBudget === 'string'
     && sizingBudget !== '0'
     && isExactPositiveDecimal(sizingBudget)
-  const displayedSizePercent = sizingReady ? sizePercent : 0
   const notionalUsdt = customNotionalUsdt
     ?? calculateFuturesNotionalForPercent(sizingBudget, sizePercent)
     ?? ''
+  const currentSizePercent = customNotionalUsdt === null
+    ? sizePercent
+    : calculateFuturesNotionalPercent(customNotionalUsdt, sizingBudget) ?? 0
+  const displayedSizePercent = sizingReady ? currentSizePercent : 0
   const tickSize = selectedContract?.filters?.price?.tickSize
   const stepSize = selectedContract?.filters?.quantity?.stepSize
   const minQuantity = selectedContract?.filters?.quantity?.min
@@ -526,7 +530,6 @@ const FuturesProductionExecutionTicket = ({
 
   const handleNotionalChange = value => {
     setCustomNotionalUsdt(value)
-    setSizePercent(calculateFuturesNotionalPercent(value, sizingBudget) ?? 0)
   }
 
   const selectSizePercent = value => {
@@ -644,7 +647,7 @@ const FuturesProductionExecutionTicket = ({
               <span>
                 <span>Size</span>
                 <output aria-live="polite">
-                  <strong>{sizingReady ? `${sizePercent}%` : '—%'}</strong>
+                  <strong>{sizingReady ? `${displayedSizePercent}%` : '—%'}</strong>
                   <b>{notionalUsdt ? `${notionalUsdt} USDT` : '— USDT'}</b>
                 </output>
               </span>
@@ -665,7 +668,7 @@ const FuturesProductionExecutionTicket = ({
                 <button
                   type="button"
                   key={value}
-                  className={sizingReady && sizePercent === value ? 'is-selected' : ''}
+                  className={sizingReady && displayedSizePercent === value ? 'is-selected' : ''}
                   disabled={!sizingReady}
                   onClick={() => selectSizePercent(value)}
                 >
@@ -894,5 +897,8 @@ const FuturesProductionExecutionTicket = ({
   )
 }
 
-export default FuturesProductionExecutionTicket
+const MemoizedFuturesProductionExecutionTicket = memo(FuturesProductionExecutionTicket)
+MemoizedFuturesProductionExecutionTicket.displayName = 'FuturesProductionExecutionTicket'
+
+export default MemoizedFuturesProductionExecutionTicket
 export { FuturesProductionExecutionTicket }

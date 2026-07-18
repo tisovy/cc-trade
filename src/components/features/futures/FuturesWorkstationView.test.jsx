@@ -2,21 +2,48 @@ import { createEvent, fireEvent, render, screen, within } from '@testing-library
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import FuturesWorkstationView from './FuturesWorkstationView.jsx'
 import FuturesProductionWorkstation from './FuturesProductionWorkstation.jsx'
+import FuturesProductionExecutionTicket from './FuturesProductionExecutionTicket.jsx'
 
-vi.mock('./FuturesWorkstationChart.jsx', () => ({
-  default: ({ onPricePick, onTradingGesture, priceTickSize, draftPrice, drawings, alerts }) => (
-    <div data-testid="mock-futures-chart">
-      <button type="button" onClick={() => onPricePick('58420.25')}>Pick chart price</button>
-      <button type="button" onClick={() => onTradingGesture?.({
-        side: 'BUY', positionSide: 'LONG', positionEffect: 'ENTRY', price: '58420.25', source: 'chart',
-      })}>Chart LONG shortcut</button>
-      <span>price tick {priceTickSize ?? 'unavailable'}</span>
-      <span>draft {draftPrice ?? 'none'}</span>
-      <span>drawings {drawings.length}</span>
-      <span>alerts {alerts.length}</span>
-    </div>
-  ),
+const workstationViewMocks = vi.hoisted(() => ({
+  chartRender: vi.fn(),
+  ticketRender: vi.fn(),
 }))
+
+vi.mock('./FuturesWorkstationChart.jsx', async () => {
+  const { memo } = await import('react')
+  const MockFuturesWorkstationChart = (
+    { onPricePick, onTradingGesture, priceTickSize, draftPrice, drawings, alerts },
+  ) => {
+    workstationViewMocks.chartRender()
+    return (
+      <div data-testid="mock-futures-chart">
+        <button type="button" onClick={() => onPricePick('58420.25')}>Pick chart price</button>
+        <button type="button" onClick={() => onTradingGesture?.({
+          side: 'BUY', positionSide: 'LONG', positionEffect: 'ENTRY', price: '58420.25', source: 'chart',
+        })}>Chart LONG shortcut</button>
+        <span>price tick {priceTickSize ?? 'unavailable'}</span>
+        <span>draft {draftPrice ?? 'none'}</span>
+        <span>drawings {drawings.length}</span>
+        <span>alerts {alerts.length}</span>
+      </div>
+    )
+  }
+  return { default: memo(MockFuturesWorkstationChart) }
+})
+
+vi.mock('./FuturesProductionExecutionTicket.jsx', async () => {
+  const { memo } = await import('react')
+  const MockFuturesProductionExecutionTicket = () => {
+    workstationViewMocks.ticketRender()
+    return (
+      <aside aria-label="USDⓈ-M production real-order execution">
+        <span>CONFIG SYNC · HEDGE</span>
+        <span>Advanced safety</span>
+      </aside>
+    )
+  }
+  return { default: memo(MockFuturesProductionExecutionTicket) }
+})
 
 const filters = Object.freeze({
   price: Object.freeze({ min: '0.1', max: '1000000', tickSize: '0.1' }),
@@ -388,6 +415,25 @@ describe('pure Futures workstation presentation', () => {
       .toHaveTextContent('reason INVALID_PROXY_CONFIGURATION')
   })
 
+  it('keeps Contracts and offers a compact Retry after reconnect exhaustion', () => {
+    const onRetry = vi.fn()
+    renderView({
+      state: createState({
+        status: 'unavailable',
+        reasonCode: 'RECONNECT_EXHAUSTED',
+      }),
+      onRetry,
+    })
+
+    expect(screen.getByRole('button', { name: /^BTCUSDT/ })).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      'Contracts stream stopped after repeated reconnect failures.',
+    )
+    expect(screen.queryByText('No matching USDⓈ-M contract.')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(onRetry).toHaveBeenCalledOnce()
+  })
+
   it('keeps independently live widgets usable while aggregate recovery remains visible', () => {
     const state = createState({ status: 'resynchronizing' })
     renderView({ state })
@@ -398,6 +444,27 @@ describe('pure Futures workstation presentation', () => {
     expect(screen.queryByText('RESYNCHRONIZING', { selector: '.futures-workstation-overlay strong' }))
       .not.toBeInTheDocument()
     expect(screen.getByTestId('futures-workstation-identity')).toHaveTextContent('RESYNCHRONIZING')
+  })
+
+  it('preserves Contracts but gates stale symbol-owned market data and gestures', () => {
+    const onTradingGesture = vi.fn()
+    renderView({
+      state: createState({ symbol: 'BTCUSDT', reasonCode: 'OLD_SYMBOL_REASON' }),
+      selectedSymbol: 'ETHUSDT',
+      onTradingGesture,
+    })
+
+    expect(screen.getAllByRole('button', { name: /BTCUSDT|ETHUSDT/ })).not.toHaveLength(0)
+    expect(screen.getByLabelText('Futures market header')).toHaveTextContent('ETHUSDT')
+    expect(screen.getByLabelText('Futures market header')).not.toHaveTextContent('58420.25')
+    expect(screen.queryByRole('button', { name: /^58420\.(?:00|50)/ })).not.toBeInTheDocument()
+    expect(screen.getByTestId('futures-workstation-identity')).toHaveTextContent('LOADING')
+    expect(screen.queryByLabelText('Futures workstation reason')).not.toBeInTheDocument()
+    expect(screen.getByText('LOADING', { selector: '.futures-workstation-overlay strong' }))
+      .toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Chart LONG shortcut' }))
+    expect(onTradingGesture).not.toHaveBeenCalled()
   })
 
   it('resets display-only drafts, drawings, alerts and paused tape on selection ownership change', () => {
@@ -506,6 +573,68 @@ const productionExecutionState = Object.freeze({
 })
 
 describe('production workstation container', () => {
+  it('adds no chart or execution-ticket render for a depth-only workstation commit', () => {
+    const initialState = createState()
+    const stableProperties = {
+      identity: 'USDⓈ-M PRODUCTION · REAL MONEY',
+      selectedSymbol: 'BTCUSDT',
+      selectedInterval: '1m',
+      onDraftPriceChange: vi.fn(),
+      onTradingGesture: vi.fn(),
+      onOrderDrag: vi.fn(),
+      onSymbolChange: vi.fn(),
+      onIntervalChange: vi.fn(),
+    }
+    const workstation = currentState => (
+      <FuturesWorkstationView
+        {...stableProperties}
+        state={currentState}
+        tradingRail={(
+          <FuturesProductionExecutionTicket
+            state={productionExecutionState}
+            selectedSymbol="BTCUSDT"
+          />
+        )}
+      />
+    )
+    const { rerender } = render(workstation(initialState))
+    const initialChartRenders = workstationViewMocks.chartRender.mock.calls.length
+    const initialTicketRenders = workstationViewMocks.ticketRender.mock.calls.length
+    const nextState = createState({
+      revision: initialState.revision + 1,
+      resources: Object.freeze({
+        ...initialState.resources,
+        depth: Object.freeze({
+          ...initialState.resources.depth,
+          bids: Object.freeze([
+            Object.freeze({ price: '58419.50', quantity: '4', total: '4' }),
+          ]),
+        }),
+      }),
+    })
+
+    rerender(workstation(nextState))
+
+    expect(screen.getByRole('button', { name: /^58419\.50/ })).toBeInTheDocument()
+    expect(workstationViewMocks.chartRender).toHaveBeenCalledTimes(initialChartRenders)
+    expect(workstationViewMocks.ticketRender).toHaveBeenCalledTimes(initialTicketRenders)
+  })
+
+  it('does not rerender the chart for an equivalent parent render', () => {
+    const properties = {
+      enabled: false,
+      wsConnection: null,
+      sendMessage: () => false,
+      executionState: productionExecutionState,
+    }
+    const { rerender } = render(<FuturesProductionWorkstation {...properties} />)
+    const initialChartRenders = workstationViewMocks.chartRender.mock.calls.length
+
+    rerender(<FuturesProductionWorkstation {...properties} />)
+
+    expect(workstationViewMocks.chartRender).toHaveBeenCalledTimes(initialChartRenders)
+  })
+
   it('places the symbol-config-aware Hedge ticket in the market rail and removes the old drawer', () => {
     render(
       <FuturesProductionWorkstation
