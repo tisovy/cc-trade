@@ -355,7 +355,10 @@ if (!/\bBUILD_MODE=smoke\b/.test(packageManifest.scripts?.['e:smoke'] ?? '')
     || !smokeMain.includes("await import('./main.js')")
     || !smokeMain.includes('SAFE_SMOKE_READY')
     || !smokeMain.includes('authenticatedLoopback: true')
-    || !smokeMain.includes('reactRootRendered: true')) {
+    || !smokeMain.includes('reactRootRendered: true')
+    || !smokeMain.includes('futuresReady: true')
+    || !smokeMain.includes('futuresSliderEnabled: true')
+    || !smokeMain.includes('externalFuturesOrderVisible: true')) {
     fail('npm run e:smoke must verify the production UI after fake-only environment/network setup');
 }
 

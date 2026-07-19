@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
     FUTURES_PRODUCTION_EXECUTION_CONFIG_CODES,
@@ -11,6 +12,10 @@ import {
 } from './futures-production-execution-config.js';
 
 const API_KEY = 'production-key-for-deterministic-fake-only-tests';
+const operatorRunbook = readFileSync(
+    'docs/futures_phase7_live_operator_runbook.md',
+    'utf8',
+);
 
 const validEnvironment = () => ({
     [FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.ENABLED]: 'true',
@@ -37,6 +42,15 @@ const validEnvironment = () => ({
 });
 
 describe('captureFuturesProductionExecutionConfig', () => {
+    it('keeps the operator runbook aligned with the compiled Hedge Isolated 2x profile', () => {
+        expect(operatorRunbook).toContain('FUTURES_PRODUCTION_EXECUTION_MAX_LEVERAGE=2');
+        expect(operatorRunbook).toContain(
+            'ARM LIVE FUTURES HEDGE ISOLATED 2X 10 USDT 50 USDT DAILY',
+        );
+        expect(operatorRunbook).not.toContain('FUTURES_PRODUCTION_EXECUTION_MAX_LEVERAGE=1');
+        expect(operatorRunbook).not.toContain('ARM LIVE FUTURES 1X');
+    });
+
     it('requires the explicit non-environment authorization in addition to every operator gate', () => {
         const environment = validEnvironment();
         const config = captureFuturesProductionExecutionConfig({ environment });

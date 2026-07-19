@@ -70,6 +70,9 @@ describe('Electron futures production execution composition boundaries', () => {
     expect(recovery).toBeGreaterThan(ready)
     expect(window).toBeGreaterThan(recovery)
     expect(productionMain).toContain("throw new Error('FUTURES_PRODUCTION_OPERATOR_ACTION_BLOCKED')")
+    expect(productionMain).toContain(
+      "throw new Error('FUTURES_PRODUCTION_OPERATOR_ACTION_UNAVAILABLE_IN_VERIFICATION')",
+    )
   })
 
   it('scrubs and force-disables E2E production while blocking exact production sockets', () => {

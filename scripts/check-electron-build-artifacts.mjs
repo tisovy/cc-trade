@@ -4,6 +4,8 @@ import path from 'node:path';
 const root = path.resolve(process.cwd());
 const outputDirectory = path.join(root, 'dist-electron');
 const expectedArtifacts = new Set(['main.js', 'preload.cjs']);
+const buildMode = process.argv[2] ?? 'normal';
+const supportedBuildModes = new Set(['normal', 'e2e']);
 const retiredImplementationSignatures = Object.freeze([
     'futuresReadEnvironment',
     'FUTURES_READ_CHANNEL_ID',
@@ -11,6 +13,15 @@ const retiredImplementationSignatures = Object.freeze([
     'FUTURES_TESTNET_WORKSTATION_CHANNEL_ID',
     'reviewed-testnet-public-read',
 ]);
+const verificationRuntimeImplementationSignatures = Object.freeze([
+    'e2e-mocked-account',
+    'FUTURES_PRODUCTION_E2E_CONFIRMED',
+    'external-desktop-order-1',
+]);
+
+if (!supportedBuildModes.has(buildMode)) {
+    throw new Error(`Unsupported Electron build artifact mode: ${buildMode}`);
+}
 
 const files = [];
 const visit = async (directory) => {
@@ -56,4 +67,25 @@ if (leakedSignatures.length > 0) {
     throw new Error(`Retired Futures implementation leaked into Electron build: ${leakedSignatures.join(', ')}`);
 }
 
-console.log(`Electron build artifact boundary passed (${files.length} files)`);
+const verificationRuntimeImplementationMatches = verificationRuntimeImplementationSignatures.filter(
+    signature => mainSource.includes(signature) || preloadSource.includes(signature),
+);
+const verificationRuntimeModeMatches = mainSource.match(/e2e-in-memory-only/g)?.length ?? 0;
+if (buildMode === 'normal'
+    && (verificationRuntimeImplementationMatches.length > 0
+        || verificationRuntimeModeMatches !== 1)) {
+    throw new Error(
+        `Verification execution leaked into normal Electron build: ${[
+            ...verificationRuntimeImplementationMatches,
+            `e2e-in-memory-only×${verificationRuntimeModeMatches}`,
+        ].join(', ')}`,
+    );
+}
+if (buildMode === 'e2e'
+    && (verificationRuntimeImplementationMatches.length
+        !== verificationRuntimeImplementationSignatures.length
+        || verificationRuntimeModeMatches < 2)) {
+    throw new Error('E2E Electron build is missing its in-memory execution runtime');
+}
+
+console.log(`Electron ${buildMode} build artifact boundary passed (${files.length} files)`);

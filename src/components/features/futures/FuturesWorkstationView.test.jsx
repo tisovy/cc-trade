@@ -37,7 +37,7 @@ vi.mock('./FuturesProductionExecutionTicket.jsx', async () => {
     workstationViewMocks.ticketRender()
     return (
       <aside aria-label="USDⓈ-M production real-order execution">
-        <span>CONFIG SYNC · HEDGE</span>
+        <span>CONFIG SYNC</span>
         <span>Advanced safety</span>
       </aside>
     )
@@ -635,7 +635,7 @@ describe('production workstation container', () => {
     expect(workstationViewMocks.chartRender).toHaveBeenCalledTimes(initialChartRenders)
   })
 
-  it('places the symbol-config-aware Hedge ticket in the market rail and removes the old drawer', () => {
+  it('places the compact execution ticket in the market rail and removes the old drawer', () => {
     render(
       <FuturesProductionWorkstation
         enabled={false}
@@ -645,7 +645,7 @@ describe('production workstation container', () => {
       />,
     )
     expect(screen.queryByText('Phase 7 production safety drawer')).not.toBeInTheDocument()
-    expect(screen.getByText('CONFIG SYNC · HEDGE')).toBeInTheDocument()
+    expect(screen.getByText('CONFIG SYNC')).toBeInTheDocument()
     expect(screen.getByText('Advanced safety')).toBeInTheDocument()
     expect(screen.getByLabelText('USDⓈ-M production real-order execution')).toBeInTheDocument()
   })

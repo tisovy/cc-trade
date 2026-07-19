@@ -15,21 +15,33 @@ describe('Vite Electron development configuration', () => {
     expect(selectFuturesWorkstationCompositionAliases({})).toEqual([])
   })
 
-  it.each(['safe-dev', 'smoke', 'e2e'])(
-    'pins %s to separately named deterministic workstation compositions',
+  it.each(['safe-dev', 'smoke'])(
+    'pins %s to deterministic public and in-memory execution compositions',
     (buildMode) => {
       const aliases = selectFuturesWorkstationCompositionAliases({ buildMode })
 
-      expect(aliases).toHaveLength(1)
+      expect(aliases).toHaveLength(2)
       expect(aliases[0].replacement)
         .toContain('futures-production-workstation-verification-composition.js')
+      expect(aliases[1].replacement)
+        .toContain('futures-production-execution-runtime-verification-composition.js')
     },
   )
 
-  it('pins Vitest to deterministic workstations without a runtime mode option', () => {
+  it('keeps E2E on its explicit main-process runtime injection', () => {
+    const aliases = selectFuturesWorkstationCompositionAliases({ buildMode: 'e2e' })
+
+    expect(aliases).toHaveLength(1)
+    expect(aliases[0].replacement)
+      .toContain('futures-production-workstation-verification-composition.js')
+  })
+
+  it('does not let ambient Vitest inject execution into a nominal normal build', () => {
     const aliases = selectFuturesWorkstationCompositionAliases({ isVitest: true })
 
     expect(aliases).toHaveLength(1)
+    expect(aliases[0].replacement)
+      .toContain('futures-production-workstation-verification-composition.js')
     expect(config.resolve.alias).toHaveLength(1)
   })
 })

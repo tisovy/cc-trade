@@ -7,6 +7,9 @@ import {
   captureFuturesProductionExecutionConfig,
 } from './services/futures-production-execution-config.js'
 import {
+  createFuturesProductionExecutionVerificationRuntime,
+} from './services/futures-production-execution-runtime-composition.js'
+import {
   FUTURES_PRODUCTION_LIVE_AUTHORIZED,
 } from './services/futures-production-execution-composition.js'
 import {
@@ -59,8 +62,12 @@ const futuresProductionSecretValues = [
   process.env.FUTURES_PRODUCTION_API_SECRET,
   process.env.FUTURES_PRODUCTION_RECOVERY_AUTHORIZATION,
 ]
+const futuresProductionExecutionVerificationRuntime = (
+  createFuturesProductionExecutionVerificationRuntime()
+)
 const futuresProductionExecutionConfig = captureFuturesProductionExecutionConfig({
   liveAuthorized: FUTURES_PRODUCTION_LIVE_AUTHORIZED,
+  forceDisabled: futuresProductionExecutionVerificationRuntime !== null,
 })
 const futuresProductionOperatorStartup = captureFuturesProductionOperatorStartupAction()
 installFuturesProductionExecutionLogSanitizer({
@@ -259,6 +266,10 @@ app.whenReady().then(async () => {
     && !futuresProductionOperatorStartup.valid) {
     throw new Error(futuresProductionOperatorStartup.code)
   }
+  if (futuresProductionOperatorStartup.requested
+    && futuresProductionExecutionVerificationRuntime !== null) {
+    throw new Error('FUTURES_PRODUCTION_OPERATOR_ACTION_UNAVAILABLE_IN_VERIFICATION')
+  }
 
   let futuresProductionExecutionKeyProtection = null
   try {
@@ -280,6 +291,9 @@ app.whenReady().then(async () => {
         : 'futures-production-execution-development',
       'v1',
     ),
+    ...(futuresProductionExecutionVerificationRuntime === null ? {} : {
+      futuresProductionExecutionRuntime: futuresProductionExecutionVerificationRuntime,
+    }),
   })
   if (futuresProductionOperatorStartup.requested) {
     const futuresProductionRuntime = await binanceController.productionExecutionReady

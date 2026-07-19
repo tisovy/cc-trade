@@ -240,6 +240,20 @@ test('Futures Live is ready, keeps contracts visible and executes only mocked ge
         await expect(chart).not.toContainText(/\bLIMIT\b/);
         await expect(mainWindow.locator('.futures-workstation-chart [aria-label*="LIMIT"]'))
             .toHaveCount(0);
+        const chartBox = await chart.boundingBox();
+        expect(chartBox).not.toBeNull();
+        await chart.click({
+            modifiers: ['Shift'],
+            position: { x: 80, y: 120 },
+        });
+        await mainWindow.mouse.move(chartBox.x + 240, chartBox.y + 180);
+        const measurement = mainWindow.locator('.measurement-info-box');
+        await expect(measurement).toBeVisible();
+        await mainWindow.mouse.move(chartBox.x - 8, chartBox.y - 8);
+        await expect(measurement).toBeVisible();
+        await attachScreenshot(mainWindow, testInfo, 'futures-shift-ruler-persistent');
+        await chart.click({ position: { x: 240, y: 180 } });
+        await expect(measurement).toHaveCount(0);
         await attachScreenshot(mainWindow, testInfo, 'futures-ready-desktop');
 
         await mainWindow.setViewportSize({ width: 540, height: 760 });

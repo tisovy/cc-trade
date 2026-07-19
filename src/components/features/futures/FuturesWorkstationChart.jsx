@@ -61,6 +61,7 @@ const CANONICAL_NONNEGATIVE_DECIMAL = /^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/
 const ORDER_HANDLE_HALF_HEIGHT = 11
 const ORDER_HANDLE_GAP = 24
 const NOOP_ORDER_COORDINATE_REFRESH = () => {}
+const EMPTY_CLICK_CANDIDATE = Object.freeze({ at: 0, x: 0, y: 0, modifier: null })
 
 const createPriceFormat = (tickSize) => {
   if (typeof tickSize !== 'string'
@@ -149,6 +150,7 @@ export const FuturesWorkstationChart = ({
   onTradingGesture,
   onOrderDrag,
 }) => {
+  const measurementGeneration = useMemo(() => Symbol(symbol), [symbol])
   const containerRef = useRef(null)
   const chartRef = useRef(null)
   const seriesRef = useRef(null)
@@ -160,8 +162,10 @@ export const FuturesWorkstationChart = ({
   const hasFittedContentRef = useRef(false)
   const rowStateRef = useRef({ contract: null, mark: null, index: null })
   const measurementRef = useRef(null)
-  const lastLeftClickRef = useRef({ at: 0, x: 0, y: 0, modifier: null })
-  const lastRightClickRef = useRef({ at: 0, x: 0, y: 0, modifier: null })
+  const measurementGenerationRef = useRef(measurementGeneration)
+  const ignoreNextLeftClickRef = useRef(false)
+  const lastLeftClickRef = useRef(EMPTY_CLICK_CANDIDATE)
+  const lastRightClickRef = useRef(EMPTY_CLICK_CANDIDATE)
   const orderDragRef = useRef(null)
   const requestOrderCoordinateRefreshRef = useRef(NOOP_ORDER_COORDINATE_REFRESH)
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 })
@@ -183,16 +187,21 @@ export const FuturesWorkstationChart = ({
 
   useEffect(() => {
     symbolRef.current = symbol
+    measurementGenerationRef.current = measurementGeneration
     hasFittedContentRef.current = false
     rowStateRef.current = { contract: null, mark: null, index: null }
-    lastLeftClickRef.current = { at: 0, x: 0, y: 0, modifier: null }
-    lastRightClickRef.current = { at: 0, x: 0, y: 0, modifier: null }
+    ignoreNextLeftClickRef.current = false
+    lastLeftClickRef.current = EMPTY_CLICK_CANDIDATE
+    lastRightClickRef.current = EMPTY_CLICK_CANDIDATE
     orderDragRef.current = null
     measurementRef.current = null
-  }, [symbol])
+  }, [measurementGeneration, symbol])
 
   const cancelMeasurement = useCallback(() => {
     measurementRef.current = null
+    ignoreNextLeftClickRef.current = false
+    lastLeftClickRef.current = EMPTY_CLICK_CANDIDATE
+    lastRightClickRef.current = EMPTY_CLICK_CANDIDATE
     setMeasurement(null)
   }, [])
 
@@ -248,13 +257,6 @@ export const FuturesWorkstationChart = ({
       priceLineVisible: false,
       lastValueVisible: false,
     })
-    const handleClick = (parameter) => {
-      if (!parameter?.point) return
-      const price = contractSeries.coordinateToPrice(parameter.point.y)
-      if (typeof price === 'number' && Number.isFinite(price) && price > 0) {
-        onPricePickRef.current?.(toDraftString(price))
-      }
-    }
     const pointFromEvent = (event) => {
       const rect = container.getBoundingClientRect()
       const x = event.clientX - rect.left
@@ -292,7 +294,59 @@ export const FuturesWorkstationChart = ({
       })
       return true
     }
+    const startMeasurement = (event) => {
+      const point = pointFromEvent(event)
+      if (!point) return false
+      event.preventDefault()
+      event.stopPropagation()
+      lastLeftClickRef.current = EMPTY_CLICK_CANDIDATE
+      lastRightClickRef.current = EMPTY_CLICK_CANDIDATE
+      measurementRef.current = { start: point, current: point }
+      setMeasurement({
+        symbol: symbolRef.current,
+        generation: measurementGenerationRef.current,
+        projection: {
+          startX: point.x,
+          currentX: point.x,
+          startY: point.y,
+          currentY: point.y,
+          deltaPrice: 0,
+          deltaPercent: 0,
+          deltaTime: 0,
+        },
+      })
+      return true
+    }
+    const handleMouseDown = (event) => {
+      if (event.button !== 0) return
+      if (measurementRef.current) {
+        event.preventDefault()
+        event.stopPropagation()
+        cancelMeasurement()
+        ignoreNextLeftClickRef.current = true
+        return
+      }
+      if (event.shiftKey && startMeasurement(event)) {
+        ignoreNextLeftClickRef.current = true
+      }
+    }
     const handleLeftClick = (event) => {
+      if (ignoreNextLeftClickRef.current) {
+        ignoreNextLeftClickRef.current = false
+        event.preventDefault()
+        event.stopPropagation()
+        return
+      }
+      if (measurementRef.current) {
+        event.preventDefault()
+        event.stopPropagation()
+        cancelMeasurement()
+        return
+      }
+      if (event.shiftKey) {
+        startMeasurement(event)
+        return
+      }
       const intent = resolveFuturesTradingGesture({
         button: 'left',
         altKey: event.altKey,
@@ -301,7 +355,10 @@ export const FuturesWorkstationChart = ({
         shiftKey: event.shiftKey,
       })
       if (!intent || !isFuturesTradingGestureTarget(event.target)) {
-        lastLeftClickRef.current = { at: 0, x: 0, y: 0, modifier: null }
+        lastLeftClickRef.current = EMPTY_CLICK_CANDIDATE
+        lastRightClickRef.current = EMPTY_CLICK_CANDIDATE
+        const point = pointFromEvent(event)
+        if (point) onPricePickRef.current?.(toDraftString(point.price))
         return
       }
       const modifier = event.altKey ? 'alt' : 'ctrl'
@@ -309,15 +366,23 @@ export const FuturesWorkstationChart = ({
         at: Date.now(), x: event.clientX, y: event.clientY, modifier,
       }
       const previous = lastLeftClickRef.current
+      lastRightClickRef.current = EMPTY_CLICK_CANDIDATE
       lastLeftClickRef.current = current
       if (current.at - previous.at > 350
         || Math.abs(current.x - previous.x) > 6
         || Math.abs(current.y - previous.y) > 6
         || previous.modifier !== modifier) return
-      lastLeftClickRef.current = { at: 0, x: 0, y: 0, modifier: null }
+      lastLeftClickRef.current = EMPTY_CLICK_CANDIDATE
+      lastRightClickRef.current = EMPTY_CLICK_CANDIDATE
       emitTradingGesture(event, 'left')
     }
     const handleContextMenu = (event) => {
+      if (measurementRef.current) {
+        event.preventDefault()
+        event.stopPropagation()
+        cancelMeasurement()
+        return
+      }
       const intent = resolveFuturesTradingGesture({
         button: 'right',
         altKey: event.altKey,
@@ -326,7 +391,8 @@ export const FuturesWorkstationChart = ({
         shiftKey: event.shiftKey,
       })
       if (!intent || !isFuturesTradingGestureTarget(event.target)) {
-        lastRightClickRef.current = { at: 0, x: 0, y: 0, modifier: null }
+        lastLeftClickRef.current = EMPTY_CLICK_CANDIDATE
+        lastRightClickRef.current = EMPTY_CLICK_CANDIDATE
         return
       }
       event.preventDefault()
@@ -335,12 +401,14 @@ export const FuturesWorkstationChart = ({
         at: Date.now(), x: event.clientX, y: event.clientY, modifier,
       }
       const previous = lastRightClickRef.current
+      lastLeftClickRef.current = EMPTY_CLICK_CANDIDATE
       lastRightClickRef.current = current
       if (current.at - previous.at > 350
         || Math.abs(current.x - previous.x) > 6
         || Math.abs(current.y - previous.y) > 6
         || previous.modifier !== modifier) return
-      lastRightClickRef.current = { at: 0, x: 0, y: 0, modifier: null }
+      lastLeftClickRef.current = EMPTY_CLICK_CANDIDATE
+      lastRightClickRef.current = EMPTY_CLICK_CANDIDATE
       emitTradingGesture(event, 'right')
     }
     const handleViewportChange = () => {
@@ -348,13 +416,10 @@ export const FuturesWorkstationChart = ({
     }
     const handleMouseMove = (event) => {
       handleViewportChange()
-      if (!event.shiftKey) {
-        if (measurementRef.current) cancelMeasurement()
-        return
-      }
+      if (!measurementRef.current) return
       const point = pointFromEvent(event)
       if (!point) return
-      const start = measurementRef.current?.start ?? point
+      const start = measurementRef.current.start
       measurementRef.current = { start, current: point }
       const deltaPrice = point.price - start.price
       let deltaTime = 0
@@ -363,6 +428,7 @@ export const FuturesWorkstationChart = ({
       }
       setMeasurement({
         symbol: symbolRef.current,
+        generation: measurementGenerationRef.current,
         projection: {
           startX: start.x,
           currentX: point.x,
@@ -374,18 +440,17 @@ export const FuturesWorkstationChart = ({
         },
       })
     }
-    const handleKeyUp = (event) => {
-      if (event.key === 'Shift' || event.key === 'Escape') cancelMeasurement()
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') cancelMeasurement()
     }
     const timeScale = chart.timeScale()
-    chart.subscribeClick(handleClick)
     timeScale.subscribeVisibleLogicalRangeChange?.(handleViewportChange)
+    container.addEventListener('mousedown', handleMouseDown)
     container.addEventListener('click', handleLeftClick)
     container.addEventListener('contextmenu', handleContextMenu)
     container.addEventListener('mousemove', handleMouseMove)
     container.addEventListener('wheel', handleViewportChange, { passive: true })
-    container.addEventListener('mouseleave', cancelMeasurement)
-    globalThis.addEventListener?.('keyup', handleKeyUp)
+    globalThis.addEventListener?.('keydown', handleKeyDown)
     chartRef.current = chart
     seriesRef.current = { contractSeries, volumeSeries, markSeries, indexSeries }
 
@@ -408,13 +473,12 @@ export const FuturesWorkstationChart = ({
     return () => {
       observer?.disconnect()
       globalThis.removeEventListener?.('resize', resize)
-      globalThis.removeEventListener?.('keyup', handleKeyUp)
+      globalThis.removeEventListener?.('keydown', handleKeyDown)
+      container.removeEventListener('mousedown', handleMouseDown)
       container.removeEventListener('click', handleLeftClick)
       container.removeEventListener('contextmenu', handleContextMenu)
       container.removeEventListener('mousemove', handleMouseMove)
       container.removeEventListener('wheel', handleViewportChange)
-      container.removeEventListener('mouseleave', cancelMeasurement)
-      chart.unsubscribeClick(handleClick)
       timeScale.unsubscribeVisibleLogicalRangeChange?.(handleViewportChange)
       chart.remove()
       chartRef.current = null
@@ -666,7 +730,11 @@ export const FuturesWorkstationChart = ({
         aria-label="Futures candlestick chart with volume, mark and index overlays"
       />
       <MeasurementOverlay
-        projection={measurement && measurement.symbol === symbol ? measurement.projection : null}
+        projection={measurement
+          && measurement.symbol === symbol
+          && measurement.generation === measurementGeneration
+          ? measurement.projection
+          : null}
         containerSize={containerSize}
         precision={measurementPrecision}
       />

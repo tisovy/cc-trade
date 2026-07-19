@@ -71,8 +71,13 @@ const deriveExecutionReadiness = ({
   if (safeState.subscribed !== true) return Object.freeze({
     tone: 'loading', label: 'SYNC', reason: 'Loading private Futures account state…',
   })
-  if (safeState.configured !== true) return Object.freeze({
-    tone: 'attention', label: 'SETUP', reason: 'Futures account access is unavailable — configure the reviewed account.',
+  if (safeState.configured == null) return Object.freeze({
+    tone: 'loading', label: 'SYNC', reason: 'Loading private Futures account state…',
+  })
+  if (safeState.configured === false) return Object.freeze({
+    tone: 'attention',
+    label: 'SETUP',
+    reason: 'Live Futures configuration was not accepted — complete the reviewed launch profile, then restart.',
   })
   if (!account) return Object.freeze({
     tone: 'loading', label: 'VERIFY', reason: 'Verifying Futures account configuration…',
@@ -604,7 +609,9 @@ const FuturesProductionExecutionTicket = ({
           <strong>
             {symbolConfiguration
               ? `${symbolConfiguration.marginType} · ${symbolConfiguration.leverage}× · HEDGE`
-              : 'CONFIG SYNC · HEDGE'}
+              : safeState.configured === false
+                ? 'SETUP REQUIRED'
+                : 'CONFIG SYNC'}
           </strong>
         </div>
         <div className="futures-production-readiness">
@@ -860,9 +867,11 @@ const FuturesProductionExecutionTicket = ({
           </dl>
           <section className="futures-production-action is-arm">
             <h3>
-              ARM LIVE · HEDGE / {symbolConfiguration
-                ? `${symbolConfiguration.marginType} / ${symbolConfiguration.leverage}×`
-                : 'CONFIG SYNC'}
+              ARM LIVE · {symbolConfiguration
+                ? `HEDGE / ${symbolConfiguration.marginType} / ${symbolConfiguration.leverage}×`
+                : safeState.configured === false
+                  ? 'SETUP REQUIRED'
+                  : 'CONFIG SYNC'}
             </h3>
             <button type="button" disabled={!canPrepare('disengageKillSwitch')} onClick={() => claimAction(onPrepareDisengageKillSwitchIntent)}>
               Prepare ARM LIVE intent

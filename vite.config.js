@@ -4,9 +4,15 @@ import electron from 'vite-plugin-electron'
 import { fileURLToPath } from 'node:url'
 
 const VERIFICATION_BUILD_MODES = new Set(['e2e', 'safe-dev', 'smoke'])
+const EXECUTION_VERIFICATION_BUILD_MODES = new Set(['safe-dev', 'smoke'])
 
 const verificationCompositionPath = environment => fileURLToPath(new URL(
   `./electron/services/futures-${environment}-workstation-verification-composition.js`,
+  import.meta.url,
+))
+
+const verificationExecutionCompositionPath = fileURLToPath(new URL(
+  './electron/services/futures-production-execution-runtime-verification-composition.js',
   import.meta.url,
 ))
 
@@ -16,12 +22,17 @@ export const selectFuturesWorkstationCompositionAliases = ({
 } = {}) => {
   const deterministic = isVitest === true || VERIFICATION_BUILD_MODES.has(buildMode)
   if (!deterministic) return []
-  return [
+  const aliases = [
     {
       find: /(?:^|.*\/)futures-production-workstation-composition\.js$/,
       replacement: verificationCompositionPath('production'),
     },
   ]
+  if (EXECUTION_VERIFICATION_BUILD_MODES.has(buildMode)) aliases.push({
+    find: /(?:^|.*\/)futures-production-execution-runtime-composition\.js$/,
+    replacement: verificationExecutionCompositionPath,
+  })
+  return aliases
 }
 
 const futuresWorkstationCompositionAliases = selectFuturesWorkstationCompositionAliases({

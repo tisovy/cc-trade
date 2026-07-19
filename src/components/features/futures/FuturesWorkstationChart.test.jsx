@@ -158,10 +158,11 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     )
   })
 
-  it('shows Shift price/percent/time measurement and clears it on Shift release', () => {
+  it('keeps a Shift-click measurement after Shift release and clears it on the next click', () => {
+    const props = properties([candle(1_784_000_000_000)])
     render(
       <FuturesWorkstationChart
-        {...properties([candle(1_784_000_000_000)])}
+        {...props}
         priceTickSize="0.1"
       />,
     )
@@ -170,13 +171,51 @@ describe('FuturesWorkstationChart viewport ownership', () => {
       left: 0, top: 0, width: 320, height: 320, right: 320, bottom: 320,
     })
 
-    fireEvent.mouseMove(canvas, { clientX: 20, clientY: 100, shiftKey: true })
+    fireEvent.mouseDown(canvas, { clientX: 20, clientY: 100, shiftKey: true, button: 0 })
+    fireEvent.click(canvas, { clientX: 20, clientY: 100, shiftKey: true, button: 0 })
     fireEvent.mouseMove(canvas, { clientX: 60, clientY: 80, shiftKey: true })
     expect(document.querySelector('.measurement-info-box')).toHaveTextContent('+0.03% +20.0')
     expect(document.querySelector('.measurement-info-box')).toHaveTextContent('40s')
 
     fireEvent.keyUp(globalThis, { key: 'Shift' })
+    fireEvent.mouseMove(canvas, { clientX: 80, clientY: 70 })
+    fireEvent.mouseLeave(canvas)
+    expect(document.querySelector('.measurement-info-box')).toHaveTextContent('+0.05% +30.0')
+    expect(document.querySelector('.measurement-info-box')).toHaveTextContent('1m')
+
+    fireEvent.mouseDown(canvas, { clientX: 80, clientY: 70, button: 0 })
+    fireEvent.click(canvas, { clientX: 80, clientY: 70, button: 0 })
     expect(document.querySelector('.measurement-info-box')).not.toBeInTheDocument()
+    expect(props.onPricePick).not.toHaveBeenCalled()
+
+    fireEvent.click(canvas, { clientX: 80, clientY: 70, button: 0 })
+    expect(props.onPricePick).toHaveBeenCalledExactlyOnceWith('59930')
+  })
+
+  it('clears a Shift-click measurement on right click or Escape without firing a gesture', () => {
+    const props = properties([candle(1_784_000_000_000)])
+    render(<FuturesWorkstationChart {...props} priceTickSize="0.1" />)
+    const canvas = screen.getByTestId('futures-workstation-chart')
+    canvas.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 320, height: 320, right: 320, bottom: 320,
+    })
+
+    fireEvent.mouseDown(canvas, { clientX: 20, clientY: 100, shiftKey: true, button: 0 })
+    fireEvent.click(canvas, { clientX: 20, clientY: 100, shiftKey: true, button: 0 })
+    const contextMenu = createEvent.contextMenu(canvas, {
+      clientX: 60, clientY: 80, ctrlKey: true, button: 2,
+    })
+    fireEvent(canvas, contextMenu)
+    expect(contextMenu.defaultPrevented).toBe(true)
+    expect(document.querySelector('.measurement-info-box')).not.toBeInTheDocument()
+    expect(props.onTradingGesture).not.toHaveBeenCalled()
+
+    fireEvent.mouseDown(canvas, { clientX: 20, clientY: 100, shiftKey: true, button: 0 })
+    fireEvent.click(canvas, { clientX: 20, clientY: 100, shiftKey: true, button: 0 })
+    fireEvent.keyDown(globalThis, { key: 'Escape' })
+    expect(document.querySelector('.measurement-info-box')).not.toBeInTheDocument()
+    expect(props.onTradingGesture).not.toHaveBeenCalled()
+    expect(props.onPricePick).not.toHaveBeenCalled()
   })
 
   it('clears a Shift measurement on symbol change without remounting the chart', () => {
@@ -188,7 +227,8 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     canvas.getBoundingClientRect = () => ({
       left: 0, top: 0, width: 320, height: 320, right: 320, bottom: 320,
     })
-    fireEvent.mouseMove(canvas, { clientX: 20, clientY: 100, shiftKey: true })
+    fireEvent.mouseDown(canvas, { clientX: 20, clientY: 100, shiftKey: true, button: 0 })
+    fireEvent.click(canvas, { clientX: 20, clientY: 100, shiftKey: true, button: 0 })
     fireEvent.mouseMove(canvas, { clientX: 60, clientY: 80, shiftKey: true })
     expect(document.querySelector('.measurement-info-box')).toBeInTheDocument()
 
@@ -198,6 +238,63 @@ describe('FuturesWorkstationChart viewport ownership', () => {
 
     expect(document.querySelector('.measurement-info-box')).not.toBeInTheDocument()
     expect(chartMock.charts).toHaveLength(1)
+
+    rerender(
+      <FuturesWorkstationChart {...properties(candles)} symbol="BTCUSDT" priceTickSize="0.1" />,
+    )
+    expect(document.querySelector('.measurement-info-box')).not.toBeInTheDocument()
+    expect(chartMock.charts).toHaveLength(1)
+  })
+
+  it('does not carry a right-click gesture candidate across the ruler lifecycle', () => {
+    const props = properties([candle(1_784_000_000_000)])
+    render(<FuturesWorkstationChart {...props} priceTickSize="0.1" />)
+    const canvas = screen.getByTestId('futures-workstation-chart')
+    canvas.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 320, height: 320, right: 320, bottom: 320,
+    })
+
+    fireEvent.contextMenu(canvas, {
+      clientX: 50, clientY: 120, ctrlKey: true, button: 2,
+    })
+    fireEvent.mouseDown(canvas, {
+      clientX: 20, clientY: 100, shiftKey: true, button: 0,
+    })
+    fireEvent.click(canvas, {
+      clientX: 20, clientY: 100, shiftKey: true, button: 0,
+    })
+    fireEvent.keyDown(globalThis, { key: 'Escape' })
+    fireEvent.contextMenu(canvas, {
+      clientX: 50, clientY: 120, ctrlKey: true, button: 2,
+    })
+
+    expect(props.onTradingGesture).not.toHaveBeenCalled()
+  })
+
+  it('does not join interleaved left and right clicks into a double gesture', () => {
+    const props = properties([candle(1_784_000_000_000)])
+    render(<FuturesWorkstationChart {...props} />)
+    const canvas = screen.getByTestId('futures-workstation-chart')
+    canvas.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 320, height: 320, right: 320, bottom: 320,
+    })
+
+    fireEvent.click(canvas, { clientX: 40, clientY: 100, altKey: true, button: 0 })
+    fireEvent.contextMenu(canvas, {
+      clientX: 40, clientY: 100, altKey: true, button: 2,
+    })
+    fireEvent.click(canvas, { clientX: 40, clientY: 100, altKey: true, button: 0 })
+    expect(props.onTradingGesture).not.toHaveBeenCalled()
+
+    fireEvent.click(canvas, { clientX: 42, clientY: 102, button: 0 })
+    fireEvent.contextMenu(canvas, {
+      clientX: 50, clientY: 120, ctrlKey: true, button: 2,
+    })
+    fireEvent.click(canvas, { clientX: 50, clientY: 120, ctrlKey: true, button: 0 })
+    fireEvent.contextMenu(canvas, {
+      clientX: 50, clientY: 120, ctrlKey: true, button: 2,
+    })
+    expect(props.onTradingGesture).not.toHaveBeenCalled()
   })
 
   it('maps exact chart double-click modifiers and keeps Shift combinations inert', () => {

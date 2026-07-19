@@ -228,6 +228,24 @@ describe('FuturesProductionExecutionTicket', () => {
     expect(screen.getByText('READY')).toBeInTheDocument()
   })
 
+  it('keeps the pre-status subscription window in SYNC instead of claiming setup failure', () => {
+    renderTicket({
+      state: createState({
+        revision: null,
+        configured: null,
+        liveAuthorized: null,
+        account: null,
+        caps: null,
+        capabilities: null,
+        portfolio: null,
+      }),
+    })
+    expect(screen.getByText('CONFIG SYNC')).toBeInTheDocument()
+    expect(screen.getByText('SYNC')).toBeInTheDocument()
+    expect(screen.getByText('Loading private Futures account state…')).toBeInTheDocument()
+    expect(screen.queryByText('SETUP')).not.toBeInTheDocument()
+  })
+
   it('does not report READY when Binance contract filters are unavailable', () => {
     renderTicket({ selectedContract: null })
     expect(screen.getByText('METADATA')).toBeInTheDocument()
@@ -722,12 +740,20 @@ describe('FuturesProductionExecutionTicket', () => {
     expect(screen.queryByText('BLOCKED')).not.toBeInTheDocument()
   })
 
-  it('shows a compact actionable setup reason when Futures account access is unavailable', () => {
+  it('shows the exact startup configuration action when Live Futures is disabled', () => {
     renderTicket({
-      state: createState({ configured: false, liveAuthorized: false, account: null }),
+      state: createState({
+        configured: false,
+        liveAuthorized: false,
+        account: null,
+        caps: null,
+        capabilities: null,
+        portfolio: null,
+      }),
     })
     expect(screen.getByText('SETUP')).toBeInTheDocument()
-    expect(screen.getByText('Futures account access is unavailable — configure the reviewed account.'))
+    expect(screen.getByText('SETUP REQUIRED')).toBeInTheDocument()
+    expect(screen.getByText('Live Futures configuration was not accepted — complete the reviewed launch profile, then restart.'))
       .toBeInTheDocument()
     expect(screen.queryByText('BLOCKED')).not.toBeInTheDocument()
   })

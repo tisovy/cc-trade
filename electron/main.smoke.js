@@ -1,12 +1,15 @@
 import './env-setup.js'
 
 const SAFE_SMOKE_DEADLINE_MS = 15_000
-const SAFE_SMOKE_RENDER_ATTEMPTS = 20
+const SAFE_SMOKE_RENDER_ATTEMPTS = 40
 const SAFE_SMOKE_RENDER_POLL_MS = 250
 
 const { app } = await import('electron')
 let hasAuthenticatedRuntime = false
 let hasRenderedRoot = false
+let hasReadyFutures = false
+let hasEnabledFuturesSlider = false
+let hasExternalFuturesOrder = false
 let hasCompleted = false
 
 const failSmoke = (reason) => {
@@ -18,11 +21,19 @@ const failSmoke = (reason) => {
 }
 
 const completeSmokeIfReady = () => {
-  if (hasCompleted || !hasAuthenticatedRuntime || !hasRenderedRoot) return
+  if (hasCompleted
+    || !hasAuthenticatedRuntime
+    || !hasRenderedRoot
+    || !hasReadyFutures
+    || !hasEnabledFuturesSlider
+    || !hasExternalFuturesOrder) return
   hasCompleted = true
   console.log('SAFE_SMOKE_READY', {
     authenticatedLoopback: true,
     reactRootRendered: true,
+    futuresReady: true,
+    futuresSliderEnabled: true,
+    externalFuturesOrderVisible: true,
   })
   app.quit()
 }
@@ -33,25 +44,59 @@ app.on('browser-window-created', (_event, window) => {
       if (hasCompleted) return
       try {
         const result = await window.webContents.executeJavaScript(
-          `({
-            authenticatedLoopback:
-              typeof globalThis.ccTradeRuntime?.localWebSocketAccess?.token === 'string'
-              && globalThis.ccTradeRuntime.localWebSocketAccess.token.length > 0,
-            reactRootRendered: Boolean(document.getElementById('root')?.childElementCount),
-          })`,
+          `(() => {
+            const root = document.getElementById('root')
+            let rail = document.querySelector(
+              '[aria-label="USDⓈ-M production real-order execution"]'
+            )
+            if (!rail) {
+              document.querySelector('[data-testid="market-mode-futures-live"]')?.click()
+              rail = document.querySelector(
+                '[aria-label="USDⓈ-M production real-order execution"]'
+              )
+            }
+            const ordersTab = [...(rail?.querySelectorAll('[role="tab"]') ?? [])]
+              .find(tab => /^Orders 1$/.test(tab.textContent?.trim() ?? ''))
+            const sizeSlider = rail?.querySelector('[aria-label="Order size percent"]')
+            const ordersPanelText = rail
+              ?.querySelector('[aria-label="Current Futures orders"]')
+              ?.textContent ?? ''
+            const externalFuturesOrderVisible = [
+              'BTCUSDT', 'BUY · LONG', '58445.00', '0.004', 'NEW',
+            ].every(fragment => ordersPanelText.includes(fragment))
+            if (!externalFuturesOrderVisible && sizeSlider?.disabled === false) {
+              ordersTab?.click()
+            }
+            return {
+              authenticatedLoopback:
+                typeof globalThis.ccTradeRuntime?.localWebSocketAccess?.token === 'string'
+                && globalThis.ccTradeRuntime.localWebSocketAccess.token.length > 0,
+              reactRootRendered: Boolean(root?.childElementCount),
+              futuresReady: rail?.querySelector('.futures-production-readiness')
+                ?.textContent?.includes('READY') === true,
+              futuresSliderEnabled: sizeSlider?.disabled === false,
+              externalFuturesOrderVisible,
+            }
+          })()`,
         )
-        hasAuthenticatedRuntime = result?.authenticatedLoopback === true
-        hasRenderedRoot = result?.reactRootRendered === true
+        hasAuthenticatedRuntime ||= result?.authenticatedLoopback === true
+        hasRenderedRoot ||= result?.reactRootRendered === true
+        hasReadyFutures ||= result?.futuresReady === true
+        hasEnabledFuturesSlider ||= result?.futuresSliderEnabled === true
+        hasExternalFuturesOrder ||= result?.externalFuturesOrderVisible === true
       } catch {
-        hasAuthenticatedRuntime = false
-        hasRenderedRoot = false
+        // Preserve already-proven gates while the next bounded probe retries.
       }
-      if (hasAuthenticatedRuntime && hasRenderedRoot) {
+      if (hasAuthenticatedRuntime
+        && hasRenderedRoot
+        && hasReadyFutures
+        && hasEnabledFuturesSlider
+        && hasExternalFuturesOrder) {
         completeSmokeIfReady()
         return
       }
       if (attempt + 1 >= SAFE_SMOKE_RENDER_ATTEMPTS) {
-        failSmoke('authenticated renderer runtime and React root were not both ready')
+        failSmoke('authenticated renderer and ready mocked Futures execution were not all available')
         return
       }
       setTimeout(() => {
