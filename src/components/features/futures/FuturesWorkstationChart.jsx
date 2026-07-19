@@ -378,8 +378,6 @@ export const FuturesWorkstationChart = ({
     }
     const handleContextMenu = (event) => {
       if (measurementRef.current) {
-        event.preventDefault()
-        event.stopPropagation()
         cancelMeasurement()
         return
       }

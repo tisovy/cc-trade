@@ -16,6 +16,8 @@ const throwIfAborted = (signal) => {
     if (signal?.aborted) throw abortError();
 };
 
+const FUTURES_WORKSTATION_FAKE_INTERVALS = new Set(['1m', '5m', '15m', '1h', '4h', '1d']);
+
 export const createFuturesWorkstationSystemClock = () => Object.freeze({
     now: () => Date.now(),
     setInterval: (callback, delay) => setInterval(callback, delay),
@@ -65,14 +67,28 @@ export const createFuturesWorkstationFakeTransport = ({
                 ticker: value.ticker,
             });
         },
-        connect: ({ symbol, interval: selectedInterval, onMessage, onDisconnect, signal } = {}) => {
+        bootstrapInterval: async ({ symbol, signal } = {}) => {
             throwIfAborted(signal);
             const value = readSymbol(symbol);
-            if (typeof onMessage !== 'function' || typeof onDisconnect !== 'function') {
+            await Promise.resolve();
+            throwIfAborted(signal);
+            return Object.freeze({
+                contractKlines: value.contractKlines,
+                markKlines: value.markKlines,
+                indexKlines: value.indexKlines,
+            });
+        },
+        connect: ({ symbol, interval: initialInterval, onMessage, onDisconnect, signal } = {}) => {
+            throwIfAborted(signal);
+            const value = readSymbol(symbol);
+            if (!FUTURES_WORKSTATION_FAKE_INTERVALS.has(initialInterval)
+                || typeof onMessage !== 'function'
+                || typeof onDisconnect !== 'function') {
                 throw new FuturesWorkstationFakeTransportError('INVALID_FAKE_SUBSCRIBER');
             }
             let closed = false;
             let cycle = 0;
+            let selectedInterval = initialInterval;
             onMessage(value.streams.bridgeDepth);
             const interval = clock.setInterval(() => {
                 if (closed || signal?.aborted) return;
@@ -93,6 +109,16 @@ export const createFuturesWorkstationFakeTransport = ({
             signal?.addEventListener?.('abort', handleAbort, { once: true });
             return Object.freeze({
                 ready: Promise.resolve(true),
+                selectInterval: async ({ interval, signal: selectionSignal } = {}) => {
+                    throwIfAborted(selectionSignal);
+                    if (closed || !FUTURES_WORKSTATION_FAKE_INTERVALS.has(interval)) {
+                        throw new FuturesWorkstationFakeTransportError('INVALID_FAKE_INTERVAL');
+                    }
+                    selectedInterval = interval;
+                    await Promise.resolve();
+                    throwIfAborted(selectionSignal);
+                    return true;
+                },
                 close: () => {
                     signal?.removeEventListener?.('abort', handleAbort);
                     close();

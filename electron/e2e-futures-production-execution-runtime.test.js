@@ -38,6 +38,63 @@ const finalCommand = (action, revision, requestId) => ({
 });
 
 describe('E2E Futures production execution runtime', () => {
+    it('keeps the entry cap while allowing a reducing order to cover the real position', async () => {
+        const runtime = createE2eFuturesProductionExecutionRuntime({
+            clock: () => 1_784_336_400_000,
+        });
+        const emitted = [];
+        const context = {
+            connectionId: CONNECTION_ID,
+            emit: status => emitted.push(parseFuturesProductionExecutionStatus(status)),
+        };
+        await runtime.service.handleRequest(JSON.stringify(command(
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.SUBSCRIBE_STATUS,
+            '0',
+            BOOTSTRAP_FINGERPRINT,
+        )), context);
+
+        const oversizedEntry = {
+            symbol: 'BTCUSDT',
+            side: 'BUY',
+            positionSide: 'LONG',
+            positionEffect: 'ENTRY',
+            quantity: '0.002',
+            price: '58400.00',
+        };
+        await expect(runtime.service.handleRequest(JSON.stringify(command(
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_ORDER_INTENT,
+            emitted.at(-1).revision,
+            E2E_FUTURES_ACCOUNT_FINGERPRINT,
+            oversizedEntry,
+        )), context)).resolves.toBe(false);
+
+        await expect(runtime.service.handleRequest(JSON.stringify(command(
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_ORDER_INTENT,
+            emitted.at(-1).revision,
+            E2E_FUTURES_ACCOUNT_FINGERPRINT,
+            {
+                ...oversizedEntry,
+                side: 'SELL',
+                positionEffect: 'EXIT',
+            },
+        )), context)).resolves.toBe(true);
+        const exitIntent = emitted.at(-1).intent;
+        await expect(runtime.service.handleRequest(JSON.stringify(finalCommand(
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.PLACE_ORDER,
+            emitted.at(-1).revision,
+            exitIntent.requestId,
+        )), context)).resolves.toBe(true);
+        expect(emitted.at(-1).portfolio.openOrders).toContainEqual(expect.objectContaining({
+            symbol: 'BTCUSDT',
+            side: 'SELL',
+            positionSide: 'LONG',
+            positionEffect: 'EXIT',
+            originalQuantity: '0.002',
+        }));
+
+        await runtime.service.shutdown();
+    });
+
     it('reconciles external snapshot plus deterministic create, amend and cancel in memory', async () => {
         const runtime = createE2eFuturesProductionExecutionRuntime({
             clock: () => 1_784_336_400_000,

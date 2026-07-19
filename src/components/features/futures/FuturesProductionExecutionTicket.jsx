@@ -75,16 +75,24 @@ const deriveExecutionReadiness = ({
   if (safeState.configured == null) return Object.freeze({
     tone: 'loading', label: 'SYNC', reason: 'Loading private Futures account state…',
   })
+  if (recovery?.required === true) {
+    const recoveryCode = exactText(recovery.code)
+    if (recoveryCode.includes('STORAGE')) return Object.freeze({
+      tone: 'attention',
+      label: 'STORAGE',
+      reason: 'Secure Futures storage is unavailable — unlock the OS keyring, preserve the durable journal, and restart.',
+    })
+    return Object.freeze({
+      tone: 'attention', label: 'RESYNC', reason: 'Private account recovery is required — wait for a safe resync.',
+    })
+  }
   if (safeState.configured === false) return Object.freeze({
     tone: 'attention',
     label: 'SETUP',
-    reason: 'Futures execution profile unavailable — configure FUTURES_PRODUCTION_* and restart (Spot BK/BS are not reused).',
+    reason: 'Dedicated USDⓈ-M profile is missing — load FUTURES_PRODUCTION_* and restart; Spot BK/BS cannot authorize Futures execution.',
   })
   if (!account) return Object.freeze({
     tone: 'loading', label: 'VERIFY', reason: 'Verifying Futures account configuration…',
-  })
-  if (recovery?.required === true) return Object.freeze({
-    tone: 'attention', label: 'RESYNC', reason: 'Private account recovery is required — wait for a safe resync.',
   })
   if (!caps) return Object.freeze({
     tone: 'attention', label: 'LIMITS', reason: 'Trading limits are unavailable — refresh private account state.',
@@ -92,7 +100,7 @@ const deriveExecutionReadiness = ({
   if (capabilityCode.includes('ACCOUNT_IDENTITY_REJECTED')) return Object.freeze({
     tone: 'attention',
     label: 'ACCOUNT',
-    reason: 'Binance rejected Futures account access — verify the USDⓈ-M API permission/IP, Hedge Mode, and single-asset margin.',
+    reason: 'Binance rejected signed USDⓈ-M reads — enable Futures for this API key, verify its IP allowlist, Hedge Mode, and single-asset margin.',
   })
   if (!hasSymbolMetadata) return Object.freeze({
     tone: 'attention', label: 'METADATA', reason: 'Binance symbol metadata is unavailable — retry the contract refresh.',
@@ -247,10 +255,17 @@ const FuturesProductionExecutionTicket = ({
   const portfolio = isRecord(safeState.portfolio) ? safeState.portfolio : null
   const positions = Array.isArray(portfolio?.positions) ? portfolio.positions : []
   const allOpenOrders = Array.isArray(portfolio?.openOrders) ? portfolio.openOrders : []
-  const openOrders = allOpenOrders.filter(order => order.symbol === selectedSymbol)
+  const openOrders = [...allOpenOrders].sort((left, right) => (
+    Number(right.symbol === selectedSymbol) - Number(left.symbol === selectedSymbol)
+    || left.symbol.localeCompare(right.symbol)
+    || left.orderId.localeCompare(right.orderId)
+  ))
+  const selectedOpenOrderCount = openOrders.filter(order => order.symbol === selectedSymbol).length
   const portfolioSyncState = typeof portfolio?.syncState === 'string'
     ? portfolio.syncState
     : portfolio?.state
+  const ordersAreAuthoritative = portfolio?.state === 'live' && portfolioSyncState === 'live'
+  const positionsAreAuthoritative = portfolio?.state === 'live'
   const [tab, setTab] = useState('trade')
   const [sizePercent, setSizePercent] = useState(25)
   const [customNotionalUsdt, setCustomNotionalUsdt] = useState(null)
@@ -335,7 +350,7 @@ const FuturesProductionExecutionTicket = ({
   const currentSizePercent = customNotionalUsdt === null
     ? sizePercent
     : calculateFuturesNotionalPercent(customNotionalUsdt, sizingBudget) ?? 0
-  const displayedSizePercent = sizingReady ? currentSizePercent : 0
+  const displayedSizePercent = sizingReady ? currentSizePercent : sizePercent
   const tickSize = selectedContract?.filters?.price?.tickSize
   const stepSize = selectedContract?.filters?.quantity?.stepSize
   const minQuantity = selectedContract?.filters?.quantity?.min
@@ -623,6 +638,8 @@ const FuturesProductionExecutionTicket = ({
           <strong>
             {symbolConfiguration
               ? `${symbolConfiguration.marginType} · ${symbolConfiguration.leverage}× · HEDGE`
+              : recovery?.required === true
+                ? 'RUNTIME RECOVERY'
               : safeState.configured === false
                 ? 'SETUP REQUIRED'
                 : 'CONFIG SYNC'}
@@ -668,7 +685,7 @@ const FuturesProductionExecutionTicket = ({
               <span>
                 <span>Size</span>
                 <output aria-live="polite">
-                  <strong>{sizingReady ? `${displayedSizePercent}%` : '—%'}</strong>
+                  <strong>{`${displayedSizePercent}%`}</strong>
                   <b>{notionalUsdt ? `${notionalUsdt} USDT` : '— USDT'}</b>
                 </output>
               </span>
@@ -679,7 +696,6 @@ const FuturesProductionExecutionTicket = ({
                 max="100"
                 step="1"
                 value={displayedSizePercent}
-                disabled={!sizingReady}
                 style={{ '--futures-size-fill': `${displayedSizePercent}%` }}
                 onChange={event => selectSizePercent(Number(event.target.value))}
               />
@@ -689,8 +705,7 @@ const FuturesProductionExecutionTicket = ({
                 <button
                   type="button"
                   key={value}
-                  className={sizingReady && displayedSizePercent === value ? 'is-selected' : ''}
-                  disabled={!sizingReady}
+                  className={displayedSizePercent === value ? 'is-selected' : ''}
                   onClick={() => selectSizePercent(value)}
                 >
                   {value}%
@@ -747,7 +762,10 @@ const FuturesProductionExecutionTicket = ({
         ) : tab === 'orders' ? (
           <section className="futures-production-orders" role="tabpanel" aria-label="Current Futures orders">
             <header className="futures-production-portfolio-heading">
-              <div><strong>Open orders</strong><span>{openOrders.length} active</span></div>
+              <div>
+                <strong>Open orders</strong>
+                <span>{openOrders.length} account-wide · {selectedOpenOrderCount} {selectedSymbol}</span>
+              </div>
               <button
                 type="button"
                 aria-label="Refresh positions and orders"
@@ -761,7 +779,9 @@ const FuturesProductionExecutionTicket = ({
             {portfolioSyncState !== 'live' ? (
               <p role="status">Active orders are {portfolioSyncState ?? 'loading'}; last confirmed rows are retained.</p>
             ) : null}
-            {openOrders.length === 0 ? <p>No active Futures orders.</p> : openOrders.map(order => (
+            {ordersAreAuthoritative && openOrders.length === 0
+              ? <p>No active Futures orders.</p>
+              : openOrders.map(order => (
               <article
                 className={`${order.symbol === selectedSymbol ? 'is-current-symbol' : ''} is-${order.positionSide.toLowerCase()}`}
                 key={`${order.symbol}:${order.orderKind}:${order.orderId}:${order.clientOrderId}`}
@@ -799,7 +819,9 @@ const FuturesProductionExecutionTicket = ({
             {portfolio?.state !== 'live' ? (
               <p role="status">Private positions are {portfolio?.state ?? 'unavailable'}; last confirmed legs are retained.</p>
             ) : null}
-            {positions.length === 0 ? <p>No open LONG or SHORT positions.</p> : positions.map(position => (
+            {positionsAreAuthoritative && positions.length === 0
+              ? <p>No open LONG or SHORT positions.</p>
+              : positions.map(position => (
               <article
                 className={`is-${position.positionSide.toLowerCase()}`}
                 key={`${position.symbol}:${position.positionSide}`}

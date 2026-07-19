@@ -165,9 +165,6 @@ const useFuturesProductionWorkstation = ({
           }),
         })
       }
-      const markStale = resource => resource === null
-        ? null
-        : Object.freeze({ ...resource, state: 'stale' })
       return Object.freeze({
         ...previousState,
         status: 'loading',
@@ -177,10 +174,7 @@ const useFuturesProductionWorkstation = ({
         resources: Object.freeze({
           ...previousState.resources,
           status: null,
-          header: markStale(previousState.resources.header),
           candles: null,
-          depth: markStale(previousState.resources.depth),
-          trades: markStale(previousState.resources.trades),
         }),
       })
     })

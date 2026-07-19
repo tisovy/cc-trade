@@ -416,13 +416,6 @@ export const FuturesWorkstationView = ({
             </div>
           ) : null}
         </div>
-        <div className="futures-workstation-local-draft" aria-label="Futures limit price draft">
-          <div>
-            <span>Limit price</span>
-            <strong>{selectedDraftPrice ?? 'Pick chart or book price'}</strong>
-          </div>
-          <code>DRAFT · VERIFIED SHORTCUT EXECUTION</code>
-        </div>
       </main>
 
       <aside className="futures-workstation-depth" data-state={depthState}>

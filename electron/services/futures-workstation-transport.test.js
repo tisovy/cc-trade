@@ -232,6 +232,35 @@ describe('reviewed environment-specific Futures workstation transports', () => {
         expect(globalThis.fetch).toHaveBeenCalledTimes(6);
     });
 
+    it('reads only the three candle snapshots for an interval-only bootstrap', async () => {
+        const calls = [];
+        globalThis.fetch = vi.fn(async (url) => {
+            calls.push(url.href);
+            return responseFor(url.href, FUTURES_PRODUCTION_WORKSTATION_FIXTURE);
+        });
+        const result = await createFuturesProductionWorkstationReviewedTransport()
+            .bootstrapInterval({
+                symbol: 'BTCUSDT',
+                pair: 'BTCUSDT',
+                interval: '5m',
+            });
+
+        expect(Object.keys(result).sort()).toEqual([
+            'contractKlines',
+            'indexKlines',
+            'markKlines',
+        ]);
+        expect(calls).toHaveLength(3);
+        expect(calls.map(url => new URL(url).pathname).sort()).toEqual([
+            '/fapi/v1/indexPriceKlines',
+            '/fapi/v1/klines',
+            '/fapi/v1/markPriceKlines',
+        ]);
+        expect(calls.every(url => new URL(url).searchParams.get('interval') === '5m')).toBe(true);
+        expect(calls.some(url => /depth|premiumIndex|ticker\/24hr|exchangeInfo/.test(url)))
+            .toBe(false);
+    });
+
     it('accepts bounded Unicode identities only on the public workstation transport', async () => {
         const symbol = '测试测试USDT';
         globalThis.fetch = vi.fn();
@@ -252,11 +281,13 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             interval: '1m',
             onMessage: () => {},
             onDisconnect: () => {},
+            onCandleDisconnect: () => {},
         });
         const lower = symbol.toLowerCase();
         expect(socketMock.instances.map(socket => socket.url)).toEqual([
             `${FUTURES_PRODUCTION_WORKSTATION_WSS_ORIGIN}/public/stream?streams=${lower}@depth@100ms`,
-            `${FUTURES_PRODUCTION_WORKSTATION_WSS_ORIGIN}/market/stream?streams=${lower}@aggTrade/${lower}@kline_1m/${lower}@markPrice@1s/${lower}@ticker`,
+            `${FUTURES_PRODUCTION_WORKSTATION_WSS_ORIGIN}/market/stream?streams=${lower}@aggTrade/${lower}@markPrice@1s/${lower}@ticker`,
+            `${FUTURES_PRODUCTION_WORKSTATION_WSS_ORIGIN}/market/stream?streams=${lower}@kline_1m`,
         ]);
         connection.close();
         transport.close();
@@ -290,6 +321,7 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             interval: '3m',
             onMessage: () => {},
             onDisconnect: () => {},
+            onCandleDisconnect: () => {},
         })).toThrowError(expect.objectContaining({ code: 'INVALID_SELECTION' }));
         expect(globalThis.fetch).not.toHaveBeenCalled();
         expect(socketMock.instances).toHaveLength(0);
@@ -313,13 +345,17 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             followRedirects: true,
             onMessage: frame => frames.push(frame),
             onDisconnect: reason => disconnects.push(reason),
+            onCandleDisconnect: () => {},
         });
-        expect(socketMock.instances).toHaveLength(2);
+        expect(socketMock.instances).toHaveLength(3);
         expect(socketMock.instances[0].url).toBe(
             `${origin}/public/stream?streams=btcusdt@depth@100ms`,
         );
         expect(socketMock.instances[1].url).toBe(
-            `${origin}/market/stream?streams=btcusdt@aggTrade/btcusdt@kline_5m/btcusdt@markPrice@1s/btcusdt@ticker`,
+            `${origin}/market/stream?streams=btcusdt@aggTrade/btcusdt@markPrice@1s/btcusdt@ticker`,
+        );
+        expect(socketMock.instances[2].url).toBe(
+            `${origin}/market/stream?streams=btcusdt@kline_5m`,
         );
         for (const socket of socketMock.instances) {
             expect(socket.options).toEqual({
@@ -337,9 +373,70 @@ describe('reviewed environment-specific Futures workstation transports', () => {
         expect(socketMock.instances.every(socket => socket.close.mock.calls.length === 1)).toBe(true);
     });
 
+    it('replaces only the official kline stream and rejects superseded interval sockets', async () => {
+        vi.useFakeTimers();
+        const frames = [];
+        const candleDisconnects = [];
+        const transport = createFuturesProductionWorkstationReviewedTransport();
+        const connection = transport.connect({
+            symbol: 'BTCUSDT',
+            interval: '1m',
+            onMessage: frame => frames.push(frame),
+            onDisconnect: () => {},
+            onCandleDisconnect: reason => candleDisconnects.push(reason),
+        });
+        socketMock.instances.slice(0, 3).forEach(socket => socket.emit('open'));
+        await expect(connection.ready).resolves.toBe(true);
+        const persistentSockets = socketMock.instances.slice(0, 2);
+        const originalCandleSocket = socketMock.instances[2];
+
+        const selected5m = connection.selectInterval({ interval: '5m' });
+        expect(socketMock.instances).toHaveLength(4);
+        expect(socketMock.instances[3].url).toBe(
+            `${FUTURES_PRODUCTION_WORKSTATION_WSS_ORIGIN}/market/stream?streams=btcusdt@kline_5m`,
+        );
+        expect(persistentSockets.every(socket => socket.close.mock.calls.length === 0)).toBe(true);
+        expect(originalCandleSocket.close).toHaveBeenCalledOnce();
+        socketMock.instances[3].emit('open');
+        await expect(selected5m).resolves.toBe(true);
+
+        const selected15m = connection.selectInterval({ interval: '15m' });
+        const supersededSocket = socketMock.instances[4];
+        const selected1h = connection.selectInterval({ interval: '1h' });
+        const currentSocket = socketMock.instances[5];
+        expect(supersededSocket.url).toBe(
+            `${FUTURES_PRODUCTION_WORKSTATION_WSS_ORIGIN}/market/stream?streams=btcusdt@kline_15m`,
+        );
+        expect(currentSocket.url).toBe(
+            `${FUTURES_PRODUCTION_WORKSTATION_WSS_ORIGIN}/market/stream?streams=btcusdt@kline_1h`,
+        );
+        await expect(selected15m).resolves.toBe(false);
+        supersededSocket.emit('message', Buffer.from('stale'), false);
+        expect(frames).toEqual([]);
+        currentSocket.emit('open');
+        await expect(selected1h).resolves.toBe(true);
+        expect(persistentSockets.every(socket => socket.close.mock.calls.length === 0)).toBe(true);
+
+        currentSocket.emit('close');
+        currentSocket.emit('error', new Error('late duplicate'));
+        expect(candleDisconnects).toEqual(['SOCKET_CLOSED']);
+        expect(persistentSockets.every(socket => socket.close.mock.calls.length === 0)).toBe(true);
+
+        const failed4h = connection.selectInterval({ interval: '4h' });
+        const failedSocket = socketMock.instances[6];
+        failedSocket.emit('error', new Error('candle handshake failed'));
+        failedSocket.emit('close');
+        await expect(failed4h).resolves.toBe(false);
+        expect(candleDisconnects).toEqual(['SOCKET_CLOSED', 'SOCKET_ERROR']);
+        expect(persistentSockets.every(socket => socket.close.mock.calls.length === 0)).toBe(true);
+
+        connection.close();
+        transport.close();
+    });
+
     it.each([
         ['production', createFuturesProductionWorkstationReviewedTransport],
-    ])('holds the %s connection readiness barrier until both routed sockets open', async (
+    ])('holds the %s connection readiness barrier until all three routed sockets open', async (
         _label,
         createTransport,
     ) => {
@@ -349,6 +446,7 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             interval: '1m',
             onMessage: () => {},
             onDisconnect: () => {},
+            onCandleDisconnect: () => {},
         });
         let settled = false;
         void connection.ready.then(() => { settled = true; });
@@ -358,6 +456,9 @@ describe('reviewed environment-specific Futures workstation transports', () => {
         await Promise.resolve();
         expect(settled).toBe(false);
         socketMock.instances[1].emit('open');
+        await Promise.resolve();
+        expect(settled).toBe(false);
+        socketMock.instances[2].emit('open');
         await expect(connection.ready).resolves.toBe(true);
         connection.close();
     });
@@ -374,9 +475,11 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             interval: '1m',
             onMessage: () => {},
             onDisconnect: () => {},
+            onCandleDisconnect: () => {},
         });
         socketMock.instances[0].emit('error', new Error('handshake failed'));
         socketMock.instances[1].emit('open');
+        socketMock.instances[2].emit('open');
         await expect(connection.ready).resolves.toBe(false);
         connection.close();
     });
@@ -398,10 +501,12 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             interval: '1m',
             onMessage: () => {},
             onDisconnect: () => {},
+            onCandleDisconnect: () => {},
         });
         expect(socketMock.instances.map(socket => socket.url)).toEqual([
             `${origin}/public/stream?streams=btcusdt_260925@depth@100ms`,
-            `${origin}/market/stream?streams=btcusdt_260925@aggTrade/btcusdt_260925@kline_1m/btcusdt_260925@markPrice@1s/btcusdt_260925@ticker`,
+            `${origin}/market/stream?streams=btcusdt_260925@aggTrade/btcusdt_260925@markPrice@1s/btcusdt_260925@ticker`,
+            `${origin}/market/stream?streams=btcusdt_260925@kline_1m`,
         ]);
         connection.close();
     });
@@ -450,6 +555,7 @@ describe('reviewed environment-specific Futures workstation transports', () => {
                 agent: {},
                 onMessage: () => {},
                 onDisconnect: () => {},
+                onCandleDisconnect: () => {},
             });
             expect(globalThis.fetch).not.toHaveBeenCalled();
             expect(proxyCalls).toHaveLength(1);
@@ -465,7 +571,7 @@ describe('reviewed environment-specific Futures workstation transports', () => {
                 maxFreeSockets: 1,
             });
             expect(proxyCalls[0].options.signal).toBeInstanceOf(AbortSignal);
-            expect(socketMock.instances).toHaveLength(2);
+            expect(socketMock.instances).toHaveLength(3);
             expect(socketMock.instances.every(socket => new URL(socket.url).origin === wssOrigin))
                 .toBe(true);
             expect(socketMock.instances.every(
@@ -681,6 +787,7 @@ describe('reviewed environment-specific Futures workstation transports', () => {
                 interval: '1m',
                 onMessage: () => {},
                 onDisconnect: () => {},
+                onCandleDisconnect: () => {},
             })).toThrowError(expect.objectContaining({ code: 'INVALID_PROXY_CONFIGURATION' }));
             expect(globalThis.fetch).not.toHaveBeenCalled();
             expect(socketMock.instances).toHaveLength(0);
@@ -716,6 +823,7 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             interval: '1m',
             onMessage: () => {},
             onDisconnect: reason => disconnects.push(reason),
+            onCandleDisconnect: () => {},
         });
         socketMock.instances[1].emit('message', Buffer.from([0xff]), true);
         expect(disconnects).toEqual(['BINARY_FRAME_REJECTED']);
@@ -731,6 +839,7 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             interval: '1m',
             onMessage: () => {},
             onDisconnect: () => {},
+            onCandleDisconnect: () => {},
         });
         vi.advanceTimersByTime(86_400_000);
         expect(socketMock.instances.every(socket => socket.close.mock.calls[0] === undefined

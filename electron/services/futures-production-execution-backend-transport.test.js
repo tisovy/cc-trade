@@ -32,6 +32,11 @@ const createRequestHarness = ({ statusCode = 200, body = '{}' } = {}) => {
     return { request, requestImpl };
 };
 
+const privateStreamUrl = (listenKey = 'a'.repeat(20)) => (
+    `${FUTURES_PRODUCTION_EXECUTION_WS_ORIGIN}/private/ws?listenKey=${listenKey}`
+    + '&events=ORDER_TRADE_UPDATE/ALGO_UPDATE/ACCOUNT_UPDATE/ACCOUNT_CONFIG_UPDATE/listenKeyExpired'
+);
+
 describe('Futures production execution backend transport', () => {
     it('uses the exact direct fetch and websocket target when no proxy is configured', async () => {
         const directFetch = vi.fn(async () => new Response('{}'));
@@ -52,12 +57,12 @@ describe('Futures production execution backend transport', () => {
             redirect: 'error',
         });
         transport.connectWebSocket(
-            `${FUTURES_PRODUCTION_EXECUTION_WS_ORIGIN}/private/ws?listenKey=${'a'.repeat(20)}`,
+            privateStreamUrl(),
             { followRedirects: false },
         );
         expect(directFetch).toHaveBeenCalledOnce();
         expect(sockets).toEqual([expect.objectContaining({
-            url: `${FUTURES_PRODUCTION_EXECUTION_WS_ORIGIN}/private/ws?listenKey=${'a'.repeat(20)}`,
+            url: privateStreamUrl(),
             options: { followRedirects: false },
         })]);
     });
@@ -86,7 +91,7 @@ describe('Futures production execution backend transport', () => {
             },
         );
         transport.connectWebSocket(
-            `${FUTURES_PRODUCTION_EXECUTION_WS_ORIGIN}/private/ws?listenKey=${'a'.repeat(20)}`,
+            privateStreamUrl(),
             { followRedirects: false },
         );
         expect(await response.text()).toBe('{}');
@@ -123,6 +128,15 @@ describe('Futures production execution backend transport', () => {
         })).toThrowError(FuturesProductionExecutionBackendTransportError);
         expect(() => transport.connectWebSocket('wss://example.com/private/ws', {}))
             .toThrowError(FuturesProductionExecutionBackendTransportError);
+        expect(() => transport.connectWebSocket(
+            `${FUTURES_PRODUCTION_EXECUTION_WS_ORIGIN}/private/ws?listenKey=${'a'.repeat(20)}`,
+            {},
+        )).toThrowError(FuturesProductionExecutionBackendTransportError);
+        expect(() => transport.connectWebSocket(
+            `${FUTURES_PRODUCTION_EXECUTION_WS_ORIGIN}/private/ws?listenKey=${'a'.repeat(20)}`
+            + '&events=ACCOUNT_UPDATE',
+            {},
+        )).toThrowError(FuturesProductionExecutionBackendTransportError);
         expect(directFetch).not.toHaveBeenCalled();
     });
 });

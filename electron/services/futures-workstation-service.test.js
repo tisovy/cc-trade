@@ -10,6 +10,7 @@ import {
     FUTURES_PRODUCTION_WORKSTATION_FIXTURE,
 } from './futures-production-workstation-fixtures.js';
 import {
+    createFuturesProductionWorkstationSelectIntervalRequest,
     createFuturesProductionWorkstationSubscribeRequest,
     createFuturesProductionWorkstationUnsubscribeRequest,
 } from '../../src/utils/futuresProductionWorkstationProtocol.js';
@@ -23,6 +24,10 @@ afterEach(() => {
 
 const productionRequest = (requestId, symbol = 'BTCUSDT', interval = '1m') => JSON.stringify(
     createFuturesProductionWorkstationSubscribeRequest({ requestId, symbol, interval }),
+);
+
+const productionIntervalRequest = (requestId, symbol, interval) => JSON.stringify(
+    createFuturesProductionWorkstationSelectIntervalRequest({ requestId, symbol, interval }),
 );
 
 const track = runtime => {
@@ -444,6 +449,349 @@ describe('production Futures workstation service', () => {
         expect(switched.at(-1).state).toBe('live');
         expect(switched.filter(event => event.resource === 'candles'))
             .toHaveLength(3);
+    });
+
+    it('switches only the candle interval without rebuilding invariant market data', async () => {
+        const base = createFuturesProductionWorkstationFakeTransport();
+        const loadExchangeInfo = vi.fn(options => base.loadExchangeInfo(options));
+        const bootstrap = vi.fn(options => base.bootstrap(options));
+        const bootstrapInterval = vi.fn(options => base.bootstrapInterval(options));
+        let streamClose;
+        let streamSelectInterval;
+        const connect = vi.fn((options) => {
+            const handle = base.connect(options);
+            streamClose = vi.fn(handle.close);
+            streamSelectInterval = vi.fn(selection => handle.selectInterval(selection));
+            return Object.freeze({
+                ready: handle.ready,
+                close: streamClose,
+                selectInterval: streamSelectInterval,
+            });
+        });
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            transport: {
+                ...base,
+                loadExchangeInfo,
+                bootstrap,
+                bootstrapInterval,
+                connect,
+            },
+        }));
+        const events = [];
+
+        await runtime.service.handleRequest(productionRequest('interval-base'), {
+            emit: event => events.push(event),
+        });
+        await runtime.service.handleRequest(
+            productionIntervalRequest('interval-only', 'BTCUSDT', '5m'),
+            { emit: event => events.push(event) },
+        );
+
+        const switched = events.filter(event => event.requestId === 'interval-only');
+        expect(loadExchangeInfo).toHaveBeenCalledOnce();
+        expect(bootstrap).toHaveBeenCalledOnce();
+        expect(connect).toHaveBeenCalledOnce();
+        expect(streamClose).not.toHaveBeenCalled();
+        expect(bootstrapInterval).toHaveBeenCalledOnce();
+        expect(streamSelectInterval).toHaveBeenCalledOnce();
+        expect(streamSelectInterval).toHaveBeenCalledWith(expect.objectContaining({
+            interval: '5m',
+        }));
+        expect(switched.map(event => event.resource)).toEqual([
+            'status',
+            'candles',
+            'candles',
+            'candles',
+            'status',
+        ]);
+        expect(switched.filter(event => event.resource === 'candles')
+            .map(event => event.payload.series)).toEqual(['contract', 'mark', 'index']);
+        expect(switched.every(event => event.generation === 1)).toBe(true);
+        expect(runtime.service.current).toMatchObject({ generation: 1, interval: '5m' });
+        expect(base.getActiveTimerCount()).toBe(1);
+    });
+
+    it('drops stale interval bootstraps during a rapid A → B → C switch', async () => {
+        const base = createFuturesProductionWorkstationFakeTransport();
+        const deferred = new Map();
+        const bootstrapInterval = vi.fn(options => new Promise((resolve) => {
+            deferred.set(options.interval, resolve);
+        }));
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            transport: { ...base, bootstrapInterval },
+        }));
+        const initialEvents = [];
+        await runtime.service.handleRequest(productionRequest('interval-a'), {
+            emit: event => initialEvents.push(event),
+        });
+
+        const bEvents = [];
+        const cEvents = [];
+        const pendingB = runtime.service.handleRequest(
+            productionIntervalRequest('interval-b', 'BTCUSDT', '5m'),
+            { emit: event => bEvents.push(event) },
+        );
+        await vi.waitFor(() => expect(deferred.has('5m')).toBe(true));
+        const pendingC = runtime.service.handleRequest(
+            productionIntervalRequest('interval-c', 'BTCUSDT', '15m'),
+            { emit: event => cEvents.push(event) },
+        );
+        await vi.waitFor(() => expect(deferred.has('15m')).toBe(true));
+
+        const fixture = FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT;
+        const candleSnapshot = {
+            contractKlines: fixture.contractKlines,
+            markKlines: fixture.markKlines,
+            indexKlines: fixture.indexKlines,
+        };
+        deferred.get('15m')(candleSnapshot);
+        await pendingC;
+        deferred.get('5m')(candleSnapshot);
+        await pendingB;
+
+        expect(bEvents.map(event => event.resource)).toEqual(['status']);
+        expect(cEvents.map(event => event.resource)).toEqual([
+            'status',
+            'candles',
+            'candles',
+            'candles',
+            'status',
+        ]);
+        expect(cEvents.filter(event => event.resource === 'candles')
+            .every(event => event.payload.interval === '15m')).toBe(true);
+        expect(runtime.service.current).toMatchObject({
+            requestId: 'interval-c',
+            interval: '15m',
+            generation: 1,
+        });
+        expect(bootstrapInterval).toHaveBeenCalledTimes(2);
+    });
+
+    it('starts a clean generation when interval selection races initial exchange info', async () => {
+        const base = createFuturesProductionWorkstationFakeTransport();
+        let resolveFirstExchangeInfo;
+        const loadExchangeInfo = vi.fn((options) => {
+            if (loadExchangeInfo.mock.calls.length === 1) {
+                return new Promise((resolve) => { resolveFirstExchangeInfo = resolve; });
+            }
+            return base.loadExchangeInfo(options);
+        });
+        const bootstrap = vi.fn(options => base.bootstrap(options));
+        const connect = vi.fn(options => base.connect(options));
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            transport: { ...base, loadExchangeInfo, bootstrap, connect },
+        }));
+        const firstEvents = [];
+        const selectedEvents = [];
+
+        const first = runtime.service.handleRequest(productionRequest('interval-early-base'), {
+            emit: event => firstEvents.push(event),
+        });
+        await vi.waitFor(() => expect(resolveFirstExchangeInfo).toBeTypeOf('function'));
+        await runtime.service.handleRequest(
+            productionIntervalRequest('interval-early-selected', 'BTCUSDT', '5m'),
+            { emit: event => selectedEvents.push(event) },
+        );
+        resolveFirstExchangeInfo(FUTURES_PRODUCTION_WORKSTATION_FIXTURE.catalog);
+        await first;
+
+        expect(loadExchangeInfo).toHaveBeenCalledTimes(2);
+        expect(bootstrap).toHaveBeenCalledOnce();
+        expect(connect).toHaveBeenCalledOnce();
+        expect(firstEvents.some(event => event.state === 'live')).toBe(false);
+        expect(selectedEvents.at(-1)).toMatchObject({
+            requestId: 'interval-early-selected',
+            generation: 2,
+            state: 'live',
+        });
+        expect(runtime.service.current).toMatchObject({
+            requestId: 'interval-early-selected',
+            interval: '5m',
+            generation: 2,
+        });
+    });
+
+    it('starts a clean generation when interval selection races a full bootstrap', async () => {
+        const base = createFuturesProductionWorkstationFakeTransport();
+        let resolveFirstBootstrap;
+        let firstBootstrapOptions;
+        const bootstrap = vi.fn((options) => {
+            if (bootstrap.mock.calls.length === 1) {
+                firstBootstrapOptions = options;
+                return new Promise((resolve) => { resolveFirstBootstrap = resolve; });
+            }
+            return base.bootstrap(options);
+        });
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            transport: { ...base, bootstrap },
+        }));
+        const firstEvents = [];
+        const selectedEvents = [];
+        const first = runtime.service.handleRequest(productionRequest('interval-bootstrap-base'), {
+            emit: event => firstEvents.push(event),
+        });
+        await vi.waitFor(() => expect(resolveFirstBootstrap).toBeTypeOf('function'));
+
+        await runtime.service.handleRequest(
+            productionIntervalRequest('interval-bootstrap-selected', 'BTCUSDT', '15m'),
+            { emit: event => selectedEvents.push(event) },
+        );
+        firstBootstrapOptions.onBootstrapResource({
+            resource: 'contractKlines',
+            value: FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.contractKlines,
+        });
+        resolveFirstBootstrap(FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT);
+        await first;
+
+        expect(bootstrap).toHaveBeenCalledTimes(2);
+        expect(firstEvents.some(event => event.resource === 'candles')).toBe(false);
+        expect(selectedEvents.filter(event => event.resource === 'candles')
+            .every(event => event.payload.interval === '15m')).toBe(true);
+        expect(selectedEvents.at(-1)).toMatchObject({
+            requestId: 'interval-bootstrap-selected',
+            generation: 2,
+            state: 'live',
+        });
+    });
+
+    it('cancels a pending full reconnect when a new interval owns recovery', async () => {
+        const manual = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport({ clock: manual.clock });
+        let disconnect;
+        const connect = vi.fn((options) => {
+            disconnect = options.onDisconnect;
+            return base.connect(options);
+        });
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock: manual.clock,
+            transport: { ...base, connect },
+        }));
+        const events = [];
+        await runtime.service.handleRequest(productionRequest('interval-reconnect-base'), {
+            emit: event => events.push(event),
+        });
+        disconnect('SOCKET_CLOSED');
+        expect(manual.timeoutCount()).toBe(1);
+
+        await runtime.service.handleRequest(
+            productionIntervalRequest('interval-reconnect-selected', 'BTCUSDT', '4h'),
+            { emit: event => events.push(event) },
+        );
+
+        expect(manual.timeoutCount()).toBe(0);
+        expect(connect).toHaveBeenCalledTimes(2);
+        expect(runtime.service.current).toMatchObject({
+            requestId: 'interval-reconnect-selected',
+            interval: '4h',
+            generation: 2,
+        });
+        expect(events.at(-1)).toMatchObject({
+            requestId: 'interval-reconnect-selected',
+            state: 'live',
+        });
+    });
+
+    it('recovers a post-ready candle disconnect without touching book or trade streams', async () => {
+        const manual = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport({ clock: manual.clock });
+        const bootstrap = vi.fn(options => base.bootstrap(options));
+        const bootstrapInterval = vi.fn(options => base.bootstrapInterval(options));
+        let candleDisconnect;
+        let streamClose;
+        let streamSelectInterval;
+        const connect = vi.fn((options) => {
+            candleDisconnect = options.onCandleDisconnect;
+            const handle = base.connect(options);
+            streamClose = vi.fn(handle.close);
+            streamSelectInterval = vi.fn(selection => handle.selectInterval(selection));
+            return Object.freeze({
+                ready: handle.ready,
+                close: streamClose,
+                selectInterval: streamSelectInterval,
+            });
+        });
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock: manual.clock,
+            transport: { ...base, bootstrap, bootstrapInterval, connect },
+        }));
+        const events = [];
+        await runtime.service.handleRequest(productionRequest('candle-recovery'), {
+            emit: event => events.push(event),
+        });
+
+        candleDisconnect('SOCKET_CLOSED');
+        expect(events.at(-1)).toMatchObject({
+            resource: 'status',
+            state: 'live',
+            payload: { connected: true, reasonCode: 'CANDLE_SOCKET_CLOSED' },
+        });
+        expect(manual.timeoutCount()).toBe(1);
+        expect(streamClose).not.toHaveBeenCalled();
+        expect(connect).toHaveBeenCalledOnce();
+        expect(bootstrap).toHaveBeenCalledOnce();
+        expect(bootstrapInterval).not.toHaveBeenCalled();
+
+        manual.runTimeouts();
+        await vi.waitFor(() => expect(bootstrapInterval).toHaveBeenCalledOnce());
+        await vi.waitFor(() => expect(events.at(-1)).toMatchObject({
+            resource: 'status',
+            state: 'live',
+            payload: { connected: true, reasonCode: null },
+        }));
+
+        expect(streamSelectInterval).toHaveBeenCalledOnce();
+        expect(streamClose).not.toHaveBeenCalled();
+        expect(connect).toHaveBeenCalledOnce();
+        expect(bootstrap).toHaveBeenCalledOnce();
+        expect(manual.timeoutCount()).toBe(0);
+    });
+
+    it('bounds candle-only handshake retries without falling back to a full resync', async () => {
+        const manual = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport({ clock: manual.clock });
+        const bootstrap = vi.fn(options => base.bootstrap(options));
+        const bootstrapInterval = vi.fn(options => base.bootstrapInterval(options));
+        let streamClose;
+        const streamSelectInterval = vi.fn(async () => false);
+        const connect = vi.fn((options) => {
+            const handle = base.connect(options);
+            streamClose = vi.fn(handle.close);
+            return Object.freeze({
+                ready: handle.ready,
+                close: streamClose,
+                selectInterval: streamSelectInterval,
+            });
+        });
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock: manual.clock,
+            transport: { ...base, bootstrap, bootstrapInterval, connect },
+        }));
+        const events = [];
+        await runtime.service.handleRequest(productionRequest('candle-retry-base'), {
+            emit: event => events.push(event),
+        });
+        await runtime.service.handleRequest(
+            productionIntervalRequest('candle-retry-selected', 'BTCUSDT', '5m'),
+            { emit: event => events.push(event) },
+        );
+
+        for (let attempt = 1; attempt <= 8; attempt += 1) {
+            expect(manual.timeoutCount()).toBe(1);
+            manual.runTimeouts();
+            await vi.waitFor(() => expect(streamSelectInterval).toHaveBeenCalledTimes(attempt + 1));
+        }
+
+        await vi.waitFor(() => expect(manual.timeoutCount()).toBe(0));
+        expect(events.at(-1)).toMatchObject({
+            resource: 'status',
+            state: 'live',
+            payload: { connected: true, reasonCode: 'INTERVAL_RECONNECT_EXHAUSTED' },
+        });
+        expect(streamSelectInterval).toHaveBeenCalledTimes(9);
+        expect(bootstrapInterval).not.toHaveBeenCalled();
+        expect(connect).toHaveBeenCalledOnce();
+        expect(bootstrap).toHaveBeenCalledOnce();
+        expect(streamClose).not.toHaveBeenCalled();
     });
 
     it('drops a late bootstrap from the prior symbol generation', async () => {

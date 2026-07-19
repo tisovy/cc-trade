@@ -76,6 +76,13 @@ test('Futures Live is ready, keeps contracts visible and executes only mocked ge
         await expect(currentOrders).toContainText('Original qty');
         await expect(currentOrders).toContainText('Filled qty');
         await expect(currentOrders).toContainText('0.004');
+        await tradingRail.getByRole('tab', { name: /^Positions 1$/ }).click();
+        const currentPositions = tradingRail.getByLabel('Hedge positions');
+        const btcLongPosition = currentPositions.locator('article').filter({ hasText: 'BTCUSDT' });
+        await expect(btcLongPosition).toContainText('LONG');
+        await expect(btcLongPosition).toContainText('Qty0.010');
+        await expect(btcLongPosition).toContainText('MarginISOLATED · 2×');
+        await expect(btcLongPosition).toContainText('Isolated305.00 USDT');
         await tradingRail.getByRole('tab', { name: 'Trade' }).click();
 
         const externalOrderLine = mainWindow.getByRole('button', {
@@ -140,21 +147,87 @@ test('Futures Live is ready, keeps contracts visible and executes only mocked ge
         expect(await orderSummary.textContent()).not.toMatch(/Quantity—|Est\. margin—/);
 
         await ask.dblclick({ modifiers: ['Alt'] });
-        await expect(tradingRail.getByRole('tab', { name: /^Orders 1$/ })).toBeVisible();
+        await expect(tradingRail.getByRole('tab', { name: /^Orders 2$/ })).toBeVisible();
+        await tradingRail.getByRole('tab', { name: /^Orders 2$/ }).click();
+        const ethLongEntry = tradingRail.getByLabel('Current Futures orders')
+            .locator('article')
+            .filter({ hasText: 'ETHUSDT' });
+        await expect(ethLongEntry).toContainText('BUY · LONG');
+        await expect(ethLongEntry).toContainText('TypeLIMIT');
+        await expect(ethLongEntry).toContainText('NEW · SYNCED');
+        await tradingRail.getByRole('tab', { name: 'Trade' }).click();
 
+        const workstation = mainWindow.locator('.futures-production-workstation');
+        const depthPanel = workstation.locator('.futures-workstation-depth');
+        const tradesPanel = workstation.locator('.futures-workstation-trades');
+        const tradeRows = tradesPanel.locator('.futures-workstation-trade-rows > div');
+        await expect(depthPanel).toHaveAttribute('data-state', 'live');
+        await expect(tradesPanel).toHaveAttribute('data-state', 'live');
+        await expect.poll(() => tradeRows.count()).toBeGreaterThan(0);
         const generationBeforeInterval = Number(
             (await identity.locator('code').textContent())?.match(/^gen (\d+)/)?.[1],
         );
-        await mainWindow.locator('.futures-production-workstation')
-            .getByRole('button', { name: '5m', exact: true })
-            .click();
+        const depthUpdateBeforeInterval = Number(
+            (await depthPanel.locator('.futures-workstation-spread code').textContent())
+                ?.match(/^u (\d+)$/)?.[1],
+        );
+        const newestTradeBeforeInterval = await tradeRows.first().textContent();
+        await workstation.evaluate((element) => {
+            const samples = [];
+            const record = () => {
+                const depth = element.querySelector('.futures-workstation-depth');
+                const trades = element.querySelector('.futures-workstation-trades');
+                samples.push({
+                    generation: element
+                        .querySelector('[data-testid="futures-workstation-identity"] code')
+                        ?.textContent?.match(/^gen (\d+)/)?.[1] ?? null,
+                    depthState: depth?.getAttribute('data-state') ?? null,
+                    askRows: depth?.querySelectorAll('.is-ask button').length ?? 0,
+                    bidRows: depth?.querySelectorAll('.is-bid button').length ?? 0,
+                    tradesState: trades?.getAttribute('data-state') ?? null,
+                    tradeRows: trades
+                        ?.querySelectorAll('.futures-workstation-trade-rows > div').length ?? 0,
+                });
+            };
+            const observer = new MutationObserver(record);
+            record();
+            observer.observe(element, {
+                attributes: true,
+                childList: true,
+                characterData: true,
+                subtree: true,
+            });
+            globalThis.__futuresIntervalProbe = { observer, record, samples };
+        });
+        const fiveMinuteInterval = workstation.getByRole('button', { name: '5m', exact: true });
+        await fiveMinuteInterval.click();
         await expect(identity.getByRole('status')).toHaveText('LIVE');
         await expect.poll(async () => Number(
             (await identity.locator('code').textContent())?.match(/^gen (\d+)/)?.[1],
-        )).toBe(generationBeforeInterval + 1);
-        await expect(mainWindow.locator('.futures-production-workstation')
-            .getByRole('button', { name: '5m', exact: true }))
-            .toHaveAttribute('aria-pressed', 'true');
+        )).toBe(generationBeforeInterval);
+        await expect(fiveMinuteInterval).toHaveAttribute('aria-pressed', 'true');
+        await expect.poll(async () => Number(
+            (await depthPanel.locator('.futures-workstation-spread code').textContent())
+                ?.match(/^u (\d+)$/)?.[1],
+        )).toBeGreaterThan(depthUpdateBeforeInterval);
+        await expect.poll(() => tradeRows.first().textContent())
+            .not.toBe(newestTradeBeforeInterval);
+        const intervalSamples = await workstation.evaluate(() => {
+            globalThis.__futuresIntervalProbe?.record?.();
+            globalThis.__futuresIntervalProbe?.observer?.disconnect();
+            const samples = globalThis.__futuresIntervalProbe?.samples ?? [];
+            delete globalThis.__futuresIntervalProbe;
+            return samples;
+        });
+        expect(intervalSamples.length).toBeGreaterThan(0);
+        expect(intervalSamples.every(sample => (
+            Number(sample.generation) === generationBeforeInterval
+            && sample.depthState === 'live'
+            && sample.tradesState === 'live'
+            && sample.askRows > 0
+            && sample.bidRows > 0
+            && sample.tradeRows > 0
+        ))).toBe(true);
 
         const marketActionNames = await mainWindow.locator([
             '.futures-workstation-market-header button',
@@ -335,6 +408,8 @@ test('Ctrl and Alt double-right gestures bypass the native menu exactly once', a
         });
 
         const chart = mainWindow.getByTestId('futures-workstation-chart');
+        const sizeSlider = tradingRail.getByRole('slider', { name: 'Order size percent' });
+        await sizeSlider.fill('100');
         await chart.dblclick({
             button: 'right',
             modifiers: ['Alt'],
@@ -345,6 +420,14 @@ test('Ctrl and Alt double-right gestures bypass the native menu exactly once', a
         await expect(tradingRail.getByLabel('Exact limit price')).not.toHaveValue('');
         await expect(tradingRail.locator('.futures-production-order-summary'))
             .toContainText('LONG leg');
+        await expect(tradingRail.getByRole('tab', { name: /^Orders 2$/ })).toBeVisible();
+        await tradingRail.getByRole('tab', { name: /^Orders 2$/ }).click();
+        const btcLongExit = tradingRail.getByLabel('Current Futures orders')
+            .locator('article')
+            .filter({ hasText: 'SELL · LONG' });
+        await expect(btcLongExit).toContainText('BTCUSDT');
+        await expect(btcLongExit).toContainText('NEW · SYNCED');
+        await tradingRail.getByRole('tab', { name: 'Trade' }).click();
 
         const contractList = mainWindow.locator('.futures-workstation-contract-list');
         await contractList.locator('.futures-workstation-contract-select')
@@ -353,13 +436,18 @@ test('Ctrl and Alt double-right gestures bypass the native menu exactly once', a
         await expect(mainWindow.getByLabel('Futures market header')).toContainText('ETHUSDT');
         await expect(mainWindow.locator('.futures-workstation-chart-frame .futures-workstation-overlay'))
             .toHaveCount(0);
-        const sizeSlider = tradingRail.getByRole('slider', { name: 'Order size percent' });
         await sizeSlider.fill('100');
         const bid = mainWindow.locator('.futures-workstation-book-side.is-bid button').first();
         await bid.dblclick({ button: 'right', modifiers: ['Control'] });
         await expect(tradingRail.locator('.futures-production-ticket-symbol code'))
             .toHaveText('SHORT entry');
-        await expect(tradingRail.getByRole('tab', { name: /^Orders 1$/ })).toBeVisible();
+        await expect(tradingRail.getByRole('tab', { name: /^Orders 3$/ })).toBeVisible();
+        await tradingRail.getByRole('tab', { name: /^Orders 3$/ }).click();
+        const ethShortEntry = tradingRail.getByLabel('Current Futures orders')
+            .locator('article')
+            .filter({ hasText: 'ETHUSDT' });
+        await expect(ethShortEntry).toContainText('SELL · SHORT');
+        await expect(ethShortEntry).toContainText('NEW · SYNCED');
 
         const nativeContextMenuCount = await electronApp.evaluate(({ BrowserWindow }) => {
             const [window] = BrowserWindow.getAllWindows();

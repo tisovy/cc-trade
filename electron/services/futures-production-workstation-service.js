@@ -71,6 +71,7 @@ export class FuturesProductionWorkstationService {
         if (!transport
             || typeof transport.loadExchangeInfo !== 'function'
             || typeof transport.bootstrap !== 'function'
+            || typeof transport.bootstrapInterval !== 'function'
             || typeof transport.connect !== 'function'
             || typeof transport.close !== 'function'
             || typeof clock.now !== 'function'
@@ -101,7 +102,105 @@ export class FuturesProductionWorkstationService {
             if (this.current?.requestId === request.requestId) this.stopCurrent();
             return;
         }
+        if (request.action === FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SELECT_INTERVAL
+            && this.current?.symbol === request.symbol
+            && this.current.bootstrapped === true
+            && this.current.reconnectTimer === null
+            && typeof this.current.stream?.selectInterval === 'function') {
+            await this.selectInterval(request, emit);
+            return;
+        }
         await this.startGeneration(request, emit, 0);
+    }
+
+    async selectInterval(request, emit, reconnectAttempt = 0) {
+        const session = this.current;
+        if (!session
+            || session.symbol !== request.symbol
+            || session.bootstrapped !== true
+            || session.reconnectTimer !== null
+            || typeof session.stream?.selectInterval !== 'function') {
+            await this.startGeneration(request, emit, 0);
+            return;
+        }
+
+        if (session.intervalReconnectTimer !== null) {
+            this.clock.clearTimeout(session.intervalReconnectTimer);
+            session.intervalReconnectTimer = null;
+        }
+
+        session.intervalEpoch += 1;
+        const intervalEpoch = session.intervalEpoch;
+        session.intervalAbortController?.abort();
+        const intervalAbortController = new AbortController();
+        session.intervalAbortController = intervalAbortController;
+        const abortFromSession = () => intervalAbortController.abort();
+        if (session.abortController.signal.aborted) abortFromSession();
+        else session.abortController.signal.addEventListener('abort', abortFromSession, { once: true });
+
+        session.request = request;
+        session.requestId = request.requestId;
+        session.interval = request.interval;
+        session.emit = emit;
+        session.intervalReconnectAttempt = reconnectAttempt;
+        session.candles = Object.freeze([]);
+        session.markCandles = Object.freeze([]);
+        session.indexCandles = Object.freeze([]);
+        session.pendingCandleEvents = [];
+        session.intervalBootstrapping = true;
+        this.emitStatus(session, FUTURES_WORKSTATION_STATES.LOADING, true, null);
+
+        const isCurrentInterval = () => this.isCurrent(session)
+            && session.reconnectTimer === null
+            && session.intervalReconnectTimer === null
+            && session.intervalEpoch === intervalEpoch
+            && session.interval === request.interval
+            && session.requestId === request.requestId
+            && !intervalAbortController.signal.aborted;
+
+        try {
+            const streamReady = await session.stream.selectInterval({
+                interval: request.interval,
+                signal: intervalAbortController.signal,
+            });
+            if (!isCurrentInterval()) return;
+            if (streamReady !== true) {
+                throw new FuturesProductionWorkstationServiceError('INTERVAL_SOCKET_NOT_READY');
+            }
+            const bootstrap = await this.transport.bootstrapInterval({
+                symbol: session.symbol,
+                pair: session.pair,
+                interval: request.interval,
+                signal: intervalAbortController.signal,
+            });
+            if (!isCurrentInterval()) return;
+            session.candles = normalizeFuturesWorkstationKlines(bootstrap?.contractKlines);
+            session.markCandles = normalizeFuturesWorkstationKlines(bootstrap?.markKlines);
+            session.indexCandles = normalizeFuturesWorkstationKlines(bootstrap?.indexKlines);
+            session.lastCandlesAt = this.observedNow(session);
+            session.staleResources.delete(FUTURES_WORKSTATION_RESOURCES.CANDLES);
+            this.emitCandleSeries(session, 'contract', session.candles);
+            this.emitCandleSeries(session, 'mark', session.markCandles);
+            this.emitCandleSeries(session, 'index', session.indexCandles);
+            session.intervalBootstrapping = false;
+            for (const event of session.pendingCandleEvents) this.applyStreamEvent(session, event);
+            session.pendingCandleEvents = [];
+            if (!isCurrentInterval()) return;
+            session.intervalReconnectAttempt = 0;
+            this.emitStatus(session, FUTURES_WORKSTATION_STATES.LIVE, true, null);
+        } catch (error) {
+            if (!isCurrentInterval()) return;
+            session.intervalBootstrapping = false;
+            session.pendingCandleEvents = [];
+            const reasonCode = safeCode(error);
+            this.onInternalError({ phase: 'interval-bootstrap', code: reasonCode });
+            this.scheduleIntervalResync(session, reasonCode);
+        } finally {
+            session.abortController.signal.removeEventListener?.('abort', abortFromSession);
+            if (session.intervalAbortController === intervalAbortController) {
+                session.intervalAbortController = null;
+            }
+        }
     }
 
     isCurrent(session) {
@@ -182,6 +281,12 @@ export class FuturesProductionWorkstationService {
             pair: request.symbol,
             generation: this.generation,
             revision: 0,
+            intervalEpoch: 0,
+            intervalAbortController: null,
+            intervalBootstrapping: false,
+            pendingCandleEvents: [],
+            intervalReconnectAttempt: 0,
+            intervalReconnectTimer: null,
             reconnectAttempt,
             emit,
             abortController: new AbortController(),
@@ -246,6 +351,7 @@ export class FuturesProductionWorkstationService {
                 signal: session.abortController.signal,
                 onMessage: raw => this.handleStreamFrame(session, raw),
                 onDisconnect: reason => this.handleDisconnect(session, reason),
+                onCandleDisconnect: reason => this.handleCandleDisconnect(session, reason),
             });
             if (!session.stream
                 || typeof session.stream.close !== 'function'
@@ -397,6 +503,14 @@ export class FuturesProductionWorkstationService {
                 pair: session.pair,
                 interval: session.interval,
             });
+            if (event.kind === 'kline' && session.intervalBootstrapping) {
+                if (session.pendingCandleEvents.length
+                    >= FUTURES_PRODUCTION_WORKSTATION_FRESHNESS.PENDING_EVENTS) {
+                    session.pendingCandleEvents.shift();
+                }
+                session.pendingCandleEvents.push(event);
+                return;
+            }
             if (event.kind === 'depth') {
                 const result = session.orderBook.push({
                     firstUpdateId: event.firstUpdateId,
@@ -514,6 +628,67 @@ export class FuturesProductionWorkstationService {
         this.scheduleResync(session, 'SOCKET_DISCONNECTED');
     }
 
+    handleCandleDisconnect(session, reason) {
+        if (!this.isCurrent(session)) return;
+        if (!session.bootstrapped) {
+            this.scheduleResync(session, 'CANDLE_SOCKET_DISCONNECTED');
+            return;
+        }
+        const prefixedReason = typeof reason === 'string' ? `CANDLE_${reason}` : '';
+        const reasonCode = /^[A-Z0-9_]{1,96}$/.test(prefixedReason)
+            ? prefixedReason
+            : 'CANDLE_SOCKET_DISCONNECTED';
+        this.scheduleIntervalResync(session, reasonCode);
+    }
+
+    scheduleIntervalResync(session, reasonCode) {
+        if (!this.isCurrent(session)
+            || session.reconnectTimer !== null
+            || session.intervalReconnectTimer !== null) return;
+
+        session.intervalEpoch += 1;
+        session.intervalAbortController?.abort();
+        session.intervalBootstrapping = false;
+        session.pendingCandleEvents = [];
+        this.emitCandleSeries(
+            session,
+            'contract',
+            session.candles,
+            FUTURES_WORKSTATION_STATES.UNAVAILABLE,
+        );
+
+        if (session.intervalReconnectAttempt
+            >= FUTURES_PRODUCTION_WORKSTATION_FRESHNESS.RECONNECT_ATTEMPTS) {
+            this.emitStatus(
+                session,
+                FUTURES_WORKSTATION_STATES.LIVE,
+                true,
+                'INTERVAL_RECONNECT_EXHAUSTED',
+            );
+            return;
+        }
+
+        this.emitStatus(session, FUTURES_WORKSTATION_STATES.LIVE, true, reasonCode);
+        const delay = Math.min(
+            FUTURES_PRODUCTION_WORKSTATION_FRESHNESS.RECONNECT_MAX_MS,
+            FUTURES_PRODUCTION_WORKSTATION_FRESHNESS.RECONNECT_BASE_MS
+                * (2 ** session.intervalReconnectAttempt),
+        );
+        const request = session.request;
+        const emit = session.emit;
+        const attempt = session.intervalReconnectAttempt + 1;
+        session.intervalReconnectTimer = this.clock.setTimeout(() => {
+            session.intervalReconnectTimer = null;
+            if (this.isCurrent(session)
+                && session.reconnectTimer === null
+                && session.requestId === request.requestId
+                && session.interval === request.interval) {
+                void this.selectInterval(request, emit, attempt);
+            }
+        }, delay);
+        session.intervalReconnectTimer?.unref?.();
+    }
+
     scheduleResync(session, reasonCode) {
         if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
         if (session.reconnectAttempt >= FUTURES_PRODUCTION_WORKSTATION_FRESHNESS.RECONNECT_ATTEMPTS) {
@@ -532,6 +707,15 @@ export class FuturesProductionWorkstationService {
             false,
             reasonCode,
         );
+        session.intervalEpoch += 1;
+        session.intervalAbortController?.abort();
+        session.intervalAbortController = null;
+        session.intervalBootstrapping = false;
+        session.pendingCandleEvents = [];
+        if (session.intervalReconnectTimer !== null) {
+            this.clock.clearTimeout(session.intervalReconnectTimer);
+            session.intervalReconnectTimer = null;
+        }
         session.stream?.close?.();
         session.stream = null;
         session.orderBook.stop();
@@ -560,6 +744,7 @@ export class FuturesProductionWorkstationService {
         session.stream?.close?.();
         session.stream = null;
         session.abortController.abort();
+        session.intervalAbortController?.abort();
         session.orderBook.stop();
         if (session.freshnessTimer !== null) {
             this.clock.clearInterval(session.freshnessTimer);
@@ -569,7 +754,12 @@ export class FuturesProductionWorkstationService {
             this.clock.clearTimeout(session.reconnectTimer);
             session.reconnectTimer = null;
         }
+        if (session.intervalReconnectTimer !== null) {
+            this.clock.clearTimeout(session.intervalReconnectTimer);
+            session.intervalReconnectTimer = null;
+        }
         session.pendingEvents = [];
+        session.pendingCandleEvents = [];
     }
 
     stopCurrent() {
@@ -577,11 +767,16 @@ export class FuturesProductionWorkstationService {
         this.current = null;
         if (!session) return;
         session.abortController.abort();
+        session.intervalAbortController?.abort();
         session.stream?.close?.();
         session.orderBook.stop();
         if (session.freshnessTimer !== null) this.clock.clearInterval(session.freshnessTimer);
         if (session.reconnectTimer !== null) this.clock.clearTimeout(session.reconnectTimer);
+        if (session.intervalReconnectTimer !== null) {
+            this.clock.clearTimeout(session.intervalReconnectTimer);
+        }
         session.pendingEvents = [];
+        session.pendingCandleEvents = [];
     }
 
     stop() {

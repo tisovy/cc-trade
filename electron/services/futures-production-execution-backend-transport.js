@@ -22,6 +22,14 @@ const PROXY_PROTOCOLS = new Set([
 ]);
 const REST_METHODS = new Set(['GET', 'POST', 'PUT', 'DELETE']);
 const MAX_RESPONSE_BYTES = FUTURES_PRODUCTION_EXECUTION_INVENTORY_RESPONSE_LIMITS.BODY_BYTES;
+const PRIVATE_STREAM_EVENTS = [
+    'ORDER_TRADE_UPDATE',
+    'ALGO_UPDATE',
+    'ACCOUNT_UPDATE',
+    'ACCOUNT_CONFIG_UPDATE',
+    'listenKeyExpired',
+].join('/');
+const PRIVATE_STREAM_LISTEN_KEY = /^[A-Za-z0-9_-]{20,256}$/;
 const trustedTransports = new WeakSet();
 
 export class FuturesProductionExecutionBackendTransportError extends Error {
@@ -93,6 +101,9 @@ const assertWebSocketUrl = (value) => {
     if (url.origin !== FUTURES_PRODUCTION_EXECUTION_WS_ORIGIN
         || url.protocol !== 'wss:'
         || url.pathname !== '/private/ws'
+        || [...url.searchParams.keys()].join('/') !== 'listenKey/events'
+        || !PRIVATE_STREAM_LISTEN_KEY.test(url.searchParams.get('listenKey') ?? '')
+        || url.searchParams.get('events') !== PRIVATE_STREAM_EVENTS
         || url.username
         || url.password
         || url.hash) {

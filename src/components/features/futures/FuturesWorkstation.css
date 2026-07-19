@@ -548,39 +548,6 @@
   font-size: 10px;
 }
 
-.futures-workstation-local-draft {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  min-height: 42px;
-  padding: 7px 10px;
-  border-top: 1px solid var(--futures-border);
-  background: var(--futures-accent-soft);
-}
-
-.futures-workstation-local-draft > div {
-  display: flex;
-  flex-direction: column;
-}
-
-.futures-workstation-local-draft span {
-  color: #718399;
-  font-size: 8px;
-  text-transform: uppercase;
-}
-
-.futures-workstation-local-draft strong {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11px;
-}
-
-.futures-workstation-local-draft code {
-  color: #f0c94e;
-  font-size: 9px;
-  font-weight: 800;
-}
-
 .futures-workstation-depth {
   grid-area: depth;
   min-height: 390px;
@@ -814,7 +781,6 @@
   }
 
   .futures-workstation-chart-toolbar,
-  .futures-workstation-local-draft,
   .futures-workstation-safety-drawer summary {
     align-items: flex-start;
     flex-direction: column;

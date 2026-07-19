@@ -386,7 +386,7 @@ describe('production workstation hook isolation', () => {
       .toEqual([firstRequest.requestId, retryRequest.requestId])
   })
 
-  it('keeps same-symbol resources visible as stale while a new interval generation loads', () => {
+  it('keeps same-symbol invariant resources live while only the interval loads', () => {
     const socket = new LocalSocket()
     const sendMessage = vi.fn(() => true)
     const { result, rerender } = renderHook(props => useFuturesProductionWorkstation(props), {
@@ -411,21 +411,22 @@ describe('production workstation hook isolation', () => {
       .toBe(FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SELECT_INTERVAL)
     expect(result.current.resources.header).toMatchObject({
       lastPrice: '58420.1',
-      state: 'stale',
+      state: 'live',
     })
     expect(result.current.resources.candles).toBeNull()
 
     act(() => socket.emitMessage(createFuturesProductionWorkstationEvent(
       eventValues(intervalRequest.requestId, {
-        generation: 2,
+        generation: 1,
+        revision: 3,
         state: 'loading',
-        payload: Object.freeze({ connected: false, reasonCode: null }),
+        payload: Object.freeze({ connected: true, reasonCode: null }),
       }),
     )))
     expect(result.current.status).toBe('loading')
     expect(result.current.resources.header).toMatchObject({
       lastPrice: '58420.1',
-      state: 'stale',
+      state: 'live',
     })
   })
 

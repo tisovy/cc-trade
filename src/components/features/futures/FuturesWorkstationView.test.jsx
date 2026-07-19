@@ -290,17 +290,16 @@ describe('pure Futures workstation presentation', () => {
   it('turns chart and book clicks into a shared limit-price draft', () => {
     const { onSymbolChange, onIntervalChange } = renderView()
     fireEvent.click(screen.getByRole('button', { name: 'Pick chart price' }))
-    expect(screen.getByLabelText('Futures limit price draft')).toHaveTextContent('58420.25')
-    expect(screen.getByLabelText('Futures limit price draft')).toHaveTextContent(
-      'DRAFT · VERIFIED SHORTCUT EXECUTION',
-    )
+    expect(screen.getByTestId('mock-futures-chart')).toHaveTextContent('draft 58420.25')
+    expect(screen.queryByLabelText('Futures limit price draft')).not.toBeInTheDocument()
+    expect(screen.queryByText('DRAFT · VERIFIED SHORTCUT EXECUTION')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Horizontal drawing' }))
     fireEvent.click(screen.getByRole('button', { name: 'Pick chart price' }))
     expect(screen.getByTestId('mock-futures-chart')).toHaveTextContent('drawings 1')
     fireEvent.click(screen.getByRole('button', { name: 'Add display alert' }))
     expect(screen.getByTestId('mock-futures-chart')).toHaveTextContent('alerts 1')
     fireEvent.click(screen.getByRole('button', { name: /^58420\.50/ }))
-    expect(screen.getByLabelText('Futures limit price draft')).toHaveTextContent('58420.50')
+    expect(screen.getByTestId('mock-futures-chart')).toHaveTextContent('draft 58420.50')
     expect(onSymbolChange).not.toHaveBeenCalled()
     expect(onIntervalChange).not.toHaveBeenCalled()
   })
@@ -439,8 +438,7 @@ describe('pure Futures workstation presentation', () => {
     const state = createState({ status: 'resynchronizing' })
     renderView({ state })
     fireEvent.click(screen.getByRole('button', { name: 'Pick chart price' }))
-    expect(screen.getByLabelText('Futures limit price draft'))
-      .toHaveTextContent('58420.25')
+    expect(screen.getByTestId('mock-futures-chart')).toHaveTextContent('draft 58420.25')
     expect(screen.getByRole('button', { name: /^58420\.50/ })).toBeEnabled()
     expect(screen.queryByText('RESYNCHRONIZING', { selector: '.futures-workstation-overlay strong' }))
       .not.toBeInTheDocument()
@@ -492,8 +490,7 @@ describe('pure Futures workstation presentation', () => {
         selectedSymbol="ETHUSDT"
       />,
     )
-    expect(screen.getByLabelText('Futures limit price draft'))
-      .toHaveTextContent('Pick chart or book price')
+    expect(screen.getByTestId('mock-futures-chart')).toHaveTextContent('draft none')
     expect(screen.getByTestId('mock-futures-chart')).toHaveTextContent('drawings 0')
     expect(screen.getByTestId('mock-futures-chart')).toHaveTextContent('alerts 0')
     expect(screen.getByRole('button', { name: 'Pause' })).toBeInTheDocument()

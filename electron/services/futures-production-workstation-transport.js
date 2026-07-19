@@ -445,104 +445,190 @@ export const createFuturesProductionWorkstationReviewedTransport = ({
         }
         return waitAndReport(EXCHANGE_INFO_CACHE.inFlight, cache);
     };
-    return Object.freeze({
-        kind: 'reviewed-production-public-read',
-        now: () => Date.now(),
-        loadExchangeInfo,
-        bootstrap: async ({
-            symbol,
-            pair,
-            interval,
-            signal,
-            onBootstrapResource,
-        } = {}) => {
-            assertSelection(symbol, interval);
-            if (!isBoundedExchangeIdentity(pair, PAIR_PATTERN)) fail('INVALID_SELECTION');
-            if (onBootstrapResource !== undefined
-                && typeof onBootstrapResource !== 'function') fail('INVALID_BOOTSTRAP_OBSERVER');
-            const batchController = new AbortController();
-            let batchFailure = null;
-            const abortBatch = (error) => {
-                if (error instanceof Error && batchFailure === null) batchFailure = error;
-                batchController.abort();
-            };
-            const abortFromParent = () => abortBatch();
-            if (signal?.aborted) abortBatch();
-            else signal?.addEventListener?.('abort', abortFromParent, { once: true });
-            const deliver = (resource, value) => {
-                if (onBootstrapResource) {
-                    onBootstrapResource(Object.freeze({ resource, value }));
-                }
-                return value;
-            };
-            const readResource = (
+    const readBootstrapResources = async ({
+        symbol,
+        pair,
+        interval,
+        signal,
+        onBootstrapResource,
+        includeInvariantResources,
+    } = {}) => {
+        assertSelection(symbol, interval);
+        if (!isBoundedExchangeIdentity(pair, PAIR_PATTERN)) fail('INVALID_SELECTION');
+        if (onBootstrapResource !== undefined
+            && typeof onBootstrapResource !== 'function') fail('INVALID_BOOTSTRAP_OBSERVER');
+        const batchController = new AbortController();
+        let batchFailure = null;
+        const abortBatch = (error) => {
+            if (error instanceof Error && batchFailure === null) batchFailure = error;
+            batchController.abort();
+        };
+        const abortFromParent = () => abortBatch();
+        if (signal?.aborted) abortBatch();
+        else signal?.addEventListener?.('abort', abortFromParent, { once: true });
+        const deliver = (resource, value) => {
+            if (onBootstrapResource) {
+                onBootstrapResource(Object.freeze({ resource, value }));
+            }
+            return value;
+        };
+        const readResource = (
+            resource,
+            phase,
+            weight,
+            pathname,
+            parameters,
+            bodyLimit,
+        ) => timedWeightedGet(
+            phase,
+            weight,
+            pathname,
+            parameters,
+            bodyLimit,
+            batchController.signal,
+            backendProxy,
+            abortBatch,
+            value => deliver(resource, value),
+        );
+        const resources = [
+            ['contractKlines', 'contract-klines', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.KLINES_99, FUTURES_PRODUCTION_WORKSTATION_ROUTES.KLINES, { symbol, interval, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES],
+            ['markKlines', 'mark-klines', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.MARK_KLINES_99, FUTURES_PRODUCTION_WORKSTATION_ROUTES.MARK_KLINES, { symbol, interval, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES],
+            ['indexKlines', 'index-klines', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.INDEX_KLINES_99, FUTURES_PRODUCTION_WORKSTATION_ROUTES.INDEX_KLINES, { pair, interval, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES],
+        ];
+        if (includeInvariantResources) {
+            resources.unshift(
+                ['depthSnapshot', 'depth', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.DEPTH_1000, FUTURES_PRODUCTION_WORKSTATION_ROUTES.DEPTH, { symbol, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.DEPTH) }, FUTURES_WORKSTATION_BODY_LIMITS.DEPTH],
+            );
+            resources.push(
+                ['premiumIndex', 'premium-index', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.PREMIUM_INDEX_SYMBOL, FUTURES_PRODUCTION_WORKSTATION_ROUTES.PREMIUM_INDEX, { symbol }, FUTURES_WORKSTATION_BODY_LIMITS.HEADER],
+                ['ticker', 'ticker', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.TICKER_SYMBOL, FUTURES_PRODUCTION_WORKSTATION_ROUTES.TICKER, { symbol }, FUTURES_WORKSTATION_BODY_LIMITS.HEADER],
+            );
+        }
+        try {
+            const values = await Promise.all(resources.map(([
                 resource,
                 phase,
                 weight,
                 pathname,
                 parameters,
                 bodyLimit,
-            ) => timedWeightedGet(
-                phase,
-                weight,
-                pathname,
-                parameters,
-                bodyLimit,
-                batchController.signal,
-                backendProxy,
-                abortBatch,
-                value => deliver(resource, value),
-            );
-            try {
-                const [
-                    depthSnapshot,
-                    contractKlines,
-                    markKlines,
-                    indexKlines,
-                    premiumIndex,
-                    ticker,
-                ] = await Promise.all([
-                    readResource('depthSnapshot', 'depth', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.DEPTH_1000, FUTURES_PRODUCTION_WORKSTATION_ROUTES.DEPTH, { symbol, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.DEPTH) }, FUTURES_WORKSTATION_BODY_LIMITS.DEPTH),
-                    readResource('contractKlines', 'contract-klines', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.KLINES_99, FUTURES_PRODUCTION_WORKSTATION_ROUTES.KLINES, { symbol, interval, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES),
-                    readResource('markKlines', 'mark-klines', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.MARK_KLINES_99, FUTURES_PRODUCTION_WORKSTATION_ROUTES.MARK_KLINES, { symbol, interval, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES),
-                    readResource('indexKlines', 'index-klines', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.INDEX_KLINES_99, FUTURES_PRODUCTION_WORKSTATION_ROUTES.INDEX_KLINES, { pair, interval, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES),
-                    readResource('premiumIndex', 'premium-index', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.PREMIUM_INDEX_SYMBOL, FUTURES_PRODUCTION_WORKSTATION_ROUTES.PREMIUM_INDEX, { symbol }, FUTURES_WORKSTATION_BODY_LIMITS.HEADER),
-                    readResource('ticker', 'ticker', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.TICKER_SYMBOL, FUTURES_PRODUCTION_WORKSTATION_ROUTES.TICKER, { symbol }, FUTURES_WORKSTATION_BODY_LIMITS.HEADER),
-                ]);
-                return Object.freeze({ depthSnapshot, contractKlines, markKlines, indexKlines, premiumIndex, ticker });
-            } catch (error) {
-                abortBatch();
-                throw batchFailure ?? error;
-            } finally {
-                signal?.removeEventListener?.('abort', abortFromParent);
-            }
-        },
-        connect: ({ symbol, interval, onMessage, onDisconnect, signal } = {}) => {
+            ]) => readResource(resource, phase, weight, pathname, parameters, bodyLimit)));
+            return Object.freeze(Object.fromEntries(
+                resources.map(([resource], index) => [resource, values[index]]),
+            ));
+        } catch (error) {
+            abortBatch();
+            throw batchFailure ?? error;
+        } finally {
+            signal?.removeEventListener?.('abort', abortFromParent);
+        }
+    };
+    return Object.freeze({
+        kind: 'reviewed-production-public-read',
+        now: () => Date.now(),
+        loadExchangeInfo,
+        bootstrap: options => readBootstrapResources({
+            ...options,
+            includeInvariantResources: true,
+        }),
+        bootstrapInterval: options => readBootstrapResources({
+            ...options,
+            includeInvariantResources: false,
+        }),
+        connect: ({
+            symbol,
+            interval,
+            onMessage,
+            onDisconnect,
+            onCandleDisconnect,
+            signal,
+        } = {}) => {
             assertSelection(symbol, interval);
-            if (typeof onMessage !== 'function' || typeof onDisconnect !== 'function') fail('INVALID_SUBSCRIBER');
+            if (typeof onMessage !== 'function'
+                || typeof onDisconnect !== 'function'
+                || typeof onCandleDisconnect !== 'function') fail('INVALID_SUBSCRIBER');
             const lower = symbol.toLowerCase();
             const publicUrl = `${FUTURES_PRODUCTION_WORKSTATION_WSS_ORIGIN}/public/stream?streams=${lower}@depth@100ms`;
             const marketUrl = `${FUTURES_PRODUCTION_WORKSTATION_WSS_ORIGIN}/market/stream?streams=${[
                 `${lower}@aggTrade`,
-                `${lower}@kline_${interval}`,
                 `${lower}@markPrice@1s`,
                 `${lower}@ticker`,
             ].join('/')}`;
             const publicSocket = createSocket(publicUrl, onMessage, onDisconnect, backendProxy);
             const marketSocket = createSocket(marketUrl, onMessage, onDisconnect, backendProxy);
+            let closed = false;
+            let candleEpoch = 0;
+            const createCandleSocket = (selectedInterval, epoch) => {
+                let disconnectReported = false;
+                let handle = null;
+                handle = createSocket(
+                    `${FUTURES_PRODUCTION_WORKSTATION_WSS_ORIGIN}/market/stream?streams=${lower}@kline_${selectedInterval}`,
+                    raw => {
+                        if (!closed && candleEpoch === epoch) onMessage(raw);
+                    },
+                    (reason) => {
+                        if (closed || candleEpoch !== epoch || disconnectReported) return;
+                        disconnectReported = true;
+                        candleEpoch += 1;
+                        handle?.close();
+                        onCandleDisconnect(reason);
+                    },
+                    backendProxy,
+                );
+                return handle;
+            };
+            let candleSocket = createCandleSocket(interval, candleEpoch);
+            const initialCandleSocket = candleSocket;
             const startedAt = Date.now();
             const close = () => {
+                if (closed) return;
+                closed = true;
+                candleEpoch += 1;
                 publicSocket.close();
                 marketSocket.close();
+                candleSocket.close();
             };
             signal?.addEventListener?.('abort', close, { once: true });
             return Object.freeze({
-                ready: Promise.all([publicSocket.ready, marketSocket.ready])
+                ready: Promise.all([publicSocket.ready, marketSocket.ready, initialCandleSocket.ready])
                     .then((results) => {
                         const ready = results.every(Boolean);
                         emitTiming(onTiming, 'upstream-streams', startedAt, ready ? 'ok' : 'error');
                         return ready;
                     }),
+                selectInterval: async ({ interval: selectedInterval, signal: selectionSignal } = {}) => {
+                    assertSelection(symbol, selectedInterval);
+                    if (closed || signal?.aborted || selectionSignal?.aborted) return false;
+                    candleEpoch += 1;
+                    const selectedEpoch = candleEpoch;
+                    candleSocket.close();
+                    const selectedSocket = createCandleSocket(selectedInterval, selectedEpoch);
+                    candleSocket = selectedSocket;
+                    const selectionStartedAt = Date.now();
+                    const abortSelection = () => {
+                        if (candleEpoch === selectedEpoch) {
+                            candleEpoch += 1;
+                            selectedSocket.close();
+                        }
+                    };
+                    selectionSignal?.addEventListener?.('abort', abortSelection, { once: true });
+                    try {
+                        const ready = await selectedSocket.ready;
+                        const accepted = ready === true
+                            && !closed
+                            && candleEpoch === selectedEpoch
+                            && !selectionSignal?.aborted;
+                        emitTiming(
+                            onTiming,
+                            'interval-stream',
+                            selectionStartedAt,
+                            accepted ? 'ok' : 'error',
+                        );
+                        return accepted;
+                    } finally {
+                        selectionSignal?.removeEventListener?.('abort', abortSelection);
+                    }
+                },
                 close: () => {
                     signal?.removeEventListener?.('abort', close);
                     close();

@@ -1171,7 +1171,6 @@ export const createFuturesProductionExecutionService = ({
             return portfolio;
         }
         const snapshotStreamGeneration = userDataStreamGeneration;
-        const snapshotStartedWithLiveStream = userDataStreamLive;
         openOrdersReconciliation = beginFuturesOpenOrdersSnapshot(
             openOrdersReconciliation,
             { startedAt: readNow() },
@@ -1232,18 +1231,6 @@ export const createFuturesProductionExecutionService = ({
                 weight: READ_WEIGHTS.allSymbolConfig,
                 operation: () => facade.getAllSymbolConfig(),
             });
-            lease.release();
-            lease = null;
-            const openOrders = await executeRead({
-                endpointId: ENDPOINT_IDS.allOpenOrders,
-                weight: READ_WEIGHTS.allOpenOrders,
-                operation: () => facade.getAllOpenOrders(),
-            });
-            const openAlgoOrders = await executeRead({
-                endpointId: ENDPOINT_IDS.allOpenAlgoOrders,
-                weight: READ_WEIGHTS.allOpenAlgoOrders,
-                operation: () => facade.getAllOpenAlgoOrders(),
-            });
             const verifiedBalance = cachedIdentity === null
                 ? verifyProductionAccountIdentity({
                     accountAlias: identity?.accountAlias,
@@ -1258,6 +1245,27 @@ export const createFuturesProductionExecutionService = ({
                 );
             }
             lastServerTime = serverTime.serverTime;
+            latestPositionRisk = positionRisk;
+            latestAvailableBalanceUsdt = verifiedBalance.availableBalance;
+            latestAccountConfig = accountConfig;
+            latestSymbolConfigurations = symbolConfigurations;
+            projectCurrentPortfolio({ state: 'stale', syncCode: 'SNAPSHOT_SYNCING' });
+            advanceRevision();
+            broadcastStatus();
+            lease.release();
+            lease = null;
+            const inventoryStartedWithLiveStream = userDataStreamLive
+                && snapshotStreamGeneration === userDataStreamGeneration;
+            const openOrders = await executeRead({
+                endpointId: ENDPOINT_IDS.allOpenOrders,
+                weight: READ_WEIGHTS.allOpenOrders,
+                operation: () => facade.getAllOpenOrders(),
+            });
+            const openAlgoOrders = await executeRead({
+                endpointId: ENDPOINT_IDS.allOpenAlgoOrders,
+                weight: READ_WEIGHTS.allOpenAlgoOrders,
+                operation: () => facade.getAllOpenAlgoOrders(),
+            });
             openOrdersReconciliation = completeFuturesOpenOrdersSnapshot(
                 openOrdersReconciliation,
                 {
@@ -1266,11 +1274,7 @@ export const createFuturesProductionExecutionService = ({
                     completedAt: serverTime.serverTime,
                 },
             );
-            latestPositionRisk = positionRisk;
-            latestAvailableBalanceUsdt = verifiedBalance.availableBalance;
-            latestAccountConfig = accountConfig;
-            latestSymbolConfigurations = symbolConfigurations;
-            const snapshotOwnsLiveStream = snapshotStartedWithLiveStream
+            const snapshotOwnsLiveStream = inventoryStartedWithLiveStream
                 && userDataStreamLive
                 && snapshotStreamGeneration === userDataStreamGeneration;
             if (!snapshotOwnsLiveStream) {
@@ -1498,14 +1502,14 @@ export const createFuturesProductionExecutionService = ({
                 openOrdersReconciliation,
                 { startedAt: readNow() },
             );
+            openOrdersReconciliation = failFuturesOpenOrdersSnapshot(
+                openOrdersReconciliation,
+                {
+                    snapshotId: openOrdersReconciliation.activeSnapshotId,
+                    errorCode: code,
+                },
+            );
         }
-        openOrdersReconciliation = failFuturesOpenOrdersSnapshot(
-            openOrdersReconciliation,
-            {
-                snapshotId: openOrdersReconciliation.activeSnapshotId,
-                errorCode: code,
-            },
-        );
         projectCurrentPortfolio({ state: 'stale', syncCode: code });
         advanceRevision();
         broadcastStatus();
@@ -1516,10 +1520,15 @@ export const createFuturesProductionExecutionService = ({
         expectedGeneration = userDataStreamGeneration,
     ) => {
         if (shuttingDown || expectedGeneration !== userDataStreamGeneration) return;
+        const shouldRefreshOutageSnapshot = userDataStreamLive;
+        userDataStreamLive = false;
         cancelScheduled(userDataKeepAliveTimer);
         userDataKeepAliveTimer = null;
         closeCurrentUserDataSocket();
         markAccountStreamDegraded(code);
+        if (shouldRefreshOutageSnapshot) {
+            runBackground('account-stream-outage-snapshot', refreshPortfolio);
+        }
         if (userDataReconnectTimer !== null) return;
         const delay = USER_DATA_RECONNECT_DELAYS_MS[Math.min(
             userDataReconnectAttempt,
@@ -1617,8 +1626,21 @@ export const createFuturesProductionExecutionService = ({
         }
     };
 
-    const startUserDataStream = async () => {
-        if (shuttingDown || !identityValid || !facade || !coordinator) return false;
+    const startUserDataStream = async (onListenKeySettled = null) => {
+        let listenKeySettled = false;
+        const settleListenKey = () => {
+            if (listenKeySettled) return;
+            listenKeySettled = true;
+            try {
+                onListenKeySettled?.();
+            } catch (error) {
+                reportInternal('account-stream-listen-key-settled', error);
+            }
+        };
+        if (shuttingDown || !identityValid || !facade || !coordinator) {
+            settleListenKey();
+            return false;
+        }
         cancelScheduled(userDataReconnectTimer);
         userDataReconnectTimer = null;
         const streamGeneration = userDataStreamGeneration + 1;
@@ -1631,6 +1653,7 @@ export const createFuturesProductionExecutionService = ({
                 weight: READ_WEIGHTS.userDataStreamStart,
                 operation: () => facade.startUserDataStream(),
             });
+            settleListenKey();
             if (shuttingDown) {
                 userDataListenKey = startedStream.listenKey;
                 return false;
@@ -1668,10 +1691,10 @@ export const createFuturesProductionExecutionService = ({
                 && streamGeneration === userDataStreamGeneration
                 && userDataStreamLive;
         } catch (error) {
+            settleListenKey();
             if (shuttingDown || streamGeneration !== userDataStreamGeneration) return false;
             reportInternal('account-stream-connect', error);
             scheduleUserDataReconnect('ACCOUNT_STREAM_UNAVAILABLE', streamGeneration);
-            await refreshPortfolio();
             return false;
         }
     };
@@ -5113,7 +5136,17 @@ export const createFuturesProductionExecutionService = ({
             }
             await refreshActivation({ audit: false });
             if (recoveryHealthy) {
-                runBackground('account-stream-bootstrap', startUserDataStream);
+                let settleListenKeyBootstrap;
+                const listenKeyBootstrap = new Promise((resolve) => {
+                    settleListenKeyBootstrap = resolve;
+                });
+                runBackground('account-stream-bootstrap', () => (
+                    startUserDataStream(settleListenKeyBootstrap)
+                ));
+                runBackground('account-snapshot-bootstrap', async () => {
+                    await listenKeyBootstrap;
+                    if (!shuttingDown && identityValid) await refreshPortfolio();
+                });
             }
             return recoveryHealthy;
         } catch (error) {

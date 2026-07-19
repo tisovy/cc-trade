@@ -11,6 +11,9 @@ import {
     FuturesProductionExecutionFacadeError,
 } from './futures-production-execution-facade.js';
 import {
+    FuturesProductionExecutionCoordinator,
+} from './futures-production-execution-coordinator.js';
+import {
     createFuturesProductionExecutionService,
 } from './futures-production-execution-service.js';
 import {
@@ -402,6 +405,7 @@ const createHarness = ({
     pauseUntil = 0,
     timers = [],
     randomBytes = () => Buffer.from(requestId, 'hex'),
+    coordinator: coordinatorOverride = null,
 } = {}) => {
     let clock = 1_783_814_400_000;
     const dailyReservations = {};
@@ -434,7 +438,7 @@ const createHarness = ({
         cancelAllOpenOrders: cancelRegular,
         cancelAllAlgoOpenOrders: cancelAlgo,
     };
-    const coordinator = {
+    const coordinator = coordinatorOverride ?? {
         beginPreflight: vi.fn(async () => ({
             executeGet: async operation => operation(),
             release: vi.fn(),
@@ -830,7 +834,74 @@ describe('FuturesProductionExecutionService', () => {
         await harness.service.shutdown();
     });
 
-    it('waits for a slow private socket before taking one authoritative REST inventory', async () => {
+    it('does not repeat account-wide REST inventory for each failed stream reconnect', async () => {
+        const allOpenOrders = vi.fn().mockResolvedValue(result('all-open-orders', []));
+        const connectUserDataStream = vi.fn(() => ({
+            ready: Promise.reject(new Error('private stream unavailable')),
+            close: vi.fn(),
+        }));
+        const harness = createHarness({ allOpenOrders, connectUserDataStream });
+
+        await harness.service.start();
+        await vi.waitFor(() => {
+            expect(connectUserDataStream).toHaveBeenCalledOnce();
+            expect(allOpenOrders).toHaveBeenCalledOnce();
+        });
+        const reconnect = harness.timers.find(timer => timer.delay === 1_000);
+        expect(reconnect).toBeDefined();
+        reconnect.callback();
+        await vi.waitFor(() => expect(connectUserDataStream).toHaveBeenCalledTimes(2));
+        await Promise.resolve();
+        expect(allOpenOrders).toHaveBeenCalledOnce();
+        await harness.service.shutdown();
+    });
+
+    it('takes one deduplicated REST snapshot when a live private stream stays unavailable', async () => {
+        const allOpenOrders = vi.fn().mockResolvedValue(result('all-open-orders', []));
+        const allOpenAlgoOrders = vi.fn().mockResolvedValue(result('all-open-algo-orders', []));
+        const streamCallbacks = [];
+        const connectUserDataStream = vi.fn((callbacks) => {
+            streamCallbacks.push(callbacks);
+            return streamCallbacks.length === 1
+                ? { ready: Promise.resolve(true), close: vi.fn() }
+                : { ready: Promise.reject(new Error('private stream unavailable')), close: vi.fn() };
+        });
+        const harness = createHarness({
+            allOpenAlgoOrders,
+            allOpenOrders,
+            connectUserDataStream,
+        });
+
+        await harness.service.start();
+        await vi.waitFor(() => expect(harness.service.getStatus().portfolio.state).toBe('live'));
+        const baselineRegular = allOpenOrders.mock.calls.length;
+        const baselineAlgo = allOpenAlgoOrders.mock.calls.length;
+
+        streamCallbacks[0].onDisconnect('FUTURES_PRODUCTION_ACCOUNT_STREAM_DISCONNECTED');
+        await vi.waitFor(() => expect(allOpenOrders).toHaveBeenCalledTimes(baselineRegular + 1));
+        expect(allOpenAlgoOrders).toHaveBeenCalledTimes(baselineAlgo + 1);
+        expect(harness.service.getStatus().portfolio.state).toBe('stale');
+
+        const firstReconnect = [...harness.timers].reverse().find(timer => timer.delay === 1_000);
+        expect(firstReconnect).toBeDefined();
+        firstReconnect.callback();
+        await vi.waitFor(() => expect(connectUserDataStream).toHaveBeenCalledTimes(2));
+        const secondReconnect = [...harness.timers].reverse().find(timer => timer.delay === 5_000);
+        expect(secondReconnect).toBeDefined();
+        secondReconnect.callback();
+        await vi.waitFor(() => expect(connectUserDataStream).toHaveBeenCalledTimes(3));
+        await Promise.resolve();
+
+        expect(allOpenOrders).toHaveBeenCalledTimes(baselineRegular + 1);
+        expect(allOpenAlgoOrders).toHaveBeenCalledTimes(baselineAlgo + 1);
+        expect(harness.service.getStatus().portfolio).toMatchObject({
+            state: 'stale',
+            syncState: 'degraded',
+        });
+        await harness.service.shutdown();
+    });
+
+    it('publishes REST inventory before a slow private socket and resyncs after it connects', async () => {
         let resolveReady;
         const ready = new Promise(resolve => { resolveReady = resolve; });
         const allOpenOrders = vi.fn().mockResolvedValue(result('all-open-orders', [
@@ -846,19 +917,184 @@ describe('FuturesProductionExecutionService', () => {
 
         await harness.service.start();
         await vi.waitFor(() => expect(connectUserDataStream).toHaveBeenCalledOnce());
-        expect(allOpenOrders).not.toHaveBeenCalled();
-        expect(allOpenAlgoOrders).not.toHaveBeenCalled();
-        expect(harness.service.getStatus().portfolio.state).not.toBe('live');
-
-        resolveReady(true);
         await vi.waitFor(() => expect(allOpenOrders).toHaveBeenCalledOnce());
         expect(allOpenAlgoOrders).toHaveBeenCalledOnce();
+        expect(harness.service.getStatus().portfolio).toMatchObject({
+            state: 'stale',
+            syncState: 'degraded',
+            openOrders: [expect.objectContaining({
+                clientOrderId: 'external-before-private-ready',
+                syncState: 'stale',
+            })],
+        });
+
+        resolveReady(true);
+        await vi.waitFor(() => expect(allOpenOrders).toHaveBeenCalledTimes(2));
+        expect(allOpenAlgoOrders).toHaveBeenCalledTimes(2);
         await vi.waitFor(() => expect(harness.service.getStatus().portfolio.state).toBe('live'));
         expect(harness.service.getStatus().portfolio.openOrders).toEqual([
             expect.objectContaining({
                 clientOrderId: 'external-before-private-ready',
             }),
         ]);
+        await harness.service.shutdown();
+    });
+
+    it('does not race inventory admission or storm retries behind a slow listen-key REST call', async () => {
+        let resolveListenKey;
+        const listenKey = new Promise(resolve => { resolveListenKey = resolve; });
+        const startUserDataStream = vi.fn(() => listenKey);
+        const allOpenOrders = vi.fn().mockResolvedValue(result('all-open-orders', [
+            ownedOpenOrder({ clientOrderId: 'external-before-listen-key' }),
+        ]));
+        const allOpenAlgoOrders = vi.fn().mockResolvedValue(result('all-open-algo-orders', []));
+        const coordinator = new FuturesProductionExecutionCoordinator({
+            spotCoordinator: { executeSpot: vi.fn(async operation => operation()) },
+            getSpotAvailableWeight: () => 800,
+            productionExecutor: async operation => operation(),
+            getProductionAvailableWeight: () => 800,
+            persistOrderReservation: vi.fn(async () => undefined),
+            persistRatePause: vi.fn(async () => undefined),
+            persistOriginWeightReservation: vi.fn(async () => undefined),
+        });
+        const harness = createHarness({
+            allOpenAlgoOrders,
+            allOpenOrders,
+            coordinator,
+            startUserDataStream,
+        });
+
+        await expect(harness.service.start()).resolves.toBeDefined();
+        await vi.waitFor(() => expect(startUserDataStream).toHaveBeenCalledOnce());
+        expect(allOpenOrders).not.toHaveBeenCalled();
+        expect(allOpenAlgoOrders).not.toHaveBeenCalled();
+
+        await new Promise(resolve => { setTimeout(resolve, 1_050); });
+        expect(startUserDataStream).toHaveBeenCalledOnce();
+        expect(allOpenOrders).not.toHaveBeenCalled();
+        expect(allOpenAlgoOrders).not.toHaveBeenCalled();
+        expect(harness.timers).toEqual([]);
+
+        resolveListenKey(result('user-data-stream-start', { listenKey: 'a'.repeat(64) }));
+        await vi.waitFor(() => expect(allOpenOrders).toHaveBeenCalledOnce());
+        expect(allOpenAlgoOrders).toHaveBeenCalledOnce();
+        await vi.waitFor(() => expect(harness.service.getStatus().portfolio).toMatchObject({
+            state: 'live',
+            syncState: 'live',
+            availableBalanceUsdt: '1000',
+            positions: [expect.objectContaining({
+                symbol: 'BTCUSDT',
+                positionSide: 'LONG',
+            })],
+            openOrders: [expect.objectContaining({
+                clientOrderId: 'external-before-listen-key',
+                syncState: 'synced',
+            })],
+        }));
+        await harness.service.shutdown();
+    });
+
+    it('resnapshots when the private socket becomes ready during an in-flight inventory', async () => {
+        let resolveReady;
+        let resolveGapSnapshot;
+        const ready = new Promise(resolve => { resolveReady = resolve; });
+        const gapSnapshot = new Promise(resolve => { resolveGapSnapshot = resolve; });
+        const staleExternalOrder = ownedOpenOrder({
+            orderId: '72',
+            clientOrderId: 'external-canceled-before-stream-ready',
+        });
+        const allOpenOrders = vi.fn()
+            .mockImplementationOnce(() => gapSnapshot)
+            .mockResolvedValueOnce(result('all-open-orders', []));
+        const connectUserDataStream = vi.fn().mockReturnValue({ ready, close: vi.fn() });
+        const harness = createHarness({ allOpenOrders, connectUserDataStream });
+
+        await harness.service.start();
+        await vi.waitFor(() => expect(allOpenOrders).toHaveBeenCalledOnce());
+        resolveReady(true);
+        resolveGapSnapshot(result('all-open-orders', [staleExternalOrder]));
+
+        await vi.waitFor(() => expect(allOpenOrders).toHaveBeenCalledTimes(2));
+        await vi.waitFor(() => expect(harness.service.getStatus().portfolio).toMatchObject({
+            state: 'live',
+            syncState: 'live',
+            openOrders: [],
+        }));
+        await harness.service.shutdown();
+    });
+
+    it('serializes slow account-wide inventories through the real production coordinator', async () => {
+        let resolveOpenOrders;
+        const slowOpenOrders = new Promise(resolve => { resolveOpenOrders = resolve; });
+        let delayNextOpenOrders = false;
+        const allOpenOrders = vi.fn(() => (
+            delayNextOpenOrders
+                ? slowOpenOrders
+                : Promise.resolve(result('all-open-orders', []))
+        ));
+        const allOpenAlgoOrders = vi.fn().mockResolvedValue(result('all-open-algo-orders', []));
+        const coordinator = new FuturesProductionExecutionCoordinator({
+            spotCoordinator: { executeSpot: vi.fn(async operation => operation()) },
+            getSpotAvailableWeight: () => 800,
+            productionExecutor: async operation => operation(),
+            getProductionAvailableWeight: () => 800,
+            persistOrderReservation: vi.fn(async () => undefined),
+            persistRatePause: vi.fn(async () => undefined),
+            persistOriginWeightReservation: vi.fn(async () => undefined),
+        });
+        const harness = createHarness({
+            allOpenAlgoOrders,
+            allOpenOrders,
+            coordinator,
+        });
+
+        await harness.service.start();
+        await waitForPortfolioBootstrap(harness.service);
+        const baselineRegular = allOpenOrders.mock.calls.length;
+        const baselineAlgo = allOpenAlgoOrders.mock.calls.length;
+        const emitted = [];
+        await subscribe(harness.service, emitted);
+        delayNextOpenOrders = true;
+        const refresh = harness.service.handleRequest(command(
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.REFRESH_PORTFOLIO,
+            harness.service.getStatus().revision,
+        ), { connectionId, emit: value => emitted.push(value) });
+
+        await vi.waitFor(() => expect(allOpenOrders).toHaveBeenCalledTimes(baselineRegular + 1));
+        await new Promise(resolve => { setTimeout(resolve, 1_050); });
+        expect(allOpenAlgoOrders).toHaveBeenCalledTimes(baselineAlgo);
+
+        resolveOpenOrders(result('all-open-orders', []));
+        await refresh;
+        expect(allOpenAlgoOrders).toHaveBeenCalledTimes(baselineAlgo + 1);
+        await vi.waitFor(() => expect(harness.service.getStatus().portfolio).toMatchObject({
+            state: 'live',
+            syncState: 'live',
+        }));
+        await harness.service.shutdown();
+    });
+
+    it('publishes balance and positions while account-wide open orders are still loading', async () => {
+        let resolveOpenOrders;
+        const allOpenOrders = vi.fn().mockReturnValue(new Promise((resolve) => {
+            resolveOpenOrders = resolve;
+        }));
+        const harness = createHarness({ allOpenOrders });
+
+        await harness.service.start();
+        await vi.waitFor(() => expect(harness.service.getStatus().portfolio).toMatchObject({
+            state: 'stale',
+            syncState: 'syncing',
+            availableBalanceUsdt: '1000',
+            positions: [expect.objectContaining({
+                symbol: 'BTCUSDT',
+                positionSide: 'LONG',
+            })],
+        }));
+        expect(allOpenOrders).toHaveBeenCalledOnce();
+
+        resolveOpenOrders(result('all-open-orders', []));
+        await vi.waitFor(() => expect(harness.service.getStatus().portfolio.state).toBe('live'));
         await harness.service.shutdown();
     });
 
@@ -1070,7 +1306,7 @@ describe('FuturesProductionExecutionService', () => {
         expect(harness.service.getStatus().portfolio.openOrders).toEqual([
             expect.objectContaining({ orderId: '2', clientOrderId: 'external-two' }),
         ]);
-        expect(openOrders).toHaveBeenCalledTimes(2);
+        expect(openOrders).toHaveBeenCalledTimes(3);
         await harness.service.shutdown();
     });
 

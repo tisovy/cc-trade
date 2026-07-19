@@ -393,6 +393,15 @@ describe('FuturesProductionExecutionComposition', () => {
                     headers: { 'content-type': 'application/json' },
                 });
             }
+            if (url.pathname === '/fapi/v3/positionRisk'
+                || url.pathname === '/fapi/v1/symbolConfig'
+                || url.pathname === '/fapi/v1/openOrders'
+                || url.pathname === '/fapi/v1/openAlgoOrders') {
+                return new Response('[]', {
+                    status: 200,
+                    headers: { 'content-type': 'application/json' },
+                });
+            }
             throw new Error('unreviewed fake route');
         });
         const runtime = await createFuturesProductionExecutionRuntime({
@@ -627,9 +636,9 @@ describe('FuturesProductionExecutionComposition', () => {
         await ledger.open();
         const records = ledger.getRecords();
         expect(records.filter(record => record.eventType === 'exchange_request')
-            .map(record => record.endpointId)).toEqual(
+            .map(record => record.endpointId).sort()).toEqual(
                 records.filter(record => record.eventType === 'rate_counter')
-                    .map(record => record.endpointId),
+                    .map(record => record.endpointId).sort(),
             );
         expect(records).toEqual(expect.arrayContaining([
             expect.objectContaining({
@@ -723,6 +732,14 @@ describe('FuturesProductionExecutionComposition', () => {
             ),
         });
         expect(firstFetch).toHaveBeenCalledTimes(3);
+        await vi.waitFor(() => expect(firstFetch.mock.calls.map(([input]) => (
+            new URL(input).pathname
+        ))).toEqual(expect.arrayContaining([
+            '/fapi/v3/positionRisk',
+            '/fapi/v1/listenKey',
+        ])));
+        await vi.waitFor(() => expect(firstFetch).toHaveBeenCalledTimes(5));
+        await new Promise(resolve => { setImmediate(resolve); });
 
         let reservedWeight = first.coordinator.getOriginWeightAdmissionSnapshot()
             .originWeightReservations.reduce(

@@ -296,7 +296,7 @@ export const createE2eFuturesProductionExecutionRuntime = ({
             if (!rule
                 || !isStepAligned(quantity, rule.stepSize)
                 || notional < rule.minimumNotionalUsdt
-                || notional > 10) return false;
+                || (command.positionEffect === 'ENTRY' && notional > 10)) return false;
             if (command.positionEffect === 'EXIT') {
                 const position = portfolio.positions.find(candidate => (
                     candidate.symbol === command.symbol

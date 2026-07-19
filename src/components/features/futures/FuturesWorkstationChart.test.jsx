@@ -206,7 +206,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
       clientX: 60, clientY: 80, ctrlKey: true, button: 2,
     })
     fireEvent(canvas, contextMenu)
-    expect(contextMenu.defaultPrevented).toBe(true)
+    expect(contextMenu.defaultPrevented).toBe(false)
     expect(document.querySelector('.measurement-info-box')).not.toBeInTheDocument()
     expect(props.onTradingGesture).not.toHaveBeenCalled()
 

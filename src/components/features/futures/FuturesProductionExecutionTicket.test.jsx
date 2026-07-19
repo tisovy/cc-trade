@@ -273,7 +273,7 @@ describe('FuturesProductionExecutionTicket', () => {
       }),
     })
     expect(screen.getByText('ACCOUNT')).toBeInTheDocument()
-    expect(screen.getByText(/verify the USDⓈ-M API permission\/IP, Hedge Mode, and single-asset margin/))
+    expect(screen.getByText(/enable Futures for this API key, verify its IP allowlist, Hedge Mode, and single-asset margin/))
       .toBeInTheDocument()
   })
 
@@ -296,7 +296,12 @@ describe('FuturesProductionExecutionTicket', () => {
     expect(screen.getByText(
       'BTCUSDT is not an active USDⓈ-M perpetual contract — select a tradable contract.',
     )).toBeInTheDocument()
-    expect(screen.getByRole('slider', { name: 'Order size percent' })).toBeDisabled()
+    const slider = screen.getByRole('slider', { name: 'Order size percent' })
+    expect(slider).toBeEnabled()
+    fireEvent.change(slider, { target: { value: '60' } })
+    expect(slider).toHaveValue('60')
+    expect(screen.getByText('60%')).toBeInTheDocument()
+    expect(screen.getAllByText('— USDT').length).toBeGreaterThan(0)
     await waitFor(() => expect(handlers.onPrepareOrderIntent).not.toHaveBeenCalled())
   })
 
@@ -442,7 +447,7 @@ describe('FuturesProductionExecutionTicket', () => {
       })}
     />)
     expect(screen.getByRole('textbox', { name: 'Order notional USDT' })).toHaveValue('')
-    expect(screen.getByLabelText('Futures order size and shortcuts')).toHaveTextContent('—%— USDT')
+    expect(screen.getByLabelText('Futures order size and shortcuts')).toHaveTextContent('25%— USDT')
   })
 
   it.each([
@@ -862,7 +867,7 @@ describe('FuturesProductionExecutionTicket', () => {
     }))
   })
 
-  it('disables sizing with the exact missing private input and replaces generic blocked status', () => {
+  it('keeps percent selectable while exact private sizing inputs remain unavailable', () => {
     renderTicket({
       state: createState({
         portfolio: {
@@ -872,7 +877,11 @@ describe('FuturesProductionExecutionTicket', () => {
       }),
       draftPrice: '7000',
     })
-    expect(screen.getByRole('slider', { name: 'Order size percent' })).toBeDisabled()
+    const slider = screen.getByRole('slider', { name: 'Order size percent' })
+    expect(slider).toBeEnabled()
+    fireEvent.change(slider, { target: { value: '60' } })
+    expect(slider).toHaveValue('60')
+    expect(screen.getByText('60%')).toBeInTheDocument()
     expect(screen.getByRole('textbox', { name: 'Order notional USDT' })).toBeDisabled()
     expect(screen.getByText('Available Futures balance is unavailable — wait for private account sync'))
       .toBeInTheDocument()
@@ -895,21 +904,43 @@ describe('FuturesProductionExecutionTicket', () => {
     })
     expect(screen.getByText('SETUP')).toBeInTheDocument()
     expect(screen.getByText('SETUP REQUIRED')).toBeInTheDocument()
-    expect(screen.getByText(/Futures execution profile unavailable/))
+    expect(screen.getByText(/Dedicated USDⓈ-M profile is missing/))
       .toBeInTheDocument()
-    expect(screen.getByText(/Spot BK\/BS are not reused/)).toBeInTheDocument()
-    expect(screen.getByRole('slider', { name: 'Order size percent' })).toBeDisabled()
+    expect(screen.getByText(/Spot BK\/BS cannot authorize Futures execution/)).toBeInTheDocument()
+    expect(screen.getByRole('slider', { name: 'Order size percent' })).toBeEnabled()
     expect(screen.queryByText('BLOCKED')).not.toBeInTheDocument()
   })
 
-  it('keeps sizing disabled when private caps are unavailable for a tradable contract', () => {
+  it('surfaces durable storage recovery before the fallback setup state', () => {
+    renderTicket({
+      state: createState({
+        configured: false,
+        account: null,
+        caps: null,
+        capabilities: null,
+        recovery: {
+          required: true,
+          state: 'blocked',
+          code: 'FUTURES_PRODUCTION_STORAGE_FAILED',
+        },
+      }),
+    })
+
+    expect(screen.getByText('STORAGE')).toBeInTheDocument()
+    expect(screen.getByText('RUNTIME RECOVERY')).toBeInTheDocument()
+    expect(screen.getByText(/unlock the OS keyring, preserve the durable journal, and restart/))
+      .toBeInTheDocument()
+    expect(screen.queryByText(/Dedicated USDⓈ-M profile is missing/)).not.toBeInTheDocument()
+  })
+
+  it('keeps notional unavailable but lets the operator preselect a percent without caps', () => {
     renderTicket({
       state: createState({ caps: null }),
       draftPrice: '7000',
     })
 
     expect(screen.getByText('LIMITS')).toBeInTheDocument()
-    expect(screen.getByRole('slider', { name: 'Order size percent' })).toBeDisabled()
+    expect(screen.getByRole('slider', { name: 'Order size percent' })).toBeEnabled()
     expect(screen.getByRole('textbox', { name: 'Order notional USDT' })).toBeDisabled()
   })
 
@@ -921,7 +952,7 @@ describe('FuturesProductionExecutionTicket', () => {
     })
     fireEvent.click(screen.getByRole('tab', { name: /^Orders 1$/ }))
     const orders = screen.getByLabelText('Current Futures orders')
-    expect(orders).toHaveTextContent('1 active')
+    expect(orders).toHaveTextContent('1 account-wide · 1 BTCUSDT')
     expect(orders).not.toHaveTextContent('app-owned')
     expect(orders).toHaveTextContent('BTCUSDTSELL · LONGPARTIALLY_FILLED')
     expect(orders).toHaveTextContent('TypeLIMIT')
@@ -931,7 +962,7 @@ describe('FuturesProductionExecutionTicket', () => {
     expect(screen.getByRole('button', { name: 'Refresh positions and orders' })).toBeEnabled()
   })
 
-  it('shows only the selected symbol inventory without filtering external ownership', () => {
+  it('shows account-wide external inventory with the selected symbol first', () => {
     renderTicket({
       state: createState({
         portfolio: {
@@ -948,9 +979,32 @@ describe('FuturesProductionExecutionTicket', () => {
         },
       }),
     })
-    fireEvent.click(screen.getByRole('tab', { name: /^Orders 1$/ }))
-    expect(screen.getByLabelText('Current Futures orders')).toHaveTextContent('BTCUSDT')
-    expect(screen.getByLabelText('Current Futures orders')).not.toHaveTextContent('ETHUSDT')
+    fireEvent.click(screen.getByRole('tab', { name: /^Orders 2$/ }))
+    const orders = screen.getByLabelText('Current Futures orders')
+    expect(orders).toHaveTextContent('2 account-wide · 1 BTCUSDT')
+    expect(orders).toHaveTextContent('BTCUSDT')
+    expect(orders).toHaveTextContent('ETHUSDT')
+    expect([...orders.querySelectorAll('article strong')].map(node => node.textContent))
+      .toEqual(['BTCUSDT', 'ETHUSDT'])
+  })
+
+  it('does not claim an empty account while the retained portfolio is unavailable', () => {
+    renderTicket({
+      state: createState({
+        portfolio: {
+          ...createState().portfolio,
+          state: 'stale',
+          syncState: 'degraded',
+          syncCode: 'FUTURES_PRODUCTION_ACCOUNT_STREAM_UNAVAILABLE',
+          openOrders: [],
+          positions: [],
+        },
+      }),
+    })
+    fireEvent.click(screen.getByRole('tab', { name: /^Orders 0$/ }))
+    expect(screen.queryByText('No active Futures orders.')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: /^Positions 0$/ }))
+    expect(screen.queryByText('No open LONG or SHORT positions.')).not.toBeInTheDocument()
   })
 
   it('retains last confirmed active orders while the private stream resynchronizes', () => {
