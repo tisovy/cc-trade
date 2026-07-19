@@ -11,7 +11,6 @@ const credentialBinding = 'b'.repeat(64);
 
 const createInput = () => ({
     policy: {
-        allowedSymbols: ['BTCUSDT'],
         maxLeverage: 2,
         maxOrderNotionalUsdt: '10',
         maxDailyNotionalUsdt: '50',
@@ -150,6 +149,38 @@ describe('production Futures exact risk evaluator', () => {
             observedLeverage: 2,
         });
         expect(Object.isFrozen(result)).toBe(true);
+    });
+
+    it('admits an arbitrary strict USDⓈ-M perpetual with matching fresh exchange state', () => {
+        const input = createInput();
+        input.snapshot.symbolConfig.symbol = 'ARBUSDT';
+        input.snapshot.markPrice.symbol = 'ARBUSDT';
+        input.snapshot.position.symbol = 'ARBUSDT';
+        input.snapshot.exchangeInfo.symbol = 'ARBUSDT';
+        input.draft.symbol = 'ARBUSDT';
+
+        expect(evaluateFuturesProductionExecutionRisk(input)).toMatchObject({
+            ok: true,
+            classification: FUTURES_PRODUCTION_EXECUTION_RISK_CLASSIFICATIONS.OPENING,
+        });
+    });
+
+    it('blocks non-trading contracts and stale authoritative snapshots', () => {
+        const nonTrading = createInput();
+        nonTrading.snapshot.exchangeInfo.status = 'BREAK';
+        expect(evaluateFuturesProductionExecutionRisk(nonTrading)).toEqual({
+            ok: false,
+            code: FUTURES_PRODUCTION_EXECUTION_RISK_CODES.SYMBOL_REJECTED,
+            reason: FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.SYMBOL_STATE,
+        });
+
+        const stale = createInput();
+        stale.snapshot.fresh = false;
+        expect(evaluateFuturesProductionExecutionRisk(stale)).toEqual({
+            ok: false,
+            code: FUTURES_PRODUCTION_EXECUTION_RISK_CODES.SNAPSHOT_REJECTED,
+            reason: FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.SNAPSHOT_INCOMPLETE,
+        });
     });
 
     it('keeps a verified reducing exit available at exhausted caps and distressed balance', () => {

@@ -192,7 +192,6 @@ const STATUS_FIELDS = Object.freeze([
 ]);
 const ACCOUNT_FIELDS = Object.freeze(['alias', 'fingerprint']);
 const CAPS_FIELDS = Object.freeze([
-    'allowedSymbols',
     'symbolConfigurations',
     'maxLeverage',
     'maxOrderNotionalUsdt',
@@ -548,24 +547,6 @@ const requireFingerprint = (value, code) => {
     return value;
 };
 
-const normalizeAllowedSymbols = (allowedSymbols) => {
-    if (allowedSymbols === undefined) return null;
-    if (!Array.isArray(allowedSymbols)
-        || Object.getPrototypeOf(allowedSymbols) !== Array.prototype
-        || allowedSymbols.length < 1
-        || allowedSymbols.length > 16) {
-        fail(FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_IDENTITY);
-    }
-    const unique = new Set();
-    for (const symbol of allowedSymbols) {
-        if (typeof symbol !== 'string' || !SYMBOL_PATTERN.test(symbol) || unique.has(symbol)) {
-            fail(FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_IDENTITY);
-        }
-        unique.add(symbol);
-    }
-    return unique;
-};
-
 const normalizeCommonCommand = (command, { accountFingerprint } = {}) => {
     if (command.version !== FUTURES_PRODUCTION_EXECUTION_PROTOCOL_VERSION) {
         fail(FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_VERSION);
@@ -637,10 +618,8 @@ export const validateFuturesProductionExecutionCommandObject = (value, options =
     normalizeCommonCommand(command, options);
 
     if (action === FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_ORDER_INTENT) {
-        const allowedSymbols = normalizeAllowedSymbols(options.allowedSymbols);
         if (typeof command.symbol !== 'string'
             || !SYMBOL_PATTERN.test(command.symbol)
-            || (allowedSymbols !== null && !allowedSymbols.has(command.symbol))
             || !['BUY', 'SELL'].includes(command.side)
             || !['LONG', 'SHORT'].includes(command.positionSide)
             || !['ENTRY', 'EXIT'].includes(command.positionEffect)
@@ -660,10 +639,8 @@ export const validateFuturesProductionExecutionCommandObject = (value, options =
     }
 
     if (action === FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_MARGIN_ADJUSTMENT_INTENT) {
-        const allowedSymbols = normalizeAllowedSymbols(options.allowedSymbols);
         if (typeof command.symbol !== 'string'
             || !SYMBOL_PATTERN.test(command.symbol)
-            || (allowedSymbols !== null && !allowedSymbols.has(command.symbol))
             || !['LONG', 'SHORT'].includes(command.positionSide)
             || !['ADD', 'REDUCE'].includes(command.marginAction)) {
             fail(FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_ORDER_DRAFT);
@@ -677,10 +654,8 @@ export const validateFuturesProductionExecutionCommandObject = (value, options =
     }
 
     if (action === FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_ORDER_AMENDMENT_INTENT) {
-        const allowedSymbols = normalizeAllowedSymbols(options.allowedSymbols);
         if (typeof command.symbol !== 'string'
             || !SYMBOL_PATTERN.test(command.symbol)
-            || (allowedSymbols !== null && !allowedSymbols.has(command.symbol))
             || !['LONG', 'SHORT'].includes(command.positionSide)
             || typeof command.clientOrderId !== 'string'
             || !CLIENT_ORDER_ID_PATTERN.test(command.clientOrderId)) {
@@ -750,41 +725,12 @@ const isCanonicalUtcDay = (value) => {
     return !Number.isNaN(date.getTime()) && date.toISOString().slice(0, 10) === value;
 };
 
-const normalizeCapSymbols = (value) => {
+const normalizeSymbolConfigurations = (value) => {
     if (!Array.isArray(value)
         || Object.getPrototypeOf(value) !== Array.prototype
-        || value.length < 1
-        || value.length > 16) {
+        || value.length > 1024) {
         fail(FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS);
     }
-    const symbols = [];
-    const unique = new Set();
-    for (let index = 0; index < value.length; index += 1) {
-        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
-        if (!descriptor
-            || descriptor.enumerable !== true
-            || !Object.hasOwn(descriptor, 'value')
-            || typeof descriptor.value !== 'string'
-            || !SYMBOL_PATTERN.test(descriptor.value)
-            || unique.has(descriptor.value)) {
-            fail(FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS);
-        }
-        unique.add(descriptor.value);
-        symbols.push(descriptor.value);
-    }
-    if (Reflect.ownKeys(value).length !== symbols.length + 1) {
-        fail(FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS);
-    }
-    return Object.freeze(symbols);
-};
-
-const normalizeSymbolConfigurations = (value, allowedSymbols) => {
-    if (!Array.isArray(value)
-        || Object.getPrototypeOf(value) !== Array.prototype
-        || value.length > 16) {
-        fail(FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS);
-    }
-    const allowed = new Set(allowedSymbols);
     const unique = new Set();
     const configurations = [];
     for (let index = 0; index < value.length; index += 1) {
@@ -800,7 +746,7 @@ const normalizeSymbolConfigurations = (value, allowedSymbols) => {
             FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS,
         );
         if (typeof configuration.symbol !== 'string'
-            || !allowed.has(configuration.symbol)
+            || !SYMBOL_PATTERN.test(configuration.symbol)
             || unique.has(configuration.symbol)
             || !['ISOLATED', 'CROSSED'].includes(configuration.marginType)
             || !Number.isSafeInteger(configuration.leverage)
@@ -825,11 +771,7 @@ const normalizeCaps = (value) => {
         CAPS_FIELDS,
         FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS,
     );
-    const allowedSymbols = normalizeCapSymbols(caps.allowedSymbols);
-    const symbolConfigurations = normalizeSymbolConfigurations(
-        caps.symbolConfigurations,
-        allowedSymbols,
-    );
+    const symbolConfigurations = normalizeSymbolConfigurations(caps.symbolConfigurations);
     if (!Number.isSafeInteger(caps.maxLeverage)
         || caps.maxLeverage !== FUTURES_PRODUCTION_EXECUTION_COMPILED_CEILINGS.maxLeverage
         || typeof caps.minLiquidationDistanceBps !== 'string'
@@ -865,7 +807,7 @@ const normalizeCaps = (value) => {
         if (!(error instanceof FuturesProductionDecimalError)) throw error;
         fail(FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS);
     }
-    return freezeFields(CAPS_FIELDS, { ...caps, allowedSymbols, symbolConfigurations });
+    return freezeFields(CAPS_FIELDS, { ...caps, symbolConfigurations });
 };
 
 const normalizeKillSwitch = (value) => {

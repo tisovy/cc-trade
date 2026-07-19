@@ -14,6 +14,9 @@ const FUTURES_PRODUCTION_CONFIG = (
 const FUTURES_PRODUCTION_COMPOSITION = (
     'electron/services/futures-production-execution-composition.js'
 );
+const FUTURES_PRODUCTION_BACKEND_TRANSPORT = (
+    'electron/services/futures-production-execution-backend-transport.js'
+);
 const REVIEWED_PRODUCTION_ORIGIN = 'https://fapi.binance.com';
 const REVIEWED_PRODUCTION_WS_ORIGIN = 'wss://fstream.binance.com';
 const REVIEWED_PRODUCTION_HOST = 'fapi.binance.com';
@@ -157,8 +160,10 @@ for (const file of productionExecutionImplementationFiles) {
     const source = fs.readFileSync(file, 'utf8');
 
     for (const specifier of readModuleSpecifiers(source)) {
+        const reviewedBackendTransport = name === FUTURES_PRODUCTION_BACKEND_TRANSPORT
+            && ['node:https', 'ws'].includes(specifier);
         if (isAlternateTransportModule(specifier)
-            && !(name === FUTURES_PRODUCTION_FACADE && specifier === 'ws')) {
+            && !reviewedBackendTransport) {
             fail(`${name} imports alternate network transport ${specifier}`);
         }
     }

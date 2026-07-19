@@ -117,6 +117,8 @@ test('Futures Live is ready, keeps contracts visible and executes only mocked ge
 
         const contractList = mainWindow.locator('.futures-workstation-contract-list');
         await expect(contractList).toBeVisible();
+        await expect(contractList.getByText(/ALLOWLISTED|OBSERVE ONLY/)).toHaveCount(0);
+        await expect(mainWindow.getByText('NOT ALLOWLISTED', { exact: true })).toHaveCount(0);
         const initialContractListBox = await contractList.boundingBox();
         expect(initialContractListBox).not.toBeNull();
         expect(initialContractListBox.width).toBeGreaterThan(100);

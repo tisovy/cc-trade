@@ -1949,7 +1949,11 @@ export function setupBinanceConnection({
             ]);
 
             const productionRuntime = await productionExecutionRuntimePromise;
-            await productionRuntime.service.shutdown();
+            try {
+                await productionRuntime.service.shutdown();
+            } finally {
+                productionRuntime.closeNetwork?.();
+            }
             activeExecutionCoordinator = null;
             if (processGlobalProductionExecutionRuntimePromise
                 === productionExecutionRuntimePromise) {

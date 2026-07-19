@@ -12,13 +12,24 @@ import {
 
 const ACCOUNT_FINGERPRINT = 'e'.repeat(64);
 const BOOTSTRAP_FINGERPRINT = '0'.repeat(64);
-const ALLOWED_SYMBOLS = Object.freeze(['BTCUSDT', 'ETHUSDT', 'SOLUSDT']);
+const E2E_SYMBOL_CONFIGURATIONS = Object.freeze([
+    'BTCUSDT',
+    'ETHUSDT',
+    'SOLUSDT',
+    'XRPUSDT',
+].map(symbol => Object.freeze({
+    symbol,
+    marginType: 'ISOLATED',
+    leverage: 2,
+    isAutoAddMargin: false,
+})));
 const EXTERNAL_CLIENT_ORDER_ID = 'external-desktop-order-1';
 const CONFIRMED_CODE = 'FUTURES_PRODUCTION_E2E_CONFIRMED';
 const ORDER_RULES = Object.freeze({
     BTCUSDT: Object.freeze({ stepSize: 0.001, minimumNotionalUsdt: 5 }),
     ETHUSDT: Object.freeze({ stepSize: 0.001, minimumNotionalUsdt: 5 }),
     SOLUSDT: Object.freeze({ stepSize: 0.1, minimumNotionalUsdt: 5 }),
+    XRPUSDT: Object.freeze({ stepSize: 0.1, minimumNotionalUsdt: 5 }),
 });
 
 const PREPARE_KINDS = Object.freeze({
@@ -202,13 +213,7 @@ export const createE2eFuturesProductionExecutionRuntime = ({
             fingerprint: ACCOUNT_FINGERPRINT,
         },
         caps: {
-            allowedSymbols: [...ALLOWED_SYMBOLS],
-            symbolConfigurations: ALLOWED_SYMBOLS.map(symbol => ({
-                symbol,
-                marginType: 'ISOLATED',
-                leverage: 2,
-                isAutoAddMargin: false,
-            })),
+            symbolConfigurations: E2E_SYMBOL_CONFIGURATIONS.map(copy),
             maxLeverage: 2,
             maxOrderNotionalUsdt: '10',
             maxDailyNotionalUsdt: '50',
@@ -461,9 +466,7 @@ export const createE2eFuturesProductionExecutionRuntime = ({
         expireActiveIntent();
         let command;
         try {
-            command = parseFuturesProductionExecutionCommand(raw, {
-                allowedSymbols: [...ALLOWED_SYMBOLS],
-            });
+            command = parseFuturesProductionExecutionCommand(raw);
         } catch {
             return reject(context.connectionId);
         }

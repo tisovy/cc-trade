@@ -91,7 +91,7 @@ There is no direct `disconnected → live`, `stale → live` or `unavailable →
 The implementation must reject or safely degrade when an attacker:
 
 - sends duplicate JSON keys or more than the exact request fields;
-- supplies lowercase, whitespace-padded, non-USDⓈ-M, non-allowlisted or oversized symbols;
+- supplies lowercase, whitespace-padded, non-USDⓈ-M, non-catalog or oversized symbols;
 - supplies an undocumented interval or an `environment`, `host`, `url`, `headers`, `proxy`, `agent` or credential field;
 - switches symbols repeatedly while old REST promises and sockets resolve late;
 - gives a snapshot `lastUpdateId` above all buffered deltas;

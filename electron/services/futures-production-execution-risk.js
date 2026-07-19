@@ -72,7 +72,6 @@ const TOP_LEVEL_FIELDS = Object.freeze([
     'dailyNotionalUsed',
 ]);
 const POLICY_FIELDS = Object.freeze([
-    'allowedSymbols',
     'maxLeverage',
     'maxOrderNotionalUsdt',
     'maxDailyNotionalUsdt',
@@ -228,7 +227,6 @@ const readExactStringArray = (value, pattern, maximumLength = 16) => {
 
 const parsePolicy = (value) => {
     const policy = readExactDataProperties(value, POLICY_FIELDS);
-    const allowedSymbols = readExactStringArray(policy.allowedSymbols, SYMBOL_PATTERN);
     const maxOrderNotional = parsePositiveExactDecimal(policy.maxOrderNotionalUsdt);
     const maxDailyNotional = parsePositiveExactDecimal(policy.maxDailyNotionalUsdt);
     const minAvailableBalance = parsePositiveExactDecimal(policy.minAvailableBalanceUsdt);
@@ -244,7 +242,6 @@ const parsePolicy = (value) => {
         throw new RiskInputError();
     }
     return Object.freeze({
-        allowedSymbols,
         maxLeverage: policy.maxLeverage,
         maxOrderNotional,
         maxDailyNotional,
@@ -452,13 +449,12 @@ const classifyExposure = (draft, positionAmount) => {
     return FUTURES_PRODUCTION_EXECUTION_RISK_CLASSIFICATIONS.INCREASING;
 };
 
-const hasRequiredSymbolState = (policy, snapshot, draft, classification) => {
+const hasRequiredSymbolState = (snapshot, draft, classification) => {
     const symbol = draft.symbol;
     const exchange = snapshot.exchangeInfo;
     const requiresEntryConfiguration = classification
         !== FUTURES_PRODUCTION_EXECUTION_RISK_CLASSIFICATIONS.REDUCING;
-    return policy.allowedSymbols.includes(symbol)
-        && snapshot.symbolConfig.symbol === symbol
+    return snapshot.symbolConfig.symbol === symbol
         && snapshot.markPrice.symbol === symbol
         && snapshot.position.symbol === symbol
         && exchange.symbol === symbol
@@ -589,7 +585,7 @@ export const evaluateFuturesProductionExecutionRisk = (value) => {
             FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.EXPOSURE_AMBIGUOUS,
         );
     }
-    if (!hasRequiredSymbolState(policy, snapshot, draft, classification)) {
+    if (!hasRequiredSymbolState(snapshot, draft, classification)) {
         return reject(
             FUTURES_PRODUCTION_EXECUTION_RISK_CODES.SYMBOL_REJECTED,
             FUTURES_PRODUCTION_EXECUTION_RISK_REASONS.SYMBOL_STATE,

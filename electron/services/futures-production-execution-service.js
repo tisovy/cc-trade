@@ -72,7 +72,10 @@ const MAX_DISPATCH_START_DELAY_MS = 5_000;
 const BOOTSTRAP_FINGERPRINT = '0'.repeat(64);
 const MAX_PORTFOLIO_ITEMS = 2_048;
 const MAX_PORTFOLIO_BYTES = 1_572_864;
+const MAX_ATTEMPT_ITEMS = 16;
+const MAX_CAP_SYMBOL_CONFIGURATIONS = 1_024;
 const CLIENT_ORDER_ID_PATTERN = /^[.A-Z:/a-z0-9_-]{1,36}$/;
+const EXECUTION_SYMBOL_PATTERN = /^[A-Z0-9]{2,20}$/;
 const EXCHANGE_SYMBOL_PATTERN = /^[\p{Lu}\p{Lt}\p{Lo}\p{N}]{2,64}(?:_[0-9]{6})?$/u;
 const MAX_EXCHANGE_SYMBOL_BYTES = 256;
 const USER_DATA_KEEPALIVE_MS = 30 * 60_000;
@@ -416,6 +419,79 @@ const isExchangeSymbol = value => (
     && !/[a-z]/.test(value)
     && EXCHANGE_SYMBOL_PATTERN.test(value)
 );
+
+const isExecutionSymbol = value => (
+    typeof value === 'string' && EXECUTION_SYMBOL_PATTERN.test(value)
+);
+
+const normalizeCapsSymbolConfigurations = (value) => {
+    if (!Array.isArray(value) || value.length > MAX_CAP_SYMBOL_CONFIGURATIONS) return [];
+    const configurations = [];
+    const symbols = new Set();
+    for (const configuration of value) {
+        const symbol = configuration?.symbol;
+        const marginToken = String(configuration?.marginType).toUpperCase();
+        const marginType = marginToken === 'ISOLATED'
+            ? 'ISOLATED'
+            : ['CROSS', 'CROSSED'].includes(marginToken) ? 'CROSSED' : null;
+        const leverage = Number(configuration?.leverage);
+        if (!isExecutionSymbol(symbol)
+            || marginType === null
+            || !Number.isSafeInteger(leverage)
+            || leverage < 1
+            || leverage > 125
+            || typeof configuration.isAutoAddMargin !== 'boolean') continue;
+        if (symbols.has(symbol)) return [];
+        symbols.add(symbol);
+        configurations.push({
+            symbol,
+            marginType,
+            leverage,
+            isAutoAddMargin: configuration.isAutoAddMargin,
+        });
+    }
+    return configurations.sort((left, right) => left.symbol.localeCompare(right.symbol));
+};
+
+const openOrderInventorySymbols = ({ regular, algo }, { strict = true } = {}) => {
+    if (!Array.isArray(regular)
+        || !Array.isArray(algo)
+        || regular.length + algo.length > MAX_PORTFOLIO_ITEMS) {
+        throw new Error('invalid production open-order inventory');
+    }
+    const symbols = new Set();
+    for (const row of [...regular, ...algo]) {
+        const valid = strict ? isExecutionSymbol(row?.symbol) : isExchangeSymbol(row?.symbol);
+        if (!valid) throw new Error('invalid production open-order symbol');
+        symbols.add(row.symbol);
+    }
+    return [...symbols].sort();
+};
+
+const nonzeroHedgePositionTargets = (rows) => {
+    if (!Array.isArray(rows) || rows.length > MAX_PORTFOLIO_ITEMS) {
+        throw new Error('invalid production position inventory');
+    }
+    const targets = [];
+    const keys = new Set();
+    for (const row of rows) {
+        const amount = parseSignedExactDecimal(row?.positionAmt);
+        if (isZeroExactDecimal(amount)) continue;
+        if (!isExecutionSymbol(row?.symbol)
+            || !['LONG', 'SHORT'].includes(row.positionSide)
+            || (row.positionSide === 'LONG' && amount.coefficient < 0n)
+            || (row.positionSide === 'SHORT' && amount.coefficient > 0n)) {
+            throw new Error('invalid production nonzero hedge position');
+        }
+        const key = `${row.symbol}:${row.positionSide}`;
+        if (keys.has(key)) throw new Error('duplicate production nonzero hedge position');
+        keys.add(key);
+        targets.push({ symbol: row.symbol, positionSide: row.positionSide });
+    }
+    return targets.sort((left, right) => (
+        `${left.symbol}:${left.positionSide}`.localeCompare(`${right.symbol}:${right.positionSide}`)
+    ));
+};
 
 const normalizePortfolioSnapshot = ({
     availableBalanceUsdt,
@@ -769,29 +845,8 @@ export const createFuturesProductionExecutionService = ({
     const getCaps = () => {
         if (!policy) return null;
         const daily = getDailyState();
-        const symbolConfigurations = policy.allowedSymbols.map(symbol => {
-            const configuration = findSymbolEntry(latestSymbolConfigurations, symbol);
-            if (!configuration) return null;
-            const marginToken = String(configuration.marginType).toUpperCase();
-            const marginType = marginToken === 'ISOLATED'
-                ? 'ISOLATED'
-                : ['CROSS', 'CROSSED'].includes(marginToken) ? 'CROSSED' : null;
-            const leverage = Number(configuration.leverage);
-            if (marginType === null
-                || !Number.isSafeInteger(leverage)
-                || leverage < 1
-                || leverage > 125
-                || typeof configuration.isAutoAddMargin !== 'boolean') return null;
-            return {
-                symbol,
-                marginType,
-                leverage,
-                isAutoAddMargin: configuration.isAutoAddMargin,
-            };
-        }).filter(Boolean);
         return {
-            allowedSymbols: [...policy.allowedSymbols],
-            symbolConfigurations,
+            symbolConfigurations: normalizeCapsSymbolConfigurations(latestSymbolConfigurations),
             maxLeverage: policy.maxLeverage,
             maxOrderNotionalUsdt: policy.maxOrderNotionalUsdt,
             maxDailyNotionalUsdt: policy.maxDailyNotionalUsdt,
@@ -1080,7 +1135,6 @@ export const createFuturesProductionExecutionService = ({
             openOrdersReconciliation.snapshotStartedAt ?? 0,
         );
         portfolio = normalizePortfolioSnapshot({
-            allowedSymbols: policy?.allowedSymbols ?? [],
             availableBalanceUsdt: latestAvailableBalanceUsdt,
             observedAt,
             positionRisk: latestPositionRisk,
@@ -1233,7 +1287,6 @@ export const createFuturesProductionExecutionService = ({
                 );
             }
             portfolio = normalizePortfolioSnapshot({
-                allowedSymbols: policy.allowedSymbols,
                 availableBalanceUsdt: latestAvailableBalanceUsdt,
                 observedAt: serverTime.serverTime,
                 positionRisk,
@@ -1743,8 +1796,7 @@ export const createFuturesProductionExecutionService = ({
 
     const readMarginPreflight = async (draft, audit = {}) => {
         const amount = parsePositiveExactDecimal(draft.amount);
-        if (!policy.allowedSymbols.includes(draft.symbol)
-            || !['LONG', 'SHORT'].includes(draft.positionSide)
+        if (!['LONG', 'SHORT'].includes(draft.positionSide)
             || !['ADD', 'REDUCE'].includes(draft.marginAction)
             || compareExactDecimals(
                 amount,
@@ -1889,8 +1941,7 @@ export const createFuturesProductionExecutionService = ({
         clientOrderId,
         price,
     }, audit = {}) => {
-        if (!policy.allowedSymbols.includes(symbol)
-            || !['LONG', 'SHORT'].includes(positionSide)
+        if (!['LONG', 'SHORT'].includes(positionSide)
             || typeof clientOrderId !== 'string'
             || !CLIENT_ORDER_ID_PATTERN.test(clientOrderId)) {
             throw new FuturesProductionExecutionServiceError(
@@ -3190,7 +3241,7 @@ export const createFuturesProductionExecutionService = ({
         return currentAttempt;
     };
 
-    const readSymbolInventories = async (symbol, audit = {}) => {
+    const readSymbolInventories = async (audit = {}) => {
         const serverTime = await executeRead({
             endpointId: ENDPOINT_IDS.serverTime,
             weight: READ_WEIGHTS.serverTime,
@@ -3204,19 +3255,26 @@ export const createFuturesProductionExecutionService = ({
         }
         lastServerTime = serverTime.serverTime;
         const regular = await executeRead({
-            endpointId: ENDPOINT_IDS.openOrders,
-            weight: READ_WEIGHTS.openOrders,
+            endpointId: ENDPOINT_IDS.allOpenOrders,
+            weight: READ_WEIGHTS.allOpenOrders,
             audit,
-            operation: () => facade.getOpenOrders(symbol),
+            operation: () => facade.getAllOpenOrders(),
         });
         const algo = await executeRead({
-            endpointId: ENDPOINT_IDS.openAlgoOrders,
-            weight: READ_WEIGHTS.openAlgoOrders,
+            endpointId: ENDPOINT_IDS.allOpenAlgoOrders,
+            weight: READ_WEIGHTS.allOpenAlgoOrders,
             audit,
-            operation: () => facade.getOpenAlgoOrders(symbol),
+            operation: () => facade.getAllOpenAlgoOrders(),
         });
         return { regular, algo, observedAt: serverTime.serverTime };
     };
+
+    const readGlobalPositionInventory = async (audit = {}) => executeRead({
+        endpointId: ENDPOINT_IDS.positionRisk,
+        weight: READ_WEIGHTS.positionRisk,
+        audit,
+        operation: () => facade.getAllPositionRisk(),
+    });
 
     const cancelAllOpenOrders = async (command, intent) => {
         activeOperation = {
@@ -3236,12 +3294,30 @@ export const createFuturesProductionExecutionService = ({
             outcome: 'pending',
             audit: { action: command.action, commandDigest: intent.commandDigest },
         });
-        const items = [];
-        for (const symbol of policy.allowedSymbols) {
-            const cancelTargetOrderKeys = [...new Set([
+        let targetSymbols = [];
+        let initialInventoryAvailable = false;
+        try {
+            const initialInventory = await readSymbolInventories({
+                requestId: command.requestId,
+                operationId: command.requestId,
+                action: command.action,
+                commandDigest: intent.commandDigest,
+            });
+            targetSymbols = openOrderInventorySymbols(initialInventory);
+            initialInventoryAvailable = true;
+        } catch (error) {
+            reportInternal('cancel-all-inventory', error);
+        }
+        const targetOrderKeys = new Map(targetSymbols.map(symbol => [
+            symbol,
+            [...new Set([
                 ...openOrdersReconciliation.orders,
                 ...openOrdersReconciliation.bufferedEvents.map(entry => entry.order),
-            ].filter(order => order.symbol === symbol).map(order => order.key))];
+            ].filter(order => order.symbol === symbol).map(order => order.key))],
+        ]));
+        const pendingProjectionTimes = new Map();
+        for (const symbol of targetSymbols) {
+            const cancelTargetOrderKeys = targetOrderKeys.get(symbol);
             const childAudit = {
                 requestId: command.requestId,
                 operationId: `${command.requestId}:${symbol}`,
@@ -3250,6 +3326,15 @@ export const createFuturesProductionExecutionService = ({
                 commandDigest: intent.commandDigest,
                 symbol,
             };
+            await appendAudit({
+                ...childAudit,
+                eventType: 'cancel_all_child',
+                category: 'safety',
+                outcome: 'pending',
+                state: 'dispatched',
+                code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.ORDER_DISPATCHED,
+                safeDetail: 'authoritative-inventory-target',
+            });
             let deletesAcknowledged = true;
             for (const [endpointId, operation] of [
                 [ENDPOINT_IDS.cancelAllOpenOrders, () => facade.cancelAllOpenOrders({ symbol })],
@@ -3265,6 +3350,7 @@ export const createFuturesProductionExecutionService = ({
             let cancelProjectionRequestedAt = null;
             if (deletesAcknowledged) {
                 cancelProjectionRequestedAt = readNow();
+                pendingProjectionTimes.set(symbol, cancelProjectionRequestedAt);
                 const projected = markFuturesOpenOrdersPendingCancel(
                     openOrdersReconciliation,
                     {
@@ -3283,59 +3369,83 @@ export const createFuturesProductionExecutionService = ({
                     broadcastStatus();
                 }
             }
-            let confirmedEmpty = false;
-            let reconciliationObservedAt = null;
+        }
+        let confirmationInventory = null;
+        try {
+            confirmationInventory = await readSymbolInventories({
+                requestId: command.requestId,
+                operationId: command.requestId,
+                action: command.action,
+                commandDigest: intent.commandDigest,
+            });
+        } catch (error) {
+            reportInternal('cancel-all-reconcile', error);
+        }
+        const allConfirmed = initialInventoryAvailable
+            && confirmationInventory !== null
+            && confirmationInventory.regular.length === 0
+            && confirmationInventory.algo.length === 0;
+        let remainingSymbols = [];
+        if (confirmationInventory !== null && !allConfirmed) {
             try {
-                const inventories = await readSymbolInventories(symbol, childAudit);
-                confirmedEmpty = inventories.regular.length === 0 && inventories.algo.length === 0;
-                reconciliationObservedAt = inventories.observedAt;
+                remainingSymbols = openOrderInventorySymbols(confirmationInventory);
             } catch (error) {
-                reportInternal('cancel-all-reconcile', error);
+                reportInternal('cancel-all-remaining-inventory', error);
             }
-            const projectionObservedAt = reconciliationObservedAt ?? readNow();
-            const projected = confirmedEmpty
+        }
+        const reportSymbols = [...new Set([...targetSymbols, ...remainingSymbols])].sort();
+        const projectionObservedAt = confirmationInventory?.observedAt ?? readNow();
+        for (const symbol of targetSymbols) {
+            const orderKeys = targetOrderKeys.get(symbol);
+            const projected = allConfirmed
                 ? removeFuturesOpenOrdersForSymbols(openOrdersReconciliation, {
                     symbols: [symbol],
-                    orderKeys: cancelTargetOrderKeys,
+                    orderKeys,
                     confirmedAt: projectionObservedAt,
                 })
-                : cancelProjectionRequestedAt === null
-                    ? openOrdersReconciliation
-                    : failFuturesOpenOrdersPendingCancel(openOrdersReconciliation, {
+                : pendingProjectionTimes.has(symbol)
+                    ? failFuturesOpenOrdersPendingCancel(openOrdersReconciliation, {
                         symbol,
-                        orderKeys: cancelTargetOrderKeys,
+                        orderKeys,
                         failedAt: projectionObservedAt,
-                    });
-            if (projected !== openOrdersReconciliation) {
-                openOrdersReconciliation = projected;
-                projectCurrentPortfolio({
-                    state: confirmedEmpty && userDataStreamLive ? 'live' : 'stale',
-                    syncCode: userDataStreamLive ? null : 'ACCOUNT_STREAM_UNAVAILABLE',
-                });
-                advanceRevision();
-                broadcastStatus();
-            }
-            const outcome = confirmedEmpty ? 'canceled' : 'unknown';
-            const code = confirmedEmpty
+                    })
+                    : openOrdersReconciliation;
+            if (projected !== openOrdersReconciliation) openOrdersReconciliation = projected;
+        }
+        if (targetSymbols.length > 0) {
+            projectCurrentPortfolio({
+                state: allConfirmed && userDataStreamLive ? 'live' : 'stale',
+                syncCode: userDataStreamLive ? null : 'ACCOUNT_STREAM_UNAVAILABLE',
+            });
+            advanceRevision();
+            broadcastStatus();
+        }
+        const items = reportSymbols.slice(0, MAX_ATTEMPT_ITEMS).map(symbol => ({
+            symbol,
+            outcome: allConfirmed ? 'canceled' : 'unknown',
+            code: allConfirmed
                 ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.CANCEL_ALL_CONFIRMED
-                : FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RESULT_UNKNOWN;
-            items.push({ symbol, outcome, code });
+                : FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RESULT_UNKNOWN,
+        }));
+        for (const symbol of targetSymbols) {
+            const acknowledged = pendingProjectionTimes.has(symbol);
             await appendAudit({
                 eventType: 'cancel_all_child',
                 category: 'safety',
-                outcome: confirmedEmpty ? 'confirmed' : 'unknown',
+                outcome: allConfirmed ? 'confirmed' : 'unknown',
                 requestId: command.requestId,
                 operationId: `${command.requestId}:${symbol}`,
                 parentOperationId: command.requestId,
                 action: command.action,
                 commandDigest: intent.commandDigest,
                 symbol,
-                state: confirmedEmpty ? 'confirmed_empty' : 'recovery_required',
-                code,
-                safeDetail: deletesAcknowledged ? 'delete-acknowledged' : 'delete-outcome-unknown',
+                state: allConfirmed ? 'confirmed_empty' : 'recovery_required',
+                code: allConfirmed
+                    ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.CANCEL_ALL_CONFIRMED
+                    : FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RESULT_UNKNOWN,
+                safeDetail: acknowledged ? 'delete-acknowledged' : 'delete-outcome-unknown',
             });
         }
-        const allConfirmed = items.every(item => item.outcome === 'canceled');
         await setAttempt({
             requestId: command.requestId,
             kind: intent.kind,
@@ -3671,7 +3781,15 @@ export const createFuturesProductionExecutionService = ({
             exchangeOrderId,
             ...durableOrderFields(draft),
         });
-        return { outcome, code };
+        return {
+            outcome,
+            code,
+            operationId: childRequestId,
+            clientOrderId,
+            commandDigest: childDigest,
+            exchangeOrderId,
+            draft,
+        };
     };
 
     const closePositions = async (command, intent) => {
@@ -3692,31 +3810,85 @@ export const createFuturesProductionExecutionService = ({
             outcome: 'pending',
             audit: { action: command.action, commandDigest: intent.commandDigest },
         });
-        const items = [];
-        for (const symbol of policy.allowedSymbols) {
-            const legResults = [];
-            for (const positionSide of ['LONG', 'SHORT']) {
-                legResults.push(await closePositionLeg({
+        let initialTargets = [];
+        let initialInventoryAvailable = false;
+        try {
+            const positions = await readGlobalPositionInventory({
+                requestId: command.requestId,
+                operationId: command.requestId,
+                action: command.action,
+                commandDigest: intent.commandDigest,
+            });
+            initialTargets = nonzeroHedgePositionTargets(positions);
+            initialInventoryAvailable = true;
+        } catch (error) {
+            reportInternal('close-positions-inventory', error);
+        }
+        const legResults = [];
+        for (const target of initialTargets) {
+            legResults.push({
+                ...target,
+                ...await closePositionLeg({
                     command,
                     intent,
-                    symbol,
-                    positionSide,
-                }));
-            }
-            const outcome = legResults.every(result => result.outcome === 'closed')
-                ? 'closed'
-                : legResults.some(result => result.outcome === 'unknown') ? 'unknown' : 'rejected';
-            const code = outcome === 'closed'
-                ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.CLOSE_POSITIONS_CONFIRMED
-                : outcome === 'unknown'
-                    ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RESULT_UNKNOWN
-                    : legResults.find(result => result.outcome === 'rejected')?.code
-                        ?? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.ORDER_REJECTED;
-            items.push({ symbol, outcome, code });
+                    symbol: target.symbol,
+                    positionSide: target.positionSide,
+                }),
+            });
         }
-
-        const allClosed = items.length === policy.allowedSymbols.length
-            && items.every(item => item.outcome === 'closed');
+        let confirmationPositions = null;
+        let remainingTargets = [];
+        try {
+            confirmationPositions = await readGlobalPositionInventory({
+                requestId: command.requestId,
+                operationId: command.requestId,
+                action: command.action,
+                commandDigest: intent.commandDigest,
+            });
+            remainingTargets = nonzeroHedgePositionTargets(confirmationPositions);
+        } catch (error) {
+            reportInternal('close-positions-global-reconcile', error);
+        }
+        const allClosed = initialInventoryAvailable
+            && confirmationPositions !== null
+            && remainingTargets.length === 0;
+        if (allClosed) {
+            latestPositionRisk = confirmationPositions;
+            projectCurrentPortfolio({
+                state: portfolio.state === 'live' ? 'live' : 'stale',
+            });
+            for (const result of legResults.filter(item => (
+                item.outcome !== 'closed' && item.operationId
+            ))) {
+                await appendAudit({
+                    eventType: 'close_positions_child',
+                    category: 'safety',
+                    outcome: 'confirmed',
+                    requestId: result.operationId,
+                    operationId: result.operationId,
+                    parentOperationId: command.requestId,
+                    clientOrderId: result.clientOrderId,
+                    commandDigest: result.commandDigest,
+                    action: command.action,
+                    state: 'confirmed_closed',
+                    code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.CLOSE_POSITIONS_CONFIRMED,
+                    exchangeOrderId: result.exchangeOrderId,
+                    safeDetail: 'global-position-inventory-flat',
+                    ...durableOrderFields(result.draft),
+                });
+            }
+        }
+        const reportSymbols = [...new Set([
+            ...initialTargets.map(target => target.symbol),
+            ...remainingTargets.map(target => target.symbol),
+        ])].sort();
+        const items = reportSymbols.slice(0, MAX_ATTEMPT_ITEMS).map(symbol => ({
+            symbol,
+            outcome: allClosed ? 'closed' : 'unknown',
+            code: allClosed
+                ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.CLOSE_POSITIONS_CONFIRMED
+                : FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RESULT_UNKNOWN,
+        }));
         await setAttempt({
             requestId: command.requestId,
             kind: intent.kind,
@@ -4400,39 +4572,57 @@ export const createFuturesProductionExecutionService = ({
         const parent = records.find(record => record.parentOperationId === null)
             ?? records[0];
         const requestId = parent.parentOperationId ?? parent.requestId;
-        const items = [];
-        for (const symbol of policy.allowedSymbols) {
-            let confirmed = false;
-            try {
-                const inventories = await readSymbolInventories(symbol, {
-                    requestId,
-                    operationId: `${requestId}:${symbol}`,
+        let inventories = null;
+        let remainingSymbols = [];
+        try {
+            inventories = await readSymbolInventories({
+                requestId,
+                operationId: requestId,
+                action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.CANCEL_ALL_OPEN_ORDERS,
+            });
+            if (inventories.regular.length > 0 || inventories.algo.length > 0) {
+                remainingSymbols = openOrderInventorySymbols(inventories);
+            }
+        } catch (error) {
+            reportInternal('restart-cancel-reconcile', error);
+        }
+        const complete = inventories !== null
+            && inventories.regular.length === 0
+            && inventories.algo.length === 0;
+        const childRecords = [...new Map(records.filter(record => (
+            record.parentOperationId === requestId
+            && typeof record.operationId === 'string'
+            && isExecutionSymbol(record.symbol)
+        )).map(record => [record.operationId, record])).values()];
+        if (complete) {
+            for (const record of childRecords) {
+                await appendAudit({
+                    eventType: 'restart_recovery',
+                    category: 'recovery',
+                    outcome: 'confirmed',
+                    requestId: record.requestId,
+                    operationId: record.operationId,
                     parentOperationId: requestId,
                     action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.CANCEL_ALL_OPEN_ORDERS,
-                    symbol,
+                    commandDigest: record.commandDigest,
+                    symbol: record.symbol,
+                    state: 'confirmed_empty',
+                    code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.CANCEL_ALL_CONFIRMED,
+                    safeDetail: 'global-open-order-inventory-empty',
                 });
-                confirmed = inventories.regular.length === 0 && inventories.algo.length === 0;
-            } catch (error) {
-                reportInternal('restart-cancel-reconcile', error);
             }
-            const code = confirmed
-                ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.CANCEL_ALL_CONFIRMED
-                : FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RESULT_UNKNOWN;
-            items.push({ symbol, outcome: confirmed ? 'canceled' : 'unknown', code });
-            await appendAudit({
-                eventType: 'restart_recovery',
-                category: 'recovery',
-                outcome: confirmed ? 'confirmed' : 'unknown',
-                requestId,
-                operationId: `${requestId}:${symbol}`,
-                parentOperationId: requestId,
-                action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.CANCEL_ALL_OPEN_ORDERS,
-                symbol,
-                state: confirmed ? 'confirmed_empty' : 'recovery_required',
-                code,
-            });
         }
-        const complete = items.every(item => item.outcome === 'canceled');
+        const reportSymbols = [...new Set([
+            ...childRecords.map(record => record.symbol),
+            ...remainingSymbols,
+        ])].sort();
+        const items = reportSymbols.slice(0, MAX_ATTEMPT_ITEMS).map(symbol => ({
+            symbol,
+            outcome: complete ? 'canceled' : 'unknown',
+            code: complete
+                ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.CANCEL_ALL_CONFIRMED
+                : FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RESULT_UNKNOWN,
+        }));
         await setAttempt({
             requestId,
             kind: FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.CANCEL_ALL_OPEN_ORDERS,
@@ -4469,102 +4659,59 @@ export const createFuturesProductionExecutionService = ({
         const parent = records.find(record => record.parentOperationId === null)
             ?? records[0];
         const requestId = parent.parentOperationId ?? parent.requestId;
-        const definitivelyRejectedLegs = new Set();
-        for (const record of records) {
-            if (!record.clientOrderId || !record.symbol || record.orderType !== 'MARKET') continue;
-            if (hasDefinitiveRejectedPostEvidence({
-                operationId: record.operationId ?? record.requestId,
-                endpointId: ENDPOINT_IDS.placeHedgeMarketExitOrder,
-                dispatchAt: record.dispatchAt,
-            })) {
-                await terminalizeDefinitivelyRejectedOrder(
-                    record,
-                    FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.CLOSE_POSITIONS,
-                );
-                definitivelyRejectedLegs.add(`${record.symbol}:${record.positionSide}`);
-                continue;
-            }
-            try {
-                await queryCloseChild({
-                    operation: {
-                        requestId: record.requestId,
-                        parentOperationId: requestId,
-                        symbol: record.symbol,
-                        clientOrderId: record.clientOrderId,
-                        commandDigest: record.commandDigest,
-                        draft: draftFromRecord(record),
-                    },
-                    expectedExchangeOrderId: record.exchangeOrderId,
-                });
-            } catch (error) {
-                reportInternal('restart-close-query', error);
-            }
-        }
-        const items = [];
-        for (const symbol of policy.allowedSymbols) {
-            let flat = false;
-            let positions = null;
-            try {
-                positions = await executeRead({
-                    endpointId: ENDPOINT_IDS.positionRisk,
-                    weight: READ_WEIGHTS.positionRisk,
-                    audit: {
-                        requestId,
-                        operationId: requestId,
-                        action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.CLOSE_POSITIONS,
-                        symbol,
-                    },
-                    operation: () => facade.getPositionRisk(symbol),
-                });
-                flat = ['LONG', 'SHORT'].every((positionSide) => {
-                    const position = findHedgePositionEntry(positions, symbol, positionSide);
-                    return position !== null
-                        && isZeroExactDecimal(parseSignedExactDecimal(position.positionAmt));
-                });
-            } catch (error) {
-                reportInternal('restart-close-position', error);
-            }
-            const symbolHasDefinitiveRejection = ['LONG', 'SHORT'].some(positionSide => (
-                definitivelyRejectedLegs.has(`${symbol}:${positionSide}`)
-            ));
-            const code = flat
-                ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.CLOSE_POSITIONS_CONFIRMED
-                : symbolHasDefinitiveRejection
-                    ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.EXCHANGE_REJECTED
-                    : FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RESULT_UNKNOWN;
-            items.push({
-                symbol,
-                outcome: flat
-                    ? 'closed'
-                    : symbolHasDefinitiveRejection ? 'rejected' : 'unknown',
-                code,
+        let positions = null;
+        let remainingTargets = [];
+        let inventoryValid = false;
+        try {
+            positions = await readGlobalPositionInventory({
+                requestId,
+                operationId: requestId,
+                action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.CLOSE_POSITIONS,
             });
-            if (flat) {
-                for (const record of records.filter(item => (
-                    item.symbol === symbol
-                    && item.clientOrderId
-                    && item.orderType === 'MARKET'
-                ))) {
-                    await appendAudit({
-                        eventType: 'restart_recovery',
-                        category: 'recovery',
-                        outcome: 'confirmed',
-                        requestId: record.requestId,
-                        operationId: record.operationId ?? record.requestId,
-                        parentOperationId: requestId,
-                        clientOrderId: record.clientOrderId,
-                        commandDigest: record.commandDigest,
-                        action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.CLOSE_POSITIONS,
-                        symbol,
-                        state: 'confirmed_closed',
-                        code,
-                        exchangeOrderId: record.exchangeOrderId,
-                        ...durableOrderFields(draftFromRecord(record)),
-                    });
-                }
+            remainingTargets = nonzeroHedgePositionTargets(positions);
+            inventoryValid = true;
+        } catch (error) {
+            reportInternal('restart-close-position', error);
+        }
+        const complete = inventoryValid && remainingTargets.length === 0;
+        const childRecords = [...new Map(records.filter(record => (
+            record.parentOperationId === requestId
+            && record.clientOrderId
+            && isExecutionSymbol(record.symbol)
+            && record.orderType === 'MARKET'
+        )).map(record => [record.operationId ?? record.requestId, record])).values()];
+        if (complete) {
+            for (const record of childRecords) {
+                await appendAudit({
+                    eventType: 'restart_recovery',
+                    category: 'recovery',
+                    outcome: 'confirmed',
+                    requestId: record.requestId,
+                    operationId: record.operationId ?? record.requestId,
+                    parentOperationId: requestId,
+                    clientOrderId: record.clientOrderId,
+                    commandDigest: record.commandDigest,
+                    action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.CLOSE_POSITIONS,
+                    symbol: record.symbol,
+                    state: 'confirmed_closed',
+                    code: FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.CLOSE_POSITIONS_CONFIRMED,
+                    exchangeOrderId: record.exchangeOrderId,
+                    safeDetail: 'global-position-inventory-flat',
+                    ...durableOrderFields(draftFromRecord(record)),
+                });
             }
         }
-        const complete = items.every(item => item.outcome === 'closed');
+        const reportSymbols = [...new Set([
+            ...childRecords.map(record => record.symbol),
+            ...remainingTargets.map(target => target.symbol),
+        ])].sort();
+        const items = reportSymbols.slice(0, MAX_ATTEMPT_ITEMS).map(symbol => ({
+            symbol,
+            outcome: complete ? 'closed' : 'unknown',
+            code: complete
+                ? FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.CLOSE_POSITIONS_CONFIRMED
+                : FUTURES_PRODUCTION_EXECUTION_SAFE_CODES.RESULT_UNKNOWN,
+        }));
         await setAttempt({
             requestId,
             kind: FUTURES_PRODUCTION_EXECUTION_INTENT_KINDS.CLOSE_POSITIONS,
@@ -5063,9 +5210,7 @@ export const createFuturesProductionExecutionService = ({
             || typeof context.emit !== 'function') return false;
         let command;
         try {
-            command = parseFuturesProductionExecutionCommand(raw, {
-                allowedSymbols: policy?.allowedSymbols,
-            });
+            command = parseFuturesProductionExecutionCommand(raw);
         } catch {
             await appendAudit({
                 eventType: 'received_command',

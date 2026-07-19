@@ -54,7 +54,6 @@ const status = (overrides = {}) => ({
   configured: true,
   account: { alias: 'reviewed-account-1', fingerprint: FINGERPRINT },
   caps: {
-    allowedSymbols: ['BTCUSDT', 'ETHUSDT'],
     symbolConfigurations: [
       {
         symbol: 'BTCUSDT',
@@ -400,14 +399,19 @@ describe('production futures renderer status parser', () => {
     })
     expect(Object.isFrozen(parsed)).toBe(true)
     expect(Object.isFrozen(parsed.caps)).toBe(true)
-    expect(Object.isFrozen(parsed.caps.allowedSymbols)).toBe(true)
     expect(Object.isFrozen(parsed.caps.symbolConfigurations)).toBe(true)
     expect(Object.isFrozen(parsed.caps.symbolConfigurations[0])).toBe(true)
     expect(Object.isFrozen(parsed.intent)).toBe(true)
   })
 
-  it('allows symbol configuration bootstrap to be empty or partial', () => {
+  it('allows symbol configuration bootstrap to be empty, partial, or larger than 16 symbols', () => {
     const input = status()
+    const broadConfigurations = Array.from({ length: 32 }, (_, index) => ({
+      symbol: `S${index}USDT`,
+      marginType: 'ISOLATED',
+      leverage: 2,
+      isAutoAddMargin: false,
+    }))
     const empty = parseFuturesProductionExecutionStatus(JSON.stringify(status({
       caps: { ...input.caps, symbolConfigurations: [] },
     })))
@@ -417,10 +421,42 @@ describe('production futures renderer status parser', () => {
         symbolConfigurations: [input.caps.symbolConfigurations[0]],
       },
     })))
+    const broad = parseFuturesProductionExecutionStatus(JSON.stringify(status({
+      caps: { ...input.caps, symbolConfigurations: broadConfigurations },
+    })))
     expect(empty.caps.symbolConfigurations).toEqual([])
     expect(partial.caps.symbolConfigurations).toEqual([
       input.caps.symbolConfigurations[0],
     ])
+    expect(broad.caps.symbolConfigurations).toHaveLength(32)
+    expect(broad.caps.symbolConfigurations[31].symbol).toBe('S31USDT')
+  })
+
+  it('accepts at most 1024 independent symbol configurations', () => {
+    const input = status()
+    const configurations = Array.from({ length: 1_024 }, (_, index) => ({
+      symbol: `S${index}USDT`,
+      marginType: 'ISOLATED',
+      leverage: 2,
+      isAutoAddMargin: false,
+    }))
+    const parsed = parseFuturesProductionExecutionStatus(JSON.stringify(status({
+      caps: { ...input.caps, symbolConfigurations: configurations },
+    })))
+    expect(parsed.caps.symbolConfigurations).toHaveLength(1_024)
+
+    expectProtocolError(
+      () => parseFuturesProductionExecutionStatus(JSON.stringify(status({
+        caps: {
+          ...input.caps,
+          symbolConfigurations: [
+            ...configurations,
+            { ...configurations[0], symbol: 'S1024USDT' },
+          ],
+        },
+      }))),
+      FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS,
+    )
   })
 
   it.each([
@@ -620,8 +656,7 @@ describe('production futures renderer status parser', () => {
       status({ caps: { ...status().caps, maxLeverage: 1 } }),
       status({ caps: { ...status().caps, maxOrderNotionalUsdt: '10.000000000000000001' } }),
       status({ caps: { ...status().caps, maxDailyNotionalUsdt: '50.000000000000000001' } }),
-      status({ caps: { ...status().caps, allowedSymbols: ['BTCUSDT', 'BTCUSDT'] } }),
-      status({ caps: { ...status().caps, allowedSymbols: ['btcusdt'] } }),
+      status({ caps: { ...status().caps, allowedSymbols: ['BTCUSDT'] } }),
       status({
         caps: {
           ...status().caps,
@@ -629,17 +664,6 @@ describe('production futures renderer status parser', () => {
             status().caps.symbolConfigurations[0],
             status().caps.symbolConfigurations[0],
           ],
-        },
-      }),
-      status({
-        caps: {
-          ...status().caps,
-          symbolConfigurations: [{
-            symbol: 'XRPUSDT',
-            marginType: 'ISOLATED',
-            leverage: 2,
-            isAutoAddMargin: false,
-          }],
         },
       }),
       status({

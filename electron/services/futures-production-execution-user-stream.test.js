@@ -22,13 +22,20 @@ const {
     FuturesProductionExecutionFacadeError,
     createFuturesProductionExecutionFacade,
 } = await import('./futures-production-execution-facade.js');
+const {
+    createFuturesProductionExecutionBackendTransport,
+} = await import('./futures-production-execution-backend-transport.js');
 
 const listenKey = 'futures-listen-key-0123456789abcdef';
 const createFacade = () => createFuturesProductionExecutionFacade({
     apiKey: 'production-api-key-fixture',
     apiSecret: 'production-api-secret-fixture',
-    allowedSymbols: ['BTCUSDT'],
-}, { fetchImpl: vi.fn() });
+}, {
+    backendTransport: createFuturesProductionExecutionBackendTransport({
+        environment: {},
+        directFetch: vi.fn(),
+    }),
+});
 
 describe('Futures production user-data stream transport', () => {
     beforeEach(() => sockets.splice(0));

@@ -280,23 +280,9 @@
   font-size: 11px;
 }
 
-.futures-workstation-contract-select span,
-.futures-workstation-contract-select small {
+.futures-workstation-contract-select span {
   color: #718399;
   font-size: 8px;
-}
-
-.futures-workstation-contract-select small {
-  grid-column: 1 / -1;
-  letter-spacing: 0.05em;
-}
-
-.futures-workstation .is-allowed {
-  color: #52dba8 !important;
-}
-
-.futures-workstation .is-observe-only {
-  color: #f0c94e !important;
 }
 
 .futures-workstation-contract-inspector {

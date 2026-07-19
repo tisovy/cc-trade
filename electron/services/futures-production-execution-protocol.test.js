@@ -87,7 +87,6 @@ const createStatusInput = (overrides = {}) => ({
     configured: true,
     account: { alias: 'reviewed-account-1', fingerprint: FINGERPRINT },
     caps: {
-        allowedSymbols: ['BTCUSDT', 'ETHUSDT'],
         symbolConfigurations: [
             {
                 symbol: 'BTCUSDT',
@@ -213,10 +212,11 @@ describe('production futures command protocol', () => {
     });
 
     it('parses a full exact order draft only at prepare time', () => {
-        expect(parseFuturesProductionExecutionCommand(JSON.stringify(prepareOrder()), {
+        const arbitraryContract = prepareOrder({ symbol: 'ARBUSDT' });
+        expect(parseFuturesProductionExecutionCommand(JSON.stringify(arbitraryContract), {
             accountFingerprint: FINGERPRINT,
-            allowedSymbols: ['BTCUSDT', 'ETHUSDT'],
-        })).toEqual(prepareOrder());
+            allowedSymbols: ['BTCUSDT'],
+        })).toEqual(arbitraryContract);
         expect(parseFuturesProductionExecutionCommand(JSON.stringify(prepareOrder({
             side: 'SELL',
             positionEffect: 'EXIT',
@@ -305,7 +305,7 @@ describe('production futures command protocol', () => {
         ['float quantity', prepareOrder({ quantity: '1e-3' }), FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_ORDER_DRAFT],
         ['ambiguous Hedge side', prepareOrder({ side: 'SELL' }), FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_ORDER_DRAFT],
         ['one-way position side', prepareOrder({ positionSide: 'BOTH' }), FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_ORDER_DRAFT],
-        ['wrong symbol', prepareOrder({ symbol: 'ETHUSDT' }), FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_ORDER_DRAFT],
+        ['malformed symbol', prepareOrder({ symbol: 'ethusdt' }), FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_ORDER_DRAFT],
         ['mutable extra field', { ...finalCommand(FUTURES_PRODUCTION_EXECUTION_ACTIONS.PLACE_ORDER), price: '1' }, FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_FIELDS],
         ['wrong confirmation', finalCommand(FUTURES_PRODUCTION_EXECUTION_ACTIONS.PLACE_ORDER, { confirmation: 'place order' }), FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_CONFIRMATION],
     ])('rejects %s', (_label, command, code) => {
@@ -383,7 +383,7 @@ describe('production futures backend-owned status protocol', () => {
         });
         expect(Object.isFrozen(parsed)).toBe(true);
         expect(Object.isFrozen(parsed.caps)).toBe(true);
-        expect(Object.isFrozen(parsed.caps.allowedSymbols)).toBe(true);
+        expect(parsed.caps).not.toHaveProperty('allowedSymbols');
         expect(Object.isFrozen(parsed.caps.symbolConfigurations)).toBe(true);
         expect(Object.isFrozen(parsed.caps.symbolConfigurations[0])).toBe(true);
         expect(Object.isFrozen(parsed.intent)).toBe(true);
@@ -404,6 +404,32 @@ describe('production futures backend-owned status protocol', () => {
         expect(partial.caps.symbolConfigurations).toEqual([
             input.caps.symbolConfigurations[0],
         ]);
+    });
+
+    it('accepts independent symbol configurations beyond the former 16-symbol cap', () => {
+        const input = createStatusInput();
+        const symbolConfigurations = Array.from({ length: 17 }, (_, index) => ({
+            symbol: `S${index}USDT`,
+            marginType: 'ISOLATED',
+            leverage: 2,
+            isAutoAddMargin: false,
+        }));
+        const status = createFuturesProductionExecutionStatus(createStatusInput({
+            caps: { ...input.caps, symbolConfigurations },
+        }));
+        expect(status.caps.symbolConfigurations).toHaveLength(17);
+
+        expectProtocolError(() => createFuturesProductionExecutionStatus(createStatusInput({
+            caps: {
+                ...input.caps,
+                symbolConfigurations: Array.from({ length: 1025 }, (_, index) => ({
+                    symbol: `S${index}USDT`,
+                    marginType: 'ISOLATED',
+                    leverage: 2,
+                    isAutoAddMargin: false,
+                })),
+            },
+        })), FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS);
     });
 
     it('represents disabled production without exposing account or configured caps', () => {
@@ -540,8 +566,6 @@ describe('production futures backend-owned status protocol', () => {
             },
         })), FUTURES_PRODUCTION_EXECUTION_PROTOCOL_ERROR_CODES.INVALID_STATUS);
         for (const invalidCaps of [
-            { ...createStatusInput().caps, allowedSymbols: ['BTCUSDT', 'BTCUSDT'] },
-            { ...createStatusInput().caps, allowedSymbols: ['btcusdt'] },
             {
                 ...createStatusInput().caps,
                 symbolConfigurations: [
@@ -552,7 +576,7 @@ describe('production futures backend-owned status protocol', () => {
             {
                 ...createStatusInput().caps,
                 symbolConfigurations: [{
-                    symbol: 'XRPUSDT',
+                    symbol: 'xrpusdt',
                     marginType: 'ISOLATED',
                     leverage: 2,
                     isAutoAddMargin: false,

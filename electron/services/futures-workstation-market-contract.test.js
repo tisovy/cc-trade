@@ -32,14 +32,13 @@ const expectation = (symbol = 'BTCUSDT', interval = '1m') => ({
 });
 
 describe('official Futures workstation market schemas', () => {
-    it('normalizes a USDⓈ-M-only catalog with exact filters and allowlist state', () => {
+    it('normalizes every execution-compatible USDⓈ-M contract without a static symbol list', () => {
         const catalog = normalizeFuturesWorkstationExchangeInfo(
             FUTURES_PRODUCTION_WORKSTATION_FIXTURE.catalog,
-            new Set(['BTCUSDT']),
         );
         expect(catalog.map(contract => contract.symbol)).toEqual(['BTCUSDT', 'ETHUSDT', 'SOLUSDT']);
-        expect(catalog[0].allowlisted).toBe(true);
-        expect(catalog[1].allowlisted).toBe(false);
+        expect(catalog[0].tradable).toBe(true);
+        expect(catalog.every(contract => contract.tradable)).toBe(true);
         expect(catalog[0].filters).toEqual({
             price: { min: '0.10', max: '10000000.00000000', tickSize: '0.10' },
             quantity: { min: '0.001', max: '1000000.00000000', stepSize: '0.001' },
@@ -66,10 +65,7 @@ describe('official Futures workstation market schemas', () => {
             quoteAsset: 'USD',
             marginAsset: 'BTC',
         });
-        const catalog = normalizeFuturesWorkstationExchangeInfo(
-            JSON.stringify(source),
-            new Set(['BTCUSDT']),
-        );
+        const catalog = normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source));
         expect(catalog.some(contract => contract.symbol === 'BTCUSD')).toBe(false);
     });
 
@@ -85,12 +81,10 @@ describe('official Futures workstation market schemas', () => {
                 baseAsset,
             };
         });
-        const catalog = normalizeFuturesWorkstationExchangeInfo(
-            JSON.stringify(source),
-            new Set(['A0000USDT']),
-        );
+        const catalog = normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source));
         expect(catalog).toHaveLength(600);
-        expect(catalog[0]).toMatchObject({ symbol: 'A0000USDT', allowlisted: true });
+        expect(catalog[0]).toMatchObject({ symbol: 'A0000USDT', tradable: true });
+        expect(catalog.at(-1)).toMatchObject({ tradable: true });
     });
 
     it('rejects a catalog above the revised 1024-contract bound', () => {
@@ -105,10 +99,8 @@ describe('official Futures workstation market schemas', () => {
                 baseAsset,
             };
         });
-        expect(() => normalizeFuturesWorkstationExchangeInfo(
-            JSON.stringify(source),
-            new Set(),
-        )).toThrowError(expect.objectContaining({ code: 'INVALID_EXCHANGE_INFO' }));
+        expect(() => normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source)))
+            .toThrowError(expect.objectContaining({ code: 'INVALID_EXCHANGE_INFO' }));
     });
 
     it('accepts the official dated delivery-symbol grammar without widening pair grammar', () => {
@@ -119,21 +111,27 @@ describe('official Futures workstation market schemas', () => {
             pair: 'BTCUSDT',
             contractType: 'CURRENT_QUARTER',
         };
-        const catalog = normalizeFuturesWorkstationExchangeInfo(
-            JSON.stringify(source),
-            new Set(['BTCUSDT_260925']),
-        );
+        const catalog = normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source));
         expect(catalog.find(contract => contract.symbol === 'BTCUSDT_260925')).toMatchObject({
             pair: 'BTCUSDT',
             contractType: 'CURRENT_QUARTER',
-            allowlisted: true,
+            tradable: false,
         });
 
         source.symbols[0].pair = 'BTCUSDT_260925';
-        expect(() => normalizeFuturesWorkstationExchangeInfo(
-            JSON.stringify(source),
-            new Set(),
-        )).toThrowError(expect.objectContaining({ code: 'INVALID_EXCHANGE_INFO_SYMBOL' }));
+        expect(() => normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source)))
+            .toThrowError(expect.objectContaining({ code: 'INVALID_EXCHANGE_INFO_SYMBOL' }));
+    });
+
+    it('does not mark a non-trading perpetual contract as tradable', () => {
+        const source = JSON.parse(FUTURES_PRODUCTION_WORKSTATION_FIXTURE.catalog);
+        source.symbols[0].status = 'PENDING_TRADING';
+        const catalog = normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source));
+        expect(catalog.find(contract => contract.symbol === 'BTCUSDT')).toMatchObject({
+            status: 'PENDING_TRADING',
+            contractType: 'PERPETUAL',
+            tradable: false,
+        });
     });
 
     it('normalizes current metadata and bounded Unicode public symbols without execution authority', () => {
@@ -168,10 +166,7 @@ describe('official Futures workstation market schemas', () => {
             baseAsset: '测试测试',
         });
 
-        const catalog = normalizeFuturesWorkstationExchangeInfo(
-            JSON.stringify(source),
-            new Set(['BTCUSDT', '测试测试USDT']),
-        );
+        const catalog = normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source));
 
         expect(catalog.map(contract => contract.symbol)).toEqual([
             'BTCUSDT',
@@ -181,7 +176,7 @@ describe('official Futures workstation market schemas', () => {
             '测试测试USDT',
         ]);
         expect(catalog.find(contract => contract.symbol === 'BTCUSDT')).toMatchObject({
-            allowlisted: true,
+            tradable: true,
             filters: { maximumOrders: 0, maximumAlgoOrders: null },
         });
         expect(catalog.find(contract => contract.symbol === 'BTCUSDT_260626')).toMatchObject({
@@ -191,7 +186,7 @@ describe('official Futures workstation market schemas', () => {
         expect(catalog.find(contract => contract.symbol === '测试测试USDT')).toMatchObject({
             pair: '测试测试USDT',
             baseAsset: '测试测试',
-            allowlisted: false,
+            tradable: false,
         });
     });
 
@@ -203,10 +198,8 @@ describe('official Futures workstation market schemas', () => {
             pair: `${'测'.repeat(17)}USDT`,
             baseAsset: '测'.repeat(17),
         };
-        expect(() => normalizeFuturesWorkstationExchangeInfo(
-            JSON.stringify(source),
-            new Set(),
-        )).toThrowError(expect.objectContaining({ code: 'INVALID_EXCHANGE_INFO_SYMBOL' }));
+        expect(() => normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source)))
+            .toThrowError(expect.objectContaining({ code: 'INVALID_EXCHANGE_INFO_SYMBOL' }));
 
         const fourByteLetter = '\u{20000}';
         source.symbols[0] = {
@@ -215,10 +208,8 @@ describe('official Futures workstation market schemas', () => {
             pair: `${fourByteLetter.repeat(16)}USDT`,
             baseAsset: fourByteLetter.repeat(16),
         };
-        expect(() => normalizeFuturesWorkstationExchangeInfo(
-            JSON.stringify(source),
-            new Set(),
-        )).toThrowError(expect.objectContaining({ code: 'INVALID_EXCHANGE_INFO_SYMBOL' }));
+        expect(() => normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source)))
+            .toThrowError(expect.objectContaining({ code: 'INVALID_EXCHANGE_INFO_SYMBOL' }));
     });
 
     it('rejects malformed current filter metadata and the superseded symbol field name', () => {
@@ -232,18 +223,18 @@ describe('official Futures workstation market schemas', () => {
             positionControlSide: 'NONE',
             unreviewed: true,
         });
-        expect(() => normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source), new Set()))
+        expect(() => normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source)))
             .toThrowError(expect.objectContaining({ code: 'INVALID_EXCHANGE_FILTER' }));
 
         symbol.filters.at(-1).unreviewed = undefined;
         delete symbol.filters.at(-1).unreviewed;
         symbol.maxMoveOrderLimitPercent = 1_000;
-        expect(() => normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source), new Set()))
+        expect(() => normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source)))
             .toThrowError(expect.objectContaining({ code: 'INVALID_EXCHANGE_INFO_SYMBOL' }));
 
         delete symbol.maxMoveOrderLimitPercent;
         symbol.maxMoveOrderLimit = '1000';
-        expect(() => normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source), new Set()))
+        expect(() => normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source)))
             .toThrowError(expect.objectContaining({ code: 'INVALID_INTEGER_IDENTITY' }));
     });
 
@@ -254,7 +245,7 @@ describe('official Futures workstation market schemas', () => {
             source.symbols[0].filters.find(
                 filter => filter.filterType === 'PERCENT_PRICE',
             ).multiplierDecimal = multiplierDecimal;
-            expect(() => normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source), new Set()))
+            expect(() => normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source)))
                 .toThrowError(expect.objectContaining({ code: 'INVALID_EXCHANGE_FILTER' }));
         },
     );
@@ -412,11 +403,11 @@ describe('official Futures workstation market schemas', () => {
     it('rejects catalog schema drift and duplicate symbols', () => {
         const source = JSON.parse(FUTURES_PRODUCTION_WORKSTATION_FIXTURE.catalog);
         source.unreviewed = true;
-        expect(() => normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source), new Set()))
+        expect(() => normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source)))
             .toThrow(FuturesWorkstationMarketContractError);
         delete source.unreviewed;
         source.symbols.push(source.symbols[0]);
-        expect(() => normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source), new Set()))
+        expect(() => normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source)))
             .toThrowError(expect.objectContaining({ code: 'DUPLICATE_EXCHANGE_SYMBOL' }));
     });
 
@@ -425,11 +416,11 @@ describe('official Futures workstation market schemas', () => {
         const price = source.symbols[0].filters.find(filter => filter.filterType === 'PRICE_FILTER');
         price.maxPrice = '0';
         price.tickSize = '0';
-        const catalog = normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source), new Set());
+        const catalog = normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source));
         expect(catalog[0].filters.price).toMatchObject({ max: '0', tickSize: '0' });
 
         source.symbols[0].filters.push({ filterType: 'UNREVIEWED_FILTER', value: '1' });
-        expect(() => normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source), new Set()))
+        expect(() => normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source)))
             .toThrowError(expect.objectContaining({ code: 'INVALID_EXCHANGE_FILTER' }));
     });
 
@@ -539,7 +530,6 @@ describe('official Futures workstation market schemas', () => {
     it('chunks a large catalog into bounded renderer frames', () => {
         const seed = normalizeFuturesWorkstationExchangeInfo(
             FUTURES_PRODUCTION_WORKSTATION_FIXTURE.catalog,
-            new Set(['BTCUSDT']),
         )[0];
         const contracts = Array.from({ length: 95 }, (_, index) => ({
             ...seed,

@@ -68,7 +68,6 @@ describe('captureFuturesProductionExecutionConfig', () => {
                 fingerprint: createFuturesProductionApiKeyFingerprint(API_KEY),
             },
             policy: {
-                allowedSymbols: ['BTCUSDT', 'ETHUSDT'],
                 maxLeverage: 2,
                 maxOrderNotionalUsdt: '10',
                 maxDailyNotionalUsdt: '50',
@@ -95,7 +94,31 @@ describe('captureFuturesProductionExecutionConfig', () => {
             recoveryAuthorization: 'r'.repeat(32),
         });
         expect(Object.isFrozen(config)).toBe(true);
-        expect(Object.isFrozen(config.policy.allowedSymbols)).toBe(true);
+        expect(config.policy).not.toHaveProperty('allowedSymbols');
+        expect(environment).toEqual({ UNRELATED: 'retained' });
+    });
+
+    it.each([
+        ['legacy value', 'BTCUSDT'],
+        ['legacy malformed value', 'btcusdt,BTCUSDT,BTCUSDT'],
+        ['legacy non-string value', true],
+        ['missing legacy value', undefined],
+    ])('captures, scrubs, and ignores the deprecated symbol policy: %s', (
+        _label,
+        allowedSymbols,
+    ) => {
+        const environment = validEnvironment();
+        if (allowedSymbols === undefined) {
+            delete environment[FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.ALLOWED_SYMBOLS];
+        } else {
+            environment[FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.ALLOWED_SYMBOLS] = allowedSymbols;
+        }
+        const config = captureFuturesProductionExecutionConfig({
+            environment,
+            liveAuthorized: true,
+        });
+        expect(config.enabled).toBe(true);
+        expect(config.policy).not.toHaveProperty('allowedSymbols');
         expect(environment).toEqual({ UNRELATED: 'retained' });
     });
 
@@ -143,8 +166,6 @@ describe('captureFuturesProductionExecutionConfig', () => {
     });
 
     it.each([
-        ['duplicate symbols', FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.ALLOWED_SYMBOLS, 'BTCUSDT,BTCUSDT'],
-        ['lowercase symbol', FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.ALLOWED_SYMBOLS, 'btcusdt'],
         ['leverage below compiled profile', FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MAX_LEVERAGE, '1'],
         ['leverage above ceiling', FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MAX_LEVERAGE, '3'],
         ['order cap above ceiling', FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MAX_ORDER_NOTIONAL_USDT, '10.000000000000000001'],

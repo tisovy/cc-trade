@@ -292,10 +292,7 @@ const EXCHANGE_CONTRACT_TYPES = new Set([
     'CURRENT_QUARTER DELIVERING',
 ]);
 
-export const normalizeFuturesWorkstationExchangeInfo = (
-    text,
-    allowlistedSymbols,
-) => {
+export const normalizeFuturesWorkstationExchangeInfo = (text) => {
     const payload = parseFuturesWorkstationJson(text, {
         maxBytes: FUTURES_WORKSTATION_BODY_LIMITS.EXCHANGE_INFO,
         maxDepth: 12,
@@ -303,8 +300,7 @@ export const normalizeFuturesWorkstationExchangeInfo = (
     });
     if (!allowedKeys(payload, ['symbols'], EXCHANGE_TOP_LEVEL_KEYS.filter(key => key !== 'symbols'))
         || !Array.isArray(payload.symbols)
-        || payload.symbols.length > FUTURES_WORKSTATION_MARKET_LIMITS.CATALOG_CONTRACTS
-        || !(allowlistedSymbols instanceof Set)) {
+        || payload.symbols.length > FUTURES_WORKSTATION_MARKET_LIMITS.CATALOG_CONTRACTS) {
         fail('INVALID_EXCHANGE_INFO');
     }
     const seen = new Set();
@@ -326,6 +322,7 @@ export const normalizeFuturesWorkstationExchangeInfo = (
         if (seen.has(symbol.symbol)) fail('DUPLICATE_EXCHANGE_SYMBOL');
         seen.add(symbol.symbol);
         if (symbol.marginAsset !== 'USDT' || symbol.quoteAsset !== 'USDT') continue;
+        const filters = normalizeFilters(symbol.filters);
         contracts.push(Object.freeze({
             symbol: symbol.symbol,
             pair: symbol.pair,
@@ -334,9 +331,10 @@ export const normalizeFuturesWorkstationExchangeInfo = (
             baseAsset: symbol.baseAsset,
             quoteAsset: symbol.quoteAsset,
             marginAsset: symbol.marginAsset,
-            allowlisted: ASCII_EXECUTION_SYMBOL_PATTERN.test(symbol.symbol)
-                && allowlistedSymbols.has(symbol.symbol),
-            filters: normalizeFilters(symbol.filters),
+            tradable: ASCII_EXECUTION_SYMBOL_PATTERN.test(symbol.symbol)
+                && symbol.status === 'TRADING'
+                && symbol.contractType === 'PERPETUAL',
+            filters,
         }));
     }
     if (contracts.length === 0) fail('EMPTY_USD_M_CATALOG');

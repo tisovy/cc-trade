@@ -344,7 +344,7 @@ const validateContract = (value) => (
     'baseAsset',
     'quoteAsset',
     'marginAsset',
-    'allowlisted',
+    'tradable',
     'filters',
   ])
   && isFuturesWorkstationSymbol(value.symbol)
@@ -358,7 +358,7 @@ const validateContract = (value) => (
   && isBoundedFuturesWorkstationExchangeIdentity(value.baseAsset, PAIR_PATTERN, 16)
   && isBoundedFuturesWorkstationExchangeIdentity(value.quoteAsset, PAIR_PATTERN, 16)
   && value.marginAsset === 'USDT'
-  && typeof value.allowlisted === 'boolean'
+  && typeof value.tradable === 'boolean'
   && hasExactFuturesWorkstationKeys(value.filters, [
     'price',
     'quantity',

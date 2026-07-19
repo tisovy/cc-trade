@@ -59,7 +59,6 @@ const config = Object.freeze({
     recoveryAuthorization: 'r'.repeat(32),
     account: Object.freeze({ alias: 'primary', fingerprint }),
     policy: Object.freeze({
-        allowedSymbols: Object.freeze(['BTCUSDT']),
         maxLeverage: 2,
         maxOrderNotionalUsdt: '10',
         maxDailyNotionalUsdt: '50',
@@ -172,14 +171,6 @@ const exchangeInfo = {
         ],
     }],
 };
-
-const twoSymbolConfig = Object.freeze({
-    ...config,
-    policy: Object.freeze({
-        ...config.policy,
-        allowedSymbols: Object.freeze(['BTCUSDT', 'ETHUSDT']),
-    }),
-});
 
 const twoSymbolExchangeInfo = Object.freeze({
     symbols: Object.freeze([
@@ -697,11 +688,16 @@ describe('FuturesProductionExecutionService', () => {
         expect(symbolAlgoOrders).not.toHaveBeenCalled();
         expect(harness.service.getStatus()).toMatchObject({
             caps: {
-                allowedSymbols: ['BTCUSDT'],
-                symbolConfigurations: [{
-                    symbol: 'BTCUSDT', marginType: 'ISOLATED', leverage: 2,
-                    isAutoAddMargin: false,
-                }],
+                symbolConfigurations: [
+                    {
+                        symbol: 'BTCUSDT', marginType: 'ISOLATED', leverage: 2,
+                        isAutoAddMargin: false,
+                    },
+                    {
+                        symbol: 'ETHUSDT', marginType: 'ISOLATED', leverage: 2,
+                        isAutoAddMargin: false,
+                    },
+                ],
             },
             portfolio: {
                 positions: [{
@@ -720,6 +716,57 @@ describe('FuturesProductionExecutionService', () => {
             },
         });
         await harness.service.shutdown();
+    });
+
+    it('publishes more than sixteen strict symbol configurations and fails closed above 1024', async () => {
+        const configurations = Array.from({ length: 24 }, (_, index) => ({
+            symbol: `ASSET${String(index).padStart(3, '0')}USDT`,
+            marginType: 'ISOLATED',
+            isAutoAddMargin: false,
+            leverage: 2,
+            maxNotionalValue: '1000000',
+        }));
+        const harness = createHarness({
+            allSymbolConfig: vi.fn().mockResolvedValue(result(
+                'all-symbol-config',
+                [...configurations, {
+                    symbol: 'BTCUSDT_250926',
+                    marginType: 'ISOLATED',
+                    isAutoAddMargin: false,
+                    leverage: 2,
+                    maxNotionalValue: '1000000',
+                }],
+            )),
+        });
+
+        await harness.service.start();
+        await waitForPortfolioBootstrap(harness.service);
+
+        expect(harness.service.getStatus().caps.symbolConfigurations).toHaveLength(24);
+        expect(harness.service.getStatus().caps.symbolConfigurations).toEqual(
+            expect.arrayContaining([
+                expect.objectContaining({ symbol: 'ASSET000USDT' }),
+                expect.objectContaining({ symbol: 'ASSET023USDT' }),
+            ]),
+        );
+        await harness.service.shutdown();
+
+        const overflow = createHarness({
+            allSymbolConfig: vi.fn().mockResolvedValue(result(
+                'all-symbol-config',
+                Array.from({ length: 1_025 }, (_, index) => ({
+                    symbol: `S${String(index).padStart(4, '0')}USDT`,
+                    marginType: 'ISOLATED',
+                    isAutoAddMargin: false,
+                    leverage: 2,
+                    maxNotionalValue: '1000000',
+                })),
+            )),
+        });
+        await overflow.service.start();
+        await waitForPortfolioBootstrap(overflow.service);
+        expect(overflow.service.getStatus().caps.symbolConfigurations).toEqual([]);
+        await overflow.service.shutdown();
     });
 
     it('keeps a BTC order beside Unicode and delivery external orders in one snapshot', async () => {
@@ -2265,8 +2312,8 @@ describe('FuturesProductionExecutionService', () => {
                 },
             ), { connectionId, emit: value => emitted.push(value) });
 
-            expect(getAccountConfig).toHaveBeenCalledTimes(3);
-            expect(getBalance).toHaveBeenCalledTimes(3);
+            expect(getAccountConfig).toHaveBeenCalledTimes(2);
+            expect(getBalance).toHaveBeenCalledTimes(2);
             expect(harness.evaluateRisk).not.toHaveBeenCalled();
             expect(harness.coordinator.reserveOrderDispatch).not.toHaveBeenCalled();
             expect(harness.coordinator.executeProduction).not.toHaveBeenCalled();
@@ -2390,6 +2437,77 @@ describe('FuturesProductionExecutionService', () => {
             eventType: 'reconciliation_result',
             detailDigest: expect.stringMatching(/^[0-9a-f]{64}$/),
         }));
+        await harness.service.shutdown();
+    });
+
+    it('places an ETH order after fresh symbol preflight without a configured symbol list', async () => {
+        const positionRisk = vi.fn(symbol => result('position-risk', [
+            {
+                symbol, positionSide: 'LONG', positionAmt: '1',
+                liquidationPrice: '2000', isolatedMargin: '1750', marginAsset: 'USDT',
+            },
+            {
+                symbol, positionSide: 'SHORT', positionAmt: '0',
+                liquidationPrice: '0', isolatedMargin: '0', marginAsset: 'USDT',
+            },
+        ]));
+        const place = vi.fn(args => result('new-limit-gtc-order', {
+            symbol: args.symbol,
+            clientOrderId: args.clientOrderId,
+            orderId: '41',
+        }));
+        const query = vi.fn(args => result('query-order', order({
+            symbol: 'ETHUSDT',
+            clientOrderId: args.originalClientOrderId,
+            orderId: '41',
+            side: 'SELL',
+            positionSide: 'LONG',
+            status: 'FILLED',
+            originalQuantity: '0.001',
+            executedQuantity: '0.001',
+            price: '3500',
+        })));
+        const harness = createHarness({
+            exchangeInfoValue: twoSymbolExchangeInfo,
+            positionRisk,
+            place,
+            query,
+        });
+        const emitted = [];
+        await harness.service.start();
+        await subscribe(harness.service, emitted);
+        await waitForPortfolioBootstrap(harness.service);
+        await harness.service.handleRequest(command(
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_ORDER_INTENT,
+            harness.service.getStatus().revision,
+            {
+                symbol: 'ETHUSDT',
+                side: 'SELL',
+                positionSide: 'LONG',
+                positionEffect: 'EXIT',
+                quantity: '0.001',
+                price: '3500',
+            },
+        ), { connectionId, emit: value => emitted.push(value) });
+        const intent = emitted.at(-1).intent;
+        expect(intent).toMatchObject({ kind: 'order' });
+        await harness.service.handleRequest(command(
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.PLACE_ORDER,
+            intent.revision,
+            {
+                requestId: intent.requestId,
+                confirmation: FUTURES_PRODUCTION_EXECUTION_CONFIRMATIONS[
+                    FUTURES_PRODUCTION_EXECUTION_ACTIONS.PLACE_ORDER
+                ],
+            },
+        ), { connectionId, emit: value => emitted.push(value) });
+
+        expect(place).toHaveBeenCalledWith(expect.objectContaining({ symbol: 'ETHUSDT' }));
+        expect(query).toHaveBeenCalledWith(expect.objectContaining({ symbol: 'ETHUSDT' }));
+        expect(harness.service.getCurrentAttempt()).toMatchObject({
+            state: 'confirmed_filled',
+            items: [{ symbol: 'ETHUSDT' }],
+        });
         await harness.service.shutdown();
     });
 
@@ -2571,7 +2689,7 @@ describe('FuturesProductionExecutionService', () => {
         await harness.service.shutdown();
     });
 
-    it('keeps cancel-all separate from close-position order placement', async () => {
+    it('confirms an empty authoritative order inventory without issuing delete writes', async () => {
         const harness = createHarness();
         const emitted = [];
         await harness.service.start();
@@ -2596,8 +2714,10 @@ describe('FuturesProductionExecutionService', () => {
                 ],
             },
         ), { connectionId, emit: value => emitted.push(value) });
-        expect(harness.facade.cancelAllOpenOrders).toHaveBeenCalledOnce();
-        expect(harness.facade.cancelAllAlgoOpenOrders).toHaveBeenCalledOnce();
+        expect(harness.facade.getAllOpenOrders).toHaveBeenCalledTimes(3);
+        expect(harness.facade.getAllOpenAlgoOrders).toHaveBeenCalledTimes(3);
+        expect(harness.facade.cancelAllOpenOrders).not.toHaveBeenCalled();
+        expect(harness.facade.cancelAllAlgoOpenOrders).not.toHaveBeenCalled();
         expect(harness.facade.placeHedgeMarketExitOrder).not.toHaveBeenCalled();
         expect(harness.service.getCurrentAttempt().state).toBe('confirmed_canceled');
         await harness.service.shutdown();
@@ -2610,10 +2730,16 @@ describe('FuturesProductionExecutionService', () => {
             clientOrderId: 'cancel-target',
             updateTime: 1_783_814_400_000,
         });
-        const allOpenOrders = vi.fn().mockResolvedValue(result(
-            'all-open-orders',
-            [oldOrder],
-        ));
+        const newOrder = ownedOpenOrder({
+            orderId: '2',
+            clientOrderId: 'arrived-during-cancel',
+            side: 'BUY',
+            updateTime: 1_783_814_400_001,
+        });
+        const allOpenOrders = vi.fn()
+            .mockResolvedValueOnce(result('all-open-orders', [oldOrder]))
+            .mockResolvedValueOnce(result('all-open-orders', [oldOrder]))
+            .mockResolvedValue(result('all-open-orders', [newOrder]));
         const openOrders = vi.fn().mockResolvedValue(result('open-orders', []));
         const connectUserDataStream = vi.fn((callbacks) => {
             streamCallbacks = callbacks;
@@ -2671,12 +2797,22 @@ describe('FuturesProductionExecutionService', () => {
             },
         ), { connectionId, emit: value => emitted.push(value) });
 
-        expect(harness.service.getStatus().portfolio.openOrders).toEqual([
+        expect(harness.service.getStatus().portfolio.openOrders).toEqual(expect.arrayContaining([
             expect.objectContaining({
                 orderId: '2',
                 clientOrderId: 'arrived-during-cancel',
             }),
-        ]);
+            expect.objectContaining({
+                orderId: '1',
+                clientOrderId: 'cancel-target',
+                syncState: 'stale',
+            }),
+        ]));
+        expect(harness.service.getCurrentAttempt()).toMatchObject({
+            state: 'partial',
+            items: [{ symbol: 'BTCUSDT', outcome: 'unknown' }],
+        });
+        expect(harness.service.getStatus().recovery.required).toBe(true);
         await harness.service.shutdown();
     });
 
@@ -2882,10 +3018,10 @@ describe('FuturesProductionExecutionService', () => {
     });
 
     it('reports cancel-all as partial until both exact inventories are confirmed empty', async () => {
-        const openOrders = vi.fn().mockResolvedValue(result('open-orders', [{
-            symbol: 'BTCUSDT',
-            orderId: '9223372036854775807',
-        }]));
+        const openOrders = vi.fn().mockResolvedValue(result(
+            'open-orders',
+            [ownedOpenOrder({ clientOrderId: 'still-open-after-cancel' })],
+        ));
         const harness = createHarness({ openOrders });
         const emitted = [];
         await harness.service.start();
@@ -2940,20 +3076,22 @@ describe('FuturesProductionExecutionService', () => {
 
     it('keeps cancel targets visible as pending and restores them stale when exact GET fails', async () => {
         let rejectInventory;
+        const inventory = [
+            ownedOpenOrder({
+                orderId: '7',
+                clientOrderId: 'external-cancel-target',
+                updateTime: 1_783_814_400_000,
+            }),
+            ownedOpenOrder({
+                symbol: 'ETHUSDT',
+                orderId: '8',
+                clientOrderId: 'external-eth-cancel-target',
+                updateTime: 1_783_814_400_001,
+            }),
+        ];
         const openOrders = vi.fn()
-            .mockResolvedValueOnce(result('open-orders', [
-                ownedOpenOrder({
-                    orderId: '7',
-                    clientOrderId: 'external-cancel-target',
-                    updateTime: 1_783_814_400_000,
-                }),
-                ownedOpenOrder({
-                    symbol: 'ETHUSDT',
-                    orderId: '8',
-                    clientOrderId: 'external-outside-write-allowlist',
-                    updateTime: 1_783_814_400_001,
-                }),
-            ]))
+            .mockResolvedValueOnce(result('open-orders', inventory))
+            .mockResolvedValueOnce(result('open-orders', inventory))
             .mockImplementationOnce(() => new Promise((_resolve, reject) => {
                 rejectInventory = reject;
             }));
@@ -2988,8 +3126,8 @@ describe('FuturesProductionExecutionService', () => {
             }),
             expect.objectContaining({
                 symbol: 'ETHUSDT',
-                clientOrderId: 'external-outside-write-allowlist',
-                syncState: 'synced',
+                clientOrderId: 'external-eth-cancel-target',
+                syncState: 'pending',
             }),
         ]));
         rejectInventory(new FuturesProductionExecutionFacadeError({
@@ -3007,8 +3145,8 @@ describe('FuturesProductionExecutionService', () => {
             }),
             expect.objectContaining({
                 symbol: 'ETHUSDT',
-                clientOrderId: 'external-outside-write-allowlist',
-                syncState: 'synced',
+                clientOrderId: 'external-eth-cancel-target',
+                syncState: 'stale',
             }),
         ]));
         expect(harness.service.getCurrentAttempt()).toMatchObject({
@@ -3018,21 +3156,23 @@ describe('FuturesProductionExecutionService', () => {
         await harness.service.shutdown();
     });
 
-    it('removes confirmed-canceled symbols immediately without dropping external inventory', async () => {
+    it('cancels arbitrary external BTC and ETH inventory without a catalog allowlist', async () => {
+        const inventory = [
+            ownedOpenOrder({
+                orderId: '7',
+                clientOrderId: 'external-btc-cancel-target',
+                updateTime: 1_783_814_400_000,
+            }),
+            ownedOpenOrder({
+                symbol: 'ETHUSDT',
+                orderId: '8',
+                clientOrderId: 'external-eth-cancel-target',
+                updateTime: 1_783_814_400_001,
+            }),
+        ];
         const openOrders = vi.fn()
-            .mockResolvedValueOnce(result('open-orders', [
-                ownedOpenOrder({
-                    orderId: '7',
-                    clientOrderId: 'external-cancel-target',
-                    updateTime: 1_783_814_400_000,
-                }),
-                ownedOpenOrder({
-                    symbol: 'ETHUSDT',
-                    orderId: '8',
-                    clientOrderId: 'external-outside-write-allowlist',
-                    updateTime: 1_783_814_400_001,
-                }),
-            ]))
+            .mockResolvedValueOnce(result('open-orders', inventory))
+            .mockResolvedValueOnce(result('open-orders', inventory))
             .mockResolvedValue(result('open-orders', []));
         const harness = createHarness({ openOrders });
         const emitted = [];
@@ -3061,13 +3201,12 @@ describe('FuturesProductionExecutionService', () => {
             state: 'confirmed_canceled',
             acknowledgement: 'accepted',
         });
-        expect(harness.service.getStatus().portfolio.openOrders).toEqual([
-            expect.objectContaining({
-                symbol: 'ETHUSDT',
-                clientOrderId: 'external-outside-write-allowlist',
-            }),
+        expect(harness.service.getStatus().portfolio.openOrders).toEqual([]);
+        expect(harness.facade.cancelAllOpenOrders.mock.calls).toEqual([
+            [{ symbol: 'BTCUSDT' }],
+            [{ symbol: 'ETHUSDT' }],
         ]);
-        expect(openOrders).toHaveBeenCalledTimes(2);
+        expect(openOrders).toHaveBeenCalledTimes(3);
         await harness.service.shutdown();
     });
 
@@ -3083,6 +3222,11 @@ describe('FuturesProductionExecutionService', () => {
             });
         });
         const openOrders = vi.fn()
+            .mockResolvedValueOnce(result('open-orders', [ownedOpenOrder({
+                orderId: '71',
+                clientOrderId: 'clock-skew-cancel-target',
+                updateTime: 1_900_000_000_100,
+            })]))
             .mockResolvedValueOnce(result('open-orders', [ownedOpenOrder({
                 orderId: '71',
                 clientOrderId: 'clock-skew-cancel-target',
@@ -3119,7 +3263,7 @@ describe('FuturesProductionExecutionService', () => {
             acknowledgement: 'accepted',
         });
         expect(harness.service.getStatus().portfolio.openOrders).toEqual([]);
-        expect(getServerTime).toHaveBeenCalledTimes(2);
+        expect(getServerTime).toHaveBeenCalledTimes(3);
         await harness.service.shutdown();
     });
 
@@ -3188,13 +3332,171 @@ describe('FuturesProductionExecutionService', () => {
         await harness.service.shutdown();
     });
 
-    it('keeps two-symbol regular and algo cancel outcomes exact across GET-only restart recovery', async () => {
-        const openOrders = vi.fn(() => result('open-orders', []));
-        const openAlgoOrders = vi.fn(symbol => result('open-algo-orders', (
-            symbol === 'ETHUSDT'
-                ? [{ symbol, algoId: '9223372036854775807' }]
-                : []
-        )));
+    it('closes an arbitrary SOL hedge leg from authoritative global position inventory', async () => {
+        const livePosition = {
+            symbol: 'SOLUSDT',
+            positionSide: 'LONG',
+            positionAmt: '3',
+            entryPrice: '150',
+            markPrice: '160',
+            notional: '480',
+            unRealizedProfit: '30',
+            isolatedMargin: '240',
+            liquidationPrice: '100',
+            leverage: '2',
+            marginType: 'isolated',
+            marginAsset: 'USDT',
+        };
+        const allPositionRisk = vi.fn()
+            .mockResolvedValueOnce(result('position-risk', [livePosition]))
+            .mockResolvedValueOnce(result('position-risk', [livePosition]))
+            .mockResolvedValue(result('position-risk', []));
+        const positionRisk = vi.fn()
+            .mockResolvedValueOnce(result('position-risk', [{
+                symbol: 'SOLUSDT', positionSide: 'LONG', positionAmt: '3',
+                liquidationPrice: '100', isolatedMargin: '240', marginAsset: 'USDT',
+            }]))
+            .mockResolvedValue(result('position-risk', [{
+                symbol: 'SOLUSDT', positionSide: 'LONG', positionAmt: '0',
+                liquidationPrice: '0', isolatedMargin: '0', marginAsset: 'USDT',
+            }]));
+        const query = vi.fn(args => result('query-order', order({
+            symbol: 'SOLUSDT',
+            clientOrderId: args.originalClientOrderId,
+            side: 'SELL',
+            positionSide: 'LONG',
+            type: 'MARKET',
+            originalType: 'MARKET',
+            status: 'FILLED',
+            originalQuantity: '3',
+            executedQuantity: '3',
+            price: '0',
+        })));
+        const placeMarket = vi.fn(args => result('new-hedge-market-exit-order', {
+            symbol: args.symbol,
+            clientOrderId: args.clientOrderId,
+            orderId: '31',
+        }));
+        const solExchangeInfo = {
+            symbols: [{
+                ...exchangeInfo.symbols[0],
+                symbol: 'SOLUSDT',
+                filters: exchangeInfo.symbols[0].filters.map(filter => ({ ...filter })),
+            }],
+        };
+        const harness = createHarness({
+            exchangeInfoValue: solExchangeInfo,
+            allPositionRisk,
+            positionRisk,
+            query,
+            placeMarket,
+            allSymbolConfig: vi.fn().mockResolvedValue(result('all-symbol-config', [{
+                symbol: 'SOLUSDT', marginType: 'ISOLATED', isAutoAddMargin: false,
+                leverage: 2, maxNotionalValue: '1000000',
+            }])),
+        });
+        const emitted = [];
+        await harness.service.start();
+        await subscribe(harness.service, emitted);
+        await waitForPortfolioBootstrap(harness.service);
+        await harness.service.handleRequest(command(
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_CLOSE_POSITIONS_INTENT,
+            harness.service.getStatus().revision,
+        ), { connectionId, emit: value => emitted.push(value) });
+        const intent = emitted.at(-1).intent;
+        await harness.service.handleRequest(command(
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.CLOSE_POSITIONS,
+            intent.revision,
+            {
+                requestId: intent.requestId,
+                confirmation: FUTURES_PRODUCTION_EXECUTION_CONFIRMATIONS[
+                    FUTURES_PRODUCTION_EXECUTION_ACTIONS.CLOSE_POSITIONS
+                ],
+            },
+        ), { connectionId, emit: value => emitted.push(value) });
+
+        expect(placeMarket).toHaveBeenCalledWith(expect.objectContaining({
+            symbol: 'SOLUSDT', side: 'SELL', positionSide: 'LONG', quantity: '3',
+        }));
+        expect(harness.service.getCurrentAttempt()).toMatchObject({
+            state: 'confirmed_closed',
+            items: [{ symbol: 'SOLUSDT', outcome: 'closed' }],
+        });
+        expect(harness.service.getStatus().portfolio.positions).toEqual([]);
+        expect(allPositionRisk).toHaveBeenCalledTimes(3);
+        await harness.service.shutdown();
+    });
+
+    it('blocks close-all when a new position appears after the target snapshot', async () => {
+        const newPosition = {
+            symbol: 'SOLUSDT',
+            positionSide: 'SHORT',
+            positionAmt: '-1',
+            entryPrice: '150',
+            markPrice: '160',
+            notional: '-160',
+            unRealizedProfit: '-10',
+            isolatedMargin: '80',
+            liquidationPrice: '220',
+            leverage: '2',
+            marginType: 'isolated',
+            marginAsset: 'USDT',
+        };
+        const allPositionRisk = vi.fn()
+            .mockResolvedValueOnce(result('position-risk', []))
+            .mockResolvedValueOnce(result('position-risk', []))
+            .mockResolvedValue(result('position-risk', [newPosition]));
+        const harness = createHarness({ allPositionRisk });
+        const emitted = [];
+        await harness.service.start();
+        await subscribe(harness.service, emitted);
+        await waitForPortfolioBootstrap(harness.service);
+        await harness.service.handleRequest(command(
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_CLOSE_POSITIONS_INTENT,
+            harness.service.getStatus().revision,
+        ), { connectionId, emit: value => emitted.push(value) });
+        const intent = emitted.at(-1).intent;
+        await harness.service.handleRequest(command(
+            FUTURES_PRODUCTION_EXECUTION_ACTIONS.CLOSE_POSITIONS,
+            intent.revision,
+            {
+                requestId: intent.requestId,
+                confirmation: FUTURES_PRODUCTION_EXECUTION_CONFIRMATIONS[
+                    FUTURES_PRODUCTION_EXECUTION_ACTIONS.CLOSE_POSITIONS
+                ],
+            },
+        ), { connectionId, emit: value => emitted.push(value) });
+
+        expect(harness.placeMarket).not.toHaveBeenCalled();
+        expect(harness.service.getCurrentAttempt()).toMatchObject({
+            state: 'partial',
+            items: [{ symbol: 'SOLUSDT', outcome: 'unknown' }],
+        });
+        expect(harness.service.getStatus().recovery).toMatchObject({
+            required: true,
+            state: 'blocked',
+        });
+        await harness.service.shutdown();
+    });
+
+    it('uses global regular and algo inventory for GET-only cancel recovery', async () => {
+        const btcOrder = ownedOpenOrder({
+            orderId: '11',
+            clientOrderId: 'external-btc-limit',
+        });
+        const ethAlgo = externalAlgoOrder({
+            symbol: 'ETHUSDT',
+            algoId: '12',
+            clientAlgoId: 'external-eth-algo',
+        });
+        const openOrders = vi.fn()
+            .mockResolvedValueOnce(result('open-orders', [btcOrder]))
+            .mockResolvedValueOnce(result('open-orders', [btcOrder]))
+            .mockResolvedValue(result('open-orders', []));
+        const openAlgoOrders = vi.fn()
+            .mockResolvedValueOnce(result('open-algo-orders', [ethAlgo]))
+            .mockResolvedValueOnce(result('open-algo-orders', [ethAlgo]))
+            .mockResolvedValue(result('open-algo-orders', [ethAlgo]));
         const cancelRegular = vi.fn(({ symbol }) => result('cancel-all-open-orders', {
             acknowledged: true,
             symbol,
@@ -3204,7 +3506,7 @@ describe('FuturesProductionExecutionService', () => {
             symbol,
         }));
         const harness = createHarness({
-            runtimeConfig: twoSymbolConfig,
+            runtimeConfig: config,
             exchangeInfoValue: twoSymbolExchangeInfo,
             openOrders,
             openAlgoOrders,
@@ -3247,20 +3549,21 @@ describe('FuturesProductionExecutionService', () => {
             state: 'partial',
             acknowledgement: 'partial',
             items: [
-                { symbol: 'BTCUSDT', outcome: 'canceled' },
+                { symbol: 'BTCUSDT', outcome: 'unknown' },
                 { symbol: 'ETHUSDT', outcome: 'unknown' },
             ],
         });
         expect(harness.ledger.records.filter(record => (
             record.eventType === 'cancel_all_child'
+            && record.state !== 'dispatched'
         ))).toEqual([
             expect.objectContaining({
                 requestId: intent.requestId,
                 operationId: `${intent.requestId}:BTCUSDT`,
                 parentOperationId: intent.requestId,
                 symbol: 'BTCUSDT',
-                outcome: 'confirmed',
-                state: 'confirmed_empty',
+                outcome: 'unknown',
+                state: 'recovery_required',
             }),
             expect.objectContaining({
                 requestId: intent.requestId,
@@ -3274,16 +3577,12 @@ describe('FuturesProductionExecutionService', () => {
         await harness.service.shutdown();
 
         const restartOpenOrders = vi.fn(() => result('open-orders', []));
-        const restartOpenAlgoOrders = vi.fn(symbol => result('open-algo-orders', (
-            symbol === 'ETHUSDT'
-                ? [{ symbol, algoId: '9223372036854775807' }]
-                : []
-        )));
+        const restartOpenAlgoOrders = vi.fn(() => result('open-algo-orders', [ethAlgo]));
         const restartCancelRegular = vi.fn();
         const restartCancelAlgo = vi.fn();
         const restarted = createHarness({
             ledger: harness.ledger,
-            runtimeConfig: twoSymbolConfig,
+            runtimeConfig: config,
             exchangeInfoValue: twoSymbolExchangeInfo,
             openOrders: restartOpenOrders,
             openAlgoOrders: restartOpenAlgoOrders,
@@ -3293,8 +3592,8 @@ describe('FuturesProductionExecutionService', () => {
         restarted.setClock(1_783_814_500_000);
         await restarted.service.start();
 
-        expect(restartOpenOrders.mock.calls).toEqual([['BTCUSDT'], ['ETHUSDT']]);
-        expect(restartOpenAlgoOrders.mock.calls).toEqual([['BTCUSDT'], ['ETHUSDT']]);
+        expect(restartOpenOrders.mock.calls).toEqual([[]]);
+        expect(restartOpenAlgoOrders.mock.calls).toEqual([[]]);
         expect(restartCancelRegular).not.toHaveBeenCalled();
         expect(restartCancelAlgo).not.toHaveBeenCalled();
         expect(restarted.coordinator.executeProduction).not.toHaveBeenCalled();
@@ -3304,26 +3603,15 @@ describe('FuturesProductionExecutionService', () => {
             requestId: intent.requestId,
             state: 'partial',
             items: [
-                { symbol: 'BTCUSDT', outcome: 'canceled' },
+                { symbol: 'BTCUSDT', outcome: 'unknown' },
                 { symbol: 'ETHUSDT', outcome: 'unknown' },
             ],
         });
-        expect(harness.ledger.records.filter(record => (
+        expect(harness.ledger.records.some(record => (
             record.eventType === 'restart_recovery'
             && record.action === FUTURES_PRODUCTION_EXECUTION_ACTIONS.CANCEL_ALL_OPEN_ORDERS
-            && record.symbol
-        )).slice(-2)).toEqual([
-            expect.objectContaining({
-                operationId: `${intent.requestId}:BTCUSDT`,
-                symbol: 'BTCUSDT',
-                state: 'confirmed_empty',
-            }),
-            expect.objectContaining({
-                operationId: `${intent.requestId}:ETHUSDT`,
-                symbol: 'ETHUSDT',
-                state: 'recovery_required',
-            }),
-        ]);
+            && record.state === 'confirmed_empty'
+        ))).toBe(false);
         await restarted.service.shutdown();
     });
 
@@ -3350,6 +3638,21 @@ describe('FuturesProductionExecutionService', () => {
                 marginAsset: 'USDT',
             },
         ]));
+        const allPositionRows = [{
+            symbol: 'ETHUSDT',
+            positionSide: 'LONG',
+            positionAmt: '2.000',
+            entryPrice: '3000',
+            markPrice: '3500',
+            notional: '7000',
+            unRealizedProfit: '1000',
+            isolatedMargin: '3500',
+            liquidationPrice: '2000',
+            leverage: '2',
+            marginType: 'isolated',
+            marginAsset: 'USDT',
+        }];
+        const allPositionRisk = vi.fn(() => result('position-risk', allPositionRows));
         const placeMarket = vi.fn().mockRejectedValue(
             new FuturesProductionExecutionFacadeError({
                 kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.AMBIGUOUS,
@@ -3363,9 +3666,10 @@ describe('FuturesProductionExecutionService', () => {
             endpointId: 'query-order',
         }));
         const harness = createHarness({
-            runtimeConfig: twoSymbolConfig,
+            runtimeConfig: config,
             exchangeInfoValue: twoSymbolExchangeInfo,
             positionRisk,
+            allPositionRisk,
             placeMarket,
             query,
             randomBytes,
@@ -3408,31 +3712,12 @@ describe('FuturesProductionExecutionService', () => {
             state: 'partial',
             acknowledgement: 'partial',
             items: [
-                { symbol: 'BTCUSDT', outcome: 'closed' },
                 { symbol: 'ETHUSDT', outcome: 'unknown' },
             ],
         });
         expect(harness.ledger.records.filter(record => (
             record.eventType === 'close_positions_child'
         ))).toEqual([
-            expect.objectContaining({
-                requestId,
-                operationId: `${requestId}:BTCUSDT:LONG`,
-                parentOperationId: requestId,
-                symbol: 'BTCUSDT',
-                positionSide: 'LONG',
-                state: 'confirmed_closed',
-                safeDetail: 'already-flat',
-            }),
-            expect.objectContaining({
-                requestId,
-                operationId: `${requestId}:BTCUSDT:SHORT`,
-                parentOperationId: requestId,
-                symbol: 'BTCUSDT',
-                positionSide: 'SHORT',
-                state: 'confirmed_closed',
-                safeDetail: 'already-flat',
-            }),
             expect.objectContaining({
                 requestId: childRequestId,
                 operationId: childRequestId,
@@ -3442,15 +3727,6 @@ describe('FuturesProductionExecutionService', () => {
                 positionSide: 'LONG',
                 quantity: '2.000',
                 state: 'recovery_required',
-            }),
-            expect.objectContaining({
-                requestId,
-                operationId: `${requestId}:ETHUSDT:SHORT`,
-                parentOperationId: requestId,
-                symbol: 'ETHUSDT',
-                positionSide: 'SHORT',
-                state: 'confirmed_closed',
-                safeDetail: 'already-flat',
             }),
         ]);
         expect(harness.ledger.records.filter(record => (
@@ -3482,6 +3758,7 @@ describe('FuturesProductionExecutionService', () => {
                 marginAsset: 'USDT',
             },
         ]));
+        const restartAllPositionRisk = vi.fn(() => result('position-risk', allPositionRows));
         const restartQuery = vi.fn().mockRejectedValue(
             new FuturesProductionExecutionFacadeError({
                 kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.NOT_FOUND,
@@ -3492,17 +3769,19 @@ describe('FuturesProductionExecutionService', () => {
         const restartPlaceMarket = vi.fn();
         const restarted = createHarness({
             ledger: harness.ledger,
-            runtimeConfig: twoSymbolConfig,
+            runtimeConfig: config,
             exchangeInfoValue: twoSymbolExchangeInfo,
             positionRisk: restartPositionRisk,
+            allPositionRisk: restartAllPositionRisk,
             query: restartQuery,
             placeMarket: restartPlaceMarket,
         });
         restarted.setClock(1_783_814_500_000);
         await restarted.service.start();
 
-        expect(restartQuery).toHaveBeenCalledOnce();
-        expect(restartPositionRisk.mock.calls).toEqual([['BTCUSDT'], ['ETHUSDT']]);
+        expect(restartQuery).not.toHaveBeenCalled();
+        expect(restartPositionRisk).not.toHaveBeenCalled();
+        expect(restartAllPositionRisk.mock.calls).toEqual([[]]);
         expect(restartPlaceMarket).not.toHaveBeenCalled();
         expect(restarted.place).not.toHaveBeenCalled();
         expect(restarted.facade.cancelAllOpenOrders).not.toHaveBeenCalled();
@@ -3512,7 +3791,6 @@ describe('FuturesProductionExecutionService', () => {
             requestId,
             state: 'partial',
             items: [
-                { symbol: 'BTCUSDT', outcome: 'closed' },
                 { symbol: 'ETHUSDT', outcome: 'unknown' },
             ],
         });
@@ -4103,7 +4381,7 @@ describe('FuturesProductionExecutionService', () => {
             originalQuantity: '1.0',
             price: '0',
         })));
-        const positionRisk = vi.fn().mockResolvedValue(result('position-risk', [
+        const allPositionRisk = vi.fn().mockResolvedValue(result('position-risk', [
             {
                 symbol: 'BTCUSDT',
                 positionSide: 'LONG',
@@ -4119,12 +4397,13 @@ describe('FuturesProductionExecutionService', () => {
                 marginAsset: 'USDT',
             },
         ]));
-        const harness = createHarness({ ledger, query, positionRisk });
+        const harness = createHarness({ ledger, query, allPositionRisk });
 
         await harness.service.start();
 
         expect(harness.placeMarket).not.toHaveBeenCalled();
-        expect(query).toHaveBeenCalledOnce();
+        expect(query).not.toHaveBeenCalled();
+        expect(allPositionRisk).toHaveBeenCalledOnce();
         expect(ledger.getActiveOperations()).toEqual([]);
         expect(ledger.records).toContainEqual(expect.objectContaining({
             eventType: 'restart_recovery',
@@ -4135,19 +4414,56 @@ describe('FuturesProductionExecutionService', () => {
         }));
         expect(ledger.records.filter(record => (
             ['exchange_request', 'exchange_response'].includes(record.eventType)
-            && record.endpointId === 'query-order'
-        ))).toEqual([
-            expect.objectContaining({
-                operationId: requestId,
+            && ['query-order', 'new-hedge-market-exit-order'].includes(record.endpointId)
+        ))).toEqual([]);
+        expect(harness.service.getStatus().recovery.required).toBe(false);
+        await harness.service.shutdown();
+    });
+
+    it('recovers cancel-all only from globally empty regular and algo inventories', async () => {
+        const parentRequestId = '2'.repeat(32);
+        const ledger = new FakeLedger([
+            {
+                eventType: 'cancel_all_parent',
+                requestId: parentRequestId,
+                operationId: parentRequestId,
+                parentOperationId: null,
+                action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.CANCEL_ALL_OPEN_ORDERS,
+                commandDigest: 'e'.repeat(64),
+                credentialBinding: binding,
+                state: 'partial',
+                dispatchAt: 1_783_814_400_000,
+            },
+            {
+                eventType: 'cancel_all_child',
+                requestId: parentRequestId,
+                operationId: `${parentRequestId}:ETHUSDT`,
                 parentOperationId: parentRequestId,
-                clientOrderId: `cc7-${requestId}`,
-            }),
-            expect.objectContaining({
-                operationId: requestId,
-                parentOperationId: parentRequestId,
-                clientOrderId: `cc7-${requestId}`,
-            }),
+                action: FUTURES_PRODUCTION_EXECUTION_ACTIONS.CANCEL_ALL_OPEN_ORDERS,
+                commandDigest: 'e'.repeat(64),
+                credentialBinding: binding,
+                symbol: 'ETHUSDT',
+                state: 'recovery_required',
+                dispatchAt: 1_783_814_400_001,
+            },
         ]);
+        const allOpenOrders = vi.fn().mockResolvedValue(result('all-open-orders', []));
+        const allOpenAlgoOrders = vi.fn().mockResolvedValue(result('all-open-algo-orders', []));
+        const harness = createHarness({ ledger, allOpenOrders, allOpenAlgoOrders });
+
+        await harness.service.start();
+
+        expect(allOpenOrders).toHaveBeenCalledOnce();
+        expect(allOpenAlgoOrders).toHaveBeenCalledOnce();
+        expect(harness.facade.cancelAllOpenOrders).not.toHaveBeenCalled();
+        expect(harness.facade.cancelAllAlgoOpenOrders).not.toHaveBeenCalled();
+        expect(harness.coordinator.executeProduction).not.toHaveBeenCalled();
+        expect(ledger.getActiveOperations()).toEqual([]);
+        expect(harness.service.getCurrentAttempt()).toMatchObject({
+            requestId: parentRequestId,
+            state: 'confirmed_canceled',
+            items: [{ symbol: 'ETHUSDT', outcome: 'canceled' }],
+        });
         expect(harness.service.getStatus().recovery.required).toBe(false);
         await harness.service.shutdown();
     });

@@ -17,6 +17,9 @@ import {
 import {
     createFuturesProductionExecutionService,
 } from './futures-production-execution-service.js';
+import {
+    createFuturesProductionExecutionBackendTransport,
+} from './futures-production-execution-backend-transport.js';
 
 export const FUTURES_PRODUCTION_LIVE_AUTHORIZED = true;
 
@@ -26,6 +29,12 @@ const INITIAL_GLOBAL_FETCH = typeof globalThis.fetch === 'function' ? globalThis
 const CAN_ISSUE_FAKE_TRANSPORT_AUTHORIZATION = process.env.NODE_ENV === 'test'
     && process.env.VITEST === 'true';
 const fakeTransportAuthorizations = new WeakMap();
+
+class FuturesProductionNonNetworkingFakeWebSocket {
+    constructor() {
+        throw new Error('Deterministic Futures production fake cannot open a network socket');
+    }
+}
 
 const isGlobalFetch = fetchImpl => (
     fetchImpl === INITIAL_GLOBAL_FETCH
@@ -227,76 +236,106 @@ export const createFuturesProductionExecutionRuntime = async ({
     const memoryLedger = createMemoryLedger({ startupFailureCode });
     const canUseLiveTransport = FUTURES_PRODUCTION_LIVE_AUTHORIZED === true
         && config?.liveAuthorized === true
-        && isGlobalFetch(fetchImpl);
+        && isGlobalFetch(fetchImpl)
+        && config?.enabled === true
+        && Boolean(config?.credentials);
     const authorizedFakeFetch = isFakeAuthorization(fakeTransportAuthorization, fetchImpl);
     const canUseFakeTransport = typeof authorizedFakeFetch === 'function';
-    const networkFetch = canUseFakeTransport
-        ? authorizedFakeFetch
-        : canUseLiveTransport
-            ? fetchImpl
+    let backendTransport = null;
+    let service = null;
+    let networkClosed = false;
+    const closeNetwork = () => {
+        if (networkClosed) return;
+        networkClosed = true;
+        backendTransport?.close();
+    };
+
+    try {
+        if (canUseFakeTransport) {
+            backendTransport = createFuturesProductionExecutionBackendTransport({
+                environment: Object.freeze({}),
+                directFetch: authorizedFakeFetch,
+                WebSocketImpl: FuturesProductionNonNetworkingFakeWebSocket,
+            });
+        } else if (canUseLiveTransport) {
+            backendTransport = createFuturesProductionExecutionBackendTransport({
+                environment: process.env,
+                directFetch: fetchImpl,
+            });
+        }
+
+        const canComposeDurably = Boolean(
+            config?.enabled
+            && config?.credentials
+            && typeof storageDirectory === 'string'
+            && path.isAbsolute(storageDirectory)
+            && keyProtection
+            && backendTransport
+            && spotCoordinator
+            && typeof productionExecutor === 'function',
+        );
+
+        const ledger = canComposeDurably
+            ? createFuturesProductionExecutionLedger({
+                directory: storageDirectory,
+                integrityKey: await loadOrCreateIntegrityKey(storageDirectory, keyProtection),
+                secretValues: [
+                    config.credentials.apiKey,
+                    config.credentials.apiSecret,
+                    config.recoveryAuthorization,
+                ],
+            })
+            : memoryLedger;
+        const coordinator = createFuturesProductionExecutionCoordinator({
+            spotCoordinator,
+            getSpotAvailableWeight,
+            productionExecutor,
+            getProductionAvailableWeight,
+            persistOrderReservation: ledger.reserveDailyNotional,
+            persistOriginWeightReservation: ledger.persistOriginWeightReservation,
+            persistRatePause: ledger.persistRatePause,
+        });
+
+        const runtimeConfig = canComposeDurably ? config : Object.freeze({
+            ...config,
+            enabled: false,
+            liveAuthorized: false,
+            credentials: null,
+            recoveryAuthorization: null,
+        });
+        const credentialBinding = canComposeDurably
+            ? createFuturesProductionCredentialBinding(config.credentials)
             : null;
-    const canComposeDurably = Boolean(
-        config?.enabled
-        && config?.credentials
-        && typeof storageDirectory === 'string'
-        && path.isAbsolute(storageDirectory)
-        && keyProtection
-        && networkFetch
-        && spotCoordinator
-        && typeof productionExecutor === 'function',
-    );
-
-    const ledger = canComposeDurably
-        ? createFuturesProductionExecutionLedger({
-            directory: storageDirectory,
-            integrityKey: await loadOrCreateIntegrityKey(storageDirectory, keyProtection),
-            secretValues: [
-                config.credentials.apiKey,
-                config.credentials.apiSecret,
-                config.recoveryAuthorization,
-            ],
-        })
-        : memoryLedger;
-    const coordinator = createFuturesProductionExecutionCoordinator({
-        spotCoordinator,
-        getSpotAvailableWeight,
-        productionExecutor,
-        getProductionAvailableWeight,
-        persistOrderReservation: ledger.reserveDailyNotional,
-        persistOriginWeightReservation: ledger.persistOriginWeightReservation,
-        persistRatePause: ledger.persistRatePause,
-    });
-
-    const runtimeConfig = canComposeDurably ? config : Object.freeze({
-        ...config,
-        enabled: false,
-        liveAuthorized: false,
-        credentials: null,
-        recoveryAuthorization: null,
-    });
-    const credentialBinding = canComposeDurably
-        ? createFuturesProductionCredentialBinding(config.credentials)
-        : null;
-    const facade = canComposeDurably
-        ? createFuturesProductionExecutionFacade({
-            ...config.credentials,
-            allowedSymbols: config.policy.allowedSymbols,
-        }, { fetchImpl: networkFetch })
-        : null;
-    const service = createFuturesProductionExecutionService({
-        config: runtimeConfig,
-        credentialBinding,
-        ledger,
-        facade,
-        coordinator,
-        onInternalError,
-    });
-    await service.start();
-    return Object.freeze({
-        service,
-        coordinator,
-        durable: canComposeDurably,
-        fakeBacked: canUseFakeTransport,
-        recoverOperationally: service.recoverOperationally,
-    });
+        const facade = canComposeDurably
+            ? createFuturesProductionExecutionFacade(
+                { ...config.credentials },
+                { backendTransport },
+            )
+            : null;
+        service = createFuturesProductionExecutionService({
+            config: runtimeConfig,
+            credentialBinding,
+            ledger,
+            facade,
+            coordinator,
+            onInternalError,
+        });
+        await service.start();
+        return Object.freeze({
+            service,
+            coordinator,
+            durable: canComposeDurably,
+            fakeBacked: canUseFakeTransport,
+            recoverOperationally: service.recoverOperationally,
+            closeNetwork,
+        });
+    } catch (error) {
+        try {
+            await service?.shutdown();
+        } catch {
+            // The startup error remains authoritative; network teardown still runs.
+        }
+        closeNetwork();
+        throw error;
+    }
 };

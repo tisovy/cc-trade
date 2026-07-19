@@ -23,7 +23,6 @@ const CONFIG = Object.freeze({
   recoveryAuthorization: 'r'.repeat(32),
   account: Object.freeze({ alias: 'reviewed-production-account', fingerprint: ACCOUNT_FINGERPRINT }),
   policy: Object.freeze({
-    allowedSymbols: Object.freeze(['BTCUSDT']),
     maxLeverage: 2,
     maxOrderNotionalUsdt: '10',
     maxDailyNotionalUsdt: '50',

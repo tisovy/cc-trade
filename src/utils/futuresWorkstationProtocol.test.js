@@ -55,7 +55,7 @@ const payloads = Object.freeze({
       baseAsset: 'BTC',
       quoteAsset: 'USDT',
       marginAsset: 'USDT',
-      allowlisted: true,
+      tradable: true,
       filters,
     })]),
   }),
@@ -238,7 +238,7 @@ describe('Futures workstation environment-specific protocols', () => {
           symbol,
           pair: symbol,
           baseAsset: '测试测试',
-          allowlisted: false,
+          tradable: false,
         }],
       },
     })).not.toThrow()

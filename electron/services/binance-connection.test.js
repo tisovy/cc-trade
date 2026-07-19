@@ -38,6 +38,7 @@ const moduleMocks = vi.hoisted(() => {
             service: state.productionExecutionService,
             coordinator: undefined,
             durable: false,
+            closeNetwork: vi.fn(),
         };
         state.sendRequest = vi.fn(async (path, method) => ({
             data: vi.fn().mockResolvedValue(
@@ -109,6 +110,7 @@ const moduleMocks = vi.hoisted(() => {
         get connect() { return state.connect; },
         get httpServer() { return state.httpServer; },
         get marketSocket() { return state.marketSocket; },
+        get productionExecutionRuntime() { return state.productionExecutionRuntime; },
         get productionExecutionService() { return state.productionExecutionService; },
         get rendererConnection() { return state.rendererConnection; },
         get rendererHandlers() { return state.rendererHandlers; },
@@ -199,6 +201,21 @@ describe('setupBinanceConnection user-data orchestration', () => {
         console.log = originalConsoleLog;
         process.stdout.write = originalStdoutWrite;
         process.stderr.write = originalStderrWrite;
+    });
+
+    it('closes the production execution network exactly once with the controller', async () => {
+        moduleMocks.httpServer.close.mockImplementation(callback => callback?.());
+        const controller = setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1' },
+        });
+        await controller.productionExecutionReady;
+
+        const firstClose = controller.close();
+        expect(controller.close()).toBe(firstClose);
+        await firstClose;
+
+        expect(moduleMocks.productionExecutionService.shutdown).toHaveBeenCalledOnce();
+        expect(moduleMocks.productionExecutionRuntime.closeNetwork).toHaveBeenCalledOnce();
     });
 
     it('connects live user data and coalesces adapter-owned stream refreshes', async () => {

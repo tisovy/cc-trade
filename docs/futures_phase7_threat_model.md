@@ -12,7 +12,7 @@ them below are historical threat-boundary evidence, not an active workflow.
 - production USDⓈ-M account funds and positions;
 - production API key, API secret, and backend-only recovery authorization;
 - exact account alias, key fingerprint, and credential binding;
-- operator-configured allowlist and leverage/notional/liquidation/balance caps;
+- fresh Binance symbol eligibility plus leverage/notional/liquidation/balance caps;
 - one-use intent identities, command digests, client order IDs, and exchange order IDs;
 - durable daily-notional reservations, rate pauses, kill-switch state, dispatch states, reconciliation ownership, and audit history;
 - integrity key, rollback anchor, journal lease, and storage namespace;
@@ -45,7 +45,7 @@ Controls:
 - exact ASCII flag and acknowledgement, complete hard-limit grammar, unknown-key rejection, independent credential/account identity checks, healthy storage/recovery, and active kill-switch policy;
 - separately named production capture before the first window; E2E force-disable and scrubbing;
 - the non-environment compiled live-authorization interlock was enabled only after explicit operator authorization and is still combined with every exact environment/account/storage/recovery gate;
-- live composition accepts only the process-global Node `fetch`; a supplied transport, fake authority forgery, or E2E environment cannot resolve live I/O;
+- live composition accepts only the process-global Node `fetch` as authority for a branded backend transport; the transport alone may resolve the process-owned proxy for both signed REST and private WSS, while a supplied transport, fake authority forgery, invalid proxy, or E2E environment cannot resolve live I/O;
 - deterministic tests inject fakes through a test-only composition seam;
 - every gate combination is exhaustively tested and audited.
 
@@ -108,7 +108,7 @@ Controls:
 - UTC rollover uses bounded fresh server time and fails closed on regression;
 - equality/one-unit-over, concurrency, restart, crash, and midnight boundaries are deterministic tests.
 
-Residual risk: exchange state can change after preflight. One-way mode and exchange `reduceOnly` independently protect reductions; opening orders remain subject to a bounded race inside the reviewed one-second validation-to-dispatch window.
+Residual risk: exchange state can change after preflight. Hedge `positionSide`, the bound closing side, and the fresh leg-quantity check constrain reductions, but orders remain subject to a bounded race inside the reviewed one-second validation-to-dispatch window. The service does not claim `reduceOnly` protection in Hedge Mode.
 
 ### Ambiguous write and duplicate order
 
@@ -150,7 +150,7 @@ Controls:
 - ARM LIVE sends no exchange request and cannot imply order placement, cancellation, or closure; backend-only recovery remains separately authorized and audited;
 - recovery/monitoring runs while engaged or softly disabled.
 
-Residual risk: an already compromised subscribed renderer can automate the visible ARM phrase once all backend activation gates are satisfied; the phrase is an accidental-action barrier, not proof of a human. The compiled 1x / 10 USDT / 50 USDT ceilings, durable daily accounting, one-use order intents, and persistent kill switch limit but do not eliminate that risk. Kill-switch engagement also does not protect orders placed by other applications or users. Cancel-all is the explicit exchange action and may itself be partial or unknown.
+Residual risk: an already compromised subscribed renderer can automate the visible ARM phrase once all backend activation gates are satisfied; the phrase is an accidental-action barrier, not proof of a human. The compiled 2x / 10 USDT / 50 USDT ceilings, durable daily accounting, one-use order intents, and persistent kill switch limit but do not eliminate that risk. Kill-switch engagement also does not protect orders placed by other applications or users. Cancel-all is the explicit exchange action and may itself be partial or unknown.
 
 ### Cancel-all and close-position partial failure
 
@@ -163,15 +163,16 @@ Threats:
 
 Controls:
 
-- separate regular/algo requests and reconciliation reads per allowlisted symbol;
+- a fresh account-wide regular/algo inventory defines the finite cancel targets;
+- a fresh account-wide position inventory defines the non-zero Hedge legs to close;
 - exact empty inventories are the only cancel confirmation;
-- separate reduce-only MARKET child identity, durable intent, daily reservation, Query Order, and result per position;
+- separate position-side-bound Hedge MARKET child identity, durable intent, rate reservation, Query Order, and result per position; no invalid `reduceOnly` field is sent;
 - parent outcome is confirmed only when every required child is confirmed; otherwise partial or unknown;
 - bounded result arrays and fixed safe messages;
 - no automatic retry of writes and no inferred sibling success;
-- UI uses distinct controls and never maps partial/unknown to accepted.
+- UI uses distinct safety controls and never maps partial/unknown to accepted.
 
-Residual risk: the literal daily/per-order caps can prevent a complete emergency close. The system reports this as a partial hard-limit result; operators must account for this when choosing conservative caps and retain external exchange access.
+Residual risk: exchange filters, rate admission, a changed position, transport ambiguity, or reconciliation failure can prevent a complete emergency close. The system reports this as partial/unknown rather than success; operators must retain external exchange access.
 
 ### Storage corruption, rollback, and multiple owners
 

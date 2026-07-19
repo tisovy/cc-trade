@@ -27,8 +27,6 @@ import {
     FuturesWorkstationOrderBook,
 } from './futures-workstation-order-book.js';
 
-export const FUTURES_PRODUCTION_WORKSTATION_ALLOWLIST = Object.freeze(['BTCUSDT']);
-
 export const FUTURES_PRODUCTION_WORKSTATION_FRESHNESS = Object.freeze({
     HEADER_MS: 5_000,
     CANDLES_MS: 5_000,
@@ -220,10 +218,7 @@ export class FuturesProductionWorkstationService {
                 signal: session.abortController.signal,
             });
             if (!this.isCurrent(session)) return;
-            session.contracts = normalizeFuturesWorkstationExchangeInfo(
-                exchangeInfo,
-                new Set(FUTURES_PRODUCTION_WORKSTATION_ALLOWLIST),
-            );
+            session.contracts = normalizeFuturesWorkstationExchangeInfo(exchangeInfo);
             for (const frame of createFuturesWorkstationCatalogFrames(session.contracts)) {
                 this.emitResource(
                     session,

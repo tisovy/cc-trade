@@ -47,7 +47,6 @@ const createStatus = (overrides = {}) => ({
   configured: true,
   account: { alias: 'reviewed-account-1', fingerprint: FINGERPRINT },
   caps: {
-    allowedSymbols: ['BTCUSDT'],
     symbolConfigurations: [{
       symbol: 'BTCUSDT', marginType: 'ISOLATED', leverage: 2, isAutoAddMargin: false,
     }],

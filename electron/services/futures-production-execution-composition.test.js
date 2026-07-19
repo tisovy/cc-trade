@@ -1,6 +1,7 @@
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
     FUTURES_PRODUCTION_LIVE_AUTHORIZED,
@@ -19,6 +20,13 @@ import {
 } from './futures-production-execution-protocol.js';
 
 const directories = [];
+const stubProxyEnvironment = (value) => {
+    vi.stubEnv('https_proxy', value);
+    vi.stubEnv('HTTPS_PROXY', value);
+    vi.stubEnv('http_proxy', value);
+    vi.stubEnv('HTTP_PROXY', value);
+};
+
 afterEach(async () => {
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
@@ -56,7 +64,6 @@ const enabledFakeConfig = Object.freeze({
     recoveryAuthorization: 'r'.repeat(32),
     account: Object.freeze({ alias: 'fake-account', fingerprint: 'a'.repeat(64) }),
     policy: Object.freeze({
-        allowedSymbols: Object.freeze(['BTCUSDT']),
         maxLeverage: 2,
         maxOrderNotionalUsdt: '10',
         maxDailyNotionalUsdt: '50',
@@ -103,9 +110,11 @@ describe('FuturesProductionExecutionComposition', () => {
         });
         expect(fetchImpl).not.toHaveBeenCalled();
         await runtime.service.shutdown();
+        runtime.closeNetwork();
     });
 
     it('rejects caller-supplied live transports and accepts only process-global fetch', async () => {
+        stubProxyEnvironment('');
         const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-trade-prod-live-gate-'));
         directories.push(directory);
         const identityResponse = async (input) => {
@@ -160,6 +169,7 @@ describe('FuturesProductionExecutionComposition', () => {
         });
         expect(callerFetch).not.toHaveBeenCalled();
         await rejected.service.shutdown();
+        rejected.closeNetwork();
 
         const processGlobalFetch = vi.fn(identityResponse);
         vi.stubGlobal('fetch', processGlobalFetch);
@@ -179,6 +189,90 @@ describe('FuturesProductionExecutionComposition', () => {
         });
         expect(processGlobalFetch).toHaveBeenCalledTimes(3);
         await live.service.shutdown();
+        expect(() => {
+            live.closeNetwork();
+            live.closeNetwork();
+        }).not.toThrow();
+    });
+
+    it('does not resolve the process proxy for a disabled live capture', async () => {
+        const processGlobalFetch = vi.fn(async () => {
+            throw new Error('disabled runtime must not dispatch');
+        });
+        vi.stubGlobal('fetch', processGlobalFetch);
+        stubProxyEnvironment('file:///tmp/disabled-futures-proxy.sock');
+
+        const runtime = await createFuturesProductionExecutionRuntime({
+            config: Object.freeze({ ...enabledFakeConfig, enabled: false }),
+            ...coordinatorOptions,
+            fetchImpl: globalThis.fetch,
+        });
+        expect(runtime).toMatchObject({ durable: false, fakeBacked: false });
+        expect(runtime.service.getStatus()).toMatchObject({
+            liveAuthorized: false,
+            capabilities: {
+                placeOrder: false,
+                cancelAllOpenOrders: false,
+                closePositions: false,
+            },
+        });
+        expect(processGlobalFetch).not.toHaveBeenCalled();
+        await runtime.service.shutdown();
+        runtime.closeNetwork();
+    });
+
+    it('fails closed for an invalid process proxy without falling back to direct fetch', async () => {
+        const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-trade-prod-proxy-gate-'));
+        directories.push(directory);
+        const processGlobalFetch = vi.fn(async () => {
+            throw new Error('direct network fallback must remain unreachable');
+        });
+        vi.stubGlobal('fetch', processGlobalFetch);
+        stubProxyEnvironment('file:///tmp/unreviewed-futures-proxy.sock');
+
+        await expect(createFuturesProductionExecutionRuntime({
+            config: enabledFakeConfig,
+            storageDirectory: directory,
+            ...coordinatorOptions,
+            keyProtection: {
+                generate: () => Buffer.alloc(32, 4),
+                seal: key => Buffer.from(key),
+                open: sealed => Buffer.from(sealed),
+            },
+            fetchImpl: globalThis.fetch,
+        })).rejects.toMatchObject({
+            code: 'FUTURES_PRODUCTION_INVALID_PROXY_CONFIGURATION',
+        });
+        expect(processGlobalFetch).not.toHaveBeenCalled();
+        await expect(fs.readdir(directory)).resolves.toEqual([]);
+    });
+
+    it('closes the backend proxy agent when durable startup fails', async () => {
+        const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-trade-prod-proxy-close-'));
+        directories.push(directory);
+        const processGlobalFetch = vi.fn(async () => {
+            throw new Error('startup failure must precede network dispatch');
+        });
+        vi.stubGlobal('fetch', processGlobalFetch);
+        stubProxyEnvironment('http://127.0.0.1:8080');
+        const destroy = vi.spyOn(HttpsProxyAgent.prototype, 'destroy');
+        try {
+            await expect(createFuturesProductionExecutionRuntime({
+                config: enabledFakeConfig,
+                storageDirectory: directory,
+                ...coordinatorOptions,
+                keyProtection: {
+                    generate: () => { throw new Error('sealed key unavailable'); },
+                    seal: key => Buffer.from(key),
+                    open: sealed => Buffer.from(sealed),
+                },
+                fetchImpl: globalThis.fetch,
+            })).rejects.toThrow('sealed key unavailable');
+            expect(processGlobalFetch).not.toHaveBeenCalled();
+            expect(destroy).toHaveBeenCalledOnce();
+        } finally {
+            destroy.mockRestore();
+        }
     });
 
     it('surfaces a durable-runtime startup failure as blocked recovery', async () => {
@@ -201,6 +295,7 @@ describe('FuturesProductionExecutionComposition', () => {
             },
         });
         await runtime.service.shutdown();
+        runtime.closeNetwork();
     });
 
     it('rejects global, forged, mutated, and substituted fake transport authority', async () => {
@@ -237,6 +332,7 @@ describe('FuturesProductionExecutionComposition', () => {
             },
         });
         await forgedRuntime.service.shutdown();
+        forgedRuntime.closeNetwork();
 
         const substitutedGlobalFetch = vi.fn(async () => {
             throw new Error('global transport must remain unreachable');
@@ -260,9 +356,11 @@ describe('FuturesProductionExecutionComposition', () => {
         expect(deterministicFetch).not.toHaveBeenCalled();
         expect(substitutedGlobalFetch).not.toHaveBeenCalled();
         await substitutedRuntime.service.shutdown();
+        substitutedRuntime.closeNetwork();
     });
 
     it('keeps explicit deterministic fake authorization available only to tests', async () => {
+        stubProxyEnvironment('file:///tmp/process-proxy-must-not-reach-fake');
         const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'cc-trade-prod-fake-'));
         directories.push(directory);
         const fetchImpl = vi.fn(async (input) => {
@@ -320,6 +418,7 @@ describe('FuturesProductionExecutionComposition', () => {
         });
         expect(fetchImpl).toHaveBeenCalledTimes(3);
         await runtime.service.shutdown();
+        runtime.closeNetwork();
     });
 
     it('executes one complete Hedge LONG exit through the real fake-backed composition', async () => {
@@ -519,6 +618,7 @@ describe('FuturesProductionExecutionComposition', () => {
         ))).toHaveLength(1);
         expect(productionEscape).not.toHaveBeenCalled();
         await runtime.service.shutdown();
+        runtime.closeNetwork();
 
         const ledger = createFuturesProductionExecutionLedger({
             directory,
@@ -651,6 +751,7 @@ describe('FuturesProductionExecutionComposition', () => {
             0,
         )).toBe(761);
         await first.service.shutdown();
+        first.closeNetwork();
 
         const restartFetch = createFakeFetch();
         const restarted = await createFuturesProductionExecutionRuntime({
@@ -677,5 +778,6 @@ describe('FuturesProductionExecutionComposition', () => {
             },
         });
         await restarted.service.shutdown();
+        restarted.closeNetwork();
     }, 10_000);
 });

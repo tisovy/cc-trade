@@ -61,7 +61,6 @@ const MAX_ORDER_NOTIONAL = parsePositiveExactDecimal(
 const MAX_DAILY_NOTIONAL = parsePositiveExactDecimal(
     FUTURES_PRODUCTION_EXECUTION_COMPILED_CEILINGS.maxDailyNotionalUsdt,
 );
-const SYMBOLS_PATTERN = /^[A-Z0-9]{2,20}(,[A-Z0-9]{2,20}){0,15}$/;
 const FINGERPRINT_PATTERN = /^[0-9a-f]{64}$/;
 const ACCOUNT_ALIAS_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
@@ -138,14 +137,6 @@ const parseAccount = (captured, apiKey) => {
 };
 
 const parsePolicy = (captured) => {
-    const symbolsText = captured[FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.ALLOWED_SYMBOLS];
-    if (typeof symbolsText !== 'string'
-        || Buffer.byteLength(symbolsText, 'utf8') < 2
-        || Buffer.byteLength(symbolsText, 'utf8') > 335
-        || !SYMBOLS_PATTERN.test(symbolsText)) return null;
-    const allowedSymbols = symbolsText.split(',');
-    if (new Set(allowedSymbols).size !== allowedSymbols.length) return null;
-
     const orderText = captured[
         FUTURES_PRODUCTION_EXECUTION_ENV_KEYS.MAX_ORDER_NOTIONAL_USDT
     ];
@@ -186,7 +177,6 @@ const parsePolicy = (captured) => {
     if (killSwitchPolicy !== FUTURES_PRODUCTION_EXECUTION_KILL_SWITCH_POLICY) return null;
 
     return Object.freeze({
-        allowedSymbols: Object.freeze([...allowedSymbols]),
         maxLeverage: Number(leverageText),
         maxOrderNotionalUsdt: orderText,
         maxDailyNotionalUsdt: dailyText,

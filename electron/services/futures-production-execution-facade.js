@@ -1,5 +1,7 @@
 import { createHash, createHmac } from 'node:crypto';
-import WebSocket from 'ws';
+import {
+    isFuturesProductionExecutionBackendTransport,
+} from './futures-production-execution-backend-transport.js';
 import {
     FUTURES_PRODUCTION_EXECUTION_REST_ORIGIN,
     FUTURES_PRODUCTION_EXECUTION_WS_ORIGIN,
@@ -61,7 +63,6 @@ const isExchangeSymbol = value => (
 export const FUTURES_PRODUCTION_EXECUTION_FACADE_LIMITS = Object.freeze({
     OPERATION_DEADLINE_MS,
     SIGNED_RECV_WINDOW,
-    MAX_ALLOWED_SYMBOLS: 16,
 });
 
 export const FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS = Object.freeze({
@@ -137,9 +138,11 @@ const readDependencies = (value) => {
         || Object.getPrototypeOf(value) !== Object.prototype) {
         throw argumentError();
     }
-    const allowed = new Set(['fetchImpl', 'now', 'setTimeoutFn', 'clearTimeoutFn']);
+    const allowed = new Set([
+        'backendTransport', 'now', 'setTimeoutFn', 'clearTimeoutFn',
+    ]);
     const keys = Reflect.ownKeys(value);
-    if (!keys.includes('fetchImpl')
+    if (!keys.includes('backendTransport')
         || keys.some((key) => typeof key !== 'string' || !allowed.has(key))) {
         throw argumentError();
     }
@@ -151,29 +154,9 @@ const readDependencies = (value) => {
             || !Object.hasOwn(descriptor, 'value')) throw argumentError();
         result[key] = descriptor.value;
     }
-    return result;
-};
-
-const readDenseUniqueSymbols = (value) => {
-    if (!Array.isArray(value)
-        || Object.getPrototypeOf(value) !== Array.prototype
-        || value.length < 1
-        || value.length > FUTURES_PRODUCTION_EXECUTION_FACADE_LIMITS.MAX_ALLOWED_SYMBOLS) {
+    if (!isFuturesProductionExecutionBackendTransport(result.backendTransport)) {
         throw argumentError();
     }
-    const keys = Reflect.ownKeys(value);
-    if (keys.length !== value.length + 1 || !keys.includes('length')) throw argumentError();
-    const result = [];
-    for (let index = 0; index < value.length; index += 1) {
-        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
-        if (!descriptor
-            || descriptor.enumerable !== true
-            || !Object.hasOwn(descriptor, 'value')
-            || typeof descriptor.value !== 'string'
-            || !SYMBOL_PATTERN.test(descriptor.value)) throw argumentError();
-        result.push(descriptor.value);
-    }
-    if (new Set(result).size !== result.length) throw argumentError();
     return result;
 };
 
@@ -189,10 +172,9 @@ const requireSafeTimestamp = (value) => {
     return String(value);
 };
 
-const requireSymbol = (value, allowedSymbols, operation) => {
+const requireSymbol = (value, operation) => {
     if (typeof value !== 'string'
-        || !SYMBOL_PATTERN.test(value)
-        || !allowedSymbols.has(value)) throw argumentError(operation);
+        || !SYMBOL_PATTERN.test(value)) throw argumentError(operation);
     return value;
 };
 
@@ -635,12 +617,12 @@ const createReceipt = ({ operation, endpointId, status, bodyDigest, rateLimitHea
 );
 
 export const createFuturesProductionExecutionFacade = (config, dependencies) => {
-    const source = readExactDataProperties(config, ['apiKey', 'apiSecret', 'allowedSymbols']);
+    const source = readExactDataProperties(config, ['apiKey', 'apiSecret']);
     const apiKey = requireCredential(source.apiKey);
     const apiSecret = requireCredential(source.apiSecret);
-    const allowedSymbols = new Set(readDenseUniqueSymbols(source.allowedSymbols));
     const injected = readDependencies(dependencies);
-    const fetchImpl = injected.fetchImpl;
+    const { backendTransport } = injected;
+    const fetchImpl = backendTransport.fetchImpl;
     const now = injected.now ?? Date.now;
     const setTimeoutFn = injected.setTimeoutFn ?? setTimeout;
     const clearTimeoutFn = injected.clearTimeoutFn ?? clearTimeout;
@@ -877,7 +859,7 @@ export const createFuturesProductionExecutionFacade = (config, dependencies) => 
         streamUrl.searchParams.set('events', USER_DATA_STREAM_EVENTS_QUERY);
         const url = streamUrl.toString();
         assertFixedUserDataStreamUrl(url, args.listenKey);
-        const socket = new WebSocket(url, {
+        const socket = backendTransport.connectWebSocket(url, {
             followRedirects: false,
             handshakeTimeout: OPERATION_DEADLINE_MS,
             maxPayload: USER_DATA_STREAM_MAX_BYTES,
@@ -935,7 +917,7 @@ export const createFuturesProductionExecutionFacade = (config, dependencies) => 
     };
 
     const getMarkPrice = (symbolValue) => {
-        const symbol = requireSymbol(symbolValue, allowedSymbols, 'markPrice');
+        const symbol = requireSymbol(symbolValue, 'markPrice');
         return execute({
             operation: 'markPrice',
             endpointId: 'mark-price',
@@ -958,7 +940,7 @@ export const createFuturesProductionExecutionFacade = (config, dependencies) => 
     });
 
     const signedSymbolRead = ({ operation, endpointId, pathname, symbolValue }) => {
-        const symbol = requireSymbol(symbolValue, allowedSymbols, operation);
+        const symbol = requireSymbol(symbolValue, operation);
         return execute({
             operation,
             endpointId,
@@ -1046,7 +1028,7 @@ export const createFuturesProductionExecutionFacade = (config, dependencies) => 
         const args = readExactDataProperties(value, [
             'symbol', 'positionSide', 'marginAction', 'amount',
         ], operation);
-        const symbol = requireSymbol(args.symbol, allowedSymbols, operation);
+        const symbol = requireSymbol(args.symbol, operation);
         if (!['LONG', 'SHORT'].includes(args.positionSide)
             || !['ADD', 'REDUCE'].includes(args.marginAction)) {
             throw argumentError(operation);
@@ -1076,7 +1058,7 @@ export const createFuturesProductionExecutionFacade = (config, dependencies) => 
         const args = readExactDataProperties(value, [
             'symbol', 'positionSide', 'marginAction', 'startTime',
         ], operation);
-        const symbol = requireSymbol(args.symbol, allowedSymbols, operation);
+        const symbol = requireSymbol(args.symbol, operation);
         if (!['LONG', 'SHORT'].includes(args.positionSide)
             || !['ADD', 'REDUCE'].includes(args.marginAction)
             || !Number.isSafeInteger(args.startTime)
@@ -1107,7 +1089,7 @@ export const createFuturesProductionExecutionFacade = (config, dependencies) => 
             'symbol', 'side', 'positionSide', 'positionEffect',
             'quantity', 'price', 'clientOrderId',
         ], operation);
-        const symbol = requireSymbol(args.symbol, allowedSymbols, operation);
+        const symbol = requireSymbol(args.symbol, operation);
         if (!['BUY', 'SELL'].includes(args.side)
             || !['LONG', 'SHORT'].includes(args.positionSide)
             || !['ENTRY', 'EXIT'].includes(args.positionEffect)
@@ -1146,7 +1128,7 @@ export const createFuturesProductionExecutionFacade = (config, dependencies) => 
         const args = readExactDataProperties(value, [
             'symbol', 'side', 'positionSide', 'quantity', 'clientOrderId',
         ], operation);
-        const symbol = requireSymbol(args.symbol, allowedSymbols, operation);
+        const symbol = requireSymbol(args.symbol, operation);
         const expectedSide = args.positionSide === 'LONG' ? 'SELL' : 'BUY';
         if (!['LONG', 'SHORT'].includes(args.positionSide)
             || args.side !== expectedSide
@@ -1178,7 +1160,7 @@ export const createFuturesProductionExecutionFacade = (config, dependencies) => 
         const args = readExactDataProperties(value, [
             'symbol', 'side', 'positionSide', 'quantity', 'price', 'clientOrderId',
         ], operation);
-        const symbol = requireSymbol(args.symbol, allowedSymbols, operation);
+        const symbol = requireSymbol(args.symbol, operation);
         if (!['BUY', 'SELL'].includes(args.side)
             || !['LONG', 'SHORT'].includes(args.positionSide)
             || typeof args.clientOrderId !== 'string'
@@ -1212,7 +1194,7 @@ export const createFuturesProductionExecutionFacade = (config, dependencies) => 
         const args = readExactDataProperties(value, [
             'symbol', 'positionSide', 'originalClientOrderId',
         ], operation);
-        const symbol = requireSymbol(args.symbol, allowedSymbols, operation);
+        const symbol = requireSymbol(args.symbol, operation);
         if (!['LONG', 'SHORT'].includes(args.positionSide)
             || typeof args.originalClientOrderId !== 'string'
             || !EXCHANGE_CLIENT_ID_PATTERN.test(args.originalClientOrderId)) {
@@ -1239,7 +1221,7 @@ export const createFuturesProductionExecutionFacade = (config, dependencies) => 
 
     const cancel = (value, { operation, endpointId, pathname }) => {
         const args = readExactDataProperties(value, ['symbol'], operation);
-        const symbol = requireSymbol(args.symbol, allowedSymbols, operation);
+        const symbol = requireSymbol(args.symbol, operation);
         return execute({
             operation,
             endpointId,

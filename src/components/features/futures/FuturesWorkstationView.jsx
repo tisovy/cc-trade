@@ -285,9 +285,6 @@ export const FuturesWorkstationView = ({
               >
                 <strong>{contract.symbol}</strong>
                 <span>{contract.contractType}</span>
-                <small className={contract.allowlisted ? 'is-allowed' : 'is-observe-only'}>
-                  {contract.allowlisted ? 'ALLOWLISTED' : 'OBSERVE ONLY'}
-                </small>
               </button>
             </div>
           ))}
@@ -308,9 +305,6 @@ export const FuturesWorkstationView = ({
             <div className="futures-workstation-contract-status">
               <span>Status</span>
               <strong>{selectedContract.status}</strong>
-              <span className={selectedContract.allowlisted ? 'is-allowed' : 'is-observe-only'}>
-                {selectedContract.allowlisted ? 'ALLOWLISTED' : 'NOT ALLOWLISTED'}
-              </span>
             </div>
             <p>{selectedContract.baseAsset} / {selectedContract.quoteAsset} · margin {selectedContract.marginAsset}</p>
             <FilterRow name="Price" filter={selectedContract.filters.price} stepLabel="tickSize" />

@@ -59,7 +59,7 @@ const filters = Object.freeze({
   minimumNotional: '5',
 })
 
-const contract = (symbol, baseAsset, allowlisted) => Object.freeze({
+const contract = (symbol, baseAsset, tradable) => Object.freeze({
   symbol,
   pair: symbol,
   contractType: 'PERPETUAL',
@@ -67,7 +67,7 @@ const contract = (symbol, baseAsset, allowlisted) => Object.freeze({
   baseAsset,
   quoteAsset: 'USDT',
   marginAsset: 'USDT',
-  allowlisted,
+  tradable,
   filters,
 })
 
@@ -265,13 +265,14 @@ describe('pure Futures workstation presentation', () => {
     )
   })
 
-  it('searches USDⓈ-M contracts and exposes allowlist state without selecting on Enter', () => {
+  it('searches every USDⓈ-M contract without a stale per-symbol allowlist badge', () => {
     const { onSymbolChange, onIntervalChange } = renderView()
     const search = screen.getByLabelText('Search Futures contracts')
     fireEvent.change(search, { target: { value: 'eth' } })
     expect(screen.queryByRole('button', { name: /BTCUSDT/ })).not.toBeInTheDocument()
     const eth = screen.getByRole('button', { name: /^ETHUSDT/ })
-    expect(eth).toHaveTextContent('OBSERVE ONLY')
+    expect(eth).not.toHaveTextContent(/ALLOWLISTED|OBSERVE ONLY/)
+    expect(screen.queryByText(/NOT ALLOWLISTED/)).not.toBeInTheDocument()
     fireEvent.keyDown(search, { key: 'Enter' })
     expect(onSymbolChange).not.toHaveBeenCalled()
     expect(onIntervalChange).not.toHaveBeenCalled()

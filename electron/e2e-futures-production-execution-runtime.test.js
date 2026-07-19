@@ -94,12 +94,12 @@ describe('E2E Futures production execution runtime', () => {
             emitted.at(-1).revision,
             E2E_FUTURES_ACCOUNT_FINGERPRINT,
             {
-                symbol: 'ETHUSDT',
+                symbol: 'XRPUSDT',
                 side: 'BUY',
                 positionSide: 'LONG',
                 positionEffect: 'ENTRY',
-                quantity: '0.003',
-                price: '3185.00',
+                quantity: '10',
+                price: '0.50',
             },
         )), context)).resolves.toBe(true);
         const orderIntent = emitted.at(-1).intent;
@@ -113,7 +113,8 @@ describe('E2E Futures production execution runtime', () => {
         const appOrder = emitted.at(-1).portfolio.openOrders.find(order => order.isAppOwned);
         expect(appOrder).toMatchObject({
             clientOrderId: `cc7-${orderIntent.requestId}`,
-            price: '3185.00',
+            symbol: 'XRPUSDT',
+            price: '0.50',
             status: 'NEW',
         });
 
@@ -125,7 +126,7 @@ describe('E2E Futures production execution runtime', () => {
                 symbol: appOrder.symbol,
                 positionSide: appOrder.positionSide,
                 clientOrderId: appOrder.clientOrderId,
-                price: '3200.00',
+                price: '0.60',
             },
         )), context)).resolves.toBe(true);
         const amendIntent = emitted.at(-1).intent;
@@ -135,7 +136,7 @@ describe('E2E Futures production execution runtime', () => {
             amendIntent.requestId,
         )), context)).resolves.toBe(true);
         expect(emitted.at(-1).portfolio.openOrders.find(order => order.isAppOwned)?.price)
-            .toBe('3200.00');
+            .toBe('0.60');
 
         await expect(runtime.service.handleRequest(JSON.stringify(command(
             FUTURES_PRODUCTION_EXECUTION_ACTIONS.PREPARE_CANCEL_ALL_OPEN_ORDERS_INTENT,

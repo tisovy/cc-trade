@@ -58,6 +58,7 @@ const deriveExecutionReadiness = ({
   portfolio,
   recovery,
   safeState,
+  selectedContractTradable,
   symbolConfiguration,
   hasSymbolMetadata,
   positionEffect,
@@ -77,7 +78,7 @@ const deriveExecutionReadiness = ({
   if (safeState.configured === false) return Object.freeze({
     tone: 'attention',
     label: 'SETUP',
-    reason: 'Live Futures configuration was not accepted — complete the reviewed launch profile, then restart.',
+    reason: 'Futures execution profile unavailable — configure FUTURES_PRODUCTION_* and restart (Spot BK/BS are not reused).',
   })
   if (!account) return Object.freeze({
     tone: 'loading', label: 'VERIFY', reason: 'Verifying Futures account configuration…',
@@ -88,15 +89,25 @@ const deriveExecutionReadiness = ({
   if (!caps) return Object.freeze({
     tone: 'attention', label: 'LIMITS', reason: 'Trading limits are unavailable — refresh private account state.',
   })
-  if (!Array.isArray(caps.allowedSymbols) || !caps.allowedSymbols.includes(selectedSymbol)) {
+  if (capabilityCode.includes('ACCOUNT_IDENTITY_REJECTED')) return Object.freeze({
+    tone: 'attention',
+    label: 'ACCOUNT',
+    reason: 'Binance rejected Futures account access — verify the USDⓈ-M API permission/IP, Hedge Mode, and single-asset margin.',
+  })
+  if (!hasSymbolMetadata) return Object.freeze({
+    tone: 'attention', label: 'METADATA', reason: 'Binance symbol metadata is unavailable — retry the contract refresh.',
+  })
+  if (!selectedContractTradable) {
     return Object.freeze({
       tone: 'attention',
       label: 'SYMBOL',
-      reason: `${selectedSymbol} is not enabled for live execution — select an allowed contract.`,
+      reason: `${selectedSymbol} is not an active USDⓈ-M perpetual contract — select a tradable contract.`,
     })
   }
   if (!symbolConfiguration) return Object.freeze({
-    tone: 'loading', label: 'CONFIG', reason: `${selectedSymbol} Futures configuration is pending — waiting for Binance symbol settings.`,
+    tone: 'loading',
+    label: 'CONFIG',
+    reason: `${selectedSymbol} Futures configuration is unavailable — refresh private account state or reselect the contract.`,
   })
   if (positionEffect !== 'EXIT' && symbolConfiguration.marginType !== 'ISOLATED') return Object.freeze({
     tone: 'attention', label: 'MARGIN', reason: `${selectedSymbol} uses Cross margin — switch it to Isolated on Binance.`,
@@ -109,12 +120,6 @@ const deriveExecutionReadiness = ({
   })
   if (safeState.liveAuthorized !== true) return Object.freeze({
     tone: 'attention', label: 'LOCKED', reason: 'Live Futures execution is disabled in the production configuration.',
-  })
-  if (capabilityCode.includes('ACCOUNT_IDENTITY_REJECTED')) return Object.freeze({
-    tone: 'attention', label: 'ACCOUNT', reason: 'Binance rejected the Futures account identity or mode — verify Futures API access, Hedge Mode, and single-asset margin.',
-  })
-  if (!hasSymbolMetadata) return Object.freeze({
-    tone: 'attention', label: 'METADATA', reason: 'Binance symbol metadata is unavailable — retry the contract refresh.',
   })
   if (positionEffect !== 'EXIT'
     && typeof portfolio?.availableBalanceUsdt !== 'string') return Object.freeze({
@@ -270,8 +275,8 @@ const FuturesProductionExecutionTicket = ({
   const guardKey = `${backendRevision ?? ''}:${intentId ?? ''}`
   const transportReady = safeState.connected === true && safeState.subscribed === true
   const backendLocked = safeState.submissionLocked === true
-  const symbolExecutionAllowed = Array.isArray(caps?.allowedSymbols)
-    && caps.allowedSymbols.includes(selectedSymbol)
+  const selectedContractTradable = selectedContract?.symbol === selectedSymbol
+    && selectedContract?.tradable === true
   const symbolConfiguration = Array.isArray(caps?.symbolConfigurations)
     ? caps.symbolConfigurations.find(configuration => configuration.symbol === selectedSymbol) ?? null
     : null
@@ -281,44 +286,52 @@ const FuturesProductionExecutionTicket = ({
   const symbolConfigurationAllowsGesture = Boolean(symbolConfiguration)
     && (activeAction.positionEffect === 'EXIT' || symbolExecutionConfigured)
   const gestureCanPrepare = transportReady
-    && symbolExecutionAllowed
+    && selectedContractTradable
     && symbolConfigurationAllowsGesture
     && capabilities?.placeOrder === true
     && intent === null
     && !backendLocked
   const amendmentCanPrepare = transportReady
-    && symbolExecutionAllowed
+    && selectedContractTradable
     && symbolExecutionConfigured
     && capabilities?.amendOrder === true
     && intent === null
     && !backendLocked
-  const entryBudget = symbolExecutionAllowed ? calculateFuturesEntryBudget({
-    maximumOrderNotionalUsdt: caps?.maxOrderNotionalUsdt,
-    maximumDailyNotionalUsdt: caps?.maxDailyNotionalUsdt,
-    dailyUsedNotionalUsdt: caps?.dailyUsedNotionalUsdt,
-    availableBalanceUsdt: portfolio?.availableBalanceUsdt,
-    minimumAvailableBalanceUsdt: caps?.minAvailableBalanceUsdt,
-    leverage: caps?.maxLeverage,
-  }) : null
+  const entryBudget = safeState.configured === true
+    && account !== null
+    && selectedContractTradable
+    && caps !== null
+    && typeof portfolio?.availableBalanceUsdt === 'string'
+    ? calculateFuturesEntryBudget({
+      maximumOrderNotionalUsdt: caps.maxOrderNotionalUsdt,
+      maximumDailyNotionalUsdt: caps.maxDailyNotionalUsdt,
+      dailyUsedNotionalUsdt: caps.dailyUsedNotionalUsdt,
+      availableBalanceUsdt: portfolio.availableBalanceUsdt,
+      minimumAvailableBalanceUsdt: caps.minAvailableBalanceUsdt,
+      leverage: caps.maxLeverage,
+    })
+    : null
   const selectedPosition = positions.find(position => (
     position.symbol === selectedSymbol
     && position.positionSide === activeAction.positionSide
   )) ?? null
-  const exitBudget = calculateFuturesExitBudget({
-    positionQuantity: selectedPosition?.quantity,
-    price,
-    tickSize: selectedContract?.filters?.price?.tickSize,
-    maximumOrderNotionalUsdt: caps?.maxOrderNotionalUsdt,
-    maximumDailyNotionalUsdt: caps?.maxDailyNotionalUsdt,
-    dailyUsedNotionalUsdt: caps?.dailyUsedNotionalUsdt,
-  })
+  const exitBudget = safeState.configured === true && selectedContractTradable && caps !== null
+    ? calculateFuturesExitBudget({
+      positionQuantity: selectedPosition?.quantity,
+      price,
+      tickSize: selectedContract.filters?.price?.tickSize,
+      maximumOrderNotionalUsdt: caps.maxOrderNotionalUsdt,
+      maximumDailyNotionalUsdt: caps.maxDailyNotionalUsdt,
+      dailyUsedNotionalUsdt: caps.dailyUsedNotionalUsdt,
+    })
+    : null
   const sizingBudget = activeAction.positionEffect === 'EXIT' ? exitBudget : entryBudget
   const sizingReady = typeof sizingBudget === 'string'
     && sizingBudget !== '0'
     && isExactPositiveDecimal(sizingBudget)
-  const notionalUsdt = customNotionalUsdt
-    ?? calculateFuturesNotionalForPercent(sizingBudget, sizePercent)
-    ?? ''
+  const notionalUsdt = sizingReady
+    ? customNotionalUsdt ?? calculateFuturesNotionalForPercent(sizingBudget, sizePercent) ?? ''
+    : ''
   const currentSizePercent = customNotionalUsdt === null
     ? sizePercent
     : calculateFuturesNotionalPercent(customNotionalUsdt, sizingBudget) ?? 0
@@ -346,6 +359,7 @@ const FuturesProductionExecutionTicket = ({
     portfolio,
     recovery,
     safeState,
+    selectedContractTradable,
     symbolConfiguration,
     hasSymbolMetadata: Boolean(selectedContract) && hasSymbolSizingMetadata,
     positionEffect: activeAction.positionEffect,
@@ -404,8 +418,8 @@ const FuturesProductionExecutionTicket = ({
     const gestureId = gestureRequest?.id
     if (gestureId === null || gestureId === undefined || handledGestureRef.current === gestureId) return
     if (!gestureAction || typeof gestureRequest.price !== 'string') return
-    if (!isExactPositiveDecimal(notionalUsdt)) return
     handledGestureRef.current = gestureId
+    if (!isExactPositiveDecimal(notionalUsdt)) return
     const candidateDraft = deriveTicketDraft({
       notionalUsdt,
       price: gestureRequest.price,
@@ -545,14 +559,14 @@ const FuturesProductionExecutionTicket = ({
   const amountWithinBudget = isFuturesDraftAmountWithinBudget(notionalUsdt, sizingBudget)
   const draftReason = !caps
     ? 'Trading limits are unavailable — refresh private account state'
-    : !symbolExecutionAllowed
-    ? `${selectedSymbol} is not enabled for live execution — select an allowed contract`
-    : !symbolConfiguration
-    ? `${selectedSymbol} Futures configuration is unavailable — wait for account sync`
-    : !symbolConfigurationAllowsGesture
-    ? readiness.reason
     : !selectedContract || !hasSymbolSizingMetadata
     ? 'Binance symbol metadata is unavailable — retry the contract refresh'
+    : !selectedContractTradable
+    ? `${selectedSymbol} is not an active USDⓈ-M perpetual contract — select a tradable contract`
+    : !symbolConfiguration
+    ? `${selectedSymbol} Futures configuration is unavailable — refresh private account state or reselect the contract`
+    : !symbolConfigurationAllowsGesture
+    ? readiness.reason
     : activeAction.positionEffect === 'ENTRY' && typeof portfolio?.availableBalanceUsdt !== 'string'
     ? 'Available Futures balance is unavailable — wait for private account sync'
     : activeAction.positionEffect === 'EXIT' && !selectedPosition

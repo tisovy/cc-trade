@@ -75,7 +75,7 @@ const contract = symbol => Object.freeze({
   baseAsset: symbol.replace('USDT', ''),
   quoteAsset: 'USDT',
   marginAsset: 'USDT',
-  allowlisted: symbol === 'BTCUSDT',
+  tradable: true,
   filters: contractFilters,
 })
 

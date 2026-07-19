@@ -3,8 +3,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
     FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS,
     FuturesProductionExecutionFacadeError,
-    createFuturesProductionExecutionFacade,
+    createFuturesProductionExecutionFacade as createProductionFacade,
 } from './futures-production-execution-facade.js';
+import {
+    createFuturesProductionExecutionBackendTransport,
+} from './futures-production-execution-backend-transport.js';
 import {
     FUTURES_PRODUCTION_EXECUTION_INVENTORY_RESPONSE_LIMITS,
     FUTURES_PRODUCTION_EXECUTION_RESPONSE_LIMITS,
@@ -17,8 +20,27 @@ const clientOrderId = 'cc7-0123456789abcdef0123456789abcdef';
 const config = Object.freeze({
     apiKey: 'production-api-key-fixture',
     apiSecret: 'production-api-secret-fixture',
-    allowedSymbols: ['BTCUSDT'],
 });
+
+const createFuturesProductionExecutionFacade = (facadeConfig, dependencies) => {
+    if (dependencies === null
+        || typeof dependencies !== 'object'
+        || Array.isArray(dependencies)
+        || !Object.hasOwn(dependencies, 'fetchImpl')
+        || Reflect.ownKeys(dependencies).some(key => ![
+            'fetchImpl', 'now', 'setTimeoutFn', 'clearTimeoutFn',
+        ].includes(key))) {
+        return createProductionFacade(facadeConfig, dependencies);
+    }
+    const { fetchImpl, ...rest } = dependencies;
+    return createProductionFacade(facadeConfig, {
+        ...rest,
+        backendTransport: createFuturesProductionExecutionBackendTransport({
+            environment: {},
+            directFetch: (input, options) => fetchImpl(input.toString(), options),
+        }),
+    });
+};
 const limitOrder = Object.freeze({
     symbol: 'BTCUSDT',
     side: 'BUY',
@@ -111,6 +133,12 @@ describe('FuturesProductionExecutionFacade', () => {
         expect(() => createFuturesProductionExecutionFacade(config, {
             fetchImpl: vi.fn(),
             dispatcher: {},
+        })).toThrow(FuturesProductionExecutionFacadeError);
+        expect(() => createProductionFacade(config, {
+            backendTransport: Object.freeze({
+                fetchImpl: vi.fn(),
+                connectWebSocket: vi.fn(),
+            }),
         })).toThrow(FuturesProductionExecutionFacadeError);
         expect(productionTripwire).not.toHaveBeenCalled();
     });
@@ -977,8 +1005,10 @@ describe('FuturesProductionExecutionFacade', () => {
         }
     });
 
-    it('rejects expanded or malformed write arguments before transport', () => {
-        const fetchImpl = vi.fn();
+    it('rejects expanded or malformed writes but admits any strict ASCII symbol', async () => {
+        const fetchImpl = vi.fn().mockResolvedValue(makeResponse(
+            '{"code":200,"msg":"acknowledged"}',
+        ));
         const facade = createFuturesProductionExecutionFacade(config, { fetchImpl });
         expect(() => facade.placeLimitGtcOrder({
             ...limitOrder,
@@ -987,11 +1017,16 @@ describe('FuturesProductionExecutionFacade', () => {
             kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.ARGUMENT,
         }));
         expect(() => facade.cancelAllOpenOrders({
-            symbol: 'ETHUSDT',
+            symbol: 'ethusdt',
         })).toThrow(expect.objectContaining({
             kind: FUTURES_PRODUCTION_EXECUTION_FACADE_ERROR_KINDS.ARGUMENT,
         }));
-        expect(fetchImpl).not.toHaveBeenCalled();
+        await expect(facade.cancelAllOpenOrders({
+            symbol: 'ARBUSDT',
+        })).resolves.toMatchObject({
+            data: { acknowledged: true, code: 200 },
+        });
+        expect(fetchImpl).toHaveBeenCalledOnce();
     });
 });
 
