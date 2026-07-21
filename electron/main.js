@@ -1,26 +1,8 @@
-import { app, BrowserWindow, Menu, ipcMain, protocol, safeStorage, session } from 'electron'
+import { app, BrowserWindow, Menu, ipcMain, protocol, session } from 'electron'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { shouldOpenDevTools } from './devtools.js'
 import { setupBinanceConnection } from './services/binance-connection.js'
-import {
-  captureFuturesProductionExecutionConfig,
-} from './services/futures-production-execution-config.js'
-import {
-  createFuturesProductionExecutionVerificationRuntime,
-} from './services/futures-production-execution-runtime-composition.js'
-import {
-  FUTURES_PRODUCTION_LIVE_AUTHORIZED,
-} from './services/futures-production-execution-composition.js'
-import {
-  installFuturesProductionExecutionLogSanitizer,
-} from './services/futures-production-execution-sanitizer.js'
-import {
-  createElectronSafeStorageProductionIntegrityKeyProtection,
-} from './services/futures-production-execution-key-protection.js'
-import {
-  captureFuturesProductionOperatorStartupAction,
-} from './services/futures-production-operator-startup.js'
 import {
   createLocalWebSocketAccess,
 } from './services/local-websocket-access.js'
@@ -50,33 +32,17 @@ if (configureLinuxSafeStorageBackend({ app })) {
 
 registerRendererAppProtocolScheme(protocol)
 
-// Futures Testnet is retired. Scrub every legacy Testnet/read variable before a
-// BrowserWindow can exist; no Testnet value is captured or composed at runtime.
+// Legacy Futures Testnet and guarded-production variables are retired; the
+// futures path now uses the same BK/BS credentials as Spot.
 for (const key of Object.keys(process.env)) {
-  if (key.startsWith('FUTURES_TESTNET_') || key.startsWith('FUTURES_READ_')) {
+  if (key.startsWith('FUTURES_TESTNET_')
+    || key.startsWith('FUTURES_READ_')
+    || key.startsWith('FUTURES_PRODUCTION_')) {
     delete process.env[key]
   }
 }
-const futuresProductionSecretValues = [
-  process.env.FUTURES_PRODUCTION_API_KEY,
-  process.env.FUTURES_PRODUCTION_API_SECRET,
-  process.env.FUTURES_PRODUCTION_RECOVERY_AUTHORIZATION,
-]
-const futuresProductionExecutionVerificationRuntime = (
-  createFuturesProductionExecutionVerificationRuntime()
-)
-const futuresProductionExecutionConfig = captureFuturesProductionExecutionConfig({
-  liveAuthorized: FUTURES_PRODUCTION_LIVE_AUTHORIZED,
-  forceDisabled: futuresProductionExecutionVerificationRuntime !== null,
-})
-const futuresProductionOperatorStartup = captureFuturesProductionOperatorStartupAction()
-installFuturesProductionExecutionLogSanitizer({
-  secretValues: futuresProductionSecretValues,
-})
-futuresProductionSecretValues.fill(null)
 
-// The durable execution ledger has exactly one process owner. A second app
-// instance exits before opening the ledger or creating a renderer.
+// A second app instance exits before opening a renderer.
 const hasExclusiveExecutionOwnership = app.requestSingleInstanceLock()
 if (!hasExclusiveExecutionOwnership) app.quit()
 
@@ -262,49 +228,10 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   if (!hasExclusiveExecutionOwnership) return
-  if (futuresProductionOperatorStartup.requested
-    && !futuresProductionOperatorStartup.valid) {
-    throw new Error(futuresProductionOperatorStartup.code)
-  }
-  if (futuresProductionOperatorStartup.requested
-    && futuresProductionExecutionVerificationRuntime !== null) {
-    throw new Error('FUTURES_PRODUCTION_OPERATOR_ACTION_UNAVAILABLE_IN_VERIFICATION')
-  }
-
-  let futuresProductionExecutionKeyProtection = null
-  try {
-    futuresProductionExecutionKeyProtection = (
-      createElectronSafeStorageProductionIntegrityKeyProtection({ safeStorage })
-    )
-  } catch (error) {
-    console.warn('[Electron] Futures production secure storage unavailable:', error)
-  }
 
   binanceController = setupBinanceConnection({
     localWebSocketAccess,
-    futuresProductionExecutionConfig,
-    futuresProductionExecutionKeyProtection,
-    futuresProductionExecutionStorageDirectory: path.join(
-      app.getPath('userData'),
-      app.isPackaged
-        ? 'futures-production-execution'
-        : 'futures-production-execution-development',
-      'v1',
-    ),
-    ...(futuresProductionExecutionVerificationRuntime === null ? {} : {
-      futuresProductionExecutionRuntime: futuresProductionExecutionVerificationRuntime,
-    }),
   })
-  if (futuresProductionOperatorStartup.requested) {
-    const futuresProductionRuntime = await binanceController.productionExecutionReady
-    const recovered = await futuresProductionRuntime.recoverOperationally({
-      authorization: futuresProductionExecutionConfig.recoveryAuthorization,
-      action: futuresProductionOperatorStartup.action,
-    })
-    if (!recovered) {
-      throw new Error('FUTURES_PRODUCTION_OPERATOR_ACTION_BLOCKED')
-    }
-  }
 
   installRendererAppProtocol({
     protocol,

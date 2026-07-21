@@ -1,5 +1,8 @@
 # Prompt for the next Futures Live session
 
+> **OBSOLETE 2026-07-21.** The guarded execution contract described below was
+> retired; Futures now trades via the spot-parity path (`docs/futures_trading.md`).
+
 Скопируй следующий блок в новую сессию:
 
 ```text

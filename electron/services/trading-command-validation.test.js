@@ -349,7 +349,7 @@ describe('backend trading command validation', () => {
         expect(validateTypedTradingCommand({
             action: TRADING_COMMAND_ACTIONS.PLACE_ORDER,
             version: TRADE_COMMAND_VERSION,
-            marketType: 'futures',
+            marketType: 'margin',
             symbol: 'BTCUSDT',
             side: 'BUY',
             orderType: 'LIMIT',
@@ -383,6 +383,115 @@ describe('backend trading command validation', () => {
                     request: TRADING_COMMAND_ACTIONS.PLACE_ORDER,
                     code: 'UNSUPPORTED_TYPED_ORDER_TYPE',
                 },
+            },
+        });
+    });
+
+    it('accepts spot-parity futures typed commands', () => {
+        expect(validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.PLACE_ORDER,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'futures',
+            symbol: 'BTCUSDT',
+            side: 'BUY',
+            orderType: 'LIMIT',
+            timeInForce: 'GTC',
+            price: '50000',
+            quantity: '0.01',
+        })).toMatchObject({
+            ok: true,
+            command: {
+                marketType: 'futures',
+                futuresOrderPayload: {
+                    symbol: 'BTCUSDT',
+                    side: 'BUY',
+                    orderType: 'LIMIT',
+                    numericQuantity: 0.01,
+                    numericPrice: 50000,
+                    reduceOnly: false,
+                },
+            },
+        });
+
+        expect(validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.PLACE_ORDER,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'futures',
+            symbol: 'BTCUSDT',
+            side: 'SELL',
+            orderType: 'MARKET',
+            quantity: '0.01',
+            positionSide: 'LONG',
+            reduceOnly: true,
+        })).toMatchObject({
+            ok: true,
+            command: {
+                marketType: 'futures',
+                futuresOrderPayload: {
+                    orderType: 'MARKET',
+                    positionSide: 'LONG',
+                    reduceOnly: true,
+                },
+            },
+        });
+
+        expect(validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.CANCEL_ALL,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'futures',
+            symbol: 'BTCUSDT',
+        })).toMatchObject({
+            ok: true,
+            command: { marketType: 'futures', symbol: 'BTCUSDT' },
+        });
+
+        expect(validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.SET_TRADING_PAUSED,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'futures',
+            paused: true,
+        })).toMatchObject({
+            ok: true,
+            command: { marketType: 'futures', paused: true },
+        });
+
+        expect(validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.SET_TRADING_PAUSED,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'futures',
+            paused: 'yes',
+        })).toMatchObject({
+            ok: false,
+            rejection: {
+                command_rejected: { code: 'INVALID_TYPED_PAUSE_FLAG' },
+            },
+        });
+
+        expect(validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.SET_TRADING_PAUSED,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'spot',
+            paused: true,
+        })).toMatchObject({
+            ok: false,
+            rejection: {
+                command_rejected: { code: 'TYPED_COMMAND_NOT_ENABLED' },
+            },
+        });
+
+        expect(validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.PLACE_ORDER,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'futures',
+            symbol: 'BTCUSDT',
+            side: 'BUY',
+            orderType: 'LIMIT',
+            quantity: '0.01',
+            positionSide: 'SIDEWAYS',
+        })).toMatchObject({
+            ok: false,
+            rejection: {
+                command_rejected: { code: 'INVALID_TYPED_ORDER_POSITION_SIDE' },
             },
         });
     });

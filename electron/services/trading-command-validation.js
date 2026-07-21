@@ -2,11 +2,16 @@ import {
     DEFAULT_ACCOUNT_ID,
     DEFAULT_SPOT_ORDER_TYPE,
     DEFAULT_SPOT_TIME_IN_FORCE,
+    FUTURES_MARKET_TYPE,
     SPOT_MARKET_TYPE,
     TRADE_COMMAND_VERSION,
     TRADING_COMMAND_ACTIONS,
     isTypedTradingAction,
 } from '../../src/utils/tradingCommands.js';
+
+const SUPPORTED_MARKET_TYPES = new Set([SPOT_MARKET_TYPE, FUTURES_MARKET_TYPE]);
+const FUTURES_ORDER_TYPES = new Set(['LIMIT', 'MARKET']);
+const FUTURES_POSITION_SIDES = new Set(['BOTH', 'LONG', 'SHORT']);
 
 const isCommandPayloadObject = (payload) => (
     payload !== null &&
@@ -115,13 +120,13 @@ const validateTypedCommandBase = (payload) => {
     }
 
     const marketType = normalizeTextField(payload.marketType) || SPOT_MARKET_TYPE;
-    if (marketType !== SPOT_MARKET_TYPE) {
+    if (!SUPPORTED_MARKET_TYPES.has(marketType)) {
         return {
             ok: false,
             rejection: createTypedCommandRejection(
                 payload,
                 'UNSUPPORTED_MARKET_TYPE',
-                'only spot typed trading commands are enabled',
+                'only spot and futures typed trading commands are enabled',
                 { field: 'marketType', value: payload.marketType },
             ),
         };
@@ -166,28 +171,55 @@ const validateTypedPlaceOrderCommand = (payload, baseCommand, { selectedSymbol }
         };
     }
 
+    const isFutures = baseCommand.marketType === FUTURES_MARKET_TYPE;
     const orderType = normalizeTextField(payload.orderType)?.toUpperCase() || DEFAULT_SPOT_ORDER_TYPE;
-    if (orderType !== DEFAULT_SPOT_ORDER_TYPE) {
+    if (isFutures ? !FUTURES_ORDER_TYPES.has(orderType) : orderType !== DEFAULT_SPOT_ORDER_TYPE) {
         return {
             ok: false,
             rejection: createTypedCommandRejection(
                 payload,
                 'UNSUPPORTED_TYPED_ORDER_TYPE',
-                'only LIMIT typed spot orders are enabled',
+                isFutures
+                    ? 'only LIMIT and MARKET typed futures orders are enabled'
+                    : 'only LIMIT typed spot orders are enabled',
                 { field: 'orderType', value: payload.orderType },
             ),
         };
     }
 
     const timeInForce = normalizeTextField(payload.timeInForce)?.toUpperCase() || DEFAULT_SPOT_TIME_IN_FORCE;
-    if (timeInForce !== DEFAULT_SPOT_TIME_IN_FORCE) {
+    if (orderType === 'LIMIT' && timeInForce !== DEFAULT_SPOT_TIME_IN_FORCE) {
         return {
             ok: false,
             rejection: createTypedCommandRejection(
                 payload,
                 'UNSUPPORTED_TYPED_TIME_IN_FORCE',
-                'only GTC typed spot orders are enabled',
+                'only GTC typed limit orders are enabled',
                 { field: 'timeInForce', value: payload.timeInForce },
+            ),
+        };
+    }
+
+    const positionSide = normalizeTextField(payload.positionSide)?.toUpperCase() ?? null;
+    if (isFutures && positionSide !== null && !FUTURES_POSITION_SIDES.has(positionSide)) {
+        return {
+            ok: false,
+            rejection: createTypedCommandRejection(
+                payload,
+                'INVALID_TYPED_ORDER_POSITION_SIDE',
+                'trade.placeOrder positionSide must be BOTH, LONG, or SHORT',
+                { field: 'positionSide', value: payload.positionSide },
+            ),
+        };
+    }
+    if (isFutures && payload.reduceOnly !== undefined && typeof payload.reduceOnly !== 'boolean') {
+        return {
+            ok: false,
+            rejection: createTypedCommandRejection(
+                payload,
+                'INVALID_TYPED_ORDER_REDUCE_ONLY',
+                'trade.placeOrder reduceOnly must be a boolean',
+                { field: 'reduceOnly', value: payload.reduceOnly },
             ),
         };
     }
@@ -208,7 +240,7 @@ const validateTypedPlaceOrderCommand = (payload, baseCommand, { selectedSymbol }
 
     const priceValue = payload.price ?? payload.p;
     const numericPrice = normalizePositiveNumber(priceValue);
-    if (numericPrice === null) {
+    if (numericPrice === null && !(isFutures && orderType === 'MARKET')) {
         return {
             ok: false,
             rejection: createTypedCommandRejection(
@@ -239,6 +271,19 @@ const validateTypedPlaceOrderCommand = (payload, baseCommand, { selectedSymbol }
                 quantity: quantityValue,
                 price: priceValue,
             },
+            ...(isFutures ? {
+                futuresOrderPayload: {
+                    symbol,
+                    side,
+                    orderType,
+                    timeInForce,
+                    numericQuantity,
+                    numericPrice,
+                    positionSide,
+                    reduceOnly: payload.reduceOnly === true,
+                    newClientOrderId: baseCommand.clientOrderId ?? undefined,
+                },
+            } : {}),
         },
     };
 };
@@ -365,8 +410,42 @@ export const validateTypedTradingCommand = (payload, { selectedSymbol } = {}) =>
                     symbol: normalizeTextField(payload.symbol) || normalizeTextField(selectedSymbol),
                 },
             };
+        case TRADING_COMMAND_ACTIONS.CANCEL_ALL: {
+            if (baseCommand.marketType !== FUTURES_MARKET_TYPE) {
+                return rejectDefinedButDisabledCommand(payload, baseCommand);
+            }
+            const symbol = normalizeTextField(payload.symbol) || normalizeTextField(selectedSymbol);
+            if (!symbol) {
+                return {
+                    ok: false,
+                    rejection: createTypedCommandRejection(
+                        payload,
+                        'INVALID_TYPED_CANCEL_ALL_SYMBOL',
+                        'trade.cancelAll requires a symbol',
+                        { field: 'symbol' },
+                    ),
+                };
+            }
+            return { ok: true, command: { ...baseCommand, symbol } };
+        }
+        case TRADING_COMMAND_ACTIONS.SET_TRADING_PAUSED: {
+            if (baseCommand.marketType !== FUTURES_MARKET_TYPE) {
+                return rejectDefinedButDisabledCommand(payload, baseCommand);
+            }
+            if (typeof payload.paused !== 'boolean') {
+                return {
+                    ok: false,
+                    rejection: createTypedCommandRejection(
+                        payload,
+                        'INVALID_TYPED_PAUSE_FLAG',
+                        'trade.setTradingPaused paused must be a boolean',
+                        { field: 'paused', value: payload.paused },
+                    ),
+                };
+            }
+            return { ok: true, command: { ...baseCommand, paused: payload.paused } };
+        }
         case TRADING_COMMAND_ACTIONS.REPLACE_ORDER:
-        case TRADING_COMMAND_ACTIONS.CANCEL_ALL:
             return rejectDefinedButDisabledCommand(payload, baseCommand);
         default:
             return {

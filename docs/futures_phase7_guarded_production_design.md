@@ -1,5 +1,8 @@
 # ADR: Phase 7 Guarded Production Futures Rollout
 
+> **RETIRED 2026-07-21.** This design was removed in favor of the
+> spot-parity futures path — see `docs/futures_trading.md`. Kept for history only.
+
 Date: 2026-07-13
 
 Status: accepted; fake-backed implementation completed 2026-07-13 and live production composition explicitly authorized 2026-07-14
@@ -60,7 +63,7 @@ Normal composition exposes no live write capability unless every backend-owned f
 5. The configured SHA-256 API-key fingerprint matches the captured key.
 6. A signed fixed-production-origin read returns exactly the configured account alias, fingerprint binding, `canTrade: true`, Hedge Mode, and single-asset mode.
 7. All required limits parse exactly: account maximum leverage, maximum order notional, maximum daily notional, minimum available balance, and minimum liquidation distance. The retired launcher symbol list is ignored and has no authorization meaning.
-8. The gradual-live ceilings are compiled at exactly 2x maximum leverage, 10 USDT maximum order notional, and 50 USDT gross maximum daily notional. Leverage must equal 2x; configured notional caps may be lower but never higher, and these ceilings are not environment-overridable.
+8. The gradual-live ceilings are compiled at exactly 2x maximum leverage, 10000 USDT maximum order notional, and 100000 USDT gross maximum daily notional (raised from 10/50 USDT by the reviewed 2026-07-21 operator change so exchange minimum-notional filters cannot make every major contract untradeable). Leverage must equal 2x; the operator-configured notional caps are the authoritative limits, may be lower but never higher than the ceilings, and the ceilings are not environment-overridable.
 9. The exact persistent kill-switch policy is `v1-persistent-block-new-exposure`; missing or unknown policy fails closed.
 10. The production storage directory, integrity key, anchor, HMAC chain, exclusive lease, audit replay, exact counters, clock state, and recovery state validate fully.
 11. The current credential binding matches every durable nonterminal record. Rotation never opens a fresh bypass namespace.
@@ -115,7 +118,7 @@ Cancel-all first reads the authoritative account-wide regular and algo open-orde
 
 Close-positions reads the authoritative account-wide position inventory, selects exact non-zero LONG/SHORT Hedge legs, and issues one position-side-bound `MARKET` exit child per leg. Every child has a deterministic production client ID, its own durable dispatch intent and daily reservation, zero POST retries, Query Order reconciliation, and a per-position result. A final global position inventory must be flat; no child success is inferred from another child. Hedge or identity ambiguity blocks the affected item.
 
-Engaging the kill switch fsyncs its state before acknowledgement. It sends no exchange request and does not invoke cancel-all or close-positions. The reviewed gradual-live amendment also permits a dedicated renderer request to disengage it only after a backend-issued one-use intent, exact current revision, owning connection, process-global mutex, exact phrase `ARM LIVE FUTURES HEDGE ISOLATED 2X 10 USDT 50 USDT DAILY`, healthy recovery/storage, no blocking durable operation, and every activation gate. The backend fsyncs the production-only transition before returning `kill_switch_disengaged`; no exchange request, cancellation, or closure is inferred. The separately authorized backend recovery action remains available for operational recovery but is not the routine UI path.
+Engaging the kill switch fsyncs its state before acknowledgement. It sends no exchange request and does not invoke cancel-all or close-positions. The reviewed gradual-live amendment also permits a dedicated renderer request to disengage it only after a backend-issued one-use intent, exact current revision, owning connection, process-global mutex, exact phrase `ARM LIVE FUTURES HEDGE ISOLATED 2X WITHIN CONFIGURED CAPS`, healthy recovery/storage, no blocking durable operation, and every activation gate. The backend fsyncs the production-only transition before returning `kill_switch_disengaged`; no exchange request, cancellation, or closure is inferred. The separately authorized backend recovery action remains available for operational recovery but is not the routine UI path.
 
 ## Ambiguous outcomes and recovery
 
@@ -179,7 +182,7 @@ Every action requires a backend-issued one-use intent, a current revision, a syn
 
 Automated development, tests, and verification continue to use deterministic backend fakes only. E2E scrubs production configuration, force-disables the service, and rejects any attempted production socket. No live account read, order, cancellation, or close request is part of automated verification.
 
-The operator supplied the required explicit live authorization on 2026-07-14 and then approved gradual UI arming under the compiled 2x / 10 USDT / 50 USDT ceilings. Normal composition permits the exact process-global production transport only after every configuration, account, storage, recovery, quota, and policy gate passes. Production remains disabled when any required environment value is absent or invalid. Startup begins with the durable kill switch engaged unless the intact production journal proves a prior reviewed disengagement. Routine disengagement uses only the dedicated two-step ARM LIVE action above. Reconciliation remains backend-only; backend kill-switch actions remain protected by captured recovery authorization. Startup arguments are scrubbed before `BrowserWindow` creation.
+The operator supplied the required explicit live authorization on 2026-07-14 and then approved gradual UI arming under the compiled ceilings (2x leverage; order/daily notional ceilings raised to 10000/100000 USDT by the reviewed 2026-07-21 change, with the operator-configured caps as the authoritative limits). Normal composition permits the exact process-global production transport only after every configuration, account, storage, recovery, quota, and policy gate passes. Production remains disabled when any required environment value is absent or invalid. Startup begins with the durable kill switch engaged unless the intact production journal proves a prior reviewed disengagement. Routine disengagement uses only the dedicated two-step ARM LIVE action above. Reconciliation remains backend-only; backend kill-switch actions remain protected by captured recovery authorization. Startup arguments are scrubbed before `BrowserWindow` creation.
 
 The operational credential ceremony, manual account/fingerprint/cap inspection, and any real request remain operator actions, not automated delivery steps. See `docs/futures_phase7_live_operator_runbook.md`.
 

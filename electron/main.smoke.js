@@ -47,12 +47,12 @@ app.on('browser-window-created', (_event, window) => {
           `(() => {
             const root = document.getElementById('root')
             let rail = document.querySelector(
-              '[aria-label="USDⓈ-M production real-order execution"]'
+              '[aria-label="Futures trading ticket"]'
             )
             if (!rail) {
               document.querySelector('[data-testid="market-mode-futures-live"]')?.click()
               rail = document.querySelector(
-                '[aria-label="USDⓈ-M production real-order execution"]'
+                '[aria-label="Futures trading ticket"]'
               )
             }
             const ordersTab = [...(rail?.querySelectorAll('[role="tab"]') ?? [])]

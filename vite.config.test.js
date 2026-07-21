@@ -16,15 +16,13 @@ describe('Vite Electron development configuration', () => {
   })
 
   it.each(['safe-dev', 'smoke'])(
-    'pins %s to deterministic public and in-memory execution compositions',
+    'pins %s to the deterministic public workstation composition',
     (buildMode) => {
       const aliases = selectFuturesWorkstationCompositionAliases({ buildMode })
 
-      expect(aliases).toHaveLength(2)
+      expect(aliases).toHaveLength(1)
       expect(aliases[0].replacement)
         .toContain('futures-production-workstation-verification-composition.js')
-      expect(aliases[1].replacement)
-        .toContain('futures-production-execution-runtime-verification-composition.js')
     },
   )
 

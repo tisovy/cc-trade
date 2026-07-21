@@ -97,9 +97,9 @@ describe('production Futures workstation service', () => {
                     manual.advance(20);
                     return base.loadExchangeInfo(options);
                 },
-                bootstrap: async (options) => {
+                bootstrapIndependent: async (options) => {
                     manual.advance(30);
-                    return base.bootstrap(options);
+                    return base.bootstrapIndependent(options);
                 },
             },
         }));
@@ -124,7 +124,7 @@ describe('production Futures workstation service', () => {
             createFuturesProductionWorkstationRuntimeForTest,
             productionRequest,
         ],
-    ])('waits for both %s stream handshakes before dispatching REST bootstrap', async (
+    ])('starts %s independent reads before the handshake but holds depth until ready', async (
         _label,
         createBase,
         createRuntime,
@@ -133,10 +133,12 @@ describe('production Futures workstation service', () => {
         const base = createBase();
         let resolveReady;
         const ready = new Promise(resolve => { resolveReady = resolve; });
-        const bootstrap = vi.fn(options => base.bootstrap(options));
+        const bootstrapIndependent = vi.fn(options => base.bootstrapIndependent(options));
+        const readDepthSnapshot = vi.fn(options => base.readDepthSnapshot(options));
         const transport = {
             ...base,
-            bootstrap,
+            bootstrapIndependent,
+            readDepthSnapshot,
             connect: (options) => {
                 const handle = base.connect(options);
                 return { ready, close: handle.close };
@@ -148,11 +150,11 @@ describe('production Futures workstation service', () => {
             emit: event => events.push(event),
         });
         await vi.waitFor(() => expect(resolveReady).toBeTypeOf('function'));
-        expect(bootstrap).not.toHaveBeenCalled();
-        expect(events.at(-1)).toMatchObject({ resource: 'catalog', state: 'live' });
+        await vi.waitFor(() => expect(bootstrapIndependent).toHaveBeenCalledOnce());
+        expect(readDepthSnapshot).not.toHaveBeenCalled();
         resolveReady(true);
         await pending;
-        expect(bootstrap).toHaveBeenCalledOnce();
+        expect(readDepthSnapshot).toHaveBeenCalledOnce();
         expect(events.at(-1)).toMatchObject({ resource: 'status', state: 'live' });
     });
 
@@ -163,7 +165,7 @@ describe('production Futures workstation service', () => {
         let resolveBootstrap;
         const transport = {
             ...base,
-            bootstrap: options => new Promise((resolve) => {
+            bootstrapIndependent: options => new Promise((resolve) => {
                 bootstrapOptions = options;
                 resolveBootstrap = resolve;
             }),
@@ -194,7 +196,6 @@ describe('production Futures workstation service', () => {
         deliver('ticker');
         expect(events.filter(event => event.resource === 'header')).toHaveLength(1);
 
-        deliver('depthSnapshot');
         expect(events.some(event => event.resource === 'depth')).toBe(false);
         deliver('markKlines');
         deliver('indexKlines');
@@ -202,7 +203,6 @@ describe('production Futures workstation service', () => {
             .toEqual(['loading']);
 
         resolveBootstrap(Object.freeze({
-            depthSnapshot: fixture.depthSnapshot,
             contractKlines: fixture.contractKlines,
             markKlines: fixture.markKlines,
             indexKlines: fixture.indexKlines,
@@ -258,7 +258,7 @@ describe('production Futures workstation service', () => {
         const base = createBase();
         const transport = {
             ...base,
-            bootstrap: async () => {
+            bootstrapIndependent: async () => {
                 const error = new Error('request deadline');
                 error.name = 'AbortError';
                 throw error;
@@ -454,7 +454,8 @@ describe('production Futures workstation service', () => {
     it('switches only the candle interval without rebuilding invariant market data', async () => {
         const base = createFuturesProductionWorkstationFakeTransport();
         const loadExchangeInfo = vi.fn(options => base.loadExchangeInfo(options));
-        const bootstrap = vi.fn(options => base.bootstrap(options));
+        const bootstrapIndependent = vi.fn(options => base.bootstrapIndependent(options));
+        const readDepthSnapshot = vi.fn(options => base.readDepthSnapshot(options));
         const bootstrapInterval = vi.fn(options => base.bootstrapInterval(options));
         let streamClose;
         let streamSelectInterval;
@@ -472,7 +473,8 @@ describe('production Futures workstation service', () => {
             transport: {
                 ...base,
                 loadExchangeInfo,
-                bootstrap,
+                bootstrapIndependent,
+                readDepthSnapshot,
                 bootstrapInterval,
                 connect,
             },
@@ -489,7 +491,8 @@ describe('production Futures workstation service', () => {
 
         const switched = events.filter(event => event.requestId === 'interval-only');
         expect(loadExchangeInfo).toHaveBeenCalledOnce();
-        expect(bootstrap).toHaveBeenCalledOnce();
+        expect(bootstrapIndependent).toHaveBeenCalledOnce();
+        expect(readDepthSnapshot).toHaveBeenCalledOnce();
         expect(connect).toHaveBeenCalledOnce();
         expect(streamClose).not.toHaveBeenCalled();
         expect(bootstrapInterval).toHaveBeenCalledOnce();
@@ -576,10 +579,10 @@ describe('production Futures workstation service', () => {
             }
             return base.loadExchangeInfo(options);
         });
-        const bootstrap = vi.fn(options => base.bootstrap(options));
+        const bootstrapIndependent = vi.fn(options => base.bootstrapIndependent(options));
         const connect = vi.fn(options => base.connect(options));
         const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
-            transport: { ...base, loadExchangeInfo, bootstrap, connect },
+            transport: { ...base, loadExchangeInfo, bootstrapIndependent, connect },
         }));
         const firstEvents = [];
         const selectedEvents = [];
@@ -596,7 +599,7 @@ describe('production Futures workstation service', () => {
         await first;
 
         expect(loadExchangeInfo).toHaveBeenCalledTimes(2);
-        expect(bootstrap).toHaveBeenCalledOnce();
+        expect(bootstrapIndependent).toHaveBeenCalledOnce();
         expect(connect).toHaveBeenCalledOnce();
         expect(firstEvents.some(event => event.state === 'live')).toBe(false);
         expect(selectedEvents.at(-1)).toMatchObject({
@@ -615,15 +618,15 @@ describe('production Futures workstation service', () => {
         const base = createFuturesProductionWorkstationFakeTransport();
         let resolveFirstBootstrap;
         let firstBootstrapOptions;
-        const bootstrap = vi.fn((options) => {
-            if (bootstrap.mock.calls.length === 1) {
+        const bootstrapIndependent = vi.fn((options) => {
+            if (bootstrapIndependent.mock.calls.length === 1) {
                 firstBootstrapOptions = options;
                 return new Promise((resolve) => { resolveFirstBootstrap = resolve; });
             }
-            return base.bootstrap(options);
+            return base.bootstrapIndependent(options);
         });
         const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
-            transport: { ...base, bootstrap },
+            transport: { ...base, bootstrapIndependent },
         }));
         const firstEvents = [];
         const selectedEvents = [];
@@ -643,7 +646,7 @@ describe('production Futures workstation service', () => {
         resolveFirstBootstrap(FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT);
         await first;
 
-        expect(bootstrap).toHaveBeenCalledTimes(2);
+        expect(bootstrapIndependent).toHaveBeenCalledTimes(2);
         expect(firstEvents.some(event => event.resource === 'candles')).toBe(false);
         expect(selectedEvents.filter(event => event.resource === 'candles')
             .every(event => event.payload.interval === '15m')).toBe(true);
@@ -694,7 +697,7 @@ describe('production Futures workstation service', () => {
     it('recovers a post-ready candle disconnect without touching book or trade streams', async () => {
         const manual = createManualClock();
         const base = createFuturesProductionWorkstationFakeTransport({ clock: manual.clock });
-        const bootstrap = vi.fn(options => base.bootstrap(options));
+        const bootstrapIndependent = vi.fn(options => base.bootstrapIndependent(options));
         const bootstrapInterval = vi.fn(options => base.bootstrapInterval(options));
         let candleDisconnect;
         let streamClose;
@@ -712,7 +715,7 @@ describe('production Futures workstation service', () => {
         });
         const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
             clock: manual.clock,
-            transport: { ...base, bootstrap, bootstrapInterval, connect },
+            transport: { ...base, bootstrapIndependent, bootstrapInterval, connect },
         }));
         const events = [];
         await runtime.service.handleRequest(productionRequest('candle-recovery'), {
@@ -728,7 +731,7 @@ describe('production Futures workstation service', () => {
         expect(manual.timeoutCount()).toBe(1);
         expect(streamClose).not.toHaveBeenCalled();
         expect(connect).toHaveBeenCalledOnce();
-        expect(bootstrap).toHaveBeenCalledOnce();
+        expect(bootstrapIndependent).toHaveBeenCalledOnce();
         expect(bootstrapInterval).not.toHaveBeenCalled();
 
         manual.runTimeouts();
@@ -742,14 +745,14 @@ describe('production Futures workstation service', () => {
         expect(streamSelectInterval).toHaveBeenCalledOnce();
         expect(streamClose).not.toHaveBeenCalled();
         expect(connect).toHaveBeenCalledOnce();
-        expect(bootstrap).toHaveBeenCalledOnce();
+        expect(bootstrapIndependent).toHaveBeenCalledOnce();
         expect(manual.timeoutCount()).toBe(0);
     });
 
     it('bounds candle-only handshake retries without falling back to a full resync', async () => {
         const manual = createManualClock();
         const base = createFuturesProductionWorkstationFakeTransport({ clock: manual.clock });
-        const bootstrap = vi.fn(options => base.bootstrap(options));
+        const bootstrapIndependent = vi.fn(options => base.bootstrapIndependent(options));
         const bootstrapInterval = vi.fn(options => base.bootstrapInterval(options));
         let streamClose;
         const streamSelectInterval = vi.fn(async () => false);
@@ -764,7 +767,7 @@ describe('production Futures workstation service', () => {
         });
         const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
             clock: manual.clock,
-            transport: { ...base, bootstrap, bootstrapInterval, connect },
+            transport: { ...base, bootstrapIndependent, bootstrapInterval, connect },
         }));
         const events = [];
         await runtime.service.handleRequest(productionRequest('candle-retry-base'), {
@@ -790,7 +793,7 @@ describe('production Futures workstation service', () => {
         expect(streamSelectInterval).toHaveBeenCalledTimes(9);
         expect(bootstrapInterval).not.toHaveBeenCalled();
         expect(connect).toHaveBeenCalledOnce();
-        expect(bootstrap).toHaveBeenCalledOnce();
+        expect(bootstrapIndependent).toHaveBeenCalledOnce();
         expect(streamClose).not.toHaveBeenCalled();
     });
 
@@ -799,7 +802,7 @@ describe('production Futures workstation service', () => {
         const deferred = new Map();
         const transport = {
             ...base,
-            bootstrap: options => new Promise(resolve => deferred.set(options.symbol, {
+            bootstrapIndependent: options => new Promise(resolve => deferred.set(options.symbol, {
                 resolve,
                 onBootstrapResource: options.onBootstrapResource,
             })),
@@ -825,7 +828,6 @@ describe('production Futures workstation service', () => {
         });
         expect(oldEvents.some(event => ['candles', 'header'].includes(event.resource))).toBe(false);
         deferred.get('ETHUSDT').resolve({
-            depthSnapshot: FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.ETHUSDT.depthSnapshot,
             contractKlines: FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.ETHUSDT.contractKlines,
             markKlines: FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.ETHUSDT.markKlines,
             indexKlines: FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.ETHUSDT.indexKlines,
@@ -834,7 +836,6 @@ describe('production Futures workstation service', () => {
         });
         await second;
         deferred.get('BTCUSDT').resolve({
-            depthSnapshot: FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.depthSnapshot,
             contractKlines: FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.contractKlines,
             markKlines: FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.markKlines,
             indexKlines: FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.indexKlines,
@@ -846,6 +847,55 @@ describe('production Futures workstation service', () => {
         expect(oldEvents.some(event => ['header', 'candles', 'depth', 'trades'].includes(event.resource)))
             .toBe(false);
         expect(newEvents.at(-1)).toMatchObject({ symbol: 'ETHUSDT', state: 'live' });
+    });
+
+    it('heals a depth bootstrap gap by refetching only the snapshot', async () => {
+        const manual = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport({ clock: manual.clock });
+        const parsedSnapshot = JSON.parse(
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.depthSnapshot,
+        );
+        // Attempt 1 returns a snapshot older than every buffered diff; the
+        // healed retry matches the diff emitted by fake cycle 1 (U=u=1002).
+        const staleSnapshot = JSON.stringify({ ...parsedSnapshot, lastUpdateId: 1 });
+        const healedSnapshot = JSON.stringify({ ...parsedSnapshot, lastUpdateId: 1002 });
+        const readDepthSnapshot = vi.fn(async () => (
+            readDepthSnapshot.mock.calls.length === 1 ? staleSnapshot : healedSnapshot
+        ));
+        const close = vi.fn();
+        const connect = vi.fn((options) => {
+            const handle = base.connect(options);
+            return Object.freeze({
+                ready: handle.ready,
+                selectInterval: handle.selectInterval,
+                close: () => {
+                    close();
+                    handle.close();
+                },
+            });
+        });
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock: manual.clock,
+            transport: { ...base, readDepthSnapshot, connect },
+        }));
+        const events = [];
+        const pending = runtime.service.handleRequest(productionRequest('depth-heal'), {
+            emit: event => events.push(event),
+        });
+        await vi.waitFor(() => expect(readDepthSnapshot).toHaveBeenCalledOnce());
+        await vi.waitFor(() => expect(manual.timeoutCount()).toBe(1));
+        manual.advance(750);
+        manual.runIntervals();
+        manual.runTimeouts();
+        await pending;
+
+        expect(readDepthSnapshot).toHaveBeenCalledTimes(2);
+        expect(readDepthSnapshot.mock.calls[1][0]).toMatchObject({ retryAttempt: 1 });
+        expect(close).not.toHaveBeenCalled();
+        expect(connect).toHaveBeenCalledOnce();
+        expect(events.filter(event => event.resource === 'status').map(event => event.state))
+            .toEqual(['loading', 'live']);
+        expect(events.some(event => event.state === 'resynchronizing')).toBe(false);
     });
 
     it('detects a live depth gap and enters resynchronizing before rebuilding', async () => {
@@ -1059,8 +1109,8 @@ describe('production Futures workstation service', () => {
                     },
                 };
             },
-            bootstrap: async (options) => ({
-                ...await base.bootstrap(options),
+            bootstrapIndependent: async (options) => ({
+                ...await base.bootstrapIndependent(options),
                 premiumIndex: '{}',
             }),
         };
@@ -1087,10 +1137,10 @@ describe('production Futures workstation service', () => {
         let bootstrapAttempts = 0;
         const transport = {
             ...base,
-            bootstrap: async (options) => {
+            bootstrapIndependent: async (options) => {
                 bootstrapAttempts += 1;
                 if (bootstrapAttempts === 1) throw new Error('temporary bootstrap failure');
-                return base.bootstrap(options);
+                return base.bootstrapIndependent(options);
             },
         };
         const runtime = track(createFuturesProductionWorkstationRuntimeForTest({

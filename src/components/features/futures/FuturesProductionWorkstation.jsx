@@ -1,6 +1,6 @@
 import { memo, useCallback, useMemo, useRef, useState } from 'react'
 import useFuturesProductionWorkstation from '../../../hooks/useFuturesProductionWorkstation.js'
-import FuturesProductionExecutionTicket from './FuturesProductionExecutionTicket.jsx'
+import FuturesTradingTicket from './FuturesTradingTicket.jsx'
 import FuturesWorkstationView from './FuturesWorkstationView.jsx'
 
 export const FuturesProductionWorkstation = ({
@@ -46,15 +46,23 @@ export const FuturesProductionWorkstation = ({
     setOrderAmendRequest({ ...amendment, id: amendmentSequenceRef.current })
   }, [])
 
-  const portfolioOpenOrders = executionState?.portfolio?.openOrders
+  const executionOpenOrders = executionState?.openOrders
   const ownedOrders = useMemo(() => (
-    Array.isArray(portfolioOpenOrders)
-      ? portfolioOpenOrders.filter(order => order.symbol === symbol)
+    Array.isArray(executionOpenOrders)
+      ? executionOpenOrders
+        .filter(order => order.symbol === symbol)
+        .map(order => ({
+          ...order,
+          orderKind: 'REGULAR',
+          positionEffect: order.positionSide === 'SHORT'
+            ? (order.side === 'SELL' ? 'ENTRY' : 'EXIT')
+            : (order.side === 'BUY' && order.reduceOnly !== true ? 'ENTRY' : 'EXIT'),
+        }))
       : []
-  ), [portfolioOpenOrders, symbol])
+  ), [executionOpenOrders, symbol])
 
   const tradingRail = (
-    <FuturesProductionExecutionTicket
+    <FuturesTradingTicket
       state={executionState}
       selectedSymbol={symbol}
       selectedContract={selectedContract}
@@ -62,21 +70,6 @@ export const FuturesProductionWorkstation = ({
       gestureRequest={gestureRequest}
       orderAmendRequest={orderAmendRequest}
       onDraftPriceChange={setDraftPrice}
-      onRefreshPortfolio={executionState.refreshPortfolio}
-      onPrepareOrderIntent={executionState.prepareOrderIntent}
-      onPlaceOrder={executionState.placeOrder}
-      onPrepareMarginAdjustment={executionState.prepareMarginAdjustment}
-      onAdjustMargin={executionState.adjustMargin}
-      onPrepareOrderAmendment={executionState.prepareOrderAmendment}
-      onAmendOrder={executionState.amendOrder}
-      onPrepareCancelAllOpenOrdersIntent={executionState.prepareCancelAllOpenOrdersIntent}
-      onCancelAllOpenOrders={executionState.cancelAllOpenOrders}
-      onPrepareClosePositionsIntent={executionState.prepareClosePositionsIntent}
-      onClosePositions={executionState.closePositions}
-      onPrepareEngageKillSwitchIntent={executionState.prepareEngageKillSwitchIntent}
-      onEngageKillSwitch={executionState.engageKillSwitch}
-      onPrepareDisengageKillSwitchIntent={executionState.prepareDisengageKillSwitchIntent}
-      onDisengageKillSwitch={executionState.disengageKillSwitch}
     />
   )
 

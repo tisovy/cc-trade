@@ -29,16 +29,19 @@ const moduleMocks = vi.hoisted(() => {
                 state.websocketServerHandlers[event] = handler;
             }),
         };
-        state.productionExecutionService = {
-            shutdown: vi.fn().mockResolvedValue(undefined),
-            disconnect: vi.fn(() => true),
-            handleRequest: vi.fn().mockResolvedValue(true),
-        };
-        state.productionExecutionRuntime = {
-            service: state.productionExecutionService,
-            coordinator: undefined,
-            durable: false,
-            closeNetwork: vi.fn(),
+        state.futuresAdapter = {
+            syncServerTime: vi.fn().mockResolvedValue(1),
+            getPositionMode: vi.fn().mockResolvedValue({ hedgeMode: false }),
+            placeOrder: vi.fn().mockResolvedValue({
+                e: 'executionReport', symbol: 'BTCUSDT', status: 'NEW', orderId: 1,
+            }),
+            cancelOrder: vi.fn().mockResolvedValue({
+                e: 'executionReport', symbol: 'BTCUSDT', status: 'CANCELED', orderId: 1,
+            }),
+            cancelAllOrders: vi.fn().mockResolvedValue({}),
+            getAccountRefreshOperations: vi.fn(() => []),
+            createUserDataStreamListenKey: vi.fn().mockResolvedValue('futures-listen-key'),
+            renewUserDataStreamListenKey: vi.fn().mockResolvedValue({}),
         };
         state.sendRequest = vi.fn(async (path, method) => ({
             data: vi.fn().mockResolvedValue(
@@ -91,9 +94,9 @@ const moduleMocks = vi.hoisted(() => {
     const Spot = vi.fn(function MockSpot() {
         return state.spotClient;
     });
-    const createProductionExecutionRuntime = vi.fn(
-        async () => state.productionExecutionRuntime,
-    );
+    const FuturesTradingAdapter = vi.fn(function MockFuturesTradingAdapter() {
+        return state.futuresAdapter;
+    });
 
     reset();
 
@@ -101,7 +104,7 @@ const moduleMocks = vi.hoisted(() => {
         Spot,
         WebSocketServer,
         createHttpServer,
-        createProductionExecutionRuntime,
+        FuturesTradingAdapter,
         makeSocket,
         reset,
         setUserDataConnection: (connection) => {
@@ -110,8 +113,7 @@ const moduleMocks = vi.hoisted(() => {
         get connect() { return state.connect; },
         get httpServer() { return state.httpServer; },
         get marketSocket() { return state.marketSocket; },
-        get productionExecutionRuntime() { return state.productionExecutionRuntime; },
-        get productionExecutionService() { return state.productionExecutionService; },
+        get futuresAdapter() { return state.futuresAdapter; },
         get rendererConnection() { return state.rendererConnection; },
         get rendererHandlers() { return state.rendererHandlers; },
         get sendRequest() { return state.sendRequest; },
@@ -141,8 +143,18 @@ vi.mock('./local-websocket-access.js', () => ({
     validateLocalWebSocketRequest: vi.fn(() => ({ allowed: true })),
 }));
 
-vi.mock('./futures-production-execution-composition.js', () => ({
-    createFuturesProductionExecutionRuntime: moduleMocks.createProductionExecutionRuntime,
+vi.mock('./futures-trading-adapter.js', async (importOriginal) => {
+    const actual = await importOriginal();
+    return {
+        ...actual,
+        FuturesTradingAdapter: moduleMocks.FuturesTradingAdapter,
+    };
+});
+
+vi.mock('ws', () => ({
+    default: vi.fn(function MockFuturesUserDataSocket() {
+        return { on: vi.fn(), close: vi.fn() };
+    }),
 }));
 
 const flushMicrotasks = async () => {
@@ -203,19 +215,15 @@ describe('setupBinanceConnection user-data orchestration', () => {
         process.stderr.write = originalStderrWrite;
     });
 
-    it('closes the production execution network exactly once with the controller', async () => {
+    it('deduplicates controller close into a single shutdown promise', async () => {
         moduleMocks.httpServer.close.mockImplementation(callback => callback?.());
         const controller = setupBinanceConnection({
             localWebSocketAccess: { host: '127.0.0.1' },
         });
-        await controller.productionExecutionReady;
 
         const firstClose = controller.close();
         expect(controller.close()).toBe(firstClose);
         await firstClose;
-
-        expect(moduleMocks.productionExecutionService.shutdown).toHaveBeenCalledOnce();
-        expect(moduleMocks.productionExecutionRuntime.closeNetwork).toHaveBeenCalledOnce();
     });
 
     it('connects live user data and coalesces adapter-owned stream refreshes', async () => {
@@ -1972,15 +1980,20 @@ describe('setupBinanceConnection user-data orchestration', () => {
         const rejections = moduleMocks.rendererConnection.sendUTF.mock.calls
             .map(([message]) => JSON.parse(message))
             .filter(payload => payload.command_rejected?.code === 'UNSUPPORTED_MARKET_TYPE');
-        expect(rejections).toHaveLength(6);
+        expect(rejections).toHaveLength(4);
         expect(rejections.map(payload => payload.command_rejected.request)).toEqual([
             'buyOrder',
             'cancelOrder',
             'sellOrder',
             'subscribe',
-            'trade.placeOrder',
-            'trade.cancelOrder',
         ]);
+        // Typed futures commands are first-class now and route to the futures adapter.
+        expect(moduleMocks.futuresAdapter.placeOrder).toHaveBeenCalledOnce();
+        expect(moduleMocks.futuresAdapter.cancelOrder).toHaveBeenCalledOnce();
+        const futuresUpdates = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.futures_execution_update);
+        expect(futuresUpdates.length).toBeGreaterThanOrEqual(2);
     });
 
     it('pins local renderer frame/message bounds and rejects malformed or oversized messages', async () => {
@@ -2060,11 +2073,96 @@ describe('setupBinanceConnection user-data orchestration', () => {
             await moduleMocks.rendererHandlers.message({ type: 'utf8', utf8Data: raw });
         }
 
-        expect(moduleMocks.productionExecutionService.handleRequest).not.toHaveBeenCalled();
+        expect(moduleMocks.futuresAdapter.placeOrder).not.toHaveBeenCalled();
         expect(spotPlaceOrder).not.toHaveBeenCalled();
     });
 
-    it('routes production commands through only the dedicated raw protocol boundary', async () => {
+    it('pauses futures order placement in-memory while cancels stay allowed', async () => {
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1', port: 14477 },
+        });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        const sendTyped = payload => moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({ version: 1, marketType: 'futures', ...payload }),
+        });
+
+        await sendTyped({ action: 'trade.setTradingPaused', paused: true });
+        await sendTyped({
+            action: 'trade.placeOrder',
+            symbol: 'BTCUSDT',
+            side: 'BUY',
+            orderType: 'LIMIT',
+            timeInForce: 'GTC',
+            price: '50000',
+            quantity: '0.01',
+        });
+        await sendTyped({ action: 'trade.cancelOrder', symbol: 'BTCUSDT', orderId: '1' });
+
+        expect(moduleMocks.futuresAdapter.placeOrder).not.toHaveBeenCalled();
+        expect(moduleMocks.futuresAdapter.cancelOrder).toHaveBeenCalledOnce();
+        const messages = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message));
+        expect(messages.some(payload => payload.futures_trading_paused === true)).toBe(true);
+        expect(messages.some(payload => (
+            payload.command_rejected?.code === 'FUTURES_TRADING_PAUSED'
+        ))).toBe(true);
+
+        await sendTyped({ action: 'trade.setTradingPaused', paused: false });
+        await sendTyped({
+            action: 'trade.placeOrder',
+            symbol: 'BTCUSDT',
+            side: 'BUY',
+            orderType: 'LIMIT',
+            timeInForce: 'GTC',
+            price: '50000',
+            quantity: '0.01',
+        });
+        expect(moduleMocks.futuresAdapter.placeOrder).toHaveBeenCalledOnce();
+    });
+
+    it('enforces FUTURES_MAX_ORDER_USDT on entries but never on reduce-only orders', async () => {
+        vi.stubEnv('FUTURES_MAX_ORDER_USDT', '100');
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1', port: 14477 },
+        });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        const sendOrder = payload => moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'trade.placeOrder',
+                version: 1,
+                marketType: 'futures',
+                symbol: 'BTCUSDT',
+                side: 'BUY',
+                ...payload,
+            }),
+        });
+
+        // 0.01 × 50000 = 500 USDT > 100 USDT cap → rejected before the adapter.
+        await sendOrder({ orderType: 'LIMIT', timeInForce: 'GTC', price: '50000', quantity: '0.01' });
+        expect(moduleMocks.futuresAdapter.placeOrder).not.toHaveBeenCalled();
+        const rejection = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .find(payload => payload.command_rejected?.code === 'FUTURES_ORDER_CAP_EXCEEDED');
+        expect(rejection.command_rejected.details).toMatchObject({ capUsdt: 100 });
+
+        // 0.001 × 50000 = 50 USDT ≤ cap → placed.
+        await sendOrder({ orderType: 'LIMIT', timeInForce: 'GTC', price: '50000', quantity: '0.001' });
+        expect(moduleMocks.futuresAdapter.placeOrder).toHaveBeenCalledOnce();
+
+        // Reduce-only market close is exempt regardless of size.
+        await sendOrder({ side: 'SELL', orderType: 'MARKET', quantity: '10', positionSide: 'LONG', reduceOnly: true });
+        expect(moduleMocks.futuresAdapter.placeOrder).toHaveBeenCalledTimes(2);
+    });
+
+    it('rejects retired futures.production frames without touching any adapter', async () => {
         const spotPlaceOrder = vi.spyOn(SpotTradingAdapter.prototype, 'placeOrder');
         setupBinanceConnection({
             localWebSocketAccess: { host: '127.0.0.1', port: 14477 },
@@ -2074,66 +2172,26 @@ describe('setupBinanceConnection user-data orchestration', () => {
             accept: vi.fn(() => moduleMocks.rendererConnection),
         });
 
-        const subscribeRaw = JSON.stringify({
-            action: 'futures.production.subscribeStatus',
-            version: 1,
-            revision: '0',
-            marketType: 'futures',
-            environment: 'production',
-            accountFingerprint: '0'.repeat(64),
-        });
-        const duplicateKeyRaw = '{"action":"futures.production.placeOrder","action":"trade.placeOrder","version":1,"marketType":"spot"}';
-        const escapedDuplicateRaw = '{"action":"futures.\\u0070roduction.placeOrder","action":"trade.placeOrder","version":1,"marketType":"spot"}';
-        const removedAliasRaw = JSON.stringify({
-            action: 'futures.production.executeOrder',
-            version: 1,
-            marketType: 'spot',
-        });
-        const oversizedRaw = JSON.stringify({
-            action: 'futures.production.placeOrder',
-            padding: 'x'.repeat(4_096),
-        });
-        expect(Buffer.byteLength(oversizedRaw, 'utf8')).toBeGreaterThan(4_096);
-        expect(Buffer.byteLength(oversizedRaw, 'utf8')).toBeLessThanOrEqual(
-            LOCAL_RENDERER_WS_MAX_MESSAGE_BYTES,
-        );
-
         for (const raw of [
-            subscribeRaw,
-            duplicateKeyRaw,
-            escapedDuplicateRaw,
-            removedAliasRaw,
-            oversizedRaw,
+            JSON.stringify({
+                action: 'futures.production.subscribeStatus',
+                version: 1,
+                revision: '0',
+                marketType: 'futures',
+                environment: 'production',
+                accountFingerprint: '0'.repeat(64),
+            }),
+            JSON.stringify({ action: 'futures.production.placeOrder', version: 1 }),
         ]) {
             await moduleMocks.rendererHandlers.message({ type: 'utf8', utf8Data: raw });
         }
 
-        expect(moduleMocks.productionExecutionService.handleRequest).toHaveBeenCalledTimes(5);
-        expect(moduleMocks.productionExecutionService.handleRequest.mock.calls.map(
-            ([raw]) => raw,
-        )).toEqual([
-            subscribeRaw,
-            duplicateKeyRaw,
-            escapedDuplicateRaw,
-            removedAliasRaw,
-            oversizedRaw,
-        ]);
-        const productionRouteOptions = moduleMocks.productionExecutionService.handleRequest
-            .mock.calls.map(([, options]) => options);
-        expect(productionRouteOptions).toEqual(productionRouteOptions.map(() => ({
-            connectionId: productionRouteOptions[0].connectionId,
-            emit: expect.any(Function),
-        })));
+        const rejections = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.command_rejected?.code === 'UNSUPPORTED_ACTION');
+        expect(rejections).toHaveLength(2);
         expect(spotPlaceOrder).not.toHaveBeenCalled();
-
-        moduleMocks.rendererConnection.close();
-        await flushMicrotasks();
-
-        expect(moduleMocks.productionExecutionService.disconnect).toHaveBeenCalledOnce();
-        expect(moduleMocks.productionExecutionService.disconnect).toHaveBeenCalledWith(
-            productionRouteOptions[0].connectionId,
-        );
-        expect(moduleMocks.productionExecutionService.handleRequest).toHaveBeenCalledTimes(5);
+        expect(moduleMocks.futuresAdapter.placeOrder).not.toHaveBeenCalled();
     });
 
     it('rejects removed hidden action aliases and bounded action/channel envelopes', async () => {

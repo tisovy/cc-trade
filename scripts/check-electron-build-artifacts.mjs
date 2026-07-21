@@ -12,11 +12,11 @@ const retiredImplementationSignatures = Object.freeze([
     'FUTURES_TESTNET_EXECUTION_ACTION',
     'FUTURES_TESTNET_WORKSTATION_CHANNEL_ID',
     'reviewed-testnet-public-read',
-]);
-const verificationRuntimeImplementationSignatures = Object.freeze([
-    'e2e-mocked-account',
-    'FUTURES_PRODUCTION_E2E_CONFIRMED',
-    'external-desktop-order-1',
+    // Guarded-production execution ceremony (retired for the spot-parity path).
+    'futures.production.placeOrder',
+    'I_UNDERSTAND_REAL_USDT_FUTURES',
+    'v1-persistent-block-new-exposure',
+    'e2e-in-memory-only',
 ]);
 
 if (!supportedBuildModes.has(buildMode)) {
@@ -65,27 +65,6 @@ const leakedSignatures = retiredImplementationSignatures.filter(signature => (
 ));
 if (leakedSignatures.length > 0) {
     throw new Error(`Retired Futures implementation leaked into Electron build: ${leakedSignatures.join(', ')}`);
-}
-
-const verificationRuntimeImplementationMatches = verificationRuntimeImplementationSignatures.filter(
-    signature => mainSource.includes(signature) || preloadSource.includes(signature),
-);
-const verificationRuntimeModeMatches = mainSource.match(/e2e-in-memory-only/g)?.length ?? 0;
-if (buildMode === 'normal'
-    && (verificationRuntimeImplementationMatches.length > 0
-        || verificationRuntimeModeMatches !== 1)) {
-    throw new Error(
-        `Verification execution leaked into normal Electron build: ${[
-            ...verificationRuntimeImplementationMatches,
-            `e2e-in-memory-only×${verificationRuntimeModeMatches}`,
-        ].join(', ')}`,
-    );
-}
-if (buildMode === 'e2e'
-    && (verificationRuntimeImplementationMatches.length
-        !== verificationRuntimeImplementationSignatures.length
-        || verificationRuntimeModeMatches < 2)) {
-    throw new Error('E2E Electron build is missing its in-memory execution runtime');
 }
 
 console.log(`Electron ${buildMode} build artifact boundary passed (${files.length} files)`);

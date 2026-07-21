@@ -29,7 +29,7 @@
     "test:all": "npm run test && npm run test:e2e",
     "check:circular": "node scripts/check-circular-imports.mjs",
     "check:electron-build-artifacts": "node scripts/check-electron-build-artifacts.mjs normal",
-    "check:futures-production": "node scripts/check-futures-production-boundaries.mjs && node scripts/check-futures-workstation-boundaries.mjs",
+    "check:futures-production": "node scripts/check-futures-workstation-boundaries.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

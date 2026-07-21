@@ -40,26 +40,24 @@ test('Futures Live is ready, keeps contracts visible and executes only mocked ge
             element => getComputedStyle(element).getPropertyValue('--futures-accent').trim(),
         );
         expect(accent).toBe('#e34f5e');
-        const tradingRail = mainWindow.getByLabel('USDⓈ-M production real-order execution');
+        const tradingRail = mainWindow.getByLabel('Futures trading ticket');
         await expect(tradingRail).toBeVisible();
         await expect(tradingRail.getByRole('tab', { name: 'Trade' }))
             .toHaveAttribute('aria-selected', 'true');
         await expect(tradingRail.locator('.futures-production-readiness')).toContainText('READY');
         await expect(tradingRail.locator('.futures-production-readiness'))
-            .toContainText('Gesture execution ready');
+            .toContainText('Futures trading ready');
         await expect(tradingRail.getByRole('tab', { name: /^Orders 1$/ })).toBeVisible();
         await expect(mainWindow.getByText('Gesture trading', { exact: true })).toHaveCount(0);
         await expect(tradingRail.getByRole('button', {
-            name: /Enter LONG|Exit LONG|Enter SHORT|Exit SHORT/i,
-        })).toHaveCount(0);
+            name: /LONG entry|LONG exit|SHORT entry|SHORT exit/,
+        })).toHaveCount(4);
         const sizeSlider = tradingRail.getByRole('slider', { name: 'Order size percent' });
         await expect(sizeSlider).toBeEnabled();
         await expect(mainWindow.locator('.futures-workstation-safety-drawer')).toHaveCount(0);
         await expect(mainWindow.locator('.futures-production-execution-header strong'))
-            .toContainText('ISOLATED · 2× · HEDGE');
-        const advancedSafety = mainWindow.locator('.futures-production-advanced-safety');
-        await expect(advancedSafety.locator('summary')).toContainText('Advanced safety');
-        await expect(advancedSafety).not.toHaveAttribute('open', '');
+            .toContainText('BTCUSDT');
+        await expect(mainWindow.locator('.futures-production-advanced-safety')).toHaveCount(0);
         const productionLast = await mainWindow.getByText('Last', { exact: true })
             .locator('..')
             .locator('dd')
@@ -77,12 +75,11 @@ test('Futures Live is ready, keeps contracts visible and executes only mocked ge
         await expect(currentOrders).toContainText('Filled qty');
         await expect(currentOrders).toContainText('0.004');
         await tradingRail.getByRole('tab', { name: /^Positions 1$/ }).click();
-        const currentPositions = tradingRail.getByLabel('Hedge positions');
+        const currentPositions = tradingRail.getByLabel('Open positions');
         const btcLongPosition = currentPositions.locator('article').filter({ hasText: 'BTCUSDT' });
         await expect(btcLongPosition).toContainText('LONG');
         await expect(btcLongPosition).toContainText('Qty0.010');
         await expect(btcLongPosition).toContainText('MarginISOLATED · 2×');
-        await expect(btcLongPosition).toContainText('Isolated305.00 USDT');
         await tradingRail.getByRole('tab', { name: 'Trade' }).click();
 
         const externalOrderLine = mainWindow.getByRole('button', {
@@ -116,11 +113,9 @@ test('Futures Live is ready, keeps contracts visible and executes only mocked ge
         await sizeSlider.fill('100');
         await expect(tradingRail.locator('.futures-production-size-slider output'))
             .toContainText('100%');
-        await expect(tradingRail.getByLabel('Order notional USDT')).toHaveValue('10');
-        await expect(tradingRail.locator('.futures-production-draft-reason'))
-            .toContainText('below the Binance minimum quantity');
+        await expect(tradingRail.getByLabel('Order notional USDT')).toHaveValue('1000');
         await expect(tradingRail.locator('.futures-production-order-summary'))
-            .toContainText('Safe limit10 USDT');
+            .toContainText('Available1000.00 USDT');
 
         const contractList = mainWindow.locator('.futures-workstation-contract-list');
         await expect(contractList).toBeVisible();
@@ -140,11 +135,10 @@ test('Futures Live is ready, keeps contracts visible and executes only mocked ge
         await sizeSlider.fill('100');
         await expect(tradingRail.locator('.futures-production-size-slider output'))
             .toContainText('100%');
-        await expect(tradingRail.getByLabel('Order notional USDT')).toHaveValue('10');
+        await expect(tradingRail.getByLabel('Order notional USDT')).toHaveValue('1000');
         const orderSummary = tradingRail.locator('.futures-production-order-summary');
         await expect(orderSummary).toContainText('Quantity');
-        await expect(orderSummary).toContainText('Est. margin');
-        expect(await orderSummary.textContent()).not.toMatch(/Quantity—|Est\. margin—/);
+        expect(await orderSummary.textContent()).not.toMatch(/Quantity—/);
 
         await ask.dblclick({ modifiers: ['Alt'] });
         await expect(tradingRail.getByRole('tab', { name: /^Orders 2$/ })).toBeVisible();
@@ -154,7 +148,7 @@ test('Futures Live is ready, keeps contracts visible and executes only mocked ge
             .filter({ hasText: 'ETHUSDT' });
         await expect(ethLongEntry).toContainText('BUY · LONG');
         await expect(ethLongEntry).toContainText('TypeLIMIT');
-        await expect(ethLongEntry).toContainText('NEW · SYNCED');
+        await expect(ethLongEntry).toContainText('NEW');
         await tradingRail.getByRole('tab', { name: 'Trade' }).click();
 
         const workstation = mainWindow.locator('.futures-production-workstation');
@@ -396,7 +390,7 @@ test('Ctrl and Alt double-right gestures bypass the native menu exactly once', a
     try {
         await mainWindow.getByTestId('market-mode-futures-live').click();
         await waitForLiveWorkstation(mainWindow, 'USDⓈ-M PRODUCTION · REAL MONEY');
-        const tradingRail = mainWindow.getByLabel('USDⓈ-M production real-order execution');
+        const tradingRail = mainWindow.getByLabel('Futures trading ticket');
         await expect(tradingRail.locator('.futures-production-readiness')).toContainText('READY');
         await electronApp.evaluate(({ BrowserWindow }) => {
             const [window] = BrowserWindow.getAllWindows();
@@ -419,14 +413,14 @@ test('Ctrl and Alt double-right gestures bypass the native menu exactly once', a
             .toHaveText('LONG exit');
         await expect(tradingRail.getByLabel('Exact limit price')).not.toHaveValue('');
         await expect(tradingRail.locator('.futures-production-order-summary'))
-            .toContainText('LONG leg');
+            .toContainText('Quantity');
         await expect(tradingRail.getByRole('tab', { name: /^Orders 2$/ })).toBeVisible();
         await tradingRail.getByRole('tab', { name: /^Orders 2$/ }).click();
         const btcLongExit = tradingRail.getByLabel('Current Futures orders')
             .locator('article')
             .filter({ hasText: 'SELL · LONG' });
         await expect(btcLongExit).toContainText('BTCUSDT');
-        await expect(btcLongExit).toContainText('NEW · SYNCED');
+        await expect(btcLongExit).toContainText('NEW');
         await tradingRail.getByRole('tab', { name: 'Trade' }).click();
 
         const contractList = mainWindow.locator('.futures-workstation-contract-list');
@@ -447,7 +441,7 @@ test('Ctrl and Alt double-right gestures bypass the native menu exactly once', a
             .locator('article')
             .filter({ hasText: 'ETHUSDT' });
         await expect(ethShortEntry).toContainText('SELL · SHORT');
-        await expect(ethShortEntry).toContainText('NEW · SYNCED');
+        await expect(ethShortEntry).toContainText('NEW');
 
         const nativeContextMenuCount = await electronApp.evaluate(({ BrowserWindow }) => {
             const [window] = BrowserWindow.getAllWindows();

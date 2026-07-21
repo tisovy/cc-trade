@@ -1,6 +1,7 @@
 export const TRADE_COMMAND_VERSION = 1;
 export const DEFAULT_ACCOUNT_ID = 'default';
 export const SPOT_MARKET_TYPE = 'spot';
+export const FUTURES_MARKET_TYPE = 'futures';
 
 export const TRADING_COMMAND_ACTIONS = Object.freeze({
     PLACE_ORDER: 'trade.placeOrder',
@@ -8,6 +9,7 @@ export const TRADING_COMMAND_ACTIONS = Object.freeze({
     REPLACE_ORDER: 'trade.replaceOrder',
     CANCEL_ALL: 'trade.cancelAll',
     ACCOUNT_REFRESH: 'account.refresh',
+    SET_TRADING_PAUSED: 'trade.setTradingPaused',
 });
 
 export const DEFAULT_SPOT_ORDER_TYPE = 'LIMIT';
@@ -148,6 +150,93 @@ export const createAccountRefreshCommand = ({
         symbol,
     }),
     ...compactObject({ symbol }),
+});
+
+export const createFuturesPlaceOrderCommand = ({
+    accountId,
+    clientOrderId,
+    symbol,
+    side,
+    orderType = DEFAULT_SPOT_ORDER_TYPE,
+    timeInForce = DEFAULT_SPOT_TIME_IN_FORCE,
+    price,
+    quantity,
+    positionSide,
+    reduceOnly,
+} = {}) => ({
+    ...buildBaseCommand({
+        action: TRADING_COMMAND_ACTIONS.PLACE_ORDER,
+        marketType: FUTURES_MARKET_TYPE,
+        accountId,
+        clientOrderId,
+        symbol,
+        side,
+    }),
+    symbol,
+    side,
+    orderType,
+    ...(orderType === 'LIMIT' ? { timeInForce, price: toOptionalString(price) } : {}),
+    quantity: toOptionalString(quantity),
+    ...compactObject({ positionSide }),
+    ...(reduceOnly === true ? { reduceOnly: true } : {}),
+});
+
+export const createFuturesCancelOrderCommand = ({
+    accountId,
+    clientOrderId,
+    symbol,
+    orderId,
+    origClientOrderId,
+} = {}) => ({
+    ...buildBaseCommand({
+        action: TRADING_COMMAND_ACTIONS.CANCEL_ORDER,
+        marketType: FUTURES_MARKET_TYPE,
+        accountId,
+        clientOrderId,
+        symbol,
+    }),
+    symbol,
+    ...compactObject({ orderId, origClientOrderId }),
+});
+
+export const createFuturesCancelAllCommand = ({
+    accountId,
+    clientOrderId,
+    symbol,
+} = {}) => ({
+    ...buildBaseCommand({
+        action: TRADING_COMMAND_ACTIONS.CANCEL_ALL,
+        marketType: FUTURES_MARKET_TYPE,
+        accountId,
+        clientOrderId,
+        symbol,
+    }),
+    symbol,
+});
+
+export const createFuturesAccountRefreshCommand = ({
+    accountId,
+    clientOrderId,
+    symbol,
+} = {}) => createAccountRefreshCommand({
+    accountId,
+    clientOrderId,
+    marketType: FUTURES_MARKET_TYPE,
+    symbol,
+});
+
+export const createFuturesSetTradingPausedCommand = ({
+    accountId,
+    clientOrderId,
+    paused,
+} = {}) => ({
+    ...buildBaseCommand({
+        action: TRADING_COMMAND_ACTIONS.SET_TRADING_PAUSED,
+        marketType: FUTURES_MARKET_TYPE,
+        accountId,
+        clientOrderId,
+    }),
+    paused: paused === true,
 });
 
 export const isTypedTradingAction = (action) => (

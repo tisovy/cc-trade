@@ -52,35 +52,21 @@ vi.mock('./hooks/useAlertContext', () => ({
   }),
 }))
 
-vi.mock('./hooks/useFuturesProductionExecution', () => ({
+vi.mock('./hooks/useFuturesTrading', () => ({
   default: ({ enabled }) => {
     mocks.futuresProductionEnabled.push(enabled)
     return {
       connected: false,
-      subscribed: false,
-      submissionLocked: false,
-      revision: null,
-      mode: null,
-      liveAuthorized: null,
-      configured: null,
-      account: null,
-      caps: null,
-      killSwitch: null,
-      capabilities: null,
-      intent: null,
-      attempt: null,
-      reconciliation: null,
-      recovery: null,
-      prepareOrderIntent: vi.fn(() => false),
+      balances: null,
+      openOrders: [],
+      positions: [],
+      lastExecution: null,
+      lastError: null,
       placeOrder: vi.fn(() => false),
-      prepareCancelAllOpenOrdersIntent: vi.fn(() => false),
-      cancelAllOpenOrders: vi.fn(() => false),
-      prepareClosePositionsIntent: vi.fn(() => false),
-      closePositions: vi.fn(() => false),
-      prepareEngageKillSwitchIntent: vi.fn(() => false),
-      engageKillSwitch: vi.fn(() => false),
-      prepareDisengageKillSwitchIntent: vi.fn(() => false),
-      disengageKillSwitch: vi.fn(() => false),
+      cancelOrder: vi.fn(() => false),
+      cancelAll: vi.fn(() => false),
+      closePosition: vi.fn(() => false),
+      refresh: vi.fn(() => false),
       ...(mocks.futuresProductionState ?? {}),
     }
   },
@@ -295,7 +281,7 @@ describe('App spot order payloads', () => {
     expect(screen.getByTestId('futures-live-banner')).toHaveTextContent(
       'USDⓈ-M FUTURESREAL MONEY · PRODUCTION',
     )
-    expect(screen.getByLabelText('USDⓈ-M production real-order execution')).toBeInTheDocument()
+    expect(screen.getByLabelText('Futures trading ticket')).toBeInTheDocument()
     expect(screen.queryByTestId('place-spot-order')).not.toBeInTheDocument()
     expect(mocks.futuresProductionEnabled.at(-1)).toBe(true)
     expect(mocks.sendMessage).toHaveBeenLastCalledWith({ action: 'disable_depth_view' })
@@ -361,8 +347,8 @@ describe('App spot order payloads', () => {
     expect(screen.getByTestId('futures-workstation-chart')).toBeInTheDocument()
     expect(screen.getByText('Contracts', { selector: '.futures-workstation-section-heading span' }))
       .toBeInTheDocument()
-    expect(screen.getByLabelText('USDⓈ-M production real-order execution'))
-      .toHaveTextContent('SYNCLoading private Futures account state')
+    expect(screen.getByLabelText('Futures trading ticket'))
+      .toHaveTextContent('CONTRACTSelect an active USDⓈ-M contract.')
     expect(screen.getByRole('slider', { name: 'Order size percent' })).toBeEnabled()
     expect(screen.getByLabelText('Futures order size and shortcuts'))
       .toHaveTextContent('25%— USDT')

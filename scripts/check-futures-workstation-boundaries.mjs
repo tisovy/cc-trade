@@ -298,8 +298,8 @@ if (!localWorkstationConnector.includes(exactLocalUrlSource)
 
 const appSource = fs.readFileSync(path.join(ROOT, 'src/App.jsx'), 'utf8');
 const productionWorkstationContainer = sources.get(PRODUCTION_WORKSTATION_CONTAINER) ?? '';
-if (!/useFuturesProductionExecution\(\{\s*enabled:\s*isFuturesLiveMode,\s*wsConnection,\s*\}\)/.test(appSource)
-    || !/<FuturesProductionWorkstation\s+enabled=\{isFuturesLiveMode\}\s+executionState=\{futuresProductionExecution\}\s+wsConnection=\{wsConnection\}\s+sendMessage=\{sendMessage\}\s*\/>/.test(appSource)
+if (!/useFuturesTrading\(\{\s*enabled:\s*isFuturesLiveMode,\s*wsConnection,\s*\}\)/.test(appSource)
+    || !/<FuturesProductionWorkstation\s+enabled=\{isFuturesLiveMode\}\s+executionState=\{futuresTrading\}\s+wsConnection=\{wsConnection\}\s+sendMessage=\{sendMessage\}\s*\/>/.test(appSource)
     || !/export const FuturesProductionWorkstation = \(\{\s*enabled,\s*executionState,\s*wsConnection,\s*sendMessage,\s*\}\) =>/.test(productionWorkstationContainer)
     || !/useFuturesProductionWorkstation\(\{\s*enabled,\s*symbol,\s*interval,\s*wsConnection,\s*sendMessage,\s*\}\)/.test(productionWorkstationContainer)
     || /useFutures(?:Local|Production)WorkstationConnection/.test(productionWorkstationContainer)) {

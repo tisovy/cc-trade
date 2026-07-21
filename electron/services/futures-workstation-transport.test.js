@@ -151,16 +151,21 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             headers: { authorization: 'forbidden' },
             proxy: 'http://attacker.invalid',
         });
-        const result = await transport.bootstrap({
+        const result = await transport.bootstrapIndependent({
             symbol: 'BTCUSDT',
             pair: 'BTCUSDT',
             interval: '1m',
             url: 'https://attacker.invalid',
             agent: {},
         });
+        const depthSnapshot = await transport.readDepthSnapshot({
+            symbol: 'BTCUSDT',
+            url: 'https://attacker.invalid',
+            agent: {},
+        });
+        expect(depthSnapshot).toBe(fixture.symbols.BTCUSDT.depthSnapshot);
         expect(Object.keys(result).sort()).toEqual([
             'contractKlines',
-            'depthSnapshot',
             'indexKlines',
             'markKlines',
             'premiumIndex',
@@ -189,7 +194,7 @@ describe('reviewed environment-specific Futures workstation transports', () => {
         }
     });
 
-    it('delivers completed bootstrap resources progressively with the same six REST reads', async () => {
+    it('delivers completed bootstrap resources progressively with the same five REST reads', async () => {
         const deliveries = [];
         let resolveTicker;
         globalThis.fetch = vi.fn((url) => {
@@ -207,7 +212,7 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             ));
         });
         let settled = false;
-        const pending = createFuturesProductionWorkstationReviewedTransport().bootstrap({
+        const pending = createFuturesProductionWorkstationReviewedTransport().bootstrapIndependent({
             symbol: 'BTCUSDT',
             pair: 'BTCUSDT',
             interval: '1m',
@@ -217,7 +222,7 @@ describe('reviewed environment-specific Futures workstation transports', () => {
 
         await vi.waitFor(() => {
             expect(resolveTicker).toBeTypeOf('function');
-            expect(deliveries).toHaveLength(5);
+            expect(deliveries).toHaveLength(4);
         });
         expect(settled).toBe(false);
         expect(deliveries.map(delivery => delivery.resource)).not.toContain('ticker');
@@ -228,8 +233,8 @@ describe('reviewed environment-specific Futures workstation transports', () => {
         expect(Object.keys(aggregate).sort()).toEqual(
             deliveries.map(delivery => delivery.resource).sort(),
         );
-        expect(new Set(deliveries.map(delivery => delivery.resource)).size).toBe(6);
-        expect(globalThis.fetch).toHaveBeenCalledTimes(6);
+        expect(new Set(deliveries.map(delivery => delivery.resource)).size).toBe(5);
+        expect(globalThis.fetch).toHaveBeenCalledTimes(5);
     });
 
     it('reads only the three candle snapshots for an interval-only bootstrap', async () => {
@@ -268,7 +273,7 @@ describe('reviewed environment-specific Futures workstation transports', () => {
         const controller = new AbortController();
         controller.abort();
 
-        await expect(transport.bootstrap({
+        await expect(transport.bootstrapIndependent({
             symbol,
             pair: symbol,
             interval: '1m',
@@ -311,10 +316,13 @@ describe('reviewed environment-specific Futures workstation transports', () => {
     it('rejects alternate symbols and intervals before network or socket creation', async () => {
         globalThis.fetch = vi.fn();
         const transport = createFuturesProductionWorkstationReviewedTransport();
-        await expect(transport.bootstrap({
+        await expect(transport.bootstrapIndependent({
             symbol: 'BTC/USDT',
             pair: 'BTCUSDT',
             interval: '1m',
+        })).rejects.toMatchObject({ code: 'INVALID_SELECTION' });
+        await expect(transport.readDepthSnapshot({
+            symbol: 'BTC/USDT',
         })).rejects.toMatchObject({ code: 'INVALID_SELECTION' });
         expect(() => transport.connect({
             symbol: 'BTCUSDT',
@@ -515,7 +523,7 @@ describe('reviewed environment-specific Futures workstation transports', () => {
         ['production', createFuturesProductionWorkstationReviewedTransport],
     ])('rejects a delivery-shaped %s pair before REST dispatch', async (_label, createTransport) => {
         globalThis.fetch = vi.fn();
-        await expect(createTransport().bootstrap({
+        await expect(createTransport().bootstrapIndependent({
             symbol: 'BTCUSDT_260925',
             pair: 'BTCUSDT_260925',
             interval: '1m',
@@ -567,8 +575,8 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             expect(proxyCalls[0].options.agent).toBeTruthy();
             expect(proxyCalls[0].options.agent).toMatchObject({
                 keepAlive: true,
-                maxSockets: 2,
-                maxFreeSockets: 1,
+                maxSockets: 8,
+                maxFreeSockets: 2,
             });
             expect(proxyCalls[0].options.signal).toBeInstanceOf(AbortSignal);
             expect(socketMock.instances).toHaveLength(3);
@@ -606,7 +614,7 @@ describe('reviewed environment-specific Futures workstation transports', () => {
         await expect(result).resolves.toMatchObject({ code: 'REQUEST_DEADLINE_EXCEEDED' });
     });
 
-    it('keeps production bootstrap REST bounded and cancels queued reads after failure', async () => {
+    it('keeps production bootstrap REST bounded and aborts sibling reads after failure', async () => {
         const failure = new Error('first bootstrap request failed');
         const calls = [];
         let failFirst;
@@ -621,18 +629,56 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             signal.addEventListener('abort', abort, { once: true });
             if (calls.length === 1) failFirst = () => reject(failure);
         }));
-        const pending = createFuturesProductionWorkstationReviewedTransport().bootstrap({
+        const pending = createFuturesProductionWorkstationReviewedTransport().bootstrapIndependent({
             symbol: 'BTCUSDT',
             pair: 'BTCUSDT',
             interval: '1m',
         });
-        await vi.waitFor(() => expect(calls).toHaveLength(
-            FUTURES_PRODUCTION_WORKSTATION_BOOTSTRAP_CONCURRENCY,
-        ));
+        await vi.waitFor(() => expect(calls).toHaveLength(5));
         failFirst();
         await expect(pending).rejects.toBe(failure);
         await Promise.resolve();
-        expect(calls).toHaveLength(FUTURES_PRODUCTION_WORKSTATION_BOOTSTRAP_CONCURRENCY);
+        expect(calls).toHaveLength(5);
+        expect(calls.slice(1).every(call => call.signal.aborted)).toBe(true);
+    });
+
+    it('retries a stalled bootstrap read on a fresh connection before failing the batch', async () => {
+        const stall = new Error('read ECONNRESET: network socket stalled');
+        const calls = [];
+        globalThis.fetch = vi.fn((url, { signal }) => new Promise((resolve, reject) => {
+            calls.push({
+                url,
+                signal,
+                succeed: () => resolve(responseFor(url.href, FUTURES_PRODUCTION_WORKSTATION_FIXTURE)),
+                stall: () => reject(stall),
+            });
+            const abort = () => {
+                const error = new Error('aborted');
+                error.name = 'AbortError';
+                reject(error);
+            };
+            signal.addEventListener('abort', abort, { once: true });
+        }));
+        const timings = [];
+        const pending = createFuturesProductionWorkstationReviewedTransport({
+            onTiming: timing => timings.push(timing),
+        }).bootstrapIndependent({
+            symbol: 'BTCUSDT',
+            pair: 'BTCUSDT',
+            interval: '1m',
+        });
+
+        await vi.waitFor(() => expect(calls).toHaveLength(5));
+        calls[0].stall();
+        // The stalled read is retried on a fresh request while its four
+        // siblings stay alive.
+        await vi.waitFor(() => expect(calls).toHaveLength(6));
+        expect(calls.slice(1, 5).every(call => call.signal.aborted)).toBe(false);
+        for (const call of calls.slice(1)) call.succeed();
+        await expect(pending).resolves.toBeTruthy();
+        expect(timings.some(timing => (
+            timing.phase.endsWith('-retry') && timing.outcome === 'ok'
+        ))).toBe(true);
     });
 
     it('aborts active and queued reads when a progressive resource observer rejects data', async () => {
@@ -655,21 +701,19 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             }
         }));
         const observer = vi.fn(() => { throw observerFailure; });
-        const pending = createFuturesProductionWorkstationReviewedTransport().bootstrap({
+        const pending = createFuturesProductionWorkstationReviewedTransport().bootstrapIndependent({
             symbol: 'BTCUSDT',
             pair: 'BTCUSDT',
             interval: '1m',
             onBootstrapResource: observer,
         });
 
-        await vi.waitFor(() => expect(calls).toHaveLength(
-            FUTURES_PRODUCTION_WORKSTATION_BOOTSTRAP_CONCURRENCY,
-        ));
+        await vi.waitFor(() => expect(calls).toHaveLength(5));
         resolveFirst();
         await expect(pending).rejects.toBe(observerFailure);
         await Promise.resolve();
         expect(observer).toHaveBeenCalledOnce();
-        expect(calls).toHaveLength(FUTURES_PRODUCTION_WORKSTATION_BOOTSTRAP_CONCURRENCY);
+        expect(calls).toHaveLength(5);
         expect(calls[0].signal.aborted).toBe(false);
         expect(calls.slice(1).every(call => call.signal.aborted)).toBe(true);
     });
@@ -867,6 +911,24 @@ describe('reviewed environment-specific Futures workstation transports', () => {
         });
         expect(Object.isFrozen(FUTURES_PRODUCTION_WORKSTATION_ROUTES)).toBe(true);
         expect(Object.isFrozen(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS)).toBe(true);
-        expect(FUTURES_PRODUCTION_WORKSTATION_BOOTSTRAP_CONCURRENCY).toBe(3);
+        expect(FUTURES_PRODUCTION_WORKSTATION_BOOTSTRAP_CONCURRENCY).toBe(6);
+    });
+
+    it('reports depth snapshot reads with a distinct retry phase', async () => {
+        const timings = [];
+        globalThis.fetch = vi.fn(async url => responseFor(
+            url.href,
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE,
+        ));
+        const transport = createFuturesProductionWorkstationReviewedTransport({
+            onTiming: timing => timings.push(timing),
+        });
+        await transport.readDepthSnapshot({ symbol: 'BTCUSDT' });
+        await transport.readDepthSnapshot({ symbol: 'BTCUSDT', retryAttempt: 1 });
+        expect(timings.map(timing => timing.phase)).toEqual(['depth', 'depth-retry']);
+        expect(timings.every(timing => timing.outcome === 'ok')).toBe(true);
+        const depthCalls = globalThis.fetch.mock.calls.map(([url]) => new URL(url.href));
+        expect(depthCalls.every(url => url.pathname === '/fapi/v1/depth'
+            && url.searchParams.get('limit') === '1000')).toBe(true);
     });
 });

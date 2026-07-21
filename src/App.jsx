@@ -25,7 +25,7 @@ import {
   createSpotCancelOrderCommand,
   createSpotPlaceOrderCommand,
 } from './utils/tradingCommands';
-import useFuturesProductionExecution from './hooks/useFuturesProductionExecution';
+import useFuturesTrading from './hooks/useFuturesTrading';
 
 // View types
 const VIEWS = {
@@ -100,7 +100,7 @@ function AppShell() {
   const [quickSwitch, setQuickSwitch] = useState({ visible: false, mode: 'pair', query: '', selectedIndex: 0 });
   const [marketMode, setMarketMode] = useState(MARKET_MODES.SPOT);
   const isFuturesLiveMode = marketMode === MARKET_MODES.FUTURES_LIVE;
-  const futuresProductionExecution = useFuturesProductionExecution({
+  const futuresTrading = useFuturesTrading({
     enabled: isFuturesLiveMode,
     wsConnection,
   });
@@ -531,7 +531,7 @@ function AppShell() {
           <FuturesModeBanner />
           <FuturesProductionWorkstation
             enabled={isFuturesLiveMode}
-            executionState={futuresProductionExecution}
+            executionState={futuresTrading}
             wsConnection={wsConnection}
             sendMessage={sendMessage}
           />

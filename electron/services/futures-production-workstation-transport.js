@@ -39,7 +39,8 @@ export const FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS = Object.freeze({
 });
 
 export const FUTURES_PRODUCTION_WORKSTATION_EXCHANGE_INFO_CACHE_TTL_MS = 5 * 60_000;
-export const FUTURES_PRODUCTION_WORKSTATION_BOOTSTRAP_CONCURRENCY = 3;
+export const FUTURES_PRODUCTION_WORKSTATION_BOOTSTRAP_CONCURRENCY = 6;
+export const FUTURES_PRODUCTION_WORKSTATION_RESOURCE_RETRIES = 2;
 
 const ROUTE_SET = new Set(Object.values(FUTURES_PRODUCTION_WORKSTATION_ROUTES));
 const PUBLIC_READ_BUDGET = new FuturesWorkstationReadBudget({
@@ -117,13 +118,13 @@ const resolveProductionBackendProxy = () => {
         const agent = parsed.protocol.startsWith('socks')
             ? new SocksProxyAgent(proxyUrl, {
                 keepAlive: true,
-                maxSockets: 2,
-                maxFreeSockets: 1,
+                maxSockets: 8,
+                maxFreeSockets: 2,
             })
             : new HttpsProxyAgent(proxyUrl, {
                 keepAlive: true,
-                maxSockets: 2,
-                maxFreeSockets: 1,
+                maxSockets: 8,
+                maxFreeSockets: 2,
             });
         return Object.freeze({ proxyAgent: agent, errorCode: null });
     } catch {
@@ -445,13 +446,25 @@ export const createFuturesProductionWorkstationReviewedTransport = ({
         }
         return waitAndReport(EXCHANGE_INFO_CACHE.inFlight, cache);
     };
+    const readDepthSnapshot = async ({ symbol, signal, retryAttempt = 0 } = {}) => {
+        if (!isBoundedExchangeIdentity(symbol, SYMBOL_PATTERN)) fail('INVALID_SELECTION');
+        return timedWeightedGet(
+            retryAttempt > 0 ? 'depth-retry' : 'depth',
+            FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.DEPTH_1000,
+            FUTURES_PRODUCTION_WORKSTATION_ROUTES.DEPTH,
+            { symbol, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.DEPTH) },
+            FUTURES_WORKSTATION_BODY_LIMITS.DEPTH,
+            signal,
+            backendProxy,
+        );
+    };
     const readBootstrapResources = async ({
         symbol,
         pair,
         interval,
         signal,
         onBootstrapResource,
-        includeInvariantResources,
+        includeHeaderResources,
     } = {}) => {
         assertSelection(symbol, interval);
         if (!isBoundedExchangeIdentity(pair, PAIR_PATTERN)) fail('INVALID_SELECTION');
@@ -472,33 +485,52 @@ export const createFuturesProductionWorkstationReviewedTransport = ({
             }
             return value;
         };
-        const readResource = (
+        // A single stalled connection on a lossy network reaches the 10s
+        // deadline while its five siblings finish in well under a second.
+        // Retrying just that read on a fresh connection almost always succeeds
+        // immediately, so only a deadline/network stall defers the batch abort
+        // until its retries exhaust; every other failure aborts as before.
+        const isRetryableReadFailure = error => (
+            error?.code === 'REQUEST_DEADLINE_EXCEEDED'
+            || /ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|socket|network/i.test(error?.message ?? '')
+        );
+        const readResource = async (
             resource,
             phase,
             weight,
             pathname,
             parameters,
             bodyLimit,
-        ) => timedWeightedGet(
-            phase,
-            weight,
-            pathname,
-            parameters,
-            bodyLimit,
-            batchController.signal,
-            backendProxy,
-            abortBatch,
-            value => deliver(resource, value),
-        );
+        ) => {
+            for (let attempt = 0; ; attempt += 1) {
+                try {
+                    return await timedWeightedGet(
+                        attempt > 0 ? `${phase}-retry` : phase,
+                        weight,
+                        pathname,
+                        parameters,
+                        bodyLimit,
+                        batchController.signal,
+                        backendProxy,
+                        undefined,
+                        value => deliver(resource, value),
+                    );
+                } catch (error) {
+                    if (attempt >= FUTURES_PRODUCTION_WORKSTATION_RESOURCE_RETRIES
+                        || batchController.signal.aborted
+                        || !isRetryableReadFailure(error)) {
+                        abortBatch(error);
+                        throw error;
+                    }
+                }
+            }
+        };
         const resources = [
             ['contractKlines', 'contract-klines', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.KLINES_99, FUTURES_PRODUCTION_WORKSTATION_ROUTES.KLINES, { symbol, interval, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES],
             ['markKlines', 'mark-klines', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.MARK_KLINES_99, FUTURES_PRODUCTION_WORKSTATION_ROUTES.MARK_KLINES, { symbol, interval, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES],
             ['indexKlines', 'index-klines', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.INDEX_KLINES_99, FUTURES_PRODUCTION_WORKSTATION_ROUTES.INDEX_KLINES, { pair, interval, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES],
         ];
-        if (includeInvariantResources) {
-            resources.unshift(
-                ['depthSnapshot', 'depth', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.DEPTH_1000, FUTURES_PRODUCTION_WORKSTATION_ROUTES.DEPTH, { symbol, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.DEPTH) }, FUTURES_WORKSTATION_BODY_LIMITS.DEPTH],
-            );
+        if (includeHeaderResources) {
             resources.push(
                 ['premiumIndex', 'premium-index', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.PREMIUM_INDEX_SYMBOL, FUTURES_PRODUCTION_WORKSTATION_ROUTES.PREMIUM_INDEX, { symbol }, FUTURES_WORKSTATION_BODY_LIMITS.HEADER],
                 ['ticker', 'ticker', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.TICKER_SYMBOL, FUTURES_PRODUCTION_WORKSTATION_ROUTES.TICKER, { symbol }, FUTURES_WORKSTATION_BODY_LIMITS.HEADER],
@@ -527,13 +559,14 @@ export const createFuturesProductionWorkstationReviewedTransport = ({
         kind: 'reviewed-production-public-read',
         now: () => Date.now(),
         loadExchangeInfo,
-        bootstrap: options => readBootstrapResources({
+        readDepthSnapshot,
+        bootstrapIndependent: options => readBootstrapResources({
             ...options,
-            includeInvariantResources: true,
+            includeHeaderResources: true,
         }),
         bootstrapInterval: options => readBootstrapResources({
             ...options,
-            includeInvariantResources: false,
+            includeHeaderResources: false,
         }),
         connect: ({
             symbol,

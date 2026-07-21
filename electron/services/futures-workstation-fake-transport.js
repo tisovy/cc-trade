@@ -53,13 +53,19 @@ export const createFuturesWorkstationFakeTransport = ({
             throwIfAborted(signal);
             return fixture.catalog;
         },
-        bootstrap: async ({ symbol, signal } = {}) => {
+        readDepthSnapshot: async ({ symbol, signal } = {}) => {
+            throwIfAborted(signal);
+            const value = readSymbol(symbol);
+            await Promise.resolve();
+            throwIfAborted(signal);
+            return value.depthSnapshot;
+        },
+        bootstrapIndependent: async ({ symbol, signal } = {}) => {
             throwIfAborted(signal);
             const value = readSymbol(symbol);
             await Promise.resolve();
             throwIfAborted(signal);
             return Object.freeze({
-                depthSnapshot: value.depthSnapshot,
                 contractKlines: value.contractKlines,
                 markKlines: value.markKlines,
                 indexKlines: value.indexKlines,

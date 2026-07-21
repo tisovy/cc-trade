@@ -2,7 +2,7 @@ import { createEvent, fireEvent, render, screen, within } from '@testing-library
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import FuturesWorkstationView from './FuturesWorkstationView.jsx'
 import FuturesProductionWorkstation from './FuturesProductionWorkstation.jsx'
-import FuturesProductionExecutionTicket from './FuturesProductionExecutionTicket.jsx'
+import FuturesTradingTicket from './FuturesTradingTicket.jsx'
 
 const workstationViewMocks = vi.hoisted(() => ({
   chartRender: vi.fn(),
@@ -31,18 +31,17 @@ vi.mock('./FuturesWorkstationChart.jsx', async () => {
   return { default: memo(MockFuturesWorkstationChart) }
 })
 
-vi.mock('./FuturesProductionExecutionTicket.jsx', async () => {
+vi.mock('./FuturesTradingTicket.jsx', async () => {
   const { memo } = await import('react')
-  const MockFuturesProductionExecutionTicket = () => {
+  const MockFuturesTradingTicket = () => {
     workstationViewMocks.ticketRender()
     return (
-      <aside aria-label="USDⓈ-M production real-order execution">
-        <span>CONFIG SYNC</span>
-        <span>Advanced safety</span>
+      <aside aria-label="Futures trading ticket">
+        <span>SYNC</span>
       </aside>
     )
   }
-  return { default: memo(MockFuturesProductionExecutionTicket) }
+  return { default: memo(MockFuturesTradingTicket) }
 })
 
 const filters = Object.freeze({
@@ -588,7 +587,7 @@ describe('production workstation container', () => {
         {...stableProperties}
         state={currentState}
         tradingRail={(
-          <FuturesProductionExecutionTicket
+          <FuturesTradingTicket
             state={productionExecutionState}
             selectedSymbol="BTCUSDT"
           />
@@ -633,7 +632,7 @@ describe('production workstation container', () => {
     expect(workstationViewMocks.chartRender).toHaveBeenCalledTimes(initialChartRenders)
   })
 
-  it('places the compact execution ticket in the market rail and removes the old drawer', () => {
+  it('places the compact trading ticket in the market rail and removes the old drawer', () => {
     render(
       <FuturesProductionWorkstation
         enabled={false}
@@ -643,9 +642,8 @@ describe('production workstation container', () => {
       />,
     )
     expect(screen.queryByText('Phase 7 production safety drawer')).not.toBeInTheDocument()
-    expect(screen.getByText('CONFIG SYNC')).toBeInTheDocument()
-    expect(screen.getByText('Advanced safety')).toBeInTheDocument()
-    expect(screen.getByLabelText('USDⓈ-M production real-order execution')).toBeInTheDocument()
+    expect(screen.queryByText('Advanced safety')).not.toBeInTheDocument()
+    expect(screen.getByLabelText('Futures trading ticket')).toBeInTheDocument()
   })
 
   it('does not duplicate the backend authoritative portfolio bootstrap in the renderer', () => {

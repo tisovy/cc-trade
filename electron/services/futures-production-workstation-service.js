@@ -70,7 +70,8 @@ export class FuturesProductionWorkstationService {
     } = {}) {
         if (!transport
             || typeof transport.loadExchangeInfo !== 'function'
-            || typeof transport.bootstrap !== 'function'
+            || typeof transport.bootstrapIndependent !== 'function'
+            || typeof transport.readDepthSnapshot !== 'function'
             || typeof transport.bootstrapInterval !== 'function'
             || typeof transport.connect !== 'function'
             || typeof transport.close !== 'function'
@@ -252,6 +253,13 @@ export class FuturesProductionWorkstationService {
         );
     }
 
+    delay(durationMs) {
+        return new Promise((resolve) => {
+            const timer = this.clock.setTimeout(resolve, durationMs);
+            timer?.unref?.();
+        });
+    }
+
     emitAggregateTiming(session, outcome) {
         try {
             const finishedAt = this.clock.now();
@@ -318,6 +326,8 @@ export class FuturesProductionWorkstationService {
         this.current = session;
         this.emitStatus(session, FUTURES_WORKSTATION_STATES.LOADING, false, null);
 
+        let bootstrapAbort = null;
+        let releaseBootstrapAbort = null;
         try {
             const exchangeInfo = await this.transport.loadExchangeInfo({
                 signal: session.abortController.signal,
@@ -358,27 +368,27 @@ export class FuturesProductionWorkstationService {
                 || typeof session.stream.ready?.then !== 'function') {
                 throw new FuturesProductionWorkstationServiceError('INVALID_STREAM_HANDLE');
             }
-            if (session.reconnectTimer !== null) {
-                session.stream.close();
-                session.stream = null;
-                return;
-            }
-            const streamReady = await session.stream.ready;
-            if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
-            if (streamReady !== true) {
-                this.scheduleResync(session, 'SOCKET_NOT_READY');
-                return;
+            // Bootstrap reads are scoped to their own controller so an early
+            // return or resync aborts them without tearing down the session.
+            bootstrapAbort = new AbortController();
+            const abortBootstrapFromSession = () => bootstrapAbort.abort();
+            if (session.abortController.signal.aborted) abortBootstrapFromSession();
+            else {
+                session.abortController.signal.addEventListener(
+                    'abort',
+                    abortBootstrapFromSession,
+                    { once: true },
+                );
+                releaseBootstrapAbort = () => session.abortController.signal.removeEventListener(
+                    'abort',
+                    abortBootstrapFromSession,
+                );
             }
             const deliveredBootstrapResources = new Set();
             const deliverBootstrapResource = ({ resource, value } = {}) => {
                 if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
                 if (deliveredBootstrapResources.has(resource)) return;
-                if (resource === 'depthSnapshot') {
-                    session.bootstrapDepthSnapshot = normalizeFuturesWorkstationDepthSnapshot(
-                        value,
-                        session.symbol,
-                    );
-                } else if (resource === 'contractKlines') {
+                if (resource === 'contractKlines') {
                     session.candles = normalizeFuturesWorkstationKlines(value);
                     session.lastCandlesAt = this.observedNow(session);
                     this.emitCandleSeries(session, 'contract', session.candles);
@@ -423,16 +433,43 @@ export class FuturesProductionWorkstationService {
                     );
                 }
             };
-            const bootstrap = await this.transport.bootstrap({
+            // The five socket-independent reads start immediately, concurrent
+            // with the WebSocket handshakes. The rejection is observed here so
+            // an early return below cannot surface an unhandled rejection; the
+            // await further down still rethrows.
+            const independentReads = this.transport.bootstrapIndependent({
                 symbol: session.symbol,
                 pair: session.pair,
                 interval: session.interval,
-                signal: session.abortController.signal,
+                signal: bootstrapAbort.signal,
                 onBootstrapResource: deliverBootstrapResource,
             });
+            independentReads.catch(() => {});
+            if (session.reconnectTimer !== null) {
+                session.stream.close();
+                session.stream = null;
+                return;
+            }
+            const streamReady = await session.stream.ready;
+            if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
+            if (streamReady !== true) {
+                this.scheduleResync(session, 'SOCKET_NOT_READY');
+                return;
+            }
+            // The depth snapshot must be taken only after the depth socket is
+            // open so buffered diffs can bridge it.
+            const depthValue = await this.transport.readDepthSnapshot({
+                symbol: session.symbol,
+                signal: bootstrapAbort.signal,
+            });
+            if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
+            session.bootstrapDepthSnapshot = normalizeFuturesWorkstationDepthSnapshot(
+                depthValue,
+                session.symbol,
+            );
+            const bootstrap = await independentReads;
             if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
             for (const resource of [
-                'depthSnapshot',
                 'contractKlines',
                 'markKlines',
                 'indexKlines',
@@ -441,7 +478,28 @@ export class FuturesProductionWorkstationService {
             ]) {
                 deliverBootstrapResource({ resource, value: bootstrap?.[resource] });
             }
-            const bookResult = session.orderBook.bootstrap(session.bootstrapDepthSnapshot);
+            let bookResult = session.orderBook.bootstrap(session.bootstrapDepthSnapshot);
+            let depthRetryAttempt = 0;
+            while (!bookResult.live && depthRetryAttempt < 3) {
+                // A missed bridge follows Binance's documented depth-sync
+                // algorithm: keep the sockets and re-arm the diff buffer in the
+                // same tick, wait for fresh diffs, then take a newer snapshot.
+                session.orderBook.beginBootstrap();
+                depthRetryAttempt += 1;
+                await this.delay(200 * (2 ** (depthRetryAttempt - 1)));
+                if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
+                const retryValue = await this.transport.readDepthSnapshot({
+                    symbol: session.symbol,
+                    signal: bootstrapAbort.signal,
+                    retryAttempt: depthRetryAttempt,
+                });
+                if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
+                session.bootstrapDepthSnapshot = normalizeFuturesWorkstationDepthSnapshot(
+                    retryValue,
+                    session.symbol,
+                );
+                bookResult = session.orderBook.bootstrap(session.bootstrapDepthSnapshot);
+            }
             if (!bookResult.live) {
                 throw new FuturesProductionWorkstationServiceError('DEPTH_BOOTSTRAP_GAP');
             }
@@ -470,6 +528,11 @@ export class FuturesProductionWorkstationService {
             this.emitAggregateTiming(session, 'error');
             this.onInternalError({ phase: 'bootstrap', code: safeCode(error) });
             this.scheduleResync(session, safeCode(error));
+        } finally {
+            // Any bootstrap read still in flight after this generation settles
+            // (success, resync, or teardown) is abandoned.
+            bootstrapAbort?.abort();
+            releaseBootstrapAbort?.();
         }
     }
 

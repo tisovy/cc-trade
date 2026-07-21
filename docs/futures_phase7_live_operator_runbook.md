@@ -1,10 +1,25 @@
 # Phase 7 Live Futures Operator Runbook
 
+> **RETIRED 2026-07-21.** The guarded production execution subsystem this
+> runbook describes was removed in favor of the spot-parity futures path —
+> see `docs/futures_trading.md`. Kept for history only.
+
 Date: 2026-07-14
 
 Updated: 2026-07-16 — Futures Testnet is retired. This is now a Spot → stopped
 process → Futures production runbook; legacy `FUTURES_TESTNET_*` and `FUTURES_READ_*`
 values are scrubbed and cannot enable a Testnet runtime.
+
+Updated: 2026-07-21 — Reviewed ceiling change. The compiled order/daily notional
+ceilings are raised from 10/50 USDT to 10000/100000 USDT so that exchange
+minimum-notional filters (for example 100 USDT on BTCUSDT) no longer make every
+major contract untradeable. The operator-configured
+`FUTURES_PRODUCTION_EXECUTION_MAX_ORDER_NOTIONAL_USDT` /
+`FUTURES_PRODUCTION_EXECUTION_MAX_DAILY_NOTIONAL_USDT` values remain the
+authoritative caps and must be set deliberately; the compiled values are only
+sanity ceilings. Leverage remains compiled at exactly 2x. The ARM LIVE phrase no
+longer encodes cap numbers; the Advanced safety panel displays the exact
+configured caps that arming approves.
 
 This runbook covers manual USDⓈ-M production verification after the operator's explicit live authorization. Automated tests and development verification must still use deterministic fakes and must never send a production request.
 
@@ -26,8 +41,8 @@ FUTURES_PRODUCTION_EXECUTION_OPERATOR_ACKNOWLEDGEMENT=I_UNDERSTAND_REAL_USDT_FUT
 FUTURES_PRODUCTION_EXECUTION_ACCOUNT_ALIAS=<exact signed Binance account alias>
 FUTURES_PRODUCTION_EXECUTION_API_KEY_FINGERPRINT=<lowercase SHA-256 of the exact API key>
 FUTURES_PRODUCTION_EXECUTION_MAX_LEVERAGE=2
-FUTURES_PRODUCTION_EXECUTION_MAX_ORDER_NOTIONAL_USDT=<exact positive decimal, max 10>
-FUTURES_PRODUCTION_EXECUTION_MAX_DAILY_NOTIONAL_USDT=<exact positive decimal, max 50>
+FUTURES_PRODUCTION_EXECUTION_MAX_ORDER_NOTIONAL_USDT=<exact positive decimal, max 10000>
+FUTURES_PRODUCTION_EXECUTION_MAX_DAILY_NOTIONAL_USDT=<exact positive decimal, max 100000>
 FUTURES_PRODUCTION_EXECUTION_MIN_AVAILABLE_BALANCE_USDT=<exact positive decimal>
 FUTURES_PRODUCTION_EXECUTION_MIN_LIQUIDATION_DISTANCE_BPS=<1000..10000>
 FUTURES_PRODUCTION_EXECUTION_KILL_SWITCH_POLICY=v1-persistent-block-new-exposure
@@ -59,8 +74,8 @@ If the startup log still reports `SAFE_STORAGE_UNAVAILABLE` or `UNSAFE_STORAGE_B
 3. **Live readiness launch:** inject the complete production environment through the trusted launcher and start normally, with no operator-action argument. A valid live configuration performs exact signed production identity/recovery GETs during startup. It does not place, cancel, or close an order automatically. The persistent kill switch starts engaged.
 4. Select red `Futures`. Open `Advanced safety` and verify the backend-owned account alias, full key fingerprint, leverage/order/daily caps, UTC usage, `CONFIGURED`, `LIVE LOCKED`, healthy recovery, and `KILL SWITCH ENGAGED`. A selected symbol is admitted only after a fresh Binance `TRADING` / perpetual / USDT preflight and exact account-symbol checks; neither the public Contracts catalog nor launcher text authorizes a write. No retired Phase 5/6/Testnet ticket may be present.
 5. Resolve any rejected identity, storage, recovery, rate-pause, credential-binding, or cap state before proceeding. Do not bypass it by deleting state or rotating to a fresh directory.
-6. Only after the displayed identity and exact Hedge / Isolated / 2x / 10 USDT / 50 USDT caps are approved, click `Prepare ARM LIVE intent`. Type exactly `ARM LIVE FUTURES HEDGE ISOLATED 2X 10 USDT 50 USDT DAILY`, then click `ARM LIVE FUTURES`. Enter never submits. The backend must report `LIVE ARMED`, `KILL SWITCH DISENGAGED`, and `kill_switch_disengaged`; the UI does not place, cancel, or close anything during arming.
-7. Every real order, cancel-all, close-positions, and kill-switch action still requires its own backend one-use intent and exact bound confirmation. Gesture execution finalizes only the exact immutable draft returned by that intent; typed confirmation remains mandatory where the safety UI explicitly asks for it. Never interpret an acknowledgement, partial result, timeout, or unknown result as a completed safety action. At the 10 USDT ceiling, exchange quantity/minimum-notional filters may make a selected symbol unavailable; that is a local rejection, not a reason to bypass or raise a cap without a new review.
+6. Only after the displayed identity and the exact Hedge / Isolated / 2x profile with the displayed configured order/daily caps are approved, click `Prepare ARM LIVE intent`. Type exactly `ARM LIVE FUTURES HEDGE ISOLATED 2X WITHIN CONFIGURED CAPS`, then click `ARM LIVE FUTURES`. Enter never submits. The backend must report `LIVE ARMED`, `KILL SWITCH DISENGAGED`, and `kill_switch_disengaged`; the UI does not place, cancel, or close anything during arming.
+7. Every real order, cancel-all, close-positions, and kill-switch action still requires its own backend one-use intent and exact bound confirmation. Gesture execution finalizes only the exact immutable draft returned by that intent; typed confirmation remains mandatory where the safety UI explicitly asks for it. Never interpret an acknowledgement, partial result, timeout, or unknown result as a completed safety action. If the configured order cap is below an exchange quantity/minimum-notional filter, the selected symbol stays unavailable; that is a local rejection, and raising the configured cap (never above the compiled ceiling) is the reviewed response.
 8. Re-engage the kill switch from its dedicated production UI action or by a reviewed backend startup action. Engaging it blocks new exposure; it does not imply cancellation or closure.
 
 The backend `--futures-production-operator-action=disengageKillSwitch` path remains an authorized operational-recovery mechanism, not the normal arming workflow. `reconcile` remains backend-only.

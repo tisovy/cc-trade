@@ -5,15 +5,9 @@ import { fileURLToPath } from 'url'
 import { shouldOpenDevTools } from './devtools.js'
 import { setupBinanceConnection } from './services/binance-connection.js'
 import {
-    captureFuturesProductionExecutionConfig,
-} from './services/futures-production-execution-config.js'
-import {
     createLocalWebSocketAccess,
 } from './services/local-websocket-access.js'
 import { captureE2eMockWebSocketAccess } from './e2e-websocket-route.js'
-import {
-    createE2eFuturesProductionExecutionRuntime,
-} from './e2e-futures-production-execution-runtime.js'
 import {
     createRendererRuntime,
     createRendererRuntimeRegistry,
@@ -35,11 +29,6 @@ import {
 
 registerRendererAppProtocolScheme(protocol)
 
-const futuresProductionExecutionConfig = captureFuturesProductionExecutionConfig({
-    forceDisabled: true,
-    liveAuthorized: false,
-})
-
 const rendererDevServerUrl = resolveTrustedRendererDevServerUrl({
     value: process.env.VITE_DEV_SERVER_URL,
     isPackaged: app.isPackaged,
@@ -53,7 +42,6 @@ const localWebSocketAccess = {
 };
 const rendererWebSocketAccess = captureE2eMockWebSocketAccess(process.env) || localWebSocketAccess
 const rendererRuntimeRegistry = createRendererRuntimeRegistry(ipcMain)
-const futuresProductionExecutionRuntime = createE2eFuturesProductionExecutionRuntime()
 
 const processFetch = globalThis.fetch?.bind(globalThis)
 globalThis.fetch = async (input, init) => {
@@ -78,8 +66,6 @@ globalThis.fetch = async (input, init) => {
 
 const binanceController = setupBinanceConnection({
     localWebSocketAccess,
-    futuresProductionExecutionConfig,
-    futuresProductionExecutionRuntime,
 });
 let hasCompletedBinanceShutdown = false
 let binanceShutdownPromise = null
