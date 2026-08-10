@@ -18,7 +18,11 @@ import {
 export const FUTURES_WORKSTATION_MARKET_LIMITS = Object.freeze({
     CATALOG_CONTRACTS: 1_024,
     CATALOG_FRAME_CONTRACTS: 8,
+    // How many candles the live session keeps in memory. History is delivered
+    // straight through to the renderer and never enters this cache.
     CANDLES: 500,
+    // The largest klines response the contract will accept — one history page.
+    KLINES_RESPONSE: 1_000,
     RENDERER_CANDLES: 80,
     TRADES: 512,
     RENDERER_TRADES: 32,
@@ -399,7 +403,7 @@ export const normalizeFuturesWorkstationKlines = (text) => {
         maxNodes: 16_384,
     });
     if (!Array.isArray(payload)
-        || payload.length > FUTURES_WORKSTATION_MARKET_LIMITS.CANDLES) {
+        || payload.length > FUTURES_WORKSTATION_MARKET_LIMITS.KLINES_RESPONSE) {
         fail('INVALID_KLINES');
     }
     const seen = new Set();

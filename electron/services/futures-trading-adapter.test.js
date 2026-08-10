@@ -4,9 +4,12 @@ import { createHmac } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
     FuturesTradingAdapter,
-    buildFuturesMockOrderPlacementExecutionReport,
+    describeFuturesApiError,
+    normalizeFuturesAlgoOrder,
     normalizeFuturesBalances,
     normalizeFuturesExecutionReport,
+    normalizeFuturesHistoryOrder,
+    normalizeFuturesHistoryTrade,
     normalizeFuturesPositions,
     normalizeFuturesUserDataStreamEvent,
     parseFuturesExchangeFilters,
@@ -14,19 +17,34 @@ import {
 
 const requests = [];
 
+// The mock can answer with a status, refuse at the transport, or time out, so
+// the three outcomes a mutating command must tell apart are all reachable here.
 vi.mock('node:https', () => ({
     default: {
         request: (url, options, onResponse) => {
             const chunks = [];
+            const listeners = {};
             const request = {
-                on: vi.fn(),
+                on: (event, handler) => {
+                    listeners[event] = handler;
+                    return request;
+                },
                 write: chunk => chunks.push(chunk),
                 end: () => {
                     const record = { url: String(url), options, body: chunks.join('') };
                     requests.push(record);
+                    const transport = globalThis.__futuresTestTransport ?? null;
+                    if (transport === 'timeout') {
+                        queueMicrotask(() => listeners.timeout?.());
+                        return;
+                    }
+                    if (transport) {
+                        queueMicrotask(() => listeners.error?.(transport));
+                        return;
+                    }
                     const handlers = {};
                     const response = {
-                        statusCode: 200,
+                        statusCode: globalThis.__futuresTestStatus ?? 200,
                         on: (event, handler) => {
                             handlers[event] = handler;
                         },
@@ -38,7 +56,11 @@ vi.mock('node:https', () => ({
                         handlers.end?.();
                     });
                 },
-                destroy: vi.fn(),
+                // Node emits `error` with the destroy reason, which is how the
+                // timeout handler's own error reaches the caller.
+                destroy: (error) => {
+                    queueMicrotask(() => listeners.error?.(error));
+                },
             };
             return request;
         },
@@ -54,6 +76,8 @@ const createAdapter = () => new FuturesTradingAdapter({
 afterEach(() => {
     requests.length = 0;
     delete globalThis.__futuresTestResponse;
+    delete globalThis.__futuresTestStatus;
+    delete globalThis.__futuresTestTransport;
     vi.restoreAllMocks();
 });
 
@@ -94,6 +118,64 @@ describe('FuturesTradingAdapter signing', () => {
         expect(params.get('timestamp')).toMatch(/^\d+$/);
     });
 
+    it('amends a live order in place with a signed PUT instead of cancel and re-place', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        await adapter.modifyOrder({
+            symbol: 'BTCUSDT',
+            side: 'BUY',
+            orderId: 11,
+            numericQuantity: 0.004,
+            numericPrice: 58500,
+        });
+
+        expect(requests).toHaveLength(1);
+        const [amendment] = requests;
+        expect(amendment.options.method).toBe('PUT');
+        expect(amendment.url.endsWith('/fapi/v1/order')).toBe(true);
+        const params = new URLSearchParams(
+            amendment.body.slice(0, amendment.body.lastIndexOf('&signature=')),
+        );
+        expect(params.get('symbol')).toBe('BTCUSDT');
+        expect(params.get('side')).toBe('BUY');
+        expect(params.get('orderId')).toBe('11');
+        expect(params.get('quantity')).toBe('0.004');
+        expect(params.get('price')).toBe('58500');
+    });
+
+    // A margin transfer is not an order: no side, no quantity, no notional —
+    // only which position, which way, and how much.
+    it('moves position margin with a signed POST and Binance own direction code', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestResponse = { amount: 250, code: 200, type: 1 };
+
+        const added = await adapter.adjustPositionMargin({
+            symbol: 'BTCUSDT', positionSide: 'LONG', direction: 'ADD', amount: '250',
+        });
+        expect(added).toEqual({
+            symbol: 'BTCUSDT', positionSide: 'LONG', direction: 'ADD', amount: '250',
+        });
+
+        await adapter.adjustPositionMargin({
+            symbol: 'BTCUSDT', positionSide: 'BOTH', direction: 'REMOVE', amount: '40',
+        });
+
+        const transfers = requests.filter(request => request.url.endsWith('/fapi/v1/positionMargin'));
+        expect(transfers).toHaveLength(2);
+        expect(transfers[0].options.method).toBe('POST');
+        const [add, remove] = transfers.map(request => new URLSearchParams(
+            request.body.slice(0, request.body.lastIndexOf('&signature=')),
+        ));
+        expect(add.get('symbol')).toBe('BTCUSDT');
+        expect(add.get('positionSide')).toBe('LONG');
+        expect(add.get('amount')).toBe('250');
+        expect(add.get('type')).toBe('1');
+        expect(add.get('quantity')).toBeNull();
+        expect(remove.get('type')).toBe('2');
+        expect(remove.get('amount')).toBe('40');
+    });
+
     it('derives hedge-mode position sides from order intent', async () => {
         const adapter = createAdapter();
         adapter.serverTimeOffsetMs = 0;
@@ -128,6 +210,209 @@ describe('FuturesTradingAdapter signing', () => {
         const params = new URLSearchParams(requests.at(-1).body);
         expect(params.get('positionSide')).toBe('BOTH');
         expect(params.get('reduceOnly')).toBe('true');
+    });
+
+    it('reads regular and ALGO orders account-wide with all-symbol weights', async () => {
+        globalThis.__futuresTestResponse = [];
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        const operations = adapter.getAccountRefreshOperations();
+
+        expect(operations.map(({ type, weight }) => ({ type, weight }))).toEqual([
+            { type: 'balances', weight: 5 },
+            { type: 'regularOrders', weight: 40 },
+            { type: 'algoOrders', weight: 40 },
+            { type: 'positions', weight: 5 },
+        ]);
+
+        await operations.find(operation => operation.type === 'regularOrders').loadPayload();
+        await operations.find(operation => operation.type === 'algoOrders').loadPayload();
+
+        const regularUrl = new URL(requests.at(-2).url);
+        const algoUrl = new URL(requests.at(-1).url);
+        expect(regularUrl.pathname).toBe('/fapi/v1/openOrders');
+        expect(algoUrl.pathname).toBe('/fapi/v1/openAlgoOrders');
+        expect(regularUrl.searchParams.has('symbol')).toBe(false);
+        expect(algoUrl.searchParams.has('symbol')).toBe(false);
+        expect(regularUrl.searchParams.has('signature')).toBe(true);
+        expect(algoUrl.searchParams.has('signature')).toBe(true);
+    });
+});
+
+describe('futures execution outcome classification', () => {
+    // Binance is explicit that a 503 "Unknown error" may have succeeded. Showing
+    // it as a plain failure is what makes an operator resubmit a live order.
+    it('marks an exchange-side 5xx as indeterminate', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestStatus = 503;
+        globalThis.__futuresTestResponse = { code: -1000, msg: 'Unknown error' };
+
+        const error = await adapter.placeOrder({
+            symbol: 'BTCUSDT', side: 'BUY', orderType: 'LIMIT', numericQuantity: 1, numericPrice: 10,
+            positionSide: 'BOTH',
+        }).catch(caught => caught);
+
+        expect(error.name).toBe('FuturesApiError');
+        expect(error.status).toBe(503);
+        expect(error.indeterminate).toBe(true);
+    });
+
+    it('marks a request timeout as indeterminate', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestTransport = 'timeout';
+
+        const error = await adapter.placeOrder({
+            symbol: 'BTCUSDT', side: 'BUY', orderType: 'LIMIT', numericQuantity: 1, numericPrice: 10,
+            positionSide: 'BOTH',
+        }).catch(caught => caught);
+
+        expect(error.code).toBe('ETIMEDOUT');
+        expect(error.indeterminate).toBe(true);
+    });
+
+    it('keeps a business rejection determinate', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestStatus = 400;
+        globalThis.__futuresTestResponse = { code: -2019, msg: 'Margin is insufficient.' };
+
+        const error = await adapter.placeOrder({
+            symbol: 'BTCUSDT', side: 'BUY', orderType: 'LIMIT', numericQuantity: 1, numericPrice: 10,
+            positionSide: 'BOTH',
+        }).catch(caught => caught);
+
+        expect(error.code).toBe(-2019);
+        expect(error.indeterminate).toBe(false);
+    });
+
+    it('keeps a connection that never opened determinate', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestTransport = Object.assign(new Error('refused'), { code: 'ECONNREFUSED' });
+
+        const error = await adapter.placeOrder({
+            symbol: 'BTCUSDT', side: 'BUY', orderType: 'LIMIT', numericQuantity: 1, numericPrice: 10,
+            positionSide: 'BOTH',
+        }).catch(caught => caught);
+
+        expect(error.code).toBe('ECONNREFUSED');
+        expect(error.indeterminate).toBe(false);
+    });
+});
+
+describe('futures order lookup by identity', () => {
+    it('reports an order that exists under the command identity', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestResponse = {
+            orderId: 42, symbol: 'BTCUSDT', side: 'BUY', status: 'NEW', clientOrderId: 'f-1',
+        };
+
+        const outcome = await adapter.findOrder({ symbol: 'BTCUSDT', origClientOrderId: 'f-1' });
+
+        expect(new URL(requests[0].url).pathname).toBe('/fapi/v1/order');
+        expect(new URL(requests[0].url).searchParams.get('origClientOrderId')).toBe('f-1');
+        expect(outcome.exists).toBe(true);
+        expect(outcome.report.orderId).toBe(42);
+    });
+
+    it('reports the one answer that makes a resubmission safe', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestStatus = 400;
+        globalThis.__futuresTestResponse = { code: -2013, msg: 'Order does not exist.' };
+
+        await expect(adapter.findOrder({ symbol: 'BTCUSDT', origClientOrderId: 'f-1' }))
+            .resolves.toEqual({ exists: false, report: null });
+    });
+
+    it('does not turn an unrelated failure into "no such order"', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestStatus = 503;
+        globalThis.__futuresTestResponse = { code: -1000, msg: 'Unknown error' };
+
+        await expect(adapter.findOrder({ symbol: 'BTCUSDT', origClientOrderId: 'f-1' }))
+            .rejects.toMatchObject({ status: 503 });
+    });
+});
+
+describe('futures history reads', () => {
+    it('requests bounded, signed order and trade history and returns newest first', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestResponse = [
+            { orderId: 1, symbol: 'BTCUSDT', side: 'BUY', status: 'FILLED', updateTime: 1_000 },
+            { orderId: 2, symbol: 'BTCUSDT', side: 'SELL', status: 'CANCELED', updateTime: 5_000 },
+        ];
+        const orders = await adapter.getOrderHistory({ symbol: 'BTCUSDT', limit: 5000 });
+
+        const [request] = requests;
+        expect(request.options.method).toBe('GET');
+        expect(request.url).toContain('/fapi/v1/allOrders');
+        const params = new URLSearchParams(request.url.split('?')[1]);
+        expect(params.get('symbol')).toBe('BTCUSDT');
+        expect(params.get('limit')).toBe('500');
+        expect(params.get('signature')).toMatch(/^[0-9a-f]{64}$/);
+        expect(orders.map(order => order.orderId)).toEqual([2, 1]);
+    });
+
+    it('carries the realized PnL and fee of every trade', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestResponse = [
+            {
+                id: 9, orderId: 2, symbol: 'BTCUSDT', side: 'SELL', price: '58500', qty: '0.004',
+                realizedPnl: '-96.74', commission: '0.0234', commissionAsset: 'USDT', time: 7_000,
+            },
+        ];
+        const trades = await adapter.getTradeHistory({ symbol: 'BTCUSDT' });
+        expect(requests[0].url).toContain('/fapi/v1/userTrades');
+        expect(trades).toEqual([expect.objectContaining({
+            id: 9,
+            realizedPnl: '-96.74',
+            commission: '0.0234',
+            commissionAsset: 'USDT',
+            time: 7_000,
+        })]);
+    });
+
+    it('projects history rows to display fields only', () => {
+        expect(normalizeFuturesHistoryOrder({
+            orderId: 3, symbol: 'BTCUSDT', side: 'BUY', origType: 'LIMIT', status: 'FILLED',
+            price: '58000', avgPrice: '57999.9', origQty: '0.004', executedQty: '0.004',
+            cumQuote: '232', reduceOnly: true, updateTime: 4_000, secret: 'never',
+        })).toEqual({
+            orderId: 3,
+            clientOrderId: null,
+            symbol: 'BTCUSDT',
+            side: 'BUY',
+            positionSide: 'BOTH',
+            type: 'LIMIT',
+            status: 'FILLED',
+            price: '58000',
+            averagePrice: '57999.9',
+            origQty: '0.004',
+            executedQty: '0.004',
+            quoteQty: '232',
+            reduceOnly: true,
+            time: 4_000,
+        });
+        expect(normalizeFuturesHistoryTrade({}).realizedPnl).toBe('0');
+    });
+});
+
+describe('futures API error descriptions', () => {
+    it('explains what to change for actionable Binance codes and keeps the rest verbatim', () => {
+        expect(describeFuturesApiError({
+            code: -2015,
+            message: 'Invalid API-key, IP, or permissions for action',
+        })).toContain('enable "Futures" on the key');
+        expect(describeFuturesApiError({ code: -9999, message: 'Unknown failure' }))
+            .toBe('Unknown failure');
+        expect(describeFuturesApiError(undefined)).toBe('Binance futures request failed');
     });
 });
 
@@ -168,6 +453,44 @@ describe('futures normalization', () => {
                 positionSide: 'LONG',
             });
         }
+    });
+
+    it('keeps ALGO identity and trigger semantics in a separate namespace', () => {
+        const algoOrder = normalizeFuturesAlgoOrder({
+            symbol: 'TUTUSDT',
+            algoId: 42,
+            clientAlgoId: 'algo-client-42',
+            algoType: 'CONDITIONAL',
+            orderType: 'STOP_MARKET',
+            side: 'SELL',
+            positionSide: 'LONG',
+            algoStatus: 'NEW',
+            quantity: '100',
+            triggerPrice: '0.0123',
+            closePosition: true,
+            updateTime: 1000,
+        });
+
+        expect(algoOrder).toMatchObject({
+            symbol: 'TUTUSDT',
+            orderId: 42,
+            sourceOrderId: 42,
+            algoId: 42,
+            clientOrderId: 'algo-client-42',
+            orderKind: 'ALGO',
+            orderSource: 'ALGO',
+            type: 'STOP_MARKET',
+            status: 'NEW',
+            triggerPrice: '0.0123',
+            closePosition: true,
+        });
+        expect(normalizeFuturesExecutionReport({
+            symbol: 'TUTUSDT', orderId: 42, status: 'NEW', price: '0.01', origQty: '1',
+        })).toMatchObject({
+            orderId: 42,
+            orderKind: 'REGULAR',
+            orderSource: 'REGULAR',
+        });
     });
 
     it('classifies user data stream events and refresh triggers', () => {
@@ -212,6 +535,12 @@ describe('futures normalization', () => {
             USDT: { available: '90', total: '100', crossUnPnl: '0' },
         });
 
+        expect(normalizeFuturesBalances([
+            { asset: 'USDT', balance: '0', availableBalance: '0', crossUnPnl: '0' },
+        ])).toEqual({
+            USDT: { available: '0', total: '0', crossUnPnl: '0' },
+        });
+
         expect(normalizeFuturesPositions([
             { symbol: 'BTCUSDT', positionAmt: '0.010', positionSide: 'LONG', entryPrice: '57000', markPrice: '58445', unRealizedProfit: '14.45', liquidationPrice: '29000', leverage: '2', marginType: 'isolated', isolatedMargin: '305', notional: '584' },
             { symbol: 'ETHUSDT', positionAmt: '0', positionSide: 'BOTH' },
@@ -221,25 +550,28 @@ describe('futures normalization', () => {
             quantity: '0.010',
             marginType: 'ISOLATED',
         })]);
+
+        // /fapi/v3/positionRisk answers without leverage or margin mode; the
+        // committed margin it does report is what ROE is computed from.
+        expect(normalizeFuturesPositions([
+            { symbol: 'BEATUSDT', positionAmt: '-2873', positionSide: 'BOTH', entryPrice: '3.3449999999999998', markPrice: '3.37867363', unRealizedProfit: '-96.74', liquidationPrice: '4.71896804', isolatedMargin: '0', notional: '-9707', initialMargin: '960.5', maintMargin: '38.8' },
+        ])).toEqual([expect.objectContaining({
+            symbol: 'BEATUSDT',
+            leverage: undefined,
+            marginType: undefined,
+            initialMargin: '960.5',
+            maintenanceMargin: '38.8',
+        })]);
+
+        // The isolated wallet is what the read still carries once marginType is
+        // gone, and it is the amount actually at stake behind the position.
+        expect(normalizeFuturesPositions([
+            { symbol: 'BLUAIUSDT', positionAmt: '700000', positionSide: 'BOTH', entryPrice: '0.015384', markPrice: '0.015349', unRealizedProfit: '-24.45', isolatedMargin: '512.4', isolatedWallet: '537.9', initialMargin: '480' },
+        ])).toEqual([expect.objectContaining({
+            symbol: 'BLUAIUSDT',
+            isolatedWallet: '537.9',
+            isolatedMargin: '512.4',
+        })]);
     });
 
-    it('builds mock placement reports in the shared executionReport shape', () => {
-        expect(buildFuturesMockOrderPlacementExecutionReport({
-            symbol: 'BTCUSDT',
-            side: 'BUY',
-            priceValue: '58445.00',
-            quantityValue: '0.004',
-            positionSide: 'LONG',
-            orderId: 7,
-            eventTime: 1000,
-        })).toMatchObject({
-            e: 'executionReport',
-            marketType: 'futures',
-            symbol: 'BTCUSDT',
-            status: 'NEW',
-            price: '58445.00',
-            origQty: '0.004',
-            positionSide: 'LONG',
-        });
-    });
 });

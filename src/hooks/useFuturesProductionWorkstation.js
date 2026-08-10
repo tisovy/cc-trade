@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   FUTURES_PRODUCTION_WORKSTATION_ENVIRONMENT,
+  createFuturesProductionWorkstationConfigureTapeRequest,
+  createFuturesProductionWorkstationLoadCandleHistoryRequest,
   createFuturesProductionWorkstationSelectIntervalRequest,
   createFuturesProductionWorkstationSelectSymbolRequest,
   createFuturesProductionWorkstationSubscribeRequest,
@@ -8,9 +10,13 @@ import {
   parseFuturesProductionWorkstationEvent,
 } from '../utils/futuresProductionWorkstationProtocol.js'
 import {
+  FUTURES_WORKSTATION_CANDLE_HISTORY_LIMITS,
+  FUTURES_WORKSTATION_DEFAULT_TAPE_SETTINGS,
   applyFuturesWorkstationEvent,
   transitionFuturesWorkstationConnectionState,
 } from '../utils/futuresWorkstationProtocolShared.js'
+import { readStoredTapeSettings } from '../utils/futuresTapeSettings.js'
+import { futuresCandleHistoryCache } from '../utils/futuresCandleHistoryCache.js'
 
 let requestSequence = 0
 
@@ -29,9 +35,44 @@ const emptyResources = () => Object.freeze({
   catalog: null,
   header: null,
   candles: null,
+  candleHistory: null,
   depth: null,
   trades: null,
 })
+
+const EMPTY_CANDLE_HISTORY = Object.freeze({
+  symbol: null,
+  interval: null,
+  rows: Object.freeze([]),
+  exhausted: false,
+})
+
+// Older rows arrive in front of what is already loaded; an open time that is
+// already known keeps the row already on the chart, so a re-read can never
+// duplicate a bar or rewrite one the stream has since updated.
+const mergeCandleHistoryRows = (older, known) => {
+  if (known.length === 0) return Object.freeze([...older])
+  const oldest = known[0].openTime
+  const merged = older.filter(row => row.openTime < oldest)
+  return merged.length === 0 ? known : Object.freeze([...merged, ...known])
+}
+
+// A page belongs to the contract and interval it was read for, and to nothing
+// else. Merged into rows left over from a previous selection it would splice
+// two markets — or two candle widths — into one series that still looks
+// continuous: the chart would draw 15m bars in front of 1h bars and present the
+// join as a gap in the market rather than as the mistake it is.
+const applyCandleHistoryPage = (previous, { symbol, interval, rows, exhausted }) => {
+  const base = previous.symbol === symbol && previous.interval === interval
+    ? previous
+    : EMPTY_CANDLE_HISTORY
+  return Object.freeze({
+    symbol,
+    interval,
+    exhausted: base.exhausted || exhausted,
+    rows: mergeCandleHistoryRows(rows, base.rows),
+  })
+}
 
 const createState = ({ status, symbol, interval, requestId = null, reasonCode = null }) => (
   Object.freeze({
@@ -54,11 +95,19 @@ const useFuturesProductionWorkstation = ({
   interval,
   wsConnection,
   sendMessage,
+  candleHistoryCache = futuresCandleHistoryCache,
 }) => {
   const selectionRef = useRef(null)
   const catalogBufferRef = useRef(null)
   const activeSubscriptionRef = useRef(null)
+  // Seeded from the persisted desk settings so a restored configuration is
+  // re-sent on the first subscription, instead of the tape running at defaults
+  // while the panel displays the restored values.
+  const tapeSettingsRef = useRef(readStoredTapeSettings())
   const ownerRef = useRef(0)
+  const historyRequestRef = useRef(null)
+  const historySelectionRef = useRef(null)
+  const [candleHistory, setCandleHistory] = useState(EMPTY_CANDLE_HISTORY)
   const [retryNonce, setRetryNonce] = useState(0)
   const [state, setState] = useState(() => createState({
     status: enabled && isOpenSocket(wsConnection) ? 'loading' : enabled ? 'disconnected' : 'idle',
@@ -83,6 +132,23 @@ const useFuturesProductionWorkstation = ({
     catalogBufferRef.current = null
     activeSubscriptionRef.current = null
     setRetryNonce(previous => previous + 1)
+  }, [])
+
+  const configureTape = useCallback((settings) => {
+    const activeSubscription = activeSubscriptionRef.current
+    if (activeSubscription === null) return false
+    try {
+      const sent = activeSubscription.sendMessage(
+        createFuturesProductionWorkstationConfigureTapeRequest({
+          requestId: activeSubscription.requestId,
+          ...settings,
+        }),
+      ) !== false
+      if (sent) tapeSettingsRef.current = Object.freeze({ ...settings })
+      return sent
+    } catch {
+      return false
+    }
   }, [])
 
   useEffect(() => () => {
@@ -133,6 +199,12 @@ const useFuturesProductionWorkstation = ({
 
     const requestId = createRequestId()
     catalogBufferRef.current = null
+    // A new subscription owns a new contract or interval, so an in-flight read
+    // for the previous one is abandoned here. The rows it already pulled in are
+    // not carried over either: they are hidden from the moment the selection
+    // changes, and the next page for the new selection replaces them outright.
+    historyRequestRef.current = null
+    historySelectionRef.current = null
     const previousSelection = selectionRef.current
     const previous = previousSelection?.connection === wsConnection
       ? previousSelection
@@ -288,6 +360,20 @@ const useFuturesProductionWorkstation = ({
       }))
     } else if (sent) {
       activeSubscriptionRef.current = Object.freeze({ requestId, sendMessage })
+      const tapeSettings = tapeSettingsRef.current
+      if (tapeSettings.throttleEnabled !== FUTURES_WORKSTATION_DEFAULT_TAPE_SETTINGS.throttleEnabled
+        || tapeSettings.timeoutMs !== FUTURES_WORKSTATION_DEFAULT_TAPE_SETTINGS.timeoutMs
+        || tapeSettings.minNotionalUsdt
+          !== FUTURES_WORKSTATION_DEFAULT_TAPE_SETTINGS.minNotionalUsdt) {
+        try {
+          sendMessage(createFuturesProductionWorkstationConfigureTapeRequest({
+            requestId,
+            ...tapeSettings,
+          }))
+        } catch {
+          // The explicit UI action remains available to retry a rejected configuration.
+        }
+      }
     }
 
     return () => {
@@ -299,7 +385,88 @@ const useFuturesProductionWorkstation = ({
     }
   }, [enabled, interval, retryNonce, sendMessage, symbol, wsConnection])
 
-  return { ...state, retry }
+  // History is accumulated outside the resource snapshot: a resource is what the
+  // exchange says now, while history is what the operator has already pulled
+  // into view and must not lose to the next status transition.
+  const historyResponse = state.resources.candleHistory
+  useEffect(() => {
+    if (!historyResponse?.complete) return
+    const selection = historySelectionRef.current
+    if (selection === null
+      || selection.symbol !== state.symbol
+      || selection.interval !== historyResponse.interval) return
+    if (selection.endTime !== historyResponse.endTime) return
+    historyRequestRef.current = null
+    // Written back so the next run of the app starts where this one left off.
+    void candleHistoryCache.writePage({
+      symbol: state.symbol,
+      interval: historyResponse.interval,
+      rows: historyResponse.rows,
+    })
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setCandleHistory(previous => applyCandleHistoryPage(previous, {
+      symbol: state.symbol,
+      interval: historyResponse.interval,
+      rows: historyResponse.rows,
+      // A short answer is the exchange saying there is nothing older.
+      exhausted: historyResponse.total < FUTURES_WORKSTATION_CANDLE_HISTORY_LIMITS.DEFAULT_ROWS,
+    }))
+  }, [candleHistoryCache, historyResponse, state.symbol])
+
+  const loadCandleHistory = useCallback(async (endTime) => {
+    const activeSubscription = activeSubscriptionRef.current
+    if (activeSubscription === null) return false
+    if (!Number.isSafeInteger(endTime) || endTime <= 0) return false
+    // One read at a time: the left edge fires continuously while scrolling.
+    if (historyRequestRef.current !== null) return false
+    const limit = FUTURES_WORKSTATION_CANDLE_HISTORY_LIMITS.DEFAULT_ROWS
+    const selection = { symbol, interval, endTime }
+    historyRequestRef.current = selection
+    historySelectionRef.current = selection
+
+    // A candle that has closed cannot change, so a page already held is the
+    // same page the exchange would send — and asking for it again would cost a
+    // round trip on a link that is the slowest part of this desk.
+    const cached = await candleHistoryCache.readPage({ symbol, interval, endTime, limit })
+    if (historyRequestRef.current !== selection) return false
+    if (cached !== null && cached.length > 0) {
+      historyRequestRef.current = null
+      setCandleHistory(previous => applyCandleHistoryPage(previous, {
+        symbol,
+        interval,
+        rows: cached,
+        exhausted: cached.length < limit,
+      }))
+      return true
+    }
+
+    try {
+      const sent = activeSubscription.sendMessage(
+        createFuturesProductionWorkstationLoadCandleHistoryRequest({
+          requestId: activeSubscription.requestId,
+          symbol,
+          interval,
+          endTime,
+          limit,
+        }),
+      ) !== false
+      if (!sent) historyRequestRef.current = null
+      return sent
+    } catch {
+      historyRequestRef.current = null
+      return false
+    }
+  }, [candleHistoryCache, interval, symbol])
+
+  return {
+    ...state,
+    candleHistory: candleHistory.symbol === symbol && candleHistory.interval === interval
+      ? candleHistory
+      : EMPTY_CANDLE_HISTORY,
+    retry,
+    configureTape,
+    loadCandleHistory,
+  }
 }
 
 export default useFuturesProductionWorkstation

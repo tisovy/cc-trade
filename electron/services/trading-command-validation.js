@@ -1,8 +1,11 @@
 import {
+    CLIENT_ORDER_ID_MAX_LENGTH,
+    CLIENT_ORDER_ID_PATTERN,
     DEFAULT_ACCOUNT_ID,
     DEFAULT_SPOT_ORDER_TYPE,
     DEFAULT_SPOT_TIME_IN_FORCE,
     FUTURES_MARKET_TYPE,
+    POSITION_MARGIN_DIRECTIONS,
     SPOT_MARKET_TYPE,
     TRADE_COMMAND_VERSION,
     TRADING_COMMAND_ACTIONS,
@@ -12,6 +15,7 @@ import {
 const SUPPORTED_MARKET_TYPES = new Set([SPOT_MARKET_TYPE, FUTURES_MARKET_TYPE]);
 const FUTURES_ORDER_TYPES = new Set(['LIMIT', 'MARKET']);
 const FUTURES_POSITION_SIDES = new Set(['BOTH', 'LONG', 'SHORT']);
+const POSITION_MARGIN_DIRECTION_VALUES = new Set(Object.values(POSITION_MARGIN_DIRECTIONS));
 
 const isCommandPayloadObject = (payload) => (
     payload !== null &&
@@ -132,6 +136,23 @@ const validateTypedCommandBase = (payload) => {
         };
     }
 
+    // The exchange refuses a client order id longer than 36 characters or built
+    // from characters outside its alphabet. Refusing it here means a malformed
+    // id is a local rejection with a named field, not an order the operator
+    // watches Binance reject.
+    const clientOrderId = normalizeTextField(payload.clientOrderId);
+    if (clientOrderId !== null && !CLIENT_ORDER_ID_PATTERN.test(clientOrderId)) {
+        return {
+            ok: false,
+            rejection: createTypedCommandRejection(
+                payload,
+                'INVALID_CLIENT_ORDER_ID',
+                `clientOrderId must be at most ${CLIENT_ORDER_ID_MAX_LENGTH} characters from [.A-Za-z0-9:/_-]`,
+                { field: 'clientOrderId', length: clientOrderId.length },
+            ),
+        };
+    }
+
     return {
         ok: true,
         command: {
@@ -139,7 +160,7 @@ const validateTypedCommandBase = (payload) => {
             version: TRADE_COMMAND_VERSION,
             marketType,
             accountId: normalizeTextField(payload.accountId) || DEFAULT_ACCOUNT_ID,
-            clientOrderId: normalizeTextField(payload.clientOrderId),
+            clientOrderId,
         },
     };
 };
@@ -270,6 +291,7 @@ const validateTypedPlaceOrderCommand = (payload, baseCommand, { selectedSymbol }
                 side,
                 quantity: quantityValue,
                 price: priceValue,
+                newClientOrderId: baseCommand.clientOrderId ?? undefined,
             },
             ...(isFutures ? {
                 futuresOrderPayload: {
@@ -362,6 +384,191 @@ const validateTypedCancelOrderCommand = (payload, baseCommand, { selectedSymbol 
     };
 };
 
+// trade.replaceOrder is enabled for futures only: Binance USDⓈ-M exposes a native
+// amendment, so a reprice never has to pass through a cancel that could succeed
+// while the replacement fails.
+const validateTypedFuturesModifyOrderCommand = (payload, baseCommand, { selectedSymbol } = {}) => {
+    const symbol = normalizeTextField(payload.symbol) || normalizeTextField(selectedSymbol);
+    if (!symbol) {
+        return {
+            ok: false,
+            rejection: createTypedCommandRejection(
+                payload,
+                'INVALID_TYPED_MODIFY_SYMBOL',
+                'trade.replaceOrder requires a symbol',
+                { field: 'symbol' },
+            ),
+        };
+    }
+
+    const side = normalizeSide(payload.side);
+    if (!side) {
+        return {
+            ok: false,
+            rejection: createTypedCommandRejection(
+                payload,
+                'INVALID_TYPED_MODIFY_SIDE',
+                'trade.replaceOrder side must be BUY or SELL',
+                { field: 'side', value: payload.side },
+            ),
+        };
+    }
+
+    const rawOrderId = firstUsableValue(payload.orderId, payload.id);
+    const rawOrigClientOrderId = firstUsableValue(payload.origClientOrderId);
+    const orderId = rawOrderId === undefined ? null : normalizeOrderId(rawOrderId);
+    const origClientOrderId = rawOrigClientOrderId === undefined
+        ? null
+        : normalizeTextField(rawOrigClientOrderId);
+    if (rawOrderId !== undefined && orderId === null) {
+        return {
+            ok: false,
+            rejection: createTypedCommandRejection(
+                payload,
+                'INVALID_TYPED_MODIFY_ORDER_ID',
+                'trade.replaceOrder orderId must be a positive integer',
+                { field: payload.orderId === undefined ? 'id' : 'orderId', value: rawOrderId },
+            ),
+        };
+    }
+    if (!orderId && !origClientOrderId) {
+        return {
+            ok: false,
+            rejection: createTypedCommandRejection(
+                payload,
+                'INVALID_TYPED_MODIFY_TARGET',
+                'trade.replaceOrder requires orderId or origClientOrderId',
+                { fields: ['orderId', 'id', 'origClientOrderId'] },
+            ),
+        };
+    }
+
+    const quantityValue = payload.quantity ?? payload.qty;
+    const numericQuantity = normalizePositiveNumber(quantityValue);
+    if (numericQuantity === null) {
+        return {
+            ok: false,
+            rejection: createTypedCommandRejection(
+                payload,
+                'INVALID_TYPED_MODIFY_QUANTITY',
+                'trade.replaceOrder quantity must be a positive finite number',
+                { field: payload.quantity === undefined ? 'qty' : 'quantity', value: quantityValue },
+            ),
+        };
+    }
+
+    const priceValue = payload.price ?? payload.p;
+    const numericPrice = normalizePositiveNumber(priceValue);
+    if (numericPrice === null) {
+        return {
+            ok: false,
+            rejection: createTypedCommandRejection(
+                payload,
+                'INVALID_TYPED_MODIFY_PRICE',
+                'trade.replaceOrder price must be a positive finite number',
+                { field: payload.price === undefined ? 'p' : 'price', value: priceValue },
+            ),
+        };
+    }
+
+    return {
+        ok: true,
+        command: {
+            ...baseCommand,
+            symbol,
+            side,
+            orderId,
+            origClientOrderId,
+            quantityValue,
+            priceValue,
+            numericQuantity,
+            numericPrice,
+            futuresModifyPayload: {
+                symbol,
+                side,
+                orderId,
+                origClientOrderId,
+                quantity: quantityValue,
+                price: priceValue,
+                numericQuantity,
+                numericPrice,
+            },
+        },
+    };
+};
+
+// Moving margin names one position and no other. Unlike every other command
+// here, the symbol has no fallback to the selected contract: a margin transfer
+// whose symbol went missing would otherwise land on whichever position the
+// operator happened to be watching, which is not the one they clicked.
+const validateTypedAdjustPositionMarginCommand = (payload, baseCommand) => {
+    const symbol = normalizeTextField(payload.symbol);
+    if (!symbol) {
+        return {
+            ok: false,
+            rejection: createTypedCommandRejection(
+                payload,
+                'INVALID_TYPED_MARGIN_SYMBOL',
+                'trade.adjustPositionMargin requires the symbol of the position',
+                { field: 'symbol' },
+            ),
+        };
+    }
+
+    const positionSide = normalizeTextField(payload.positionSide)?.toUpperCase() ?? 'BOTH';
+    if (!FUTURES_POSITION_SIDES.has(positionSide)) {
+        return {
+            ok: false,
+            rejection: createTypedCommandRejection(
+                payload,
+                'INVALID_TYPED_MARGIN_POSITION_SIDE',
+                'trade.adjustPositionMargin positionSide must be BOTH, LONG, or SHORT',
+                { field: 'positionSide', value: payload.positionSide },
+            ),
+        };
+    }
+
+    const direction = normalizeTextField(payload.direction)?.toUpperCase() ?? null;
+    if (direction === null || !POSITION_MARGIN_DIRECTION_VALUES.has(direction)) {
+        return {
+            ok: false,
+            rejection: createTypedCommandRejection(
+                payload,
+                'INVALID_TYPED_MARGIN_DIRECTION',
+                'trade.adjustPositionMargin direction must be ADD or REMOVE',
+                { field: 'direction', value: payload.direction },
+            ),
+        };
+    }
+
+    const amount = normalizePositiveNumber(payload.amount);
+    if (amount === null) {
+        return {
+            ok: false,
+            rejection: createTypedCommandRejection(
+                payload,
+                'INVALID_TYPED_MARGIN_AMOUNT',
+                'trade.adjustPositionMargin amount must be a positive number',
+                { field: 'amount', value: payload.amount },
+            ),
+        };
+    }
+
+    return {
+        ok: true,
+        command: {
+            ...baseCommand,
+            symbol: symbol.toUpperCase(),
+            marginPayload: {
+                symbol: symbol.toUpperCase(),
+                positionSide,
+                direction,
+                amount: String(amount),
+            },
+        },
+    };
+};
+
 const rejectDefinedButDisabledCommand = (payload, baseCommand) => ({
     ok: false,
     rejection: createTypedCommandRejection(
@@ -428,6 +635,24 @@ export const validateTypedTradingCommand = (payload, { selectedSymbol } = {}) =>
             }
             return { ok: true, command: { ...baseCommand, symbol } };
         }
+        case TRADING_COMMAND_ACTIONS.ACCOUNT_HISTORY: {
+            if (baseCommand.marketType !== FUTURES_MARKET_TYPE) {
+                return rejectDefinedButDisabledCommand(payload, baseCommand);
+            }
+            const symbol = normalizeTextField(payload.symbol) || normalizeTextField(selectedSymbol);
+            if (!symbol) {
+                return {
+                    ok: false,
+                    rejection: createTypedCommandRejection(
+                        payload,
+                        'INVALID_TYPED_HISTORY_SYMBOL',
+                        'account.history requires a symbol',
+                        { field: 'symbol' },
+                    ),
+                };
+            }
+            return { ok: true, command: { ...baseCommand, symbol } };
+        }
         case TRADING_COMMAND_ACTIONS.SET_TRADING_PAUSED: {
             if (baseCommand.marketType !== FUTURES_MARKET_TYPE) {
                 return rejectDefinedButDisabledCommand(payload, baseCommand);
@@ -445,8 +670,16 @@ export const validateTypedTradingCommand = (payload, { selectedSymbol } = {}) =>
             }
             return { ok: true, command: { ...baseCommand, paused: payload.paused } };
         }
+        case TRADING_COMMAND_ACTIONS.ADJUST_POSITION_MARGIN:
+            if (baseCommand.marketType !== FUTURES_MARKET_TYPE) {
+                return rejectDefinedButDisabledCommand(payload, baseCommand);
+            }
+            return validateTypedAdjustPositionMarginCommand(payload, baseCommand);
         case TRADING_COMMAND_ACTIONS.REPLACE_ORDER:
-            return rejectDefinedButDisabledCommand(payload, baseCommand);
+            if (baseCommand.marketType !== FUTURES_MARKET_TYPE) {
+                return rejectDefinedButDisabledCommand(payload, baseCommand);
+            }
+            return validateTypedFuturesModifyOrderCommand(payload, baseCommand, { selectedSymbol });
         default:
             return {
                 ok: false,
@@ -539,6 +772,22 @@ export const validateLegacyOrderCommand = (
         };
     }
 
+    // Carried through so Spot placement can send the identity the operator's
+    // intent was minted with, exactly as Futures already does. Without it the
+    // exchange cannot deduplicate a resubmission of the same intent.
+    const newClientOrderId = normalizeTextField(payload.newClientOrderId);
+    if (newClientOrderId !== null && !CLIENT_ORDER_ID_PATTERN.test(newClientOrderId)) {
+        return {
+            ok: false,
+            rejection: createCommandRejection(
+                requestType,
+                'INVALID_ORDER_CLIENT_ID',
+                `newClientOrderId must be at most ${CLIENT_ORDER_ID_MAX_LENGTH} characters from [.A-Za-z0-9:/_-]`,
+                { field: 'newClientOrderId', length: newClientOrderId.length },
+            ),
+        };
+    }
+
     return {
         ok: true,
         command: {
@@ -548,6 +797,7 @@ export const validateLegacyOrderCommand = (
             priceValue,
             numericQuantity,
             numericPrice,
+            newClientOrderId,
         },
     };
 };

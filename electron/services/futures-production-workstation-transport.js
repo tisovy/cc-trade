@@ -17,7 +17,6 @@ export const FUTURES_PRODUCTION_WORKSTATION_ROUTES = Object.freeze({
     EXCHANGE_INFO: '/fapi/v1/exchangeInfo',
     DEPTH: '/fapi/v1/depth',
     KLINES: '/fapi/v1/klines',
-    MARK_KLINES: '/fapi/v1/markPriceKlines',
     INDEX_KLINES: '/fapi/v1/indexPriceKlines',
     PREMIUM_INDEX: '/fapi/v1/premiumIndex',
     TICKER: '/fapi/v1/ticker/24hr',
@@ -27,7 +26,8 @@ export const FUTURES_PRODUCTION_WORKSTATION_WEIGHTS = Object.freeze({
     EXCHANGE_INFO: 1,
     DEPTH_1000: 20,
     KLINES_99: 1,
-    MARK_KLINES_99: 1,
+    // Binance charges klines by page size: 100 → 1, 1000 → 5.
+    KLINES_1000: 5,
     INDEX_KLINES_99: 1,
     PREMIUM_INDEX_SYMBOL: 1,
     TICKER_SYMBOL: 1,
@@ -36,10 +36,16 @@ export const FUTURES_PRODUCTION_WORKSTATION_WEIGHTS = Object.freeze({
 export const FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS = Object.freeze({
     DEPTH: 1_000,
     KLINES: 99,
+    // Kept equal to the protocol's candle-history bound; the transport stays
+    // self-contained, so the two are asserted against each other by test.
+    CANDLE_HISTORY: 1_000,
 });
 
 export const FUTURES_PRODUCTION_WORKSTATION_EXCHANGE_INFO_CACHE_TTL_MS = 5 * 60_000;
-export const FUTURES_PRODUCTION_WORKSTATION_BOOTSTRAP_CONCURRENCY = 6;
+// After the TTL the cached catalog is still served immediately (contracts
+// change rarely) while a background refresh revalidates it, up to this bound.
+export const FUTURES_PRODUCTION_WORKSTATION_EXCHANGE_INFO_STALE_SERVE_MS = 6 * 60 * 60_000;
+export const FUTURES_PRODUCTION_WORKSTATION_BOOTSTRAP_CONCURRENCY = 5;
 export const FUTURES_PRODUCTION_WORKSTATION_RESOURCE_RETRIES = 2;
 
 const ROUTE_SET = new Set(Object.values(FUTURES_PRODUCTION_WORKSTATION_ROUTES));
@@ -404,17 +410,8 @@ export const createFuturesProductionWorkstationReviewedTransport = ({
                 throw error;
             },
         );
-        if (EXCHANGE_INFO_CACHE.value !== null
-            && startedAt < EXCHANGE_INFO_CACHE.expiresAt) {
-            return waitAndReport(
-                Promise.resolve(EXCHANGE_INFO_CACHE.value),
-                'hit',
-            );
-        }
-
-        let cache = 'shared';
-        if (EXCHANGE_INFO_CACHE.inFlight === null) {
-            cache = 'miss';
+        const startExchangeInfoRefresh = () => {
+            if (EXCHANGE_INFO_CACHE.inFlight !== null) return EXCHANGE_INFO_CACHE.inFlight;
             const pending = weightedGet(
                 FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.EXCHANGE_INFO,
                 FUTURES_PRODUCTION_WORKSTATION_ROUTES.EXCHANGE_INFO,
@@ -431,20 +428,36 @@ export const createFuturesProductionWorkstationReviewedTransport = ({
                 return value;
             });
             EXCHANGE_INFO_CACHE.inFlight = pending;
-            void pending.then(
-                () => {
-                    if (EXCHANGE_INFO_CACHE.inFlight === pending) {
-                        EXCHANGE_INFO_CACHE.inFlight = null;
-                    }
-                },
-                () => {
-                    if (EXCHANGE_INFO_CACHE.inFlight === pending) {
-                        EXCHANGE_INFO_CACHE.inFlight = null;
-                    }
-                },
-            );
+            const settle = () => {
+                if (EXCHANGE_INFO_CACHE.inFlight === pending) {
+                    EXCHANGE_INFO_CACHE.inFlight = null;
+                }
+            };
+            void pending.then(settle, settle);
+            return pending;
+        };
+
+        if (EXCHANGE_INFO_CACHE.value !== null) {
+            if (startedAt < EXCHANGE_INFO_CACHE.expiresAt) {
+                return waitAndReport(
+                    Promise.resolve(EXCHANGE_INFO_CACHE.value),
+                    'hit',
+                );
+            }
+            if (startedAt < EXCHANGE_INFO_CACHE.expiresAt
+                + FUTURES_PRODUCTION_WORKSTATION_EXCHANGE_INFO_STALE_SERVE_MS) {
+                // Serve the bounded-stale catalog immediately and revalidate in
+                // the background; a refresh failure keeps the stale value.
+                startExchangeInfoRefresh().catch(() => {});
+                return waitAndReport(
+                    Promise.resolve(EXCHANGE_INFO_CACHE.value),
+                    'stale',
+                );
+            }
         }
-        return waitAndReport(EXCHANGE_INFO_CACHE.inFlight, cache);
+
+        const cache = EXCHANGE_INFO_CACHE.inFlight === null ? 'miss' : 'shared';
+        return waitAndReport(startExchangeInfoRefresh(), cache);
     };
     const readDepthSnapshot = async ({ symbol, signal, retryAttempt = 0 } = {}) => {
         if (!isBoundedExchangeIdentity(symbol, SYMBOL_PATTERN)) fail('INVALID_SELECTION');
@@ -454,6 +467,39 @@ export const createFuturesProductionWorkstationReviewedTransport = ({
             FUTURES_PRODUCTION_WORKSTATION_ROUTES.DEPTH,
             { symbol, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.DEPTH) },
             FUTURES_WORKSTATION_BODY_LIMITS.DEPTH,
+            signal,
+            backendProxy,
+        );
+    };
+    // Candles behind the live window, read from the same reviewed public route
+    // the bootstrap uses. `endTime` is exclusive: Binance answers with the
+    // candles that closed before it, newest last.
+    const readCandleHistory = async ({
+        symbol,
+        interval,
+        endTime,
+        limit = FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.CANDLE_HISTORY,
+        signal,
+    } = {}) => {
+        assertSelection(symbol, interval);
+        if (!Number.isSafeInteger(endTime)
+            || endTime <= 0
+            || !Number.isSafeInteger(limit)
+            || limit <= 0
+            || limit > FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.CANDLE_HISTORY) {
+            fail('INVALID_SELECTION');
+        }
+        return timedWeightedGet(
+            'candle-history',
+            FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.KLINES_1000,
+            FUTURES_PRODUCTION_WORKSTATION_ROUTES.KLINES,
+            {
+                symbol,
+                interval,
+                endTime: String(endTime - 1),
+                limit: String(limit),
+            },
+            FUTURES_WORKSTATION_BODY_LIMITS.KLINES,
             signal,
             backendProxy,
         );
@@ -486,7 +532,7 @@ export const createFuturesProductionWorkstationReviewedTransport = ({
             return value;
         };
         // A single stalled connection on a lossy network reaches the 10s
-        // deadline while its five siblings finish in well under a second.
+        // deadline while its remaining siblings finish in well under a second.
         // Retrying just that read on a fresh connection almost always succeeds
         // immediately, so only a deadline/network stall defers the batch abort
         // until its retries exhaust; every other failure aborts as before.
@@ -527,7 +573,6 @@ export const createFuturesProductionWorkstationReviewedTransport = ({
         };
         const resources = [
             ['contractKlines', 'contract-klines', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.KLINES_99, FUTURES_PRODUCTION_WORKSTATION_ROUTES.KLINES, { symbol, interval, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES],
-            ['markKlines', 'mark-klines', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.MARK_KLINES_99, FUTURES_PRODUCTION_WORKSTATION_ROUTES.MARK_KLINES, { symbol, interval, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES],
             ['indexKlines', 'index-klines', FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.INDEX_KLINES_99, FUTURES_PRODUCTION_WORKSTATION_ROUTES.INDEX_KLINES, { pair, interval, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.KLINES) }, FUTURES_WORKSTATION_BODY_LIMITS.KLINES],
         ];
         if (includeHeaderResources) {
@@ -560,6 +605,7 @@ export const createFuturesProductionWorkstationReviewedTransport = ({
         now: () => Date.now(),
         loadExchangeInfo,
         readDepthSnapshot,
+        readCandleHistory,
         bootstrapIndependent: options => readBootstrapResources({
             ...options,
             includeHeaderResources: true,

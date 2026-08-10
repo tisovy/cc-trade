@@ -1,36 +1,13 @@
 import { getRendererRuntime } from './rendererRuntime';
 
-const LOCAL_WS_HOST_ARG = 'local-ws-host';
-const LOCAL_WS_PORT_ARG = 'local-ws-port';
-const LOCAL_WS_TOKEN_ARG = 'local-ws-token';
-const LOCAL_WS_TOKEN_PARAM_ARG = 'local-ws-token-param';
-const DEFAULT_LOCAL_WS_HOST = '127.0.0.1';
-const DEFAULT_LOCAL_WS_PORT = 14477;
 const DEFAULT_LOCAL_WS_TOKEN_PARAM = 'token';
 const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1', '[::1]']);
 
-const getArgValue = (args, name) => {
-    const prefix = `--${name}=`;
-    const match = (Array.isArray(args) ? args : []).find((arg) => typeof arg === 'string' && arg.startsWith(prefix));
-    return match ? match.slice(prefix.length) : '';
-};
-
-const getPortArgValue = (args) => {
-    const port = Number(getArgValue(args, LOCAL_WS_PORT_ARG));
-    return Number.isSafeInteger(port) && port >= 1 && port <= 65535
-        ? port
-        : DEFAULT_LOCAL_WS_PORT;
-};
-
-const getRendererRuntimeArgs = () => {
-    const { localWebSocketAccess } = getRendererRuntime();
-    return [
-        `--${LOCAL_WS_HOST_ARG}=${localWebSocketAccess.host}`,
-        `--${LOCAL_WS_PORT_ARG}=${localWebSocketAccess.port}`,
-        `--${LOCAL_WS_TOKEN_ARG}=${localWebSocketAccess.token}`,
-        `--${LOCAL_WS_TOKEN_PARAM_ARG}=${localWebSocketAccess.tokenParam}`,
-    ];
-};
+// The close code the local backend uses to say "this token is not mine". A
+// rejected handshake reaches the renderer as an anonymous 1006, which reads
+// exactly like a backend that has not started yet — so the renderer retried it
+// forever. This code is delivered to the client and is terminal.
+export const LOCAL_WEBSOCKET_AUTH_CLOSE_CODE = 4401;
 
 const isExactLocalWebSocketUrl = (url, access) => {
     const hostname = url.hostname.toLowerCase();
@@ -44,15 +21,16 @@ const isExactLocalWebSocketUrl = (url, access) => {
         && actualPort === expectedPort;
 };
 
-export const getRendererLocalWebSocketAccess = (args = getRendererRuntimeArgs()) => ({
-    host: getArgValue(args, LOCAL_WS_HOST_ARG) || DEFAULT_LOCAL_WS_HOST,
-    port: getPortArgValue(args),
-    token: getArgValue(args, LOCAL_WS_TOKEN_ARG),
-    tokenParam: getArgValue(args, LOCAL_WS_TOKEN_PARAM_ARG) || DEFAULT_LOCAL_WS_TOKEN_PARAM,
-});
+// The renderer's only source of an address is the runtime the main process
+// registered for this window, and the answer is `null` when there is none. It
+// defaults nothing and parses nothing: an endpoint the renderer invented is how
+// a window that could never authenticate kept dialling one that could.
+export const getRendererLocalWebSocketAccess = () => (
+    getRendererRuntime()?.localWebSocketAccess ?? null
+);
 
 export const withLocalWebSocketAccess = (rawUrl, access = getRendererLocalWebSocketAccess()) => {
-    if (!access.token) {
+    if (!access?.token) {
         return rawUrl;
     }
 

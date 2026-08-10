@@ -29,7 +29,9 @@
     "test:all": "npm run test && npm run test:e2e",
     "check:circular": "node scripts/check-circular-imports.mjs",
     "check:electron-build-artifacts": "node scripts/check-electron-build-artifacts.mjs normal",
+    "check:runtime-mock": "node scripts/check-runtime-mock-layer.mjs",
     "check:futures-production": "node scripts/check-futures-workstation-boundaries.mjs",
+    "check:command-path": "node scripts/check-trading-command-path.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

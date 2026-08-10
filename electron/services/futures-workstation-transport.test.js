@@ -34,6 +34,7 @@ vi.mock('ws', () => {
 import {
     FUTURES_PRODUCTION_WORKSTATION_BOOTSTRAP_CONCURRENCY,
     FUTURES_PRODUCTION_WORKSTATION_EXCHANGE_INFO_CACHE_TTL_MS,
+    FUTURES_PRODUCTION_WORKSTATION_EXCHANGE_INFO_STALE_SERVE_MS,
     FUTURES_PRODUCTION_WORKSTATION_REST_ORIGIN,
     FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS,
     FUTURES_PRODUCTION_WORKSTATION_ROUTES,
@@ -41,6 +42,9 @@ import {
     FUTURES_PRODUCTION_WORKSTATION_WSS_ORIGIN,
     createFuturesProductionWorkstationReviewedTransport,
 } from './futures-production-workstation-transport.js';
+import {
+    FUTURES_WORKSTATION_CANDLE_HISTORY_LIMITS,
+} from '../../src/utils/futuresWorkstationProtocolShared.js';
 
 const originalFetch = globalThis.fetch;
 const PROXY_ENVIRONMENT_KEYS = Object.freeze([
@@ -167,11 +171,10 @@ describe('reviewed environment-specific Futures workstation transports', () => {
         expect(Object.keys(result).sort()).toEqual([
             'contractKlines',
             'indexKlines',
-            'markKlines',
             'premiumIndex',
             'ticker',
         ]);
-        expect(calls).toHaveLength(7);
+        expect(calls).toHaveLength(6);
         expect(calls.every(call => new URL(call.url).origin === origin)).toBe(true);
         expect(calls.every(call => call.options.method === 'GET')).toBe(true);
         expect(calls.every(call => call.options.redirect === 'error')).toBe(true);
@@ -182,19 +185,18 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             '/fapi/v1/exchangeInfo',
             '/fapi/v1/indexPriceKlines',
             '/fapi/v1/klines',
-            '/fapi/v1/markPriceKlines',
             '/fapi/v1/premiumIndex',
             '/fapi/v1/ticker/24hr',
         ]);
         expect(new URL(calls.find(call => call.url.includes('/depth?')).url).searchParams.get('limit'))
             .toBe('1000');
-        for (const path of ['/klines?', '/markPriceKlines?', '/indexPriceKlines?']) {
+        for (const path of ['/klines?', '/indexPriceKlines?']) {
             expect(new URL(calls.find(call => call.url.includes(path)).url).searchParams.get('limit'))
                 .toBe('99');
         }
     });
 
-    it('delivers completed bootstrap resources progressively with the same five REST reads', async () => {
+    it('delivers completed bootstrap resources progressively with the same four REST reads', async () => {
         const deliveries = [];
         let resolveTicker;
         globalThis.fetch = vi.fn((url) => {
@@ -222,7 +224,7 @@ describe('reviewed environment-specific Futures workstation transports', () => {
 
         await vi.waitFor(() => {
             expect(resolveTicker).toBeTypeOf('function');
-            expect(deliveries).toHaveLength(4);
+            expect(deliveries).toHaveLength(3);
         });
         expect(settled).toBe(false);
         expect(deliveries.map(delivery => delivery.resource)).not.toContain('ticker');
@@ -233,11 +235,11 @@ describe('reviewed environment-specific Futures workstation transports', () => {
         expect(Object.keys(aggregate).sort()).toEqual(
             deliveries.map(delivery => delivery.resource).sort(),
         );
-        expect(new Set(deliveries.map(delivery => delivery.resource)).size).toBe(5);
-        expect(globalThis.fetch).toHaveBeenCalledTimes(5);
+        expect(new Set(deliveries.map(delivery => delivery.resource)).size).toBe(4);
+        expect(globalThis.fetch).toHaveBeenCalledTimes(4);
     });
 
-    it('reads only the three candle snapshots for an interval-only bootstrap', async () => {
+    it('reads only the two visible candle snapshots for an interval-only bootstrap', async () => {
         const calls = [];
         globalThis.fetch = vi.fn(async (url) => {
             calls.push(url.href);
@@ -253,13 +255,11 @@ describe('reviewed environment-specific Futures workstation transports', () => {
         expect(Object.keys(result).sort()).toEqual([
             'contractKlines',
             'indexKlines',
-            'markKlines',
         ]);
-        expect(calls).toHaveLength(3);
+        expect(calls).toHaveLength(2);
         expect(calls.map(url => new URL(url).pathname).sort()).toEqual([
             '/fapi/v1/indexPriceKlines',
             '/fapi/v1/klines',
-            '/fapi/v1/markPriceKlines',
         ]);
         expect(calls.every(url => new URL(url).searchParams.get('interval') === '5m')).toBe(true);
         expect(calls.some(url => /depth|premiumIndex|ticker\/24hr|exchangeInfo/.test(url)))
@@ -634,11 +634,11 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             pair: 'BTCUSDT',
             interval: '1m',
         });
-        await vi.waitFor(() => expect(calls).toHaveLength(5));
+        await vi.waitFor(() => expect(calls).toHaveLength(4));
         failFirst();
         await expect(pending).rejects.toBe(failure);
         await Promise.resolve();
-        expect(calls).toHaveLength(5);
+        expect(calls).toHaveLength(4);
         expect(calls.slice(1).every(call => call.signal.aborted)).toBe(true);
     });
 
@@ -668,12 +668,12 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             interval: '1m',
         });
 
-        await vi.waitFor(() => expect(calls).toHaveLength(5));
+        await vi.waitFor(() => expect(calls).toHaveLength(4));
         calls[0].stall();
-        // The stalled read is retried on a fresh request while its four
+        // The stalled read is retried on a fresh request while its three
         // siblings stay alive.
-        await vi.waitFor(() => expect(calls).toHaveLength(6));
-        expect(calls.slice(1, 5).every(call => call.signal.aborted)).toBe(false);
+        await vi.waitFor(() => expect(calls).toHaveLength(5));
+        expect(calls.slice(1, 4).every(call => call.signal.aborted)).toBe(false);
         for (const call of calls.slice(1)) call.succeed();
         await expect(pending).resolves.toBeTruthy();
         expect(timings.some(timing => (
@@ -708,12 +708,12 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             onBootstrapResource: observer,
         });
 
-        await vi.waitFor(() => expect(calls).toHaveLength(5));
+        await vi.waitFor(() => expect(calls).toHaveLength(4));
         resolveFirst();
         await expect(pending).rejects.toBe(observerFailure);
         await Promise.resolve();
         expect(observer).toHaveBeenCalledOnce();
-        expect(calls).toHaveLength(5);
+        expect(calls).toHaveLength(4);
         expect(calls[0].signal.aborted).toBe(false);
         expect(calls.slice(1).every(call => call.signal.aborted)).toBe(true);
     });
@@ -793,14 +793,17 @@ describe('reviewed environment-specific Futures workstation transports', () => {
         expect(timings.at(-1)).toMatchObject({ cache: 'hit', outcome: 'ok' });
     });
 
-    it('refreshes exchange-info after the bounded production cache TTL', async () => {
+    it('serves the bounded-stale catalog instantly and revalidates in the background', async () => {
         vi.useFakeTimers();
         vi.setSystemTime(new Date('2026-07-16T12:00:00.000Z'));
         globalThis.fetch = vi.fn(async url => responseFor(
             url.href,
             FUTURES_PRODUCTION_WORKSTATION_FIXTURE,
         ));
-        const transport = createFuturesProductionWorkstationReviewedTransport();
+        const timings = [];
+        const transport = createFuturesProductionWorkstationReviewedTransport({
+            onTiming: timing => timings.push(timing),
+        });
 
         await transport.loadExchangeInfo();
         await transport.loadExchangeInfo();
@@ -810,6 +813,36 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             FUTURES_PRODUCTION_WORKSTATION_EXCHANGE_INFO_CACHE_TTL_MS + 1,
         );
         await transport.loadExchangeInfo();
+        expect(timings.at(-1)).toMatchObject({ cache: 'stale', outcome: 'ok' });
+        await vi.runAllTimersAsync();
+        expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+
+        // The background refresh restored a fresh TTL window.
+        await transport.loadExchangeInfo();
+        expect(timings.at(-1)).toMatchObject({ cache: 'hit', outcome: 'ok' });
+        expect(globalThis.fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it('blocks on a fresh catalog once the stale-serve bound is exceeded', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(new Date('2026-07-16T12:00:00.000Z'));
+        globalThis.fetch = vi.fn(async url => responseFor(
+            url.href,
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE,
+        ));
+        const timings = [];
+        const transport = createFuturesProductionWorkstationReviewedTransport({
+            onTiming: timing => timings.push(timing),
+        });
+
+        await transport.loadExchangeInfo();
+        await vi.advanceTimersByTimeAsync(
+            FUTURES_PRODUCTION_WORKSTATION_EXCHANGE_INFO_CACHE_TTL_MS
+            + FUTURES_PRODUCTION_WORKSTATION_EXCHANGE_INFO_STALE_SERVE_MS
+            + 1,
+        );
+        await transport.loadExchangeInfo();
+        expect(timings.at(-1)).toMatchObject({ cache: 'miss', outcome: 'ok' });
         expect(globalThis.fetch).toHaveBeenCalledTimes(2);
     });
 
@@ -895,23 +928,27 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             EXCHANGE_INFO: 1,
             DEPTH_1000: 20,
             KLINES_99: 1,
-            MARK_KLINES_99: 1,
+            KLINES_1000: 5,
             INDEX_KLINES_99: 1,
             PREMIUM_INDEX_SYMBOL: 1,
             TICKER_SYMBOL: 1,
         });
         expect(Object.values(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS)
-            .reduce((total, weight) => total + weight, 0)).toBe(26);
+            .reduce((total, weight) => total + weight, 0)).toBe(30);
         expect(Object.entries(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS)
             .filter(([name]) => name !== 'EXCHANGE_INFO')
-            .reduce((total, [, weight]) => total + weight, 0)).toBe(25);
+            .reduce((total, [, weight]) => total + weight, 0)).toBe(29);
         expect(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS).toEqual({
             DEPTH: 1_000,
             KLINES: 99,
+            CANDLE_HISTORY: 1_000,
         });
+        // The transport's page bound and the protocol's must not drift apart.
+        expect(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.CANDLE_HISTORY)
+            .toBe(FUTURES_WORKSTATION_CANDLE_HISTORY_LIMITS.MAX_ROWS);
         expect(Object.isFrozen(FUTURES_PRODUCTION_WORKSTATION_ROUTES)).toBe(true);
         expect(Object.isFrozen(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS)).toBe(true);
-        expect(FUTURES_PRODUCTION_WORKSTATION_BOOTSTRAP_CONCURRENCY).toBe(6);
+        expect(FUTURES_PRODUCTION_WORKSTATION_BOOTSTRAP_CONCURRENCY).toBe(5);
     });
 
     it('reports depth snapshot reads with a distinct retry phase', async () => {

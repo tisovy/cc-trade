@@ -5,6 +5,9 @@ import {
     FuturesWorkstationOrderBook,
     FuturesWorkstationOrderBookError,
 } from './futures-workstation-order-book.js';
+import {
+    FUTURES_WORKSTATION_EVENT_MAX_BYTES,
+} from '../../src/utils/futuresWorkstationProtocolShared.js';
 
 const snapshot = (overrides = {}) => ({
     lastUpdateId: '100',
@@ -198,21 +201,56 @@ describe('authoritative Futures local order book', () => {
         expect(book.push(delta(), 1).resync).toBe(true);
     });
 
-    it('retains only bounded levels and emits at most 24 per side', () => {
-        const levels = Array.from({ length: 600 }, (_, index) => [
-            `${1000 - index}.01`,
-            '1',
-        ]);
+    // The snapshot is already the retained size, so the book only outgrows its
+    // bound the way it does live: diffs quoting levels beyond the snapshot's
+    // window. What is dropped must be the far end, never the tradable top.
+    it('retains only bounded levels and emits the renderer window per side', () => {
+        const { RETAINED_LEVELS_PER_SIDE } = FUTURES_WORKSTATION_ORDER_BOOK_LIMITS;
         const book = new FuturesWorkstationOrderBook();
         book.push(delta({ bids: [], asks: [] }), 1);
         expect(book.bootstrap(snapshot({
-            bids: levels,
-            asks: Array.from({ length: 600 }, (_, index) => [`${1001 + index}.01`, '1']),
+            bids: Array.from({ length: RETAINED_LEVELS_PER_SIDE },
+                (_, index) => [`${100000 - index}.01`, '1']),
+            asks: Array.from({ length: RETAINED_LEVELS_PER_SIDE },
+                (_, index) => [`${100001 + index}.01`, '1']),
         })).live).toBe(true);
-        expect(book.bids.size).toBeLessThanOrEqual(500);
-        expect(book.asks.size).toBeLessThanOrEqual(500);
-        expect(book.toRendererView().bids).toHaveLength(24);
-        expect(book.toRendererView().asks).toHaveLength(24);
+        expect(book.push(delta({
+            firstUpdateId: '102',
+            finalUpdateId: '102',
+            previousFinalUpdateId: '101',
+            bids: Array.from({ length: 100 }, (_, index) => [`${99000 - index}.01`, '1']),
+            asks: Array.from({ length: 100 }, (_, index) => [`${101001 + index}.01`, '1']),
+        }), 1).applied).toBe(true);
+        expect(book.bids.size).toBe(RETAINED_LEVELS_PER_SIDE);
+        expect(book.asks.size).toBe(RETAINED_LEVELS_PER_SIDE);
+        const view = book.toRendererView();
+        expect(view.bids).toHaveLength(
+            FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.RENDERER_LEVELS_PER_SIDE,
+        );
+        expect(view.asks).toHaveLength(
+            FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.RENDERER_LEVELS_PER_SIDE,
+        );
+        expect(view.bids[0].price).toBe('100000.01');
+        expect(view.asks[0].price).toBe('100001.01');
+    });
+
+    // The delivered book is the largest frame the desk sends. If it outgrows the
+    // protocol's byte ceiling the service throws OUTBOUND_FRAME_TOO_LARGE and the
+    // book stops updating entirely, so the two bounds are asserted together.
+    it('keeps a full delivered book inside the protocol frame ceiling', () => {
+        const side = count => Array.from({ length: count }, (_, index) => [
+            `${(900000 - index) / 10000}`,
+            '184467440737.09551615',
+        ]);
+        const book = new FuturesWorkstationOrderBook();
+        book.push(delta({ bids: [], asks: [] }), 1);
+        book.bootstrap(snapshot({
+            bids: side(FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.RETAINED_LEVELS_PER_SIDE),
+            asks: Array.from({ length: FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.RETAINED_LEVELS_PER_SIDE },
+                (_, index) => [`${(900001 + index) / 10000}`, '184467440737.09551615']),
+        }));
+        const bytes = Buffer.byteLength(JSON.stringify(book.toRendererView()), 'utf8');
+        expect(bytes).toBeLessThanOrEqual(FUTURES_WORKSTATION_EVENT_MAX_BYTES);
     });
 
     it('sorts high-precision prices without Number coercion', () => {

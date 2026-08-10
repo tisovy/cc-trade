@@ -64,14 +64,14 @@ describe('renderer runtime bridge reader', () => {
       analyticsConfig: { secret: 'not-exposed' },
     })
 
-    expect(getRendererRuntime()).toEqual({
-      localWebSocketAccess: {
-        host: '127.0.0.1',
-        port: 14477,
-        token: '',
-        tokenParam: 'token',
-      },
-      analyticsConfig: null,
-    })
+    // No endpoint is invented for a bridge that failed validation, and none is
+    // invented for a window that was never issued one.
+    expect(getRendererRuntime()).toBeNull()
+    expect(getRendererLocalWebSocketAccess()).toBeNull()
+    expect(getRendererAnalyticsConfig()).toBeNull()
+
+    vi.unstubAllGlobals()
+    expect(getRendererRuntime()).toBeNull()
+    expect(getRendererLocalWebSocketAccess()).toBeNull()
   })
 })

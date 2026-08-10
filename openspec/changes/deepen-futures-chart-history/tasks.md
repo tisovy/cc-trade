@@ -34,4 +34,5 @@
 
 - [x] 6.1 `npm test` (927 passed), futures boundary, circular-import and runtime-mock checks pass; eslint clean on every touched file.
 - [x] 6.2 Add `load-candle-history` to the reviewed action allowlist in `scripts/check-futures-workstation-boundaries.mjs`, stating what was reviewed.
-- [ ] 6.3 Operator confirms on live data: opening a contract shows deep history, scrolling left keeps loading, and a restart loads the same history without a request.
+- [x] 6.3 Defect found on live data: rows loaded under the previous selection survived the switch and the next page merged in front of them, drawing 15m bars behind a 1h series. A page now replaces, rather than joins, rows read for another contract or interval, and `exhausted` is no longer inherited across a switch.
+- [ ] 6.4 Operator confirms on live data: opening a contract shows deep history, scrolling left keeps loading, and a restart loads the same history without a request.

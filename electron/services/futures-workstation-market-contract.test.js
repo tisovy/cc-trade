@@ -56,6 +56,80 @@ describe('official Futures workstation market schemas', () => {
         expect(Object.isFrozen(catalog[0].filters)).toBe(true);
     });
 
+    it('normalizes the current Production TUTUSDT contract as tradable', () => {
+        const source = JSON.parse(FUTURES_PRODUCTION_WORKSTATION_FIXTURE.catalog);
+        source.symbols = [{
+            ...source.symbols[0],
+            symbol: 'TUTUSDT',
+            pair: 'TUTUSDT',
+            contractType: 'PERPETUAL',
+            status: 'TRADING',
+            baseAsset: 'TUT',
+            quoteAsset: 'USDT',
+            marginAsset: 'USDT',
+            pricePrecision: 7,
+            quantityPrecision: 0,
+            filters: [
+                {
+                    minPrice: '0.0000100',
+                    maxPrice: '200',
+                    tickSize: '0.0000100',
+                    filterType: 'PRICE_FILTER',
+                },
+                {
+                    filterType: 'LOT_SIZE',
+                    minQty: '1',
+                    maxQty: '40000000',
+                    stepSize: '1',
+                },
+                {
+                    minQty: '1',
+                    filterType: 'MARKET_LOT_SIZE',
+                    stepSize: '1',
+                    maxQty: '4000000',
+                },
+                { filterType: 'MAX_NUM_ORDERS', limit: 200 },
+                { notional: '5', filterType: 'MIN_NOTIONAL' },
+                {
+                    multiplierDown: '0.8500',
+                    filterType: 'PERCENT_PRICE',
+                    multiplierUp: '1.1500',
+                    multiplierDecimal: '4',
+                },
+                {
+                    positionControlSide: 'NONE',
+                    filterType: 'POSITION_RISK_CONTROL',
+                },
+            ],
+        }];
+
+        const [tut] = normalizeFuturesWorkstationExchangeInfo(JSON.stringify(source));
+
+        expect(tut).toEqual({
+            symbol: 'TUTUSDT',
+            pair: 'TUTUSDT',
+            contractType: 'PERPETUAL',
+            status: 'TRADING',
+            baseAsset: 'TUT',
+            quoteAsset: 'USDT',
+            marginAsset: 'USDT',
+            tradable: true,
+            filters: {
+                price: { min: '0.0000100', max: '200', tickSize: '0.0000100' },
+                quantity: { min: '1', max: '40000000', stepSize: '1' },
+                marketQuantity: { min: '1', max: '4000000', stepSize: '1' },
+                percentPrice: {
+                    multiplierUp: '1.1500',
+                    multiplierDown: '0.8500',
+                    multiplierDecimal: 4,
+                },
+                maximumOrders: 200,
+                maximumAlgoOrders: null,
+                minimumNotional: '5',
+            },
+        });
+    });
+
     it('excludes non-USDT contracts from the catalog', () => {
         const source = JSON.parse(FUTURES_PRODUCTION_WORKSTATION_FIXTURE.catalog);
         source.symbols.push({

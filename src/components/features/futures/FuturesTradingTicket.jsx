@@ -3,9 +3,22 @@ import {
   calculateFuturesNotionalForPercent,
   calculateFuturesNotionalPercent,
   deriveFuturesLimitOrderDraft,
+  evaluateFuturesOrderRisk,
   isFuturesDraftAmountWithinBudget,
   normalizeFuturesDraftPrice,
+  quantizeFuturesNotionalUsdt,
 } from '../../../utils/futuresOrderDraft.js'
+import {
+  describeFuturesOrderIntent,
+  describeFuturesPosition,
+  orderNotionalUsdt,
+  formatSignedPercent,
+  formatSignedUsdt,
+} from '../../../utils/futuresOrderPresentation.js'
+import { describeFuturesOrderConfirmation } from '../../../utils/futuresOrderConfirmation.js'
+import { formatExchangePrice, formatUsdtAmount } from '../../../utils/futuresPriceFormat.js'
+import { deriveFuturesReadiness } from '../../../utils/futuresReadiness.js'
+import FuturesOrderConfirmation from './FuturesOrderConfirmation.jsx'
 import './FuturesProductionExecutionTicket.css'
 
 const SIZE_ANCHORS = Object.freeze([0, 25, 50, 75, 100])
@@ -33,29 +46,12 @@ const DRAFT_REASON_MESSAGES = Object.freeze({
   BELOW_MINIMUM_NOTIONAL: 'Size is below the Binance minimum notional',
 })
 
+const SEND_FAILED_MESSAGE = 'Local backend connection unavailable — reconnect.'
+
 const isExactPositiveDecimal = value => (
   typeof value === 'string' && value.length <= 42 && EXACT_POSITIVE_DECIMAL.test(value)
 )
 const exactText = value => (typeof value === 'string' && value.length > 0 ? value : '—')
-
-const deriveReadiness = ({ connected, selectedContractTradable, balances, hasFilters, tradingPaused }) => {
-  if (!connected) {
-    return { tone: 'attention', label: 'OFFLINE', reason: 'Local backend connection unavailable — reconnect.' }
-  }
-  if (tradingPaused) {
-    return { tone: 'attention', label: 'PAUSED', reason: 'Trading is paused — new orders are blocked until you resume.' }
-  }
-  if (!selectedContractTradable) {
-    return { tone: 'attention', label: 'CONTRACT', reason: 'Select an active USDⓈ-M contract.' }
-  }
-  if (!hasFilters) {
-    return { tone: 'loading', label: 'METADATA', reason: 'Loading Binance symbol filters…' }
-  }
-  if (balances === null) {
-    return { tone: 'loading', label: 'SYNC', reason: 'Loading Futures account state…' }
-  }
-  return { tone: 'live', label: 'READY', reason: 'Futures trading ready — orders submit immediately.' }
-}
 
 const FuturesTradingTicket = ({
   state,
@@ -64,18 +60,33 @@ const FuturesTradingTicket = ({
   draftPrice = null,
   gestureRequest = null,
   orderAmendRequest = null,
+  sizeRequest = null,
   onDraftPriceChange,
+  onOrderEdit,
+  onPositionClose,
 }) => {
   const safeState = state ?? {}
   const balances = safeState.balances ?? null
+  const balanceResource = safeState.accountResources?.balances ?? {
+    status: balances === null ? 'loading' : 'ready',
+    data: balances,
+    lastSuccessfulAt: balances === null ? null : Date.now(),
+    error: null,
+  }
   const openOrders = Array.isArray(safeState.openOrders) ? safeState.openOrders : []
   const positions = Array.isArray(safeState.positions) ? safeState.positions : []
   const [tab, setTab] = useState('trade')
-  const [sizePercent, setSizePercent] = useState(25)
+  // Sizing starts at zero, never at a share of the balance: a size the operator
+  // never chose is a size they will not read on the confirmation either.
+  const [sizePercent, setSizePercent] = useState(0)
   const [customNotionalUsdt, setCustomNotionalUsdt] = useState(null)
   const [localPrice, setLocalPrice] = useState('')
+  const [feedback, setFeedback] = useState(null)
+  const [pendingOrder, setPendingOrder] = useState(null)
   const handledGestureRef = useRef(null)
   const handledAmendmentRef = useRef(null)
+  const handledSizeRef = useRef(null)
+  const feedbackSymbolRef = useRef(selectedSymbol)
 
   const price = typeof draftPrice === 'string' ? draftPrice : localPrice
   const updatePrice = (nextPrice) => {
@@ -90,6 +101,9 @@ const FuturesTradingTicket = ({
   const minQuantity = selectedContract?.filters?.quantity?.min
   const maxQuantity = selectedContract?.filters?.quantity?.max
   const minNotionalUsdt = selectedContract?.filters?.minimumNotional
+  // Only the selected contract's filters are loaded, so another symbol's rows
+  // are cleaned of float noise but never rounded to a foreign tick.
+  const tickOf = symbol => (symbol === selectedSymbol ? tickSize ?? null : null)
   const hasFilters = isExactPositiveDecimal(tickSize)
     && isExactPositiveDecimal(stepSize)
     && isExactPositiveDecimal(minQuantity)
@@ -102,10 +116,15 @@ const FuturesTradingTicket = ({
   const sizingBudget = availableUsdt !== null && isExactPositiveDecimal(availableUsdt)
     ? availableUsdt
     : null
-  const sizingReady = sizingBudget !== null && hasFilters
-  const notionalUsdt = sizingReady
+  const sizingReady = balanceResource.status === 'ready'
+    && sizingBudget !== null
+    && hasFilters
+  // Whole USDT only: a slider that reports 66030.478842815 makes the operator
+  // read noise instead of a size.
+  const rawNotionalUsdt = sizingReady
     ? customNotionalUsdt ?? calculateFuturesNotionalForPercent(sizingBudget, sizePercent) ?? ''
     : ''
+  const notionalUsdt = quantizeFuturesNotionalUsdt(rawNotionalUsdt) ?? rawNotionalUsdt
   const displayedSizePercent = customNotionalUsdt === null
     ? sizePercent
     : calculateFuturesNotionalPercent(customNotionalUsdt, sizingBudget) ?? 0
@@ -124,20 +143,55 @@ const FuturesTradingTicket = ({
   const amountWithinBudget = isFuturesDraftAmountWithinBudget(notionalUsdt, sizingBudget)
 
   const tradingPaused = safeState.tradingPaused === true
-  const readiness = deriveReadiness({
+  const readinessInput = {
+    startupReady: safeState.startupReady !== false,
     connected: safeState.connected === true,
     selectedContractTradable,
-    balances,
     hasFilters,
     tradingPaused,
+    balanceResource,
+    availableUsdt,
+    notionalUsdt,
+    maxOrderNotionalUsdt: safeState.maxOrderNotionalUsdt,
+  }
+  const readiness = deriveFuturesReadiness(readinessInput)
+  const sizingControlsReady = sizingReady && deriveFuturesReadiness({
+    ...readinessInput,
+    exposureIncreasing: false,
+  }).ready
+  const deriveSubmissionReadiness = (action, draft) => deriveFuturesReadiness({
+    ...readinessInput,
+    draftRequired: true,
+    draftValid: draft.ok,
+    amountWithinBudget,
+    exposureIncreasing: action.positionEffect === 'ENTRY',
   })
-  const canSubmit = readiness.label === 'READY' && sizingReady && amountWithinBudget
+  const canSubmitAction = action => deriveSubmissionReadiness(action, orderDraft).ready
+
+  const resolveSubmitBlockReason = (action, draft) => {
+    if (!readiness.ready) return readiness.reason
+    if (!sizingReady) return 'No confirmed available USDT balance to size the order.'
+    // Sizing starts at zero, so an unsized draft is the ordinary case, not a
+    // broken contract: say so instead of blaming the exchange filters.
+    if (!isExactPositiveDecimal(notionalUsdt)) return 'Order size is 0 — choose a size first.'
+    if (!draft.ok) return DRAFT_REASON_MESSAGES[draft.reason] ?? 'Order draft is invalid.'
+    const submissionReadiness = deriveSubmissionReadiness(action, draft)
+    if (!submissionReadiness.ready) return submissionReadiness.reason
+    return SEND_FAILED_MESSAGE
+  }
 
   const submitLimitOrder = (action, candidatePrice) => {
-    if (!canSubmit || typeof safeState.placeOrder !== 'function') return false
     const draft = deriveDraft(candidatePrice)
-    if (!draft.ok) return false
-    return safeState.placeOrder({
+    const submissionReadiness = deriveSubmissionReadiness(action, draft)
+    if (!submissionReadiness.ready || !draft.ok || typeof safeState.placeOrder !== 'function') {
+      setFeedback({
+        tone: 'ignored',
+        title: `${action.label} NOT sent`,
+        detail: resolveSubmitBlockReason(action, draft),
+      })
+      return false
+    }
+    const accepted = safeState.placeOrder({
       symbol: selectedSymbol,
       side: action.side,
       orderType: 'LIMIT',
@@ -145,9 +199,43 @@ const FuturesTradingTicket = ({
       quantity: draft.quantity,
       ...(action.positionEffect === 'EXIT' ? { reduceOnly: true } : {}),
     })
+    setFeedback(accepted
+      ? {
+          tone: 'submitted',
+          title: `${action.label} submitted`,
+          detail: `LIMIT ${draft.quantity} @ ${draft.price}`,
+        }
+      : { tone: 'ignored', title: `${action.label} NOT sent`, detail: SEND_FAILED_MESSAGE })
+    return accepted
   }
 
-  // Chart/book gestures place immediately, exactly like a spot ticket submit.
+  // Readiness is re-derived by submitLimitOrder at this moment, not at the
+  // moment the order was staged, so a balance or connection that lapsed while
+  // the panel was open still blocks the send.
+  const confirmPendingOrder = () => {
+    if (!pendingOrder) return
+    setPendingOrder(null)
+    submitLimitOrder(pendingOrder.action, pendingOrder.price)
+  }
+
+  // Cancelling says so out loud: silence after a gesture is indistinguishable
+  // from an order that was quietly sent.
+  const cancelPendingOrder = () => {
+    if (!pendingOrder) return
+    setPendingOrder(null)
+    setFeedback({
+      tone: 'ignored',
+      title: `${pendingOrder.action.label} cancelled`,
+      detail: 'Nothing was sent to the exchange.',
+    })
+  }
+
+  // A gesture prepares the order; it does not send it.
+  //
+  // Alt+right ("exit LONG") and Ctrl+right ("enter SHORT") are the same SELL at
+  // the same price for the same size, so a slipped modifier produces an order
+  // that looks exactly right while doing the opposite thing to the position.
+  // The operator confirms the consequence instead, in a panel at the cursor.
   useEffect(() => {
     if (!gestureRequest || handledGestureRef.current === gestureRequest.id) return
     handledGestureRef.current = gestureRequest.id
@@ -157,41 +245,163 @@ const FuturesTradingTicket = ({
       && candidate.positionEffect === gestureRequest.positionEffect
     ))
     if (!action) return
-    submitLimitOrder(action, normalizeFuturesDraftPrice(gestureRequest.price, tickSize) ?? gestureRequest.price)
+    const candidatePrice = normalizeFuturesDraftPrice(gestureRequest.price, tickSize)
+      ?? gestureRequest.price
+    const draft = deriveDraft(candidatePrice)
+    // An order that cannot be sent is refused here, not staged and then refused
+    // on confirmation: the operator learns the reason while the price is fresh.
+    if (!draft.ok || !deriveSubmissionReadiness(action, draft).ready) {
+      setPendingOrder(null)
+      setFeedback({
+        tone: 'ignored',
+        title: `${action.label} NOT sent`,
+        detail: resolveSubmitBlockReason(action, draft),
+      })
+      return
+    }
+    setFeedback(null)
+    setPendingOrder({
+      action,
+      symbol: selectedSymbol,
+      price: draft.price,
+      quantity: draft.quantity,
+      notionalUsdt,
+      anchor: gestureRequest.anchor ?? null,
+    })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gestureRequest])
 
-  // Ctrl/Alt-dragging an order line moves it: cancel + re-place at the new
-  // price. Skipped entirely while paused so a drag cannot cancel an order
-  // that the paused backend would then refuse to re-place.
+  // Ctrl/Alt-dragging an order line reprices it through Binance's native
+  // amendment — one call, so a rejection leaves the order exactly where it was.
+  // Skipped while paused so a drag cannot touch the book at all.
   useEffect(() => {
     if (!orderAmendRequest || handledAmendmentRef.current === orderAmendRequest.id) return
     handledAmendmentRef.current = orderAmendRequest.id
-    if (tradingPaused) return
-    if (typeof safeState.cancelOrder !== 'function' || typeof safeState.placeOrder !== 'function') return
+    if (tradingPaused) {
+      setFeedback({
+        tone: 'ignored',
+        title: 'Order move NOT applied',
+        detail: 'Trading is paused — resume to move orders.',
+      })
+      return
+    }
+    if (typeof safeState.modifyOrder !== 'function') return
     const target = openOrders.find(order => (
       order.clientOrderId === orderAmendRequest.clientOrderId
       || String(order.orderId) === String(orderAmendRequest.orderId)
     ))
-    if (!target) return
+    if (!target) {
+      setFeedback({
+        tone: 'ignored',
+        title: 'Order move NOT applied',
+        detail: 'The dragged order is no longer open.',
+      })
+      return
+    }
     const nextPrice = normalizeFuturesDraftPrice(orderAmendRequest.price, tickSize)
       ?? orderAmendRequest.price
     const remaining = Number(target.origQty) - Number(target.z ?? target.executedQty ?? 0)
-    if (!Number.isFinite(remaining) || remaining <= 0) return
-    safeState.cancelOrder({ symbol: target.symbol, orderId: target.orderId })
-    safeState.placeOrder({
+    if (!Number.isFinite(remaining) || remaining <= 0) {
+      setFeedback({
+        tone: 'ignored',
+        title: 'Order move NOT applied',
+        detail: 'The dragged order has no remaining quantity.',
+      })
+      return
+    }
+    // A price-only drag still changes the notional, so the ceiling is checked
+    // against the order the drag would leave working, not the one it replaces.
+    const risk = evaluateFuturesOrderRisk({
+      quantity: target.origQty,
+      price: nextPrice,
+      maxOrderNotionalUsdt: safeState.maxOrderNotionalUsdt,
+      exposureIncreasing: target.reduceOnly !== true,
+    })
+    if (!risk.ok) {
+      setFeedback({
+        tone: 'ignored',
+        title: 'Order move NOT applied',
+        detail: risk.reason === 'ABOVE_ORDER_CAP'
+          ? `Moved order would be ${risk.notionalUsdt} USDT, above the local ${risk.capUsdt} USDT limit.`
+          : 'The moved order could not be valued, so the order limit could not be checked.',
+      })
+      return
+    }
+    const accepted = safeState.modifyOrder({
       symbol: target.symbol,
       side: target.side,
-      orderType: 'LIMIT',
+      orderId: target.orderId,
+      origClientOrderId: target.orderId ? undefined : target.clientOrderId,
       price: nextPrice,
-      quantity: remaining,
-      ...(target.positionSide && target.positionSide !== 'BOTH'
-        ? { positionSide: target.positionSide }
-        : {}),
-      ...(target.reduceOnly === true ? { reduceOnly: true } : {}),
+      quantity: target.origQty,
     })
+    setFeedback(accepted
+      ? {
+          tone: 'submitted',
+          title: 'Order move submitted',
+          detail: `${target.symbol} ${target.side} → ${nextPrice}`,
+        }
+      : { tone: 'ignored', title: 'Order move NOT applied', detail: SEND_FAILED_MESSAGE })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [orderAmendRequest])
+
+  // Sizing the ticket from an open position: the quantity comes from the dock,
+  // the price from wherever the operator is working, so "the whole position"
+  // means the whole position at the limit they are about to place.
+  useEffect(() => {
+    if (!sizeRequest || handledSizeRef.current === sizeRequest.id) return
+    handledSizeRef.current = sizeRequest.id
+    const priceNumber = Number(price)
+    if (!Number.isFinite(priceNumber) || priceNumber <= 0) {
+      setFeedback({
+        tone: 'ignored',
+        title: 'Size NOT applied',
+        detail: 'Pick a price first — the position is sized at the price you trade at.',
+      })
+      return
+    }
+    // Floored to whole USDT, so a full-position exit can never round up past
+    // the position it is closing.
+    const notional = quantizeFuturesNotionalUsdt((sizeRequest.quantity * priceNumber).toFixed(2))
+    if (notional === null) {
+      setFeedback({
+        tone: 'ignored',
+        title: 'Size NOT applied',
+        detail: 'The position size could not be valued at this price.',
+      })
+      return
+    }
+    setCustomNotionalUsdt(notional)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sizeRequest])
+
+  // Feedback and sizing belong to one symbol's trading session; a symbol change
+  // clears both, so a size chosen for the previous contract cannot be inherited
+  // by the next one and fired by a gesture.
+  useEffect(() => {
+    if (feedbackSymbolRef.current === selectedSymbol) return
+    feedbackSymbolRef.current = selectedSymbol
+    setFeedback(null)
+    setSizePercent(0)
+    setCustomNotionalUsdt(null)
+    // An order staged for the previous contract must never be confirmable
+    // against the new one.
+    setPendingOrder(null)
+  }, [selectedSymbol])
+
+  // Recomputed on every render rather than frozen at staging time, so the
+  // projected position keeps up with account updates that land while the
+  // operator is still reading the panel.
+  const pendingConfirmation = pendingOrder
+    ? describeFuturesOrderConfirmation({
+      action: pendingOrder.action,
+      symbol: pendingOrder.symbol,
+      price: pendingOrder.price,
+      quantity: pendingOrder.quantity,
+      notionalUsdt: pendingOrder.notionalUsdt,
+      positions,
+    })
+    : null
 
   const gestureAction = ORDER_ACTIONS.find(candidate => (
     candidate.side === gestureRequest?.side
@@ -203,17 +413,27 @@ const FuturesTradingTicket = ({
     : (price ? DRAFT_REASON_MESSAGES[orderDraft.reason] ?? null : 'Pick a chart or order-book price')
   const selectedOpenOrders = openOrders.filter(order => order.symbol === selectedSymbol)
   const lastError = safeState.lastError ?? null
+  const unresolvedCommand = safeState.unresolvedCommand ?? null
+  const accountFailures = Object.entries(safeState.accountResources ?? {})
+    .filter(([, resource]) => resource?.status === 'error' || resource?.status === 'stale')
+  const orderResourceStates = ['regularOrders', 'algoOrders']
+    .map(resource => safeState.accountResources?.[resource])
+    .filter(Boolean)
+  const orderSyncUnavailable = orderResourceStates.some(resource => (
+    resource.status === 'error' && resource.lastSuccessfulAt == null
+  ))
+  const orderSyncPartial = orderResourceStates.some(resource => (
+    resource.status === 'error' || resource.status === 'stale'
+  ))
 
   return (
     <aside className="futures-production-execution-ticket" aria-label="Futures trading ticket">
+      {/* The market and the symbol are already stated by the identity bar and
+          the market header; this rail only has to answer "can I trade now?". */}
       <header className="futures-production-execution-header">
-        <div>
-          <span className="futures-production-execution-market">FUTURES · USDⓈ-M</span>
-          <strong>{selectedSymbol}</strong>
-        </div>
         <div className="futures-production-readiness">
           <span className={`futures-production-live is-${readiness.tone}`}>{readiness.label}</span>
-          <small role="status">{readiness.reason}</small>
+          {readiness.ready ? null : <small role="status">{readiness.reason}</small>}
         </div>
         <button
           type="button"
@@ -224,6 +444,22 @@ const FuturesTradingTicket = ({
           {tradingPaused ? 'Resume trading' : 'Pause trading'}
         </button>
       </header>
+
+      {feedback ? (
+        <div
+          className={`futures-production-feedback is-${feedback.tone}`}
+          role="status"
+          aria-label="Futures gesture feedback"
+        >
+          <div>
+            <strong>{feedback.title}</strong>
+            <span>{feedback.detail}</span>
+          </div>
+          <button type="button" aria-label="Dismiss feedback" onClick={() => setFeedback(null)}>
+            ×
+          </button>
+        </div>
+      ) : null}
 
       <div className="futures-production-tabs" role="tablist" aria-label="Futures trading rail tabs">
         <button type="button" role="tab" aria-selected={tab === 'trade'} onClick={() => setTab('trade')}>Trade</button>
@@ -270,6 +506,7 @@ const FuturesTradingTicket = ({
                 max="100"
                 step="1"
                 value={displayedSizePercent}
+                disabled={!sizingControlsReady}
                 style={{ '--futures-size-fill': `${displayedSizePercent}%` }}
                 onChange={(event) => {
                   setCustomNotionalUsdt(null)
@@ -283,6 +520,7 @@ const FuturesTradingTicket = ({
                   type="button"
                   key={value}
                   className={displayedSizePercent === value ? 'is-selected' : ''}
+                  disabled={!sizingControlsReady}
                   onClick={() => {
                     setCustomNotionalUsdt(null)
                     setSizePercent(value)
@@ -299,7 +537,7 @@ const FuturesTradingTicket = ({
                 type="text"
                 inputMode="decimal"
                 placeholder="—"
-                disabled={!sizingReady}
+                disabled={!sizingControlsReady}
                 value={notionalUsdt}
                 onChange={event => setCustomNotionalUsdt(event.target.value)}
               />
@@ -307,7 +545,10 @@ const FuturesTradingTicket = ({
             <dl className="futures-production-order-summary">
               <div><dt>Price</dt><dd>{orderDraft.ok ? orderDraft.price : exactText(price)}</dd></div>
               <div><dt>Quantity</dt><dd>{orderDraft.ok ? orderDraft.quantity : '—'}</dd></div>
-              <div><dt>Available</dt><dd>{availableUsdt ? `${availableUsdt} USDT` : '—'}</dd></div>
+              <div>
+                <dt>Available</dt>
+                <dd>{availableUsdt ? `${formatUsdtAmount(availableUsdt)} USDT` : '—'}</dd>
+              </div>
             </dl>
             {draftReason ? <p className="futures-production-draft-reason" role="status">{draftReason}</p> : null}
             <div className="futures-production-manual-actions" aria-label="Manual Futures orders">
@@ -316,7 +557,7 @@ const FuturesTradingTicket = ({
                   type="button"
                   key={action.key}
                   className={`is-${action.positionSide.toLowerCase()} is-${action.positionEffect.toLowerCase()}`}
-                  disabled={!canSubmit || !orderDraft.ok}
+                  disabled={!canSubmitAction(action)}
                   onClick={() => submitLimitOrder(action, price)}
                 >
                   {action.label}
@@ -348,33 +589,59 @@ const FuturesTradingTicket = ({
                 ↻
               </button>
             </header>
-            {openOrders.length === 0
+            {orderSyncUnavailable ? (
+              <p role="alert">Open orders unavailable — synchronization has not completed successfully.</p>
+            ) : orderSyncPartial ? (
+              <p role="status">Open orders are partially synchronized; last confirmed data remains visible.</p>
+            ) : null}
+            {openOrders.length === 0 && !orderSyncUnavailable
               ? <p>No active Futures orders.</p>
-              : openOrders.map(order => (
-                <article
-                  className={`${order.symbol === selectedSymbol ? 'is-current-symbol' : ''} is-${(order.positionSide ?? 'both').toLowerCase()}`}
-                  key={`${order.symbol}:${order.orderId}`}
-                >
-                  <header>
-                    <div><strong>{order.symbol}</strong><span>{order.side} · {order.positionSide ?? 'BOTH'}</span></div>
-                    <code>{order.status}</code>
-                  </header>
-                  <dl>
-                    <div><dt>Type</dt><dd>{order.type}</dd></div>
-                    <div><dt>Price</dt><dd>{order.price}</dd></div>
-                    <div><dt>Original qty</dt><dd>{order.origQty}</dd></div>
-                    <div><dt>Filled qty</dt><dd>{order.z ?? '0'}</dd></div>
-                  </dl>
-                  <div>
-                    <button
-                      type="button"
-                      onClick={() => safeState.cancelOrder?.({ symbol: order.symbol, orderId: order.orderId })}
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </article>
-              ))}
+              : (
+                <div className="futures-production-order-rows">
+                  {openOrders.map((order) => {
+                    const intent = describeFuturesOrderIntent(order)
+                    const isAlgo = order.orderKind === 'ALGO'
+                    return (
+                      <div
+                        className={`futures-production-order-row is-${intent.tone}${order.symbol === selectedSymbol ? ' is-current-symbol' : ''}`}
+                        key={`${order.orderKind ?? 'REGULAR'}:${order.symbol}:${order.orderId}`}
+                        onDoubleClick={event => (isAlgo ? undefined : onOrderEdit?.(order, {
+                          x: event.clientX,
+                          y: event.clientY,
+                        }))}
+                      >
+                        <strong>{order.symbol}</strong>
+                        <span className={`futures-production-side is-${intent.tone}`}>
+                          {intent.label}
+                        </span>
+                        <code>{order.triggerPrice ?? order.price}</code>
+                        <b>{orderNotionalUsdt(order) ?? '—'} USDT</b>
+                        {isAlgo ? (
+                          <em title="Managed on Binance">ALGO</em>
+                        ) : (
+                          <button
+                            type="button"
+                            className="futures-production-order-cancel"
+                            aria-label={`Cancel ${order.symbol} ${intent.side} order at ${order.price}`}
+                            title="Cancel order"
+                            onClick={() => safeState.cancelOrder?.({
+                              symbol: order.symbol,
+                              orderId: order.orderId,
+                            })}
+                          >
+                            ×
+                          </button>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
+            {openOrders.length > 0 ? (
+              <p className="futures-production-order-hint">
+                Double-click a row or its chart line to change price and amount.
+              </p>
+            ) : null}
             {selectedOpenOrders.length > 0 ? (
               <button
                 type="button"
@@ -401,40 +668,109 @@ const FuturesTradingTicket = ({
             </header>
             {positions.length === 0
               ? <p>No open positions.</p>
-              : positions.map(position => (
+              : positions.map((position) => {
+                const presentation = describeFuturesPosition(position)
+                return (
                 <article
-                  className={`is-${(position.positionSide ?? 'both').toLowerCase()}`}
+                  className={`is-${presentation.tone}`}
                   key={`${position.symbol}:${position.positionSide}`}
                 >
-                  <header><strong>{position.symbol}</strong><span>{position.positionSide}</span></header>
+                  <header>
+                    <strong>{position.symbol}</strong>
+                    <span className={`futures-production-side is-${presentation.tone}`}>
+                      {presentation.positionSide}
+                    </span>
+                  </header>
+                  <div className={`futures-production-position-pnl is-${presentation.pnlTone}`}>
+                    <strong>{formatSignedUsdt(presentation.unrealizedPnl)} USDT</strong>
+                    <em>{formatSignedPercent(presentation.roePercent)}</em>
+                  </div>
                   <dl>
                     <div><dt>Qty</dt><dd>{exactText(position.quantity)}</dd></div>
-                    <div><dt>Entry</dt><dd>{exactText(position.entryPrice)}</dd></div>
-                    <div><dt>Mark</dt><dd>{exactText(position.markPrice)}</dd></div>
-                    <div><dt>Margin</dt><dd>{position.marginType ?? '—'} · {position.leverage ?? '—'}×</dd></div>
-                    <div><dt>UPnL</dt><dd>{exactText(position.unrealizedPnl)} USDT</dd></div>
-                    <div><dt>Liq.</dt><dd>{exactText(position.liquidationPrice)}</dd></div>
+                    <div>
+                      <dt>Entry</dt>
+                      <dd>{formatExchangePrice(position.entryPrice, tickOf(position.symbol))}</dd>
+                    </div>
+                    <div>
+                      <dt>Mark</dt>
+                      <dd>{formatExchangePrice(position.markPrice, tickOf(position.symbol))}</dd>
+                    </div>
+                    <div>
+                      <dt>Liq.</dt>
+                      <dd>{formatExchangePrice(position.liquidationPrice, tickOf(position.symbol))}</dd>
+                    </div>
                   </dl>
                   <div>
                     <button
                       type="button"
-                      onClick={() => safeState.closePosition?.(position)}
+                      onClick={event => onPositionClose?.(position, {
+                        x: event.clientX,
+                        y: event.clientY,
+                      })}
                     >
-                      Close (market)
+                      Close position
                     </button>
                   </div>
                 </article>
-              ))}
+                )
+              })}
           </section>
         )}
 
-        {lastError ? (
+        {/* An unconfirmed submission outranks every other status: the order may
+            be live, and nothing else on this card is more urgent to read. It
+            carries no control at all — a retry here is what creates the second
+            order. */}
+        {unresolvedCommand ? (
+          <section
+            className="futures-production-backend-card is-unresolved"
+            role="alert"
+            aria-label="Futures command outcome unconfirmed"
+          >
+            <strong>{unresolvedCommand.code}</strong>
+            <code>{unresolvedCommand.message}</code>
+          </section>
+        ) : accountFailures.length > 0 ? (
+          <section className="futures-production-backend-card is-rejected" aria-label="Futures account synchronization errors">
+            {accountFailures.map(([resourceName, resource]) => (
+              <div key={`${resourceName}:${resource.error?.code ?? resource.status}`}>
+                <strong>{resourceName} · {resource.status}</strong>
+                <code>{resource.error?.message ?? 'Synchronization failed.'}</code>
+              </div>
+            ))}
+            <button type="button" onClick={() => safeState.refresh?.(selectedSymbol)}>
+              Retry account sync
+            </button>
+          </section>
+        ) : lastError ? (
           <section className="futures-production-backend-card is-rejected" aria-label="Futures command rejection">
             <strong>{lastError.code}</strong>
             <code>{lastError.message}</code>
           </section>
+        ) : safeState.lastExecution ? (
+          <section className="futures-production-backend-card is-ack" aria-label="Last Futures execution">
+            <strong>
+              {safeState.lastExecution.symbol} {safeState.lastExecution.side}
+              {' · '}
+              {safeState.lastExecution.status}
+            </strong>
+            <code>
+              {safeState.lastExecution.type ?? 'LIMIT'} {safeState.lastExecution.origQty}
+              {safeState.lastExecution.price && safeState.lastExecution.price !== '0'
+                ? ` @ ${safeState.lastExecution.price}`
+                : ''}
+            </code>
+          </section>
         ) : null}
       </div>
+      {pendingConfirmation ? (
+        <FuturesOrderConfirmation
+          confirmation={pendingConfirmation}
+          anchor={pendingOrder.anchor}
+          onConfirm={confirmPendingOrder}
+          onCancel={cancelPendingOrder}
+        />
+      ) : null}
     </aside>
   )
 }

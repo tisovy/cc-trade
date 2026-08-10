@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   FUTURES_WORKSTATION_REQUEST_MAX_BYTES,
 } from '../utils/futuresWorkstationProtocolShared.js'
+import { LOCAL_WEBSOCKET_AUTH_CLOSE_CODE } from '../utils/localWebSocketAccess.js'
 
 export const FUTURES_LOCAL_WORKSTATION_CONNECTION_LIMITS = Object.freeze({
   CONNECT_TIMEOUT_MS: 10_000,
@@ -12,13 +13,10 @@ export const FUTURES_LOCAL_WORKSTATION_CONNECTION_LIMITS = Object.freeze({
 
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]'])
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{0,256}$/
-const FALLBACK_LOCAL_ACCESS = Object.freeze({
-  host: '127.0.0.1',
-  port: 14477,
-  token: '',
-  tokenParam: 'token',
-})
 
+// No runtime means no address. This used to fall back to `127.0.0.1:14477`
+// with an empty token — a real endpoint that answers 401 — so a window that was
+// never issued a runtime kept dialling one it could never authenticate against.
 const readExactLocalWorkstationAccess = () => {
   const access = globalThis.ccTradeRuntime?.localWebSocketAccess
   if (access === null
@@ -31,13 +29,14 @@ const readExactLocalWorkstationAccess = () => {
     || typeof access.token !== 'string'
     || !TOKEN_PATTERN.test(access.token)
     || access.tokenParam !== 'token') {
-    return FALLBACK_LOCAL_ACCESS
+    return null
   }
   return access
 }
 
 const createExactLocalWorkstationUrl = () => {
   const access = readExactLocalWorkstationAccess()
+  if (access === null) return null
   const host = access.host === '::1' ? '[::1]' : access.host
   const url = new URL(`ws://${host}:${access.port}`)
   if (access.token) url.searchParams.set(access.tokenParam, access.token)
@@ -120,12 +119,15 @@ const useFuturesLocalWorkstationConnection = ({ enabled }) => {
         reconnectAttempts = 0
         setWsConnection(socket)
       }
-      socket.onclose = () => {
+      socket.onclose = (event) => {
         if (connectionTimer !== null) clearTimeout(connectionTimer)
         connectionTimer = null
         if (socketRef.current === socket) socketRef.current = null
         if (!active) return
         setWsConnection(previous => previous === socket ? null : previous)
+        // The next attempt would carry the same refused token. Reconnecting on
+        // an authentication failure only repeats it.
+        if (event?.code === LOCAL_WEBSOCKET_AUTH_CLOSE_CODE) return
         scheduleReconnect()
       }
       socket.onerror = () => {

@@ -1,3 +1,8 @@
+// Inspects the **built artifacts** in `dist-electron`. Its counterpart,
+// `check-runtime-mock-layer.mjs`, inspects the production **source graph**.
+// Neither subsumes the other: source can be clean while a build pulls in a
+// verification composition, and a build can be clean while source drifts.
+
 import fs from 'node:fs/promises';
 import path from 'node:path';
 

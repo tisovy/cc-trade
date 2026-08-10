@@ -4,11 +4,13 @@ import {
     readFuturesProductionWorkstationRequest,
 } from '../../src/utils/futuresProductionWorkstationProtocol.js';
 import {
+    FUTURES_WORKSTATION_DEFAULT_TAPE_SETTINGS,
     FUTURES_WORKSTATION_EVENT_MAX_BYTES,
     FUTURES_WORKSTATION_RESOURCES,
     FUTURES_WORKSTATION_STATES,
 } from '../../src/utils/futuresWorkstationProtocolShared.js';
 import {
+    FUTURES_WORKSTATION_MARKET_LIMITS,
     appendFuturesWorkstationTrade,
     createFuturesWorkstationCatalogFrames,
     createFuturesWorkstationHeader,
@@ -26,6 +28,9 @@ import {
 import {
     FuturesWorkstationOrderBook,
 } from './futures-workstation-order-book.js';
+import {
+    parseFuturesWorkstationDecimal,
+} from './futures-workstation-decimal.js';
 
 export const FUTURES_PRODUCTION_WORKSTATION_FRESHNESS = Object.freeze({
     HEADER_MS: 5_000,
@@ -61,6 +66,31 @@ const safeCode = error => (
         : 'WORKSTATION_RESOURCE_REJECTED'
 );
 
+const freezeTapeSettings = value => Object.freeze({
+    throttleEnabled: value.throttleEnabled,
+    timeoutMs: value.timeoutMs,
+    minNotionalUsdt: value.minNotionalUsdt,
+});
+
+const absoluteCoefficient = value => (value < 0n ? -value : value);
+
+const tradeMeetsTapeNotional = (row, minimumNotionalUsdt) => {
+    const price = parseFuturesWorkstationDecimal(row.price);
+    const quantity = parseFuturesWorkstationDecimal(row.quantity);
+    const minimum = parseFuturesWorkstationDecimal(minimumNotionalUsdt);
+    const productCoefficient = absoluteCoefficient(price.coefficient)
+        * absoluteCoefficient(quantity.coefficient);
+    const productScale = price.scale + quantity.scale;
+    const scale = Math.max(productScale, minimum.scale);
+    const scaledProduct = productCoefficient * (10n ** BigInt(scale - productScale));
+    const scaledMinimum = minimum.coefficient * (10n ** BigInt(scale - minimum.scale));
+    return scaledProduct >= scaledMinimum;
+};
+
+const tapeFingerprint = (state, rows) => (
+    `${state}:${rows.map(row => row.aggregateTradeId).join(',')}`
+);
+
 export class FuturesProductionWorkstationService {
     constructor({
         transport,
@@ -91,6 +121,7 @@ export class FuturesProductionWorkstationService {
         this.generation = 0;
         this.current = null;
         this.stopped = false;
+        this.tapeSettings = FUTURES_WORKSTATION_DEFAULT_TAPE_SETTINGS;
     }
 
     async handleRequest(raw, { emit } = {}) {
@@ -99,8 +130,19 @@ export class FuturesProductionWorkstationService {
             throw new FuturesProductionWorkstationServiceError('INVALID_EMITTER');
         }
         const request = readFuturesProductionWorkstationRequest(raw);
+        if (request.action === FUTURES_PRODUCTION_WORKSTATION_ACTIONS.CONFIGURE_TAPE) {
+            this.configureTape(request);
+            return;
+        }
+        if (request.action === FUTURES_PRODUCTION_WORKSTATION_ACTIONS.LOAD_CANDLE_HISTORY) {
+            await this.loadCandleHistory(request);
+            return;
+        }
         if (request.action === FUTURES_PRODUCTION_WORKSTATION_ACTIONS.UNSUBSCRIBE) {
-            if (this.current?.requestId === request.requestId) this.stopCurrent();
+            if (this.current?.requestId === request.requestId) {
+                this.stopCurrent();
+                this.tapeSettings = FUTURES_WORKSTATION_DEFAULT_TAPE_SETTINGS;
+            }
             return;
         }
         if (request.action === FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SELECT_INTERVAL
@@ -112,6 +154,90 @@ export class FuturesProductionWorkstationService {
             return;
         }
         await this.startGeneration(request, emit, 0);
+    }
+
+    // History is read on demand and delivered behind the live window. It never
+    // touches session.candles: the live series stays the single writer of the
+    // tail, so a slow history read can never rewind what the stream just drew.
+    async loadCandleHistory(request) {
+        const session = this.current;
+        if (!session
+            || !this.isCurrent(session)
+            || session.requestId !== request.requestId
+            || session.symbol !== request.symbol
+            || session.interval !== request.interval) {
+            throw new FuturesProductionWorkstationServiceError('CANDLE_HISTORY_OWNER_UNAVAILABLE');
+        }
+        if (typeof this.transport.readCandleHistory !== 'function') {
+            throw new FuturesProductionWorkstationServiceError('CANDLE_HISTORY_UNSUPPORTED');
+        }
+        const { endTime, interval } = request;
+        let rows;
+        try {
+            rows = normalizeFuturesWorkstationKlines(await this.transport.readCandleHistory({
+                symbol: session.symbol,
+                interval,
+                endTime,
+                limit: request.limit,
+                signal: session.abortController.signal,
+            }));
+        } catch (error) {
+            // A failed history read leaves the chart exactly as it was; the
+            // operator can scroll again. It is never a reason to resync a live
+            // session that is otherwise healthy.
+            this.onInternalError({ phase: 'candle-history', code: safeCode(error) });
+            return;
+        }
+        // The session may have moved to another contract or interval while the
+        // read was in flight; that history belongs to nothing now.
+        if (!this.isCurrent(session)
+            || session.requestId !== request.requestId
+            || session.symbol !== request.symbol
+            || session.interval !== interval) return;
+        this.emitCandleHistory(session, { endTime, interval, rows });
+    }
+
+    emitCandleHistory(session, { endTime, interval, rows }) {
+        const pageSize = FUTURES_WORKSTATION_MARKET_LIMITS.RENDERER_CANDLES;
+        const pages = Math.max(1, Math.ceil(rows.length / pageSize));
+        for (let page = 0; page < pages; page += 1) {
+            const offset = page * pageSize;
+            const emitted = this.emitResource(
+                session,
+                FUTURES_WORKSTATION_RESOURCES.CANDLE_HISTORY,
+                FUTURES_WORKSTATION_STATES.LIVE,
+                Object.freeze({
+                    series: 'contract',
+                    interval,
+                    endTime,
+                    offset,
+                    total: rows.length,
+                    complete: page === pages - 1,
+                    rows: Object.freeze(rows.slice(offset, offset + pageSize)),
+                }),
+            );
+            if (!emitted) return;
+        }
+    }
+
+    configureTape(request) {
+        const session = this.current;
+        if (!session || !this.isCurrent(session) || session.requestId !== request.requestId) {
+            throw new FuturesProductionWorkstationServiceError('TAPE_OWNER_UNAVAILABLE');
+        }
+        const settings = freezeTapeSettings(request);
+        this.tapeSettings = settings;
+        session.tapeSettings = settings;
+        this.clearPendingTapeTimer(session);
+        session.lastTapeEmittedAt = null;
+        if (!session.bootstrapped) return;
+        const state = session.staleResources.has(FUTURES_WORKSTATION_RESOURCES.TRADES)
+            ? FUTURES_WORKSTATION_STATES.STALE
+            : FUTURES_WORKSTATION_STATES.LIVE;
+        this.emitTrades(session, state, {
+            force: true,
+            recordWindow: settings.throttleEnabled,
+        });
     }
 
     async selectInterval(request, emit, reconnectAttempt = 0) {
@@ -145,7 +271,6 @@ export class FuturesProductionWorkstationService {
         session.emit = emit;
         session.intervalReconnectAttempt = reconnectAttempt;
         session.candles = Object.freeze([]);
-        session.markCandles = Object.freeze([]);
         session.indexCandles = Object.freeze([]);
         session.pendingCandleEvents = [];
         session.intervalBootstrapping = true;
@@ -176,12 +301,10 @@ export class FuturesProductionWorkstationService {
             });
             if (!isCurrentInterval()) return;
             session.candles = normalizeFuturesWorkstationKlines(bootstrap?.contractKlines);
-            session.markCandles = normalizeFuturesWorkstationKlines(bootstrap?.markKlines);
             session.indexCandles = normalizeFuturesWorkstationKlines(bootstrap?.indexKlines);
             session.lastCandlesAt = this.observedNow(session);
             session.staleResources.delete(FUTURES_WORKSTATION_RESOURCES.CANDLES);
             this.emitCandleSeries(session, 'contract', session.candles);
-            this.emitCandleSeries(session, 'mark', session.markCandles);
             this.emitCandleSeries(session, 'index', session.indexCandles);
             session.intervalBootstrapping = false;
             for (const event of session.pendingCandleEvents) this.applyStreamEvent(session, event);
@@ -311,9 +434,13 @@ export class FuturesProductionWorkstationService {
             bootstrapPremium: null,
             bootstrapTicker: null,
             candles: Object.freeze([]),
-            markCandles: Object.freeze([]),
             indexCandles: Object.freeze([]),
             trades: Object.freeze([]),
+            tapeSettings: this.tapeSettings,
+            pendingTapeTimer: null,
+            pendingTapeEmission: false,
+            lastTapeEmittedAt: null,
+            lastTapeFingerprint: null,
             lastHeaderAt: 0,
             lastCandlesAt: 0,
             lastDepthAt: 0,
@@ -392,10 +519,6 @@ export class FuturesProductionWorkstationService {
                     session.candles = normalizeFuturesWorkstationKlines(value);
                     session.lastCandlesAt = this.observedNow(session);
                     this.emitCandleSeries(session, 'contract', session.candles);
-                } else if (resource === 'markKlines') {
-                    session.markCandles = normalizeFuturesWorkstationKlines(value);
-                    session.lastCandlesAt = this.observedNow(session);
-                    this.emitCandleSeries(session, 'mark', session.markCandles);
                 } else if (resource === 'indexKlines') {
                     session.indexCandles = normalizeFuturesWorkstationKlines(value);
                     session.lastCandlesAt = this.observedNow(session);
@@ -433,7 +556,7 @@ export class FuturesProductionWorkstationService {
                     );
                 }
             };
-            // The five socket-independent reads start immediately, concurrent
+            // The four socket-independent reads start immediately, concurrent
             // with the WebSocket handshakes. The rejection is observed here so
             // an early return below cannot surface an unhandled rejection; the
             // await further down still rethrows.
@@ -471,7 +594,6 @@ export class FuturesProductionWorkstationService {
             if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
             for (const resource of [
                 'contractKlines',
-                'markKlines',
                 'indexKlines',
                 'premiumIndex',
                 'ticker',
@@ -509,7 +631,7 @@ export class FuturesProductionWorkstationService {
             session.lastCandlesAt = now;
             session.lastDepthAt = now;
             session.lastTradesAt = now;
-            this.emitTrades(session);
+            this.emitTrades(session, FUTURES_WORKSTATION_STATES.LIVE, { force: true });
             for (const event of session.pendingEvents) this.applyStreamEvent(session, event);
             session.pendingEvents = [];
             if (!this.isCurrent(session)) return;
@@ -549,13 +671,78 @@ export class FuturesProductionWorkstationService {
         );
     }
 
-    emitTrades(session, state = FUTURES_WORKSTATION_STATES.LIVE) {
-        this.emitResource(
+    rendererTapeRows(session) {
+        return toRendererTradeRows(session.trades.filter(row => (
+            tradeMeetsTapeNotional(row, session.tapeSettings.minNotionalUsdt)
+        )));
+    }
+
+    clearPendingTapeTimer(session) {
+        if (session?.pendingTapeTimer !== null && session?.pendingTapeTimer !== undefined) {
+            this.clock.clearTimeout(session.pendingTapeTimer);
+            session.pendingTapeTimer = null;
+        }
+        if (session) session.pendingTapeEmission = false;
+    }
+
+    emitTrades(
+        session,
+        state = FUTURES_WORKSTATION_STATES.LIVE,
+        { force = false, recordWindow = false } = {},
+    ) {
+        if (state !== FUTURES_WORKSTATION_STATES.LIVE) this.clearPendingTapeTimer(session);
+        const rows = this.rendererTapeRows(session);
+        const fingerprint = tapeFingerprint(state, rows);
+        if (!force && fingerprint === session.lastTapeFingerprint) return false;
+        const emitted = this.emitResource(
             session,
             FUTURES_WORKSTATION_RESOURCES.TRADES,
             state,
-            Object.freeze({ rows: toRendererTradeRows(session.trades) }),
+            Object.freeze({ rows }),
         );
+        if (emitted) {
+            session.lastTapeFingerprint = fingerprint;
+            if (recordWindow) session.lastTapeEmittedAt = session.lastClock;
+        }
+        return emitted;
+    }
+
+    queueTapeEmission(session) {
+        const rows = this.rendererTapeRows(session);
+        const fingerprint = tapeFingerprint(FUTURES_WORKSTATION_STATES.LIVE, rows);
+        if (fingerprint === session.lastTapeFingerprint) {
+            this.clearPendingTapeTimer(session);
+            return;
+        }
+        if (!session.tapeSettings.throttleEnabled) {
+            this.clearPendingTapeTimer(session);
+            session.lastTapeEmittedAt = null;
+            this.emitTrades(session);
+            return;
+        }
+
+        const now = session.lastClock;
+        const elapsed = session.lastTapeEmittedAt === null
+            ? session.tapeSettings.timeoutMs
+            : Math.max(0, now - session.lastTapeEmittedAt);
+        if (elapsed >= session.tapeSettings.timeoutMs) {
+            this.clearPendingTapeTimer(session);
+            this.emitTrades(session, FUTURES_WORKSTATION_STATES.LIVE, { recordWindow: true });
+            return;
+        }
+
+        session.pendingTapeEmission = true;
+        if (session.pendingTapeTimer !== null) return;
+        const generation = session.generation;
+        session.pendingTapeTimer = this.clock.setTimeout(() => {
+            session.pendingTapeTimer = null;
+            if (!this.isCurrent(session)
+                || session.generation !== generation
+                || !session.pendingTapeEmission) return;
+            session.pendingTapeEmission = false;
+            this.emitTrades(session, FUTURES_WORKSTATION_STATES.LIVE, { recordWindow: true });
+        }, session.tapeSettings.timeoutMs - elapsed);
+        session.pendingTapeTimer?.unref?.();
     }
 
     handleStreamFrame(session, raw) {
@@ -615,10 +802,17 @@ export class FuturesProductionWorkstationService {
         if (!this.isCurrent(session)) return;
         const now = this.observedNow(session);
         if (event.kind === 'trade') {
-            session.trades = appendFuturesWorkstationTrade(session.trades, event.row);
+            // Freshness is proven by the stream, not by eligibility: an ineligible
+            // print still means the tape is live.
             session.lastTradesAt = now;
             session.staleResources.delete(FUTURES_WORKSTATION_RESOURCES.TRADES);
-            this.emitTrades(session);
+            // Filter on ingestion so the bounded buffer accumulates trades the
+            // operator asked for. Filtering only on delivery let small prints
+            // evict the large ones and left the tape almost empty.
+            if (tradeMeetsTapeNotional(event.row, session.tapeSettings.minNotionalUsdt)) {
+                session.trades = appendFuturesWorkstationTrade(session.trades, event.row);
+                this.queueTapeEmission(session);
+            }
         } else if (event.kind === 'kline') {
             session.candles = updateFuturesWorkstationCandles(session.candles, event.row);
             session.lastCandlesAt = now;
@@ -775,6 +969,7 @@ export class FuturesProductionWorkstationService {
         session.intervalAbortController = null;
         session.intervalBootstrapping = false;
         session.pendingCandleEvents = [];
+        this.clearPendingTapeTimer(session);
         if (session.intervalReconnectTimer !== null) {
             this.clock.clearTimeout(session.intervalReconnectTimer);
             session.intervalReconnectTimer = null;
@@ -809,6 +1004,7 @@ export class FuturesProductionWorkstationService {
         session.abortController.abort();
         session.intervalAbortController?.abort();
         session.orderBook.stop();
+        this.clearPendingTapeTimer(session);
         if (session.freshnessTimer !== null) {
             this.clock.clearInterval(session.freshnessTimer);
             session.freshnessTimer = null;
@@ -833,6 +1029,7 @@ export class FuturesProductionWorkstationService {
         session.intervalAbortController?.abort();
         session.stream?.close?.();
         session.orderBook.stop();
+        this.clearPendingTapeTimer(session);
         if (session.freshnessTimer !== null) this.clock.clearInterval(session.freshnessTimer);
         if (session.reconnectTimer !== null) this.clock.clearTimeout(session.reconnectTimer);
         if (session.intervalReconnectTimer !== null) {

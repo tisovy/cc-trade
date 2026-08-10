@@ -1,5 +1,4 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
-import useWebSocket from '../hooks/useWebSocket';
 import { parseData, balanceUpdate } from '../utils/utils';
 import { DEFAULT_PANEL } from '../constants';
 import { calculatePrecision, DEFAULT_PRECISION } from '../utils/precision';
@@ -17,105 +16,11 @@ import {
   isChannelMessage,
   isGlobalMessage,
 } from '../utils/channels';
-import { useNotifications } from '../hooks/useNotifications';
 import {
   requestAnalyticsCombined,
   requestActivityMetrics,
 } from '../utils/analytics';
-import {
-  getRendererLocalWebSocketAccess,
-  redactLocalWebSocketAccess,
-  withLocalWebSocketAccess,
-} from '../utils/localWebSocketAccess';
-
-
-
-const initialChartData = [
-  { time: '2018-12-22', open: 32.51, high: 33.00, low: 32.00, close: 32.51 },
-  { time: '2018-12-23', open: 31.11, high: 32.00, low: 31.00, close: 31.11 },
-  { time: '2018-12-24', open: 27.02, high: 28.00, low: 26.00, close: 27.02 },
-  { time: '2018-12-25', open: 27.32, high: 28.00, low: 27.00, close: 27.32 },
-  { time: '2018-12-26', open: 25.17, high: 26.00, low: 25.00, close: 25.17 },
-  { time: '2018-12-27', open: 28.89, high: 29.00, low: 28.00, close: 28.89 },
-  { time: '2018-12-28', open: 25.46, high: 26.00, low: 25.00, close: 25.46 },
-  { time: '2018-12-29', open: 23.92, high: 24.00, low: 23.00, close: 23.92 },
-  { time: '2018-12-30', open: 22.68, high: 23.00, low: 22.00, close: 22.68 },
-  { time: '2018-12-31', open: 22.67, high: 23.00, low: 22.00, close: 22.67 },
-];
-
-const mockFilters = {
-  BTCUSDT: {
-    tickSize: '0.01',
-    stepSize: '0.000001',
-    minQty: '0.000001',
-    minNotional: '10',
-    maxQty: '9000',
-    maxPrice: '1000000',
-    minPrice: '0.01',
-    status: 'TRADING',
-    baseAsset: 'BTC',
-    quoteAsset: 'USDT',
-    baseAssetPrecision: 8,
-    quoteAssetPrecision: 2,
-  },
-  ETHUSDT: {
-    tickSize: '0.01',
-    stepSize: '0.0001',
-    minQty: '0.0001',
-    minNotional: '10',
-    maxQty: '9000',
-    maxPrice: '1000000',
-    minPrice: '0.01',
-    status: 'TRADING',
-    baseAsset: 'ETH',
-    quoteAsset: 'USDT',
-    baseAssetPrecision: 8,
-    quoteAssetPrecision: 2,
-  },
-  BNBUSDT: {
-    tickSize: '0.01',
-    stepSize: '0.001',
-    minQty: '0.001',
-    minNotional: '10',
-    maxQty: '9000',
-    maxPrice: '1000000',
-    minPrice: '0.01',
-    status: 'TRADING',
-    baseAsset: 'BNB',
-    quoteAsset: 'USDT',
-    baseAssetPrecision: 8,
-    quoteAssetPrecision: 2,
-  },
-  ADAUSDT: {
-    tickSize: '0.0001',
-    stepSize: '0.1',
-    minQty: '0.1',
-    minNotional: '10',
-    maxQty: '900000',
-    maxPrice: '1000',
-    minPrice: '0.0001',
-    status: 'TRADING',
-    baseAsset: 'ADA',
-    quoteAsset: 'USDT',
-    baseAssetPrecision: 6,
-    quoteAssetPrecision: 2,
-  },
-  PAXUSDT: {
-    tickSize: '0.0001',
-    stepSize: '0.01',
-    minQty: '0.01',
-    minNotional: '10',
-    maxQty: '900000',
-    maxPrice: '1000',
-    minPrice: '0.0001',
-    status: 'TRADING',
-    baseAsset: 'PAX',
-    quoteAsset: 'USDT',
-    baseAssetPrecision: 2,
-    quoteAssetPrecision: 4,
-  },
-};
-
+import { useGatewayContext } from './GatewayContext.jsx';
 const INTERVAL_TO_MS = {
   '1m': 60_000,
   '3m': 180_000,
@@ -277,16 +182,22 @@ const upsertCandle = (series, candle, { allowAppend = true } = {}) => {
 
 const DataContext = createContext(null);
 
-export const DataProvider = ({ children }) => {
+export const DataProvider = ({
+  children,
+  spotEnabled = true,
+}) => {
   const [throttle, setThrottle] = useState({ state: false, timeout: 500 });
 
-  // Get notification functions (safely with fallback)
-  const notifications = useNotifications();
-
-  const localWebSocketAccess = getRendererLocalWebSocketAccess();
-  const runtimeWsUrl = `ws://${localWebSocketAccess.host}:${localWebSocketAccess.port}`;
-  const WS_URL = withLocalWebSocketAccess(runtimeWsUrl, localWebSocketAccess);
-  console.log('Using WebSocket URL:', redactLocalWebSocketAccess(WS_URL, localWebSocketAccess.tokenParam));
+  const {
+    addMessageListener,
+    notifications,
+    sendMessage: sendWsMessage,
+    setSpotDetailSubscription,
+    startupStatus,
+    subscribe: subscribeChannel,
+    unsubscribe: unsubscribeChannel,
+    wsConnection,
+  } = useGatewayContext();
 
   const initialPanelState = (() => {
     const storedPanel = readStorage(STORAGE_KEYS.PANEL, null);
@@ -300,12 +211,17 @@ export const DataProvider = ({ children }) => {
   const [enabledMarketBalance, setEnabledMarketBalance] = useState(() => {
     return readStorage(STORAGE_KEYS.ENABLED_MARKET_BALANCE, false);
   });
-  const [chart, setChart] = useState(initialChartData);
+  const [chart, setChart] = useState([]);
   // Mini charts data: Map of "symbol-interval" -> { data: [], lastTick: null }
   const [miniCharts, setMiniCharts] = useState({});
   const [balances, setBalances] = useState({});
   const [orders, setOrders] = useState([]);
-  const [filters, setFilters] = useState(mockFilters);
+  // The last Spot command outcome the exchange or the transport reported.
+  // Stays until the operator dismisses it: a refusal that scrolls away
+  // unnoticed is the same as no refusal at all.
+  const [commandOutcome, setCommandOutcome] = useState(null);
+  const dismissCommandOutcome = useCallback(() => setCommandOutcome(null), []);
+  const [filters, setFilters] = useState({});
   const [depth, setDepth] = useState({ bids: {}, asks: {} });
   const [trades, setTrades] = useState([]);
   const [tradeNotionalFilter, setTradeNotionalFilter] = useState(() => {
@@ -511,13 +427,21 @@ export const DataProvider = ({ children }) => {
   const [isFinal, setIsFinal] = useState(false);
 
   // Loading states for user feedback
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(spotEnabled);
   const [isChartLoading, setIsChartLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState('Connecting...');
   const loadingTimeoutRef = useRef(null);
 
   // Loading timeout - auto-dismiss after 15 seconds to prevent stuck loading
   useEffect(() => {
+    if (!spotEnabled || !startupStatus.ready) {
+      if (loadingTimeoutRef.current) {
+        clearTimeout(loadingTimeoutRef.current);
+        loadingTimeoutRef.current = null;
+      }
+      return undefined;
+    }
+
     if (isLoading) {
       loadingTimeoutRef.current = setTimeout(() => {
         console.warn('Loading timeout - dismissing loading overlay');
@@ -536,7 +460,7 @@ export const DataProvider = ({ children }) => {
         clearTimeout(loadingTimeoutRef.current);
       }
     };
-  }, [isLoading, notifications]);
+  }, [isLoading, notifications, spotEnabled, startupStatus.ready]);
 
   // Offline/cache mode
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
@@ -545,6 +469,8 @@ export const DataProvider = ({ children }) => {
 
   // Initialize cache on mount
   useEffect(() => {
+    if (!spotEnabled || !startupStatus.ready) return undefined;
+
     if (!cacheInitialized.current) {
       cacheInitialized.current = true;
       initCache().then(() => {
@@ -574,9 +500,11 @@ export const DataProvider = ({ children }) => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, [notifications]);
+  }, [notifications, spotEnabled, startupStatus.ready]);
 
   useEffect(() => {
+    if (!spotEnabled || !startupStatus.ready) return undefined;
+
     refreshAnalytics();
     refreshActivityMetrics();
     const intervalId = setInterval(() => {
@@ -595,7 +523,7 @@ export const DataProvider = ({ children }) => {
         activityAbortControllerRef.current = null;
       }
     };
-  }, [refreshAnalytics, refreshActivityMetrics]);
+  }, [refreshAnalytics, refreshActivityMetrics, spotEnabled, startupStatus.ready]);
 
   const [detailSubscription, setDetailSubscription] = useState(() => ({
     symbol: panel.selected,
@@ -603,6 +531,20 @@ export const DataProvider = ({ children }) => {
     requestId: `init-${Date.now()}`,
     panelState: panel,
   }));
+
+  useEffect(() => {
+    if (!spotEnabled || !startupStatus.ready) {
+      setSpotDetailSubscription(null);
+      return undefined;
+    }
+    setSpotDetailSubscription(detailSubscription);
+    return () => setSpotDetailSubscription(null);
+  }, [
+    detailSubscription,
+    setSpotDetailSubscription,
+    spotEnabled,
+    startupStatus.ready,
+  ]);
 
   // Channel registry for multi-chart support
   // Maps channelId -> { type, symbol, interval, data }
@@ -1156,6 +1098,24 @@ export const DataProvider = ({ children }) => {
       return;
     }
 
+    // A refused or unconfirmed Spot command used to reach only the main-process
+    // log, so a failed order was invisible at the desk. Futures owns its own
+    // presentation, so its outcomes are left alone here.
+    const outcome = rawMessage.command_rejected ?? rawMessage.command_unresolved;
+    if (outcome) {
+      if (outcome.details?.marketType !== 'futures') {
+        setCommandOutcome({
+          kind: rawMessage.command_unresolved ? 'unresolved' : 'rejected',
+          request: outcome.request ?? null,
+          code: outcome.code ?? null,
+          message: outcome.message ?? 'The trading command failed.',
+          binanceCode: outcome.details?.binanceCode ?? null,
+          timestamp: outcome.timestamp ?? null,
+        });
+      }
+      return;
+    }
+
     // Check if this is a channel-format message
     if (isChannelMessage(rawMessage)) {
       const { channelId, type, symbol, interval, payload, extra } = rawMessage;
@@ -1282,7 +1242,10 @@ export const DataProvider = ({ children }) => {
     handleGlobalMessage,
   ]);
 
-
+  useEffect(() => addMessageListener(handleSocketUpdate), [
+    addMessageListener,
+    handleSocketUpdate,
+  ]);
 
   const resubscribeDetail = useCallback(() => {
     setDetailSubscription((prev) => ({
@@ -1292,15 +1255,26 @@ export const DataProvider = ({ children }) => {
     }));
   }, [panel]);
 
-  // WebSocket connection with channel subscription API
-  const {
-    connection: wsConnection,
-    subscribe: subscribeChannel,
-    unsubscribe: unsubscribeChannel,
-    sendMessage: sendWsMessage
-  } = useWebSocket(WS_URL, detailSubscription, handleSocketUpdate);
+  useEffect(() => {
+    if (spotEnabled && startupStatus.ready) {
+      setIsLoading(true);
+      setLoadingMessage('Connecting...');
+      return;
+    }
+
+    setIsLoading(false);
+    setIsChartLoading(false);
+    setLoadingMessage('');
+    chartQueueRef.current = [];
+    if (chartFlushTimerRef.current) {
+      clearTimeout(chartFlushTimerRef.current);
+      chartFlushTimerRef.current = null;
+    }
+  }, [spotEnabled, startupStatus.ready]);
 
   useEffect(() => {
+    if (!spotEnabled || !startupStatus.ready) return undefined;
+
     const WATCHDOG_INTERVAL = 5000;
     const STALL_THRESHOLD = 10000;
     const intervalId = setInterval(() => {
@@ -1319,7 +1293,7 @@ export const DataProvider = ({ children }) => {
       });
     }, WATCHDOG_INTERVAL);
     return () => clearInterval(intervalId);
-  }, [resubscribeDetail]);
+  }, [resubscribeDetail, spotEnabled, startupStatus.ready]);
 
   const selectedPrecision = calculatePrecision(filters?.[panel.selected]) ?? DEFAULT_PRECISION;
 
@@ -1329,6 +1303,8 @@ export const DataProvider = ({ children }) => {
     chart,
     balances,
     orders,
+    commandOutcome,
+    dismissCommandOutcome,
     filters,
     depth,
     trades,
@@ -1339,6 +1315,8 @@ export const DataProvider = ({ children }) => {
     tradePairs,
     selectedPrecision,
     wsConnection,
+    startupStatus,
+    spotEnabled,
     handlePanelUpdate,
     handleThrottleSwitch,
     handleThrottleTimeout,

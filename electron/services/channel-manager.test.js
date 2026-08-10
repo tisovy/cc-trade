@@ -264,6 +264,33 @@ describe('MarketStreamManager', () => {
             expect(manager.marketWsConnection).toBeNull();
         });
 
+        // A connect is an await. Cleanup that lands inside it used to be undone
+        // by the socket arriving afterwards and being adopted as the current
+        // one — a live connection to a market the operator had already left.
+        it('discards a connect that resolves after cleanup instead of reviving it', async () => {
+            let resolveConnect;
+            const lateSocket = { on: vi.fn(), close: vi.fn(), disconnect: vi.fn() };
+            mockConnectFn.mockImplementationOnce(() => new Promise((resolve) => {
+                resolveConnect = resolve;
+            }));
+
+            manager.addKlineStream('mini-BTCUSDT-1h', 'BTCUSDT', '1h');
+            const connecting = manager.reconnectMarketSocket();
+            await Promise.resolve();
+
+            await manager.cleanup(vi.fn());
+            resolveConnect(lateSocket);
+            await connecting;
+
+            expect(manager.marketWsConnection).toBeNull();
+            expect(lateSocket.on).not.toHaveBeenCalled();
+            expect(lateSocket.disconnect).toHaveBeenCalledOnce();
+
+            // And no reconnect timer survives it either.
+            await vi.advanceTimersByTimeAsync(10_000);
+            expect(manager.marketWsConnection).toBeNull();
+        });
+
         it('should cancel pending reconnect timer on cleanup', async () => {
             manager.addKlineStream('mini-BTCUSDT-1h', 'BTCUSDT', '1h');
             // Timer is scheduled but not yet fired

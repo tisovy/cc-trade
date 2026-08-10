@@ -1,21 +1,19 @@
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]'])
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{0,256}$/
-const DEFAULT_LOCAL_WEBSOCKET_PORT = 14477
 
-const fallbackRuntime = () => ({
-  localWebSocketAccess: {
-    host: '127.0.0.1',
-    port: DEFAULT_LOCAL_WEBSOCKET_PORT,
-    token: '',
-    tokenParam: 'token',
-  },
-  analyticsConfig: null,
-})
+// There is no fallback runtime any more, and its absence is the point.
+//
+// A renderer whose runtime was never registered used to be handed
+// `127.0.0.1:14477` with an empty token. That is a real endpoint the backend
+// answers — with 401 — so a window that could never authenticate spent the
+// session retrying a doomed handshake every 500 ms and filling the log with
+// `invalid token`. A missing runtime is now missing: no endpoint, no token,
+// and the caller has to say so instead of dialling a guess.
 
 const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
 
 const readLocalWebSocketAccess = (source) => {
-  if (!isRecord(source)) return fallbackRuntime().localWebSocketAccess
+  if (!isRecord(source)) return null
 
   const { host, port, token, tokenParam } = source
   if (!LOOPBACK_HOSTS.has(host)
@@ -25,7 +23,7 @@ const readLocalWebSocketAccess = (source) => {
     || typeof token !== 'string'
     || !TOKEN_PATTERN.test(token)
     || tokenParam !== 'token') {
-    return fallbackRuntime().localWebSocketAccess
+    return null
   }
 
   return { host, port, token, tokenParam }
@@ -47,12 +45,15 @@ const readAnalyticsConfig = (source) => {
 
 export const getRendererRuntime = () => {
   const runtime = globalThis.ccTradeRuntime
-  if (!isRecord(runtime)) return fallbackRuntime()
+  if (!isRecord(runtime)) return null
+
+  const localWebSocketAccess = readLocalWebSocketAccess(runtime.localWebSocketAccess)
+  if (localWebSocketAccess === null) return null
 
   return {
-    localWebSocketAccess: readLocalWebSocketAccess(runtime.localWebSocketAccess),
+    localWebSocketAccess,
     analyticsConfig: readAnalyticsConfig(runtime.analyticsConfig),
   }
 }
 
-export const getRendererAnalyticsConfig = () => getRendererRuntime().analyticsConfig
+export const getRendererAnalyticsConfig = () => getRendererRuntime()?.analyticsConfig ?? null

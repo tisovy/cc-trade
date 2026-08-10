@@ -116,6 +116,56 @@ describe('useWebSocket', () => {
         expect(global.WebSocket).toHaveBeenCalledTimes(1)
     })
 
+    // The `invalid token` flood: the same token was re-offered 120 times a
+    // minute for the whole session, and the log said nothing else.
+    it('stops retrying when the backend refuses the session token', () => {
+        const { result } = renderHook(() => useWebSocket('ws://127.0.0.1:14477/?token=stale', {}, vi.fn()))
+
+        act(() => { mockWebSocket.onopen() })
+        global.WebSocket.mockClear()
+
+        act(() => { mockWebSocket.onclose({ code: 4401 }) })
+
+        expect(result.current.failure).toMatchObject({ code: 'AUTHENTICATION_REJECTED' })
+        act(() => { vi.advanceTimersByTime(60_000) })
+        expect(global.WebSocket).not.toHaveBeenCalled()
+    })
+
+    it('resumes only on an explicit operator action', () => {
+        const { result } = renderHook(() => useWebSocket('ws://127.0.0.1:14477/?token=stale', {}, vi.fn()))
+
+        act(() => { mockWebSocket.onclose({ code: 4401 }) })
+        global.WebSocket.mockClear()
+
+        act(() => { result.current.reconnect() })
+
+        expect(global.WebSocket).toHaveBeenCalledTimes(1)
+        expect(result.current.failure).toBeNull()
+    })
+
+    it('keeps retrying an ordinary transport loss, so only authentication is terminal', () => {
+        const { result } = renderHook(() => useWebSocket('ws://test.com', {}, vi.fn()))
+
+        act(() => { mockWebSocket.onopen() })
+        global.WebSocket.mockClear()
+
+        act(() => { mockWebSocket.onclose({ code: 1006 }) })
+        act(() => { vi.advanceTimersByTime(500) })
+
+        expect(global.WebSocket).toHaveBeenCalledTimes(1)
+        expect(result.current.failure).toBeNull()
+    })
+
+    it('attempts no connection at all when this window has no runtime address', () => {
+        const { result } = renderHook(() => useWebSocket(null, {}, vi.fn()))
+
+        expect(global.WebSocket).not.toHaveBeenCalled()
+        expect(result.current.failure).toMatchObject({ code: 'RUNTIME_UNAVAILABLE' })
+
+        act(() => { vi.advanceTimersByTime(60_000) })
+        expect(global.WebSocket).not.toHaveBeenCalled()
+    })
+
     it('should reuse existing subscriptions', () => {
         const { result } = renderHook(() => useWebSocket('ws://test.com', null, vi.fn()))
 

@@ -1,13 +1,16 @@
-import { act, render, screen } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import { describe, it, expect, vi } from 'vitest'
 import { DataProvider, useDataContext } from './DataContext'
+import { GatewayProvider } from './GatewayContext.jsx'
 import { NotificationProvider } from './NotificationProvider'
+import { useNotifications } from '../hooks/useNotifications'
 import { attachMockLocalStorage } from '@/test/mocks'
 
 // Mock localStorage
 const _localStorageMock = attachMockLocalStorage()
 
 const webSocketMocks = vi.hoisted(() => ({
+    connection: { readyState: 1 },
     handleMessage: null,
 }))
 
@@ -18,7 +21,7 @@ vi.mock('../hooks/useWebSocket', () => ({
         return {
             send: vi.fn(),
             readyState: 1,
-            connection: null,
+            connection: webSocketMocks.connection,
             subscribe: vi.fn(),
             unsubscribe: vi.fn(),
             sendMessage: vi.fn(),
@@ -39,6 +42,11 @@ vi.mock('../utils/cache', () => ({
     getCacheStats: vi.fn(() => Promise.resolve({ candles: 0, trades: 0, alerts: 0, exchangeInfo: false })),
 }))
 
+vi.mock('../utils/analytics', () => ({
+    requestAnalyticsCombined: vi.fn(() => Promise.resolve({ items: [] })),
+    requestActivityMetrics: vi.fn(() => Promise.resolve({ items: [] })),
+}))
+
 // Test component to consume context
 const renderObserver = vi.fn()
 
@@ -55,10 +63,22 @@ const TestConsumer = () => {
     )
 }
 
+const NotificationConsumer = () => {
+    const { notifications, notificationHistory } = useNotifications()
+    return (
+        <div>
+            <span data-testid="notification-count">{notifications.length}</span>
+            <span data-testid="notification-history">{JSON.stringify(notificationHistory)}</span>
+        </div>
+    )
+}
+
 // Wrapper with required providers
 const TestWrapper = ({ children }) => (
     <NotificationProvider>
-        {children}
+        <GatewayProvider activeMarketMode="spot">
+            {children}
+        </GatewayProvider>
     </NotificationProvider>
 )
 
@@ -107,5 +127,52 @@ describe('DataContext', () => {
 
         expect(screen.getByTestId('balances').textContent).toBe(balancesBefore)
         expect(screen.getByTestId('orders').textContent).toBe(ordersBefore)
+    })
+
+    it('deduplicates startup configuration alerts and re-arms after recovery', async () => {
+        render(
+            <TestWrapper>
+                <DataProvider>
+                    <NotificationConsumer />
+                </DataProvider>
+            </TestWrapper>
+        )
+        const configurationError = {
+            type: 'startup_status',
+            version: 1,
+            state: 'CONFIG_ERROR',
+            code: 'MISSING_API_SECRET',
+            ready: false,
+            missingFields: ['BS'],
+            retiredFields: [],
+        }
+
+        act(() => webSocketMocks.handleMessage({
+            data: JSON.stringify(configurationError),
+        }, webSocketMocks.connection))
+        await waitFor(() => expect(screen.getByTestId('notification-count')).toHaveTextContent('1'))
+        expect(screen.getByTestId('notification-history')).toHaveTextContent(
+            'Configure BK and BS for Spot and BFK and BFS for Futures, '
+            + 'then restart the application.',
+        )
+
+        act(() => webSocketMocks.handleMessage({
+            data: JSON.stringify(configurationError),
+        }, webSocketMocks.connection))
+        expect(screen.getByTestId('notification-count')).toHaveTextContent('1')
+
+        act(() => webSocketMocks.handleMessage({
+            data: JSON.stringify({
+                ...configurationError,
+                state: 'READY',
+                code: 'READY',
+                ready: true,
+                missingFields: [],
+            }),
+        }, webSocketMocks.connection))
+        act(() => webSocketMocks.handleMessage({
+            data: JSON.stringify(configurationError),
+        }, webSocketMocks.connection))
+        await waitFor(() => expect(screen.getByTestId('notification-count')).toHaveTextContent('2'))
     })
 })

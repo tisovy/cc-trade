@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
+  FUTURES_WORKSTATION_DEPTH_LEVELS_PER_SIDE,
+  FUTURES_WORKSTATION_EVENT_MAX_BYTES,
   FUTURES_WORKSTATION_PROTOCOL_VERSION,
   FUTURES_WORKSTATION_RESOURCES,
   FUTURES_WORKSTATION_STATES,
@@ -9,6 +11,7 @@ import {
 } from './futuresWorkstationProtocolShared.js'
 import {
   FUTURES_PRODUCTION_WORKSTATION_ACTIONS,
+  createFuturesProductionWorkstationConfigureTapeRequest,
   createFuturesProductionWorkstationEvent,
   createFuturesProductionWorkstationSelectIntervalRequest,
   createFuturesProductionWorkstationSelectSymbolRequest,
@@ -91,6 +94,24 @@ const payloads = Object.freeze({
       closed: false,
     })]),
   }),
+  [FUTURES_WORKSTATION_RESOURCES.CANDLE_HISTORY]: Object.freeze({
+    series: 'contract',
+    interval: '1m',
+    endTime: 1_784_000_000_000,
+    offset: 0,
+    total: 1,
+    complete: true,
+    rows: Object.freeze([Object.freeze({
+      openTime: 1_783_999_940_000,
+      closeTime: 1_783_999_999_999,
+      open: '58300',
+      high: '58450',
+      low: '58250',
+      close: '58400',
+      volume: '87.25',
+      closed: true,
+    })]),
+  }),
   [FUTURES_WORKSTATION_RESOURCES.DEPTH]: Object.freeze({
     lastUpdateId: '9007199254740993',
     bids: Object.freeze([Object.freeze({ price: '58420', quantity: '2', total: '2' })]),
@@ -123,8 +144,8 @@ const createEventValues = resource => ({
 })
 
 describe('Futures workstation environment-specific protocols', () => {
-  it('uses protocol revision 4 for current catalog filter availability', () => {
-    expect(FUTURES_WORKSTATION_PROTOCOL_VERSION).toBe('4')
+  it('uses protocol revision 5 for bounded tape configuration', () => {
+    expect(FUTURES_WORKSTATION_PROTOCOL_VERSION).toBe('6')
   })
 
   it('preserves an unavailable per-symbol algo limit instead of inventing one', () => {
@@ -177,6 +198,44 @@ describe('Futures workstation environment-specific protocols', () => {
     })
     expect(request).not.toHaveProperty('symbol')
     expect(readFuturesProductionWorkstationRequest(JSON.stringify(request))).toEqual(request)
+  })
+
+  it('round-trips an exact bounded tape configuration without market authority', () => {
+    const request = createFuturesProductionWorkstationConfigureTapeRequest({
+      requestId: requestValues.requestId,
+      throttleEnabled: true,
+      timeoutMs: 250,
+      minNotionalUsdt: '1250.5',
+    })
+
+    expect(request).toEqual(expect.objectContaining({
+      action: FUTURES_PRODUCTION_WORKSTATION_ACTIONS.CONFIGURE_TAPE,
+      throttleEnabled: true,
+      timeoutMs: 250,
+      minNotionalUsdt: '1250.5',
+    }))
+    expect(request).not.toHaveProperty('symbol')
+    expect(request).not.toHaveProperty('interval')
+    expect(readFuturesProductionWorkstationRequest(JSON.stringify(request))).toEqual(request)
+    expect(Object.isFrozen(request)).toBe(true)
+  })
+
+  it.each([
+    ['non-boolean throttle', { throttleEnabled: 'true' }],
+    ['sub-frame timeout', { timeoutMs: 15 }],
+    ['oversized timeout', { timeoutMs: 5_001 }],
+    ['floating timeout', { timeoutMs: 250.5 }],
+    ['negative notional', { minNotionalUsdt: '-1' }],
+    ['non-finite notional', { minNotionalUsdt: 'Infinity' }],
+    ['non-canonical notional', { minNotionalUsdt: '01' }],
+  ])('rejects %s in bounded tape configuration', (_label, override) => {
+    expect(() => createFuturesProductionWorkstationConfigureTapeRequest({
+      requestId: requestValues.requestId,
+      throttleEnabled: true,
+      timeoutMs: 250,
+      minNotionalUsdt: '0',
+      ...override,
+    })).toThrowError(expect.objectContaining({ code: 'INVALID_TAPE_CONFIGURATION' }))
   })
 
   it('rejects extra request fields including network and execution authority', () => {
@@ -288,6 +347,39 @@ describe('Futures workstation environment-specific protocols', () => {
       .toThrowError(expect.objectContaining({ code: 'INVALID_JSON_ENCODING' }))
   })
 
+  // The parser counts a string's bytes instead of encoding it, and takes an
+  // unescaped span verbatim instead of re-parsing it. Both shortcuts sit on the
+  // depth hot path and both are security-relevant, so they are held against the
+  // things they replaced rather than assumed equivalent.
+  it.each([
+    'plain',
+    'кириллица',
+    '☃ snowman',
+    '𝄞 clef',
+    'quote \\" and backslash \\\\',
+    'escaped \\u0416 codepoint',
+    'tab\\tnewline\\n',
+  ])('decodes and measures %s exactly as JSON and TextEncoder do', (encoded) => {
+    const raw = `{"value":"${encoded}"}`
+    const expected = JSON.parse(raw).value
+    expect(parseBoundedFuturesWorkstationJson(raw, { maxBytes: 1_000 }).value).toBe(expected)
+    const bytes = new TextEncoder().encode(expected).byteLength
+    expect(parseBoundedFuturesWorkstationJson(raw, { maxBytes: 1_000, maxStringBytes: bytes }).value)
+      .toBe(expected)
+    expect(() => parseBoundedFuturesWorkstationJson(raw, {
+      maxBytes: 1_000,
+      maxStringBytes: bytes - 1,
+    })).toThrowError(expect.objectContaining({ code: 'JSON_RESOURCE_LIMIT' }))
+    expect(() => parseBoundedFuturesWorkstationJson(raw, {
+      maxBytes: new TextEncoder().encode(raw).byteLength - 1,
+    })).toThrowError(expect.objectContaining({ code: 'INVALID_JSON_ENCODING' }))
+  })
+
+  it('rejects a lone surrogate rather than counting it as a pair', () => {
+    expect(() => parseBoundedFuturesWorkstationJson('{"value":"\ud83d"}', { maxBytes: 100 }))
+      .toThrowError(expect.objectContaining({ code: 'INVALID_JSON_ENCODING' }))
+  })
+
   it('rejects unsafe and floating JSON numbers', () => {
     expect(() => parseBoundedFuturesWorkstationJson('{"value":9007199254740993}', { maxBytes: 100 }))
       .toThrowError(expect.objectContaining({ code: 'UNSAFE_JSON_INTEGER' }))
@@ -316,6 +408,40 @@ describe('Futures workstation environment-specific protocols', () => {
       ...productionEvent,
       environment: 'TESTNET',
     }))).toThrow(FuturesWorkstationProtocolError)
+  })
+
+  // The book the desk delivers is the largest and node-densest frame on the
+  // wire. Its byte bound, its node bound and the level count it is allowed to
+  // carry are three separate numbers, and a frame that clears the payload rules
+  // but trips either parser bound does not degrade — depth simply stops
+  // arriving. So the deepest legal book is parsed here, not reasoned about.
+  it('parses the deepest legal depth frame rather than running out of budget', () => {
+    // Long decimals throughout, and the longest identities the rules accept:
+    // the bound has to hold for the widest book the protocol calls legal, not
+    // for the tidy one this contract happens to quote today.
+    const level = index => ({
+      price: `${900_000 + index}.123456789012345678`,
+      quantity: '184467440737.09551615',
+      total: `${184_467_440_737 * (index + 1)}.09551615`,
+    })
+    const event = createFuturesProductionWorkstationEvent({
+      ...createEventValues('depth'),
+      requestId: 'a'.repeat(96),
+      symbol: 'ABCDEFGHIJKLMNOPQRST',
+      payload: {
+        lastUpdateId: '18446744073709551615',
+        bids: Array.from({ length: FUTURES_WORKSTATION_DEPTH_LEVELS_PER_SIDE },
+          (_, index) => level(-index)),
+        asks: Array.from({ length: FUTURES_WORKSTATION_DEPTH_LEVELS_PER_SIDE },
+          (_, index) => level(index + 1)),
+        spread: '0.00001',
+      },
+    })
+    const raw = JSON.stringify(event)
+    expect(new TextEncoder().encode(raw).byteLength)
+      .toBeLessThanOrEqual(FUTURES_WORKSTATION_EVENT_MAX_BYTES)
+    expect(parseFuturesProductionWorkstationEvent(raw).payload.bids)
+      .toHaveLength(FUTURES_WORKSTATION_DEPTH_LEVELS_PER_SIDE)
   })
 
   it('preserves lossless int64 identities as strings', () => {
@@ -360,15 +486,14 @@ describe('Futures workstation environment-specific protocols', () => {
       }),
     })
     const contract = createFuturesProductionWorkstationEvent(createEventValues('candles'))
-    const mark = createFuturesProductionWorkstationEvent({
+    const index = createFuturesProductionWorkstationEvent({
       ...createEventValues('candles'),
       revision: 2,
-      payload: { ...payloads.candles, series: 'mark' },
+      payload: { ...payloads.candles, series: 'index' },
     })
-    const next = applyFuturesWorkstationEvent(applyFuturesWorkstationEvent(initial, contract), mark)
+    const next = applyFuturesWorkstationEvent(applyFuturesWorkstationEvent(initial, contract), index)
     expect(next.resources.candles.contract).toHaveLength(1)
-    expect(next.resources.candles.mark).toHaveLength(1)
-    expect(next.resources.candles.index).toEqual([])
+    expect(next.resources.candles.index).toHaveLength(1)
   })
 
   it('clears prior-generation resources and marks cached data non-live during resync', () => {

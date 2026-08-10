@@ -33,6 +33,7 @@ const createHarness = () => {
         timers.length = 0;
         for (const timer of pending) timer.callback();
     };
+    const logger = { info: vi.fn(), warn: vi.fn() };
     const feed = createFuturesMarkPriceFeed({
         streamOrigin: STREAM_ORIGIN,
         createSocket: (url) => {
@@ -52,10 +53,10 @@ const createHarness = () => {
             return socket;
         },
         broadcast: payload => broadcasts.push(payload),
-        logger: { warn: vi.fn() },
+        logger,
         clock,
     });
-    return { feed, sockets, broadcasts, timers, runTimers };
+    return { feed, sockets, broadcasts, logger, timers, runTimers };
 };
 
 describe('readFuturesPositionSymbols', () => {
@@ -90,9 +91,19 @@ describe('readFuturesMarkPriceEvent', () => {
 });
 
 describe('futuresMarkPriceStreamUrl', () => {
-    it('subscribes one second stream per symbol', () => {
+    it('subscribes one second stream per symbol on the routed market path', () => {
         expect(futuresMarkPriceStreamUrl(STREAM_ORIGIN, ['BTCUSDT', 'ETHUSDT']))
-            .toBe(`${STREAM_ORIGIN}/stream?streams=btcusdt@markPrice@1s/ethusdt@markPrice@1s`);
+            .toBe(`${STREAM_ORIGIN}/market/stream?streams=btcusdt@markPrice@1s/ethusdt@markPrice@1s`);
+    });
+
+    // The decommissioned path is not a connection error: it opens, stays open
+    // and delivers nothing, which reads on screen as a still market. Measured
+    // against the live exchange on 2026-08-10: `/market/stream` delivered one
+    // mark per second, `/stream` and `/ws` delivered zero frames in 6 seconds.
+    it('never reaches for a path decommissioned on 2026-04-23', () => {
+        const url = futuresMarkPriceStreamUrl(STREAM_ORIGIN, ['BTCUSDT']);
+        expect(url).not.toContain(`${STREAM_ORIGIN}/stream?`);
+        expect(url).not.toContain(`${STREAM_ORIGIN}/ws/`);
     });
 });
 
@@ -188,6 +199,56 @@ describe('createFuturesMarkPriceFeed', () => {
         harness.runTimers();
         expect(harness.sockets).toHaveLength(2);
         expect(harness.sockets[1].url).toContain('bmtusdt@markPrice@1s');
+    });
+
+    // A frozen uPnL and a quiet market look identical on screen. The log is the
+    // only place the difference is recorded, so the feed has to say both.
+    it('reports connecting and dropping so a dead feed is not read as a still market', () => {
+        harness.feed.track([{ symbol: 'BMTUSDT', quantity: '-1' }]);
+        harness.sockets[0].emit('open');
+        expect(harness.logger.info).toHaveBeenCalledWith(
+            expect.stringContaining('BMTUSDT'),
+        );
+
+        harness.sockets[0].emit('close');
+        expect(harness.logger.warn).toHaveBeenCalledWith(
+            expect.stringContaining('mark price stream closed'),
+        );
+    });
+
+    // The dangerous state is not a closed socket — that one announces itself.
+    // It is a socket that opened, never closed, and stopped delivering: uPnL
+    // freezes at the account snapshot and nothing in the process says so.
+    it('reports a socket that opened and then went silent, and its recovery', () => {
+        harness.feed.track([{ symbol: 'BICOUSDT', quantity: '-120' }]);
+        harness.sockets[0].emit('open');
+        harness.logger.warn.mockClear();
+
+        harness.runTimers();
+        expect(harness.logger.warn).toHaveBeenCalledWith(
+            expect.stringContaining('delivered nothing for 15s (BICOUSDT)'),
+        );
+
+        // Reported once per episode, not on every check.
+        harness.logger.warn.mockClear();
+        harness.runTimers();
+        expect(harness.logger.warn).not.toHaveBeenCalled();
+
+        harness.sockets[0].emit('message', markFrame('BICOUSDT', '2.1340'));
+        harness.runTimers();
+        expect(harness.logger.info).toHaveBeenCalledWith(
+            expect.stringContaining('delivering again: BICOUSDT'),
+        );
+    });
+
+    it('says nothing about silence while marks keep arriving', () => {
+        harness.feed.track([{ symbol: 'BICOUSDT', quantity: '-120' }]);
+        harness.sockets[0].emit('open');
+        harness.sockets[0].emit('message', markFrame('BICOUSDT', '2.1340'));
+        harness.logger.warn.mockClear();
+
+        harness.runTimers();
+        expect(harness.logger.warn).not.toHaveBeenCalled();
     });
 
     it('stops for good and does not reconnect', () => {

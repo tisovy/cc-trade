@@ -2,6 +2,7 @@ import { app, BrowserWindow, Menu, ipcMain, protocol, session } from 'electron'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import { shouldOpenDevTools } from './devtools.js'
+import { installRendererZoomControls } from './renderer-zoom.js'
 import { setupBinanceConnection } from './services/binance-connection.js'
 import {
   createLocalWebSocketAccess,
@@ -33,7 +34,7 @@ if (configureLinuxSafeStorageBackend({ app })) {
 registerRendererAppProtocolScheme(protocol)
 
 // Legacy Futures Testnet and guarded-production variables are retired; the
-// futures path now uses the same BK/BS credentials as Spot.
+// futures path uses its own BFK/BFS credentials, separate from Spot's BK/BS.
 for (const key of Object.keys(process.env)) {
   if (key.startsWith('FUTURES_TESTNET_')
     || key.startsWith('FUTURES_READ_')
@@ -171,24 +172,32 @@ function createWindow() {
     })
     hasInstalledDevServerCsp = true
   }
+  // The runtime exists before the window that will ask for it, and the two are
+  // bound in one step that nothing can be inserted between. The preload asks
+  // synchronously over IPC the moment its document is created; a sender the
+  // registry does not know receives no runtime at all, and a renderer with no
+  // runtime fails closed with a stated reason instead of dialling a default
+  // endpoint it can never authenticate against.
   const rendererRuntime = createRendererRuntime({
     localWebSocketAccess,
     analyticsConfig,
   })
-  const win = new BrowserWindow({
+  const win = rendererRuntimeRegistry.createRegisteredWindow(rendererRuntime, () => new BrowserWindow({
     width: 1200,
     height: 800,
     webPreferences: createSecureRendererWebPreferences({
       preload: path.join(__dirname, 'preload.cjs'),
     }),
-  })
-
-  rendererRuntimeRegistry.register(win.webContents, rendererRuntime)
+  }))
 
   installRendererSecurityGuards(
     win.webContents,
     createRendererNavigationGuard({ devServerUrl, rendererUrl }),
   )
+
+  installRendererZoomControls(win.webContents, {
+    settingsDirectory: app.getPath('userData'),
+  })
 
   win.webContents.on('did-fail-load', (event, errorCode, errorDescription) => {
     console.error('Failed to load:', errorCode, errorDescription)

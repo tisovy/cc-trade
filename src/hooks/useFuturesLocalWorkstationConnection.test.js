@@ -87,6 +87,14 @@ describe('isolated Futures local workstation connection', () => {
       }
     }
     globalThis.WebSocket = FailingLocalSocket
+    globalThis.ccTradeRuntime = {
+      localWebSocketAccess: {
+        host: '127.0.0.1',
+        port: 15555,
+        token: 'local-token-1',
+        tokenParam: 'token',
+      },
+    }
 
     const { unmount } = renderHook(() => (
       useFuturesLocalWorkstationConnection({ enabled: true })
@@ -96,6 +104,61 @@ describe('isolated Futures local workstation connection', () => {
       FUTURES_LOCAL_WORKSTATION_CONNECTION_LIMITS.RECONNECT_ATTEMPTS + 1,
     )
     expect(vi.getTimerCount()).toBe(0)
+    unmount()
+  })
+
+  // This hook carried its own copy of the fallback endpoint: with no runtime it
+  // dialled `127.0.0.1:14477` with an empty token, which the backend answers
+  // with 401.
+  it('opens nothing at all when this window was issued no runtime', () => {
+    vi.useFakeTimers()
+    const sockets = []
+    globalThis.WebSocket = class { constructor(url) { sockets.push(url) } }
+    delete globalThis.ccTradeRuntime
+
+    const { unmount } = renderHook(() => (
+      useFuturesLocalWorkstationConnection({ enabled: true })
+    ))
+    act(() => vi.advanceTimersByTime(60_000))
+
+    expect(sockets).toEqual([])
+    unmount()
+  })
+
+  it('stops reconnecting when the backend refuses the session token', () => {
+    vi.useFakeTimers()
+    const sockets = []
+    class RefusedLocalSocket {
+      constructor(url) {
+        this.url = url
+        this.readyState = 0
+        sockets.push(this)
+        setTimeout(() => {
+          this.readyState = 3
+          this.onclose?.({ code: 4401 })
+        }, 0)
+      }
+
+      close() {
+        this.readyState = 3
+      }
+    }
+    globalThis.WebSocket = RefusedLocalSocket
+    globalThis.ccTradeRuntime = {
+      localWebSocketAccess: {
+        host: '127.0.0.1',
+        port: 15555,
+        token: 'stale-token',
+        tokenParam: 'token',
+      },
+    }
+
+    const { unmount } = renderHook(() => (
+      useFuturesLocalWorkstationConnection({ enabled: true })
+    ))
+    act(() => vi.runAllTimers())
+
+    expect(sockets).toHaveLength(1)
     unmount()
   })
 
@@ -114,6 +177,14 @@ describe('isolated Futures local workstation connection', () => {
       }
     }
     globalThis.WebSocket = HangingLocalSocket
+    globalThis.ccTradeRuntime = {
+      localWebSocketAccess: {
+        host: '127.0.0.1',
+        port: 15555,
+        token: 'local-token-1',
+        tokenParam: 'token',
+      },
+    }
 
     const { unmount } = renderHook(() => (
       useFuturesLocalWorkstationConnection({ enabled: true })

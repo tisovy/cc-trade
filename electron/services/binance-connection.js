@@ -19,17 +19,50 @@ import {
 } from './trading-command-validation.js';
 import {
     SpotTradingAdapter,
-    buildSpotMockOrderPlacementExecutionReport,
     runSpotAccountRefreshOperations,
 } from './spot-trading-adapter.js';
-import { FUTURES_MARKET_TYPE, TRADING_COMMAND_ACTIONS } from '../../src/utils/tradingCommands.js';
+import {
+    FUTURES_MARKET_TYPE,
+    SPOT_MARKET_TYPE,
+    TRADING_COMMAND_ACTIONS,
+} from '../../src/utils/tradingCommands.js';
+import {
+    UNCONFIRMED_COMMAND_MESSAGE,
+    UNRESOLVED_COMMAND_MESSAGE,
+    createCommandUnresolved,
+    isIndeterminateTradingFailure,
+} from './trading-command-outcome.js';
+// The ceiling rule itself lives with the draft evaluator the renderer uses, so
+// both sides measure an order the same way. This evaluation is still the main
+// process's own: it runs on the command as received, never on a verdict the
+// renderer supplied.
+import {
+    FUTURES_RISK_REASONS,
+    evaluateFuturesOrderRisk,
+} from '../../src/utils/futuresOrderDraft.js';
+import { LOCAL_WEBSOCKET_AUTH_CLOSE_CODE } from '../../src/utils/localWebSocketAccess.js';
 import {
     FUTURES_STREAM_ORIGIN,
     FuturesTradingAdapter,
-    buildFuturesMockOrderPlacementExecutionReport,
-    normalizeFuturesExecutionReport,
+    describeFuturesApiError,
     normalizeFuturesUserDataStreamEvent,
 } from './futures-trading-adapter.js';
+import {
+    createBinanceStartupEnvelope,
+    evaluateBinanceCredentialPreflight,
+} from './binance-credential-preflight.js';
+import {
+    createFuturesMarkPriceFeed,
+} from './futures-mark-price-feed.js';
+import {
+    createFuturesAccountStateEnvelope,
+    createInitialFuturesAccountResources,
+    markFuturesOrderResourcesStale,
+    markFuturesResourceFailed,
+    markFuturesResourceIdle,
+    markFuturesResourceLoading,
+    markFuturesResourceReady,
+} from './futures-account-state.js';
 import WebSocket from 'ws';
 import {
     createFuturesProductionWorkstationRuntime,
@@ -53,11 +86,30 @@ export const LOCAL_RENDERER_WS_MAX_ACTION_FIELDS = 32;
 export const LOCAL_RENDERER_WS_MAX_CHANNELS = 64;
 
 const CHANNEL_ACTIONS = new Set([
+    'get_startup_status',
+    'activate_market',
     'subscribe',
     'unsubscribe',
     'enable_depth_view',
     'disable_depth_view',
 ]);
+// A market-scoped frame is only accepted while that market is the activated
+// one. Before `activate_market` there is no activated market, and after a
+// switch the market the operator left is not it — so neither can quietly keep
+// the backend subscribing, refreshing or trading on their behalf.
+export const MARKET_MODES = Object.freeze({
+    SPOT: 'spot',
+    FUTURES: 'futures-live',
+    UNSELECTED: 'unselected',
+});
+const SPOT_CHANNEL_ACTIONS = new Set([
+    'subscribe',
+    'unsubscribe',
+    'enable_depth_view',
+    'disable_depth_view',
+]);
+const SPOT_LEGACY_REQUESTS = new Set(['chart', 'buyOrder', 'sellOrder', 'cancelOrder']);
+
 const CHANNEL_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const CHANNEL_SYMBOL_PATTERN = /^[A-Z0-9_]{1,64}$/;
 const CHANNEL_INTERVAL_PATTERN = /^[A-Za-z0-9]{1,16}$/;
@@ -78,6 +130,15 @@ const validateRendererActionEnvelope = (data, channelManager) => {
     }
 
     if (!CHANNEL_ACTIONS.has(data.action)) return null;
+    if (data.action === 'get_startup_status') return null;
+    if (data.action === 'activate_market') {
+        if (data.marketMode !== 'spot'
+            && data.marketMode !== 'futures-live'
+            && data.marketMode !== 'unselected') {
+            return { code: 'INVALID_MARKET_MODE', message: 'marketMode is invalid' };
+        }
+        return null;
+    }
     if (data.marketType !== undefined && data.marketType !== 'spot') {
         return { code: 'UNSUPPORTED_MARKET_TYPE', message: 'only spot channel actions are enabled' };
     }
@@ -111,51 +172,6 @@ const validateRendererActionEnvelope = (data, channelManager) => {
     }
 
     return null;
-};
-
-// Mock Data Generators (Preserved)
-const generateTrade = () => ({
-    time: Date.now(),
-    price: (45000 + Math.random() * 100).toFixed(2),
-    qty: (Math.random() * 2).toFixed(4),
-    isBuyerMaker: Math.random() > 0.5
-});
-
-const generateTicker = () => ([
-    { symbol: 'BTCUSDT', lastPrice: (45000 + Math.random() * 100).toFixed(2), priceChangePercent: '2.5', highPrice: '46000.00', lowPrice: '44000.00', quoteVolume: '100000000', closeTime: Date.now() },
-    { symbol: 'ETHUSDT', lastPrice: (3000 + Math.random() * 50).toFixed(2), priceChangePercent: '1.2', highPrice: '3100.00', lowPrice: '2900.00', quoteVolume: '50000000', closeTime: Date.now() }
-]);
-
-const generateDepth = () => {
-    const bids = {};
-    const asks = {};
-    for (let i = 0; i < 10; i++) {
-        bids[(44900 + i * 10).toFixed(2)] = (Math.random() * 2).toFixed(2);
-        asks[(45100 + i * 10).toFixed(2)] = (Math.random() * 2).toFixed(2);
-    }
-    return { bids, asks };
-};
-
-const buildMockCandle = (timestamp, open, high, low, close, volume) => ({
-    time: Math.floor(timestamp / 1000),
-    open: Number(open),
-    high: Number(high),
-    low: Number(low),
-    close: Number(close),
-    volume: Number(volume),
-    isFinal: true,
-});
-
-const buildMockChartPayload = () => {
-    const base = Date.now();
-    const candles = [
-        buildMockCandle(base - 60000, 45000, 45100, 44900, 45050, 1000),
-        buildMockCandle(base, 45050, 45150, 45000, 45100, 1200),
-    ];
-    return {
-        chart: candles,
-        last_tick: candles[candles.length - 1],
-    };
 };
 
 const normalizeBinanceCandle = (candle) => ({
@@ -599,8 +615,17 @@ const safeDisconnect = async (socket, label) => {
 export function setupBinanceConnection({
     localWebSocketAccess = createLocalWebSocketAccess(),
 } = {}) {
-    const APIKEY = process.env.BK;
-    const APISECRET = process.env.BS;
+    const credentialPreflight = evaluateBinanceCredentialPreflight(process.env);
+    const startupEnvelope = createBinanceStartupEnvelope(credentialPreflight);
+    // Spot and Futures authenticate with independent pairs. Every construction
+    // gate below reads one of these two flags — never credentialPreflight.ready,
+    // which only answers "may any workspace start at all".
+    const spotCredentialsReady = credentialPreflight.markets.spot.ready;
+    const futuresCredentialsReady = credentialPreflight.markets.futures.ready;
+    const APIKEY = spotCredentialsReady ? process.env.BK : null;
+    const APISECRET = spotCredentialsReady ? process.env.BS : null;
+    const FUTURES_APIKEY = futuresCredentialsReady ? process.env.BFK : null;
+    const FUTURES_APISECRET = futuresCredentialsReady ? process.env.BFS : null;
     // The guarded Futures production subsystem is retired: scrub its legacy
     // environment surface so stale launcher values cannot linger in-process.
     for (const key of Object.keys(process.env)) {
@@ -613,7 +638,9 @@ export function setupBinanceConnection({
 
     // Futures REST account reads use their own quota bucket so they cannot
     // contend with Spot admission (Binance meters fapi.* separately anyway).
-    const futuresRestLimiter = new RateLimiter(800, 60000, 500);
+    // fapi allows 2400 weight/min, so 150ms spacing at our tiny read weights
+    // stays far inside the quota while keeping READY latency low.
+    const futuresRestLimiter = new RateLimiter(800, 60000, 150);
 
     // Optional fat-finger guard: FUTURES_MAX_ORDER_USDT caps the notional of
     // every exposure-increasing futures order. Unset or invalid = no cap.
@@ -631,14 +658,22 @@ export function setupBinanceConnection({
         logger.info(`Futures order cap active: ${futuresMaxOrderUsdt} USDT per order`);
     }
 
-    const USE_MOCK = !APIKEY;
-    const sharedProxyAgent = resolveProxyAgent();
+    const sharedProxyAgent = credentialPreflight.ready ? resolveProxyAgent() : null;
     applyLogMasking([
         APIKEY,
         APISECRET,
+        FUTURES_APIKEY,
+        FUTURES_APISECRET,
     ]);
 
-    logger.info(`Starting Binance Service. Mock Mode: ${USE_MOCK}`);
+    logger.info(`Starting Binance Service. Startup state: ${credentialPreflight.state}`);
+    for (const market of [credentialPreflight.markets.spot, credentialPreflight.markets.futures]) {
+        if (market.ready) {
+            logger.info(`[startup] ${market.label}: READY`);
+        } else {
+            logger.error(`[startup] ${market.label}: ${market.code}: ${market.message}`);
+        }
+    }
 
     let client;
     let spotTradingAdapter = null;
@@ -669,7 +704,16 @@ export function setupBinanceConnection({
         }
     };
 
-    if (!USE_MOCK) {
+    if (futuresCredentialsReady) {
+        futuresTradingAdapter = new FuturesTradingAdapter({
+            apiKey: FUTURES_APIKEY,
+            apiSecret: FUTURES_APISECRET,
+            recvWindow: SIGNED_RECV_WINDOW,
+            proxyAgent: sharedProxyAgent,
+        });
+    }
+
+    if (spotCredentialsReady) {
         const restConfig = {
             apiKey: APIKEY,
             apiSecret: APISECRET,
@@ -689,12 +733,6 @@ export function setupBinanceConnection({
         spotTradingAdapter = new SpotTradingAdapter({
             client,
             recvWindow: SIGNED_RECV_WINDOW,
-        });
-        futuresTradingAdapter = new FuturesTradingAdapter({
-            apiKey: APIKEY,
-            apiSecret: APISECRET,
-            recvWindow: SIGNED_RECV_WINDOW,
-            proxyAgent: sharedProxyAgent,
         });
 
         const restBaseOptions = client?.restAPI?.configuration?.baseOptions;
@@ -740,7 +778,7 @@ export function setupBinanceConnection({
     // actionable warning (recvWindow already absorbs latency / clock-behind drift,
     // but a clock running AHEAD by >1s is rejected regardless).
     const checkClockDrift = async () => {
-        if (USE_MOCK || !client) return;
+        if (!spotCredentialsReady || !client) return;
         try {
             const sentAt = Date.now();
             const serverTime = Number(await spotTradingAdapter.getServerTime());
@@ -787,6 +825,8 @@ export function setupBinanceConnection({
     let tickerStallInterval = null;     // Watchdog interval for the ticker stream
     let globalSocketsInitialized = false;
     const rendererConnections = new Set();  // Track all connected renderers
+    const spotRendererConnections = new Set();
+    const futuresRendererConnections = new Set();
 
     // Broadcast to all connected renderers
     const broadcastToRenderers = (payload) => {
@@ -798,11 +838,31 @@ export function setupBinanceConnection({
         }
     };
 
+    const stopSharedSpotConnections = async () => {
+        globalSocketsInitialized = false;
+        if (tickerStallInterval) {
+            clearInterval(tickerStallInterval);
+            tickerStallInterval = null;
+        }
+        if (keepAliveInterval) {
+            clearInterval(keepAliveInterval);
+            keepAliveInterval = null;
+        }
+        const staleGlobal = globalWsConnection;
+        const staleUserData = userDataWsConnection;
+        globalWsConnection = null;
+        userDataWsConnection = null;
+        await Promise.all([
+            safeDisconnect(staleGlobal, 'global stream'),
+            safeDisconnect(staleUserData, 'user data stream'),
+        ]);
+    };
+
     // Shared balance refresh - fetches via REST and broadcasts to all renderers
     // Deduplicated by in-flight guard to avoid duplicate calls from rapid events
     let _balanceRefreshInFlight = false;
     const fetchAndBroadcastBalances = async () => {
-        if (!spotTradingAdapter || USE_MOCK) return;
+        if (!spotTradingAdapter) return;
         if (_balanceRefreshInFlight) return;
         _balanceRefreshInFlight = true;
         try {
@@ -820,74 +880,134 @@ export function setupBinanceConnection({
     };
 
     // ============================================================
-    // Futures trading (spot-parity path, same BK/BS credentials)
+    // Futures trading (spot-parity path, separate BFK/BFS credentials)
     // ============================================================
-    const futuresMockState = {
-        orders: [
-            normalizeFuturesExecutionReport({
-                symbol: 'BTCUSDT',
-                side: 'BUY',
-                type: 'LIMIT',
-                status: 'NEW',
-                orderId: 900001,
-                clientOrderId: 'futures-mock-seed',
-                price: '58445.00',
-                origQty: '0.004',
-                executedQty: '0',
-                positionSide: 'LONG',
-                updateTime: 1_700_000_000_000,
-            }),
-        ],
-        positions: [{
-            symbol: 'BTCUSDT',
-            positionSide: 'LONG',
-            quantity: '0.010',
-            entryPrice: '57000.00',
-            markPrice: '58445.00',
-            unrealizedPnl: '14.45',
-            liquidationPrice: '29000.00',
-            leverage: '2',
-            marginType: 'ISOLATED',
-            isolatedMargin: '305.00',
-            notional: '584.45',
-        }],
-        balances: { USDT: { available: '1000.00', total: '1305.00', crossUnPnl: '0.00' } },
-    };
-
-    const broadcastFuturesMockAccountState = () => {
-        broadcastToRenderers({ futures_balances: futuresMockState.balances });
-        broadcastToRenderers({ futures_orders: futuresMockState.orders });
-        broadcastToRenderers({ futures_positions: futuresMockState.positions });
-    };
-
     // In-memory pause toggle: blocks new futures orders (cancels stay allowed)
     // until the operator resumes. Deliberately not persisted anywhere.
     let futuresTradingPaused = false;
     const broadcastFuturesTradingPaused = () => {
-        broadcastToRenderers({ futures_trading_paused: futuresTradingPaused });
+        broadcastToRenderers({
+            futures_trading_paused: futuresTradingPaused,
+            futures_max_order_usdt: futuresMaxOrderUsdt === null
+                ? null
+                : String(futuresMaxOrderUsdt),
+        });
     };
 
     let _futuresAccountRefreshInFlight = false;
-    const refreshFuturesAccountState = async (symbol) => {
+    let futuresAccountResources = createInitialFuturesAccountResources();
+    const futuresAccountPayloadKeys = Object.freeze({
+        balances: 'futures_balances',
+        positions: 'futures_positions',
+        regularOrders: 'futures_regular_orders',
+        algoOrders: 'futures_algo_orders',
+    });
+    const broadcastFuturesAccountState = () => {
+        // Versioned renderer contract: futures_account_state.
+        broadcastToRenderers(createFuturesAccountStateEnvelope(futuresAccountResources));
+    };
+
+    // positionRisk is only re-read on an account event, so without this the
+    // desk's mark, size and uPnL would stand still while the chart moves. The
+    // stream is public: no credentials, no REST weight, no account writes.
+    const futuresMarkPriceFeed = futuresCredentialsReady
+        ? createFuturesMarkPriceFeed({
+            streamOrigin: FUTURES_STREAM_ORIGIN,
+            createSocket: url => new WebSocket(url, {
+                agent: sharedProxyAgent ?? undefined,
+                handshakeTimeout: 10_000,
+            }),
+            broadcast: broadcastToRenderers,
+            logger,
+        })
+        : null;
+
+    // Bumped once per confirmed mutating command. A snapshot carries the epoch
+    // it began under, so a read that started before a place, amend or cancel can
+    // be recognised as describing a world that no longer exists and dropped,
+    // instead of restoring the state that command just replaced.
+    let futuresMutationEpoch = 0;
+    // Bumped whenever the Futures market is deactivated, so a read that began
+    // under an earlier activation cannot land on a desk that has moved on.
+    let futuresActivationGeneration = 0;
+    const noteFuturesMutation = () => {
+        futuresMutationEpoch += 1;
+    };
+
+    const runFuturesAccountRefreshPass = async () => {
+        const operations = futuresTradingAdapter.getAccountRefreshOperations();
+        if (operations.length === 0) return;
+        const epoch = futuresMutationEpoch;
+        const activation = futuresActivationGeneration;
+
+        for (const operation of operations) {
+            futuresAccountResources = markFuturesResourceLoading(
+                futuresAccountResources,
+                operation.type,
+            );
+        }
+        broadcastFuturesAccountState();
+
+        // The signed reads run concurrently: the limiter still spaces their
+        // admissions, but the round-trips overlap, so the ticket reaches
+        // READY in roughly one round-trip instead of serial endpoint latency.
+        await Promise.all(operations.map(operation => futuresRestLimiter.execute(async () => {
+            const payload = await operation.loadPayload();
+            const payloadKey = futuresAccountPayloadKeys[operation.type];
+            if (!payloadKey || !Object.hasOwn(payload, payloadKey)) {
+                const error = new Error('Invalid Futures account resource payload');
+                error.code = 'INVALID_RESOURCE_PAYLOAD';
+                throw error;
+            }
+            // A mutating command landed while this read was in flight. The read
+            // predates it, so applying it would undo it. The command queued its
+            // own refresh, so nothing is lost by dropping this one. The same
+            // goes for a read that outlived the activation it was started under.
+            if (epoch !== futuresMutationEpoch || activation !== futuresActivationGeneration) return;
+            futuresAccountResources = markFuturesResourceReady(
+                futuresAccountResources,
+                operation.type,
+                payload[payloadKey],
+            );
+            if (operation.type === 'positions') {
+                futuresMarkPriceFeed?.track(payload[payloadKey]);
+            }
+            broadcastFuturesAccountState();
+        }, operation.weight).catch((error) => {
+                if (epoch !== futuresMutationEpoch || activation !== futuresActivationGeneration) return;
+                futuresAccountResources = markFuturesResourceFailed(
+                    futuresAccountResources,
+                    operation.type,
+                    error,
+                );
+                broadcastFuturesAccountState();
+                logger.error(`${operation.errorLabel}:`, error?.code || error?.message);
+            })));
+    };
+
+    // A refresh asked for while one is running used to be discarded outright, so
+    // the reconciliation that follows a trade silently never happened and the
+    // panel kept showing the pre-trade account until the operator pressed
+    // Ctrl+R. It is queued instead: at most one follow-up is pending, because
+    // any number of requests collapse into "read the account again once this
+    // read finishes".
+    let _futuresAccountRefreshQueued = false;
+    const refreshFuturesAccountState = async () => {
         broadcastFuturesTradingPaused();
-        if (USE_MOCK) {
-            broadcastFuturesMockAccountState();
+        if (!futuresTradingAdapter) return;
+        if (_futuresAccountRefreshInFlight) {
+            _futuresAccountRefreshQueued = true;
             return;
         }
-        if (!futuresTradingAdapter || _futuresAccountRefreshInFlight) return;
         _futuresAccountRefreshInFlight = true;
         try {
-            for (const operation of futuresTradingAdapter.getAccountRefreshOperations(symbol)) {
-                try {
-                    await futuresRestLimiter.execute(async () => {
-                        broadcastToRenderers(await operation.loadPayload());
-                    }, operation.weight);
-                } catch (error) {
-                    logger.error(`${operation.errorLabel}:`, error?.code || error?.message);
-                }
-            }
+            do {
+                _futuresAccountRefreshQueued = false;
+                await runFuturesAccountRefreshPass();
+            } while (_futuresAccountRefreshQueued);
         } finally {
             _futuresAccountRefreshInFlight = false;
+            _futuresAccountRefreshQueued = false;
         }
     };
 
@@ -897,16 +1017,75 @@ export function setupBinanceConnection({
     let futuresKeepAliveInterval = null;
     let futuresUserDataReconnecting = false;
     let futuresUserDataRequested = false;
+    let futuresUserDataGeneration = 0;
 
-    const startFuturesUserDataStream = async (retryCount = 0) => {
+    const markFuturesUserDataLoading = () => {
+        futuresAccountResources = markFuturesResourceLoading(
+            futuresAccountResources,
+            'userDataStream',
+        );
+        broadcastFuturesAccountState();
+    };
+    const markFuturesUserDataReady = () => {
+        futuresAccountResources = markFuturesResourceReady(
+            futuresAccountResources,
+            'userDataStream',
+            { connected: true },
+        );
+        broadcastFuturesAccountState();
+    };
+    const markFuturesUserDataFailed = (error) => {
+        futuresAccountResources = markFuturesOrderResourcesStale(
+            futuresAccountResources,
+            error,
+        );
+        futuresAccountResources = markFuturesResourceFailed(
+            futuresAccountResources,
+            'userDataStream',
+            error,
+        );
+        broadcastFuturesAccountState();
+    };
+
+    const stopSharedFuturesConnections = async () => {
+        // Every Futures read already in flight belongs to an activation that is
+        // over. Its result describes a market nobody is on, so it is dropped
+        // rather than applied over the state the switch produced.
+        futuresActivationGeneration += 1;
+        futuresUserDataGeneration += 1;
+        futuresUserDataRequested = false;
+        futuresUserDataReconnecting = false;
+        // No Futures renderer is watching: nothing to mark to market.
+        futuresMarkPriceFeed?.track([]);
+        if (futuresKeepAliveInterval) {
+            clearInterval(futuresKeepAliveInterval);
+            futuresKeepAliveInterval = null;
+        }
+        const staleFuturesUserData = futuresUserDataWs;
+        futuresUserDataWs = null;
+        await safeDisconnect(staleFuturesUserData, 'futures user data stream');
+        futuresAccountResources = markFuturesResourceIdle(
+            futuresAccountResources,
+            'userDataStream',
+        );
+        broadcastFuturesAccountState();
+    };
+
+    const startFuturesUserDataStream = async (
+        retryCount = 0,
+        generation = futuresUserDataGeneration,
+    ) => {
         const MAX_RETRIES = 5;
-        if (USE_MOCK || !futuresTradingAdapter) return;
-        if (rendererConnections.size === 0) return;
+        if (!futuresTradingAdapter) return;
+        if (generation !== futuresUserDataGeneration) return;
+        if (futuresRendererConnections.size === 0) return;
         if (futuresUserDataReconnecting && retryCount === 0) return;
         futuresUserDataReconnecting = true;
+        markFuturesUserDataLoading();
         try {
             const listenKey = await futuresRestLimiter.execute(
-                () => (rendererConnections.size === 0
+                () => (generation !== futuresUserDataGeneration
+                    || futuresRendererConnections.size === 0
                     ? undefined
                     : futuresTradingAdapter.createUserDataStreamListenKey()),
                 1,
@@ -926,7 +1105,8 @@ export function setupBinanceConnection({
                 }
                 await safeDisconnect(previous, 'previous futures user data stream');
             }
-            if (rendererConnections.size === 0) {
+            if (generation !== futuresUserDataGeneration
+                || futuresRendererConnections.size === 0) {
                 futuresUserDataReconnecting = false;
                 return;
             }
@@ -937,6 +1117,14 @@ export function setupBinanceConnection({
             });
             futuresUserDataWs = socket;
             futuresUserDataReconnecting = false;
+
+            socket.on('open', () => {
+                if (generation !== futuresUserDataGeneration
+                    || futuresUserDataWs !== socket) return;
+                markFuturesUserDataReady();
+                logger.info('Futures user data stream connected.');
+                void refreshFuturesAccountState();
+            });
 
             socket.on('message', (data) => {
                 const payload = extractStreamPayload(data);
@@ -949,6 +1137,9 @@ export function setupBinanceConnection({
                     broadcastToRenderers(streamEvent.rendererPayload);
                 }
                 if (streamEvent.type === 'listenKeyExpired') {
+                    const error = new Error('Futures listen key expired');
+                    error.code = 'LISTEN_KEY_EXPIRED';
+                    markFuturesUserDataFailed(error);
                     socket.close();
                     return;
                 }
@@ -957,41 +1148,52 @@ export function setupBinanceConnection({
                 }
             });
             socket.on('error', (err) => {
+                markFuturesUserDataFailed(err);
                 logger.warn('Futures user data stream error:', err?.code || err?.message);
             });
             socket.on('close', () => {
                 if (futuresUserDataWs !== socket) return;
                 futuresUserDataWs = null;
+                const error = new Error('Futures user data stream disconnected');
+                error.code = 'ECONNRESET';
+                markFuturesUserDataFailed(error);
                 if (futuresKeepAliveInterval) {
                     clearInterval(futuresKeepAliveInterval);
                     futuresKeepAliveInterval = null;
                 }
-                if (rendererConnections.size > 0 && !futuresUserDataReconnecting) {
+                if (generation === futuresUserDataGeneration
+                    && futuresRendererConnections.size > 0
+                    && !futuresUserDataReconnecting) {
                     logger.info('Scheduling futures user data stream reconnection...');
-                    setTimeout(() => startFuturesUserDataStream(), 5000);
+                    setTimeout(() => startFuturesUserDataStream(0, generation), 5000);
                 }
             });
 
             futuresKeepAliveInterval = setInterval(() => {
-                if (rendererConnections.size === 0 || futuresUserDataWs !== socket) return;
+                if (generation !== futuresUserDataGeneration
+                    || futuresRendererConnections.size === 0
+                    || futuresUserDataWs !== socket) return;
                 void futuresRestLimiter.execute(
                     () => futuresTradingAdapter.renewUserDataStreamListenKey(),
                     1,
-                ).catch(err => logger.warn('Failed to renew futures listenKey:', err?.code || err?.message));
+                ).catch((err) => {
+                    markFuturesUserDataFailed(err);
+                    logger.warn('Failed to renew futures listenKey:', err?.code || err?.message);
+                });
             }, 30 * 60 * 1000);
-
-            logger.info('Futures user data stream connected.');
-            void refreshFuturesAccountState();
         } catch (err) {
             futuresUserDataReconnecting = false;
+            markFuturesUserDataFailed(err);
             if (err?.code === -2015 || err?.status === 401) {
                 logger.error('Futures listenKey rejected — enable Futures permission on this API key.');
                 return;
             }
-            if (retryCount < MAX_RETRIES && rendererConnections.size > 0) {
+            if (generation === futuresUserDataGeneration
+                && retryCount < MAX_RETRIES
+                && futuresRendererConnections.size > 0) {
                 const delay = 3000 * (retryCount + 1);
                 logger.warn(`Futures user data stream failed (${err?.code || err?.message}), retrying in ${delay}ms`);
-                setTimeout(() => startFuturesUserDataStream(retryCount + 1), delay);
+                setTimeout(() => startFuturesUserDataStream(retryCount + 1, generation), delay);
             } else {
                 logger.error('Failed to start futures user data stream:', err?.code || err?.message);
             }
@@ -999,7 +1201,8 @@ export function setupBinanceConnection({
     };
 
     const ensureFuturesUserDataStream = () => {
-        if (futuresUserDataRequested) return;
+        if (futuresUserDataRequested
+            && (futuresUserDataWs || futuresUserDataReconnecting)) return;
         futuresUserDataRequested = true;
         void startFuturesUserDataStream();
     };
@@ -1009,6 +1212,18 @@ export function setupBinanceConnection({
         const accessCheck = validateLocalWebSocketRequest(request, localWebSocketAccess);
         if (!accessCheck.allowed) {
             logger.warn(`Rejected local WebSocket request: ${accessCheck.reason}`);
+            // A rejected handshake reaches the browser as an anonymous 1006,
+            // which is indistinguishable from "the backend has not started
+            // yet" — so a renderer holding a token this process will never
+            // accept retried it every 500 ms for the whole session. An
+            // authentication failure is accepted only to be closed with its own
+            // code, which the renderer can read and stop on. Nothing is
+            // registered and nothing is ever sent on it.
+            if (accessCheck.status === 401) {
+                const refused = request.accept(null, request.origin);
+                refused.close(LOCAL_WEBSOCKET_AUTH_CLOSE_CODE, 'invalid-token');
+                return;
+            }
             request.reject(accessCheck.status, accessCheck.reason);
             return;
         }
@@ -1022,37 +1237,230 @@ export function setupBinanceConnection({
         let panelSettings = {};
         let activeRequestId = null;
 
+        // The market this renderer has activated, and the generation that
+        // activation belongs to. Work started under an older generation is
+        // discarded rather than applied: a switch back to Spot must not be
+        // undone by a Futures read that was already in flight.
+        let activeMarketMode = MARKET_MODES.UNSELECTED;
+        let marketActivationGeneration = 0;
+
+        const marketScopeOf = (data) => {
+            if (typeof data?.action === 'string') {
+                if (SPOT_CHANNEL_ACTIONS.has(data.action)) return MARKET_MODES.SPOT;
+                if (Object.values(TRADING_COMMAND_ACTIONS).includes(data.action)) {
+                    return data.marketType === FUTURES_MARKET_TYPE
+                        ? MARKET_MODES.FUTURES
+                        : MARKET_MODES.SPOT;
+                }
+                return null;
+            }
+            return SPOT_LEGACY_REQUESTS.has(data?.request) ? MARKET_MODES.SPOT : null;
+        };
+
+        const describeMarketMode = mode => (mode === MARKET_MODES.FUTURES ? 'Futures' : 'Spot');
+
+        // Returns true when the frame was refused, so the caller stops.
+        const refuseUnlessMarketActive = (label, requiredMode) => {
+            if (requiredMode === null || activeMarketMode === requiredMode) return false;
+            logger.warn(`[market-gate] Refused ${label}: ${requiredMode} is not the activated market`);
+            emit(createCommandRejection(
+                label,
+                'MARKET_NOT_ACTIVE',
+                activeMarketMode === MARKET_MODES.UNSELECTED
+                    ? `${describeMarketMode(requiredMode)} is not activated yet — activate the market before sending this.`
+                    : `${describeMarketMode(requiredMode)} is not the activated market — the operator switched away.`,
+                {
+                    marketType: requiredMode === MARKET_MODES.FUTURES
+                        ? FUTURES_MARKET_TYPE
+                        : SPOT_MARKET_TYPE,
+                    requiredMarketMode: requiredMode,
+                    activeMarketMode,
+                },
+            ));
+            return true;
+        };
+
+        const applyMarketActivation = (marketMode) => {
+            activeMarketMode = marketMode;
+            marketActivationGeneration += 1;
+            sendJSON(connection, {
+                type: 'market_activation',
+                version: 1,
+                marketMode: activeMarketMode,
+                generation: marketActivationGeneration,
+            });
+        };
+
         // Channel manager for this connection (each renderer has its own channels)
         const channelManager = new ChannelManager(logger);
         const marketStreamManager = channelManager.getMarketStreamManager();
-        const futuresProductionWorkstationRuntime = createFuturesProductionWorkstationRuntime({
-            onTiming: ({ phase, durationMs, outcome, cache }) => {
-                logger.info(
-                    `[futures-production-workstation:timing] ${phase} ${durationMs}ms ${outcome}`
-                    + (cache === null ? '' : ` cache=${cache}`),
-                );
-            },
-        });
+        const futuresProductionWorkstationRuntime = futuresCredentialsReady
+            ? createFuturesProductionWorkstationRuntime({
+                onTiming: ({ phase, durationMs, outcome, cache }) => {
+                    logger.info(
+                        `[futures-production-workstation:timing] ${phase} ${durationMs}ms ${outcome}`
+                        + (cache === null ? '' : ` cache=${cache}`),
+                    );
+                },
+            })
+            : null;
 
-        const emitSpotRefreshOperation = async (operation) => {
+        // Spot's counterpart of the Futures mutation epoch. A snapshot that began
+        // before a placement or cancellation describes a world that command has
+        // already replaced, so emitting it would move the panel backwards.
+        let spotMutationEpoch = 0;
+        const noteSpotMutation = () => {
+            spotMutationEpoch += 1;
+        };
+
+        const emitSpotRefreshOperation = async (operation, epoch) => {
             const payload = await operation.loadPayload();
+            if (epoch !== spotMutationEpoch) return;
             emit(payload);
         };
 
-        const enqueueSpotRefreshOperation = (operation) => (
-            rateLimiter.execute(() => emitSpotRefreshOperation(operation), operation.weight)
-                .catch((err) => logger.error(operation.errorLabel || 'Account Refresh Fetch Error:', err))
-        );
+        const enqueueSpotRefreshOperation = (operation) => {
+            const epoch = spotMutationEpoch;
+            return rateLimiter.execute(() => emitSpotRefreshOperation(operation, epoch), operation.weight)
+                .catch((err) => logger.error(operation.errorLabel || 'Account Refresh Fetch Error:', err));
+        };
 
-        const refreshAccountState = async (symbol) => {
-            if (!spotTradingAdapter) return;
+        let _spotAccountRefreshInFlight = false;
+        let _spotAccountRefreshQueued = null;
+        const runSpotAccountRefreshPass = async (symbol) => {
+            const epoch = spotMutationEpoch;
             await runSpotAccountRefreshOperations({
                 operations: spotTradingAdapter.getAccountRefreshOperations(symbol),
                 executeOperation: (operation) => (
-                    rateLimiter.execute(() => emitSpotRefreshOperation(operation), operation.weight)
+                    rateLimiter.execute(() => emitSpotRefreshOperation(operation, epoch), operation.weight)
                 ),
                 onOperationError: ({ error, errorLabel }) => logger.error(`${errorLabel}:`, error),
             });
+        };
+
+        // Queued rather than dropped, for the same reason as Futures: the read
+        // that follows a trade is the one that proves what the trade did.
+        const refreshAccountState = async (symbol) => {
+            if (!spotTradingAdapter) return;
+            if (_spotAccountRefreshInFlight) {
+                _spotAccountRefreshQueued = { symbol };
+                return;
+            }
+            _spotAccountRefreshInFlight = true;
+            try {
+                let pending = { symbol };
+                while (pending) {
+                    _spotAccountRefreshQueued = null;
+                    await runSpotAccountRefreshPass(pending.symbol);
+                    pending = _spotAccountRefreshQueued;
+                }
+            } finally {
+                _spotAccountRefreshInFlight = false;
+                _spotAccountRefreshQueued = null;
+            }
+        };
+
+        const RECONCILE_ATTEMPTS = 3;
+        const RECONCILE_BACKOFF_MS = 500;
+        const pause = ms => new Promise((resolve) => { setTimeout(resolve, ms); });
+
+        const describeSpotError = error => (
+            error?.response?.data?.msg
+            || error?.message
+            || 'The Binance Spot request failed.'
+        );
+
+        const spotBinanceCode = error => (
+            error?.code ?? error?.response?.data?.code ?? null
+        );
+
+        /**
+         * Spot failures used to reach only the application log, so a refused
+         * placement or cancellation was invisible at the desk. They now travel
+         * the same road as Futures: a determinate failure is a rejection, an
+         * ambiguous one is reconciled against the exchange and never presented
+         * as a refusal.
+         */
+        const reportSpotCommandFailure = async ({
+            action,
+            label,
+            error,
+            symbol,
+            orderId,
+            origClientOrderId,
+        }) => {
+            logger.error(`${label} error:`, error?.code || error?.message);
+            if (error?.response?.data) {
+                logger.error(`${label} response:`, error.response.data);
+            }
+
+            const emitRejection = () => emit(createCommandRejection(
+                action,
+                'SPOT_API_ERROR',
+                describeSpotError(error),
+                { marketType: SPOT_MARKET_TYPE, binanceCode: spotBinanceCode(error) },
+            ));
+
+            if (!isIndeterminateTradingFailure(error)) {
+                emitRejection();
+                return;
+            }
+            if (!symbol || !(orderId || origClientOrderId)) {
+                emit(createCommandUnresolved(
+                    action,
+                    'SPOT_OUTCOME_UNKNOWN',
+                    UNCONFIRMED_COMMAND_MESSAGE,
+                    { marketType: SPOT_MARKET_TYPE, symbol: symbol ?? null, reconciled: false },
+                ));
+                return;
+            }
+
+            emit(createCommandUnresolved(
+                action,
+                'SPOT_OUTCOME_PENDING',
+                UNRESOLVED_COMMAND_MESSAGE,
+                {
+                    marketType: SPOT_MARKET_TYPE,
+                    symbol,
+                    binanceCode: spotBinanceCode(error),
+                    reconciled: false,
+                },
+            ));
+
+            for (let attempt = 1; attempt <= RECONCILE_ATTEMPTS; attempt += 1) {
+                try {
+                    const outcome = await spotTradingAdapter.findOrder({
+                        symbol,
+                        orderId,
+                        origClientOrderId,
+                    });
+                    if (outcome.exists) {
+                        noteSpotMutation();
+                        emit({ execution_update: outcome.report });
+                        await refreshAccountState(symbol);
+                        return;
+                    }
+                    emitRejection();
+                    return;
+                } catch (lookupError) {
+                    if (attempt === RECONCILE_ATTEMPTS) {
+                        logger.error(`${label} could not be reconciled:`, lookupError?.code || lookupError?.message);
+                        emit(createCommandUnresolved(
+                            action,
+                            'SPOT_OUTCOME_UNKNOWN',
+                            UNCONFIRMED_COMMAND_MESSAGE,
+                            {
+                                marketType: SPOT_MARKET_TYPE,
+                                symbol,
+                                binanceCode: spotBinanceCode(error),
+                                reconciled: false,
+                            },
+                        ));
+                        return;
+                    }
+                    await pause(RECONCILE_BACKOFF_MS * attempt);
+                }
+            }
         };
 
         const handleOrderPlacement = async (
@@ -1074,25 +1482,20 @@ export function setupBinanceConnection({
             const {
                 symbol,
                 side: resolvedSide,
-                quantityValue,
-                priceValue,
                 numericQuantity,
                 numericPrice,
+                newClientOrderId,
             } = validation.command;
 
-            if (USE_MOCK) {
-                logger.info(`[MOCK] Order Placed: ${requestType}`, payload);
-                emit({
-                    execution_update: buildSpotMockOrderPlacementExecutionReport({
-                        symbol,
-                        side: resolvedSide,
-                        priceValue,
-                        quantityValue,
-                    }),
-                });
+            if (!spotTradingAdapter) {
+                emit(createCommandRejection(
+                    TRADING_COMMAND_ACTIONS.PLACE_ORDER,
+                    'EXECUTION_NOT_CONFIGURED',
+                    'Binance Spot execution is unavailable. Configure BK and BS, then restart.',
+                    { marketType: 'spot' },
+                ));
                 return;
             }
-            if (!spotTradingAdapter) return;
 
             try {
                 logger.info(`[orders] ${resolvedSide} ${symbol} qty=${numericQuantity} price=${numericPrice}`);
@@ -1101,14 +1504,19 @@ export function setupBinanceConnection({
                     side: resolvedSide,
                     numericQuantity,
                     numericPrice,
+                    newClientOrderId,
                 });
+                noteSpotMutation();
                 emit({ execution_update: executionReport });
                 await refreshAccountState(symbol);
             } catch (error) {
-                logger.error("Order placement error:", error);
-                if (error?.response?.data) {
-                    logger.error("Order placement response:", error.response.data);
-                }
+                await reportSpotCommandFailure({
+                    action: TRADING_COMMAND_ACTIONS.PLACE_ORDER,
+                    label: 'Order placement',
+                    error,
+                    symbol,
+                    origClientOrderId: newClientOrderId,
+                });
             }
         };
 
@@ -1122,7 +1530,15 @@ export function setupBinanceConnection({
                 emit(validation.rejection);
                 return;
             }
-            if (!spotTradingAdapter) return;
+            if (!spotTradingAdapter) {
+                emit(createCommandRejection(
+                    TRADING_COMMAND_ACTIONS.CANCEL_ORDER,
+                    'EXECUTION_NOT_CONFIGURED',
+                    'Binance Spot execution is unavailable. Configure BK and BS, then restart.',
+                    { marketType: 'spot' },
+                ));
+                return;
+            }
 
             const {
                 symbol: targetSymbol,
@@ -1139,13 +1555,18 @@ export function setupBinanceConnection({
                     origClientOrderId,
                     newClientOrderId,
                 });
+                noteSpotMutation();
                 emit({ execution_update: executionReport });
                 await refreshAccountState(targetSymbol);
             } catch (error) {
-                logger.error("Cancel order error:", error);
-                if (error?.response?.data) {
-                    logger.error("Cancel order response:", error.response.data);
-                }
+                await reportSpotCommandFailure({
+                    action: TRADING_COMMAND_ACTIONS.CANCEL_ORDER,
+                    label: 'Cancel order',
+                    error,
+                    symbol: targetSymbol,
+                    orderId,
+                    origClientOrderId,
+                });
             }
         };
 
@@ -1154,9 +1575,152 @@ export function setupBinanceConnection({
             emit(createCommandRejection(
                 action,
                 'FUTURES_API_ERROR',
-                error?.message || 'Binance futures request failed',
+                describeFuturesApiError(error),
                 { marketType: FUTURES_MARKET_TYPE, binanceCode: error?.code ?? null },
             ));
+        };
+
+        /**
+         * Answers an ambiguous submission by asking Binance what it actually did.
+         *
+         * The operator sees an unresolved outcome immediately — never a
+         * rejection, because a rejection invites the retry that would create the
+         * second order — and the reconciliation replaces it with the truth.
+         * `onAbsent` differs per command: an absent order means a placement never
+         * happened, and means a cancellation has nothing left to cancel.
+         */
+        const reconcileAmbiguousFuturesCommand = async ({
+            action,
+            symbol,
+            orderId,
+            origClientOrderId,
+            error,
+            onAbsent,
+        }) => {
+            const identified = Boolean(symbol) && Boolean(orderId || origClientOrderId);
+            if (!identified) {
+                emit(createCommandUnresolved(
+                    action,
+                    'FUTURES_OUTCOME_UNKNOWN',
+                    UNCONFIRMED_COMMAND_MESSAGE,
+                    { marketType: FUTURES_MARKET_TYPE, symbol: symbol ?? null, reconciled: false },
+                ));
+                return;
+            }
+            emit(createCommandUnresolved(
+                action,
+                'FUTURES_OUTCOME_PENDING',
+                UNRESOLVED_COMMAND_MESSAGE,
+                {
+                    marketType: FUTURES_MARKET_TYPE,
+                    symbol,
+                    binanceCode: error?.code ?? null,
+                    reconciled: false,
+                },
+            ));
+
+            for (let attempt = 1; attempt <= RECONCILE_ATTEMPTS; attempt += 1) {
+                try {
+                    const outcome = await futuresTradingAdapter.findOrder({
+                        symbol,
+                        orderId,
+                        origClientOrderId,
+                    });
+                    if (outcome.exists) {
+                        logger.info(`[futures-orders] ${action} resolved by reconciliation: order exists`);
+                        noteFuturesMutation();
+                        emit({ futures_execution_update: outcome.report });
+                        await refreshFuturesAccountState();
+                        return;
+                    }
+                    logger.info(`[futures-orders] ${action} resolved by reconciliation: no such order`);
+                    await onAbsent();
+                    return;
+                } catch (lookupError) {
+                    if (attempt === RECONCILE_ATTEMPTS) {
+                        logger.error(
+                            `[futures-orders] ${action} could not be reconciled:`,
+                            lookupError?.code || lookupError?.message,
+                        );
+                        emit(createCommandUnresolved(
+                            action,
+                            'FUTURES_OUTCOME_UNKNOWN',
+                            UNCONFIRMED_COMMAND_MESSAGE,
+                            {
+                                marketType: FUTURES_MARKET_TYPE,
+                                symbol,
+                                binanceCode: error?.code ?? null,
+                                reconciled: false,
+                            },
+                        ));
+                        return;
+                    }
+                    await pause(RECONCILE_BACKOFF_MS * attempt);
+                }
+            }
+        };
+
+        // Every mutating Futures command routes its failure through here, so a
+        // timeout or a 5xx can never again be shown as a plain refusal.
+        const reportFuturesCommandFailure = async ({
+            action,
+            error,
+            symbol,
+            orderId,
+            origClientOrderId,
+            onAbsent,
+        }) => {
+            if (!isIndeterminateTradingFailure(error)) {
+                await onAbsent();
+                return;
+            }
+            await reconcileAmbiguousFuturesCommand({
+                action,
+                symbol,
+                orderId,
+                origClientOrderId,
+                error,
+                onAbsent,
+            });
+        };
+
+        // Whether an amendment is an exit is decided from the desk's own view of
+        // the book, never from a claim travelling with the command. An order the
+        // desk cannot find is treated as exposure-increasing: the safe answer
+        // when the ceiling is active and the facts are missing.
+        const isReduceOnlyWorkingOrder = ({ symbol, orderId, origClientOrderId }) => {
+            const workingOrders = futuresAccountResources.regularOrders?.data;
+            if (!Array.isArray(workingOrders)) return false;
+            const match = workingOrders.find(order => order.symbol === symbol
+                && ((orderId != null && String(order.orderId) === String(orderId))
+                    || (origClientOrderId != null && order.clientOrderId === origClientOrderId)));
+            return match?.reduceOnly === true;
+        };
+
+        // FUTURES_MAX_ORDER_USDT, applied here to every exposure-increasing
+        // command the main process receives — placement and amendment alike.
+        // Returns true when the command was refused.
+        const refuseOverCapFuturesCommand = (action, { quantity, price, exposureIncreasing }) => {
+            const risk = evaluateFuturesOrderRisk({
+                quantity,
+                price,
+                maxOrderNotionalUsdt: futuresMaxOrderUsdt,
+                exposureIncreasing,
+            });
+            if (risk.ok) return false;
+            emit(createCommandRejection(
+                action,
+                'FUTURES_ORDER_CAP_EXCEEDED',
+                risk.reason === FUTURES_RISK_REASONS.UNPRICEABLE_ORDER
+                    ? `Order cap ${futuresMaxOrderUsdt} USDT is active — an order without a usable price cannot be verified against it.`
+                    : `Order notional ${risk.notionalUsdt} USDT exceeds the FUTURES_MAX_ORDER_USDT cap of ${futuresMaxOrderUsdt} USDT.`,
+                {
+                    marketType: FUTURES_MARKET_TYPE,
+                    capUsdt: futuresMaxOrderUsdt,
+                    notionalUsdt: risk.notionalUsdt,
+                },
+            ));
+            return true;
         };
 
         const handleFuturesOrderPlacement = async (command) => {
@@ -1171,92 +1735,248 @@ export function setupBinanceConnection({
                 return;
             }
             // The cap guards new exposure only; reduce-only orders always pass
-            // so a position can be closed regardless of the cap.
-            if (futuresMaxOrderUsdt !== null && order.reduceOnly !== true) {
-                const notional = typeof order.numericPrice === 'number'
-                    ? order.numericQuantity * order.numericPrice
-                    : null;
-                if (notional === null || notional > futuresMaxOrderUsdt) {
-                    emit(createCommandRejection(
-                        TRADING_COMMAND_ACTIONS.PLACE_ORDER,
-                        'FUTURES_ORDER_CAP_EXCEEDED',
-                        notional === null
-                            ? `Order cap ${futuresMaxOrderUsdt} USDT is active — market entries without a price cannot be verified.`
-                            : `Order notional ${notional.toFixed(2)} USDT exceeds the FUTURES_MAX_ORDER_USDT cap of ${futuresMaxOrderUsdt} USDT.`,
-                        { marketType: FUTURES_MARKET_TYPE, capUsdt: futuresMaxOrderUsdt, notionalUsdt: notional },
-                    ));
-                    return;
-                }
-            }
+            // so a position can be closed regardless of the cap. A limit close
+            // sent without reduce-only is new exposure as far as the exchange is
+            // concerned, and is capped like any other entry.
+            if (refuseOverCapFuturesCommand(TRADING_COMMAND_ACTIONS.PLACE_ORDER, {
+                quantity: order.numericQuantity,
+                price: order.numericPrice,
+                exposureIncreasing: order.reduceOnly !== true,
+            })) return;
             ensureFuturesUserDataStream();
-            if (USE_MOCK) {
-                // The mock behaves like a hedge-mode account so gesture entries
-                // and exits render with a meaningful LONG/SHORT leg.
-                const mockPositionSide = order.positionSide ?? (order.reduceOnly
-                    ? (order.side === 'SELL' ? 'LONG' : 'SHORT')
-                    : (order.side === 'BUY' ? 'LONG' : 'SHORT'));
-                const report = buildFuturesMockOrderPlacementExecutionReport({
-                    symbol: order.symbol,
-                    side: order.side,
-                    priceValue: String(order.numericPrice ?? ''),
-                    quantityValue: String(order.numericQuantity),
-                    positionSide: mockPositionSide,
-                });
-                futuresMockState.orders = [...futuresMockState.orders, report];
-                emit({ futures_execution_update: report });
-                broadcastFuturesMockAccountState();
+            if (!futuresTradingAdapter) {
+                emit(createCommandRejection(
+                    TRADING_COMMAND_ACTIONS.PLACE_ORDER,
+                    'EXECUTION_NOT_CONFIGURED',
+                    'Binance Futures execution is unavailable. Configure BFK and BFS, then restart.',
+                    { marketType: FUTURES_MARKET_TYPE },
+                ));
                 return;
             }
-            if (!futuresTradingAdapter) return;
             try {
                 logger.info(`[futures-orders] ${order.side} ${order.symbol} ${order.orderType} qty=${order.numericQuantity}${order.numericPrice ? ` price=${order.numericPrice}` : ''}`);
                 const report = await futuresTradingAdapter.placeOrder(order);
+                noteFuturesMutation();
                 emit({ futures_execution_update: report });
-                await refreshFuturesAccountState(order.symbol);
+                await refreshFuturesAccountState();
             } catch (error) {
-                emitFuturesApiRejection(TRADING_COMMAND_ACTIONS.PLACE_ORDER, error);
+                await reportFuturesCommandFailure({
+                    action: TRADING_COMMAND_ACTIONS.PLACE_ORDER,
+                    error,
+                    symbol: order.symbol,
+                    origClientOrderId: order.newClientOrderId,
+                    // Binance says no such order: the placement never happened,
+                    // so this is an ordinary refusal the operator may act on.
+                    onAbsent: async () => {
+                        emitFuturesApiRejection(TRADING_COMMAND_ACTIONS.PLACE_ORDER, error);
+                    },
+                });
+            }
+        };
+
+        // A history read must never disturb trading state: a failure is reported
+        // inside the history payload itself, not as an account resource error.
+        const handleFuturesHistory = async (command) => {
+            const { symbol } = command;
+            try {
+                const [orders, trades] = await Promise.all([
+                    futuresTradingAdapter.getOrderHistory({ symbol }),
+                    futuresTradingAdapter.getTradeHistory({ symbol }),
+                ]);
+                emit({ futures_history: { symbol, orders, trades, error: null } });
+            } catch (error) {
+                logger.error('[futures-history] request failed:', error?.code || error?.message);
+                emit({
+                    futures_history: {
+                        symbol,
+                        orders: [],
+                        trades: [],
+                        error: {
+                            code: 'FUTURES_API_ERROR',
+                            binanceCode: error?.code ?? null,
+                            message: describeFuturesApiError(error),
+                        },
+                    },
+                });
+            }
+        };
+
+        const handleFuturesModifyOrder = async (command) => {
+            const amendment = command.futuresModifyPayload;
+            if (futuresTradingPaused) {
+                emit(createCommandRejection(
+                    TRADING_COMMAND_ACTIONS.REPLACE_ORDER,
+                    'FUTURES_TRADING_PAUSED',
+                    'Futures trading is paused — resume to move orders.',
+                    { marketType: FUTURES_MARKET_TYPE },
+                ));
+                return;
+            }
+            // The audit's case: a 160 USDT order edited to 10 000 under a 200
+            // USDT cap reached Binance because only placement was checked. An
+            // amendment is measured against the notional it will leave working.
+            if (refuseOverCapFuturesCommand(TRADING_COMMAND_ACTIONS.REPLACE_ORDER, {
+                quantity: amendment.quantity,
+                price: amendment.price,
+                exposureIncreasing: !isReduceOnlyWorkingOrder(amendment),
+            })) return;
+            ensureFuturesUserDataStream();
+            if (!futuresTradingAdapter) {
+                emit(createCommandRejection(
+                    TRADING_COMMAND_ACTIONS.REPLACE_ORDER,
+                    'EXECUTION_NOT_CONFIGURED',
+                    'Binance Futures execution is unavailable. Configure BFK and BFS, then restart.',
+                    { marketType: FUTURES_MARKET_TYPE },
+                ));
+                return;
+            }
+            try {
+                logger.info(`[futures-orders] Amend ${amendment.symbol} orderId=${amendment.orderId ?? amendment.origClientOrderId} price=${amendment.numericPrice}`);
+                const report = await futuresTradingAdapter.modifyOrder(amendment);
+                noteFuturesMutation();
+                emit({ futures_execution_update: report });
+                await refreshFuturesAccountState();
+            } catch (error) {
+                await reportFuturesCommandFailure({
+                    action: TRADING_COMMAND_ACTIONS.REPLACE_ORDER,
+                    error,
+                    symbol: amendment.symbol,
+                    orderId: amendment.orderId,
+                    origClientOrderId: amendment.origClientOrderId,
+                    onAbsent: async () => {
+                        emitFuturesApiRejection(TRADING_COMMAND_ACTIONS.REPLACE_ORDER, error);
+                        // The order survives a rejected amendment; resync so the
+                        // chart snaps the line back to the price Binance holds.
+                        await refreshFuturesAccountState();
+                    },
+                });
             }
         };
 
         const handleFuturesCancelOrder = async (command) => {
             ensureFuturesUserDataStream();
-            if (USE_MOCK) {
-                const target = futuresMockState.orders.find(order => (
-                    String(order.orderId) === String(command.orderId)
-                    || (command.origClientOrderId && order.clientOrderId === command.origClientOrderId)
+            if (!futuresTradingAdapter) {
+                emit(createCommandRejection(
+                    TRADING_COMMAND_ACTIONS.CANCEL_ORDER,
+                    'EXECUTION_NOT_CONFIGURED',
+                    'Binance Futures execution is unavailable. Configure BFK and BFS, then restart.',
+                    { marketType: FUTURES_MARKET_TYPE },
                 ));
-                futuresMockState.orders = futuresMockState.orders.filter(order => order !== target);
-                if (target) {
-                    emit({ futures_execution_update: { ...target, x: 'CANCELED', X: 'CANCELED', status: 'CANCELED' } });
-                }
-                broadcastFuturesMockAccountState();
                 return;
             }
-            if (!futuresTradingAdapter) return;
             try {
                 const report = await futuresTradingAdapter.cancelOrder(command);
+                noteFuturesMutation();
                 emit({ futures_execution_update: report });
-                await refreshFuturesAccountState(command.symbol);
+                await refreshFuturesAccountState();
             } catch (error) {
-                emitFuturesApiRejection(TRADING_COMMAND_ACTIONS.CANCEL_ORDER, error);
+                await reportFuturesCommandFailure({
+                    action: TRADING_COMMAND_ACTIONS.CANCEL_ORDER,
+                    error,
+                    symbol: command.symbol,
+                    orderId: command.orderId,
+                    origClientOrderId: command.origClientOrderId,
+                    onAbsent: async () => {
+                        // An order Binance does not have cannot be cancelled and
+                        // needs no rejection: the book already matches intent.
+                        // Only a determinate failure is a refusal to report.
+                        if (isIndeterminateTradingFailure(error)) {
+                            await refreshFuturesAccountState();
+                            return;
+                        }
+                        emitFuturesApiRejection(TRADING_COMMAND_ACTIONS.CANCEL_ORDER, error);
+                    },
+                });
             }
         };
 
         const handleFuturesCancelAll = async (command) => {
             ensureFuturesUserDataStream();
-            if (USE_MOCK) {
-                futuresMockState.orders = futuresMockState.orders.filter(
-                    order => order.symbol !== command.symbol,
-                );
-                broadcastFuturesMockAccountState();
+            if (!futuresTradingAdapter) {
+                emit(createCommandRejection(
+                    TRADING_COMMAND_ACTIONS.CANCEL_ALL,
+                    'EXECUTION_NOT_CONFIGURED',
+                    'Binance Futures execution is unavailable. Configure BFK and BFS, then restart.',
+                    { marketType: FUTURES_MARKET_TYPE },
+                ));
                 return;
             }
-            if (!futuresTradingAdapter) return;
             try {
                 await futuresTradingAdapter.cancelAllOrders(command.symbol);
-                await refreshFuturesAccountState(command.symbol);
+                noteFuturesMutation();
+                await refreshFuturesAccountState();
             } catch (error) {
+                // Cancel-all names no single order, so there is nothing to look
+                // up. An ambiguous outcome is stated as unknown and the account
+                // is re-read, which is what actually settles it.
+                if (isIndeterminateTradingFailure(error)) {
+                    emit(createCommandUnresolved(
+                        TRADING_COMMAND_ACTIONS.CANCEL_ALL,
+                        'FUTURES_OUTCOME_UNKNOWN',
+                        UNCONFIRMED_COMMAND_MESSAGE,
+                        { marketType: FUTURES_MARKET_TYPE, symbol: command.symbol, reconciled: false },
+                    ));
+                    await refreshFuturesAccountState();
+                    return;
+                }
                 emitFuturesApiRejection(TRADING_COMMAND_ACTIONS.CANCEL_ALL, error);
+            }
+        };
+
+        // Margin moves between the wallet and one open position. It places no
+        // order, so the order ceiling has nothing to measure: adding margin
+        // lowers the risk on a position that already exists, and capping that
+        // could block the top-up that would have prevented a liquidation.
+        const handleFuturesAdjustPositionMargin = async (command) => {
+            const adjustment = command.marginPayload;
+            // Pausing exists to stop risk being taken. Taking margin out of a
+            // position takes risk; putting it in is the same class of action as
+            // cancelling, and stays available.
+            if (futuresTradingPaused && adjustment.direction === 'REMOVE') {
+                emit(createCommandRejection(
+                    TRADING_COMMAND_ACTIONS.ADJUST_POSITION_MARGIN,
+                    'FUTURES_TRADING_PAUSED',
+                    'Futures trading is paused — resume to take margin out of a position.',
+                    { marketType: FUTURES_MARKET_TYPE },
+                ));
+                return;
+            }
+            ensureFuturesUserDataStream();
+            if (!futuresTradingAdapter) {
+                emit(createCommandRejection(
+                    TRADING_COMMAND_ACTIONS.ADJUST_POSITION_MARGIN,
+                    'EXECUTION_NOT_CONFIGURED',
+                    'Binance Futures execution is unavailable. Configure BFK and BFS, then restart.',
+                    { marketType: FUTURES_MARKET_TYPE },
+                ));
+                return;
+            }
+            try {
+                logger.info(`[futures-margin] ${adjustment.direction} ${adjustment.amount} USDT ${adjustment.symbol} ${adjustment.positionSide}`);
+                await futuresTradingAdapter.adjustPositionMargin(adjustment);
+                noteFuturesMutation();
+                // The row shows the exchange's figure, not the requested one.
+                await refreshFuturesAccountState();
+            } catch (error) {
+                // A margin transfer carries no client id Binance would echo, so
+                // there is nothing to reconcile by: re-reading the account is
+                // what settles it. It is never resent — a repeated transfer
+                // moves the amount twice.
+                if (isIndeterminateTradingFailure(error)) {
+                    emit(createCommandUnresolved(
+                        TRADING_COMMAND_ACTIONS.ADJUST_POSITION_MARGIN,
+                        'FUTURES_OUTCOME_UNKNOWN',
+                        UNCONFIRMED_COMMAND_MESSAGE,
+                        {
+                            marketType: FUTURES_MARKET_TYPE,
+                            symbol: adjustment.symbol,
+                            reconciled: false,
+                        },
+                    ));
+                    await refreshFuturesAccountState();
+                    return;
+                }
+                emitFuturesApiRejection(TRADING_COMMAND_ACTIONS.ADJUST_POSITION_MARGIN, error);
             }
         };
 
@@ -1271,6 +1991,20 @@ export function setupBinanceConnection({
             }
 
             const command = validation.command;
+            const authenticatedAdapter = command.marketType === FUTURES_MARKET_TYPE
+                ? futuresTradingAdapter
+                : spotTradingAdapter;
+            if (!authenticatedAdapter) {
+                emit(createCommandRejection(
+                    command.action,
+                    'EXECUTION_NOT_CONFIGURED',
+                    command.marketType === FUTURES_MARKET_TYPE
+                        ? credentialPreflight.markets.futures.message
+                        : credentialPreflight.markets.spot.message,
+                    { marketType: command.marketType },
+                ));
+                return;
+            }
             if (command.marketType === FUTURES_MARKET_TYPE) {
                 switch (command.action) {
                     case TRADING_COMMAND_ACTIONS.PLACE_ORDER:
@@ -1279,12 +2013,25 @@ export function setupBinanceConnection({
                     case TRADING_COMMAND_ACTIONS.CANCEL_ORDER:
                         await handleFuturesCancelOrder(command);
                         break;
+                    case TRADING_COMMAND_ACTIONS.REPLACE_ORDER:
+                        await handleFuturesModifyOrder(command);
+                        break;
                     case TRADING_COMMAND_ACTIONS.CANCEL_ALL:
                         await handleFuturesCancelAll(command);
                         break;
+                    case TRADING_COMMAND_ACTIONS.ADJUST_POSITION_MARGIN:
+                        await handleFuturesAdjustPositionMargin(command);
+                        break;
                     case TRADING_COMMAND_ACTIONS.ACCOUNT_REFRESH:
                         ensureFuturesUserDataStream();
-                        await refreshFuturesAccountState(command.symbol);
+                        // Warm the cached position mode (and the server-time
+                        // offset its signed request syncs) so the first order
+                        // pays no extra round-trips.
+                        void futuresTradingAdapter?.getPositionMode().catch(() => {});
+                        await refreshFuturesAccountState();
+                        break;
+                    case TRADING_COMMAND_ACTIONS.ACCOUNT_HISTORY:
+                        await handleFuturesHistory(command);
                         break;
                     case TRADING_COMMAND_ACTIONS.SET_TRADING_PAUSED:
                         futuresTradingPaused = command.paused;
@@ -1369,36 +2116,14 @@ export function setupBinanceConnection({
             });
         };
 
-        if (USE_MOCK) {
-            // Mock Logic - send initial global data
-            emitGlobal('filters', {
-                'BTCUSDT': { tickSize: '0.01', stepSize: '0.000001', minQty: '0.000001', minNotional: '10', maxQty: '9000', maxPrice: '1000000', minPrice: '0.01', status: 'TRADING', baseAsset: 'BTC', quoteAsset: 'USDT', baseAssetPrecision: 8, quoteAssetPrecision: 2, quotePrecision: 2 },
-                'ETHUSDT': { tickSize: '0.01', stepSize: '0.0001', minQty: '0.0001', minNotional: '10', maxQty: '9000', maxPrice: '1000000', minPrice: '0.01', status: 'TRADING', baseAsset: 'ETH', quoteAsset: 'USDT', baseAssetPrecision: 8, quoteAssetPrecision: 2, quotePrecision: 2 }
-            });
-            emitGlobal('balances', { 'USDT': { available: '1000.00', onOrder: '0.00' }, 'BTC': { available: '0.5', onOrder: '0.1' } });
-            emitGlobal('orders', []);
-            emitGlobal('ticker', generateTicker());
+        let spotDataInitialized = false;
+        let futuresDataInitialized = false;
+        const initializeSpotData = () => {
+            if (!spotCredentialsReady) return;
+            spotRendererConnections.add(connection);
+            if (spotDataInitialized) return;
+            spotDataInitialized = true;
 
-            // Mock interval for streaming data
-            const mockInterval = setInterval(() => {
-                if (!connection.connected) {
-                    clearInterval(mockInterval);
-                    return;
-                }
-
-                // Emit to active detail channel if exists
-                const detailChannel = channelManager.getDetailChannel();
-                if (detailChannel) {
-                    const mockPayload = buildMockChartPayload();
-                    emitToChannel(detailChannel.id, 'trades', [generateTrade()]);
-                    emitToChannel(detailChannel.id, 'depth', generateDepth());
-                    emitToChannel(detailChannel.id, 'chart', mockPayload.chart, mockPayload.last_tick);
-                }
-
-                // Emit ticker updates globally
-                emitGlobal('ticker', generateTicker());
-            }, 1000);
-        } else {
             // Real Data Logic using @binance/spot
 
             const sendInitialTicker = async () => {
@@ -1527,7 +2252,7 @@ export function setupBinanceConnection({
                             if (globalWsConnection !== conn) return;
                             globalWsConnection = null;
                             // Auto-reconnect on abnormal close if any renderer is connected
-                            if (code !== 1000 && rendererConnections.size > 0 && !globalWsReconnecting) {
+                            if (code !== 1000 && spotRendererConnections.size > 0 && !globalWsReconnecting) {
                                 logger.info('Scheduling global WS reconnection...');
                                 setTimeout(() => subscribeGlobal(), 5000);
                             }
@@ -1537,7 +2262,7 @@ export function setupBinanceConnection({
                         const isNetworkError = err?.code === 'ECONNRESET' || err?.code === 'ETIMEDOUT' ||
                                                err?.code === 'ENOTFOUND' || err?.message?.includes('TLS');
                         
-                        if (isNetworkError && retryCount < MAX_RETRIES && rendererConnections.size > 0) {
+                        if (isNetworkError && retryCount < MAX_RETRIES && spotRendererConnections.size > 0) {
                             const delay = RETRY_DELAY_BASE * (retryCount + 1);
                             logger.warn(`Global WS connection failed (${err?.code}), retrying in ${delay}ms (${retryCount + 1}/${MAX_RETRIES})`);
                             setTimeout(() => subscribeGlobal(retryCount + 1), delay);
@@ -1560,7 +2285,7 @@ export function setupBinanceConnection({
                 // reconnecting the ticker socket and multiplying the fan-out flood.
                 if (tickerStallInterval) clearInterval(tickerStallInterval);
                 tickerStallInterval = setInterval(() => {
-                    if (rendererConnections.size === 0) return;
+                    if (spotRendererConnections.size === 0) return;
                     if (Date.now() - lastTickerMessageAt <= TICKER_STALL_MS) return;
                     logger.warn(`[ticker-stream] No !ticker@arr data for >${TICKER_STALL_MS / 1000}s — forcing reconnect`);
                     lastTickerMessageAt = Date.now(); // reset to avoid a tight reconnect loop
@@ -1579,7 +2304,7 @@ export function setupBinanceConnection({
                     // Close/retry timers and awaited setup stages can outlive the
                     // renderer session that started them. Do not resurrect shared
                     // user-data state after the last renderer tears global sockets down.
-                    if (rendererConnections.size === 0) return;
+                    if (spotRendererConnections.size === 0) return;
                     
                     if (userDataReconnecting && retryCount === 0) return;
                     userDataReconnecting = true;
@@ -1594,7 +2319,7 @@ export function setupBinanceConnection({
                                 // for rate-limiter spacing. Recheck ownership immediately
                                 // before issuing the POST so teardown cannot create a
                                 // renderer-less listen key.
-                                if (rendererConnections.size === 0) {
+                                if (spotRendererConnections.size === 0) {
                                     listenKeyCreationSkipped = true;
                                     return undefined;
                                 }
@@ -1625,13 +2350,13 @@ export function setupBinanceConnection({
                         if (keepAliveInterval) { clearInterval(keepAliveInterval); keepAliveInterval = null; }
                         await safeDisconnect(previousUserData, 'previous user data stream');
                     }
-                    if (rendererConnections.size === 0) {
+                    if (spotRendererConnections.size === 0) {
                         userDataReconnecting = false;
                         return;
                     }
 
                     const nextUserDataConnection = await spotTradingAdapter.connectUserDataStream(listenKey);
-                    if (rendererConnections.size === 0) {
+                    if (spotRendererConnections.size === 0) {
                         userDataReconnecting = false;
                         await safeDisconnect(nextUserDataConnection, 'orphaned user data stream');
                         return;
@@ -1692,7 +2417,7 @@ export function setupBinanceConnection({
                         if (keepAliveInterval) { clearInterval(keepAliveInterval); keepAliveInterval = null; }
                         userDataWsConnection = null;
                         // Auto-reconnect on unexpected close if any renderer connected
-                        if (rendererConnections.size > 0 && !userDataReconnecting) {
+                        if (spotRendererConnections.size > 0 && !userDataReconnecting) {
                             logger.info('Scheduling User Data Stream reconnection...');
                             setTimeout(() => startUserDataStream(), 5000);
                         }
@@ -1707,7 +2432,7 @@ export function setupBinanceConnection({
                                     // callback is waiting for rate-limiter spacing. Recheck
                                     // ownership immediately before issuing the PUT so a
                                     // superseded or renderer-less stream cannot renew.
-                                    if (rendererConnections.size === 0 || userDataWsConnection !== udConn) {
+                                    if (spotRendererConnections.size === 0 || userDataWsConnection !== udConn) {
                                         return false;
                                     }
                                     await spotTradingAdapter.renewUserDataStreamListenKey(listenKey);
@@ -1726,7 +2451,7 @@ export function setupBinanceConnection({
                     const isNetworkError = err?.code === 'ECONNRESET' || err?.code === 'ETIMEDOUT' ||
                                            err?.code === 'ENOTFOUND' || err?.message?.includes('TLS');
                     
-                    if (isNetworkError && retryCount < MAX_RETRIES && rendererConnections.size > 0) {
+                    if (isNetworkError && retryCount < MAX_RETRIES && spotRendererConnections.size > 0) {
                         const delay = RETRY_DELAY_BASE * (retryCount + 1);
                         logger.warn(`User Data Stream connection failed (${err?.code}), retrying in ${delay}ms (${retryCount + 1}/${MAX_RETRIES})`);
                         setTimeout(() => startUserDataStream(retryCount + 1), delay);
@@ -1798,7 +2523,35 @@ export function setupBinanceConnection({
                     emitToChannel(detailChannel.id, 'depth', detailChannel.depthCache.getFormatted());
                 }
             });
-        }
+        };
+
+        const deactivateSpotData = async () => {
+            spotDataInitialized = false;
+            spotRendererConnections.delete(connection);
+            marketStreamManager.disableDepthView();
+            await channelManager.cleanup(safeDisconnect);
+            if (spotRendererConnections.size === 0) {
+                await stopSharedSpotConnections();
+            }
+        };
+
+        const initializeFuturesData = () => {
+            if (!futuresCredentialsReady || futuresDataInitialized) return;
+            futuresDataInitialized = true;
+            futuresRendererConnections.add(connection);
+            ensureFuturesUserDataStream();
+            void refreshFuturesAccountState();
+        };
+
+        const deactivateFuturesData = async () => {
+            const wasInitialized = futuresDataInitialized
+                || futuresRendererConnections.has(connection);
+            futuresDataInitialized = false;
+            futuresRendererConnections.delete(connection);
+            if (wasInitialized && futuresRendererConnections.size === 0) {
+                await stopSharedFuturesConnections();
+            }
+        };
 
         /**
          * Subscribe to a channel (detail or mini)
@@ -1812,6 +2565,7 @@ export function setupBinanceConnection({
          * @param {string} interval 
          */
         const subscribeChannel = async (channelId, channelType, symbol, interval) => {
+            initializeSpotData();
             const isDetail = channelType === CHANNEL_TYPES.DETAIL;
 
             // For detail channels, cleanup any existing detail channel first
@@ -1827,13 +2581,6 @@ export function setupBinanceConnection({
             // Create the channel
             const channel = channelManager.createChannel(channelId, channelType, symbol, interval);
             channel.depthCache = new DepthCache();
-
-            if (USE_MOCK) {
-                // Mock mode - emit mock data for the channel
-                const mockPayload = buildMockChartPayload();
-                emitToChannel(channelId, 'chart', mockPayload.chart, mockPayload.last_tick);
-                return;
-            }
 
             // Rate-limited Data Fetching
             // Binance API weights: exchangeInfo=10, depth=5-50, klines=1-5, trades=1, account=10
@@ -1954,6 +2701,22 @@ export function setupBinanceConnection({
             // The production public-read workstation is routed before the broader
             // production execution prefix detector. It contains no execution action.
             if (isPotentialFuturesProductionWorkstationFrame(rawUtf8Frame)) {
+                if (refuseUnlessMarketActive(
+                    'futures.production.workstation',
+                    MARKET_MODES.FUTURES,
+                )) return;
+                if (!futuresCredentialsReady) {
+                    sendJSON(connection, createCommandRejection(
+                        'futures.production.workstation',
+                        'EXECUTION_NOT_CONFIGURED',
+                        credentialPreflight.markets.futures.message,
+                        {
+                            market: FUTURES_MARKET_TYPE,
+                            startupCode: credentialPreflight.markets.futures.code,
+                        },
+                    ));
+                    return;
+                }
                 try {
                     await futuresProductionWorkstationRuntime.service.handleRequest(
                         rawUtf8Frame,
@@ -1977,6 +2740,20 @@ export function setupBinanceConnection({
                 return;
             }
 
+            if (data.action === 'get_startup_status') {
+                sendJSON(connection, startupEnvelope);
+                return;
+            }
+            if (!credentialPreflight.ready) {
+                emit(createCommandRejection(
+                    typeof data.action === 'string' ? data.action : data.request || 'startup',
+                    'EXECUTION_NOT_CONFIGURED',
+                    credentialPreflight.message,
+                    { startupCode: credentialPreflight.code },
+                ));
+                return;
+            }
+
             // New channel protocol
             if (data.action !== undefined) {
                 const envelopeError = validateRendererActionEnvelope(data, channelManager);
@@ -1990,7 +2767,56 @@ export function setupBinanceConnection({
                     ));
                     return;
                 }
+                // Nothing market-scoped runs before its market is the activated
+                // one. `subscribeChannel` used to activate Spot implicitly, so
+                // a stray subscribe was enough to start market work the
+                // operator never asked for.
+                if (refuseUnlessMarketActive(data.action, marketScopeOf(data))) return;
                 switch (data.action) {
+                    case 'get_startup_status':
+                        sendJSON(connection, startupEnvelope);
+                        break;
+                    case 'activate_market':
+                        if (data.marketMode === 'spot') {
+                            if (!spotCredentialsReady) {
+                                emit(createCommandRejection(
+                                    'activate_market',
+                                    'MARKET_NOT_CONFIGURED',
+                                    credentialPreflight.markets.spot.message,
+                                    {
+                                        market: 'spot',
+                                        startupCode: credentialPreflight.markets.spot.code,
+                                    },
+                                ));
+                                break;
+                            }
+                            await deactivateFuturesData();
+                            applyMarketActivation(MARKET_MODES.SPOT);
+                            initializeSpotData();
+                        } else if (data.marketMode === 'futures-live') {
+                            if (!futuresCredentialsReady) {
+                                emit(createCommandRejection(
+                                    'activate_market',
+                                    'MARKET_NOT_CONFIGURED',
+                                    credentialPreflight.markets.futures.message,
+                                    {
+                                        market: FUTURES_MARKET_TYPE,
+                                        startupCode: credentialPreflight.markets.futures.code,
+                                    },
+                                ));
+                                break;
+                            }
+                            await deactivateSpotData();
+                            applyMarketActivation(MARKET_MODES.FUTURES);
+                            initializeFuturesData();
+                        } else {
+                            await Promise.all([
+                                deactivateSpotData(),
+                                deactivateFuturesData(),
+                            ]);
+                            applyMarketActivation(MARKET_MODES.UNSELECTED);
+                        }
+                        break;
                     case 'subscribe': {
                         const { channelId, channelType, symbol, interval } = data;
                         if (!channelId || !symbol || !interval) {
@@ -2032,7 +2858,9 @@ export function setupBinanceConnection({
                     case TRADING_COMMAND_ACTIONS.REPLACE_ORDER:
                     case TRADING_COMMAND_ACTIONS.CANCEL_ALL:
                     case TRADING_COMMAND_ACTIONS.ACCOUNT_REFRESH:
+                    case TRADING_COMMAND_ACTIONS.ACCOUNT_HISTORY:
                     case TRADING_COMMAND_ACTIONS.SET_TRADING_PAUSED:
+                    case TRADING_COMMAND_ACTIONS.ADJUST_POSITION_MARGIN:
                         await handleTypedTradingCommand(data);
                         break;
                 }
@@ -2040,6 +2868,10 @@ export function setupBinanceConnection({
             }
 
             // Legacy protocol (backward compatibility)
+            if (refuseUnlessMarketActive(
+                typeof data.request === 'string' ? data.request : 'request',
+                marketScopeOf(data),
+            )) return;
             switch (data.request) {
                 case 'chart': {
                     const requestData = data.data;
@@ -2085,10 +2917,12 @@ export function setupBinanceConnection({
 
             // Remove this renderer from tracking
             rendererConnections.delete(connection);
+            spotRendererConnections.delete(connection);
+            futuresRendererConnections.delete(connection);
 
             // Invalidate production Futures ownership before asynchronous teardown
             // can resolve. This stops reconnects, sockets, and late delivery.
-            futuresProductionWorkstationRuntime.close();
+            futuresProductionWorkstationRuntime?.close();
 
             // Cleanup this renderer's channels (market socket per-renderer)
             void channelManager.cleanup(safeDisconnect);
@@ -2130,6 +2964,14 @@ export function setupBinanceConnection({
                     futuresKeepAliveInterval = null;
                 }
                 futuresUserDataRequested = false;
+                futuresUserDataGeneration += 1;
+            } else {
+                if (spotRendererConnections.size === 0) {
+                    void stopSharedSpotConnections();
+                }
+                if (futuresRendererConnections.size === 0) {
+                    void stopSharedFuturesConnections();
+                }
             }
         });
     });
@@ -2159,6 +3001,10 @@ export function setupBinanceConnection({
                 }
             }
             rendererConnections.clear();
+            spotRendererConnections.clear();
+            futuresRendererConnections.clear();
+            futuresMarkPriceFeed?.stop();
+            futuresUserDataGeneration += 1;
             const staleGlobal = globalWsConnection;
             const staleUserData = userDataWsConnection;
             const staleFuturesUserData = futuresUserDataWs;

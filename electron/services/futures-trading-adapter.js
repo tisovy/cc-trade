@@ -1,5 +1,6 @@
 import { createHmac } from 'node:crypto';
 import https from 'node:https';
+import { isIndeterminateTradingFailure } from './trading-command-outcome.js';
 
 export const FUTURES_REST_ORIGIN = 'https://fapi.binance.com';
 export const FUTURES_STREAM_ORIGIN = 'wss://fstream.binance.com';
@@ -8,14 +9,41 @@ const DEFAULT_RECV_WINDOW = 5000;
 const REQUEST_TIMEOUT_MS = 10000;
 
 export class FuturesApiError extends Error {
-    constructor(message, { status, code, body } = {}) {
+    constructor(message, { status, code, body, indeterminate = false } = {}) {
         super(message);
         this.name = 'FuturesApiError';
         this.status = status;
         this.code = code;
         this.body = body;
+        // Set when the request may have executed despite failing. Only mutating
+        // callers read it; see trading-command-outcome.js.
+        this.indeterminate = indeterminate;
     }
 }
+
+// Binance's "Order does not exist" — the one answer that proves a submission
+// never reached the book, and therefore the only one that makes a resubmission
+// safe.
+export const FUTURES_ORDER_NOT_FOUND_CODE = -2013;
+
+// Binance error codes whose bare message hides what the trader has to change.
+// Only codes we can act on are listed; anything else keeps the exchange wording.
+const FUTURES_API_ERROR_HINTS = new Map([
+    [-2015, 'the BFK/BFS key is refused for trading: enable "Futures" on the key in Binance API Management, and if the key is IP-restricted add this machine\'s address. Reads can keep working while trading stays blocked.'],
+    [-2011, 'the order is already gone (filled or cancelled) — refresh open orders.'],
+    [-2019, 'insufficient margin for this order.'],
+    [-1021, 'local clock drifted outside recvWindow — sync system time.'],
+    [-1111, 'price or quantity has more precision than the symbol filters allow.'],
+    [-1013, 'price or quantity violates a symbol filter (tick size, step size, or minimum notional).'],
+    [-4164, 'notional is below the exchange minimum (5 USDT) — increase the size.'],
+    [-4400, 'futures trading is restricted for this account or region.'],
+]);
+
+export const describeFuturesApiError = (error) => {
+    const message = error?.message || 'Binance futures request failed';
+    const hint = FUTURES_API_ERROR_HINTS.get(Number(error?.code));
+    return hint ? `${message} — ${hint}` : message;
+};
 
 const toQueryString = (params = {}) => {
     const search = new URLSearchParams();
@@ -48,14 +76,33 @@ const httpsJsonRequest = ({ url, method, headers, body, agent }) => (
                     resolve(parsed);
                     return;
                 }
+                // A 5xx from Binance means the execution status is unknown, not
+                // that the request failed: the order may already be on the book.
                 reject(new FuturesApiError(
                     parsed?.msg || `Futures REST ${method} failed (${response.statusCode})`,
-                    { status: response.statusCode, code: parsed?.code, body: parsed ?? text },
+                    {
+                        status: response.statusCode,
+                        code: parsed?.code,
+                        body: parsed ?? text,
+                        indeterminate: response.statusCode >= 500,
+                    },
                 ));
             });
         });
-        request.on('timeout', () => request.destroy(new Error('Futures REST request timed out')));
-        request.on('error', reject);
+        // The request was already written when the timeout fires, so Binance may
+        // have processed it. That is indeterminate, not failed.
+        request.on('timeout', () => request.destroy(new FuturesApiError(
+            'Futures REST request timed out',
+            { code: 'ETIMEDOUT', indeterminate: true },
+        )));
+        request.on('error', error => reject(
+            error instanceof FuturesApiError
+                ? error
+                : new FuturesApiError(error?.message || 'Futures REST transport failed', {
+                    code: error?.code,
+                    indeterminate: isIndeterminateTradingFailure(error),
+                }),
+        ));
         if (body) request.write(body);
         request.end();
     })
@@ -69,6 +116,7 @@ export const normalizeFuturesExecutionReport = (payload = {}, overrides = {}) =>
     const status = overrides.status || order.status || order.X || 'NEW';
     const price = order.price ?? order.p ?? '0';
     const avgPrice = order.avgPrice ?? order.ap;
+    const orderKind = overrides.orderKind ?? order.orderKind ?? 'REGULAR';
     return {
         e: 'executionReport',
         marketType: 'futures',
@@ -93,12 +141,84 @@ export const normalizeFuturesExecutionReport = (payload = {}, overrides = {}) =>
         l: order.lastFilledQty ?? order.l ?? '0',
         positionSide: order.positionSide ?? order.ps ?? 'BOTH',
         reduceOnly: order.reduceOnly ?? order.R ?? false,
+        orderKind,
+        orderSource: orderKind,
+        sourceOrderId: order.orderId ?? order.i,
         ...(avgPrice !== undefined ? { avgPrice } : {}),
         T: timestamp,
         transactTime: timestamp,
         time: timestamp,
         ...overrides,
     };
+};
+
+export const FUTURES_HISTORY_LIMIT = 100;
+
+const historyNumber = (value) => {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+};
+
+// History rows are read-only and never re-enter the execution path, so they are
+// projected to exactly the fields the review surface renders.
+export const normalizeFuturesHistoryOrder = (order = {}) => Object.freeze({
+    orderId: order.orderId ?? null,
+    clientOrderId: order.clientOrderId ?? null,
+    symbol: order.symbol ?? null,
+    side: order.side ?? null,
+    positionSide: order.positionSide ?? 'BOTH',
+    type: order.origType ?? order.type ?? null,
+    status: order.status ?? null,
+    price: order.price ?? '0',
+    averagePrice: order.avgPrice ?? '0',
+    origQty: order.origQty ?? '0',
+    executedQty: order.executedQty ?? '0',
+    quoteQty: order.cumQuote ?? '0',
+    reduceOnly: order.reduceOnly === true,
+    time: historyNumber(order.updateTime ?? order.time) ?? 0,
+});
+
+export const normalizeFuturesHistoryTrade = (trade = {}) => Object.freeze({
+    id: trade.id ?? null,
+    orderId: trade.orderId ?? null,
+    symbol: trade.symbol ?? null,
+    side: trade.side ?? null,
+    positionSide: trade.positionSide ?? 'BOTH',
+    price: trade.price ?? '0',
+    quantity: trade.qty ?? '0',
+    quoteQty: trade.quoteQty ?? '0',
+    realizedPnl: trade.realizedPnl ?? '0',
+    commission: trade.commission ?? '0',
+    commissionAsset: trade.commissionAsset ?? null,
+    maker: trade.maker === true,
+    time: historyNumber(trade.time) ?? 0,
+});
+
+export const normalizeFuturesAlgoOrder = (order = {}) => {
+    const algoId = order.algoId ?? order.orderId;
+    const clientAlgoId = order.clientAlgoId ?? order.clientOrderId;
+    const triggerPrice = order.triggerPrice ?? order.stopPrice ?? '0';
+    return normalizeFuturesExecutionReport({
+        ...order,
+        orderId: algoId,
+        clientOrderId: clientAlgoId,
+        type: order.orderType ?? order.algoType ?? order.type,
+        status: order.algoStatus ?? order.status ?? 'NEW',
+        updateTime: order.updateTime ?? order.createTime,
+        price: order.price ?? triggerPrice,
+        origQty: order.quantity ?? order.origQty,
+    }, {
+        orderKind: 'ALGO',
+        orderSource: 'ALGO',
+        sourceOrderId: algoId,
+        algoId,
+        clientAlgoId,
+        triggerPrice,
+        closePosition: order.closePosition === true,
+        workingType: order.workingType,
+        priceProtect: order.priceProtect,
+        algoType: order.algoType,
+    });
 };
 
 export const parseFuturesExchangeFilters = (exchangeInfo = {}, symbol) => {
@@ -134,7 +254,9 @@ export const parseFuturesExchangeFilters = (exchangeInfo = {}, symbol) => {
 export const normalizeFuturesBalances = (balanceEntries = []) => {
     const balances = {};
     for (const entry of Array.isArray(balanceEntries) ? balanceEntries : []) {
-        if (parseFloat(entry.balance) > 0 || parseFloat(entry.availableBalance) > 0) {
+        if (entry.asset === 'USDT'
+            || parseFloat(entry.balance) > 0
+            || parseFloat(entry.availableBalance) > 0) {
             balances[entry.asset] = {
                 available: entry.availableBalance,
                 total: entry.balance,
@@ -159,7 +281,15 @@ export const normalizeFuturesPositions = (positionEntries = []) => (
             leverage: entry.leverage,
             marginType: (entry.marginType ?? '').toUpperCase() || undefined,
             isolatedMargin: entry.isolatedMargin,
+            // The funds actually walled off behind an isolated position. It is
+            // also what tells the two margin modes apart now that the read no
+            // longer reports one: a cross position has no isolated wallet.
+            isolatedWallet: entry.isolatedWallet,
             notional: entry.notional,
+            // /fapi/v3/positionRisk reports neither leverage nor margin mode, so
+            // the margin actually committed is the only basis left for ROE.
+            initialMargin: entry.initialMargin ?? entry.positionInitialMargin,
+            maintenanceMargin: entry.maintMargin,
         }))
 );
 
@@ -193,13 +323,15 @@ export const normalizeFuturesUserDataStreamEvent = (payload = {}) => {
 
 const FUTURES_ACCOUNT_REFRESH_WEIGHTS = {
     balances: 5,
-    openOrders: 3,
+    regularOrders: 40,
+    algoOrders: 40,
     positions: 5,
 };
 
 const FUTURES_ACCOUNT_REFRESH_ERROR_LABELS = {
     balances: 'Futures Balances Fetch Error',
-    openOrders: 'Futures Open Orders Fetch Error',
+    regularOrders: 'Futures Regular Orders Fetch Error',
+    algoOrders: 'Futures ALGO Orders Fetch Error',
     positions: 'Futures Positions Fetch Error',
 };
 
@@ -320,7 +452,25 @@ export class FuturesTradingAdapter {
             .then(orders => ({ futures_orders: orders.map(order => normalizeFuturesExecutionReport(order)) }));
     }
 
-    getAccountRefreshOperations(symbol) {
+    getRegularOpenOrdersPayload() {
+        return this.getOpenOrders()
+            .then(orders => ({
+                futures_regular_orders: orders.map(order => normalizeFuturesExecutionReport(order)),
+            }));
+    }
+
+    getOpenAlgoOrders() {
+        return this.#signedRequest('GET', '/fapi/v1/openAlgoOrders');
+    }
+
+    getOpenAlgoOrdersPayload() {
+        return this.getOpenAlgoOrders()
+            .then(orders => ({
+                futures_algo_orders: orders.map(normalizeFuturesAlgoOrder),
+            }));
+    }
+
+    getAccountRefreshOperations() {
         return [
             {
                 type: 'balances',
@@ -329,10 +479,16 @@ export class FuturesTradingAdapter {
                 loadPayload: () => this.getBalancesPayload(),
             },
             {
-                type: 'openOrders',
-                weight: FUTURES_ACCOUNT_REFRESH_WEIGHTS.openOrders,
-                errorLabel: FUTURES_ACCOUNT_REFRESH_ERROR_LABELS.openOrders,
-                loadPayload: () => this.getOpenOrdersPayload(symbol),
+                type: 'regularOrders',
+                weight: FUTURES_ACCOUNT_REFRESH_WEIGHTS.regularOrders,
+                errorLabel: FUTURES_ACCOUNT_REFRESH_ERROR_LABELS.regularOrders,
+                loadPayload: () => this.getRegularOpenOrdersPayload(),
+            },
+            {
+                type: 'algoOrders',
+                weight: FUTURES_ACCOUNT_REFRESH_WEIGHTS.algoOrders,
+                errorLabel: FUTURES_ACCOUNT_REFRESH_ERROR_LABELS.algoOrders,
+                loadPayload: () => this.getOpenAlgoOrdersPayload(),
             },
             {
                 type: 'positions',
@@ -375,6 +531,22 @@ export class FuturesTradingAdapter {
         return normalizeFuturesExecutionReport(data, { x: 'NEW' });
     }
 
+    // Binance USDⓈ-M amendment: reprices/resizes a live LIMIT order in one call.
+    // The order survives a rejection, so a failed move never leaves the trader
+    // without the order they meant to reprice.
+    async modifyOrder(command) {
+        const params = {
+            symbol: command.symbol,
+            side: command.side,
+            quantity: String(command.numericQuantity ?? command.quantity),
+            price: String(command.numericPrice ?? command.price),
+        };
+        if (command.orderId) params.orderId = command.orderId;
+        else if (command.origClientOrderId) params.origClientOrderId = command.origClientOrderId;
+        const data = await this.#signedRequest('PUT', '/fapi/v1/order', params);
+        return normalizeFuturesExecutionReport(data, { x: 'AMENDMENT' });
+    }
+
     async cancelOrder(command) {
         const params = { symbol: command.symbol };
         if (command.orderId) params.orderId = command.orderId;
@@ -389,6 +561,49 @@ export class FuturesTradingAdapter {
 
     async cancelAllOrders(symbol) {
         return this.#signedRequest('DELETE', '/fapi/v1/allOpenOrders', { symbol });
+    }
+
+    // Moves margin in or out of one isolated position. No order is placed and
+    // the notional does not change — what changes is the distance to
+    // liquidation. Binance's `type` is 1 to add and 2 to remove.
+    async adjustPositionMargin({ symbol, positionSide, direction, amount }) {
+        const params = {
+            symbol,
+            amount: String(amount),
+            type: direction === 'REMOVE' ? 2 : 1,
+        };
+        // The position side travels as the account read reported it: BOTH for a
+        // one-way account, the explicit leg for a hedged one.
+        if (positionSide) params.positionSide = positionSide;
+        const data = await this.#signedRequest('POST', '/fapi/v1/positionMargin', params);
+        return {
+            symbol,
+            positionSide: positionSide ?? 'BOTH',
+            direction: direction === 'REMOVE' ? 'REMOVE' : 'ADD',
+            amount: String(data?.amount ?? amount),
+        };
+    }
+
+    // Asks the exchange what became of one command, by the identity that command
+    // carried — the client id it was submitted with, or the exchange id of the
+    // order it targeted. This is the only way to answer an ambiguous submission
+    // without guessing: `exists: false` is Binance stating the order is not
+    // there, which is the sole condition under which the same intent may be
+    // sent again.
+    async findOrder({ symbol, orderId, origClientOrderId }) {
+        const params = { symbol };
+        if (orderId) params.orderId = orderId;
+        else if (origClientOrderId) params.origClientOrderId = origClientOrderId;
+        else throw new FuturesApiError('An order lookup needs an order id or a client order id');
+        try {
+            const data = await this.#signedRequest('GET', '/fapi/v1/order', params);
+            return { exists: true, report: normalizeFuturesExecutionReport(data) };
+        } catch (error) {
+            if (Number(error?.code) === FUTURES_ORDER_NOT_FOUND_CODE) {
+                return { exists: false, report: null };
+            }
+            throw error;
+        }
     }
 
     // Closes (part of) a position with a MARKET order on the opposite side.
@@ -408,6 +623,28 @@ export class FuturesTradingAdapter {
         return normalizeFuturesExecutionReport(data, { x: 'NEW' });
     }
 
+    // History is bounded at the source: a desk reviews the last session, not the
+    // last year, and an unbounded reply would have to be trimmed here anyway.
+    async getOrderHistory({ symbol, limit = FUTURES_HISTORY_LIMIT }) {
+        const data = await this.#signedRequest('GET', '/fapi/v1/allOrders', {
+            symbol,
+            limit: Math.min(Math.max(Number(limit) || FUTURES_HISTORY_LIMIT, 1), 500),
+        });
+        return (Array.isArray(data) ? data : [])
+            .map(order => normalizeFuturesHistoryOrder(order))
+            .sort((left, right) => right.time - left.time);
+    }
+
+    async getTradeHistory({ symbol, limit = FUTURES_HISTORY_LIMIT }) {
+        const data = await this.#signedRequest('GET', '/fapi/v1/userTrades', {
+            symbol,
+            limit: Math.min(Math.max(Number(limit) || FUTURES_HISTORY_LIMIT, 1), 500),
+        });
+        return (Array.isArray(data) ? data : [])
+            .map(trade => normalizeFuturesHistoryTrade(trade))
+            .sort((left, right) => right.time - left.time);
+    }
+
     async createUserDataStreamListenKey() {
         const data = await this.#request('POST', '/fapi/v1/listenKey');
         return data?.listenKey;
@@ -417,24 +654,3 @@ export class FuturesTradingAdapter {
         return this.#request('PUT', '/fapi/v1/listenKey');
     }
 }
-
-export const buildFuturesMockOrderPlacementExecutionReport = ({
-    symbol,
-    side,
-    priceValue,
-    quantityValue,
-    positionSide = 'BOTH',
-    orderId = Date.now(),
-    eventTime = Date.now(),
-}) => normalizeFuturesExecutionReport({
-    symbol,
-    side,
-    type: 'LIMIT',
-    status: 'NEW',
-    orderId,
-    price: priceValue,
-    origQty: quantityValue,
-    executedQty: '0',
-    positionSide,
-    updateTime: eventTime,
-});

@@ -14,6 +14,8 @@ const LOCAL_WORKSTATION_CONNECTOR = 'src/hooks/useFuturesLocalWorkstationConnect
 const PRODUCTION_WORKSTATION_CONTAINER = (
     'src/components/features/futures/FuturesProductionWorkstation.jsx'
 );
+const FUTURES_WORKSPACE = 'src/workspaces/FuturesWorkspace.jsx';
+const GATEWAY_CONTEXT = 'src/context/GatewayContext.jsx';
 
 const EXACT_ORIGINS = Object.freeze(new Map([
     ['https://fapi.binance.com', PRODUCTION_TRANSPORT],
@@ -23,7 +25,6 @@ const REVIEWED_PUBLIC_READ_ROUTES = Object.freeze(new Set([
     '/fapi/v1/exchangeInfo',
     '/fapi/v1/depth',
     '/fapi/v1/klines',
-    '/fapi/v1/markPriceKlines',
     '/fapi/v1/indexPriceKlines',
     '/fapi/v1/premiumIndex',
     '/fapi/v1/ticker/24hr',
@@ -253,8 +254,20 @@ if (!productionProtocol.includes("'futures-production-workstation'")
 for (const [name, source] of [[PRODUCTION_PROTOCOL, productionProtocol]]) {
     const actions = [...source.matchAll(/['"]futures\.production\.workstation\.([a-z-]+)['"]/g)]
         .map(match => match[1]);
-    const allowed = new Set(['resource', 'subscribe', 'select-symbol', 'select-interval', 'unsubscribe']);
-    if (actions.length !== 5 || actions.some(action => !allowed.has(action))) {
+    const allowed = new Set([
+        'resource',
+        'subscribe',
+        'select-symbol',
+        'select-interval',
+        'configure-tape',
+        // Reviewed read: candles behind the live window, over the public klines
+        // route already in the reviewed set, bounded by contract, interval, a
+        // point in time and a page size. It reads nothing the subscription
+        // itself does not already read.
+        'load-candle-history',
+        'unsubscribe',
+    ]);
+    if (actions.length !== 7 || actions.some(action => !allowed.has(action))) {
         fail(`${name} exposes an action outside the exact read-only workstation protocol`);
     }
 }
@@ -297,13 +310,38 @@ if (!localWorkstationConnector.includes(exactLocalUrlSource)
 }
 
 const appSource = fs.readFileSync(path.join(ROOT, 'src/App.jsx'), 'utf8');
+const gatewaySource = fs.readFileSync(path.join(ROOT, GATEWAY_CONTEXT), 'utf8');
+const futuresWorkspace = fs.readFileSync(path.join(ROOT, FUTURES_WORKSPACE), 'utf8');
 const productionWorkstationContainer = sources.get(PRODUCTION_WORKSTATION_CONTAINER) ?? '';
-if (!/useFuturesTrading\(\{\s*enabled:\s*isFuturesLiveMode,\s*wsConnection,\s*\}\)/.test(appSource)
-    || !/<FuturesProductionWorkstation\s+enabled=\{isFuturesLiveMode\}\s+executionState=\{futuresTrading\}\s+wsConnection=\{wsConnection\}\s+sendMessage=\{sendMessage\}\s*\/>/.test(appSource)
-    || !/export const FuturesProductionWorkstation = \(\{\s*enabled,\s*executionState,\s*wsConnection,\s*sendMessage,\s*\}\) =>/.test(productionWorkstationContainer)
-    || !/useFuturesProductionWorkstation\(\{\s*enabled,\s*symbol,\s*interval,\s*wsConnection,\s*sendMessage,\s*\}\)/.test(productionWorkstationContainer)
-    || /useFutures(?:Local|Production)WorkstationConnection/.test(productionWorkstationContainer)) {
-    fail('Futures public data and execution must multiplex the exact AppShell loopback transport without a second renderer socket');
+const sharedGatewayAssertions = [
+    ['App Gateway ownership', /<GatewayProvider\s+activeMarketMode=\{marketMode\}>/.test(appSource)],
+    ['Gateway WebSocket ownership', /useWebSocket\(\s*wsUrl,/.test(gatewaySource)],
+    ['Futures Gateway consumption', /useGatewayContext\(\)/.test(futuresWorkspace)],
+    [
+        'Futures execution hook wiring',
+        /useFuturesTrading\(\{\s*enabled:\s*startupStatus\?\.ready\s*===\s*true,\s*wsConnection,\s*\}\)/.test(futuresWorkspace),
+    ],
+    [
+        'Futures workstation wiring',
+        /<FuturesProductionWorkstation\s+enabled\s+executionState=\{futuresTrading\}\s+wsConnection=\{wsConnection\}\s+sendMessage=\{sendMessage\}\s*\/>/.test(futuresWorkspace),
+    ],
+    [
+        'Futures workstation transport props',
+        /export const FuturesProductionWorkstation = \(\{\s*enabled,\s*executionState,\s*wsConnection,\s*sendMessage,\s*\}\) =>/.test(productionWorkstationContainer),
+    ],
+    [
+        'Futures hook transport props',
+        /useFuturesProductionWorkstation\(\{\s*enabled,\s*symbol,\s*interval,\s*wsConnection,\s*sendMessage,\s*\}\)/.test(productionWorkstationContainer),
+    ],
+    [
+        'No second Futures connector',
+        !/useFutures(?:Local|Production)WorkstationConnection/.test(productionWorkstationContainer),
+    ],
+];
+for (const [label, passed] of sharedGatewayAssertions) {
+    if (!passed) {
+        fail(`Futures shared Gateway boundary is missing: ${label}`);
+    }
 }
 
 for (const pureView of [

@@ -1,12 +1,17 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import {
+    CLIENT_ORDER_ID_MAX_LENGTH,
+    CLIENT_ORDER_ID_PATTERN,
     DEFAULT_ACCOUNT_ID,
     DEFAULT_SPOT_ORDER_TYPE,
     DEFAULT_SPOT_TIME_IN_FORCE,
+    FUTURES_MARKET_TYPE,
+    POSITION_MARGIN_DIRECTIONS,
     SPOT_MARKET_TYPE,
     TRADE_COMMAND_VERSION,
     TRADING_COMMAND_ACTIONS,
     createAccountRefreshCommand,
+    createFuturesAdjustPositionMarginCommand,
     createSpotCancelAllCommand,
     createSpotCancelOrderCommand,
     createSpotPlaceOrderCommand,
@@ -36,7 +41,7 @@ describe('trading command contract', () => {
             version: TRADE_COMMAND_VERSION,
             marketType: SPOT_MARKET_TYPE,
             accountId: DEFAULT_ACCOUNT_ID,
-            clientOrderId: 'spot-BTCUSDT-BUY-mrc0zuo0-4fzyo8',
+            clientOrderId: 's-mrc0zuo0-4fzyo82m',
             symbol: 'BTCUSDT',
             side: 'BUY',
             orderType: DEFAULT_SPOT_ORDER_TYPE,
@@ -44,6 +49,37 @@ describe('trading command contract', () => {
             price: '50000',
             quantity: '0.01',
         });
+    });
+
+    // Binance refuses an id over 36 characters. The previous form spelled out
+    // the market, symbol and side and reached exactly 37 for a futures order on
+    // an 8-character symbol, so every futures entry was rejected by the
+    // exchange. The bound is asserted here rather than discovered live.
+    it('mints client order ids the exchange accepts, for the longest symbols', () => {
+        vi.restoreAllMocks();
+        for (const symbol of ['BTCUSDT', 'BEATUSDT', '1000000MOGUSDT', 'X'.repeat(24)]) {
+            for (const marketType of [SPOT_MARKET_TYPE, FUTURES_MARKET_TYPE]) {
+                const { clientOrderId } = createSpotPlaceOrderCommand({
+                    marketType,
+                    symbol,
+                    side: 'SELL',
+                    price: 1,
+                    quantity: '1',
+                });
+                expect(clientOrderId.length).toBeLessThanOrEqual(CLIENT_ORDER_ID_MAX_LENGTH);
+                expect(clientOrderId).toMatch(CLIENT_ORDER_ID_PATTERN);
+            }
+        }
+    });
+
+    it('keeps an operator-supplied client order id instead of minting one', () => {
+        expect(createSpotPlaceOrderCommand({
+            symbol: 'BTCUSDT',
+            side: 'BUY',
+            price: 1,
+            quantity: '1',
+            clientOrderId: 'my-own-id',
+        }).clientOrderId).toBe('my-own-id');
     });
 
     it('adapts spot place-order commands to unchanged legacy wire payloads', () => {
@@ -126,6 +162,30 @@ describe('trading command contract', () => {
         expect(createAccountRefreshCommand({ symbol: 'BTCUSDT' }).action).toBe(TRADING_COMMAND_ACTIONS.ACCOUNT_REFRESH);
         expect(isTypedTradingAction(TRADING_COMMAND_ACTIONS.PLACE_ORDER)).toBe(true);
         expect(isTypedTradingAction('order')).toBe(false);
+    });
+
+    it('builds a futures margin adjustment that names one position and no order', () => {
+        const command = createFuturesAdjustPositionMarginCommand({
+            symbol: 'BTCUSDT',
+            positionSide: 'LONG',
+            direction: POSITION_MARGIN_DIRECTIONS.ADD,
+            amount: 250,
+        });
+        expect(command).toMatchObject({
+            action: TRADING_COMMAND_ACTIONS.ADJUST_POSITION_MARGIN,
+            version: TRADE_COMMAND_VERSION,
+            marketType: FUTURES_MARKET_TYPE,
+            accountId: DEFAULT_ACCOUNT_ID,
+            symbol: 'BTCUSDT',
+            positionSide: 'LONG',
+            direction: 'ADD',
+            amount: '250',
+        });
+        expect(command.clientOrderId).toMatch(CLIENT_ORDER_ID_PATTERN);
+        // Nothing that would make this look like an order to the exchange.
+        expect(command).not.toHaveProperty('side');
+        expect(command).not.toHaveProperty('quantity');
+        expect(command).not.toHaveProperty('price');
     });
 
     it('rejects legacy adaptation for unsupported command families', () => {

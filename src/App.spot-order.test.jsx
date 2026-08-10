@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { attachMockLocalStorage } from '@/test/mocks'
 import {
@@ -9,6 +9,10 @@ import {
   TRADE_COMMAND_VERSION,
   TRADING_COMMAND_ACTIONS,
 } from './utils/tradingCommands'
+import {
+  MARKET_WORKSPACES,
+  MARKET_WORKSPACE_STORAGE_KEY,
+} from './utils/marketWorkspaceStorage'
 import App from './App'
 
 const mocks = vi.hoisted(() => ({
@@ -41,6 +45,39 @@ vi.mock('./context/DataContext', () => ({
     },
     isOffline: false,
     sendMessage: mocks.sendMessage,
+    startupStatus: {
+      version: 1,
+      type: 'startup_status',
+      state: 'READY',
+      code: 'READY',
+      ready: true,
+      missingFields: [],
+      retiredFields: [],
+    },
+  }),
+}))
+
+vi.mock('./context/GatewayContext.jsx', () => ({
+  GatewayProvider: ({ activeMarketMode, children }) => {
+    // The backend acknowledges the market before its workspace may mount, so
+    // the double stands in for that acknowledgement.
+    mocks.activatedMode = activeMarketMode
+    return children
+  },
+  useGatewayContext: () => ({
+    marketActivation: { marketMode: mocks.activatedMode, generation: 1 },
+    notifyError: vi.fn(),
+    sendMessage: mocks.sendMessage,
+    startupStatus: {
+      version: 1,
+      type: 'startup_status',
+      state: 'READY',
+      code: 'READY',
+      ready: true,
+      missingFields: [],
+      retiredFields: [],
+    },
+    wsConnection: { readyState: 1, send: mocks.send },
   }),
 }))
 
@@ -139,11 +176,21 @@ vi.mock('./components/features/tools/AlertPanel', () => ({
   default: () => null,
 }))
 
+vi.mock('./components/features/futures/FuturesWorkstationChart', () => ({
+  default: () => <div data-testid="futures-workstation-chart" />,
+}))
+
 vi.mock('./components/common/NotificationToast', () => ({
   default: () => null,
 }))
 
 const localStorageMock = attachMockLocalStorage()
+
+// A workspace is code-split, so its first paint waits on a dynamic import. The
+// 1s default is enough when this file runs alone and not always enough under
+// full-suite load, which made these tests fail for a reason none of them is
+// about.
+const WORKSPACE_MOUNT = { timeout: 5_000 }
 
 describe('App spot order payloads', () => {
   let originalWebSocket
@@ -159,6 +206,7 @@ describe('App spot order payloads', () => {
       removeEventListener: vi.fn(),
     })))
     localStorageMock.clear()
+    localStorageMock.setItem(MARKET_WORKSPACE_STORAGE_KEY, MARKET_WORKSPACES.SPOT)
     mocks.order = null
     mocks.cancelOrder = null
     mocks.send.mockClear()
@@ -176,7 +224,7 @@ describe('App spot order payloads', () => {
     localStorageMock.clear()
   })
 
-  it('sends typed buy place-order commands with the 0.999 quantity reduction', () => {
+  it('sends typed buy place-order commands with the 0.999 quantity reduction', async () => {
     mocks.order = {
       symbol: 'BTCUSDT',
       side: 'BUY',
@@ -185,7 +233,7 @@ describe('App spot order payloads', () => {
     }
 
     render(<App />)
-    fireEvent.click(screen.getByTestId('place-spot-order'))
+    fireEvent.click(await screen.findByTestId('place-spot-order', {}, WORKSPACE_MOUNT))
 
     expect(mocks.send).toHaveBeenCalledTimes(1)
     expect(JSON.parse(mocks.send.mock.calls[0][0])).toEqual({
@@ -203,7 +251,7 @@ describe('App spot order payloads', () => {
     })
   })
 
-  it('sends typed sell place-order commands with the same 0.999 reduction path', () => {
+  it('sends typed sell place-order commands with the same 0.999 reduction path', async () => {
     mocks.order = {
       symbol: 'BTCUSDT',
       side: 'SELL',
@@ -212,7 +260,7 @@ describe('App spot order payloads', () => {
     }
 
     render(<App />)
-    fireEvent.click(screen.getByTestId('place-spot-order'))
+    fireEvent.click(await screen.findByTestId('place-spot-order', {}, WORKSPACE_MOUNT))
 
     expect(mocks.send).toHaveBeenCalledTimes(1)
     expect(JSON.parse(mocks.send.mock.calls[0][0])).toEqual({
@@ -230,14 +278,14 @@ describe('App spot order payloads', () => {
     })
   })
 
-  it('sends typed cancel-order commands from the spot cancel path', () => {
+  it('sends typed cancel-order commands from the spot cancel path', async () => {
     mocks.cancelOrder = {
       symbol: 'BTCUSDT',
       id: 12345,
     }
 
     render(<App />)
-    fireEvent.click(screen.getByTestId('cancel-spot-order'))
+    fireEvent.click(await screen.findByTestId('cancel-spot-order', {}, WORKSPACE_MOUNT))
 
     expect(mocks.send).toHaveBeenCalledTimes(1)
     expect(JSON.parse(mocks.send.mock.calls[0][0])).toEqual({
@@ -251,7 +299,7 @@ describe('App spot order payloads', () => {
     })
   })
 
-  it('exposes only Futures, unmounts spot execution there, and restores spot unchanged', () => {
+  it('exposes only Futures, unmounts spot execution there, and restores spot unchanged', async () => {
     mocks.order = {
       symbol: 'BTCUSDT',
       side: 'BUY',
@@ -265,26 +313,25 @@ describe('App spot order payloads', () => {
 
     render(<App />)
 
-    expect(screen.getByTestId('place-spot-order')).toBeInTheDocument()
+    expect(await screen.findByTestId('place-spot-order', {}, WORKSPACE_MOUNT)).toBeInTheDocument()
     expect(screen.getByTestId('cancel-spot-order')).toBeInTheDocument()
     expect(screen.queryByTestId('market-mode-futures-testnet')).not.toBeInTheDocument()
     expect(screen.getByTestId('market-mode-futures-live')).toHaveTextContent('Futures')
-    expect(mocks.futuresProductionEnabled.at(-1)).toBe(false)
-    expect(mocks.sendMessage).toHaveBeenLastCalledWith({
-      action: 'enable_depth_view',
-      symbol: 'BTCUSDT',
-    })
+    expect(mocks.futuresProductionEnabled).toEqual([])
+    await waitFor(() => expect(mocks.sendMessage).toHaveBeenLastCalledWith({
+        action: 'enable_depth_view',
+        symbol: 'BTCUSDT',
+      }))
 
     fireEvent.click(screen.getByTestId('market-mode-futures-live'))
 
-    expect(screen.getByTestId('futures-live-view')).toBeInTheDocument()
-    expect(screen.getByTestId('futures-live-banner')).toHaveTextContent(
-      'USDⓈ-M FUTURESREAL MONEY · PRODUCTION',
-    )
+    expect(await screen.findByTestId('futures-live-view', {}, WORKSPACE_MOUNT)).toBeInTheDocument()
+    expect(screen.getByTestId('futures-workstation-identity'))
+      .toHaveTextContent('USDⓈ-M FUTURES')
     expect(screen.getByLabelText('Futures trading ticket')).toBeInTheDocument()
     expect(screen.queryByTestId('place-spot-order')).not.toBeInTheDocument()
     expect(mocks.futuresProductionEnabled.at(-1)).toBe(true)
-    expect(mocks.sendMessage).toHaveBeenLastCalledWith({ action: 'disable_depth_view' })
+    await waitFor(() => expect(mocks.sendMessage).toHaveBeenCalledWith({ action: 'disable_depth_view' }))
 
     fireEvent.keyDown(document, { key: 'B' })
     expect(screen.queryByTestId('quick-switch-modal')).not.toBeInTheDocument()
@@ -292,13 +339,13 @@ describe('App spot order payloads', () => {
     fireEvent.click(screen.getByTestId('market-mode-spot'))
 
     expect(screen.queryByTestId('futures-live-view')).not.toBeInTheDocument()
-    expect(screen.getByTestId('place-spot-order')).toBeInTheDocument()
+    expect(await screen.findByTestId('place-spot-order', {}, WORKSPACE_MOUNT)).toBeInTheDocument()
     expect(screen.getByTestId('cancel-spot-order')).toBeInTheDocument()
-    expect(mocks.futuresProductionEnabled.at(-1)).toBe(false)
-    expect(mocks.sendMessage).toHaveBeenLastCalledWith({
-      action: 'enable_depth_view',
-      symbol: 'BTCUSDT',
-    })
+    expect(mocks.futuresProductionEnabled).toEqual([true])
+    await waitFor(() => expect(mocks.sendMessage).toHaveBeenLastCalledWith({
+        action: 'enable_depth_view',
+        symbol: 'BTCUSDT',
+      }))
 
     fireEvent.keyDown(document, { key: 'B' })
     expect(screen.getByTestId('quick-switch-modal')).toBeInTheDocument()
@@ -333,7 +380,7 @@ describe('App spot order payloads', () => {
     ])
   })
 
-  it('renders the Futures shell immediately while private execution remains pending', () => {
+  it('renders the Futures shell after its on-demand chunk loads while private execution remains pending', async () => {
     mocks.futuresProductionState = {
       connected: true,
       subscribed: false,
@@ -342,16 +389,17 @@ describe('App spot order payloads', () => {
     render(<App />)
     fireEvent.click(screen.getByTestId('market-mode-futures-live'))
 
-    expect(screen.getByTestId('futures-live-banner')).toHaveTextContent('USDⓈ-M FUTURES')
+    expect(await screen.findByTestId('futures-workstation-identity', {}, WORKSPACE_MOUNT))
+      .toHaveTextContent('USDⓈ-M FUTURES')
     expect(screen.getByTestId('futures-production-workstation')).toBeInTheDocument()
     expect(screen.getByTestId('futures-workstation-chart')).toBeInTheDocument()
     expect(screen.getByText('Contracts', { selector: '.futures-workstation-section-heading span' }))
       .toBeInTheDocument()
     expect(screen.getByLabelText('Futures trading ticket'))
       .toHaveTextContent('CONTRACTSelect an active USDⓈ-M contract.')
-    expect(screen.getByRole('slider', { name: 'Order size percent' })).toBeEnabled()
+    expect(screen.getByRole('slider', { name: 'Order size percent' })).toBeDisabled()
     expect(screen.getByLabelText('Futures order size and shortcuts'))
-      .toHaveTextContent('25%— USDT')
+      .toHaveTextContent('0%— USDT')
     expect(screen.queryByText('BLOCKED', { exact: true })).not.toBeInTheDocument()
   })
 })

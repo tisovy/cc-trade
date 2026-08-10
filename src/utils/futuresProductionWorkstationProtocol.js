@@ -1,5 +1,6 @@
 import {
   FUTURES_WORKSTATION_EVENT_MAX_BYTES,
+  FUTURES_WORKSTATION_EVENT_MAX_NODES,
   FUTURES_WORKSTATION_MARKET_TYPE,
   FUTURES_WORKSTATION_PROTOCOL_VERSION,
   FUTURES_WORKSTATION_REQUEST_MAX_BYTES,
@@ -20,6 +21,8 @@ export const FUTURES_PRODUCTION_WORKSTATION_ACTIONS = Object.freeze({
   SUBSCRIBE: 'futures.production.workstation.subscribe',
   SELECT_SYMBOL: 'futures.production.workstation.select-symbol',
   SELECT_INTERVAL: 'futures.production.workstation.select-interval',
+  CONFIGURE_TAPE: 'futures.production.workstation.configure-tape',
+  LOAD_CANDLE_HISTORY: 'futures.production.workstation.load-candle-history',
   UNSUBSCRIBE: 'futures.production.workstation.unsubscribe',
 })
 
@@ -41,6 +44,14 @@ export const createFuturesProductionWorkstationSelectSymbolRequest = value => (
 
 export const createFuturesProductionWorkstationSelectIntervalRequest = value => (
   createRequest(FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SELECT_INTERVAL, value)
+)
+
+export const createFuturesProductionWorkstationConfigureTapeRequest = value => (
+  createRequest(FUTURES_PRODUCTION_WORKSTATION_ACTIONS.CONFIGURE_TAPE, value)
+)
+
+export const createFuturesProductionWorkstationLoadCandleHistoryRequest = value => (
+  createRequest(FUTURES_PRODUCTION_WORKSTATION_ACTIONS.LOAD_CANDLE_HISTORY, value)
 )
 
 export const createFuturesProductionWorkstationUnsubscribeRequest = value => (
@@ -72,6 +83,7 @@ export const createFuturesProductionWorkstationEvent = value => createFuturesWor
 export const parseFuturesProductionWorkstationEvent = (raw) => {
   const value = parseBoundedFuturesWorkstationJson(raw, {
     maxBytes: FUTURES_WORKSTATION_EVENT_MAX_BYTES,
+    maxNodes: FUTURES_WORKSTATION_EVENT_MAX_NODES,
   })
   return validateFuturesWorkstationEvent({
     value,

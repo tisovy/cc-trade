@@ -10,6 +10,8 @@ import {
     FUTURES_PRODUCTION_WORKSTATION_FIXTURE,
 } from './futures-production-workstation-fixtures.js';
 import {
+    createFuturesProductionWorkstationConfigureTapeRequest,
+    createFuturesProductionWorkstationLoadCandleHistoryRequest,
     createFuturesProductionWorkstationSelectIntervalRequest,
     createFuturesProductionWorkstationSubscribeRequest,
     createFuturesProductionWorkstationUnsubscribeRequest,
@@ -29,6 +31,49 @@ const productionRequest = (requestId, symbol = 'BTCUSDT', interval = '1m') => JS
 const productionIntervalRequest = (requestId, symbol, interval) => JSON.stringify(
     createFuturesProductionWorkstationSelectIntervalRequest({ requestId, symbol, interval }),
 );
+
+const productionCandleHistoryRequest = (requestId, overrides = {}) => JSON.stringify(
+    createFuturesProductionWorkstationLoadCandleHistoryRequest({
+        requestId,
+        symbol: 'BTCUSDT',
+        interval: '1m',
+        endTime: 1_784_000_000_000,
+        limit: 1_000,
+        ...overrides,
+    }),
+);
+
+const productionTapeRequest = (requestId, overrides = {}) => JSON.stringify(
+    createFuturesProductionWorkstationConfigureTapeRequest({
+        requestId,
+        throttleEnabled: true,
+        timeoutMs: 250,
+        minNotionalUsdt: '0',
+        ...overrides,
+    }),
+);
+
+const productionTradeFrame = ({
+    cycle = 1,
+    aggregateTradeId,
+    price,
+    quantity,
+} = {}) => {
+    const frame = JSON.parse(
+        FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.streams.makeCycle(cycle)[1],
+    );
+    if (aggregateTradeId !== undefined) {
+        frame.data.a = aggregateTradeId;
+        frame.data.f = aggregateTradeId;
+        frame.data.l = aggregateTradeId;
+    }
+    if (price !== undefined) frame.data.p = price;
+    if (quantity !== undefined) {
+        frame.data.q = quantity;
+        frame.data.nq = quantity;
+    }
+    return JSON.stringify(frame);
+};
 
 const track = runtime => {
     runtimes.push(runtime);
@@ -197,14 +242,12 @@ describe('production Futures workstation service', () => {
         expect(events.filter(event => event.resource === 'header')).toHaveLength(1);
 
         expect(events.some(event => event.resource === 'depth')).toBe(false);
-        deliver('markKlines');
         deliver('indexKlines');
         expect(events.filter(event => event.resource === 'status').map(event => event.state))
             .toEqual(['loading']);
 
         resolveBootstrap(Object.freeze({
             contractKlines: fixture.contractKlines,
-            markKlines: fixture.markKlines,
             indexKlines: fixture.indexKlines,
             premiumIndex: fixture.premiumIndex,
             ticker: fixture.ticker,
@@ -212,7 +255,7 @@ describe('production Futures workstation service', () => {
         await pending;
 
         expect(events.filter(event => event.resource === 'candles')
-            .map(event => event.payload.series).sort()).toEqual(['contract', 'index', 'mark']);
+            .map(event => event.payload.series).sort()).toEqual(['contract', 'index']);
         expect(events.filter(event => event.resource === 'header')).toHaveLength(1);
         expect(events.filter(event => event.resource === 'depth')).toHaveLength(1);
         expect(events.filter(event => event.resource === 'status').map(event => event.state))
@@ -448,7 +491,7 @@ describe('production Futures workstation service', () => {
         expect(switched.every(event => event.symbol === symbol)).toBe(true);
         expect(switched.at(-1).state).toBe('live');
         expect(switched.filter(event => event.resource === 'candles'))
-            .toHaveLength(3);
+            .toHaveLength(2);
     });
 
     it('switches only the candle interval without rebuilding invariant market data', async () => {
@@ -504,11 +547,10 @@ describe('production Futures workstation service', () => {
             'status',
             'candles',
             'candles',
-            'candles',
             'status',
         ]);
         expect(switched.filter(event => event.resource === 'candles')
-            .map(event => event.payload.series)).toEqual(['contract', 'mark', 'index']);
+            .map(event => event.payload.series)).toEqual(['contract', 'index']);
         expect(switched.every(event => event.generation === 1)).toBe(true);
         expect(runtime.service.current).toMatchObject({ generation: 1, interval: '5m' });
         expect(base.getActiveTimerCount()).toBe(1);
@@ -544,7 +586,6 @@ describe('production Futures workstation service', () => {
         const fixture = FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT;
         const candleSnapshot = {
             contractKlines: fixture.contractKlines,
-            markKlines: fixture.markKlines,
             indexKlines: fixture.indexKlines,
         };
         deferred.get('15m')(candleSnapshot);
@@ -555,7 +596,6 @@ describe('production Futures workstation service', () => {
         expect(bEvents.map(event => event.resource)).toEqual(['status']);
         expect(cEvents.map(event => event.resource)).toEqual([
             'status',
-            'candles',
             'candles',
             'candles',
             'status',
@@ -1010,13 +1050,295 @@ describe('production Futures workstation service', () => {
         });
         expect(events.at(-1)).toMatchObject({ resource: 'status', state: 'live' });
         expect(events.some(event => event.state === 'resynchronizing')).toBe(false);
-        expect(clock.timeoutCount()).toBe(0);
+        expect(clock.timeoutCount()).toBe(1);
         expect(runtime.service.current.pendingEvents).toHaveLength(0);
         expect(runtime.service.current.trades).toHaveLength(128);
+        clock.advance(250);
+        clock.runTimeouts();
         const tape = events.filter(event => event.resource === 'trades').at(-1).payload.rows;
         expect(tape).toHaveLength(32);
         expect(tape[0].aggregateTradeId).toBe('1128');
         expect(tape.some(row => row.aggregateTradeId === '1000')).toBe(false);
+    });
+
+    it('coalesces a trade burst into leading and newest trailing tape payloads', async () => {
+        const clock = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport({ clock: clock.clock });
+        let subscriber;
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock: clock.clock,
+            transport: {
+                ...base,
+                connect: (options) => {
+                    subscriber = options;
+                    return base.connect(options);
+                },
+            },
+        }));
+        const events = [];
+        await runtime.service.handleRequest(productionRequest('tape-burst'), {
+            emit: event => events.push(event),
+        });
+        const initialCount = events.filter(event => event.resource === 'trades').length;
+
+        subscriber.onMessage(productionTradeFrame({ cycle: 1, aggregateTradeId: 2001 }));
+        subscriber.onMessage(productionTradeFrame({ cycle: 2, aggregateTradeId: 2002 }));
+        subscriber.onMessage(productionTradeFrame({ cycle: 3, aggregateTradeId: 2003 }));
+
+        expect(events.filter(event => event.resource === 'trades')).toHaveLength(initialCount + 1);
+        expect(clock.timeoutCount()).toBe(1);
+        clock.advance(250);
+        clock.runTimeouts();
+        const tapeEvents = events.filter(event => event.resource === 'trades');
+        expect(tapeEvents).toHaveLength(initialCount + 2);
+        expect(tapeEvents.at(-1).payload.rows[0].aggregateTradeId).toBe('2003');
+        expect(clock.timeoutCount()).toBe(0);
+    });
+
+    it('filters tape by exact USDT notional while raw trade freshness stays live', async () => {
+        const clock = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport({ clock: clock.clock });
+        let subscriber;
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock: clock.clock,
+            transport: {
+                ...base,
+                connect: (options) => {
+                    subscriber = options;
+                    return base.connect(options);
+                },
+            },
+        }));
+        const events = [];
+        await runtime.service.handleRequest(productionRequest('tape-notional'), {
+            emit: event => events.push(event),
+        });
+        await runtime.service.handleRequest(productionTapeRequest('tape-notional', {
+            minNotionalUsdt: '25',
+        }), { emit: event => events.push(event) });
+        const configuredCount = events.filter(event => event.resource === 'trades').length;
+
+        subscriber.onMessage(productionTradeFrame({
+            cycle: 1,
+            aggregateTradeId: 3001,
+            price: '99',
+            quantity: '0.25',
+        }));
+        expect(events.filter(event => event.resource === 'trades')).toHaveLength(configuredCount);
+        expect(clock.timeoutCount()).toBe(0);
+
+        subscriber.onMessage(productionTradeFrame({
+            cycle: 2,
+            aggregateTradeId: 3002,
+            price: '100',
+            quantity: '0.25',
+        }));
+        expect(clock.timeoutCount()).toBe(1);
+        clock.advance(250);
+        clock.runTimeouts();
+        expect(events.filter(event => event.resource === 'trades').at(-1).payload.rows)
+            .toEqual([expect.objectContaining({ aggregateTradeId: '3002' })]);
+        expect(runtime.service.current.lastTradesAt).toBe(clock.clock.now() - 250);
+        expect(runtime.service.current.staleResources.has('trades')).toBe(false);
+    });
+
+    it('keeps eligible trades in the tape while small prints churn past the bound', async () => {
+        const clock = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport({ clock: clock.clock });
+        let subscriber;
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock: clock.clock,
+            transport: {
+                ...base,
+                connect: (options) => {
+                    subscriber = options;
+                    return base.connect(options);
+                },
+            },
+        }));
+        const events = [];
+        await runtime.service.handleRequest(productionRequest('tape-retention'), {
+            emit: event => events.push(event),
+        });
+        await runtime.service.handleRequest(productionTapeRequest('tape-retention', {
+            minNotionalUsdt: '500',
+        }), { emit: event => events.push(event) });
+
+        subscriber.onMessage(productionTradeFrame({
+            cycle: 1,
+            aggregateTradeId: 4001,
+            price: '1000',
+            quantity: '1',
+        }));
+        // A long run of ineligible prints must not evict the large one.
+        for (let index = 0; index < 600; index += 1) {
+            subscriber.onMessage(productionTradeFrame({
+                cycle: 2 + index,
+                aggregateTradeId: 5000 + index,
+                price: '1',
+                quantity: '1',
+            }));
+        }
+        clock.advance(250);
+        clock.runTimeouts();
+
+        expect(events.filter(event => event.resource === 'trades').at(-1).payload.rows)
+            .toEqual([expect.objectContaining({ aggregateTradeId: '4001' })]);
+        expect(runtime.service.current.staleResources.has('trades')).toBe(false);
+    });
+
+    it('treats an explicit zero-USDT threshold as no tape filter', async () => {
+        const clock = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport({ clock: clock.clock });
+        let subscriber;
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock: clock.clock,
+            transport: {
+                ...base,
+                connect: (options) => {
+                    subscriber = options;
+                    return base.connect(options);
+                },
+            },
+        }));
+        const events = [];
+        await runtime.service.handleRequest(productionRequest('tape-zero-filter'), {
+            emit: event => events.push(event),
+        });
+        await runtime.service.handleRequest(productionTapeRequest('tape-zero-filter', {
+            minNotionalUsdt: '0',
+        }), { emit: event => events.push(event) });
+
+        subscriber.onMessage(productionTradeFrame({
+            cycle: 1,
+            aggregateTradeId: 3501,
+            price: '0.0000001',
+            quantity: '0.0000001',
+        }));
+        clock.advance(250);
+        clock.runTimeouts();
+
+        expect(events.filter(event => event.resource === 'trades').at(-1).payload.rows)
+            .toEqual([expect.objectContaining({ aggregateTradeId: '3501' })]);
+    });
+
+    it('disables throttling without disabling the notional filter or row bound', async () => {
+        const clock = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport({ clock: clock.clock });
+        let subscriber;
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock: clock.clock,
+            transport: {
+                ...base,
+                connect: (options) => {
+                    subscriber = options;
+                    return base.connect(options);
+                },
+            },
+        }));
+        const events = [];
+        await runtime.service.handleRequest(productionRequest('tape-unthrottled'), {
+            emit: event => events.push(event),
+        });
+        await runtime.service.handleRequest(productionTapeRequest('tape-unthrottled', {
+            throttleEnabled: false,
+            minNotionalUsdt: '10',
+        }), { emit: event => events.push(event) });
+        const configuredCount = events.filter(event => event.resource === 'trades').length;
+
+        subscriber.onMessage(productionTradeFrame({
+            cycle: 1,
+            aggregateTradeId: 4001,
+            price: '100',
+            quantity: '0.2',
+        }));
+        subscriber.onMessage(productionTradeFrame({
+            cycle: 2,
+            aggregateTradeId: 4002,
+            price: '100',
+            quantity: '0.2',
+        }));
+
+        expect(events.filter(event => event.resource === 'trades')).toHaveLength(configuredCount + 2);
+        expect(clock.timeoutCount()).toBe(0);
+        expect(events.filter(event => event.resource === 'trades').at(-1).payload.rows.length)
+            .toBeLessThanOrEqual(32);
+    });
+
+    it('cancels a pending tape payload when a new symbol generation takes ownership', async () => {
+        const clock = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport({ clock: clock.clock });
+        let subscriber;
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock: clock.clock,
+            transport: {
+                ...base,
+                connect: (options) => {
+                    if (options.symbol === 'BTCUSDT') subscriber = options;
+                    return base.connect(options);
+                },
+            },
+        }));
+        const oldEvents = [];
+        await runtime.service.handleRequest(productionRequest('tape-old-owner'), {
+            emit: event => oldEvents.push(event),
+        });
+        subscriber.onMessage(productionTradeFrame({ cycle: 1, aggregateTradeId: 5001 }));
+        subscriber.onMessage(productionTradeFrame({ cycle: 2, aggregateTradeId: 5002 }));
+        expect(clock.timeoutCount()).toBe(1);
+
+        const newEvents = [];
+        await runtime.service.handleRequest(productionRequest('tape-new-owner', 'ETHUSDT'), {
+            emit: event => newEvents.push(event),
+        });
+        const oldCount = oldEvents.length;
+        expect(clock.timeoutCount()).toBe(0);
+        clock.advance(250);
+        clock.runTimeouts();
+        expect(oldEvents).toHaveLength(oldCount);
+        expect(newEvents.at(-1)).toMatchObject({ symbol: 'ETHUSDT', state: 'live' });
+    });
+
+    it('cancels a pending tape payload before a full reconnect rebuilds the generation', async () => {
+        const clock = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport({ clock: clock.clock });
+        let subscriber;
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock: clock.clock,
+            transport: {
+                ...base,
+                connect: (options) => {
+                    subscriber = options;
+                    return base.connect(options);
+                },
+            },
+        }));
+        const events = [];
+        await runtime.service.handleRequest(productionRequest('tape-reconnect'), {
+            emit: event => events.push(event),
+        });
+        subscriber.onMessage(productionTradeFrame({ cycle: 1, aggregateTradeId: 6001 }));
+        subscriber.onMessage(productionTradeFrame({ cycle: 2, aggregateTradeId: 6002 }));
+
+        expect(runtime.service.current.pendingTapeTimer).not.toBeNull();
+        expect(clock.timeoutCount()).toBe(1);
+        subscriber.onDisconnect('SOCKET_CLOSED');
+
+        expect(runtime.service.current.pendingTapeTimer).toBeNull();
+        expect(runtime.service.current.pendingTapeEmission).toBe(false);
+        // The only remaining timeout belongs to the reconnect, not the tape.
+        expect(clock.timeoutCount()).toBe(1);
+        clock.runTimeouts();
+        await vi.waitFor(() => expect(runtime.service.current.generation).toBe(2));
+        await vi.waitFor(() => expect(events.at(-1)).toMatchObject({
+            generation: 2,
+            state: 'live',
+        }));
+
+        expect(events
+            .filter(event => event.resource === 'trades')
+            .some(event => event.payload.rows.some(row => row.aggregateTradeId === '6002')))
+            .toBe(false);
     });
 
     it('marks individual resources stale on deterministic freshness deadlines', async () => {
@@ -1231,6 +1553,111 @@ describe('production Futures workstation service', () => {
             interval: '1m',
         }), () => {}, 7);
         expect(runtime.service.current.reconnectAttempt).toBe(0);
+    });
+
+    describe('candle history', () => {
+        const historyKlines = (count, { endTime = 1_784_000_000_000, intervalMs = 60_000 } = {}) => (
+            JSON.stringify(Array.from({ length: count }, (_, index) => {
+                const openTime = endTime - ((count - index) * intervalMs);
+                return [
+                    openTime,
+                    '58400.00',
+                    '58500.00',
+                    '58300.00',
+                    '58420.00',
+                    '100.12500000',
+                    openTime + intervalMs - 1,
+                    '100000.00000000',
+                    50 + index,
+                    '40.00000000',
+                    '40000.00000000',
+                    '0',
+                ];
+            }))
+        );
+
+        const historyRuntime = async (requestId, { readCandleHistory } = {}) => {
+            const base = createFuturesProductionWorkstationFakeTransport();
+            const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+                transport: { ...base, readCandleHistory },
+            }));
+            const events = [];
+            await runtime.service.handleRequest(productionRequest(requestId), {
+                emit: event => events.push(event),
+            });
+            events.length = 0;
+            return { runtime, events };
+        };
+
+        it('delivers history behind the live window as bounded pages', async () => {
+            const reads = [];
+            const { runtime, events } = await historyRuntime('history-pages', {
+                readCandleHistory: async (options) => {
+                    reads.push(options);
+                    return historyKlines(100);
+                },
+            });
+
+            await runtime.service.handleRequest(productionCandleHistoryRequest('history-pages'), {
+                emit: event => events.push(event),
+            });
+
+            expect(reads).toMatchObject([{ symbol: 'BTCUSDT', interval: '1m', limit: 1_000 }]);
+            const pages = events.filter(event => event.resource === 'candleHistory');
+            expect(pages.map(page => [
+                page.payload.offset,
+                page.payload.rows.length,
+                page.payload.complete,
+            ])).toEqual([[0, 80, false], [80, 20, true]]);
+            // The live window keeps its own tail: history never writes it.
+            expect(events.some(event => event.resource === 'candles')).toBe(false);
+        });
+
+        it('states an exhausted history instead of staying silent', async () => {
+            const { runtime, events } = await historyRuntime('history-empty', {
+                readCandleHistory: async () => '[]',
+            });
+
+            await runtime.service.handleRequest(productionCandleHistoryRequest('history-empty'), {
+                emit: event => events.push(event),
+            });
+
+            expect(events.filter(event => event.resource === 'candleHistory')).toMatchObject([{
+                payload: { offset: 0, total: 0, complete: true, rows: [] },
+            }]);
+        });
+
+        it('refuses history for a subscription, contract or interval it does not own', async () => {
+            const { runtime } = await historyRuntime('history-owner', {
+                readCandleHistory: async () => historyKlines(10),
+            });
+
+            for (const overrides of [
+                { requestId: 'history-someone-else' },
+                { symbol: 'ETHUSDT' },
+                { interval: '15m' },
+            ]) {
+                await expect(runtime.service.handleRequest(
+                    productionCandleHistoryRequest('history-owner', overrides),
+                    { emit: () => {} },
+                )).rejects.toMatchObject({ code: 'CANDLE_HISTORY_OWNER_UNAVAILABLE' });
+            }
+        });
+
+        it('drops a read that fails and leaves the live session alone', async () => {
+            const { runtime, events } = await historyRuntime('history-failure', {
+                readCandleHistory: async () => {
+                    throw new Error('network down');
+                },
+            });
+
+            await runtime.service.handleRequest(productionCandleHistoryRequest('history-failure'), {
+                emit: event => events.push(event),
+            });
+
+            expect(events).toEqual([]);
+            expect(runtime.service.current.requestId).toBe('history-failure');
+        });
     });
 
     it('never emits credential, signature, private response or write fields', async () => {

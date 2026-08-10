@@ -4,11 +4,15 @@ import {
   ColorType,
   CrosshairMode,
   HistogramSeries,
-  LineSeries,
   LineStyle,
   createChart,
 } from 'lightweight-charts'
 import { buildVolumeHistogramPresentation } from '../../../utils/chartVolume.js'
+import {
+  describeFuturesOrderIntent,
+  describeFuturesPosition,
+  orderNotionalUsdt,
+} from '../../../utils/futuresOrderPresentation.js'
 import {
   isFuturesTradingGestureTarget,
   resolveFuturesTradingGesture,
@@ -23,34 +27,33 @@ const toNumber = (value) => {
   return Number.isFinite(parsed) ? parsed : null
 }
 
-const toCandleData = rows => rows.flatMap((row) => {
+// The candles and their volume must cover exactly the same times. The library
+// colours a histogram bar by looking up the row at the time it is drawing, so a
+// row that reaches the candle series but not the volume series leaves it
+// looking at nothing and the chart dies with "Value is null". Price decides
+// whether a row is usable at all; a usable row whose volume is missing is drawn
+// at zero rather than silently dropped from one series only.
+const toChartRows = rows => rows.flatMap((row) => {
   const open = toNumber(row.open)
   const high = toNumber(row.high)
   const low = toNumber(row.low)
   const close = toNumber(row.close)
   if ([open, high, low, close].some(value => value === null)) return []
-  return [{ time: toSeconds(row.openTime), open, high, low, close }]
-})
-
-const toVolumeData = rows => buildVolumeHistogramPresentation(rows.flatMap((row) => {
-  const value = toNumber(row.volume)
-  const open = toNumber(row.open)
-  const close = toNumber(row.close)
-  if ([value, open, close].some(entry => entry === null)) return []
   return [{
     time: toSeconds(row.openTime),
-    volume: value,
     open,
+    high,
+    low,
     close,
+    volume: toNumber(row.volume) ?? 0,
   }]
-}), {
-  upColor: 'rgba(40, 190, 140, 0.42)',
-  downColor: 'rgba(241, 91, 105, 0.42)',
 })
 
-const toLineData = rows => rows.flatMap((row) => {
-  const value = toNumber(row.close)
-  return value === null ? [] : [{ time: toSeconds(row.openTime), value }]
+const toCandleData = rows => toChartRows(rows).map(({ volume: _volume, ...candle }) => candle)
+
+const toVolumeData = rows => buildVolumeHistogramPresentation(toChartRows(rows), {
+  upColor: 'rgba(40, 190, 140, 0.42)',
+  downColor: 'rgba(241, 91, 105, 0.42)',
 })
 
 const toDraftString = (value) => (
@@ -61,6 +64,9 @@ const CANONICAL_NONNEGATIVE_DECIMAL = /^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/
 const ORDER_HANDLE_HALF_HEIGHT = 11
 const ORDER_HANDLE_GAP = 24
 const NOOP_ORDER_COORDINATE_REFRESH = () => {}
+// Ask for the next page a few bars before the edge, so the candles are there by
+// the time the operator scrolls onto them.
+const HISTORY_PREFETCH_BARS = 12
 const EMPTY_CLICK_CANDIDATE = Object.freeze({ at: 0, x: 0, y: 0, modifier: null })
 
 const createPriceFormat = (tickSize) => {
@@ -88,6 +94,16 @@ const canUpdateLastRow = (previous, rows) => {
     && first === previous.first
     && (rows.length === previous.length || rows.length === previous.length + 1)
     && last >= previous.last
+}
+
+// How many rows appeared in front of what was drawn last time. Counted from the
+// open time that used to be first, so a tail update reads as zero.
+const countPrependedRows = (previous, rows) => {
+  if (!previous || rows.length === 0) return 0
+  const first = rowTime(rows[0])
+  if (first === null || previous.first === null || first >= previous.first) return 0
+  const index = rows.findIndex(row => rowTime(row) === previous.first)
+  return index > 0 ? index : 0
 }
 
 const rememberRows = rows => rows.length === 0 ? null : Object.freeze({
@@ -137,18 +153,18 @@ const layoutOrderCoordinates = (entries, height) => {
 export const FuturesWorkstationChart = ({
   symbol,
   candles,
-  markCandles,
-  indexCandles,
-  markPrice,
-  indexPrice,
+  historyExhausted = false,
+  onLoadHistory,
   priceTickSize,
-  draftPrice,
   drawings,
   alerts,
   ownedOrders = [],
+  positions = [],
   onPricePick,
   onTradingGesture,
   onOrderDrag,
+  onOrderCancel,
+  onOrderEdit,
 }) => {
   const measurementGeneration = useMemo(() => Symbol(symbol), [symbol])
   const containerRef = useRef(null)
@@ -158,20 +174,29 @@ export const FuturesWorkstationChart = ({
   const onPricePickRef = useRef(onPricePick)
   const onTradingGestureRef = useRef(onTradingGesture)
   const onOrderDragRef = useRef(onOrderDrag)
+  const onOrderCancelRef = useRef(onOrderCancel)
+  const onOrderEditRef = useRef(onOrderEdit)
   const symbolRef = useRef(symbol)
+  const candlesRef = useRef(candles)
+  const onLoadHistoryRef = useRef(onLoadHistory)
   const hasFittedContentRef = useRef(false)
-  const rowStateRef = useRef({ contract: null, mark: null, index: null })
+  const volumeScaleRef = useRef(null)
+  const rowStateRef = useRef({ contract: null, index: null })
   const measurementRef = useRef(null)
   const measurementGenerationRef = useRef(measurementGeneration)
   const ignoreNextLeftClickRef = useRef(false)
   const lastLeftClickRef = useRef(EMPTY_CLICK_CANDIDATE)
   const lastRightClickRef = useRef(EMPTY_CLICK_CANDIDATE)
   const orderDragRef = useRef(null)
+  const dragPriceLineRef = useRef(null)
+  const dragOriginLineRef = useRef(null)
   const requestOrderCoordinateRefreshRef = useRef(NOOP_ORDER_COORDINATE_REFRESH)
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 })
   const [measurement, setMeasurement] = useState(null)
   const [orderCoordinates, setOrderCoordinates] = useState([])
   const [orderDragPreview, setOrderDragPreview] = useState(null)
+  const [heldGestureModifier, setHeldGestureModifier] = useState(null)
+  const tradingGesturesEnabled = typeof onTradingGesture === 'function'
 
   useEffect(() => {
     onPricePickRef.current = onPricePick
@@ -186,14 +211,33 @@ export const FuturesWorkstationChart = ({
   }, [onOrderDrag])
 
   useEffect(() => {
+    onOrderCancelRef.current = onOrderCancel
+  }, [onOrderCancel])
+
+  useEffect(() => {
+    onOrderEditRef.current = onOrderEdit
+  }, [onOrderEdit])
+
+  useEffect(() => {
     symbolRef.current = symbol
     measurementGenerationRef.current = measurementGeneration
     hasFittedContentRef.current = false
-    rowStateRef.current = { contract: null, mark: null, index: null }
+    volumeScaleRef.current = null
+    rowStateRef.current = { contract: null }
     ignoreNextLeftClickRef.current = false
     lastLeftClickRef.current = EMPTY_CLICK_CANDIDATE
     lastRightClickRef.current = EMPTY_CLICK_CANDIDATE
     orderDragRef.current = null
+    // A contract change ends any drag in flight, so its preview line must not
+    // survive onto the next contract's chart.
+    if (dragPriceLineRef.current) {
+      try {
+        seriesRef.current?.contractSeries?.removePriceLine(dragPriceLineRef.current)
+      } catch {
+        // The series may already be gone; the line dies with it either way.
+      }
+      dragPriceLineRef.current = null
+    }
     measurementRef.current = null
   }, [measurementGeneration, symbol])
 
@@ -243,20 +287,6 @@ export const FuturesWorkstationChart = ({
     chart.priceScale('volume').applyOptions({
       scaleMargins: { top: 0.78, bottom: 0 },
     })
-    const markSeries = chart.addSeries(LineSeries, {
-      color: '#f0b90b',
-      lineWidth: 1,
-      lineStyle: LineStyle.Dashed,
-      priceLineVisible: false,
-      lastValueVisible: false,
-    })
-    const indexSeries = chart.addSeries(LineSeries, {
-      color: '#7e8fa6',
-      lineWidth: 1,
-      lineStyle: LineStyle.Dotted,
-      priceLineVisible: false,
-      lastValueVisible: false,
-    })
     const pointFromEvent = (event) => {
       const rect = container.getBoundingClientRect()
       const x = event.clientX - rect.left
@@ -291,6 +321,9 @@ export const FuturesWorkstationChart = ({
         ...intent,
         price: toDraftString(point.price),
         source: 'chart',
+        // Where the operator was looking when they asked: the confirmation
+        // opens there rather than making them hunt for it.
+        anchor: { x: event.clientX, y: event.clientY },
       })
       return true
     }
@@ -450,7 +483,7 @@ export const FuturesWorkstationChart = ({
     container.addEventListener('wheel', handleViewportChange, { passive: true })
     globalThis.addEventListener?.('keydown', handleKeyDown)
     chartRef.current = chart
-    seriesRef.current = { contractSeries, volumeSeries, markSeries, indexSeries }
+    seriesRef.current = { contractSeries, volumeSeries }
 
     const resize = () => {
       const width = Math.max(320, container.clientWidth)
@@ -482,58 +515,120 @@ export const FuturesWorkstationChart = ({
       chartRef.current = null
       seriesRef.current = null
       overlayLinesRef.current = []
-      rowStateRef.current = { contract: null, mark: null, index: null }
+      rowStateRef.current = { contract: null }
     }
   }, [cancelMeasurement])
+
+  // Holding exactly one trading modifier shows the gesture legend on the
+  // chart, so the double-click shortcuts are discoverable where they act.
+  useEffect(() => {
+    if (!tradingGesturesEnabled) {
+      setHeldGestureModifier(null)
+      return undefined
+    }
+    const resolveModifier = (event) => {
+      if (event.shiftKey || event.metaKey || event.altKey === event.ctrlKey) return null
+      return event.altKey ? 'alt' : 'ctrl'
+    }
+    const handleModifierChange = (event) => {
+      setHeldGestureModifier(previous => {
+        const next = resolveModifier(event)
+        return previous === next ? previous : next
+      })
+    }
+    const clearModifier = () => setHeldGestureModifier(null)
+    globalThis.addEventListener?.('keydown', handleModifierChange)
+    globalThis.addEventListener?.('keyup', handleModifierChange)
+    globalThis.addEventListener?.('blur', clearModifier)
+    return () => {
+      globalThis.removeEventListener?.('keydown', handleModifierChange)
+      globalThis.removeEventListener?.('keyup', handleModifierChange)
+      globalThis.removeEventListener?.('blur', clearModifier)
+    }
+  }, [tradingGesturesEnabled])
 
   useEffect(() => {
     const priceFormat = createPriceFormat(priceTickSize)
     if (!priceFormat || !seriesRef.current) return
-    const { contractSeries, markSeries, indexSeries } = seriesRef.current
-    contractSeries.applyOptions({ priceFormat })
-    markSeries.applyOptions({ priceFormat })
-    indexSeries.applyOptions({ priceFormat })
+    seriesRef.current.contractSeries.applyOptions({ priceFormat })
   }, [priceTickSize])
 
   useEffect(() => {
+    candlesRef.current = candles
+  }, [candles])
+
+  useEffect(() => {
+    onLoadHistoryRef.current = onLoadHistory
+  }, [onLoadHistory])
+
+  useEffect(() => {
     if (!seriesRef.current) return
+    const { contractSeries, volumeSeries } = seriesRef.current
     const contractData = toCandleData(candles)
     const volumePresentation = toVolumeData(candles)
-    seriesRef.current.volumeSeries.applyOptions({
-      priceFormat: volumePresentation.priceFormat,
-    })
+    // The volume series is written first and the candles second. The candles
+    // own the time scale, and the library answers a time-scale change by
+    // re-sending every series' data — so writing them last leaves both series
+    // holding the same generation of rows when the frame ends.
     if (canUpdateLastRow(rowStateRef.current.contract, candles)
       && contractData.length > 0
       && volumePresentation.data.length > 0) {
-      seriesRef.current.contractSeries.update(contractData.at(-1))
-      seriesRef.current.volumeSeries.update(volumePresentation.data.at(-1))
+      volumeSeries.update(volumePresentation.data.at(-1))
+      contractSeries.update(contractData.at(-1))
     } else {
-      seriesRef.current.contractSeries.setData(contractData)
-      seriesRef.current.volumeSeries.setData(volumePresentation.data)
+      // Older candles arriving in front shift every bar's logical index. Left
+      // alone, the chart would jump backwards under the operator's cursor at
+      // the exact moment they were reading it, so the visible range is moved by
+      // as many bars as were prepended and the view stands still.
+      const prepended = countPrependedRows(rowStateRef.current.contract, candles)
+      const timeScale = chartRef.current?.timeScale()
+      const heldRange = prepended > 0 ? timeScale?.getVisibleLogicalRange?.() ?? null : null
+      volumeSeries.setData(volumePresentation.data)
+      contractSeries.setData(contractData)
+      if (heldRange) {
+        timeScale.setVisibleLogicalRange?.({
+          from: heldRange.from + prepended,
+          to: heldRange.to + prepended,
+        })
+      }
     }
-    const markData = toLineData(markCandles)
-    if (canUpdateLastRow(rowStateRef.current.mark, markCandles) && markData.length > 0) {
-      seriesRef.current.markSeries.update(markData.at(-1))
-    } else {
-      seriesRef.current.markSeries.setData(markData)
+    // Applying options is never free: the library recreates the formatter,
+    // forces a full chart update, and marks the series' drawn items as needing
+    // a restyle. Done on every tick it also keeps the histogram permanently in
+    // the one state where a restyle can outrun the data it is styling. The
+    // volume format only changes when the scale does, so it is applied then.
+    if (volumeScaleRef.current !== volumePresentation.scale) {
+      volumeScaleRef.current = volumePresentation.scale
+      volumeSeries.applyOptions({ priceFormat: volumePresentation.priceFormat })
     }
-    const indexData = toLineData(indexCandles)
-    if (canUpdateLastRow(rowStateRef.current.index, indexCandles) && indexData.length > 0) {
-      seriesRef.current.indexSeries.update(indexData.at(-1))
-    } else {
-      seriesRef.current.indexSeries.setData(indexData)
-    }
-    rowStateRef.current = {
-      contract: rememberRows(candles),
-      mark: rememberRows(markCandles),
-      index: rememberRows(indexCandles),
-    }
+    rowStateRef.current = { contract: rememberRows(candles) }
     if (contractData.length > 0 && !hasFittedContentRef.current) {
       chartRef.current?.timeScale().fitContent()
       hasFittedContentRef.current = true
     }
     requestOrderCoordinateRefreshRef.current()
-  }, [candles, indexCandles, markCandles])
+  }, [candles])
+
+  // Scrolling into the left edge is the request for more history: the operator
+  // is asking to see what came before, and the chart answers by loading it
+  // rather than by ending.
+  useEffect(() => {
+    const timeScale = chartRef.current?.timeScale()
+    if (!timeScale || typeof onLoadHistory !== 'function') return undefined
+    const handleRangeChange = (range) => {
+      if (!range || historyExhausted) return
+      if (range.from > HISTORY_PREFETCH_BARS) return
+      const oldest = candlesRef.current[0]?.openTime
+      if (!Number.isSafeInteger(oldest)) return
+      onLoadHistoryRef.current?.(oldest)
+    }
+    timeScale.subscribeVisibleLogicalRangeChange(handleRangeChange)
+    // The range the chart already settled on after its first fit never fires an
+    // event we are subscribed for, so the opening view is evaluated directly —
+    // otherwise a contract would only deepen once the operator scrolled.
+    handleRangeChange(timeScale.getVisibleLogicalRange?.() ?? null)
+    return () => timeScale.unsubscribeVisibleLogicalRangeChange(handleRangeChange)
+  }, [historyExhausted, onLoadHistory])
 
   useEffect(() => {
     const series = seriesRef.current?.contractSeries
@@ -545,28 +640,6 @@ export const FuturesWorkstationChart = ({
       if (price === null || price <= 0) return
       nextLines.push(series.createPriceLine({ price, ...options }))
     }
-    addLine(draftPrice, {
-      color: '#f0b90b',
-      lineWidth: 1,
-      lineStyle: LineStyle.Dotted,
-      lineVisible: false,
-      axisLabelVisible: true,
-      title: '',
-    })
-    addLine(markPrice, {
-      color: '#f0b90b',
-      lineWidth: 1,
-      lineStyle: LineStyle.Dashed,
-      axisLabelVisible: true,
-      title: 'MARK',
-    })
-    addLine(indexPrice, {
-      color: '#7e8fa6',
-      lineWidth: 1,
-      lineStyle: LineStyle.Dotted,
-      axisLabelVisible: true,
-      title: 'INDEX',
-    })
     drawings.forEach((drawing, index) => addLine(drawing.price, {
       color: '#8b5cf6',
       lineWidth: 1,
@@ -581,16 +654,43 @@ export const FuturesWorkstationChart = ({
       axisLabelVisible: true,
       title: `ALERT ${index + 1}`,
     }))
-    ownedOrders.forEach(order => addLine(order.price, {
-      color: order.positionSide === 'LONG' ? '#2bc48a' : '#ef5b69',
-      lineWidth: 2,
-      lineStyle: LineStyle.Solid,
-      axisLabelVisible: true,
-      title: `${order.orderKind === 'ALGO' ? 'ALGO ' : ''}${order.positionSide} ${order.positionEffect}`,
-    }))
+    // Where the position was opened and where it dies are the two prices a
+    // trader must never have to look up in another panel.
+    positions.forEach((position) => {
+      const presentation = describeFuturesPosition(position)
+      // Half opacity: the entry band is a reference the candles are read
+      // against, not a signal competing with them. At full strength its axis
+      // label and its line both hid the bars sitting at that price.
+      addLine(position.entryPrice, {
+        color: presentation.tone === 'buy' ? 'rgba(43, 196, 138, 0.5)' : 'rgba(239, 91, 105, 0.5)',
+        lineWidth: 1,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: `ENTRY ${presentation.positionSide}`,
+      })
+      addLine(position.liquidationPrice, {
+        color: '#f0b90b',
+        lineWidth: 1,
+        lineStyle: LineStyle.LargeDashed,
+        axisLabelVisible: true,
+        title: 'LIQ',
+      })
+    })
+    // One-way accounts report positionSide BOTH, so a `positionSide === 'LONG'`
+    // test painted every order — including plain buys — red. Colour by side.
+    ownedOrders.forEach((order) => {
+      const intent = describeFuturesOrderIntent(order)
+      addLine(order.price, {
+        color: intent.tone === 'buy' ? '#2bc48a' : '#ef5b69',
+        lineWidth: 2,
+        lineStyle: LineStyle.Solid,
+        axisLabelVisible: true,
+        title: '',
+      })
+    })
     overlayLinesRef.current = nextLines
     requestOrderCoordinateRefreshRef.current()
-  }, [alerts, draftPrice, drawings, indexPrice, markPrice, ownedOrders])
+  }, [alerts, drawings, ownedOrders, positions])
 
   useEffect(() => {
     let pending = null
@@ -644,7 +744,25 @@ export const FuturesWorkstationChart = ({
       if (pending?.kind === 'timer') globalThis.clearTimeout(pending.id)
       pending = null
     }
-  }, [candles, containerSize.height, indexCandles, markCandles, ownedOrders])
+  }, [candles, containerSize.height, ownedOrders])
+
+  // A dragged order is shown as its own price line so the move is read on the
+  // chart and on the price axis, not only on the handle badge.
+  const removeDragPriceLine = useCallback(() => {
+    const series = seriesRef.current?.contractSeries
+    const lines = [dragPriceLineRef.current, dragOriginLineRef.current]
+    dragPriceLineRef.current = null
+    dragOriginLineRef.current = null
+    if (!series) return
+    for (const line of lines) {
+      if (!line) continue
+      try {
+        series.removePriceLine(line)
+      } catch {
+        // The series can be disposed before the pointer is released.
+      }
+    }
+  }, [])
 
   const beginOrderDrag = useCallback((event, order) => {
     if (order?.orderKind !== 'REGULAR'
@@ -655,6 +773,32 @@ export const FuturesWorkstationChart = ({
     event.preventDefault()
     event.stopPropagation()
     const modifier = event.altKey ? 'alt' : 'ctrl'
+    const series = seriesRef.current?.contractSeries
+    const startPrice = toNumber(order.price)
+    removeDragPriceLine()
+    if (series && startPrice !== null && startPrice > 0) {
+      const intent = describeFuturesOrderIntent(order)
+      // The level the order is leaving stays drawn, faint and unlabelled on the
+      // axis: without it the handle simply walks off and nothing says the old
+      // price is no longer where the order rests. The axis belongs to the price
+      // being aimed at, so only the moving line claims a label there.
+      dragOriginLineRef.current = series.createPriceLine({
+        price: startPrice,
+        color: 'rgba(126, 143, 166, 0.55)',
+        lineWidth: 1,
+        lineStyle: LineStyle.Dotted,
+        axisLabelVisible: false,
+        title: 'WAS',
+      })
+      dragPriceLineRef.current = series.createPriceLine({
+        price: startPrice,
+        color: intent.tone === 'buy' ? '#2bc48a' : '#ef5b69',
+        lineWidth: 2,
+        lineStyle: LineStyle.Dashed,
+        axisLabelVisible: true,
+        title: 'MOVING',
+      })
+    }
     orderDragRef.current = {
       pointerId: event.pointerId,
       modifier,
@@ -668,7 +812,7 @@ export const FuturesWorkstationChart = ({
       price: order.price,
       y: null,
     })
-  }, [])
+  }, [removeDragPriceLine])
 
   const moveOrderDrag = useCallback((event) => {
     const drag = orderDragRef.current
@@ -680,6 +824,12 @@ export const FuturesWorkstationChart = ({
     const price = series.coordinateToPrice(y)
     if (typeof price !== 'number' || !Number.isFinite(price) || price <= 0) return
     drag.price = toDraftString(price)
+    const draggedPrice = toNumber(drag.price)
+    if (typeof dragPriceLineRef.current?.applyOptions === 'function'
+      && draggedPrice !== null
+      && draggedPrice > 0) {
+      dragPriceLineRef.current.applyOptions({ price: draggedPrice })
+    }
     event.preventDefault()
     event.stopPropagation()
     setOrderDragPreview({
@@ -693,6 +843,7 @@ export const FuturesWorkstationChart = ({
     const drag = orderDragRef.current
     if (!drag || drag.pointerId !== event.pointerId) return
     orderDragRef.current = null
+    removeDragPriceLine()
     event.currentTarget.releasePointerCapture?.(event.pointerId)
     event.preventDefault()
     event.stopPropagation()
@@ -710,7 +861,7 @@ export const FuturesWorkstationChart = ({
       })
     }
     setOrderDragPreview(null)
-  }, [])
+  }, [removeDragPriceLine])
 
   const measurementPrecision = useMemo(() => {
     const fraction = typeof priceTickSize === 'string'
@@ -725,7 +876,7 @@ export const FuturesWorkstationChart = ({
         className="futures-workstation-chart-canvas"
         data-testid="futures-workstation-chart"
         ref={containerRef}
-        aria-label="Futures candlestick chart with volume, mark and index overlays"
+        aria-label="Futures candlestick chart with volume"
       />
       <MeasurementOverlay
         projection={measurement
@@ -736,6 +887,20 @@ export const FuturesWorkstationChart = ({
         containerSize={containerSize}
         precision={measurementPrecision}
       />
+      {heldGestureModifier ? (
+        <div
+          className={`futures-workstation-gesture-hint is-${heldGestureModifier}`}
+          role="status"
+          aria-label="Futures gesture shortcuts for the held modifier"
+        >
+          <strong>{heldGestureModifier === 'alt' ? 'ALT · LONG' : 'CTRL · SHORT'}</strong>
+          <span>
+            {heldGestureModifier === 'alt'
+              ? 'double left-click: enter · double right-click: exit'
+              : 'double right-click: enter · double left-click: exit'}
+          </span>
+        </div>
+      ) : null}
       <div className="futures-workstation-owned-order-layer" aria-label="Owned Futures orders">
         {orderCoordinates.map(({ order, y, anchorY }) => {
           const orderIdentity = futuresOrderIdentity(order)
@@ -745,41 +910,65 @@ export const FuturesWorkstationChart = ({
           const top = preview?.y ?? y
           const displayedPrice = preview?.price ?? order.price
           const displaced = preview === null && Math.abs(anchorY - y) > 0.5
+          const intent = describeFuturesOrderIntent(order)
+          const notional = orderNotionalUsdt(order)
+          // Idle handles show what the order is worth; a dragged handle shows the
+          // price being aimed at. The exact resting price stays on the axis.
+          const label = preview === null ? `${notional ?? '—'} USDT` : displayedPrice
           const content = (
             <>
-              <span>{order.orderKind === 'ALGO' ? 'ALGO · ' : ''}{order.positionSide} {order.positionEffect}</span>
-              <strong>{displayedPrice}</strong>
+              <b>{order.orderKind === 'ALGO' ? 'ALGO ' : ''}{intent.label}</b>
+              <span>{label}</span>
             </>
           )
           if (order.orderKind === 'ALGO') {
             return (
               <div
-                className={`futures-workstation-owned-order is-${order.positionSide.toLowerCase()} is-algo${displaced ? ' is-displaced' : ''}`}
+                className={`futures-workstation-owned-order is-${intent.tone} is-algo${displaced ? ' is-displaced' : ''}`}
                 key={orderIdentity}
                 style={{ top: `${top}px` }}
                 data-anchor-y={anchorY}
                 role="note"
-                aria-label={`ALGO ${order.positionSide} ${order.positionEffect} order at ${order.price}; price is managed by Binance and is not draggable`}
+                aria-label={`ALGO ${intent.side} ${intent.label} order at ${order.price}; price is managed by Binance and is not draggable`}
               >
                 {content}
               </div>
             )
           }
           return (
-            <button
-              type="button"
-              className={`futures-workstation-owned-order is-${order.positionSide.toLowerCase()}${displaced ? ' is-displaced' : ''}`}
+            <div
+              className={`futures-workstation-owned-order is-${intent.tone}${displaced ? ' is-displaced' : ''}${preview === null ? '' : ' is-moving'}`}
               key={orderIdentity}
               style={{ top: `${top}px` }}
               data-anchor-y={anchorY}
-              aria-label={`Move ${order.positionSide} ${order.positionEffect} order at ${order.price} with Ctrl or Alt drag`}
-              onPointerDown={event => beginOrderDrag(event, order)}
-              onPointerMove={moveOrderDrag}
-              onPointerUp={event => finishOrderDrag(event)}
-              onPointerCancel={event => finishOrderDrag(event, true)}
             >
-              {content}
-            </button>
+              <button
+                type="button"
+                className="futures-workstation-owned-order-grip"
+                aria-label={`Move ${intent.side} ${intent.label} order at ${order.price} with Ctrl or Alt drag`}
+                onPointerDown={event => beginOrderDrag(event, order)}
+                onPointerMove={moveOrderDrag}
+                onPointerUp={event => finishOrderDrag(event)}
+                onPointerCancel={event => finishOrderDrag(event, true)}
+                onDoubleClick={event => onOrderEditRef.current?.(order, {
+                  x: event.clientX,
+                  y: event.clientY,
+                })}
+              >
+                {content}
+              </button>
+              <button
+                type="button"
+                className="futures-workstation-owned-order-cancel"
+                aria-label={`Cancel ${intent.side} ${intent.label} order at ${order.price}`}
+                onClick={() => onOrderCancelRef.current?.({
+                  symbol: order.symbol,
+                  orderId: order.orderId,
+                })}
+              >
+                ×
+              </button>
+            </div>
           )
         })}
       </div>

@@ -20,6 +20,7 @@ const moduleMocks = vi.hoisted(() => {
         state.marketSocket = makeSocket();
         state.userDataSocket = makeSocket();
         state.userDataConnection = Promise.resolve(state.userDataSocket);
+        state.futuresUserDataSockets = [];
         state.httpServer = {
             listen: vi.fn((port, host, callback) => callback?.()),
             close: vi.fn(),
@@ -39,6 +40,15 @@ const moduleMocks = vi.hoisted(() => {
                 e: 'executionReport', symbol: 'BTCUSDT', status: 'CANCELED', orderId: 1,
             }),
             cancelAllOrders: vi.fn().mockResolvedValue({}),
+            adjustPositionMargin: vi.fn().mockResolvedValue({
+                symbol: 'BTCUSDT', positionSide: 'BOTH', direction: 'ADD', amount: '250',
+            }),
+            modifyOrder: vi.fn().mockResolvedValue({
+                e: 'executionReport', symbol: 'BTCUSDT', status: 'NEW', orderId: 1,
+            }),
+            findOrder: vi.fn().mockResolvedValue({ exists: false, report: null }),
+            getOrderHistory: vi.fn().mockResolvedValue([{ orderId: 1, status: 'FILLED' }]),
+            getTradeHistory: vi.fn().mockResolvedValue([{ id: 2, realizedPnl: '-96.74' }]),
             getAccountRefreshOperations: vi.fn(() => []),
             createUserDataStreamListenKey: vi.fn().mockResolvedValue('futures-listen-key'),
             renewUserDataStreamListenKey: vi.fn().mockResolvedValue({}),
@@ -110,10 +120,17 @@ const moduleMocks = vi.hoisted(() => {
         setUserDataConnection: (connection) => {
             state.userDataConnection = connection;
         },
+        createFuturesUserDataSocket: () => {
+            const socket = makeSocket();
+            socket.close = vi.fn();
+            state.futuresUserDataSockets.push(socket);
+            return socket;
+        },
         get connect() { return state.connect; },
         get httpServer() { return state.httpServer; },
         get marketSocket() { return state.marketSocket; },
         get futuresAdapter() { return state.futuresAdapter; },
+        get futuresUserDataSockets() { return state.futuresUserDataSockets; },
         get rendererConnection() { return state.rendererConnection; },
         get rendererHandlers() { return state.rendererHandlers; },
         get sendRequest() { return state.sendRequest; },
@@ -153,7 +170,7 @@ vi.mock('./futures-trading-adapter.js', async (importOriginal) => {
 
 vi.mock('ws', () => ({
     default: vi.fn(function MockFuturesUserDataSocket() {
-        return { on: vi.fn(), close: vi.fn() };
+        return moduleMocks.createFuturesUserDataSocket();
     }),
 }));
 
@@ -161,6 +178,21 @@ const flushMicrotasks = async () => {
     for (let index = 0; index < 10; index += 1) {
         await Promise.resolve();
     }
+};
+
+// Activation is now a precondition for any market-scoped frame, and it answers
+// with its own envelope. The acknowledgement is cleared here so each test still
+// counts the frames it is actually about.
+const activateSpotRuntime = async () => {
+    await moduleMocks.rendererHandlers.message({
+        type: 'utf8',
+        utf8Data: JSON.stringify({
+            action: 'activate_market',
+            marketMode: 'spot',
+        }),
+    });
+    await flushMicrotasks();
+    moduleMocks.rendererConnection.sendUTF.mockClear();
 };
 
 describe('setupBinanceConnection user-data orchestration', () => {
@@ -178,8 +210,12 @@ describe('setupBinanceConnection user-data orchestration', () => {
         moduleMocks.reset();
         vi.useFakeTimers();
         vi.setSystemTime(new Date('2026-07-09T10:00:00.000Z'));
+        // Stubbed unconditionally so an operator shell that still exports real
+        // credentials cannot leak them into a test run or into its output.
         vi.stubEnv('BK', 'test-api-key');
         vi.stubEnv('BS', 'test-api-secret');
+        vi.stubEnv('BFK', 'test-futures-api-key');
+        vi.stubEnv('BFS', 'test-futures-api-secret');
         vi.stubEnv('WS_PORT', '14477');
         vi.stubEnv('LOG_LEVEL', 'info');
         vi.stubEnv('https_proxy', '');
@@ -224,6 +260,435 @@ describe('setupBinanceConnection user-data orchestration', () => {
         const firstClose = controller.close();
         expect(controller.close()).toBe(firstClose);
         await firstClose;
+    });
+
+    // A rejected handshake reaches the browser as an anonymous 1006, which is
+    // why a renderer holding a token this process never issued retried it every
+    // 500 ms for the whole session and filled the log with `invalid token`.
+    it('closes a wrong token with a code the renderer can stop on, and registers nothing', async () => {
+        const { validateLocalWebSocketRequest } = await import('./local-websocket-access.js');
+        validateLocalWebSocketRequest.mockReturnValueOnce({
+            allowed: false,
+            status: 401,
+            reason: 'invalid-token',
+        });
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+
+        const refused = { close: vi.fn() };
+        const request = {
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => refused),
+            reject: vi.fn(),
+        };
+        moduleMocks.websocketServerHandlers.request(request);
+
+        expect(request.reject).not.toHaveBeenCalled();
+        expect(refused.close).toHaveBeenCalledExactlyOnceWith(4401, 'invalid-token');
+        // Accepted only in order to be closed: no message handler was attached
+        // and nothing was ever sent on it.
+        expect(refused.on).toBeUndefined();
+        expect(moduleMocks.rendererConnection.sendUTF).not.toHaveBeenCalled();
+    });
+
+    it('still rejects an untrusted origin outright rather than accepting it', async () => {
+        const { validateLocalWebSocketRequest } = await import('./local-websocket-access.js');
+        validateLocalWebSocketRequest.mockReturnValueOnce({
+            allowed: false,
+            status: 403,
+            reason: 'untrusted-origin',
+        });
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+
+        const request = {
+            origin: 'https://evil.example',
+            accept: vi.fn(),
+            reject: vi.fn(),
+        };
+        moduleMocks.websocketServerHandlers.request(request);
+
+        expect(request.accept).not.toHaveBeenCalled();
+        expect(request.reject).toHaveBeenCalledWith(403, 'untrusted-origin');
+    });
+
+    it('starts only the local diagnostic transport and rejects market work without BK/BS', async () => {
+        vi.stubEnv('BK', '');
+        vi.stubEnv('BS', '');
+        vi.stubEnv('BFK', '');
+        vi.stubEnv('BFS', '');
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1' },
+        });
+
+        expect(moduleMocks.Spot).not.toHaveBeenCalled();
+        expect(moduleMocks.FuturesTradingAdapter).not.toHaveBeenCalled();
+        expect(moduleMocks.connect).not.toHaveBeenCalled();
+
+        const request = {
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+            reject: vi.fn(),
+        };
+        moduleMocks.websocketServerHandlers.request(request);
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({ action: 'get_startup_status' }),
+        });
+
+        const startup = JSON.parse(moduleMocks.rendererConnection.sendUTF.mock.calls[0][0]);
+        expect(startup).toMatchObject({
+            type: 'startup_status',
+            state: 'CONFIG_ERROR',
+            code: 'MISSING_CREDENTIALS',
+            ready: false,
+            missingFields: ['BK', 'BS', 'BFK', 'BFS'],
+        });
+        expect(startup.markets).toMatchObject({
+            spot: { ready: false, missingFields: ['BK', 'BS'] },
+            futures: { ready: false, missingFields: ['BFK', 'BFS'] },
+        });
+
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'subscribe',
+                channelId: 'detail-BTCUSDT-1m',
+                symbol: 'BTCUSDT',
+                interval: '1m',
+            }),
+        });
+        const rejection = JSON.parse(moduleMocks.rendererConnection.sendUTF.mock.calls[1][0]);
+        expect(rejection.command_rejected).toMatchObject({
+            code: 'EXECUTION_NOT_CONFIGURED',
+        });
+        expect(moduleMocks.sendRequest).not.toHaveBeenCalled();
+        expect(moduleMocks.connect).not.toHaveBeenCalled();
+    });
+
+    it('builds no Futures adapter and refuses Futures activation with Spot credentials only', async () => {
+        vi.stubEnv('BFK', '');
+        vi.stubEnv('BFS', '');
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1' },
+        });
+
+        expect(moduleMocks.Spot).toHaveBeenCalledTimes(1);
+        expect(moduleMocks.FuturesTradingAdapter).not.toHaveBeenCalled();
+
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'activate_market',
+                marketMode: 'futures-live',
+            }),
+        });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+
+        const payloads = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message));
+        expect(payloads.find(payload => payload.command_rejected)?.command_rejected)
+            .toMatchObject({
+                code: 'MARKET_NOT_CONFIGURED',
+                details: { market: 'futures' },
+            });
+        expect(payloads.some(payload => payload.type === 'futures_account_state')).toBe(false);
+        expect(moduleMocks.futuresUserDataSockets).toHaveLength(0);
+    });
+
+    it('builds no Spot client and refuses Spot activation with Futures credentials only', async () => {
+        vi.stubEnv('BK', '');
+        vi.stubEnv('BS', '');
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1' },
+        });
+
+        expect(moduleMocks.Spot).not.toHaveBeenCalled();
+        expect(moduleMocks.FuturesTradingAdapter).toHaveBeenCalledTimes(1);
+        expect(moduleMocks.FuturesTradingAdapter.mock.calls[0][0]).toMatchObject({
+            apiKey: 'test-futures-api-key',
+            apiSecret: 'test-futures-api-secret',
+        });
+
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({ action: 'activate_market', marketMode: 'spot' }),
+        });
+        await flushMicrotasks();
+
+        const rejections = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.command_rejected);
+        expect(rejections[0].command_rejected).toMatchObject({
+            code: 'MARKET_NOT_CONFIGURED',
+            details: { market: 'spot' },
+        });
+        expect(moduleMocks.connect).not.toHaveBeenCalled();
+    });
+
+    it('never signs Futures requests with the Spot credential pair', () => {
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1' },
+        });
+
+        expect(moduleMocks.FuturesTradingAdapter.mock.calls[0][0]).toMatchObject({
+            apiKey: 'test-futures-api-key',
+            apiSecret: 'test-futures-api-secret',
+        });
+        expect(moduleMocks.Spot.mock.calls[0][0].configurationRestAPI).toMatchObject({
+            apiKey: 'test-api-key',
+            apiSecret: 'test-api-secret',
+        });
+    });
+
+    it('broadcasts independent Futures account resource transitions and retains partial success', async () => {
+        const permissionError = Object.assign(new Error('permission denied'), { code: -2015 });
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([
+            {
+                type: 'balances',
+                weight: 5,
+                errorLabel: 'balances',
+                loadPayload: vi.fn().mockResolvedValue({
+                    futures_balances: { USDT: { available: '0', total: '0' } },
+                }),
+            },
+            {
+                type: 'regularOrders',
+                weight: 40,
+                errorLabel: 'regular orders',
+                loadPayload: vi.fn().mockResolvedValue({
+                    futures_regular_orders: [
+                        { symbol: 'TUTUSDT', orderId: 1, orderKind: 'REGULAR', status: 'NEW' },
+                        { symbol: 'BTCUSDT', orderId: 2, orderKind: 'REGULAR', status: 'NEW' },
+                    ],
+                }),
+            },
+            {
+                type: 'algoOrders',
+                weight: 40,
+                errorLabel: 'algo orders',
+                loadPayload: vi.fn().mockRejectedValue(permissionError),
+            },
+            {
+                type: 'positions',
+                weight: 5,
+                errorLabel: 'positions',
+                loadPayload: vi.fn().mockResolvedValue({ futures_positions: [] }),
+            },
+        ]);
+
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1' },
+        });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'activate_market',
+                marketMode: 'futures-live',
+            }),
+        });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+
+        const accountEnvelopes = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.type === 'futures_account_state');
+        expect(accountEnvelopes.length).toBeGreaterThanOrEqual(5);
+        const initialAccountLoading = accountEnvelopes.find(payload => (
+            payload.resources.balances.status === 'loading'
+            && payload.resources.regularOrders.status === 'loading'
+            && payload.resources.algoOrders.status === 'loading'
+            && payload.resources.positions.status === 'loading'
+        ));
+        expect(initialAccountLoading.resources).toMatchObject({
+            balances: { status: 'loading', data: null },
+            regularOrders: { status: 'loading', data: [] },
+            algoOrders: { status: 'loading', data: [] },
+            positions: { status: 'loading', data: [] },
+        });
+
+        const latest = accountEnvelopes.at(-1);
+        expect(latest.resources.balances).toMatchObject({
+            status: 'ready',
+            data: { USDT: { available: '0', total: '0' } },
+            lastSuccessfulAt: expect.any(Number),
+        });
+        expect(latest.resources.regularOrders).toMatchObject({
+            status: 'ready',
+            data: [
+                expect.objectContaining({ symbol: 'TUTUSDT', orderId: 1 }),
+                expect.objectContaining({ symbol: 'BTCUSDT', orderId: 2 }),
+            ],
+        });
+        expect(latest.resources.algoOrders).toMatchObject({
+            status: 'error',
+            data: [],
+            error: {
+                code: 'FUTURES_PERMISSION_DENIED',
+                category: 'permission',
+                retryable: false,
+            },
+        });
+        expect(latest.resources.positions.status).toBe('ready');
+        expect(JSON.stringify(latest)).not.toContain('test-api-secret');
+    });
+
+    // positionRisk is only re-read on an account event, so a position row is
+    // worth what the exchange said minutes ago unless the public mark stream
+    // reaches the renderer. This covers the whole path, not the feed alone.
+    it('marks open Futures positions to the live mark price stream', async () => {
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([
+            {
+                type: 'positions',
+                weight: 5,
+                errorLabel: 'positions',
+                loadPayload: vi.fn().mockResolvedValue({
+                    futures_positions: [
+                        {
+                            symbol: 'BMTUSDT',
+                            positionSide: 'BOTH',
+                            quantity: '-446422',
+                            entryPrice: '0.03140',
+                            markPrice: '0.03398',
+                            unrealizedPnl: '-1151.77',
+                        },
+                    ],
+                }),
+            },
+        ]);
+
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1' },
+        });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'activate_market',
+                marketMode: 'futures-live',
+            }),
+        });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+
+        const { default: MockWebSocket } = await import('ws');
+        const streamIndex = MockWebSocket.mock.calls
+            .findIndex(([url]) => String(url).includes('@markPrice@1s'));
+        expect(streamIndex).toBeGreaterThanOrEqual(0);
+        // The routed prefix is part of the contract, not decoration: `/stream`
+        // was decommissioned on 2026-04-23 and answers the handshake with a
+        // socket that never delivers a frame.
+        expect(MockWebSocket.mock.calls[streamIndex][0])
+            .toBe('wss://fstream.binance.com/market/stream?streams=bmtusdt@markPrice@1s');
+
+        const markSocket = MockWebSocket.mock.results[streamIndex].value;
+        markSocket.handlers.message(JSON.stringify({
+            stream: 'bmtusdt@markPrice@1s',
+            data: { e: 'markPriceUpdate', E: 1_784_000_000_000, s: 'BMTUSDT', p: '0.03500' },
+        }));
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        const markEnvelopes = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.type === 'futures_position_marks');
+        expect(markEnvelopes.at(-1)).toMatchObject({
+            version: 1,
+            marks: { BMTUSDT: { markPrice: '0.03500', updatedAt: 1_784_000_000_000 } },
+        });
+    });
+
+    it('retains account-wide orders as stale across Futures stream reconnect until REST recovery', async () => {
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([
+            {
+                type: 'regularOrders',
+                weight: 1,
+                errorLabel: 'regular orders',
+                loadPayload: vi.fn().mockResolvedValue({
+                    futures_regular_orders: [
+                        { symbol: 'TUTUSDT', orderId: 11, orderKind: 'REGULAR', status: 'NEW' },
+                    ],
+                }),
+            },
+            {
+                type: 'algoOrders',
+                weight: 1,
+                errorLabel: 'algo orders',
+                loadPayload: vi.fn().mockResolvedValue({
+                    futures_algo_orders: [
+                        { symbol: 'TUTUSDT', orderId: 11, orderKind: 'ALGO', status: 'NEW' },
+                    ],
+                }),
+            },
+        ]);
+
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1' },
+        });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'activate_market',
+                marketMode: 'futures-live',
+            }),
+        });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+
+        const firstSocket = moduleMocks.futuresUserDataSockets[0];
+        expect(firstSocket).toBeDefined();
+        firstSocket.handlers.open();
+        await vi.advanceTimersByTimeAsync(1_000);
+        await flushMicrotasks();
+
+        const readAccountEnvelopes = () => moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.type === 'futures_account_state');
+        expect(readAccountEnvelopes().at(-1).resources).toMatchObject({
+            regularOrders: { status: 'ready', data: [expect.objectContaining({ orderKind: 'REGULAR' })] },
+            algoOrders: { status: 'ready', data: [expect.objectContaining({ orderKind: 'ALGO' })] },
+            userDataStream: { status: 'ready' },
+        });
+
+        firstSocket.handlers.close();
+        await flushMicrotasks();
+        expect(readAccountEnvelopes().at(-1).resources).toMatchObject({
+            regularOrders: { status: 'stale', data: [expect.objectContaining({ orderKind: 'REGULAR' })] },
+            algoOrders: { status: 'stale', data: [expect.objectContaining({ orderKind: 'ALGO' })] },
+            userDataStream: { status: 'stale' },
+        });
+
+        await vi.advanceTimersByTimeAsync(6_000);
+        await flushMicrotasks();
+        const secondSocket = moduleMocks.futuresUserDataSockets[1];
+        expect(secondSocket).toBeDefined();
+        secondSocket.handlers.open();
+        await vi.advanceTimersByTimeAsync(1_000);
+        await flushMicrotasks();
+
+        expect(readAccountEnvelopes().at(-1).resources).toMatchObject({
+            regularOrders: { status: 'ready', data: [expect.objectContaining({ orderKind: 'REGULAR' })] },
+            algoOrders: { status: 'ready', data: [expect.objectContaining({ orderKind: 'ALGO' })] },
+            userDataStream: { status: 'ready' },
+        });
     });
 
     it('connects live user data and coalesces adapter-owned stream refreshes', async () => {
@@ -296,6 +761,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
             accept: vi.fn(() => moduleMocks.rendererConnection),
         };
         moduleMocks.websocketServerHandlers.request(request);
+        await activateSpotRuntime();
 
         await flushMicrotasks();
         await vi.advanceTimersByTimeAsync(500);
@@ -454,6 +920,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
             accept: vi.fn(() => moduleMocks.rendererConnection),
         };
         moduleMocks.websocketServerHandlers.request(request);
+        await activateSpotRuntime();
 
         await flushMicrotasks();
         await vi.advanceTimersByTimeAsync(500);
@@ -654,6 +1121,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 accept: vi.fn(() => moduleMocks.rendererConnection),
             };
             moduleMocks.websocketServerHandlers.request(requestA);
+            await activateSpotRuntime();
 
             await flushMicrotasks();
             await vi.advanceTimersByTimeAsync(500);
@@ -689,6 +1157,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 accept: vi.fn(() => moduleMocks.rendererConnection),
             };
             moduleMocks.websocketServerHandlers.request(requestB);
+            await activateSpotRuntime();
 
             await flushMicrotasks();
             await vi.advanceTimersByTimeAsync(500);
@@ -991,6 +1460,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 accept: vi.fn(() => moduleMocks.rendererConnection),
             };
             moduleMocks.websocketServerHandlers.request(request);
+            await activateSpotRuntime();
 
             await flushMicrotasks();
             await vi.advanceTimersByTimeAsync(500);
@@ -1185,6 +1655,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 accept: vi.fn(() => moduleMocks.rendererConnection),
             };
             moduleMocks.websocketServerHandlers.request(request);
+            await activateSpotRuntime();
 
             await flushMicrotasks();
             await vi.advanceTimersByTimeAsync(500);
@@ -1381,6 +1852,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 accept: vi.fn(() => moduleMocks.rendererConnection),
             };
             moduleMocks.websocketServerHandlers.request(request);
+            await activateSpotRuntime();
 
             await flushMicrotasks();
             await vi.advanceTimersByTimeAsync(500);
@@ -1615,6 +2087,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 accept: vi.fn(() => moduleMocks.rendererConnection),
             };
             moduleMocks.websocketServerHandlers.request(request);
+            await activateSpotRuntime();
 
             await flushMicrotasks();
 
@@ -1738,6 +2211,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 accept: vi.fn(() => moduleMocks.rendererConnection),
             };
             moduleMocks.websocketServerHandlers.request(request);
+            await activateSpotRuntime();
 
             await flushMicrotasks();
 
@@ -1829,6 +2303,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 accept: vi.fn(() => moduleMocks.rendererConnection),
             };
             moduleMocks.websocketServerHandlers.request(request);
+            await activateSpotRuntime();
 
             await flushMicrotasks();
             await vi.advanceTimersByTimeAsync(500);
@@ -1896,6 +2371,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
             origin: 'http://localhost:5174',
             accept: vi.fn(() => moduleMocks.rendererConnection),
         });
+        await activateMarket('spot');
 
         await moduleMocks.rendererHandlers.message({
             type: 'utf8',
@@ -1946,6 +2422,13 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 interval: '1h',
             }),
         });
+        // The forged Spot frames above are refused while Spot is the activated
+        // market; the typed Futures commands below need Futures to be, which is
+        // the whole point of the gate. The refusals are read before switching.
+        const forgedRejections = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.command_rejected?.code === 'UNSUPPORTED_MARKET_TYPE');
+        await activateMarket('futures-live');
         await moduleMocks.rendererHandlers.message({
             type: 'utf8',
             utf8Data: JSON.stringify({
@@ -1977,11 +2460,8 @@ describe('setupBinanceConnection user-data orchestration', () => {
 
         expect(placeOrder).not.toHaveBeenCalled();
         expect(cancelOrder).not.toHaveBeenCalled();
-        const rejections = moduleMocks.rendererConnection.sendUTF.mock.calls
-            .map(([message]) => JSON.parse(message))
-            .filter(payload => payload.command_rejected?.code === 'UNSUPPORTED_MARKET_TYPE');
-        expect(rejections).toHaveLength(4);
-        expect(rejections.map(payload => payload.command_rejected.request)).toEqual([
+        expect(forgedRejections).toHaveLength(4);
+        expect(forgedRejections.map(payload => payload.command_rejected.request)).toEqual([
             'buyOrder',
             'cancelOrder',
             'sellOrder',
@@ -1994,6 +2474,358 @@ describe('setupBinanceConnection user-data orchestration', () => {
             .map(([message]) => JSON.parse(message))
             .filter(payload => payload.futures_execution_update);
         expect(futuresUpdates.length).toBeGreaterThanOrEqual(2);
+    });
+
+    it('answers a futures history command without touching account resources', async () => {
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1' },
+        });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'account.history',
+                version: 1,
+                marketType: 'futures',
+                accountId: 'default',
+                clientOrderId: 'history-1',
+                symbol: 'BTCUSDT',
+            }),
+        });
+
+        expect(moduleMocks.futuresAdapter.getOrderHistory).toHaveBeenCalledWith({ symbol: 'BTCUSDT' });
+        expect(moduleMocks.futuresAdapter.getTradeHistory).toHaveBeenCalledWith({ symbol: 'BTCUSDT' });
+        const [history] = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.futures_history);
+        expect(history.futures_history).toMatchObject({
+            symbol: 'BTCUSDT',
+            orders: [{ orderId: 1, status: 'FILLED' }],
+            trades: [{ id: 2, realizedPnl: '-96.74' }],
+            error: null,
+        });
+    });
+
+    it('reports a failed futures history read inside the history payload', async () => {
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1' },
+        });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        const refusal = Object.assign(new Error('Invalid API-key, IP, or permissions for action'), {
+            code: -2015,
+        });
+        moduleMocks.futuresAdapter.getOrderHistory.mockRejectedValueOnce(refusal);
+
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'account.history',
+                version: 1,
+                marketType: 'futures',
+                accountId: 'default',
+                clientOrderId: 'history-2',
+                symbol: 'BTCUSDT',
+            }),
+        });
+
+        const payloads = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message));
+        const [history] = payloads.filter(payload => payload.futures_history);
+        expect(history.futures_history.error).toMatchObject({
+            code: 'FUTURES_API_ERROR',
+            binanceCode: -2015,
+        });
+        expect(history.futures_history.error.message).toContain('Futures');
+        // The failure stays inside history: no command rejection, no resync.
+        expect(payloads.some(payload => payload.command_rejected)).toBe(false);
+    });
+
+    // The audit case: a submission whose outcome Binance never confirmed. The
+    // old path called it a rejection, and resubmitting it created a second real
+    // order. These tests pin the three answers reconciliation can give.
+    // Nothing market-scoped is accepted before its market is activated, so a
+    // renderer that wants to trade Futures says so first — exactly as the real
+    // one does.
+    const activateMarket = async (marketMode) => {
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({ action: 'activate_market', marketMode }),
+        });
+        moduleMocks.rendererConnection.sendUTF.mockClear();
+    };
+
+    const connectRenderer = async (marketMode = 'futures-live') => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        if (marketMode) await activateMarket(marketMode);
+    };
+
+    const placeFuturesOrder = (clientOrderId = 'ambiguous-1') => moduleMocks.rendererHandlers.message({
+        type: 'utf8',
+        utf8Data: JSON.stringify({
+            action: 'trade.placeOrder',
+            version: 1,
+            marketType: 'futures',
+            accountId: 'default',
+            clientOrderId,
+            symbol: 'BTCUSDT',
+            side: 'BUY',
+            orderType: 'LIMIT',
+            timeInForce: 'GTC',
+            price: '50000',
+            quantity: '0.01',
+        }),
+    });
+
+    const emitted = () => moduleMocks.rendererConnection.sendUTF.mock.calls
+        .map(([message]) => JSON.parse(message));
+
+    it('never resubmits an ambiguous placement whose order exists on the exchange', async () => {
+        await connectRenderer();
+        moduleMocks.futuresAdapter.placeOrder.mockRejectedValueOnce(
+            Object.assign(new Error('Unknown error'), { status: 503, indeterminate: true }),
+        );
+        moduleMocks.futuresAdapter.findOrder.mockResolvedValueOnce({
+            exists: true,
+            report: { e: 'executionReport', symbol: 'BTCUSDT', status: 'NEW', orderId: 77 },
+        });
+
+        await placeFuturesOrder();
+
+        expect(moduleMocks.futuresAdapter.placeOrder).toHaveBeenCalledTimes(1);
+        expect(moduleMocks.futuresAdapter.findOrder).toHaveBeenCalledWith({
+            symbol: 'BTCUSDT',
+            orderId: undefined,
+            origClientOrderId: 'ambiguous-1',
+        });
+        const payloads = emitted();
+        // The operator is told it is unknown, never that it failed.
+        expect(payloads.some(payload => payload.command_rejected)).toBe(false);
+        expect(payloads.some(payload => payload.command_unresolved?.code === 'FUTURES_OUTCOME_PENDING')).toBe(true);
+        // …and then told the truth: the order is live.
+        expect(payloads.some(payload => payload.futures_execution_update?.orderId === 77)).toBe(true);
+    });
+
+    it('reports an ambiguous placement the exchange never received as an ordinary refusal', async () => {
+        await connectRenderer();
+        moduleMocks.futuresAdapter.placeOrder.mockRejectedValueOnce(
+            Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }),
+        );
+        moduleMocks.futuresAdapter.findOrder.mockResolvedValueOnce({ exists: false, report: null });
+
+        await placeFuturesOrder('ambiguous-2');
+
+        expect(moduleMocks.futuresAdapter.placeOrder).toHaveBeenCalledTimes(1);
+        const payloads = emitted();
+        expect(payloads.some(payload => payload.command_rejected?.code === 'FUTURES_API_ERROR')).toBe(true);
+    });
+
+    it('leaves an unreconcilable outcome unresolved and offers no retry', async () => {
+        await connectRenderer();
+        moduleMocks.futuresAdapter.placeOrder.mockRejectedValueOnce(
+            Object.assign(new Error('Unknown error'), { status: 500 }),
+        );
+        moduleMocks.futuresAdapter.findOrder.mockRejectedValue(
+            Object.assign(new Error('Unknown error'), { status: 500 }),
+        );
+
+        // Reconciliation backs off between attempts, so the timers have to run
+        // before the command settles.
+        const pending = placeFuturesOrder('ambiguous-3');
+        await vi.advanceTimersByTimeAsync(5_000);
+        await pending;
+
+        const payloads = emitted();
+        expect(payloads.some(payload => payload.command_rejected)).toBe(false);
+        const unknown = payloads.filter(p => p.command_unresolved?.code === 'FUTURES_OUTCOME_UNKNOWN');
+        expect(unknown).toHaveLength(1);
+        expect(unknown[0].command_unresolved.message).toMatch(/before acting on it/);
+    });
+
+    it('reports a determinate refusal without asking the exchange anything', async () => {
+        await connectRenderer();
+        moduleMocks.futuresAdapter.placeOrder.mockRejectedValueOnce(
+            Object.assign(new Error('Margin is insufficient.'), { status: 400, code: -2019 }),
+        );
+
+        await placeFuturesOrder('determinate-1');
+
+        expect(moduleMocks.futuresAdapter.findOrder).not.toHaveBeenCalled();
+        const payloads = emitted();
+        expect(payloads.some(payload => payload.command_unresolved)).toBe(false);
+        expect(payloads.some(payload => payload.command_rejected?.details?.binanceCode === -2019)).toBe(true);
+    });
+
+    it('runs a reconciliation requested while one is in flight instead of dropping it', async () => {
+        // The old code returned early when a refresh was already running, so the
+        // read that follows a trade silently never happened and the panel kept
+        // showing the pre-trade account until the operator pressed Ctrl+R.
+        let releaseFirstPass;
+        const firstPassGate = new Promise((resolve) => { releaseFirstPass = resolve; });
+        let passes = 0;
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockImplementation(() => {
+            passes += 1;
+            const pass = passes;
+            return [{
+                type: 'balances',
+                weight: 1,
+                errorLabel: 'balances',
+                loadPayload: async () => {
+                    if (pass === 1) await firstPassGate;
+                    return { futures_balances: { USDT: { available: String(pass), total: String(pass) } } };
+                },
+            }];
+        });
+        await connectRenderer();
+
+        const refresh = clientOrderId => moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'account.refresh',
+                version: 1,
+                marketType: 'futures',
+                accountId: 'default',
+                clientOrderId,
+                symbol: 'BTCUSDT',
+            }),
+        });
+
+        const first = refresh('refresh-1');
+        await flushMicrotasks();
+        const second = refresh('refresh-2');
+        await flushMicrotasks();
+        releaseFirstPass();
+        // The limiter spaces admissions, so the second pass only runs once the
+        // timers do.
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+        await second;
+        await first;
+
+        expect(passes).toBe(2);
+        const balances = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.type === 'futures_account_state')
+            .map(payload => payload.resources.balances.data?.USDT?.available)
+            .filter(Boolean);
+        expect(balances.at(-1)).toBe('2');
+    });
+
+    it('does not let a snapshot started before a trade overwrite the state that trade produced', async () => {
+        let releaseSnapshot;
+        const snapshotGate = new Promise((resolve) => { releaseSnapshot = resolve; });
+        let passes = 0;
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockImplementation(() => {
+            passes += 1;
+            const pass = passes;
+            return [{
+                type: 'regularOrders',
+                weight: 1,
+                errorLabel: 'regular orders',
+                loadPayload: async () => {
+                    // The first read is the stale one: it began before the
+                    // placement and describes an account with no orders.
+                    if (pass === 1) await snapshotGate;
+                    return {
+                        futures_regular_orders: pass === 1
+                            ? []
+                            : [{ symbol: 'BTCUSDT', orderId: 77, orderKind: 'REGULAR', status: 'NEW' }],
+                    };
+                },
+            }];
+        });
+        await connectRenderer();
+
+        // Not awaited: this read is deliberately still in flight when the
+        // placement lands.
+        const staleRead = moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'account.refresh',
+                version: 1,
+                marketType: 'futures',
+                accountId: 'default',
+                clientOrderId: 'stale-refresh',
+                symbol: 'BTCUSDT',
+            }),
+        });
+        await flushMicrotasks();
+
+        const placement = placeFuturesOrder('epoch-1');
+        await flushMicrotasks();
+        releaseSnapshot();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+        await placement;
+        await staleRead;
+
+        const orderSnapshots = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.type === 'futures_account_state')
+            .filter(payload => payload.resources.regularOrders.status === 'ready')
+            .map(payload => payload.resources.regularOrders.data);
+        // The pre-trade snapshot is discarded rather than applied as an empty book.
+        expect(orderSnapshots.every(orders => orders.length === 1)).toBe(true);
+        expect(orderSnapshots.at(-1)[0]).toMatchObject({ orderId: 77 });
+    });
+
+    it('reports a failed Spot placement and cancellation to the operator, not only to the log', async () => {
+        await connectRenderer('spot');
+        moduleMocks.spotClient.restAPI.newOrder = vi.fn().mockRejectedValue(
+            Object.assign(new Error('Filter failure: MIN_NOTIONAL'), { status: 400, code: -1013 }),
+        );
+        moduleMocks.spotClient.restAPI.deleteOrder = vi.fn().mockRejectedValue(
+            Object.assign(new Error('Unknown order sent.'), { status: 400, code: -2011 }),
+        );
+
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'trade.placeOrder',
+                version: 1,
+                marketType: 'spot',
+                accountId: 'default',
+                clientOrderId: 'spot-fail-1',
+                symbol: 'BTCUSDT',
+                side: 'BUY',
+                orderType: 'LIMIT',
+                timeInForce: 'GTC',
+                price: '50000',
+                quantity: '0.01',
+            }),
+        });
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'trade.cancelOrder',
+                version: 1,
+                marketType: 'spot',
+                accountId: 'default',
+                clientOrderId: 'spot-fail-2',
+                symbol: 'BTCUSDT',
+                orderId: '5',
+            }),
+        });
+
+        const rejections = emitted()
+            .filter(payload => payload.command_rejected?.code === 'SPOT_API_ERROR');
+        expect(rejections.map(payload => payload.command_rejected.request)).toEqual([
+            'trade.placeOrder',
+            'trade.cancelOrder',
+        ]);
+        expect(rejections[0].command_rejected.details.binanceCode).toBe(-1013);
     });
 
     it('pins local renderer frame/message bounds and rejects malformed or oversized messages', async () => {
@@ -2085,6 +2917,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
             origin: 'http://localhost:5174',
             accept: vi.fn(() => moduleMocks.rendererConnection),
         });
+        await activateMarket('futures-live');
         const sendTyped = payload => moduleMocks.rendererHandlers.message({
             type: 'utf8',
             utf8Data: JSON.stringify({ version: 1, marketType: 'futures', ...payload }),
@@ -2133,6 +2966,13 @@ describe('setupBinanceConnection user-data orchestration', () => {
             origin: 'http://localhost:5174',
             accept: vi.fn(() => moduleMocks.rendererConnection),
         });
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'activate_market',
+                marketMode: 'futures-live',
+            }),
+        });
         const sendOrder = payload => moduleMocks.rendererHandlers.message({
             type: 'utf8',
             utf8Data: JSON.stringify({
@@ -2152,6 +2992,9 @@ describe('setupBinanceConnection user-data orchestration', () => {
             .map(([message]) => JSON.parse(message))
             .find(payload => payload.command_rejected?.code === 'FUTURES_ORDER_CAP_EXCEEDED');
         expect(rejection.command_rejected.details).toMatchObject({ capUsdt: 100 });
+        expect(moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .some(payload => payload.futures_max_order_usdt === '100')).toBe(true);
 
         // 0.001 × 50000 = 50 USDT ≤ cap → placed.
         await sendOrder({ orderType: 'LIMIT', timeInForce: 'GTC', price: '50000', quantity: '0.001' });
@@ -2160,6 +3003,346 @@ describe('setupBinanceConnection user-data orchestration', () => {
         // Reduce-only market close is exempt regardless of size.
         await sendOrder({ side: 'SELL', orderType: 'MARKET', quantity: '10', positionSide: 'LONG', reduceOnly: true });
         expect(moduleMocks.futuresAdapter.placeOrder).toHaveBeenCalledTimes(2);
+    });
+
+    // The backend used to do market work for whichever market asked, including
+    // one the operator had left and one they had not yet chosen.
+    describe('the market activation gate', () => {
+        const sendFuturesPlacement = () => moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'trade.placeOrder',
+                version: 1,
+                marketType: 'futures',
+                accountId: 'default',
+                clientOrderId: 'ungated-1',
+                symbol: 'BTCUSDT',
+                side: 'BUY',
+                orderType: 'LIMIT',
+                timeInForce: 'GTC',
+                price: '50000',
+                quantity: '0.01',
+            }),
+        });
+
+        const sendSpotSubscribe = () => moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'subscribe',
+                channelId: 'detail-BTCUSDT-1h',
+                channelType: 'detail',
+                symbol: 'BTCUSDT',
+                interval: '1h',
+            }),
+        });
+
+        const refusals = () => emitted()
+            .filter(payload => payload.command_rejected?.code === 'MARKET_NOT_ACTIVE');
+
+        it('refuses a Futures command that arrives before any market is activated', async () => {
+            await connectRenderer(null);
+
+            await sendFuturesPlacement();
+
+            expect(moduleMocks.futuresAdapter.placeOrder).not.toHaveBeenCalled();
+            expect(moduleMocks.futuresAdapter.getAccountRefreshOperations).not.toHaveBeenCalled();
+            expect(refusals()[0].command_rejected.details).toMatchObject({
+                marketType: 'futures',
+                requiredMarketMode: 'futures-live',
+                activeMarketMode: 'unselected',
+            });
+        });
+
+        it('refuses a Futures command after the operator has switched to Spot', async () => {
+            await connectRenderer('futures-live');
+            await activateMarket('spot');
+
+            await sendFuturesPlacement();
+
+            expect(moduleMocks.futuresAdapter.placeOrder).not.toHaveBeenCalled();
+            expect(refusals()[0].command_rejected.details).toMatchObject({
+                activeMarketMode: 'spot',
+            });
+        });
+
+        // `subscribeChannel` used to activate Spot itself, so a stray subscribe
+        // was enough to start market work nobody asked for.
+        it('starts no Spot subscription before Spot is activated', async () => {
+            await connectRenderer(null);
+
+            await sendSpotSubscribe();
+
+            expect(refusals()[0].command_rejected.details).toMatchObject({
+                marketType: 'spot',
+                requiredMarketMode: 'spot',
+            });
+            expect(moduleMocks.marketSocket.on).not.toHaveBeenCalled();
+        });
+
+        it('accepts the same commands once their market is the activated one', async () => {
+            await connectRenderer('futures-live');
+
+            await sendFuturesPlacement();
+
+            expect(moduleMocks.futuresAdapter.placeOrder).toHaveBeenCalledOnce();
+            expect(refusals()).toEqual([]);
+        });
+
+        it('acknowledges each activation with its own generation', async () => {
+            await connectRenderer(null);
+
+            await moduleMocks.rendererHandlers.message({
+                type: 'utf8',
+                utf8Data: JSON.stringify({ action: 'activate_market', marketMode: 'futures-live' }),
+            });
+            await moduleMocks.rendererHandlers.message({
+                type: 'utf8',
+                utf8Data: JSON.stringify({ action: 'activate_market', marketMode: 'spot' }),
+            });
+
+            const activations = emitted().filter(payload => payload.type === 'market_activation');
+            expect(activations).toEqual([
+                { type: 'market_activation', version: 1, marketMode: 'futures-live', generation: 1 },
+                { type: 'market_activation', version: 1, marketMode: 'spot', generation: 2 },
+            ]);
+        });
+    });
+
+    // The audit's amendment case, checked where the renderer cannot be trusted
+    // to have checked it: these frames are hand-built and never passed through
+    // any renderer gate.
+    describe('the order cap on amendments', () => {
+        const amend = (overrides = {}) => moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'trade.replaceOrder',
+                version: 1,
+                marketType: 'futures',
+                accountId: 'default',
+                clientOrderId: 'amend-1',
+                symbol: 'BTCUSDT',
+                side: 'BUY',
+                orderId: 11,
+                price: '40000',
+                quantity: '0.004',
+                ...overrides,
+            }),
+        });
+
+        // The desk's own view of the book, so an exemption is a fact it read
+        // rather than a claim the command carried.
+        const loadWorkingOrders = async (orders) => {
+            moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([{
+                type: 'regularOrders',
+                weight: 1,
+                errorLabel: 'regular orders',
+                loadPayload: async () => ({ futures_regular_orders: orders }),
+            }]);
+            // Fired, not awaited: the read is gated behind the rate limiter, so
+            // the timers have to move before the message settles.
+            const loaded = moduleMocks.rendererHandlers.message({
+                type: 'utf8',
+                utf8Data: JSON.stringify({
+                    action: 'account.refresh',
+                    version: 1,
+                    marketType: 'futures',
+                    accountId: 'default',
+                    clientOrderId: 'load-orders',
+                    symbol: 'BTCUSDT',
+                }),
+            });
+            await vi.advanceTimersByTimeAsync(1_000);
+            await loaded;
+        };
+
+        it('refuses an amendment past the cap and issues no exchange request', async () => {
+            vi.stubEnv('FUTURES_MAX_ORDER_USDT', '200');
+            await connectRenderer();
+
+            // 0.004 × 2 500 000 = 10 000 USDT against a 200 USDT ceiling.
+            await amend({ price: '2500000' });
+
+            expect(moduleMocks.futuresAdapter.modifyOrder).not.toHaveBeenCalled();
+            const rejection = emitted()
+                .find(payload => payload.command_rejected?.code === 'FUTURES_ORDER_CAP_EXCEEDED');
+            expect(rejection.command_rejected.details).toMatchObject({
+                marketType: 'futures',
+                capUsdt: 200,
+                notionalUsdt: '10000',
+            });
+            expect(rejection.command_rejected.message).toContain('FUTURES_MAX_ORDER_USDT');
+        });
+
+        it('lets an amendment inside the cap through unchanged', async () => {
+            vi.stubEnv('FUTURES_MAX_ORDER_USDT', '200');
+            await connectRenderer();
+
+            // 0.004 × 40 000 = 160 USDT, the order the audit started from.
+            await amend();
+
+            expect(moduleMocks.futuresAdapter.modifyOrder).toHaveBeenCalledOnce();
+            expect(emitted().some(payload => payload.command_rejected)).toBe(false);
+        });
+
+        it('exempts an amendment to an order the desk knows is reduce-only', async () => {
+            vi.stubEnv('FUTURES_MAX_ORDER_USDT', '200');
+            await connectRenderer();
+            await loadWorkingOrders([{
+                symbol: 'BTCUSDT',
+                orderId: 11,
+                clientOrderId: 'abc',
+                orderKind: 'REGULAR',
+                status: 'NEW',
+                reduceOnly: true,
+            }]);
+
+            await amend({ price: '2500000' });
+
+            expect(moduleMocks.futuresAdapter.modifyOrder).toHaveBeenCalledOnce();
+        });
+
+        it('caps an amendment to an order it cannot find rather than assuming an exit', async () => {
+            vi.stubEnv('FUTURES_MAX_ORDER_USDT', '200');
+            await connectRenderer();
+            await loadWorkingOrders([{
+                symbol: 'BTCUSDT',
+                orderId: 99,
+                clientOrderId: 'other',
+                orderKind: 'REGULAR',
+                status: 'NEW',
+                reduceOnly: true,
+            }]);
+
+            await amend({ price: '2500000' });
+
+            expect(moduleMocks.futuresAdapter.modifyOrder).not.toHaveBeenCalled();
+        });
+
+        it('leaves amendments alone when no cap is configured', async () => {
+            await connectRenderer();
+
+            await amend({ price: '2500000' });
+
+            expect(moduleMocks.futuresAdapter.modifyOrder).toHaveBeenCalledOnce();
+        });
+    });
+
+    // Margin moves between the wallet and one position. It places no order, so
+    // the order ceiling has nothing to measure — but it is still a submission,
+    // and travels the same gate, validation and outcome handling as one.
+    describe('position margin adjustments', () => {
+        const adjust = (overrides = {}) => moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'trade.adjustPositionMargin',
+                version: 1,
+                marketType: 'futures',
+                accountId: 'default',
+                clientOrderId: 'margin-1',
+                symbol: 'BTCUSDT',
+                positionSide: 'BOTH',
+                direction: 'ADD',
+                amount: '250',
+                ...overrides,
+            }),
+        });
+
+        it('moves margin on the named position and re-reads the account', async () => {
+            await connectRenderer();
+
+            await adjust();
+
+            expect(moduleMocks.futuresAdapter.adjustPositionMargin).toHaveBeenCalledExactlyOnceWith({
+                symbol: 'BTCUSDT',
+                positionSide: 'BOTH',
+                direction: 'ADD',
+                amount: '250',
+            });
+            expect(moduleMocks.futuresAdapter.placeOrder).not.toHaveBeenCalled();
+            expect(emitted().some(payload => payload.command_rejected)).toBe(false);
+        });
+
+        // The ceiling measures what an order puts at risk. Adding margin lowers
+        // the risk on a position that already exists.
+        it('does not measure a margin transfer against the order cap', async () => {
+            vi.stubEnv('FUTURES_MAX_ORDER_USDT', '100');
+            await connectRenderer();
+
+            await adjust({ amount: '10000' });
+
+            expect(moduleMocks.futuresAdapter.adjustPositionMargin).toHaveBeenCalledOnce();
+            expect(emitted().some(payload => (
+                payload.command_rejected?.code === 'FUTURES_ORDER_CAP_EXCEEDED'
+            ))).toBe(false);
+        });
+
+        it('refuses to take margin out while trading is paused, but lets it in', async () => {
+            await connectRenderer();
+            await moduleMocks.rendererHandlers.message({
+                type: 'utf8',
+                utf8Data: JSON.stringify({
+                    action: 'trade.setTradingPaused',
+                    version: 1,
+                    marketType: 'futures',
+                    paused: true,
+                }),
+            });
+
+            await adjust({ direction: 'REMOVE', amount: '40' });
+            expect(moduleMocks.futuresAdapter.adjustPositionMargin).not.toHaveBeenCalled();
+            expect(emitted().some(payload => (
+                payload.command_rejected?.code === 'FUTURES_TRADING_PAUSED'
+            ))).toBe(true);
+
+            await adjust();
+            expect(moduleMocks.futuresAdapter.adjustPositionMargin).toHaveBeenCalledOnce();
+        });
+
+        it('refuses a margin adjustment while futures is not the active market', async () => {
+            await connectRenderer('spot');
+
+            await adjust();
+
+            expect(moduleMocks.futuresAdapter.adjustPositionMargin).not.toHaveBeenCalled();
+            expect(emitted().some(payload => (
+                payload.command_rejected?.code === 'MARKET_NOT_ACTIVE'
+            ))).toBe(true);
+        });
+
+        // A transfer carries no client id Binance would echo, so there is
+        // nothing to reconcile by — and resending it would move the amount
+        // twice. Unknown is stated as unknown.
+        it('states an unanswered transfer as unresolved and never resends it', async () => {
+            await connectRenderer();
+            moduleMocks.futuresAdapter.adjustPositionMargin.mockRejectedValueOnce(
+                Object.assign(new Error('socket hang up'), { status: 503, indeterminate: true }),
+            );
+
+            await adjust();
+
+            expect(moduleMocks.futuresAdapter.adjustPositionMargin).toHaveBeenCalledOnce();
+            const payloads = emitted();
+            expect(payloads.some(payload => (
+                payload.command_unresolved?.code === 'FUTURES_OUTCOME_UNKNOWN'
+            ))).toBe(true);
+            expect(payloads.some(payload => payload.command_rejected)).toBe(false);
+        });
+
+        it('reports a refused transfer with the exchange own code', async () => {
+            await connectRenderer();
+            moduleMocks.futuresAdapter.adjustPositionMargin.mockRejectedValueOnce(
+                Object.assign(new Error('Add margin only supported for isolated'), { code: -4051 }),
+            );
+
+            await adjust();
+
+            const rejection = emitted().find(payload => payload.command_rejected);
+            expect(rejection.command_rejected).toMatchObject({
+                request: 'trade.adjustPositionMargin',
+                code: 'FUTURES_API_ERROR',
+                details: { marketType: 'futures', binanceCode: -4051 },
+            });
+        });
     });
 
     it('rejects retired futures.production frames without touching any adapter', async () => {
@@ -2195,8 +3378,6 @@ describe('setupBinanceConnection user-data orchestration', () => {
     });
 
     it('rejects removed hidden action aliases and bounded action/channel envelopes', async () => {
-        vi.stubEnv('BK', '');
-        vi.stubEnv('BS', '');
         const placeOrder = vi.spyOn(SpotTradingAdapter.prototype, 'placeOrder');
         const cancelOrder = vi.spyOn(SpotTradingAdapter.prototype, 'cancelOrder');
 
@@ -2207,6 +3388,8 @@ describe('setupBinanceConnection user-data orchestration', () => {
             origin: 'http://localhost:5174',
             accept: vi.fn(() => moduleMocks.rendererConnection),
         });
+
+        await activateMarket('spot');
 
         for (const payload of [
             { action: 'order', symbol: 'BTCUSDT', side: 'BUY', quantity: '1', price: '1' },
@@ -2311,6 +3494,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
             origin: 'http://localhost:5174',
             accept: vi.fn(() => moduleMocks.rendererConnection),
         });
+        await activateMarket('spot');
         await flushMicrotasks();
         await vi.advanceTimersByTimeAsync(1_000);
         await flushMicrotasks();
@@ -2349,6 +3533,9 @@ describe('setupBinanceConnection user-data orchestration', () => {
             price: '12346',
             newOrderRespType: 'FULL',
             recvWindow: 60000,
+            // The command's own identity, so Binance can recognise a
+            // resubmission of this intent instead of creating a second order.
+            newClientOrderId: 'spot-place-positive',
         });
         expect(events).toEqual([
             'rest:newOrder',

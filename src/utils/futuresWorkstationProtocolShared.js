@@ -1,8 +1,47 @@
 export const FUTURES_WORKSTATION_MARKET_TYPE = 'USD_M_FUTURES'
-export const FUTURES_WORKSTATION_PROTOCOL_VERSION = '4'
+export const FUTURES_WORKSTATION_PROTOCOL_VERSION = '6'
 export const FUTURES_WORKSTATION_REQUEST_MAX_BYTES = 1_024
-export const FUTURES_WORKSTATION_EVENT_MAX_BYTES = 15 * 1_024
+// Sized around the largest frame the desk actually sends — a full depth view.
+// The bound exists so a hostile frame can never force an unbounded parse, not to
+// keep frames small; 256 KiB is still a bounded, trivially cheap parse, and a
+// ceiling that silently truncated the book would be the more dangerous of the two.
+export const FUTURES_WORKSTATION_EVENT_MAX_BYTES = 256 * 1_024
 export const FUTURES_WORKSTATION_UINT64_MAX = '18446744073709551615'
+
+// How much of the book crosses to the renderer. This is a count of *raw*
+// exchange levels, but the book is displayed *grouped*: 14 rows at a 50× step
+// consume 700 levels. Sizing this below rows × step makes the book look empty
+// far from the mid — the feed ran out, not the market. It is pinned to the
+// thousand levels per side Binance serves, which is the deepest book that can
+// be delivered complete rather than guessed at.
+export const FUTURES_WORKSTATION_DEPTH_LEVELS_PER_SIDE = 1_000
+
+// A full depth frame is the node-densest event the desk sends: every level is
+// an object plus three strings. Deriving the parser's node budget from the level
+// count keeps it from being the bound that silently kills the book — a frame the
+// payload rules accept but the parser refuses is a feed that simply stops.
+export const FUTURES_WORKSTATION_EVENT_MAX_NODES = (
+  (FUTURES_WORKSTATION_DEPTH_LEVELS_PER_SIDE * 2 * 4) + 256
+)
+
+export const FUTURES_WORKSTATION_TAPE_LIMITS = Object.freeze({
+  MIN_TIMEOUT_MS: 16,
+  MAX_TIMEOUT_MS: 5_000,
+})
+
+export const FUTURES_WORKSTATION_DEFAULT_TAPE_SETTINGS = Object.freeze({
+  throttleEnabled: true,
+  timeoutMs: 250,
+  minNotionalUsdt: '0',
+})
+
+// One request reads at most this many candles behind the live window. Binance
+// serves 1500 per call; 1000 keeps the read at weight 5 and the response inside
+// the transport's body bound, and deeper history is simply more requests.
+export const FUTURES_WORKSTATION_CANDLE_HISTORY_LIMITS = Object.freeze({
+  MAX_ROWS: 1_000,
+  DEFAULT_ROWS: 1_000,
+})
 
 export const FUTURES_WORKSTATION_INTERVALS = Object.freeze([
   '1m',
@@ -18,6 +57,7 @@ export const FUTURES_WORKSTATION_RESOURCES = Object.freeze({
   CATALOG: 'catalog',
   HEADER: 'header',
   CANDLES: 'candles',
+  CANDLE_HISTORY: 'candleHistory',
   DEPTH: 'depth',
   TRADES: 'trades',
 })
@@ -36,6 +76,8 @@ const STATE_VALUES = new Set(Object.values(FUTURES_WORKSTATION_STATES))
 const INTERVAL_VALUES = new Set(FUTURES_WORKSTATION_INTERVALS)
 const EXCHANGE_IDENTITY_MAX_BYTES = 64
 const UTF8_ENCODER = new TextEncoder()
+const JSON_WHITESPACE = new Set([' ', '\n', '\r', '\t'])
+const JSON_STRING_ESCAPES = new Set(['"', '\\', '/', 'b', 'f', 'n', 'r', 't'])
 const EXCHANGE_IDENTITY_CHARACTERS = '[\\p{Lu}\\p{Lt}\\p{Lo}\\p{N}]'
 const SYMBOL_PATTERN = new RegExp(
   `^(?:${EXCHANGE_IDENTITY_CHARACTERS}{1,20}|${EXCHANGE_IDENTITY_CHARACTERS}{1,13}_[0-9]{6})$`,
@@ -110,7 +152,24 @@ const isReasonCode = value => (
   || (typeof value === 'string' && /^[A-Z0-9_]{1,96}$/.test(value))
 )
 
-const utf8Length = (value) => new TextEncoder().encode(value).byteLength
+// Measured, not encoded. A full depth frame carries six thousand short strings
+// and each one used to be encoded into a throwaway buffer — behind a throwaway
+// encoder — purely to learn its length. Counting the bytes is the same number.
+// Lone surrogates are counted as if paired; hasOnlyUnicodeScalars rejects them
+// on the same expression, so the value never survives the miscount.
+const utf8Length = (value) => {
+  let bytes = 0
+  for (let index = 0; index < value.length; index += 1) {
+    const unit = value.charCodeAt(index)
+    if (unit < 0x80) bytes += 1
+    else if (unit < 0x800) bytes += 2
+    else if (unit >= 0xd800 && unit <= 0xdbff) {
+      bytes += 4
+      index += 1
+    } else bytes += 3
+  }
+  return bytes
+}
 
 const hasOnlyUnicodeScalars = (value) => {
   for (let index = 0; index < value.length; index += 1) {
@@ -148,13 +207,14 @@ export const parseBoundedFuturesWorkstationJson = (
     if (nodes > maxNodes) fail('JSON_RESOURCE_LIMIT')
   }
   const skipWhitespace = () => {
-    while ([' ', '\n', '\r', '\t'].includes(text[cursor])) cursor += 1
+    while (JSON_WHITESPACE.has(text[cursor])) cursor += 1
   }
   const parseString = () => {
     if (text[cursor] !== '"') fail('INVALID_JSON')
     const start = cursor
     cursor += 1
     let closed = false
+    let escaped = false
     while (cursor < text.length) {
       const character = text[cursor]
       const unit = text.charCodeAt(cursor)
@@ -165,6 +225,7 @@ export const parseBoundedFuturesWorkstationJson = (
       }
       if (unit < 0x20) fail('INVALID_JSON')
       if (character === '\\') {
+        escaped = true
         cursor += 1
         const escape = text[cursor]
         if (escape === 'u') {
@@ -174,7 +235,7 @@ export const parseBoundedFuturesWorkstationJson = (
           cursor += 5
           continue
         }
-        if (!['"', '\\', '/', 'b', 'f', 'n', 'r', 't'].includes(escape)) {
+        if (!JSON_STRING_ESCAPES.has(escape)) {
           fail('INVALID_JSON')
         }
         cursor += 1
@@ -184,10 +245,17 @@ export const parseBoundedFuturesWorkstationJson = (
     }
     if (!closed) fail('INVALID_JSON')
     let value
-    try {
-      value = JSON.parse(text.slice(start, cursor))
-    } catch {
-      fail('INVALID_JSON')
+    // The loop above already proved the span is a well-formed JSON string, and
+    // a span with no escape in it decodes to itself. Prices, sizes and IDs are
+    // never escaped, so the whole book takes this exit.
+    if (!escaped) {
+      value = text.slice(start + 1, cursor - 1)
+    } else {
+      try {
+        value = JSON.parse(text.slice(start, cursor))
+      } catch {
+        fail('INVALID_JSON')
+      }
     }
     if (!hasOnlyUnicodeScalars(value) || utf8Length(value) > maxStringBytes) {
       fail('JSON_RESOURCE_LIMIT')
@@ -454,8 +522,35 @@ const validateCandle = (value) => (
 
 const validateCandles = (value) => (
   hasExactFuturesWorkstationKeys(value, ['series', 'interval', 'rows'])
-  && ['contract', 'mark', 'index'].includes(value.series)
+  && ['contract', 'index'].includes(value.series)
   && isFuturesWorkstationInterval(value.interval)
+  && Array.isArray(value.rows)
+  && value.rows.length <= 80
+  && value.rows.every(validateCandle)
+)
+
+// History is the same candle behind the live window, delivered in pages that
+// obey the same per-event bounds as everything else: depth comes from more
+// events, never from a bigger one.
+const validateCandleHistory = (value) => (
+  hasExactFuturesWorkstationKeys(value, [
+    'series',
+    'interval',
+    'endTime',
+    'offset',
+    'total',
+    'complete',
+    'rows',
+  ])
+  && value.series === 'contract'
+  && isFuturesWorkstationInterval(value.interval)
+  && isSafeTimestamp(value.endTime)
+  && Number.isSafeInteger(value.offset)
+  && value.offset >= 0
+  && Number.isSafeInteger(value.total)
+  && value.total >= 0
+  && value.total <= FUTURES_WORKSTATION_CANDLE_HISTORY_LIMITS.MAX_ROWS
+  && typeof value.complete === 'boolean'
   && Array.isArray(value.rows)
   && value.rows.length <= 80
   && value.rows.every(validateCandle)
@@ -471,8 +566,8 @@ const validateDepth = (value) => (
   && isCanonicalFuturesIdentity(value.lastUpdateId)
   && Array.isArray(value.bids)
   && Array.isArray(value.asks)
-  && value.bids.length <= 24
-  && value.asks.length <= 24
+  && value.bids.length <= FUTURES_WORKSTATION_DEPTH_LEVELS_PER_SIDE
+  && value.asks.length <= FUTURES_WORKSTATION_DEPTH_LEVELS_PER_SIDE
   && value.bids.every(validateDepthLevel)
   && value.asks.every(validateDepthLevel)
   && isCanonicalFuturesDecimal(value.spread)
@@ -515,6 +610,9 @@ export const validateFuturesWorkstationPayload = (resource, payload) => {
   if (resource === FUTURES_WORKSTATION_RESOURCES.CATALOG) return validateCatalog(payload)
   if (resource === FUTURES_WORKSTATION_RESOURCES.HEADER) return validateHeader(payload)
   if (resource === FUTURES_WORKSTATION_RESOURCES.CANDLES) return validateCandles(payload)
+  if (resource === FUTURES_WORKSTATION_RESOURCES.CANDLE_HISTORY) {
+    return validateCandleHistory(payload)
+  }
   if (resource === FUTURES_WORKSTATION_RESOURCES.DEPTH) return validateDepth(payload)
   if (resource === FUTURES_WORKSTATION_RESOURCES.TRADES) return validateTrades(payload)
   return false
@@ -540,6 +638,55 @@ export const validateFuturesWorkstationRequest = ({
     if (!hasExactFuturesWorkstationKeys(value, [
       'channelId', 'version', 'marketType', 'environment', 'action', 'requestId',
     ])) fail('INVALID_REQUEST_SHAPE')
+    return freezeFuturesWorkstationValue(value)
+  }
+
+  if (value.action === actions.CONFIGURE_TAPE) {
+    if (!hasExactFuturesWorkstationKeys(value, [
+      'channelId',
+      'version',
+      'marketType',
+      'environment',
+      'action',
+      'requestId',
+      'throttleEnabled',
+      'timeoutMs',
+      'minNotionalUsdt',
+    ])
+      || typeof value.throttleEnabled !== 'boolean'
+      || !Number.isSafeInteger(value.timeoutMs)
+      || value.timeoutMs < FUTURES_WORKSTATION_TAPE_LIMITS.MIN_TIMEOUT_MS
+      || value.timeoutMs > FUTURES_WORKSTATION_TAPE_LIMITS.MAX_TIMEOUT_MS
+      || typeof value.minNotionalUsdt !== 'string'
+      || value.minNotionalUsdt.length > 64
+      || !NONNEGATIVE_DECIMAL_PATTERN.test(value.minNotionalUsdt)) {
+      fail('INVALID_TAPE_CONFIGURATION')
+    }
+    return freezeFuturesWorkstationValue(value)
+  }
+
+  // Reading behind the live window is bounded on both sides: a point in time to
+  // read back from, and how many candles that one read may return.
+  if (value.action === actions.LOAD_CANDLE_HISTORY) {
+    if (!hasExactFuturesWorkstationKeys(value, [
+      'channelId',
+      'version',
+      'marketType',
+      'environment',
+      'action',
+      'requestId',
+      'symbol',
+      'interval',
+      'endTime',
+      'limit',
+    ])
+      || !isFuturesWorkstationSymbol(value.symbol)
+      || !isFuturesWorkstationInterval(value.interval)
+      || !isPositiveSafeInteger(value.endTime)
+      || !isPositiveSafeInteger(value.limit)
+      || value.limit > FUTURES_WORKSTATION_CANDLE_HISTORY_LIMITS.MAX_ROWS) {
+      fail('INVALID_CANDLE_HISTORY_REQUEST')
+    }
     return freezeFuturesWorkstationValue(value)
   }
 
@@ -606,6 +753,11 @@ export const createFuturesWorkstationRequest = ({
   requestId,
   symbol,
   interval,
+  endTime,
+  limit,
+  throttleEnabled,
+  timeoutMs,
+  minNotionalUsdt,
   actions,
 }) => validateFuturesWorkstationRequest({
   value: {
@@ -615,7 +767,13 @@ export const createFuturesWorkstationRequest = ({
     environment,
     action,
     requestId,
-    ...(action === actions.UNSUBSCRIBE ? {} : { symbol, interval }),
+    ...(action === actions.UNSUBSCRIBE
+      ? {}
+      : action === actions.CONFIGURE_TAPE
+        ? { throttleEnabled, timeoutMs, minNotionalUsdt }
+        : action === actions.LOAD_CANDLE_HISTORY
+          ? { symbol, interval, endTime, limit }
+          : { symbol, interval }),
   },
   channelId,
   environment,
@@ -660,6 +818,7 @@ const createEmptyFuturesWorkstationResources = () => ({
   catalog: null,
   header: null,
   candles: null,
+  candleHistory: null,
   depth: null,
   trades: null,
 })
@@ -726,11 +885,22 @@ export const applyFuturesWorkstationEvent = (state, event) => {
       state: event.state,
       observedAt: event.observedAt,
     })
+  } else if (event.resource === FUTURES_WORKSTATION_RESOURCES.CANDLE_HISTORY) {
+    // One response, many pages: the rows accumulate until it completes, and a
+    // fresh response (offset 0) starts over rather than appending to the last.
+    const previousRows = event.payload.offset === 0
+      ? []
+      : (baseResources.candleHistory?.rows ?? [])
+    nextResources.candleHistory = Object.freeze({
+      ...event.payload,
+      rows: Object.freeze([...previousRows, ...event.payload.rows]),
+      state: event.state,
+      observedAt: event.observedAt,
+    })
   } else if (event.resource === FUTURES_WORKSTATION_RESOURCES.CANDLES) {
     const previous = baseResources.candles ?? Object.freeze({
       interval: event.payload.interval,
       contract: Object.freeze([]),
-      mark: Object.freeze([]),
       index: Object.freeze([]),
     })
     nextResources.candles = Object.freeze({

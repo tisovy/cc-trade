@@ -3,7 +3,7 @@ const { contextBridge, ipcRenderer } = require('electron')
 const RUNTIME_IPC_CHANNEL = 'cc-trade:renderer-runtime'
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '[::1]'])
 const TOKEN_PATTERN = /^[A-Za-z0-9_-]{0,256}$/
-const DEFAULT_LOCAL_WEBSOCKET_PORT = 14477
+
 
 const isRecord = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
 
@@ -14,15 +14,11 @@ const hasExactKeys = (value, keys) => {
   return actual.length === expected.length && actual.every((key, index) => key === expected[index])
 }
 
-const fallbackRuntime = () => Object.freeze({
-  localWebSocketAccess: Object.freeze({
-    host: '127.0.0.1',
-    port: DEFAULT_LOCAL_WEBSOCKET_PORT,
-    token: '',
-    tokenParam: 'token',
-  }),
-  analyticsConfig: null,
-})
+// A sender with no registered runtime gets nothing. It used to get
+// `127.0.0.1:14477` with an empty token — a real endpoint that answers 401 —
+// so a window that was never issued a runtime retried forever instead of
+// saying it had none.
+const noRuntime = () => null
 
 const normalizeAnalyticsConfig = (source) => {
   if (!isRecord(source)) return null
@@ -53,10 +49,10 @@ const normalizeAnalyticsConfig = (source) => {
 const parseRuntime = (runtime) => {
   try {
     if (!hasExactKeys(runtime, ['version', 'localWebSocketAccess', 'analyticsConfig'])) {
-      return fallbackRuntime()
+      return noRuntime()
     }
     if (runtime.version !== 1 || !hasExactKeys(runtime.localWebSocketAccess, ['host', 'port', 'token', 'tokenParam'])) {
-      return fallbackRuntime()
+      return noRuntime()
     }
 
     const { host, port, token, tokenParam } = runtime.localWebSocketAccess
@@ -67,7 +63,7 @@ const parseRuntime = (runtime) => {
       || typeof token !== 'string'
       || !TOKEN_PATTERN.test(token)
       || tokenParam !== 'token') {
-      return fallbackRuntime()
+      return noRuntime()
     }
 
     return Object.freeze({
@@ -75,7 +71,7 @@ const parseRuntime = (runtime) => {
       analyticsConfig: runtime.analyticsConfig === null ? null : normalizeAnalyticsConfig(runtime.analyticsConfig),
     })
   } catch {
-    return fallbackRuntime()
+    return noRuntime()
   }
 }
 

@@ -32,6 +32,45 @@ describe('backend trading command validation', () => {
         });
     });
 
+    // Binance caps a client order id at 36 characters. Catching it here keeps a
+    // malformed id a named local rejection instead of an order the operator
+    // watches the exchange refuse.
+    it('refuses a client order id the exchange would reject', () => {
+        const result = validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.PLACE_ORDER,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'futures',
+            clientOrderId: 'futures-BEATUSDT-SELL-mrc0zuo0-4fzyo8',
+            symbol: 'BEATUSDT',
+            side: 'SELL',
+            price: '3.4',
+            quantity: '100',
+        }, { selectedSymbol: 'BEATUSDT' });
+
+        expect(result.ok).toBe(false);
+        expect(result.rejection.command_rejected.code).toBe('INVALID_CLIENT_ORDER_ID');
+        expect(result.rejection.command_rejected.details).toMatchObject({
+            field: 'clientOrderId',
+            length: 37,
+        });
+    });
+
+    it('refuses a client order id built from characters the exchange forbids', () => {
+        const result = validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.PLACE_ORDER,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'futures',
+            clientOrderId: 'has spaces & symbols',
+            symbol: 'BEATUSDT',
+            side: 'SELL',
+            price: '3.4',
+            quantity: '100',
+        }, { selectedSymbol: 'BEATUSDT' });
+
+        expect(result.ok).toBe(false);
+        expect(result.rejection.command_rejected.code).toBe('INVALID_CLIENT_ORDER_ID');
+    });
+
     it('accepts valid legacy order aliases without changing resolved spot fields', () => {
         expect(validateLegacyOrderCommand({
             qty: '0.2500',
@@ -48,6 +87,8 @@ describe('backend trading command validation', () => {
                 priceValue: '61000.50',
                 numericQuantity: 0.25,
                 numericPrice: 61000.5,
+                // A legacy payload carries no command identity of its own.
+                newClientOrderId: null,
             },
         });
 
@@ -291,6 +332,9 @@ describe('backend trading command validation', () => {
                     side: 'BUY',
                     price: '50000.00',
                     quantity: '0.010000',
+                    // The identity the intent was minted with reaches the
+                    // exchange on Spot too, so a resubmission is deduplicable.
+                    newClientOrderId: 'client-123',
                 },
             },
         });
@@ -496,6 +540,43 @@ describe('backend trading command validation', () => {
         });
     });
 
+    it('accepts futures order amendments and rejects untargeted ones', () => {
+        expect(validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.REPLACE_ORDER,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'futures',
+            symbol: 'BTCUSDT',
+            side: 'BUY',
+            orderId: 11,
+            price: '58500.0',
+            quantity: '0.004',
+        })).toMatchObject({
+            ok: true,
+            command: {
+                futuresModifyPayload: {
+                    symbol: 'BTCUSDT',
+                    side: 'BUY',
+                    orderId: 11,
+                    numericPrice: 58500,
+                    numericQuantity: 0.004,
+                },
+            },
+        });
+
+        expect(validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.REPLACE_ORDER,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'futures',
+            symbol: 'BTCUSDT',
+            side: 'BUY',
+            price: '58500.0',
+            quantity: '0.004',
+        })).toMatchObject({
+            ok: false,
+            rejection: { command_rejected: { code: 'INVALID_TYPED_MODIFY_TARGET' } },
+        });
+    });
+
     it('defines disabled typed command families with explicit backend rejection', () => {
         expect(validateTypedTradingCommand({
             action: TRADING_COMMAND_ACTIONS.REPLACE_ORDER,
@@ -523,6 +604,143 @@ describe('backend trading command validation', () => {
                 command_rejected: {
                     request: TRADING_COMMAND_ACTIONS.CANCEL_ALL,
                     code: 'TYPED_COMMAND_NOT_ENABLED',
+                },
+            },
+        });
+    });
+
+    it('accepts futures history and refuses it for spot or without a contract', () => {
+        expect(validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.ACCOUNT_HISTORY,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'futures',
+            accountId: 'default',
+            clientOrderId: 'history-1',
+            symbol: 'BTCUSDT',
+        })).toEqual({
+            ok: true,
+            command: {
+                action: TRADING_COMMAND_ACTIONS.ACCOUNT_HISTORY,
+                version: TRADE_COMMAND_VERSION,
+                marketType: 'futures',
+                accountId: 'default',
+                clientOrderId: 'history-1',
+                symbol: 'BTCUSDT',
+            },
+        });
+
+        expect(validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.ACCOUNT_HISTORY,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'futures',
+            accountId: 'default',
+            clientOrderId: 'history-2',
+        })).toMatchObject({
+            ok: false,
+            rejection: {
+                command_rejected: { code: 'INVALID_TYPED_HISTORY_SYMBOL' },
+            },
+        });
+
+        expect(validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.ACCOUNT_HISTORY,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'spot',
+            accountId: 'default',
+            clientOrderId: 'history-3',
+            symbol: 'BTCUSDT',
+        })).toMatchObject({ ok: false });
+    });
+
+    // Margin transfers move real money and name one position. The symbol has no
+    // fallback to the selected contract precisely because the fallback would
+    // land the transfer on a position the operator never clicked.
+    it('accepts a futures margin adjustment and names every field it refuses', () => {
+        const validCommand = {
+            action: TRADING_COMMAND_ACTIONS.ADJUST_POSITION_MARGIN,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'futures',
+            accountId: 'default',
+            clientOrderId: 'margin-1',
+            symbol: 'btcusdt',
+            positionSide: 'LONG',
+            direction: 'add',
+            amount: '250.5',
+        };
+        expect(validateTypedTradingCommand(validCommand, { selectedSymbol: 'ETHUSDT' })).toEqual({
+            ok: true,
+            command: {
+                action: TRADING_COMMAND_ACTIONS.ADJUST_POSITION_MARGIN,
+                version: TRADE_COMMAND_VERSION,
+                marketType: 'futures',
+                accountId: 'default',
+                clientOrderId: 'margin-1',
+                symbol: 'BTCUSDT',
+                marginPayload: {
+                    symbol: 'BTCUSDT',
+                    positionSide: 'LONG',
+                    direction: 'ADD',
+                    amount: '250.5',
+                },
+            },
+        });
+
+        // No symbol means no position, even with a contract on screen.
+        expect(validateTypedTradingCommand(
+            { ...validCommand, symbol: undefined },
+            { selectedSymbol: 'ETHUSDT' },
+        )).toMatchObject({
+            ok: false,
+            rejection: { command_rejected: { code: 'INVALID_TYPED_MARGIN_SYMBOL' } },
+        });
+
+        expect(validateTypedTradingCommand({ ...validCommand, positionSide: 'BOTHS' }))
+            .toMatchObject({
+                ok: false,
+                rejection: { command_rejected: { code: 'INVALID_TYPED_MARGIN_POSITION_SIDE' } },
+            });
+
+        for (const direction of [undefined, '', 'SET', 'ADD_ALL']) {
+            expect(validateTypedTradingCommand({ ...validCommand, direction }))
+                .toMatchObject({
+                    ok: false,
+                    rejection: { command_rejected: { code: 'INVALID_TYPED_MARGIN_DIRECTION' } },
+                });
+        }
+
+        for (const amount of [undefined, '', '0', '-5', 'abc', Number.NaN]) {
+            expect(validateTypedTradingCommand({ ...validCommand, amount }))
+                .toMatchObject({
+                    ok: false,
+                    rejection: { command_rejected: { code: 'INVALID_TYPED_MARGIN_AMOUNT' } },
+                });
+        }
+
+        // Spot has no position margin to move.
+        expect(validateTypedTradingCommand({ ...validCommand, marketType: 'spot' }))
+            .toMatchObject({
+                ok: false,
+                rejection: { command_rejected: { code: 'TYPED_COMMAND_NOT_ENABLED' } },
+            });
+    });
+
+    it('defaults a margin adjustment to the one-way leg the account read reports', () => {
+        expect(validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.ADJUST_POSITION_MARGIN,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'futures',
+            accountId: 'default',
+            clientOrderId: 'margin-2',
+            symbol: 'BTCUSDT',
+            direction: 'REMOVE',
+            amount: 40,
+        })).toMatchObject({
+            ok: true,
+            command: {
+                marginPayload: {
+                    positionSide: 'BOTH',
+                    direction: 'REMOVE',
+                    amount: '40',
                 },
             },
         });

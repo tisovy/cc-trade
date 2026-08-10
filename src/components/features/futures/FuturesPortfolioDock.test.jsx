@@ -1,0 +1,324 @@
+import { readFileSync } from 'node:fs'
+import { fireEvent, render, screen, within } from '@testing-library/react'
+import { describe, expect, it, vi } from 'vitest'
+import FuturesPortfolioDock from './FuturesPortfolioDock.jsx'
+
+const position = Object.freeze({
+  symbol: 'BTCUSDT',
+  positionSide: 'BOTH',
+  quantity: '-0.5',
+  entryPrice: '60000',
+  markPrice: '60600',
+  liquidationPrice: '71000',
+  leverage: '10',
+  marginType: 'CROSSED',
+  unrealizedPnl: '-300',
+})
+
+const order = Object.freeze({
+  symbol: 'BTCUSDT',
+  orderKind: 'REGULAR',
+  orderId: 11,
+  side: 'BUY',
+  positionSide: 'BOTH',
+  type: 'LIMIT',
+  status: 'NEW',
+  price: '58445.00',
+  origQty: '0.004',
+  z: '0',
+})
+
+describe('FuturesPortfolioDock', () => {
+  it('shows the direction and signed PnL of every position without opening a tab', () => {
+    render(<FuturesPortfolioDock selectedSymbol="BTCUSDT" positions={[position]} />)
+    const table = screen.getByRole('table', { name: 'Open positions' })
+    expect(table).toHaveTextContent('SHORT')
+    expect(table).toHaveTextContent('−300.00')
+    expect(table).toHaveTextContent('−10.00%')
+    expect(screen.getByLabelText('Futures positions and working orders'))
+      .toHaveTextContent('−300.00 USDT')
+  })
+
+  it('states position size as a plain USDT amount, leaving direction to the side badge', () => {
+    render(<FuturesPortfolioDock selectedSymbol="ETHUSDT" positions={[position]} />)
+    // -0.5 contracts at a 60600 mark is a 30300 USDT short.
+    const size = screen.getByTitle('-0.5 contracts')
+    expect(size).toHaveTextContent('30300.00')
+    expect(size.textContent).not.toContain('−')
+    expect(screen.getByRole('table', { name: 'Open positions' }))
+      .toHaveTextContent('Size (USDT)')
+  })
+
+  it('re-values the row when a fresher mark arrives without an account event', () => {
+    const { rerender } = render(
+      <FuturesPortfolioDock selectedSymbol="ETHUSDT" positions={[position]} />,
+    )
+    rerender(
+      <FuturesPortfolioDock
+        selectedSymbol="ETHUSDT"
+        positions={[{ ...position, markPrice: '61200', unrealizedPnl: '-600' }]}
+      />,
+    )
+    const table = screen.getByRole('table', { name: 'Open positions' })
+    expect(table).toHaveTextContent('30600.00')
+    expect(table).toHaveTextContent('−600.00')
+    expect(screen.getByLabelText('Futures positions and working orders'))
+      .toHaveTextContent('−600.00 USDT')
+  })
+
+  it('sizes the ticket for the whole position when its size is activated', () => {
+    const onSizePick = vi.fn()
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[position]}
+        onSizePick={onSizePick}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', {
+      name: 'Size the ticket for the whole BTCUSDT position',
+    }))
+    expect(onSizePick).toHaveBeenCalledWith(0.5)
+  })
+
+  it('offers no size shortcut for a position on another contract', () => {
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="ETHUSDT"
+        positions={[position]}
+        onSizePick={vi.fn()}
+      />,
+    )
+    expect(screen.queryByRole('button', {
+      name: 'Size the ticket for the whole BTCUSDT position',
+    })).not.toBeInTheDocument()
+  })
+
+  // ROE had no visible denominator: the dock divided by the committed margin
+  // and then showed only the quotient.
+  it('states the margin behind each position beside the ROE measured against it', () => {
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[{ ...position, isolatedWallet: '3000', unrealizedPnl: '-300' }]}
+      />,
+    )
+    const table = screen.getByRole('table', { name: 'Open positions' })
+    expect(table).toHaveTextContent('Margin')
+    expect(table).toHaveTextContent('3000.00')
+    expect(table).toHaveTextContent('−10.00%')
+  })
+
+  it('opens the margin panel at the cursor for the position that was clicked', () => {
+    const onMarginEdit = vi.fn()
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="ETHUSDT"
+        positions={[{ ...position, isolatedWallet: '3000' }]}
+        onMarginEdit={onMarginEdit}
+      />,
+    )
+    fireEvent.click(
+      screen.getByRole('button', { name: 'Adjust margin on the BTCUSDT SHORT position' }),
+      { clientX: 240, clientY: 310 },
+    )
+    expect(onMarginEdit).toHaveBeenCalledWith(
+      expect.objectContaining({ symbol: 'BTCUSDT', positionSide: 'BOTH' }),
+      { x: 240, y: 310 },
+    )
+  })
+
+  // A cross row still opens the panel: that is where the reason it cannot be
+  // adjusted is stated, which a dead cell would never say.
+  it('marks a shared-margin position as cross rather than hiding its figure', () => {
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[position]}
+        onMarginEdit={vi.fn()}
+      />,
+    )
+    const marginCell = screen.getByRole('button', {
+      name: 'Adjust margin on the BTCUSDT SHORT position',
+    })
+    expect(marginCell).toHaveClass('is-cross')
+    expect(marginCell).toHaveAttribute('title', 'Cross margin — backed by the whole account')
+  })
+
+  it('shows no margin at all when the account read carried none', () => {
+    const unmargined = { ...position, leverage: undefined, marginType: undefined }
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[unmargined]}
+        onMarginEdit={vi.fn()}
+      />,
+    )
+    expect(screen.queryByRole('button', {
+      name: 'Adjust margin on the BTCUSDT SHORT position',
+    })).not.toBeInTheDocument()
+    expect(screen.getByRole('table', { name: 'Open positions' })).toHaveTextContent('—')
+  })
+
+  it('labels a one-way BUY order as a long instead of a bare BOTH', () => {
+    render(<FuturesPortfolioDock selectedSymbol="BTCUSDT" openOrders={[order]} />)
+    const table = screen.getByRole('table', { name: 'Working orders' })
+    expect(within(table).getByText('BUY')).toHaveClass('is-buy')
+    expect(table).toHaveTextContent('LONG')
+    expect(table).not.toHaveTextContent('BOTH')
+  })
+
+  // The desk sizes in USDT everywhere else — the ticket, the editor, the chart
+  // label. A working order printed in contracts was the one place the operator
+  // had to do the multiplication by eye.
+  it('states working-order size in USDT and keeps the contract count exact on hover', () => {
+    render(<FuturesPortfolioDock selectedSymbol="BTCUSDT" openOrders={[order]} />)
+    const table = screen.getByRole('table', { name: 'Working orders' })
+    expect(table).toHaveTextContent('Size (USDT)')
+    expect(table).not.toHaveTextContent('Qty')
+    // 0.004 contracts at 58445 is a 234 USDT order.
+    expect(screen.getByTitle('0.004 contracts')).toHaveTextContent('234')
+  })
+
+  // A stop carries its size against the price it triggers at; `price` is 0 on a
+  // stop-market, so sizing from it would print every algo order as worth nothing.
+  it('sizes an algo order from the price it triggers at', () => {
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        openOrders={[{
+          ...order,
+          orderKind: 'ALGO',
+          price: '0',
+          triggerPrice: '57000.00',
+          origQty: '0.01',
+        }]}
+      />,
+    )
+    expect(screen.getByTitle('0.01 contracts')).toHaveTextContent('570')
+  })
+
+  it('closes positions and cancels orders straight from the dock', () => {
+    const onClosePosition = vi.fn()
+    const onCancelOrder = vi.fn()
+    const onSymbolChange = vi.fn()
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="ETHUSDT"
+        positions={[position]}
+        openOrders={[order]}
+        onClosePosition={onClosePosition}
+        onCancelOrder={onCancelOrder}
+        onSymbolChange={onSymbolChange}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Close BTCUSDT position' }))
+    expect(onClosePosition).toHaveBeenCalledWith(position, expect.any(Object))
+
+    fireEvent.click(screen.getByRole('button', {
+      name: 'Cancel BTCUSDT BUY order at 58445.00',
+    }))
+    expect(onCancelOrder).toHaveBeenCalledWith({ symbol: 'BTCUSDT', orderId: 11 })
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Show BTCUSDT' })[0])
+    expect(onSymbolChange).toHaveBeenCalledWith('BTCUSDT')
+  })
+
+  it('opens the shared order editor from a working-order row', () => {
+    const onOrderEdit = vi.fn()
+    const onCancelOrder = vi.fn()
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        openOrders={[order, { ...order, orderId: 12, orderKind: 'ALGO' }]}
+        onOrderEdit={onOrderEdit}
+        onCancelOrder={onCancelOrder}
+      />,
+    )
+    const rows = screen.getAllByRole('row').filter(row => row.classList.contains('is-orders'))
+    fireEvent.click(rows[1])
+    expect(onOrderEdit).toHaveBeenCalledWith(order, expect.any(Object))
+
+    // An exchange-managed row stays display-only, and Cancel never opens it.
+    fireEvent.click(rows[2])
+    expect(onOrderEdit).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel BTCUSDT BUY order at 58445.00' }))
+    expect(onCancelOrder).toHaveBeenCalledTimes(1)
+    expect(onOrderEdit).toHaveBeenCalledTimes(1)
+  })
+
+  it('renders account prices at the contract tick instead of raw exchange floats', () => {
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BEATUSDT"
+        positions={[{
+          ...position,
+          symbol: 'BEATUSDT',
+          quantity: '-2873',
+          entryPrice: '3.3449999999999998',
+          markPrice: '3.37867363',
+          liquidationPrice: '4.71896804',
+          leverage: undefined,
+          marginType: undefined,
+          initialMargin: '960.5',
+          unrealizedPnl: '-96.74',
+        }]}
+        tickSizes={{ BEATUSDT: '0.0001' }}
+      />,
+    )
+    const table = screen.getByRole('table', { name: 'Open positions' })
+    expect(table).toHaveTextContent('3.3450')
+    expect(table).toHaveTextContent('3.3787')
+    expect(table).not.toHaveTextContent('3.344999')
+    // ROE now comes from the reported margin, not from a leverage v3 dropped.
+    expect(table).toHaveTextContent('−10.07%')
+    expect(table).not.toHaveTextContent('×')
+  })
+
+  it('loads history from the dock tabs for the selected contract', () => {
+    const onLoadHistory = vi.fn()
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        openOrders={[order]}
+        onLoadHistory={onLoadHistory}
+        history={{
+          symbol: 'BTCUSDT',
+          status: 'ready',
+          orders: [],
+          trades: [{ id: 4, side: 'SELL', price: '58500', quantity: '0.004', commission: '0.02', realizedPnl: '12.5', time: 1 }],
+          error: null,
+        }}
+      />,
+    )
+    fireEvent.click(screen.getByRole('tab', { name: /Trades/ }))
+    expect(onLoadHistory).toHaveBeenCalledWith('BTCUSDT')
+    expect(screen.getByRole('table', { name: 'Trade history' })).toHaveTextContent('+12.50')
+    expect(screen.queryByRole('table', { name: 'Working orders' })).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('tab', { name: /Working/ }))
+    expect(screen.getByRole('table', { name: 'Working orders' })).toBeInTheDocument()
+  })
+
+  it('states emptiness explicitly instead of rendering a blank strip', () => {
+    render(<FuturesPortfolioDock selectedSymbol="BTCUSDT" />)
+    expect(screen.getByText('No open positions.')).toBeInTheDocument()
+    expect(screen.getByText('No working orders.')).toBeInTheDocument()
+  })
+
+  // An unstyled control does not fail loudly: it renders as a browser button
+  // face — a white rectangle in a dark row — and only the selected contract's
+  // row is affected, so the same datum looks like two different things.
+  it('styles every class it renders, so no cell falls back to a browser control', () => {
+    const here = 'src/components/features/futures'
+    const component = readFileSync(`${here}/FuturesPortfolioDock.jsx`, 'utf8')
+    const stylesheet = readFileSync(`${here}/FuturesWorkstation.css`, 'utf8')
+    const rendered = [...component.matchAll(/className=(?:"([^"{}]+)"|\{`([^`${}]+)`)/g)]
+      .flatMap(match => (match[1] ?? match[2]).split(/\s+/))
+      .filter(name => name.startsWith('futures-'))
+    expect(rendered.length).toBeGreaterThan(0)
+    for (const name of new Set(rendered)) {
+      expect(stylesheet, `${name} has no rule`).toContain(`.${name}`)
+    }
+  })
+})

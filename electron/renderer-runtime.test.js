@@ -79,6 +79,18 @@ describe('renderer runtime preload boundary', () => {
     expect(JSON.stringify(runtime)).not.toContain('must-not-cross-the-bridge')
   })
 
+  // No default endpoint anywhere on the path: a runtime that cannot say where
+  // the backend is is not issued, rather than pointing the window at 14477.
+  it('issues no runtime when the endpoint cannot be stated', () => {
+    expect(createRendererRuntime({
+      localWebSocketAccess: { host: '127.0.0.1', port: 0, token: 'abc' },
+    })).toBeNull()
+    expect(createRendererRuntime({
+      localWebSocketAccess: { host: '127.0.0.1', token: 'abc' },
+    })).toBeNull()
+    expect(createRendererRuntime()).toBeNull()
+  })
+
   it('exposes one immutable data object and fails closed on malformed main data', () => {
     const runtime = createRendererRuntime({
       localWebSocketAccess: { host: 'localhost', port: 54321, token: 'abc123' },
@@ -96,16 +108,40 @@ describe('renderer runtime preload boundary', () => {
     expect(Object.isFrozen(exposed.ccTradeRuntime.localWebSocketAccess)).toBe(true)
     expect(channels).toEqual([RENDERER_RUNTIME_IPC_CHANNEL])
 
-    const malformed = runPreload({}).exposed
-    expect(malformed.ccTradeRuntime).toEqual({
-      localWebSocketAccess: {
-        host: '127.0.0.1',
-        port: 14477,
-        token: '',
-        tokenParam: 'token',
-      },
-      analyticsConfig: null,
-    })
+    // Malformed or absent main-process data exposes no runtime at all. It used
+    // to expose `127.0.0.1:14477` with an empty token — a real endpoint that
+    // answers 401 — so a renderer that was never issued a runtime retried a
+    // doomed handshake for the whole session.
+    expect(runPreload({}).exposed.ccTradeRuntime).toBeNull()
+    expect(runPreload(null).exposed.ccTradeRuntime).toBeNull()
+  })
+
+  // The `invalid token` flood came from a default endpoint the renderer could
+  // reach for when it had been issued none. This walks the renderer source for
+  // any remaining hard-coded local port so a third copy cannot reappear the way
+  // the second one did, in `useFuturesLocalWorkstationConnection`.
+  it('leaves no hard-coded local endpoint in renderer source', () => {
+    const rendererRoot = path.join(__dirname, '..', 'src')
+    const stripComments = source => source
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')
+      .split('\n')
+      .map(line => (line.trimStart().startsWith('//') ? '' : line))
+      .join('\n')
+
+    const walk = (directory) => fs.readdirSync(directory, { withFileTypes: true })
+      .flatMap((entry) => {
+        const absolute = path.join(directory, entry.name)
+        if (entry.isDirectory()) return walk(absolute)
+        return /\.(?:js|jsx|mjs|cjs)$/.test(entry.name) && !/\.test\./.test(entry.name)
+          ? [absolute]
+          : []
+      })
+
+    const offenders = [...walk(rendererRoot), path.join(__dirname, 'preload.cjs')]
+      .filter(file => /\b14477\b/.test(stripComments(fs.readFileSync(file, 'utf8'))))
+      .map(file => path.relative(path.join(__dirname, '..'), file))
+
+    expect(offenders).toEqual([])
   })
 
   it('contains no generic IPC or Node module bridge', () => {

@@ -136,6 +136,9 @@ export const runSpotAccountRefreshOperations = async ({
     }
 };
 
+// Binance's "Order does not exist", identical on both markets.
+export const SPOT_ORDER_NOT_FOUND_CODE = -2013;
+
 const SPOT_USER_DATA_STREAM_PATH = '/api/v3/userDataStream';
 const SPOT_SERVER_TIME_PATH = '/api/v3/time';
 
@@ -251,9 +254,33 @@ export class SpotTradingAdapter {
             price: command.numericPrice.toString(),
             newOrderRespType: 'FULL',
             recvWindow: this.recvWindow,
+            // Spot used to drop the identity the command was minted with, so a
+            // resubmission after an ambiguous failure looked like a brand-new
+            // order to Binance. Futures always sent it; now both do.
+            ...(command.newClientOrderId ? { newClientOrderId: command.newClientOrderId } : {}),
         });
         const data = await response.data();
         return normalizeSpotExecutionReport(data, { x: 'NEW' });
+    }
+
+    // The Spot counterpart of the Futures lookup: what became of the command
+    // that carried this identity. `exists: false` is the exchange stating the
+    // order is not there, which is the only safe basis for resubmitting.
+    async findOrder({ symbol, orderId, origClientOrderId }) {
+        try {
+            const response = await this.client.restAPI.getOrder({
+                symbol,
+                ...(orderId ? { orderId } : { origClientOrderId }),
+                recvWindow: this.recvWindow,
+            });
+            const data = await response.data();
+            return { exists: true, report: normalizeSpotExecutionReport(data) };
+        } catch (error) {
+            if (Number(error?.code ?? error?.response?.data?.code) === SPOT_ORDER_NOT_FOUND_CODE) {
+                return { exists: false, report: null };
+            }
+            throw error;
+        }
     }
 
     async cancelOrder(command) {
@@ -279,24 +306,3 @@ export class SpotTradingAdapter {
         });
     }
 }
-
-export const buildSpotMockOrderPlacementExecutionReport = ({
-    symbol,
-    side,
-    priceValue,
-    quantityValue,
-    orderId = Date.now(),
-    eventTime = Date.now(),
-}) => ({
-    e: 'executionReport',
-    s: symbol,
-    S: side,
-    o: 'LIMIT',
-    x: 'NEW',
-    X: 'NEW',
-    i: orderId,
-    p: priceValue,
-    q: quantityValue,
-    z: '0.0',
-    T: eventTime,
-});

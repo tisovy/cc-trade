@@ -107,7 +107,10 @@ function createWindow() {
             authMode: 'none',
         },
     })
-    const win = new BrowserWindow({
+    // Constructed and registered in one step: an unregistered sender receives
+    // no runtime, and a renderer with no runtime fails closed rather than
+    // dialling a default endpoint.
+    const win = rendererRuntimeRegistry.createRegisteredWindow(rendererRuntime, () => new BrowserWindow({
         width: 1200,
         height: 800,
         // Keep host-desktop keystrokes out while retaining compositor-backed screenshots.
@@ -115,9 +118,7 @@ function createWindow() {
         webPreferences: createSecureRendererWebPreferences({
             preload: path.join(__dirname, 'preload.cjs'),
         }),
-    })
-
-    rendererRuntimeRegistry.register(win.webContents, rendererRuntime)
+    }))
 
     installRendererSecurityGuards(
         win.webContents,

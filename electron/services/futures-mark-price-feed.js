@@ -10,6 +10,9 @@ export const FUTURES_MARK_PRICE_TYPE = 'futures_position_marks';
 export const FUTURES_MARK_PRICE_VERSION = 1;
 export const FUTURES_MARK_PRICE_BATCH_MS = 500;
 export const FUTURES_MARK_PRICE_RECONNECT_MS = 5000;
+// One mark per symbol per second is the contract, so silence this long is not a
+// quiet market — it is a feed that stopped delivering without closing.
+export const FUTURES_MARK_PRICE_STALL_MS = 15000;
 
 // One mark per symbol per second is what the desk reads; the stream is public,
 // so the symbol set is the only thing that ever leaves the process.
@@ -24,9 +27,18 @@ export const readFuturesPositionSymbols = (positions) => {
     return [...symbols].sort();
 };
 
+// The unrouted market paths `/ws` and `/stream` were decommissioned on
+// 2026-04-23; `<symbol>@markPrice@1s` is a compiled route on `/market/stream`
+// (see docs/futures_phase8_workstation_adr.md, WebSocket registry). A
+// decommissioned path is the worst kind of wrong here: the handshake still
+// succeeds and the socket stays open, so nothing reports an error — it simply
+// never delivers a frame, and every position keeps the value the account
+// snapshot gave it while the chart moves on.
+export const FUTURES_MARK_PRICE_ROUTED_PREFIX = '/market/stream?streams=';
+
 export const futuresMarkPriceStreamUrl = (streamOrigin, symbols) => {
     const streams = symbols.map(symbol => `${symbol.toLowerCase()}@markPrice@1s`).join('/');
-    return `${streamOrigin}/stream?streams=${streams}`;
+    return `${streamOrigin}${FUTURES_MARK_PRICE_ROUTED_PREFIX}${streams}`;
 };
 
 export const readFuturesMarkPriceEvent = (payload) => {
@@ -66,6 +78,7 @@ export const createFuturesMarkPriceFeed = ({
     clock = { setTimeout, clearTimeout },
     batchIntervalMs = FUTURES_MARK_PRICE_BATCH_MS,
     reconnectDelayMs = FUTURES_MARK_PRICE_RECONNECT_MS,
+    stallTimeoutMs = FUTURES_MARK_PRICE_STALL_MS,
 }) => {
     let symbols = [];
     let socket = null;
@@ -73,6 +86,9 @@ export const createFuturesMarkPriceFeed = ({
     let stopped = false;
     let flushTimer = null;
     let reconnectTimer = null;
+    let stallTimer = null;
+    let markSeenSinceCheck = false;
+    let stallReported = false;
     let published = false;
     const marks = new Map();
 
@@ -103,8 +119,47 @@ export const createFuturesMarkPriceFeed = ({
         }, batchIntervalMs);
     };
 
+    const clearStallCheck = () => {
+        if (stallTimer !== null) {
+            clock.clearTimeout(stallTimer);
+            stallTimer = null;
+        }
+        markSeenSinceCheck = false;
+        stallReported = false;
+    };
+
+    // A socket that opens and then goes quiet is the one failure this feed kept
+    // to itself: 'open' was logged, no 'close' ever followed, and the desk went
+    // on presenting an unrealized PnL from an earlier account read as the
+    // market's own. Silence against a one-per-second contract is reported as
+    // what it is, and so is its end.
+    const armStallCheck = () => {
+        if (stallTimer !== null || stopped || symbols.length === 0) return;
+        stallTimer = clock.setTimeout(() => {
+            stallTimer = null;
+            if (socket === null || symbols.length === 0) return;
+            if (markSeenSinceCheck) {
+                if (stallReported) {
+                    logger.info?.(
+                        `Futures mark price stream is delivering again: ${symbols.join(', ')}.`,
+                    );
+                }
+                stallReported = false;
+            } else if (!stallReported) {
+                stallReported = true;
+                logger.warn?.(
+                    `Futures mark price stream delivered nothing for ${Math.round(stallTimeoutMs / 1000)}s `
+                    + `(${symbols.join(', ')}); position values are the account snapshot, not the market.`,
+                );
+            }
+            markSeenSinceCheck = false;
+            armStallCheck();
+        }, stallTimeoutMs);
+    };
+
     const disconnect = () => {
         generation += 1;
+        clearStallCheck();
         if (reconnectTimer !== null) {
             clock.clearTimeout(reconnectTimer);
             reconnectTimer = null;
@@ -134,10 +189,21 @@ export const createFuturesMarkPriceFeed = ({
         }
         socket = opened;
 
+        // Every other Binance socket in this process says when it connects and
+        // when it drops. Without the same line here, a desk showing a mark that
+        // has not moved for a minute gives the operator no way to tell a quiet
+        // market from a dead feed.
+        opened.on('open', () => {
+            if (socket !== opened) return;
+            logger.info?.(`Futures mark price stream connected: ${symbols.join(', ')}.`);
+            armStallCheck();
+        });
+
         opened.on('message', (raw) => {
             if (socket !== opened) return;
             const event = readFuturesMarkPriceEvent(parseFrame(raw));
             if (!event || !symbols.includes(event.symbol)) return;
+            markSeenSinceCheck = true;
             marks.set(event.symbol, { markPrice: event.markPrice, updatedAt: event.updatedAt });
             scheduleFlush();
         });
@@ -148,6 +214,10 @@ export const createFuturesMarkPriceFeed = ({
         opened.on('close', () => {
             if (socket !== opened) return;
             socket = null;
+            clearStallCheck();
+            logger.warn?.(
+                'Futures mark price stream closed; positions fall back to the account snapshot.',
+            );
             clearMarks();
             scheduleReconnect(socketGeneration);
         });

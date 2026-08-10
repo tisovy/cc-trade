@@ -1,7 +1,6 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import {
     SpotTradingAdapter,
-    buildSpotMockOrderPlacementExecutionReport,
     normalizeSpotBalances,
     normalizeSpotExecutionReport,
     normalizeSpotUserDataStreamEvent,
@@ -120,29 +119,6 @@ describe('SpotTradingAdapter', () => {
 
         expect(client.restAPI.sendRequest).toHaveBeenNthCalledWith(1, '/api/v3/time', 'GET');
         expect(client.restAPI.sendRequest).toHaveBeenNthCalledWith(2, '/api/v3/time', 'GET');
-    });
-
-    it('builds mock spot placement execution reports with the existing renderer payload shape', () => {
-        expect(buildSpotMockOrderPlacementExecutionReport({
-            symbol: 'BTCUSDT',
-            side: 'BUY',
-            priceValue: '12346',
-            quantityValue: '0.0999',
-            orderId: 12345,
-            eventTime: Date.parse('2026-07-09T10:00:01.000Z'),
-        })).toEqual({
-            e: 'executionReport',
-            s: 'BTCUSDT',
-            S: 'BUY',
-            o: 'LIMIT',
-            x: 'NEW',
-            X: 'NEW',
-            i: 12345,
-            p: '12346',
-            q: '0.0999',
-            z: '0.0',
-            T: Date.parse('2026-07-09T10:00:01.000Z'),
-        });
     });
 
     it('builds account refresh operations with the existing weights and renderer payload shapes', async () => {
@@ -608,5 +584,79 @@ describe('SpotTradingAdapter', () => {
 
         expect(result).toBe(connectionPromise);
         await expect(result).rejects.toBe(error);
+    });
+
+    it('sends the command identity so a resubmission can be deduplicated', async () => {
+        const newOrder = vi.fn().mockResolvedValue(makeResponse({
+            symbol: 'BTCUSDT', side: 'BUY', status: 'NEW', orderId: 1,
+        }));
+        const client = makeClient({ newOrder });
+        const adapter = new SpotTradingAdapter({ client, recvWindow: 60000 });
+
+        await adapter.placeOrder({
+            symbol: 'BTCUSDT',
+            side: 'BUY',
+            numericQuantity: 0.01,
+            numericPrice: 50000,
+            newClientOrderId: 's-intent-1',
+        });
+
+        expect(newOrder).toHaveBeenCalledWith(expect.objectContaining({
+            newClientOrderId: 's-intent-1',
+        }));
+    });
+
+    it('omits the identity when the command carries none', async () => {
+        const newOrder = vi.fn().mockResolvedValue(makeResponse({
+            symbol: 'BTCUSDT', side: 'BUY', status: 'NEW', orderId: 1,
+        }));
+        const client = makeClient({ newOrder });
+        const adapter = new SpotTradingAdapter({ client, recvWindow: 60000 });
+
+        await adapter.placeOrder({
+            symbol: 'BTCUSDT', side: 'BUY', numericQuantity: 0.01, numericPrice: 50000,
+        });
+
+        expect(Object.hasOwn(newOrder.mock.calls[0][0], 'newClientOrderId')).toBe(false);
+    });
+
+    it('answers what became of a command by its identity', async () => {
+        const getOrder = vi.fn().mockResolvedValue(makeResponse({
+            symbol: 'BTCUSDT', side: 'BUY', status: 'FILLED', orderId: 9, clientOrderId: 's-intent-1',
+        }));
+        const client = makeClient({ getOrder });
+        const adapter = new SpotTradingAdapter({ client, recvWindow: 60000 });
+
+        const outcome = await adapter.findOrder({ symbol: 'BTCUSDT', origClientOrderId: 's-intent-1' });
+
+        expect(getOrder).toHaveBeenCalledWith({
+            symbol: 'BTCUSDT',
+            origClientOrderId: 's-intent-1',
+            recvWindow: 60000,
+        });
+        expect(outcome.exists).toBe(true);
+        expect(outcome.report.orderId).toBe(9);
+    });
+
+    it('reports the one answer that makes a resubmission safe', async () => {
+        const getOrder = vi.fn().mockRejectedValue(
+            Object.assign(new Error('Order does not exist.'), { code: -2013 }),
+        );
+        const client = makeClient({ getOrder });
+        const adapter = new SpotTradingAdapter({ client, recvWindow: 60000 });
+
+        await expect(adapter.findOrder({ symbol: 'BTCUSDT', origClientOrderId: 's-intent-1' }))
+            .resolves.toEqual({ exists: false, report: null });
+    });
+
+    it('does not turn an unrelated failure into "no such order"', async () => {
+        const getOrder = vi.fn().mockRejectedValue(
+            Object.assign(new Error('Unknown error'), { status: 503 }),
+        );
+        const client = makeClient({ getOrder });
+        const adapter = new SpotTradingAdapter({ client, recvWindow: 60000 });
+
+        await expect(adapter.findOrder({ symbol: 'BTCUSDT', origClientOrderId: 's-intent-1' }))
+            .rejects.toMatchObject({ status: 503 });
     });
 });

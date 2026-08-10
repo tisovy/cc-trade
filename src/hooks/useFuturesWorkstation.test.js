@@ -142,6 +142,42 @@ describe('production workstation hook isolation', () => {
     ])
   })
 
+  it('sends validated tape settings to the active owner and reapplies them after selection', () => {
+    const socket = new LocalSocket()
+    const sendMessage = vi.fn(() => true)
+    const { result, rerender } = renderHook(
+      props => useFuturesProductionWorkstation(props),
+      { initialProps: defaultProps(socket, sendMessage) },
+    )
+
+    act(() => {
+      expect(result.current.configureTape({
+        throttleEnabled: true,
+        timeoutMs: 400,
+        minNotionalUsdt: '1000',
+      })).toBe(true)
+    })
+    expect(sendMessage.mock.calls.at(-1)[0]).toMatchObject({
+      action: FUTURES_PRODUCTION_WORKSTATION_ACTIONS.CONFIGURE_TAPE,
+      requestId: result.current.requestId,
+      throttleEnabled: true,
+      timeoutMs: 400,
+      minNotionalUsdt: '1000',
+    })
+
+    rerender(defaultProps(socket, sendMessage, { symbol: 'ETHUSDT' }))
+    const actions = sendMessage.mock.calls.slice(-2).map(([message]) => message.action)
+    expect(actions).toEqual([
+      FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SELECT_SYMBOL,
+      FUTURES_PRODUCTION_WORKSTATION_ACTIONS.CONFIGURE_TAPE,
+    ])
+    expect(sendMessage.mock.calls.at(-1)[0]).toMatchObject({
+      requestId: result.current.requestId,
+      timeoutMs: 400,
+      minNotionalUsdt: '1000',
+    })
+  })
+
   it('replays StrictMode with a fresh subscription owner and no interval selection', () => {
     const socket = new LocalSocket()
     const sendMessage = vi.fn(() => true)
@@ -515,5 +551,190 @@ describe('production workstation hook isolation', () => {
       requestId,
       environment: 'PRODUCTION',
     })
+  })
+})
+
+describe('useFuturesProductionWorkstation candle history', () => {
+  const MINUTE = 60_000
+  const START = 1_784_000_000_000
+  const historyRows = (from, to) => Array.from({ length: to - from }, (_, index) => ({
+    openTime: START + ((from + index) * MINUTE),
+    closeTime: START + ((from + index + 1) * MINUTE) - 1,
+    open: '58400',
+    high: '58500',
+    low: '58300',
+    close: '58420',
+    volume: '1',
+    closed: true,
+  }))
+
+  const missingCache = () => ({
+    readPage: vi.fn(async () => null),
+    writePage: vi.fn(async () => true),
+  })
+
+  const emitHistoryPage = (socket, requestId, revision, payload) => {
+    socket.emitMessage(createFuturesProductionWorkstationEvent(eventValues(requestId, {
+      revision,
+      resource: 'candleHistory',
+      payload: Object.freeze({
+        series: 'contract',
+        interval: '1m',
+        endTime: START,
+        ...payload,
+      }),
+    })))
+  }
+
+  it('assembles a paged response into one history and remembers it for next time', async () => {
+    const socket = new LocalSocket()
+    const sendMessage = vi.fn(() => true)
+    const candleHistoryCache = missingCache()
+    const { result } = renderHook(props => useFuturesProductionWorkstation(props), {
+      initialProps: defaultProps(socket, sendMessage, { candleHistoryCache }),
+    })
+    const requestId = sendMessage.mock.calls[0][0].requestId
+
+    await act(async () => { await result.current.loadCandleHistory(START) })
+    const request = sendMessage.mock.calls.at(-1)[0]
+    expect(request.action).toBe(FUTURES_PRODUCTION_WORKSTATION_ACTIONS.LOAD_CANDLE_HISTORY)
+    expect(request).toMatchObject({ symbol: 'BTCUSDT', interval: '1m', endTime: START })
+
+    act(() => emitHistoryPage(socket, requestId, 2, {
+      offset: 0,
+      total: 100,
+      complete: false,
+      rows: historyRows(-100, -20),
+    }))
+    // Nothing is shown until the response is whole.
+    expect(result.current.candleHistory.rows).toHaveLength(0)
+
+    await act(async () => emitHistoryPage(socket, requestId, 3, {
+      offset: 80,
+      total: 100,
+      complete: true,
+      rows: historyRows(-20, 0),
+    }))
+    expect(result.current.candleHistory.rows).toHaveLength(100)
+    expect(result.current.candleHistory.rows[0].openTime).toBe(START - (100 * MINUTE))
+    // A short answer is the start of the contract's history.
+    expect(result.current.candleHistory.exhausted).toBe(true)
+    expect(candleHistoryCache.writePage).toHaveBeenCalledWith(expect.objectContaining({
+      symbol: 'BTCUSDT',
+      interval: '1m',
+    }))
+  })
+
+  it('serves a cached page without asking the exchange for it again', async () => {
+    const socket = new LocalSocket()
+    const sendMessage = vi.fn(() => true)
+    const candleHistoryCache = {
+      readPage: vi.fn(async () => historyRows(-50, 0)),
+      writePage: vi.fn(async () => true),
+    }
+    const { result } = renderHook(props => useFuturesProductionWorkstation(props), {
+      initialProps: defaultProps(socket, sendMessage, { candleHistoryCache }),
+    })
+
+    await act(async () => { await result.current.loadCandleHistory(START) })
+
+    expect(result.current.candleHistory.rows).toHaveLength(50)
+    expect(sendMessage.mock.calls.map(([message]) => message.action))
+      .not.toContain(FUTURES_PRODUCTION_WORKSTATION_ACTIONS.LOAD_CANDLE_HISTORY)
+  })
+
+  it('keeps one read in flight however hard the operator scrolls', async () => {
+    const socket = new LocalSocket()
+    const sendMessage = vi.fn(() => true)
+    const { result } = renderHook(props => useFuturesProductionWorkstation(props), {
+      initialProps: defaultProps(socket, sendMessage, { candleHistoryCache: missingCache() }),
+    })
+
+    await act(async () => {
+      await Promise.all([
+        result.current.loadCandleHistory(START),
+        result.current.loadCandleHistory(START),
+        result.current.loadCandleHistory(START),
+      ])
+    })
+
+    expect(sendMessage.mock.calls
+      .filter(([message]) => (
+        message.action === FUTURES_PRODUCTION_WORKSTATION_ACTIONS.LOAD_CANDLE_HISTORY
+      ))).toHaveLength(1)
+  })
+
+  it('drops history that belonged to the previous contract', async () => {
+    const socket = new LocalSocket()
+    const sendMessage = vi.fn(() => true)
+    const { result, rerender } = renderHook(props => useFuturesProductionWorkstation(props), {
+      initialProps: defaultProps(socket, sendMessage, { candleHistoryCache: missingCache() }),
+    })
+    const requestId = sendMessage.mock.calls[0][0].requestId
+
+    await act(async () => { await result.current.loadCandleHistory(START) })
+    await act(async () => emitHistoryPage(socket, requestId, 2, {
+      offset: 0,
+      total: 20,
+      complete: true,
+      rows: historyRows(-20, 0),
+    }))
+    expect(result.current.candleHistory.rows).toHaveLength(20)
+
+    rerender(defaultProps(socket, sendMessage, {
+      symbol: 'ETHUSDT',
+      candleHistoryCache: missingCache(),
+    }))
+    expect(result.current.candleHistory.rows).toHaveLength(0)
+  })
+
+  // The rows of the abandoned selection used to survive the switch and the next
+  // page merged in front of them, so a 1h chart was drawn on top of 15m bars
+  // and the join looked like a hole in the market.
+  it('never joins a page to rows read at another interval', async () => {
+    const socket = new LocalSocket()
+    const sendMessage = vi.fn(() => true)
+    const { result, rerender } = renderHook(props => useFuturesProductionWorkstation(props), {
+      initialProps: defaultProps(socket, sendMessage, { candleHistoryCache: missingCache() }),
+    })
+    const requestId = sendMessage.mock.calls[0][0].requestId
+
+    await act(async () => { await result.current.loadCandleHistory(START) })
+    await act(async () => emitHistoryPage(socket, requestId, 2, {
+      offset: 0,
+      total: 20,
+      complete: true,
+      rows: historyRows(-20, 0),
+    }))
+    expect(result.current.candleHistory.rows).toHaveLength(20)
+    // Short answers mark the 1m series exhausted; the 15m series must not
+    // inherit that verdict and stop loading before it has read anything.
+    expect(result.current.candleHistory.exhausted).toBe(true)
+
+    rerender(defaultProps(socket, sendMessage, {
+      interval: '15m',
+      candleHistoryCache: missingCache(),
+    }))
+    const intervalRequestId = sendMessage.mock.calls.at(-1)[0].requestId
+
+    await act(async () => { await result.current.loadCandleHistory(START) })
+    // A whole page: the 15m series has more behind it, whatever the 1m read
+    // concluded about where the 1m series began.
+    const page = historyRows(-1_040, -40)
+    for (let offset = 0; offset < page.length; offset += 80) {
+      const rows = page.slice(offset, offset + 80)
+      await act(async () => emitHistoryPage(socket, intervalRequestId, 3 + (offset / 80), {
+        interval: '15m',
+        offset,
+        total: page.length,
+        complete: offset + rows.length === page.length,
+        rows,
+      }))
+    }
+
+    expect(result.current.candleHistory.interval).toBe('15m')
+    expect(result.current.candleHistory.rows).toHaveLength(1_000)
+    expect(result.current.candleHistory.rows.at(-1).openTime).toBe(START - (41 * MINUTE))
+    expect(result.current.candleHistory.exhausted).toBe(false)
   })
 })

@@ -4,16 +4,26 @@ import {
     isNonNegativeFuturesWorkstationDecimal,
     isPositiveFuturesWorkstationDecimal,
     normalizeFuturesWorkstationDecimal,
+    parseFuturesWorkstationDecimal,
     subtractFuturesWorkstationDecimals,
 } from './futures-workstation-decimal.js';
 import {
+    FUTURES_WORKSTATION_DEPTH_LEVELS_PER_SIDE,
     FUTURES_WORKSTATION_UINT64_MAX,
 } from '../../src/utils/futuresWorkstationProtocolShared.js';
 
 export const FUTURES_WORKSTATION_ORDER_BOOK_LIMITS = Object.freeze({
+    // Binance serves at most a thousand levels per side, so this is the deepest
+    // *complete* book that exists: past it the exchange publishes no snapshot to
+    // bridge against, and a book stitched from diff traffic alone would show
+    // less liquidity than the market holds — the same lie, further out.
     SNAPSHOT_LEVELS_PER_SIDE: 1_000,
-    RETAINED_LEVELS_PER_SIDE: 500,
-    RENDERER_LEVELS_PER_SIDE: 24,
+    // Everything the snapshot gives is kept. Retaining less discarded half of a
+    // read the desk already paid weight 20 for.
+    RETAINED_LEVELS_PER_SIDE: 1_000,
+    // Shared with the renderer's own bound so the two can never drift apart:
+    // a delivered book larger than the protocol accepts is dropped whole.
+    RENDERER_LEVELS_PER_SIDE: FUTURES_WORKSTATION_DEPTH_LEVELS_PER_SIDE,
     BUFFERED_EVENTS: 2_048,
     BUFFERED_BYTES: 8 * 1024 * 1024,
 });
@@ -117,13 +127,34 @@ const validateDelta = (delta) => {
     });
 };
 
+// A thousand-level side is sorted several times a second, and comparing two
+// decimals re-parses both strings. Sorting through the comparator would parse
+// every price twenty-odd times per pass; parsing each price once and ordering
+// on the parsed value is the same order, exactly, for a fraction of the work.
+const sortedByPrice = (side, descending) => {
+    const entries = [];
+    let scale = 0;
+    for (const [price, quantity] of side) {
+        const decimal = parseFuturesWorkstationDecimal(price);
+        if (decimal.scale > scale) scale = decimal.scale;
+        entries.push({ price, quantity, decimal, key: 0n });
+    }
+    for (const entry of entries) {
+        entry.key = entry.decimal.coefficient * (10n ** BigInt(scale - entry.decimal.scale));
+    }
+    const direction = descending ? -1n : 1n;
+    entries.sort((left, right) => {
+        if (left.key === right.key) return 0;
+        return Number((left.key < right.key ? -1n : 1n) * direction);
+    });
+    return entries;
+};
+
 const trimSide = (side, descending) => {
     if (side.size <= FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.RETAINED_LEVELS_PER_SIDE) return;
-    const sorted = [...side.keys()].sort((left, right) => (
-        compareFuturesWorkstationDecimals(left, right) * (descending ? -1 : 1)
-    ));
-    for (const price of sorted.slice(FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.RETAINED_LEVELS_PER_SIDE)) {
-        side.delete(price);
+    const sorted = sortedByPrice(side, descending);
+    for (const entry of sorted.slice(FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.RETAINED_LEVELS_PER_SIDE)) {
+        side.delete(entry.price);
     }
 };
 
@@ -134,14 +165,25 @@ const applyLevels = (side, levels) => {
     }
 };
 
+// The best price on a side is a minimum, not an ordering — taking it by sorting
+// the whole book was two full sorts per delta for two values.
+const bestPrice = (side, descending) => {
+    let best = null;
+    for (const price of side.keys()) {
+        if (best === null) {
+            best = price;
+            continue;
+        }
+        const comparison = compareFuturesWorkstationDecimals(price, best);
+        if (descending ? comparison > 0 : comparison < 0) best = price;
+    }
+    return best;
+};
+
 const formatSide = (side, descending, limit) => {
-    const entries = [...side.entries()]
-        .sort(([left], [right]) => (
-            compareFuturesWorkstationDecimals(left, right) * (descending ? -1 : 1)
-        ))
-        .slice(0, limit);
+    const entries = sortedByPrice(side, descending).slice(0, limit);
     let total = '0';
-    return Object.freeze(entries.map(([price, quantity]) => {
+    return Object.freeze(entries.map(({ price, quantity }) => {
         total = addFuturesWorkstationDecimals(total, quantity);
         return Object.freeze({ price, quantity, total });
     }));
@@ -242,8 +284,8 @@ export class FuturesWorkstationOrderBook {
         trimSide(this.bids, true);
         trimSide(this.asks, false);
         this.lastUpdateId = delta.finalUpdateIdBigInt;
-        const bestBid = formatSide(this.bids, true, 1)[0]?.price;
-        const bestAsk = formatSide(this.asks, false, 1)[0]?.price;
+        const bestBid = bestPrice(this.bids, true);
+        const bestAsk = bestPrice(this.asks, false);
         if (bestBid && bestAsk && compareFuturesWorkstationDecimals(bestBid, bestAsk) >= 0) {
             this.phase = FUTURES_WORKSTATION_ORDER_BOOK_PHASES.RESYNC_REQUIRED;
             fail('CROSSED_ORDER_BOOK');

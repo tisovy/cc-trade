@@ -1,12 +1,38 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { FUTURES_WORKSTATION_INTERVALS } from '../../../utils/futuresWorkstationProtocolShared.js'
+import {
+  FUTURES_WORKSTATION_DEFAULT_TAPE_SETTINGS,
+  FUTURES_WORKSTATION_INTERVALS,
+  FUTURES_WORKSTATION_TAPE_LIMITS,
+} from '../../../utils/futuresWorkstationProtocolShared.js'
+import { orderFuturesContracts } from '../../../utils/futuresSymbolHistory.js'
+import {
+  futuresBookGroupKey,
+  futuresBookGroupSteps,
+  groupFuturesBookLevels,
+} from '../../../utils/futuresOrderBook.js'
+import { formatCompactUsdt } from '../../../utils/futuresPriceFormat.js'
+import {
+  normalizeTapeNotional,
+  readStoredTapeSettings,
+  writeStoredTapeSettings,
+} from '../../../utils/futuresTapeSettings.js'
+import {
+  UI_SCALE_DEFAULT,
+  UI_SCALE_MAX,
+  UI_SCALE_MIN,
+  stepUiScale,
+} from '../../../utils/uiScale.js'
 import { resolveFuturesTradingGesture } from '../../../utils/futuresTradingGestures.js'
 import FuturesWorkstationChart from './FuturesWorkstationChart.jsx'
 import './FuturesWorkstation.css'
 
 const EMPTY_ROWS = Object.freeze([])
+const EMPTY_SYMBOL_HISTORY = Object.freeze({ recent: EMPTY_ROWS, favorites: EMPTY_ROWS })
 const IGNORE_PRICE_PICK = () => {}
-const VISIBLE_DEPTH_LEVELS_PER_SIDE = 10
+const VISIBLE_DEPTH_LEVELS_PER_SIDE = 14
+// The tape carries base quantity, so the USDT a print is worth is derived here
+// rather than added to the exact-keys market contract.
+const tradeNotionalUsdt = trade => Number(trade.price) * Number(trade.quantity)
 
 const formatTime = (timestamp) => {
   if (!Number.isSafeInteger(timestamp)) return '—'
@@ -28,6 +54,26 @@ const formatCountdown = (target, now) => {
 
 const displayPercent = value => value ? `${value}%` : '—'
 
+// A grouping step means nothing until it is read against the price it groups.
+// On a 0.03551 contract a 0.001 step is 2.8% of price per row, so the whole
+// book collapses into two or three of them — which looks like a broken book
+// rather than a coarse setting. Stating the share makes the choice legible at
+// the moment it is made instead of after the book empties.
+const describeBookStep = (step, referencePrice) => {
+  const stepNumber = Number(step)
+  const price = Number(referencePrice)
+  if (!Number.isFinite(stepNumber) || !Number.isFinite(price) || price <= 0) return step
+  const share = (stepNumber / price) * 100
+  if (share <= 0) return step
+  return `${step} · ${share < 0.01 ? '<0.01' : share.toFixed(2)}%`
+}
+
+const percentTone = (value) => {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed) || parsed === 0) return 'flat'
+  return parsed > 0 ? 'positive' : 'negative'
+}
+
 const FundingCountdown = ({ target }) => {
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -43,14 +89,12 @@ const StateBadge = ({ state }) => (
   </span>
 )
 
-const FilterRow = ({ name, filter, stepLabel }) => (
-  <div className="futures-workstation-filter-row">
-    <strong>{name}</strong>
-    {filter ? (
-      <code>{filter.min} → {filter.max} · {stepLabel} {filter[stepLabel]}</code>
-    ) : <span>Unavailable</span>}
-  </div>
-)
+const EMPTY_CANDLE_HISTORY = Object.freeze({
+  symbol: null,
+  interval: null,
+  rows: Object.freeze([]),
+  exhausted: false,
+})
 
 export const FuturesWorkstationView = ({
   identity,
@@ -59,22 +103,43 @@ export const FuturesWorkstationView = ({
   selectedInterval,
   draftPrice,
   ownedOrders = EMPTY_ROWS,
+  ownedPositions = EMPTY_ROWS,
+  candleHistory = EMPTY_CANDLE_HISTORY,
+  onLoadHistory,
   tradingRail,
+  portfolioDock = null,
+  symbolHistory = EMPTY_SYMBOL_HISTORY,
+  uiScale = UI_SCALE_DEFAULT,
+  onToggleFavorite,
+  onUiScaleChange,
   onDraftPriceChange,
   onTradingGesture,
   onOrderDrag,
+  onOrderCancel,
+  onOrderEdit,
   onRetry,
+  onTapeConfigurationChange,
   onSymbolChange,
   onIntervalChange,
 }) => {
   const [search, setSearch] = useState('')
-  const [favorites, setFavorites] = useState(() => new Set(['BTCUSDT']))
   const [localDraftPrice, setLocalDraftPrice] = useState(null)
   const [drawingMode, setDrawingMode] = useState(false)
   const [drawings, setDrawings] = useState(EMPTY_ROWS)
   const [alerts, setAlerts] = useState(EMPTY_ROWS)
   const [tapePaused, setTapePaused] = useState(false)
   const [pausedTrades, setPausedTrades] = useState(EMPTY_ROWS)
+  // Tape settings outlive the session: the operator tunes them once for the
+  // desk, not once per launch. The workstation hook seeds its own reference
+  // from the same store, so a restored setting is re-applied on subscribe
+  // rather than only displayed here.
+  const [storedTapeSettings] = useState(readStoredTapeSettings)
+  const [tapeSettings, setTapeSettings] = useState(storedTapeSettings)
+  const [tapeThrottleInput, setTapeThrottleInput] = useState(storedTapeSettings.throttleEnabled)
+  const [tapeTimeoutInput, setTapeTimeoutInput] = useState(String(storedTapeSettings.timeoutMs))
+  const [tapeNotionalInput, setTapeNotionalInput] = useState(storedTapeSettings.minNotionalUsdt)
+  const [tapeSettingsError, setTapeSettingsError] = useState(null)
+  const [bookGrouping, setBookGrouping] = useState(1)
   const lastBookLeftClickRef = useRef({ at: 0, price: null, modifier: null, symbol: null })
   const lastBookRightClickRef = useRef({ at: 0, price: null, modifier: null, symbol: null })
   const selectedDraftPrice = draftPrice === undefined ? localDraftPrice : draftPrice
@@ -90,6 +155,7 @@ export const FuturesWorkstationView = ({
     setAlerts(EMPTY_ROWS)
     setTapePaused(false)
     setPausedTrades(EMPTY_ROWS)
+    setBookGrouping(1)
   }, [selectedSymbol])
 
   const resources = state.resources
@@ -106,6 +172,20 @@ export const FuturesWorkstationView = ({
   const contractsUnavailable = selectionOwned && state.status === 'unavailable'
   const catalogState = contractsUnavailable ? 'unavailable' : resourceState(resources.catalog)
   const candlesState = resourceState(candles)
+  const liveCandles = candles?.contract ?? EMPTY_ROWS
+  // History is drawn behind the live window, never over it: the streaming rows
+  // own the tail, and anything the history read repeats is dropped.
+  const chartCandles = useMemo(() => {
+    const history = candleHistory.symbol === selectedSymbol
+      && candleHistory.interval === selectedInterval
+      ? candleHistory.rows
+      : EMPTY_ROWS
+    if (history.length === 0) return liveCandles
+    if (liveCandles.length === 0) return history
+    const oldestLive = liveCandles[0].openTime
+    const behind = history.filter(row => row.openTime < oldestLive)
+    return behind.length === 0 ? liveCandles : [...behind, ...liveCandles]
+  }, [candleHistory, liveCandles, selectedInterval, selectedSymbol])
   const depthState = resourceState(depth)
   const tradesState = resourceState(trades)
   const contractsUnavailableMessage = state.reasonCode === 'RECONNECT_EXHAUSTED'
@@ -114,16 +194,30 @@ export const FuturesWorkstationView = ({
       ? 'Contracts subscription was rejected by the local connection.'
       : 'Contracts are unavailable. Fix the reported connection issue, then retry.'
 
-  const visibleContracts = useMemo(() => {
-    const query = search.trim().toUpperCase()
-    return contracts
-      .filter(contract => !query || contract.symbol.includes(query) || contract.baseAsset.includes(query))
-      .sort((left, right) => {
-        const favoriteDifference = Number(favorites.has(right.symbol)) - Number(favorites.has(left.symbol))
-        return favoriteDifference || left.symbol.localeCompare(right.symbol)
-      })
-      .slice(0, 128)
-  }, [contracts, favorites, search])
+  const favorites = useMemo(() => new Set(symbolHistory.favorites), [symbolHistory.favorites])
+  // The recency list is local state; it must not wait on a catalogue round-trip.
+  // Until the catalogue confirms a recent contract, the rail lists it as pending
+  // so a restart never shows an empty instrument panel.
+  const listedContracts = useMemo(() => {
+    const known = new Set(contracts.map(contract => contract.symbol))
+    const pending = (symbolHistory.recent ?? EMPTY_ROWS)
+      .filter(symbol => !known.has(symbol))
+      .map(symbol => Object.freeze({
+        symbol,
+        baseAsset: symbol.replace(/USDT$/, ''),
+        contractType: 'RECENT',
+        pending: true,
+      }))
+    return pending.length === 0 ? contracts : [...contracts, ...pending]
+  }, [contracts, symbolHistory.recent])
+  const visibleContracts = useMemo(() => orderFuturesContracts(
+    listedContracts.filter((contract) => {
+      const query = search.trim().toUpperCase()
+      return !query || contract.symbol.includes(query) || contract.baseAsset.includes(query)
+    }),
+    symbolHistory,
+  ).slice(0, 128), [listedContracts, search, symbolHistory])
+  const catalogPending = contracts.length === 0 && !contractsUnavailable
 
   const pickPrice = useCallback((price) => {
     if (typeof onDraftPriceChange === 'function') onDraftPriceChange(price)
@@ -147,7 +241,14 @@ export const FuturesWorkstationView = ({
     if (!gesture) return false
     event.preventDefault()
     event.stopPropagation()
-    onTradingGesture?.({ ...gesture, price, source: 'order-book' })
+    onTradingGesture?.({
+      ...gesture,
+      price,
+      source: 'order-book',
+      // The confirmation opens on the level the operator clicked, not across
+      // the workspace in the trading rail.
+      anchor: { x: event.clientX, y: event.clientY },
+    })
     return true
   }, [onTradingGesture])
 
@@ -202,13 +303,8 @@ export const FuturesWorkstationView = ({
   }, [emitBookGesture, pickPrice, selectedSymbol])
 
   const toggleFavorite = useCallback((symbol) => {
-    setFavorites((previous) => {
-      const next = new Set(previous)
-      if (next.has(symbol)) next.delete(symbol)
-      else next.add(symbol)
-      return next
-    })
-  }, [])
+    onToggleFavorite?.(symbol)
+  }, [onToggleFavorite])
 
   const addDisplayAlert = useCallback(() => {
     if (!selectedDraftPrice) return
@@ -223,25 +319,159 @@ export const FuturesWorkstationView = ({
     setTapePaused(previous => !previous)
   }, [liveTrades, tapePaused])
 
+  const applyTapeSettings = useCallback((event) => {
+    event.preventDefault()
+    const timeoutMs = Number(tapeTimeoutInput)
+    const minNotionalUsdt = normalizeTapeNotional(tapeNotionalInput)
+    if (!/^[0-9]+$/.test(tapeTimeoutInput)
+      || !Number.isSafeInteger(timeoutMs)
+      || timeoutMs < FUTURES_WORKSTATION_TAPE_LIMITS.MIN_TIMEOUT_MS
+      || timeoutMs > FUTURES_WORKSTATION_TAPE_LIMITS.MAX_TIMEOUT_MS) {
+      setTapeSettingsError(
+        `Timeout must be an integer from ${FUTURES_WORKSTATION_TAPE_LIMITS.MIN_TIMEOUT_MS} to ${FUTURES_WORKSTATION_TAPE_LIMITS.MAX_TIMEOUT_MS} ms.`,
+      )
+      return
+    }
+    if (minNotionalUsdt === null) {
+      setTapeSettingsError('Minimum displayed trade must be a finite non-negative USDT value.')
+      return
+    }
+    const next = Object.freeze({
+      throttleEnabled: tapeThrottleInput,
+      timeoutMs,
+      minNotionalUsdt,
+    })
+    let accepted = true
+    try {
+      accepted = onTapeConfigurationChange?.(next) !== false
+    } catch {
+      accepted = false
+    }
+    if (!accepted) {
+      setTapeSettingsError('Tape configuration was rejected by the local workstation.')
+      return
+    }
+    setTapeSettings(next)
+    setTapeTimeoutInput(String(timeoutMs))
+    setTapeNotionalInput(minNotionalUsdt)
+    setTapeSettingsError(null)
+    // Only a configuration the workstation accepted is remembered, so a restart
+    // never restores a setting that was never in effect.
+    writeStoredTapeSettings(next)
+  }, [onTapeConfigurationChange, tapeNotionalInput, tapeThrottleInput, tapeTimeoutInput])
+
+  const changeTone = percentTone(header?.priceChangePercent)
+  const fundingTone = percentTone(header?.fundingRatePercent)
   const displayedTrades = tapePaused ? pausedTrades : liveTrades
-  const visibleAsks = [...(depth?.asks ?? EMPTY_ROWS)]
-    .slice(0, VISIBLE_DEPTH_LEVELS_PER_SIDE)
-    .reverse()
-  const visibleBids = (depth?.bids ?? EMPTY_ROWS)
-    .slice(0, VISIBLE_DEPTH_LEVELS_PER_SIDE)
+  const lastTrade = liveTrades[0] ?? null
+  const groupSteps = useMemo(
+    () => futuresBookGroupSteps(selectedContract?.filters?.price?.tickSize ?? null),
+    [selectedContract],
+  )
+  // 1× is "as the exchange sent it": no alignment pass at all, so a contract
+  // whose filters disagree with its quoted prices still renders level by level.
+  const activeGroupStep = bookGrouping === 1
+    ? null
+    : groupSteps.find(entry => entry.multiplier === bookGrouping)?.step ?? null
+  // Grouping happens on the whole delivered book, then the visible window is
+  // taken — otherwise a coarse step would only ever aggregate the first rows.
+  const visibleAsks = useMemo(() => [...groupFuturesBookLevels({
+    levels: depth?.asks ?? EMPTY_ROWS,
+    side: 'ask',
+    step: activeGroupStep,
+    limit: VISIBLE_DEPTH_LEVELS_PER_SIDE,
+  })].reverse(), [activeGroupStep, depth])
+  const visibleBids = useMemo(() => groupFuturesBookLevels({
+    levels: depth?.bids ?? EMPTY_ROWS,
+    side: 'bid',
+    step: activeGroupStep,
+    limit: VISIBLE_DEPTH_LEVELS_PER_SIDE,
+  }), [activeGroupStep, depth])
+  // Where the operator's own working orders sit in the book. Matched by the
+  // row's bucket, not its printed price, so a grouped row still marks an order
+  // resting anywhere inside it.
+  const ownBookLevels = useMemo(() => {
+    const marks = { bid: new Map(), ask: new Map() }
+    for (const order of ownedOrders) {
+      if (order.symbol !== selectedSymbol) continue
+      const side = order.side === 'BUY' ? 'bid' : 'ask'
+      const key = futuresBookGroupKey({ price: order.price, side, step: activeGroupStep })
+      if (key === null) continue
+      marks[side].set(key, (marks[side].get(key) ?? 0) + 1)
+    }
+    return marks
+  }, [activeGroupStep, ownedOrders, selectedSymbol])
+
+  // Depth bars are scaled against the deepest visible level on either side, so
+  // the two halves of the book stay comparable to each other.
+  const deepestVisibleTotal = [...visibleAsks, ...visibleBids].reduce(
+    (deepest, level) => (level.cumulativeUsdt > deepest ? level.cumulativeUsdt : deepest),
+    0,
+  )
+  const depthShare = (level) => {
+    if (deepestVisibleTotal <= 0) return '0%'
+    return `${Math.min(100, (level.cumulativeUsdt / deepestVisibleTotal) * 100).toFixed(2)}%`
+  }
+  // Which side is leaning on the book: the resting USDT on each visible side,
+  // measured over exactly the levels on screen, so changing the step changes
+  // how wide a range the reading covers.
+  const askDepthUsdt = visibleAsks[0]?.cumulativeUsdt ?? 0
+  const bidDepthUsdt = visibleBids.at(-1)?.cumulativeUsdt ?? 0
+  const bookDepthUsdt = askDepthUsdt + bidDepthUsdt
+  const bidPressure = bookDepthUsdt > 0 ? (bidDepthUsdt / bookDepthUsdt) * 100 : 0
+  // How far from the last trade the rows on screen actually reach. The pressure
+  // reading above is measured over exactly those rows, so without this a 0.3%
+  // reading and a 10% reading print as the same number and mean opposite things.
+  const bookReach = useMemo(() => {
+    const reference = Number(lastTrade?.price ?? header?.lastPrice)
+    if (!Number.isFinite(reference) || reference <= 0) return null
+    const edges = [visibleAsks[0]?.price, visibleBids.at(-1)?.price]
+      .map(Number)
+      .filter(edge => Number.isFinite(edge) && edge > 0)
+      .map(edge => (Math.abs(edge - reference) / reference) * 100)
+    if (edges.length === 0) return null
+    const reach = Math.max(...edges)
+    if (reach <= 0) return null
+    return `±${reach < 0.01 ? '<0.01' : reach.toFixed(2)}%`
+  }, [header?.lastPrice, lastTrade?.price, visibleAsks, visibleBids])
 
   return (
     <section className="futures-workstation" aria-label={`${identity} live trading workstation`}>
       <div className="futures-workstation-identity" data-testid="futures-workstation-identity">
         <strong>{identity}</strong>
-        <span>PUBLIC MARKET DATA · LIVE EXECUTION</span>
         <StateBadge state={aggregateState} />
-        <code>gen {state.generation || '—'} · rev {state.revision || '—'}</code>
         {selectionOwned && state.reasonCode ? (
           <code className="futures-workstation-reason" aria-label="Futures workstation reason">
             reason {state.reasonCode}
           </code>
         ) : null}
+        <div className="futures-workstation-scale" role="group" aria-label="Interface scale">
+          <span>{Math.round(uiScale * 100)}%</span>
+          <button
+            type="button"
+            aria-label="Decrease interface scale"
+            disabled={uiScale <= UI_SCALE_MIN}
+            onClick={() => onUiScaleChange?.(stepUiScale(uiScale, -1))}
+          >
+            A−
+          </button>
+          <button
+            type="button"
+            aria-label="Reset interface scale"
+            disabled={uiScale === UI_SCALE_DEFAULT}
+            onClick={() => onUiScaleChange?.(UI_SCALE_DEFAULT)}
+          >
+            A
+          </button>
+          <button
+            type="button"
+            aria-label="Increase interface scale"
+            disabled={uiScale >= UI_SCALE_MAX}
+            onClick={() => onUiScaleChange?.(stepUiScale(uiScale, 1))}
+          >
+            A+
+          </button>
+        </div>
       </div>
 
       <aside className="futures-workstation-instruments" aria-label="USDⓈ-M contract selector">
@@ -284,12 +514,17 @@ export const FuturesWorkstationView = ({
                 aria-pressed={contract.symbol === selectedSymbol}
               >
                 <strong>{contract.symbol}</strong>
-                <span>{contract.contractType}</span>
+                <span>{contract.pending ? 'recent' : contract.contractType}</span>
               </button>
             </div>
           ))}
           {visibleContracts.length === 0 && !contractsUnavailable ? (
-            <p className="futures-workstation-empty">No matching USDⓈ-M contract.</p>
+            <p className="futures-workstation-empty">
+              {catalogPending ? 'Loading contracts…' : 'No matching USDⓈ-M contract.'}
+            </p>
+          ) : null}
+          {visibleContracts.length > 0 && catalogPending ? (
+            <p className="futures-workstation-empty">Loading contracts…</p>
           ) : null}
         </div>
         {contractsUnavailable ? (
@@ -299,41 +534,6 @@ export const FuturesWorkstationView = ({
           </div>
         ) : null}
         {tradingRail}
-        {selectedContract ? (
-          <details className="futures-workstation-contract-inspector" aria-label="Exact contract filters">
-            <summary>Contract filters</summary>
-            <div className="futures-workstation-contract-status">
-              <span>Status</span>
-              <strong>{selectedContract.status}</strong>
-            </div>
-            <p>{selectedContract.baseAsset} / {selectedContract.quoteAsset} · margin {selectedContract.marginAsset}</p>
-            <FilterRow name="Price" filter={selectedContract.filters.price} stepLabel="tickSize" />
-            <FilterRow name="Quantity" filter={selectedContract.filters.quantity} stepLabel="stepSize" />
-            <FilterRow name="Market qty" filter={selectedContract.filters.marketQuantity} stepLabel="stepSize" />
-            <div className="futures-workstation-filter-row">
-              <strong>Percent price</strong>
-              <code>
-                {selectedContract.filters.percentPrice.multiplierDown}
-                {' → '}
-                {selectedContract.filters.percentPrice.multiplierUp}
-                {' · decimals '}
-                {selectedContract.filters.percentPrice.multiplierDecimal}
-              </code>
-            </div>
-            <div className="futures-workstation-filter-row">
-              <strong>Max orders</strong>
-              <code>{selectedContract.filters.maximumOrders}</code>
-            </div>
-            <div className="futures-workstation-filter-row">
-              <strong>Max algo orders</strong>
-              <code>{selectedContract.filters.maximumAlgoOrders ?? 'Unavailable'}</code>
-            </div>
-            <div className="futures-workstation-filter-row">
-              <strong>Min notional</strong>
-              <code>{selectedContract.filters.minimumNotional ?? 'Unavailable'} USDT</code>
-            </div>
-          </details>
-        ) : null}
       </aside>
 
       <header className="futures-workstation-market-header" aria-label="Futures market header">
@@ -344,14 +544,19 @@ export const FuturesWorkstationView = ({
         </div>
         <dl>
           <div className="is-primary"><dt>Last</dt><dd>{header?.lastPrice ?? '—'}</dd></div>
-          <div><dt>Mark</dt><dd>{header?.markPrice ?? '—'}</dd></div>
-          <div><dt>Index</dt><dd>{header?.indexPrice ?? '—'}</dd></div>
-          <div><dt>Basis</dt><dd>{header?.basis ?? '—'}</dd></div>
-          <div><dt>24h change</dt><dd>{displayPercent(header?.priceChangePercent)}</dd></div>
+          <div className={`is-change is-${changeTone}`}>
+            <dt>24h change</dt>
+            <dd>{displayPercent(header?.priceChangePercent)}</dd>
+          </div>
           <div><dt>24h high</dt><dd>{header?.highPrice ?? '—'}</dd></div>
           <div><dt>24h low</dt><dd>{header?.lowPrice ?? '—'}</dd></div>
           <div><dt>24h volume</dt><dd>{header?.volume ?? '—'}</dd></div>
-          <div><dt>Funding</dt><dd>{displayPercent(header?.fundingRatePercent)}</dd></div>
+          {/* Funding is a cost or an income depending on the leg; its sign is
+              the whole point, so it is coloured like one. */}
+          <div className={`is-change is-${fundingTone}`}>
+            <dt>Funding</dt>
+            <dd>{displayPercent(header?.fundingRatePercent)}</dd>
+          </div>
           <div><dt>Next funding</dt><FundingCountdown target={header?.nextFundingTime} /></div>
         </dl>
       </header>
@@ -395,19 +600,20 @@ export const FuturesWorkstationView = ({
         <div className="futures-workstation-chart-frame">
           <FuturesWorkstationChart
             symbol={selectedSymbol}
-            candles={candles?.contract ?? EMPTY_ROWS}
-            markCandles={candles?.mark ?? EMPTY_ROWS}
-            indexCandles={candles?.index ?? EMPTY_ROWS}
-            markPrice={header?.markPrice ?? null}
-            indexPrice={header?.indexPrice ?? null}
+            candles={chartCandles}
+            historyExhausted={candleHistory.exhausted}
+            onLoadHistory={onLoadHistory}
             priceTickSize={selectedContract?.filters.price?.tickSize ?? null}
-            draftPrice={selectedDraftPrice}
+            quantityStepSize={selectedContract?.filters.quantity?.stepSize ?? null}
             drawings={drawings}
             alerts={alerts}
             ownedOrders={ownedOrders}
+            positions={ownedPositions}
             onPricePick={candlesState === 'live' ? pickPrice : IGNORE_PRICE_PICK}
             onTradingGesture={candlesState === 'live' ? onTradingGesture : undefined}
             onOrderDrag={candlesState === 'live' ? onOrderDrag : undefined}
+            onOrderCancel={onOrderCancel}
+            onOrderEdit={onOrderEdit}
           />
           {candlesState !== 'live' ? (
             <div className={`futures-workstation-overlay is-${candlesState}`}>
@@ -420,39 +626,102 @@ export const FuturesWorkstationView = ({
 
       <aside className="futures-workstation-depth" data-state={depthState}>
         <div className="futures-workstation-section-heading">
-          <div><span>Order book</span><strong>Snapshot + diff</strong></div>
+          <div><span>Order book</span><strong>USDT</strong></div>
           <StateBadge state={depthState} />
         </div>
-        <div className="futures-workstation-book-head"><span>Price</span><span>Qty</span><span>Total</span></div>
+        {groupSteps.length > 0 ? (
+          <label className="futures-workstation-book-grouping">
+            <span>Step</span>
+            <select
+              aria-label="Order book price step"
+              value={bookGrouping}
+              onChange={event => setBookGrouping(Number(event.target.value))}
+            >
+              {groupSteps.map(entry => (
+                <option key={entry.multiplier} value={entry.multiplier}>
+                  {describeBookStep(entry.step, header?.lastPrice)}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+        <div className="futures-workstation-book-head"><span>Price</span><span>USDT</span><span>Total</span></div>
         <div className="futures-workstation-book-side is-ask">
           {visibleAsks.map(level => (
             <button
               type="button"
               key={`ask-${level.price}`}
+              className={ownBookLevels.ask.has(level.groupKey) ? 'has-own-order' : undefined}
+              title={ownBookLevels.ask.get(level.groupKey)
+                ? `${ownBookLevels.ask.get(level.groupKey)} working sell order here`
+                : undefined}
               disabled={depthState !== 'live'}
+              style={{ '--futures-depth-share': depthShare(level) }}
               onClick={event => handleBookClick(event, level.price)}
               onContextMenu={event => handleBookContextMenu(event, level.price)}
             >
-              <span>{level.price}</span><span>{level.quantity}</span><span>{level.total}</span>
+              {ownBookLevels.ask.has(level.groupKey)
+                ? <i className="futures-workstation-book-own is-sell" aria-hidden="true" />
+                : null}
+              <span>{level.price}</span>
+              <span>{formatCompactUsdt(level.notionalUsdt)}</span>
+              <span>{formatCompactUsdt(level.cumulativeUsdt)}</span>
             </button>
           ))}
         </div>
-        <div className="futures-workstation-spread">
-          <span>Spread</span><strong>{depth?.spread ?? '—'}</strong><code>u {depth?.lastUpdateId ?? '—'}</code>
+        {/* The row between the sides carries the only number worth reading
+            there: what just traded, and which side lifted it. */}
+        <div className={`futures-workstation-book-last is-${lastTrade?.buyerMaker ? 'sell' : 'buy'}`}>
+          <strong>{lastTrade?.price ?? header?.lastPrice ?? '—'}</strong>
+          <span>last</span>
         </div>
         <div className="futures-workstation-book-side is-bid">
           {visibleBids.map(level => (
             <button
               type="button"
               key={`bid-${level.price}`}
+              className={ownBookLevels.bid.has(level.groupKey) ? 'has-own-order' : undefined}
+              title={ownBookLevels.bid.get(level.groupKey)
+                ? `${ownBookLevels.bid.get(level.groupKey)} working buy order here`
+                : undefined}
               disabled={depthState !== 'live'}
+              style={{ '--futures-depth-share': depthShare(level) }}
               onClick={event => handleBookClick(event, level.price)}
               onContextMenu={event => handleBookContextMenu(event, level.price)}
             >
-              <span>{level.price}</span><span>{level.quantity}</span><span>{level.total}</span>
+              {ownBookLevels.bid.has(level.groupKey)
+                ? <i className="futures-workstation-book-own is-buy" aria-hidden="true" />
+                : null}
+              <span>{level.price}</span>
+              <span>{formatCompactUsdt(level.notionalUsdt)}</span>
+              <span>{formatCompactUsdt(level.cumulativeUsdt)}</span>
             </button>
           ))}
         </div>
+        {bookDepthUsdt > 0 ? (
+          <div
+            className="futures-workstation-book-pressure"
+            aria-label="Order book buy and sell pressure"
+            title={`${formatCompactUsdt(bidDepthUsdt)} USDT bid · ${formatCompactUsdt(askDepthUsdt)} USDT ask`}
+          >
+            <div className="futures-workstation-book-pressure-bar">
+              <span className="is-buy" style={{ width: `${bidPressure.toFixed(2)}%` }} />
+              <span className="is-sell" style={{ width: `${(100 - bidPressure).toFixed(2)}%` }} />
+            </div>
+            <div className="futures-workstation-book-pressure-legend">
+              <strong className="is-buy">B {bidPressure.toFixed(2)}%</strong>
+              {bookReach ? (
+                <span
+                  className="futures-workstation-book-reach"
+                  title="Price range the rows on screen cover"
+                >
+                  {bookReach}
+                </span>
+              ) : null}
+              <strong className="is-sell">{(100 - bidPressure).toFixed(2)}% S</strong>
+            </div>
+          </div>
+        ) : null}
       </aside>
 
       <aside className="futures-workstation-trades" data-state={tradesState}>
@@ -462,16 +731,56 @@ export const FuturesWorkstationView = ({
             {tapePaused ? 'Resume' : 'Pause'}
           </button>
         </div>
-        <div className="futures-workstation-trade-head"><span>Price</span><span>Qty</span><span>Time</span></div>
+        <form className="futures-workstation-tape-controls" onSubmit={applyTapeSettings}>
+          <label className="futures-workstation-tape-toggle">
+            <input
+              type="checkbox"
+              checked={tapeThrottleInput}
+              onChange={event => setTapeThrottleInput(event.target.checked)}
+            />
+            <span>Throttle</span>
+          </label>
+          <label>
+            <span>Timeout (ms)</span>
+            <input
+              aria-label="Tape timeout in ms"
+              inputMode="numeric"
+              value={tapeTimeoutInput}
+              onChange={event => setTapeTimeoutInput(event.target.value)}
+            />
+          </label>
+          <label>
+            <span>Min trade (USDT)</span>
+            <input
+              aria-label="Minimum displayed trade in USDT"
+              inputMode="decimal"
+              value={tapeNotionalInput}
+              onChange={event => setTapeNotionalInput(event.target.value)}
+            />
+          </label>
+          <button type="submit">Apply</button>
+          <output className="futures-workstation-tape-effective" aria-live="polite">
+            Effective: {tapeSettings.throttleEnabled ? 'throttled' : 'unthrottled'} ·{' '}
+            {tapeSettings.timeoutMs} ms · ≥ {tapeSettings.minNotionalUsdt} USDT
+          </output>
+          {tapeSettingsError ? (
+            <span className="futures-workstation-tape-error" role="alert">{tapeSettingsError}</span>
+          ) : null}
+        </form>
+        <div className="futures-workstation-trade-head"><span>Price</span><span>USDT</span><span>Time</span></div>
         <div className="futures-workstation-trade-rows">
           {displayedTrades.map(trade => (
             <div className={trade.buyerMaker ? 'is-sell' : 'is-buy'} key={trade.aggregateTradeId}>
-              <span>{trade.price}</span><span>{trade.quantity}</span><span>{formatTime(trade.tradeTime)}</span>
+              <span>{trade.price}</span>
+              <span title={`${trade.quantity} base`}>{formatCompactUsdt(tradeNotionalUsdt(trade))}</span>
+              <span>{formatTime(trade.tradeTime)}</span>
             </div>
           ))}
           {displayedTrades.length === 0 ? <p className="futures-workstation-empty">Waiting for aggregate trades…</p> : null}
         </div>
       </aside>
+
+      {portfolioDock}
     </section>
   )
 }

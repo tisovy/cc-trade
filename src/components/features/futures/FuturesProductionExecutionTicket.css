@@ -14,7 +14,7 @@
   border-radius: 7px;
   background: var(--production-background);
   color: #e8f0f7;
-  font-size: 11px;
+  font-size: calc(var(--fx-ui-scale, 1) * 14px);
   box-shadow: 0 8px 26px rgba(0, 0, 0, 0.2);
 }
 
@@ -40,7 +40,7 @@
 
 .futures-production-execution-market {
   color: #f4f8fb;
-  font-size: 9px;
+  font-size: calc(var(--fx-ui-scale, 1) * 12.5px);
   font-weight: 900;
   letter-spacing: 0.1em;
 }
@@ -55,7 +55,7 @@
 
 .futures-production-execution-header strong {
   color: #aebdca;
-  font-size: 9px;
+  font-size: calc(var(--fx-ui-scale, 1) * 12.5px);
   letter-spacing: 0.04em;
 }
 
@@ -65,7 +65,7 @@
   border-radius: 999px;
   background: rgba(255, 107, 120, 0.08);
   color: #ff8792;
-  font-size: 8px;
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
   font-weight: 900;
   letter-spacing: 0.05em;
   white-space: nowrap;
@@ -103,7 +103,7 @@
   overflow: hidden;
   max-width: 100%;
   color: var(--production-muted);
-  font-size: 7px;
+  font-size: calc(var(--fx-ui-scale, 1) * 11px);
   line-height: 1.25;
   text-align: right;
   text-overflow: ellipsis;
@@ -123,7 +123,7 @@
   padding: 8px 3px 7px;
   background: transparent;
   color: var(--production-muted);
-  font-size: 9px;
+  font-size: calc(var(--fx-ui-scale, 1) * 12.5px);
   font-weight: 800;
   cursor: pointer;
   white-space: nowrap;
@@ -137,7 +137,7 @@
   margin-left: 2px;
   border-radius: 999px;
   background: rgba(127, 147, 165, 0.14);
-  font-size: 8px;
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
 }
 
 .futures-production-tabs button[aria-selected="true"] {
@@ -154,6 +154,96 @@
   display: grid;
   gap: 8px;
   padding: 8px;
+}
+
+.futures-production-feedback {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: start;
+  margin: 8px 8px 0;
+  padding: 7px 8px;
+  border: 1px solid var(--production-border);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.018);
+  animation: futures-production-feedback-in 160ms ease-out;
+}
+
+@keyframes futures-production-feedback-in {
+  from {
+    transform: translateY(-3px);
+    opacity: 0;
+  }
+
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.futures-production-feedback > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.futures-production-feedback strong {
+  font-size: calc(var(--fx-ui-scale, 1) * 12.5px);
+  font-weight: 900;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.futures-production-feedback span {
+  color: var(--production-muted);
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.futures-production-feedback.is-submitted {
+  border-color: rgba(43, 196, 138, 0.45);
+}
+
+.futures-production-feedback.is-submitted strong {
+  color: #63dbae;
+}
+
+.futures-production-feedback.is-ignored {
+  border-color: rgba(244, 202, 67, 0.45);
+}
+
+.futures-production-feedback.is-ignored strong {
+  color: #f4ca43;
+}
+
+.futures-production-feedback > button {
+  padding: 0 4px;
+  border: 0;
+  background: transparent;
+  color: var(--production-muted);
+  font-size: calc(var(--fx-ui-scale, 1) * 15px);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.futures-production-feedback > button:hover {
+  color: #fff;
+}
+
+.futures-production-backend-card.is-ack > strong {
+  color: #63dbae;
+}
+
+/* An unconfirmed outcome is neither a success nor a refusal, so it reads as
+   neither green nor red: amber, the colour of "look at this before you act". */
+.futures-production-backend-card.is-unresolved {
+  border-color: rgba(240, 185, 11, 0.55);
+  background: rgba(240, 185, 11, 0.08);
+}
+
+.futures-production-backend-card.is-unresolved > strong {
+  color: #f0b90b;
 }
 
 .futures-production-action,
@@ -183,7 +273,7 @@
 .futures-production-ticket-symbol > span {
   grid-column: 1 / -1;
   color: var(--production-muted);
-  font-size: 8px;
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
   font-weight: 800;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -191,12 +281,12 @@
 
 .futures-production-ticket-symbol > strong {
   color: #fff;
-  font-size: 15px;
+  font-size: calc(var(--fx-ui-scale, 1) * 18px);
 }
 
 .futures-production-ticket-symbol > code {
   color: #f4ca43;
-  font-size: 8px;
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
   text-transform: uppercase;
 }
 
@@ -220,7 +310,7 @@
 .futures-production-confirmation label > span,
 .futures-production-execution-ticket dt {
   color: var(--production-muted);
-  font-size: 8px;
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
   font-weight: 700;
 }
 
@@ -236,7 +326,7 @@
   outline: 0;
   background: #061019;
   color: #edf5fb;
-  font-size: 10px;
+  font-size: calc(var(--fx-ui-scale, 1) * 13px);
 }
 
 .futures-production-action.is-order input[type="text"]:focus,
@@ -268,11 +358,11 @@
 
 .futures-production-size-slider output strong {
   color: #f4ca43;
-  font-size: 13px;
+  font-size: calc(var(--fx-ui-scale, 1) * 16px);
 }
 
 .futures-production-size-slider output b {
-  font-size: 9px;
+  font-size: calc(var(--fx-ui-scale, 1) * 12.5px);
   font-weight: 700;
 }
 
@@ -354,7 +444,7 @@
 
 .futures-production-size-anchors button {
   padding: 4px 1px;
-  font-size: 8px;
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
 }
 
 .futures-production-size-anchors button.is-selected {
@@ -395,7 +485,7 @@
   margin: 1px 0 0;
   overflow: hidden;
   color: #e7f0f8;
-  font-size: 9px;
+  font-size: calc(var(--fx-ui-scale, 1) * 12.5px);
   overflow-wrap: anywhere;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -409,7 +499,7 @@
   border-left: 2px solid #b88e0c;
   background: rgba(240, 185, 11, 0.06);
   color: #e8c65a;
-  font-size: 8px;
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
   line-height: 1.4;
 }
 
@@ -430,7 +520,7 @@
   gap: 4px;
   align-items: center;
   min-width: 0;
-  font-size: 7px;
+  font-size: calc(var(--fx-ui-scale, 1) * 11px);
 }
 
 .futures-production-shortcuts kbd {
@@ -439,7 +529,7 @@
   border-radius: 3px;
   background: #122432;
   color: #dbe7ef;
-  font: 7px ui-monospace, monospace;
+  font: calc(var(--fx-ui-scale, 1) * 11px) ui-monospace, monospace;
 }
 
 .futures-production-shortcuts b {
@@ -458,7 +548,7 @@
 .futures-production-shortcuts small {
   grid-column: 1 / -1;
   color: #64798a;
-  font-size: 7px;
+  font-size: calc(var(--fx-ui-scale, 1) * 11px);
 }
 
 .futures-production-gesture-confirmation {
@@ -488,13 +578,13 @@
 
 .futures-production-gesture-confirmation > header span {
   color: var(--production-muted);
-  font-size: 8px;
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
   text-transform: uppercase;
 }
 
 .futures-production-gesture-confirmation > header strong {
   color: #65dcb1;
-  font-size: 9px;
+  font-size: calc(var(--fx-ui-scale, 1) * 12.5px);
 }
 
 .futures-production-gesture-confirmation.is-short > header strong {
@@ -504,7 +594,7 @@
 .futures-production-gesture-confirmation > p {
   margin: 0;
   color: #dce8f0;
-  font: 9px ui-monospace, monospace;
+  font: calc(var(--fx-ui-scale, 1) * 12.5px) ui-monospace, monospace;
 }
 
 .futures-production-orders,
@@ -521,12 +611,12 @@
 
 .futures-production-portfolio-heading strong {
   color: #e9f1f7;
-  font-size: 10px;
+  font-size: calc(var(--fx-ui-scale, 1) * 13px);
 }
 
 .futures-production-portfolio-heading span {
   color: var(--production-muted);
-  font-size: 8px;
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
 }
 
 .futures-production-portfolio-heading button {
@@ -534,7 +624,7 @@
   height: 25px;
   padding: 0;
   color: #f1c63c;
-  font-size: 15px;
+  font-size: calc(var(--fx-ui-scale, 1) * 18px);
 }
 
 .futures-production-orders article,
@@ -565,23 +655,23 @@
 .futures-production-orders article header span,
 .futures-production-positions article header span {
   color: var(--production-muted);
-  font-size: 8px;
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
 }
 
 .futures-production-orders article header code {
   color: #f0c94e;
-  font-size: 8px;
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
 }
 
 .futures-production-orders article small {
   color: #667c8d;
-  font-size: 7px;
+  font-size: calc(var(--fx-ui-scale, 1) * 11px);
 }
 
 .futures-production-positions article > div button {
   flex: 1;
   padding: 5px;
-  font-size: 8px;
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
 }
 
 .futures-production-margin-adjustment {
@@ -596,7 +686,7 @@
 .futures-production-margin-adjustment p {
   margin: 0;
   color: var(--production-muted);
-  font-size: 8px;
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
 }
 
 .futures-production-margin-adjustment button,
@@ -624,7 +714,7 @@
   grid-column: 1 / -1;
   overflow: hidden;
   color: var(--production-muted);
-  font-size: 8px;
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
   text-overflow: ellipsis;
 }
 
@@ -634,7 +724,7 @@
   border-left: 2px solid var(--production-positive);
   background: rgba(43, 196, 138, 0.06);
   color: #8edcbe;
-  font-size: 8px;
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
   line-height: 1.4;
 }
 
@@ -647,7 +737,7 @@
 
 .futures-production-confirmation label span code {
   color: #fff;
-  font-size: 8px;
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
 }
 
 .futures-production-confirmation button.is-final,
@@ -661,7 +751,7 @@
 .futures-production-action h3 {
   margin: 0;
   color: var(--production-warning);
-  font-size: 9px;
+  font-size: calc(var(--fx-ui-scale, 1) * 12.5px);
   font-weight: 900;
   letter-spacing: 0.05em;
 }
@@ -669,14 +759,14 @@
 .futures-production-backend-card > code {
   overflow-wrap: anywhere;
   color: #aebdca;
-  font-size: 8px;
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
 }
 
 .futures-production-backend-card > p,
 .futures-production-action > p {
   margin: 0;
   color: var(--production-muted);
-  font-size: 8px;
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
   line-height: 1.4;
 }
 
@@ -687,7 +777,7 @@
 
 .futures-production-advanced-safety > summary {
   color: #8296a7;
-  font-size: 8px;
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
   font-weight: 800;
   cursor: pointer;
 }
@@ -736,7 +826,7 @@
   border-radius: 6px;
   background: transparent;
   color: inherit;
-  font-size: 11px;
+  font-size: calc(var(--fx-ui-scale, 1) * 14px);
   cursor: pointer;
 }
 
@@ -753,4 +843,474 @@
 .futures-production-pause-toggle:disabled {
   opacity: 0.5;
   cursor: default;
+}
+
+/* Side is the primary signal in a list of orders: colour by BUY/SELL, because a
+   one-way account reports positionSide BOTH for every one of them. */
+.futures-production-orders article.is-buy,
+.futures-production-positions article.is-buy {
+  border-left-color: var(--production-positive);
+}
+
+.futures-production-orders article.is-sell,
+.futures-production-positions article.is-sell {
+  border-left-color: var(--production-danger);
+}
+
+.futures-production-side {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: calc(var(--fx-ui-scale, 1) * 11.5px);
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.futures-production-side.is-buy {
+  background: rgba(43, 196, 138, 0.16);
+  color: #48d8a4;
+}
+
+.futures-production-side.is-sell {
+  background: rgba(239, 91, 105, 0.16);
+  color: #ff8490;
+}
+
+.futures-production-position-pnl {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 7px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.03);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+.futures-production-position-pnl strong {
+  font-size: calc(var(--fx-ui-scale, 1) * 17px);
+  font-weight: 800;
+}
+
+.futures-production-position-pnl em {
+  font-size: calc(var(--fx-ui-scale, 1) * 13px);
+  font-style: normal;
+}
+
+.futures-production-position-pnl.is-positive {
+  color: #3fd79b;
+}
+
+.futures-production-position-pnl.is-negative {
+  color: #ff8490;
+}
+
+.futures-production-position-pnl.is-flat {
+  color: #93a6b7;
+}
+
+/* ── Open order rows ──────────────────────────────────────────────────────── */
+
+.futures-production-order-rows {
+  display: grid;
+  gap: 3px;
+}
+
+.futures-production-order-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, auto) minmax(0, auto) 22px;
+  gap: 7px;
+  align-items: center;
+  padding: 5px 7px;
+  border: 1px solid var(--production-border);
+  border-left: 3px solid #577185;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.02);
+  font-variant-numeric: tabular-nums;
+  cursor: default;
+}
+
+.futures-production-order-row.is-buy {
+  border-left-color: var(--production-positive);
+}
+
+.futures-production-order-row.is-sell {
+  border-left-color: var(--production-danger);
+}
+
+.futures-production-order-row.is-current-symbol {
+  background: rgba(38, 136, 217, 0.09);
+}
+
+.futures-production-order-row strong {
+  overflow: hidden;
+  color: #e9f1f7;
+  font-size: calc(var(--fx-ui-scale, 1) * 12.5px);
+  text-overflow: ellipsis;
+}
+
+.futures-production-order-row code {
+  color: #c9d7e4;
+  font-size: calc(var(--fx-ui-scale, 1) * 12.5px);
+}
+
+.futures-production-order-row b {
+  color: #f0f6fb;
+  font-size: calc(var(--fx-ui-scale, 1) * 12.5px);
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.futures-production-order-row em {
+  color: #7d8fa1;
+  font-size: calc(var(--fx-ui-scale, 1) * 11px);
+  font-style: normal;
+}
+
+.futures-production-order-cancel {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid rgba(239, 91, 105, 0.45);
+  border-radius: 4px;
+  background: rgba(239, 91, 105, 0.12);
+  color: #ff9aa3;
+  font-size: calc(var(--fx-ui-scale, 1) * 15px);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.futures-production-order-cancel:hover {
+  border-color: #ef5b69;
+  background: rgba(239, 91, 105, 0.24);
+  color: #fff;
+}
+
+.futures-production-order-hint {
+  margin: 0;
+  color: #6d8092;
+  font-size: calc(var(--fx-ui-scale, 1) * 11px);
+}
+
+/* Buttons in this rail had no styling at all and rendered as blank white boxes. */
+.futures-production-cancel-all,
+.futures-production-positions article > div button,
+.futures-production-backend-card button {
+  padding: 6px 8px;
+  border: 1px solid var(--production-border);
+  border-radius: 4px;
+  background: rgba(239, 91, 105, 0.12);
+  color: #ffd2d7;
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.futures-production-cancel-all:hover,
+.futures-production-positions article > div button:hover,
+.futures-production-backend-card button:hover {
+  border-color: #ef5b69;
+  background: rgba(239, 91, 105, 0.22);
+  color: #fff;
+}
+
+/* ── Draggable order editor ───────────────────────────────────────────────── */
+
+.futures-order-editor {
+  position: fixed;
+  z-index: 60;
+  display: grid;
+  gap: 7px;
+  padding: 9px;
+  border: 1px solid rgba(126, 143, 166, 0.4);
+  border-radius: 8px;
+  background: #0b1622;
+  box-shadow: 0 20px 46px rgba(0, 0, 0, 0.55);
+  color: #dbe6f0;
+}
+
+.futures-order-editor.is-buy {
+  border-color: rgba(43, 196, 138, 0.5);
+}
+
+.futures-order-editor.is-sell {
+  border-color: rgba(239, 91, 105, 0.5);
+}
+
+.futures-order-editor-handle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: -9px -9px 0;
+  padding: 7px 9px;
+  border-bottom: 1px solid rgba(126, 143, 166, 0.22);
+  border-radius: 8px 8px 0 0;
+  background: rgba(255, 255, 255, 0.04);
+  cursor: move;
+  touch-action: none;
+  user-select: none;
+}
+
+.futures-order-editor-handle strong {
+  font-size: calc(var(--fx-ui-scale, 1) * 13px);
+}
+
+.futures-order-editor-side {
+  padding: 1px 6px;
+  border-radius: 3px;
+  font-size: calc(var(--fx-ui-scale, 1) * 11.5px);
+  font-weight: 800;
+}
+
+.futures-order-editor-side.is-buy {
+  background: rgba(43, 196, 138, 0.16);
+  color: #48d8a4;
+}
+
+.futures-order-editor-side.is-sell {
+  background: rgba(239, 91, 105, 0.16);
+  color: #ff8490;
+}
+
+.futures-order-editor-handle button {
+  margin-left: auto;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: #9fb0c1;
+  font-size: calc(var(--fx-ui-scale, 1) * 15px);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.futures-order-editor label {
+  display: grid;
+  gap: 3px;
+  color: #7f93a6;
+  font-size: calc(var(--fx-ui-scale, 1) * 11px);
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.futures-order-editor input {
+  width: 100%;
+  padding: 6px 7px;
+  border: 1px solid rgba(126, 143, 166, 0.3);
+  border-radius: 4px;
+  outline: 0;
+  background: #071019;
+  color: #e7f0f8;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: calc(var(--fx-ui-scale, 1) * 14px);
+}
+
+.futures-order-editor input:focus {
+  border-color: #4f9ad8;
+}
+
+.futures-order-editor-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 8px;
+  margin: 0;
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
+}
+
+.futures-order-editor-summary dt {
+  color: #7f93a6;
+  font-size: calc(var(--fx-ui-scale, 1) * 11px);
+}
+
+.futures-order-editor-summary dd {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.futures-order-editor p {
+  margin: 0;
+  color: #e8c65a;
+  font-size: calc(var(--fx-ui-scale, 1) * 11.5px);
+}
+
+.futures-order-editor-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+/* Neutral by default: an action here that carries no intent class is a plain
+   dismissal, and must not fall back to the user agent's white button. */
+.futures-order-editor-actions button {
+  padding: 7px;
+  border: 1px solid var(--production-border);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #c3d0dd;
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.futures-order-editor-actions button:hover {
+  background: rgba(255, 255, 255, 0.11);
+}
+
+.futures-order-editor-actions .is-apply {
+  border-color: rgba(43, 196, 138, 0.5);
+  background: rgba(43, 196, 138, 0.16);
+  color: #7ff0c4;
+}
+
+.futures-order-editor-actions .is-apply:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.futures-order-editor-actions .is-cancel-order {
+  border-color: rgba(239, 91, 105, 0.45);
+  background: rgba(239, 91, 105, 0.14);
+  color: #ff9aa3;
+}
+
+/* ── Direction controls ───────────────────────────────────────────────────── */
+
+/* Direction is read by colour before it is read as text: entries are solid,
+   exits are outlined, longs are green and shorts are red. */
+.futures-production-manual-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.futures-production-manual-actions button {
+  padding: 7px 6px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  font-size: calc(var(--fx-ui-scale, 1) * 12.5px);
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+}
+
+.futures-production-manual-actions button.is-long.is-entry {
+  border-color: rgba(43, 196, 138, 0.65);
+  background: rgba(43, 196, 138, 0.24);
+  color: #8df3c8;
+}
+
+.futures-production-manual-actions button.is-long.is-exit {
+  border-color: rgba(43, 196, 138, 0.45);
+  background: rgba(43, 196, 138, 0.08);
+  color: #62d6a8;
+}
+
+.futures-production-manual-actions button.is-short.is-entry {
+  border-color: rgba(239, 91, 105, 0.65);
+  background: rgba(239, 91, 105, 0.24);
+  color: #ffb0b7;
+}
+
+.futures-production-manual-actions button.is-short.is-exit {
+  border-color: rgba(239, 91, 105, 0.45);
+  background: rgba(239, 91, 105, 0.08);
+  color: #ff8f9a;
+}
+
+.futures-production-manual-actions button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ── Position close panel ─────────────────────────────────────────────────── */
+
+.futures-order-editor-modes,
+.futures-order-editor-anchors {
+  display: grid;
+  gap: 4px;
+}
+
+.futures-order-editor-modes {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.futures-order-editor-anchors {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.futures-order-editor-modes button,
+.futures-order-editor-anchors button {
+  padding: 5px 4px;
+  border: 1px solid rgba(126, 143, 166, 0.3);
+  border-radius: 4px;
+  background: rgba(126, 143, 166, 0.08);
+  color: #cfdcea;
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.futures-order-editor-modes button.is-selected {
+  border-color: #4f9ad8;
+  background: rgba(79, 154, 216, 0.22);
+  color: #eaf4ff;
+}
+
+.futures-order-editor.is-sell .futures-order-editor-actions .is-apply {
+  border-color: rgba(239, 91, 105, 0.5);
+  background: rgba(239, 91, 105, 0.16);
+  color: #ffb0b7;
+}
+
+/* A close panel offers one action, so it spans the row. */
+.futures-order-editor-actions:has(> :only-child) {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* ── Order confirmation ───────────────────────────────────────────────────── */
+
+/* This panel is read in the second before real money moves, so the direction
+   is carried by the whole surface rather than by a badge in one corner. */
+.futures-order-confirm.is-buy {
+  border-color: rgba(43, 196, 138, 0.65);
+  background: #0a2019;
+}
+
+.futures-order-confirm.is-sell {
+  border-color: rgba(239, 91, 105, 0.65);
+  background: #211216;
+}
+
+.futures-order-confirm-headline {
+  padding: 5px 8px;
+  border-radius: 4px;
+  text-align: center;
+  font-size: calc(var(--fx-ui-scale, 1) * 17px);
+  font-weight: 900;
+  letter-spacing: 0.06em;
+}
+
+.futures-order-confirm-headline.is-buy {
+  background: rgba(43, 196, 138, 0.2);
+  color: #59e3ad;
+}
+
+.futures-order-confirm-headline.is-sell {
+  background: rgba(239, 91, 105, 0.2);
+  color: #ff8f9a;
+}
+
+/* Reserved for the one thing the operator is about to get wrong. */
+.futures-order-confirm-warning {
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: rgba(240, 173, 78, 0.16);
+  color: #f5c67a;
+  font-size: calc(var(--fx-ui-scale, 1) * 11.5px);
+  font-weight: 700;
 }

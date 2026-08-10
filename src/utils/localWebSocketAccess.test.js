@@ -6,26 +6,12 @@ import {
 } from './localWebSocketAccess.js';
 
 describe('renderer local WebSocket access', () => {
-    it('reads Electron renderer arguments with safe defaults', () => {
-        expect(getRendererLocalWebSocketAccess([
-            '--local-ws-host=127.0.0.1',
-            '--local-ws-port=14477',
-            '--local-ws-token-param=token',
-            '--local-ws-token=abc123',
-        ])).toEqual({
-            host: '127.0.0.1',
-            port: 14477,
-            token: 'abc123',
-            tokenParam: 'token',
-        });
-
-        expect(getRendererLocalWebSocketAccess([])).toEqual({
-            host: '127.0.0.1',
-            port: 14477,
-            token: '',
-            tokenParam: 'token',
-        });
-        expect(getRendererLocalWebSocketAccess(['--local-ws-port=99999']).port).toBe(14477);
+    // The address comes from the registered runtime and from nowhere else. The
+    // argument-parsing path with its `127.0.0.1:14477` defaults is gone: it was
+    // a second way to invent an endpoint this window was never given.
+    it('has no address at all without a registered runtime', () => {
+        expect(getRendererLocalWebSocketAccess()).toBeNull();
+        expect(getRendererLocalWebSocketAccess.length).toBe(0);
     });
 
     it('adds the session token only to loopback websocket URLs', () => {

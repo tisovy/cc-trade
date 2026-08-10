@@ -1,6 +1,23 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { createSubscribeRequest, createUnsubscribeRequest, normalizeMessage, CHANNEL_TYPES } from '../utils/channels';
-import { redactLocalWebSocketAccess } from '../utils/localWebSocketAccess';
+import {
+    LOCAL_WEBSOCKET_AUTH_CLOSE_CODE,
+    redactLocalWebSocketAccess,
+} from '../utils/localWebSocketAccess';
+
+// Two failures that retrying cannot fix. Everything else keeps reconnecting.
+export const TRANSPORT_FAILURES = Object.freeze({
+    RUNTIME_UNAVAILABLE: Object.freeze({
+        code: 'RUNTIME_UNAVAILABLE',
+        message: 'This window was not issued a local backend address.'
+            + ' Restart the application; if it recurs, the backend did not start.',
+    }),
+    AUTHENTICATION_REJECTED: Object.freeze({
+        code: 'AUTHENTICATION_REJECTED',
+        message: 'The local backend refused this window\'s session token.'
+            + ' Restart the application so a matching token is issued.',
+    }),
+});
 
 /**
  * WebSocket hook with channel subscription support
@@ -16,6 +33,10 @@ import { redactLocalWebSocketAccess } from '../utils/localWebSocketAccess';
  */
 const useWebSocket = (url, detailSubscription, handleMessage) => {
     const [connection, setConnection] = useState(null);
+    // A failure the retry loop cannot resolve, held so the operator is told
+    // rather than left watching a silent reconnect that will never succeed.
+    const [failure, setFailure] = useState(null);
+    const [retryGeneration, setRetryGeneration] = useState(0);
     const reconnectTimeoutRef = useRef(null);
     const connectionRef = useRef(null);
     const messageHandlerRef = useRef(handleMessage);
@@ -153,6 +174,16 @@ const useWebSocket = (url, detailSubscription, handleMessage) => {
     }, []);
 
     useEffect(() => {
+        // No address means no connection. Dialling a default endpoint instead is
+        // exactly what produced an endless `invalid token` reconnect.
+        if (!url) {
+            setConnection(null);
+            connectionRef.current = null;
+            setFailure(TRANSPORT_FAILURES.RUNTIME_UNAVAILABLE);
+            return undefined;
+        }
+        setFailure(null);
+
         const connect = () => {
             console.log('Connecting to WebSocket:', redactLocalWebSocketAccess(url));
             const ws = new WebSocket(url);
@@ -191,6 +222,14 @@ const useWebSocket = (url, detailSubscription, handleMessage) => {
                 console.log('WebSocket Closed:', event.code);
                 setConnection(null);
                 connectionRef.current = null;
+                // A refused token is not a transport hiccup: the next attempt
+                // carries the same token and is refused the same way. Retrying
+                // it 120 times a minute is what filled the log with `invalid
+                // token` and hid the real cause. Say it once and stop.
+                if (event.code === LOCAL_WEBSOCKET_AUTH_CLOSE_CODE) {
+                    setFailure(TRANSPORT_FAILURES.AUTHENTICATION_REJECTED);
+                    return;
+                }
                 reconnectTimeoutRef.current = setTimeout(connect, 500);
             };
 
@@ -209,7 +248,14 @@ const useWebSocket = (url, detailSubscription, handleMessage) => {
                 connectionRef.current.close();
             }
         };
-    }, [url, sendDetailRequest, resubscribeChannels]);
+    }, [url, retryGeneration, sendDetailRequest, resubscribeChannels]);
+
+    // The explicit operator action that resumes a stopped transport. A reload
+    // resumes it too, by re-running the preload and issuing a fresh runtime.
+    const reconnect = useCallback(() => {
+        setFailure(null);
+        setRetryGeneration(generation => generation + 1);
+    }, []);
 
     // Send legacy detail request when subscription changes
     useEffect(() => {
@@ -221,6 +267,8 @@ const useWebSocket = (url, detailSubscription, handleMessage) => {
     // Return enhanced API
     return {
         connection,
+        failure,
+        reconnect,
         subscribe,
         unsubscribe,
         sendMessage,

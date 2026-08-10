@@ -115,4 +115,37 @@ describe('local WebSocket access control', () => {
             status: 401,
         });
     });
+
+    // A verification run and a development instance are two runtimes. Neither
+    // renderer may address the other's backend: they listen on different ports,
+    // and even on the same one the token belongs to the runtime that minted it.
+    it('refuses a renderer holding another runtime instance\'s token', () => {
+        const developmentRuntime = createLocalWebSocketAccess();
+        const verificationRuntime = createLocalWebSocketAccess();
+
+        expect(developmentRuntime.token).not.toBe(verificationRuntime.token);
+        expect(validateLocalWebSocketRequest(
+            makeRequest({ token: verificationRuntime.token }),
+            { ...developmentRuntime, allowedOrigins: [RENDERER_ORIGIN] },
+        )).toMatchObject({ allowed: false, status: 401, reason: 'invalid-token' });
+        expect(validateLocalWebSocketRequest(
+            makeRequest({ token: developmentRuntime.token }),
+            { ...developmentRuntime, allowedOrigins: [RENDERER_ORIGIN] },
+        )).toMatchObject({ allowed: true, status: 101 });
+    });
+
+    it('gives a verification run a port of its own', async () => {
+        const previousPort = process.env.WS_PORT;
+        delete process.env.WS_PORT;
+        const developmentPort = resolveLocalWebSocketPort();
+
+        const { VERIFICATION_LOCAL_WEBSOCKET_PORT } = await import('../env-setup.js');
+
+        expect(VERIFICATION_LOCAL_WEBSOCKET_PORT).not.toBe(developmentPort);
+        expect(process.env.WS_PORT).toBe(String(VERIFICATION_LOCAL_WEBSOCKET_PORT));
+        expect(resolveLocalWebSocketPort()).toBe(VERIFICATION_LOCAL_WEBSOCKET_PORT);
+
+        if (previousPort === undefined) delete process.env.WS_PORT;
+        else process.env.WS_PORT = previousPort;
+    });
 });
