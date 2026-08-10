@@ -661,8 +661,20 @@ export const FuturesWorkstationChart = ({
       // Half opacity: the entry band is a reference the candles are read
       // against, not a signal competing with them. At full strength its axis
       // label and its line both hid the bars sitting at that price.
+      //
+      // The label plate needs its own colour because the library will not honour
+      // alpha there: it builds the plate with `rgb(...)` from the parsed colour
+      // and drops the fourth component, so the band faded and its plate stayed
+      // solid. The translucency is pre-composited instead — the same tone at half
+      // strength over the chart's own `#071019` — which leaves the entry reading
+      // as a dimmed plate beside the solid ones the last price and the working
+      // orders get, rather than as one more price on the scale.
+      const entryTone = presentation.tone === 'buy'
+        ? { band: 'rgba(43, 196, 138, 0.5)', plate: '#196a51' }
+        : { band: 'rgba(239, 91, 105, 0.5)', plate: '#7b3541' }
       addLine(position.entryPrice, {
-        color: presentation.tone === 'buy' ? 'rgba(43, 196, 138, 0.5)' : 'rgba(239, 91, 105, 0.5)',
+        color: entryTone.band,
+        axisLabelColor: entryTone.plate,
         lineWidth: 1,
         lineStyle: LineStyle.Dashed,
         axisLabelVisible: true,

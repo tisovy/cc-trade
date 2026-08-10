@@ -516,11 +516,13 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     await waitFor(() => {
       expect(chartMock.charts[0].series[0].createPriceLine).toHaveBeenCalledWith(
         // Half-opaque on purpose: the entry band must not hide the candles at
-        // its own price.
+        // its own price, and its label plate carries the same translucency
+        // pre-composited, because the library drops alpha from label plates.
         expect.objectContaining({
           price: 59900,
           title: 'ENTRY SHORT',
           color: 'rgba(239, 91, 105, 0.5)',
+          axisLabelColor: '#7b3541',
         }),
       )
     })
