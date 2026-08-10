@@ -119,6 +119,31 @@ const CHANNEL_SYMBOL_PATTERN = /^[A-Z0-9_]{1,64}$/;
 const CHANNEL_INTERVAL_PATTERN = /^[A-Za-z0-9]{1,16}$/;
 const isMatchingString = (value, pattern) => typeof value === 'string' && pattern.test(value);
 
+/**
+ * Separates the market activation stamp from the frame it travels on.
+ *
+ * The stamp belongs to the transport envelope, not to any channel's protocol.
+ * The workstation channel validates an exact key set, so a frame still carrying
+ * the stamp is rejected as a malformed request — which is how a chart, a book
+ * and a tape that were correct on both sides went dark between them.
+ */
+const splitMarketGenerationStamp = (rawFrame) => {
+    let parsed;
+    try {
+        parsed = JSON.parse(rawFrame);
+    } catch {
+        return { frame: rawFrame, generation: null };
+    }
+    if (!parsed
+        || typeof parsed !== 'object'
+        || Array.isArray(parsed)
+        || !Number.isSafeInteger(parsed.generation)) {
+        return { frame: rawFrame, generation: null };
+    }
+    const { generation, ...request } = parsed;
+    return { frame: JSON.stringify(request), generation };
+};
+
 const validateRendererActionEnvelope = (data, channelManager) => {
     if (typeof data.action !== 'string' || data.action.length < 1 || data.action.length > 64) {
         return { code: 'INVALID_ACTION_ENVELOPE', message: 'action must be a bounded string' };
@@ -3150,18 +3175,15 @@ export function setupBinanceConnection({
             // The production public-read workstation is routed before the broader
             // production execution prefix detector. It contains no execution action.
             if (isPotentialFuturesProductionWorkstationFrame(rawUtf8Frame)) {
-                // The frame is routed before it is parsed, so the generation is
-                // read from the raw text here — a workstation request is as
-                // market-scoped as any other.
-                let workstationGeneration = null;
-                try {
-                    const parsed = JSON.parse(rawUtf8Frame);
-                    if (Number.isSafeInteger(parsed?.generation)) {
-                        workstationGeneration = parsed.generation;
-                    }
-                } catch {
-                    workstationGeneration = null;
-                }
+                // The frame is routed before it is parsed, so the activation
+                // stamp is read from the raw text here — a workstation request
+                // is as market-scoped as any other — and taken back off before
+                // the channel sees it, because the channel accepts its own keys
+                // and nothing else.
+                const {
+                    frame: workstationFrame,
+                    generation: workstationGeneration,
+                } = splitMarketGenerationStamp(rawUtf8Frame);
                 if (refuseUnlessMarketActive(
                     'futures.production.workstation',
                     MARKET_MODES.FUTURES,
@@ -3181,7 +3203,7 @@ export function setupBinanceConnection({
                 }
                 try {
                     await futuresProductionWorkstationRuntime.service.handleRequest(
-                        rawUtf8Frame,
+                        workstationFrame,
                         { emit: payload => sendJSON(connection, payload) },
                     );
                 } catch (error) {

@@ -50,3 +50,6 @@
 - [x] 8.2 Serialize `activate_market` handling in the main process so two activations cannot interleave and leave the backend on the market the operator left.
 - [x] 8.3 Prove by test that a reconnect issues no market-scoped frame before the new activation is acknowledged, and that two rapid switches settle on the last one requested.
 - [x] 8.4 Re-run the suites and guard checks after sections 2 and 8 land.
+- [x] 8.5 Read the activation generation from a ref rather than closing over it, so the sender keeps one identity. *(Added 2026-08-10 from live operation: every acknowledgement rebuilt `sendMessage`, which re-ran the effect that activates the market — an endless activation loop that refused every frame issued behind it.)*
+- [x] 8.6 Take the stamp back off before a channel with a closed request shape validates the frame. *(Added 2026-08-10 from live operation: the production workstation rejected every stamped request as `INVALID_REQUEST_SHAPE`/`INVALID_TAPE_CONFIGURATION`, so chart, book and tape stayed empty.)*
+- [x] 8.7 Prove by test that an acknowledgement triggers no second activation, that a stamped workstation request reaches its channel, and that a superseded one is still refused.

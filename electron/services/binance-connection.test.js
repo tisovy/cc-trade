@@ -1,4 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+    FUTURES_PRODUCTION_WORKSTATION_EVENT_TYPE,
+    createFuturesProductionWorkstationSubscribeRequest,
+} from '../../src/utils/futuresProductionWorkstationProtocol.js';
 
 const moduleMocks = vi.hoisted(() => {
     const state = {};
@@ -3424,6 +3428,49 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 requiredMarketMode: 'spot',
                 generation: 3,
             });
+        });
+
+        // The workstation channel accepts its own keys and nothing else, so a
+        // frame that reached it still carrying the activation stamp was thrown
+        // out as malformed: the chart, the book and the tape stayed empty while
+        // each side was, on its own, correct.
+        const sendWorkstationSubscribe = (overrides = {}) => moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                ...createFuturesProductionWorkstationSubscribeRequest({
+                    requestId: 'workstation-1',
+                    symbol: 'BTCUSDT',
+                    interval: '1m',
+                }),
+                ...overrides,
+            }),
+        });
+
+        it('hands the workstation channel a request without the activation stamp', async () => {
+            await connectRenderer('futures-live');
+
+            await sendWorkstationSubscribe({ generation: 1 });
+            await flushMicrotasks();
+
+            expect(emitted().some(payload => (
+                payload.type === FUTURES_PRODUCTION_WORKSTATION_EVENT_TYPE
+            ))).toBe(true);
+        });
+
+        it('still refuses a workstation request issued under a superseded activation', async () => {
+            await connectRenderer('futures-live');
+            await activateMarket('spot');
+            await activateMarket('futures-live');
+
+            await sendWorkstationSubscribe({ generation: 1 });
+            await flushMicrotasks();
+
+            expect(emitted().some(payload => (
+                payload.command_rejected?.code === 'MARKET_ACTIVATION_SUPERSEDED'
+            ))).toBe(true);
+            expect(emitted().some(payload => (
+                payload.type === FUTURES_PRODUCTION_WORKSTATION_EVENT_TYPE
+            ))).toBe(false);
         });
 
         it('accepts a frame carrying the activation that is current', async () => {

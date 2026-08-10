@@ -18,6 +18,11 @@ SHALL start no subscription, refresh, timer or stream. Every market-scoped
 request SHALL carry the activation generation it was issued under, and a
 request from a superseded generation SHALL be discarded rather than applied.
 
+The stamp belongs to the transport envelope and SHALL NOT alter the request a
+channel defines: a channel that validates its own request shape SHALL receive
+the request without the stamp. Acknowledging an activation SHALL NOT by itself
+cause another activation to be requested.
+
 #### Scenario: Startup restores Futures
 - **WHEN** Futures is the persisted active workspace
 - **THEN** Futures code/data initialization begins and Spot components, subscriptions, account refreshes, and analytics polling remain inactive
@@ -61,6 +66,14 @@ request from a superseded generation SHALL be discarded rather than applied.
 #### Scenario: Two activations are requested in quick succession
 - **WHEN** two `activate_market` frames arrive before the first has finished being applied
 - **THEN** they are applied in the order received and the backend settles on the market the later frame requested
+
+#### Scenario: A stamped request reaches a channel that validates its own shape
+- **WHEN** a request for a channel that accepts an exact set of keys is issued under the current activation
+- **THEN** the channel receives the request it defines and serves it, while a request issued under a superseded activation is still refused before the channel sees it
+
+#### Scenario: An activation is acknowledged
+- **WHEN** the backend acknowledges an activation with its generation
+- **THEN** nothing in the renderer's send path changes identity because of it, so no further activation is requested
 
 ## ADDED Requirements
 
