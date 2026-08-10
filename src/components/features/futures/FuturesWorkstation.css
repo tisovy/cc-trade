@@ -736,20 +736,46 @@
   text-align: right;
 }
 
+/* The sides split whatever the panel has left, and the renderer puts exactly
+   the number of whole rows that fits into it. Sizing them by content instead
+   left flex shrink to take the shortfall out of the rows themselves — which
+   clipped five levels off each side, and on the ask side, drawn farthest-first,
+   those five were the best asks. */
+.futures-workstation-book-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
 .futures-workstation-book-side {
-  max-height: 200px;
+  display: flex;
+  flex: 1 1 0;
+  flex-direction: column;
+  min-height: 0;
   overflow: hidden;
 }
 
+/* Slack goes to the far end of each side, so the levels nearest the traded
+   price stay against the last-print row between them. */
+.futures-workstation-book-side.is-ask {
+  justify-content: flex-end;
+}
+
+.futures-workstation-book-side.is-bid {
+  justify-content: flex-start;
+}
+
 .futures-workstation-book-side button {
+  flex: 0 0 auto;
   width: 100%;
-  height: 14px;
+  height: var(--fx-book-row-height, 14px);
   padding: 0 4px;
   border: 0;
   background: transparent;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: calc(var(--fx-ui-scale, 1) * 12px);
-  line-height: 14px;
+  line-height: var(--fx-book-row-height, 14px);
   text-align: right;
   cursor: pointer;
 }
@@ -1457,11 +1483,90 @@
 
 /* ── Order book: USDT and grouping ────────────────────────────────────────── */
 
-.futures-workstation-book-grouping {
+/* One line for both book controls. The panel is already short of the room its
+   rows need; a second control row would cost six levels of book. */
+.futures-workstation-book-controls {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   padding: 4px 0;
+}
+
+.futures-workstation-book-modes {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 3px;
+}
+
+.futures-workstation-book-modes button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 21px;
+  height: 21px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  opacity: 0.42;
+  cursor: pointer;
+}
+
+.futures-workstation-book-modes button:hover {
+  opacity: 0.8;
+}
+
+.futures-workstation-book-modes button.is-selected {
+  border-color: rgba(126, 143, 166, 0.32);
+  background: rgba(126, 143, 166, 0.14);
+  opacity: 1;
+}
+
+/* Two stacked bars say which halves of the book the mode shows: red over
+   green for both, one colour twice for a single side. */
+.futures-workstation-book-modes i {
+  position: relative;
+  display: block;
+  width: 11px;
+  height: 11px;
+}
+
+.futures-workstation-book-modes i::before,
+.futures-workstation-book-modes i::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  width: 100%;
+  height: 4px;
+  border-radius: 1px;
+}
+
+.futures-workstation-book-modes i::before {
+  top: 0;
+}
+
+.futures-workstation-book-modes i::after {
+  bottom: 0;
+}
+
+.futures-workstation-book-modes .is-both i::before,
+.futures-workstation-book-modes .is-asks i::before,
+.futures-workstation-book-modes .is-asks i::after {
+  background: #ff7380;
+}
+
+.futures-workstation-book-modes .is-both i::after,
+.futures-workstation-book-modes .is-bids i::before,
+.futures-workstation-book-modes .is-bids i::after {
+  background: #3dd69c;
+}
+
+.futures-workstation-book-grouping {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
   color: #718399;
   font-size: calc(var(--fx-ui-scale, 1) * 11px);
   font-weight: 800;
@@ -1485,6 +1590,7 @@
 /* The row between the two sides is the last print, not a derived constant. */
 .futures-workstation-book-last {
   display: flex;
+  flex: 0 0 auto;
   align-items: baseline;
   gap: 7px;
   margin: 4px 0;
@@ -1498,12 +1604,28 @@
   font-variant-numeric: tabular-nums;
 }
 
-.futures-workstation-book-last.is-buy strong {
+.futures-workstation-book-last.is-flat strong {
+  color: #dbe6f0;
+}
+
+/* Direction is carried by the arrow as well as the colour, so it survives a
+   monochrome screen and an operator who cannot separate the two hues. */
+.futures-workstation-book-last.is-up strong,
+.futures-workstation-book-last.is-up .futures-workstation-book-last-arrow {
   color: #3dd69c;
 }
 
-.futures-workstation-book-last.is-sell strong {
+.futures-workstation-book-last.is-down strong,
+.futures-workstation-book-last.is-down .futures-workstation-book-last-arrow {
   color: #ff7380;
+}
+
+.futures-workstation-book-last .futures-workstation-book-last-arrow {
+  margin-left: -4px;
+  font-size: calc(var(--fx-ui-scale, 1) * 14px);
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: none;
 }
 
 .futures-workstation-book-last span {

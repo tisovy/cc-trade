@@ -70,6 +70,46 @@ const contract = (symbol, baseAsset, tradable) => Object.freeze({
   filters,
 })
 
+const candle = (close, openTime = 1_784_000_000_000) => Object.freeze({
+  openTime,
+  closeTime: openTime + 59_999,
+  open: close,
+  high: close,
+  low: close,
+  close,
+  closed: false,
+})
+
+// A book side deep enough that the panel, not the feed, decides how much shows.
+const bookLevels = (best, direction, count) => Object.freeze(
+  Array.from({ length: count }, (unused, index) => Object.freeze({
+    price: (best + (direction * index * 0.1)).toFixed(2),
+    quantity: '1',
+    total: String(index + 1),
+  })),
+)
+
+// jsdom lays nothing out, so the panel measurement has to be told what the
+// operator's panel is worth. The sides are `flex: 1 1 0` in one column, so the
+// area they share is split between however many of them are rendered — which
+// is what makes a single side twice as deep.
+const bookPanelRestores = []
+const stubBookSideHeight = (sidesArea) => {
+  const previous = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientHeight')
+  Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+    configurable: true,
+    get() {
+      if (!this.classList.contains('futures-workstation-book-side')) return 0
+      const rendered = this.parentElement?.querySelectorAll('.futures-workstation-book-side').length
+      return Math.floor(sidesArea / Math.max(rendered ?? 1, 1))
+    },
+  })
+  bookPanelRestores.push(() => {
+    if (previous) Object.defineProperty(HTMLElement.prototype, 'clientHeight', previous)
+    else delete HTMLElement.prototype.clientHeight
+  })
+}
+
 const trade = (id, price = '58420.25') => Object.freeze({
   aggregateTradeId: id,
   price,
@@ -167,6 +207,7 @@ const renderView = (properties = {}) => {
 }
 
 afterEach(() => {
+  while (bookPanelRestores.length > 0) bookPanelRestores.pop()()
   vi.clearAllMocks()
   vi.unstubAllGlobals()
   // Tape settings now outlive a session, so one test's applied configuration
@@ -503,7 +544,7 @@ describe('pure Futures workstation presentation', () => {
       }),
     })
     // 57000 is 2.43% below the 58420.25 last trade — the farther of the two edges.
-    expect(screen.getByTitle('Price range the rows on screen cover'))
+    expect(screen.getByTitle('Price range the split is measured over'))
       .toHaveTextContent('±2.43%')
   })
 
@@ -871,6 +912,223 @@ describe('instrument recency and interface scale', () => {
       'title',
       '300 USDT bid · 100 USDT ask',
     )
+  })
+
+  // The tape is a filtered, throttled display of prints: with a minimum notional
+  // set, the service emits no tape frame for as long as nothing large trades.
+  // Reading the last price off it froze the number between the two book sides
+  // while depth and the chart ran on.
+  it('reads the last price from a source the tape filter cannot freeze', () => {
+    const base = createState()
+    const withCandle = close => createState({
+      resources: Object.freeze({
+        ...base.resources,
+        candles: Object.freeze({ ...base.resources.candles, contract: Object.freeze([candle(close)]) }),
+      }),
+    })
+    const { container, rerender } = renderView({ state: withCandle('58500.00') })
+    const bookLast = () => container.querySelector('.futures-workstation-book-last')
+
+    expect(bookLast()).toHaveTextContent('58500.00')
+    // One price on screen: the header is not separately sourced from the ticker.
+    expect(within(screen.getByLabelText('Futures market header')).getByText('58500.00'))
+      .toBeInTheDocument()
+    // The tape itself still shows exactly the prints it was asked to show.
+    const tape = screen.getByText('Aggregate trades').closest('aside')
+    expect(within(tape).getByText('58420.25')).toBeInTheDocument()
+
+    rerender(
+      <FuturesWorkstationView
+        identity="USDⓈ-M PRODUCTION · REAL MONEY"
+        state={withCandle('58600.00')}
+        selectedSymbol="BTCUSDT"
+        selectedInterval="1m"
+        onSymbolChange={() => {}}
+        onIntervalChange={() => {}}
+      />,
+    )
+    // The tape delivered nothing new; the price moved anyway.
+    expect(within(tape).getByText('58420.25')).toBeInTheDocument()
+    expect(bookLast()).toHaveTextContent('58600')
+    expect(bookLast()).toHaveClass('is-up')
+  })
+
+  it('states the last move as a direction rather than as a maker side', () => {
+    const base = createState()
+    const withCandle = (close, symbol = 'BTCUSDT') => createState({
+      symbol,
+      resources: Object.freeze({
+        ...base.resources,
+        candles: Object.freeze({ ...base.resources.candles, contract: Object.freeze([candle(close)]) }),
+      }),
+    })
+    const { container, rerender } = renderView({ state: withCandle('58500.00') })
+    const bookLast = () => container.querySelector('.futures-workstation-book-last')
+    const show = (close, symbol = 'BTCUSDT') => rerender(
+      <FuturesWorkstationView
+        identity="USDⓈ-M PRODUCTION · REAL MONEY"
+        state={withCandle(close, symbol)}
+        selectedSymbol={symbol}
+        selectedInterval="1m"
+        onSymbolChange={() => {}}
+        onIntervalChange={() => {}}
+      />,
+    )
+
+    // A first reading is not a move.
+    expect(bookLast()).toHaveClass('is-flat')
+    expect(bookLast()).not.toHaveTextContent('↑')
+
+    show('58600.00')
+    expect(bookLast()).toHaveClass('is-up')
+    expect(bookLast()).toHaveTextContent('↑')
+
+    show('58400.00')
+    expect(bookLast()).toHaveClass('is-down')
+    expect(bookLast()).toHaveTextContent('↓')
+
+    // An unchanged price is not a reversal: the row keeps the way it was going.
+    show('58400.00')
+    expect(bookLast()).toHaveClass('is-down')
+
+    // A direction belongs to one book.
+    show('2000.00', 'ETHUSDT')
+    expect(bookLast()).toHaveClass('is-flat')
+  })
+
+  // Sizing the sides by content let flex shrink take the panel's shortfall out
+  // of the rows: fourteen were rendered into room for eight and a half, and on
+  // the ask side — drawn farthest-first — the five hidden were the best asks.
+  it('renders only the whole rows the panel can hold, nearest the traded price', () => {
+    stubBookSideHeight(180)
+    const base = createState()
+    const { container } = renderView({
+      state: createState({
+        resources: Object.freeze({
+          ...base.resources,
+          depth: Object.freeze({
+            ...base.resources.depth,
+            bids: bookLevels(58420, -1, 20),
+            asks: bookLevels(58420.5, 1, 20),
+          }),
+        }),
+      }),
+    })
+    const prices = side => [...container.querySelectorAll(`.futures-workstation-book-side.is-${side} button`)]
+      .map(row => row.children[0].textContent)
+
+    // 180 px of side area, halved between the two sides, over a 14 px row.
+    expect(prices('ask')).toHaveLength(6)
+    expect(prices('bid')).toHaveLength(6)
+    // The rows the ask side drops are its farthest, and the best ask is the row
+    // that sits against the last-print row.
+    expect(prices('ask').at(-1)).toBe('58420.50')
+    expect(prices('ask')[0]).toBe('58421.00')
+    expect(prices('bid')[0]).toBe('58420.00')
+  })
+
+  it('leaves the default row count in place where there is nothing to measure', () => {
+    const base = createState()
+    const { container } = renderView({
+      state: createState({
+        resources: Object.freeze({
+          ...base.resources,
+          depth: Object.freeze({
+            ...base.resources.depth,
+            bids: bookLevels(58420, -1, 20),
+            asks: bookLevels(58420.5, 1, 20),
+          }),
+        }),
+      }),
+    })
+    expect(container.querySelectorAll('.futures-workstation-book-side.is-bid button')).toHaveLength(14)
+  })
+
+  // Reaching deeper used to cost resolution: the only control was the step.
+  it('gives one side the whole book area when the operator asks for it', () => {
+    stubBookSideHeight(180)
+    const base = createState()
+    const { container } = renderView({
+      state: createState({
+        resources: Object.freeze({
+          ...base.resources,
+          depth: Object.freeze({
+            ...base.resources.depth,
+            bids: bookLevels(58420, -1, 20),
+            asks: bookLevels(58420.5, 1, 20),
+          }),
+        }),
+      }),
+    })
+    const rows = side => container.querySelectorAll(`.futures-workstation-book-side.is-${side} button`)
+    const sides = screen.getByRole('group', { name: 'Order book sides' })
+
+    expect(within(sides).getByRole('button', { name: 'Show both book sides' }))
+      .toHaveAttribute('aria-pressed', 'true')
+
+    fireEvent.click(within(sides).getByRole('button', { name: 'Show buy side only' }))
+    expect(rows('ask')).toHaveLength(0)
+    // The same 180 px, undivided, at the same step.
+    expect(rows('bid')).toHaveLength(12)
+    expect(container.querySelector('.futures-workstation-book-last')).toBeInTheDocument()
+    // The split still has two sides to measure, now over the deeper window.
+    expect(screen.getByLabelText('Order book buy and sell pressure')).toBeInTheDocument()
+
+    fireEvent.click(within(sides).getByRole('button', { name: 'Show sell side only' }))
+    expect(rows('bid')).toHaveLength(0)
+    expect(rows('ask')).toHaveLength(12)
+    expect([...rows('ask')].at(-1).children[0]).toHaveTextContent('58420.50')
+
+    fireEvent.click(within(sides).getByRole('button', { name: 'Show both book sides' }))
+    expect(rows('ask')).toHaveLength(6)
+    expect(rows('bid')).toHaveLength(6)
+  })
+
+  // How a book is read belongs to the contract it was read on: the step is a
+  // multiple of that contract's own tick, so one global setting would carry a
+  // step that is a sane zoom-out on one contract and collapses the next.
+  it('opens each contract the way that contract was last read', () => {
+    const showContract = symbol => (
+      <FuturesWorkstationView
+        identity="USDⓈ-M PRODUCTION · REAL MONEY"
+        state={createState({ symbol })}
+        selectedSymbol={symbol}
+        selectedInterval="1m"
+        onSymbolChange={() => {}}
+        onIntervalChange={() => {}}
+      />
+    )
+    const { rerender, container } = renderView()
+    const sideMode = name => screen.getByRole('button', { name }).getAttribute('aria-pressed')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show sell side only' }))
+    fireEvent.change(screen.getByLabelText('Order book price step'), { target: { value: '10' } })
+
+    // A contract never configured opens at both sides and 1×, not at what the
+    // previous contract happened to be set to.
+    rerender(showContract('ETHUSDT'))
+    expect(container.querySelector('.futures-workstation-book-side.is-bid')).not.toBeNull()
+    expect(sideMode('Show both book sides')).toBe('true')
+    expect(screen.getByLabelText('Order book price step')).toHaveValue('1')
+
+    rerender(showContract('BTCUSDT'))
+    expect(container.querySelector('.futures-workstation-book-side.is-bid')).toBeNull()
+    expect(sideMode('Show sell side only')).toBe('true')
+    expect(screen.getByLabelText('Order book price step')).toHaveValue('10')
+  })
+
+  it('restores what a contract was left with after a restart', () => {
+    const { unmount } = renderView()
+    fireEvent.click(screen.getByRole('button', { name: 'Show buy side only' }))
+    fireEvent.change(screen.getByLabelText('Order book price step'), { target: { value: '25' } })
+    unmount()
+
+    // A fresh mount reads the store, exactly as a relaunch would.
+    const { container } = renderView()
+    expect(container.querySelector('.futures-workstation-book-side.is-ask')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Show buy side only' }))
+      .toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByLabelText('Order book price step')).toHaveValue('25')
   })
 
   it('hides book pressure rather than claiming a split with no book', () => {

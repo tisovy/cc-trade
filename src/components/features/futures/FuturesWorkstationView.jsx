@@ -17,6 +17,11 @@ import {
   writeStoredTapeSettings,
 } from '../../../utils/futuresTapeSettings.js'
 import {
+  FUTURES_BOOK_SIDE_MODES,
+  readStoredBookView,
+  writeStoredBookView,
+} from '../../../utils/futuresBookView.js'
+import {
   UI_SCALE_DEFAULT,
   UI_SCALE_MAX,
   UI_SCALE_MIN,
@@ -29,7 +34,20 @@ import './FuturesWorkstation.css'
 const EMPTY_ROWS = Object.freeze([])
 const EMPTY_SYMBOL_HISTORY = Object.freeze({ recent: EMPTY_ROWS, favorites: EMPTY_ROWS })
 const IGNORE_PRICE_PICK = () => {}
+// Used only where the panel cannot be measured — a book that has not been laid
+// out, or an environment with no resize observation. The rendered count is
+// otherwise whatever fits, so a row is never half-drawn or clipped away.
 const VISIBLE_DEPTH_LEVELS_PER_SIDE = 14
+const BOOK_ROW_HEIGHT_PX = 14
+// A ceiling, not a setting: a very tall panel must not ask the grouper for an
+// unbounded number of rows.
+const MAX_DEPTH_LEVELS_PER_SIDE = 200
+const BOOK_SIDE_MODE_LABELS = Object.freeze({
+  both: 'Show both book sides',
+  bids: 'Show buy side only',
+  asks: 'Show sell side only',
+})
+const NEUTRAL_TICK = Object.freeze({ symbol: null, price: null, direction: 'flat' })
 // The tape carries base quantity, so the USDT a print is worth is derived here
 // rather than added to the exact-keys market contract.
 const tradeNotionalUsdt = trade => Number(trade.price) * Number(trade.quantity)
@@ -139,10 +157,29 @@ export const FuturesWorkstationView = ({
   const [tapeTimeoutInput, setTapeTimeoutInput] = useState(String(storedTapeSettings.timeoutMs))
   const [tapeNotionalInput, setTapeNotionalInput] = useState(storedTapeSettings.minNotionalUsdt)
   const [tapeSettingsError, setTapeSettingsError] = useState(null)
-  const [bookGrouping, setBookGrouping] = useState(1)
+  // How this contract's book is read: restored for the contract it was chosen
+  // for rather than reset, and rather than carried over as one global setting —
+  // a step is a multiple of the contract's own tick, and the same multiplier is
+  // a different share of price elsewhere.
+  const [bookGrouping, setBookGrouping] = useState(
+    () => readStoredBookView(selectedSymbol).stepMultiplier,
+  )
+  const [bookSideMode, setBookSideMode] = useState(
+    () => readStoredBookView(selectedSymbol).sideMode,
+  )
+  const [measuredBookRows, setMeasuredBookRows] = useState(null)
+  // The price previously shown, with the contract it belonged to: a direction
+  // is only a direction within one book.
+  const [lastTick, setLastTick] = useState(NEUTRAL_TICK)
+  const askSideRef = useRef(null)
+  const bidSideRef = useRef(null)
   const lastBookLeftClickRef = useRef({ at: 0, price: null, modifier: null, symbol: null })
   const lastBookRightClickRef = useRef({ at: 0, price: null, modifier: null, symbol: null })
   const selectedDraftPrice = draftPrice === undefined ? localDraftPrice : draftPrice
+  // The row is as tall as the type it carries, so the count that fits and the
+  // height the rows are drawn at come from one number rather than from a CSS
+  // constant and a JS constant free to disagree with it.
+  const bookRowHeight = Math.max(11, Math.round(BOOK_ROW_HEIGHT_PX * uiScale))
 
   useEffect(() => {
     lastBookLeftClickRef.current = { at: 0, price: null, modifier: null, symbol: null }
@@ -155,7 +192,11 @@ export const FuturesWorkstationView = ({
     setAlerts(EMPTY_ROWS)
     setTapePaused(false)
     setPausedTrades(EMPTY_ROWS)
-    setBookGrouping(1)
+    // Not a reset: the book opens the way this contract was last read, and at
+    // both sides and 1× for a contract never configured.
+    const storedBookView = readStoredBookView(selectedSymbol)
+    setBookGrouping(storedBookView.stepMultiplier)
+    setBookSideMode(storedBookView.sideMode)
   }, [selectedSymbol])
 
   const resources = state.resources
@@ -302,6 +343,46 @@ export const FuturesWorkstationView = ({
     emitBookGesture(event, 'left', price)
   }, [emitBookGesture, pickPrice, selectedSymbol])
 
+  // How many rows the panel can actually hold. Sizing the sides by content and
+  // letting flex shrink take the difference clipped the last five rows of each
+  // side — and on the ask side, which is drawn farthest-first, those five are
+  // the best asks. Measuring means the rows dropped are the ones nobody reads.
+  //
+  // Each side is measured directly rather than derived from the body less the
+  // last-print row: that row carries vertical margins, which `offsetHeight`
+  // does not count, and eight unaccounted pixels are half a row on screen.
+  // A side's height is `flex: 1 1 0`, so it does not depend on the rows the
+  // measurement puts in it and cannot feed back into itself.
+  useEffect(() => {
+    const sides = [askSideRef.current, bidSideRef.current].filter(side => side !== null)
+    if (sides.length === 0) return undefined
+    const measure = () => {
+      const available = Math.min(...sides.map(side => side.clientHeight))
+      // Nothing laid out yet: keep the default rather than render an empty book.
+      if (!(available > 0)) return
+      const rows = Math.floor(available / bookRowHeight)
+      setMeasuredBookRows(Math.min(Math.max(rows, 1), MAX_DEPTH_LEVELS_PER_SIDE))
+    }
+    measure()
+    const ResizeObserverImpl = globalThis.ResizeObserver
+    if (typeof ResizeObserverImpl !== 'function') return undefined
+    const observer = new ResizeObserverImpl(measure)
+    for (const side of sides) observer.observe(side)
+    return () => observer.disconnect()
+  }, [bookRowHeight, bookSideMode])
+
+  // Written on the choice, not on every render: what is stored is what the
+  // operator picked for this contract.
+  const chooseBookSideMode = useCallback((sideMode) => {
+    setBookSideMode(sideMode)
+    writeStoredBookView(selectedSymbol, { sideMode, stepMultiplier: bookGrouping })
+  }, [bookGrouping, selectedSymbol])
+
+  const chooseBookGrouping = useCallback((stepMultiplier) => {
+    setBookGrouping(stepMultiplier)
+    writeStoredBookView(selectedSymbol, { sideMode: bookSideMode, stepMultiplier })
+  }, [bookSideMode, selectedSymbol])
+
   const toggleFavorite = useCallback((symbol) => {
     onToggleFavorite?.(symbol)
   }, [onToggleFavorite])
@@ -364,6 +445,31 @@ export const FuturesWorkstationView = ({
   const fundingTone = percentTone(header?.fundingRatePercent)
   const displayedTrades = tapePaused ? pausedTrades : liveTrades
   const lastTrade = liveTrades[0] ?? null
+  // The tape is a filtered, throttled *display* of prints — the service drops
+  // anything under the operator's minimum notional on ingestion and only arms
+  // its throttle when an eligible print arrives. Reading a price off it means
+  // a desk set to "≥ 400 USDT" watches a frozen number while depth and the
+  // chart run. The newest candle's close is the same last trade the chart is
+  // drawing, at the kline stream's own cadence, and no display setting can
+  // filter it; the ticker is next, and the tape only if there is nothing else.
+  const lastPrice = (candlesState === 'live' ? liveCandles.at(-1)?.close : null)
+    ?? header?.lastPrice
+    ?? lastTrade?.price
+    ?? null
+  // Direction is the change from the price previously on screen. Taking it from
+  // the newest displayed trade's maker flag would report the side of a print
+  // the filter left on screen long after the market moved past it. The first
+  // price of a contract is a reading rather than a move, and an unchanged price
+  // keeps the direction it last had instead of dropping to neutral.
+  const carriedTick = lastTick.symbol === selectedSymbol
+  let lastDirection = carriedTick ? lastTick.direction : 'flat'
+  if (lastPrice !== null && (!carriedTick || lastTick.price !== lastPrice)) {
+    const moved = Number(lastPrice) - Number(lastTick.price)
+    if (carriedTick && Number.isFinite(moved) && moved !== 0) {
+      lastDirection = moved > 0 ? 'up' : 'down'
+    }
+    setLastTick({ symbol: selectedSymbol, price: lastPrice, direction: lastDirection })
+  }
   const groupSteps = useMemo(
     () => futuresBookGroupSteps(selectedContract?.filters?.price?.tickSize ?? null),
     [selectedContract],
@@ -373,20 +479,23 @@ export const FuturesWorkstationView = ({
   const activeGroupStep = bookGrouping === 1
     ? null
     : groupSteps.find(entry => entry.multiplier === bookGrouping)?.step ?? null
+  const depthLevelsPerSide = measuredBookRows ?? VISIBLE_DEPTH_LEVELS_PER_SIDE
   // Grouping happens on the whole delivered book, then the visible window is
   // taken — otherwise a coarse step would only ever aggregate the first rows.
+  // Both sides are grouped in every mode: a hidden side still carries half of
+  // the pressure split.
   const visibleAsks = useMemo(() => [...groupFuturesBookLevels({
     levels: depth?.asks ?? EMPTY_ROWS,
     side: 'ask',
     step: activeGroupStep,
-    limit: VISIBLE_DEPTH_LEVELS_PER_SIDE,
-  })].reverse(), [activeGroupStep, depth])
+    limit: depthLevelsPerSide,
+  })].reverse(), [activeGroupStep, depth, depthLevelsPerSide])
   const visibleBids = useMemo(() => groupFuturesBookLevels({
     levels: depth?.bids ?? EMPTY_ROWS,
     side: 'bid',
     step: activeGroupStep,
-    limit: VISIBLE_DEPTH_LEVELS_PER_SIDE,
-  }), [activeGroupStep, depth])
+    limit: depthLevelsPerSide,
+  }), [activeGroupStep, depth, depthLevelsPerSide])
   // Where the operator's own working orders sit in the book. Matched by the
   // row's bucket, not its printed price, so a grouped row still marks an order
   // resting anywhere inside it.
@@ -423,7 +532,7 @@ export const FuturesWorkstationView = ({
   // reading above is measured over exactly those rows, so without this a 0.3%
   // reading and a 10% reading print as the same number and mean opposite things.
   const bookReach = useMemo(() => {
-    const reference = Number(lastTrade?.price ?? header?.lastPrice)
+    const reference = Number(lastPrice)
     if (!Number.isFinite(reference) || reference <= 0) return null
     const edges = [visibleAsks[0]?.price, visibleBids.at(-1)?.price]
       .map(Number)
@@ -433,7 +542,7 @@ export const FuturesWorkstationView = ({
     const reach = Math.max(...edges)
     if (reach <= 0) return null
     return `±${reach < 0.01 ? '<0.01' : reach.toFixed(2)}%`
-  }, [header?.lastPrice, lastTrade?.price, visibleAsks, visibleBids])
+  }, [lastPrice, visibleAsks, visibleBids])
 
   return (
     <section className="futures-workstation" aria-label={`${identity} live trading workstation`}>
@@ -543,7 +652,7 @@ export const FuturesWorkstationView = ({
           <small>{selectedContract?.status ?? 'LOADING'}</small>
         </div>
         <dl>
-          <div className="is-primary"><dt>Last</dt><dd>{header?.lastPrice ?? '—'}</dd></div>
+          <div className="is-primary"><dt>Last</dt><dd>{lastPrice ?? '—'}</dd></div>
           <div className={`is-change is-${changeTone}`}>
             <dt>24h change</dt>
             <dd>{displayPercent(header?.priceChangePercent)}</dd>
@@ -624,29 +733,59 @@ export const FuturesWorkstationView = ({
         </div>
       </main>
 
-      <aside className="futures-workstation-depth" data-state={depthState}>
+      <aside
+        className="futures-workstation-depth"
+        data-state={depthState}
+        style={{ '--fx-book-row-height': `${bookRowHeight}px` }}
+      >
         <div className="futures-workstation-section-heading">
           <div><span>Order book</span><strong>USDT</strong></div>
           <StateBadge state={depthState} />
         </div>
-        {groupSteps.length > 0 ? (
-          <label className="futures-workstation-book-grouping">
-            <span>Step</span>
-            <select
-              aria-label="Order book price step"
-              value={bookGrouping}
-              onChange={event => setBookGrouping(Number(event.target.value))}
-            >
-              {groupSteps.map(entry => (
-                <option key={entry.multiplier} value={entry.multiplier}>
-                  {describeBookStep(entry.step, header?.lastPrice)}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : null}
+        {/* The side control shares the step's line on purpose: the panel is
+            already short of the room its rows need, and a control row of its
+            own would cost six of them. */}
+        <div className="futures-workstation-book-controls">
+          <div
+            className="futures-workstation-book-modes"
+            role="group"
+            aria-label="Order book sides"
+          >
+            {FUTURES_BOOK_SIDE_MODES.map(mode => (
+              <button
+                type="button"
+                key={mode}
+                className={`is-${mode}${bookSideMode === mode ? ' is-selected' : ''}`}
+                aria-label={BOOK_SIDE_MODE_LABELS[mode]}
+                aria-pressed={bookSideMode === mode}
+                title={BOOK_SIDE_MODE_LABELS[mode]}
+                onClick={() => chooseBookSideMode(mode)}
+              >
+                <i aria-hidden="true" />
+              </button>
+            ))}
+          </div>
+          {groupSteps.length > 0 ? (
+            <label className="futures-workstation-book-grouping">
+              <span>Step</span>
+              <select
+                aria-label="Order book price step"
+                value={bookGrouping}
+                onChange={event => chooseBookGrouping(Number(event.target.value))}
+              >
+                {groupSteps.map(entry => (
+                  <option key={entry.multiplier} value={entry.multiplier}>
+                    {describeBookStep(entry.step, lastPrice)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : null}
+        </div>
         <div className="futures-workstation-book-head"><span>Price</span><span>USDT</span><span>Total</span></div>
-        <div className="futures-workstation-book-side is-ask">
+        <div className="futures-workstation-book-body">
+        {bookSideMode === 'bids' ? null : (
+        <div className="futures-workstation-book-side is-ask" ref={askSideRef}>
           {visibleAsks.map(level => (
             <button
               type="button"
@@ -669,13 +808,20 @@ export const FuturesWorkstationView = ({
             </button>
           ))}
         </div>
+        )}
         {/* The row between the sides carries the only number worth reading
-            there: what just traded, and which side lifted it. */}
-        <div className={`futures-workstation-book-last is-${lastTrade?.buyerMaker ? 'sell' : 'buy'}`}>
-          <strong>{lastTrade?.price ?? header?.lastPrice ?? '—'}</strong>
+            there: what just traded, and which way it went. */}
+        <div className={`futures-workstation-book-last is-${lastDirection}`}>
+          <strong>{lastPrice ?? '—'}</strong>
+          {lastDirection === 'flat' ? null : (
+            <span className="futures-workstation-book-last-arrow" aria-hidden="true">
+              {lastDirection === 'up' ? '↑' : '↓'}
+            </span>
+          )}
           <span>last</span>
         </div>
-        <div className="futures-workstation-book-side is-bid">
+        {bookSideMode === 'asks' ? null : (
+        <div className="futures-workstation-book-side is-bid" ref={bidSideRef}>
           {visibleBids.map(level => (
             <button
               type="button"
@@ -698,6 +844,8 @@ export const FuturesWorkstationView = ({
             </button>
           ))}
         </div>
+        )}
+        </div>
         {bookDepthUsdt > 0 ? (
           <div
             className="futures-workstation-book-pressure"
@@ -713,7 +861,7 @@ export const FuturesWorkstationView = ({
               {bookReach ? (
                 <span
                   className="futures-workstation-book-reach"
-                  title="Price range the rows on screen cover"
+                  title="Price range the split is measured over"
                 >
                   {bookReach}
                 </span>
