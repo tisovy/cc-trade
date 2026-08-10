@@ -1,27 +1,36 @@
-## 0. Measure Before Changing
+## 0. What Was Measured
 
-- [ ] 0.1 Record the frame sizes actually delivered on `<symbol>@depth@100ms`, `@aggTrade`, `@ticker` and `@kline` for a liquid contract over a session that includes a sharp move: the maximum, the 99th percentile and the count above the 64 KiB ceiling.
-- [ ] 0.2 Record whether any session in that window was resynchronized, and with what reason.
-- [ ] 0.3 State the reading in the change before touching the ceiling — if no frame comes near 64 KiB, the cause is elsewhere and this change says so rather than raising a limit for nothing.
+- [x] 0.1 Read the bounds against the data they bound: `@depth@100ms` is a diff and carries every changed level, while the desk bounded it at the snapshot's 1 000 per side, at `maxNodes: 8_192` and at `maxPayload: 64 KiB` — none derived from the book the desk retains.
+- [x] 0.2 Establish the consequence in code: a refused frame throws, and `handleStreamFrame` answers a throw by resynchronizing the whole session rather than the book.
+- [ ] 0.3 Record, from a live session, the largest depth diff actually delivered on a volatile contract, and confirm it now passes. Until then the new bounds are derived, not observed.
 
-## 1. The Ceiling Stops Costing The Market
+## 1. A Diff Is Bounded As A Diff
 
-- [ ] 1.1 Decide from the measurement: raise the ceiling to the exchange's real maximum with headroom, or drop the oversized frame and recover, and record why.
-- [ ] 1.2 Apply it to the upstream direction only; the ceiling on frames this desk *accepts from the renderer* is a different rule with a different threat behind it, and is not widened here.
-- [ ] 1.3 Prove by test that a frame above the old ceiling no longer ends the session, and that the book afterwards matches the exchange.
+- [x] 1.1 Bound a diff by `FUTURES_WORKSTATION_DIFF_LEVELS_PER_SIDE`, derived from the book depth rather than equal to it, in both the market contract and the order book.
+- [x] 1.2 Derive the stream frame's byte and node budgets from that same bound, so no ceiling under it can refuse a frame the rules accept.
+- [x] 1.3 Leave the snapshot bound where it is: Binance serves a thousand levels per side and a deeper snapshot is not a thing that exists.
+- [x] 1.4 Leave the renderer-bound ceiling alone: what the desk accepts *from the renderer* is a different rule with a different threat behind it.
+- [x] 1.5 Prove by test that a diff restating more levels than the book is deep is accepted, and that a frame past the new ceiling is still refused.
 
-## 2. A Resync Names Its Cause
+## 2. A Frame Is Not Worth The Connection
 
-- [ ] 2.1 Give a desk-initiated close its own reason code, distinct from `SOCKET_CLOSED`.
-- [ ] 2.2 Carry that reason to the workspace's reason line.
-- [ ] 2.3 Prove by test that each of the three causes reaches the operator under its own name.
+- [x] 2.1 Stop closing the upstream socket over an oversized frame: drop the frame and keep the stream.
+- [x] 2.2 Report the drop, with its size, so a desk that starts refusing frames is visible rather than silent.
+- [x] 2.3 Keep the reviewed socket options pinned — to the derived ceiling — in `check:futures-production`.
+- [ ] 2.4 Give a desk-initiated refusal its own reason code, distinct from `SOCKET_CLOSED` and from `MALFORMED_STREAM_FRAME`, and carry it to the workspace's reason line.
 
-## 3. Under Load, End To End
+## 3. A Refused Frame Costs The Book, Not The Desk
 
-- [ ] 3.1 Drive the service with a burst — a depth diff per 100 ms carrying hundreds of levels, plus a heavy tape — and assert the session stays live throughout.
-- [ ] 3.2 State plainly whether the renderer keeps up at that rate, and if it does not, hand the finding to `stop-rebuilding-the-desk-on-every-tick` rather than fixing it here.
+- [ ] 3.1 Recover from a dropped or rejected depth frame by re-bootstrapping the *book* — the snapshot plus the buffered diffs — rather than by tearing down the session's streams, tape, header and candles.
+- [ ] 3.2 Prove by test that a rejected depth frame leaves the tape, the header and the candles live throughout.
+- [ ] 3.3 Prove by test that the book after such a recovery matches the exchange.
 
-## 4. Verification
+## 4. Under Load, End To End
 
-- [ ] 4.1 `npm run lint`, `npm test`, `npm run check:futures-production`.
-- [ ] 4.2 Operator confirms on live data during a volatile session: a sharp move no longer sends the workspace to `RESYNCHRONIZING`, and any resync that does happen states a cause they can act on.
+- [ ] 4.1 Drive the service with a burst — a diff per 100 ms carrying thousands of levels, plus a heavy tape — and assert the session stays live throughout.
+- [ ] 4.2 State plainly whether the renderer keeps up at that rate; if it does not, hand the finding to `stop-rebuilding-the-desk-on-every-tick` rather than fixing it here.
+
+## 5. Verification
+
+- [x] 5.1 `npm run lint`, `npm test`, `npm run check:futures-production`, `check:command-path`, `check:circular`, `check:runtime-mock`.
+- [ ] 5.2 Operator confirms on live data during a volatile session: a sharp move no longer sends the workspace to `RESYNCHRONIZING`, and any resync that does happen states a cause they can act on.

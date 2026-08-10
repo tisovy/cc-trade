@@ -180,7 +180,11 @@ for (const transportName of [PRODUCTION_TRANSPORT]) {
     }
     if (!/followRedirects\s*:\s*false/.test(source)
         || !/handshakeTimeout\s*:\s*10_000/.test(source)
-        || !/maxPayload\s*:\s*FUTURES_WORKSTATION_JSON_LIMITS\.WS_FRAME_BYTES/.test(source)
+        // The upstream ceiling is derived from the book the desk retains, not
+        // from a flat number under it: a depth diff on a sharp move restates
+        // every level, and a frame the desk refuses is market data lost at the
+        // moment it matters. It stays pinned — to the derived bound.
+        || !/maxPayload\s*:\s*FUTURES_WORKSTATION_JSON_LIMITS\.WS_STREAM_FRAME_BYTES/.test(source)
         || !/perMessageDeflate\s*:\s*false/.test(source)) {
         fail(`${transportName} does not pin the reviewed bounded WebSocket options`);
     }

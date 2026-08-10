@@ -1,9 +1,13 @@
 import {
+    FUTURES_WORKSTATION_STREAM_FRAME_BYTES,
     FUTURES_WORKSTATION_UINT64_MAX,
 } from '../../src/utils/futuresWorkstationProtocolShared.js';
 
 export const FUTURES_WORKSTATION_JSON_LIMITS = Object.freeze({
     WS_FRAME_BYTES: 64 * 1024,
+    // What arrives from the exchange, bounded by the book the desk holds rather
+    // than by a flat number below it. See the derivation beside the constant.
+    WS_STREAM_FRAME_BYTES: FUTURES_WORKSTATION_STREAM_FRAME_BYTES,
     HEADER_COUNT: 64,
     HEADER_VALUE_BYTES: 4 * 1024,
     HEADER_AGGREGATE_BYTES: 16 * 1024,

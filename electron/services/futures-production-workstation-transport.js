@@ -299,7 +299,7 @@ const weightedGet = (
     )
 );
 
-const createSocket = (url, onMessage, onDisconnect, backendProxy) => {
+const createSocket = (url, onMessage, onDisconnect, backendProxy, onOversizedFrame = () => {}) => {
     const parsed = new URL(url);
     if (parsed.origin !== FUTURES_PRODUCTION_WORKSTATION_WSS_ORIGIN
         || !['/public/stream', '/market/stream'].includes(parsed.pathname)) {
@@ -309,7 +309,7 @@ const createSocket = (url, onMessage, onDisconnect, backendProxy) => {
     const socket = new WebSocket(url, {
         followRedirects: false,
         handshakeTimeout: 10_000,
-        maxPayload: FUTURES_WORKSTATION_JSON_LIMITS.WS_FRAME_BYTES,
+        maxPayload: FUTURES_WORKSTATION_JSON_LIMITS.WS_STREAM_FRAME_BYTES,
         perMessageDeflate: false,
         ...(backendProxy.proxyAgent ? { agent: backendProxy.proxyAgent } : {}),
     });
@@ -336,8 +336,13 @@ const createSocket = (url, onMessage, onDisconnect, backendProxy) => {
             return;
         }
         const raw = typeof data === 'string' ? data : data.toString('utf8');
-        if (Buffer.byteLength(raw, 'utf8') > FUTURES_WORKSTATION_JSON_LIMITS.WS_FRAME_BYTES) {
-            socket.close(1009, 'frame too large');
+        // A frame past the ceiling is dropped, not answered by hanging up. The
+        // market is what makes a frame big, and closing the stream over one of
+        // them took depth, tape, header and candles away at the moment the
+        // operator needed them most.
+        if (Buffer.byteLength(raw, 'utf8')
+            > FUTURES_WORKSTATION_JSON_LIMITS.WS_STREAM_FRAME_BYTES) {
+            onOversizedFrame(Buffer.byteLength(raw, 'utf8'));
             return;
         }
         onMessage(raw);
@@ -633,8 +638,26 @@ export const createFuturesProductionWorkstationReviewedTransport = ({
                 `${lower}@markPrice@1s`,
                 `${lower}@ticker`,
             ].join('/')}`;
-            const publicSocket = createSocket(publicUrl, onMessage, onDisconnect, backendProxy);
-            const marketSocket = createSocket(marketUrl, onMessage, onDisconnect, backendProxy);
+            // A dropped frame is a fact the operator's log should carry: it is
+            // the difference between a market that went quiet and a desk that
+            // refused what the market sent.
+            const reportOversizedFrame = (bytes) => {
+                emitTiming(onTiming, `oversized-frame:${bytes}`, Date.now(), 'error');
+            };
+            const publicSocket = createSocket(
+                publicUrl,
+                onMessage,
+                onDisconnect,
+                backendProxy,
+                reportOversizedFrame,
+            );
+            const marketSocket = createSocket(
+                marketUrl,
+                onMessage,
+                onDisconnect,
+                backendProxy,
+                reportOversizedFrame,
+            );
             let closed = false;
             let candleEpoch = 0;
             const createCandleSocket = (selectedInterval, epoch) => {
@@ -653,6 +676,7 @@ export const createFuturesProductionWorkstationReviewedTransport = ({
                         onCandleDisconnect(reason);
                     },
                     backendProxy,
+                    reportOversizedFrame,
                 );
                 return handle;
             };

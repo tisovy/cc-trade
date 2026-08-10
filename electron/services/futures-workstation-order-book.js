@@ -9,6 +9,7 @@ import {
 } from './futures-workstation-decimal.js';
 import {
     FUTURES_WORKSTATION_DEPTH_LEVELS_PER_SIDE,
+    FUTURES_WORKSTATION_DIFF_LEVELS_PER_SIDE,
     FUTURES_WORKSTATION_UINT64_MAX,
 } from '../../src/utils/futuresWorkstationProtocolShared.js';
 
@@ -24,6 +25,12 @@ export const FUTURES_WORKSTATION_ORDER_BOOK_LIMITS = Object.freeze({
     // Shared with the renderer's own bound so the two can never drift apart:
     // a delivered book larger than the protocol accepts is dropped whole.
     RENDERER_LEVELS_PER_SIDE: FUTURES_WORKSTATION_DEPTH_LEVELS_PER_SIDE,
+    // What one *diff* may carry, which is not what a snapshot holds: a diff
+    // restates every level that changed, and a sweep with the makers re-posting
+    // behind it changes more levels than the book is deep. Bounding a diff by
+    // the snapshot's thousand refused the frame — and refusing one frame
+    // resynchronizes the whole workspace.
+    DIFF_LEVELS_PER_SIDE: FUTURES_WORKSTATION_DIFF_LEVELS_PER_SIDE,
     BUFFERED_EVENTS: 2_048,
     BUFFERED_BYTES: 8 * 1024 * 1024,
 });
@@ -122,8 +129,8 @@ const validateDelta = (delta) => {
         firstUpdateIdBigInt: firstUpdateId,
         finalUpdateIdBigInt: finalUpdateId,
         previousFinalUpdateIdBigInt: previousFinalUpdateId,
-        bids: validateLevels(delta.bids, FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.SNAPSHOT_LEVELS_PER_SIDE),
-        asks: validateLevels(delta.asks, FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.SNAPSHOT_LEVELS_PER_SIDE),
+        bids: validateLevels(delta.bids, FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.DIFF_LEVELS_PER_SIDE),
+        asks: validateLevels(delta.asks, FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.DIFF_LEVELS_PER_SIDE),
     });
 };
 

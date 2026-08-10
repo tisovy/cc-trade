@@ -458,9 +458,42 @@ describe('official Futures workstation market schemas', () => {
     });
 
     it('rejects an oversized WebSocket frame before parsing', () => {
-        const raw = `${fixtureFor('BTCUSDT').streams.bridgeDepth}${' '.repeat(65_536)}`;
+        const raw = `${fixtureFor('BTCUSDT').streams.bridgeDepth}${' '.repeat(600_000)}`;
         expect(() => normalizeFuturesWorkstationStreamFrame(raw, expectation()))
             .toThrowError(expect.objectContaining({ code: 'INVALID_JSON_ENCODING' }));
+    });
+
+    // The ceiling is the book's, not a flat number under it. A depth diff that
+    // restates every level the desk retains is what a sharp move produces, and
+    // the desk used to refuse it — and resynchronize the whole workspace to
+    // recover from refusing its own data.
+    it('accepts a depth diff that restates more levels than the book is deep', () => {
+        const level = (index) => [
+            (0.00012345 + (index * 0.00000001)).toFixed(8),
+            (1_000_000 + index).toFixed(3),
+        ];
+        const side = (offset) => Array.from({ length: 2_000 }, (_, index) => level(offset + index));
+        const raw = JSON.stringify({
+            stream: 'btcusdt@depth@100ms',
+            data: {
+                e: 'depthUpdate',
+                E: 1_784_000_000_000,
+                T: 1_784_000_000_000,
+                s: 'BTCUSDT',
+                U: 100,
+                u: 200,
+                pu: 99,
+                b: side(0),
+                a: side(10_000),
+            },
+        });
+        // Bigger than the flat ceiling the desk used to hang up on, and bigger
+        // than the snapshot bound it used to refuse the frame by.
+        expect(Buffer.byteLength(raw, 'utf8')).toBeGreaterThan(64 * 1024);
+        const frame = normalizeFuturesWorkstationStreamFrame(raw, expectation());
+        expect(frame.kind).toBe('depth');
+        expect(frame.bids).toHaveLength(2_000);
+        expect(frame.asks).toHaveLength(2_000);
     });
 
     it('rejects duplicate and malformed REST candle rows', () => {

@@ -14,6 +14,10 @@ import {
     subtractFuturesWorkstationDecimals,
     toFuturesWorkstationPercent,
 } from './futures-workstation-decimal.js';
+import {
+    FUTURES_WORKSTATION_DIFF_LEVELS_PER_SIDE,
+    FUTURES_WORKSTATION_STREAM_MAX_NODES,
+} from '../../src/utils/futuresWorkstationProtocolShared.js';
 
 export const FUTURES_WORKSTATION_MARKET_LIMITS = Object.freeze({
     CATALOG_CONTRACTS: 1_024,
@@ -121,9 +125,12 @@ const readOrderedIdentityPair = (firstValue, lastValue, code) => {
     return Object.freeze({ first, last });
 };
 
-const normalizeLevelArray = (levels) => {
-    if (!Array.isArray(levels)
-        || levels.length > FUTURES_WORKSTATION_MARKET_LIMITS.DEPTH_LEVELS_PER_SIDE) {
+// The snapshot's thousand per side is Binance's own depth; a diff carries every
+// level that *changed*, which on a sharp move is more than the book is deep. The
+// two are bounded separately, because bounding the diff by the snapshot is what
+// made the desk refuse the market at the moment it moved.
+const normalizeLevelArray = (levels, maximum = FUTURES_WORKSTATION_MARKET_LIMITS.DEPTH_LEVELS_PER_SIDE) => {
+    if (!Array.isArray(levels) || levels.length > maximum) {
         fail('INVALID_DEPTH_LEVELS');
     }
     return Object.freeze(levels.map((level) => {
@@ -531,8 +538,8 @@ const normalizeStreamDepth = (payload) => {
         firstUpdateId: readFuturesWorkstationIdentity(payload.U),
         finalUpdateId: readFuturesWorkstationIdentity(payload.u),
         previousFinalUpdateId: readFuturesWorkstationIdentity(payload.pu),
-        bids: normalizeLevelArray(payload.b),
-        asks: normalizeLevelArray(payload.a),
+        bids: normalizeLevelArray(payload.b, FUTURES_WORKSTATION_DIFF_LEVELS_PER_SIDE),
+        asks: normalizeLevelArray(payload.a, FUTURES_WORKSTATION_DIFF_LEVELS_PER_SIDE),
         eventTime,
     });
 };
@@ -659,9 +666,12 @@ export const normalizeFuturesWorkstationStreamFrame = (
         fail('INVALID_STREAM_EXPECTATION');
     }
     const frameBytes = Buffer.byteLength(raw, 'utf8');
+    // Both bounds are the book's, not a flat number under it: a depth diff may
+    // restate every level the desk retains, and a frame the payload rules accept
+    // but the parser refuses is a feed that simply stops.
     const envelope = parseFuturesWorkstationJson(raw, {
-        maxBytes: FUTURES_WORKSTATION_JSON_LIMITS.WS_FRAME_BYTES,
-        maxNodes: 8_192,
+        maxBytes: FUTURES_WORKSTATION_JSON_LIMITS.WS_STREAM_FRAME_BYTES,
+        maxNodes: FUTURES_WORKSTATION_STREAM_MAX_NODES,
     });
     if (!exactKeys(envelope, ['stream', 'data']) || typeof envelope.stream !== 'string') {
         fail('INVALID_STREAM_ENVELOPE');

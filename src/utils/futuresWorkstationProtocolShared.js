@@ -24,6 +24,37 @@ export const FUTURES_WORKSTATION_EVENT_MAX_NODES = (
   (FUTURES_WORKSTATION_DEPTH_LEVELS_PER_SIDE * 2 * 4) + 256
 )
 
+// A diff is not a snapshot, and bounding it like one is what took the desk off
+// the market at every sharp move.
+//
+// `<symbol>@depth@100ms` carries every level that *changed* in the last hundred
+// milliseconds. That is unrelated to the thousand levels per side Binance serves
+// in a snapshot: a sweep that lifts a book and the makers re-posting behind it
+// restate far more levels than the book is deep. The desk applied the snapshot's
+// bound to the diff, and a frame past it was refused — which resynchronized the
+// whole workspace, at the one moment the operator needed depth, tape, header and
+// candles most.
+//
+// Four times the snapshot depth per side is chosen for what it costs rather than
+// for what has been observed: a refused frame costs the market, a frame carried
+// costs a bounded number of bytes.
+export const FUTURES_WORKSTATION_DIFF_LEVELS_PER_SIDE = (
+  FUTURES_WORKSTATION_DEPTH_LEVELS_PER_SIDE * 4
+)
+
+// The frame bounds follow the diff, not the book, for the same reason the node
+// budget above follows the level count: a frame the payload rules accept but the
+// parser refuses is a feed that simply stops. A level is a two-element array of
+// decimal strings, and sixty-four bytes is more than any USDⓈ-M price and
+// quantity pair reaches, with the envelope allowed for separately.
+export const FUTURES_WORKSTATION_STREAM_FRAME_BYTES = (
+  (FUTURES_WORKSTATION_DIFF_LEVELS_PER_SIDE * 2 * 64) + (4 * 1024)
+)
+
+export const FUTURES_WORKSTATION_STREAM_MAX_NODES = (
+  (FUTURES_WORKSTATION_DIFF_LEVELS_PER_SIDE * 2 * 4) + 256
+)
+
 export const FUTURES_WORKSTATION_TAPE_LIMITS = Object.freeze({
   MIN_TIMEOUT_MS: 16,
   MAX_TIMEOUT_MS: 5_000,

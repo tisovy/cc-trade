@@ -1,39 +1,41 @@
 ## Why
 
 The desk drops into `RESYNCHRONIZING` when the market moves hardest — the
-operator reports it on a sharp buy or sell, "как будто не справляется сокет".
-That is the moment the desk exists for, and there is a mechanism in the code
-that would produce exactly this behaviour at exactly that moment.
+operator reported it twice on 2026-08-11, the second time on BLUAI on a sharp
+upward spike. That is the moment the desk exists for.
 
-**A frame the market makes big enough closes the socket.**
+**The desk bounded a diff as if it were a snapshot.**
 
-Every upstream stream is opened with a hard ceiling on one frame
-(`electron/services/futures-production-workstation-transport.js:312`):
+`<symbol>@depth@100ms` carries every level that *changed* in the last hundred
+milliseconds. That has nothing to do with the thousand levels per side Binance
+serves in a depth *snapshot*: a sweep that lifts the book, with the makers
+pulling and re-posting behind it, restates far more levels than the book is
+deep. The desk applied the snapshot's bound to the diff, in two places:
 
-```js
-maxPayload: FUTURES_WORKSTATION_JSON_LIMITS.WS_FRAME_BYTES,   // 64 KiB
-```
+- `normalizeLevelArray` (`futures-workstation-market-contract.js:127`) failed
+  the frame with `INVALID_DEPTH_LEVELS` past 1 000 levels on a side;
+- `validateDelta` (`futures-workstation-order-book.js:131`) applied
+  `SNAPSHOT_LEVELS_PER_SIDE` to the diff again.
 
-and the message handler enforces the same ceiling a second time (`:339`), by
-closing the connection with `1009 frame too large`. `ws` answers an over-`maxPayload`
-frame the same way on its own: it closes the connection.
+A failure there is a throw, and `handleStreamFrame`
+(`futures-production-workstation-service.js:793`) answers a throw with
+`scheduleResync(session, 'MALFORMED_STREAM_FRAME')` — which closes every stream,
+stops the order book, and starts a whole new generation: depth, tape, header and
+candles all go, and the chart is read-only until the bootstrap reads come back.
 
-So a single oversized frame does not drop *that frame* — it drops **the stream**.
-The close reaches `onDisconnect('SOCKET_CLOSED')`, which reaches
-`handleDisconnect` (`futures-production-workstation-service.js:874`), which
-schedules a resync of the whole session: depth, tape, header and candles go with
-it, and the chart goes read-only until the session comes back.
+Two more ceilings sat under the same rule and were reached the same way. The
+parse budget for a stream frame was a flat `maxBytes: 64 KiB, maxNodes: 8_192`,
+and the socket itself was opened with `maxPayload: 64 KiB` — and answered an
+oversized frame by **closing the connection** (`1009 frame too large`), which is
+the same resync by another route. None of the three was derived from the data
+the desk had already decided to hold: the renderer-bound direction learned this
+lesson already, and says so at `FUTURES_WORKSTATION_EVENT_MAX_NODES` — "a frame
+the payload rules accept but the parser refuses is a feed that simply stops".
+The exchange-bound direction never got the same treatment.
 
-`<symbol>@depth@100ms` carries every level that changed in the last 100 ms. On a
-quiet book that is a few hundred bytes. In a violent move it is every level a
-sweep touched plus every level the makers re-posted — the one condition where
-the frame can reach tens of kilobytes, and the one condition where losing the
-book costs the operator money.
-
-This has not been measured on this desk yet, which is why the first task is to
-measure it rather than to change it. What is certain from the code is the
-consequence: whatever makes one frame exceed the ceiling takes the whole session
-down and resynchronizes it.
+So the harder the market moved, the more certain the desk was to refuse the
+update — and to resynchronize the whole workspace to recover from refusing its
+own data.
 
 ## What Changes
 

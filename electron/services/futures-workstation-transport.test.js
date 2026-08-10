@@ -369,7 +369,7 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             expect(socket.options).toEqual({
                 followRedirects: false,
                 handshakeTimeout: 10_000,
-                maxPayload: 65_536,
+                maxPayload: 516_096,
                 perMessageDeflate: false,
             });
         }
