@@ -1,0 +1,7 @@
+schema: spec-driven
+created: 2026-08-10
+# This change performs verification of requirements that already exist, against
+# the live account and a written runbook. It adds, modifies and removes nothing,
+# so it carries no spec delta by design — the same shape as
+# `verify-live-futures-account-read`.
+skip_specs: true

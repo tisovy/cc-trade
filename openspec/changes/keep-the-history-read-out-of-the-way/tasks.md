@@ -40,3 +40,8 @@
   the order of admission.
 - [ ] 4.2 Halving the requests does not remove the contention, it halves it. The
   overtaking in section 2 is what actually bounds the delay.
+- [ ] 4.3 The reads that should never have been issued are not this change's
+  either: selecting a history tab re-reads the whole account on every click, and
+  that is `hold-the-history-the-desk-has-read`. This change makes one read
+  cheaper and better-ordered; that one removes the repeats. Do them in either
+  order — they touch different code — but neither is complete without the other.
