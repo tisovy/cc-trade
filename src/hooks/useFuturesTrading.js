@@ -269,12 +269,21 @@ const applyAccountEnvelope = (previous, payload) => {
 // Spot-parity futures trading state: pushed futures_* messages from the local
 // backend plus fire-and-forget typed trading commands. No intents, no
 // confirmations — the backend and the exchange are the authority.
-const useFuturesTrading = ({ enabled, symbol, wsConnection } = {}) => {
+// A frame issued under no known activation is sent unstamped: the backend gates
+// it on the market name alone, exactly as it did before generations existed.
+const stampGeneration = (command, generation) => (
+  Number.isSafeInteger(generation) ? { ...command, generation } : command
+)
+
+const useFuturesTrading = ({ enabled, symbol, wsConnection, marketGeneration = null } = {}) => {
   const [state, setState] = useState(() => createInitialState({
     enabled,
     connection: wsConnection,
   }))
   const symbolRef = useRef(symbol)
+  // Read inside the connection effect, which must not re-run when only the
+  // generation changes: re-running it would resend the account refresh.
+  const generationRef = useRef(marketGeneration)
   const unsentCommandsRef = useRef(null)
   if (unsentCommandsRef.current === null) {
     unsentCommandsRef.current = createUnsentCommandStore()
@@ -284,6 +293,10 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection } = {}) => {
   useEffect(() => {
     symbolRef.current = symbol
   }, [symbol])
+
+  useEffect(() => {
+    generationRef.current = marketGeneration
+  }, [marketGeneration])
 
   useEffect(() => {
     if (!enabled || !isUsableSocket(wsConnection)) {
@@ -448,9 +461,9 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection } = {}) => {
     wsConnection.addEventListener('error', handleDisconnect)
 
     try {
-      wsConnection.send(JSON.stringify(createFuturesAccountRefreshCommand({
+      wsConnection.send(JSON.stringify(stampGeneration(createFuturesAccountRefreshCommand({
         symbol: symbolRef.current,
-      })))
+      }), generationRef.current)))
       setState(previous => ({ ...previous, connected: true }))
     } catch {
       handleDisconnect()
@@ -464,20 +477,23 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection } = {}) => {
     }
   }, [enabled, wsConnection])
 
+  // Every command carries the market activation it was issued under. The
+  // backend refuses one from a superseded activation, so a command composed
+  // before a market switch cannot execute after it.
   const sendCommand = useCallback((command) => {
     if (!enabled || !isOpenSocket(wsConnection) || typeof wsConnection?.send !== 'function') {
       unsentCommands.remember(command)
       return false
     }
     try {
-      wsConnection.send(JSON.stringify(command))
+      wsConnection.send(JSON.stringify(stampGeneration(command, marketGeneration)))
       unsentCommands.clear()
       return true
     } catch {
       unsentCommands.remember(command)
       return false
     }
-  }, [enabled, unsentCommands, wsConnection])
+  }, [enabled, marketGeneration, unsentCommands, wsConnection])
 
   // Resends the exact command that never left the renderer, identity and all.
   // Rebuilding it would mint a new client order id and the exchange could no

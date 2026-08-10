@@ -1371,8 +1371,33 @@ export function setupBinanceConnection({
         const describeMarketMode = mode => (mode === MARKET_MODES.FUTURES ? 'Futures' : 'Spot');
 
         // Returns true when the frame was refused, so the caller stops.
-        const refuseUnlessMarketActive = (label, requiredMode) => {
-            if (requiredMode === null || activeMarketMode === requiredMode) return false;
+        //
+        // The market name alone is not enough. Spot → Futures → Spot leaves the
+        // mode string equal to what a frame issued before the first switch
+        // carries, so that frame passed the gate and acted on a selection the
+        // operator had already left twice. Each activation mints a generation and
+        // every market-scoped frame carries the one it was issued under.
+        const refuseUnlessMarketActive = (label, requiredMode, requestGeneration = null) => {
+            if (requiredMode === null) return false;
+            if (activeMarketMode === requiredMode) {
+                if (requestGeneration === null
+                    || requestGeneration === marketActivationGeneration) return false;
+                logger.warn(`[market-gate] Refused ${label}: generation ${requestGeneration} is superseded by ${marketActivationGeneration}`);
+                emit(createCommandRejection(
+                    label,
+                    'MARKET_ACTIVATION_SUPERSEDED',
+                    'This was issued for an earlier activation of the market — it is no longer current.',
+                    {
+                        marketType: requiredMode === MARKET_MODES.FUTURES
+                            ? FUTURES_MARKET_TYPE
+                            : SPOT_MARKET_TYPE,
+                        requiredMarketMode: requiredMode,
+                        activeMarketMode,
+                        generation: marketActivationGeneration,
+                    },
+                ));
+                return true;
+            }
             logger.warn(`[market-gate] Refused ${label}: ${requiredMode} is not the activated market`);
             emit(createCommandRejection(
                 label,
@@ -1400,6 +1425,18 @@ export function setupBinanceConnection({
                 marketMode: activeMarketMode,
                 generation: marketActivationGeneration,
             });
+        };
+
+        // Activations run one at a time. Each one tears the other market down
+        // before starting its own, and two overlapping runs could interleave
+        // those steps and leave the backend on the market the operator left —
+        // the older request finishing last and winning.
+        let marketActivationChain = Promise.resolve();
+        const serializeMarketActivation = (run) => {
+            const next = marketActivationChain.then(run, run);
+            // A failed activation must not poison the chain for the next one.
+            marketActivationChain = next.catch(() => {});
+            return next;
         };
 
         // Channel manager for this connection (each renderer has its own channels)
@@ -3113,9 +3150,22 @@ export function setupBinanceConnection({
             // The production public-read workstation is routed before the broader
             // production execution prefix detector. It contains no execution action.
             if (isPotentialFuturesProductionWorkstationFrame(rawUtf8Frame)) {
+                // The frame is routed before it is parsed, so the generation is
+                // read from the raw text here — a workstation request is as
+                // market-scoped as any other.
+                let workstationGeneration = null;
+                try {
+                    const parsed = JSON.parse(rawUtf8Frame);
+                    if (Number.isSafeInteger(parsed?.generation)) {
+                        workstationGeneration = parsed.generation;
+                    }
+                } catch {
+                    workstationGeneration = null;
+                }
                 if (refuseUnlessMarketActive(
                     'futures.production.workstation',
                     MARKET_MODES.FUTURES,
+                    workstationGeneration,
                 )) return;
                 if (!futuresCredentialsReady) {
                     sendJSON(connection, createCommandRejection(
@@ -3183,51 +3233,57 @@ export function setupBinanceConnection({
                 // one. `subscribeChannel` used to activate Spot implicitly, so
                 // a stray subscribe was enough to start market work the
                 // operator never asked for.
-                if (refuseUnlessMarketActive(data.action, marketScopeOf(data))) return;
+                if (refuseUnlessMarketActive(
+                    data.action,
+                    marketScopeOf(data),
+                    Number.isSafeInteger(data.generation) ? data.generation : null,
+                )) return;
                 switch (data.action) {
                     case 'get_startup_status':
                         sendJSON(connection, startupEnvelope);
                         break;
                     case 'activate_market':
-                        if (data.marketMode === 'spot') {
-                            if (!spotCredentialsReady) {
-                                emit(createCommandRejection(
-                                    'activate_market',
-                                    'MARKET_NOT_CONFIGURED',
-                                    credentialPreflight.markets.spot.message,
-                                    {
-                                        market: 'spot',
-                                        startupCode: credentialPreflight.markets.spot.code,
-                                    },
-                                ));
-                                break;
+                        await serializeMarketActivation(async () => {
+                            if (data.marketMode === 'spot') {
+                                if (!spotCredentialsReady) {
+                                    emit(createCommandRejection(
+                                        'activate_market',
+                                        'MARKET_NOT_CONFIGURED',
+                                        credentialPreflight.markets.spot.message,
+                                        {
+                                            market: 'spot',
+                                            startupCode: credentialPreflight.markets.spot.code,
+                                        },
+                                    ));
+                                    return;
+                                }
+                                await deactivateFuturesData();
+                                applyMarketActivation(MARKET_MODES.SPOT);
+                                initializeSpotData();
+                            } else if (data.marketMode === 'futures-live') {
+                                if (!futuresCredentialsReady) {
+                                    emit(createCommandRejection(
+                                        'activate_market',
+                                        'MARKET_NOT_CONFIGURED',
+                                        credentialPreflight.markets.futures.message,
+                                        {
+                                            market: FUTURES_MARKET_TYPE,
+                                            startupCode: credentialPreflight.markets.futures.code,
+                                        },
+                                    ));
+                                    return;
+                                }
+                                await deactivateSpotData();
+                                applyMarketActivation(MARKET_MODES.FUTURES);
+                                initializeFuturesData();
+                            } else {
+                                await Promise.all([
+                                    deactivateSpotData(),
+                                    deactivateFuturesData(),
+                                ]);
+                                applyMarketActivation(MARKET_MODES.UNSELECTED);
                             }
-                            await deactivateFuturesData();
-                            applyMarketActivation(MARKET_MODES.SPOT);
-                            initializeSpotData();
-                        } else if (data.marketMode === 'futures-live') {
-                            if (!futuresCredentialsReady) {
-                                emit(createCommandRejection(
-                                    'activate_market',
-                                    'MARKET_NOT_CONFIGURED',
-                                    credentialPreflight.markets.futures.message,
-                                    {
-                                        market: FUTURES_MARKET_TYPE,
-                                        startupCode: credentialPreflight.markets.futures.code,
-                                    },
-                                ));
-                                break;
-                            }
-                            await deactivateSpotData();
-                            applyMarketActivation(MARKET_MODES.FUTURES);
-                            initializeFuturesData();
-                        } else {
-                            await Promise.all([
-                                deactivateSpotData(),
-                                deactivateFuturesData(),
-                            ]);
-                            applyMarketActivation(MARKET_MODES.UNSELECTED);
-                        }
+                        });
                         break;
                     case 'subscribe': {
                         const { channelId, channelType, symbol, interval } = data;
@@ -3289,6 +3345,7 @@ export function setupBinanceConnection({
             if (refuseUnlessMarketActive(
                 typeof data.request === 'string' ? data.request : 'request',
                 marketScopeOf(data),
+                Number.isSafeInteger(data.generation) ? data.generation : null,
             )) return;
             switch (data.request) {
                 case 'chart': {

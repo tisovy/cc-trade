@@ -183,6 +183,7 @@ export const DataProvider = ({
 
   const {
     addMessageListener,
+    marketGeneration,
     notifications,
     sendMessage: sendWsMessage,
     setSpotDetailSubscription,
@@ -1440,6 +1441,10 @@ export const DataProvider = ({
     unsubscribeChannel,
     sendWsMessage,
     sendMessage: sendWsMessage,  // Alias for convenience
+    // The activation a market-scoped frame must carry. Frames sent through
+    // `sendMessage` are stamped by the gateway; a caller that writes to the
+    // socket itself stamps with this.
+    marketGeneration,
     activeDetailChannelId,
     // Mini charts data for MainView
     miniCharts,

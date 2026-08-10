@@ -50,6 +50,18 @@ request from a superseded generation SHALL be discarded rather than applied.
 - **WHEN** a market-scoped request issued under an earlier activation returns after the operator has switched
 - **THEN** its result is discarded and does not alter the current market's state
 
+#### Scenario: A market is returned to after leaving it
+- **WHEN** the operator selects Spot, switches to Futures, returns to Spot, and a Spot frame issued before the first switch arrives afterwards
+- **THEN** the frame is refused, because it belongs to a superseded activation even though it names the market that is active again
+
+#### Scenario: The transport reconnects
+- **WHEN** the local transport drops and reconnects
+- **THEN** no market is treated as activated until the new connection acknowledges an activation, and no market-scoped frame is sent before that acknowledgement
+
+#### Scenario: Two activations are requested in quick succession
+- **WHEN** two `activate_market` frames arrive before the first has finished being applied
+- **THEN** they are applied in the order received and the backend settles on the market the later frame requested
+
 ## ADDED Requirements
 
 ### Requirement: A connect that outlives its cleanup does not revive a channel

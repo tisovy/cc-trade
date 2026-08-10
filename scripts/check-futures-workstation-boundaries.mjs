@@ -319,7 +319,10 @@ const sharedGatewayAssertions = [
     ['Futures Gateway consumption', /useGatewayContext\(\)/.test(futuresWorkspace)],
     [
         'Futures execution hook wiring',
-        /useFuturesTrading\(\{\s*enabled:\s*startupStatus\?\.ready\s*===\s*true,\s*wsConnection,\s*\}\)/.test(futuresWorkspace),
+        // The activation generation is part of the wiring: every market-scoped
+        // frame carries the activation it was issued under, and the execution
+        // hook writes to the socket itself.
+        /useFuturesTrading\(\{\s*enabled:\s*startupStatus\?\.ready\s*===\s*true,\s*wsConnection,\s*marketGeneration,\s*\}\)/.test(futuresWorkspace),
     ],
     [
         'Futures workstation wiring',

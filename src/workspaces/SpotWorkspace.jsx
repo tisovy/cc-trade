@@ -40,6 +40,7 @@ function SpotWorkspaceContent() {
     filters,
     isOffline,
     sendMessage,
+    marketGeneration,
     commandOutcome,
     dismissCommandOutcome,
   } = useDataContext();
@@ -270,6 +271,9 @@ function SpotWorkspaceContent() {
     unsentCommandsRef.current = createUnsentCommandStore();
   }
 
+  // The command carries the market activation it was issued under, the way
+  // every other market-scoped frame does: the backend refuses one composed
+  // before a switch the operator has since made.
   const sendTradingCommand = useCallback((command) => {
     const unsent = unsentCommandsRef.current;
     if (!wsConnection || wsConnection.readyState !== WebSocket.OPEN) {
@@ -278,7 +282,9 @@ function SpotWorkspaceContent() {
       return false;
     }
     try {
-      wsConnection.send(JSON.stringify(command));
+      wsConnection.send(JSON.stringify(
+        Number.isSafeInteger(marketGeneration) ? { ...command, generation: marketGeneration } : command,
+      ));
       unsent.clear();
       return true;
     } catch (error) {
@@ -286,7 +292,7 @@ function SpotWorkspaceContent() {
       console.warn('Trading command could not be sent', error);
       return false;
     }
-  }, [wsConnection]);
+  }, [marketGeneration, wsConnection]);
 
   const handleRequest = useCallback((data, type) => {
     if (type === 'cancel') {

@@ -3398,6 +3398,77 @@ describe('setupBinanceConnection user-data orchestration', () => {
             expect(refusals()).toEqual([]);
         });
 
+        // The market name is not enough: Spot → Futures → Spot leaves the name
+        // equal to what a frame issued before the first switch carries.
+        it('refuses a frame issued under a superseded activation of the same market', async () => {
+            await connectRenderer('spot');
+            await activateMarket('futures-live');
+            await activateMarket('spot');
+
+            await moduleMocks.rendererHandlers.message({
+                type: 'utf8',
+                utf8Data: JSON.stringify({
+                    action: 'subscribe',
+                    channelId: 'detail-BTCUSDT-1h',
+                    channelType: 'detail',
+                    symbol: 'BTCUSDT',
+                    interval: '1h',
+                    generation: 1,
+                }),
+            });
+
+            const superseded = emitted()
+                .filter(payload => payload.command_rejected?.code === 'MARKET_ACTIVATION_SUPERSEDED');
+            expect(superseded).toHaveLength(1);
+            expect(superseded[0].command_rejected.details).toMatchObject({
+                requiredMarketMode: 'spot',
+                generation: 3,
+            });
+        });
+
+        it('accepts a frame carrying the activation that is current', async () => {
+            await connectRenderer('spot');
+
+            await moduleMocks.rendererHandlers.message({
+                type: 'utf8',
+                utf8Data: JSON.stringify({
+                    action: 'subscribe',
+                    channelId: 'detail-BTCUSDT-1h',
+                    channelType: 'detail',
+                    symbol: 'BTCUSDT',
+                    interval: '1h',
+                    generation: 1,
+                }),
+            });
+
+            expect(emitted().some(payload => (
+                payload.command_rejected?.code === 'MARKET_ACTIVATION_SUPERSEDED'
+            ))).toBe(false);
+        });
+
+        // Two activations used to run concurrently: the older one could finish
+        // last and leave the backend on the market the operator left.
+        it('settles on the last market requested when activations overlap', async () => {
+            await connectRenderer(null);
+
+            const first = moduleMocks.rendererHandlers.message({
+                type: 'utf8',
+                utf8Data: JSON.stringify({ action: 'activate_market', marketMode: 'futures-live' }),
+            });
+            const second = moduleMocks.rendererHandlers.message({
+                type: 'utf8',
+                utf8Data: JSON.stringify({ action: 'activate_market', marketMode: 'spot' }),
+            });
+            await Promise.all([first, second]);
+
+            const activations = emitted().filter(payload => payload.type === 'market_activation');
+            expect(activations.map(activation => activation.marketMode)).toEqual([
+                'futures-live',
+                'spot',
+            ]);
+            expect(activations.at(-1).generation).toBe(2);
+        });
+
         it('acknowledges each activation with its own generation', async () => {
             await connectRenderer(null);
 

@@ -6,8 +6,8 @@
 
 ## 2. Generation-Isolated Activation
 
-- [x] 2.1 Carry an activation generation through market activation and stamp every market-scoped request with the generation it was issued under.
-- [x] 2.2 Discard a request whose generation is no longer current instead of applying its result.
+- [x] 2.1 Carry an activation generation through market activation and stamp every market-scoped request with the generation it was issued under. *(Reopened 2026-08-10: the backend mints and announces a generation, but the renderer never sends one back — `src/context/GatewayContext.jsx:150` stores it and `electron/services/binance-connection.js:1364` gates on the market name alone.)*
+- [x] 2.2 Discard a request whose generation is no longer current instead of applying its result. *(Reopened 2026-08-10: with no generation on the request there is nothing to compare; a stale Spot frame after Spot → Futures → Spot is accepted because the mode string matches.)*
 - [x] 2.3 Order lazy workspace mount so a child effect cannot issue refresh or subscribe before the parent activation has been accepted.
 - [x] 2.4 Prove by test that a warm lazy switch never sends a market-scoped request ahead of its activation.
 
@@ -40,4 +40,13 @@
 ## 7. Verification
 
 - [x] 7.1 Run unit and integration suites, the production-guard checks and the workstation boundary check.
-- [ ] 7.2 Run an end-to-end verification concurrently with a development instance and record that neither reaches the other.
+- [ ] 7.2 Use retained integration coverage with two independently issued runtimes and record that each rejects the other runtime's token, without browser automation.
+
+## 8. Activation Survives A Reconnect And A Fast Switch
+
+*(Added 2026-08-10 from the delivery audit.)*
+
+- [x] 8.1 Bind the renderer's stored activation to the connection that acknowledged it, so a reconnect starts from "no market activated" instead of carrying the previous socket's acknowledgement.
+- [x] 8.2 Serialize `activate_market` handling in the main process so two activations cannot interleave and leave the backend on the market the operator left.
+- [x] 8.3 Prove by test that a reconnect issues no market-scoped frame before the new activation is acknowledged, and that two rapid switches settle on the last one requested.
+- [x] 8.4 Re-run the suites and guard checks after sections 2 and 8 land.

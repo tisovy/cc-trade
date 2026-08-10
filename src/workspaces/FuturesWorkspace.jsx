@@ -5,6 +5,7 @@ import useFuturesTrading from '../hooks/useFuturesTrading.js'
 
 const FuturesWorkspace = () => {
   const {
+    marketGeneration,
     notifyError,
     sendMessage,
     startupStatus,
@@ -14,6 +15,7 @@ const FuturesWorkspace = () => {
   const futuresTrading = useFuturesTrading({
     enabled: startupStatus?.ready === true,
     wsConnection,
+    marketGeneration,
   })
 
   useEffect(() => {

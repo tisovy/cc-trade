@@ -144,4 +144,87 @@ describe('GatewayContext', () => {
     expect(screen.getByTestId('failure')).toHaveTextContent('AUTHENTICATION_REJECTED')
     mocks.failure = null
   })
+
+  // Every market-scoped frame carries the activation it was issued under. The
+  // market name alone does not separate a stale frame from a current one:
+  // Spot → Futures → Spot leaves the name equal to what the stale frame holds.
+  it('stamps market-scoped frames with the activation that is current', async () => {
+    const Sender = () => {
+      const { sendMessage } = useGatewayContext()
+      return (
+        <button type="button" onClick={() => sendMessage({ action: 'unsubscribe', channelId: 'c1' })}>
+          send
+        </button>
+      )
+    }
+    render(
+      <NotificationProvider>
+        <GatewayProvider activeMarketMode={MARKET_WORKSPACES.SPOT}>
+          <Sender />
+        </GatewayProvider>
+      </NotificationProvider>,
+    )
+
+    // Before an acknowledgement there is no activation to stamp with.
+    act(() => screen.getByRole('button', { name: 'send' }).click())
+    expect(mocks.sendMessage).toHaveBeenLastCalledWith({ action: 'unsubscribe', channelId: 'c1' })
+
+    act(() => mocks.handleMessage({
+      data: JSON.stringify({
+        type: 'market_activation', version: 1, marketMode: 'spot', generation: 4,
+      }),
+    }, mocks.connection, null))
+
+    act(() => screen.getByRole('button', { name: 'send' }).click())
+    expect(mocks.sendMessage).toHaveBeenLastCalledWith({
+      action: 'unsubscribe',
+      channelId: 'c1',
+      generation: 4,
+    })
+
+    // The activation frame itself is never stamped: it is what mints the next
+    // generation.
+    expect(mocks.sendMessage).not.toHaveBeenCalledWith(expect.objectContaining({
+      action: 'activate_market',
+      generation: expect.anything(),
+    }))
+  })
+
+  it('treats a reconnected transport as having no activated market', () => {
+    const ActivationObserver = () => {
+      const { marketActivation } = useGatewayContext()
+      return (
+        <span data-testid="activated">
+          {marketActivation ? `${marketActivation.marketMode}:${marketActivation.generation}` : 'none'}
+        </span>
+      )
+    }
+    const { rerender } = render(
+      <NotificationProvider>
+        <GatewayProvider activeMarketMode={MARKET_WORKSPACES.SPOT}>
+          <ActivationObserver />
+        </GatewayProvider>
+      </NotificationProvider>,
+    )
+
+    act(() => mocks.handleMessage({
+      data: JSON.stringify({
+        type: 'market_activation', version: 1, marketMode: 'spot', generation: 1,
+      }),
+    }, mocks.connection, null))
+    expect(screen.getByTestId('activated')).toHaveTextContent('spot:1')
+
+    // A reconnect hands out a new socket; the backend it reaches has activated
+    // nothing yet.
+    mocks.connection = { readyState: 1 }
+    rerender(
+      <NotificationProvider>
+        <GatewayProvider activeMarketMode={MARKET_WORKSPACES.SPOT}>
+          <ActivationObserver />
+        </GatewayProvider>
+      </NotificationProvider>,
+    )
+    expect(screen.getByTestId('activated')).toHaveTextContent('none')
+  })
+
 })

@@ -147,10 +147,16 @@ export const GatewayProvider = ({
     // Market-scoped work waits for it: a child effect that ran ahead of its
     // parent's activation used to reach the backend first, and the ordering
     // depended on nothing more solid than effect scheduling.
+    //
+    // The connection it arrived on is kept with it. An acknowledgement belongs
+    // to one socket: after a reconnect the backend has no activated market
+    // again, and carrying the old one across would open the workspace before
+    // anything had been activated for it.
     if (payload?.type === 'market_activation'
       && typeof payload.marketMode === 'string'
       && Number.isSafeInteger(payload.generation)) {
       setMarketActivation({
+        connection,
         marketMode: payload.marketMode,
         generation: payload.generation,
       })
@@ -166,7 +172,7 @@ export const GatewayProvider = ({
     connection: wsConnection,
     failure: transportFailure,
     reconnect: reconnectTransport,
-    sendMessage,
+    sendMessage: sendRawMessage,
     subscribe,
     unsubscribe,
   } = useWebSocket(
@@ -179,6 +185,24 @@ export const GatewayProvider = ({
     && startupSnapshot.connection === wsConnection
     ? startupSnapshot.status
     : STARTUP_STATUS_LOADING
+  // An activation is only an activation of the connection that acknowledged it.
+  const activation = marketActivation?.connection === wsConnection
+    ? marketActivation
+    : null
+  const activationGeneration = activation?.generation ?? null
+
+  // Every market-scoped frame carries the activation it was issued under, so a
+  // frame that was in flight across a switch cannot be applied to the market
+  // that is active now. The market name alone does not separate them: Spot →
+  // Futures → Spot leaves the name equal to what the stale frame carries.
+  const sendMessage = useCallback((message) => {
+    if (activationGeneration === null
+      || message?.action === 'activate_market'
+      || message?.action === 'get_startup_status') {
+      return sendRawMessage(message)
+    }
+    return sendRawMessage({ ...message, generation: activationGeneration })
+  }, [activationGeneration, sendRawMessage])
 
   useEffect(() => {
     if (wsUrl === null) return
@@ -263,7 +287,8 @@ export const GatewayProvider = ({
     notifyInfo: notifications?.notifyInfo,
     notifySuccess: notifications?.notifySuccess,
     notifyWarning: notifications?.notifyWarning,
-    marketActivation,
+    marketActivation: activation,
+    marketGeneration: activationGeneration,
     reconnectTransport,
     sendMessage,
     setSpotDetailSubscription,
@@ -273,8 +298,9 @@ export const GatewayProvider = ({
     unsubscribe,
     wsConnection,
   }), [
+    activation,
+    activationGeneration,
     addMessageListener,
-    marketActivation,
     notifications,
     reconnectTransport,
     sendMessage,
