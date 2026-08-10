@@ -952,20 +952,30 @@ export function setupBinanceConnection({
     // What the account is set to for one contract: the leverage, its ceiling and
     // the margin mode. The ceiling comes from the contract's own leverage bracket,
     // which is what Binance refuses a higher setting against.
+    // Guarded by the same epoch as every other account read: a read that began
+    // before a leverage change lands after it carrying the multiple the contract
+    // used to be set at, and there is nothing behind it to correct the record until
+    // the next refresh. A read that outlived its market activation is dropped for
+    // the same reason.
     const readFuturesSymbolConfig = async (symbol, { withCeiling = false } = {}) => {
         if (!futuresTradingAdapter || !symbol) return null;
+        const epoch = futuresMutationEpoch;
+        const activation = futuresActivationGeneration;
+        const superseded = () => epoch !== futuresMutationEpoch
+            || activation !== futuresActivationGeneration;
         try {
             const config = await futuresRestLimiter.execute(
                 () => futuresTradingAdapter.getSymbolConfig(symbol),
                 FUTURES_SYMBOL_CONFIG_WEIGHT,
             );
-            if (config === null) return null;
+            if (config === null || superseded()) return null;
             const ceiling = withCeiling
                 ? await futuresRestLimiter.execute(
                     () => futuresTradingAdapter.getMaxLeverage(symbol),
                     FUTURES_LEVERAGE_BRACKET_WEIGHT,
                 ).catch(() => null)
                 : futuresSymbolConfigs.get(config.symbol)?.maxLeverage ?? null;
+            if (superseded()) return null;
             // A bracket read that failed does not un-know a ceiling that was read
             // before it: the panel would silently offer the whole 1–125 range.
             const entry = {

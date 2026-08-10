@@ -2635,6 +2635,57 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(payloads.some(payload => payload.command_rejected)).toBe(false);
     });
 
+    // The same exposure the stale-working-order fix answered, in the read that
+    // states the leverage: a configuration read that began before a mutation lands
+    // after it, and nothing behind it corrects the record until the next refresh.
+    it('drops a configuration read that a mutation overtook', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        let answerConfigRead;
+        moduleMocks.futuresAdapter.getSymbolConfig.mockReturnValueOnce(new Promise((resolve) => {
+            answerConfigRead = resolve;
+        }));
+
+        const configRead = moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'account.symbolConfig',
+                version: 1,
+                marketType: 'futures',
+                accountId: 'default',
+                clientOrderId: 'config-stale',
+                symbol: 'BTCUSDT',
+            }),
+        });
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        // A fill lands while that read is in flight, so the world it describes is
+        // one the desk has already moved past.
+        await runFuturesCommand({
+            action: 'trade.placeOrder',
+            clientOrderId: 'overtaking-order',
+            symbol: 'BTCUSDT',
+            side: 'BUY',
+            orderType: 'LIMIT',
+            timeInForce: 'GTC',
+            price: '50000',
+            quantity: '0.01',
+        });
+        answerConfigRead({ symbol: 'BTCUSDT', leverage: 5, marginType: 'CROSSED' });
+        await vi.advanceTimersByTimeAsync(5_000);
+        await configRead;
+
+        const stale = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.futures_symbol_configs)
+            .filter(payload => payload.futures_symbol_configs.BTCUSDT?.leverage === 5);
+        expect(stale).toEqual([]);
+    });
+
     it('refuses a leverage change while trading is paused and reports the refusal', async () => {
         setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
         moduleMocks.websocketServerHandlers.request({
