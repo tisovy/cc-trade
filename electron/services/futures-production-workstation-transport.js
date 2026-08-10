@@ -366,7 +366,20 @@ const createSocket = (url, onMessage, onDisconnect, backendProxy, onOversizedFra
             settleReady(false);
             clearTimeout(lifetime);
             socket.removeAllListeners();
-            socket.close(1000, 'generation teardown');
+            // A connection still in its handshake does not answer `close()` by
+            // closing: `ws` aborts the handshake and *raises* "WebSocket was
+            // closed before the connection was established". With every listener
+            // just removed, nothing was listening, so Node threw it — out of the
+            // abort listener, out of `AbortController.abort()`, and out of the
+            // teardown that called it, which then skipped closing the streams and
+            // clearing the timers. One contract switch during a handshake left
+            // two contracts alive on the desk.
+            socket.on('error', () => {});
+            try {
+                socket.close(1000, 'generation teardown');
+            } catch {
+                // The connection is being abandoned either way.
+            }
         },
     });
 };

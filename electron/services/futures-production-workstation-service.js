@@ -999,12 +999,12 @@ export class FuturesProductionWorkstationService {
     haltSession(session) {
         if (this.current !== session) return;
         this.current = null;
-        session.stream?.close?.();
+        this.release(() => session.stream?.close?.());
         session.stream = null;
-        session.abortController.abort();
-        session.intervalAbortController?.abort();
-        session.orderBook.stop();
-        this.clearPendingTapeTimer(session);
+        this.release(() => session.abortController.abort());
+        this.release(() => session.intervalAbortController?.abort());
+        this.release(() => session.orderBook.stop());
+        this.release(() => this.clearPendingTapeTimer(session));
         if (session.freshnessTimer !== null) {
             this.clock.clearInterval(session.freshnessTimer);
             session.freshnessTimer = null;
@@ -1021,20 +1021,38 @@ export class FuturesProductionWorkstationService {
         session.pendingCandleEvents = [];
     }
 
+    // Every step, independently. A release that gave up half-way left the
+    // previous contract's sockets delivering and its timers armed while the desk
+    // had already moved on — which is what the operator saw as two contracts
+    // flickering against each other.
+    release(step) {
+        try {
+            step();
+        } catch (error) {
+            this.onInternalError({ phase: 'release', code: safeCode(error) });
+        }
+    }
+
     stopCurrent() {
         const session = this.current;
         this.current = null;
         if (!session) return;
-        session.abortController.abort();
-        session.intervalAbortController?.abort();
-        session.stream?.close?.();
-        session.orderBook.stop();
-        this.clearPendingTapeTimer(session);
-        if (session.freshnessTimer !== null) this.clock.clearInterval(session.freshnessTimer);
-        if (session.reconnectTimer !== null) this.clock.clearTimeout(session.reconnectTimer);
-        if (session.intervalReconnectTimer !== null) {
-            this.clock.clearTimeout(session.intervalReconnectTimer);
-        }
+        this.release(() => session.abortController.abort());
+        this.release(() => session.intervalAbortController?.abort());
+        this.release(() => session.stream?.close?.());
+        this.release(() => session.orderBook.stop());
+        this.release(() => this.clearPendingTapeTimer(session));
+        this.release(() => {
+            if (session.freshnessTimer !== null) this.clock.clearInterval(session.freshnessTimer);
+            if (session.reconnectTimer !== null) this.clock.clearTimeout(session.reconnectTimer);
+            if (session.intervalReconnectTimer !== null) {
+                this.clock.clearTimeout(session.intervalReconnectTimer);
+            }
+        });
+        session.freshnessTimer = null;
+        session.reconnectTimer = null;
+        session.intervalReconnectTimer = null;
+        session.stream = null;
         session.pendingEvents = [];
         session.pendingCandleEvents = [];
     }

@@ -381,6 +381,38 @@ describe('reviewed environment-specific Futures workstation transports', () => {
         expect(socketMock.instances.every(socket => socket.close.mock.calls.length === 1)).toBe(true);
     });
 
+    // `ws` answers `close()` on a connection still in its handshake by raising
+    // "WebSocket was closed before the connection was established". With the
+    // listeners already removed nothing was listening, so the throw travelled out
+    // of the abort listener and out of the teardown that called it — and the
+    // teardown then skipped closing the other streams. One contract switch during
+    // a handshake left the previous contract alive on the desk.
+    it('closes a connection still in its handshake without raising', () => {
+        vi.useFakeTimers();
+        const controller = new AbortController();
+        const transport = createFuturesProductionWorkstationReviewedTransport();
+        const connection = transport.connect({
+            symbol: 'BTCUSDT',
+            interval: '5m',
+            onMessage: () => {},
+            onDisconnect: () => {},
+            onCandleDisconnect: () => {},
+            signal: controller.signal,
+        });
+        for (const socket of socketMock.instances) {
+            socket.close = vi.fn(() => {
+                throw new Error('WebSocket was closed before the connection was established');
+            });
+        }
+
+        expect(() => controller.abort()).not.toThrow();
+        // Every socket was still closed: the first failure cannot skip the rest.
+        expect(socketMock.instances).toHaveLength(3);
+        expect(socketMock.instances.every(socket => socket.close.mock.calls.length === 1)).toBe(true);
+        expect(() => connection.close()).not.toThrow();
+        vi.useRealTimers();
+    });
+
     it('replaces only the official kline stream and rejects superseded interval sockets', async () => {
         vi.useFakeTimers();
         const frames = [];

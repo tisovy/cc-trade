@@ -556,6 +556,43 @@ describe('production Futures workstation service', () => {
         expect(base.getActiveTimerCount()).toBe(1);
     });
 
+    // The operator's crash: closing a stream whose socket was still in its
+    // handshake threw out of `AbortController.abort()`, which is the first
+    // statement of the teardown — so the streams stayed open, the timers stayed
+    // armed, and the request that was supposed to start the next contract
+    // rejected instead. Two contracts on one desk.
+    it('starts the next contract even when releasing the previous one throws', async () => {
+        const base = createFuturesProductionWorkstationFakeTransport();
+        const connect = vi.fn((options) => {
+            const handle = base.connect(options);
+            return Object.freeze({
+                ready: handle.ready,
+                close: () => {
+                    handle.close();
+                    throw new Error('WebSocket was closed before the connection was established');
+                },
+                selectInterval: selection => handle.selectInterval(selection),
+            });
+        });
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            transport: { ...base, connect },
+        }));
+        const events = [];
+        const emit = event => events.push(event);
+
+        await runtime.service.handleRequest(productionRequest('first', 'BTCUSDT'), { emit });
+        await expect(runtime.service.handleRequest(
+            productionRequest('second', 'ETHUSDT'),
+            { emit },
+        )).resolves.toBeUndefined();
+
+        // The new contract owns the desk, and the previous session left nothing
+        // of itself running.
+        expect(runtime.service.current).toMatchObject({ symbol: 'ETHUSDT' });
+        expect(connect).toHaveBeenCalledTimes(2);
+        expect(base.getActiveTimerCount()).toBe(1);
+    });
+
     it('drops stale interval bootstraps during a rapid A → B → C switch', async () => {
         const base = createFuturesProductionWorkstationFakeTransport();
         const deferred = new Map();
