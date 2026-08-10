@@ -31,10 +31,10 @@
 - [x] 5.3 Keep ordinary transport losses retrying as they do today, so only authentication is terminal.
 - [x] 5.4 Prove by test that a rejected token produces one surfaced failure rather than a repeating reconnect.
 
-## 6. Verification Runtime Isolation
+## 6. Runtime Isolation
 
-- [x] 6.1 Give a verification or end-to-end run its own runtime endpoint and token, distinct from a development instance.
-- [x] 6.2 Refuse a connection whose token does not belong to the runtime that issued it, so a verification renderer cannot address a development backend.
+- [x] 6.1 Give each independently constructed renderer runtime its own endpoint and token.
+- [x] 6.2 Refuse a connection whose token does not belong to the runtime that issued it, so one renderer cannot address another runtime.
 - [x] 6.3 Prove by test that a renderer holding one runtime's token is refused by another runtime.
 
 ## 7. Verification

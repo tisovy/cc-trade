@@ -21,14 +21,14 @@ describe('shouldOpenDevTools', () => {
     })).toBe(false)
   })
 
-  it('keeps E2E builds closed by default even if a dev-server URL exists', () => {
+  it('keeps DevTools closed when the dev-server default is disabled', () => {
     expect(shouldOpenDevTools({
       env: { VITE_DEV_SERVER_URL: 'http://localhost:5174' },
       allowDevServerDefault: false,
     })).toBe(false)
   })
 
-  it('allows explicit DevTools opt-in for E2E diagnostics', () => {
+  it('allows explicit DevTools opt-in when the default is disabled', () => {
     expect(shouldOpenDevTools({
       env: { ELECTRON_OPEN_DEVTOOLS: 'true' },
       allowDevServerDefault: false,

@@ -214,7 +214,7 @@ Gate: cancel-before-replace is impossible; ambiguous PUT results block and recon
 ### Slice E — performance and rollout
 
 - Separate interval-only loading, isolate the clock, stabilize chart series, and coalesce streams.
-- Run unit, protocol parity, integration, Electron owner/peer isolation, build, lint, and Playwright tests.
+- Run Vitest unit/protocol/integration coverage, Electron owner/peer isolation tests, lint, the normal build, bounded smoke, and retained static safety/boundary checks.
 - Run GitNexus detect-changes and inspect all direct dependants.
 - Use production read-only smoke tests first. Any live write smoke requires explicit operator authorization and the smallest compiled cap.
 

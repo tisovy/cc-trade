@@ -5,27 +5,13 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { assertNormalElectronBuildSources } from './electron-build-artifact-contract.mjs';
 
 const root = path.resolve(process.cwd());
 const outputDirectory = path.join(root, 'dist-electron');
 const expectedArtifacts = new Set(['main.js', 'preload.cjs']);
-const buildMode = process.argv[2] ?? 'normal';
-const supportedBuildModes = new Set(['normal', 'e2e']);
-const retiredImplementationSignatures = Object.freeze([
-    'futuresReadEnvironment',
-    'FUTURES_READ_CHANNEL_ID',
-    'FUTURES_TESTNET_EXECUTION_ACTION',
-    'FUTURES_TESTNET_WORKSTATION_CHANNEL_ID',
-    'reviewed-testnet-public-read',
-    // Guarded-production execution ceremony (retired for the spot-parity path).
-    'futures.production.placeOrder',
-    'I_UNDERSTAND_REAL_USDT_FUTURES',
-    'v1-persistent-block-new-exposure',
-    'e2e-in-memory-only',
-]);
-
-if (!supportedBuildModes.has(buildMode)) {
-    throw new Error(`Unsupported Electron build artifact mode: ${buildMode}`);
+if (process.argv[2] !== undefined) {
+    throw new Error('Electron build artifact check does not accept a build mode');
 }
 
 const files = [];
@@ -46,8 +32,7 @@ try {
     }
 } catch (error) {
     if (error?.code === 'ENOENT') {
-        console.log('Electron build artifact boundary skipped (no build output)');
-        process.exit(0);
+        throw new Error('Electron build output is missing; run the normal build first');
     }
     throw error;
 }
@@ -65,11 +50,6 @@ for (const required of expectedArtifacts) {
 
 const mainSource = await fs.readFile(path.join(outputDirectory, 'main.js'), 'utf8');
 const preloadSource = await fs.readFile(path.join(outputDirectory, 'preload.cjs'), 'utf8');
-const leakedSignatures = retiredImplementationSignatures.filter(signature => (
-    mainSource.includes(signature) || preloadSource.includes(signature)
-));
-if (leakedSignatures.length > 0) {
-    throw new Error(`Retired Futures implementation leaked into Electron build: ${leakedSignatures.join(', ')}`);
-}
+assertNormalElectronBuildSources({ mainSource, preloadSource });
 
-console.log(`Electron ${buildMode} build artifact boundary passed (${files.length} files)`);
+console.log(`Electron build artifact boundary passed (${files.length} files)`);

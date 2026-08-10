@@ -1,6 +1,6 @@
 // @vitest-environment node
 
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 
 const readProjectFile = relativePath => readFileSync(
@@ -8,6 +8,7 @@ const readProjectFile = relativePath => readFileSync(
   'utf8',
 )
 const packageManifest = JSON.parse(readProjectFile('./package.json'))
+const packageLock = JSON.parse(readProjectFile('./package-lock.json'))
 
 describe('Electron launch contracts', () => {
   it('keeps the normal operator launch on the default persistent main entry', () => {
@@ -37,5 +38,52 @@ describe('Electron launch contracts', () => {
     expect(entry.trimStart()).toMatch(/^import '\.\/env-setup\.js'/)
     expect(entry).toContain('SAFE_SMOKE_READY')
     expect(entry).toContain('app.quit()')
+  })
+
+  it('aggregates only the retained non-browser verification gates', () => {
+    expect(packageManifest.scripts['test:all'].split(' && ')).toEqual([
+      'npm run test',
+      'npm run lint',
+      'npm run build',
+      'npm run check:circular',
+      'npm run check:runtime-mock',
+      'npm run check:futures-production',
+      'npm run check:command-path',
+    ])
+    expect(packageManifest.scripts.postbuild)
+      .toBe('npm run check:electron-build-artifacts')
+  })
+
+  it('keeps the retired browser-automation surface absent', () => {
+    for (const scriptName of [
+      'prebuild:e2e',
+      'build:e2e',
+      'postbuild:e2e',
+      'test:e2e',
+    ]) {
+      expect(packageManifest.scripts).not.toHaveProperty(scriptName)
+    }
+
+    for (const dependencyName of ['@playwright/test', 'playwright']) {
+      expect(packageManifest.dependencies).not.toHaveProperty(dependencyName)
+      expect(packageManifest.devDependencies).not.toHaveProperty(dependencyName)
+    }
+
+    for (const packagePath of [
+      'node_modules/@playwright/test',
+      'node_modules/playwright',
+      'node_modules/playwright-core',
+    ]) {
+      expect(packageLock.packages[packagePath]).toBeUndefined()
+    }
+
+    for (const retiredPath of [
+      './playwright.config.js',
+      './electron/main.e2e.js',
+      './electron/e2e-websocket-route.js',
+      './tests',
+    ]) {
+      expect(existsSync(new URL(retiredPath, import.meta.url))).toBe(false)
+    }
   })
 })

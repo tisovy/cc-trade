@@ -6,10 +6,6 @@ import { DataProvider, useDataContext } from './DataContext'
 import { GatewayProvider } from './GatewayContext.jsx'
 import { NotificationProvider } from './NotificationProvider'
 import { useNotifications } from '../hooks/useNotifications'
-import { attachMockLocalStorage } from '@/test/mocks'
-
-// Mock localStorage
-const _localStorageMock = attachMockLocalStorage()
 
 const webSocketMocks = vi.hoisted(() => ({
     connection: { readyState: 1 },

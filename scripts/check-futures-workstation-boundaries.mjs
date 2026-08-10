@@ -224,7 +224,7 @@ if (/process\s*\.\s*env|import\s*\.\s*meta\s*\.\s*env/.test(allCompositions)) {
 }
 
 const viteConfig = fs.readFileSync(path.join(ROOT, 'vite.config.js'), 'utf8');
-for (const buildMode of ['e2e', 'safe-dev', 'smoke']) {
+for (const buildMode of ['safe-dev', 'smoke']) {
     if (!viteConfig.includes(`'${buildMode}'`)) {
         fail(`Vite is missing deterministic workstation build mode ${buildMode}`);
     }
@@ -232,7 +232,7 @@ for (const buildMode of ['e2e', 'safe-dev', 'smoke']) {
 if (!viteConfig.includes('process.env.VITEST')
     || !/verificationCompositionPath\(['"]production['"]\)/.test(viteConfig)
     || [...viteConfig.matchAll(/alias:\s*futuresWorkstationCompositionAliases/g)].length !== 2) {
-    fail('Safe, smoke, E2E and Vitest builds must resolve deterministic workstation compositions');
+    fail('Safe, smoke and Vitest builds must resolve deterministic workstation compositions');
 }
 const vitestConfig = fs.readFileSync(path.join(ROOT, 'vitest.config.js'), 'utf8');
 if (!/selectFuturesWorkstationCompositionAliases\(\{\s*isVitest:\s*true\s*\}\)/.test(vitestConfig)) {

@@ -10,6 +10,10 @@ the original milestone record. See
 [the retirement plan](./futures_live_performance_and_testnet_retirement_plan.md)
 and [`archive/futures-testnet/`](../archive/futures-testnet/README.md).
 
+Browser-driven automation was removed on 2026-08-10. References below to an
+E2E composition, runner, or automated screenshot are historical milestone
+evidence and are not current architecture or verification instructions.
+
 Planning checkpoint: `b597f67fd61f3b4bb8e4ccd6bf4d2cd8e6e19fc5`
 
 Production execution base: `dcd2260c5aed73b268a6e1f12cac2c3cb8849873`

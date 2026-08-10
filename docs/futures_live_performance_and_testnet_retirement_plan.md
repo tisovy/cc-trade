@@ -67,7 +67,10 @@ Unlike Spot, which performs independent bootstrap reads concurrently, Futures th
 - Depth is not declared ready before a valid snapshot and buffered stream-diff reconciliation.
 - Mode switches cannot place, cancel, close, arm, or disarm anything implicitly.
 
-## Verification gates
+## Historical verification gates
+
+The following gates were required when this completed plan was delivered; they
+are retained as dated evidence rather than current runnable instructions.
 
 - GitNexus upstream impact is reviewed before every edited symbol; HIGH or CRITICAL impact is reported before editing.
 - Focused unit/component tests cover every changed service, hook, reducer, view, and Electron route.
@@ -212,5 +215,5 @@ protocol, activation, facade, coordinator, ledger, and E2E regressions all pass.
   cold catalog read, and failed refreshes remain explicit rather than serving an
   indefinitely stale catalog.
 
-The copy-ready role-based handoff is in
+The historical, now-obsolete role-based handoff is retained in
 [`docs/next_session_prompt_futures_live.md`](./next_session_prompt_futures_live.md).

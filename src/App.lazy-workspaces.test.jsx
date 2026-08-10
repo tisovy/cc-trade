@@ -66,10 +66,11 @@ vi.mock('./components/common/NotificationToast.jsx', () => ({
   default: () => null,
 }))
 
-const localStorageMock = attachMockLocalStorage()
+let localStorageMock
 
 describe('App lazy market workspace ownership', () => {
   beforeEach(() => {
+    localStorageMock = attachMockLocalStorage()
     localStorageMock.clear()
     mocks.spotRenders = 0
     mocks.futuresRenders = 0

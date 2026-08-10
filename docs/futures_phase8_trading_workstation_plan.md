@@ -2,7 +2,7 @@
 
 Date: 2026-07-14
 
-Status: Phase 8.0–8.2 complete; Phase 8.3–8.7 remain planned
+Status: Phase 8.0–8.2 complete; the remaining slices were superseded by Phase 9 and are retained as planning history
 
 Historical status: Testnet-dependent items were cancelled on 2026-07-16 when
 Futures Testnet was retired. They remain below as planning history and are not
@@ -271,7 +271,7 @@ Exit: account-setting and position-action concurrency, partial failure, restart 
 - Close accessibility, keyboard, responsive layout and sustained-load performance gaps.
 - Run the final feature matrix against the reviewed Binance capability baseline and document intentional exclusions.
 
-Exit: every in-scope matrix row is demonstrated in deterministic E2E and manual Testnet evidence; separately authorized Live rows are demonstrated one at a time.
+Historical planned exit: every in-scope matrix row is demonstrated in deterministic E2E and manual Testnet evidence; separately authorized Live rows are demonstrated one at a time.
 
 ## Test and audit matrix
 
@@ -293,7 +293,7 @@ Every slice adds deterministic adversarial coverage for its own surface and reru
 - Spot priority and full Spot/Phase 5/Phase 6/Phase 7 regression;
 - a fail-fast guard if any automated production request escapes the fake layer.
 
-Required completion commands remain:
+The completion commands required at that time were:
 
 - full Vitest suite with only established reviewed skips;
 - `npm run lint`;

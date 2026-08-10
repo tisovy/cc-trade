@@ -184,7 +184,7 @@ vi.mock('./components/common/NotificationToast', () => ({
   default: () => null,
 }))
 
-const localStorageMock = attachMockLocalStorage()
+let localStorageMock
 
 // A workspace is code-split, so its first paint waits on a dynamic import. The
 // 1s default is enough when this file runs alone and not always enough under
@@ -196,6 +196,7 @@ describe('App spot order payloads', () => {
   let originalWebSocket
 
   beforeEach(() => {
+    localStorageMock = attachMockLocalStorage()
     originalWebSocket = globalThis.WebSocket
     globalThis.WebSocket = { OPEN: 1 }
     vi.stubGlobal('matchMedia', vi.fn(() => ({

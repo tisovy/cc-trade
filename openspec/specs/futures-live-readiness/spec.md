@@ -171,7 +171,7 @@ A trading, workstation, or market-activation command addressed to a market witho
 - **THEN** the command is explicitly rejected, no synthetic acknowledgement is emitted, and the other market remains able to trade
 
 #### Scenario: Verification launches carry no production capability
-- **WHEN** the application starts under a safe, smoke, or end-to-end verification entry point
+- **WHEN** the application starts under the retained safe-development or bounded-smoke verification entry
 - **THEN** both credential pairs are cleared before preflight and no production trading capability exists in that process
 
 ### Requirement: Open positions are marked to the live market
@@ -205,4 +205,3 @@ holding a mark that has stopped updating.
 #### Scenario: A malformed frame arrives
 - **WHEN** the mark price socket delivers a frame that is not a mark price update
 - **THEN** it is ignored, and no mark is broadcast for it
-

@@ -7,6 +7,11 @@ This document is the implementation roadmap for stabilizing the current spot ter
 > Historical Testnet sections below are retained for traceability. Current work
 > follows the [Live performance and Testnet retirement plan](./futures_live_performance_and_testnet_retirement_plan.md).
 
+> Verification addendum (2026-08-10): browser-driven end-to-end automation was
+> retired. Current automated gates are Vitest, lint, the normal build, bounded
+> smoke, and retained static checks. Browser-automation evidence below is
+> historical unless explicitly stated otherwise.
+
 ## Guardrails
 
 - Do not change the existing `0.999` quantity reduction behavior unless explicitly approved later.
@@ -23,7 +28,7 @@ This document is the implementation roadmap for stabilizing the current spot ter
 - Market data is partly on the newer channel protocol.
 - Renderer trading commands use the versioned typed protocol; the legacy WebSocket protocol (`buyOrder`, `sellOrder`, `cancelOrder`) remains available for compatibility.
 - Spot order execution is currently limited to `LIMIT` + `GTC`.
-- E2E builds keep DevTools closed by default; remaining E2E work should focus on deterministic state and selectors.
+- Browser-driven end-to-end automation is retired; current verification uses the retained non-browser gates listed above.
 
 ## Product Direction
 
@@ -54,7 +59,10 @@ Acceptance:
 - No visual UI changes.
 - Existing spot order payload behavior remains unchanged.
 
-## Phase 2: E2E Stabilization
+## Historical Phase 2: Browser-Automation Stabilization
+
+This completed phase records the acceptance contract used at that time; its
+commands are not current project entry points.
 
 Goal: make regression checks reliable before larger architecture work.
 
@@ -1154,9 +1162,9 @@ Suggested UI order:
 4. Futures order ticket in testnet.
 5. Production futures controls after safety gates.
 
-## Phase 7 Live Operations Continuation
+## Historical Phase 7 Live Operations Continuation (retired 2026-07-21)
 
-The fake-backed Phase 7 delivery is complete and the operator has now authorized normal live composition. Continue only through explicit operational review; do not merge production into Phase 5/6 or convert their boundaries into a mode enum.
+The fake-backed Phase 7 delivery was complete and the operator had authorized normal live composition. The continuation rules at that time were:
 
 - keep every production composition, credential, configuration, action/channel, service, store/lock, audit, recovery, host, hook, and component separately named from Phase 5/6;
 - run GitNexus upstream impact before editing every existing symbol and report HIGH/CRITICAL results before proceeding;

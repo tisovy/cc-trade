@@ -13,7 +13,6 @@
 1. **WebSocket Server**: Creates an HTTP server + WebSocketServer on `127.0.0.1` and `process.env.WS_PORT` (defaults to `14477`).
    - Incoming WebSocket upgrades are accepted only after local-origin validation where the browser supplies `Origin`.
    - Electron main and renderer share a per-session token; it is attached only to the exact main-issued host and port before the legacy or channel message protocol starts.
-   - The E2E-only entry can project one validated `E2E_MOCK_WS_URL` loopback route without a token. Browser storage and renderer globals never select the route.
 2. **Mock Mode**: When `BK/BS` are missing we emit synthetic ticker/depth/trade/chart data every second so the renderer can boot without hitting Binance.
 3. **Live Mode**: Uses `@binance/spot` REST + WebSocket Streams to hydrate:
    - 24h ticker snapshots + incremental updates for the Activity panel.

@@ -2,6 +2,9 @@
 
 Date: 2026-07-13
 
+Status: RETIRED 2026-07-21. This threat model is retained for historical
+evidence only and does not define current verification commands.
+
 Scope: the separately named USDⓈ-M production execution subsystem described by the Phase 7 ADR. Phase 5 and Phase 6 are frozen adjacent trust domains, not production dependencies.
 
 Update (2026-07-16): Phase 5/6 and Futures Testnet were retired. References to

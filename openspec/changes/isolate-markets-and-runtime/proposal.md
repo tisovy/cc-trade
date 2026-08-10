@@ -44,8 +44,8 @@ guarantee assumes.
 - An authentication failure on the renderer transport is terminal: the retry
   loop stops, the failure is surfaced, and reconnection resumes only on an
   explicit operator action or a new runtime registration.
-- A verification run cannot address a development runtime: endpoint and token
-  are separated per runtime instance.
+- One renderer runtime cannot address another runtime: endpoint and token are
+  separated per runtime instance.
 
 ## Capabilities
 
@@ -56,8 +56,7 @@ guarantee assumes.
   effects and late connects.
 - `futures-live-readiness`: the renderer runtime is issued before any window can
   request it, no fallback endpoint or empty token exists, an authentication
-  failure is terminal, and a verification runtime is addressable only by its own
-  renderer.
+  failure is terminal, and each runtime is addressable only by its own renderer.
 
 ## Impact
 
@@ -67,7 +66,8 @@ guarantee assumes.
 - Renderer: `src/hooks/useWebSocket.js` (terminal authentication handling),
   `src/context/GatewayContext.jsx`, `src/context/DataContext.jsx`,
   `src/App.jsx` (activation ordering across lazy workspaces).
-- Verification: the E2E entry point receives its own endpoint and token;
+- Verification: retained integration coverage constructs independently issued
+  runtimes and proves that their endpoint/token pairs cannot cross;
   `package.json` scripts and `scripts/` checks follow.
 - Operator-visible change: a renderer that cannot obtain a runtime shows a
   stated failure instead of an endless reconnect.

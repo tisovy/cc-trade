@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react'
 import electron from 'vite-plugin-electron'
 import { fileURLToPath } from 'node:url'
 
-const VERIFICATION_BUILD_MODES = new Set(['e2e', 'safe-dev', 'smoke'])
+const VERIFICATION_BUILD_MODES = new Set(['safe-dev', 'smoke'])
 
 const verificationCompositionPath = environment => fileURLToPath(new URL(
   `./electron/services/futures-${environment}-workstation-verification-composition.js`,
@@ -29,13 +29,16 @@ const futuresWorkstationCompositionAliases = selectFuturesWorkstationComposition
   isVitest: process.env.VITEST === 'true',
 })
 
-const electronMainEntry = process.env.BUILD_MODE === 'e2e'
-  ? 'electron/main.e2e.js'
-  : process.env.BUILD_MODE === 'smoke'
-    ? 'electron/main.smoke.js'
-    : process.env.BUILD_MODE === 'safe-dev'
-      ? 'electron/main.safe-dev.js'
-      : 'electron/main.js'
+export const selectElectronMainEntry = ({ buildMode } = {}) => {
+  if (buildMode === undefined || buildMode === '') return 'electron/main.js'
+  if (buildMode === 'safe-dev') return 'electron/main.safe-dev.js'
+  if (buildMode === 'smoke') return 'electron/main.smoke.js'
+  throw new Error(`Unsupported Electron build mode: ${buildMode}`)
+}
+
+const electronMainEntry = selectElectronMainEntry({
+  buildMode: process.env.BUILD_MODE,
+})
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -72,8 +75,8 @@ export default defineConfig({
           },
           build: {
             lib: {
-              // Playwright and package.json both launch dist-electron/main.js.
-              // Keep that stable filename when the E2E-only entry is selected.
+              // package.json launches dist-electron/main.js. Keep that stable
+              // filename for every retained Electron entry.
               fileName: () => 'main.js',
             },
           },

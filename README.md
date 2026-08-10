@@ -17,7 +17,7 @@ A modern cryptocurrency trading terminal built with React, Vite, and Electron. F
 
 ## Prerequisites
 
-- Node.js 18+
+- Node.js `^20.19.0 || >=22.12.0`
 - npm or yarn
 - Binance API keys (optional — app runs in mock mode without them)
 
@@ -95,10 +95,8 @@ npm test
 # Run tests in watch mode
 npm run test:watch
 
-# Run E2E tests (Playwright)
-npm run test:e2e
-
-# Run all tests
+# Run the supported aggregate verification
+# (Vitest, lint, normal build, and retained static safety gates)
 npm run test:all
 ```
 
@@ -115,7 +113,6 @@ npm run test:all
 │   ├── hooks/          # Custom hooks (useWebSocket, etc.)
 │   ├── styles/         # Global styles
 │   └── utils/          # Utility functions
-└── tests/              # E2E tests
 ```
 
 ## Documentation

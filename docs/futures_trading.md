@@ -61,7 +61,7 @@ There is no `USE_MOCK` mode and no Spot fallback. Old `FUTURES_TESTNET_*`,
 credential alternatives; migrate operator launch configuration to the four
 supported names and restart. Test fixtures and deterministic transports remain
 isolated to automated verification and are not reachable from the Production
-runtime graph. Safe, smoke, and end-to-end entry points clear all four
+runtime graph. Safe-development and bounded-smoke entries clear all four
 credential variables before preflight.
 
 Two checks enforce that, and neither replaces the other. `npm run
@@ -121,10 +121,10 @@ renderer stops, states the failure, and resumes only on an explicit operator
 action or a fresh runtime (a reload). Ordinary transport losses keep retrying as
 before — only authentication is terminal.
 
-A verification run is its own runtime: `electron/env-setup.js` pins the local
-transport to port `14479`, distinct from a development instance, and a token
-belongs to the runtime that minted it. A parallel end-to-end run therefore
-cannot address a development backend.
+Retained verification uses `electron/env-setup.js` to pin the local transport
+to port `14479`, distinct from a development instance, and a token belongs to
+the runtime that minted it. A safe-development or bounded-smoke renderer
+therefore cannot address a development backend.
 
 ## Workspace startup and switching
 

@@ -9,6 +9,10 @@ Testnet. The Testnet trust boundaries below document the former system and are
 not active runtime guarantees. See
 [the retirement plan](./futures_live_performance_and_testnet_retirement_plan.md).
 
+Browser-driven automation was removed on 2026-08-10. References below to an
+E2E session guard, Playwright evidence, or automated screenshots describe the
+former verification system and are retained only as historical evidence.
+
 Related ADR: `docs/futures_phase8_workstation_adr.md`
 
 ## Assets and safety properties

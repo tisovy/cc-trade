@@ -2,7 +2,7 @@
 
 Closes the renderer runtime bootstrap race behind the recurring `invalid token`
 episode, removes the fallback endpoint that made an unregistered renderer retry
-forever, and separates a verification runtime from a development one.
+forever, and separates independently issued renderer runtimes.
 
 ## ADDED Requirements
 
@@ -45,14 +45,13 @@ continue to reconnect.
 - **WHEN** a new runtime endpoint and token become available after a terminal authentication failure
 - **THEN** the renderer may connect again
 
-### Requirement: A verification runtime is addressable only by its own renderer
-A verification or end-to-end run SHALL receive its own runtime endpoint and
-token, distinct from any development instance running alongside it. A
-connection presenting a token that the receiving runtime did not issue SHALL be
-refused.
+### Requirement: A runtime is addressable only by its own renderer
+Each independently constructed renderer runtime SHALL receive its own endpoint
+and token. A connection presenting a token that the receiving runtime did not
+issue SHALL be refused.
 
-#### Scenario: Verification runs beside a development instance
-- **WHEN** an end-to-end run and a development instance are running at the same time
+#### Scenario: Independent runtimes exist concurrently
+- **WHEN** two renderer runtimes are constructed with independently issued endpoint and token pairs
 - **THEN** neither renderer can connect to the other's runtime
 
 #### Scenario: A foreign token is presented
