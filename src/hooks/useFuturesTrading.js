@@ -70,6 +70,12 @@ const createEmptyHistory = () => ({
   status: 'idle',
   orders: [],
   trades: [],
+  // Which contracts the read covered, and how many the account actually traded
+  // in the window. Both were on the payload and neither reached the surface, so
+  // the review said "in this window" where it meant "across the eight contracts
+  // read" — and said nothing at all where contracts had been dropped.
+  symbols: [],
+  discovered: 0,
   error: null,
 })
 
@@ -326,6 +332,8 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection } = {}) => {
             status: history.error ? 'error' : 'ready',
             orders: Array.isArray(history.orders) ? history.orders : [],
             trades: Array.isArray(history.trades) ? history.trades : [],
+            symbols: Array.isArray(history.symbols) ? history.symbols : [],
+            discovered: Number.isSafeInteger(history.discovered) ? history.discovered : 0,
             error: history.error ?? null,
           },
         }))

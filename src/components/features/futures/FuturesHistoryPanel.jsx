@@ -1,7 +1,11 @@
 import { memo } from 'react'
 import { formatSignedUsdt } from '../../../utils/futuresOrderPresentation.js'
 import { buildFuturesTradeRounds } from '../../../utils/futuresTradeRounds.js'
-import { formatPriceOrAbsent, formatUsdtAmount } from '../../../utils/futuresPriceFormat.js'
+import {
+  formatCompactUsdt,
+  formatPriceOrAbsent,
+  formatUsdtAmount,
+} from '../../../utils/futuresPriceFormat.js'
 
 const EMPTY_ROWS = Object.freeze([])
 const EMPTY_TICKS = Object.freeze({})
@@ -65,9 +69,33 @@ export const FuturesHistoryPanel = ({
   // How wide the read actually was. An empty table means "nothing here" only if
   // the operator knows what was looked at — the backend reads a bounded set of
   // contracts, so the count says which claim is being made.
-  const scope = Array.isArray(history?.symbols) && history.symbols.length > 0
-    ? ` across the ${history.symbols.length} contract${history.symbols.length === 1 ? '' : 's'} read`
+  const read = Array.isArray(history?.symbols) ? history.symbols.length : 0
+  const traded = Number.isSafeInteger(history?.discovered) ? history.discovered : 0
+  const scope = read > 0
+    ? ` across the ${read} contract${read === 1 ? '' : 's'} read`
     : ' in this window'
+  // What the list does not cover. A review that is bounded and does not say so is
+  // read as complete — the operator looked for two days of losses, found none, and
+  // had no way to tell the difference between "there were none" and "they are on
+  // the contracts this read dropped, or older than the fills it reached".
+  const reach = (rows) => {
+    const oldest = rows.reduce((earliest, row) => {
+      const time = Number(row?.time)
+      return Number.isFinite(time) && time > 0 && (earliest === null || time < earliest)
+        ? time
+        : earliest
+    }, null)
+    if (rows.length === 0) return null
+    const contracts = traded > read
+      ? `${read} of ${traded} contracts traded were read`
+      : `${read} contract${read === 1 ? '' : 's'} read`
+    return (
+      <p className="futures-workstation-history-reach">
+        {contracts}
+        {oldest === null ? '' : `, back to ${exactTime(oldest)}`}
+      </p>
+    )
+  }
   const tickOf = rowSymbol => tickSizes[rowSymbol] ?? null
   const symbolCell = (rowSymbol) => {
     const name = typeof rowSymbol === 'string' && rowSymbol.length > 0 ? rowSymbol : '—'
@@ -120,61 +148,70 @@ export const FuturesHistoryPanel = ({
       return <p className="futures-workstation-empty">No closed positions{scope}.</p>
     }
     return (
-      <div className="futures-workstation-dock-table" role="table" aria-label="Position history">
-        {/* Seven columns, not eight: the fee is a component of the result rather
-            than a reading of its own, so it moved into the PnL cell's title — the
-            column it was crowding is the only one this panel exists for. */}
-        <div className="futures-workstation-dock-row is-head is-rounds" role="row">
-          <span role="columnheader">Symbol</span>
-          <span role="columnheader">Closed</span>
-          <span role="columnheader">Side</span>
-          <span role="columnheader">Size</span>
-          <span role="columnheader">Entry</span>
-          <span role="columnheader">Exit</span>
-          <span role="columnheader">Realized PnL</span>
+      <>
+        <div className="futures-workstation-dock-table" role="table" aria-label="Position history">
+          {/* Seven columns, not eight: the fee is a component of the result rather
+              than a reading of its own, so it moved into the PnL cell's title — the
+              column it was crowding is the only one this panel exists for. */}
+          <div className="futures-workstation-dock-row is-head is-rounds" role="row">
+            <span role="columnheader">Symbol</span>
+            <span role="columnheader">Closed</span>
+            <span role="columnheader">Side</span>
+            <span role="columnheader">Size</span>
+            <span role="columnheader">Entry</span>
+            <span role="columnheader">Exit</span>
+            <span role="columnheader">Realized PnL</span>
+          </div>
+          {rounds.map((round) => {
+            const tone = round.realizedPnl === 0
+              ? 'flat'
+              : round.realizedPnl > 0 ? 'positive' : 'negative'
+            const leg = round.positionSide === 'LONG' ? 'buy' : 'sell'
+            return (
+              <div className={rowClass('is-rounds', leg, round.symbol)} role="row" key={round.key}>
+                {symbolCell(round.symbol)}
+                {/* A closed position is filed under when it closed; the whole span,
+                    open to close, stays in the title. */}
+                <span role="cell" title={roundSpan(round)}>{formatTime(round.closeTime)}</span>
+                <span role="cell" className={`futures-workstation-dock-side is-${leg}`}>
+                  {round.positionSide}
+                </span>
+                {/* Sized in USDT, like every other size on this desk. The contract
+                    count is what the exchange worked in, so it stays exact on the
+                    element rather than taking the column. */}
+                <span
+                  role="cell"
+                  title={`${round.quantity} contracts · ${round.fills} fill${round.fills === 1 ? '' : 's'}`}
+                >
+                  {formatCompactUsdt(round.notional)}
+                </span>
+                {/* A position opened before this window of trades still has a knowable
+                    entry: the exchange's realized PnL states it exactly. The row says
+                    where the number came from rather than showing a dash. */}
+                <span
+                  role="cell"
+                  title={round.entryImplied
+                    ? 'Opened before this window of trades — entry recovered from the realized PnL'
+                    : undefined}
+                >
+                  {formatPriceOrAbsent(round.entryPrice, tickOf(round.symbol))}
+                </span>
+                <span role="cell">{formatPriceOrAbsent(round.exitPrice, tickOf(round.symbol))}</span>
+                {/* The exchange's realized PnL is before its own commission, so the
+                    fee and the net are both stated in the title. */}
+                <span
+                  role="cell"
+                  className={`futures-workstation-dock-pnl is-${tone}`}
+                  title={`${formatSignedUsdt(round.realizedPnl)} realized less ${formatUsdtAmount(round.fee, 4)} in fees is ${formatSignedUsdt(round.netPnl)} net`}
+                >
+                  <strong>{formatSignedUsdt(round.realizedPnl)}</strong>
+                </span>
+              </div>
+            )
+          })}
         </div>
-        {rounds.map((round) => {
-          const tone = round.realizedPnl === 0
-            ? 'flat'
-            : round.realizedPnl > 0 ? 'positive' : 'negative'
-          const leg = round.positionSide === 'LONG' ? 'buy' : 'sell'
-          return (
-            <div className={rowClass('is-rounds', leg, round.symbol)} role="row" key={round.key}>
-              {symbolCell(round.symbol)}
-              {/* A closed position is filed under when it closed; the whole span,
-                  open to close, stays in the title. */}
-              <span role="cell" title={roundSpan(round)}>{formatTime(round.closeTime)}</span>
-              <span role="cell" className={`futures-workstation-dock-side is-${leg}`}>
-                {round.positionSide}
-              </span>
-              <span role="cell" title={`${round.fills} fill${round.fills === 1 ? '' : 's'}`}>
-                {round.quantity}
-              </span>
-              {/* A position opened before this window of trades still has a knowable
-                  entry: the exchange's realized PnL states it exactly. The row says
-                  where the number came from rather than showing a dash. */}
-              <span
-                role="cell"
-                title={round.entryImplied
-                  ? 'Opened before this window of trades — entry recovered from the realized PnL'
-                  : undefined}
-              >
-                {formatPriceOrAbsent(round.entryPrice, tickOf(round.symbol))}
-              </span>
-              <span role="cell">{formatPriceOrAbsent(round.exitPrice, tickOf(round.symbol))}</span>
-              {/* The exchange's realized PnL is before its own commission, so the
-                  fee and the net are both stated in the title. */}
-              <span
-                role="cell"
-                className={`futures-workstation-dock-pnl is-${tone}`}
-                title={`${formatSignedUsdt(round.realizedPnl)} realized less ${formatUsdtAmount(round.fee, 4)} in fees is ${formatSignedUsdt(round.netPnl)} net`}
-              >
-                <strong>{formatSignedUsdt(round.realizedPnl)}</strong>
-              </span>
-            </div>
-          )
-        })}
-      </div>
+        {reach(trades)}
+      </>
     )
   }
 
@@ -182,39 +219,42 @@ export const FuturesHistoryPanel = ({
     return <p className="futures-workstation-empty">No orders{scope}.</p>
   }
   return (
-    <div className="futures-workstation-dock-table" role="table" aria-label="Order history">
-      <div className="futures-workstation-dock-row is-head is-order-history" role="row">
-        <span role="columnheader">Symbol</span>
-        <span role="columnheader">Time</span>
-        <span role="columnheader">Side</span>
-        <span role="columnheader">Type</span>
-        <span role="columnheader">Price</span>
-        <span role="columnheader">Filled</span>
-        <span role="columnheader">Avg</span>
-        <span role="columnheader">Status</span>
-      </div>
-      {orders.map(order => (
-        <div
-          className={rowClass('is-order-history', sideTone(order.side), order.symbol)}
-          role="row"
-          key={`${order.symbol}:${order.orderId}:${order.time}`}
-        >
-          {symbolCell(order.symbol)}
-          <span role="cell" title={exactTime(order.time)}>{formatTime(order.time)}</span>
-          <span role="cell" className={`futures-workstation-dock-side is-${sideTone(order.side)}`}>
-            {order.side}
-          </span>
-          <span role="cell">{order.type}{order.reduceOnly ? ' · RO' : ''}</span>
-          {/* A market order carries no limit price and an unfilled order no
-              average: the exchange reports 0 for both, and 0.000 in a price column
-              reads as a level rather than as an absence. */}
-          <span role="cell">{formatPriceOrAbsent(order.price, tickOf(order.symbol))}</span>
-          <span role="cell">{order.executedQty} / {order.origQty}</span>
-          <span role="cell">{formatPriceOrAbsent(order.averagePrice, tickOf(order.symbol))}</span>
-          <span role="cell" className="futures-workstation-dock-status">{order.status}</span>
+    <>
+      <div className="futures-workstation-dock-table" role="table" aria-label="Order history">
+        <div className="futures-workstation-dock-row is-head is-order-history" role="row">
+          <span role="columnheader">Symbol</span>
+          <span role="columnheader">Time</span>
+          <span role="columnheader">Side</span>
+          <span role="columnheader">Type</span>
+          <span role="columnheader">Price</span>
+          <span role="columnheader">Filled</span>
+          <span role="columnheader">Avg</span>
+          <span role="columnheader">Status</span>
         </div>
-      ))}
-    </div>
+        {orders.map(order => (
+          <div
+            className={rowClass('is-order-history', sideTone(order.side), order.symbol)}
+            role="row"
+            key={`${order.symbol}:${order.orderId}:${order.time}`}
+          >
+            {symbolCell(order.symbol)}
+            <span role="cell" title={exactTime(order.time)}>{formatTime(order.time)}</span>
+            <span role="cell" className={`futures-workstation-dock-side is-${sideTone(order.side)}`}>
+              {order.side}
+            </span>
+            <span role="cell">{order.type}{order.reduceOnly ? ' · RO' : ''}</span>
+            {/* A market order carries no limit price and an unfilled order no
+                average: the exchange reports 0 for both, and 0.000 in a price column
+                reads as a level rather than as an absence. */}
+            <span role="cell">{formatPriceOrAbsent(order.price, tickOf(order.symbol))}</span>
+            <span role="cell">{order.executedQty} / {order.origQty}</span>
+            <span role="cell">{formatPriceOrAbsent(order.averagePrice, tickOf(order.symbol))}</span>
+            <span role="cell" className="futures-workstation-dock-status">{order.status}</span>
+          </div>
+        ))}
+      </div>
+      {reach(orders)}
+    </>
   )
 }
 

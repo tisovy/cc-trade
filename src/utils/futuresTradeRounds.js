@@ -107,8 +107,17 @@ const finishRound = (round, open) => {
   const exitQuantity = Number(fromAtoms(round.exitAtoms))
   // An open round is the size it is holding; a closed one is the size it closed.
   const quantityAtoms = open || round.exitAtoms === 0n ? round.entryAtoms : round.exitAtoms
+  const quantity = Number(fromAtoms(quantityAtoms))
   const exitPrice = exitQuantity > 0 ? round.exitNotional / exitQuantity : null
   const enteredHere = entryQuantity > 0
+  const entryPrice = enteredHere
+    ? round.entryNotional / entryQuantity
+    : impliedEntryPrice({
+      positionSide: round.positionSide,
+      exitPrice,
+      realizedPnl: round.realizedPnl,
+      quantity: exitQuantity,
+    })
   return Object.freeze({
     key: round.key,
     symbol: round.symbol,
@@ -116,14 +125,13 @@ const finishRound = (round, open) => {
     openTime: round.openTime,
     closeTime: round.closeTime,
     quantity: fromAtoms(quantityAtoms),
-    entryPrice: enteredHere
-      ? round.entryNotional / entryQuantity
-      : impliedEntryPrice({
-        positionSide: round.positionSide,
-        exitPrice,
-        realizedPnl: round.realizedPnl,
-        quantity: exitQuantity,
-      }),
+    // What the position was worth, in the currency it settles in. A contract
+    // count is only a size once you also know the price of the contract, and a
+    // desk that sizes every order in USDT cannot compare 237 518 BMT against
+    // 5 210 BEAT without doing that arithmetic by hand. Valued at the entry: the
+    // exit is the entry plus the realized PnL, which the row states beside it.
+    notional: entryPrice === null ? null : quantity * entryPrice,
+    entryPrice,
     // Stated so the surface can say where the entry came from: read from the
     // fills, or recovered from what the position realized.
     entryImplied: !enteredHere,

@@ -111,6 +111,30 @@ describe('buildFuturesTradeRounds', () => {
     expect(rounds[0]).toMatchObject({ positionSide: 'LONG', quantity: '800', open: true })
   })
 
+  // A desk that sizes every order in USDT cannot read a position it is handed in
+  // contracts: 3 000 BICO and 3 000 BMT differ by two orders of magnitude.
+  it('values each round in USDT at the price it was entered at', () => {
+    const [round] = buildFuturesTradeRounds([
+      fill({ id: 1, side: 'BUY', price: '2.500', quantity: '4000', realizedPnl: '0', time: 1000 }),
+      fill({ id: 2, side: 'SELL', price: '2.600', quantity: '4000', realizedPnl: '400', time: 2000 }),
+    ])
+    expect(round.notional).toBeCloseTo(10_000, 6)
+    // The exit is the entry plus what the round realized, which is the column
+    // beside it — so the two readings cannot contradict each other.
+    expect(round.notional + round.realizedPnl).toBeCloseTo(4000 * 2.6, 6)
+  })
+
+  // The entry of a position opened before the window is recovered rather than
+  // read, and what it was worth follows from the same arithmetic.
+  it('values a round whose entry was recovered rather than read', () => {
+    const [round] = buildFuturesTradeRounds([
+      fill({ id: 1, side: 'SELL', price: '2.632', quantity: '1000', realizedPnl: '78', time: 1000 }),
+    ])
+    expect(round.entryImplied).toBe(true)
+    // 1 000 sold at 2.632 for 78 of profit was entered at 2.554: 2 554 USDT.
+    expect(round.notional).toBeCloseTo(2554, 6)
+  })
+
   // A market order larger than the position closes it and opens the opposite one.
   it('splits a fill that flips the position into two rounds', () => {
     const rounds = buildFuturesTradeRounds([

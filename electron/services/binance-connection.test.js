@@ -50,8 +50,11 @@ const moduleMocks = vi.hoisted(() => {
             getOrderHistory: vi.fn().mockResolvedValue([{ orderId: 1, status: 'FILLED' }]),
             getTradeHistory: vi.fn().mockResolvedValue([{ id: 2, realizedPnl: '-96.74' }]),
             // Every USDⓈ-M history endpoint takes a symbol, so a review of the
-            // account starts by asking which contracts it was traded on.
-            getTradedSymbols: vi.fn().mockResolvedValue(['BTCUSDT']),
+            // account starts by asking which contracts it was traded on. The read
+            // is paged: a full page means newer rows are still behind it.
+            getTradedSymbolPage: vi.fn().mockResolvedValue({
+                symbols: ['BTCUSDT'], full: false, lastTime: 5_000,
+            }),
             getSymbolConfig: vi.fn().mockResolvedValue({
                 symbol: 'BTCUSDT', leverage: 20, marginType: 'CROSSED', maxNotionalValue: '5000000',
             }),
@@ -2542,9 +2545,9 @@ describe('setupBinanceConnection user-data orchestration', () => {
             accept: vi.fn(() => moduleMocks.rendererConnection),
         });
         await activateMarket('futures-live');
-        moduleMocks.futuresAdapter.getTradedSymbols.mockResolvedValueOnce([
-            'BICOUSDT', 'BTCUSDT', 'BEATUSDT',
-        ]);
+        moduleMocks.futuresAdapter.getTradedSymbolPage.mockResolvedValueOnce({
+            symbols: ['BICOUSDT', 'BTCUSDT', 'BEATUSDT'], full: false, lastTime: 9,
+        });
         moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({ symbol }) => (
             Promise.resolve([{ id: 2, symbol, realizedPnl: '1', time: symbol === 'BICOUSDT' ? 9 : 1 }])
         ));
@@ -2573,6 +2576,45 @@ describe('setupBinanceConnection user-data orchestration', () => {
         // Newest first across contracts, whichever contract they are on.
         expect(history.futures_history.trades[0].symbol).toBe('BICOUSDT');
         expect(history.futures_history.trades).toHaveLength(3);
+    });
+
+    // Income is answered oldest-first from the start time given, so a week that
+    // overruns one page hands back the contracts traded a week ago and never
+    // reaches this morning's. The walk goes forward until a page comes back short.
+    it('walks income to the recent end and reports the contracts it could not read', async () => {
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1' },
+        });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        const older = ['A1USDT', 'A2USDT', 'A3USDT', 'A4USDT', 'A5USDT', 'A6USDT', 'A7USDT'];
+        const newer = ['B1USDT', 'B2USDT', 'B3USDT', 'B4USDT', 'B5USDT', 'B6USDT'];
+        moduleMocks.futuresAdapter.getTradedSymbolPage
+            .mockResolvedValueOnce({ symbols: older, full: true, lastTime: 100 })
+            .mockResolvedValueOnce({ symbols: newer, full: false, lastTime: 900 });
+
+        await runFuturesCommand({
+            action: 'account.history',
+            clientOrderId: 'history-4',
+            symbol: 'ETHUSDT',
+        });
+
+        const [, secondPage] = moduleMocks.futuresAdapter.getTradedSymbolPage.mock.calls;
+        expect(secondPage[0].startTime).toBe(101);
+        const [history] = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.futures_history);
+        const { symbols, discovered } = history.futures_history;
+        // Fourteen contracts are known and twelve are read: the contract on screen,
+        // then everything from the newest page, then the oldest page until the cap.
+        expect(discovered).toBe(14);
+        expect(symbols).toHaveLength(12);
+        expect(symbols.slice(0, 7)).toEqual(['ETHUSDT', ...newer]);
+        expect(symbols).not.toContain('A6USDT');
+        expect(symbols).not.toContain('A7USDT');
     });
 
     // The position read reports neither leverage nor margin mode any more, so both

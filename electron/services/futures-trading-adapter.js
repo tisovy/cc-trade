@@ -159,6 +159,17 @@ export const normalizeFuturesExecutionReport = (payload = {}, overrides = {}) =>
 };
 
 export const FUTURES_HISTORY_LIMIT = 100;
+// Fills are read far deeper than orders, because they are not read as a list.
+// They are folded back into the positions they formed, and a fold that starts in
+// the middle of a position reports a round it cannot state the entry of — while
+// everything older than the cut is simply not there. A hundred fills is an hour
+// on a contract that closes in five, which is how a whole day of closed positions
+// went missing from the review. This is the endpoint's own ceiling, and the read
+// costs the same weight at any depth.
+export const FUTURES_TRADE_HISTORY_LIMIT = 1000;
+// One income row per realizing fill: a week of them overruns a single page, and
+// Binance answers a `startTime` with the *oldest* rows after it.
+export const FUTURES_INCOME_PAGE_LIMIT = 1000;
 
 const historyNumber = (value) => {
     const parsed = Number(value);
@@ -692,10 +703,10 @@ export class FuturesTradingAdapter {
             .sort((left, right) => right.time - left.time);
     }
 
-    async getTradeHistory({ symbol, limit = FUTURES_HISTORY_LIMIT }) {
+    async getTradeHistory({ symbol, limit = FUTURES_TRADE_HISTORY_LIMIT }) {
         const data = await this.#signedRequest('GET', '/fapi/v1/userTrades', {
             symbol,
-            limit: Math.min(Math.max(Number(limit) || FUTURES_HISTORY_LIMIT, 1), 500),
+            limit: Math.min(Math.max(Number(limit) || FUTURES_TRADE_HISTORY_LIMIT, 1), 1000),
         });
         return (Array.isArray(data) ? data : [])
             .map(trade => normalizeFuturesHistoryTrade(trade))
@@ -735,13 +746,30 @@ export class FuturesTradingAdapter {
 
     // Bounded by time rather than by count: what is wanted is the set of contracts
     // traded in the window, and the amounts on these rows are never read.
-    async getTradedSymbols({ startTime, limit = 1000 }) {
+    //
+    // One page of it, not the window. Binance answers a `startTime` with the
+    // oldest rows after it, so a week that overruns the page hands back the
+    // contracts the account traded seven days ago and never reaches this
+    // morning's. The page therefore reports whether it came back full and where
+    // it ended, which is what lets the caller walk forward to the recent end.
+    async getTradedSymbolPage({ startTime, limit = FUTURES_INCOME_PAGE_LIMIT }) {
+        const bounded = Math.min(Math.max(Number(limit) || FUTURES_INCOME_PAGE_LIMIT, 1), 1000);
         const data = await this.#signedRequest('GET', '/fapi/v1/income', {
             incomeType: 'REALIZED_PNL',
             startTime,
-            limit: Math.min(Math.max(Number(limit) || 1000, 1), 1000),
+            limit: bounded,
         });
-        return readFuturesTradedSymbols(data);
+        const rows = Array.isArray(data) ? data : [];
+        let lastTime = null;
+        for (const row of rows) {
+            const time = historyNumber(row?.time);
+            if (time !== null && (lastTime === null || time > lastTime)) lastTime = time;
+        }
+        return Object.freeze({
+            symbols: readFuturesTradedSymbols(rows),
+            full: rows.length >= bounded,
+            lastTime,
+        });
     }
 
     async createUserDataStreamListenKey() {

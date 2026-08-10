@@ -61,7 +61,8 @@ describe('FuturesHistoryPanel', () => {
     expect(table).toHaveTextContent('LONG')
     expect(table).toHaveTextContent('2.554')
     expect(table).toHaveTextContent('2.632')
-    expect(table).toHaveTextContent('3000')
+    // 3 000 contracts entered at 2.554 is 7 662 USDT — the size the desk sizes in.
+    expect(table).toHaveTextContent('7662')
     // The whole round's PnL, not a fill's slice of it.
     expect(table).toHaveTextContent('+234.00')
     // The fee is a component of the result, not a column of its own: it was
@@ -115,8 +116,55 @@ describe('FuturesHistoryPanel', () => {
     )
     const rows = screen.getAllByRole('row')
     expect(rows).toHaveLength(2)
-    expect(within(rows[1]).getAllByRole('cell')[3]).toHaveTextContent('3000')
+    expect(within(rows[1]).getAllByRole('cell')[3]).toHaveTextContent('7662')
     expect(screen.getByRole('table')).not.toHaveTextContent('open')
+  })
+
+  // A contract count is a size only next to the price of the contract. 237 518 BMT
+  // and 5 210 BEAT are the same column of digits and nothing like the same money.
+  it('sizes a closed position in USDT and keeps the contract count on the row', () => {
+    render(
+      <FuturesHistoryPanel
+        view="tradeHistory"
+        symbol="BICOUSDT"
+        tickSizes={ticks}
+        history={{
+          ...history,
+          trades: [
+            { id: 1, symbol: 'BICOUSDT', side: 'BUY', price: '2.500', quantity: '4000', commission: '0.03', realizedPnl: '0', time: 1_784_000_000_000 },
+            { id: 2, symbol: 'BICOUSDT', side: 'SELL', price: '2.600', quantity: '4000', commission: '0.03', realizedPnl: '400', time: 1_784_000_002_000 },
+          ],
+        }}
+      />,
+    )
+    const size = within(screen.getAllByRole('row')[1]).getAllByRole('cell')[3]
+    // 4 000 at 2.5 is 10 000 USDT, which the narrow column abbreviates.
+    expect(size).toHaveTextContent('10.0k')
+    expect(size).toHaveAttribute('title', '4000 contracts · 2 fills')
+  })
+
+  // The read is bounded on both axes — how many contracts, and how far back the
+  // fills reach. An operator who cannot find two days of losses must be able to
+  // tell "there were none" from "this list does not go there".
+  it('states how many contracts were read and how far back the fills reach', () => {
+    render(
+      <FuturesHistoryPanel
+        view="tradeHistory"
+        symbol="BICOUSDT"
+        tickSizes={ticks}
+        history={{
+          ...history,
+          symbols: ['BICOUSDT', 'BTCUSDT'],
+          discovered: 17,
+          trades: [
+            { id: 1, symbol: 'BICOUSDT', side: 'BUY', price: '2.500', quantity: '4000', commission: '0.03', realizedPnl: '0', time: 1_784_000_000_000 },
+            { id: 2, symbol: 'BICOUSDT', side: 'SELL', price: '2.600', quantity: '4000', commission: '0.03', realizedPnl: '400', time: 1_784_000_002_000 },
+          ],
+        }}
+      />,
+    )
+    expect(screen.getByText(/2 of 17 contracts traded were read/))
+      .toHaveTextContent(new Date(1_784_000_000_000).toLocaleString())
   })
 
   it('says so plainly when the window holds no closed position at all', () => {

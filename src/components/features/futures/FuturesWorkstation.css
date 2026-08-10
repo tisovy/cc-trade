@@ -929,6 +929,16 @@
   text-align: center;
 }
 
+/* How far the review actually reaches, under the rows it reaches over. Quieter
+   than the rows and never mistakable for one — it is a statement about the list,
+   not an entry in it. */
+.futures-workstation-history-reach {
+  margin: 6px 4px 2px;
+  color: #63768a;
+  font-size: calc(var(--fx-ui-scale, 1) * 11px);
+  text-align: right;
+}
+
 .futures-workstation-safety-drawer {
   margin-top: 10px;
   border: 1px solid var(--futures-border);

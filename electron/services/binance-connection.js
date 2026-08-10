@@ -912,10 +912,20 @@ export function setupBinanceConnection({
     // history is the only read that answers it without naming a symbol first;
     // every other history endpoint on USDⓈ-M requires one.
     const FUTURES_HISTORY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
-    // Each contract costs two signed reads at weight 5. Eight is a session's worth
-    // of contracts against a 800/minute budget, and anything dropped is logged
-    // rather than silently missing from the table.
-    const FUTURES_HISTORY_MAX_SYMBOLS = 8;
+    // Each contract costs two signed reads at weight 5. Twelve is a session's worth
+    // of contracts against a 800/minute budget — eight was not: the contract on
+    // screen, the contracts holding positions and the contracts holding working
+    // orders are seeded first, and a desk in three positions with four resting
+    // orders had spent seven of the eight before the traded-symbol read was
+    // consulted at all. What is still dropped is reported in the payload, not only
+    // logged, because a bounded list that does not say so reads as a complete one.
+    const FUTURES_HISTORY_MAX_SYMBOLS = 12;
+    // Leverage per open position is a different read with a different budget; it
+    // is bounded on its own so that widening the history fan-out does not widen it.
+    const FUTURES_POSITION_CONFIG_MAX_SYMBOLS = 8;
+    // Income is paged forward from the oldest end of the window. The pages are
+    // bounded: this walks to the recent end of a busy week, it does not download it.
+    const FUTURES_INCOME_MAX_PAGES = 4;
     const FUTURES_HISTORY_READ_WEIGHT = 5;
     const FUTURES_INCOME_READ_WEIGHT = 30;
     const FUTURES_SYMBOL_CONFIG_WEIGHT = 5;
@@ -1017,15 +1027,14 @@ export function setupBinanceConnection({
         futuresMutationEpoch += 1;
     };
 
-    // The leverage of every contract the account is actually holding. Bounded by
-    // the same ceiling as the history fan-out: an account in eight positions is
-    // eight reads at weight 5, and a ninth row states no leverage rather than
-    // spending the minute's budget on it.
+    // The leverage of every contract the account is actually holding. Bounded:
+    // an account in eight positions is eight reads at weight 5, and a ninth row
+    // states no leverage rather than spending the minute's budget on it.
     const refreshFuturesPositionConfigs = async (positions) => {
         const symbols = [...new Set((Array.isArray(positions) ? positions : [])
             .filter(position => Number(position?.quantity) !== 0)
             .map(position => String(position?.symbol ?? '').toUpperCase())
-            .filter(Boolean))].slice(0, FUTURES_HISTORY_MAX_SYMBOLS);
+            .filter(Boolean))].slice(0, FUTURES_POSITION_CONFIG_MAX_SYMBOLS);
         if (symbols.length === 0) return;
         const configs = await Promise.all(symbols.map(symbol => readFuturesSymbolConfig(symbol)));
         broadcastFuturesSymbolConfigs(configs);
@@ -1896,13 +1905,25 @@ export function setupBinanceConnection({
                 }
             }
             try {
-                const traded = await futuresRestLimiter.execute(
-                    () => futuresTradingAdapter.getTradedSymbols({
-                        startTime: Date.now() - FUTURES_HISTORY_WINDOW_MS,
-                    }),
-                    FUTURES_INCOME_READ_WEIGHT,
-                );
-                for (const symbol of traded) remember(symbol);
+                // Walked from the oldest end of the window to the newest, because
+                // that is the only direction the endpoint offers. Each full page
+                // means there is a newer one behind it; the pages are then read
+                // back to front, so the contract traded most recently leads the
+                // list and the cap below drops the stalest rather than the newest.
+                const pages = [];
+                let startTime = Date.now() - FUTURES_HISTORY_WINDOW_MS;
+                for (let page = 0; page < FUTURES_INCOME_MAX_PAGES; page += 1) {
+                    const traded = await futuresRestLimiter.execute(
+                        () => futuresTradingAdapter.getTradedSymbolPage({ startTime }),
+                        FUTURES_INCOME_READ_WEIGHT,
+                    );
+                    pages.push(traded?.symbols ?? []);
+                    if (!traded?.full || !Number.isFinite(traded?.lastTime)) break;
+                    startTime = traded.lastTime + 1;
+                }
+                for (const page of pages.reverse()) {
+                    for (const symbol of page) remember(symbol);
+                }
             } catch (error) {
                 // The fan-out still covers what the desk already knows about; only
                 // contracts closed and switched away from go unlisted.
@@ -1911,7 +1932,10 @@ export function setupBinanceConnection({
             if (symbols.length > FUTURES_HISTORY_MAX_SYMBOLS) {
                 logger.info(`[futures-history] ${symbols.length} contracts traded; reading the ${FUTURES_HISTORY_MAX_SYMBOLS} most relevant: ${symbols.slice(0, FUTURES_HISTORY_MAX_SYMBOLS).join(', ')}`);
             }
-            return symbols.slice(0, FUTURES_HISTORY_MAX_SYMBOLS);
+            return {
+                symbols: symbols.slice(0, FUTURES_HISTORY_MAX_SYMBOLS),
+                discovered: symbols.length,
+            };
         };
 
         // A history read must never disturb trading state: a failure is reported
@@ -1923,7 +1947,7 @@ export function setupBinanceConnection({
         // does not blank the others — only a total failure is reported as an error.
         const handleFuturesHistory = async (command) => {
             const { symbol } = command;
-            const symbols = await collectFuturesHistorySymbols(symbol);
+            const { symbols, discovered } = await collectFuturesHistorySymbols(symbol);
             const orders = [];
             const trades = [];
             const unavailable = [];
@@ -1954,6 +1978,7 @@ export function setupBinanceConnection({
                     futures_history: {
                         symbol,
                         symbols,
+                        discovered,
                         orders: [],
                         trades: [],
                         error: {
@@ -1969,6 +1994,11 @@ export function setupBinanceConnection({
                 futures_history: {
                     symbol,
                     symbols: symbols.filter(entry => !unavailable.includes(entry)),
+                    // How many contracts the account actually traded in the window,
+                    // against how many were read. The review surface states the
+                    // difference: an operator who cannot see yesterday's losses must
+                    // be told the list is bounded, not left to conclude there were none.
+                    discovered,
                     orders: orders.sort((left, right) => right.time - left.time),
                     trades: trades.sort((left, right) => right.time - left.time),
                     error: null,

@@ -252,12 +252,19 @@ describe('useFuturesTrading', () => {
           symbol: 'BTCUSDT',
           orders: [{ orderId: 1, side: 'BUY', status: 'FILLED' }],
           trades: [{ id: 7, realizedPnl: '12.5' }],
+          symbols: ['BTCUSDT', 'BICOUSDT'],
+          discovered: 17,
           error: null,
         },
       })
     })
     expect(result.current.history.status).toBe('ready')
     expect(result.current.history.trades).toHaveLength(1)
+    // How wide the read was, and how wide it should have been. Both were on the
+    // payload and neither reached the surface, which is how a bounded review
+    // presented itself as the whole account.
+    expect(result.current.history.symbols).toEqual(['BTCUSDT', 'BICOUSDT'])
+    expect(result.current.history.discovered).toBe(17)
 
     act(() => {
       socket.receive({

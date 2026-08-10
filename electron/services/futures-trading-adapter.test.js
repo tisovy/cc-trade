@@ -479,14 +479,40 @@ describe('futures contract configuration', () => {
             { symbol: 'bicousdt', incomeType: 'REALIZED_PNL', income: '4', time: 1_000 },
             { incomeType: 'FUNDING_FEE', income: '-0.1', time: 3_000 },
         ];
-        const symbols = await adapter.getTradedSymbols({ startTime: 1_000, limit: 5_000 });
+        const page = await adapter.getTradedSymbolPage({ startTime: 1_000, limit: 5_000 });
         const params = new URLSearchParams(requests[0].url.split('?')[1]);
         expect(requests[0].url).toContain('/fapi/v1/income');
         expect(params.get('incomeType')).toBe('REALIZED_PNL');
         expect(params.get('startTime')).toBe('1000');
         expect(params.get('limit')).toBe('1000');
-        expect(symbols).toEqual(['BTCUSDT', 'BICOUSDT']);
+        expect(page.symbols).toEqual(['BTCUSDT', 'BICOUSDT']);
         expect(readFuturesTradedSymbols(null)).toEqual([]);
+    });
+
+    // The endpoint answers a start time with the *oldest* rows after it, so a page
+    // that comes back full is a page with newer rows behind it. Saying so is what
+    // lets the caller walk to the recent end instead of reviewing last Tuesday.
+    it('reports a full income page and where it ended, so the walk can continue', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestResponse = [
+            { symbol: 'BICOUSDT', incomeType: 'REALIZED_PNL', income: '78', time: 2_000 },
+            { symbol: 'BTCUSDT', incomeType: 'REALIZED_PNL', income: '-96', time: 9_000 },
+        ];
+        expect(await adapter.getTradedSymbolPage({ startTime: 1_000, limit: 2 }))
+            .toMatchObject({ full: true, lastTime: 9_000 });
+        expect(await adapter.getTradedSymbolPage({ startTime: 1_000, limit: 3 }))
+            .toMatchObject({ full: false, lastTime: 9_000 });
+    });
+
+    // The fills are folded back into positions, so the read has to reach past the
+    // start of the oldest position it reports rather than a screenful of rows.
+    it('reads fills to the endpoint ceiling, far deeper than the order log', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestResponse = [];
+        await adapter.getTradeHistory({ symbol: 'BTCUSDT' });
+        expect(new URLSearchParams(requests[0].url.split('?')[1]).get('limit')).toBe('1000');
     });
 });
 
