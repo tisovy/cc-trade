@@ -10,7 +10,7 @@
 - [x] 2.1 Style `.futures-workstation-dock-size` as row-native text with hover and focus-visible affordances, so the selected row is not a white rectangle.
 - [x] 2.2 Prove by test that the size control is reachable and labelled on the selected contract's row and absent on others.
 - [x] 2.3 Guard the whole class of defect: assert every class the dock renders has a rule in the stylesheet, because an unstyled control fails silently.
-- [x] 2.4 Operator asked for the ENTRY LONG/ENTRY SHORT bands at half opacity: the entry price is a reference the candles are read against, and at full strength the band and its axis label hid the bars sitting at that price.
+- [x] 2.4 Operator asked for the ENTRY LONG/ENTRY SHORT bands at half opacity: the entry price is a reference the candles are read against, and at full strength the band hid the bars sitting at that price. The label plate needed its own colour — the library rebuilds a price line's label background as `rgb(...)` and drops the alpha, so the band faded while its plate and badge stayed solid and went on competing with the last price on the axis. Pre-composited over the chart's background instead.
 
 ## 3. Live Mark Price Feed
 
