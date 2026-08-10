@@ -193,6 +193,10 @@ Order notional SHALL be quantized to whole USDT wherever it is computed, display
 ### Requirement: The chart shows only decision-relevant overlays
 The chart SHALL render the contract candles, the operator's drawings and alerts, the operator's orders, and the open position's entry and liquidation prices. The chart SHALL NOT render an index-price overlay, an index price line, or a price-axis marker for the working price draft, and the market header SHALL NOT present an index price field.
 
+The price scale SHALL carry prices. The volume series SHALL NOT stamp its newest
+bar onto it: volume is stated by the bars themselves, against their own baseline,
+and a quantity in the plate the desk reads levels from is read as a level.
+
 #### Scenario: Chart is rendered for a live contract
 - **WHEN** the workstation is live on a contract
 - **THEN** no index series, no index price line, and no index header field are present
@@ -200,6 +204,10 @@ The chart SHALL render the contract candles, the operator's drawings and alerts,
 #### Scenario: Operator picks a price on the chart
 - **WHEN** the operator clicks a price to seed the order draft
 - **THEN** the draft is reflected in the ticket without adding a coloured label to the price axis
+
+#### Scenario: The newest candle has volume
+- **WHEN** the chart draws the volume histogram for the contract on screen
+- **THEN** the last bar's volume is not labelled on the price scale
 
 ### Requirement: The instrument rail carries no exchange-filter reference panel
 The instrument rail SHALL NOT present a contract-filter reference panel. Exchange filters SHALL remain enforced on every order draft and SHALL be reported only when they block a specific action.
@@ -226,6 +234,13 @@ tick size, and SHALL show the levels reached by that grouping rather than a
 fixed ten per side. The `Spread` and raw update-id readouts SHALL be replaced by
 the last traded price.
 
+Because grouping is applied after delivery, the number of raw levels delivered
+to the renderer SHALL be at least the deepest view the grouping control can ask
+for and fully fill, and SHALL NOT be reduced below the depth the exchange
+publishes. Delivery SHALL carry the whole retained book, and the bound the
+payload validator enforces SHALL be the same value the book is built to, so a
+book that is legal to build is never rejected on arrival.
+
 #### Scenario: Operator reads a level
 - **WHEN** a level rests at a price with a base quantity
 - **THEN** the row shows the price, the level's value in USDT, and the cumulative value in USDT from the top of the book
@@ -238,12 +253,22 @@ the last traded price.
 - **WHEN** the contract's filters have not arrived
 - **THEN** the book renders ungrouped at exchange precision instead of failing
 
+#### Scenario: A coarse step is selected
+- **WHEN** the operator selects a step of 25 or 50 ticks and the exchange has published enough levels to reach it
+- **THEN** every visible row is filled from delivered levels, rather than the book appearing to end a fraction of a percent from the mid
+
+#### Scenario: The book reaches the end of what the exchange publishes
+- **WHEN** the selected step would need more levels than Binance serves for the contract
+- **THEN** the rows that can be filled are filled and the remainder are absent, and no level is invented or inferred from diff traffic beyond the snapshot's window
+
 ### Requirement: The order book states which side is leaning on it
 The order book SHALL show the split between resting buy and sell value across a
 symmetric window of levels — the same number of levels on each side, being the
 number the visible side displays — as a two-colour bar with both percentages
 stated in text, measured in USDT rather than by level count. The price range
-that window covers SHALL be stated beside the split.
+that window covers SHALL be stated beside the split, expressed as a percentage
+of the last traded price, because the same split across a fraction of a percent
+and across ten percent are different readings.
 
 #### Scenario: Bids rest more value than asks
 - **WHEN** the visible bids hold three times the USDT the visible asks hold
@@ -251,11 +276,15 @@ that window covers SHALL be stated beside the split.
 
 #### Scenario: Operator changes the price step
 - **WHEN** the grouping step changes the range of prices on screen
-- **THEN** the split is recomputed over exactly the levels now displayed
+- **THEN** the split is recomputed over exactly the levels now displayed, and the stated range changes with it
 
 #### Scenario: Operator reads one side only
 - **WHEN** only one side is displayed, over twice as many levels
 - **THEN** the split is still measured over both sides at that deeper level count, and the stated range says how far it now reaches
+
+#### Scenario: Operator reads how far the book reaches
+- **WHEN** the farther of the two visible edges sits 2.43% from the last traded price
+- **THEN** the legend states `±2.43%` beside the split
 
 #### Scenario: No book is available
 - **WHEN** neither side has any resting value
@@ -295,7 +324,9 @@ SHALL derive return on margin from the reported initial or isolated margin.
 The market header SHALL NOT repeat mark price or basis, SHALL colour funding by
 its sign, and the trading rail header SHALL NOT repeat the market identity or
 the selected symbol shown elsewhere. Direction controls SHALL be coloured by
-direction, and available balance SHALL be shown to cents.
+direction. Account funds in the ticket — the available balance and the value of
+the working orders — SHALL be shown in whole USDT: at six and seven figures the
+cents never change a decision and cost a glance on every read.
 
 #### Scenario: Funding is negative
 - **WHEN** the funding rate is negative
@@ -307,7 +338,7 @@ direction, and available balance SHALL be shown to cents.
 
 #### Scenario: Balance carries exchange precision
 - **WHEN** the exchange reports an available balance such as `245228.33961912`
-- **THEN** the ticket shows it to two decimals
+- **THEN** the snapshot keeps that value exactly, and the ticket shows `245228 USDT` — rounded rather than truncated — as it shows the value of the working orders
 
 ### Requirement: The last traded price has a source the tape cannot filter
 The last-print row between the two book sides, the market header's `Last`, the
@@ -388,8 +419,8 @@ last-print row SHALL remain visible in every mode.
 - **THEN** the two sides are shown again, each remeasured to half the area
 
 #### Scenario: Selected mode outlives a contract change
-- **WHEN** the operator selects another contract
-- **THEN** the side mode is kept, because it is a way of reading a book rather than a property of one contract
+- **WHEN** the operator selects another contract and comes back
+- **THEN** the side mode chosen for the first contract is what it is shown with again, rather than being reset or replaced by the mode chosen for the second
 
 ### Requirement: A margin panel states the liquidation price it would move to
 A panel that moves margin on a position SHALL state that position's liquidation
@@ -709,4 +740,146 @@ interval and subscription that asked for it.
 #### Scenario: A late response arrives after a symbol change
 - **WHEN** a history response for the previous contract arrives after the operator switched contracts
 - **THEN** it is ignored
+
+### Requirement: The ticket states what the working orders are worth
+The trading ticket SHALL state, beneath the available balance, the total USDT
+value of the account's working orders. That total SHALL be summed from the same
+orders the working-orders list shows and priced by the same valuation as each of
+its rows, so the stated figure and a hand-sum of the column cannot disagree. It
+SHALL NOT be the margin the exchange holds against those orders, which at
+leverage is a fraction of their value and which reduce-only exits do not hold at
+all. Where the order list has never synchronized the total SHALL be absent
+rather than zero; where the list is synchronized and empty it SHALL be zero,
+which is a reading.
+
+#### Scenario: Orders are resting
+- **WHEN** the account holds a 116890 USDT entry order and a 30006 USDT reduce-only exit
+- **THEN** the ticket states `146896 USDT` as `On order` directly under `Available`, the reduce-only leg included even though the exchange holds no margin against it
+
+#### Scenario: Nothing is resting
+- **WHEN** the order list is synchronized and empty
+- **THEN** the ticket states zero, which is a reading rather than a gap
+
+#### Scenario: Orders have not synchronized
+- **WHEN** no confirmed order snapshot exists
+- **THEN** the total is absent, exactly as the available balance is when unread, and is not shown as zero
+
+### Requirement: Transport bounds are derived from the payload they carry
+Every bound that a workstation event must satisfy to be delivered and read —
+its byte ceiling, the parser's node budget, and the level count the payload
+rules accept — SHALL be derived from a single statement of how much book is
+delivered, rather than written independently. Exceeding any of these bounds
+stops the resource entirely instead of degrading it, so the bounds SHALL be
+proven against the widest payload the rules call legal rather than against a
+representative one.
+
+#### Scenario: The deepest legal book is delivered
+- **WHEN** an event carries a full book at the longest decimals and identities the payload rules accept
+- **THEN** it is within the byte ceiling and is parsed to completion, rather than being refused for size or for resource limits
+
+#### Scenario: The delivered depth is changed
+- **WHEN** the number of levels delivered per side is changed
+- **THEN** the payload validator's bound and the parser's node budget follow it without a second edit
+
+### Requirement: How a contract's book is read is remembered per contract
+The side mode and the grouping step SHALL be stored against the contract they
+were chosen for and restored when that contract is selected again, including
+after a restart. They SHALL NOT be stored as one setting shared by every
+contract: the step is a multiple of the contract's own tick, so the same
+multiplier is a different share of price on a different contract and would
+carry a book-collapsing step from one to the next. A contract with nothing
+stored SHALL open at both sides and 1×.
+
+Stored values SHALL be validated on read exactly as fresh operator input is: a
+side mode that is not one of the three, or a step that is not one of the
+contract's multipliers, SHALL fall back to the default rather than be applied.
+The store SHALL be bounded, so a desk that has watched many contracts cannot
+grow it without limit.
+
+#### Scenario: Operator returns to a contract
+- **WHEN** the operator selects a contract for which a side mode and step were previously chosen
+- **THEN** the book opens with that side mode and that step, without being re-dialled
+
+#### Scenario: Operator returns after a restart
+- **WHEN** the application is restarted and that contract is selected again
+- **THEN** the same side mode and step are restored
+
+#### Scenario: Contract has nothing stored
+- **WHEN** a contract is selected for the first time
+- **THEN** the book opens at both sides and 1×, and the choice made for another contract does not carry over
+
+#### Scenario: Stored entry is unusable
+- **WHEN** the stored value is malformed, or names a step multiplier the contract does not offer
+- **THEN** the default is used and the unusable entry changes nothing on screen
+
+#### Scenario: Store reaches its bound
+- **WHEN** more contracts have been configured than the store holds
+- **THEN** the least recently written entries are dropped rather than the store growing without limit
+
+### Requirement: The order book marks its heaviest levels
+The order book SHALL mark the five levels resting the most USDT on each visible
+side, ranked over exactly the levels on screen so that changing the grouping
+step or the side mode re-ranks with them. The mark SHALL apply to the size cell
+alone: the level's price and its cumulative total SHALL read the same on a
+marked level as on any other.
+
+Levels resting an equal size SHALL be marked alike, and a side holding no more
+levels than there are marks SHALL carry none, because marking every row states
+nothing.
+
+#### Scenario: A side holds a few heavy levels
+- **WHEN** a visible side holds ten levels, five of which rest far more USDT than the others
+- **THEN** those five have their size cell thickened, and their price and cumulative cells are unchanged
+
+#### Scenario: Two levels rest the same size
+- **WHEN** the fifth and sixth heaviest levels rest the same USDT
+- **THEN** both are marked, rather than one being chosen over its equal
+
+#### Scenario: The visible side is short
+- **WHEN** a side shows no more levels than there are marks
+- **THEN** no level is marked
+
+#### Scenario: The operator regroups the book
+- **WHEN** the grouping step changes which levels are on screen
+- **THEN** the marks are recomputed over the levels now displayed
+
+### Requirement: The contract list keeps its rows at their own height
+Every row of the instrument rail's contract list SHALL be drawn at the height its
+own content needs, whatever the length of the list and whatever height the panel
+around it has been given. A list longer than its panel SHALL scroll; it SHALL NOT
+be fitted by compressing its rows.
+
+The list SHALL keep a floor of readable rows next to the execution ticket. Where
+the two together exceed the column, the column SHALL scroll rather than the list
+being reduced to nothing.
+
+#### Scenario: The catalogue is longer than the panel
+- **WHEN** the rail lists the whole contract catalogue in a panel that can show only a few rows
+- **THEN** each row keeps the height of its own content and the list scrolls to reach the rest
+
+#### Scenario: The ticket beside it is tall
+- **WHEN** the execution ticket grows past the height the column has left
+- **THEN** the contract list keeps at least three readable rows and the column scrolls
+
+### Requirement: The instrument rail is sized for the rows it carries
+The instrument column SHALL be wide enough for a working-order row in the ticket
+to state its contract, its side, its price and what it is worth in USDT without
+any of them being cut, for the contracts and amounts this desk actually holds.
+Where a reading still cannot fit, it SHALL be shortened by the rules that already
+govern a sliced reading rather than by narrowing the column further.
+
+#### Scenario: Working orders rest on several contracts
+- **WHEN** the ticket lists working orders whose prices run to five significant digits and whose values run to six
+- **THEN** every row states its price and its USDT value whole, with neither ellipsized
+
+### Requirement: Chart annotations are drawn under the weight of the candles
+Labels the chart puts on its own plotting area — the order handles and what they
+are worth, the titles of the entry, liquidation, alert and drawing lines, and the
+plates those lines put on the price scale — SHALL be drawn smaller than the desk's
+body text, so that a contract carrying a position and several working orders is
+still read as price action rather than as a stack of labels.
+
+#### Scenario: A position and its working orders are on screen
+- **WHEN** the chart draws the order handles and the entry and liquidation lines of an open position
+- **THEN** their text is drawn at a reduced size rather than at the size the surrounding desk is set in
 

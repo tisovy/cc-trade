@@ -28,8 +28,8 @@
   the beat starting and stopping with the list.
 - [x] 3.2 `eslint` clean on the file this change touches.
 - [x] 3.3 `npm run check:futures-production` passes.
-- [ ] 3.4 Operator confirms on the live account that an order placed into a
-  breaking level leaves the list when it fills, with no reload.
+- [x] 3.4 Operator confirms on the live account that an order placed into a
+  breaking level leaves the list when it fills, with no reload. — closed by the operator on 2026-08-10 rather than reported checked.
 
 ## 4. Stated Limits, Not Fixed Here
 

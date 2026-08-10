@@ -21,7 +21,7 @@
 - [x] 4.1 `npx vitest run` — 88 files, 1,136 passed, with cases for the summed total, a triggered order, an empty list, an unsynchronized list, a row that cannot be valued, and the trigger carried from both the REST and the stream shape.
 - [x] 4.2 `eslint` clean on every file this change touches.
 - [x] 4.3 `npm run check:futures-production` passes.
-- [ ] 4.4 Operator confirms on the live account that `On order` matches the total of their working-orders list, and that both figures read in whole USDT.
+- [x] 4.4 Operator confirms on the live account that `On order` matches the total of their working-orders list, and that both figures read in whole USDT. — closed by the operator on 2026-08-10 rather than reported checked.
 
 ## 5. Stated Limits, Not Fixed Here
 

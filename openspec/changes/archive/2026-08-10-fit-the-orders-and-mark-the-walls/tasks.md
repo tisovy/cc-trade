@@ -33,9 +33,9 @@
   second session's work in the same files.
 - [x] 3.2 `eslint` clean on every file this change touches.
 - [x] 3.3 `npm run check:futures-production` passes.
-- [ ] 3.4 Operator confirms on the live account that the orders list fits without
+- [x] 3.4 Operator confirms on the live account that the orders list fits without
   wrapping or collision, and that the marked levels are the ones they would have
-  picked out by eye.
+  picked out by eye. — closed by the operator on 2026-08-10 rather than reported checked.
 
 ## 4. Stated Limits, Not Fixed Here
 

@@ -17,7 +17,7 @@
 - [x] 3.1 `npx vitest run` — 88 files, 1,123 passed, with util cases for a malformed entry, an unknown multiplier, a store that is not a map, the eviction bound and rewrite-as-recency, and view cases for restore-on-return, a first-seen contract and a restart.
 - [x] 3.2 `eslint` clean on every file this change touches.
 - [x] 3.3 `npm run check:futures-production` passes.
-- [ ] 3.4 Operator confirms that a contract comes back with the step and sides it was left with, across a restart.
+- [x] 3.4 Operator confirms that a contract comes back with the step and sides it was left with, across a restart. — closed by the operator on 2026-08-10 rather than reported checked.
 
 ## 4. Stated Limits, Not Fixed Here
 

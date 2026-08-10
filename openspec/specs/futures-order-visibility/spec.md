@@ -65,7 +65,11 @@ The chart SHALL distinguish regular and algorithmic orders visually and accessib
 - **THEN** the chart does not offer drag amendment and identifies the order as display-only
 
 ### Requirement: Order reconciliation remains current after startup
-After the first snapshot, the system SHALL combine authenticated user-data updates with periodic or operator-requested REST reconciliation so that missed stream events or reconnects do not leave the visible order state permanently incorrect.
+After the first snapshot, the system SHALL combine authenticated user-data
+updates with periodic and operator-requested REST reconciliation so that missed
+stream events or reconnects do not leave the visible order state permanently
+incorrect. The periodic read SHALL run while orders are working and SHALL stop
+while none are, so that a desk holding nothing spends no weight on it.
 
 #### Scenario: User-data stream reconnects
 - **WHEN** the authenticated stream disconnects and reconnects
@@ -74,6 +78,14 @@ After the first snapshot, the system SHALL combine authenticated user-data updat
 #### Scenario: Manual refresh completes
 - **WHEN** the operator requests an account refresh and both order sources succeed
 - **THEN** the visible selected-symbol orders match the new account-wide snapshots and their freshness becomes ready
+
+#### Scenario: No message reports a settlement
+- **WHEN** orders are working and no execution report or snapshot arrives
+- **THEN** the account is re-read without the operator asking, on a beat measured in tens of seconds
+
+#### Scenario: Nothing is working
+- **WHEN** the working-orders list is empty
+- **THEN** no periodic read is sent at all
 
 ### Requirement: Moving an order is a single atomic amendment
 The system SHALL reprice or resize a live regular LIMIT futures order with one Binance USDⓈ-M order amendment. The system SHALL NOT implement a move as a cancel followed by a separate placement.
@@ -136,6 +148,16 @@ account snapshot it is reconciled against is at least as recent. An account
 snapshot SHALL NOT replace an open order with an older version of that same
 order.
 
+An order the exchange has reported settled SHALL NOT be listed as working again,
+by any message. This covers both a report that left the exchange before the
+settlement — the reply to a placement that filled the instant it was made — and
+an account snapshot read from a service that had not yet seen the settlement.
+Settlement is remembered by the order's exchange identity rather than compared by
+time, because the exchange does not reuse an order id; the memory SHALL be
+bounded, since it guards messages in flight rather than recording history. A
+settlement report that carries no order id SHALL settle nothing, its identity
+being the prefix every unidentified order on that contract would share.
+
 #### Scenario: Snapshot arrives with pre-amendment values
 - **WHEN** an amendment is confirmed and the account synchronization that follows returns the order with an earlier update time
 - **THEN** the order keeps the confirmed price and size, and no operator refresh is required to see them
@@ -143,6 +165,14 @@ order.
 #### Scenario: Snapshot is newer than the local report
 - **WHEN** the account snapshot reports the order with a later update time than the last locally applied report
 - **THEN** the snapshot values replace the local ones
+
+#### Scenario: The placement's reply arrives after the fill
+- **WHEN** an order fills the instant it is placed, so the stream reports it filled before the reply to the placement arrives describing it as new
+- **THEN** the order is not listed as working, and no reload is required to clear it
+
+#### Scenario: A snapshot still describes a settled order
+- **WHEN** an account snapshot lists an order the exchange has already reported settled, alongside an order that is genuinely resting
+- **THEN** the settled one is refused and the resting one is listed
 
 ### Requirement: A position can be closed at market or with a reduce-only limit
 The system SHALL let the operator close an open position either immediately at
@@ -214,6 +244,30 @@ before the rest, and SHALL bound the number of contracts it reads, logging whate
 that bound drops. Each row SHALL name its own contract and SHALL be priced at that
 contract's tick.
 
+The traded-contract read is answered oldest-first from the time it is given, so
+the system SHALL walk it forward, within a bounded number of pages, until a page
+comes back short, and SHALL order the contracts it discovered most recent first.
+Otherwise a window busier than one page yields the contracts the account has since
+moved off and never reaches the ones it traded today.
+
+Fills SHALL be read deeply enough to be folded into the positions they formed
+rather than merely deeply enough to fill a screen: they are not shown as a list,
+and a fold that begins inside a position cannot state what happened before it.
+
+The bound SHALL be visible, not merely logged. The payload SHALL state how many
+contracts were found against how many were read, and the review SHALL state,
+beside the rows, how much of the session it covers — the contracts read of those
+found, and how far back the fills it read reach. A bounded review that does not
+say so is read as a complete one, and an operator looking for losses they know
+they took cannot tell an empty list from a short one.
+
+The count of contracts found is itself a read, and it can fail or run out of
+pages. Where it did, the payload SHALL say so and the review SHALL state that
+more may have been traded, rather than presenting what was found as all there
+was. A failed discovery SHALL NOT discard the pages already read, and SHALL NOT
+be reported as a history failure: the contracts the desk already knows about are
+still read and still shown.
+
 #### Scenario: Operator opens history
 - **WHEN** the operator opens the history view
 - **THEN** the recent orders of every contract read are listed with their contract, status, side, price, size, filled size and time, and the closed positions are listed with their contract, entry, exit, size and signed realized PnL
@@ -229,6 +283,18 @@ contract's tick.
 #### Scenario: Operator switches contract
 - **WHEN** the selected contract changes
 - **THEN** the loaded account history remains valid and shown, with the rows of the newly selected contract marked as its own
+
+#### Scenario: The traded-contract read overruns one page
+- **WHEN** the account traded more in the window than one page of the traded-contract read can carry
+- **THEN** the read continues from where the page ended, and the contracts traded most recently are the ones the fan-out covers
+
+#### Scenario: The account traded more contracts than the fan-out reads
+- **WHEN** the account traded more contracts in the window than the fan-out is bounded to read
+- **THEN** the review states how many of them were read, alongside how far back the fills it read reach
+
+#### Scenario: The traded-contract read fails partway through
+- **WHEN** one page of the traded-contract read succeeds and the next is refused
+- **THEN** the contracts from the page already read are still covered, the history is not reported as failed, and the review states that more may have been traded
 
 ### Requirement: A price the order does not have is reported as absent
 Where the exchange reports no price for an order — a market order has no limit
@@ -271,6 +337,11 @@ reported as the exchange reports it, with the fees and the net stated on the
 element rather than as a column of their own. Exposure SHALL be folded per
 contract.
 
+The size SHALL be stated in USDT, valued at the price the round was entered at,
+because that is what every other size on this desk is stated in and a contract
+count cannot be compared across contracts. The count of contracts SHALL remain
+available on the element.
+
 A position that has not returned to flat SHALL NOT appear in this history: it has
 no exit and no result, and the live positions table is where it is reported. A
 position whose opening fills are older than the window SHALL still state an entry
@@ -296,4 +367,80 @@ element that the entry was recovered rather than read.
 #### Scenario: Two contracts were traded in the same window
 - **WHEN** the window holds fills on more than one contract
 - **THEN** each contract's exposure is folded on its own, and a fill on one never closes or reduces a round on another
+
+#### Scenario: A closed round is sized
+- **WHEN** the closed-position history lists a round
+- **THEN** its size is what the position was worth in USDT at its entry, and the contract count is on the element
+
+### Requirement: An order is valued at the price it rests at
+An order's stated price and value SHALL be taken from the price it is actually
+working at. For a stop or take-profit that is the trigger, which the exchange
+reports separately and alongside a `price` of zero for the market-triggered
+kinds; the normalized order SHALL carry that trigger for regular orders as it
+already does for algorithmic ones, and SHALL omit the field where the exchange
+reports no trigger rather than carrying a zero that would be read as a price.
+
+An order SHALL NOT be valued at zero because a field it needs is missing. An
+order with no usable price or no usable size SHALL be reported as unvaluable, so
+that a row which could not be read is distinguishable from an order that commits
+nothing.
+
+#### Scenario: A stop rests in the list
+- **WHEN** the exchange reports a resting stop with `price` `0` and a trigger of `58000` for `0.5` contracts
+- **THEN** the order is shown at `58000` and valued at `29000` USDT, in the list and in any total of the working orders
+
+#### Scenario: A limit order has no trigger
+- **WHEN** the exchange reports a plain limit order
+- **THEN** the normalized order carries no trigger price at all, and is shown and valued at its limit price
+
+#### Scenario: An order cannot be valued
+- **WHEN** an order carries no usable price, or a close-position stop carries no quantity of its own
+- **THEN** it is reported as unvaluable and shown as absent, not as an order worth zero, and it is left out of the working-orders total rather than adding zero to it
+
+### Requirement: A working order's size is stated in USDT
+The working-orders list SHALL state an order's size as the USDT amount it
+commits, under a header that names the unit, using the same derivation as every
+other surface that sizes an order — the ticket, the order editor and the chart
+label — so one order reads as one number wherever it appears. The exact contract
+quantity SHALL remain available on the cell without occupying the column. An
+order whose size is carried against a trigger price SHALL be valued at that
+trigger price, because a stop-market carries a `price` of `0`.
+
+#### Scenario: A limit order is listed
+- **WHEN** a working order rests at `58445.00` for `0.004` contracts
+- **THEN** the size cell reads `234` under a `Size (USDT)` header, and its title states `0.004 contracts`
+
+#### Scenario: An algo order is listed
+- **WHEN** a stop order carries `price` `0`, a trigger price of `57000.00` and `0.01` contracts
+- **THEN** the size cell reads `570` rather than a zero
+
+#### Scenario: The same order is read on two surfaces
+- **WHEN** the operator compares a working order's size in the list against the same order on the chart or in the editor
+- **THEN** both state the same USDT amount
+
+### Requirement: The working-orders list is read as a table, not as sentences
+The list of working orders SHALL state the unit of each column once, at the head
+of the list, and no row SHALL repeat it. Every column SHALL occupy a bounded
+track and SHALL shorten its own content when it does not fit, so that no column
+can be squeezed out of the row by another and the cancel control keeps its
+place at every width.
+
+A price SHALL be stated at the precision the contract quotes where that
+precision is known, and with the exchange's float padding removed where it is
+not; the padded string the exchange sends SHALL NOT be rendered as though it
+were precision. A symbol MAY be shortened to its base asset where the quote
+asset is the one every contract on the desk settles in, provided the whole name
+remains available on the cell and on every control that acts on the contract.
+
+#### Scenario: A row states a value
+- **WHEN** an order worth 10 982 USDT rests in the list
+- **THEN** the row states `10982`, the unit is stated once by the column heading, and the exact contract count is available on the cell
+
+#### Scenario: The exchange pads a price
+- **WHEN** the exchange reports the order resting at `0.0148410`
+- **THEN** the row states `0.014841`, and a contract whose tick size is known is stated at that tick instead
+
+#### Scenario: An order rests on another contract
+- **WHEN** the account holds orders on contracts other than the one on screen
+- **THEN** every row names its own contract, shortened to its base asset with the whole name on the cell, rather than losing the column to its neighbours
 

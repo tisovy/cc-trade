@@ -37,7 +37,7 @@
 - [x] 6.2 `npm run check:futures-production` passes (23 isolated implementation files; exact public-read routes only).
 - [x] 6.3 `eslint` clean on every file this change touches.
 - [x] 6.4 Cost measured rather than assumed, at 1,000 levels per side and 10 updates a second: main 2.50 ms/frame with no trim and 2.82 ms/frame when every diff forces one; renderer 3.03 ms to parse and validate plus 0.60 ms to group both sides.
-- [ ] 6.5 Operator confirms on live data that the book reaches the distances actually traded, and that the `±X%` reading matches what the chart ruler measures.
+- [x] 6.5 Operator confirms on live data that the book reaches the distances actually traded, and that the `±X%` reading matches what the chart ruler measures. — closed by the operator on 2026-08-10 rather than reported checked.
 
 ## 7. Stated Limits, Not Fixed Here
 

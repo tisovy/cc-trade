@@ -21,12 +21,13 @@
 
 ## 4. Verification
 
-- [x] 4.1 `npx vitest run` — 90 files, 1,185 passed, including the chart's label
-  size and the volume series' options.
+- [x] 4.1 `npx vitest run` on the committed tree, extracted with `git archive`
+  — 90 files, 1,187 passed, including the chart's label size, the volume series'
+  options, and the handle sizes measured in Chromium.
 - [x] 4.2 `eslint` clean; `npm run check:futures-production` passes.
-- [ ] 4.3 Operator confirms on the live desk that the handles and the entry and
+- [x] 4.3 Operator confirms on the live desk that the handles and the entry and
   liquidation plates read as annotations, and that the price scale is still
-  comfortable at 9px.
+  comfortable at 9px. — closed by the operator on 2026-08-10 rather than reported checked.
 
 ## 5. Stated Limits, Not Fixed Here
 

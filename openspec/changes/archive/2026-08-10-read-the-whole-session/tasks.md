@@ -44,15 +44,16 @@
 
 ## 5. Verification
 
-- [x] 5.1 `npx vitest run` — 90 files, 1,185 passed, including the income walk to
-  the recent end, the fan-out reporting what it dropped, the fill read's depth,
-  the round's USDT value on both the read and the recovered entry, and the reach
-  line.
+- [x] 5.1 `npx vitest run` on the committed tree, extracted with `git archive`
+  — 90 files, 1,187 passed, including the income walk to the recent end, the
+  walk keeping the pages it read when a later one fails, the fan-out reporting
+  what it dropped, the fill read's depth, the round's USDT value on both the read
+  and the recovered entry, and the reach line with and without a complete count.
 - [x] 5.2 `eslint` clean on every file this change touches.
 - [x] 5.3 `npm run check:futures-production` passes.
-- [ ] 5.4 Operator confirms on the live account that the closed positions of the
+- [x] 5.4 Operator confirms on the live account that the closed positions of the
   last few days are all there, that the sizes read as money, and that where the
-  list is bounded it says so.
+  list is bounded it says so. — closed by the operator on 2026-08-10 rather than reported checked.
 
 ## 6. Stated Limits, Not Fixed Here
 

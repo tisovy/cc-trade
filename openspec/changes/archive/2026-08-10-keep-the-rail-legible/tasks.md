@@ -18,10 +18,12 @@
 - [x] 3.2 Measured against the four working orders from the operator's own
   screenshot: four cells clipped at 260px (three prices and one value), none at
   280px or wider. Shipped at 300px, which leaves headroom for a six-figure value.
-- [x] 3.3 `npx vitest run` — 90 files, 1,185 passed.
+- [x] 3.3 `npx vitest run` on the committed tree, extracted with `git archive`
+  so a neighbouring session's work in progress cannot flatter it — 90 files,
+  1,187 passed.
 - [x] 3.4 `eslint` clean; `npm run check:futures-production` passes.
-- [ ] 3.5 Operator confirms on the live desk that the rail lists its contracts
-  again on launch, and that no working-order row is cut.
+- [x] 3.5 Operator confirms on the live desk that the rail lists its contracts
+  again on launch, and that no working-order row is cut. — closed by the operator on 2026-08-10 rather than reported checked.
 
 ## 4. Stated Limits, Not Fixed Here
 
