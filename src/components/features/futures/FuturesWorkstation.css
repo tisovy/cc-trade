@@ -20,7 +20,13 @@
 
 .futures-workstation {
   display: grid;
-  grid-template-columns: minmax(210px, 260px) minmax(420px, 1fr) minmax(270px, 330px);
+  /* The instrument column carries the execution ticket, and the ticket carries a
+     working order per row: contract, side, price, what it is worth, cancel. At
+     260px the price cell was cut for anything past five significant digits and
+     the USDT value for anything past four — measured, not guessed: `0.03961`
+     and `50134` both ellipsized. Forty pixels more clears every row this desk
+     actually holds, and the chart column absorbs it. */
+  grid-template-columns: minmax(240px, 300px) minmax(420px, 1fr) minmax(270px, 330px);
   grid-template-rows: auto auto minmax(420px, 1fr) auto auto;
   grid-template-areas:
     "identity identity identity"
@@ -293,9 +299,23 @@
   box-shadow: 0 0 0 2px var(--futures-accent-soft);
 }
 
+/* `grid-auto-rows: min-content` is what keeps this list visible at all. The list
+   is a flex item with a definite height, so its rows are auto tracks inside a box
+   whose size is already decided — and each row clips its own overflow, which makes
+   its minimum size zero. Four hundred contracts against 180px therefore squeezed
+   every row down to its two border pixels: the rail rendered as a stack of hairlines
+   with a scrollbar beside it, and the operator read it, correctly, as an empty list.
+   Content-sized tracks make the rows keep their height and the list scroll instead.
+
+   The floor is the second half of it: as a shrinkable flex item next to a ticket
+   that never shrinks, the list was driven to zero height whenever the ticket grew —
+   a working order or two was enough. It now gives up space to three rows and no
+   further; past that the rail scrolls, which is what it is set up to do. */
 .futures-workstation-contract-list {
   display: grid;
+  grid-auto-rows: min-content;
   gap: 3px;
+  min-height: 96px;
   max-height: 180px;
   overflow: auto;
   scrollbar-color: rgba(126, 143, 166, 0.25) transparent;
@@ -950,7 +970,7 @@
 
 @media (max-width: 980px) {
   .futures-workstation {
-    grid-template-columns: minmax(170px, 205px) minmax(370px, 1fr) minmax(220px, 270px);
+    grid-template-columns: minmax(200px, 240px) minmax(370px, 1fr) minmax(220px, 270px);
   }
 
   .futures-workstation-market-header dl {
