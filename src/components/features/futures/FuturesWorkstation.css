@@ -1596,7 +1596,11 @@
   touch-action: none;
 }
 
-.futures-workstation-owned-order-grip b {
+/* Every handle's side label, not only the ones with a grip: an exchange-managed
+   order is drawn as a bare plate with no grip to take hold of, and its label was
+   left at the body size the layer inherits — 16px beside its own 9px value, on a
+   chart where every other label had just been taken down to eight. */
+.futures-workstation-owned-order b {
   font-size: calc(var(--fx-ui-scale, 1) * 8px);
   font-weight: 800;
   letter-spacing: 0.04em;

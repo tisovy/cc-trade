@@ -2615,6 +2615,39 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(symbols.slice(0, 7)).toEqual(['ETHUSDT', ...newer]);
         expect(symbols).not.toContain('A6USDT');
         expect(symbols).not.toContain('A7USDT');
+        // The walk ended because a page came back short, so the count above is
+        // the whole set the fan-out was choosing from.
+        expect(history.futures_history.discoveryComplete).toBe(true);
+    });
+
+    // The count of traded contracts is itself a read. When it fails halfway, the
+    // pages already paid for still cover part of the session — and the review must
+    // not report the contracts it found as though they were all of them.
+    it('keeps the pages it already read when discovery fails, and says it is short', async () => {
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1' },
+        });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        moduleMocks.futuresAdapter.getTradedSymbolPage
+            .mockResolvedValueOnce({ symbols: ['BICOUSDT'], full: true, lastTime: 100 })
+            .mockRejectedValueOnce(Object.assign(new Error('gone'), { code: -1003 }));
+
+        await runFuturesCommand({
+            action: 'account.history',
+            clientOrderId: 'history-5',
+            symbol: 'ETHUSDT',
+        });
+
+        const [history] = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.futures_history);
+        expect(history.futures_history.error).toBeNull();
+        expect(history.futures_history.symbols).toContain('BICOUSDT');
+        expect(history.futures_history.discoveryComplete).toBe(false);
     });
 
     // The position read reports neither leverage nor margin mode any more, so both

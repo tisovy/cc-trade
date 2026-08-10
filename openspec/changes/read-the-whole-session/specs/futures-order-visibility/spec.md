@@ -24,11 +24,18 @@ rather than merely deeply enough to fill a screen: they are not shown as a list,
 and a fold that begins inside a position cannot state what happened before it.
 
 The bound SHALL be visible, not merely logged. The payload SHALL state how many
-contracts the account traded in the window against how many were read, and the
-review SHALL state, beside the rows, how much of the session it covers — the
-contracts read of those traded, and how far back the fills it read reach. A
-bounded review that does not say so is read as a complete one, and an operator
-looking for losses they know they took cannot tell an empty list from a short one.
+contracts were found against how many were read, and the review SHALL state,
+beside the rows, how much of the session it covers — the contracts read of those
+found, and how far back the fills it read reach. A bounded review that does not
+say so is read as a complete one, and an operator looking for losses they know
+they took cannot tell an empty list from a short one.
+
+The count of contracts found is itself a read, and it can fail or run out of
+pages. Where it did, the payload SHALL say so and the review SHALL state that
+more may have been traded, rather than presenting what was found as all there
+was. A failed discovery SHALL NOT discard the pages already read, and SHALL NOT
+be reported as a history failure: the contracts the desk already knows about are
+still read and still shown.
 
 #### Scenario: Operator opens history
 - **WHEN** the operator opens the history view
@@ -53,6 +60,10 @@ looking for losses they know they took cannot tell an empty list from a short on
 #### Scenario: The account traded more contracts than the fan-out reads
 - **WHEN** the account traded more contracts in the window than the fan-out is bounded to read
 - **THEN** the review states how many of them were read, alongside how far back the fills it read reach
+
+#### Scenario: The traded-contract read fails partway through
+- **WHEN** one page of the traded-contract read succeeds and the next is refused
+- **THEN** the contracts from the page already read are still covered, the history is not reported as failed, and the review states that more may have been traded
 
 ### Requirement: Executions are reported as the positions they formed
 The trade history SHALL report closed round trips rather than fills: a position

@@ -23,8 +23,18 @@
 - [x] 3.2 Carry `symbols` and the traded count through the renderer's history
   state — both were on the payload and neither reached the surface, so the review
   said "in this window" where it meant "across the eight contracts read".
-- [x] 3.3 State the reach under the rows: contracts read of those traded, and the
+- [x] 3.3 State the reach under the rows: contracts read of those found, and the
   oldest fill the read reached.
+- [x] 3.4 Catch a failed page where it happens rather than around the walk, so a
+  refusal on the third read does not discard the two already paid for.
+- [x] 3.5 Say when the count of contracts is not known to be complete — the
+  discovery failed, or the walk ran out of pages with a full page in hand.
+
+## 3a. Folding Once Per Read
+
+- [x] 3a.1 Fold the fills into rounds in a memo rather than in the render body:
+  the read is now a thousand fills per contract across twelve contracts, and this
+  panel re-renders whenever a contract configuration arrives.
 
 ## 4. Sizing A Closed Position In Money
 

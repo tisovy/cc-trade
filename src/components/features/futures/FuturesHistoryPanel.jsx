@@ -1,4 +1,4 @@
-import { memo } from 'react'
+import { memo, useMemo } from 'react'
 import { formatSignedUsdt } from '../../../utils/futuresOrderPresentation.js'
 import { buildFuturesTradeRounds } from '../../../utils/futuresTradeRounds.js'
 import {
@@ -69,6 +69,23 @@ export const FuturesHistoryPanel = ({
   // How wide the read actually was. An empty table means "nothing here" only if
   // the operator knows what was looked at — the backend reads a bounded set of
   // contracts, so the count says which claim is being made.
+  // What the operator traded is a position, not an execution: one market close
+  // arrives as five fills in the same second, and five rows of a sixth of the
+  // PnL each is not the number anybody reviews a session with.
+  //
+  // And this is the log of positions that are *finished*: entered, exited, and
+  // what came of it. A position still running has no exit and no result, so it
+  // belongs to the live positions table above, not to a history — listing it
+  // here put half-empty rows among the closed ones and read as noise.
+  //
+  // Folded once per set of fills rather than once per render. The read is now a
+  // thousand fills per contract across twelve contracts, and this panel
+  // re-renders whenever a contract config arrives.
+  const rounds = useMemo(() => (
+    view === 'tradeHistory'
+      ? buildFuturesTradeRounds(trades).filter(round => !round.open && round.exitPrice !== null)
+      : EMPTY_ROWS
+  ), [trades, view])
   const read = Array.isArray(history?.symbols) ? history.symbols.length : 0
   const traded = Number.isSafeInteger(history?.discovered) ? history.discovered : 0
   const scope = read > 0
@@ -87,12 +104,16 @@ export const FuturesHistoryPanel = ({
     }, null)
     if (rows.length === 0) return null
     const contracts = traded > read
-      ? `${read} of ${traded} contracts traded were read`
+      ? `${read} of ${traded} contracts read`
       : `${read} contract${read === 1 ? '' : 's'} read`
     return (
       <p className="futures-workstation-history-reach">
         {contracts}
         {oldest === null ? '' : `, back to ${exactTime(oldest)}`}
+        {/* The count above is of the contracts the desk found. Where the search
+            for them failed or ran out of pages, it is not known to be all of
+            them, and a bounded number stated flatly reads as a total. */}
+        {history?.discoveryComplete === false ? ' · more may have been traded' : ''}
       </p>
     )
   }
@@ -134,16 +155,6 @@ export const FuturesHistoryPanel = ({
   }
 
   if (view === 'tradeHistory') {
-    // What the operator traded is a position, not an execution: one market close
-    // arrives as five fills in the same second, and five rows of a sixth of the
-    // PnL each is not the number anybody reviews a session with.
-    //
-    // And this is the log of positions that are *finished*: entered, exited, and
-    // what came of it. A position still running has no exit and no result, so it
-    // belongs to the live positions table above, not to a history — listing it
-    // here put half-empty rows among the closed ones and read as noise.
-    const rounds = buildFuturesTradeRounds(trades)
-      .filter(round => !round.open && round.exitPrice !== null)
     if (rounds.length === 0) {
       return <p className="futures-workstation-empty">No closed positions{scope}.</p>
     }

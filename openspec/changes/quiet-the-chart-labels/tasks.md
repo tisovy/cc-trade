@@ -3,6 +3,10 @@
 - [x] 1.1 Draw the order handle, its value and its cancel control at seven tenths
   of their size: 11.5px → 8px, 12.5px → 8.75px, 15px → 10.5px, with the plate's
   height, padding and gaps taken down with them.
+- [x] 1.2 Cover the handle of an exchange-managed order too. It is drawn as a bare
+  plate with no grip, so its side label was not reached by the rule that sized the
+  others and stayed at the 16px the layer inherits — measured beside its own 9px
+  value. Found in audit, after the first pass.
 
 ## 2. The Library's Own Labels
 

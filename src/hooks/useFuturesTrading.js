@@ -76,6 +76,9 @@ const createEmptyHistory = () => ({
   // read" — and said nothing at all where contracts had been dropped.
   symbols: [],
   discovered: 0,
+  // Whether that count is the whole set. Discovery can fail, or run out of pages
+  // on a week busier than the walk is bounded to.
+  discoveryComplete: true,
   error: null,
 })
 
@@ -334,6 +337,7 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection } = {}) => {
             trades: Array.isArray(history.trades) ? history.trades : [],
             symbols: Array.isArray(history.symbols) ? history.symbols : [],
             discovered: Number.isSafeInteger(history.discovered) ? history.discovered : 0,
+            discoveryComplete: history.discoveryComplete !== false,
             error: history.error ?? null,
           },
         }))

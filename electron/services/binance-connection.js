@@ -1904,30 +1904,42 @@ export function setupBinanceConnection({
                     remember(order?.symbol);
                 }
             }
-            try {
-                // Walked from the oldest end of the window to the newest, because
-                // that is the only direction the endpoint offers. Each full page
-                // means there is a newer one behind it; the pages are then read
-                // back to front, so the contract traded most recently leads the
-                // list and the cap below drops the stalest rather than the newest.
-                const pages = [];
-                let startTime = Date.now() - FUTURES_HISTORY_WINDOW_MS;
-                for (let page = 0; page < FUTURES_INCOME_MAX_PAGES; page += 1) {
-                    const traded = await futuresRestLimiter.execute(
+            // Walked from the oldest end of the window to the newest, because that
+            // is the only direction the endpoint offers. Each full page means there
+            // is a newer one behind it; the pages are then read back to front, so
+            // the contract traded most recently leads the list and the cap below
+            // drops the stalest rather than the newest.
+            //
+            // A page that fails is caught where it happens rather than around the
+            // walk: the pages already in hand are contracts the review can cover,
+            // and throwing them away because the third read timed out would drop
+            // history the desk had already paid for.
+            const pages = [];
+            let complete = true;
+            let startTime = Date.now() - FUTURES_HISTORY_WINDOW_MS;
+            for (let page = 0; page < FUTURES_INCOME_MAX_PAGES; page += 1) {
+                let traded = null;
+                try {
+                    traded = await futuresRestLimiter.execute(
                         () => futuresTradingAdapter.getTradedSymbolPage({ startTime }),
                         FUTURES_INCOME_READ_WEIGHT,
                     );
-                    pages.push(traded?.symbols ?? []);
-                    if (!traded?.full || !Number.isFinite(traded?.lastTime)) break;
-                    startTime = traded.lastTime + 1;
+                } catch (error) {
+                    // The fan-out still covers what the desk already knows about;
+                    // only contracts closed and switched away from go unlisted.
+                    logger.warn('[futures-history] traded-symbol discovery failed:', error?.code || error?.message);
+                    complete = false;
+                    break;
                 }
-                for (const page of pages.reverse()) {
-                    for (const symbol of page) remember(symbol);
-                }
-            } catch (error) {
-                // The fan-out still covers what the desk already knows about; only
-                // contracts closed and switched away from go unlisted.
-                logger.warn('[futures-history] traded-symbol discovery failed:', error?.code || error?.message);
+                pages.push(traded?.symbols ?? []);
+                if (!traded?.full || !Number.isFinite(traded?.lastTime)) break;
+                startTime = traded.lastTime + 1;
+                // The last page still came back full: there are contracts behind it
+                // this walk will not reach, and the review must not imply otherwise.
+                if (page === FUTURES_INCOME_MAX_PAGES - 1) complete = false;
+            }
+            for (const page of pages.reverse()) {
+                for (const symbol of page) remember(symbol);
             }
             if (symbols.length > FUTURES_HISTORY_MAX_SYMBOLS) {
                 logger.info(`[futures-history] ${symbols.length} contracts traded; reading the ${FUTURES_HISTORY_MAX_SYMBOLS} most relevant: ${symbols.slice(0, FUTURES_HISTORY_MAX_SYMBOLS).join(', ')}`);
@@ -1935,6 +1947,10 @@ export function setupBinanceConnection({
             return {
                 symbols: symbols.slice(0, FUTURES_HISTORY_MAX_SYMBOLS),
                 discovered: symbols.length,
+                // Whether the desk knows the whole set it is choosing from. A
+                // discovery that failed or ran out of pages leaves a review that
+                // covers everything it found — and cannot say that is everything.
+                discoveryComplete: complete,
             };
         };
 
@@ -1947,7 +1963,9 @@ export function setupBinanceConnection({
         // does not blank the others — only a total failure is reported as an error.
         const handleFuturesHistory = async (command) => {
             const { symbol } = command;
-            const { symbols, discovered } = await collectFuturesHistorySymbols(symbol);
+            const {
+                symbols, discovered, discoveryComplete,
+            } = await collectFuturesHistorySymbols(symbol);
             const orders = [];
             const trades = [];
             const unavailable = [];
@@ -1979,6 +1997,7 @@ export function setupBinanceConnection({
                         symbol,
                         symbols,
                         discovered,
+                        discoveryComplete,
                         orders: [],
                         trades: [],
                         error: {
@@ -1999,6 +2018,7 @@ export function setupBinanceConnection({
                     // difference: an operator who cannot see yesterday's losses must
                     // be told the list is bounded, not left to conclude there were none.
                     discovered,
+                    discoveryComplete,
                     orders: orders.sort((left, right) => right.time - left.time),
                     trades: trades.sort((left, right) => right.time - left.time),
                     error: null,

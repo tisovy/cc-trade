@@ -163,8 +163,40 @@ describe('FuturesHistoryPanel', () => {
         }}
       />,
     )
-    expect(screen.getByText(/2 of 17 contracts traded were read/))
+    expect(screen.getByText(/2 of 17 contracts read/))
       .toHaveTextContent(new Date(1_784_000_000_000).toLocaleString())
+  })
+
+  // The count of contracts is itself a read that can fail or run out of pages.
+  // Stated flatly it reads as a total, which is the same fault one level up.
+  it('says when it does not know how many contracts were traded', () => {
+    const trades = [
+      { id: 1, symbol: 'BICOUSDT', side: 'BUY', price: '2.500', quantity: '4000', commission: '0.03', realizedPnl: '0', time: 1_784_000_000_000 },
+      { id: 2, symbol: 'BICOUSDT', side: 'SELL', price: '2.600', quantity: '4000', commission: '0.03', realizedPnl: '400', time: 1_784_000_002_000 },
+    ]
+    const { rerender } = render(
+      <FuturesHistoryPanel
+        view="tradeHistory"
+        symbol="BICOUSDT"
+        tickSizes={ticks}
+        history={{
+          ...history, symbols: ['BICOUSDT'], discovered: 1, discoveryComplete: false, trades,
+        }}
+      />,
+    )
+    expect(screen.getByText(/more may have been traded/)).toBeInTheDocument()
+
+    rerender(
+      <FuturesHistoryPanel
+        view="tradeHistory"
+        symbol="BICOUSDT"
+        tickSizes={ticks}
+        history={{
+          ...history, symbols: ['BICOUSDT'], discovered: 1, discoveryComplete: true, trades,
+        }}
+      />,
+    )
+    expect(screen.queryByText(/more may have been traded/)).not.toBeInTheDocument()
   })
 
   it('says so plainly when the window holds no closed position at all', () => {
