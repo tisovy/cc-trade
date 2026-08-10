@@ -95,6 +95,25 @@ const moduleMocks = vi.hoisted(() => {
                 ticker24hr: vi.fn().mockResolvedValue({
                     data: vi.fn().mockResolvedValue([]),
                 }),
+                newOrder: vi.fn().mockResolvedValue({
+                    data: vi.fn().mockResolvedValue({
+                        symbol: 'PAXUSDT', orderId: 41, status: 'NEW', side: 'BUY',
+                    }),
+                }),
+                getOrder: vi.fn().mockResolvedValue({
+                    data: vi.fn().mockResolvedValue({
+                        symbol: 'PAXUSDT', orderId: 41, status: 'NEW', side: 'BUY',
+                    }),
+                }),
+                getAccount: vi.fn().mockResolvedValue({
+                    data: vi.fn().mockResolvedValue({ balances: [] }),
+                }),
+                getOpenOrders: vi.fn().mockResolvedValue({
+                    data: vi.fn().mockResolvedValue([]),
+                }),
+                myTrades: vi.fn().mockResolvedValue({
+                    data: vi.fn().mockResolvedValue([]),
+                }),
             },
             websocketStreams: { connect: state.connect },
         };
@@ -2921,6 +2940,88 @@ describe('setupBinanceConnection user-data orchestration', () => {
             symbol: 'BTCUSDT',
             clientOrderId: 'ambiguous-2',
         });
+    });
+
+    // Spot has no per-order presentation to read an execution report as an
+    // answer, so its unknown outcome is ended by name or not at all: the desk
+    // stood at "outcome unconfirmed" over an order Binance had confirmed it
+    // holds, and every envelope about it named no order to match on.
+    it('answers a Spot unresolved outcome by the identity it was raised with', async () => {
+        await connectRenderer('spot');
+        moduleMocks.spotClient.restAPI.newOrder.mockRejectedValueOnce(
+            Object.assign(new Error('Service unavailable'), { status: 503 }),
+        );
+
+        const pending = moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'trade.placeOrder',
+                version: 1,
+                marketType: 'spot',
+                accountId: 'default',
+                clientOrderId: 'spot-ambiguous-1',
+                symbol: 'PAXUSDT',
+                side: 'BUY',
+                orderType: 'LIMIT',
+                timeInForce: 'GTC',
+                price: '0.9990',
+                quantity: '20',
+            }),
+        });
+        await vi.advanceTimersByTimeAsync(5_000);
+        await pending;
+
+        const payloads = emitted();
+        expect(payloads.find(payload => payload.command_unresolved)?.command_unresolved.details)
+            .toMatchObject({
+                marketType: 'spot',
+                symbol: 'PAXUSDT',
+                clientOrderId: 'spot-ambiguous-1',
+            });
+        // The exchange holds it, so the warning is withdrawn — by name.
+        expect(payloads.find(payload => payload.command_resolved)?.command_resolved.details)
+            .toMatchObject({
+                marketType: 'spot',
+                symbol: 'PAXUSDT',
+                clientOrderId: 'spot-ambiguous-1',
+                reconciled: true,
+            });
+        expect(payloads.some(payload => payload.command_rejected)).toBe(false);
+    });
+
+    it('names the order in a Spot refusal, so the refusal can end the warning it raised', async () => {
+        await connectRenderer('spot');
+        moduleMocks.spotClient.restAPI.newOrder.mockRejectedValueOnce(
+            Object.assign(new Error('Account has insufficient balance'), {
+                status: 400,
+                code: -2010,
+            }),
+        );
+
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'trade.placeOrder',
+                version: 1,
+                marketType: 'spot',
+                accountId: 'default',
+                clientOrderId: 'spot-refused-1',
+                symbol: 'PAXUSDT',
+                side: 'BUY',
+                orderType: 'LIMIT',
+                timeInForce: 'GTC',
+                price: '0.9990',
+                quantity: '20',
+            }),
+        });
+        await flushMicrotasks();
+
+        expect(emitted().find(payload => payload.command_rejected)?.command_rejected.details)
+            .toMatchObject({
+                marketType: 'spot',
+                symbol: 'PAXUSDT',
+                clientOrderId: 'spot-refused-1',
+            });
     });
 
     it('does not conclude a placement is absent while the exchange is still catching up', async () => {

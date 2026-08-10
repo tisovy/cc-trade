@@ -229,10 +229,14 @@ export const createFuturesMarkPriceFeed = ({
         });
     };
 
+    // A stall is a socket that will not deliver, and rebuilding it immediately —
+    // every stall window, for as long as the feed stays dead — is a reconnect
+    // loop with no spacing. The marks go the moment the stall is seen; the
+    // socket comes back on the same delay a close would have used.
     function restart() {
         if (stopped || symbols.length === 0) return;
         disconnect();
-        connect();
+        scheduleReconnect(generation);
     }
 
     function scheduleReconnect(socketGeneration) {

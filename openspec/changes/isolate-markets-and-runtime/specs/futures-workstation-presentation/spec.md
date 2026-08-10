@@ -67,6 +67,10 @@ cause another activation to be requested.
 - **WHEN** two `activate_market` frames arrive before the first has finished being applied
 - **THEN** they are applied in the order received and the backend settles on the market the later frame requested
 
+#### Scenario: A frame the transport builds for itself
+- **WHEN** a channel subscription or unsubscription is issued while a market is activated
+- **THEN** it carries the activation exactly as a frame composed by a caller does
+
 #### Scenario: A stamped request reaches a channel that validates its own shape
 - **WHEN** a request for a channel that accepts an exact set of keys is issued under the current activation
 - **THEN** the channel receives the request it defines and serves it, while a request issued under a superseded activation is still refused before the channel sees it

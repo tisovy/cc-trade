@@ -381,4 +381,134 @@ describe('DataContext spot chart depth', () => {
         expect(chartTimes()).toEqual([...times(page), ...times(live)])
         expect(desk().chart.at(-1).close).toBe(999)
     })
+
+    // An order the exchange never confirmed is the one warning that must not be
+    // replaced by the next thing to go wrong: an operator who stops seeing it
+    // sends the order again, and the first one may be live.
+    describe('a Spot command whose outcome is unknown', () => {
+        const OutcomeConsumer = () => {
+            const { commandOutcome, unresolvedOutcome } = useDataContext()
+            return (
+                <div>
+                    <span data-testid="unresolved">{unresolvedOutcome?.code ?? 'none'}</span>
+                    <span data-testid="rejected">{commandOutcome?.code ?? 'none'}</span>
+                </div>
+            )
+        }
+
+        const renderOutcomes = () => render(
+            <TestWrapper>
+                <DataProvider>
+                    <OutcomeConsumer />
+                </DataProvider>
+            </TestWrapper>,
+        )
+
+        const send = payload => act(() => webSocketMocks.handleMessage({
+            data: JSON.stringify(payload),
+        }, webSocketMocks.connection))
+
+        const unresolvedPlacement = {
+            command_unresolved: {
+                request: 'trade.placeOrder',
+                code: 'SPOT_OUTCOME_PENDING',
+                message: 'Binance did not confirm this order.',
+                details: {
+                    marketType: 'spot',
+                    symbol: 'PAXUSDT',
+                    orderId: null,
+                    clientOrderId: 'spot-1',
+                },
+                timestamp: 1,
+            },
+        }
+
+        it('holds it while another order is refused', () => {
+            renderOutcomes()
+            send(unresolvedPlacement)
+            expect(screen.getByTestId('unresolved').textContent).toBe('SPOT_OUTCOME_PENDING')
+
+            send({
+                command_rejected: {
+                    request: 'trade.cancelOrder',
+                    code: 'SPOT_API_ERROR',
+                    message: 'Unknown order sent.',
+                    details: {
+                        marketType: 'spot',
+                        symbol: 'BTCUSDT',
+                        orderId: 9,
+                        clientOrderId: 'other',
+                    },
+                    timestamp: 2,
+                },
+            })
+
+            expect(screen.getByTestId('unresolved').textContent).toBe('SPOT_OUTCOME_PENDING')
+            expect(screen.getByTestId('rejected').textContent).toBe('SPOT_API_ERROR')
+        })
+
+        it('withdraws it when reconciliation answers for that order', () => {
+            renderOutcomes()
+            send(unresolvedPlacement)
+
+            send({
+                command_resolved: {
+                    request: 'trade.placeOrder',
+                    code: 'SPOT_OUTCOME_EXECUTED',
+                    message: 'Binance holds this order — it was accepted.',
+                    details: {
+                        marketType: 'spot',
+                        symbol: 'PAXUSDT',
+                        orderId: null,
+                        clientOrderId: 'spot-1',
+                        reconciled: true,
+                    },
+                    timestamp: 3,
+                },
+            })
+
+            expect(screen.getByTestId('unresolved').textContent).toBe('none')
+            // A resolution ends a warning; it is not a refusal to display.
+            expect(screen.getByTestId('rejected').textContent).toBe('none')
+        })
+
+        it('withdraws it when that order is the one refused', () => {
+            renderOutcomes()
+            send(unresolvedPlacement)
+
+            send({
+                command_rejected: {
+                    request: 'trade.placeOrder',
+                    code: 'SPOT_API_ERROR',
+                    message: 'Order would immediately match and take.',
+                    details: {
+                        marketType: 'spot',
+                        symbol: 'PAXUSDT',
+                        orderId: null,
+                        clientOrderId: 'spot-1',
+                        binanceCode: -2010,
+                    },
+                    timestamp: 4,
+                },
+            })
+
+            expect(screen.getByTestId('unresolved').textContent).toBe('none')
+            expect(screen.getByTestId('rejected').textContent).toBe('SPOT_API_ERROR')
+        })
+
+        it('leaves Futures outcomes to the Futures desk', () => {
+            renderOutcomes()
+            send({
+                command_unresolved: {
+                    request: 'trade.placeOrder',
+                    code: 'FUTURES_OUTCOME_PENDING',
+                    message: 'Binance did not confirm this order.',
+                    details: { marketType: 'futures', symbol: 'BTCUSDT', clientOrderId: 'f-1' },
+                    timestamp: 5,
+                },
+            })
+            expect(screen.getByTestId('unresolved').textContent).toBe('none')
+            expect(screen.getByTestId('rejected').textContent).toBe('none')
+        })
+    })
 })

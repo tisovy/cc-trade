@@ -5,6 +5,8 @@
 - [x] 1.3 Leave the warning standing when an unrelated symbol's or order's update arrives.
 - [x] 1.4 Clear an unresolved command whose identity is unknown only on the reconciliation answer for that command, never on unrelated traffic.
 - [x] 1.5 Prove by test that an ETH execution update does not clear an unresolved BTC placement, and that the BTC answer does.
+- [x] 1.6 Give Spot the same rule its requirement already stated: the identity travels on the Spot rejection as well as the unresolved envelope, reconciliation answers a found order by name, and the desk holds the unknown outcome apart from ordinary refusals so a later one cannot take its place. *(Added 2026-08-10 from a review of the delivery: only the Futures desk was made to match on identity, while the Spot banner still showed the last outcome to arrive.)*
+- [x] 1.7 Prove by test that a Spot warning survives another order's refusal, that its own refusal or reconciliation answer withdraws it, and that Futures outcomes are still left to the Futures desk.
 
 ## 2. "Not Found" Is Provisional Until Asked Again
 
@@ -23,5 +25,5 @@
 
 ## 4. Verification
 
-- [ ] 4.1 `npm run lint`, `npm test`, `npm run check:command-path`.
+- [x] 4.1 `npm run lint`, `npm test`, `npm run check:command-path`.
 - [ ] 4.2 Operator confirms on live data that an unresolved outcome survives unrelated traffic and that cancel-all clears stop orders.

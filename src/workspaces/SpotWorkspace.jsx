@@ -43,6 +43,8 @@ function SpotWorkspaceContent() {
     marketGeneration,
     commandOutcome,
     dismissCommandOutcome,
+    unresolvedOutcome,
+    dismissUnresolvedOutcome,
   } = useDataContext();
   const { alerts, checkPriceAlerts, triggeredAlerts: _triggeredAlerts } = useAlertContext();
   const [showOrderModal, setShowOrderModal] = useState(false);
@@ -487,13 +489,33 @@ function SpotWorkspaceContent() {
           order the exchange refused is not something to notice in passing. An
           unconfirmed one carries no retry, because resubmitting an order that
           may already be live is how a duplicate is made. */}
+      {/* The unconfirmed one is shown above, and beside, any later refusal: they
+          are different facts about different orders, and the second used to take
+          the first one's place. */}
+      {unresolvedOutcome ? (
+        <div className="spot-command-outcome is-unresolved" role="alert">
+          <strong>
+            Outcome unconfirmed
+            {unresolvedOutcome.code ? ` · ${unresolvedOutcome.code}` : ''}
+            {unresolvedOutcome.binanceCode !== null ? ` · Binance ${unresolvedOutcome.binanceCode}` : ''}
+          </strong>
+          <span>{unresolvedOutcome.message}</span>
+          <button
+            type="button"
+            onClick={dismissUnresolvedOutcome}
+            aria-label="Dismiss unconfirmed order outcome"
+          >
+            Dismiss
+          </button>
+        </div>
+      ) : null}
       {commandOutcome ? (
         <div
           className={`spot-command-outcome is-${commandOutcome.kind}`}
           role="alert"
         >
           <strong>
-            {commandOutcome.kind === 'unresolved' ? 'Outcome unconfirmed' : 'Order refused'}
+            Order refused
             {commandOutcome.code ? ` · ${commandOutcome.code}` : ''}
             {commandOutcome.binanceCode !== null ? ` · Binance ${commandOutcome.binanceCode}` : ''}
           </strong>

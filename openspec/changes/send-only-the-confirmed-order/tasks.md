@@ -26,5 +26,5 @@
 
 ## 5. Verification
 
-- [ ] 5.1 `npm run lint`, `npm test`, `npm run check:command-path`, `npm run check:futures-production`.
+- [x] 5.1 `npm run lint`, `npm test`, `npm run check:command-path`, `npm run check:futures-production`.
 - [ ] 5.2 Operator confirms on live data that a confirmation sends the size shown and that a panel that fails to send stays open.

@@ -15,6 +15,10 @@ order or symbol SHALL leave the unresolved state exactly as it was.
 - **WHEN** an execution report or rejection carrying the unresolved command's identity arrives
 - **THEN** the unresolved outcome is cleared and replaced by that answer
 
+#### Scenario: Both markets hold it the same way
+- **WHEN** a Spot command's outcome is unknown and a different Spot order is refused afterwards
+- **THEN** the unknown outcome is still shown, beside the refusal rather than replaced by it
+
 #### Scenario: The command could not be identified
 - **WHEN** an ambiguous failure occurred on a command whose identity the system could not determine
 - **THEN** the unresolved outcome is cleared only by the reconciliation result for that command, never by unrelated traffic

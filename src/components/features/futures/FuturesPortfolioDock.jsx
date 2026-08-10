@@ -30,10 +30,14 @@ const marginModeLabel = mode => (
 // to say "0 open" and "No open positions." before the first account read had
 // even answered, which is the one reading an operator must never be given
 // falsely — a flat account and an unknown account call for opposite actions.
+//
+// No resource at all is the same unknown: a dock wired to a workstation with no
+// execution state behind it knows nothing about the account, and the honest
+// reading of nothing is "not read", not "nothing there".
 const EMPTY_RESOURCES = Object.freeze({})
 const describeRowsAvailability = (resources) => {
-  if (resources.length === 0) return { known: true, label: null }
-  const everRead = resources.every(resource => resource?.lastSuccessfulAt != null)
+  const everRead = resources.length > 0
+    && resources.every(resource => resource?.lastSuccessfulAt != null)
   if (everRead) return { known: true, label: null }
   const failed = resources.some(resource => resource?.status === 'error')
   return {
@@ -71,11 +75,13 @@ export const FuturesPortfolioDock = ({
     ? 'positive'
     : totalUnrealizedPnl < 0 ? 'negative' : 'flat'
   const priceOf = (symbol, value) => formatExchangePrice(value, tickSizes[symbol] ?? null)
+  // A caller that passes the account state through may pass null for it.
+  const resources = accountResources ?? EMPTY_RESOURCES
   const positionsAvailability = describeRowsAvailability(
-    [accountResources.positions].filter(Boolean),
+    [resources.positions].filter(Boolean),
   )
   const ordersAvailability = describeRowsAvailability(
-    [accountResources.regularOrders, accountResources.algoOrders].filter(Boolean),
+    [resources.regularOrders, resources.algoOrders].filter(Boolean),
   )
 
   const openHistory = (tab) => {

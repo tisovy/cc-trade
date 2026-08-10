@@ -20,6 +20,7 @@ import {
   createFuturesSymbolConfigCommand,
 } from '../utils/tradingCommands.js'
 import { createUnsentCommandStore } from '../utils/unsentTradingCommand.js'
+import { answersUnresolvedCommand } from '../utils/unresolvedCommandIdentity.js'
 
 const OPEN_ORDER_STATUSES = new Set(['NEW', 'PARTIALLY_FILLED'])
 const TERMINAL_ORDER_STATUSES = new Set([
@@ -60,8 +61,12 @@ const createInitialAccountResources = () => Object.fromEntries(
 // worse — but nothing may treat them as current until a read answers on the
 // connection that is up now. `stale` is the status the readiness gate already
 // understands, so sizing refuses on it and exits stay available.
-const markAccountResourcesUnconfirmed = resources => Object.fromEntries(
-  Object.entries(resources ?? {}).map(([name, resource]) => [
+// Returns what it was given when nothing was confirmed in the first place, so a
+// caller can tell "already unconfirmed" from "just became unconfirmed".
+const markAccountResourcesUnconfirmed = (resources) => {
+  const entries = Object.entries(resources ?? {})
+  if (!entries.some(([, resource]) => resource?.status === 'ready')) return resources
+  return Object.fromEntries(entries.map(([name, resource]) => [
     name,
     resource?.status === 'ready'
       ? {
@@ -73,8 +78,8 @@ const markAccountResourcesUnconfirmed = resources => Object.fromEntries(
         },
       }
       : resource,
-  ]),
-)
+  ]))
+}
 
 const isOpenSocket = (connection) => {
   const openState = globalThis.WebSocket?.OPEN ?? 1
@@ -150,30 +155,6 @@ const orderExchangeId = (order) => {
 const orderIdentity = (order) => {
   const normalized = normalizeOrderSource(order)
   return `${normalized.orderKind}:${normalized.symbol ?? ''}:${orderExchangeId(order) ?? ''}`
-}
-
-// Does this message answer the command whose outcome is unknown?
-//
-// Only its own answer may clear it. Any execution update used to do so, so a
-// placement on one contract stopped warning as soon as an unrelated order on
-// another contract ticked — and an operator reading no warning sends the order
-// again. A command the backend could not identify is answered only by the
-// resolution envelope for that command, never by order traffic.
-const answersUnresolvedCommand = (unresolved, { symbol, orderId, clientOrderId, request } = {}) => {
-  if (!unresolved) return false
-  const held = unresolved.details ?? {}
-  const heldOrderId = held.orderId ?? null
-  const heldClientOrderId = held.clientOrderId ?? null
-  const sameSymbol = held.symbol == null || symbol == null || String(held.symbol) === String(symbol)
-  if (heldOrderId === null && heldClientOrderId === null) {
-    // Nothing to match on but the command itself.
-    return request != null && request === unresolved.request
-  }
-  if (!sameSymbol) return false
-  return (heldOrderId !== null && orderId != null && String(heldOrderId) === String(orderId))
-    || (heldClientOrderId !== null
-      && clientOrderId != null
-      && String(heldClientOrderId) === String(clientOrderId))
 }
 
 // An order that has settled cannot rest again: the exchange does not reuse an
@@ -322,16 +303,19 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection, marketGeneration = n
   useEffect(() => {
     if (!enabled || !isUsableSocket(wsConnection)) {
       // Keep the last-known account snapshot so re-entering Futures mode is
-      // usable immediately; the refresh sent on re-enable reconciles it.
+      // usable immediately; the refresh sent on re-enable reconciles it. The
+      // early return has to answer for the whole update, not only the two fields
+      // it started with: a held resource still marked ready is a reading nothing
+      // has confirmed on this connection.
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      setState(previous => (previous.connected === false && previous.lastError === null
-        ? previous
-        : {
-          ...previous,
-          connected: false,
-          lastError: null,
-          accountResources: markAccountResourcesUnconfirmed(previous.accountResources),
-        }))
+      setState((previous) => {
+        const accountResources = markAccountResourcesUnconfirmed(previous.accountResources)
+        return previous.connected === false
+          && previous.lastError === null
+          && accountResources === previous.accountResources
+          ? previous
+          : { ...previous, connected: false, lastError: null, accountResources }
+      })
       return undefined
     }
 

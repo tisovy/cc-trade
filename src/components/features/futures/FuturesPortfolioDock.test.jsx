@@ -353,10 +353,26 @@ describe('FuturesPortfolioDock', () => {
     expect(screen.getByRole('table', { name: 'Working orders' })).toBeInTheDocument()
   })
 
+  // Both readings are stated out loud; which one is stated depends on whether
+  // the account has been read. A dock with no account state behind it knows
+  // nothing, and said "nothing is open".
   it('states emptiness explicitly instead of rendering a blank strip', () => {
-    render(<FuturesPortfolioDock selectedSymbol="BTCUSDT" />)
+    const read = { status: 'ready', data: [], lastSuccessfulAt: 1_760_000_000_000, error: null }
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        accountResources={{ positions: read, regularOrders: read, algoOrders: read }}
+      />,
+    )
     expect(screen.getByText('No open positions.')).toBeInTheDocument()
     expect(screen.getByText('No working orders.')).toBeInTheDocument()
+  })
+
+  it('says it has not read the account when nothing tells it that it has', () => {
+    render(<FuturesPortfolioDock selectedSymbol="BTCUSDT" />)
+    expect(screen.getAllByText('Not read yet.')).toHaveLength(2)
+    expect(screen.queryByText('No open positions.')).toBeNull()
+    expect(screen.queryByText('No working orders.')).toBeNull()
   })
 
   // An unstyled control does not fail loudly: it renders as a browser button

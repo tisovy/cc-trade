@@ -236,6 +236,12 @@ describe('createFuturesMarkPriceFeed', () => {
         // own price: consumers fall back to the account snapshot.
         expect(harness.broadcasts.at(-1).marks).toEqual({});
         expect(harness.sockets[0].closed).toBe(true);
+        // The socket comes back on the reconnect delay, not instantly: a feed
+        // that stays dead would otherwise rebuild itself every stall window
+        // with no spacing at all.
+        expect(harness.sockets).toHaveLength(1);
+
+        harness.runTimers();
         expect(harness.sockets).toHaveLength(2);
 
         harness.sockets[1].emit('open');

@@ -17,6 +17,7 @@ import {
   spotChartIntervalSeconds,
 } from '../utils/spotChartHistory';
 import { incrementTradeCount } from '../utils/pnl';
+import { answersUnresolvedCommand } from '../utils/unresolvedCommandIdentity.js';
 import {
   CHANNEL_TYPES,
   isChannelMessage,
@@ -215,6 +216,13 @@ export const DataProvider = ({
   // unnoticed is the same as no refusal at all.
   const [commandOutcome, setCommandOutcome] = useState(null);
   const dismissCommandOutcome = useCallback(() => setCommandOutcome(null), []);
+  // A command whose outcome the exchange never confirmed is held apart from the
+  // ordinary ones. It shared the slot, so the next refusal — of any other order
+  // — took its place, and an operator who no longer sees the warning sends the
+  // order that may already be live a second time. It leaves on its own answer,
+  // or when the operator dismisses it.
+  const [unresolvedOutcome, setUnresolvedOutcome] = useState(null);
+  const dismissUnresolvedOutcome = useCallback(() => setUnresolvedOutcome(null), []);
   const [filters, setFilters] = useState({});
   const [depth, setDepth] = useState({ bids: {}, asks: {} });
   const [trades, setTrades] = useState([]);
@@ -1198,18 +1206,38 @@ export const DataProvider = ({
     // A refused or unconfirmed Spot command used to reach only the main-process
     // log, so a failed order was invisible at the desk. Futures owns its own
     // presentation, so its outcomes are left alone here.
-    const outcome = rawMessage.command_rejected ?? rawMessage.command_unresolved;
+    const outcome = rawMessage.command_rejected
+      ?? rawMessage.command_unresolved
+      ?? rawMessage.command_resolved;
     if (outcome) {
-      if (outcome.details?.marketType !== 'futures') {
-        setCommandOutcome({
-          kind: rawMessage.command_unresolved ? 'unresolved' : 'rejected',
-          request: outcome.request ?? null,
-          code: outcome.code ?? null,
-          message: outcome.message ?? 'The trading command failed.',
-          binanceCode: outcome.details?.binanceCode ?? null,
-          timestamp: outcome.timestamp ?? null,
-        });
+      if (outcome.details?.marketType === 'futures') return;
+      const reading = {
+        request: outcome.request ?? null,
+        code: outcome.code ?? null,
+        message: outcome.message ?? 'The trading command failed.',
+        binanceCode: outcome.details?.binanceCode ?? null,
+        details: outcome.details ?? null,
+        timestamp: outcome.timestamp ?? null,
+      };
+      if (rawMessage.command_unresolved) {
+        setUnresolvedOutcome({ kind: 'unresolved', ...reading });
+        return;
       }
+      // Whether this envelope withdraws the standing warning is a question about
+      // identity, not about arrival order: only the answer to that command ends
+      // it.
+      const answered = {
+        symbol: outcome.details?.symbol,
+        orderId: outcome.details?.orderId,
+        clientOrderId: outcome.details?.clientOrderId,
+        request: outcome.request,
+      };
+      setUnresolvedOutcome(previous => (
+        answersUnresolvedCommand(previous, answered) ? null : previous
+      ));
+      // A resolution is the end of a warning, not a notice of its own.
+      if (rawMessage.command_resolved) return;
+      setCommandOutcome({ kind: 'rejected', ...reading });
       return;
     }
 
@@ -1402,6 +1430,8 @@ export const DataProvider = ({
     orders,
     commandOutcome,
     dismissCommandOutcome,
+    unresolvedOutcome,
+    dismissUnresolvedOutcome,
     filters,
     depth,
     trades,

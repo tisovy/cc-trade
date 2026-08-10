@@ -1567,25 +1567,26 @@ export function setupBinanceConnection({
                 logger.error(`${label} response:`, error.response.data);
             }
 
+            // The identity travels with every envelope about this command, so a
+            // renderer holding an unknown outcome can tell this command's answer
+            // from another order's traffic — the rejection that concludes the
+            // reconciliation included.
+            const identity = {
+                symbol: symbol ?? null,
+                orderId: orderId ?? null,
+                clientOrderId: origClientOrderId ?? null,
+            };
             const emitRejection = () => emit(createCommandRejection(
                 action,
                 'SPOT_API_ERROR',
                 describeSpotError(error),
-                { marketType: SPOT_MARKET_TYPE, binanceCode: spotBinanceCode(error) },
+                { marketType: SPOT_MARKET_TYPE, ...identity, binanceCode: spotBinanceCode(error) },
             ));
 
             if (!isIndeterminateTradingFailure(error)) {
                 emitRejection();
                 return;
             }
-            // The identity travels with every envelope about this command, so a
-            // renderer holding an unknown outcome can tell this command's answer
-            // from another order's traffic.
-            const identity = {
-                symbol: symbol ?? null,
-                orderId: orderId ?? null,
-                clientOrderId: origClientOrderId ?? null,
-            };
             if (!symbol || !(orderId || origClientOrderId)) {
                 emit(createCommandUnresolved(
                     action,
@@ -1618,6 +1619,16 @@ export function setupBinanceConnection({
                     if (outcome.exists) {
                         noteSpotMutation();
                         emit({ execution_update: outcome.report });
+                        // Spot has no per-order presentation to read the report
+                        // as an answer, so the warning is withdrawn by name —
+                        // otherwise "outcome unconfirmed" stood over an order
+                        // the exchange had just confirmed it holds.
+                        emit(createCommandResolved(
+                            action,
+                            'SPOT_OUTCOME_EXECUTED',
+                            'Binance holds this order — it was accepted.',
+                            { marketType: SPOT_MARKET_TYPE, ...identity, reconciled: true },
+                        ));
                         await refreshAccountState(symbol);
                         return;
                     }

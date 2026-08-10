@@ -29,9 +29,13 @@ export const TRANSPORT_FAILURES = Object.freeze({
  * @param {string} url - WebSocket URL
  * @param {Object} detailSubscription - Legacy detail subscription config (for backward compat)
  * @param {Function} handleMessage - Message handler callback
+ * @param {Function} [frameMessage] - Last chance to amend an outgoing frame,
+ *   called with the message and the socket it is about to be written to. This is
+ *   the one place every frame passes through: the channel helpers below build
+ *   and send their own, so anything applied only at a caller misses them.
  * @returns {Object} { connection, subscribe, unsubscribe, sendMessage }
  */
-const useWebSocket = (url, detailSubscription, handleMessage) => {
+const useWebSocket = (url, detailSubscription, handleMessage, frameMessage = null) => {
     const [connection, setConnection] = useState(null);
     // A failure the retry loop cannot resolve, held so the operator is told
     // rather than left watching a silent reconnect that will never succeed.
@@ -41,6 +45,10 @@ const useWebSocket = (url, detailSubscription, handleMessage) => {
     const connectionRef = useRef(null);
     const messageHandlerRef = useRef(handleMessage);
     const detailRef = useRef(detailSubscription);
+    // Held in a ref so `sendMessage` keeps one identity: it is a dependency of
+    // the effects that activate the market, and rebuilding it on every change
+    // of what it stamps re-ran them.
+    const frameMessageRef = useRef(frameMessage);
 
     // Track active channel subscriptions
     const channelSubscriptionsRef = useRef(new Map());
@@ -53,6 +61,10 @@ const useWebSocket = (url, detailSubscription, handleMessage) => {
         detailRef.current = detailSubscription;
     }, [detailSubscription]);
 
+    useEffect(() => {
+        frameMessageRef.current = frameMessage;
+    }, [frameMessage]);
+
     /**
      * Send a message over the WebSocket connection
      */
@@ -64,7 +76,10 @@ const useWebSocket = (url, detailSubscription, handleMessage) => {
         }
 
         try {
-            ws.send(JSON.stringify(message));
+            const frame = frameMessageRef.current
+                ? frameMessageRef.current(message, ws)
+                : message;
+            ws.send(JSON.stringify(frame));
             return true;
         } catch (error) {
             console.error('Failed to send WebSocket message:', error);

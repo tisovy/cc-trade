@@ -468,6 +468,47 @@ describe('FuturesTradingTicket', () => {
     expect(Number(order.quantity) * Number(order.price)).toBeLessThan(1000)
   })
 
+  // The staged draft is what Confirm sends, and it names one contract. Leaving
+  // it confirmable after the ticket moved to another would send that contract's
+  // quantity and price against this one's symbol.
+  it('withdraws a staged order when the ticket moves to another contract', () => {
+    const state = createState()
+    const gesture = {
+      id: 13, side: 'BUY', positionSide: 'LONG', positionEffect: 'ENTRY', price: '58445.0',
+    }
+    const { rerender } = render(
+      <FuturesTradingTicket
+        state={state}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+        draftPrice="58445.0"
+      />,
+    )
+    sizeTo(50)
+    rerender(
+      <FuturesTradingTicket
+        state={state}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+        draftPrice="58445.0"
+        gestureRequest={gesture}
+      />,
+    )
+    expect(screen.getByRole('alertdialog')).toBeInTheDocument()
+
+    rerender(
+      <FuturesTradingTicket
+        state={state}
+        selectedSymbol="TUTUSDT"
+        selectedContract={tutContract}
+        draftPrice="0.0250000"
+        gestureRequest={gesture}
+      />,
+    )
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(state.placeOrder).not.toHaveBeenCalled()
+  })
+
   it('refuses a staged order the balance no longer covers instead of re-sizing it', () => {
     const state = createState()
     const gesture = {

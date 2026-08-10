@@ -116,8 +116,11 @@ export const GatewayProvider = ({
   // market-scoped is sent before that.
   const [marketActivation, setMarketActivation] = useState(null)
   // The activation as the socket announced it, kept where a send can read it
-  // without `sendMessage` having to change identity when it moves. Written in
-  // the message handler, which runs before anything that could send under it.
+  // without the send function having to change identity when it moves — that
+  // function is a dependency of the effect that activates the market, and
+  // rebuilding it on every acknowledgement re-ran the effect, which minted the
+  // next acknowledgement. Written in the message handler, which runs before
+  // anything that could send under it.
   const activationRef = useRef(null)
   const startupAlertFingerprintRef = useRef(new Set())
   const deliveredTransportFailureRef = useRef(null)
@@ -173,17 +176,40 @@ export const GatewayProvider = ({
     }
   }, [])
 
+  // Every market-scoped frame carries the activation it was issued under, so a
+  // frame that was in flight across a switch cannot be applied to the market
+  // that is active now. The market name alone does not separate them: Spot →
+  // Futures → Spot leaves the name equal to what the stale frame carries.
+  //
+  // Stamped here, at the socket, rather than at a caller: the channel helpers
+  // build and send their own frames, so a stamp applied only to `sendMessage`
+  // left every subscribe and unsubscribe unstamped. The activation is compared
+  // against the socket being written to — a reconnect reaches a backend that has
+  // activated nothing, and the acknowledgement of the previous socket says
+  // nothing about this one.
+  const stampActivation = useCallback((message, socket) => {
+    const held = activationRef.current
+    if (!held
+      || held.connection !== socket
+      || message?.action === 'activate_market'
+      || message?.action === 'get_startup_status') {
+      return message
+    }
+    return { ...message, generation: held.generation }
+  }, [])
+
   const {
     connection: wsConnection,
     failure: transportFailure,
     reconnect: reconnectTransport,
-    sendMessage: sendRawMessage,
+    sendMessage,
     subscribe,
     unsubscribe,
   } = useWebSocket(
     wsUrl,
     activeMarketMode === MARKET_WORKSPACES.SPOT ? spotDetailSubscription : null,
     handleSocketUpdate,
+    stampActivation,
   )
   const openState = globalThis.WebSocket?.OPEN ?? 1
   const startupStatus = wsConnection?.readyState === openState
@@ -195,36 +221,6 @@ export const GatewayProvider = ({
     ? marketActivation
     : null
   const activationGeneration = activation?.generation ?? null
-
-  // Every market-scoped frame carries the activation it was issued under, so a
-  // frame that was in flight across a switch cannot be applied to the market
-  // that is active now. The market name alone does not separate them: Spot →
-  // Futures → Spot leaves the name equal to what the stale frame carries.
-  //
-  // The generation is read through the ref rather than closed over:
-  // `sendMessage` is a dependency of the effect that sends `activate_market`,
-  // and an acknowledgement changes the generation. Rebuilding the function on
-  // that change re-ran the effect, which activated the market again, which
-  // minted the next generation — an activation loop that refused every frame
-  // issued behind it.
-  const sendMessage = useCallback((message) => {
-    const generation = activationRef.current?.generation ?? null
-    if (generation === null
-      || message?.action === 'activate_market'
-      || message?.action === 'get_startup_status') {
-      return sendRawMessage(message)
-    }
-    return sendRawMessage({ ...message, generation })
-  }, [sendRawMessage])
-
-  // An activation belongs to the socket that acknowledged it. A reconnect
-  // reaches a backend that has activated nothing, so nothing may be stamped with
-  // what the previous socket was told.
-  useEffect(() => {
-    if (activationRef.current && activationRef.current.connection !== wsConnection) {
-      activationRef.current = null
-    }
-  }, [wsConnection])
 
   useEffect(() => {
     if (wsUrl === null) return
