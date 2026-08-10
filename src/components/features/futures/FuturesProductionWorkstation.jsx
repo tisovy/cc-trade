@@ -101,6 +101,20 @@ export const FuturesProductionWorkstation = ({
     setSymbolHistory(previous => rememberFuturesSymbol(previous, nextSymbol))
   }, [])
 
+  // The account review is read once, when the workspace opens on a contract it
+  // can name, and after that only when the operator asks for it. Selecting a
+  // history view renders what is held; the stream keeps it current.
+  const loadHistory = executionState?.loadHistory
+  const executionConnected = executionState?.connected === true
+  const historyReadRef = useRef(false)
+  useEffect(() => {
+    if (!enabled || !executionConnected || typeof loadHistory !== 'function') return
+    if (historyReadRef.current) return
+    // Armed until a frame actually leaves: a read that could not be sent must be
+    // performed by the next usable connection, not silently skipped.
+    if (loadHistory(symbol)) historyReadRef.current = true
+  }, [enabled, executionConnected, loadHistory, symbol])
+
   const handleToggleFavorite = useCallback((favoriteSymbol) => {
     setSymbolHistory(previous => toggleFuturesFavorite(previous, favoriteSymbol))
   }, [])

@@ -1223,7 +1223,10 @@
   background: var(--futures-border);
 }
 
-@media (max-width: 1200px) {
+/* Below this the two dock panels cannot both hold their tables: the positions
+   row alone needs about 780px and the split gives it 699. Stacked, each table
+   has the whole width and neither scrolls sideways. */
+@media (max-width: 1400px) {
   .futures-workstation-dock {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -1303,10 +1306,13 @@
 
 .futures-workstation-dock-table {
   /* The rows scroll, not the panel: a panel that scrolls takes its own heading
-     and its totals away with it. */
+     and its totals away with it. Sideways is left on `auto` deliberately — the
+     order-history view is eight columns wide and the operator asked to keep the
+     scroll on these tables; hiding it there would clip the review instead of
+     letting it be read. The positions row is tightened above so that it fits and
+     no sideways scrollbar appears under it at all. */
   min-height: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
+  overflow: auto;
   display: grid;
   gap: 2px;
   min-width: 0;

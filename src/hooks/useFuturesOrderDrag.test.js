@@ -212,6 +212,29 @@ describe('useFuturesOrderDrag', () => {
     expect(cancelOrder).toHaveBeenCalledTimes(2)
   })
 
+  // A drag that ends because the operator changed contract must not price the
+  // old order at the new contract's tick: 0.0308370 against a 0.01 tick is an
+  // order at 0.03.
+  it('replaces at the tick of the order\'s own contract, not the one on screen', async () => {
+    const cancelOrder = vi.fn(async () => CONFIRMED)
+    const placeOrder = vi.fn(async () => CONFIRMED)
+    const { result, rerender } = renderHook(
+      ({ tickSize }) => useFuturesOrderDrag({ tickSize, cancelOrder, placeOrder }),
+      { initialProps: { tickSize: '0.0000010' } },
+    )
+
+    await act(async () => {
+      await result.current.lift(order({ price: '0.0308370', origQty: '3000' }))
+    })
+    // The operator moves to a contract that trades in whole cents.
+    rerender({ tickSize: '0.01' })
+    await act(async () => { await result.current.drop({ restored: true }) })
+
+    expect(placeOrder).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ price: '0.030837' }),
+    )
+  })
+
   it('carries the exchange leg of a hedged order onto its replacement', async () => {
     const { result, placeOrder } = setup()
 

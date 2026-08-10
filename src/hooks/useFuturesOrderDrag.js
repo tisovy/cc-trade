@@ -80,7 +80,11 @@ export const useFuturesOrderDrag = ({
     const replacement = describeFuturesDragReplacement({
       order: lifted.order,
       price,
-      tickSize,
+      // The tick the order's own contract trades at, captured when it was
+      // lifted. A drag that ends because the operator changed contract would
+      // otherwise round the old order's price to the new contract's tick —
+      // 0.0308370 against a 0.01 tick is an order at 0.03.
+      tickSize: lifted.tickSize,
       maxOrderNotionalUsdt,
     })
     if (!replacement.ok) {
@@ -116,7 +120,7 @@ export const useFuturesOrderDrag = ({
     } finally {
       setReplacementInFlight(false)
     }
-  }, [maxOrderNotionalUsdt, placeOrder, raiseObligation, tickSize])
+  }, [maxOrderNotionalUsdt, placeOrder, raiseObligation])
 
   /**
    * Take the order off the book. Resolves `{ ok: true }` only once Binance has
@@ -154,7 +158,7 @@ export const useFuturesOrderDrag = ({
       return { ok: false }
     }
     setAlert(null)
-    const lifted = Object.freeze({ order, originPrice: order.price })
+    const lifted = Object.freeze({ order, originPrice: order.price, tickSize })
     liftedRef.current = lifted
     const answer = await cancelOrder({
       symbol: order.symbol,

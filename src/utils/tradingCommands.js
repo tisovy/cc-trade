@@ -219,9 +219,13 @@ export const createFuturesPlaceOrderCommand = ({
     ...(reduceOnly === true ? { reduceOnly: true } : {}),
 });
 
-// Moving a futures order is a single atomic amendment (Binance PUT /fapi/v1/order),
-// never cancel + re-place: a failed re-place would leave the trader flat without
-// the order they only meant to reprice.
+// Binance's single atomic amendment (PUT /fapi/v1/order). One call, so a
+// rejection leaves the order exactly where it was — which is why the amend panel
+// reprices by typing through this and not through a cancellation.
+//
+// The chart drag deliberately does not: picking an order up cancels it, and the
+// drop places its replacement. That trade is stated where it is made
+// (`useFuturesOrderDrag`), and the window it opens is the operator's choice.
 export const createFuturesModifyOrderCommand = ({
     accountId,
     clientOrderId,

@@ -24,6 +24,7 @@ import { createUnsentCommandStore } from '../utils/unsentTradingCommand.js'
 import { answersUnresolvedCommand } from '../utils/unresolvedCommandIdentity.js'
 import {
   FUTURES_COMMAND_OUTCOME,
+  futuresCommandAnswerNamesAnOrder,
   readFuturesCommandAnswer,
 } from '../utils/futuresCommandOutcome.js'
 import {
@@ -306,9 +307,16 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection, marketGeneration = n
   }, [])
 
   const answerCommandWatchers = useCallback((answer) => {
+    // An answer that names no order — a paused desk, a local cap, an
+    // unconfigured adapter — answers one command of that action, and the oldest
+    // in flight is the one it is about. Settling every watcher on it would let a
+    // refusal of the ticket's order end the drag's wait for a different one.
+    const settlesOne = !futuresCommandAnswerNamesAnOrder(answer)
     for (const watcher of [...commandWatchersRef.current]) {
       const result = readFuturesCommandAnswer(watcher, answer)
-      if (result) settleCommandWatcher(watcher, result)
+      if (!result) continue
+      settleCommandWatcher(watcher, result)
+      if (settlesOne) return
     }
   }, [settleCommandWatcher])
 
@@ -656,8 +664,9 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection, marketGeneration = n
     }))
   ), [sendCommand])
 
-  // Atomic reprice. Never falls back to cancel + place: a rejected amendment
-  // leaves the original order untouched on the exchange.
+  // Atomic reprice, for the surface that reprices by typing: a rejected
+  // amendment leaves the original order untouched on the exchange. The chart
+  // drag is cancel-and-place instead, by design — see `useFuturesOrderDrag`.
   const modifyOrder = useCallback(({
     symbol: orderSymbol,
     side,
@@ -726,15 +735,11 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection, marketGeneration = n
     return sent
   }, [sendCommand])
 
-  // The one read nobody asks for. The account review is read when the desk first
-  // has a connection to read on; after that, selecting a view renders what is
-  // held and only the panel's refresh control reads again. A send that fails
-  // leaves the attempt armed, so the next usable connection performs it.
-  const historyReadRef = useRef(false)
-  useEffect(() => {
-    if (!enabled || !isUsableSocket(wsConnection) || historyReadRef.current) return
-    if (loadHistory(symbolRef.current)) historyReadRef.current = true
-  }, [enabled, loadHistory, wsConnection])
+  // The opening read is not issued here. This hook is mounted by the workspace,
+  // which is not told which contract is on screen — `symbolRef` is undefined for
+  // its whole life — and a history command without a symbol is completed by the
+  // backend from the *panel's* selection or refused outright. The workstation
+  // issues it, because the workstation is what knows the contract.
 
   const refresh = useCallback((targetSymbol) => sendCommand(createFuturesAccountRefreshCommand({
     symbol: targetSymbol ?? symbolRef.current,

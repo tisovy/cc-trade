@@ -38,17 +38,13 @@ describe('useFuturesTrading', () => {
       wsConnection: socket,
     }))
 
-    // Two frames on subscribe, and only two: the account refresh, and the one
-    // account-history read the desk performs for the whole session. Selecting a
-    // history view reads nothing after this.
-    expect(socket.sent).toHaveLength(2)
+    // One frame on subscribe: the account refresh. The opening history read is
+    // the workstation's, because this hook is not told which contract is on
+    // screen and a history command without a symbol is completed by the backend
+    // from the panel's selection.
+    expect(socket.sent).toHaveLength(1)
     expect(socket.sent[0]).toMatchObject({
       action: 'account.refresh',
-      marketType: 'futures',
-      symbol: 'BTCUSDT',
-    })
-    expect(socket.sent[1]).toMatchObject({
-      action: 'account.history',
       marketType: 'futures',
       symbol: 'BTCUSDT',
     })
@@ -663,9 +659,7 @@ describe('useFuturesTrading', () => {
       result.current.closePosition({ symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '0.01' })
     })
 
-    // The first two frames are the subscribe pair — the account refresh and the
-    // session's one history read — so the operator's own commands start at 2.
-    const [, , placed, canceled, cancelAll, closed] = socket.sent
+    const [, placed, canceled, cancelAll, closed] = socket.sent
     expect(placed).toMatchObject({
       action: 'trade.placeOrder',
       marketType: 'futures',
@@ -709,9 +703,7 @@ describe('useFuturesTrading', () => {
         symbol: 'BTCUSDT', positionSide: 'LONG', direction: 'ADD', amount: '250',
       })
     })
-    // Behind the subscribe pair: the account refresh and the session's one
-    // history read.
-    const [, , adjustment] = socket.sent
+    const [, adjustment] = socket.sent
     expect(adjustment).toMatchObject({
       action: 'trade.adjustPositionMargin',
       marketType: 'futures',
@@ -724,7 +716,7 @@ describe('useFuturesTrading', () => {
     act(() => {
       expect(result.current.adjustPositionMargin({ direction: 'ADD', amount: '250' })).toBe(false)
     })
-    expect(socket.sent).toHaveLength(3)
+    expect(socket.sent).toHaveLength(2)
   })
 
   it('reports disconnect and refuses to send on a closed socket', () => {
@@ -1147,6 +1139,46 @@ describe('useFuturesTrading command answers', () => {
     expect(answer).toMatchObject({ outcome: 'confirmed' })
     // Exactly one frame: the account refresh on subscribe, and this order.
     expect(socket.sent.filter(frame => frame.action === 'trade.placeOrder')).toHaveLength(1)
+  })
+
+  // A refusal that names no order — a paused desk, a local cap — answers one
+  // command of that action. Settling every waiting command on it would let a
+  // refusal of the ticket's order end the drag's wait for a different one.
+  it('settles one command on an answer that names no order', async () => {
+    const socket = createSocket()
+    const { result } = renderTrading(socket)
+
+    const answers = []
+    act(() => {
+      result.current.placeOrderAndConfirm({ symbol: 'BTCUSDT', side: 'BUY', price: '1', quantity: '1' })
+        .then(outcome => answers.push(['first', outcome]))
+      result.current.placeOrderAndConfirm({ symbol: 'BTCUSDT', side: 'SELL', price: '2', quantity: '1' })
+        .then(outcome => answers.push(['second', outcome]))
+    })
+    await act(async () => {
+      socket.receive({
+        command_rejected: {
+          request: 'trade.placeOrder',
+          code: 'FUTURES_ORDER_CAP_EXCEEDED',
+          message: 'above the cap',
+          details: { marketType: 'futures', capUsdt: '200' },
+        },
+      })
+    })
+
+    expect(answers).toEqual([['first', expect.objectContaining({ outcome: 'refused' })]])
+
+    // The second is still waiting, and its own report answers it.
+    const second = socket.sent.at(-1)
+    await act(async () => {
+      socket.receive({
+        futures_execution_update: {
+          symbol: 'BTCUSDT', orderId: 5, clientOrderId: second.clientOrderId, status: 'NEW',
+        },
+      })
+    })
+    expect(answers).toHaveLength(2)
+    expect(answers[1]).toEqual(['second', expect.objectContaining({ outcome: 'confirmed' })])
   })
 
   it('refuses immediately when the frame cannot leave the renderer', async () => {

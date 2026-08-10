@@ -54,6 +54,18 @@ const answersEnvelope = (watcher, envelope) => {
 }
 
 /**
+ * Does this envelope name the order it is about?
+ *
+ * An envelope that does not — a paused desk, an unconfigured adapter, a local
+ * cap — is still an answer to a command of that action, but it is an answer to
+ * *one* of them. A caller with two in flight must not settle both on it.
+ */
+export const futuresCommandAnswerNamesAnOrder = (answer) => {
+  if (answer?.kind === 'execution') return true
+  return !carriesNoIdentity(answer?.envelope?.details ?? {})
+}
+
+/**
  * Does this message answer the command being waited on, and how?
  *
  * Returns `null` while the command is still unanswered — including for a report

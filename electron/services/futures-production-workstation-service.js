@@ -854,13 +854,16 @@ export class FuturesProductionWorkstationService {
             && now - session.bookRecoveredAt < FUTURES_PRODUCTION_WORKSTATION_BOOK_RECOVERY.COOLDOWN_MS) return;
         session.bookRecovering = true;
         session.bookRecoveredAt = now;
-        this.onInternalError({ phase: 'book-recovery', code: reasonCode });
-        this.markResourceStale(
-            session,
-            FUTURES_WORKSTATION_RESOURCES.DEPTH,
-            session.lastDepthView,
-        );
         try {
+            // Inside the guard: anything that raises out here would leave
+            // `bookRecovering` set and the book unable to ask again for the rest
+            // of the session.
+            this.onInternalError({ phase: 'book-recovery', code: reasonCode });
+            this.markResourceStale(
+                session,
+                FUTURES_WORKSTATION_RESOURCES.DEPTH,
+                session.lastDepthView,
+            );
             for (let attempt = 1;
                 attempt <= FUTURES_PRODUCTION_WORKSTATION_BOOK_RECOVERY.ATTEMPTS;
                 attempt += 1) {

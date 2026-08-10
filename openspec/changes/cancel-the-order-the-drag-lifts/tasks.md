@@ -44,3 +44,9 @@
 - [x] 7.2 Refuse the lift itself when the order could not be placed again at the price it already rests at — an order the desk cannot put back must not be taken off the book.
 - [x] 7.3 Place the remainder, not the original quantity: a partly filled order that is lifted comes back the size it was still working.
 - [x] 7.4 Carry the exchange's own `positionSide` onto the replacement: a one-way account reports `BOTH`, and the derived leg is refused by Binance.
+- [x] 7.5 Replace at the tick of the order's own contract, captured when it was lifted: a drag ended by a contract change would otherwise round the old order's price to the new contract's tick, and 0.0308370 against a 0.01 tick is an order at 0.03.
+- [x] 7.6 Settle one command on an answer that names no order. A refusal composed before the order was identified — a paused desk, the local cap, an unconfigured adapter — answers one command of that action, and settling every waiting command on it would let a refusal of the ticket's order end the drag's wait for a different one.
+
+## 8. Stated Limits, Not Fixed Here
+
+- [x] 8.1 A drag whose lift is confirmed while the whole workspace unmounts — leaving the Futures market mid-gesture — ends with the order cancelled and no alert, because the surface that would raise it is gone. A contract change is handled (the chart restores the order); leaving the market is not. Carrying an obligation across an unmount needs somewhere outside the workspace to hold it, which is a larger decision than this change.
