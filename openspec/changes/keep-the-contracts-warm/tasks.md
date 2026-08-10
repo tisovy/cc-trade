@@ -2,7 +2,7 @@
 
 - [ ] 0.1 Record what one held session costs: frames per second per stream on a liquid contract, bytes, and the parse time of each, so the pool bound is chosen from a number.
 - [ ] 0.2 Decide the first shipped bound and state why. Two — the shown contract and the one before it — is the smallest thing that proves the machinery and covers the switch the operator makes most.
-- [ ] 0.3 Decide what a background session subscribes to, and state what it costs to promote it to shown.
+- [ ] 0.3 Decide what a background session subscribes to, and state what it costs to promote it to shown. The operator's ranking, stated 2026-08-11: candles and ticker are what a held contract is for; depth and the tape are opened only for the contract being shown.
 
 ## 1. A Session Stops Being The Service
 
@@ -14,9 +14,10 @@
 ## 2. Selecting Is Not Subscribing
 
 - [ ] 2.1 Deliver the held state of a selected contract immediately, without a `loading` status and without re-reading what it already holds.
-- [ ] 2.2 Open the depth stream and bootstrap the book on promotion, and drop the depth stream on demotion.
-- [ ] 2.3 Keep the renderer's ownership checks intact: a frame still names the request and the generation it belongs to.
-- [ ] 2.4 Prove by test that returning to a held contract issues no bootstrap read and passes through no `loading`.
+- [ ] 2.2 Open the depth and trade streams and bootstrap the book on promotion, and drop both on demotion.
+- [ ] 2.3 Shed rather than queue under load on the shown contract: coalesce depth deliveries to at most one book per frame and drop the tape's overflow, so a burst costs the book's freshness and never the price.
+- [ ] 2.4 Keep the renderer's ownership checks intact: a frame still names the request and the generation it belongs to.
+- [ ] 2.5 Prove by test that returning to a held contract issues no bootstrap read and passes through no `loading`.
 
 ## 3. The Pool Is Bounded
 

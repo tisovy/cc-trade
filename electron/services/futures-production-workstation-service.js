@@ -60,6 +60,23 @@ const systemClock = Object.freeze({
     clearTimeout: handle => clearTimeout(handle),
 });
 
+// Rebuilding the book while the desk keeps running. Bridging needs fresh diffs
+// to arrive after the snapshot is taken, which is why each attempt waits before
+// reading; the cooldown keeps a book that cannot bridge from asking on every
+// diff that lands on it.
+export const FUTURES_PRODUCTION_WORKSTATION_BOOK_RECOVERY = Object.freeze({
+    ATTEMPTS: 3,
+    BRIDGE_MS: 200,
+    COOLDOWN_MS: 5_000,
+});
+
+// Which stream a frame came from, read without parsing it — the frame that
+// lands here is the one the parser has already refused.
+const DEPTH_STREAM_NAME = /"stream"\s*:\s*"[a-z0-9_]{1,32}@depth/;
+const isDepthStreamFrame = raw => (
+    typeof raw === 'string' && DEPTH_STREAM_NAME.test(raw.slice(0, 256))
+);
+
 const safeCode = error => (
     typeof error?.code === 'string' && /^[A-Z0-9_-]{1,96}$/.test(error.code)
         ? error.code.replace(/-/g, '_')
@@ -424,6 +441,11 @@ export class FuturesProductionWorkstationService {
             stream: null,
             reconnectTimer: null,
             freshnessTimer: null,
+            // The last book the renderer was given, kept so a recovery can leave
+            // it on screen rather than blanking the panel.
+            lastDepthView: null,
+            bookRecovering: false,
+            bookRecoveredAt: null,
             orderBook: new FuturesWorkstationOrderBook(),
             bootstrapped: false,
             pendingEvents: [],
@@ -635,11 +657,12 @@ export class FuturesProductionWorkstationService {
             for (const event of session.pendingEvents) this.applyStreamEvent(session, event);
             session.pendingEvents = [];
             if (!this.isCurrent(session)) return;
+            session.lastDepthView = session.orderBook.toRendererView();
             this.emitResource(
                 session,
                 FUTURES_WORKSTATION_RESOURCES.DEPTH,
                 FUTURES_WORKSTATION_STATES.LIVE,
-                session.orderBook.toRendererView(),
+                session.lastDepthView,
             );
             session.reconnectAttempt = 0;
             this.emitStatus(session, FUTURES_WORKSTATION_STATES.LIVE, true, null);
@@ -770,15 +793,22 @@ export class FuturesProductionWorkstationService {
                     asks: event.asks,
                     eventTime: event.eventTime,
                 }, event.frameBytes);
-                if (result.resync) this.scheduleResync(session, 'DEPTH_SEQUENCE_GAP');
+                // The book is the one resource the desk can lose without losing
+                // the desk: the price, the candles, the tape and the account's
+                // own PnL do not come from it, and in a violent move the
+                // operator is not reading it. So a broken sequence rebuilds the
+                // book and nothing else — it used to resynchronize the whole
+                // workspace, which is how a burst took the desk off the market.
+                if (result.resync) void this.recoverBook(session, 'DEPTH_SEQUENCE_GAP');
                 else if (result.applied && session.bootstrapped) {
                     session.lastDepthAt = this.observedNow(session);
                     session.staleResources.delete(FUTURES_WORKSTATION_RESOURCES.DEPTH);
+                    session.lastDepthView = session.orderBook.toRendererView();
                     this.emitResource(
                         session,
                         FUTURES_WORKSTATION_RESOURCES.DEPTH,
                         FUTURES_WORKSTATION_STATES.LIVE,
-                        session.orderBook.toRendererView(),
+                        session.lastDepthView,
                     );
                 }
                 return;
@@ -794,7 +824,82 @@ export class FuturesProductionWorkstationService {
         } catch (error) {
             if (!this.isCurrent(session)) return;
             this.onInternalError({ phase: 'stream', code: safeCode(error) });
+            // A depth frame the desk could not read is a book problem. Only a
+            // frame from the streams the desk actually trades on — price,
+            // candles, tape — is worth the whole session.
+            if (isDepthStreamFrame(raw)) {
+                void this.recoverBook(session, 'MALFORMED_DEPTH_FRAME');
+                return;
+            }
             this.scheduleResync(session, 'MALFORMED_STREAM_FRAME');
+        }
+    }
+
+    /**
+     * Rebuild the book without touching the session.
+     *
+     * The streams stay open, so diffs keep buffering while a fresh snapshot is
+     * read and bridged — Binance's own depth-sync algorithm, which the initial
+     * bootstrap already performs. Until it succeeds the book is stale and says
+     * so; the desk stays live around it. A recovery that fails leaves the book
+     * stale rather than escalating: nothing else on the desk depends on it.
+     */
+    async recoverBook(session, reasonCode) {
+        if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
+        if (session.bookRecovering) return;
+        const now = this.observedNow(session);
+        // Backed off between rounds, because every diff arriving on a book that
+        // is not bridged asks for another one.
+        if (session.bookRecoveredAt !== null
+            && now - session.bookRecoveredAt < FUTURES_PRODUCTION_WORKSTATION_BOOK_RECOVERY.COOLDOWN_MS) return;
+        session.bookRecovering = true;
+        session.bookRecoveredAt = now;
+        this.onInternalError({ phase: 'book-recovery', code: reasonCode });
+        this.markResourceStale(
+            session,
+            FUTURES_WORKSTATION_RESOURCES.DEPTH,
+            session.lastDepthView,
+        );
+        try {
+            for (let attempt = 1;
+                attempt <= FUTURES_PRODUCTION_WORKSTATION_BOOK_RECOVERY.ATTEMPTS;
+                attempt += 1) {
+                if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
+                session.orderBook.beginBootstrap();
+                await this.delay(
+                    FUTURES_PRODUCTION_WORKSTATION_BOOK_RECOVERY.BRIDGE_MS * (2 ** (attempt - 1)),
+                );
+                if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
+                try {
+                    const value = await this.transport.readDepthSnapshot({
+                        symbol: session.symbol,
+                        signal: session.abortController.signal,
+                        retryAttempt: attempt,
+                    });
+                    if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
+                    const snapshot = normalizeFuturesWorkstationDepthSnapshot(
+                        value,
+                        session.symbol,
+                    );
+                    if (!session.orderBook.bootstrap(snapshot).live) continue;
+                } catch (error) {
+                    this.onInternalError({ phase: 'book-recovery', code: safeCode(error) });
+                    continue;
+                }
+                session.lastDepthAt = this.observedNow(session);
+                session.staleResources.delete(FUTURES_WORKSTATION_RESOURCES.DEPTH);
+                session.lastDepthView = session.orderBook.toRendererView();
+                this.emitResource(
+                    session,
+                    FUTURES_WORKSTATION_RESOURCES.DEPTH,
+                    FUTURES_WORKSTATION_STATES.LIVE,
+                    session.lastDepthView,
+                );
+                return;
+            }
+        } finally {
+            session.bookRecovering = false;
+            session.bookRecoveredAt = this.observedNow(session);
         }
     }
 
@@ -834,11 +939,15 @@ export class FuturesProductionWorkstationService {
     markResourceStale(session, resource, payload) {
         if (session.staleResources.has(resource)) return;
         session.staleResources.add(resource);
+        // A book that never bridged has no view to deliver. The staleness is
+        // still recorded — what cannot be sent is the payload, and sending an
+        // empty one is refused by the protocol, which used to raise inside the
+        // freshness monitor and resynchronize the session over it.
         if (resource === FUTURES_WORKSTATION_RESOURCES.CANDLES) {
             this.emitCandleSeries(session, 'contract', session.candles, FUTURES_WORKSTATION_STATES.STALE);
         } else if (resource === FUTURES_WORKSTATION_RESOURCES.TRADES) {
             this.emitTrades(session, FUTURES_WORKSTATION_STATES.STALE);
-        } else {
+        } else if (payload !== null && payload !== undefined) {
             this.emitResource(session, resource, FUTURES_WORKSTATION_STATES.STALE, payload);
         }
     }

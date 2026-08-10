@@ -35,10 +35,14 @@ different things. The desk can hold several contracts live and show one.
 - **The pool is bounded and warm.** The most recently used contracts are kept —
   the bound is a setting, and the first shipped value is small on purpose.
   Beyond it, the least recently used session is released.
-- **A background session is cheap.** Only the displayed contract carries the
-  full depth diff stream. A held-but-not-shown contract keeps what is cheap to
-  keep and useful to have warm — its candles and its ticker — and gains its book
-  on the way to being shown, from one snapshot rather than a whole generation.
+- **A background session is cheap, and the operator said how cheap.** The
+  spiky streams — the depth diff and the trade tape — are not held at all for a
+  contract that is not shown: they are opened on the way to showing it. A held
+  contract keeps only what is small and steady, its candles and its ticker, so
+  the price and the position's PnL are warm the moment it is selected. On the
+  shown contract the same two streams may be throttled or skipped under load,
+  because "в момент спайка я вообще не смотрю на него" — the book is the first
+  thing to shed and the last thing to wait for.
 - **A failure is local to its session.** A resync, a refused frame or a lost
   socket affects the contract it belongs to and nothing else.
 - **The renderer selects rather than resubscribes.** The protocol already names

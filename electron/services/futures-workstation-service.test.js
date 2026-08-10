@@ -975,7 +975,12 @@ describe('production Futures workstation service', () => {
         expect(events.some(event => event.state === 'resynchronizing')).toBe(false);
     });
 
-    it('detects a live depth gap and enters resynchronizing before rebuilding', async () => {
+    // A broken depth sequence is a book problem, and the book is the one thing
+    // the desk can lose without losing the desk: the price, the candles, the
+    // tape and the account's own PnL do not come from it, and in a violent move
+    // the operator is not reading it. It used to resynchronize the whole
+    // workspace — which is how a burst took the desk off the market.
+    it('rebuilds the book on a depth gap and leaves the desk live', async () => {
         const base = createFuturesProductionWorkstationFakeTransport();
         let subscriber;
         const transport = {
@@ -994,13 +999,59 @@ describe('production Futures workstation service', () => {
         await runtime.service.handleRequest(productionRequest('depth-gap'), {
             emit: event => events.push(event),
         });
+        const book = events.findLast(event => event.resource === 'depth')?.payload;
+        expect(book).not.toBeNull();
+
         subscriber.onMessage(FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.streams.makeCycle(2)[0]);
-        expect(events.at(-1)).toMatchObject({
-            resource: 'status',
-            state: 'resynchronizing',
-            payload: { connected: false, reasonCode: 'DEPTH_SEQUENCE_GAP' },
+
+        // The book says it is stale and keeps the levels last delivered; the
+        // session says nothing, because nothing happened to it.
+        expect(events.at(-1)).toMatchObject({ resource: 'depth', state: 'stale' });
+        expect(events.at(-1).payload).toEqual(book);
+        expect(events.some(event => event.resource === 'status'
+            && event.state === 'resynchronizing')).toBe(false);
+        expect(runtime.service.current).toMatchObject({ symbol: 'BTCUSDT' });
+    });
+
+    // The operator, on a violent move: the book is the last thing they are
+    // reading — the price and the PnL are what must not stop. So a book that
+    // cannot be rebuilt at all stays stale for as long as it must, and the desk
+    // keeps delivering around it.
+    it('keeps the desk delivering when the book cannot be rebuilt at all', async () => {
+        const base = createFuturesProductionWorkstationFakeTransport();
+        let subscriber;
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            transport: {
+                ...base,
+                connect: (options) => {
+                    subscriber = options;
+                    return base.connect(options);
+                },
+                readDepthSnapshot: vi.fn(async (options) => {
+                    if (options?.retryAttempt) throw new Error('depth unavailable');
+                    return base.readDepthSnapshot(options);
+                }),
+            },
+        }));
+        const events = [];
+        await runtime.service.handleRequest(productionRequest('depth-unavailable'), {
+            emit: event => events.push(event),
         });
-        expect(clock.timeoutCount()).toBe(1);
+        const delivered = events.length;
+        const cycle = FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.streams.makeCycle(2);
+
+        subscriber.onMessage(cycle[0]);
+        await vi.waitFor(() => expect(events.at(-1)).toMatchObject({
+            resource: 'depth',
+            state: 'stale',
+        }));
+
+        // The price keeps arriving while the book is out.
+        subscriber.onMessage(cycle[2]);
+        expect(events.at(-1)).toMatchObject({ resource: 'candles', state: 'live' });
+        expect(events.some(event => event.resource === 'status'
+            && event.state === 'resynchronizing')).toBe(false);
+        expect(events.length).toBeGreaterThan(delivered);
     });
 
     it('ignores a duplicate depth update without revising visible state', async () => {

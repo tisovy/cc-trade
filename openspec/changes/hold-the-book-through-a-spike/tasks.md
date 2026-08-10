@@ -21,9 +21,10 @@
 
 ## 3. A Refused Frame Costs The Book, Not The Desk
 
-- [ ] 3.1 Recover from a dropped or rejected depth frame by re-bootstrapping the *book* — the snapshot plus the buffered diffs — rather than by tearing down the session's streams, tape, header and candles.
-- [ ] 3.2 Prove by test that a rejected depth frame leaves the tape, the header and the candles live throughout.
-- [ ] 3.3 Prove by test that the book after such a recovery matches the exchange.
+- [x] 3.1 Recover from a dropped or rejected depth frame by re-bootstrapping the *book* — the snapshot plus the buffered diffs — rather than by tearing down the session's streams, tape, header and candles.
+- [x] 3.2 Prove by test that a rejected depth frame leaves the tape, the header and the candles live throughout.
+- [x] 3.3 Prove by test that a book that cannot be rebuilt at all stays stale while the desk keeps delivering, rather than escalating to a session resync.
+- [x] 3.4 Keep the last delivered book on screen while it is being rebuilt, and stop the freshness monitor raising on a book that has no view to send — that raise was itself a path to a session resync.
 
 ## 4. Under Load, End To End
 
