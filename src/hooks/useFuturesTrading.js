@@ -30,6 +30,12 @@ const TERMINAL_ORDER_STATUSES = new Set([
   'FINISHED',
   'REJECTED',
 ])
+// Slow enough to stay a fraction of the exchange's weight budget — one account
+// read costs ninety of the 2400 a minute — and fast enough that a settlement
+// nobody told the desk about is half a minute of staleness rather than a
+// permanent one.
+const ACCOUNT_RECONCILE_INTERVAL_MS = 30_000
+
 const ACCOUNT_RESOURCE_NAMES = [
   'balances',
   'positions',
@@ -71,6 +77,9 @@ const createInitialState = ({ enabled, connection }) => ({
   connected: Boolean(enabled && isUsableSocket(connection)),
   balances: null,
   openOrders: [],
+  // Identities the exchange has reported settled, so a message that left before
+  // the settlement cannot put an order back into the list after it.
+  settledOrders: new Map(),
   positions: [],
   // Live mark prices, keyed by symbol. Kept beside the snapshot rather than
   // folded into it, so a dropped feed loses only the overlay.
@@ -98,14 +107,57 @@ const normalizeOrderSource = (order, fallback = 'REGULAR') => {
   }
 }
 
-const orderIdentity = (order) => {
+const orderExchangeId = (order) => {
   const normalized = normalizeOrderSource(order)
-  const exchangeId = normalized.sourceOrderId
+  return normalized.sourceOrderId
     ?? normalized.algoId
     ?? normalized.orderId
     ?? normalized.clientAlgoId
     ?? normalized.clientOrderId
-  return `${normalized.orderKind}:${normalized.symbol ?? ''}:${exchangeId ?? ''}`
+    ?? null
+}
+
+const orderIdentity = (order) => {
+  const normalized = normalizeOrderSource(order)
+  return `${normalized.orderKind}:${normalized.symbol ?? ''}:${orderExchangeId(order) ?? ''}`
+}
+
+// An order that has settled cannot rest again: the exchange does not reuse an
+// order id. It can, however, still be described as resting — by a report that
+// left the exchange before the fill and arrives after it, and by an account
+// snapshot read from a different Binance service than the stream, which is
+// eventually consistent with it.
+//
+// Both happen when an order fills the instant it is placed, which is what a
+// limit order at a level break does: the stream's FILLED overtakes the reply to
+// the placement itself, and the reply then puts the order back into the list as
+// NEW. Nothing reads the account again unless the desk acts, so it rests there,
+// filled, until the application is reloaded.
+//
+// So the desk remembers what it has seen settle and refuses to be told
+// otherwise. Bounded, because it is a guard against messages in flight and not
+// a history: a few hundred settlements is far more than can be in flight at
+// once.
+const SETTLED_ORDER_MEMORY = 256
+
+const rememberSettledOrder = (settledOrders, identity) => {
+  const next = new Map(settledOrders)
+  // Re-inserting moves it back to the newest end, so an identity that is still
+  // being contradicted cannot age out while the contradictions arrive.
+  next.delete(identity)
+  next.set(identity, true)
+  while (next.size > SETTLED_ORDER_MEMORY) next.delete(next.keys().next().value)
+  return next
+}
+
+// Only a report that names an order the exchange can identify settles anything:
+// without an id, the identity is a prefix that every unidentified order on the
+// contract would share.
+const settledReportIdentity = (report) => {
+  if (orderExchangeId(report) === null) return null
+  return TERMINAL_ORDER_STATUSES.has(String(report?.status ?? '').toUpperCase())
+    ? orderIdentity(report)
+    : null
 }
 
 const isOpenSnapshotOrder = order => (
@@ -130,12 +182,13 @@ const preferNewerOrder = (snapshotOrder, knownOrders) => {
   return knownAt > snapshotAt ? known : snapshotOrder
 }
 
-const mergeOrderUpdate = (openOrders, report) => {
+const mergeOrderUpdate = (openOrders, report, settledOrders) => {
   if (!report || typeof report.orderId === 'undefined') return openOrders
   const normalizedReport = normalizeOrderSource(report)
   const reportIdentity = orderIdentity(normalizedReport)
   const withoutOrder = openOrders.filter(order => orderIdentity(order) !== reportIdentity)
-  if (OPEN_ORDER_STATUSES.has(normalizedReport.status)) {
+  if (OPEN_ORDER_STATUSES.has(normalizedReport.status)
+    && !settledOrders.has(reportIdentity)) {
     return [...withoutOrder, normalizedReport]
   }
   return withoutOrder
@@ -175,6 +228,7 @@ const applyAccountEnvelope = (previous, payload) => {
     positions,
     openOrders: [...regularOrders, ...algoOrders]
       .filter(isOpenSnapshotOrder)
+      .filter(order => !previous.settledOrders.has(orderIdentity(order)))
       .map(order => preferNewerOrder(order, knownOrders)),
   }
 }
@@ -244,16 +298,23 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection } = {}) => {
       }
       if (payload.futures_execution_update) {
         const report = payload.futures_execution_update
-        setState(previous => ({
-          ...previous,
-          connected: true,
-          lastExecution: report,
-          lastError: null,
-          // An execution report is the answer an unresolved command was waiting
-          // for, whether it arrived from the stream or from reconciliation.
-          unresolvedCommand: null,
-          openOrders: mergeOrderUpdate(previous.openOrders, report),
-        }))
+        setState((previous) => {
+          const settled = settledReportIdentity(report)
+          const settledOrders = settled === null
+            ? previous.settledOrders
+            : rememberSettledOrder(previous.settledOrders, settled)
+          return {
+            ...previous,
+            connected: true,
+            lastExecution: report,
+            lastError: null,
+            // An execution report is the answer an unresolved command was waiting
+            // for, whether it arrived from the stream or from reconciliation.
+            unresolvedCommand: null,
+            settledOrders,
+            openOrders: mergeOrderUpdate(previous.openOrders, report, settledOrders),
+          }
+        })
       }
       if (payload.futures_history && typeof payload.futures_history === 'object') {
         const history = payload.futures_history
@@ -461,6 +522,25 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection } = {}) => {
   const refresh = useCallback((targetSymbol) => sendCommand(createFuturesAccountRefreshCommand({
     symbol: targetSymbol ?? symbolRef.current,
   })), [sendCommand])
+
+  // Everything above learns that an order is gone from a message: the stream's
+  // report, or the snapshot a mutation asks for. If no message arrives — a
+  // socket that stopped delivering without closing, an event the exchange never
+  // sent — nothing re-reads at all, and an order that filled rests in the list
+  // until the application is reloaded. So while orders are working, the account
+  // is re-read on a slow beat, and the settled memory decides what the read is
+  // allowed to say.
+  //
+  // Only while they are working: with nothing resting there is nothing to go
+  // stale this way, and the read is not free.
+  const hasWorkingOrders = state.openOrders.length > 0
+  useEffect(() => {
+    if (!enabled || !isUsableSocket(wsConnection) || !hasWorkingOrders) return undefined
+    const reconcile = setInterval(() => {
+      sendCommand(createFuturesAccountRefreshCommand({ symbol: symbolRef.current }))
+    }, ACCOUNT_RECONCILE_INTERVAL_MS)
+    return () => clearInterval(reconcile)
+  }, [enabled, hasWorkingOrders, sendCommand, wsConnection])
 
   // A read, not a write: what leverage this contract is set to and how far it may
   // be set. Asked for per contract rather than folded into the account refresh,

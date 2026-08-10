@@ -415,6 +415,135 @@ describe('useFuturesTrading', () => {
     expect(result.current.openOrders.some(order => order.symbol === 'BTCUSDT')).toBe(true)
   })
 
+  // An order placed as a level breaks fills instantly, and the stream's FILLED
+  // overtakes the reply to the placement itself. The reply describes the order
+  // as it left — NEW — and put it back in the list, where nothing removed it
+  // again because nothing reads the account unless the desk acts.
+  it('refuses to relist an order the exchange has already reported settled', () => {
+    const socket = createSocket()
+    const { result } = renderHook(() => useFuturesTrading({
+      enabled: true,
+      symbol: 'BTCUSDT',
+      wsConnection: socket,
+    }))
+
+    act(() => {
+      socket.receive({
+        futures_execution_update: {
+          symbol: 'BTCUSDT', orderId: 7, status: 'FILLED', side: 'BUY', orderKind: 'REGULAR',
+        },
+      })
+    })
+    expect(result.current.openOrders).toHaveLength(0)
+
+    // The placement's own reply, which left the exchange before the fill.
+    act(() => {
+      socket.receive({
+        futures_execution_update: {
+          symbol: 'BTCUSDT', orderId: 7, status: 'NEW', side: 'BUY', orderKind: 'REGULAR',
+        },
+      })
+    })
+    expect(result.current.openOrders).toHaveLength(0)
+
+    // And a snapshot read from the account service, which is eventually
+    // consistent with the stream and can still be describing the order.
+    act(() => {
+      socket.receive({
+        version: 1,
+        type: 'futures_account_state',
+        resources: {
+          balances: {
+            status: 'ready', data: { USDT: { available: '25', total: '25' } }, lastSuccessfulAt: 100,
+          },
+          positions: { status: 'ready', data: [], lastSuccessfulAt: 100 },
+          regularOrders: {
+            status: 'ready',
+            data: [
+              { symbol: 'BTCUSDT', orderId: 7, status: 'NEW', orderKind: 'REGULAR' },
+              { symbol: 'BTCUSDT', orderId: 8, status: 'NEW', orderKind: 'REGULAR' },
+            ],
+            lastSuccessfulAt: 100,
+          },
+          algoOrders: { status: 'ready', data: [], lastSuccessfulAt: 100 },
+        },
+      })
+    })
+    // Only the settled one is refused; the order beside it is still resting.
+    expect(result.current.openOrders.map(order => order.orderId)).toEqual([8])
+  })
+
+  it('settles only the orders the exchange named', () => {
+    const socket = createSocket()
+    const { result } = renderHook(() => useFuturesTrading({
+      enabled: true,
+      symbol: 'BTCUSDT',
+      wsConnection: socket,
+    }))
+
+    // No id: the identity would be a prefix every unidentified order on the
+    // contract shares, and settling that silences the whole contract.
+    act(() => {
+      socket.receive({
+        futures_execution_update: {
+          symbol: 'BTCUSDT', orderId: null, status: 'FILLED', side: 'BUY',
+        },
+      })
+    })
+    act(() => {
+      socket.receive({
+        futures_execution_update: {
+          symbol: 'BTCUSDT', orderId: 9, status: 'NEW', side: 'BUY', orderKind: 'REGULAR',
+        },
+      })
+    })
+
+    expect(result.current.openOrders.map(order => order.orderId)).toEqual([9])
+  })
+
+  it('re-reads the account while orders rest and stops once none do', () => {
+    vi.useFakeTimers()
+    const socket = createSocket()
+    const snapshot = orders => ({
+      version: 1,
+      type: 'futures_account_state',
+      resources: {
+        balances: {
+          status: 'ready', data: { USDT: { available: '25', total: '25' } }, lastSuccessfulAt: 100,
+        },
+        positions: { status: 'ready', data: [], lastSuccessfulAt: 100 },
+        regularOrders: { status: 'ready', data: orders, lastSuccessfulAt: 100 },
+        algoOrders: { status: 'ready', data: [], lastSuccessfulAt: 100 },
+      },
+    })
+    try {
+      renderHook(() => useFuturesTrading({
+        enabled: true,
+        symbol: 'BTCUSDT',
+        wsConnection: socket,
+      }))
+      const refreshes = () => socket.sent.filter(message => message.action === 'account.refresh').length
+      // The mount's own read, before any beat.
+      expect(refreshes()).toBe(1)
+
+      // Nothing is resting, so nothing is re-read.
+      act(() => { vi.advanceTimersByTime(120_000) })
+      expect(refreshes()).toBe(1)
+
+      act(() => {
+        socket.receive(snapshot([{ symbol: 'BTCUSDT', orderId: 11, status: 'NEW', orderKind: 'REGULAR' }]))
+      })
+      act(() => { vi.advanceTimersByTime(90_000) })
+      expect(refreshes()).toBe(4)
+
+      act(() => { socket.receive(snapshot([])) })
+      act(() => { vi.advanceTimersByTime(120_000) })
+      expect(refreshes()).toBe(4)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('retains last-known resource data and exposes partial stale/error state', () => {
     const socket = createSocket()
     const { result } = renderHook(() => useFuturesTrading({
