@@ -89,8 +89,32 @@ const properties = candles => ({
   alerts: [],
   onPricePick: vi.fn(),
   onTradingGesture: vi.fn(),
-  onOrderDrag: vi.fn(),
+  // A drag begins with a cancellation and ends with a placement: the chart asks
+  // for both and waits on the first, so both are promises here.
+  onOrderLift: vi.fn(async () => ({ ok: true })),
+  onOrderDrop: vi.fn(async () => true),
 })
+
+const workingOrder = (overrides = {}) => ({
+  symbol: 'BTCUSDT',
+  orderKind: 'REGULAR',
+  orderId: '71',
+  clientOrderId: 'cc7-0123456789abcdef0123456789abcdef',
+  side: 'SELL',
+  positionSide: 'LONG',
+  positionEffect: 'EXIT',
+  price: '59900',
+  origQty: '0.5',
+  ...overrides,
+})
+
+// The shell captures the pointer, because the grip the drag started from is
+// gone the moment the exchange confirms the cancellation.
+const dragSurface = () => screen.getByTestId('futures-workstation-chart').parentElement
+
+const settle = async () => { await act(async () => {}) }
+
+const priceLinesOf = series => series.createPriceLine.mock.results.map(result => result.value)
 
 beforeEach(() => {
   chartMock.charts.length = 0
@@ -545,20 +569,10 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     )
   })
 
-  it('renders owned order lines and emits one Ctrl-drag amendment draft on release', async () => {
-    const props = {
-      ...properties([candle(1_784_000_000_000)]),
-      ownedOrders: [{
-        symbol: 'BTCUSDT',
-        orderKind: 'REGULAR',
-        orderId: '71',
-        clientOrderId: 'cc7-0123456789abcdef0123456789abcdef',
-        side: 'SELL',
-        positionSide: 'LONG',
-        positionEffect: 'EXIT',
-        price: '59900',
-      }],
-    }
+  // The drag is a cancellation followed by a placement, and the operator asked
+  // for exactly that: the order they pick up leaves the book.
+  it('cancels the order the drag lifts and places it again where it is dropped', async () => {
+    const props = { ...properties([candle(1_784_000_000_000)]), ownedOrders: [workingOrder()] }
     render(<FuturesWorkstationChart {...props} />)
     const canvas = screen.getByTestId('futures-workstation-chart')
     canvas.getBoundingClientRect = () => ({
@@ -567,38 +581,62 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     const order = await screen.findByRole('button', {
       name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
     })
+
     fireEvent.pointerDown(order, { pointerId: 7, button: 0, ctrlKey: true })
-    fireEvent.pointerMove(order, { pointerId: 7, clientY: 80, ctrlKey: true })
-    fireEvent.pointerUp(order, { pointerId: 7, clientY: 80, ctrlKey: true })
-
-    expect(props.onOrderDrag).toHaveBeenCalledExactlyOnceWith({
-      symbol: 'BTCUSDT',
-      positionSide: 'LONG',
-      clientOrderId: 'cc7-0123456789abcdef0123456789abcdef',
-      price: '59920',
-      modifier: 'ctrl',
-    })
-    expect(chartMock.charts[0].series[0].createPriceLine).toHaveBeenCalledWith(
-      expect.objectContaining({ price: 59900, title: '' }),
+    expect(props.onOrderLift).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ orderId: '71' }),
     )
-    const orderContextMenu = createEvent.contextMenu(order, { button: 2 })
-    fireEvent(order, orderContextMenu)
-    expect(orderContextMenu.defaultPrevented).toBe(false)
+    // Until Binance answers, the order is still working and still says so.
+    expect(order).toHaveTextContent('lifting…')
+    expect(props.onOrderDrop).not.toHaveBeenCalled()
+
+    await settle()
+    const surface = dragSurface()
+    fireEvent.pointerMove(surface, { pointerId: 7, clientY: 80, ctrlKey: true })
+    fireEvent.pointerUp(surface, { pointerId: 7, clientY: 80, ctrlKey: true })
+    await settle()
+
+    expect(props.onOrderDrop).toHaveBeenCalledExactlyOnceWith({
+      order: expect.objectContaining({ orderId: '71' }),
+      price: '59920',
+      restored: false,
+    })
   })
 
-  it('emits one Alt-drag amendment draft on release', async () => {
+  it('places the order again where it was lifted from when the drag is abandoned', async () => {
+    const props = { ...properties([candle(1_784_000_000_000)]), ownedOrders: [workingOrder()] }
+    render(<FuturesWorkstationChart {...props} />)
+    const canvas = screen.getByTestId('futures-workstation-chart')
+    canvas.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 320, height: 320, right: 320, bottom: 320,
+    })
+    const order = await screen.findByRole('button', {
+      name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
+    })
+
+    fireEvent.pointerDown(order, { pointerId: 8, button: 0, altKey: true })
+    await settle()
+    const surface = dragSurface()
+    fireEvent.pointerMove(surface, { pointerId: 8, clientY: 80, altKey: true })
+    // Letting the modifier go abandons the drag: the order goes back.
+    fireEvent.pointerUp(surface, { pointerId: 8, clientY: 80 })
+    await settle()
+
+    expect(props.onOrderDrop).toHaveBeenCalledExactlyOnceWith({
+      order: expect.objectContaining({ orderId: '71' }),
+      price: '59900',
+      restored: true,
+    })
+  })
+
+  // A cancellation the exchange refuses leaves the order exactly where it was,
+  // and the drag never starts — there is no state where the chart shows a
+  // lifted order that is still resting on the book.
+  it('starts no drag when the cancellation is not confirmed', async () => {
     const props = {
       ...properties([candle(1_784_000_000_000)]),
-      ownedOrders: [{
-        symbol: 'BTCUSDT',
-        orderKind: 'REGULAR',
-        orderId: '72',
-        clientOrderId: 'cc7-0123456789abcdef0123456789abcdef',
-        side: 'SELL',
-        positionSide: 'LONG',
-        positionEffect: 'EXIT',
-        price: '59900',
-      }],
+      onOrderLift: vi.fn(async () => ({ ok: false })),
+      ownedOrders: [workingOrder()],
     }
     render(<FuturesWorkstationChart {...props} />)
     const canvas = screen.getByTestId('futures-workstation-chart')
@@ -608,41 +646,34 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     const order = await screen.findByRole('button', {
       name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
     })
-    fireEvent.pointerDown(order, { pointerId: 8, button: 0, altKey: true })
-    fireEvent.pointerMove(order, { pointerId: 8, clientY: 80, altKey: true })
-    fireEvent.pointerUp(order, { pointerId: 8, clientY: 80, altKey: true })
 
-    expect(props.onOrderDrag).toHaveBeenCalledExactlyOnceWith({
-      symbol: 'BTCUSDT',
-      positionSide: 'LONG',
-      clientOrderId: 'cc7-0123456789abcdef0123456789abcdef',
-      price: '59920',
-      modifier: 'alt',
-    })
+    fireEvent.pointerDown(order, { pointerId: 9, button: 0, ctrlKey: true })
+    await settle()
+    const surface = dragSurface()
+    fireEvent.pointerMove(surface, { pointerId: 9, clientY: 80, ctrlKey: true })
+    fireEvent.pointerUp(surface, { pointerId: 9, clientY: 80, ctrlKey: true })
+    await settle()
+
+    expect(props.onOrderDrop).not.toHaveBeenCalled()
+    // Still listed, still drawn, still worth what it was.
+    expect(screen.getByRole('button', {
+      name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
+    })).toHaveTextContent('29950 USDT')
+    expect(screen.queryByRole('status', { name: /lifted off the book/ })).not.toBeInTheDocument()
   })
 
-  it('separates same-price regular order handles so each remains independently draggable', async () => {
+  it('leaves every other order untouched while one is being dragged', async () => {
     const props = {
       ...properties([candle(1_784_000_000_000)]),
-      ownedOrders: [{
-        symbol: 'BTCUSDT',
-        orderKind: 'REGULAR',
-        orderId: '101',
-        clientOrderId: 'first-same-price-order',
-        side: 'SELL',
-        positionSide: 'LONG',
-        positionEffect: 'EXIT',
-        price: '59900',
-      }, {
-        symbol: 'BTCUSDT',
-        orderKind: 'REGULAR',
-        orderId: '102',
-        clientOrderId: 'second-same-price-order',
-        side: 'SELL',
-        positionSide: 'SHORT',
-        positionEffect: 'ENTRY',
-        price: '59900',
-      }],
+      ownedOrders: [
+        workingOrder({ orderId: '101', clientOrderId: 'first-same-price-order' }),
+        workingOrder({
+          orderId: '102',
+          clientOrderId: 'second-same-price-order',
+          positionSide: 'SHORT',
+          positionEffect: 'ENTRY',
+        }),
+      ],
     }
     render(<FuturesWorkstationChart {...props} />)
     const canvas = screen.getByTestId('futures-workstation-chart')
@@ -658,21 +689,21 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     await waitFor(() => expect(handleOf(first).style.top).not.toBe(handleOf(second).style.top))
 
     fireEvent.pointerDown(first, { pointerId: 11, button: 0, ctrlKey: true })
-    fireEvent.pointerMove(first, { pointerId: 11, clientY: 80, ctrlKey: true })
-    fireEvent.pointerUp(first, { pointerId: 11, clientY: 80, ctrlKey: true })
-    fireEvent.pointerDown(second, { pointerId: 12, button: 0, altKey: true })
-    fireEvent.pointerMove(second, { pointerId: 12, clientY: 70, altKey: true })
-    fireEvent.pointerUp(second, { pointerId: 12, clientY: 70, altKey: true })
+    await settle()
+    fireEvent.pointerMove(dragSurface(), { pointerId: 11, clientY: 80, ctrlKey: true })
 
-    expect(props.onOrderDrag).toHaveBeenNthCalledWith(1, expect.objectContaining({
-      clientOrderId: 'first-same-price-order',
-      modifier: 'ctrl',
+    // One mark for the dragged order, and the other order exactly as it was.
+    expect(screen.getAllByRole('status', { name: /lifted off the book/ })).toHaveLength(1)
+    expect(screen.getByRole('button', {
+      name: 'Move SELL SHORT order at 59900 with Ctrl or Alt drag',
+    })).toHaveTextContent('29950 USDT')
+
+    fireEvent.pointerUp(dragSurface(), { pointerId: 11, clientY: 80, ctrlKey: true })
+    await settle()
+    expect(props.onOrderDrop).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      order: expect.objectContaining({ clientOrderId: 'first-same-price-order' }),
       price: '59920',
-    }))
-    expect(props.onOrderDrag).toHaveBeenNthCalledWith(2, expect.objectContaining({
-      clientOrderId: 'second-same-price-order',
-      modifier: 'alt',
-      price: '59930',
+      restored: false,
     }))
   })
 
@@ -703,19 +734,12 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     await waitFor(() => expect(handleOf(order)).toHaveStyle({ top: '50px' }))
   })
 
-  it('draws the dragged order as a moving price line with an axis label', async () => {
+  it('draws the lifted order at the pointer, dashed, until the exchange answers', async () => {
+    let answerPlacement = null
     const props = {
       ...properties([candle(1_784_000_000_000)]),
-      ownedOrders: [{
-        symbol: 'BTCUSDT',
-        orderKind: 'REGULAR',
-        orderId: '91',
-        clientOrderId: 'moving-order',
-        side: 'BUY',
-        positionSide: 'LONG',
-        positionEffect: 'ENTRY',
-        price: '59900',
-      }],
+      onOrderDrop: vi.fn(() => new Promise((resolve) => { answerPlacement = resolve })),
+      ownedOrders: [workingOrder({ orderId: '91', side: 'BUY', positionEffect: 'ENTRY' })],
     }
     render(<FuturesWorkstationChart {...props} />)
     const canvas = screen.getByTestId('futures-workstation-chart')
@@ -728,90 +752,78 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     const series = chartMock.charts[0].series[0]
 
     fireEvent.pointerDown(handle, { pointerId: 4, button: 0, altKey: true })
-    const movingLine = series.createPriceLine.mock.results
-      .map(result => result.value)
-      .find(line => line.title === 'MOVING')
-    expect(movingLine).toBeDefined()
-    expect(movingLine.axisLabelVisible).toBe(true)
-    expect(movingLine.price).toBe(59900)
+    await settle()
+    const movingLine = priceLinesOf(series).find(line => line.lineStyle === 'Dashed')
+    expect(movingLine).toMatchObject({ price: 59900, axisLabelVisible: true })
 
-    fireEvent.pointerMove(handle, { pointerId: 4, clientY: 80, altKey: true })
+    fireEvent.pointerMove(dragSurface(), { pointerId: 4, clientY: 80, altKey: true })
     expect(movingLine.applyOptions).toHaveBeenCalledWith({ price: 59920 })
 
-    fireEvent.pointerUp(handle, { pointerId: 4, clientY: 80, altKey: true })
-    expect(series.removePriceLine).toHaveBeenCalledWith(movingLine)
-  })
+    fireEvent.pointerUp(dragSurface(), { pointerId: 4, clientY: 80, altKey: true })
+    await settle()
+    // The replacement is in flight: the level is uncovered, and nothing on the
+    // chart says an order is resting there.
+    expect(screen.getByRole('status', { name: /being placed at 59920/ }))
+      .toHaveTextContent('placing…')
+    expect(screen.queryByRole('button', { name: /Move BUY LONG order/ })).not.toBeInTheDocument()
 
-  // Without a mark at the origin the handle simply walks off and nothing on the
-  // chart says the order is no longer resting at the price it started from.
-  it('leaves the price the order is being moved off marked for the whole drag', async () => {
-    const props = {
-      ...properties([candle(1_784_000_000_000)]),
-      ownedOrders: [{
-        symbol: 'BTCUSDT',
-        orderKind: 'REGULAR',
-        orderId: '77',
-        clientOrderId: 'moving-order',
-        side: 'BUY',
-        positionSide: 'LONG',
-        positionEffect: 'ENTRY',
-        price: '59900',
-        origQty: '0.5',
-      }],
-    }
+    await act(async () => { answerPlacement(true) })
+    expect(series.removePriceLine).toHaveBeenCalledWith(movingLine)
+    expect(screen.queryByRole('status', { name: /lifted off the book|being placed/ }))
+      .not.toBeInTheDocument()
+  })
+  // The order is gone from the book the moment the drag starts, so the level it
+  // was lifted from carries one faint, unlabelled mark and nothing else.
+  it('marks the price it was lifted from once, faintly and without an axis label', async () => {
+    const props = { ...properties([candle(1_784_000_000_000)]), ownedOrders: [workingOrder()] }
     render(<FuturesWorkstationChart {...props} />)
     const canvas = screen.getByTestId('futures-workstation-chart')
     canvas.getBoundingClientRect = () => ({
       left: 0, top: 0, width: 320, height: 320, right: 320, bottom: 320,
     })
     const handle = await screen.findByRole('button', {
-      name: 'Move BUY LONG order at 59900 with Ctrl or Alt drag',
+      name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
     })
     const series = chartMock.charts[0].series[0]
 
     fireEvent.pointerDown(handle, { pointerId: 9, button: 0, altKey: true })
-    const originLine = series.createPriceLine.mock.results
-      .map(result => result.value)
-      .find(line => line.title === 'WAS')
-    expect(originLine).toBeDefined()
-    expect(originLine.price).toBe(59900)
-    // The axis states the price being aimed at; two labels would compete there.
-    expect(originLine.axisLabelVisible).toBe(false)
-    expect(handleOf(handle)).toHaveClass('is-moving')
+    await settle()
+    const originLine = priceLinesOf(series).find(line => line.lineStyle === 'Dotted')
+    expect(originLine).toMatchObject({
+      price: 59900,
+      axisLabelVisible: false,
+      title: '',
+    })
+    // The order itself no longer has a working-order handle: it is not working.
+    expect(screen.queryByRole('button', {
+      name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
+    })).not.toBeInTheDocument()
 
     // The origin does not follow the pointer — that is the whole point of it.
-    fireEvent.pointerMove(handle, { pointerId: 9, clientY: 80, altKey: true })
+    fireEvent.pointerMove(dragSurface(), { pointerId: 9, clientY: 80, altKey: true })
     expect(originLine.applyOptions).not.toHaveBeenCalled()
     expect(originLine.price).toBe(59900)
 
-    fireEvent.pointerUp(handle, { pointerId: 9, clientY: 80, altKey: true })
+    fireEvent.pointerUp(dragSurface(), { pointerId: 9, clientY: 80, altKey: true })
+    await settle()
     expect(series.removePriceLine).toHaveBeenCalledWith(originLine)
-    expect(handleOf(handle)).not.toHaveClass('is-moving')
   })
 
   it('keeps REGULAR and ALGO rows distinct when Binance reuses a client order id', async () => {
     const sharedClientOrderId = 'shared-client-order-id'
     const props = {
       ...properties([candle(1_784_000_000_000)]),
-      ownedOrders: [{
-        symbol: 'BTCUSDT',
-        orderKind: 'REGULAR',
-        orderId: '81',
-        clientOrderId: sharedClientOrderId,
-        side: 'SELL',
-        positionSide: 'LONG',
-        positionEffect: 'EXIT',
-        price: '59900',
-      }, {
-        symbol: 'BTCUSDT',
-        orderKind: 'ALGO',
-        orderId: '82',
-        clientOrderId: sharedClientOrderId,
-        side: 'SELL',
-        positionSide: 'SHORT',
-        positionEffect: 'ENTRY',
-        price: '59850',
-      }],
+      ownedOrders: [
+        workingOrder({ orderId: '81', clientOrderId: sharedClientOrderId }),
+        workingOrder({
+          orderKind: 'ALGO',
+          orderId: '82',
+          clientOrderId: sharedClientOrderId,
+          positionSide: 'SHORT',
+          positionEffect: 'ENTRY',
+          price: '59850',
+        }),
+      ],
     }
     render(<FuturesWorkstationChart {...props} />)
     const canvas = screen.getByTestId('futures-workstation-chart')
@@ -826,15 +838,19 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     })
 
     fireEvent.pointerDown(regularOrder, { pointerId: 9, button: 0, ctrlKey: true })
-    fireEvent.pointerMove(regularOrder, { pointerId: 9, clientY: 80, ctrlKey: true })
+    await settle()
+    fireEvent.pointerMove(dragSurface(), { pointerId: 9, clientY: 80, ctrlKey: true })
 
-    expect(regularOrder).toHaveTextContent('59920')
+    // The lifted one is drawn once, at the pointer; the ALGO row is untouched.
+    expect(screen.getByRole('status', { name: /lifted off the book/ }))
+      .toHaveTextContent('59920')
     expect(algoOrder).toHaveTextContent('ALGO SHORT')
     expect(algoOrder).not.toHaveTextContent('59920')
 
-    fireEvent.pointerUp(regularOrder, { pointerId: 9, clientY: 80, ctrlKey: true })
-    expect(props.onOrderDrag).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
-      clientOrderId: sharedClientOrderId,
+    fireEvent.pointerUp(dragSurface(), { pointerId: 9, clientY: 80, ctrlKey: true })
+    await settle()
+    expect(props.onOrderDrop).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      order: expect.objectContaining({ clientOrderId: sharedClientOrderId, orderKind: 'REGULAR' }),
       price: '59920',
     }))
   })
@@ -897,7 +913,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     fireEvent.pointerUp(algoOrder, { pointerId: 10, clientY: 80, altKey: true })
 
     expect(algoOrder).toHaveTextContent('ALGO LONG— USDT')
-    expect(props.onOrderDrag).not.toHaveBeenCalled()
+    expect(props.onOrderLift).not.toHaveBeenCalled()
     expect(screen.queryByRole('button')).not.toBeInTheDocument()
   })
 })

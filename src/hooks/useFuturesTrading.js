@@ -21,6 +21,10 @@ import {
 } from '../utils/tradingCommands.js'
 import { createUnsentCommandStore } from '../utils/unsentTradingCommand.js'
 import { answersUnresolvedCommand } from '../utils/unresolvedCommandIdentity.js'
+import {
+  FUTURES_COMMAND_OUTCOME,
+  readFuturesCommandAnswer,
+} from '../utils/futuresCommandOutcome.js'
 
 const OPEN_ORDER_STATUSES = new Set(['NEW', 'PARTIALLY_FILLED'])
 const TERMINAL_ORDER_STATUSES = new Set([
@@ -36,6 +40,12 @@ const TERMINAL_ORDER_STATUSES = new Set([
 // nobody told the desk about is half a minute of staleness rather than a
 // permanent one.
 const ACCOUNT_RECONCILE_INTERVAL_MS = 30_000
+
+// How long a caller waits for the exchange's answer before the silence itself
+// becomes the answer. The backend states an ambiguous outcome immediately and
+// reconciles it over a few seconds, so this only bounds total silence — a
+// caller that waited forever would hold a drag open on a dead connection.
+const COMMAND_ANSWER_TIMEOUT_MS = 15_000
 
 const ACCOUNT_RESOURCE_NAMES = [
   'balances',
@@ -300,6 +310,42 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection, marketGeneration = n
     generationRef.current = marketGeneration
   }, [marketGeneration])
 
+  // Commands whose answer somebody is waiting on. Held in a ref rather than in
+  // state: nothing renders from them, and a pending answer must survive every
+  // re-render the account traffic causes while it is outstanding.
+  const commandWatchersRef = useRef([])
+
+  const settleCommandWatcher = useCallback((watcher, result) => {
+    if (!commandWatchersRef.current.includes(watcher)) return
+    commandWatchersRef.current = commandWatchersRef.current.filter(entry => entry !== watcher)
+    if (watcher.timer !== null) globalThis.clearTimeout(watcher.timer)
+    watcher.settle(Object.freeze(result))
+  }, [])
+
+  const answerCommandWatchers = useCallback((answer) => {
+    for (const watcher of [...commandWatchersRef.current]) {
+      const result = readFuturesCommandAnswer(watcher, answer)
+      if (result) settleCommandWatcher(watcher, result)
+    }
+  }, [settleCommandWatcher])
+
+  // A connection that drops mid-command answers nothing: what the exchange did
+  // with it is exactly as unknown as it was a moment before.
+  const abandonCommandWatchers = useCallback((code, message) => {
+    for (const watcher of [...commandWatchersRef.current]) {
+      settleCommandWatcher(watcher, {
+        outcome: FUTURES_COMMAND_OUTCOME.UNKNOWN,
+        code,
+        message,
+      })
+    }
+  }, [settleCommandWatcher])
+
+  useEffect(() => () => abandonCommandWatchers(
+    'FUTURES_WORKSPACE_CLOSED',
+    'The Futures workspace closed before Binance answered this command.',
+  ), [abandonCommandWatchers])
+
   useEffect(() => {
     if (!enabled || !isUsableSocket(wsConnection)) {
       // Keep the last-known account snapshot so re-entering Futures mode is
@@ -378,6 +424,7 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection, marketGeneration = n
             openOrders: mergeOrderUpdate(previous.openOrders, report, settledOrders),
           }
         })
+        answerCommandWatchers({ kind: 'execution', report })
       }
       if (payload.futures_history && typeof payload.futures_history === 'object') {
         const history = payload.futures_history
@@ -432,6 +479,7 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection, marketGeneration = n
               : previous.unresolvedCommand,
           }
         })
+        answerCommandWatchers({ kind: 'rejected', envelope: payload.command_rejected })
       }
       // The end of an unknown outcome: the backend has established what the
       // exchange did with this command, and says so by name.
@@ -448,6 +496,7 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection, marketGeneration = n
             ? { ...previous, unresolvedCommand: null }
             : previous
         })
+        answerCommandWatchers({ kind: 'resolved', envelope: payload.command_resolved })
       }
       // An unresolved outcome is deliberately not an error: the order may be
       // live, and presenting it as a failure is what makes an operator create a
@@ -458,11 +507,16 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection, marketGeneration = n
           ...previous,
           unresolvedCommand: payload.command_unresolved,
         }))
+        answerCommandWatchers({ kind: 'unresolved', envelope: payload.command_unresolved })
       }
     }
 
     const handleDisconnect = () => {
       if (!active) return
+      abandonCommandWatchers(
+        'TRANSPORT_LOST',
+        'The connection dropped before Binance answered this command.',
+      )
       setState(previous => ({
         ...previous,
         connected: false,
@@ -489,7 +543,7 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection, marketGeneration = n
       wsConnection.removeEventListener('close', handleDisconnect)
       wsConnection.removeEventListener('error', handleDisconnect)
     }
-  }, [enabled, wsConnection])
+  }, [abandonCommandWatchers, answerCommandWatchers, enabled, wsConnection])
 
   // Every command carries the market activation it was issued under. The
   // backend refuses one from a superseded activation, so a command composed
@@ -508,6 +562,86 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection, marketGeneration = n
       return false
     }
   }, [enabled, marketGeneration, unsentCommands, wsConnection])
+
+  // Sends a command and answers with what the exchange did with it, rather than
+  // with whether the frame left. A drag that lifts an order off the book cannot
+  // begin on a dispatch: it has to know the order is gone, and it has to know
+  // the difference between "refused" and "no answer" — a drag started on the
+  // second would show a lifted order that is still resting on the exchange.
+  const awaitCommandOutcome = useCallback((command, identity) => new Promise((resolve) => {
+    const watcher = {
+      ...identity,
+      request: command.action,
+      settle: resolve,
+      timer: null,
+    }
+    watcher.timer = globalThis.setTimeout(() => settleCommandWatcher(watcher, {
+      outcome: FUTURES_COMMAND_OUTCOME.UNKNOWN,
+      code: 'FUTURES_ANSWER_TIMEOUT',
+      message: 'Binance has not answered this command. Check the order on Binance before acting on it.',
+    }), COMMAND_ANSWER_TIMEOUT_MS)
+    // Registered before it is sent: the answer cannot arrive before the frame
+    // does, but the registration must not be the thing that races it.
+    commandWatchersRef.current = [...commandWatchersRef.current, watcher]
+    if (!sendCommand(command)) {
+      settleCommandWatcher(watcher, {
+        outcome: FUTURES_COMMAND_OUTCOME.REFUSED,
+        code: 'LOCAL_CONNECTION_UNAVAILABLE',
+        message: 'Local backend connection unavailable — nothing was sent.',
+      })
+    }
+  }), [sendCommand, settleCommandWatcher])
+
+  // The cancellation a drag waits on. Confirmed means the exchange reported the
+  // order cancelled; an order the market filled while the command was in flight
+  // is refused, not confirmed, because nothing is owed for an order that traded.
+  const cancelOrderAndConfirm = useCallback(({
+    symbol: orderSymbol,
+    orderId,
+    origClientOrderId,
+  } = {}) => {
+    const command = createFuturesCancelOrderCommand({
+      symbol: orderSymbol ?? symbolRef.current,
+      orderId,
+      origClientOrderId,
+    })
+    return awaitCommandOutcome(command, {
+      kind: 'cancel',
+      symbol: command.symbol,
+      orderId: orderId ?? null,
+      // The order's own client id, not the command's: the cancellation report
+      // echoes the order that was cancelled.
+      clientOrderId: origClientOrderId ?? null,
+    })
+  }, [awaitCommandOutcome])
+
+  const placeOrderAndConfirm = useCallback(({
+    symbol: orderSymbol,
+    side,
+    orderType = 'LIMIT',
+    price,
+    quantity,
+    positionSide,
+    reduceOnly,
+  } = {}) => {
+    const command = createFuturesPlaceOrderCommand({
+      symbol: orderSymbol ?? symbolRef.current,
+      side,
+      orderType,
+      price,
+      quantity,
+      positionSide,
+      reduceOnly,
+    })
+    return awaitCommandOutcome(command, {
+      kind: 'place',
+      symbol: command.symbol,
+      orderId: null,
+      // Binance echoes the id the command minted, which is how a placement is
+      // recognised before it has an order id at all.
+      clientOrderId: command.clientOrderId,
+    })
+  }, [awaitCommandOutcome])
 
   // Resends the exact command that never left the renderer, identity and all.
   // Rebuilding it would mint a new client order id and the exchange could no
@@ -675,8 +809,10 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection, marketGeneration = n
     ...state,
     positions,
     placeOrder,
+    placeOrderAndConfirm,
     modifyOrder,
     cancelOrder,
+    cancelOrderAndConfirm,
     cancelAll,
     closePosition,
     adjustPositionMargin,
@@ -690,11 +826,13 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection, marketGeneration = n
     adjustPositionMargin,
     cancelAll,
     cancelOrder,
+    cancelOrderAndConfirm,
     closePosition,
     loadHistory,
     loadSymbolConfig,
     modifyOrder,
     placeOrder,
+    placeOrderAndConfirm,
     positions,
     refresh,
     retryUnsentCommand,

@@ -1,5 +1,6 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import useFuturesProductionWorkstation from '../../../hooks/useFuturesProductionWorkstation.js'
+import useFuturesOrderDrag from '../../../hooks/useFuturesOrderDrag.js'
 import { describeFuturesOrderIntent } from '../../../utils/futuresOrderPresentation.js'
 import {
   readFuturesSymbolHistory,
@@ -12,6 +13,7 @@ import { FUTURES_WORKSTATION_INTERVALS } from '../../../utils/futuresWorkstation
 import { clampUiScale, readUiScale, writeUiScale } from '../../../utils/uiScale.js'
 import QuickSwitchModal from '../tools/QuickSwitchModal.jsx'
 import FuturesLeverageEditor from './FuturesLeverageEditor.jsx'
+import FuturesOrderDragAlert from './FuturesOrderDragAlert.jsx'
 import FuturesOrderEditor from './FuturesOrderEditor.jsx'
 import FuturesPositionCloser from './FuturesPositionCloser.jsx'
 import FuturesPositionMarginEditor from './FuturesPositionMarginEditor.jsx'
@@ -42,7 +44,6 @@ export const FuturesProductionWorkstation = ({
   const [uiScale, setUiScale] = useState(() => readUiScale())
   const [draftPrice, setDraftPrice] = useState(null)
   const [gestureRequest, setGestureRequest] = useState(null)
-  const [orderAmendRequest, setOrderAmendRequest] = useState(null)
   const [orderEditor, setOrderEditor] = useState(null)
   const [positionCloser, setPositionCloser] = useState(null)
   const [marginEditor, setMarginEditor] = useState(null)
@@ -59,7 +60,6 @@ export const FuturesProductionWorkstation = ({
     selectedIndex: 0,
   })
   const gestureSequenceRef = useRef(0)
-  const amendmentSequenceRef = useRef(0)
   const sizeSequenceRef = useRef(0)
   const workstationState = useFuturesProductionWorkstation({
     enabled,
@@ -72,6 +72,18 @@ export const FuturesProductionWorkstation = ({
     contract => contract.symbol === symbol,
   ) ?? null
 
+  // Dragging an order lifts it off the book: the cancellation is sent when the
+  // drag begins, and from that moment the desk owes the operator a replacement.
+  // The whole transaction lives here rather than in the chart, because it must
+  // outlive a contract change and a chart that stops being live.
+  const orderDrag = useFuturesOrderDrag({
+    tradingPaused: executionState?.tradingPaused === true,
+    maxOrderNotionalUsdt: executionState?.maxOrderNotionalUsdt ?? null,
+    tickSize: selectedContract?.filters?.price?.tickSize ?? null,
+    cancelOrder: executionState?.cancelOrderAndConfirm,
+    placeOrder: executionState?.placeOrderAndConfirm,
+  })
+
   // The ticket owns the price-to-notional conversion, so a size pick carries the
   // quantity and the ticket values it at the price the operator is working at.
   const handleSizePick = useCallback((quantity) => {
@@ -82,7 +94,6 @@ export const FuturesProductionWorkstation = ({
   const handleSymbolChange = useCallback((nextSymbol) => {
     setDraftPrice(null)
     setGestureRequest(null)
-    setOrderAmendRequest(null)
     setOrderEditor(null)
     setSizeRequest(null)
     setSymbol(nextSymbol)
@@ -233,11 +244,14 @@ export const FuturesProductionWorkstation = ({
     setGestureRequest({ ...gesture, id: gestureSequenceRef.current })
   }, [])
 
-  const handleOrderDrag = useCallback((amendment) => {
-    amendmentSequenceRef.current += 1
-    setDraftPrice(amendment.price)
-    setOrderAmendRequest({ ...amendment, id: amendmentSequenceRef.current })
-  }, [])
+  // The drag's two ends. Lifting answers whether the order actually left the
+  // book; dropping is what puts one back, at the new price or at the old one.
+  const handleOrderLift = useCallback(order => orderDrag.lift(order), [orderDrag])
+
+  const handleOrderDrop = useCallback(({ price, restored }) => {
+    if (!restored && typeof price === 'string') setDraftPrice(price)
+    return orderDrag.drop({ price, restored })
+  }, [orderDrag])
 
   const executionOpenOrders = executionState?.openOrders
   const ownedOrders = useMemo(() => (
@@ -252,6 +266,10 @@ export const FuturesProductionWorkstation = ({
             price: order.orderKind === 'ALGO'
               ? (order.triggerPrice ?? order.price)
               : order.price,
+            // The exchange's own leg, kept beside the derived one: a one-way
+            // account reports BOTH, and an order placed with the LONG a label
+            // was derived from is refused by Binance.
+            exchangePositionSide: order.positionSide ?? null,
             positionSide: intent.positionSide,
             positionEffect: intent.positionEffect,
             intentLabel: intent.label,
@@ -310,7 +328,6 @@ export const FuturesProductionWorkstation = ({
       onLeverageEdit={handleLeverageEdit}
       draftPrice={draftPrice}
       gestureRequest={gestureRequest}
-      orderAmendRequest={orderAmendRequest}
       sizeRequest={sizeRequest}
       onDraftPriceChange={setDraftPrice}
       onOrderEdit={handleOrderEdit}
@@ -361,13 +378,23 @@ export const FuturesProductionWorkstation = ({
         onUiScaleChange={handleUiScaleChange}
         onDraftPriceChange={setDraftPrice}
         onTradingGesture={handleTradingGesture}
-        onOrderDrag={handleOrderDrag}
+        onOrderLift={handleOrderLift}
+        onOrderDrop={handleOrderDrop}
         onOrderCancel={executionState?.cancelOrder}
         onOrderEdit={handleOrderEdit}
         onRetry={workstationState.retry}
         onTapeConfigurationChange={workstationState.configureTape}
         onSymbolChange={handleSymbolChange}
         onIntervalChange={setInterval}
+      />
+      {/* An order the drag lifted and could not put back is the one thing that
+          may not wait in a panel: it is stated over the workspace, with the
+          control that places it again. */}
+      <FuturesOrderDragAlert
+        alert={orderDrag.alert}
+        busy={orderDrag.replacementInFlight}
+        onRetry={orderDrag.retry}
+        onDismiss={orderDrag.dismiss}
       />
       {/* Keyed by the object each panel edits. The panels seed their price, size
           and amount from props once, so re-targeting one at another order or

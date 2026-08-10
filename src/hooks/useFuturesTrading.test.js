@@ -990,3 +990,144 @@ describe('useFuturesTrading', () => {
   })
 
 })
+
+describe('useFuturesTrading command answers', () => {
+  // A drag that lifts an order off the book may not begin on a dispatch: it
+  // needs to know the exchange actually cancelled the order.
+  const renderTrading = (socket) => renderHook(() => useFuturesTrading({
+    enabled: true,
+    symbol: 'BTCUSDT',
+    wsConnection: socket,
+  }))
+
+  it('answers a cancellation with what the exchange did, not with what was sent', async () => {
+    const socket = createSocket()
+    const { result } = renderTrading(socket)
+
+    let answer = null
+    act(() => {
+      result.current.cancelOrderAndConfirm({ symbol: 'BTCUSDT', orderId: 11 })
+        .then((outcome) => { answer = outcome })
+    })
+    expect(socket.sent.at(-1)).toMatchObject({ action: 'trade.cancelOrder', orderId: 11 })
+    // Another order's traffic answers nothing.
+    await act(async () => {
+      socket.receive({
+        futures_execution_update: { symbol: 'BTCUSDT', orderId: 99, status: 'CANCELED' },
+      })
+    })
+    expect(answer).toBeNull()
+
+    await act(async () => {
+      socket.receive({
+        futures_execution_update: { symbol: 'BTCUSDT', orderId: 11, status: 'CANCELED' },
+      })
+    })
+    expect(answer).toMatchObject({ outcome: 'confirmed' })
+  })
+
+  it('answers a refusal that names the order as a refusal', async () => {
+    const socket = createSocket()
+    const { result } = renderTrading(socket)
+
+    let answer = null
+    act(() => {
+      result.current.cancelOrderAndConfirm({ symbol: 'BTCUSDT', orderId: 11 })
+        .then((outcome) => { answer = outcome })
+    })
+    await act(async () => {
+      socket.receive({
+        command_rejected: {
+          request: 'trade.cancelOrder',
+          code: 'FUTURES_API_ERROR',
+          message: 'Unknown order sent.',
+          details: { marketType: 'futures', symbol: 'BTCUSDT', orderId: 11 },
+        },
+      })
+    })
+
+    expect(answer).toMatchObject({ outcome: 'refused', message: 'Unknown order sent.' })
+  })
+
+  it('answers an unconfirmed outcome as unknown, never as a failure', async () => {
+    const socket = createSocket()
+    const { result } = renderTrading(socket)
+
+    let answer = null
+    act(() => {
+      result.current.cancelOrderAndConfirm({ symbol: 'BTCUSDT', orderId: 11 })
+        .then((outcome) => { answer = outcome })
+    })
+    await act(async () => {
+      socket.receive({
+        command_unresolved: {
+          request: 'trade.cancelOrder',
+          code: 'FUTURES_OUTCOME_PENDING',
+          message: 'Binance did not confirm this order either way.',
+          details: { marketType: 'futures', symbol: 'BTCUSDT', orderId: 11 },
+        },
+      })
+    })
+
+    expect(answer).toMatchObject({ outcome: 'unknown' })
+  })
+
+  it('recognises its own placement by the identity the command minted', async () => {
+    const socket = createSocket()
+    const { result } = renderTrading(socket)
+
+    let answer = null
+    act(() => {
+      result.current.placeOrderAndConfirm({
+        symbol: 'BTCUSDT',
+        side: 'BUY',
+        price: '58445',
+        quantity: '0.004',
+      }).then((outcome) => { answer = outcome })
+    })
+    const placement = socket.sent.at(-1)
+    expect(placement).toMatchObject({ action: 'trade.placeOrder', quantity: '0.004' })
+
+    await act(async () => {
+      socket.receive({
+        futures_execution_update: {
+          symbol: 'BTCUSDT',
+          orderId: 12,
+          clientOrderId: placement.clientOrderId,
+          status: 'NEW',
+        },
+      })
+    })
+
+    expect(answer).toMatchObject({ outcome: 'confirmed' })
+    // Exactly one frame: the account refresh on subscribe, and this order.
+    expect(socket.sent.filter(frame => frame.action === 'trade.placeOrder')).toHaveLength(1)
+  })
+
+  it('refuses immediately when the frame cannot leave the renderer', async () => {
+    const socket = createSocket()
+    const { result } = renderTrading(socket)
+    socket.readyState = 3
+
+    let answer = null
+    await act(async () => {
+      answer = await result.current.cancelOrderAndConfirm({ symbol: 'BTCUSDT', orderId: 11 })
+    })
+
+    expect(answer).toMatchObject({ outcome: 'refused', code: 'LOCAL_CONNECTION_UNAVAILABLE' })
+  })
+
+  it('leaves a command unanswered by a dropped connection as unknown', async () => {
+    const socket = createSocket()
+    const { result } = renderTrading(socket)
+
+    let answer = null
+    act(() => {
+      result.current.cancelOrderAndConfirm({ symbol: 'BTCUSDT', orderId: 11 })
+        .then((outcome) => { answer = outcome })
+    })
+    await act(async () => { socket.dropConnection() })
+
+    expect(answer).toMatchObject({ outcome: 'unknown', code: 'TRANSPORT_LOST' })
+  })
+})

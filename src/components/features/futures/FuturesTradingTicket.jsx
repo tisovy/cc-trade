@@ -3,7 +3,6 @@ import {
   calculateFuturesNotionalForPercent,
   calculateFuturesNotionalPercent,
   deriveFuturesLimitOrderDraft,
-  evaluateFuturesOrderRisk,
   isFuturesDraftAmountWithinBudget,
   normalizeFuturesDraftPrice,
   quantizeFuturesNotionalUsdt,
@@ -82,7 +81,6 @@ const FuturesTradingTicket = ({
   onLeverageEdit,
   draftPrice = null,
   gestureRequest = null,
-  orderAmendRequest = null,
   sizeRequest = null,
   onDraftPriceChange,
   onOrderEdit,
@@ -107,7 +105,6 @@ const FuturesTradingTicket = ({
   const [feedback, setFeedback] = useState(null)
   const [pendingOrder, setPendingOrder] = useState(null)
   const handledGestureRef = useRef(null)
-  const handledAmendmentRef = useRef(null)
   const handledSizeRef = useRef(null)
   const feedbackSymbolRef = useRef(selectedSymbol)
 
@@ -321,79 +318,11 @@ const FuturesTradingTicket = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gestureRequest])
 
-  // Ctrl/Alt-dragging an order line reprices it through Binance's native
-  // amendment — one call, so a rejection leaves the order exactly where it was.
-  // Skipped while paused so a drag cannot touch the book at all.
-  useEffect(() => {
-    if (!orderAmendRequest || handledAmendmentRef.current === orderAmendRequest.id) return
-    handledAmendmentRef.current = orderAmendRequest.id
-    if (tradingPaused) {
-      setFeedback({
-        tone: 'ignored',
-        title: 'Order move NOT applied',
-        detail: 'Trading is paused — resume to move orders.',
-      })
-      return
-    }
-    if (typeof safeState.modifyOrder !== 'function') return
-    const target = openOrders.find(order => (
-      order.clientOrderId === orderAmendRequest.clientOrderId
-      || String(order.orderId) === String(orderAmendRequest.orderId)
-    ))
-    if (!target) {
-      setFeedback({
-        tone: 'ignored',
-        title: 'Order move NOT applied',
-        detail: 'The dragged order is no longer open.',
-      })
-      return
-    }
-    const nextPrice = normalizeFuturesDraftPrice(orderAmendRequest.price, tickSize)
-      ?? orderAmendRequest.price
-    const remaining = Number(target.origQty) - Number(target.z ?? target.executedQty ?? 0)
-    if (!Number.isFinite(remaining) || remaining <= 0) {
-      setFeedback({
-        tone: 'ignored',
-        title: 'Order move NOT applied',
-        detail: 'The dragged order has no remaining quantity.',
-      })
-      return
-    }
-    // A price-only drag still changes the notional, so the ceiling is checked
-    // against the order the drag would leave working, not the one it replaces.
-    const risk = evaluateFuturesOrderRisk({
-      quantity: target.origQty,
-      price: nextPrice,
-      maxOrderNotionalUsdt: safeState.maxOrderNotionalUsdt,
-      exposureIncreasing: target.reduceOnly !== true,
-    })
-    if (!risk.ok) {
-      setFeedback({
-        tone: 'ignored',
-        title: 'Order move NOT applied',
-        detail: risk.reason === 'ABOVE_ORDER_CAP'
-          ? `Moved order would be ${risk.notionalUsdt} USDT, above the local ${risk.capUsdt} USDT limit.`
-          : 'The moved order could not be valued, so the order limit could not be checked.',
-      })
-      return
-    }
-    const accepted = safeState.modifyOrder({
-      symbol: target.symbol,
-      side: target.side,
-      orderId: target.orderId,
-      origClientOrderId: target.orderId ? undefined : target.clientOrderId,
-      price: nextPrice,
-      quantity: target.origQty,
-    })
-    setFeedback(accepted
-      ? {
-          tone: 'submitted',
-          title: 'Order move submitted',
-          detail: `${target.symbol} ${target.side} → ${nextPrice}`,
-        }
-      : { tone: 'ignored', title: 'Order move NOT applied', detail: SEND_FAILED_MESSAGE })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [orderAmendRequest])
+  // A drag no longer amends anything. Picking an order up cancels it and the
+  // drop places its replacement, so the cap and the paused-trading refusal moved
+  // to that path with the placement they now guard (`useFuturesOrderDrag`).
+  // Repricing by typing keeps the single-call amendment and its safety: the
+  // amend panel is the surface where a rejection leaves the order where it was.
 
   // Sizing the ticket from an open position: the quantity comes from the dock,
   // the price from wherever the operator is working, so "the whole position"
@@ -680,7 +609,7 @@ const FuturesTradingTicket = ({
               <span><kbd>Alt</kbd><b>×2 right</b><em>LONG exit</em></span>
               <span><kbd>Ctrl</kbd><b>×2 right</b><em>SHORT entry</em></span>
               <span><kbd>Ctrl</kbd><b>×2 left</b><em>SHORT exit</em></span>
-              <small>Ctrl/Alt + drag an order line to move it</small>
+              <small>Ctrl/Alt + drag an order: it is cancelled and placed where you drop it</small>
             </div>
           </section>
         ) : tab === 'orders' ? (

@@ -1769,13 +1769,21 @@ export function setupBinanceConnection({
             }
         };
 
-        const emitFuturesApiRejection = (action, error) => {
+        // `identity` names the order the refusal is about. Without it a renderer
+        // waiting on one command's answer cannot tell it from another's, and a
+        // drag waiting on a cancellation would sit through a refusal it was
+        // supposed to act on.
+        const emitFuturesApiRejection = (action, error, identity = {}) => {
             logger.error(`[futures-orders] ${action} failed:`, error?.code || error?.message);
             emit(createCommandRejection(
                 action,
                 'FUTURES_API_ERROR',
                 describeFuturesApiError(error),
-                { marketType: FUTURES_MARKET_TYPE, binanceCode: error?.code ?? null },
+                {
+                    marketType: FUTURES_MARKET_TYPE,
+                    binanceCode: error?.code ?? null,
+                    ...identity,
+                },
             ));
         };
 
@@ -1995,7 +2003,10 @@ export function setupBinanceConnection({
                     // Binance says no such order: the placement never happened,
                     // so this is an ordinary refusal the operator may act on.
                     onAbsent: async () => {
-                        emitFuturesApiRejection(TRADING_COMMAND_ACTIONS.PLACE_ORDER, error);
+                        emitFuturesApiRejection(TRADING_COMMAND_ACTIONS.PLACE_ORDER, error, {
+                            symbol: order.symbol,
+                            clientOrderId: order.newClientOrderId ?? null,
+                        });
                     },
                 });
             }
@@ -2267,7 +2278,11 @@ export function setupBinanceConnection({
                             await refreshFuturesAccountState();
                             return;
                         }
-                        emitFuturesApiRejection(TRADING_COMMAND_ACTIONS.CANCEL_ORDER, error);
+                        emitFuturesApiRejection(TRADING_COMMAND_ACTIONS.CANCEL_ORDER, error, {
+                            symbol: command.symbol,
+                            orderId: command.orderId ?? null,
+                            clientOrderId: command.origClientOrderId ?? null,
+                        });
                     },
                 });
             }

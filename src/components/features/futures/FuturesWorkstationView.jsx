@@ -133,7 +133,8 @@ export const FuturesWorkstationView = ({
   onUiScaleChange,
   onDraftPriceChange,
   onTradingGesture,
-  onOrderDrag,
+  onOrderLift,
+  onOrderDrop,
   onOrderCancel,
   onOrderEdit,
   onRetry,
@@ -753,6 +754,8 @@ export const FuturesWorkstationView = ({
             </button>
           </div>
         </div>
+        {/* `onOrderDrop` is never gated on the chart being live: a drag already
+            in flight owes a replacement whatever the candles are doing. */}
         <div className="futures-workstation-chart-frame">
           <FuturesWorkstationChart
             symbol={selectedSymbol}
@@ -767,7 +770,8 @@ export const FuturesWorkstationView = ({
             positions={ownedPositions}
             onPricePick={candlesState === 'live' ? pickPrice : IGNORE_PRICE_PICK}
             onTradingGesture={candlesState === 'live' ? onTradingGesture : undefined}
-            onOrderDrag={candlesState === 'live' ? onOrderDrag : undefined}
+            onOrderLift={candlesState === 'live' ? onOrderLift : undefined}
+            onOrderDrop={onOrderDrop}
             onOrderCancel={onOrderCancel}
             onOrderEdit={onOrderEdit}
           />

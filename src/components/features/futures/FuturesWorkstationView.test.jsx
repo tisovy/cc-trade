@@ -1250,7 +1250,8 @@ describe('production workstation container', () => {
       selectedInterval: '1m',
       onDraftPriceChange: vi.fn(),
       onTradingGesture: vi.fn(),
-      onOrderDrag: vi.fn(),
+      onOrderLift: vi.fn(),
+      onOrderDrop: vi.fn(),
       onSymbolChange: vi.fn(),
       onIntervalChange: vi.fn(),
     }

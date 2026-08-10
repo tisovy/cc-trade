@@ -683,16 +683,35 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* While a drag is in flight the handle stops looking like an order resting at a
-   price: it is a price being aimed at, and the dotted WAS line behind it is
-   where the order still sits until the exchange accepts the move. */
-.futures-workstation-owned-order.is-moving {
+/* A lifted order is not resting anywhere: it was cancelled when the drag picked
+   it up, and nothing stands at this price until the exchange accepts the
+   placement. Dashed, and never drawn like a working order. */
+.futures-workstation-owned-order.is-lifted {
   border-style: dashed;
   background: rgba(5, 12, 19, 0.72);
   box-shadow: 0 0 0 1px rgba(5, 12, 19, 0.9), 0 6px 18px rgba(0, 0, 0, 0.45);
+  cursor: ns-resize;
+  pointer-events: none;
 }
 
-.futures-workstation-owned-order.is-moving .futures-workstation-owned-order-cancel {
+/* The window between the cancellation and the placement, shown as the window it
+   is: the mark pulses rather than settling into a resting order. */
+.futures-workstation-owned-order.is-placing {
+  animation: futures-order-placing 1.1s ease-in-out infinite;
+}
+
+@keyframes futures-order-placing {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+/* The cancellation that lifts it is still in flight, so the order is still on
+   the book and still drawn as one — dimmed, because it is on its way off. */
+.futures-workstation-owned-order.is-lifting {
+  opacity: 0.6;
+}
+
+.futures-workstation-owned-order.is-lifting .futures-workstation-owned-order-cancel {
   visibility: hidden;
 }
 
@@ -1917,4 +1936,98 @@
 
 .futures-workstation-book-pressure-legend > .is-sell {
   color: #ff7380;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   The drag's obligation
+   ───────────────────────────────────────────────────────────────────────────── */
+
+/* Placed over the workspace rather than inside a panel: this is the one message
+   that means an order the operator had is gone and has not come back. */
+.futures-order-drag-alert {
+  position: fixed;
+  top: 18px;
+  left: 50%;
+  z-index: 40;
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  width: min(680px, calc(100vw - 48px));
+  padding: 12px 14px;
+  transform: translateX(-50%);
+  border: 1px solid #ef5b69;
+  border-radius: 8px;
+  background: rgba(28, 8, 12, 0.97);
+  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.55);
+}
+
+/* An order still on the book: a refusal to read, not a loss to repair. */
+.futures-order-drag-alert.is-refused {
+  border-color: rgba(240, 185, 11, 0.75);
+  background: rgba(30, 22, 6, 0.97);
+}
+
+/* Neither: what Binance did is unknown, and the desk says exactly that. */
+.futures-order-drag-alert.is-unresolved {
+  border-color: rgba(240, 201, 78, 0.85);
+  background: rgba(28, 24, 8, 0.97);
+}
+
+.futures-order-drag-alert-body {
+  display: grid;
+  gap: 4px;
+  flex: 1 1 auto;
+}
+
+.futures-order-drag-alert-body strong {
+  color: #ff8c96;
+  font-size: calc(var(--fx-ui-scale, 1) * 13px);
+  font-weight: 900;
+  letter-spacing: 0.06em;
+}
+
+.futures-order-drag-alert.is-refused .futures-order-drag-alert-body strong,
+.futures-order-drag-alert.is-unresolved .futures-order-drag-alert-body strong {
+  color: #f0c94e;
+}
+
+.futures-order-drag-alert-body span {
+  color: #d8e3ed;
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
+  line-height: 1.45;
+}
+
+.futures-order-drag-alert-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.futures-order-drag-alert-retry {
+  padding: 6px 10px;
+  border: 1px solid #2bc48a;
+  border-radius: 5px;
+  background: rgba(43, 196, 138, 0.16);
+  color: #63dbae;
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+}
+
+.futures-order-drag-alert-retry:disabled {
+  opacity: 0.55;
+  cursor: progress;
+}
+
+.futures-order-drag-alert-dismiss {
+  padding: 4px 8px;
+  border: 1px solid rgba(135, 151, 170, 0.35);
+  border-radius: 5px;
+  background: transparent;
+  color: #9eb0c2;
+  font-size: calc(var(--fx-ui-scale, 1) * 13px);
+  line-height: 1;
+  cursor: pointer;
 }

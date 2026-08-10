@@ -891,100 +891,9 @@ describe('FuturesTradingTicket', () => {
     expect(state.setTradingPaused).toHaveBeenCalledWith(false)
   })
 
-  it('moves a dragged order with one atomic amendment and never cancels it', () => {
-    const state = createState({
-      openOrders: [{
-        symbol: 'BTCUSDT', orderId: 11, side: 'BUY', positionSide: 'LONG',
-        type: 'LIMIT', status: 'NEW', price: '58445.00', origQty: '0.004', z: '0',
-        clientOrderId: 'abc',
-      }],
-    })
-    render(
-      <FuturesTradingTicket
-        state={state}
-        selectedSymbol="BTCUSDT"
-        selectedContract={contract}
-        orderAmendRequest={{ id: 4, clientOrderId: 'abc', price: '58500.04' }}
-      />,
-    )
-    expect(state.modifyOrder).toHaveBeenCalledExactlyOnceWith({
-      symbol: 'BTCUSDT',
-      side: 'BUY',
-      orderId: 11,
-      origClientOrderId: undefined,
-      price: '58500',
-      quantity: '0.004',
-    })
-    expect(state.cancelOrder).not.toHaveBeenCalled()
-    expect(state.placeOrder).not.toHaveBeenCalled()
-    expect(screen.getByLabelText('Futures gesture feedback'))
-      .toHaveTextContent('Order move submitted')
-  })
-
-  // A drag changes only the price, and the price is half of the notional: the
-  // ceiling has to be read on the order the drag would leave working.
-  it('refuses a drag that would move an order past the local ceiling', () => {
-    const state = createState({
-      maxOrderNotionalUsdt: '200',
-      openOrders: [{
-        symbol: 'BTCUSDT', orderId: 11, side: 'BUY', positionSide: 'LONG',
-        type: 'LIMIT', status: 'NEW', price: '40000.00', origQty: '0.004', z: '0',
-        clientOrderId: 'abc',
-      }],
-    })
-    render(
-      <FuturesTradingTicket
-        state={state}
-        selectedSymbol="BTCUSDT"
-        selectedContract={contract}
-        orderAmendRequest={{ id: 4, clientOrderId: 'abc', price: '60000.0' }}
-      />,
-    )
-    expect(state.modifyOrder).not.toHaveBeenCalled()
-    expect(screen.getByLabelText('Futures gesture feedback'))
-      .toHaveTextContent('above the local 200 USDT limit')
-  })
-
-  it('lets a reduce-only order be dragged whatever the ceiling says', () => {
-    const state = createState({
-      maxOrderNotionalUsdt: '200',
-      openOrders: [{
-        symbol: 'BTCUSDT', orderId: 11, side: 'SELL', positionSide: 'LONG',
-        type: 'LIMIT', status: 'NEW', price: '40000.00', origQty: '0.004', z: '0',
-        clientOrderId: 'abc', reduceOnly: true,
-      }],
-    })
-    render(
-      <FuturesTradingTicket
-        state={state}
-        selectedSymbol="BTCUSDT"
-        selectedContract={contract}
-        orderAmendRequest={{ id: 4, clientOrderId: 'abc', price: '60000.0' }}
-      />,
-    )
-    expect(state.modifyOrder).toHaveBeenCalledOnce()
-  })
-
-  it('skips drag amendments while paused instead of cancelling half-way', () => {
-    const state = createState({
-      tradingPaused: true,
-      openOrders: [{
-        symbol: 'BTCUSDT', orderId: 11, side: 'BUY', positionSide: 'LONG',
-        type: 'LIMIT', status: 'NEW', price: '58445.00', origQty: '0.004', z: '0',
-        clientOrderId: 'abc',
-      }],
-    })
-    render(
-      <FuturesTradingTicket
-        state={state}
-        selectedSymbol="BTCUSDT"
-        selectedContract={contract}
-        orderAmendRequest={{ id: 4, clientOrderId: 'abc', price: '58500.0' }}
-      />,
-    )
-    expect(state.cancelOrder).not.toHaveBeenCalled()
-    expect(state.placeOrder).not.toHaveBeenCalled()
-  })
+  // A drag no longer amends anything: it cancels the order and places its
+  // replacement, so the ceiling, the reduce-only exemption and the paused-desk
+  // refusal are proved where they now live — `useFuturesOrderDrag.test.js`.
 
   it('confirms a submitted gesture in the feedback card', () => {
     const state = createState()
@@ -1061,27 +970,6 @@ describe('FuturesTradingTicket', () => {
     expect(state.placeOrder).not.toHaveBeenCalled()
     expect(screen.getByLabelText('Futures gesture feedback'))
       .toHaveTextContent('Size is below the Binance minimum')
-  })
-
-  it('reports skipped drag amendments while paused', () => {
-    const state = createState({
-      tradingPaused: true,
-      openOrders: [{
-        symbol: 'BTCUSDT', orderId: 11, side: 'BUY', positionSide: 'LONG',
-        type: 'LIMIT', status: 'NEW', price: '58445.00', origQty: '0.004', z: '0',
-        clientOrderId: 'abc',
-      }],
-    })
-    render(
-      <FuturesTradingTicket
-        state={state}
-        selectedSymbol="BTCUSDT"
-        selectedContract={contract}
-        orderAmendRequest={{ id: 4, clientOrderId: 'abc', price: '58500.0' }}
-      />,
-    )
-    expect(screen.getByLabelText('Futures gesture feedback'))
-      .toHaveTextContent('Trading is paused')
   })
 
   it('shows the last execution acknowledgement when there is no rejection', () => {

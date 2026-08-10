@@ -378,22 +378,50 @@ fetched immediately after an amendment can still describe the previous size.
 Both carry the exchange's update time, so the newer of the two wins per order
 and an amended size appears without a manual refresh.
 
-Dragging a regular LIMIT order line with Ctrl/Alt reprices it through Binance's
-native amendment (`PUT /fapi/v1/order`, typed action `trade.replaceOrder`,
-futures only). The amendment keeps the original quantity and is a single call:
-a rejected move leaves the order untouched at its previous price, and the
-account state is resynchronized so the chart line snaps back. Moves are never
-composed from a cancel plus a re-place, which could cancel successfully and
-then fail to re-place, leaving the trader unintentionally flat.
+Dragging a regular LIMIT order line with Ctrl/Alt **lifts the order off the
+book**: the cancellation is sent when the drag begins, and the drag starts only
+once Binance confirms it. A refused cancellation leaves the order working where
+it was and states why; an unconfirmed one starts nothing and is presented as
+unconfirmed, so the operator is never told the order is gone when it may not be.
+
+From the confirmed cancellation the desk owes an order, and discharges that
+obligation in exactly one of three ways:
+
+- the drop places the replacement at the new price, through the placement path
+  with its ceiling and filter checks;
+- abandoning the drag — releasing the modifier, cancelling the pointer, dropping
+  at the price it started from, or changing contract mid-drag — places it again
+  at the price it was lifted from;
+- neither could be placed, and an alert over the workspace names the order that
+  is gone, gives the reason, and carries the control that places it again. An
+  unresolved placement offers no such control: a second attempt on an unknown
+  outcome is how two real orders end up resting.
+
+The replacement carries what was still working (original quantity less what
+filled) and the order's own `reduceOnly` and exchange `positionSide`. While it
+is in flight the chart draws the level as uncovered — a dashed mark reading
+`placing…` — rather than as an order that is not there yet.
+
+This accepts a window with no order on the book, and accepts that an interrupted
+session (a crash, a closed window) leaves the order cancelled. The operator chose
+this shape knowing both; the mitigation is that the obligation is impossible to
+miss, not that the window is hidden.
+
+Repricing by **typing** still uses Binance's native amendment (`PUT
+/fapi/v1/order`, typed action `trade.replaceOrder`, futures only): the amend
+panel is one call, so a rejection leaves the order exactly where it was. That is
+why the panel keeps the amendment and the drag does not.
 
 Two lightweight backend protections remain:
 
 - `FUTURES_MAX_ORDER_USDT=<positive number>` caps every exposure-increasing
   order on every path that can create one: a new order, an amendment from the
-  order editor, a Ctrl/Alt drag on the chart, and a limit close sent without
-  `reduceOnly`. An amendment is measured against the notional it will *leave
-  working* — its new price against the quantity it will carry — not the one it
-  had. The cap is broadcast to the UI and evaluated again in the main process
+  order editor, the replacement a Ctrl/Alt drag places, and a limit close sent
+  without `reduceOnly`. An amendment is measured against the notional it will
+  *leave working* — its new price against the quantity it will carry — not the
+  one it had. A drag is refused before it lifts anything when the order could
+  not be placed again at the price it is already resting at: an order the desk
+  could not put back is one it must not take off the book. The cap is broadcast to the UI and evaluated again in the main process
   on the command as received, so a frame that never passed through the
   interface is refused just the same. An oversized entry shows `RISK CAP`;
   sizing controls remain usable so the amount can be reduced, and reduce-only
@@ -415,7 +443,9 @@ and risk display.
 Each order handle shows its leg (`LONG`/`SHORT`), its notional in USDT, and a
 cancel control, coloured by side — BUY green, SELL red — because one-way
 accounts report `positionSide: BOTH` for every order. The exact resting price
-stays on the price axis. Dragging a handle with Ctrl/Alt reprices the order;
+stays on the price axis. Dragging a handle with Ctrl/Alt lifts the order off the
+book and places it again where it is dropped — while it is dragged it is drawn
+once, at the pointer, with one faint unlabelled mark at the level it came from;
 double-clicking it, double-clicking a row in the Orders tab, or clicking a
 working-order row in the dock opens the same draggable editor for price and
 USDT amount, which applies both as one amendment and closes on an outside click
