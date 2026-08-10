@@ -19,7 +19,9 @@ to do, what should be seen, and what each observation settles.
 
 - One runbook, `runbook.md` in this change, holding every outstanding operator
   confirmation as a numbered step: the action, the expected reading, and the task
-  it closes.
+  it closes. It is written in Russian, because the operator is the only person
+  who executes it, and it opens with the protocol for the session that leads the
+  pass — one step at a time, recorded verbatim, stopping on a failure.
 - The steps are ordered so the pass runs once, front to back, in roughly forty
   minutes: everything read-only first, then the checks that need the exchange
   cut off, then the few that place a real order.

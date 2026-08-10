@@ -5,6 +5,8 @@
 - [x] 1.3 State the exposure of every step that places an order, before the step.
 - [x] 1.4 State plainly which guarantees cannot be staged by hand, and why, rather than inventing a procedure for them.
 - [x] 1.5 State which changes are not ready to verify because the work is not built.
+- [x] 1.6 Write the runbook in Russian: the operator is its only executor, and a checklist that has to be translated while it is being run is a checklist that gets skipped.
+- [x] 1.7 Give the session that leads the pass its own protocol — one step at a time, no batching, record verbatim, stop on a failure, warn before the steps that place orders — and a results table to fill in.
 
 ## 2. The Operator Runs It
 

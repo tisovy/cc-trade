@@ -1,282 +1,339 @@
-# The operator verification pass
+# Прогон проверки деска — один заход
 
-One sitting, front to back. Roughly forty minutes. Read this page once before
-starting so nothing is a surprise.
+> This runbook is written in Russian on purpose: the operator is its only
+> executor, and a checklist you have to translate while running it is a
+> checklist that gets skipped. The proposal and the task list stay in English.
 
-## What you need
-
-- The desk running on the live Production account (`npm run e`).
-- A note somewhere to write one line per step. The line is the point of the pass:
-  a step nobody wrote down did not happen.
-- A liquid contract you are willing to trade at the exchange minimum. BTCUSDT is
-  the safe default because its minimum notional is small relative to its
-  liquidity.
-- Access to the local proxy (`127.0.0.1:1080`). Stopping it is how the pass cuts
-  the desk off from Binance without touching anything else — the desk's own
-  internal socket keeps running, so the application stays alive and honest.
-
-## What it will cost
-
-Steps 1 to 9 place nothing and cost nothing. Steps 10 to 13 place real orders at
-the exchange minimum; two of them are meant to be cancelled unfilled, one is
-meant to fill. Expect a few cents of fees. Every step that touches money says so
-in its own first line.
-
-## How to record a step
-
-For each step write one of:
-
-- `PASS` — you saw what the step says you should see.
-- `FAIL — <what you saw instead>` — write the actual reading, not a judgement.
-- `NOT OBSERVABLE — <why>` — the situation would not arise.
-
-At the end, hand the whole list back to the session working on this repository.
-It goes into the live-verification ledger, and the confirmation items in the
-eight changes are checked from that record.
+Тринадцать шагов, примерно сорок минут, подряд. Прочитайте страницу один раз до
+начала — дальше сюрпризов не будет.
 
 ---
 
-## Part 1 — Startup, read-only
+## Для сессии, которая ведёт прогон
 
-### Step 1. The desk comes up on Futures
+Вы ведёте, оператор выполняет. Правила:
 
-Start the desk. Select the Futures workspace.
+1. **Один шаг за раз.** Дайте текст шага целиком — «что сделать» и «что должно
+   быть» — и остановитесь. Не выдавайте следующий, пока не получили ответ.
+2. **Не объединяйте шаги.** Даже соседние и даже похожие. Оператор ведёт три
+   сессии сразу; пакет из четырёх шагов гарантированно превратится в один
+   невнимательный ответ.
+3. **Записывайте дословно.** Если оператор написал «висит секунд пять, потом
+   рисует» — так и запишите. Не превращайте в «PASS с задержкой».
+4. **На `FAIL` — остановитесь.** Спросите ещё два-три уточняющих факта (что в
+   терминале, что на экране, что на Binance), запишите и **не продолжайте
+   прогон**, если шаг ставит под сомнение следующие. Явно скажите оператору, что
+   останавливаетесь и почему.
+5. **Перед шагами 10–13 предупредите отдельно.** Это реальные ордера. Спросите
+   подтверждение, что момент подходящий.
+6. **В конце соберите таблицу** из раздела «Результаты» и сохраните её. Только
+   после этого можно проставлять галочки в `tasks.md` — и только те, которые
+   запись подтверждает.
+7. **Не подсказывайте ожидаемый ответ.** «Видите ли вы, что стакан заполнен?» —
+   плохо. «Что показывает стакан?» — хорошо.
 
-**Look at:** the ticket's account state — balances, positions, working orders,
-ALGO orders, and the user-data stream.
+---
 
-**Should be:** all five reach a ready state. Nothing says "not read" after a few
-seconds.
+## Что нужно
 
-**If one does not:** write down the exact code shown (for example `-2015`). A
-code on *all* of them means credentials, key permission or the IP restriction on
-the key. A code on ALGO orders alone means the ALGO endpoint or its permission —
-that distinction is the main thing this step is for.
+- Деск, запущенный на живом Production-аккаунте (`npm run e`).
+- Место, куда писать по строке на шаг. Строка и есть смысл прогона: шаг, который
+  никто не записал, не состоялся.
+- Ликвидный контракт, которым вы готовы торговать минимальным размером. BTCUSDT —
+  безопасный вариант по умолчанию: минимальный номинал маленький относительно
+  ликвидности.
+- Доступ к локальному прокси (`127.0.0.1:1080`). Его остановка — это то, чем
+  прогон отрезает деск от Binance, ничего больше не трогая: внутренний сокет
+  деска при этом жив, приложение работает и честно показывает, что биржи не
+  видит.
 
-*Closes:* `verify-live-futures-account-read` 1.2 and 1.3.
+## Во что обойдётся
 
-### Step 2. The workstation is alive
+Шаги 1–9 ничего не размещают и ничего не стоят. Шаги 10–13 размещают реальные
+ордера минимального размера: два предполагается отменить неисполненными, один —
+исполнить. Ожидаемая цена — несколько центов комиссии. Каждый шаг, где есть
+деньги, говорит об этом в первой строке.
 
-**Look at:** the chart draws candles, the order book fills both sides, the tape
-prints trades.
+## Как записывать шаг
 
-**Should be:** all three moving. This is the fix from 2026-08-10 — every
-workstation request was being rejected as malformed, and these three panels
-stayed empty.
+Для каждого шага — одно из:
 
-**If empty:** the desk is broken again; stop the pass and say so.
+- `PASS` — увидели то, что описано.
+- `FAIL — <что увидели вместо>` — пишите фактическое наблюдение, не оценку.
+- `NOT OBSERVABLE — <почему>` — ситуация не возникла.
 
-*Closes:* `isolate-markets-and-runtime` 8.6 confirmation.
+---
 
-### Step 3. Switching markets does not start a storm
+# Часть 1 — Старт, только чтение
 
-Switch Spot → Futures → Spot → Futures, without waiting between switches.
+## Шаг 1. Деск поднимается на Futures
 
-**Look at:** the terminal the desk was started from.
+Запустите деск. Выберите рабочее место Futures.
 
-**Should be:** a handful of lines. No wall of repeating `[market-gate] Refused …
-generation N is superseded by N+1`, and no growing number.
+**Смотрим на:** состояние счёта в тикете — балансы, позиции, рабочие ордера,
+ALGO-ордера и поток пользовательских данных.
 
-**And:** the workspace you land on works — chart and book fill again.
+**Должно быть:** все пять доходят до готового состояния. Через несколько секунд
+нигде не написано «не прочитано».
 
-*Closes:* `isolate-markets-and-runtime` 8.5 and 8.8 confirmation.
+**Если что-то не дошло:** запишите точный код (например `-2015`). Код на **всех**
+— это креды, права ключа или IP-ограничение. Код только на ALGO-ордерах — это
+ALGO-эндпоинт или его право у ключа. Ради этого различия шаг и существует.
 
-### Step 4. Orders on other contracts stay listed
+*Закрывает:* `verify-live-futures-account-read` 1.2 и 1.3.
 
-Have at least one working order on a contract other than the one on screen (if
-you have none, this step is done after step 10 — come back to it).
+## Шаг 2. Воркстейшн живой
 
-Switch the selected contract.
+**Смотрим на:** график рисует свечи, стакан заполнен с обеих сторон, лента
+печатает сделки.
 
-**Should be:** the order on the other contract is still in the working orders
-list. The list is the account's, not the contract's.
+**Должно быть:** все три двигаются. Это исправление от 2026-08-10 — до него
+каждый запрос воркстейшна отклонялся как некорректный, и эти три панели стояли
+пустыми.
 
-*Closes:* `verify-live-futures-account-read` 1.4.
+**Если пусто:** деск снова сломан. Остановите прогон и скажите об этом.
 
-### Step 5. The dock says what it does not know
+*Закрывает:* подтверждение `isolate-markets-and-runtime` 8.6.
 
-Open the portfolio dock's history views once (`ORDER HISTORY`, then `CLOSED
-POSITIONS`).
+## Шаг 3. Переключение рынков не устраивает шторм
 
-**Look at:** what is shown before the rows arrive, and what the counts say.
+Переключите Spot → Futures → Spot → Futures, не выжидая между переключениями.
 
-**Should be:** while nothing has been read, the panel says it has not read the
-account — not "0 open" or "No open positions". A count it does not know shows as
+**Смотрим на:** терминал, из которого запущен деск.
+
+**Должно быть:** несколько строк. Никакой простыни из повторяющегося
+`[market-gate] Refused … generation N is superseded by N+1` и никакого растущего
+номера.
+
+**И:** рабочее место, на котором вы остановились, работает — график и стакан
+снова наполняются.
+
+*Закрывает:* подтверждение `isolate-markets-and-runtime` 8.5 и 8.8.
+
+## Шаг 4. Ордера на других контрактах остаются в списке
+
+Нужен хотя бы один рабочий ордер на контракте, отличном от того, что на экране.
+Если сейчас ни одного нет — вернитесь к этому шагу после шага 10.
+
+Переключите выбранный контракт.
+
+**Должно быть:** ордер на другом контракте всё ещё в списке рабочих ордеров.
+Список принадлежит счёту, а не контракту.
+
+*Закрывает:* `verify-live-futures-account-read` 1.4.
+
+## Шаг 5. Док говорит, чего он не знает
+
+Откройте в доке обе вкладки истории: сначала `ORDER HISTORY`, потом
+`CLOSED POSITIONS`.
+
+**Смотрим на:** что показано до того, как приедут строки, и что написано в
+счётчиках.
+
+**Должно быть:** пока ничего не прочитано, панель говорит, что счёт не прочитан
+— а не «0 open» и не «No open positions». Неизвестный счётчик показывается как
 `—`.
 
-**Note also, for the record:** how long each tab takes to load, and whether
-switching between them reloads from scratch. This is the defect
-`hold-the-history-the-desk-has-read` is about; you are recording the "before",
-not testing a fix.
+**Дополнительно запишите для протокола:** сколько секунд грузится каждая вкладка
+и перезагружается ли всё заново при переключении между ними. Это дефект, ради
+которого заведено `hold-the-history-the-desk-has-read`; вы фиксируете «как было»,
+а не проверяете исправление.
 
-*Closes:* `say-which-readings-are-stale` 5.2, first half.
-
----
-
-## Part 2 — With the exchange cut off
-
-These steps stop the local proxy so the desk cannot reach Binance. The desk
-itself keeps running. Nothing is placed and nothing is at risk; the only
-consequence is that the desk cannot read the account until the proxy is back.
-
-**Before you start:** make sure you have no position you would need to close in
-the next two minutes.
-
-### Step 6. Cut the exchange off
-
-Stop the proxy on `127.0.0.1:1080`.
-
-Wait about thirty seconds, watching the desk.
-
-### Step 7. A frozen price is not presented as the market
-
-**Look at:** the mark price and the unrealized PnL on any open position, and the
-terminal.
-
-**Should be:** the terminal reports that the mark price stream delivered nothing
-for 15s. Position values fall back to the last account reading rather than
-sitting on a mark that stopped moving. Nothing on screen claims a current market
-price it does not have.
-
-*Closes:* `say-which-readings-are-stale` 5.2, second half.
-
-### Step 8. The account read fails out loud
-
-**Look at:** the ticket and the dock.
-
-**Should be:** the account resources say they failed — with a code — rather than
-showing their last values as current. The order-size control refuses to size and
-says why.
-
-**Write down:** the exact wording of the refusal. It should name the reason, not
-just refuse.
-
-### Step 9. A failed history read does not lock the chart
-
-Still cut off, scroll the chart to the left until it asks for older candles.
-
-**Should be:** a message that older candles could not be loaded.
-
-Now restore the proxy. Wait for the account to be read again (a few seconds).
-
-Scroll left again.
-
-**Should be:** it loads. Before the fix, one failed read disabled scrolling left
-for the rest of the session.
-
-**Note:** this is the Spot chart. The Futures chart has the same defect and is
-not fixed yet — if you are on Futures, do this step on the Spot workspace.
-
-*Closes:* `keep-the-chart-loadable` 6.2.
+*Закрывает:* `say-which-readings-are-stale` 5.2, первая половина.
 
 ---
 
-## Part 3 — With real orders
+# Часть 2 — С отрезанной биржей
 
-From here the desk places real orders. Each step says what it exposes.
+Эти шаги останавливают локальный прокси, и деск перестаёт видеть Binance. Сам
+деск при этом работает. Ничего не размещается и ничем не рискуем; единственное
+следствие — пока прокси не вернётся, счёт не читается.
 
-### Step 10. What was confirmed is what is sent
+**Перед началом:** убедитесь, что нет позиции, которую вам может понадобиться
+закрыть в ближайшие две минуты.
 
-*Exposure: one limit order at the exchange minimum, far from the market, meant
-not to fill. You cancel it at the end of the step.*
+## Шаг 6. Отрезать биржу
 
-1. Choose a size on the ticket.
-2. Start an order and read the confirmation panel. **Write down the quantity and
-   the price it shows.**
-3. Leave the panel open for ten to fifteen seconds — long enough for at least one
-   account refresh to land underneath it.
-4. Confirm.
+Остановите прокси на `127.0.0.1:1080`.
 
-**Should be:** the order that appears in the working orders list has exactly the
-quantity you wrote down. Not a recalculated one.
+Подождите около тридцати секунд, наблюдая за деском.
 
-5. Cancel the order.
+## Шаг 7. Замерзшая цена не выдаётся за рыночную
 
-*Closes:* `send-only-the-confirmed-order` 5.2, first half.
+**Смотрим на:** mark-цену и нереализованный PnL по любой открытой позиции, и на
+терминал.
 
-### Step 11. A panel that could not send stays open
+**Должно быть:** в терминале сообщение, что поток mark price ничего не доставил
+за 15 секунд. Значения позиции опираются на последнее чтение счёта, а не стоят на
+цене, которая перестала двигаться. Ничто на экране не выдаёт за текущую рыночную
+цену то, чего у него нет.
 
-*Exposure: none. The command deliberately does not reach the exchange.*
+*Закрывает:* `say-which-readings-are-stale` 5.2, вторая половина.
 
-1. Place a limit order far from the market, as in step 10, and leave it working.
-2. Stop the proxy again.
-3. Open the amend panel on that order, change the price, submit.
+## Шаг 8. Неудачное чтение счёта заявляет о себе
 
-**Should be:** the panel **stays open** and says the order was not changed. It
-must not close — a panel that vanishes reads as "done".
+**Смотрим на:** тикет и док.
 
-4. Restore the proxy, close the panel, cancel the order.
+**Должно быть:** ресурсы счёта говорят, что чтение не удалось — с кодом, — а не
+показывают последние значения как текущие. Контрол размера ордера отказывается
+считать размер и объясняет почему.
 
-*Closes:* `send-only-the-confirmed-order` 5.2, second half.
+**Запишите:** точную формулировку отказа. Он должен называть причину, а не просто
+отказывать.
 
-### Step 12. Cancel all clears the conditional book too
+## Шаг 9. Неудачное чтение истории не запирает график
 
-*Exposure: one limit order and one stop order at the exchange minimum, both
-cancelled within the step.*
+Всё ещё без биржи, прокрутите график влево, пока он не запросит более старые
+свечи.
 
-1. Place a limit order far from the market.
-2. Place a stop (conditional) order, also far from the market.
-3. Confirm both appear in the working orders list.
-4. Press `Cancel all`.
+**Должно быть:** сообщение, что старые свечи загрузить не удалось.
 
-**Should be:** both disappear from the desk.
+Теперь верните прокси. Дождитесь, пока счёт прочитается снова (несколько секунд).
 
-5. **Now check Binance's own screen** — the web or the app, open orders for that
-   contract.
+Прокрутите влево ещё раз.
 
-**Should be:** nothing there either. Before the fix the desk cancelled only the
-regular book, so the stop stayed live on the exchange under an empty list on
-screen. This is the step that matters most in the whole pass.
+**Должно быть:** загружается. До исправления одно неудачное чтение отключало
+прокрутку влево до конца сессии.
 
-*Closes:* `answer-the-command-that-asked` 4.2, second half.
+**Внимание:** это график Spot. У Futures-графика тот же дефект и он **не
+исправлен** — если вы на Futures, делайте этот шаг на рабочем месте Spot.
 
-### Step 13. An order that fills, read end to end
-
-*Exposure: one market order at the exchange minimum that will fill, and its
-close. This is the only step that intentionally takes a position. Cost is the
-fees on two fills.*
-
-1. Place a market order at the exchange minimum.
-2. Let it fill; confirm a position appears.
-3. Close it.
-4. Open `CLOSED POSITIONS`.
-
-**Should be:** one row for the round you just did, with an entry, an exit and a
-realized PnL. Not two rows, not a half-empty one.
-
-5. Open `ORDER HISTORY`.
-
-**Look at it and write down, honestly, whether you can tell what happened to each
-order without scrolling sideways.** This is the "before" reading for
-`make-the-order-history-readable`.
+*Закрывает:* `keep-the-chart-loadable` 6.2.
 
 ---
 
-## What this pass cannot settle
+# Часть 3 — С реальными ордерами
 
-Write these down as `COVERED BY TEST ONLY` — they are real guarantees, but the
-situation cannot be staged safely by hand:
+Дальше деск размещает настоящие ордера. Каждый шаг говорит, чем именно вы
+рискуете.
 
-- **An unresolved outcome surviving unrelated traffic**
-  (`answer-the-command-that-asked` 4.2, first half). It needs Binance to accept a
-  command and fail to answer — a timeout mid-placement. You cannot cause that on
-  purpose, and simulating it would mean shipping a switch that fakes exchange
-  failures on a live desk, which is a worse risk than the one it verifies.
-- **Sizing blocked between a transport reconnect and the first account answer**
-  (`say-which-readings-are-stale` 1.4). This is the desk's *internal* socket
-  dropping, not Binance. Reloading the window makes a new socket but also a new
-  state, so there is nothing held to observe.
+## Шаг 10. Уходит то, что было подтверждено
 
-## What is not ready to verify yet
+*Риск: один лимитный ордер минимального размера, далеко от рынка, исполниться не
+должен. В конце шага вы его отменяете.*
 
-Do not attempt these — the work is not done:
+1. Выберите размер в тикете.
+2. Начните ордер и прочитайте панель подтверждения. **Запишите количество и цену,
+   которые в ней показаны.**
+3. Оставьте панель открытой на 10–15 секунд — чтобы под ней успело приехать хотя
+   бы одно обновление счёта.
+4. Подтвердите.
 
-- `reach-the-desk-without-a-mouse` — the dock still disappears on a narrow window
-  and order rows still cannot be edited from the keyboard.
-- `stop-rebuilding-the-desk-on-every-tick` — the responsiveness work has not
-  started.
+**Должно быть:** ордер, появившийся в списке рабочих, имеет ровно то количество,
+которое вы записали. Не пересчитанное.
+
+5. Отмените ордер.
+
+*Закрывает:* `send-only-the-confirmed-order` 5.2, первая половина.
+
+## Шаг 11. Панель, которая не смогла отправить, не закрывается
+
+*Риск: нулевой. Команда намеренно не доходит до биржи.*
+
+1. Разместите лимитный ордер далеко от рынка, как в шаге 10, и оставьте его
+   рабочим.
+2. Снова остановите прокси.
+3. Откройте панель изменения этого ордера, поменяйте цену, отправьте.
+
+**Должно быть:** панель **остаётся открытой** и говорит, что ордер не был
+изменён. Она не должна закрыться — исчезнувшая панель читается как «готово».
+
+4. Верните прокси, закройте панель, отмените ордер.
+
+*Закрывает:* `send-only-the-confirmed-order` 5.2, вторая половина.
+
+## Шаг 12. «Отменить всё» убирает и условную книгу
+
+*Риск: один лимитный и один стоп-ордер минимального размера, оба отменяются
+внутри шага.*
+
+1. Разместите лимитный ордер далеко от рынка.
+2. Разместите стоп-ордер (условный), тоже далеко от рынка.
+3. Убедитесь, что оба видны в списке рабочих ордеров.
+4. Нажмите `Cancel all`.
+
+**Должно быть:** оба исчезли с деска.
+
+5. **Теперь откройте сам Binance** — сайт или приложение, открытые ордера по
+   этому контракту.
+
+**Должно быть:** там тоже пусто. До исправления деск отменял только обычную
+книгу, и стоп оставался живым на бирже под пустым списком на экране. Это самый
+важный шаг всего прогона.
+
+*Закрывает:* `answer-the-command-that-asked` 4.2, вторая половина.
+
+## Шаг 13. Ордер, который исполнился — от начала до конца
+
+*Риск: один рыночный ордер минимального размера, который исполнится, и его
+закрытие. Единственный шаг, где позиция открывается намеренно. Цена — комиссия за
+две сделки.*
+
+1. Разместите рыночный ордер минимального размера.
+2. Дождитесь исполнения, убедитесь, что появилась позиция.
+3. Закройте её.
+4. Откройте `CLOSED POSITIONS`.
+
+**Должно быть:** одна строка на только что сделанный круг, со входом, выходом и
+реализованным PnL. Не две строки и не полупустая.
+
+5. Откройте `ORDER HISTORY`.
+
+**Посмотрите и запишите честно, можете ли вы понять, что стало с каждым ордером,
+не прокручивая вбок.** Это «как было» для `make-the-order-history-readable`.
+
+---
+
+# Результаты
+
+Заполните и верните сессии.
+
+| Шаг | Что | Результат |
+|-----|-----|-----------|
+| 1 | Пять ресурсов счёта готовы | |
+| 2 | График, стакан, лента живые | |
+| 3 | Переключения без шторма отказов | |
+| 4 | Ордера чужих контрактов в списке | |
+| 5 | Док говорит «не прочитано», а не «0» | |
+| 6 | Прокси остановлен | |
+| 7 | Замерзший mark не выдаётся за рынок | |
+| 8 | Отказ чтения счёта с причиной | |
+| 9 | История графика разблокируется | |
+| 10 | Уходит подтверждённый размер | |
+| 11 | Панель остаётся открытой | |
+| 12 | Cancel all убрал и стоп — проверено на Binance | |
+| 13 | Одна строка закрытой позиции | |
+
+Дата, аккаунт (Production), ревизия деска (`git rev-parse --short HEAD`):
+
+---
+
+# Чего этот прогон закрыть не может
+
+Запишите как `COVERED BY TEST ONLY` — это реальные гарантии, но ситуацию нельзя
+безопасно устроить руками:
+
+- **Неизвестный исход, переживающий чужой трафик**
+  (`answer-the-command-that-asked` 4.2, первая половина). Нужно, чтобы Binance
+  приняла команду и не ответила — таймаут посреди размещения. Специально такого
+  не сделать, а подделывать его означало бы держать на живом деске переключатель,
+  имитирующий отказы биржи: риск больше проверяемого.
+- **Блокировка расчёта размера между переподключением транспорта и первым
+  ответом счёта** (`say-which-readings-are-stale` 1.4). Это обрыв **внутреннего**
+  сокета деска, не биржи. Перезагрузка окна даёт новый сокет, но и новое
+  состояние — наблюдать нечего.
+
+# Что проверять пока рано
+
+Не пытайтесь — работа не сделана:
+
+- `reach-the-desk-without-a-mouse` — док по-прежнему пропадает на узком окне, а
+  строки ордеров нельзя редактировать с клавиатуры.
+- `stop-rebuilding-the-desk-on-every-tick` — работа по отзывчивости не начата.
 - `keep-the-history-read-out-of-the-way`, `hold-the-history-the-desk-has-read`,
-  `make-the-order-history-readable` — all three are planned, none is built.
-- `keep-the-chart-loadable` beyond step 9 — the ceiling, the calendar month and
-  the interior-candle resync are not fixed, and the Futures chart's history lock
-  is not released.
+  `make-the-order-history-readable` — все три запланированы, ни одна не сделана.
+- `cancel-the-order-the-drag-lifts` — перетаскивание ордера пока не отменяет его
+  при захвате; дубль на графике остаётся.
+- `keep-the-chart-loadable` дальше шага 9 — потолок серии, календарный месяц и
+  пересчёт свечи в середине не исправлены, и замок истории на Futures-графике не
+  снимается.
