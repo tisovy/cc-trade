@@ -74,11 +74,6 @@ const orderSizeTitle = (order) => (
   Number(order?.origQty) > 0 ? `${order.origQty} contracts` : undefined
 )
 
-// An order rests at its trigger where it has one, and the exchange pads the
-// price it sends: `8.1200000` is nine characters of which three carry
-// information, and in this column it wrapped onto a second line. A price of
-// zero is not a price — an order carrying neither reads as absent rather than
-// as resting at the cheapest level in the column.
 const FuturesTradingTicket = ({
   state,
   selectedSymbol = 'BTCUSDT',
@@ -722,6 +717,12 @@ const FuturesTradingTicket = ({
                             {intent.label}
                           </span>
                         </span>
+                        {/* An order rests at its trigger where it has one, at the
+                            contract's tick rather than at the stream's padded
+                            width — `8.1200000` is nine characters of which three
+                            carry information, and in this column it wrapped onto a
+                            second line. An order carrying neither price reads as
+                            absent rather than as resting at zero. */}
                         <span role="cell">
                           <code>{formatPriceOrAbsent(order.triggerPrice ?? order.price, tickOf(order.symbol))}</code>
                         </span>
