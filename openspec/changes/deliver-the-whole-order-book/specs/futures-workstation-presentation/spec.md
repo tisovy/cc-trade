@@ -35,12 +35,13 @@ book that is legal to build is never rejected on arrival.
 - **THEN** the rows that can be filled are filled and the remainder are absent, and no level is invented or inferred from diff traffic beyond the snapshot's window
 
 ### Requirement: The order book states which side is leaning on it
-The order book SHALL show the split between resting buy and sell value across
-the levels it displays, as a two-colour bar with both percentages stated in
-text, measured in USDT rather than by level count. The split SHALL be
-accompanied by the price range the displayed rows cover, expressed as a
-percentage of the last traded price, because the same split across a fraction
-of a percent and across ten percent are different readings.
+The order book SHALL show the split between resting buy and sell value across a
+symmetric window of levels — the same number of levels on each side, being the
+number the visible side displays — as a two-colour bar with both percentages
+stated in text, measured in USDT rather than by level count. The price range
+that window covers SHALL be stated beside the split, expressed as a percentage
+of the last traded price, because the same split across a fraction of a percent
+and across ten percent are different readings.
 
 #### Scenario: Bids rest more value than asks
 - **WHEN** the visible bids hold three times the USDT the visible asks hold
@@ -49,6 +50,10 @@ of a percent and across ten percent are different readings.
 #### Scenario: Operator changes the price step
 - **WHEN** the grouping step changes the range of prices on screen
 - **THEN** the split is recomputed over exactly the levels now displayed, and the stated range changes with it
+
+#### Scenario: Operator reads one side only
+- **WHEN** only one side is displayed, over twice as many levels
+- **THEN** the split is still measured over both sides at that deeper level count, and the stated range says how far it now reaches
 
 #### Scenario: Operator reads how far the book reaches
 - **WHEN** the farther of the two visible edges sits 2.43% from the last traded price
