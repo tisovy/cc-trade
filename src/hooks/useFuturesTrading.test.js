@@ -38,9 +38,17 @@ describe('useFuturesTrading', () => {
       wsConnection: socket,
     }))
 
-    expect(socket.sent).toHaveLength(1)
+    // Two frames on subscribe, and only two: the account refresh, and the one
+    // account-history read the desk performs for the whole session. Selecting a
+    // history view reads nothing after this.
+    expect(socket.sent).toHaveLength(2)
     expect(socket.sent[0]).toMatchObject({
       action: 'account.refresh',
+      marketType: 'futures',
+      symbol: 'BTCUSDT',
+    })
+    expect(socket.sent[1]).toMatchObject({
+      action: 'account.history',
       marketType: 'futures',
       symbol: 'BTCUSDT',
     })
@@ -276,7 +284,12 @@ describe('useFuturesTrading', () => {
         },
       })
     })
-    expect(result.current.history.status).toBe('error')
+    // A failed re-read keeps the reading it could not replace, and states itself
+    // beside it: emptying the panel would make the operator wait again for rows
+    // they were already reading.
+    expect(result.current.history.status).toBe('ready')
+    expect(result.current.history.trades).toHaveLength(1)
+    expect(result.current.history.error).toMatchObject({ code: 'FUTURES_API_ERROR' })
     // A failed history read never disturbs live trading state.
     expect(result.current.openOrders).toEqual([])
     expect(result.current.lastError).toBeNull()
@@ -650,7 +663,9 @@ describe('useFuturesTrading', () => {
       result.current.closePosition({ symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '0.01' })
     })
 
-    const [, placed, canceled, cancelAll, closed] = socket.sent
+    // The first two frames are the subscribe pair — the account refresh and the
+    // session's one history read — so the operator's own commands start at 2.
+    const [, , placed, canceled, cancelAll, closed] = socket.sent
     expect(placed).toMatchObject({
       action: 'trade.placeOrder',
       marketType: 'futures',
@@ -694,7 +709,9 @@ describe('useFuturesTrading', () => {
         symbol: 'BTCUSDT', positionSide: 'LONG', direction: 'ADD', amount: '250',
       })
     })
-    const [, adjustment] = socket.sent
+    // Behind the subscribe pair: the account refresh and the session's one
+    // history read.
+    const [, , adjustment] = socket.sent
     expect(adjustment).toMatchObject({
       action: 'trade.adjustPositionMargin',
       marketType: 'futures',
@@ -707,7 +724,7 @@ describe('useFuturesTrading', () => {
     act(() => {
       expect(result.current.adjustPositionMargin({ direction: 'ADD', amount: '250' })).toBe(false)
     })
-    expect(socket.sent).toHaveLength(2)
+    expect(socket.sent).toHaveLength(3)
   })
 
   it('reports disconnect and refuses to send on a closed socket', () => {
@@ -1157,5 +1174,115 @@ describe('useFuturesTrading command answers', () => {
     await act(async () => { socket.dropConnection() })
 
     expect(answer).toMatchObject({ outcome: 'unknown', code: 'TRANSPORT_LOST' })
+  })
+})
+
+describe('useFuturesTrading held account review', () => {
+  const subscribe = (socket) => renderHook(() => useFuturesTrading({
+    enabled: true,
+    symbol: 'BTCUSDT',
+    wsConnection: socket,
+  }))
+
+  const readingArrives = (socket) => {
+    act(() => {
+      socket.receive({
+        futures_history: {
+          symbol: 'BTCUSDT',
+          orders: [{ symbol: 'BTCUSDT', orderId: 1, status: 'FILLED', time: 1_000 }],
+          trades: [{ symbol: 'BTCUSDT', id: 7, realizedPnl: '12.5', time: 1_000 }],
+          symbols: ['BTCUSDT'],
+          discovered: 1,
+          error: null,
+        },
+      })
+    })
+  }
+
+  // The review is read once and then maintained. An order that settles after it
+  // was read belongs in it, and asking Binance for the account again to learn
+  // something the desk was already told is what this replaces.
+  it('folds a settled order and its fill into the reading without sending anything', () => {
+    const socket = createSocket()
+    const { result } = subscribe(socket)
+    readingArrives(socket)
+    const framesAfterReading = socket.sent.length
+
+    act(() => {
+      socket.receive({
+        futures_execution_update: {
+          symbol: 'BTCUSDT',
+          orderId: 2,
+          status: 'FILLED',
+          side: 'SELL',
+          origQty: '0.004',
+          executedQty: '0.004',
+          tradeId: 8,
+          lastFilledQty: '0.004',
+          lastFilledPrice: '58500',
+          realizedPnl: '31.2',
+          time: 9_000,
+        },
+      })
+    })
+
+    expect(result.current.history.orders).toHaveLength(2)
+    expect(result.current.history.trades).toHaveLength(2)
+    expect(result.current.history.orders[0]).toMatchObject({ orderId: 2, status: 'FILLED' })
+    // Not one frame: the stream already carried it.
+    expect(socket.sent).toHaveLength(framesAfterReading)
+
+    // And the read that follows lists it once, not twice.
+    act(() => {
+      socket.receive({
+        futures_history: {
+          symbol: 'BTCUSDT',
+          orders: [
+            { symbol: 'BTCUSDT', orderId: 1, status: 'FILLED', time: 1_000 },
+            { symbol: 'BTCUSDT', orderId: 2, status: 'FILLED', time: 9_000 },
+          ],
+          trades: [
+            { symbol: 'BTCUSDT', id: 7, realizedPnl: '12.5', time: 1_000 },
+            { symbol: 'BTCUSDT', id: 8, realizedPnl: '31.2', time: 9_000 },
+          ],
+          symbols: ['BTCUSDT'],
+          discovered: 1,
+          error: null,
+        },
+      })
+    })
+    expect(result.current.history.orders).toHaveLength(2)
+    expect(result.current.history.trades).toHaveLength(2)
+  })
+
+  it('holds the rows through a refresh and states when the reading was taken', () => {
+    const socket = createSocket()
+    const { result } = subscribe(socket)
+    readingArrives(socket)
+    const readAt = result.current.history.readAt
+    expect(readAt).toBeGreaterThan(0)
+
+    act(() => { result.current.loadHistory('BTCUSDT') })
+    expect(result.current.history.status).toBe('refreshing')
+    expect(result.current.history.orders).toHaveLength(1)
+    expect(result.current.history.readAt).toBe(readAt)
+  })
+
+  it('folds nothing into a review nobody has read', () => {
+    const socket = createSocket()
+    const { result } = subscribe(socket)
+
+    act(() => {
+      socket.receive({
+        futures_execution_update: {
+          symbol: 'BTCUSDT', orderId: 2, status: 'FILLED', time: 9_000,
+        },
+      })
+    })
+
+    // A lone folded row would present itself as an account review, and the scope
+    // beneath it would describe a read that never happened.
+    expect(result.current.history.orders).toEqual([])
+    expect(result.current.history.readAt).toBeNull()
   })
 })

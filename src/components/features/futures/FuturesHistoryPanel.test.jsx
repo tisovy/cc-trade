@@ -7,6 +7,9 @@ const ticks = Object.freeze({ BTCUSDT: '0.1', BICOUSDT: '0.001', ETHUSDT: '0.01'
 const history = Object.freeze({
   symbol: 'BTCUSDT',
   status: 'ready',
+  // A reading exists: the panel renders rows from what was read, and `readAt`
+  // is what says a reading was ever taken.
+  readAt: 1_784_000_100_000,
   orders: Object.freeze([Object.freeze({
     orderId: 3,
     symbol: 'BTCUSDT',
@@ -339,5 +342,61 @@ describe('FuturesHistoryPanel', () => {
     // Reviewing a contract is usually the reason to go back to it.
     fireEvent.click(screen.getByRole('button', { name: 'Show BICOUSDT' }))
     expect(onSymbolChange).toHaveBeenCalledWith('BICOUSDT')
+  })
+  // A refresh used to blank the table: the operator watched rows they were
+  // reading disappear and waited for them again.
+  it('keeps the rows on screen while a re-read is in flight', () => {
+    render(
+      <FuturesHistoryPanel
+        view="orderHistory"
+        symbol="BTCUSDT"
+        tickSizes={ticks}
+        history={{ ...history, status: 'refreshing' }}
+      />,
+    )
+    expect(screen.getByRole('table', { name: 'Order history' })).toHaveTextContent('58000.1')
+    expect(screen.getByRole('status')).toHaveTextContent('Re-reading the account…')
+  })
+
+  it('states a failed re-read beside the reading it could not replace', () => {
+    render(
+      <FuturesHistoryPanel
+        view="orderHistory"
+        symbol="BTCUSDT"
+        tickSizes={ticks}
+        history={{
+          ...history,
+          status: 'ready',
+          error: { code: 'FUTURES_API_ERROR', message: 'Binance refused the read.' },
+        }}
+      />,
+    )
+    expect(screen.getByRole('table', { name: 'Order history' })).toBeInTheDocument()
+    expect(screen.getByRole('alert')).toHaveTextContent('Binance refused the read.')
+    expect(screen.getByRole('alert')).toHaveTextContent('Showing the reading taken')
+  })
+
+  it('says nothing has been read rather than showing an empty review', () => {
+    render(<FuturesHistoryPanel view="orderHistory" symbol="BTCUSDT" history={null} />)
+    expect(screen.getByRole('status')).toHaveTextContent('Open history to load it.')
+  })
+
+  // The count describes the read. Rows the stream added are not a read, and
+  // saying otherwise would claim coverage nobody paid for.
+  it('counts what the stream added apart from what was read', () => {
+    render(
+      <FuturesHistoryPanel
+        view="orderHistory"
+        symbol="BTCUSDT"
+        tickSizes={ticks}
+        history={{
+          ...history,
+          symbols: ['BTCUSDT'],
+          discovered: 1,
+          foldedOrders: ['BTCUSDT:9'],
+        }}
+      />,
+    )
+    expect(screen.getByText(/1 contract read/)).toHaveTextContent('1 added since')
   })
 })

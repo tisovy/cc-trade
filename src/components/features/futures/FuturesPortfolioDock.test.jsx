@@ -326,7 +326,10 @@ describe('FuturesPortfolioDock', () => {
     expect(table).not.toHaveTextContent('×')
   })
 
-  it('loads history from the dock tabs for the selected contract', () => {
+  // Selecting a view renders the reading the desk holds. Every click here used
+  // to cost an account-wide fan-out — about twenty-five requests through one
+  // 150ms-spaced queue — for a past that had not changed.
+  it('renders the held reading from the dock tabs and reads nothing to do it', () => {
     const onLoadHistory = vi.fn()
     render(
       <FuturesPortfolioDock
@@ -336,6 +339,7 @@ describe('FuturesPortfolioDock', () => {
         history={{
           symbol: 'BTCUSDT',
           status: 'ready',
+          readAt: 1_784_000_100_000,
           orders: [],
           trades: [{ id: 4, side: 'SELL', price: '58500', quantity: '0.004', commission: '0.02', realizedPnl: '12.5', time: 1 }],
           error: null,
@@ -345,12 +349,74 @@ describe('FuturesPortfolioDock', () => {
     // The tab lists positions now, not executions: fills are folded into the
     // round trips they belong to before anything is drawn.
     fireEvent.click(screen.getByRole('tab', { name: 'Closed positions' }))
-    expect(onLoadHistory).toHaveBeenCalledWith('BTCUSDT')
     expect(screen.getByRole('table', { name: 'Position history' })).toHaveTextContent('+12.50')
     expect(screen.queryByRole('table', { name: 'Working orders' })).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('tab', { name: /Working/ }))
     expect(screen.getByRole('table', { name: 'Working orders' })).toBeInTheDocument()
+
+    // Counted, not merely spied on: every one of these clicks used to send one.
+    fireEvent.click(screen.getByRole('tab', { name: 'Order history' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Order history' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Closed positions' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Closed positions' }))
+    expect(onLoadHistory).toHaveBeenCalledTimes(0)
+
+    // The refresh control is the operator's own read, and the only one.
+    fireEvent.click(screen.getByRole('button', { name: 'Re-read account history' }))
+    expect(onLoadHistory).toHaveBeenCalledExactlyOnceWith('BTCUSDT')
+  })
+
+  it('states how old the reading is and refuses a second read while one is in flight', () => {
+    const onLoadHistory = vi.fn()
+    const { rerender } = render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        onLoadHistory={onLoadHistory}
+        history={{
+          symbol: 'BTCUSDT', status: 'ready', readAt: 1_784_000_100_000, orders: [], trades: [], error: null,
+        }}
+      />,
+    )
+    fireEvent.click(screen.getByRole('tab', { name: 'Order history' }))
+    // Today's readings are read for their time of day, older ones for their day.
+    expect(screen.getByText(/^read /)).toBeInTheDocument()
+
+    rerender(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        onLoadHistory={onLoadHistory}
+        history={{
+          symbol: 'BTCUSDT', status: 'refreshing', readAt: 1_784_000_100_000, orders: [], trades: [], error: null,
+        }}
+      />,
+    )
+    expect(screen.getByText('reading…')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Re-read account history' })).toBeDisabled()
+  })
+
+  // A contract change re-reads nothing: the review spans the account, not the
+  // contract on screen.
+  it('keeps the held reading when the selected contract changes', () => {
+    const onLoadHistory = vi.fn()
+    const history = {
+      symbol: 'BTCUSDT',
+      status: 'ready',
+      readAt: 1_784_000_100_000,
+      orders: [],
+      trades: [{ id: 4, side: 'SELL', price: '58500', quantity: '0.004', commission: '0.02', realizedPnl: '12.5', time: 1 }],
+      error: null,
+    }
+    const { rerender } = render(
+      <FuturesPortfolioDock selectedSymbol="BTCUSDT" onLoadHistory={onLoadHistory} history={history} />,
+    )
+    fireEvent.click(screen.getByRole('tab', { name: 'Closed positions' }))
+    rerender(
+      <FuturesPortfolioDock selectedSymbol="ETHUSDT" onLoadHistory={onLoadHistory} history={history} />,
+    )
+
+    expect(screen.getByRole('table', { name: 'Position history' })).toHaveTextContent('+12.50')
+    expect(onLoadHistory).not.toHaveBeenCalled()
   })
 
   // Both readings are stated out loud; which one is stated depends on whether

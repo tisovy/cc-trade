@@ -2031,3 +2031,36 @@
   line-height: 1;
   cursor: pointer;
 }
+
+/* The review's own read control, and how old what it shows is. */
+.futures-workstation-dock-history-read {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.futures-workstation-dock-history-age {
+  color: #718399;
+  font-size: calc(var(--fx-ui-scale, 1) * 11px);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+.futures-workstation-dock-history-read button:disabled {
+  opacity: 0.45;
+  cursor: progress;
+}
+
+/* A read in flight, or one that failed on top of a reading already held. Stated
+   above the rows it did not take away. */
+.futures-workstation-history-notice {
+  margin: 0 0 4px;
+  color: #8192a4;
+  font-size: calc(var(--fx-ui-scale, 1) * 11px);
+  letter-spacing: 0.02em;
+}
+
+.futures-workstation-history-notice.is-error {
+  color: #ff8490;
+}

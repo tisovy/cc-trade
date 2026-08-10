@@ -6,44 +6,20 @@ import {
   formatPriceOrAbsent,
   formatUsdtAmount,
 } from '../../../utils/futuresPriceFormat.js'
+import { exactFuturesDeskTime, formatFuturesDeskTime } from '../../../utils/futuresDeskTime.js'
 
 const EMPTY_ROWS = Object.freeze([])
 const EMPTY_TICKS = Object.freeze({})
-
-const startOfToday = () => {
-  const midnight = new Date()
-  midnight.setHours(0, 0, 0, 0)
-  return midnight.getTime()
-}
-
-// The column carried the date and the time together, which is fourteen characters
-// in a narrow cell: it ellipsized to `10.08 11:21:…`, losing the seconds that
-// separate one fill from the next. A row from today is read for its time of day
-// and an older one for its day, so each shows the half it is read for. Nothing is
-// lost — the whole stamp stays in the cell's title.
-const formatTime = (timestamp) => {
-  if (!Number.isSafeInteger(timestamp) || timestamp <= 0) return '—'
-  const date = new Date(timestamp)
-  return date.getTime() >= startOfToday()
-    ? date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-    : date.toLocaleDateString([], { day: '2-digit', month: '2-digit' })
-}
-
-const exactTime = timestamp => (
-  Number.isSafeInteger(timestamp) && timestamp > 0
-    ? new Date(timestamp).toLocaleString()
-    : undefined
-)
 
 const sideTone = side => (String(side).toUpperCase() === 'SELL' ? 'sell' : 'buy')
 
 // A round is a span, not a moment: the column shows where it started and the
 // title shows how long it ran, including the case where it is still running.
 const roundSpan = (round) => {
-  const opened = exactTime(round.openTime)
+  const opened = exactFuturesDeskTime(round.openTime)
   if (opened === undefined) return undefined
   if (round.open) return `Opened ${opened} · still open`
-  const closed = exactTime(round.closeTime)
+  const closed = exactFuturesDeskTime(round.closeTime)
   return closed === undefined || closed === opened
     ? `Opened and closed ${opened}`
     : `${opened} → ${closed}`
@@ -86,6 +62,13 @@ export const FuturesHistoryPanel = ({
       ? buildFuturesTradeRounds(trades).filter(round => !round.open && round.exitPrice !== null)
       : EMPTY_ROWS
   ), [trades, view])
+  // A reading exists, whatever the read is doing now. Everything below renders
+  // from it: a refresh in flight and a refresh that failed both leave the rows
+  // the operator was reading exactly where they were.
+  const held = history?.readAt !== null && history?.readAt !== undefined
+  const folded = view === 'tradeHistory'
+    ? (history?.foldedTrades?.length ?? 0)
+    : (history?.foldedOrders?.length ?? 0)
   const read = Array.isArray(history?.symbols) ? history.symbols.length : 0
   const traded = Number.isSafeInteger(history?.discovered) ? history.discovered : 0
   const scope = read > 0
@@ -109,14 +92,36 @@ export const FuturesHistoryPanel = ({
     return (
       <p className="futures-workstation-history-reach">
         {contracts}
-        {oldest === null ? '' : `, back to ${exactTime(oldest)}`}
+        {oldest === null ? '' : `, back to ${exactFuturesDeskTime(oldest)}`}
         {/* The count above is of the contracts the desk found. Where the search
             for them failed or ran out of pages, it is not known to be all of
             them, and a bounded number stated flatly reads as a total. */}
         {history?.discoveryComplete === false ? ' · more may have been traded' : ''}
+        {/* Entries the stream added since. They widen the list without widening
+            the read, and the count above describes the read — so they are stated
+            separately rather than folded into a claim nobody made. */}
+        {folded > 0 ? ` · ${folded} added since` : ''}
       </p>
     )
   }
+  // A read that is in flight, or one that failed on top of a reading already
+  // held. Neither may take the rows away: the operator is reading them.
+  const notice = status === 'refreshing'
+    ? (
+      <p className="futures-workstation-history-notice" role="status">
+        Re-reading the account…
+      </p>
+    )
+    : held && history?.error
+      ? (
+        <p className="futures-workstation-history-notice is-error" role="alert">
+          {history.error.message ?? `Re-read failed (${history.error.code ?? 'UNKNOWN'}).`}
+          {' Showing the reading taken '}
+          {formatFuturesDeskTime(history.readAt)}
+          .
+        </p>
+      )
+      : null
   const tickOf = rowSymbol => tickSizes[rowSymbol] ?? null
   const symbolCell = (rowSymbol) => {
     const name = typeof rowSymbol === 'string' && rowSymbol.length > 0 ? rowSymbol : '—'
@@ -139,14 +144,16 @@ export const FuturesHistoryPanel = ({
     `futures-workstation-dock-row ${base} is-${tone}${rowSymbol === symbol ? ' is-current-symbol' : ''}`
   )
 
-  if (status === 'error') {
-    return (
-      <p className="futures-workstation-empty" role="alert">
-        {history?.error?.message ?? `History unavailable (${history?.error?.code ?? 'UNKNOWN'}).`}
-      </p>
-    )
-  }
-  if (status !== 'ready') {
+  // Nothing has ever been read: this is the one case where an empty panel is
+  // honest, and the one case where a failure is all there is to show.
+  if (!held) {
+    if (status === 'error') {
+      return (
+        <p className="futures-workstation-empty" role="alert">
+          {history?.error?.message ?? `History unavailable (${history?.error?.code ?? 'UNKNOWN'}).`}
+        </p>
+      )
+    }
     return (
       <p className="futures-workstation-empty" role="status">
         {status === 'loading' ? 'Loading account history…' : 'Open history to load it.'}
@@ -156,10 +163,16 @@ export const FuturesHistoryPanel = ({
 
   if (view === 'tradeHistory') {
     if (rounds.length === 0) {
-      return <p className="futures-workstation-empty">No closed positions{scope}.</p>
+      return (
+        <>
+          {notice}
+          <p className="futures-workstation-empty">No closed positions{scope}.</p>
+        </>
+      )
     }
     return (
       <>
+        {notice}
         <div className="futures-workstation-dock-table" role="table" aria-label="Position history">
           {/* Seven columns, not eight: the fee is a component of the result rather
               than a reading of its own, so it moved into the PnL cell's title — the
@@ -183,7 +196,7 @@ export const FuturesHistoryPanel = ({
                 {symbolCell(round.symbol)}
                 {/* A closed position is filed under when it closed; the whole span,
                     open to close, stays in the title. */}
-                <span role="cell" title={roundSpan(round)}>{formatTime(round.closeTime)}</span>
+                <span role="cell" title={roundSpan(round)}>{formatFuturesDeskTime(round.closeTime)}</span>
                 <span role="cell" className={`futures-workstation-dock-side is-${leg}`}>
                   {round.positionSide}
                 </span>
@@ -227,10 +240,16 @@ export const FuturesHistoryPanel = ({
   }
 
   if (orders.length === 0) {
-    return <p className="futures-workstation-empty">No orders{scope}.</p>
+    return (
+      <>
+        {notice}
+        <p className="futures-workstation-empty">No orders{scope}.</p>
+      </>
+    )
   }
   return (
     <>
+      {notice}
       <div className="futures-workstation-dock-table" role="table" aria-label="Order history">
         <div className="futures-workstation-dock-row is-head is-order-history" role="row">
           <span role="columnheader">Symbol</span>
@@ -249,7 +268,7 @@ export const FuturesHistoryPanel = ({
             key={`${order.symbol}:${order.orderId}:${order.time}`}
           >
             {symbolCell(order.symbol)}
-            <span role="cell" title={exactTime(order.time)}>{formatTime(order.time)}</span>
+            <span role="cell" title={exactFuturesDeskTime(order.time)}>{formatFuturesDeskTime(order.time)}</span>
             <span role="cell" className={`futures-workstation-dock-side is-${sideTone(order.side)}`}>
               {order.side}
             </span>

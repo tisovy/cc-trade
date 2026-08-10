@@ -26,16 +26,15 @@ import {
   FUTURES_COMMAND_OUTCOME,
   readFuturesCommandAnswer,
 } from '../utils/futuresCommandOutcome.js'
+import {
+  TERMINAL_FUTURES_ORDER_STATUSES,
+  applyFuturesHistoryReading,
+  beginFuturesHistoryRead,
+  createHeldFuturesHistory,
+  foldExecutionIntoFuturesHistory,
+} from '../utils/futuresHeldHistory.js'
 
 const OPEN_ORDER_STATUSES = new Set(['NEW', 'PARTIALLY_FILLED'])
-const TERMINAL_ORDER_STATUSES = new Set([
-  'CANCELED',
-  'CANCELLED',
-  'EXPIRED',
-  'FILLED',
-  'FINISHED',
-  'REJECTED',
-])
 // Slow enough to stay a fraction of the exchange's weight budget — one account
 // read costs ninety of the 2400 a minute — and fast enough that a settlement
 // nobody told the desk about is half a minute of staleness rather than a
@@ -102,23 +101,6 @@ const isUsableSocket = (connection) => isOpenSocket(connection)
   && typeof connection?.addEventListener === 'function'
   && typeof connection?.removeEventListener === 'function'
 
-const createEmptyHistory = () => ({
-  symbol: null,
-  status: 'idle',
-  orders: [],
-  trades: [],
-  // Which contracts the read covered, and how many the account actually traded
-  // in the window. Both were on the payload and neither reached the surface, so
-  // the review said "in this window" where it meant "across the eight contracts
-  // read" — and said nothing at all where contracts had been dropped.
-  symbols: [],
-  discovered: 0,
-  // Whether that count is the whole set. Discovery can fail, or run out of pages
-  // on a week busier than the walk is bounded to.
-  discoveryComplete: true,
-  error: null,
-})
-
 const createInitialState = ({ enabled, connection }) => ({
   connected: Boolean(enabled && isUsableSocket(connection)),
   balances: null,
@@ -141,7 +123,7 @@ const createInitialState = ({ enabled, connection }) => ({
   unresolvedCommand: null,
   tradingPaused: false,
   maxOrderNotionalUsdt: null,
-  history: createEmptyHistory(),
+  history: createHeldFuturesHistory(),
 })
 
 const normalizeOrderSource = (order, fallback = 'REGULAR') => {
@@ -201,13 +183,13 @@ const rememberSettledOrder = (settledOrders, identity) => {
 // contract would share.
 const settledReportIdentity = (report) => {
   if (orderExchangeId(report) === null) return null
-  return TERMINAL_ORDER_STATUSES.has(String(report?.status ?? '').toUpperCase())
+  return TERMINAL_FUTURES_ORDER_STATUSES.has(String(report?.status ?? '').toUpperCase())
     ? orderIdentity(report)
     : null
 }
 
 const isOpenSnapshotOrder = order => (
-  !TERMINAL_ORDER_STATUSES.has(String(order?.status ?? '').toUpperCase())
+  !TERMINAL_FUTURES_ORDER_STATUSES.has(String(order?.status ?? '').toUpperCase())
 )
 
 // Binance's own services are eventually consistent with each other: the order
@@ -423,25 +405,21 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection, marketGeneration = n
               : previous.unresolvedCommand,
             settledOrders,
             openOrders: mergeOrderUpdate(previous.openOrders, report, settledOrders),
+            // The review of the past is maintained by the same stream the live
+            // panels are: an order that settles or a fill that closes a position
+            // belongs in it without asking Binance for the account again.
+            history: foldExecutionIntoFuturesHistory(previous.history, report),
           }
         })
         answerCommandWatchers({ kind: 'execution', report })
       }
       if (payload.futures_history && typeof payload.futures_history === 'object') {
         const history = payload.futures_history
+        const readAt = Date.now()
         setState(previous => ({
           ...previous,
           connected: true,
-          history: {
-            symbol: typeof history.symbol === 'string' ? history.symbol : previous.history.symbol,
-            status: history.error ? 'error' : 'ready',
-            orders: Array.isArray(history.orders) ? history.orders : [],
-            trades: Array.isArray(history.trades) ? history.trades : [],
-            symbols: Array.isArray(history.symbols) ? history.symbols : [],
-            discovered: Number.isSafeInteger(history.discovered) ? history.discovered : 0,
-            discoveryComplete: history.discoveryComplete !== false,
-            error: history.error ?? null,
-          },
+          history: applyFuturesHistoryReading(previous.history, history, readAt),
         }))
       }
       if (typeof payload.futures_trading_paused === 'boolean'
@@ -739,20 +717,24 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection, marketGeneration = n
   const loadHistory = useCallback((targetSymbol) => {
     const symbolToLoad = targetSymbol ?? symbolRef.current
     const sent = sendCommand(createFuturesAccountHistoryCommand({ symbol: symbolToLoad }))
+    // The rows already read stay on screen while the read is in flight: emptying
+    // them makes the operator wait a second time for what they were reading.
     setState(previous => ({
       ...previous,
-      history: sent
-        ? { symbol: symbolToLoad, status: 'loading', orders: [], trades: [], error: null }
-        : {
-            symbol: symbolToLoad,
-            status: 'error',
-            orders: [],
-            trades: [],
-            error: { code: 'LOCAL_CONNECTION_UNAVAILABLE' },
-          },
+      history: beginFuturesHistoryRead(previous.history, { symbol: symbolToLoad, sent }),
     }))
     return sent
   }, [sendCommand])
+
+  // The one read nobody asks for. The account review is read when the desk first
+  // has a connection to read on; after that, selecting a view renders what is
+  // held and only the panel's refresh control reads again. A send that fails
+  // leaves the attempt armed, so the next usable connection performs it.
+  const historyReadRef = useRef(false)
+  useEffect(() => {
+    if (!enabled || !isUsableSocket(wsConnection) || historyReadRef.current) return
+    if (loadHistory(symbolRef.current)) historyReadRef.current = true
+  }, [enabled, loadHistory, wsConnection])
 
   const refresh = useCallback((targetSymbol) => sendCommand(createFuturesAccountRefreshCommand({
     symbol: targetSymbol ?? symbolRef.current,

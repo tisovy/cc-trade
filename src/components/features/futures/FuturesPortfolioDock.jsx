@@ -9,6 +9,7 @@ import {
   orderNotionalUsdt,
 } from '../../../utils/futuresOrderPresentation.js'
 import { formatExchangePrice } from '../../../utils/futuresPriceFormat.js'
+import { exactFuturesDeskTime, formatFuturesDeskTime } from '../../../utils/futuresDeskTime.js'
 import FuturesHistoryPanel from './FuturesHistoryPanel.jsx'
 
 const EMPTY_ROWS = Object.freeze([])
@@ -84,10 +85,13 @@ export const FuturesPortfolioDock = ({
     [resources.regularOrders, resources.algoOrders].filter(Boolean),
   )
 
-  const openHistory = (tab) => {
-    setOrdersTab(tab)
-    onLoadHistory?.(selectedSymbol)
-  }
+  // Selecting a view reads nothing. The review is a reading the desk holds —
+  // read once when the workspace opens, maintained by the stream, and re-read
+  // only by the control beside it. Every click here used to cost an
+  // account-wide fan-out of about twenty-five requests.
+  const historyStatus = history?.status ?? 'idle'
+  const historyReading = historyStatus === 'loading' || historyStatus === 'refreshing'
+  const historyReadAt = history?.readAt ?? null
 
   return (
     <section className="futures-workstation-dock" aria-label="Futures positions and working orders">
@@ -260,7 +264,7 @@ export const FuturesPortfolioDock = ({
               type="button"
               role="tab"
               aria-selected={ordersTab === 'orderHistory'}
-              onClick={() => openHistory('orderHistory')}
+              onClick={() => setOrdersTab('orderHistory')}
             >
               Order history
             </button>
@@ -268,7 +272,7 @@ export const FuturesPortfolioDock = ({
               type="button"
               role="tab"
               aria-selected={ordersTab === 'tradeHistory'}
-              onClick={() => openHistory('tradeHistory')}
+              onClick={() => setOrdersTab('tradeHistory')}
             >
               {/* Named for what it lists, so it cannot be read as a filtered view
                   of the live positions panel above it — which is exactly how it
@@ -277,14 +281,32 @@ export const FuturesPortfolioDock = ({
             </button>
           </div>
           {ordersTab === 'working' ? null : (
-            <button
-              type="button"
-              className="futures-workstation-dock-close"
-              aria-label="Reload history"
-              onClick={() => onLoadHistory?.(selectedSymbol)}
-            >
-              ↻
-            </button>
+            <div className="futures-workstation-dock-history-read">
+              {/* How old what is on screen is. Without it a reading held from
+                  the start of the session reads exactly like one taken now. */}
+              <span
+                className="futures-workstation-dock-history-age"
+                title={historyReadAt === null
+                  ? undefined
+                  : `Account history read ${exactFuturesDeskTime(historyReadAt)}`}
+              >
+                {historyReading
+                  ? 'reading…'
+                  : historyReadAt === null
+                    ? 'not read'
+                    : `read ${formatFuturesDeskTime(historyReadAt)}`}
+              </span>
+              <button
+                type="button"
+                className="futures-workstation-dock-close"
+                aria-label="Re-read account history"
+                title="Read the account history from Binance again"
+                disabled={historyReading || typeof onLoadHistory !== 'function'}
+                onClick={() => onLoadHistory?.(selectedSymbol)}
+              >
+                ↻
+              </button>
+            </div>
           )}
         </header>
 

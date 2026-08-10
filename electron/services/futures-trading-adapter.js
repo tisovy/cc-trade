@@ -122,6 +122,16 @@ export const normalizeFuturesExecutionReport = (payload = {}, overrides = {}) =>
     // nothing everywhere it is shown — in the list, in its size, in its total.
     // Algo orders state their own trigger through the overrides below.
     const stopPrice = order.stopPrice ?? order.sp;
+    // What the fill *was*, not just that the order moved. The stream carries the
+    // trade on the same message — its id, the price it printed at, what it
+    // realized and what it cost — and the desk dropped all four, so the account
+    // review had to be re-read from Binance to show a fill it had already been
+    // told about.
+    const tradeId = order.tradeId ?? order.t;
+    const lastFilledPrice = order.lastFilledPrice ?? order.L;
+    const realizedPnl = order.realizedPnl ?? order.rp;
+    const commission = order.commission ?? order.n;
+    const commissionAsset = order.commissionAsset ?? order.N;
     return {
         e: 'executionReport',
         marketType: 'futures',
@@ -151,6 +161,11 @@ export const normalizeFuturesExecutionReport = (payload = {}, overrides = {}) =>
         sourceOrderId: order.orderId ?? order.i,
         ...(avgPrice !== undefined ? { avgPrice } : {}),
         ...(Number(stopPrice) > 0 ? { triggerPrice: stopPrice } : {}),
+        ...(tradeId === undefined || tradeId === null ? {} : { tradeId }),
+        ...(lastFilledPrice === undefined ? {} : { lastFilledPrice }),
+        ...(realizedPnl === undefined ? {} : { realizedPnl }),
+        ...(commission === undefined ? {} : { commission }),
+        ...(commissionAsset === undefined ? {} : { commissionAsset }),
         T: timestamp,
         transactTime: timestamp,
         time: timestamp,
