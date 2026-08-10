@@ -313,6 +313,40 @@ describe('DataContext spot chart depth', () => {
         expect(historyRequests()).toHaveLength(1)
     })
 
+    // One network failure used to disable scrolling left for the rest of the
+    // session: the read answered nothing, the in-flight lock was never released,
+    // and every later scroll was refused by a request that would never arrive.
+    it('lets the next scroll ask again after a read that could not be served', async () => {
+        await renderDepthChart()
+        const live = run(LIVE_START, 12)
+        await deliver({ type: 'chart', payload: live, extra: live.at(-1) })
+
+        act(() => { expect(desk().loadChartHistory()).toBe(true) })
+        act(() => { expect(desk().loadChartHistory()).toBe(false) })
+        expect(historyRequests()).toHaveLength(1)
+
+        await deliver({
+            type: 'chart_history_failed',
+            payload: { code: 'CHART_HISTORY_READ_FAILED', message: 'Older candles could not be loaded.' },
+            extra: {
+                symbol: 'PAXUSDT',
+                interval: '1h',
+                endTime: LIVE_START * 1000 - 1,
+                limit: 1000,
+            },
+        })
+
+        // The chart keeps every candle it had, and the read point is unchanged.
+        expect(chartTimes()).toEqual(times(live))
+        act(() => { expect(desk().loadChartHistory()).toBe(true) })
+        expect(historyRequests()).toHaveLength(2)
+        expect(historyRequests().at(-1)[0]).toMatchObject({
+            symbol: 'PAXUSDT',
+            interval: '1h',
+            endTime: LIVE_START * 1000 - 1,
+        })
+    })
+
     // The series has a ceiling. A page that lands entirely below it cannot be
     // held, and asking for it again would repeat the same read for as long as
     // the operator sits at the left edge.

@@ -3158,7 +3158,18 @@ export function setupBinanceConnection({
                 // from the answer to one it already abandoned, and a page shorter
                 // than the limit is the exchange saying there is nothing older.
                 emitToChannel(channelId, 'chart_history', parsedKlines, { symbol, interval, endTime, limit });
-            }, 2).catch(err => logger.error('Chart History Fetch Error:', err));
+            }, 2).catch((err) => {
+                logger.error('Chart History Fetch Error:', err);
+                // A read that answers nothing leaves the renderer holding a
+                // request forever, and one network failure disabled scrolling
+                // left for the rest of the session. The failure answers the
+                // request it belongs to, so the lock is released and the next
+                // scroll can ask again.
+                emitToChannel(channelId, 'chart_history_failed', {
+                    code: err?.code ?? 'CHART_HISTORY_READ_FAILED',
+                    message: 'Older candles could not be loaded.',
+                }, { symbol, interval, endTime, limit });
+            });
         };
 
         connection.on("message", async (message) => {

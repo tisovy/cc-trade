@@ -1084,6 +1084,23 @@ export const DataProvider = ({
         break;
       }
 
+      // A read that could not be served. It answers the request being held so the
+      // lock is released; the pair keeps whatever depth it has, and the next
+      // scroll asks again.
+      case 'chart_history_failed': {
+        const request = chartHistoryRequestRef.current;
+        const answer = extra && typeof extra === 'object' ? extra : {};
+        if (!request
+          || answer.symbol !== request.symbol
+          || answer.interval !== request.interval
+          || answer.endTime !== request.endTime) break;
+        chartHistoryRequestRef.current = null;
+        notifications?.notifyWarning?.(
+          `Older ${request.symbol} candles could not be loaded — scroll again to retry.`,
+        );
+        break;
+      }
+
       // The depth behind the live window. It arrives once per request, is joined
       // under the rows already drawn, and is stored so the next run of the app
       // starts where this one left off rather than reading it again.
@@ -1189,7 +1206,8 @@ export const DataProvider = ({
     tradePassesNotionalFilter,
     applyTradeToChart,
     touchChannel,
-    updateHistoryCache
+    updateHistoryCache,
+    notifications
   ]);
 
   const handleSocketUpdate = useCallback((event, _connection) => {
