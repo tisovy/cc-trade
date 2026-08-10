@@ -206,7 +206,9 @@
   flex-direction: column;
   min-height: 0;
   padding: 10px;
-  overflow: auto;
+  /* The rail itself does not scroll: scrolling it takes the trading ticket off
+     the screen along with the list. The contract list scrolls inside it. */
+  overflow: hidden;
 }
 
 /* This column spans the chart's rows, and row 4 is auto — so the tallest item
@@ -226,12 +228,46 @@
      needs, and the only way a row cannot move when data arrives. */
   .futures-workstation {
     height: calc(100vh - 90px);
+    /* Told to fill the window, it may not also demand more than the window has:
+       a 690px floor plus a 420px floor under the chart is how the page itself
+       gained a scrollbar on a short screen. */
+    min-height: 0;
+    grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+  }
+
+  /* With the rail no longer scrolling, the list takes the room the ticket does
+     not: three visible contracts in a 180px box was the rail's own doing. */
+  .futures-workstation-instruments > .futures-workstation-contract-list {
+    /* Basis zero: the list takes what the ticket does not need, rather than
+       bidding its own four-thousand-pixel content height into the split and
+       squeezing the trading surface to a line. */
+    flex: 1 1 0;
+    max-height: none;
+  }
+
+  /* The ticket keeps its natural height while there is room. Where there is not,
+     it is its own body that gives — never the whole rail, and never a clip: the
+     ticket is `overflow: hidden`, so a ticket that merely shrank would lose its
+     order buttons off the bottom rather than scroll to them. */
+  .futures-workstation-instruments > .futures-production-execution-ticket {
+    display: flex;
+    flex-direction: column;
+    flex: 0 1 auto;
+    min-height: 0;
+  }
+
+  .futures-workstation-instruments .futures-production-execution-body {
+    min-height: 0;
+    overflow-y: auto;
   }
 
   /* The dock gains and loses rows on every order. A fixed height keeps that out
      of the chart's row instead of trading one jump for another. */
   .futures-workstation-dock-panel {
-    height: 260px;
+    /* A fixed 260px is a quarter of a short screen. It keeps its height where
+       there is room and gives some back to the chart and the rail where there
+       is not. */
+    height: clamp(168px, 26vh, 260px);
     max-height: none;
   }
 }
@@ -355,7 +391,10 @@
 
 .futures-workstation-instruments > .futures-production-execution-ticket {
   margin-top: 10px;
-  flex: 0 0 auto;
+  /* Shrinkable, so a rail shorter than the ticket gives the ticket's own body a
+     scrollbar instead of clipping its order buttons off the bottom. `0 0 auto`
+     here is what made the rail scroll as a whole. */
+  flex: 0 1 auto;
 }
 
 .futures-workstation-contract {
@@ -470,9 +509,15 @@
   grid-area: header;
   display: flex;
   align-items: stretch;
-  gap: 12px;
+  flex-wrap: wrap;
+  gap: 6px 12px;
   padding: 9px 12px;
-  overflow-x: auto;
+  /* Never `overflow-x: auto` here. CSS computes the other axis to `auto` as soon
+     as one of them is not `visible`, so the header became a vertical scroller —
+     and a scroll container contributes nothing to the `auto` grid row above it,
+     which sized to the padding alone. The contract's own numbers ended up
+     underneath a scrollbar 25px tall. It wraps instead. */
+  overflow: visible;
 }
 
 .futures-workstation-symbol-title {
@@ -1184,7 +1229,9 @@
   }
 }
 
+
 .futures-workstation-dock-panel {
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   min-width: 0;
@@ -1255,6 +1302,11 @@
 }
 
 .futures-workstation-dock-table {
+  /* The rows scroll, not the panel: a panel that scrolls takes its own heading
+     and its totals away with it. */
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
   display: grid;
   gap: 2px;
   min-width: 0;
@@ -1291,6 +1343,27 @@
   grid-template-columns:
     minmax(74px, 1fr) 54px minmax(96px, 1.2fr) minmax(76px, 1fr)
     minmax(86px, 0.9fr) minmax(66px, 0.9fr) 74px;
+}
+
+/* Between the point where the dock splits into two columns and the width where
+   the positions row's own minimums fit inside the wider of them, the row was
+   wider than its panel — a horizontal scrollbar under a table that fits at every
+   other size. The tracks tighten instead; every value keeps its exact form in
+   the cell's title. */
+@media (max-width: 1560px) {
+  .futures-workstation-dock-row {
+    grid-template-columns:
+      minmax(96px, 1.1fr) 48px minmax(84px, 0.9fr) minmax(64px, 0.9fr)
+      minmax(64px, 0.9fr) minmax(64px, 0.9fr) minmax(88px, 1fr)
+      minmax(148px, 1.3fr) 56px;
+    gap: 6px;
+  }
+
+  .futures-workstation-dock-row.is-orders {
+    grid-template-columns:
+      minmax(68px, 1fr) 48px minmax(84px, 1.2fr) minmax(70px, 1fr)
+      minmax(78px, 0.9fr) minmax(60px, 0.9fr) 68px;
+  }
 }
 
 .futures-workstation-dock-row > span {

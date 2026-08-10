@@ -526,9 +526,12 @@
   line-height: 1.4;
 }
 
+/* Four shortcuts on one line rather than two-by-two: this block is
+   discoverability, and it was costing the rail sixty pixels that the order
+   surface above it needs on a 900px screen. */
 .futures-production-shortcuts {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 3px 6px;
   padding: 7px;
   border: 1px solid #203746;
@@ -539,8 +542,8 @@
 
 .futures-production-shortcuts span {
   display: grid;
-  grid-template-columns: auto auto 1fr;
-  gap: 4px;
+  grid-template-columns: auto 1fr;
+  gap: 2px 4px;
   align-items: center;
   min-width: 0;
   font-size: calc(var(--fx-ui-scale, 1) * 11px);
