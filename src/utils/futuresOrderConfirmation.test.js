@@ -36,6 +36,18 @@ describe('futures order confirmation', () => {
     expect(entry.warning.code).toBe('OPPOSITE_ENTRY')
   })
 
+  // The terms the position is carried at belong on the panel that sends it, and
+  // a multiple the exchange never stated is absent rather than invented — "1×"
+  // beside a contract the account holds at 20× is worse than nothing.
+  it('carries the multiple the entry will be taken at, and never invents one', () => {
+    const shared = { action: LONG_ENTRY, symbol: 'BTCUSDT', price: '58445', quantity: '0.1' }
+    expect(describeFuturesOrderConfirmation({ ...shared, leverage: 20 }).leverage).toBe(20)
+    expect(describeFuturesOrderConfirmation(shared).leverage).toBeNull()
+    for (const leverage of [0, -2, 2.5, '20', null]) {
+      expect(describeFuturesOrderConfirmation({ ...shared, leverage }).leverage).toBeNull()
+    }
+  })
+
   it('warns that an oversized opposite entry reverses the position', () => {
     const confirmation = describeFuturesOrderConfirmation({
       action: SHORT_ENTRY,

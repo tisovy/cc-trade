@@ -956,6 +956,9 @@ export function setupBinanceConnection({
     const FUTURES_INCOME_READ_WEIGHT = 30;
     const FUTURES_SYMBOL_CONFIG_WEIGHT = 5;
     const FUTURES_LEVERAGE_BRACKET_WEIGHT = 1;
+    // "No need to change margin type" — Binance's answer when the contract is
+    // already in the requested mode. The state asked for is the state held.
+    const FUTURES_MARGIN_TYPE_UNCHANGED_CODE = -4046;
 
     let _futuresAccountRefreshInFlight = false;
     let futuresAccountResources = createInitialFuturesAccountResources();
@@ -2195,6 +2198,53 @@ export function setupBinanceConnection({
             }
         };
 
+        // The margin mode decides what a losing position can cost: isolated caps
+        // it at the margin behind that position, cross stands the whole wallet
+        // behind it. It is stopped by a pause for the same reason leverage is.
+        //
+        // Binance answers a mode the contract is already in with -4046. That is
+        // the desired state, not a failure, and reporting it as one would put a
+        // red card on the desk every time the default confirmed what was already
+        // true.
+        const handleFuturesSetMarginType = async (command) => {
+            const { symbol, marginType } = command.marginTypePayload;
+            if (futuresTradingPaused) {
+                emit(createCommandRejection(
+                    TRADING_COMMAND_ACTIONS.SET_MARGIN_TYPE,
+                    'FUTURES_TRADING_PAUSED',
+                    'Futures trading is paused — resume to change the margin mode.',
+                    { marketType: FUTURES_MARKET_TYPE },
+                ));
+                return;
+            }
+            let changed = true;
+            try {
+                logger.info(`[futures-margin-type] ${symbol} → ${marginType}`);
+                await futuresRestLimiter.execute(
+                    () => futuresTradingAdapter.setMarginType({ symbol, marginType }),
+                    1,
+                );
+                noteFuturesMutation();
+            } catch (error) {
+                if (Number(error?.code) !== FUTURES_MARGIN_TYPE_UNCHANGED_CODE) {
+                    emitFuturesApiRejection(TRADING_COMMAND_ACTIONS.SET_MARGIN_TYPE, error);
+                    return;
+                }
+                logger.info(`[futures-margin-type] ${symbol} already ${marginType}`);
+                changed = false;
+            }
+            // What the exchange holds now, not what was asked for. Read even
+            // where nothing changed: -4046 means the desk's own reading of the
+            // mode was the stale one, and that is worth correcting.
+            const config = await readFuturesSymbolConfig(symbol, { withCeiling: true });
+            broadcastFuturesSymbolConfigs([config]);
+            // The account only where the mode actually moved — it changes what
+            // stands behind a position, and therefore where it liquidates. A
+            // contract that was already in the mode moved nothing, and an
+            // account read is not free.
+            if (changed) await refreshFuturesAccountState();
+        };
+
         const handleFuturesModifyOrder = async (command) => {
             const amendment = command.futuresModifyPayload;
             if (futuresTradingPaused) {
@@ -2502,6 +2552,9 @@ export function setupBinanceConnection({
                         break;
                     case TRADING_COMMAND_ACTIONS.SET_LEVERAGE:
                         await handleFuturesSetLeverage(command);
+                        break;
+                    case TRADING_COMMAND_ACTIONS.SET_MARGIN_TYPE:
+                        await handleFuturesSetMarginType(command);
                         break;
                     case TRADING_COMMAND_ACTIONS.SET_TRADING_PAUSED:
                         futuresTradingPaused = command.paused;
@@ -3394,6 +3447,7 @@ export function setupBinanceConnection({
                     case TRADING_COMMAND_ACTIONS.ADJUST_POSITION_MARGIN:
                     case TRADING_COMMAND_ACTIONS.ACCOUNT_SYMBOL_CONFIG:
                     case TRADING_COMMAND_ACTIONS.SET_LEVERAGE:
+                    case TRADING_COMMAND_ACTIONS.SET_MARGIN_TYPE:
                         await handleTypedTradingCommand(data);
                         break;
                 }

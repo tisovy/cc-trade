@@ -654,6 +654,52 @@ describe('FuturesTradingTicket', () => {
     expect(state.placeOrder).not.toHaveBeenCalled()
   })
 
+  // The terms an entry is carried at were on no surface the operator's eye
+  // passes on the way to Enter: an entry sized in USDT went out at whatever the
+  // account was set to. The confirmation is the last place it can be read.
+  it('states the leverage the entry will be carried at in the confirmation', () => {
+    const state = createState()
+    const props = {
+      state, selectedSymbol: 'BTCUSDT', selectedContract: contract, draftPrice: '58445.0',
+    }
+    const { rerender } = render(<FuturesTradingTicket {...props} leverage={20} />)
+    sizeTo(25)
+
+    rerender(<FuturesTradingTicket
+      {...props}
+      leverage={20}
+      gestureRequest={{
+        id: 1, side: 'BUY', positionSide: 'LONG', positionEffect: 'ENTRY', price: '58445.0',
+      }}
+    />)
+    const panel = screen.getByRole('alertdialog')
+    expect(within(panel).getByTitle('This position will be carried at 20× leverage'))
+      .toHaveTextContent('20×')
+  })
+
+  // A multiple nobody reported must not be printed as one: an operator reading
+  // "1×" on a contract the exchange holds at 20× is worse off than one reading
+  // nothing at all.
+  it('states an unreported leverage as unknown in the confirmation', () => {
+    const state = createState()
+    const props = {
+      state, selectedSymbol: 'BTCUSDT', selectedContract: contract, draftPrice: '58445.0',
+    }
+    const { rerender } = render(<FuturesTradingTicket {...props} leverage={null} />)
+    sizeTo(25)
+
+    rerender(<FuturesTradingTicket
+      {...props}
+      leverage={null}
+      gestureRequest={{
+        id: 1, side: 'BUY', positionSide: 'LONG', positionEffect: 'ENTRY', price: '58445.0',
+      }}
+    />)
+    const panel = screen.getByRole('alertdialog')
+    expect(panel).toHaveTextContent('LEV ?')
+    expect(panel).not.toHaveTextContent('1×')
+  })
+
   // A leveraged position is worth more than the balance left over almost by
   // definition, so budgeting the exit would lock the operator out of closing.
   // The same size as an entry stays refused.

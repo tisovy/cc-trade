@@ -378,6 +378,10 @@ const FuturesTradingTicket = ({
       price: pendingOrder.price,
       quantity: pendingOrder.quantity,
       notionalUsdt: pendingOrder.notionalUsdt,
+      // Read live rather than from the staged draft: the panel states the terms
+      // the position will actually be carried at, and a leverage change that
+      // lands while the confirmation is open changes them.
+      leverage: entryLeverage,
       positions,
     })
     : null

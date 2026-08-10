@@ -753,6 +753,17 @@ export class FuturesTradingAdapter {
         });
     }
 
+    // Binance answers a mode the contract is already in with -4046 rather than
+    // with success, and refuses the change outright while a position or an order
+    // is open on the contract. Neither is interpreted here: this returns what the
+    // exchange said and the caller decides what it means.
+    async setMarginType({ symbol, marginType }) {
+        return this.#signedRequest('POST', '/fapi/v1/marginType', {
+            symbol,
+            marginType: String(marginType).toUpperCase(),
+        });
+    }
+
     // Bounded by time rather than by count: what is wanted is the set of contracts
     // traded in the window, and the amounts on these rows are never read.
     //

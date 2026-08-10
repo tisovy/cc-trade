@@ -1528,6 +1528,22 @@
   color: #ff8f9a;
 }
 
+/* The multiple the position will be carried at, in the yellow this desk uses
+   for liquidation readings — because that is what the multiple decides. Read at
+   the same glance as the headline, not hunted for in the summary rows. */
+.futures-order-confirm-leverage {
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid rgba(240, 201, 78, 0.35);
+  background: rgba(240, 201, 78, 0.12);
+  color: #f0c94e;
+  text-align: center;
+  font-size: calc(var(--fx-ui-scale, 1) * 20px);
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  line-height: 1.2;
+}
+
 /* Reserved for the one thing the operator is about to get wrong. */
 .futures-order-confirm-warning {
   margin: 0;

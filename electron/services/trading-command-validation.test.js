@@ -739,6 +739,51 @@ describe('backend trading command validation', () => {
             .toMatchObject({ ok: false });
     });
 
+    // The margin mode decides whether a losing position is capped at its own
+    // margin or stands behind the whole wallet, so it names its contract on the
+    // same terms as the leverage — and only the exchange's own two words.
+    it('accepts a margin-mode change and names every field it refuses', () => {
+        const validCommand = {
+            action: TRADING_COMMAND_ACTIONS.SET_MARGIN_TYPE,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'futures',
+            accountId: 'default',
+            clientOrderId: 'margin-type-1',
+            symbol: 'epicusdt',
+            marginType: 'isolated',
+        };
+        expect(validateTypedTradingCommand(validCommand, { selectedSymbol: 'ETHUSDT' })).toEqual({
+            ok: true,
+            command: {
+                action: TRADING_COMMAND_ACTIONS.SET_MARGIN_TYPE,
+                version: TRADE_COMMAND_VERSION,
+                marketType: 'futures',
+                accountId: 'default',
+                clientOrderId: 'margin-type-1',
+                symbol: 'EPICUSDT',
+                marginTypePayload: { symbol: 'EPICUSDT', marginType: 'ISOLATED' },
+            },
+        });
+
+        expect(validateTypedTradingCommand(
+            { ...validCommand, symbol: undefined },
+            { selectedSymbol: 'ETHUSDT' },
+        )).toMatchObject({
+            ok: false,
+            rejection: { command_rejected: { code: 'INVALID_TYPED_MARGIN_TYPE_SYMBOL' } },
+        });
+
+        for (const marginType of ['CROSS_MARGIN', 'cross-ish', '', undefined, 5]) {
+            expect(validateTypedTradingCommand({ ...validCommand, marginType })).toMatchObject({
+                ok: false,
+                rejection: { command_rejected: { code: 'INVALID_TYPED_MARGIN_TYPE_VALUE' } },
+            });
+        }
+
+        expect(validateTypedTradingCommand({ ...validCommand, marketType: 'spot' }))
+            .toMatchObject({ ok: false });
+    });
+
     // Margin transfers move real money and name one position. The symbol has no
     // fallback to the selected contract precisely because the fallback would
     // land the transfer on a position the operator never clicked.

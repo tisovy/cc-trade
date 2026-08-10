@@ -56,6 +56,7 @@ export const describeFuturesOrderConfirmation = ({
   price,
   quantity,
   notionalUsdt = null,
+  leverage = null,
   positions = [],
 } = {}) => {
   if (!action) return null
@@ -117,6 +118,11 @@ export const describeFuturesOrderConfirmation = ({
     price,
     quantity,
     notionalUsdt,
+    // The terms the position will be carried at. A whole multiple the exchange
+    // stated, or null: a leverage nobody reported must not become a number here
+    // of all places, and an operator reading "1×" where the contract is at 20×
+    // is worse off than one reading nothing.
+    leverage: Number.isSafeInteger(leverage) && leverage >= 1 ? leverage : null,
     positionBefore: before,
     positionAfter: after,
     positionBeforeUsdt: valueUsdt(before),

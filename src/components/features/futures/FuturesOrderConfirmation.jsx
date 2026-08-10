@@ -22,7 +22,7 @@ export const FuturesOrderConfirmation = ({
     anchor,
     width: PANEL_WIDTH,
     onClose: onCancel,
-    minHeight: 150,
+    minHeight: 190,
   })
 
   // Focus lands on the send button, so Enter releases the order and Escape
@@ -53,6 +53,21 @@ export const FuturesOrderConfirmation = ({
 
       <strong className={`futures-order-confirm-headline is-${confirmation.tone}`}>
         {confirmation.headline}
+      </strong>
+
+      {/* The terms, beside the direction and at the same weight. An operator
+          who sizes in USDT never has to think in multiples, which is how an
+          entry gets carried at a leverage nobody chose — so the multiple is
+          stated here, in the yellow this desk reserves for liquidation, in the
+          last second before the order goes. It is a reading and not a control:
+          nothing on the panel that sends an order also changes its terms. */}
+      <strong
+        className="futures-order-confirm-leverage"
+        title={confirmation.leverage === null
+          ? 'The exchange has not reported the leverage of this contract'
+          : `This position will be carried at ${confirmation.leverage}× leverage`}
+      >
+        {confirmation.leverage === null ? 'LEV ?' : `${confirmation.leverage}×`}
       </strong>
 
       <dl className="futures-order-editor-summary">

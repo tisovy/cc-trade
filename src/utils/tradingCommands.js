@@ -14,12 +14,25 @@ export const TRADING_COMMAND_ACTIONS = Object.freeze({
     ADJUST_POSITION_MARGIN: 'trade.adjustPositionMargin',
     ACCOUNT_SYMBOL_CONFIG: 'account.symbolConfig',
     SET_LEVERAGE: 'trade.setLeverage',
+    SET_MARGIN_TYPE: 'trade.setMarginType',
 });
 
 // Binance allows 1–125 depending on the contract and the bracket; the contract's
 // own ceiling is read from its leverage bracket and is always the lower of the
 // two. This is only the outer bound a command is refused past.
 export const FUTURES_LEVERAGE_LIMITS = Object.freeze({ min: 1, max: 125 });
+
+// Binance says CROSSED where its own screen says Cross; both words are its own,
+// and these two are the whole set — a mode outside them is refused rather than
+// forwarded and rejected by the exchange.
+export const FUTURES_MARGIN_TYPES = Object.freeze(['ISOLATED', 'CROSSED']);
+
+// What the desk holds a contract at unless the operator says otherwise. A
+// contract the desk has never traded carries whatever the exchange's
+// account-wide setting left on it — 20× on a contract sized in USDT liquidates
+// on a 5% move — so the desk states its own default rather than inheriting one.
+export const FUTURES_DEFAULT_LEVERAGE = 2;
+export const FUTURES_DEFAULT_MARGIN_TYPE = 'ISOLATED';
 
 export const POSITION_MARGIN_DIRECTIONS = Object.freeze({
     ADD: 'ADD',
@@ -369,6 +382,27 @@ export const createFuturesSetLeverageCommand = ({
     }),
     symbol,
     leverage,
+});
+
+// The other property of a contract set outside an order. Isolated caps a losing
+// position at the margin behind it; cross puts the whole wallet behind it, which
+// is why the mode belongs to the operator and not to whatever the account
+// happened to be left on.
+export const createFuturesSetMarginTypeCommand = ({
+    accountId,
+    clientOrderId,
+    symbol,
+    marginType,
+} = {}) => ({
+    ...buildBaseCommand({
+        action: TRADING_COMMAND_ACTIONS.SET_MARGIN_TYPE,
+        marketType: FUTURES_MARKET_TYPE,
+        accountId,
+        clientOrderId,
+        symbol,
+    }),
+    symbol,
+    marginType,
 });
 
 export const isTypedTradingAction = (action) => (

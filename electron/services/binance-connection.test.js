@@ -65,6 +65,7 @@ const moduleMocks = vi.hoisted(() => {
             }),
             getMaxLeverage: vi.fn().mockResolvedValue(125),
             setLeverage: vi.fn().mockResolvedValue({ symbol: 'BTCUSDT', leverage: 20 }),
+            setMarginType: vi.fn().mockResolvedValue({ code: 200, msg: 'success' }),
             getAccountRefreshOperations: vi.fn(() => []),
             createUserDataStreamListenKey: vi.fn().mockResolvedValue('futures-listen-key'),
             renewUserDataStreamListenKey: vi.fn().mockResolvedValue({}),
@@ -2783,6 +2784,107 @@ describe('setupBinanceConnection user-data orchestration', () => {
             .filter(payload => payload.futures_symbol_configs)
             .filter(payload => payload.futures_symbol_configs.BTCUSDT?.leverage === 5);
         expect(stale).toEqual([]);
+    });
+
+    // Isolated caps a losing position at the margin behind it; cross stands the
+    // whole wallet behind it. Like leverage, the mode changes what a position
+    // liquidates at, so the account is re-read after it.
+    it('applies a margin-mode change and re-reads the contract after it', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        moduleMocks.futuresAdapter.getSymbolConfig.mockResolvedValue({
+            symbol: 'EPICUSDT', leverage: 2, marginType: 'ISOLATED', maxNotionalValue: '500000',
+        });
+
+        const refreshesBefore = moduleMocks.futuresAdapter.getAccountRefreshOperations.mock.calls.length;
+        await runFuturesCommand({
+            action: 'trade.setMarginType',
+            clientOrderId: 'margin-type-1',
+            symbol: 'EPICUSDT',
+            marginType: 'ISOLATED',
+        });
+
+        expect(moduleMocks.futuresAdapter.setMarginType)
+            .toHaveBeenCalledWith({ symbol: 'EPICUSDT', marginType: 'ISOLATED' });
+        expect(moduleMocks.futuresAdapter.getAccountRefreshOperations.mock.calls.length)
+            .toBeGreaterThan(refreshesBefore);
+        const payloads = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message));
+        const [configs] = payloads.filter(payload => payload.futures_symbol_configs);
+        expect(configs.futures_symbol_configs.EPICUSDT.marginType).toBe('ISOLATED');
+        expect(payloads.some(payload => payload.command_rejected)).toBe(false);
+    });
+
+    // Binance answers a mode the contract is already in with -4046. The desk
+    // asked for a state and the state is held: reporting that as a failure would
+    // put a red card in front of the operator every time the default confirmed
+    // what was already true.
+    it('treats an unchanged margin mode as the mode being held, not as a failure', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        moduleMocks.futuresAdapter.setMarginType.mockRejectedValue(
+            Object.assign(new Error('No need to change margin type.'), { code: -4046 }),
+        );
+        moduleMocks.futuresAdapter.getSymbolConfig.mockResolvedValue({
+            symbol: 'EPICUSDT', leverage: 2, marginType: 'ISOLATED', maxNotionalValue: '500000',
+        });
+
+        const refreshesBefore = moduleMocks.futuresAdapter.getAccountRefreshOperations.mock.calls.length;
+        await runFuturesCommand({
+            action: 'trade.setMarginType',
+            clientOrderId: 'margin-type-2',
+            symbol: 'EPICUSDT',
+            marginType: 'ISOLATED',
+        });
+
+        const payloads = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message));
+        expect(payloads.some(payload => payload.command_rejected)).toBe(false);
+        // The reading is still corrected — -4046 says the desk's own record of
+        // the mode was the stale one — but nothing moved, so nothing is re-read
+        // at the price of a full account refresh.
+        const [configs] = payloads.filter(payload => payload.futures_symbol_configs);
+        expect(configs.futures_symbol_configs.EPICUSDT.marginType).toBe('ISOLATED');
+        expect(moduleMocks.futuresAdapter.getAccountRefreshOperations.mock.calls.length)
+            .toBe(refreshesBefore);
+    });
+
+    it('refuses a margin-mode change while trading is paused', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        await runFuturesCommand({
+            action: 'trade.setTradingPaused',
+            clientOrderId: 'pause-margin-type',
+            paused: true,
+        });
+
+        await runFuturesCommand({
+            action: 'trade.setMarginType',
+            clientOrderId: 'margin-type-3',
+            symbol: 'EPICUSDT',
+            marginType: 'ISOLATED',
+        });
+
+        expect(moduleMocks.futuresAdapter.setMarginType).not.toHaveBeenCalled();
+        const [rejection] = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.command_rejected);
+        expect(rejection.command_rejected).toMatchObject({
+            code: 'FUTURES_TRADING_PAUSED',
+            request: 'trade.setMarginType',
+        });
     });
 
     it('refuses a leverage change while trading is paused and reports the refusal', async () => {

@@ -266,9 +266,13 @@ account refresh, capped at eight. A leverage the exchange has not answered for i
 absent, never `1×`: the badge reads `Lev` and the margin estimate states the full
 notional, which overstates the cost rather than understating it.
 
-The multiple is shown where it is decided and where it is carried: on the order
-ticket beside the contract, and on each position row beside its symbol. Both are
-the control — clicking either opens a panel at the cursor with the stops Binance
+The multiple is shown where it is decided, where it is carried, and where the
+order goes: on the order ticket beside the contract, on each position row beside
+its symbol, and — large, in the yellow the desk uses for liquidation readings —
+on the confirmation panel, the last surface read before an order is sent. There
+it is a reading and not a control (`LEV ?` where the exchange has reported no
+multiple, never `1×`). The first two are the
+control — clicking either opens a panel at the cursor with the stops Binance
 offers (`1× … 125×`, filtered to the contract's own ceiling, which comes from
 bracket 1 of `/fapi/v1/leverageBracket`), a slider, what the wallet can carry at
 that multiple, the bracket's notional cap where the exchange reports one, and a
@@ -278,6 +282,33 @@ open position moves the price it liquidates at. Applying sends `trade.setLeverag
 because Binance lowers a setting a position is too large for rather than refusing
 it, and the figure on screen must be the one it applied. Pausing trading refuses a
 leverage change for the same reason it refuses a margin withdrawal.
+
+**The desk's own default is 2× isolated.** A contract this desk has never traded
+arrives carrying whatever Binance's account-wide setting left on it, which is how
+an entry sized in USDT goes out at 20×. So when a contract's configuration is read
+the desk brings it to `2×` and `ISOLATED` — `trade.setLeverage` and
+`trade.setMarginType` (→ `POST /fapi/v1/marginType`) — under four rules:
+
+- **Only downwards.** A contract at `1×` or `2×` is left alone; the desk never
+  raises a multiple the operator did not ask it to raise, and the contract's own
+  bracket ceiling still bounds it.
+- **Never on an open position.** A contract carrying a position is untouched:
+  changing its leverage moves the price it liquidates at.
+- **Not the mode while an order rests.** Binance refuses a margin-mode change on
+  a contract with working orders, so the desk does not ask; the multiple is still
+  lowered, and the mode follows once the order is gone. Nothing is sent at all
+  while trading is paused — a default applied then would arrive as refusals.
+- **Not on a reading that is not current.** Nothing is sent unless the position
+  resource is `ready`: a snapshot held from before a dropped connection is a
+  reading, not a confirmation, and a contract that went into a position while the
+  desk was disconnected would read as flat.
+- **Once per contract per session.** Raising it back to `10×` afterwards is the
+  operator's decision and stands, including after switching contracts and
+  returning. Restarting the app is what re-arms the default.
+
+Binance answers a mode the contract is already in with `-4046` ("no need to change
+margin type"); that is the state the desk asked for, so it is reported as held,
+not as a failure.
 
 The order ticket states **Est. margin** for the draft — `notional ÷ leverage`,
 what the entry actually holds out of the wallet. Order sizing itself is

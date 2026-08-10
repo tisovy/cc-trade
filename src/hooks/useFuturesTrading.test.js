@@ -361,6 +361,34 @@ describe('useFuturesTrading', () => {
     expect(socket.sent).toHaveLength(sentBefore)
   })
 
+  it('sends a margin-mode change for the named contract and nothing without one', () => {
+    const socket = createSocket()
+    const { result } = renderHook(() => useFuturesTrading({
+      enabled: true,
+      symbol: 'BTCUSDT',
+      wsConnection: socket,
+    }))
+
+    act(() => {
+      expect(result.current.setMarginType({ symbol: 'EPICUSDT', marginType: 'ISOLATED' })).toBe(true)
+    })
+    expect(socket.sent.at(-1)).toMatchObject({
+      action: 'trade.setMarginType',
+      marketType: 'futures',
+      symbol: 'EPICUSDT',
+      marginType: 'ISOLATED',
+    })
+
+    const sentBefore = socket.sent.length
+    act(() => {
+      // The mode decides what a losing position can cost, so it names its own
+      // contract for the same reason leverage does.
+      expect(result.current.setMarginType({ marginType: 'ISOLATED' })).toBe(false)
+      expect(result.current.setMarginType()).toBe(false)
+    })
+    expect(socket.sent).toHaveLength(sentBefore)
+  })
+
   it('keeps account-wide regular and ALGO namespaces distinct across terminal updates', () => {
     const socket = createSocket()
     const { result, rerender } = renderHook(

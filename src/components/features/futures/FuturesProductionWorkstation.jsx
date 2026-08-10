@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import useFuturesProductionWorkstation from '../../../hooks/useFuturesProductionWorkstation.js'
 import useFuturesOrderDrag from '../../../hooks/useFuturesOrderDrag.js'
+import useFuturesContractDefaults from '../../../hooks/useFuturesContractDefaults.js'
 import { describeFuturesOrderIntent } from '../../../utils/futuresOrderPresentation.js'
 import {
   readFuturesSymbolHistory,
@@ -238,6 +239,25 @@ export const FuturesProductionWorkstation = ({
     loadSymbolConfig(symbol)
   }, [enabled, loadSymbolConfig, symbol])
 
+  // And then held at the desk's own default rather than at whatever the account
+  // was left on: a flat contract above 2× is brought down to 2× isolated, once
+  // per contract per session.
+  const executionPositions = executionState?.positions
+  useFuturesContractDefaults({
+    enabled,
+    paused: executionState?.tradingPaused === true,
+    symbol,
+    config: executionState?.symbolConfigs?.[symbol] ?? null,
+    positions: executionPositions,
+    openOrders: executionState?.openOrders,
+    // `ready`, not "succeeded once": a snapshot held from before a dropped
+    // connection is a reading, not a confirmation, and a contract that went
+    // into a position while the desk was disconnected would read as flat.
+    positionsRead: executionState?.accountResources?.positions?.status === 'ready',
+    setLeverage: executionState?.setLeverage,
+    setMarginType: executionState?.setMarginType,
+  })
+
   const handleTradingGesture = useCallback((gesture) => {
     gestureSequenceRef.current += 1
     setDraftPrice(gesture.price)
@@ -279,7 +299,6 @@ export const FuturesProductionWorkstation = ({
       : []
   ), [executionOpenOrders, symbol])
 
-  const executionPositions = executionState?.positions
   const ownedPositions = useMemo(() => (
     Array.isArray(executionPositions)
       ? executionPositions.filter(position => position.symbol === symbol)

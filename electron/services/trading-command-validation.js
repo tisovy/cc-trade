@@ -5,6 +5,7 @@ import {
     DEFAULT_SPOT_ORDER_TYPE,
     DEFAULT_SPOT_TIME_IN_FORCE,
     FUTURES_LEVERAGE_LIMITS,
+    FUTURES_MARGIN_TYPES,
     FUTURES_MARKET_TYPE,
     POSITION_MARGIN_DIRECTIONS,
     SPOT_MARKET_TYPE,
@@ -17,6 +18,7 @@ const SUPPORTED_MARKET_TYPES = new Set([SPOT_MARKET_TYPE, FUTURES_MARKET_TYPE]);
 const FUTURES_ORDER_TYPES = new Set(['LIMIT', 'MARKET']);
 const FUTURES_POSITION_SIDES = new Set(['BOTH', 'LONG', 'SHORT']);
 const POSITION_MARGIN_DIRECTION_VALUES = new Set(Object.values(POSITION_MARGIN_DIRECTIONS));
+const FUTURES_MARGIN_TYPE_VALUES = new Set(FUTURES_MARGIN_TYPES);
 
 const isCommandPayloadObject = (payload) => (
     payload !== null &&
@@ -615,6 +617,46 @@ const validateTypedSetLeverageCommand = (payload, baseCommand) => {
     };
 };
 
+// The margin mode names its contract on the same terms as the leverage: it
+// decides whether a losing position is capped at its own margin or stands
+// behind the whole wallet, so it may not fall back to the contract on screen.
+const validateTypedSetMarginTypeCommand = (payload, baseCommand) => {
+    const symbol = normalizeTextField(payload.symbol);
+    if (!symbol) {
+        return {
+            ok: false,
+            rejection: createTypedCommandRejection(
+                payload,
+                'INVALID_TYPED_MARGIN_TYPE_SYMBOL',
+                'trade.setMarginType requires the symbol of the contract',
+                { field: 'symbol' },
+            ),
+        };
+    }
+
+    const marginType = (normalizeTextField(payload.marginType) || '').toUpperCase();
+    if (!FUTURES_MARGIN_TYPE_VALUES.has(marginType)) {
+        return {
+            ok: false,
+            rejection: createTypedCommandRejection(
+                payload,
+                'INVALID_TYPED_MARGIN_TYPE_VALUE',
+                `trade.setMarginType marginType must be one of ${FUTURES_MARGIN_TYPES.join(', ')}`,
+                { field: 'marginType', value: payload.marginType },
+            ),
+        };
+    }
+
+    return {
+        ok: true,
+        command: {
+            ...baseCommand,
+            symbol: symbol.toUpperCase(),
+            marginTypePayload: { symbol: symbol.toUpperCase(), marginType },
+        },
+    };
+};
+
 const rejectDefinedButDisabledCommand = (payload, baseCommand) => ({
     ok: false,
     rejection: createTypedCommandRejection(
@@ -744,6 +786,11 @@ export const validateTypedTradingCommand = (payload, { selectedSymbol } = {}) =>
                 return rejectDefinedButDisabledCommand(payload, baseCommand);
             }
             return validateTypedSetLeverageCommand(payload, baseCommand);
+        case TRADING_COMMAND_ACTIONS.SET_MARGIN_TYPE:
+            if (baseCommand.marketType !== FUTURES_MARKET_TYPE) {
+                return rejectDefinedButDisabledCommand(payload, baseCommand);
+            }
+            return validateTypedSetMarginTypeCommand(payload, baseCommand);
         case TRADING_COMMAND_ACTIONS.REPLACE_ORDER:
             if (baseCommand.marketType !== FUTURES_MARKET_TYPE) {
                 return rejectDefinedButDisabledCommand(payload, baseCommand);

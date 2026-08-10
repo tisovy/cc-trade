@@ -488,6 +488,18 @@ describe('futures contract configuration', () => {
         expect(applied).toMatchObject({ symbol: 'BTCUSDT', leverage: 20 });
     });
 
+    it('sends the margin mode as the exchange spells it', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestResponse = { code: 200, msg: 'success' };
+        await adapter.setMarginType({ symbol: 'EPICUSDT', marginType: 'isolated' });
+        const request = requests.find(entry => entry.url.endsWith('/fapi/v1/marginType'));
+        expect(request.options.method).toBe('POST');
+        const params = new URLSearchParams(request.body);
+        expect(params.get('symbol')).toBe('EPICUSDT');
+        expect(params.get('marginType')).toBe('ISOLATED');
+    });
+
     // Every USDⓈ-M history endpoint takes a symbol, so reviewing a whole session
     // has to start by asking which contracts it was traded on.
     it('discovers the contracts traded in a window, newest first', async () => {

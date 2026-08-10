@@ -16,6 +16,7 @@ import {
   createFuturesModifyOrderCommand,
   createFuturesPlaceOrderCommand,
   createFuturesSetLeverageCommand,
+  createFuturesSetMarginTypeCommand,
   createFuturesSetTradingPausedCommand,
   createFuturesSymbolConfigCommand,
 } from '../utils/tradingCommands.js'
@@ -790,6 +791,14 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection, marketGeneration = n
     return sendCommand(createFuturesSetLeverageCommand({ symbol: targetSymbol, leverage }))
   }, [sendCommand])
 
+  // The margin mode names its contract on the same terms as the leverage: what
+  // it decides is whether a losing position is capped at its own margin or
+  // stands behind the whole wallet.
+  const setMarginType = useCallback(({ symbol: targetSymbol, marginType } = {}) => {
+    if (!targetSymbol) return false
+    return sendCommand(createFuturesSetMarginTypeCommand({ symbol: targetSymbol, marginType }))
+  }, [sendCommand])
+
   const setTradingPaused = useCallback(paused => sendCommand(
     createFuturesSetTradingPausedCommand({ paused }),
   ), [sendCommand])
@@ -821,6 +830,7 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection, marketGeneration = n
     refresh,
     retryUnsentCommand,
     setLeverage,
+    setMarginType,
     setTradingPaused,
   }), [
     adjustPositionMargin,
@@ -837,6 +847,7 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection, marketGeneration = n
     refresh,
     retryUnsentCommand,
     setLeverage,
+    setMarginType,
     setTradingPaused,
     state,
   ])
