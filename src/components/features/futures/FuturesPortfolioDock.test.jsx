@@ -374,4 +374,66 @@ describe('FuturesPortfolioDock', () => {
       expect(stylesheet, `${name} has no rule`).toContain(`.${name}`)
     }
   })
+
+  // "No open positions" and "not read yet" call for opposite actions, and the
+  // dock used to give the first reading for both.
+  it('does not report an empty account before the first read answers', () => {
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[]}
+        openOrders={[]}
+        accountResources={{
+          positions: { status: 'loading', data: [], lastSuccessfulAt: null, error: null },
+          regularOrders: { status: 'loading', data: [], lastSuccessfulAt: null, error: null },
+          algoOrders: { status: 'loading', data: [], lastSuccessfulAt: null, error: null },
+        }}
+      />,
+    )
+
+    // Both panels say it: positions and working orders are read separately.
+    expect(screen.getAllByText('Not read yet.')).toHaveLength(2)
+    expect(screen.queryByText('No open positions.')).toBeNull()
+    expect(screen.queryByText('No working orders.')).toBeNull()
+    expect(screen.getByText('— open')).toBeInTheDocument()
+  })
+
+  it('says the read failed rather than reporting nothing open', () => {
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[]}
+        openOrders={[]}
+        accountResources={{
+          positions: {
+            status: 'error',
+            data: [],
+            lastSuccessfulAt: null,
+            error: { code: 'READ_FAILED', message: 'Positions read failed.' },
+          },
+        }}
+      />,
+    )
+
+    expect(screen.getByText('Not read — the account read failed.')).toBeInTheDocument()
+  })
+
+  it('reports an account that really is flat once the read has answered', () => {
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[]}
+        openOrders={[]}
+        accountResources={{
+          positions: { status: 'ready', data: [], lastSuccessfulAt: 1000, error: null },
+          regularOrders: { status: 'ready', data: [], lastSuccessfulAt: 1000, error: null },
+          algoOrders: { status: 'ready', data: [], lastSuccessfulAt: 1000, error: null },
+        }}
+      />,
+    )
+
+    expect(screen.getByText('No open positions.')).toBeInTheDocument()
+    expect(screen.getByText('0 open')).toBeInTheDocument()
+  })
+
 })

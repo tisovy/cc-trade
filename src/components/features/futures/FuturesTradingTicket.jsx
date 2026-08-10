@@ -882,7 +882,24 @@ const FuturesTradingTicket = ({
             <strong>{unresolvedCommand.code}</strong>
             <code>{unresolvedCommand.message}</code>
           </section>
-        ) : accountFailures.length > 0 ? (
+        ) : null}
+        {/* The operator's own last command and a background synchronization
+            failure are different facts, and the second used to hide the first:
+            a rejection of the order just sent was displaced by a balance that
+            happened to be refreshing badly. Both are shown, the command first,
+            and the exchange's own code with it. */}
+        {lastError ? (
+          <section className="futures-production-backend-card is-rejected" aria-label="Futures command rejection">
+            <strong>
+              {lastError.code}
+              {lastError.details?.binanceCode == null
+                ? ''
+                : ` · Binance ${lastError.details.binanceCode}`}
+            </strong>
+            <code>{lastError.message}</code>
+          </section>
+        ) : null}
+        {accountFailures.length > 0 ? (
           <section className="futures-production-backend-card is-rejected" aria-label="Futures account synchronization errors">
             {accountFailures.map(([resourceName, resource]) => (
               <div key={`${resourceName}:${resource.error?.code ?? resource.status}`}>
@@ -894,12 +911,8 @@ const FuturesTradingTicket = ({
               Retry account sync
             </button>
           </section>
-        ) : lastError ? (
-          <section className="futures-production-backend-card is-rejected" aria-label="Futures command rejection">
-            <strong>{lastError.code}</strong>
-            <code>{lastError.message}</code>
-          </section>
-        ) : safeState.lastExecution ? (
+        ) : null}
+        {!unresolvedCommand && !lastError && accountFailures.length === 0 && safeState.lastExecution ? (
           <section className="futures-production-backend-card is-ack" aria-label="Last Futures execution">
             <strong>
               {safeState.lastExecution.symbol} {safeState.lastExecution.side}

@@ -323,6 +323,7 @@ export const FuturesProductionWorkstation = ({
       selectedSymbol={symbol}
       positions={executionState?.positions}
       openOrders={executionState?.openOrders}
+      accountResources={executionState?.accountResources}
       tickSizes={tickSizes}
       history={executionState?.history}
       onClosePosition={handlePositionClose}

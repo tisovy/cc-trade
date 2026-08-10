@@ -219,25 +219,28 @@ describe('createFuturesMarkPriceFeed', () => {
     // The dangerous state is not a closed socket — that one announces itself.
     // It is a socket that opened, never closed, and stopped delivering: uPnL
     // freezes at the account snapshot and nothing in the process says so.
-    it('reports a socket that opened and then went silent, and its recovery', () => {
+    it('drops the marks of a silent socket and rebuilds it', () => {
         harness.feed.track([{ symbol: 'BICOUSDT', quantity: '-120' }]);
         harness.sockets[0].emit('open');
+        harness.sockets[0].emit('message', markFrame('BICOUSDT', '2.1340'));
+        harness.runTimers();
+        expect(harness.broadcasts.at(-1).marks).toMatchObject({ BICOUSDT: { markPrice: '2.1340' } });
         harness.logger.warn.mockClear();
 
+        // Nothing arrives for a whole stall window on a one-per-second contract.
         harness.runTimers();
         expect(harness.logger.warn).toHaveBeenCalledWith(
             expect.stringContaining('delivered nothing for 15s (BICOUSDT)'),
         );
+        // The frozen mark is withdrawn rather than left standing as the market's
+        // own price: consumers fall back to the account snapshot.
+        expect(harness.broadcasts.at(-1).marks).toEqual({});
+        expect(harness.sockets[0].closed).toBe(true);
+        expect(harness.sockets).toHaveLength(2);
 
-        // Reported once per episode, not on every check.
-        harness.logger.warn.mockClear();
-        harness.runTimers();
-        expect(harness.logger.warn).not.toHaveBeenCalled();
-
-        harness.sockets[0].emit('message', markFrame('BICOUSDT', '2.1340'));
-        harness.runTimers();
+        harness.sockets[1].emit('open');
         expect(harness.logger.info).toHaveBeenCalledWith(
-            expect.stringContaining('delivering again: BICOUSDT'),
+            expect.stringContaining('connected: BICOUSDT'),
         );
     });
 

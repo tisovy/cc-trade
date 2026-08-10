@@ -145,12 +145,18 @@ export const createFuturesMarkPriceFeed = ({
                     );
                 }
                 stallReported = false;
-            } else if (!stallReported) {
-                stallReported = true;
+            } else {
                 logger.warn?.(
                     `Futures mark price stream delivered nothing for ${Math.round(stallTimeoutMs / 1000)}s `
                     + `(${symbols.join(', ')}); position values are the account snapshot, not the market.`,
                 );
+                // Saying so was all this did, and the desk went on presenting the
+                // last mark as the market's own price. A socket that is open and
+                // silent against a one-per-second contract is a dead feed: its
+                // marks are dropped, so positions fall back to the account
+                // snapshot, and the socket is rebuilt.
+                restart();
+                return;
             }
             markSeenSinceCheck = false;
             armStallCheck();
@@ -222,6 +228,12 @@ export const createFuturesMarkPriceFeed = ({
             scheduleReconnect(socketGeneration);
         });
     };
+
+    function restart() {
+        if (stopped || symbols.length === 0) return;
+        disconnect();
+        connect();
+    }
 
     function scheduleReconnect(socketGeneration) {
         if (stopped || symbols.length === 0 || socketGeneration !== generation) return;

@@ -26,10 +26,27 @@ const marginModeLabel = mode => (
 
 // Positions and working orders live under the chart because they are what a
 // trader watches continuously — a tab you have to open is a tab you forget.
+// What a list of no rows means: nothing open, or nothing read yet. The dock used
+// to say "0 open" and "No open positions." before the first account read had
+// even answered, which is the one reading an operator must never be given
+// falsely — a flat account and an unknown account call for opposite actions.
+const EMPTY_RESOURCES = Object.freeze({})
+const describeRowsAvailability = (resources) => {
+  if (resources.length === 0) return { known: true, label: null }
+  const everRead = resources.every(resource => resource?.lastSuccessfulAt != null)
+  if (everRead) return { known: true, label: null }
+  const failed = resources.some(resource => resource?.status === 'error')
+  return {
+    known: false,
+    label: failed ? 'Not read — the account read failed.' : 'Not read yet.',
+  }
+}
+
 export const FuturesPortfolioDock = ({
   selectedSymbol,
   positions = EMPTY_ROWS,
   openOrders = EMPTY_ROWS,
+  accountResources = EMPTY_RESOURCES,
   tickSizes = EMPTY_TICKS,
   history = null,
   onClosePosition,
@@ -54,6 +71,12 @@ export const FuturesPortfolioDock = ({
     ? 'positive'
     : totalUnrealizedPnl < 0 ? 'negative' : 'flat'
   const priceOf = (symbol, value) => formatExchangePrice(value, tickSizes[symbol] ?? null)
+  const positionsAvailability = describeRowsAvailability(
+    [accountResources.positions].filter(Boolean),
+  )
+  const ordersAvailability = describeRowsAvailability(
+    [accountResources.regularOrders, accountResources.algoOrders].filter(Boolean),
+  )
 
   const openHistory = (tab) => {
     setOrdersTab(tab)
@@ -66,7 +89,7 @@ export const FuturesPortfolioDock = ({
         <header>
           <div>
             <span>Positions</span>
-            <strong>{positions.length} open</strong>
+            <strong>{positionsAvailability.known ? `${positions.length} open` : '— open'}</strong>
           </div>
           <div className={`futures-workstation-dock-total is-${totalTone}`}>
             <span>Total uPnL</span>
@@ -74,7 +97,9 @@ export const FuturesPortfolioDock = ({
           </div>
         </header>
         {describedPositions.length === 0 ? (
-          <p className="futures-workstation-empty">No open positions.</p>
+          <p className="futures-workstation-empty">
+            {positionsAvailability.known ? 'No open positions.' : positionsAvailability.label}
+          </p>
         ) : (
           <div className="futures-workstation-dock-table" role="table" aria-label="Open positions">
             <div className="futures-workstation-dock-row is-head" role="row">
@@ -223,7 +248,7 @@ export const FuturesPortfolioDock = ({
               aria-selected={ordersTab === 'working'}
               onClick={() => setOrdersTab('working')}
             >
-              Working <strong>{openOrders.length}</strong>
+              Working <strong>{ordersAvailability.known ? openOrders.length : '—'}</strong>
             </button>
             <button
               type="button"
@@ -266,7 +291,9 @@ export const FuturesPortfolioDock = ({
             onSymbolChange={onSymbolChange}
           />
         ) : openOrders.length === 0 ? (
-          <p className="futures-workstation-empty">No working orders.</p>
+          <p className="futures-workstation-empty">
+            {ordersAvailability.known ? 'No working orders.' : ordersAvailability.label}
+          </p>
         ) : (
           <div className="futures-workstation-dock-table" role="table" aria-label="Working orders">
             <div className="futures-workstation-dock-row is-head is-orders" role="row">

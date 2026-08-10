@@ -939,4 +939,54 @@ describe('useFuturesTrading', () => {
     expect(result.current.unresolvedCommand).toBeNull()
   })
 
+
+  // A balance held across a transport loss is a reading, not a confirmation.
+  // The ticket sizes orders from it, so it may not stay `ready` until a read has
+  // answered on the connection that is up now.
+  it('marks the held account unconfirmed when the transport drops', () => {
+    const socket = createSocket()
+    const { result } = renderHook(() => useFuturesTrading({
+      enabled: true,
+      symbol: 'BTCUSDT',
+      wsConnection: socket,
+    }))
+
+    act(() => {
+      socket.receive({
+        version: 1,
+        type: 'futures_account_state',
+        resources: {
+          balances: {
+            status: 'ready',
+            data: { USDT: { available: '90', total: '100' } },
+            lastSuccessfulAt: 100,
+          },
+        },
+      })
+    })
+    expect(result.current.accountResources.balances.status).toBe('ready')
+
+    act(() => socket.dropConnection())
+    expect(result.current.accountResources.balances.status).toBe('stale')
+    expect(result.current.accountResources.balances.error.message)
+      .toMatch(/Not confirmed since the connection dropped/)
+    // The values stay readable — an empty desk on reconnect is worse.
+    expect(result.current.balances).toMatchObject({ USDT: { available: '90' } })
+
+    act(() => {
+      socket.receive({
+        version: 1,
+        type: 'futures_account_state',
+        resources: {
+          balances: {
+            status: 'ready',
+            data: { USDT: { available: '95', total: '100' } },
+            lastSuccessfulAt: 200,
+          },
+        },
+      })
+    })
+    expect(result.current.accountResources.balances.status).toBe('ready')
+  })
+
 })

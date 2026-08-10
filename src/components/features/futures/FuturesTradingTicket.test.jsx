@@ -1161,7 +1161,43 @@ describe('FuturesTradingTicket', () => {
       />,
     )
 
-    expect(screen.getByLabelText('Futures command outcome unconfirmed')).toBeInTheDocument()
-    expect(screen.queryByLabelText('Futures command rejection')).toBeNull()
+    // Both are facts about different commands — the unknown outcome is read
+    // first, and the rejection is not hidden behind it.
+    const unconfirmed = screen.getByLabelText('Futures command outcome unconfirmed')
+    const rejection = screen.getByLabelText('Futures command rejection')
+    expect(unconfirmed.compareDocumentPosition(rejection))
+      .toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+  })
+
+  // A background synchronization failure is not an answer about the order the
+  // operator just sent, and used to displace it entirely.
+  it('shows a command rejection with its exchange code beside an account failure', () => {
+    render(
+      <FuturesTradingTicket
+        state={createState({
+          accountResources: {
+            balances: {
+              status: 'error',
+              data: null,
+              lastSuccessfulAt: 100,
+              error: { code: 'BALANCE_READ_FAILED', message: 'Balance read failed.' },
+            },
+          },
+          lastError: {
+            code: 'FUTURES_API_ERROR',
+            message: 'Margin is insufficient.',
+            details: { marketType: 'futures', binanceCode: -2019 },
+          },
+        })}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+      />,
+    )
+
+    const rejection = screen.getByLabelText('Futures command rejection')
+    expect(rejection).toHaveTextContent('Margin is insufficient.')
+    expect(rejection).toHaveTextContent('Binance -2019')
+    expect(screen.getByLabelText('Futures account synchronization errors'))
+      .toHaveTextContent('Balance read failed.')
   })
 })

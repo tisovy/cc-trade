@@ -55,6 +55,27 @@ const createInitialAccountResources = () => Object.fromEntries(
   }]),
 )
 
+// What is held from before a transport loss is a reading, not a confirmation.
+// The values stay on screen — re-entering the workspace with an empty desk is
+// worse — but nothing may treat them as current until a read answers on the
+// connection that is up now. `stale` is the status the readiness gate already
+// understands, so sizing refuses on it and exits stay available.
+const markAccountResourcesUnconfirmed = resources => Object.fromEntries(
+  Object.entries(resources ?? {}).map(([name, resource]) => [
+    name,
+    resource?.status === 'ready'
+      ? {
+        ...resource,
+        status: 'stale',
+        error: {
+          code: 'TRANSPORT_LOST',
+          message: 'Not confirmed since the connection dropped — retry account synchronization.',
+        },
+      }
+      : resource,
+  ]),
+)
+
 const isOpenSocket = (connection) => {
   const openState = globalThis.WebSocket?.OPEN ?? 1
   return connection?.readyState === openState
@@ -305,7 +326,12 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection, marketGeneration = n
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setState(previous => (previous.connected === false && previous.lastError === null
         ? previous
-        : { ...previous, connected: false, lastError: null }))
+        : {
+          ...previous,
+          connected: false,
+          lastError: null,
+          accountResources: markAccountResourcesUnconfirmed(previous.accountResources),
+        }))
       return undefined
     }
 
@@ -453,7 +479,11 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection, marketGeneration = n
 
     const handleDisconnect = () => {
       if (!active) return
-      setState(previous => ({ ...previous, connected: false }))
+      setState(previous => ({
+        ...previous,
+        connected: false,
+        accountResources: markAccountResourcesUnconfirmed(previous.accountResources),
+      }))
     }
 
     wsConnection.addEventListener('message', handleMessage)
