@@ -259,6 +259,11 @@ export const FuturesWorkstationChart = ({
         background: { type: ColorType.Solid, color: '#071019' },
         textColor: '#9eb0c2',
         attributionLogo: false,
+        // Every label the library draws — the price line titles (ENTRY, LIQ,
+        // ALERT) and the plates they put on the scale — is set from this one
+        // size, and at the default twelve they carried the weight of the candles
+        // they annotate. Nine is as small as the price scale stays readable at.
+        fontSize: 9,
       },
       grid: {
         vertLines: { color: 'rgba(135, 151, 170, 0.08)' },
@@ -283,6 +288,12 @@ export const FuturesWorkstationChart = ({
     const volumeSeries = chart.addSeries(HistogramSeries, {
       priceScaleId: 'volume',
       priceFormat: { type: 'volume' },
+      // The volume of the newest bar was stamped on the price scale, in the same
+      // plate the desk reads prices from — a quantity on a scale of prices, at the
+      // height its own bar happens to reach. The bars carry the reading; the last
+      // one needs no badge of its own.
+      lastValueVisible: false,
+      priceLineVisible: false,
     })
     chart.priceScale('volume').applyOptions({
       scaleMargins: { top: 0.78, bottom: 0 },

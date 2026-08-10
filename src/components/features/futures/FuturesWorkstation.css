@@ -653,7 +653,7 @@
   align-items: center;
   justify-content: flex-end;
   gap: 8px;
-  height: 22px;
+  height: 16px;
   max-width: 100%;
   padding: 0 6px;
   transform: translateY(-50%);
@@ -706,10 +706,10 @@
 
 .futures-workstation-owned-order span,
 .futures-workstation-owned-order strong {
-  padding: 2px 5px;
+  padding: 1px 4px;
   border-radius: 3px;
   background: rgba(5, 12, 19, 0.9);
-  font-size: calc(var(--fx-ui-scale, 1) * 13px);
+  font-size: calc(var(--fx-ui-scale, 1) * 9px);
   letter-spacing: 0.04em;
 }
 
@@ -1553,7 +1553,12 @@
 }
 
 /* Order handles: what the order is worth, plus a way to kill it. The exact
-   price is already on the price axis. */
+   price is already on the price axis.
+
+   Sized at seven tenths of what they were: a handle drawn at the desk's own body
+   size sat on the chart at the weight of a headline, and three of them across a
+   contract read as furniture rather than as marks on a price. They label candles;
+   the candles are the subject. */
 .futures-workstation-owned-order {
   gap: 4px;
   padding: 0;
@@ -1565,9 +1570,9 @@
 .futures-workstation-owned-order-cancel {
   display: flex;
   align-items: center;
-  gap: 6px;
-  height: 22px;
-  padding: 0 7px;
+  gap: 4px;
+  height: 16px;
+  padding: 0 5px;
   border: 1px solid currentColor;
   border-radius: 4px;
   background: rgba(5, 12, 19, 0.92);
@@ -1582,22 +1587,22 @@
 }
 
 .futures-workstation-owned-order-grip b {
-  font-size: calc(var(--fx-ui-scale, 1) * 11.5px);
+  font-size: calc(var(--fx-ui-scale, 1) * 8px);
   font-weight: 800;
   letter-spacing: 0.04em;
 }
 
 .futures-workstation-owned-order-grip span {
   font-family: var(--font-mono, ui-monospace, monospace);
-  font-size: calc(var(--fx-ui-scale, 1) * 12.5px);
+  font-size: calc(var(--fx-ui-scale, 1) * 8.75px);
   font-variant-numeric: tabular-nums;
 }
 
 .futures-workstation-owned-order-cancel {
   justify-content: center;
-  width: 22px;
+  width: 16px;
   padding: 0;
-  font-size: calc(var(--fx-ui-scale, 1) * 15px);
+  font-size: calc(var(--fx-ui-scale, 1) * 10.5px);
   line-height: 1;
   cursor: pointer;
 }
@@ -1607,7 +1612,7 @@
 }
 
 .futures-workstation-owned-order.is-algo {
-  padding: 0 7px;
+  padding: 0 5px;
   border: 1px dashed currentColor;
   border-radius: 4px;
   background: rgba(5, 12, 19, 0.9);

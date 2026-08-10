@@ -1,4 +1,5 @@
 import { act, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { createChart } from 'lightweight-charts'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { LIGHTWEIGHT_CHARTS_MAX_SERIES_VALUE } from '../../../utils/chartVolume.js'
 import FuturesWorkstationChart, {
@@ -114,6 +115,19 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     expect(chart.timeScale().fitContent).toHaveBeenCalledTimes(1)
     expect(chart.series[0].setData).toHaveBeenCalledTimes(1)
     expect(chart.series[0].update).toHaveBeenCalledTimes(1)
+  })
+
+  // The library draws every label it owns at one size — the price line titles
+  // (ENTRY, LIQ, ALERT) and the plates it puts on the scale — and at the default
+  // it annotated the candles at the weight of the candles. And the newest bar's
+  // volume was stamped onto the price scale, where every other plate is a price.
+  it('draws its own labels small and puts no volume badge on the price scale', () => {
+    render(<FuturesWorkstationChart {...properties([candle(1_784_000_000_000)])} />)
+
+    expect(createChart.mock.calls.at(-1)[1].layout.fontSize).toBe(9)
+    const [, volumeOptions] = chartMock.charts[0].addSeries.mock.calls
+      .find(([type]) => type === 'HistogramSeries')
+    expect(volumeOptions).toMatchObject({ lastValueVisible: false, priceLineVisible: false })
   })
 
   // A row that reached the candles but not the volume left the library colouring
