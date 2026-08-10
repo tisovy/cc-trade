@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   futuresBookGroupKey,
   futuresBookGroupSteps,
+  futuresBookWallKeys,
   groupFuturesBookLevels,
 } from './futuresOrderBook.js'
 
@@ -129,5 +130,34 @@ describe('groupFuturesBookLevels', () => {
       notionalUsdt: 2,
       cumulativeUsdt: 2,
     }])
+  })
+})
+
+describe('futuresBookWallKeys', () => {
+  const rows = sizes => sizes.map((notionalUsdt, index) => ({
+    groupKey: `k${index}`,
+    notionalUsdt,
+  }))
+
+  it('marks the five heaviest levels and nothing else', () => {
+    const walls = futuresBookWallKeys(rows([10, 900, 20, 800, 30, 700, 40, 600, 50, 500]))
+    expect([...walls].sort()).toEqual(['k1', 'k3', 'k5', 'k7', 'k9'])
+  })
+
+  it('keeps a tie whole rather than marking one twin and not the other', () => {
+    // Sixth place ties with fifth: both rest the same size, so both are walls.
+    const walls = futuresBookWallKeys(rows([100, 90, 80, 70, 60, 60, 10]))
+    expect(walls.size).toBe(6)
+    expect(walls.has('k5')).toBe(true)
+  })
+
+  it('marks nothing when there are no more levels than walls', () => {
+    expect(futuresBookWallKeys(rows([5, 4, 3, 2, 1])).size).toBe(0)
+    expect(futuresBookWallKeys(null).size).toBe(0)
+  })
+
+  it('ignores levels it cannot size instead of ranking them as empty walls', () => {
+    const walls = futuresBookWallKeys(rows([0, Number.NaN, 12, 8, 4, 2]), 3)
+    expect([...walls].sort()).toEqual(['k2', 'k3', 'k4'])
   })
 })

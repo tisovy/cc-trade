@@ -917,11 +917,40 @@
   gap: 3px;
 }
 
+/* Every track is bounded, so a long price shortens its own cell instead of
+   taking the symbol's width and pushing the value under the cancel control —
+   which is what `minmax(0, auto)` against nowrap content did. */
+.futures-production-order-head,
 .futures-production-order-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto minmax(0, auto) minmax(0, auto) 22px;
-  gap: 7px;
+  grid-template-columns: minmax(0, 0.95fr) auto minmax(0, 1.3fr) minmax(0, 0.85fr) 22px;
+  gap: 6px;
   align-items: center;
+}
+
+.futures-production-order-head {
+  padding: 1px 7px 0;
+  color: #6d8092;
+  font-size: calc(var(--fx-ui-scale, 1) * 9.5px);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.futures-production-order-head span:nth-child(3),
+.futures-production-order-head span:nth-child(4),
+.futures-production-order-row span:nth-child(3),
+.futures-production-order-row span:nth-child(4) {
+  text-align: right;
+}
+
+.futures-production-order-row > span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.futures-production-order-row {
   padding: 5px 7px;
   border: 1px solid var(--production-border);
   border-left: 3px solid #577185;

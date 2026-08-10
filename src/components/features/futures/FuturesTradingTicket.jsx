@@ -54,6 +54,30 @@ const isExactPositiveDecimal = value => (
 )
 const exactText = value => (typeof value === 'string' && value.length > 0 ? value : '—')
 
+// Every contract on this desk settles in USDT, so the quote half of the name is
+// the same four characters on every row of a column that has none to spare. The
+// whole name stays on the cell and on every control that acts on the contract.
+const contractLabel = (symbol) => {
+  if (typeof symbol !== 'string' || symbol.length === 0) return '—'
+  return symbol.length > 4 && symbol.endsWith('USDT') ? symbol.slice(0, -4) : symbol
+}
+
+// What the order is worth is what it is read against; the contract count is what
+// the exchange works in, and it stays a hover away rather than taking a column.
+const orderSizeTitle = (order) => (
+  Number(order?.origQty) > 0 ? `${order.origQty} contracts` : undefined
+)
+
+// An order rests at its trigger where it has one, and the exchange pads the
+// price it sends: `8.1200000` is nine characters of which three carry
+// information, and in this column it wrapped onto a second line. A price of
+// zero is not a price — an order carrying neither reads as absent rather than
+// as resting at the cheapest level in the column.
+const orderPriceText = (order, tickSize) => {
+  const price = order?.triggerPrice ?? order?.price
+  return Number(price) > 0 ? formatExchangePrice(price, tickSize) : '—'
+}
+
 const FuturesTradingTicket = ({
   state,
   selectedSymbol = 'BTCUSDT',
@@ -623,41 +647,61 @@ const FuturesTradingTicket = ({
             {openOrders.length === 0 && !orderSyncUnavailable
               ? <p>No active Futures orders.</p>
               : (
-                <div className="futures-production-order-rows">
+                <div className="futures-production-order-rows" role="table" aria-label="Working orders">
+                  {/* The columns are named once at the head instead of every row
+                      carrying its own unit: six rows of `10983 USDT` in a rail
+                      this narrow is six repetitions of one word, and the word is
+                      what pushed the value into the cancel control. */}
+                  <div className="futures-production-order-head" role="row">
+                    <span role="columnheader">Symbol</span>
+                    <span role="columnheader">Side</span>
+                    <span role="columnheader">Price</span>
+                    <span role="columnheader" title="What the order is worth, in USDT">USDT</span>
+                    <span role="columnheader" />
+                  </div>
                   {openOrders.map((order) => {
                     const intent = describeFuturesOrderIntent(order)
                     const isAlgo = order.orderKind === 'ALGO'
                     return (
                       <div
                         className={`futures-production-order-row is-${intent.tone}${order.symbol === selectedSymbol ? ' is-current-symbol' : ''}`}
+                        role="row"
                         key={`${order.orderKind ?? 'REGULAR'}:${order.symbol}:${order.orderId}`}
                         onDoubleClick={event => (isAlgo ? undefined : onOrderEdit?.(order, {
                           x: event.clientX,
                           y: event.clientY,
                         }))}
                       >
-                        <strong>{order.symbol}</strong>
-                        <span className={`futures-production-side is-${intent.tone}`}>
-                          {intent.label}
+                        <span role="cell"><strong title={order.symbol}>{contractLabel(order.symbol)}</strong></span>
+                        <span role="cell">
+                          <span className={`futures-production-side is-${intent.tone}`}>
+                            {intent.label}
+                          </span>
                         </span>
-                        <code>{order.triggerPrice ?? order.price}</code>
-                        <b>{orderNotionalUsdt(order) ?? '—'} USDT</b>
-                        {isAlgo ? (
-                          <em title="Managed on Binance">ALGO</em>
-                        ) : (
-                          <button
-                            type="button"
-                            className="futures-production-order-cancel"
-                            aria-label={`Cancel ${order.symbol} ${intent.side} order at ${order.price}`}
-                            title="Cancel order"
-                            onClick={() => safeState.cancelOrder?.({
-                              symbol: order.symbol,
-                              orderId: order.orderId,
-                            })}
-                          >
-                            ×
-                          </button>
-                        )}
+                        <span role="cell">
+                          <code>{orderPriceText(order, tickOf(order.symbol))}</code>
+                        </span>
+                        <span role="cell" title={orderSizeTitle(order)}>
+                          <b>{orderNotionalUsdt(order) ?? '—'}</b>
+                        </span>
+                        <span role="cell">
+                          {isAlgo ? (
+                            <em title="Managed on Binance">ALGO</em>
+                          ) : (
+                            <button
+                              type="button"
+                              className="futures-production-order-cancel"
+                              aria-label={`Cancel ${order.symbol} ${intent.side} order at ${order.price}`}
+                              title="Cancel order"
+                              onClick={() => safeState.cancelOrder?.({
+                                symbol: order.symbol,
+                                orderId: order.orderId,
+                              })}
+                            >
+                              ×
+                            </button>
+                          )}
+                        </span>
                       </div>
                     )
                   })}

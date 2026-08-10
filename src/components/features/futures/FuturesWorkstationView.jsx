@@ -8,6 +8,7 @@ import { orderFuturesContracts } from '../../../utils/futuresSymbolHistory.js'
 import {
   futuresBookGroupKey,
   futuresBookGroupSteps,
+  futuresBookWallKeys,
   groupFuturesBookLevels,
 } from '../../../utils/futuresOrderBook.js'
 import { formatCompactUsdt } from '../../../utils/futuresPriceFormat.js'
@@ -496,6 +497,14 @@ export const FuturesWorkstationView = ({
     step: activeGroupStep,
     limit: depthLevelsPerSide,
   }), [activeGroupStep, depth, depthLevelsPerSide])
+  // The heaviest levels on each visible side. Only the size is thickened: the
+  // wall is the size, and a whole bold row would drag its price and its running
+  // total into the marking with it — five loud rows instead of five walls.
+  const bookWalls = useMemo(() => ({
+    ask: futuresBookWallKeys(visibleAsks),
+    bid: futuresBookWallKeys(visibleBids),
+  }), [visibleAsks, visibleBids])
+
   // Where the operator's own working orders sit in the book. Matched by the
   // row's bucket, not its printed price, so a grouped row still marks an order
   // resting anywhere inside it.
@@ -803,7 +812,9 @@ export const FuturesWorkstationView = ({
                 ? <i className="futures-workstation-book-own is-sell" aria-hidden="true" />
                 : null}
               <span>{level.price}</span>
-              <span>{formatCompactUsdt(level.notionalUsdt)}</span>
+              <span className={bookWalls.ask.has(level.groupKey) ? 'is-wall' : undefined}>
+                {formatCompactUsdt(level.notionalUsdt)}
+              </span>
               <span>{formatCompactUsdt(level.cumulativeUsdt)}</span>
             </button>
           ))}
@@ -839,7 +850,9 @@ export const FuturesWorkstationView = ({
                 ? <i className="futures-workstation-book-own is-buy" aria-hidden="true" />
                 : null}
               <span>{level.price}</span>
-              <span>{formatCompactUsdt(level.notionalUsdt)}</span>
+              <span className={bookWalls.bid.has(level.groupKey) ? 'is-wall' : undefined}>
+                {formatCompactUsdt(level.notionalUsdt)}
+              </span>
               <span>{formatCompactUsdt(level.cumulativeUsdt)}</span>
             </button>
           ))}

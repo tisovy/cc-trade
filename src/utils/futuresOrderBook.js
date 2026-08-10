@@ -132,3 +132,27 @@ export const groupFuturesBookLevels = ({
     })
   }))
 }
+
+// A book is scanned for its walls: the few levels holding far more than the rest
+// of what is on screen. Five a side is what the eye picks out at a glance —
+// marking more of them makes the marking the background it is meant to stand
+// out from.
+export const FUTURES_BOOK_WALL_COUNT = 5
+
+// Ties are kept whole: two levels resting the same size are both walls or
+// neither, since choosing between them by their position in the array would
+// mark one wall and leave its twin plain. A side holding no more levels than
+// walls is left unmarked for the same reason — marking every row says nothing.
+export const futuresBookWallKeys = (levels, count = FUTURES_BOOK_WALL_COUNT) => {
+  if (!Array.isArray(levels) || !Number.isSafeInteger(count) || count < 1) return new Set()
+  if (levels.length <= count) return new Set()
+  const resting = levels
+    .map(level => level?.notionalUsdt)
+    .filter(notional => Number.isFinite(notional) && notional > 0)
+    .sort((left, right) => right - left)
+  if (resting.length === 0) return new Set()
+  const wall = resting[Math.min(count, resting.length) - 1]
+  return new Set(levels
+    .filter(level => Number.isFinite(level?.notionalUsdt) && level.notionalUsdt >= wall)
+    .map(level => level.groupKey))
+}

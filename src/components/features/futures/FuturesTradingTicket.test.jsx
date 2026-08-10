@@ -571,8 +571,8 @@ describe('FuturesTradingTicket', () => {
     fireEvent.click(screen.getByRole('tab', { name: /Orders/ }))
     const panel = screen.getByLabelText('Current Futures orders')
     expect(panel).toHaveTextContent('LONG')
-    expect(panel).toHaveTextContent('234 USDT')
-    expect(panel).toHaveTextContent('58445.00')
+    expect(panel).toHaveTextContent('234')
+    expect(panel).toHaveTextContent('58445.0')
 
     fireEvent.click(within(panel).getByRole('button', {
       name: 'Cancel BTCUSDT BUY order at 58445.00',
@@ -581,6 +581,32 @@ describe('FuturesTradingTicket', () => {
 
     fireEvent.click(within(panel).getByRole('button', { name: 'Cancel all BTCUSDT' }))
     expect(state.cancelAll).toHaveBeenCalledWith('BTCUSDT')
+  })
+
+  it('names the order columns once instead of repeating the unit on every row', () => {
+    const state = createState({
+      openOrders: [{
+        symbol: 'GRVTUSDT', orderId: 21, side: 'BUY', positionSide: 'LONG',
+        type: 'LIMIT', status: 'NEW', price: '0.0148410', origQty: '740000', z: '0',
+      }],
+    })
+    render(
+      <FuturesTradingTicket state={state} selectedSymbol="BTCUSDT" selectedContract={contract} />,
+    )
+    fireEvent.click(screen.getByRole('tab', { name: /Orders/ }))
+    const panel = screen.getByLabelText('Current Futures orders')
+
+    expect(within(panel).getAllByRole('columnheader').map(cell => cell.textContent))
+      .toEqual(['Symbol', 'Side', 'Price', 'USDT', ''])
+    // The unit is stated by the column, so no row carries it and none of them
+    // has to give up its width to it.
+    expect(panel).not.toHaveTextContent('10982 USDT')
+    expect(within(panel).getByText('10982')).toBeInTheDocument()
+
+    // The quote half of the name is the same on every contract this desk
+    // trades, and the exchange's padding is not precision the contract quotes.
+    expect(within(panel).getByText('GRVT')).toHaveAttribute('title', 'GRVTUSDT')
+    expect(within(panel).getByText('0.014841')).toBeInTheDocument()
   })
 
   it('opens the order editor on a double-clicked row', () => {
@@ -600,7 +626,7 @@ describe('FuturesTradingTicket', () => {
       />,
     )
     fireEvent.click(screen.getByRole('tab', { name: /Orders/ }))
-    fireEvent.doubleClick(screen.getByText('58445.00'), { clientX: 120, clientY: 240 })
+    fireEvent.doubleClick(screen.getByText('58445.0'), { clientX: 120, clientY: 240 })
     expect(onOrderEdit).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ orderId: 11 }),
       { x: 120, y: 240 },

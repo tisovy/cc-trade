@@ -826,6 +826,14 @@
   color: #8192a4;
 }
 
+/* The five heaviest levels a side. Weight alone on the muted column reads as a
+   rendering accident, so the wall is lifted out of the grey it is being told
+   apart from — and nothing else on the row changes. */
+.futures-workstation-book-side button span.is-wall {
+  color: #dde8f2;
+  font-weight: 800;
+}
+
 .futures-workstation-spread {
   display: flex;
   align-items: center;

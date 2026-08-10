@@ -886,6 +886,40 @@ describe('instrument recency and interface scale', () => {
     expect(asks[0].children[1].textContent).toBe('233.7k')
   })
 
+  it('thickens the size of the heaviest levels and leaves the rest of the row alone', () => {
+    const state = createState()
+    const { container } = renderView({
+      state: createState({
+        resources: Object.freeze({
+          ...state.resources,
+          depth: Object.freeze({
+            ...state.resources.depth,
+            bids: Object.freeze([
+              Object.freeze({ price: '100.7', quantity: '10', total: '10' }),
+              Object.freeze({ price: '100.6', quantity: '1', total: '11' }),
+              Object.freeze({ price: '100.5', quantity: '9', total: '20' }),
+              Object.freeze({ price: '100.4', quantity: '1', total: '21' }),
+              Object.freeze({ price: '100.3', quantity: '8', total: '29' }),
+              Object.freeze({ price: '100.2', quantity: '7', total: '36' }),
+              Object.freeze({ price: '100.1', quantity: '6', total: '42' }),
+            ]),
+          }),
+        }),
+      }),
+    })
+
+    const bids = [...container.querySelectorAll('.futures-workstation-book-side.is-bid button')]
+    expect(bids.map(row => row.children[1].className))
+      .toEqual(['is-wall', '', 'is-wall', '', 'is-wall', 'is-wall', 'is-wall'])
+    // Only the size carries the mark: the price and the running total beside it
+    // read the same on a wall as on any other level.
+    expect(bids[0].children[0].className).toBe('')
+    expect(bids[0].children[2].className).toBe('')
+    // One ask is not five walls: a side with no more levels than walls has none.
+    expect([...container.querySelectorAll('.futures-workstation-book-side.is-ask button')]
+      .every(row => row.children[1].className === '')).toBe(true)
+  })
+
   it('splits the visible book into buy and sell pressure by resting USDT', () => {
     const state = createState()
     const { container } = renderView({
