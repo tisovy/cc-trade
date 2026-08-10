@@ -34,4 +34,4 @@
 
 - [x] 5.1 `npm run lint`, `npm test`, `npm run check:futures-production`, `npm run check:command-path`.
 - [x] 5.2 Record the default in `docs/futures_trading.md`: what it sets, when it declines to, and that the operator's own choice stands.
-- [ ] 5.3 Operator confirms on live data: opening a contract the account holds at a high multiple leaves it at 2× ISO in the ticket and on Binance's own screen; a contract with an open position is untouched; a hand-set multiple survives a contract switch; and the confirmation panel states the multiple before an order is sent.
+- [x] 5.3 Operator confirms on live data: opening a contract the account holds at a high multiple leaves it at 2× ISO in the ticket and on Binance's own screen; a contract with an open position is untouched; a hand-set multiple survives a contract switch; and the confirmation panel states the multiple before an order is sent. Confirmed by the operator on 2026-08-11: contracts open as expected.
