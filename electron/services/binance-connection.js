@@ -70,6 +70,7 @@ import {
 import {
     isPotentialFuturesProductionWorkstationFrame,
 } from '../../src/utils/futuresProductionWorkstationProtocol.js';
+import { SPOT_CHART_HISTORY_PAGE_ROWS } from '../../src/utils/spotChartHistory.js';
 
 const LOG_LEVELS = { error: 0, warn: 1, info: 2, debug: 3 };
 const activeLogLevel = LOG_LEVELS[(process.env.LOG_LEVEL || 'info').toLowerCase()] ?? LOG_LEVELS.info;
@@ -92,6 +93,7 @@ const CHANNEL_ACTIONS = new Set([
     'unsubscribe',
     'enable_depth_view',
     'disable_depth_view',
+    'load_chart_history',
 ]);
 // A market-scoped frame is only accepted while that market is the activated
 // one. Before `activate_market` there is no activated market, and after a
@@ -107,6 +109,7 @@ const SPOT_CHANNEL_ACTIONS = new Set([
     'unsubscribe',
     'enable_depth_view',
     'disable_depth_view',
+    'load_chart_history',
 ]);
 const SPOT_LEGACY_REQUESTS = new Set(['chart', 'buyOrder', 'sellOrder', 'cancelOrder']);
 
@@ -168,6 +171,17 @@ const validateRendererActionEnvelope = (data, channelManager) => {
     } else if (data.action === 'enable_depth_view') {
         if (!isMatchingString(data.symbol, CHANNEL_SYMBOL_PATTERN)) {
             return { code: 'INVALID_CHANNEL_ACTION', message: 'depth symbol is invalid' };
+        }
+    } else if (data.action === 'load_chart_history') {
+        // The page size is bounded to what one klines read serves, so a renderer
+        // cannot turn one scroll into an unbounded read at the exchange.
+        if (!isMatchingString(data.symbol, CHANNEL_SYMBOL_PATTERN)
+            || !isMatchingString(data.interval, CHANNEL_INTERVAL_PATTERN)
+            || !Number.isSafeInteger(data.endTime) || data.endTime <= 0
+            || !Number.isSafeInteger(data.limit)
+            || data.limit < 1
+            || data.limit > SPOT_CHART_HISTORY_PAGE_ROWS) {
+            return { code: 'INVALID_CHANNEL_ACTION', message: 'chart history fields are invalid' };
         }
     }
 
@@ -2676,6 +2690,36 @@ export function setupBinanceConnection({
             await channelManager.removeChannel(channelId, null);
         };
 
+        /**
+         * Read one page of closed candles behind the chart's live window.
+         *
+         * The page is served to the detail channel that asked for it and only
+         * while that channel still holds the pair and interval in the request.
+         * A page answered after the operator moved on would arrive as one
+         * market's candles drawn under another's tail — which is how the same
+         * defect was found on the Futures chart on live data.
+         */
+        const loadChartHistory = async ({ symbol, interval, endTime, limit }) => {
+            const channel = channelManager.getDetailChannel();
+            if (!channel || channel.symbol !== symbol || channel.interval !== interval) {
+                logger.warn(`Ignored chart history request for an inactive selection: ${symbol} ${interval}`);
+                return;
+            }
+            const channelId = channel.id;
+            await rateLimiter.execute(async () => {
+                const res = await client.restAPI.klines({ symbol, interval, limit, endTime });
+                const rows = await res.data();
+                const parsedKlines = Array.isArray(rows) ? rows.map(normalizeBinanceCandle) : [];
+                const current = channelManager.getChannel(channelId);
+                if (!current || current.symbol !== symbol || current.interval !== interval) return;
+                // `endTime` and `limit` travel back with the page: the renderer
+                // has to be able to tell the answer to the request it is holding
+                // from the answer to one it already abandoned, and a page shorter
+                // than the limit is the exchange saying there is nothing older.
+                emitToChannel(channelId, 'chart_history', parsedKlines, { symbol, interval, endTime, limit });
+            }, 2).catch(err => logger.error('Chart History Fetch Error:', err));
+        };
+
         connection.on("message", async (message) => {
             if (message.type !== "utf8" || typeof message.utf8Data !== 'string') return;
             const rawUtf8Frame = message.utf8Data;
@@ -2851,6 +2895,10 @@ export function setupBinanceConnection({
                         // Disable trade + depth streams when leaving DepthView
                         logger.info('[DepthView] Disabling trade + depth streams');
                         marketStreamManager.disableDepthView();
+                        break;
+                    }
+                    case 'load_chart_history': {
+                        await loadChartHistory(data);
                         break;
                     }
                     case TRADING_COMMAND_ACTIONS.PLACE_ORDER:

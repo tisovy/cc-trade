@@ -8,6 +8,7 @@ import RSIPane from './RSIPane';
 import { SMA } from 'technicalindicators';
 import { precisionTruncate, formatVolumeShort } from '../../../utils/operations';
 import { buildVolumeHistogramPresentation } from '../../../utils/chartVolume';
+import { countPrependedRows, reachedSpotHistoryEdge } from '../../../utils/spotChartHistory';
 import { DEFAULT_PRECISION, getMinMove } from '../../../utils/precision';
 import { useDataContext } from '../../../context/DataContext';
 import { useDrawingContext } from '../../../hooks/useDrawingContext';
@@ -124,7 +125,17 @@ export const ChartWrapper = (props) => {
         onViewSwitch, // ALT+click to switch views
         showOrderHistory = 'VISIBLE', // Toggle for completed order overlays
     } = props;
-    const { chart: data, orders, history, selectedPrecision, panel, enabledMarketBalance, isChartLoading, ticker } = useDataContext();
+    const {
+        chart: data,
+        orders,
+        history,
+        selectedPrecision,
+        panel,
+        enabledMarketBalance,
+        isChartLoading,
+        ticker,
+        loadChartHistory,
+    } = useDataContext();
     const { alerts, deleteAlert, updateAlertPrice } = useAlertContext();
     const {
         drawings,
@@ -148,10 +159,18 @@ export const ChartWrapper = (props) => {
     } = useDrawingContext();
     const precision = selectedPrecision ?? DEFAULT_PRECISION;
     const activeInterval = panel?.interval ?? '1h';
+    // A primitive, not `panel`: the panel object changes on every keystroke in
+    // the search field, and the series effect must not re-run for that.
+    const chartPair = `${panel?.selected ?? ''}:${activeInterval}`;
     const timeFormatting = useMemo(() => buildTimeScaleFormatters(activeInterval), [activeInterval]);
 
     const chartContainerRef = useRef();
     const chartRef = useRef();
+    // What the drawn series was last time, keyed by the pair it belonged to.
+    // Keyed, because a prepend is only a prepend within one selection: after a
+    // switch, the new pair's first candle is not older data arriving.
+    const drawnSeriesRef = useRef({ pair: null, firstTime: null });
+    const loadChartHistoryRef = useRef(loadChartHistory);
     const candleSeriesRef = useRef();
     const volumeSeriesRef = useRef();
     const smaSeriesRef = useRef();
@@ -490,7 +509,25 @@ export const ChartWrapper = (props) => {
     }, [priceDecimals, minMove]);
 
     useEffect(() => {
+        loadChartHistoryRef.current = loadChartHistory;
+    }, [loadChartHistory]);
+
+    useEffect(() => {
         if (candleSeriesRef.current && volumeSeriesRef.current && data && data.length > 0) {
+            // Older candles arriving in front shift every bar's logical index.
+            // Left alone, the chart jumps backwards under the operator's cursor
+            // at the exact moment they were reading those bars, so the visible
+            // range is moved by as many bars as were prepended and the view
+            // stands still.
+            const prepended = drawnSeriesRef.current.pair === chartPair
+                ? countPrependedRows(drawnSeriesRef.current.firstTime, data)
+                : 0;
+            const timeScale = chartRef.current?.timeScale?.();
+            const heldRange = prepended > 0
+                ? timeScale?.getVisibleLogicalRange?.() ?? null
+                : null;
+            drawnSeriesRef.current = { pair: chartPair, firstTime: data[0].time };
+
             candleSeriesRef.current.setData(data);
 
             const volumePresentation = buildVolumeHistogramPresentation(data, {
@@ -511,6 +548,15 @@ export const ChartWrapper = (props) => {
             }));
             if (smaSeriesRef.current) {
                 smaSeriesRef.current.setData(smaData);
+            }
+
+            // After every series holds the new rows, so nothing writing data
+            // afterwards resets the range that was just restored.
+            if (heldRange) {
+                timeScale?.setVisibleLogicalRange?.({
+                    from: heldRange.from + prepended,
+                    to: heldRange.to + prepended,
+                });
             }
 
             // VPVR Logic
@@ -579,6 +625,14 @@ export const ChartWrapper = (props) => {
 
             const handleVisibleRangeChange = debounce((newVisibleLogicalRange) => {
                 if (!newVisibleLogicalRange) return;
+                // Reaching the oldest loaded bar is the request for more
+                // history. Whether there is any left to load, and whether a read
+                // is already outstanding, is the loader's own business — asking
+                // twice costs nothing here and guessing it locally would go
+                // stale the moment a page arrives.
+                if (reachedSpotHistoryEdge(newVisibleLogicalRange)) {
+                    loadChartHistoryRef.current?.();
+                }
                 const from = Math.max(0, Math.floor(newVisibleLogicalRange.from));
                 const to = Math.min(data.length - 1, Math.ceil(newVisibleLogicalRange.to));
 
@@ -608,7 +662,7 @@ export const ChartWrapper = (props) => {
                 handleVisibleRangeChange.cancel?.();
             };
         }
-    }, [data]);
+    }, [data, chartPair]);
 
     useEffect(() => {
         if (!candleSeriesRef.current || !data || data.length === 0) return;

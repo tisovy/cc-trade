@@ -7,9 +7,15 @@ import {
   initCache,
   getCachedCandles,
   setCachedCandles,
-  mergeCandles as _mergeCandles,
   getCacheStats,
 } from '../utils/cache';
+import {
+  SPOT_CHART_HISTORY_PAGE_ROWS,
+  SPOT_CHART_INTERVAL_MS,
+  mergeSpotChartSeries,
+  spotChartHistoryEndTime,
+  spotChartIntervalSeconds,
+} from '../utils/spotChartHistory';
 import { incrementTradeCount } from '../utils/pnl';
 import {
   CHANNEL_TYPES,
@@ -21,23 +27,10 @@ import {
   requestActivityMetrics,
 } from '../utils/analytics';
 import { useGatewayContext } from './GatewayContext.jsx';
-const INTERVAL_TO_MS = {
-  '1m': 60_000,
-  '3m': 180_000,
-  '5m': 300_000,
-  '15m': 900_000,
-  '30m': 1_800_000,
-  '1h': 3_600_000,
-  '2h': 7_200_000,
-  '4h': 14_400_000,
-  '6h': 21_600_000,
-  '8h': 28_800_000,
-  '12h': 43_200_000,
-  '1d': 86_400_000,
-  '3d': 259_200_000,
-  '1w': 604_800_000,
-  '1M': 2_592_000_000,
-};
+
+// One table of interval lengths for the whole Spot chart. Two of them is how a
+// gap check ends up comparing one interval's idea of a bar against another's.
+const INTERVAL_TO_MS = SPOT_CHART_INTERVAL_MS;
 
 const DEFAULT_TRADE_PAIRS = ['PAXUSDT', 'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'ADAUSDT'];
 const MIN_TRADE_NOTIONAL_BTC = 0.01;
@@ -564,6 +557,20 @@ export const DataProvider = ({
   const isFinalRef = useRef(isFinal);
   const throttleRef = useRef(throttle);
   const pendingPairRef = useRef(null);
+  // Which pair and interval the rows in `chart` belong to. Depth is only ever
+  // joined to rows read for the same selection: a page merged in front of the
+  // previous pair's tail is how one market's candles end up drawn under
+  // another's, and that defect has already been found once on live data.
+  const chartSelectionRef = useRef(null);
+  // The one history read allowed to be outstanding. The left edge fires
+  // continuously while the operator scrolls.
+  const chartHistoryRequestRef = useRef(null);
+  const chartSeriesRef = useRef([]);
+  const [chartHistoryExhausted, setChartHistoryExhausted] = useState(false);
+
+  useEffect(() => {
+    chartSeriesRef.current = chart;
+  }, [chart]);
 
   useEffect(() => {
     isFinalRef.current = isFinal;
@@ -821,10 +828,21 @@ export const DataProvider = ({
         });
       }
 
+      // Depth belongs to one pair and one interval. Nothing loaded under the
+      // previous selection may survive into this one, and whether the previous
+      // selection had reached the start of its history says nothing about this
+      // one's.
+      chartHistoryRequestRef.current = null;
+      chartSelectionRef.current = `${nextSelected}:${nextInterval}`;
+      setChartHistoryExhausted(false);
+
       // Try to load cached data first for instant display
       const loadCachedFirst = async () => {
         const cached = await getCachedCandles(nextSelected, nextInterval);
         if (cached && cached.candles.length > 0) {
+          // The stored run is the depth an earlier session already pulled in,
+          // not just the last live window: it is presented whole, and the
+          // bootstrap that follows merges into it rather than replacing it.
           setChart(cached.candles);
           // If we have cached data, clear loading immediately - data is visible
           // The chart will update seamlessly when fresh data arrives
@@ -879,6 +897,29 @@ export const DataProvider = ({
       }));
     }
   }, [panel]);
+
+  /**
+   * Ask for the page of closed candles behind the oldest one loaded.
+   *
+   * Nothing is asked for twice: the page is bounded, one read is outstanding at
+   * a time, and once the exchange answers short the pair's history is treated as
+   * having a start.
+   */
+  const loadChartHistory = useCallback(() => {
+    if (chartHistoryExhausted) return false;
+    if (chartHistoryRequestRef.current !== null) return false;
+    const symbol = panel.selected;
+    const interval = panel.interval;
+    if (chartSelectionRef.current !== `${symbol}:${interval}`) return false;
+    const endTime = spotChartHistoryEndTime(chartSeriesRef.current);
+    if (endTime === null) return false;
+
+    const request = { symbol, interval, endTime, limit: SPOT_CHART_HISTORY_PAGE_ROWS };
+    chartHistoryRequestRef.current = request;
+    const sent = sendWsMessage({ action: 'load_chart_history', ...request });
+    if (sent === false) chartHistoryRequestRef.current = null;
+    return sent !== false;
+  }, [chartHistoryExhausted, panel.selected, panel.interval, sendWsMessage]);
 
   /**
    * Handle global messages (ticker, filters, balances, orders)
@@ -988,7 +1029,19 @@ export const DataProvider = ({
             clearTimeout(chartFlushTimerRef.current);
             chartFlushTimerRef.current = null;
           }
-          setChart(sanitizedChartData);
+          // The bootstrap window is the fresher read, so it wins the overlap —
+          // but it is only the last 500 candles, and replacing with it threw
+          // away every older candle the operator had scrolled to and everything
+          // the local store had preserved across the restart. It is merged in
+          // front of that depth instead, and only when the depth was read for
+          // this same pair and interval.
+          const pair = `${panel.selected}:${panel.interval}`;
+          const intervalSeconds = spotChartIntervalSeconds(panel.interval);
+          const mergeWithHeldDepth = chartSelectionRef.current === pair;
+          chartSelectionRef.current = pair;
+          setChart(prev => (mergeWithHeldDepth
+            ? mergeSpotChartSeries(prev, sanitizedChartData, { intervalSeconds })
+            : sanitizedChartData));
           setUpdateChart(false);
           setIsFinal(false);
           isFinalRef.current = false;
@@ -1000,7 +1053,10 @@ export const DataProvider = ({
 
           // Cache the chart data
           if (sanitizedChartData.length > 0) {
-            setCachedCandles(panel.selected, panel.interval, sanitizedChartData)
+            const storedSeries = mergeWithHeldDepth
+              ? mergeSpotChartSeries(chartSeriesRef.current, sanitizedChartData, { intervalSeconds })
+              : sanitizedChartData;
+            setCachedCandles(panel.selected, panel.interval, storedSeries)
               .then(() => getCacheStats().then(setCacheStats))
               .catch(err => console.error('Cache write error:', err));
 
@@ -1016,6 +1072,46 @@ export const DataProvider = ({
             }));
           }
         }
+        break;
+      }
+
+      // The depth behind the live window. It arrives once per request, is joined
+      // under the rows already drawn, and is stored so the next run of the app
+      // starts where this one left off rather than reading it again.
+      case 'chart_history': {
+        const request = chartHistoryRequestRef.current;
+        const answer = extra && typeof extra === 'object' ? extra : {};
+        // Only the answer to the request being held is applied. A page for a
+        // pair, interval or read-point the chart has moved on from is history of
+        // something the operator is no longer looking at.
+        if (!request
+          || answer.symbol !== request.symbol
+          || answer.interval !== request.interval
+          || answer.endTime !== request.endTime) break;
+        chartHistoryRequestRef.current = null;
+        if (chartSelectionRef.current !== `${request.symbol}:${request.interval}`) break;
+
+        const rows = sanitizeCandles(Array.isArray(payload) ? payload : []);
+        // Fewer candles than were asked for is the exchange saying there is
+        // nothing older. Without this the chart would ask for the same short
+        // answer on every scroll for the rest of the session.
+        if (rows.length < request.limit) setChartHistoryExhausted(true);
+        if (rows.length === 0) break;
+
+        const intervalSeconds = spotChartIntervalSeconds(request.interval);
+        const merged = mergeSpotChartSeries(rows, chartSeriesRef.current, { intervalSeconds });
+        // The series is bounded, and a live tick never touches its front row, so
+        // this comparison is exact. A page the chart cannot hold — because it is
+        // already full to its ceiling, or because the page did not touch the run
+        // it has — must not be asked for again: the same read would otherwise
+        // repeat for as long as the operator sits at the left edge.
+        const oldestHeld = chartSeriesRef.current[0]?.time;
+        if (Number.isFinite(oldestHeld) && !(merged[0]?.time < oldestHeld)) {
+          setChartHistoryExhausted(true);
+        }
+        setChart(prev => mergeSpotChartSeries(rows, prev, { intervalSeconds }));
+        setCachedCandles(request.symbol, request.interval, merged)
+          .catch(err => console.error('Cache write error:', err));
         break;
       }
 
@@ -1318,6 +1414,10 @@ export const DataProvider = ({
     startupStatus,
     spotEnabled,
     handlePanelUpdate,
+    // Chart depth: the loader the chart calls when the operator scrolls into the
+    // oldest bar, and whether the pair's history has a start behind it.
+    loadChartHistory,
+    chartHistoryExhausted,
     handleThrottleSwitch,
     handleThrottleTimeout,
     enabledMarketBalance,

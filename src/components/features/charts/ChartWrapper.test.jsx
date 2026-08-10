@@ -1,4 +1,4 @@
-import { render } from '@testing-library/react'
+import { render, waitFor } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { ChartWrapper } from './ChartWrapper'
 import * as DataContextModule from '../../../context/DataContext'
@@ -9,19 +9,24 @@ vi.mock('../../../context/DataContext', () => ({
     useDataContext: vi.fn()
 }))
 
-// Mock AlertContext
-vi.mock('../../../context/AlertContext', () => ({
+// The alert and drawing contexts are reached through their hooks, not through
+// the context modules: mocking the modules left the hooks resolving the real
+// contexts and every render of this component throwing, which is what had these
+// tests skipped.
+vi.mock('../../../hooks/useAlertContext', () => ({
     useAlertContext: () => ({
         alerts: [],
         triggeredAlerts: [],
         checkPriceAlerts: vi.fn(),
+        deleteAlert: vi.fn(),
+        updateAlertPrice: vi.fn(),
     })
 }))
 
-// Mock DrawingContext with DRAWING_TOOLS
-vi.mock('../../../context/DrawingContext', () => ({
+vi.mock('../../../hooks/useDrawingContext', () => ({
     useDrawingContext: () => ({
         drawings: [],
+        activeDrawing: null,
         addDrawing: vi.fn(),
         removeDrawing: vi.fn(),
         updateDrawing: vi.fn(),
@@ -33,16 +38,20 @@ vi.mock('../../../context/DrawingContext', () => ({
         setActiveColor: vi.fn(),
         updateCurrentKey: vi.fn(),
         currentKey: 'BTCUSDT-1h',
+        isDragging: false,
+        addHorizontalLine: vi.fn(),
+        addTextAnnotation: vi.fn(),
+        startDrawing: vi.fn(),
+        updateActiveDrawing: vi.fn(),
+        finalizeDrawing: vi.fn(),
+        cancelDrawing: vi.fn(),
+        selectDrawing: vi.fn(),
+        deselectAll: vi.fn(),
+        deleteSelectedDrawing: vi.fn(),
+        startDrag: vi.fn(),
+        updateDrag: vi.fn(),
+        endDrag: vi.fn(),
     }),
-    DRAWING_TOOLS: {
-        CURSOR: 'cursor',
-        HORIZONTAL_LINE: 'horizontal_line',
-        TREND_LINE: 'trend_line',
-        RECTANGLE: 'rectangle',
-        FIBONACCI: 'fibonacci',
-        TEXT: 'text',
-    },
-    FIBONACCI_LEVELS: [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1],
 }))
 
 // Mock lightweight-charts
@@ -53,7 +62,12 @@ const mockTimeScale = {
     subscribeVisibleLogicalRangeChange: vi.fn(),
     unsubscribeVisibleLogicalRangeChange: vi.fn(),
     getVisibleLogicalRange: vi.fn(),
+    setVisibleLogicalRange: vi.fn(),
     applyOptions: vi.fn(),
+    height: vi.fn(() => 24),
+    timeToCoordinate: vi.fn(() => null),
+    coordinateToTime: vi.fn(() => null),
+    coordinateToLogical: vi.fn(() => null),
 }
 const mockSeries = {
     applyOptions: mockApplyOptions,
@@ -103,17 +117,19 @@ describe('ChartWrapper', () => {
         vi.clearAllMocks()
     })
 
-    it.skip('should create chart on mount', () => {
+    it('should create chart on mount', () => {
         vi.spyOn(DataContextModule, 'useDataContext').mockReturnValue(defaultContext)
         render(<ChartWrapper />)
 
-        // Check if createChart was called
-        // Note: We can't easily check the arguments because the container ref is internal
-        // But we can check if addSeries was called
-        expect(mockChart.addSeries).toHaveBeenCalledTimes(3) // Candle, Volume, SMA
+        // The price chart draws candles, volume and the moving average. The
+        // count is not asserted: the RSI pane builds its own chart and this mock
+        // returns the same one for both.
+        expect(mockChart.addSeries).toHaveBeenCalledWith('CandlestickSeries', expect.any(Object))
+        expect(mockChart.addSeries).toHaveBeenCalledWith('HistogramSeries', expect.any(Object))
+        expect(mockChart.addSeries).toHaveBeenCalledWith('LineSeries', expect.any(Object))
     })
 
-    it.skip('should set data when chart data changes', () => {
+    it('should set data when chart data changes', () => {
         const contextWithData = createMockDataContextValue({
             chart: [
                 { time: 1000, open: 10, high: 20, low: 5, close: 15, volume: 100 }
@@ -128,5 +144,100 @@ describe('ChartWrapper', () => {
     // Simple test to verify the test file loads correctly
     it('should have test file available', () => {
         expect(true).toBe(true)
+    })
+})
+
+// Depth behind the live window is only useful if arriving at the oldest bar
+// loads more of it, and if the bars the operator is reading stay where they are
+// when it arrives.
+describe('ChartWrapper chart depth', () => {
+    const candle = (time, close = 10) => ({
+        time,
+        open: close,
+        high: close,
+        low: close,
+        close,
+        volume: 1,
+    })
+    const run = (startTime, count) => Array.from(
+        { length: count },
+        (_unused, index) => candle(startTime + index * 3600),
+    )
+    const START = 1_700_000_000
+
+    const renderWithChart = (chart, loadChartHistory = vi.fn(() => true)) => {
+        vi.spyOn(DataContextModule, 'useDataContext').mockReturnValue(
+            createMockDataContextValue({
+                chart,
+                loadChartHistory,
+                panel: { selected: 'BTCUSDT', interval: '1h' },
+            }),
+        )
+        return { loadChartHistory, ...render(<ChartWrapper />) }
+    }
+
+    // The RSI pane draws on its own chart, and this mock hands every chart the
+    // same time scale, so more than one subscriber is registered here. The
+    // library notifies all of them; so does this.
+    const notifyRange = range => mockTimeScale.subscribeVisibleLogicalRangeChange.mock.calls
+        .forEach(([handler]) => handler?.(range))
+
+    beforeEach(() => {
+        vi.clearAllMocks()
+        mockTimeScale.getVisibleLogicalRange.mockReturnValue(null)
+    })
+
+    it('asks for older candles when the viewport reaches the oldest loaded bar', async () => {
+        const { loadChartHistory } = renderWithChart(run(START, 40))
+
+        expect(mockTimeScale.subscribeVisibleLogicalRangeChange).toHaveBeenCalled()
+        notifyRange({ from: 4, to: 30 })
+        await waitFor(() => expect(loadChartHistory).toHaveBeenCalled())
+    })
+
+    it('asks for nothing while the viewport is nowhere near the oldest bar', async () => {
+        const { loadChartHistory } = renderWithChart(run(START, 400))
+
+        notifyRange({ from: 300, to: 390 })
+        await new Promise(resolve => setTimeout(resolve, 80))
+        expect(loadChartHistory).not.toHaveBeenCalled()
+    })
+
+    // Older candles arriving in front shift every bar's index. Left alone, the
+    // chart jumps backwards under the cursor at the moment the operator was
+    // reading those bars.
+    it('moves the visible range by exactly as many bars as arrived in front', () => {
+        const live = run(START, 20)
+        const { rerender } = renderWithChart(live)
+        mockTimeScale.getVisibleLogicalRange.mockReturnValue({ from: 2, to: 18 })
+
+        const older = run(START - 3 * 3600, 3)
+        vi.spyOn(DataContextModule, 'useDataContext').mockReturnValue(
+            createMockDataContextValue({
+                chart: [...older, ...live],
+                loadChartHistory: vi.fn(),
+                panel: { selected: 'BTCUSDT', interval: '1h' },
+            }),
+        )
+        rerender(<ChartWrapper />)
+
+        expect(mockTimeScale.setVisibleLogicalRange).toHaveBeenCalledWith({ from: 5, to: 21 })
+    })
+
+    it('leaves the range alone when the live window merely ticks', () => {
+        const live = run(START, 20)
+        const { rerender } = renderWithChart(live)
+        mockTimeScale.getVisibleLogicalRange.mockReturnValue({ from: 2, to: 18 })
+
+        vi.spyOn(DataContextModule, 'useDataContext').mockReturnValue(
+            createMockDataContextValue({
+                chart: [...live.slice(0, -1), candle(live.at(-1).time, 42)],
+                loadChartHistory: vi.fn(),
+                panel: { selected: 'BTCUSDT', interval: '1h' },
+            }),
+        )
+        rerender(<ChartWrapper />)
+
+        expect(mockTimeScale.setVisibleLogicalRange).not.toHaveBeenCalled()
     })
 })

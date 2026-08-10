@@ -13,7 +13,9 @@ export const CHANNEL_TYPES = {
 
 // What data each channel type receives
 export const CHANNEL_DATA_TYPES = {
-    [CHANNEL_TYPES.DETAIL]: ['chart', 'depth', 'trades', 'orders', 'balances', 'history', 'execution_update'],
+    // `chart_history` is the depth behind the live window: same channel, but
+    // read on demand rather than streamed, and only for the full trading view.
+    [CHANNEL_TYPES.DETAIL]: ['chart', 'chart_history', 'depth', 'trades', 'orders', 'balances', 'history', 'execution_update'],
     [CHANNEL_TYPES.MINI]: ['chart'],
     [CHANNEL_TYPES.GLOBAL]: ['ticker', 'ticker_update', 'filters']
 };

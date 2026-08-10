@@ -1,5 +1,7 @@
+import { useEffect } from 'react'
 import { act, render, screen, waitFor } from '@testing-library/react'
-import { describe, it, expect, vi } from 'vitest'
+import { beforeEach, describe, it, expect, vi } from 'vitest'
+import { getCachedCandles, setCachedCandles } from '../utils/cache'
 import { DataProvider, useDataContext } from './DataContext'
 import { GatewayProvider } from './GatewayContext.jsx'
 import { NotificationProvider } from './NotificationProvider'
@@ -12,6 +14,7 @@ const _localStorageMock = attachMockLocalStorage()
 const webSocketMocks = vi.hoisted(() => ({
     connection: { readyState: 1 },
     handleMessage: null,
+    sendMessage: vi.fn(() => true),
 }))
 
 // Mock dependencies
@@ -24,7 +27,7 @@ vi.mock('../hooks/useWebSocket', () => ({
             connection: webSocketMocks.connection,
             subscribe: vi.fn(),
             unsubscribe: vi.fn(),
-            sendMessage: vi.fn(),
+            sendMessage: webSocketMocks.sendMessage,
         }
     })
 }))
@@ -174,5 +177,212 @@ describe('DataContext', () => {
             data: JSON.stringify(configurationError),
         }, webSocketMocks.connection))
         await waitFor(() => expect(screen.getByTestId('notification-count')).toHaveTextContent('2'))
+    })
+})
+
+// The Spot chart used to end at the 500 candles the bootstrap delivers, and the
+// bootstrap replaced whatever the chart already held — so the depth an operator
+// scrolled to, and the depth the local store kept across a restart, were both
+// discarded on arrival of the live window.
+describe('DataContext spot chart depth', () => {
+    const HOUR = 3600
+    const LIVE_START = 1_700_000_000
+    const candle = (time, close = 10) => ({
+        time,
+        open: close,
+        high: close,
+        low: close,
+        close,
+        volume: 1,
+    })
+    const run = (startTime, count) => Array.from(
+        { length: count },
+        (_unused, index) => candle(startTime + index * HOUR),
+    )
+    const times = series => series.map(row => row.time)
+
+    // Captured after commit rather than during render: the context is read from
+    // a committed render, which is also the only point at which its callbacks
+    // are the ones the chart would be holding.
+    const captured = { current: null }
+    const DepthConsumer = () => {
+        const context = useDataContext()
+        useEffect(() => { captured.current = context })
+        return <span data-testid="chart-times">{JSON.stringify(times(context.chart))}</span>
+    }
+    const desk = () => captured.current
+    const chartTimes = () => JSON.parse(screen.getByTestId('chart-times').textContent)
+
+    // Awaited: a delivered chart writes the cache and re-reads its statistics,
+    // and those state updates belong inside the same act as the delivery.
+    const deliver = message => act(async () => {
+        webSocketMocks.handleMessage({
+            data: JSON.stringify({
+                channelId: 'detail-PAXUSDT-1h-test',
+                symbol: 'PAXUSDT',
+                interval: '1h',
+                ...message,
+            }),
+        }, webSocketMocks.connection)
+    })
+
+    const renderDepthChart = async () => {
+        captured.current = null
+        render(
+            <TestWrapper>
+                <DataProvider>
+                    <DepthConsumer />
+                </DataProvider>
+            </TestWrapper>
+        )
+        await act(async () => { desk().handlePanelUpdate({ selected: 'PAXUSDT', interval: '1h' }, true) })
+        // The cache read and the subscription that follows it are two hops of a
+        // promise chain; both settle before anything is asserted.
+        await act(async () => {})
+    }
+
+    // The gateway sends its own startup and activation frames on the same
+    // socket, so only the chart's own requests are counted.
+    const historyRequests = () => webSocketMocks.sendMessage.mock.calls
+        .filter(([message]) => message?.action === 'load_chart_history')
+
+    beforeEach(() => {
+        vi.mocked(getCachedCandles).mockResolvedValue(null)
+        vi.mocked(setCachedCandles).mockClear()
+        webSocketMocks.sendMessage.mockClear()
+    })
+
+    it('merges the bootstrap window in front of stored depth instead of replacing it', async () => {
+        const stored = run(LIVE_START - 12 * HOUR, 12)
+        vi.mocked(getCachedCandles).mockResolvedValue({
+            candles: stored,
+            lastTime: stored.at(-1).time,
+        })
+        await renderDepthChart()
+        await waitFor(() => expect(chartTimes()).toEqual(times(stored)))
+
+        const live = run(LIVE_START, 12)
+        await deliver({ type: 'chart', payload: live, extra: live.at(-1) })
+
+        // Every stored candle is still there, the live window is in front of it,
+        // and the seam holds no duplicate.
+        expect(chartTimes()).toEqual([...times(stored), ...times(live)])
+    })
+
+    it('asks for the page behind the oldest candle, once, and prepends the answer', async () => {
+        await renderDepthChart()
+        const live = run(LIVE_START, 12)
+        await deliver({ type: 'chart', payload: live, extra: live.at(-1) })
+
+        let requested
+        act(() => { requested = desk().loadChartHistory() })
+        expect(requested).toBe(true)
+        expect(webSocketMocks.sendMessage).toHaveBeenCalledWith({
+            action: 'load_chart_history',
+            symbol: 'PAXUSDT',
+            interval: '1h',
+            // Binance reads endTime inclusively: one millisecond behind the
+            // oldest loaded candle, so nothing is read twice.
+            endTime: LIVE_START * 1000 - 1,
+            limit: 1000,
+        })
+
+        // The left edge fires continuously while the operator scrolls; only one
+        // read may be outstanding.
+        act(() => { expect(desk().loadChartHistory()).toBe(false) })
+        expect(historyRequests()).toHaveLength(1)
+
+        const page = run(LIVE_START - 5 * HOUR, 5)
+        await deliver({
+            type: 'chart_history',
+            payload: page,
+            extra: {
+                symbol: 'PAXUSDT',
+                interval: '1h',
+                endTime: LIVE_START * 1000 - 1,
+                limit: 1000,
+            },
+        })
+        expect(chartTimes()).toEqual([...times(page), ...times(live)])
+        // Stored, so the next run of the app starts where this one left off.
+        expect(setCachedCandles).toHaveBeenCalledWith(
+            'PAXUSDT',
+            '1h',
+            expect.arrayContaining(page),
+        )
+
+        // A page shorter than the limit is the exchange saying there is nothing
+        // older; asking again would re-read the same short answer forever.
+        act(() => { expect(desk().loadChartHistory()).toBe(false) })
+        expect(historyRequests()).toHaveLength(1)
+    })
+
+    // The series has a ceiling. A page that lands entirely below it cannot be
+    // held, and asking for it again would repeat the same read for as long as
+    // the operator sits at the left edge.
+    it('stops asking once a delivered page cannot extend the series', async () => {
+        await renderDepthChart()
+        const live = run(LIVE_START, 12)
+        await deliver({ type: 'chart', payload: live, extra: live.at(-1) })
+        act(() => { desk().loadChartHistory() })
+
+        // A full page, but every row is one the chart already holds.
+        await deliver({
+            type: 'chart_history',
+            payload: Array.from({ length: 1000 }, (_unused, index) => candle(
+                live[0].time + (index % 12) * HOUR,
+            )),
+            extra: {
+                symbol: 'PAXUSDT',
+                interval: '1h',
+                endTime: LIVE_START * 1000 - 1,
+                limit: 1000,
+            },
+        })
+
+        act(() => { expect(desk().loadChartHistory()).toBe(false) })
+        expect(historyRequests()).toHaveLength(1)
+    })
+
+    it('ignores a page answered for a read point the chart has moved on from', async () => {
+        await renderDepthChart()
+        const live = run(LIVE_START, 12)
+        await deliver({ type: 'chart', payload: live, extra: live.at(-1) })
+        act(() => { desk().loadChartHistory() })
+
+        await deliver({
+            type: 'chart_history',
+            payload: run(LIVE_START - 900 * HOUR, 5),
+            extra: {
+                symbol: 'PAXUSDT',
+                interval: '1h',
+                endTime: LIVE_START * 1000 - 90_000_000,
+                limit: 1000,
+            },
+        })
+        expect(chartTimes()).toEqual(times(live))
+    })
+
+    it('keeps a live tick applying to the tail while depth sits behind it', async () => {
+        await renderDepthChart()
+        const live = run(LIVE_START, 12)
+        await deliver({ type: 'chart', payload: live, extra: live.at(-1) })
+        act(() => { desk().loadChartHistory() })
+        const page = run(LIVE_START - 5 * HOUR, 5)
+        await deliver({
+            type: 'chart_history',
+            payload: page,
+            extra: {
+                symbol: 'PAXUSDT',
+                interval: '1h',
+                endTime: LIVE_START * 1000 - 1,
+                limit: 1000,
+            },
+        })
+
+        const tick = candle(live.at(-1).time, 999)
+        await deliver({ type: 'chart', payload: [tick], extra: tick })
+        expect(chartTimes()).toEqual([...times(page), ...times(live)])
+        expect(desk().chart.at(-1).close).toBe(999)
     })
 })

@@ -3592,4 +3592,118 @@ describe('setupBinanceConnection user-data orchestration', () => {
             'emit:history',
         ]);
     });
+    // The Spot chart used to end at the 500 candles the bootstrap delivers.
+    // Depth behind that window is read on demand from the same reviewed public
+    // klines route, and only for the selection the chart is actually showing.
+    describe("the Spot chart's candle history", () => {
+        const klinePage = (startMs, count) => Array.from({ length: count }, (_unused, index) => [
+            startMs + index * 3_600_000,
+            '10', '11', '9', '10.5', '100',
+        ]);
+
+        const openDetailChannel = async () => {
+            await connectRenderer('spot');
+            moduleMocks.spotClient.restAPI.klines = vi.fn(async () => ({
+                data: vi.fn().mockResolvedValue(klinePage(1_700_000_000_000, 3)),
+            }));
+            await moduleMocks.rendererHandlers.message({
+                type: 'utf8',
+                utf8Data: JSON.stringify({
+                    action: 'subscribe',
+                    channelId: 'detail-BTCUSDT-1h',
+                    channelType: 'detail',
+                    symbol: 'BTCUSDT',
+                    interval: '1h',
+                }),
+            });
+            await Promise.resolve();
+            moduleMocks.spotClient.restAPI.klines.mockClear();
+            moduleMocks.rendererConnection.sendUTF.mockClear();
+        };
+
+        const loadHistory = (overrides = {}) => moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'load_chart_history',
+                symbol: 'BTCUSDT',
+                interval: '1h',
+                endTime: 1_699_999_999_999,
+                limit: 1000,
+                ...overrides,
+            }),
+        });
+
+        const historyEvents = () => emitted().filter(payload => payload.type === 'chart_history');
+
+        // The shared Spot rate limiter spaces real requests 500ms apart, and the
+        // bootstrap has five of them queued ahead of this one. Time is driven
+        // rather than waited on, so the read is proven without the test taking
+        // three seconds to prove it.
+        it('reads the page behind the window and delivers it to the channel that asked', async () => {
+            vi.useFakeTimers();
+            try {
+                await openDetailChannel();
+
+                const pending = loadHistory();
+                await vi.advanceTimersByTimeAsync(6000);
+                await pending;
+            } finally {
+                vi.useRealTimers();
+            }
+
+            expect(moduleMocks.spotClient.restAPI.klines).toHaveBeenCalledWith({
+                symbol: 'BTCUSDT',
+                interval: '1h',
+                limit: 1000,
+                endTime: 1_699_999_999_999,
+            });
+            const [page] = historyEvents();
+            expect(page.payload).toHaveLength(3);
+            expect(page.payload[0]).toMatchObject({ time: 1_700_000_000, isFinal: true });
+            // The read point travels back with the page: the renderer has to be
+            // able to tell this answer from one it has already abandoned.
+            expect(page.extra).toEqual({
+                symbol: 'BTCUSDT',
+                interval: '1h',
+                endTime: 1_699_999_999_999,
+                limit: 1000,
+            });
+        });
+
+        // Found on live data on the Futures chart: a page answered for the
+        // previous selection merged in front of the new one's tail and drew 15m
+        // bars behind a 1h series.
+        it('reads nothing for a selection the chart is no longer showing', async () => {
+            await openDetailChannel();
+
+            await loadHistory({ interval: '15m' });
+            await loadHistory({ symbol: 'ETHUSDT' });
+
+            expect(moduleMocks.spotClient.restAPI.klines).not.toHaveBeenCalled();
+            expect(historyEvents()).toEqual([]);
+        });
+
+        it('refuses a page larger than one klines read serves, and a nonsense read point', async () => {
+            await openDetailChannel();
+
+            await loadHistory({ limit: 5000 });
+            await loadHistory({ endTime: 0 });
+            await loadHistory({ endTime: 1.5 });
+
+            expect(moduleMocks.spotClient.restAPI.klines).not.toHaveBeenCalled();
+            expect(emitted().map(payload => payload.command_rejected?.code).filter(Boolean))
+                .toEqual(['INVALID_CHANNEL_ACTION', 'INVALID_CHANNEL_ACTION', 'INVALID_CHANNEL_ACTION']);
+        });
+
+        it('refuses the read outright while Spot is not the activated market', async () => {
+            await connectRenderer('futures-live');
+            moduleMocks.spotClient.restAPI.klines = vi.fn();
+
+            await loadHistory();
+
+            expect(moduleMocks.spotClient.restAPI.klines).not.toHaveBeenCalled();
+            expect(emitted().some(payload => payload.command_rejected?.code === 'MARKET_NOT_ACTIVE'))
+                .toBe(true);
+        });
+    });
 });
