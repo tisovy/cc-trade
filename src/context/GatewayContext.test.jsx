@@ -227,4 +227,46 @@ describe('GatewayContext', () => {
     expect(screen.getByTestId('activated')).toHaveTextContent('none')
   })
 
+
+  // The acknowledgement changes the generation, and the generation used to be
+  // closed over by `sendMessage` — a dependency of the effect that sends
+  // `activate_market`. Each acknowledgement therefore activated the market
+  // again: the backend minted generation after generation and refused every
+  // frame issued behind the last one.
+  it('does not re-activate the market when an acknowledgement arrives', async () => {
+    render(
+      <NotificationProvider>
+        <GatewayProvider activeMarketMode={MARKET_WORKSPACES.FUTURES_LIVE}>
+          <Observer />
+        </GatewayProvider>
+      </NotificationProvider>,
+    )
+
+    act(() => mocks.handleMessage({
+      data: JSON.stringify({
+        type: 'startup_status',
+        version: 1,
+        state: 'READY',
+        code: 'READY',
+        ready: true,
+        missingFields: [],
+        retiredFields: [],
+      }),
+    }, mocks.connection, null))
+
+    const activations = () => mocks.sendMessage.mock.calls
+      .filter(([message]) => message?.action === 'activate_market')
+    await waitFor(() => expect(activations()).toHaveLength(1))
+
+    for (const generation of [1, 2, 3]) {
+      act(() => mocks.handleMessage({
+        data: JSON.stringify({
+          type: 'market_activation', version: 1, marketMode: 'futures-live', generation,
+        }),
+      }, mocks.connection, null))
+    }
+
+    await waitFor(() => expect(activations()).toHaveLength(1))
+  })
+
 })

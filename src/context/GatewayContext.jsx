@@ -115,6 +115,10 @@ export const GatewayProvider = ({
   // Null until the backend says which market it activated. Nothing
   // market-scoped is sent before that.
   const [marketActivation, setMarketActivation] = useState(null)
+  // The activation as the socket announced it, kept where a send can read it
+  // without `sendMessage` having to change identity when it moves. Written in
+  // the message handler, which runs before anything that could send under it.
+  const activationRef = useRef(null)
   const startupAlertFingerprintRef = useRef(new Set())
   const deliveredTransportFailureRef = useRef(null)
   const messageListenersRef = useRef(new Set())
@@ -155,11 +159,12 @@ export const GatewayProvider = ({
     if (payload?.type === 'market_activation'
       && typeof payload.marketMode === 'string'
       && Number.isSafeInteger(payload.generation)) {
-      setMarketActivation({
+      activationRef.current = {
         connection,
         marketMode: payload.marketMode,
         generation: payload.generation,
-      })
+      }
+      setMarketActivation(activationRef.current)
       return
     }
 
@@ -195,14 +200,31 @@ export const GatewayProvider = ({
   // frame that was in flight across a switch cannot be applied to the market
   // that is active now. The market name alone does not separate them: Spot →
   // Futures → Spot leaves the name equal to what the stale frame carries.
+  //
+  // The generation is read through the ref rather than closed over:
+  // `sendMessage` is a dependency of the effect that sends `activate_market`,
+  // and an acknowledgement changes the generation. Rebuilding the function on
+  // that change re-ran the effect, which activated the market again, which
+  // minted the next generation — an activation loop that refused every frame
+  // issued behind it.
   const sendMessage = useCallback((message) => {
-    if (activationGeneration === null
+    const generation = activationRef.current?.generation ?? null
+    if (generation === null
       || message?.action === 'activate_market'
       || message?.action === 'get_startup_status') {
       return sendRawMessage(message)
     }
-    return sendRawMessage({ ...message, generation: activationGeneration })
-  }, [activationGeneration, sendRawMessage])
+    return sendRawMessage({ ...message, generation })
+  }, [sendRawMessage])
+
+  // An activation belongs to the socket that acknowledged it. A reconnect
+  // reaches a backend that has activated nothing, so nothing may be stamped with
+  // what the previous socket was told.
+  useEffect(() => {
+    if (activationRef.current && activationRef.current.connection !== wsConnection) {
+      activationRef.current = null
+    }
+  }, [wsConnection])
 
   useEffect(() => {
     if (wsUrl === null) return
