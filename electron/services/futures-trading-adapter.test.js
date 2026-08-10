@@ -455,6 +455,37 @@ describe('futures normalization', () => {
         }
     });
 
+    it('carries the trigger of a regular stop, which rests at no limit price', () => {
+        // Binance sends `price: '0'` for the market-triggered kinds, so an order
+        // read without its trigger is priced at nothing on every surface that
+        // shows one — the row, its size, and the total of the working orders.
+        const fromRest = normalizeFuturesExecutionReport({
+            symbol: 'BTCUSDT',
+            side: 'SELL',
+            type: 'STOP_MARKET',
+            status: 'NEW',
+            orderId: 7,
+            price: '0',
+            stopPrice: '58000',
+            origQty: '0.5',
+            updateTime: 1000,
+        });
+        const fromStream = normalizeFuturesExecutionReport({
+            e: 'ORDER_TRADE_UPDATE',
+            E: 1000,
+            o: { s: 'BTCUSDT', S: 'SELL', o: 'STOP_MARKET', X: 'NEW', i: 7, p: '0', sp: '58000', q: '0.5', T: 1000 },
+        });
+        for (const report of [fromRest, fromStream]) {
+            expect(report).toMatchObject({ price: '0', triggerPrice: '58000' });
+        }
+
+        // A plain limit order has no trigger, and the field is absent rather
+        // than a zero that would be read as a price.
+        expect(normalizeFuturesExecutionReport({
+            symbol: 'BTCUSDT', orderId: 8, price: '50000', stopPrice: '0', origQty: '1',
+        })).not.toHaveProperty('triggerPrice');
+    });
+
     it('keeps ALGO identity and trigger semantics in a separate namespace', () => {
         const algoOrder = normalizeFuturesAlgoOrder({
             symbol: 'TUTUSDT',

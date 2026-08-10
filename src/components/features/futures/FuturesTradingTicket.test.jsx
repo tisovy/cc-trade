@@ -161,7 +161,24 @@ describe('FuturesTradingTicket', () => {
   it('states readiness and pause only, and colours direction by side', () => {
     const { container } = render(
       <FuturesTradingTicket
-        state={createState({ balances: { USDT: { available: '245228.33961912', total: '245228.33961912' } } })}
+        state={createState({
+          balances: {
+            USDT: { available: '245228.33961912', total: '249728.33961912' },
+          },
+          openOrders: [
+            { symbol: 'BTCUSDT', orderId: 1, side: 'BUY', price: '58445.0', origQty: '2' },
+            // Reduce-only exits hold no margin at the exchange, but they are
+            // orders on the operator's list and so are in the total.
+            {
+              symbol: 'ETHUSDT',
+              orderId: 2,
+              side: 'SELL',
+              price: '2500.5',
+              origQty: '12',
+              reduceOnly: true,
+            },
+          ],
+        })}
         selectedSymbol="BTCUSDT"
         selectedContract={contract}
         draftPrice="58445.0"
@@ -180,7 +197,76 @@ describe('FuturesTradingTicket', () => {
     expect(within(actions).getByRole('button', { name: 'LONG entry' })).toHaveClass('is-long', 'is-entry')
     expect(within(actions).getByRole('button', { name: 'SHORT entry' })).toHaveClass('is-short', 'is-entry')
 
-    expect(screen.getByText('245228.34 USDT')).toBeInTheDocument()
+    // Funds read whole: at six figures the cents cost a glance and change
+    // nothing. The exact value the exchange sent stays on the cell's title.
+    const available = screen.getByText('Available').closest('div')
+    expect(within(available).getByText('245228 USDT')).toBeInTheDocument()
+    expect(within(available).getByText('245228 USDT'))
+      .toHaveAttribute('title', '245228.33961912')
+
+    // What the resting orders come to, summed the way the operator sums the
+    // list: 2 × 58445 plus 12 × 2500.5. Not the exchange's order margin, which
+    // is a fraction of this at leverage and nothing for the reduce-only leg.
+    const onOrder = screen.getByText('On order').closest('div')
+    expect(within(onOrder).getByText('146896 USDT')).toBeInTheDocument()
+    expect(within(onOrder).getByText('146896 USDT'))
+      .toHaveAttribute('title', '146896.00 USDT across 2 working orders')
+  })
+
+  it('states an empty order list as zero and an unsynchronized one as absent', () => {
+    const { rerender } = render(
+      <FuturesTradingTicket
+        state={createState({ openOrders: [] })}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+        draftPrice="58445.0"
+      />,
+    )
+    // Nothing resting is a reading, not a gap.
+    expect(within(screen.getByText('On order').closest('div')).getByText('0 USDT'))
+      .toBeInTheDocument()
+
+    rerender(
+      <FuturesTradingTicket
+        state={createState({
+          openOrders: [],
+          accountResources: {
+            regularOrders: { status: 'error', lastSuccessfulAt: null, data: null, error: 'x' },
+          },
+        })}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+        draftPrice="58445.0"
+      />,
+    )
+    // A list that has never synchronized cannot be totalled: an empty one and
+    // an unread one would otherwise both read as zero.
+    expect(within(screen.getByText('On order').closest('div')).getByText('—')).toBeInTheDocument()
+  })
+
+  it('totals orders the exchange prices at a trigger rather than a limit', () => {
+    render(
+      <FuturesTradingTicket
+        state={createState({
+          openOrders: [
+            {
+              symbol: 'BTCUSDT',
+              orderId: 7,
+              side: 'SELL',
+              orderKind: 'ALGO',
+              price: '0',
+              triggerPrice: '60000',
+              origQty: '0.5',
+            },
+          ],
+        })}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+        draftPrice="58445.0"
+      />,
+    )
+    expect(within(screen.getByText('On order').closest('div')).getByText('30000 USDT'))
+      .toBeInTheDocument()
   })
 
   it('keeps sizing and reduce-only exits usable while the local entry cap is exceeded', () => {

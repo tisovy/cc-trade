@@ -33,15 +33,53 @@ export const describeFuturesOrderIntent = (order) => {
   })
 }
 
+// What an order is worth, unrounded. Every surface that prices an order — the
+// row, the editor, the chart label, the ticket's total — goes through here, so
+// none of them can price the same order differently.
+// An order with no price or no size is not an order worth nothing — it is one
+// this cannot value. `Number(null)` is 0, so without the positive test a missing
+// field would be reported as a confident zero, and a row that reads `0` in a
+// column of order values reads as an order that commits nothing.
+//
+// A close-position stop carries no quantity of its own, and a market-triggered
+// stop carries no limit price; both land here rather than at zero.
+const orderNotionalValue = (order) => {
+  const price = Number(order?.triggerPrice ?? order?.price)
+  const quantity = Number(order?.origQty)
+  if (!(price > 0) || !(Math.abs(quantity) > 0)) return null
+  return Math.abs(price * quantity)
+}
+
 // What an order is worth is the number a trader compares against balance and
 // risk; the exact quantity in base units is secondary.
 export const orderNotionalUsdt = (order) => {
-  const price = Number(order?.triggerPrice ?? order?.price)
-  const quantity = Number(order?.origQty)
-  if (!Number.isFinite(price) || !Number.isFinite(quantity)) return null
-  const notional = Math.abs(price * quantity)
-  if (notional === 0) return '0'
+  const notional = orderNotionalValue(order)
+  if (notional === null) return null
   return notional >= 1 ? String(Math.round(notional)) : notional.toFixed(2)
+}
+
+// What the resting orders come to, over the same arithmetic as the column they
+// are read in, so the ticket's figure and a hand-sum of the list cannot
+// disagree.
+//
+// This is order value, not the margin the exchange holds against it: at leverage
+// the second is a fraction of the first, and reduce-only exits hold none at all.
+// The operator reads this against their own list of orders, not against the
+// wallet.
+export const totalOrderNotionalUsdt = (orders) => {
+  if (!Array.isArray(orders)) return null
+  let total = 0
+  let priced = 0
+  for (const order of orders) {
+    const notional = orderNotionalValue(order)
+    if (notional === null) continue
+    total += notional
+    priced += 1
+  }
+  // Orders that exist but cannot be priced would otherwise total a confident
+  // zero. An empty list is a real zero: there is nothing resting.
+  if (orders.length > 0 && priced === 0) return null
+  return total
 }
 
 // `Number(null)` is 0, so a missing field would otherwise be reported as a

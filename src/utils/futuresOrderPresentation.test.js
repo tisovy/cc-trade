@@ -6,7 +6,49 @@ import {
   formatSignedPercent,
   formatSignedUsdt,
   formatUsdt,
+  orderNotionalUsdt,
+  totalOrderNotionalUsdt,
 } from './futuresOrderPresentation.js'
+
+describe('totalOrderNotionalUsdt', () => {
+  const order = (price, origQty, extra = {}) => ({ price, origQty, ...extra })
+
+  it('adds up what the rows of the list add up to', () => {
+    expect(totalOrderNotionalUsdt([
+      order('58445.0', '2'),
+      order('2500.5', '12', { reduceOnly: true }),
+    ])).toBeCloseTo(146896, 6)
+  })
+
+  it('prices a triggered order the same way the row does', () => {
+    const stop = order('0', '0.5', { triggerPrice: '60000' })
+    expect(orderNotionalUsdt(stop)).toBe('30000')
+    expect(totalOrderNotionalUsdt([stop])).toBe(30000)
+  })
+
+  // Nothing resting is a reading; a list that could not be read is not.
+  it('separates an empty list from one nothing could be priced from', () => {
+    expect(totalOrderNotionalUsdt([])).toBe(0)
+    expect(totalOrderNotionalUsdt([order(null, null)])).toBeNull()
+    expect(totalOrderNotionalUsdt(null)).toBeNull()
+  })
+
+  // `Number(null)` is 0, and a row reading `0` in a column of order values reads
+  // as an order that commits nothing rather than as one that could not be read.
+  it('refuses to value an order with no price or no size', () => {
+    expect(orderNotionalUsdt(order(null, '2'))).toBeNull()
+    expect(orderNotionalUsdt(order('58000', null))).toBeNull()
+    // A close-position stop carries no quantity of its own.
+    expect(orderNotionalUsdt(order('0', '0', { triggerPrice: '58000', closePosition: true })))
+      .toBeNull()
+    // A market-triggered stop read without its trigger carries no price.
+    expect(orderNotionalUsdt(order('0', '0.5'))).toBeNull()
+  })
+
+  it('still totals the rows it can price when one of them it cannot', () => {
+    expect(totalOrderNotionalUsdt([order('100', '2'), order(undefined, '3')])).toBe(200)
+  })
+})
 
 describe('describeFuturesOrderIntent', () => {
   it('colours by side so a one-way BUY never reads as a short', () => {

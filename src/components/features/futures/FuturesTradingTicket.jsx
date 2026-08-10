@@ -12,6 +12,7 @@ import {
   describeFuturesOrderIntent,
   describeFuturesPosition,
   orderNotionalUsdt,
+  totalOrderNotionalUsdt,
   formatSignedPercent,
   formatSignedUsdt,
 } from '../../../utils/futuresOrderPresentation.js'
@@ -425,6 +426,16 @@ const FuturesTradingTicket = ({
   const orderSyncPartial = orderResourceStates.some(resource => (
     resource.status === 'error' || resource.status === 'stale'
   ))
+  // What the resting orders come to, summed from the same list the operator
+  // reads them in and priced by the same helper as every row of it.
+  //
+  // Not the exchange's order margin: that is what the orders cost to hold, a
+  // fraction of their value at leverage and nothing at all for reduce-only
+  // exits, and it is not the number the operator is checking against their
+  // orders. Until the orders have synchronized once there is no total to state,
+  // on the same terms as the balance beside it — an empty list means nothing is
+  // resting and reads as zero.
+  const workingOrdersUsdt = orderSyncUnavailable ? null : totalOrderNotionalUsdt(openOrders)
 
   return (
     <aside className="futures-production-execution-ticket" aria-label="Futures trading ticket">
@@ -545,9 +556,24 @@ const FuturesTradingTicket = ({
             <dl className="futures-production-order-summary">
               <div><dt>Price</dt><dd>{orderDraft.ok ? orderDraft.price : exactText(price)}</dd></div>
               <div><dt>Quantity</dt><dd>{orderDraft.ok ? orderDraft.quantity : '—'}</dd></div>
+              {/* Six and seven figures: the cents never change a decision and
+                  cost a glance on every read, so funds are stated whole. */}
               <div>
                 <dt>Available</dt>
-                <dd>{availableUsdt ? `${formatUsdtAmount(availableUsdt)} USDT` : '—'}</dd>
+                <dd title={availableUsdt ?? undefined}>
+                  {availableUsdt ? `${formatUsdtAmount(availableUsdt, 0)} USDT` : '—'}
+                </dd>
+              </div>
+              <div>
+                <dt>On order</dt>
+                <dd title={workingOrdersUsdt === null
+                  ? undefined
+                  : `${formatUsdtAmount(workingOrdersUsdt)} USDT across ${openOrders.length} working order${openOrders.length === 1 ? '' : 's'}`}
+                >
+                  {workingOrdersUsdt === null
+                    ? '—'
+                    : `${formatUsdtAmount(workingOrdersUsdt, 0)} USDT`}
+                </dd>
               </div>
             </dl>
             {draftReason ? <p className="futures-production-draft-reason" role="status">{draftReason}</p> : null}

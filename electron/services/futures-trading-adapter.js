@@ -117,6 +117,11 @@ export const normalizeFuturesExecutionReport = (payload = {}, overrides = {}) =>
     const price = order.price ?? order.p ?? '0';
     const avgPrice = order.avgPrice ?? order.ap;
     const orderKind = overrides.orderKind ?? order.orderKind ?? 'REGULAR';
+    // A stop or take-profit rests at its trigger. The market-triggered kinds
+    // carry `price` as `0`, so an order read without this one is priced at
+    // nothing everywhere it is shown — in the list, in its size, in its total.
+    // Algo orders state their own trigger through the overrides below.
+    const stopPrice = order.stopPrice ?? order.sp;
     return {
         e: 'executionReport',
         marketType: 'futures',
@@ -145,6 +150,7 @@ export const normalizeFuturesExecutionReport = (payload = {}, overrides = {}) =>
         orderSource: orderKind,
         sourceOrderId: order.orderId ?? order.i,
         ...(avgPrice !== undefined ? { avgPrice } : {}),
+        ...(Number(stopPrice) > 0 ? { triggerPrice: stopPrice } : {}),
         T: timestamp,
         transactTime: timestamp,
         time: timestamp,
