@@ -29,6 +29,7 @@ import {
 import {
     UNCONFIRMED_COMMAND_MESSAGE,
     UNRESOLVED_COMMAND_MESSAGE,
+    createCommandResolved,
     createCommandUnresolved,
     isIndeterminateTradingFailure,
 } from './trading-command-outcome.js';
@@ -1515,12 +1516,20 @@ export function setupBinanceConnection({
                 emitRejection();
                 return;
             }
+            // The identity travels with every envelope about this command, so a
+            // renderer holding an unknown outcome can tell this command's answer
+            // from another order's traffic.
+            const identity = {
+                symbol: symbol ?? null,
+                orderId: orderId ?? null,
+                clientOrderId: origClientOrderId ?? null,
+            };
             if (!symbol || !(orderId || origClientOrderId)) {
                 emit(createCommandUnresolved(
                     action,
                     'SPOT_OUTCOME_UNKNOWN',
                     UNCONFIRMED_COMMAND_MESSAGE,
-                    { marketType: SPOT_MARKET_TYPE, symbol: symbol ?? null, reconciled: false },
+                    { marketType: SPOT_MARKET_TYPE, ...identity, reconciled: false },
                 ));
                 return;
             }
@@ -1531,7 +1540,7 @@ export function setupBinanceConnection({
                 UNRESOLVED_COMMAND_MESSAGE,
                 {
                     marketType: SPOT_MARKET_TYPE,
-                    symbol,
+                    ...identity,
                     binanceCode: spotBinanceCode(error),
                     reconciled: false,
                 },
@@ -1550,6 +1559,13 @@ export function setupBinanceConnection({
                         await refreshAccountState(symbol);
                         return;
                     }
+                    // An order the exchange has not caught up to yet is not an
+                    // order that was never accepted. Only the last attempt is
+                    // allowed to conclude the placement never happened.
+                    if (attempt < RECONCILE_ATTEMPTS) {
+                        await pause(RECONCILE_BACKOFF_MS * attempt);
+                        continue;
+                    }
                     emitRejection();
                     return;
                 } catch (lookupError) {
@@ -1561,7 +1577,7 @@ export function setupBinanceConnection({
                             UNCONFIRMED_COMMAND_MESSAGE,
                             {
                                 marketType: SPOT_MARKET_TYPE,
-                                symbol,
+                                ...identity,
                                 binanceCode: spotBinanceCode(error),
                                 reconciled: false,
                             },
@@ -1707,13 +1723,23 @@ export function setupBinanceConnection({
             error,
             onAbsent,
         }) => {
+            // The identity of the command, carried on every envelope about it.
+            // Without it the renderer cannot tell this command's answer from any
+            // other order's traffic, and used to drop the warning on the first
+            // update that arrived — for a different contract as readily as for
+            // this one.
+            const identity = {
+                symbol: symbol ?? null,
+                orderId: orderId ?? null,
+                clientOrderId: origClientOrderId ?? null,
+            };
             const identified = Boolean(symbol) && Boolean(orderId || origClientOrderId);
             if (!identified) {
                 emit(createCommandUnresolved(
                     action,
                     'FUTURES_OUTCOME_UNKNOWN',
                     UNCONFIRMED_COMMAND_MESSAGE,
-                    { marketType: FUTURES_MARKET_TYPE, symbol: symbol ?? null, reconciled: false },
+                    { marketType: FUTURES_MARKET_TYPE, ...identity, reconciled: false },
                 ));
                 return;
             }
@@ -1723,7 +1749,7 @@ export function setupBinanceConnection({
                 UNRESOLVED_COMMAND_MESSAGE,
                 {
                     marketType: FUTURES_MARKET_TYPE,
-                    symbol,
+                    ...identity,
                     binanceCode: error?.code ?? null,
                     reconciled: false,
                 },
@@ -1743,8 +1769,26 @@ export function setupBinanceConnection({
                         await refreshFuturesAccountState();
                         return;
                     }
+                    // "No such order" is provisional. Binance's order state is
+                    // eventually consistent after an ambiguous submission, so an
+                    // order accepted a moment ago can be missing from the first
+                    // read. Concluding absence here is what told the operator it
+                    // was safe to send the order a second time.
+                    if (attempt < RECONCILE_ATTEMPTS) {
+                        logger.info(`[futures-orders] ${action} not yet visible; asking again`);
+                        await pause(RECONCILE_BACKOFF_MS * attempt);
+                        continue;
+                    }
                     logger.info(`[futures-orders] ${action} resolved by reconciliation: no such order`);
                     await onAbsent();
+                    // The outcome is known now, so the warning it raised is
+                    // withdrawn — by name, so it withdraws only its own.
+                    emit(createCommandResolved(
+                        action,
+                        'FUTURES_OUTCOME_ABSENT',
+                        'Binance does not have this order — nothing was executed.',
+                        { marketType: FUTURES_MARKET_TYPE, ...identity, reconciled: true },
+                    ));
                     return;
                 } catch (lookupError) {
                     if (attempt === RECONCILE_ATTEMPTS) {
@@ -1758,7 +1802,7 @@ export function setupBinanceConnection({
                             UNCONFIRMED_COMMAND_MESSAGE,
                             {
                                 marketType: FUTURES_MARKET_TYPE,
-                                symbol,
+                                ...identity,
                                 binanceCode: error?.code ?? null,
                                 reconciled: false,
                             },
@@ -2167,26 +2211,81 @@ export function setupBinanceConnection({
                 ));
                 return;
             }
-            try {
-                await futuresTradingAdapter.cancelAllOrders(command.symbol);
+            // The desk lists regular and conditional orders in one book, so
+            // "Cancel all" is read as covering both. Binance keeps them in two,
+            // and cancelling only the regular one left stops and take-profits
+            // live under an empty list. Both are cancelled, and each is settled
+            // on its own: a failure of one may not be reported as success of the
+            // other.
+            const cancellations = [
+                {
+                    kind: 'regular',
+                    label: 'working orders',
+                    run: () => futuresTradingAdapter.cancelAllOrders(command.symbol),
+                },
+                {
+                    kind: 'algo',
+                    label: 'conditional (ALGO) orders',
+                    run: () => futuresTradingAdapter.cancelAllAlgoOrders(command.symbol),
+                },
+            ];
+            const outcomes = await Promise.all(cancellations.map(async (cancellation) => {
+                try {
+                    await cancellation.run();
+                    return { ...cancellation, ok: true, error: null };
+                } catch (error) {
+                    return { ...cancellation, ok: false, error };
+                }
+            }));
+            const failures = outcomes.filter(outcome => !outcome.ok);
+            if (failures.length === 0) {
                 noteFuturesMutation();
                 await refreshFuturesAccountState();
-            } catch (error) {
-                // Cancel-all names no single order, so there is nothing to look
-                // up. An ambiguous outcome is stated as unknown and the account
-                // is re-read, which is what actually settles it.
-                if (isIndeterminateTradingFailure(error)) {
-                    emit(createCommandUnresolved(
-                        TRADING_COMMAND_ACTIONS.CANCEL_ALL,
-                        'FUTURES_OUTCOME_UNKNOWN',
-                        UNCONFIRMED_COMMAND_MESSAGE,
-                        { marketType: FUTURES_MARKET_TYPE, symbol: command.symbol, reconciled: false },
-                    ));
-                    await refreshFuturesAccountState();
-                    return;
-                }
-                emitFuturesApiRejection(TRADING_COMMAND_ACTIONS.CANCEL_ALL, error);
+                return;
             }
+            // Whatever did cancel, cancelled: the account read below is what the
+            // operator will act on either way.
+            if (failures.length < outcomes.length) noteFuturesMutation();
+            const error = failures[0].error;
+            const stillLive = failures.map(failure => failure.label).join(' and ');
+            logger.error(
+                `[futures-orders] Cancel all ${command.symbol}: ${stillLive} not cancelled:`,
+                error?.code || error?.message,
+            );
+            // Cancel-all names no single order, so there is nothing to look up.
+            // An ambiguous outcome is stated as unknown and the account is
+            // re-read, which is what actually settles it.
+            if (failures.some(failure => isIndeterminateTradingFailure(failure.error))) {
+                emit(createCommandUnresolved(
+                    TRADING_COMMAND_ACTIONS.CANCEL_ALL,
+                    'FUTURES_OUTCOME_UNKNOWN',
+                    `${UNCONFIRMED_COMMAND_MESSAGE} The ${stillLive} on ${command.symbol} may still be live.`,
+                    { marketType: FUTURES_MARKET_TYPE, symbol: command.symbol, reconciled: false },
+                ));
+                await refreshFuturesAccountState();
+                // The re-read is what settles a cancel-all: it names no single
+                // order, so the book itself is the answer.
+                emit(createCommandResolved(
+                    TRADING_COMMAND_ACTIONS.CANCEL_ALL,
+                    'FUTURES_OUTCOME_RESYNCED',
+                    'The open orders were re-read from Binance — the list on screen is what it holds.',
+                    { marketType: FUTURES_MARKET_TYPE, symbol: command.symbol, reconciled: true },
+                ));
+                return;
+            }
+            emit(createCommandRejection(
+                TRADING_COMMAND_ACTIONS.CANCEL_ALL,
+                'FUTURES_API_ERROR',
+                `${describeFuturesApiError(error)} The ${stillLive} on ${command.symbol} are still live.`,
+                {
+                    marketType: FUTURES_MARKET_TYPE,
+                    symbol: command.symbol,
+                    binanceCode: error?.code ?? null,
+                    uncancelled: failures.map(failure => failure.kind),
+                },
+            ));
+            // The books that did cancel changed; show what is actually left.
+            await refreshFuturesAccountState();
         };
 
         // Margin moves between the wallet and one open position. It places no
@@ -2240,6 +2339,17 @@ export function setupBinanceConnection({
                         },
                     ));
                     await refreshFuturesAccountState();
+                    // The position's own margin, re-read, is the answer here.
+                    emit(createCommandResolved(
+                        TRADING_COMMAND_ACTIONS.ADJUST_POSITION_MARGIN,
+                        'FUTURES_OUTCOME_RESYNCED',
+                        'The position was re-read from Binance — the margin on screen is what it holds.',
+                        {
+                            marketType: FUTURES_MARKET_TYPE,
+                            symbol: adjustment.symbol,
+                            reconciled: true,
+                        },
+                    ));
                     return;
                 }
                 emitFuturesApiRejection(TRADING_COMMAND_ACTIONS.ADJUST_POSITION_MARGIN, error);

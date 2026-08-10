@@ -215,6 +215,26 @@ describe('FuturesTradingAdapter signing', () => {
         expect(params.get('reduceOnly')).toBe('true');
     });
 
+    // Two books, two cancellations: `/fapi/v1/allOpenOrders` does not touch the
+    // conditional one.
+    it('cancels each open-order book on its own route', async () => {
+        globalThis.__futuresTestResponse = {};
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+
+        await adapter.cancelAllOrders('BTCUSDT');
+        await adapter.cancelAllAlgoOrders('BTCUSDT');
+
+        const regular = new URL(requests.at(-2).url);
+        const algo = new URL(requests.at(-1).url);
+        expect(requests.at(-2).options.method).toBe('DELETE');
+        expect(requests.at(-1).options.method).toBe('DELETE');
+        expect(regular.pathname).toBe('/fapi/v1/allOpenOrders');
+        expect(algo.pathname).toBe('/fapi/v1/algoOpenOrders');
+        expect(algo.searchParams.get('symbol')).toBe('BTCUSDT');
+        expect(algo.searchParams.has('signature')).toBe(true);
+    });
+
     it('reads regular and ALGO orders account-wide with all-symbol weights', async () => {
         globalThis.__futuresTestResponse = [];
         const adapter = createAdapter();

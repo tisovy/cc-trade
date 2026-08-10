@@ -131,6 +131,30 @@ const orderIdentity = (order) => {
   return `${normalized.orderKind}:${normalized.symbol ?? ''}:${orderExchangeId(order) ?? ''}`
 }
 
+// Does this message answer the command whose outcome is unknown?
+//
+// Only its own answer may clear it. Any execution update used to do so, so a
+// placement on one contract stopped warning as soon as an unrelated order on
+// another contract ticked — and an operator reading no warning sends the order
+// again. A command the backend could not identify is answered only by the
+// resolution envelope for that command, never by order traffic.
+const answersUnresolvedCommand = (unresolved, { symbol, orderId, clientOrderId, request } = {}) => {
+  if (!unresolved) return false
+  const held = unresolved.details ?? {}
+  const heldOrderId = held.orderId ?? null
+  const heldClientOrderId = held.clientOrderId ?? null
+  const sameSymbol = held.symbol == null || symbol == null || String(held.symbol) === String(symbol)
+  if (heldOrderId === null && heldClientOrderId === null) {
+    // Nothing to match on but the command itself.
+    return request != null && request === unresolved.request
+  }
+  if (!sameSymbol) return false
+  return (heldOrderId !== null && orderId != null && String(heldOrderId) === String(orderId))
+    || (heldClientOrderId !== null
+      && clientOrderId != null
+      && String(heldClientOrderId) === String(clientOrderId))
+}
+
 // An order that has settled cannot rest again: the exchange does not reuse an
 // order id. It can, however, still be described as resting — by a report that
 // left the exchange before the fill and arrives after it, and by an account
@@ -317,9 +341,16 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection } = {}) => {
             connected: true,
             lastExecution: report,
             lastError: null,
-            // An execution report is the answer an unresolved command was waiting
-            // for, whether it arrived from the stream or from reconciliation.
-            unresolvedCommand: null,
+            // An execution report answers an unresolved command only when it is
+            // that command's report. Another order's update says nothing about
+            // the one whose fate is unknown.
+            unresolvedCommand: answersUnresolvedCommand(previous.unresolvedCommand, {
+              symbol: report?.symbol,
+              orderId: report?.orderId ?? report?.i,
+              clientOrderId: report?.clientOrderId ?? report?.c,
+            })
+              ? null
+              : previous.unresolvedCommand,
             settledOrders,
             openOrders: mergeOrderUpdate(previous.openOrders, report, settledOrders),
           }
@@ -361,12 +392,39 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection } = {}) => {
       if (payload.command_rejected
         && (payload.command_rejected.details?.marketType === 'futures'
           || payload.command_rejected.code === 'FUTURES_API_ERROR')) {
-        // A rejection settles whatever was pending: the exchange answered.
-        setState(previous => ({
-          ...previous,
-          lastError: payload.command_rejected,
-          unresolvedCommand: null,
-        }))
+        // A rejection settles only the command it names. A refusal of one
+        // command is not an answer about another whose outcome is unknown.
+        setState((previous) => {
+          const rejection = payload.command_rejected
+          return {
+            ...previous,
+            lastError: rejection,
+            unresolvedCommand: answersUnresolvedCommand(previous.unresolvedCommand, {
+              symbol: rejection.details?.symbol,
+              orderId: rejection.details?.orderId,
+              clientOrderId: rejection.details?.clientOrderId,
+              request: rejection.request,
+            })
+              ? null
+              : previous.unresolvedCommand,
+          }
+        })
+      }
+      // The end of an unknown outcome: the backend has established what the
+      // exchange did with this command, and says so by name.
+      if (payload.command_resolved
+        && payload.command_resolved.details?.marketType === 'futures') {
+        setState((previous) => {
+          const resolution = payload.command_resolved
+          return answersUnresolvedCommand(previous.unresolvedCommand, {
+            symbol: resolution.details?.symbol,
+            orderId: resolution.details?.orderId,
+            clientOrderId: resolution.details?.clientOrderId,
+            request: resolution.request,
+          })
+            ? { ...previous, unresolvedCommand: null }
+            : previous
+        })
       }
       // An unresolved outcome is deliberately not an error: the order may be
       // live, and presenting it as a failure is what makes an operator create a

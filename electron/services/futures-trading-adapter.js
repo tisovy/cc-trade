@@ -631,6 +631,15 @@ export class FuturesTradingAdapter {
         return this.#signedRequest('DELETE', '/fapi/v1/allOpenOrders', { symbol });
     }
 
+    // Conditional orders live in their own book: `/fapi/v1/allOpenOrders` does
+    // not touch them, so a cancel-all that called only it left every stop and
+    // take-profit live on the exchange while the desk showed an empty list.
+    // Route reviewed against the official catalogue on 2026-07-13/14 and
+    // recorded in `docs/futures_phase7_guarded_production_design.md`.
+    async cancelAllAlgoOrders(symbol) {
+        return this.#signedRequest('DELETE', '/fapi/v1/algoOpenOrders', { symbol });
+    }
+
     // Moves margin in or out of one isolated position. No order is placed and
     // the notional does not change — what changes is the distance to
     // liquidation. Binance's `type` is 1 to add and 2 to remove.

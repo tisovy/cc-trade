@@ -40,6 +40,7 @@ const moduleMocks = vi.hoisted(() => {
                 e: 'executionReport', symbol: 'BTCUSDT', status: 'CANCELED', orderId: 1,
             }),
             cancelAllOrders: vi.fn().mockResolvedValue({}),
+            cancelAllAlgoOrders: vi.fn().mockResolvedValue({}),
             adjustPositionMargin: vi.fn().mockResolvedValue({
                 symbol: 'BTCUSDT', positionSide: 'BOTH', direction: 'ADD', amount: '250',
             }),
@@ -2892,18 +2893,53 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(payloads.some(payload => payload.futures_execution_update?.orderId === 77)).toBe(true);
     });
 
+    // Binance's order state is eventually consistent after an ambiguous
+    // submission, so "no such order" is only believed once every attempt says so.
     it('reports an ambiguous placement the exchange never received as an ordinary refusal', async () => {
         await connectRenderer();
         moduleMocks.futuresAdapter.placeOrder.mockRejectedValueOnce(
             Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }),
         );
-        moduleMocks.futuresAdapter.findOrder.mockResolvedValueOnce({ exists: false, report: null });
+        moduleMocks.futuresAdapter.findOrder.mockResolvedValue({ exists: false, report: null });
 
-        await placeFuturesOrder('ambiguous-2');
+        const pending = placeFuturesOrder('ambiguous-2');
+        await vi.advanceTimersByTimeAsync(5_000);
+        await pending;
 
         expect(moduleMocks.futuresAdapter.placeOrder).toHaveBeenCalledTimes(1);
+        expect(moduleMocks.futuresAdapter.findOrder).toHaveBeenCalledTimes(3);
         const payloads = emitted();
         expect(payloads.some(payload => payload.command_rejected?.code === 'FUTURES_API_ERROR')).toBe(true);
+        // The warning it raised is withdrawn by name, so it withdraws only its own.
+        const resolved = payloads.find(payload => payload.command_resolved);
+        expect(resolved.command_resolved.details).toMatchObject({
+            marketType: 'futures',
+            symbol: 'BTCUSDT',
+            clientOrderId: 'ambiguous-2',
+        });
+    });
+
+    it('does not conclude a placement is absent while the exchange is still catching up', async () => {
+        await connectRenderer();
+        moduleMocks.futuresAdapter.placeOrder.mockRejectedValueOnce(
+            Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }),
+        );
+        moduleMocks.futuresAdapter.findOrder
+            .mockResolvedValueOnce({ exists: false, report: null })
+            .mockResolvedValueOnce({
+                exists: true,
+                report: { symbol: 'BTCUSDT', orderId: 991, clientOrderId: 'ambiguous-4', status: 'NEW' },
+            });
+
+        const pending = placeFuturesOrder('ambiguous-4');
+        await vi.advanceTimersByTimeAsync(5_000);
+        await pending;
+
+        const payloads = emitted();
+        expect(payloads.some(payload => payload.command_rejected)).toBe(false);
+        expect(payloads.some(payload => (
+            payload.futures_execution_update?.clientOrderId === 'ambiguous-4'
+        ))).toBe(true);
     });
 
     it('leaves an unreconcilable outcome unresolved and offers no retry', async () => {
@@ -3980,4 +4016,42 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 .toBe(true);
         });
     });
+
+    // The desk lists conditional orders in the same book as working ones, so a
+    // cancel-all that cleared only `/fapi/v1/allOpenOrders` emptied the list on
+    // screen while the stops stayed live on the exchange.
+    const cancelAllFutures = () => moduleMocks.rendererHandlers.message({
+        type: 'utf8',
+        utf8Data: JSON.stringify({
+            action: 'trade.cancelAll',
+            version: 1,
+            marketType: 'futures',
+            accountId: 'default',
+            clientOrderId: 'cancel-all-1',
+            symbol: 'BTCUSDT',
+        }),
+    });
+
+    it('cancels the conditional book as well as the working one', async () => {
+        await connectRenderer();
+        await cancelAllFutures();
+
+        expect(moduleMocks.futuresAdapter.cancelAllOrders).toHaveBeenCalledWith('BTCUSDT');
+        expect(moduleMocks.futuresAdapter.cancelAllAlgoOrders).toHaveBeenCalledWith('BTCUSDT');
+        expect(emitted().some(payload => payload.command_rejected)).toBe(false);
+    });
+
+    it('says which orders may still be live when one book will not cancel', async () => {
+        await connectRenderer();
+        moduleMocks.futuresAdapter.cancelAllAlgoOrders.mockRejectedValueOnce(
+            Object.assign(new Error('Unknown order sent.'), { status: 400, code: -2011 }),
+        );
+
+        await cancelAllFutures();
+
+        const rejection = emitted().find(payload => payload.command_rejected)?.command_rejected;
+        expect(rejection.message).toMatch(/conditional \(ALGO\) orders on BTCUSDT are still live/);
+        expect(rejection.details.uncancelled).toEqual(['algo']);
+    });
+
 });

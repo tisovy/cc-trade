@@ -839,4 +839,104 @@ describe('useFuturesTrading', () => {
     })
     expect(socket.sent).toHaveLength(sentCount)
   })
+
+  // An unknown outcome is the one warning that must not be cleared by anything
+  // but its own answer: an operator who stops seeing it sends the order again.
+  it('keeps an unresolved outcome standing while another order reports', () => {
+    const socket = createSocket()
+    const { result } = renderHook(() => useFuturesTrading({
+      enabled: true,
+      symbol: 'BTCUSDT',
+      wsConnection: socket,
+    }))
+
+    act(() => {
+      socket.receive({
+        command_unresolved: {
+          request: 'trade.placeOrder',
+          code: 'FUTURES_OUTCOME_PENDING',
+          message: 'Binance did not confirm this order either way.',
+          details: {
+            marketType: 'futures',
+            symbol: 'BTCUSDT',
+            orderId: null,
+            clientOrderId: 'desk-btc-1',
+          },
+        },
+      })
+    })
+    expect(result.current.unresolvedCommand?.code).toBe('FUTURES_OUTCOME_PENDING')
+
+    act(() => {
+      socket.receive({
+        futures_execution_update: {
+          symbol: 'ETHUSDT',
+          orderId: 55,
+          clientOrderId: 'desk-eth-9',
+          status: 'NEW',
+          side: 'BUY',
+          price: '3000',
+          origQty: '1',
+        },
+      })
+    })
+    expect(result.current.unresolvedCommand?.code).toBe('FUTURES_OUTCOME_PENDING')
+
+    act(() => {
+      socket.receive({
+        command_rejected: {
+          request: 'trade.cancelOrder',
+          code: 'FUTURES_API_ERROR',
+          message: 'Unknown order sent.',
+          details: { marketType: 'futures', symbol: 'ETHUSDT', orderId: 55 },
+        },
+      })
+    })
+    expect(result.current.unresolvedCommand?.code).toBe('FUTURES_OUTCOME_PENDING')
+
+    act(() => {
+      socket.receive({
+        futures_execution_update: {
+          symbol: 'BTCUSDT',
+          orderId: 77,
+          clientOrderId: 'desk-btc-1',
+          status: 'NEW',
+          side: 'BUY',
+          price: '58000',
+          origQty: '0.01',
+        },
+      })
+    })
+    expect(result.current.unresolvedCommand).toBeNull()
+  })
+
+  it('withdraws an unresolved outcome the backend resolved by name', () => {
+    const socket = createSocket()
+    const { result } = renderHook(() => useFuturesTrading({
+      enabled: true,
+      symbol: 'BTCUSDT',
+      wsConnection: socket,
+    }))
+
+    act(() => {
+      socket.receive({
+        command_unresolved: {
+          request: 'trade.placeOrder',
+          code: 'FUTURES_OUTCOME_PENDING',
+          message: 'Binance did not confirm this order either way.',
+          details: { marketType: 'futures', symbol: 'BTCUSDT', clientOrderId: 'desk-btc-2' },
+        },
+      })
+      socket.receive({
+        command_resolved: {
+          request: 'trade.placeOrder',
+          code: 'FUTURES_OUTCOME_ABSENT',
+          message: 'Binance does not have this order — nothing was executed.',
+          details: { marketType: 'futures', symbol: 'BTCUSDT', clientOrderId: 'desk-btc-2' },
+        },
+      })
+    })
+    expect(result.current.unresolvedCommand).toBeNull()
+  })
+
 })

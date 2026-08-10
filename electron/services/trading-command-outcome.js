@@ -90,3 +90,22 @@ export const createCommandUnresolved = (request, code, message, details = {}) =>
         timestamp: Date.now(),
     },
 });
+
+/**
+ * The end of an unresolved outcome: this command, named by the identity the
+ * unresolved envelope carried, is now known.
+ *
+ * An unresolved warning is cleared by nothing else. It used to fall to the next
+ * execution update to arrive — on any contract, for any order — which is how a
+ * placement whose fate was unknown stopped warning about itself and invited the
+ * second order.
+ */
+export const createCommandResolved = (request, code, message, details = {}) => ({
+    command_resolved: {
+        request,
+        code,
+        message,
+        details,
+        timestamp: Date.now(),
+    },
+});
