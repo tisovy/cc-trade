@@ -99,4 +99,35 @@ describe('FuturesLeverageEditor', () => {
     // With nothing to compare against, any choice is a change worth applying.
     expect(screen.getByRole('button', { name: 'Set 1×' })).toBeEnabled()
   })
+
+  // `maxLeverage` arrives with the contract read, which can land after the panel
+  // is already open and already picked on.
+  it('lowers a pick made under a placeholder ceiling when the real one arrives', () => {
+    const onSubmit = vi.fn()
+    const { rerender } = render(
+      <FuturesLeverageEditor
+        symbol="TUTUSDT"
+        leverage={1}
+        maxLeverage={null}
+        anchor={anchor}
+        onSubmit={onSubmit}
+      />,
+    )
+    fireEvent.change(screen.getByLabelText('Leverage multiple'), { target: { value: '100' } })
+    expect(screen.getByLabelText('Leverage multiple')).toHaveValue('100')
+
+    rerender(
+      <FuturesLeverageEditor
+        symbol="TUTUSDT"
+        leverage={1}
+        maxLeverage={20}
+        anchor={anchor}
+        onSubmit={onSubmit}
+      />,
+    )
+    expect(screen.getByLabelText('Leverage multiple')).toHaveValue('20')
+    fireEvent.click(screen.getByRole('button', { name: 'Set 20×' }))
+    expect(onSubmit).toHaveBeenCalledWith({ symbol: 'TUTUSDT', leverage: 20 })
+  })
+
 })

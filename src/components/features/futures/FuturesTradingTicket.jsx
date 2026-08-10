@@ -187,35 +187,49 @@ const FuturesTradingTicket = ({
     ...readinessInput,
     exposureIncreasing: false,
   }).ready
-  const deriveSubmissionReadiness = (action, draft) => deriveFuturesReadiness({
+  // The size a submission is measured against is the size that submission
+  // carries — the staged one when confirming an order staged earlier, the one on
+  // the ticket otherwise. Measuring a staged order against the current ticket is
+  // how a confirmation for one amount could be checked against another.
+  const deriveSubmissionReadiness = (action, draft, sizeUsdt = notionalUsdt) => deriveFuturesReadiness({
     ...readinessInput,
+    notionalUsdt: sizeUsdt,
     draftRequired: true,
     draftValid: draft.ok,
-    amountWithinBudget,
+    amountWithinBudget: sizeUsdt === notionalUsdt
+      ? amountWithinBudget
+      : isFuturesDraftAmountWithinBudget(sizeUsdt, sizingBudget),
     exposureIncreasing: action.positionEffect === 'ENTRY',
   })
   const canSubmitAction = action => deriveSubmissionReadiness(action, orderDraft).ready
 
-  const resolveSubmitBlockReason = (action, draft) => {
+  const resolveSubmitBlockReason = (action, draft, sizeUsdt = notionalUsdt) => {
     if (!readiness.ready) return readiness.reason
     if (!sizingReady) return 'No confirmed available USDT balance to size the order.'
     // Sizing starts at zero, so an unsized draft is the ordinary case, not a
     // broken contract: say so instead of blaming the exchange filters.
-    if (!isExactPositiveDecimal(notionalUsdt)) return 'Order size is 0 — choose a size first.'
+    if (!isExactPositiveDecimal(sizeUsdt)) return 'Order size is 0 — choose a size first.'
     if (!draft.ok) return DRAFT_REASON_MESSAGES[draft.reason] ?? 'Order draft is invalid.'
-    const submissionReadiness = deriveSubmissionReadiness(action, draft)
+    const submissionReadiness = deriveSubmissionReadiness(action, draft, sizeUsdt)
     if (!submissionReadiness.ready) return submissionReadiness.reason
     return SEND_FAILED_MESSAGE
   }
 
-  const submitLimitOrder = (action, candidatePrice) => {
-    const draft = deriveDraft(candidatePrice)
-    const submissionReadiness = deriveSubmissionReadiness(action, draft)
+  // Takes the draft to send rather than a price to derive one from. A caller
+  // that staged an order hands back the object it staged, so the quantity that
+  // reaches the exchange is the quantity that was read on the way in.
+  const submitLimitOrder = (action, draft, { sizeUsdt = notionalUsdt, staged = false } = {}) => {
+    const submissionReadiness = deriveSubmissionReadiness(action, draft, sizeUsdt)
     if (!submissionReadiness.ready || !draft.ok || typeof safeState.placeOrder !== 'function') {
+      const reason = resolveSubmitBlockReason(action, draft, sizeUsdt)
       setFeedback({
         tone: 'ignored',
         title: `${action.label} NOT sent`,
-        detail: resolveSubmitBlockReason(action, draft),
+        // A refused confirmation names the order it refused: the operator read
+        // those numbers a moment ago, and nothing was quietly resized to fit.
+        detail: staged && draft.ok
+          ? `${reason} The confirmed ${draft.quantity} @ ${draft.price} was not sent and was not re-sized.`
+          : reason,
       })
       return false
     }
@@ -237,13 +251,19 @@ const FuturesTradingTicket = ({
     return accepted
   }
 
-  // Readiness is re-derived by submitLimitOrder at this moment, not at the
-  // moment the order was staged, so a balance or connection that lapsed while
-  // the panel was open still blocks the send.
+  // Readiness is re-derived at this moment, not at the moment the order was
+  // staged, so a balance or connection that lapsed while the panel was open
+  // still blocks the send. The order itself is not re-derived: the panel showed
+  // a quantity, and that quantity is what leaves. Deriving it again here read
+  // the balance a second time, so a refresh landing between staging and Confirm
+  // silently doubled an order the operator had already read and approved.
   const confirmPendingOrder = () => {
     if (!pendingOrder) return
     setPendingOrder(null)
-    submitLimitOrder(pendingOrder.action, pendingOrder.price)
+    submitLimitOrder(pendingOrder.action, pendingOrder.draft, {
+      sizeUsdt: pendingOrder.notionalUsdt,
+      staged: true,
+    })
   }
 
   // Cancelling says so out loud: silence after a gesture is indistinguishable
@@ -291,6 +311,8 @@ const FuturesTradingTicket = ({
     setPendingOrder({
       action,
       symbol: selectedSymbol,
+      // The whole draft, not just its price: this object is what Confirm sends.
+      draft,
       price: draft.price,
       quantity: draft.quantity,
       notionalUsdt,
@@ -647,7 +669,7 @@ const FuturesTradingTicket = ({
                   key={action.key}
                   className={`is-${action.positionSide.toLowerCase()} is-${action.positionEffect.toLowerCase()}`}
                   disabled={!canSubmitAction(action)}
-                  onClick={() => submitLimitOrder(action, price)}
+                  onClick={() => submitLimitOrder(action, orderDraft)}
                 >
                   {action.label}
                 </button>

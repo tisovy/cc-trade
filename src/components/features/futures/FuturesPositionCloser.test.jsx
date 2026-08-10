@@ -151,4 +151,14 @@ describe('FuturesPositionCloser', () => {
     fireEvent.pointerDown(document.body)
     expect(onClose).toHaveBeenCalledTimes(1)
   })
+
+  // A closed panel reads as a closed position. It may only close when the
+  // command actually reached the backend.
+  it('stays open and states the failure when the close could not be sent', () => {
+    const { onClose } = renderCloser({ onCloseMarket: vi.fn(() => false) })
+    fireEvent.click(screen.getByRole('button', { name: 'Close at market' }))
+    expect(onClose).not.toHaveBeenCalled()
+    expect(screen.getByRole('status')).toHaveTextContent('the position was not closed')
+  })
+
 })

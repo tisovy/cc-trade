@@ -418,6 +418,127 @@ describe('FuturesTradingTicket', () => {
     expect(order.reduceOnly).toBeUndefined()
   })
 
+  // The confirmation is the one place where what is read and what is sent must
+  // be the same numbers. Confirm used to re-derive the size from the balance,
+  // so a refresh landing while the panel was open sent an order the operator
+  // had never seen.
+  it('sends the staged quantity when the balance grows under an open confirmation', () => {
+    const state = createState()
+    const gesture = {
+      id: 11, side: 'BUY', positionSide: 'LONG', positionEffect: 'ENTRY', price: '58445.0',
+    }
+    const { rerender } = render(
+      <FuturesTradingTicket
+        state={state}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+        draftPrice="58445.0"
+      />,
+    )
+    sizeTo(50)
+    rerender(
+      <FuturesTradingTicket
+        state={state}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+        draftPrice="58445.0"
+        gestureRequest={gesture}
+      />,
+    )
+    const staged = within(screen.getByRole('alertdialog'))
+      .getByTitle(/contracts$/)
+      .getAttribute('title')
+    rerender(
+      <FuturesTradingTicket
+        state={createState({
+          balances: { USDT: { available: '4000', total: '4000' } },
+          placeOrder: state.placeOrder,
+        })}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+        draftPrice="58445.0"
+        gestureRequest={gesture}
+      />,
+    )
+    confirmStagedOrder()
+    expect(state.placeOrder).toHaveBeenCalledOnce()
+    const order = state.placeOrder.mock.calls[0][0]
+    expect(staged).toContain(order.quantity)
+    // 50% of 1000 USDT, not 50% of the 4000 that arrived while the panel was up.
+    expect(Number(order.quantity) * Number(order.price)).toBeLessThan(1000)
+  })
+
+  it('refuses a staged order the balance no longer covers instead of re-sizing it', () => {
+    const state = createState()
+    const gesture = {
+      id: 12, side: 'BUY', positionSide: 'LONG', positionEffect: 'ENTRY', price: '58445.0',
+    }
+    const { rerender } = render(
+      <FuturesTradingTicket
+        state={state}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+        draftPrice="58445.0"
+      />,
+    )
+    sizeTo(100)
+    rerender(
+      <FuturesTradingTicket
+        state={state}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+        draftPrice="58445.0"
+        gestureRequest={gesture}
+      />,
+    )
+    rerender(
+      <FuturesTradingTicket
+        state={createState({
+          balances: { USDT: { available: '200', total: '200' } },
+          placeOrder: state.placeOrder,
+        })}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+        draftPrice="58445.0"
+        gestureRequest={gesture}
+      />,
+    )
+    confirmStagedOrder()
+    expect(state.placeOrder).not.toHaveBeenCalled()
+    expect(screen.getByLabelText('Futures gesture feedback'))
+      .toHaveTextContent('was not sent and was not re-sized')
+  })
+
+  it('keeps the staged size when the size controls move under the confirmation', () => {
+    const state = createState()
+    const gesture = {
+      id: 13, side: 'BUY', positionSide: 'LONG', positionEffect: 'ENTRY', price: '58445.0',
+    }
+    const { rerender } = render(
+      <FuturesTradingTicket
+        state={state}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+        draftPrice="58445.0"
+      />,
+    )
+    sizeTo(25)
+    rerender(
+      <FuturesTradingTicket
+        state={state}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+        draftPrice="58445.0"
+        gestureRequest={gesture}
+      />,
+    )
+    sizeTo(75)
+    confirmStagedOrder()
+    expect(state.placeOrder).toHaveBeenCalledOnce()
+    const order = state.placeOrder.mock.calls[0][0]
+    expect(Number(order.quantity) * Number(order.price)).toBeLessThan(300)
+  })
+
   it('marks exit gestures reduce-only and handles the same gesture only once', () => {
     const state = createState()
     const gesture = {

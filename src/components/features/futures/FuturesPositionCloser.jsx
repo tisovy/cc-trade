@@ -46,6 +46,7 @@ export const FuturesPositionCloser = ({
     formatExchangePrice(position?.markPrice, tickSize, '')
   ))
   const [quantity, setQuantity] = useState(openQuantity)
+  const [unsent, setUnsent] = useState(null)
   const { panelRef, style, handleProps } = useFloatingPanel({
     anchor,
     width: PANEL_WIDTH,
@@ -100,20 +101,25 @@ export const FuturesPositionCloser = ({
     ? 'flat'
     : outcome.realizedPnl > 0 ? 'positive' : 'negative'
 
+  // Closing is the command an operator most needs to be sure about, so the panel
+  // stays open when it could not be sent: a panel that vanished on a dead socket
+  // read exactly like a position that had been closed.
   const submit = (event) => {
     event.preventDefault()
     if (!canSubmit) return
-    if (orderType === 'MARKET') {
+    const sent = orderType === 'MARKET'
       // The position keeps its signed quantity: the side of the exit is read
       // from it, never from the size the operator typed.
-      onCloseMarket?.(position, { quantity: draft.quantity })
-    } else {
-      onCloseLimit?.({
+      ? onCloseMarket?.(position, { quantity: draft.quantity })
+      : onCloseLimit?.({
         symbol: position.symbol,
         side,
         price: normalizedPrice,
         quantity: draft.quantity,
       })
+    if (sent === false) {
+      setUnsent('Local backend connection unavailable — the position was not closed.')
+      return
     }
     onClose?.()
   }
@@ -166,7 +172,7 @@ export const FuturesPositionCloser = ({
             type="text"
             inputMode="decimal"
             value={price}
-            onChange={event => setPrice(event.target.value)}
+            onChange={(event) => { setUnsent(null); setPrice(event.target.value) }}
           />
         </label>
       ) : null}
@@ -178,7 +184,7 @@ export const FuturesPositionCloser = ({
           type="text"
           inputMode="decimal"
           value={quantity}
-          onChange={event => setQuantity(event.target.value)}
+          onChange={(event) => { setUnsent(null); setQuantity(event.target.value) }}
         />
       </label>
 
@@ -221,7 +227,9 @@ export const FuturesPositionCloser = ({
           <dd className={`is-${pnlTone}`}>{formatSignedUsdt(outcome.realizedPnl)}</dd>
         </div>
       </dl>
-      {canSubmit ? null : (
+      {unsent ? (
+        <p role="status" className="is-unsent">{unsent}</p>
+      ) : canSubmit ? null : (
         <p role="status">
           {draft.ok ? 'Enter a close price.' : CLOSE_REASONS[draft.reason] ?? 'Close size is invalid.'}
         </p>

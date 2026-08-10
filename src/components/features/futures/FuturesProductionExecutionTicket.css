@@ -1330,7 +1330,11 @@
 
 /* Raising leverage on a position that is already open moves its liquidation
    price. The line says so in the same red the projected price uses. */
-.futures-order-editor p[role='status'].is-riskier {
+.futures-order-editor p[role='status'].is-riskier,
+/* A command that never left the renderer changed nothing on the exchange. The
+   panel stays open and says so in the same red, because the operator is about
+   to act on the belief that it did. */
+.futures-order-editor p[role='status'].is-unsent {
   color: #ff8490;
 }
 

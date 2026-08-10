@@ -35,6 +35,9 @@ export const FuturesOrderEditor = ({
   const filters = contract?.filters ?? null
   const [price, setPrice] = useState(() => String(order.price ?? ''))
   const [notional, setNotional] = useState(() => orderNotionalUsdt(order) ?? '')
+  // Holds what did not happen, not merely that something did not: "not changed"
+  // and "not cancelled" are different facts about a live order.
+  const [unsent, setUnsent] = useState(null)
   const { panelRef, style, handleProps } = useFloatingPanel({
     anchor,
     width: PANEL_WIDTH,
@@ -68,10 +71,14 @@ export const FuturesOrderEditor = ({
         ? 'This amendment cannot be valued, so the order limit cannot be checked.'
         : DRAFT_REASONS[draft.reason] ?? 'Order draft is invalid.'
 
+  // A panel that closes is this desk's way of saying "done". It may only say it
+  // when the command actually left the renderer: a closed socket used to close
+  // the panel exactly as a delivered amendment did, and the operator read the
+  // one as the other.
   const submit = (event) => {
     event.preventDefault()
     if (!draft.ok) return
-    onSubmit?.({
+    const sent = onSubmit?.({
       symbol: order.symbol,
       side: intent.side,
       orderId: order.orderId,
@@ -79,6 +86,10 @@ export const FuturesOrderEditor = ({
       price: draft.price,
       quantity: draft.quantity,
     })
+    if (sent === false) {
+      setUnsent('Local backend connection unavailable — the order was not changed.')
+      return
+    }
     onClose?.()
   }
 
@@ -105,7 +116,7 @@ export const FuturesOrderEditor = ({
           type="text"
           inputMode="decimal"
           value={price}
-          onChange={event => setPrice(event.target.value)}
+          onChange={(event) => { setUnsent(null); setPrice(event.target.value) }}
         />
       </label>
       <label>
@@ -115,7 +126,7 @@ export const FuturesOrderEditor = ({
           type="text"
           inputMode="decimal"
           value={notional}
-          onChange={event => setNotional(event.target.value)}
+          onChange={(event) => { setUnsent(null); setNotional(event.target.value) }}
         />
       </label>
 
@@ -123,7 +134,9 @@ export const FuturesOrderEditor = ({
         <div><dt>Quantity</dt><dd>{draft.ok ? draft.quantity : '—'}</dd></div>
         <div><dt>Filled</dt><dd>{order.z ?? '0'}</dd></div>
       </dl>
-      {draft.ok ? null : (
+      {unsent ? (
+        <p role="status" className="is-unsent">{unsent}</p>
+      ) : draft.ok ? null : (
         <p role="status">
           {filters
             ? refusal
@@ -137,7 +150,11 @@ export const FuturesOrderEditor = ({
           type="button"
           className="is-cancel-order"
           onClick={() => {
-            onCancelOrder?.({ symbol: order.symbol, orderId: order.orderId })
+            const sent = onCancelOrder?.({ symbol: order.symbol, orderId: order.orderId })
+            if (sent === false) {
+              setUnsent('Local backend connection unavailable — the order was not cancelled.')
+              return
+            }
             onClose?.()
           }}
         >

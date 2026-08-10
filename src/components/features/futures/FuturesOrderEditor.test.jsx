@@ -132,4 +132,50 @@ describe('FuturesOrderEditor', () => {
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(onClose).toHaveBeenCalledTimes(2)
   })
+
+  // A panel that disappears is how this desk says "done". On a closed socket the
+  // amendment never left the renderer, so the panel may not say it.
+  it('stays open and states the failure when the amendment could not be sent', () => {
+    const { onClose } = renderEditor({ onSubmit: vi.fn(() => false) })
+    fireEvent.change(screen.getByLabelText('Order price'), { target: { value: '58500' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }))
+    expect(onClose).not.toHaveBeenCalled()
+    expect(screen.getByRole('status')).toHaveTextContent('the order was not changed')
+  })
+
+  it('stays open and states the failure when the cancellation could not be sent', () => {
+    const { onClose } = renderEditor({ onCancelOrder: vi.fn(() => false) })
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel order' }))
+    expect(onClose).not.toHaveBeenCalled()
+    expect(screen.getByRole('status')).toHaveTextContent('the order was not cancelled')
+  })
+
+
+  // The panel seeds its price and amount from the order once, so its identity is
+  // the order it was opened for. The workstation keys it on exactly this, and
+  // this is what that key buys: without a remount the first order's draft would
+  // be submitted against the second order's id.
+  it('starts a fresh draft when it is keyed to a different order', () => {
+    const onSubmit = vi.fn()
+    const other = { ...order, orderId: 12, price: '41000.0', origQty: '0.010' }
+    const editorFor = target => (
+      <FuturesOrderEditor
+        key={`${target.symbol}:REGULAR:${target.orderId}`}
+        order={target}
+        contract={contract}
+        anchor={{ x: 300, y: 200 }}
+        onSubmit={onSubmit}
+        onCancelOrder={vi.fn()}
+        onClose={vi.fn()}
+      />
+    )
+    const { rerender } = render(editorFor(order))
+    fireEvent.change(screen.getByLabelText('Order price'), { target: { value: '59999' } })
+
+    rerender(editorFor(other))
+    expect(screen.getByLabelText('Order price')).toHaveValue('41000.0')
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }))
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ orderId: 12, price: '41000' }))
+  })
+
 })

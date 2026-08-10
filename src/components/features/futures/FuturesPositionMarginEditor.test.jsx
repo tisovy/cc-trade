@@ -271,4 +271,13 @@ describe('FuturesPositionMarginEditor', () => {
     expect(onClose).toHaveBeenCalledTimes(1)
     expect(onSubmit).not.toHaveBeenCalled()
   })
+
+  it('stays open and states the failure when the margin move could not be sent', () => {
+    const { onClose } = renderEditor({ onSubmit: vi.fn(() => false) })
+    fireEvent.change(screen.getByLabelText('Margin amount in USDT'), { target: { value: '250' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Add margin' }))
+    expect(onClose).not.toHaveBeenCalled()
+    expect(screen.getByRole('status')).toHaveTextContent('the margin was not moved')
+  })
+
 })

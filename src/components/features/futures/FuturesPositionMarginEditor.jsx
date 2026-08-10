@@ -40,6 +40,7 @@ export const FuturesPositionMarginEditor = ({
   const tickSize = contract?.filters?.price?.tickSize ?? null
   const [direction, setDirection] = useState('ADD')
   const [amount, setAmount] = useState('')
+  const [unsent, setUnsent] = useState(null)
   const { panelRef, style, handleProps } = useFloatingPanel({
     anchor,
     width: PANEL_WIDTH,
@@ -167,15 +168,22 @@ export const FuturesPositionMarginEditor = ({
   const sliderMax = Math.max(1, Math.round(Math.max(sliderCeiling, requestedAmount ?? 0)))
   const sliderValue = Math.min(Math.round(requestedAmount ?? 0), sliderMax)
 
+  // The panel closes only on a delivered command: a margin move that never left
+  // the renderer leaves the liquidation price exactly where it was, and a closed
+  // panel would say otherwise.
   const submit = (event) => {
     event.preventDefault()
     if (!draft.ok) return
-    onSubmit?.({
+    const sent = onSubmit?.({
       symbol: position.symbol,
       positionSide: position.positionSide,
       direction,
       amount: String(draft.requested),
     })
+    if (sent === false) {
+      setUnsent('Local backend connection unavailable — the margin was not moved.')
+      return
+    }
     onClose?.()
   }
 
@@ -329,7 +337,9 @@ export const FuturesPositionMarginEditor = ({
           </dd>
         </div>
       </dl>
-      {draft.ok ? null : <p role="status">{refusal}</p>}
+      {unsent
+        ? <p role="status" className="is-unsent">{unsent}</p>
+        : draft.ok ? null : <p role="status">{refusal}</p>}
 
       <div className="futures-order-editor-actions">
         <button type="submit" className="is-apply" disabled={!draft.ok}>

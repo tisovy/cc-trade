@@ -368,8 +368,13 @@ export const FuturesProductionWorkstation = ({
         onSymbolChange={handleSymbolChange}
         onIntervalChange={setInterval}
       />
+      {/* Keyed by the object each panel edits. The panels seed their price, size
+          and amount from props once, so re-targeting one at another order or
+          position without remounting would submit the first target's draft
+          against the second target's identity. */}
       {orderEditor ? (
         <FuturesOrderEditor
+          key={`${orderEditor.order.symbol}:${orderEditor.order.orderKind ?? 'REGULAR'}:${orderEditor.order.orderId ?? orderEditor.order.clientOrderId}`}
           order={orderEditor.order}
           contract={orderEditor.order.symbol === symbol ? selectedContract : null}
           maxOrderNotionalUsdt={executionState?.maxOrderNotionalUsdt ?? null}
@@ -381,6 +386,7 @@ export const FuturesProductionWorkstation = ({
       ) : null}
       {positionCloser ? (
         <FuturesPositionCloser
+          key={`${positionCloser.position.symbol}:${positionCloser.position.positionSide}`}
           position={positionCloser.position}
           contract={positionCloser.position.symbol === symbol ? selectedContract : null}
           anchor={positionCloser.anchor}
@@ -398,6 +404,7 @@ export const FuturesProductionWorkstation = ({
       ) : null}
       {marginEditor && marginPosition ? (
         <FuturesPositionMarginEditor
+          key={`${marginPosition.symbol}:${marginPosition.positionSide}`}
           position={marginPosition}
           contract={marginPosition.symbol === symbol ? selectedContract : null}
           availableUsdt={executionState?.balances?.USDT?.available ?? null}
@@ -408,6 +415,7 @@ export const FuturesProductionWorkstation = ({
       ) : null}
       {leverageEditor ? (
         <FuturesLeverageEditor
+          key={leverageEditor.symbol}
           symbol={leverageEditor.symbol}
           leverage={leverageConfig?.leverage ?? null}
           maxLeverage={leverageConfig?.maxLeverage ?? null}

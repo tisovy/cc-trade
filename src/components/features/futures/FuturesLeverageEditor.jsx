@@ -37,7 +37,11 @@ export const FuturesLeverageEditor = ({
   // Apply armed to quietly lower the leverage.
   const [picked, setPicked] = useState(null)
   const [unsent, setUnsent] = useState(false)
-  const chosen = picked ?? Math.min(current ?? 1, ceiling)
+  // The ceiling is bounded on every render, not only at the moment of the pick.
+  // `maxLeverage` arrives with the contract read, which can land after the panel
+  // opens: a 100× chosen under the 125× placeholder used to stay on screen and
+  // stay armed when the contract answered with 20×.
+  const chosen = Math.min(picked ?? current ?? 1, ceiling)
   const setChosen = (value) => {
     setUnsent(false)
     setPicked(value)
