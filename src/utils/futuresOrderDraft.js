@@ -167,6 +167,27 @@ export const calculateFuturesCloseQuantityForPercent = ({
   return formatDecimalAtoms(snappedAtoms)
 }
 
+// The share of the position a close size stands for, floored. Computed on atoms
+// because the sizes are exchange decimals: `Number('0.3') * 100` is 29.999…,
+// which would put a slider dragged to 30% at 29 and make it drift on every read.
+export const calculateFuturesClosePercent = ({ openQuantity, quantity } = {}) => {
+  const openAtoms = parseDecimalAtoms(openQuantity, { positive: true })
+  const closeAtoms = parseDecimalAtoms(quantity, { positive: true })
+  if (openAtoms === null || closeAtoms === null) return null
+  const bounded = closeAtoms > openAtoms ? openAtoms : closeAtoms
+  return Number((bounded * 100n) / openAtoms)
+}
+
+// What the position would still hold after closing this much of it — exact for
+// the same reason: 0.5 − 0.2 in floating point is 0.30000000000000004, and no
+// position ever held that.
+export const remainingFuturesQuantity = ({ openQuantity, quantity } = {}) => {
+  const openAtoms = parseDecimalAtoms(openQuantity, { positive: true })
+  const closeAtoms = parseDecimalAtoms(quantity, { positive: true })
+  if (openAtoms === null || closeAtoms === null || closeAtoms > openAtoms) return null
+  return formatDecimalAtoms(openAtoms - closeAtoms)
+}
+
 export const deriveFuturesLimitOrderDraft = ({
   notionalUsdt,
   price,

@@ -380,6 +380,17 @@
   font-size: calc(var(--fx-ui-scale, 1) * 12px);
 }
 
+/* The contracts the operator actually works with, at the top of the list and
+   marked as theirs: sorted first is not visible on its own when four hundred rows
+   below look exactly the same. */
+.futures-workstation-contract.is-recent {
+  background: rgba(240, 185, 11, 0.05);
+}
+
+.futures-workstation-contract.is-recent .futures-workstation-contract-select span {
+  color: #c8a03a;
+}
+
 .futures-workstation-contract-inspector {
   display: grid;
   gap: 7px;
@@ -498,6 +509,13 @@
 .futures-workstation-market-header .is-primary dd {
   color: #52dba8;
   font-size: calc(var(--fx-ui-scale, 1) * 18px);
+}
+
+/* Abbreviated, the volume is three or four characters among ten-character
+   prices: weight is what keeps it from disappearing between them. */
+.futures-workstation-market-header .is-volume dd {
+  color: #dbe6f0;
+  font-weight: 800;
 }
 
 .futures-workstation-chart {
@@ -1193,12 +1211,20 @@
   min-width: 0;
 }
 
+/* The trailing action column is sized, never `auto`: a content-sized track
+   resolves to nothing in the heading row and to a button's width in the rows
+   beneath it, and every flexible column between them absorbs the difference —
+   which is exactly how the headings came to sit beside their own values. */
 .futures-workstation-dock-row {
   display: grid;
+  /* Every money track is cut for five figures and two decimals — 10 000.00 — plus
+     what sits beside it: the leverage badge after the symbol, the mode before the
+     margin, the ROE after the uPnL. An account that grows past the column is an
+     account reading its own numbers through an ellipsis. */
   grid-template-columns:
-    minmax(74px, 1fr) 54px minmax(86px, 0.9fr) minmax(66px, 0.9fr)
-    minmax(66px, 0.9fr) minmax(66px, 0.9fr) minmax(64px, 0.8fr)
-    minmax(104px, 1.1fr) auto;
+    minmax(116px, 1.1fr) 54px minmax(92px, 0.9fr) minmax(72px, 0.9fr)
+    minmax(72px, 0.9fr) minmax(72px, 0.9fr) minmax(104px, 1fr)
+    minmax(176px, 1.3fr) 62px;
   gap: 8px;
   align-items: center;
   padding: 5px 7px;
@@ -1215,7 +1241,7 @@
 .futures-workstation-dock-row.is-orders {
   grid-template-columns:
     minmax(74px, 1fr) 54px minmax(96px, 1.2fr) minmax(76px, 1fr)
-    minmax(86px, 0.9fr) minmax(66px, 0.9fr) auto;
+    minmax(86px, 0.9fr) minmax(66px, 0.9fr) 74px;
 }
 
 .futures-workstation-dock-row > span {
@@ -1243,6 +1269,44 @@
 
 .futures-workstation-dock-row.is-current-symbol {
   background: var(--futures-accent-soft);
+}
+
+/* The contract and the multiple it is carried at, read as one thing — which is
+   what they are: 3 000 BICO at 20× and at 1× are the same position facing a
+   twentieth of the move. */
+.futures-workstation-dock-instrument {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* A twelve-character contract gives way before the badge does: the multiple is
+   two glyphs and losing them costs the whole reading. */
+.futures-workstation-dock-instrument .futures-workstation-dock-symbol {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+}
+
+/* Small, quiet, and the control that changes it: the leverage is a property of
+   the instrument, so it sits with the symbol rather than in the money columns. */
+.futures-workstation-dock-leverage {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border: 1px solid rgba(244, 202, 67, 0.4);
+  border-radius: 3px;
+  background: rgba(244, 202, 67, 0.12);
+  color: #f4ca43;
+  font: inherit;
+  font-size: calc(var(--fx-ui-scale, 1) * 11px);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.futures-workstation-dock-leverage:hover {
+  border-color: rgba(244, 202, 67, 0.75);
+  background: rgba(244, 202, 67, 0.22);
 }
 
 .futures-workstation-dock-symbol {
@@ -1310,7 +1374,9 @@
    but drops the affordance colour: it opens the panel only to say why it
    cannot be moved. */
 .futures-workstation-dock-margin {
-  display: inline-block;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
   max-width: 100%;
   padding: 0;
   border: 0;
@@ -1323,9 +1389,35 @@
   cursor: pointer;
 }
 
+/* The mode rides with the figure it qualifies, because the figure means a
+   different thing in each mode: one is this position's own money, the other is
+   the account's. Styling alone cannot carry that. */
+/* The tag sits tight against the amount it labels. It was briefly padded to the
+   width of the longest tag so a CROSS row and an ISO row would start their digits
+   in the same place; the operator judged the resulting gap worse than the
+   misalignment it prevented, and a gap that wide reads as two separate columns. */
+.futures-workstation-dock-margin em {
+  color: #7f93a6;
+  font-size: calc(var(--fx-ui-scale, 1) * 10px);
+  font-style: normal;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+}
+
+.futures-workstation-dock-margin.is-isolated em {
+  color: #7cc0f5;
+}
+
 .futures-workstation-dock-margin.is-cross {
   border-bottom-style: dashed;
   color: #8fa2b6;
+}
+
+/* A margin that cannot be opened is still a margin: it keeps the reading and
+   drops only the affordance. */
+.futures-workstation-dock-margin.is-static {
+  border-bottom: 0;
+  cursor: default;
 }
 
 .futures-workstation-dock-margin:hover,
@@ -1335,18 +1427,30 @@
   outline: none;
 }
 
+/* The amount is set larger than the row, and the ROE beside it is set smaller;
+   together they were wider than the column they were given, and the cell clips
+   its overflow — first the percent sign was sliced off mid-glyph, then the amount
+   itself came out as `+177.…`. The track is now cut for a five-figure amount and a
+   four-figure ROE side by side, so neither is shortened at any size the account
+   can reach; the ellipsis below is a last resort that no longer triggers, and the
+   cell's title carries both figures exactly regardless. */
 .futures-workstation-dock-pnl {
   display: flex;
   align-items: baseline;
-  gap: 6px;
+  gap: 5px;
+  min-width: 0;
 }
 
 .futures-workstation-dock-pnl strong {
+  overflow: hidden;
+  min-width: 0;
   font-size: calc(var(--fx-ui-scale, 1) * 16px);
   font-weight: 800;
+  text-overflow: ellipsis;
 }
 
 .futures-workstation-dock-pnl em {
+  flex: 0 0 auto;
   font-size: calc(var(--fx-ui-scale, 1) * 12.5px);
   font-style: normal;
   opacity: 0.85;
@@ -1596,10 +1700,14 @@
 }
 
 /* The row between the two sides is the last print, not a derived constant. */
+/* Centred: it is the axis the two sides of the book are read against, and a
+   number that changes width as it moves is steadier in the middle than pinned to
+   one edge. */
 .futures-workstation-book-last {
   display: flex;
   flex: 0 0 auto;
   align-items: baseline;
+  justify-content: center;
   gap: 7px;
   margin: 4px 0;
   padding: 5px 4px;
@@ -1684,16 +1792,22 @@
   font-size: calc(var(--fx-ui-scale, 1) * 12px);
 }
 
+/* History spans the account, so both tables lead with the contract: a row that
+   does not name its own pair is unreadable once more than one is in the list. */
 .futures-workstation-dock-row.is-order-history {
   grid-template-columns:
-    minmax(104px, 1.1fr) 54px minmax(80px, 0.9fr) minmax(76px, 1fr)
-    minmax(96px, 1.1fr) minmax(76px, 1fr) minmax(84px, 0.9fr);
+    minmax(104px, 1fr) minmax(84px, 0.9fr) 54px minmax(80px, 0.9fr)
+    minmax(88px, 1fr) minmax(96px, 1.1fr) minmax(88px, 1fr) minmax(84px, 0.9fr);
 }
 
-.futures-workstation-dock-row.is-trades {
+/* One row per closed position rather than per execution, so it carries both ends
+   of the round: what it was entered at and what it left at. Seven tracks, because
+   the eighth — the fee — was crowding the realized PnL off the right edge, and the
+   PnL is the one column the panel exists for. */
+.futures-workstation-dock-row.is-rounds {
   grid-template-columns:
-    minmax(104px, 1.1fr) 54px minmax(76px, 1fr) minmax(66px, 0.9fr)
-    minmax(66px, 0.9fr) minmax(92px, 1fr);
+    minmax(104px, 1fr) minmax(80px, 0.8fr) minmax(64px, 0.7fr) minmax(84px, 1fr)
+    minmax(76px, 1fr) minmax(76px, 1fr) minmax(112px, 1.2fr);
 }
 
 .futures-workstation-dock-status {

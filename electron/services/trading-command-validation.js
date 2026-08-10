@@ -4,6 +4,7 @@ import {
     DEFAULT_ACCOUNT_ID,
     DEFAULT_SPOT_ORDER_TYPE,
     DEFAULT_SPOT_TIME_IN_FORCE,
+    FUTURES_LEVERAGE_LIMITS,
     FUTURES_MARKET_TYPE,
     POSITION_MARGIN_DIRECTIONS,
     SPOT_MARKET_TYPE,
@@ -569,6 +570,51 @@ const validateTypedAdjustPositionMarginCommand = (payload, baseCommand) => {
     };
 };
 
+// Setting leverage names one contract and one whole number. The symbol has no
+// fallback to the selected contract for the same reason a margin transfer has
+// none: leverage applied to the wrong contract reprices every position on it.
+const validateTypedSetLeverageCommand = (payload, baseCommand) => {
+    const symbol = normalizeTextField(payload.symbol);
+    if (!symbol) {
+        return {
+            ok: false,
+            rejection: createTypedCommandRejection(
+                payload,
+                'INVALID_TYPED_LEVERAGE_SYMBOL',
+                'trade.setLeverage requires the symbol of the contract',
+                { field: 'symbol' },
+            ),
+        };
+    }
+
+    // Leverage is a whole multiple, and the exchange refuses anything else. A
+    // fractional or out-of-range value is refused here rather than spending a
+    // signed request to be told so.
+    const leverage = Number(payload.leverage);
+    if (!Number.isSafeInteger(leverage)
+        || leverage < FUTURES_LEVERAGE_LIMITS.min
+        || leverage > FUTURES_LEVERAGE_LIMITS.max) {
+        return {
+            ok: false,
+            rejection: createTypedCommandRejection(
+                payload,
+                'INVALID_TYPED_LEVERAGE_VALUE',
+                `trade.setLeverage leverage must be a whole number between ${FUTURES_LEVERAGE_LIMITS.min} and ${FUTURES_LEVERAGE_LIMITS.max}`,
+                { field: 'leverage', value: payload.leverage },
+            ),
+        };
+    }
+
+    return {
+        ok: true,
+        command: {
+            ...baseCommand,
+            symbol: symbol.toUpperCase(),
+            leveragePayload: { symbol: symbol.toUpperCase(), leverage },
+        },
+    };
+};
+
 const rejectDefinedButDisabledCommand = (payload, baseCommand) => ({
     ok: false,
     rejection: createTypedCommandRejection(
@@ -670,11 +716,34 @@ export const validateTypedTradingCommand = (payload, { selectedSymbol } = {}) =>
             }
             return { ok: true, command: { ...baseCommand, paused: payload.paused } };
         }
+        case TRADING_COMMAND_ACTIONS.ACCOUNT_SYMBOL_CONFIG: {
+            if (baseCommand.marketType !== FUTURES_MARKET_TYPE) {
+                return rejectDefinedButDisabledCommand(payload, baseCommand);
+            }
+            const symbol = normalizeTextField(payload.symbol) || normalizeTextField(selectedSymbol);
+            if (!symbol) {
+                return {
+                    ok: false,
+                    rejection: createTypedCommandRejection(
+                        payload,
+                        'INVALID_TYPED_SYMBOL_CONFIG_SYMBOL',
+                        'account.symbolConfig requires a symbol',
+                        { field: 'symbol' },
+                    ),
+                };
+            }
+            return { ok: true, command: { ...baseCommand, symbol: symbol.toUpperCase() } };
+        }
         case TRADING_COMMAND_ACTIONS.ADJUST_POSITION_MARGIN:
             if (baseCommand.marketType !== FUTURES_MARKET_TYPE) {
                 return rejectDefinedButDisabledCommand(payload, baseCommand);
             }
             return validateTypedAdjustPositionMarginCommand(payload, baseCommand);
+        case TRADING_COMMAND_ACTIONS.SET_LEVERAGE:
+            if (baseCommand.marketType !== FUTURES_MARKET_TYPE) {
+                return rejectDefinedButDisabledCommand(payload, baseCommand);
+            }
+            return validateTypedSetLeverageCommand(payload, baseCommand);
         case TRADING_COMMAND_ACTIONS.REPLACE_ORDER:
             if (baseCommand.marketType !== FUTURES_MARKET_TYPE) {
                 return rejectDefinedButDisabledCommand(payload, baseCommand);

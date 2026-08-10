@@ -4,6 +4,10 @@ import {
   readFuturesPositionMarks,
 } from '../utils/futuresPositionMarks.js'
 import {
+  mergeFuturesPositionConfigs,
+  readFuturesSymbolConfigs,
+} from '../utils/futuresSymbolConfig.js'
+import {
   createFuturesAccountHistoryCommand,
   createFuturesAccountRefreshCommand,
   createFuturesAdjustPositionMarginCommand,
@@ -11,7 +15,9 @@ import {
   createFuturesCancelOrderCommand,
   createFuturesModifyOrderCommand,
   createFuturesPlaceOrderCommand,
+  createFuturesSetLeverageCommand,
   createFuturesSetTradingPausedCommand,
+  createFuturesSymbolConfigCommand,
 } from '../utils/tradingCommands.js'
 import { createUnsentCommandStore } from '../utils/unsentTradingCommand.js'
 
@@ -69,6 +75,9 @@ const createInitialState = ({ enabled, connection }) => ({
   // Live mark prices, keyed by symbol. Kept beside the snapshot rather than
   // folded into it, so a dropped feed loses only the overlay.
   positionMarks: {},
+  // Leverage and margin mode, keyed by symbol: the two things the position read
+  // stopped reporting. Held beside the snapshot for the same reason as the marks.
+  symbolConfigs: {},
   accountResources: createInitialAccountResources(),
   lastExecution: null,
   lastError: null,
@@ -219,6 +228,18 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection } = {}) => {
         const positionMarks = readFuturesPositionMarks(payload.marks)
         if (positionMarks !== null) {
           setState(previous => ({ ...previous, positionMarks }))
+        }
+      }
+      if (payload.futures_symbol_configs) {
+        const symbolConfigs = readFuturesSymbolConfigs(payload.futures_symbol_configs)
+        // Merged rather than replaced: the reads arrive per contract — one for the
+        // contract on screen, one per open position — and each answers only for
+        // the symbols it asked about.
+        if (symbolConfigs !== null) {
+          setState(previous => ({
+            ...previous,
+            symbolConfigs: { ...previous.symbolConfigs, ...symbolConfigs },
+          }))
         }
       }
       if (payload.futures_execution_update) {
@@ -441,15 +462,33 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection } = {}) => {
     symbol: targetSymbol ?? symbolRef.current,
   })), [sendCommand])
 
+  // A read, not a write: what leverage this contract is set to and how far it may
+  // be set. Asked for per contract rather than folded into the account refresh,
+  // which costs ninety weight and answers for the account, not for one symbol.
+  const loadSymbolConfig = useCallback((targetSymbol) => sendCommand(
+    createFuturesSymbolConfigCommand({ symbol: targetSymbol ?? symbolRef.current }),
+  ), [sendCommand])
+
+  // Leverage names its contract explicitly — never the one on screen — because
+  // applying it to the wrong contract reprices every position on that contract.
+  const setLeverage = useCallback(({ symbol: targetSymbol, leverage } = {}) => {
+    if (!targetSymbol) return false
+    return sendCommand(createFuturesSetLeverageCommand({ symbol: targetSymbol, leverage }))
+  }, [sendCommand])
+
   const setTradingPaused = useCallback(paused => sendCommand(
     createFuturesSetTradingPausedCommand({ paused }),
   ), [sendCommand])
 
   // Every position surface reads the same re-valued list, so the ticket and the
-  // dock can never disagree about what a position is worth.
+  // dock can never disagree about what a position is worth — or about the
+  // leverage it is carried at, which the position read no longer reports.
   const positions = useMemo(
-    () => mergeFuturesPositionMarks(state.positions, state.positionMarks),
-    [state.positions, state.positionMarks],
+    () => mergeFuturesPositionMarks(
+      mergeFuturesPositionConfigs(state.positions, state.symbolConfigs),
+      state.positionMarks,
+    ),
+    [state.positions, state.positionMarks, state.symbolConfigs],
   )
 
   return useMemo(() => ({
@@ -462,8 +501,10 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection } = {}) => {
     closePosition,
     adjustPositionMargin,
     loadHistory,
+    loadSymbolConfig,
     refresh,
     retryUnsentCommand,
+    setLeverage,
     setTradingPaused,
   }), [
     adjustPositionMargin,
@@ -471,11 +512,13 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection } = {}) => {
     cancelOrder,
     closePosition,
     loadHistory,
+    loadSymbolConfig,
     modifyOrder,
     placeOrder,
     positions,
     refresh,
     retryUnsentCommand,
+    setLeverage,
     setTradingPaused,
     state,
   ])

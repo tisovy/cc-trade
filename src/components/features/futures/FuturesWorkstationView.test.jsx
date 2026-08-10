@@ -153,7 +153,7 @@ const createState = (overrides = {}) => Object.freeze({
       priceChangePercent: '0.72',
       highPrice: '59000',
       lowPrice: '57000',
-      volume: '1000.5',
+      volume: '49567852.5',
       quoteVolume: '58000000',
       lastQuantity: '0.25',
       fundingRate: '-0.0001',
@@ -228,6 +228,16 @@ describe('pure Futures workstation presentation', () => {
     expect(screen.getByLabelText('Futures market header')).not.toHaveTextContent('58419.99')
     expect(screen.getByLabelText('Futures market header')).not.toHaveTextContent('1.24')
     expect(screen.getByLabelText('Futures market header')).not.toHaveTextContent('58418.75')
+    // A day's volume is read for its magnitude, not for its last three digits.
+    // The exact figure stays reachable: abbreviating is dropping digits.
+    //
+    // And it is the quote leg — the figure the exchange's own app shows. The base
+    // count is the same day measured in contracts, so a USDT abbreviation over it
+    // overstates the market by whatever the contract is priced at; both legs are in
+    // the title, each with its unit named.
+    const volume = within(screen.getByLabelText('Futures market header')).getByText('58.0M')
+    expect(volume).toHaveAttribute('title', '58000000 USDT · 49567852.5 BTC')
+    expect(screen.getByLabelText('Futures market header')).toHaveTextContent('24h volume, USDT')
     expect(screen.queryByLabelText('Exact contract filters')).not.toBeInTheDocument()
     expect(screen.getByTestId('mock-futures-chart')).toHaveTextContent('price tick 0.1')
     expect(screen.queryByText(/^u /)).not.toBeInTheDocument()
@@ -848,7 +858,10 @@ describe('instrument recency and interface scale', () => {
     })
     const listed = screen.getAllByRole('button', { name: /^BTCUSDT/ })
     expect(listed).toHaveLength(1)
-    expect(listed[0]).toHaveTextContent('PERPETUAL')
+    // Still marked as the operator's own once the catalogue confirms it: sorted to
+    // the front is not a signal when every row below reads the same.
+    expect(listed[0]).toHaveTextContent('recent')
+    expect(listed[0].closest('.futures-workstation-contract')).toHaveClass('is-recent')
     expect(screen.queryByText('Loading contracts…')).not.toBeInTheDocument()
   })
 
@@ -963,9 +976,10 @@ describe('instrument recency and interface scale', () => {
     const { container, rerender } = renderView({ state: withCandle('58500.00') })
     const bookLast = () => container.querySelector('.futures-workstation-book-last')
 
-    expect(bookLast()).toHaveTextContent('58500.00')
+    // The stream pads its closes to a fixed width; the padding is not precision.
+    expect(bookLast()).toHaveTextContent('58500')
     // One price on screen: the header is not separately sourced from the ticker.
-    expect(within(screen.getByLabelText('Futures market header')).getByText('58500.00'))
+    expect(within(screen.getByLabelText('Futures market header')).getByText('58500'))
       .toBeInTheDocument()
     // The tape itself still shows exactly the prints it was asked to show.
     const tape = screen.getByText('Aggregate trades').closest('aside')
@@ -985,6 +999,36 @@ describe('instrument recency and interface scale', () => {
     expect(within(tape).getByText('58420.25')).toBeInTheDocument()
     expect(bookLast()).toHaveTextContent('58600')
     expect(bookLast()).toHaveClass('is-up')
+  })
+
+  // Binance pads a kline close to a fixed width: BLUAIUSDT trades at 2.601 and
+  // arrives as `2.6010000`, which read as a price with four digits of noise on it.
+  it('drops the stream’s padding from the last price without rounding it', () => {
+    const base = createState()
+    const withCandle = close => createState({
+      resources: Object.freeze({
+        ...base.resources,
+        candles: Object.freeze({ ...base.resources.candles, contract: Object.freeze([candle(close)]) }),
+      }),
+    })
+    const { container, rerender } = renderView({ state: withCandle('2.6010000') })
+    const bookLast = () => container.querySelector('.futures-workstation-book-last')
+    expect(bookLast()).toHaveTextContent('2.601')
+    expect(bookLast()).not.toHaveTextContent('2.6010')
+
+    // A coin quoted in fractions of a cent keeps every digit it trades at: the
+    // padding is dropped, the precision is not.
+    rerender(
+      <FuturesWorkstationView
+        identity="USDⓈ-M PRODUCTION · REAL MONEY"
+        state={withCandle('0.00123000')}
+        selectedSymbol="BTCUSDT"
+        selectedInterval="1m"
+        onSymbolChange={() => {}}
+        onIntervalChange={() => {}}
+      />,
+    )
+    expect(bookLast()).toHaveTextContent('0.00123')
   })
 
   it('states the last move as a direction rather than as a maker side', () => {
@@ -1272,6 +1316,110 @@ describe('production workstation container', () => {
     expect(screen.queryByText('Phase 7 production safety drawer')).not.toBeInTheDocument()
     expect(screen.queryByText('Advanced safety')).not.toBeInTheDocument()
     expect(screen.getByLabelText('Futures trading ticket')).toBeInTheDocument()
+  })
+
+  // The rail's own storage round trip, which no test covered: the container reads
+  // the recency list on mount, floats the contract that is picked to its front, and
+  // writes it through, so a restart opens on the contracts the operator works with
+  // even before the catalogue arrives.
+  it('carries the recent contracts across a restart', () => {
+    localStorage.setItem('cc-trade:futures-symbols:v1', JSON.stringify({
+      recent: ['BICOUSDT', 'BEATUSDT'],
+      favorites: [],
+      lastSymbol: 'BICOUSDT',
+    }))
+    const workstation = () => (
+      <FuturesProductionWorkstation
+        enabled={false}
+        wsConnection={null}
+        sendMessage={() => false}
+        executionState={productionExecutionState}
+      />
+    )
+    const first = render(workstation())
+    const listed = () => screen.getAllByRole('button', { name: /^(?:BICO|BEAT)USDT/ })
+    expect(listed().map(button => button.textContent))
+      .toEqual(['BICOUSDTrecent', 'BEATUSDTrecent'])
+
+    fireEvent.click(listed()[1])
+    expect(JSON.parse(localStorage.getItem('cc-trade:futures-symbols:v1')))
+      .toMatchObject({ recent: ['BEATUSDT', 'BICOUSDT'], lastSymbol: 'BEATUSDT' })
+
+    first.unmount()
+    render(workstation())
+    expect(listed().map(button => button.textContent))
+      .toEqual(['BEATUSDTrecent', 'BICOUSDTrecent'])
+  })
+
+  // Spot parity: the pair changes more often than anything else on the desk, and
+  // reaching for it cost a trip to the rail's search box and a click on a row.
+  it('opens the pair list on a typed letter and switches to what is picked', () => {
+    vi.stubGlobal('WebSocket', undefined)
+    localStorage.setItem('cc-trade:futures-symbols:v1', JSON.stringify({
+      recent: ['BICOUSDT', 'BEATUSDT'],
+      favorites: [],
+      lastSymbol: 'BICOUSDT',
+    }))
+    render(
+      <FuturesProductionWorkstation
+        enabled
+        wsConnection={null}
+        sendMessage={() => false}
+        executionState={productionExecutionState}
+      />,
+    )
+    fireEvent.keyDown(document, { key: 'b' })
+    const popup = screen.getByPlaceholderText('Type pair (e.g. BTCUSDT)')
+    expect(popup).toHaveValue('B')
+    const offered = () => Array.from(
+      document.querySelectorAll('.quick-switch-item'),
+    ).map(item => item.textContent)
+    // Recency ranks above the alphabet: BEAT sorts first alphabetically and is
+    // offered second, because BICO is where the operator just was.
+    expect(offered()).toEqual(['BICOUSDT', 'BEATUSDT'])
+    fireEvent.keyDown(popup, { key: 'ArrowDown' })
+    fireEvent.keyDown(popup, { key: 'Enter' })
+    expect(screen.queryByPlaceholderText('Type pair (e.g. BTCUSDT)')).not.toBeInTheDocument()
+    expect(JSON.parse(localStorage.getItem('cc-trade:futures-symbols:v1')))
+      .toMatchObject({ recent: ['BEATUSDT', 'BICOUSDT'], lastSymbol: 'BEATUSDT' })
+  })
+
+  it('opens the interval list on a typed digit', () => {
+    vi.stubGlobal('WebSocket', undefined)
+    render(
+      <FuturesProductionWorkstation
+        enabled
+        wsConnection={null}
+        sendMessage={() => false}
+        executionState={productionExecutionState}
+      />,
+    )
+    // The workstation's own shortcuts are mouse gestures and modifier keys, so a
+    // bare digit is free to mean an interval.
+    fireEvent.keyDown(document, { key: '5' })
+    const popup = screen.getByPlaceholderText('Type interval (e.g. 15m)')
+    expect(popup).toHaveValue('5')
+    expect(Array.from(document.querySelectorAll('.quick-switch-item')).map(i => i.textContent))
+      .toEqual(['5m', '15m'])
+    fireEvent.keyDown(popup, { key: 'Enter' })
+    expect(screen.getByRole('button', { name: '5m' })).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  // Typing into a field is typing, and a modifier is a gesture, not a search.
+  it('leaves typing in a field and modified keys alone', () => {
+    vi.stubGlobal('WebSocket', undefined)
+    render(
+      <FuturesProductionWorkstation
+        enabled
+        wsConnection={null}
+        sendMessage={() => false}
+        executionState={productionExecutionState}
+      />,
+    )
+    fireEvent.keyDown(screen.getByLabelText('Search Futures contracts'), { key: 'b' })
+    expect(screen.queryByPlaceholderText('Type pair (e.g. BTCUSDT)')).not.toBeInTheDocument()
+    fireEvent.keyDown(document, { key: 'b', ctrlKey: true })
+    expect(screen.queryByPlaceholderText('Type pair (e.g. BTCUSDT)')).not.toBeInTheDocument()
   })
 
   it('does not duplicate the backend authoritative portfolio bootstrap in the renderer', () => {

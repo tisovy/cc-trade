@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  describeFuturesCloseOutcome,
   describeFuturesOrderIntent,
   describeFuturesPosition,
   describeFuturesPositionMargin,
@@ -7,6 +8,7 @@ import {
   formatSignedUsdt,
   formatUsdt,
   orderNotionalUsdt,
+  projectLiquidationPrice,
   totalOrderNotionalUsdt,
 } from './futuresOrderPresentation.js'
 
@@ -132,7 +134,7 @@ describe('describeFuturesPositionMargin', () => {
       isolatedWallet: '512.4',
       isolatedMargin: '480',
       initialMargin: '300',
-    })).toEqual({ marginMode: 'ISOLATED', margin: 512.4, adjustable: true })
+    })).toMatchObject({ marginMode: 'ISOLATED', margin: 512.4, adjustable: true })
   })
 
   it('reports a position with no isolated wallet as cross and refuses adjustment', () => {
@@ -141,7 +143,7 @@ describe('describeFuturesPositionMargin', () => {
       entryPrice: '60000',
       isolatedWallet: '0',
       initialMargin: '3000',
-    })).toEqual({ marginMode: 'CROSS', margin: 3000, adjustable: false })
+    })).toMatchObject({ marginMode: 'CROSS', margin: 3000, adjustable: false })
   })
 
   it('believes a source that states the mode outright', () => {
@@ -155,8 +157,53 @@ describe('describeFuturesPositionMargin', () => {
 
   it('reports no margin at all rather than a confident zero', () => {
     expect(describeFuturesPositionMargin({ quantity: '0.5', entryPrice: '60000' }))
-      .toEqual({ marginMode: null, margin: null, adjustable: false })
+      .toMatchObject({ marginMode: null, margin: null, adjustable: false })
     expect(describeFuturesPositionMargin({})).toMatchObject({ margin: null, adjustable: false })
+  })
+
+  // The distance to liquidation, measured in money: the position is closed when
+  // its margin balance reaches the maintenance requirement.
+  it('measures the margin standing above the liquidation floor', () => {
+    expect(describeFuturesPositionMargin({
+      isolatedWallet: '1200',
+      maintenanceMargin: '38.8',
+      unrealizedPnl: '0',
+    })).toMatchObject({
+      maintenanceMargin: 38.8,
+      marginBalance: 1200,
+      liquidationBuffer: 1161.2,
+      removable: 1161.2,
+    })
+  })
+
+  it('takes an unrealized loss out of the buffer and leaves an unrealized profit out of it', () => {
+    // The loss has already been taken out of the margin behind the position.
+    expect(describeFuturesPositionMargin({
+      isolatedWallet: '1200', maintenanceMargin: '40', unrealizedPnl: '-300',
+    })).toMatchObject({ marginBalance: 900, liquidationBuffer: 860 })
+    // The profit is not in the wallet and cannot be withdrawn, so it buys no
+    // headroom to remove margin with.
+    expect(describeFuturesPositionMargin({
+      isolatedWallet: '1200', maintenanceMargin: '40', unrealizedPnl: '300',
+    })).toMatchObject({ marginBalance: 1200, liquidationBuffer: 1160 })
+  })
+
+  it('reports nothing removable when the position is already under its floor', () => {
+    expect(describeFuturesPositionMargin({
+      isolatedWallet: '1200', maintenanceMargin: '40', unrealizedPnl: '-1180',
+    })).toMatchObject({ liquidationBuffer: -20, removable: 0 })
+  })
+
+  // A cross position's buffer belongs to the account, not to one row of a table.
+  it('claims no per-position buffer for a cross position', () => {
+    expect(describeFuturesPositionMargin({
+      isolatedWallet: '0', initialMargin: '3000', maintenanceMargin: '40',
+    })).toMatchObject({ marginMode: 'CROSS', liquidationBuffer: null, removable: null })
+  })
+
+  it('draws no floor when the read carries no maintenance requirement', () => {
+    expect(describeFuturesPositionMargin({ isolatedWallet: '1200' }))
+      .toMatchObject({ maintenanceMargin: null, liquidationBuffer: null, removable: null })
   })
 
   // The row shows the percentage and the amount it was divided by. Computing
@@ -190,5 +237,97 @@ describe('signed formatting', () => {
     expect(formatUsdt('15716.4949')).toBe('15716.49')
     expect(formatUsdt(-15716.49)).toBe('15716.49')
     expect(formatUsdt(null)).toBe('—')
+  })
+})
+
+describe('projectLiquidationPrice', () => {
+  // Margin does not change the size of the position, so a transfer moves the
+  // liquidation price by itself spread over the quantity.
+  it('moves the price away from the entry when margin is added', () => {
+    expect(projectLiquidationPrice({
+      liquidationPrice: '54680',
+      quantity: '0.5',
+      positionSide: 'LONG',
+      marginDelta: 250,
+    })).toBeCloseTo(54180, 6)
+    expect(projectLiquidationPrice({
+      liquidationPrice: '59320',
+      quantity: '-0.5',
+      positionSide: 'SHORT',
+      marginDelta: 250,
+    })).toBeCloseTo(59820, 6)
+  })
+
+  it('pulls it in when margin is taken out', () => {
+    expect(projectLiquidationPrice({
+      liquidationPrice: '54680',
+      quantity: '0.5',
+      positionSide: 'LONG',
+      marginDelta: -200,
+    })).toBeCloseTo(55080, 6)
+  })
+
+  // A price is never negative, however much margin is withdrawn on paper: the
+  // position is long gone before the arithmetic gets there.
+  it('never projects a price below zero', () => {
+    expect(projectLiquidationPrice({
+      liquidationPrice: '10',
+      quantity: '1',
+      positionSide: 'LONG',
+      marginDelta: 500,
+    })).toBe(0)
+  })
+
+  it('states nothing rather than a guess when an input is missing', () => {
+    const base = { liquidationPrice: '54680', quantity: '0.5', positionSide: 'LONG' }
+    // Binance reports 0 for a position it has no liquidation price for.
+    expect(projectLiquidationPrice({ ...base, liquidationPrice: '0', marginDelta: 250 })).toBeNull()
+    expect(projectLiquidationPrice({ ...base, quantity: '0', marginDelta: 250 })).toBeNull()
+    expect(projectLiquidationPrice({ ...base, marginDelta: null })).toBeNull()
+    expect(projectLiquidationPrice({ ...base, marginDelta: 0 })).toBeNull()
+    expect(projectLiquidationPrice()).toBeNull()
+  })
+})
+
+describe('describeFuturesCloseOutcome', () => {
+  it('values the exit and the profit it would take', () => {
+    expect(describeFuturesCloseOutcome({
+      positionSide: 'LONG',
+      entryPrice: '57000',
+      quantity: '0.25',
+      exitPrice: '58445.07',
+    })).toEqual({
+      notional: 0.25 * 58445.07,
+      realizedPnl: (58445.07 - 57000) * 0.25,
+    })
+  })
+
+  // The same mark above the same entry is a loss on the other side of the book.
+  it('reads a short’s profit from the other direction', () => {
+    const { realizedPnl } = describeFuturesCloseOutcome({
+      positionSide: 'SHORT',
+      entryPrice: '57000',
+      quantity: '0.5',
+      exitPrice: '58445.07',
+    })
+    expect(realizedPnl).toBeLessThan(0)
+    expect(realizedPnl).toBeCloseTo(-722.535, 6)
+  })
+
+  // Without an entry price there is no profit to state, and 0.00 would read as a
+  // break-even exit rather than as an unknown one.
+  it('reports an absent profit as absent while still valuing the exit', () => {
+    expect(describeFuturesCloseOutcome({
+      positionSide: 'LONG',
+      quantity: '0.5',
+      exitPrice: '100',
+    })).toEqual({ notional: 50, realizedPnl: null })
+    expect(describeFuturesCloseOutcome({
+      positionSide: 'LONG',
+      entryPrice: '57000',
+      quantity: null,
+      exitPrice: '58445.07',
+    })).toEqual({ notional: null, realizedPnl: null })
+    expect(describeFuturesCloseOutcome()).toEqual({ notional: null, realizedPnl: null })
   })
 })

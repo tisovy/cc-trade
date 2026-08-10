@@ -200,6 +200,57 @@ export const normalizeFuturesHistoryTrade = (trade = {}) => Object.freeze({
     time: historyNumber(trade.time) ?? 0,
 });
 
+// What the account is configured to for one contract. `/fapi/v3/positionRisk`
+// stopped reporting leverage and margin mode, and `/fapi/v1/symbolConfig` is where
+// Binance moved both: without this read the desk cannot state the leverage a
+// position is carried at, let alone set it.
+export const normalizeFuturesSymbolConfig = (entry = {}) => {
+    const symbol = typeof entry.symbol === 'string' ? entry.symbol.toUpperCase() : null;
+    if (symbol === null) return null;
+    const leverage = historyNumber(entry.leverage);
+    const marginType = String(entry.marginType ?? '').toUpperCase() || null;
+    return Object.freeze({
+        symbol,
+        // Never a confident default: a leverage the exchange did not report is
+        // absent, and 1× would read as an account trading unlevered.
+        leverage: leverage !== null && leverage >= 1 ? Math.floor(leverage) : null,
+        marginType,
+        maxNotionalValue: entry.maxNotionalValue ?? null,
+    });
+};
+
+// The highest leverage this contract allows. Bracket 1 is the lowest notional
+// band and carries the highest multiple, which is the ceiling Binance refuses a
+// higher setting against.
+export const readFuturesMaxLeverage = (payload) => {
+    const entries = Array.isArray(payload) ? payload : [payload];
+    let ceiling = null;
+    for (const entry of entries) {
+        for (const bracket of Array.isArray(entry?.brackets) ? entry.brackets : []) {
+            const leverage = historyNumber(bracket?.initialLeverage);
+            if (leverage === null || leverage < 1) continue;
+            if (ceiling === null || leverage > ceiling) ceiling = Math.floor(leverage);
+        }
+    }
+    return ceiling;
+};
+
+// Which contracts this account traded, newest first. Income history is the only
+// USDⓈ-M read that answers that without being told a symbol first — every trade
+// and order history endpoint requires one — so it is what a review of the whole
+// session has to start from.
+export const readFuturesTradedSymbols = (income) => {
+    const rows = (Array.isArray(income) ? income : [])
+        .filter(row => typeof row?.symbol === 'string' && row.symbol !== '')
+        .sort((left, right) => (historyNumber(right?.time) ?? 0) - (historyNumber(left?.time) ?? 0));
+    const symbols = [];
+    for (const row of rows) {
+        const symbol = row.symbol.toUpperCase();
+        if (!symbols.includes(symbol)) symbols.push(symbol);
+    }
+    return symbols;
+};
+
 export const normalizeFuturesAlgoOrder = (order = {}) => {
     const algoId = order.algoId ?? order.orderId;
     const clientAlgoId = order.clientAlgoId ?? order.clientOrderId;
@@ -649,6 +700,48 @@ export class FuturesTradingAdapter {
         return (Array.isArray(data) ? data : [])
             .map(trade => normalizeFuturesHistoryTrade(trade))
             .sort((left, right) => right.time - left.time);
+    }
+
+    // Reads Binance's own record of what this contract is set to, rather than
+    // inferring it: an inferred leverage would be a guess printed beside money.
+    async getSymbolConfig(symbol) {
+        const data = await this.#signedRequest('GET', '/fapi/v1/symbolConfig', { symbol });
+        const entries = Array.isArray(data) ? data : [data];
+        const wanted = String(symbol ?? '').toUpperCase();
+        const entry = entries.find(candidate => (
+            String(candidate?.symbol ?? '').toUpperCase() === wanted
+        )) ?? entries[0];
+        return entry ? normalizeFuturesSymbolConfig(entry) : null;
+    }
+
+    async getMaxLeverage(symbol) {
+        const data = await this.#signedRequest('GET', '/fapi/v1/leverageBracket', { symbol });
+        return readFuturesMaxLeverage(data);
+    }
+
+    // Binance answers with the leverage it actually applied, which can be lower
+    // than the one asked for when a position is already too large for the bracket.
+    async setLeverage({ symbol, leverage }) {
+        const data = await this.#signedRequest('POST', '/fapi/v1/leverage', {
+            symbol,
+            leverage: String(leverage),
+        });
+        return normalizeFuturesSymbolConfig({
+            symbol: data?.symbol ?? symbol,
+            leverage: data?.leverage ?? leverage,
+            maxNotionalValue: data?.maxNotionalValue ?? null,
+        });
+    }
+
+    // Bounded by time rather than by count: what is wanted is the set of contracts
+    // traded in the window, and the amounts on these rows are never read.
+    async getTradedSymbols({ startTime, limit = 1000 }) {
+        const data = await this.#signedRequest('GET', '/fapi/v1/income', {
+            incomeType: 'REALIZED_PNL',
+            startTime,
+            limit: Math.min(Math.max(Number(limit) || 1000, 1), 1000),
+        });
+        return readFuturesTradedSymbols(data);
     }
 
     async createUserDataStreamListenKey() {

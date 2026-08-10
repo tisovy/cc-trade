@@ -12,7 +12,14 @@ export const TRADING_COMMAND_ACTIONS = Object.freeze({
     ACCOUNT_HISTORY: 'account.history',
     SET_TRADING_PAUSED: 'trade.setTradingPaused',
     ADJUST_POSITION_MARGIN: 'trade.adjustPositionMargin',
+    ACCOUNT_SYMBOL_CONFIG: 'account.symbolConfig',
+    SET_LEVERAGE: 'trade.setLeverage',
 });
+
+// Binance allows 1–125 depending on the contract and the bracket; the contract's
+// own ceiling is read from its leverage bracket and is always the lower of the
+// two. This is only the outer bound a command is refused past.
+export const FUTURES_LEVERAGE_LIMITS = Object.freeze({ min: 1, max: 125 });
 
 export const POSITION_MARGIN_DIRECTIONS = Object.freeze({
     ADD: 'ADD',
@@ -324,6 +331,44 @@ export const createFuturesAdjustPositionMarginCommand = ({
     direction,
     amount: toOptionalString(amount),
     ...compactObject({ positionSide }),
+});
+
+// What leverage a contract is set to, and the ceiling it may be set to.
+// `/fapi/v3/positionRisk` reports neither any more, so nothing on the desk can
+// state the leverage a trade is entered at without asking for it.
+export const createFuturesSymbolConfigCommand = ({
+    accountId,
+    clientOrderId,
+    symbol,
+} = {}) => ({
+    ...buildBaseCommand({
+        action: TRADING_COMMAND_ACTIONS.ACCOUNT_SYMBOL_CONFIG,
+        marketType: FUTURES_MARKET_TYPE,
+        accountId,
+        clientOrderId,
+        symbol,
+    }),
+    symbol,
+});
+
+// Leverage is the one property of a contract the operator sets outside an order.
+// It places nothing: what it changes is the margin every future entry costs and,
+// on an open isolated position, how far that position stands from liquidation.
+export const createFuturesSetLeverageCommand = ({
+    accountId,
+    clientOrderId,
+    symbol,
+    leverage,
+} = {}) => ({
+    ...buildBaseCommand({
+        action: TRADING_COMMAND_ACTIONS.SET_LEVERAGE,
+        marketType: FUTURES_MARKET_TYPE,
+        accountId,
+        clientOrderId,
+        symbol,
+    }),
+    symbol,
+    leverage,
 });
 
 export const isTypedTradingAction = (action) => (

@@ -333,10 +333,14 @@ describe('App spot order payloads', () => {
     expect(mocks.futuresProductionEnabled.at(-1)).toBe(true)
     await waitFor(() => expect(mocks.sendMessage).toHaveBeenCalledWith({ action: 'disable_depth_view' }))
 
+    // Futures has its own type-to-search now, so the picker opens on both desks —
+    // each from its own workspace, listening only while it is the active market.
     fireEvent.keyDown(document, { key: 'B' })
-    expect(screen.queryByTestId('quick-switch-modal')).not.toBeInTheDocument()
+    expect(screen.getByTestId('quick-switch-modal')).toBeInTheDocument()
 
     fireEvent.click(screen.getByTestId('market-mode-spot'))
+    // The futures listener leaves with its workspace: what answers on Spot is
+    // Spot's own, and one keypress opens exactly one picker.
 
     expect(screen.queryByTestId('futures-live-view')).not.toBeInTheDocument()
     expect(await screen.findByTestId('place-spot-order', {}, WORKSPACE_MOUNT)).toBeInTheDocument()

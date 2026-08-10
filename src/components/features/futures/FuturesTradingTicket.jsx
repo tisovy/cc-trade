@@ -11,13 +11,19 @@ import {
 import {
   describeFuturesOrderIntent,
   describeFuturesPosition,
+  describeFuturesPositionMargin,
   orderNotionalUsdt,
   totalOrderNotionalUsdt,
   formatSignedPercent,
   formatSignedUsdt,
+  formatUsdt,
 } from '../../../utils/futuresOrderPresentation.js'
 import { describeFuturesOrderConfirmation } from '../../../utils/futuresOrderConfirmation.js'
-import { formatExchangePrice, formatUsdtAmount } from '../../../utils/futuresPriceFormat.js'
+import {
+  formatExchangePrice,
+  formatPriceOrAbsent,
+  formatUsdtAmount,
+} from '../../../utils/futuresPriceFormat.js'
 import { deriveFuturesReadiness } from '../../../utils/futuresReadiness.js'
 import FuturesOrderConfirmation from './FuturesOrderConfirmation.jsx'
 import './FuturesProductionExecutionTicket.css'
@@ -73,15 +79,12 @@ const orderSizeTitle = (order) => (
 // information, and in this column it wrapped onto a second line. A price of
 // zero is not a price — an order carrying neither reads as absent rather than
 // as resting at the cheapest level in the column.
-const orderPriceText = (order, tickSize) => {
-  const price = order?.triggerPrice ?? order?.price
-  return Number(price) > 0 ? formatExchangePrice(price, tickSize) : '—'
-}
-
 const FuturesTradingTicket = ({
   state,
   selectedSymbol = 'BTCUSDT',
   selectedContract = null,
+  leverage = null,
+  onLeverageEdit,
   draftPrice = null,
   gestureRequest = null,
   orderAmendRequest = null,
@@ -154,6 +157,11 @@ const FuturesTradingTicket = ({
     ? sizePercent
     : calculateFuturesNotionalPercent(customNotionalUsdt, sizingBudget) ?? 0
 
+  // The leverage the account is actually set to, so the margin an entry will cost
+  // is the exchange's arithmetic rather than a placeholder. Unknown falls back to
+  // 1×, which overstates the cost — never understates it — and the reading says
+  // so by showing no multiple beside it.
+  const entryLeverage = Number.isSafeInteger(leverage) && leverage >= 1 ? leverage : null
   const deriveDraft = candidatePrice => deriveFuturesLimitOrderDraft({
     notionalUsdt,
     price: candidatePrice,
@@ -162,7 +170,7 @@ const FuturesTradingTicket = ({
     minQuantity,
     maxQuantity,
     minNotionalUsdt,
-    leverage: 1,
+    leverage: entryLeverage ?? 1,
   })
   const orderDraft = deriveDraft(price)
   const amountWithinBudget = isFuturesDraftAmountWithinBudget(notionalUsdt, sizingBudget)
@@ -511,6 +519,25 @@ const FuturesTradingTicket = ({
           <section className="futures-production-action is-order" aria-label="Futures order size and shortcuts">
             <div className="futures-production-ticket-symbol">
               <strong>{selectedSymbol}</strong>
+              {/* The multiple every entry on this contract is taken at, stated
+                  where the size is chosen rather than nowhere — and it is the
+                  control that changes it. */}
+              {typeof onLeverageEdit === 'function' ? (
+                <button
+                  type="button"
+                  className="futures-production-ticket-leverage"
+                  aria-label={`Set ${selectedSymbol} leverage`}
+                  title={entryLeverage === null
+                    ? 'Leverage not reported yet — click to set it'
+                    : `${entryLeverage}× leverage on ${selectedSymbol} — click to change it`}
+                  onClick={event => onLeverageEdit(selectedSymbol, {
+                    x: event.clientX,
+                    y: event.clientY,
+                  })}
+                >
+                  {entryLeverage === null ? 'Lev' : `${entryLeverage}×`}
+                </button>
+              ) : null}
               <code className={gestureAction ? `is-${gestureAction.positionSide.toLowerCase()}` : ''}>
                 {gestureAction ? gestureAction.label : 'Awaiting shortcut'}
               </code>
@@ -586,6 +613,23 @@ const FuturesTradingTicket = ({
                 <dt>Available</dt>
                 <dd title={availableUsdt ?? undefined}>
                   {availableUsdt ? `${formatUsdtAmount(availableUsdt, 0)} USDT` : '—'}
+                </dd>
+              </div>
+              {/* What the entry actually costs out of the wallet: the notional is
+                  the position, this is the money held against it. Without the
+                  leverage the two are the same number, which is exactly the
+                  confusion that made an operator ask what they were trading at. */}
+              <div>
+                <dt title={entryLeverage === null
+                  ? 'Margin held against this order. Leverage unknown, so this is the full notional.'
+                  : `Notional ÷ ${entryLeverage}× leverage`}
+                >
+                  Est. margin
+                </dt>
+                <dd>
+                  {orderDraft.ok
+                    ? `${formatUsdtAmount(orderDraft.estimatedMarginUsdt)} USDT`
+                    : '—'}
                 </dd>
               </div>
               <div>
@@ -679,7 +723,7 @@ const FuturesTradingTicket = ({
                           </span>
                         </span>
                         <span role="cell">
-                          <code>{orderPriceText(order, tickOf(order.symbol))}</code>
+                          <code>{formatPriceOrAbsent(order.triggerPrice ?? order.price, tickOf(order.symbol))}</code>
                         </span>
                         <span role="cell" title={orderSizeTitle(order)}>
                           <b>{orderNotionalUsdt(order) ?? '—'}</b>
@@ -740,6 +784,7 @@ const FuturesTradingTicket = ({
               ? <p>No open positions.</p>
               : positions.map((position) => {
                 const presentation = describeFuturesPosition(position)
+                const marginState = describeFuturesPositionMargin(position)
                 return (
                 <article
                   className={`is-${presentation.tone}`}
@@ -768,6 +813,20 @@ const FuturesTradingTicket = ({
                     <div>
                       <dt>Liq.</dt>
                       <dd>{formatExchangePrice(position.liquidationPrice, tickOf(position.symbol))}</dd>
+                    </div>
+                    {/* The liquidation price is a function of this number, so
+                        the card that states one states the other — and names
+                        the mode, since only an isolated margin can be moved. */}
+                    <div>
+                      <dt>Margin</dt>
+                      <dd>
+                        {marginState.marginMode ? (
+                          <em className="futures-production-margin-mode">
+                            {marginState.marginMode === 'CROSS' ? 'CROSS' : 'ISO'}
+                          </em>
+                        ) : null}
+                        {formatUsdt(marginState.margin)}
+                      </dd>
                     </div>
                   </dl>
                   <div>

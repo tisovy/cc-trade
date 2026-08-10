@@ -275,6 +275,85 @@ describe('useFuturesTrading', () => {
     expect(result.current.lastError).toBeNull()
   })
 
+  // /fapi/v3/positionRisk reports neither leverage nor margin mode any more, so
+  // both are asked for per contract and folded into the rows that display them.
+  it('states the leverage a position is carried at once the config arrives', () => {
+    const socket = createSocket()
+    const { result } = renderHook(() => useFuturesTrading({
+      enabled: true,
+      symbol: 'BTCUSDT',
+      wsConnection: socket,
+    }))
+
+    act(() => {
+      socket.receive({
+        version: 1,
+        type: 'futures_account_state',
+        resources: {
+          positions: {
+            status: 'ready',
+            data: [{ symbol: 'BTCUSDT', positionSide: 'BOTH', quantity: '0.01' }],
+            lastSuccessfulAt: 100,
+          },
+        },
+      })
+    })
+    expect(result.current.positions[0].leverage).toBeUndefined()
+
+    act(() => {
+      result.current.loadSymbolConfig('BTCUSDT')
+    })
+    expect(socket.sent.at(-1)).toMatchObject({
+      action: 'account.symbolConfig',
+      marketType: 'futures',
+      symbol: 'BTCUSDT',
+    })
+
+    act(() => socket.receive({
+      futures_symbol_configs: {
+        BTCUSDT: { symbol: 'BTCUSDT', leverage: 20, maxLeverage: 125, marginType: 'ISOLATED' },
+      },
+    }))
+    expect(result.current.positions[0]).toMatchObject({ leverage: 20, marginType: 'ISOLATED' })
+    expect(result.current.symbolConfigs.BTCUSDT.maxLeverage).toBe(125)
+
+    // The reads arrive one contract at a time, so a second answer must not erase
+    // the first: the desk holds positions on more than one contract at once.
+    act(() => socket.receive({
+      futures_symbol_configs: { BICOUSDT: { symbol: 'BICOUSDT', leverage: 10 } },
+    }))
+    expect(result.current.symbolConfigs.BTCUSDT.leverage).toBe(20)
+    expect(result.current.symbolConfigs.BICOUSDT.leverage).toBe(10)
+  })
+
+  it('sends a leverage change for the named contract and nothing without one', () => {
+    const socket = createSocket()
+    const { result } = renderHook(() => useFuturesTrading({
+      enabled: true,
+      symbol: 'BTCUSDT',
+      wsConnection: socket,
+    }))
+
+    act(() => {
+      expect(result.current.setLeverage({ symbol: 'BICOUSDT', leverage: 20 })).toBe(true)
+    })
+    expect(socket.sent.at(-1)).toMatchObject({
+      action: 'trade.setLeverage',
+      marketType: 'futures',
+      symbol: 'BICOUSDT',
+      leverage: 20,
+    })
+
+    const sentBefore = socket.sent.length
+    act(() => {
+      // Never falls back to the contract on screen: leverage applied to the wrong
+      // one reprices every position on it.
+      expect(result.current.setLeverage({ leverage: 20 })).toBe(false)
+      expect(result.current.setLeverage()).toBe(false)
+    })
+    expect(socket.sent).toHaveLength(sentBefore)
+  })
+
   it('keeps account-wide regular and ALGO namespaces distinct across terminal updates', () => {
     const socket = createSocket()
     const { result, rerender } = renderHook(

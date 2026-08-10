@@ -652,6 +652,93 @@ describe('backend trading command validation', () => {
         })).toMatchObject({ ok: false });
     });
 
+    // Reading a contract's configuration touches nothing, so it may fall back to
+    // the contract on screen — unlike setting leverage, which may not.
+    it('accepts a contract configuration read and refuses it for spot', () => {
+        expect(validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.ACCOUNT_SYMBOL_CONFIG,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'futures',
+            accountId: 'default',
+            clientOrderId: 'config-1',
+        }, { selectedSymbol: 'btcusdt' })).toEqual({
+            ok: true,
+            command: {
+                action: TRADING_COMMAND_ACTIONS.ACCOUNT_SYMBOL_CONFIG,
+                version: TRADE_COMMAND_VERSION,
+                marketType: 'futures',
+                accountId: 'default',
+                clientOrderId: 'config-1',
+                symbol: 'BTCUSDT',
+            },
+        });
+
+        expect(validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.ACCOUNT_SYMBOL_CONFIG,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'futures',
+            accountId: 'default',
+            clientOrderId: 'config-2',
+        })).toMatchObject({
+            ok: false,
+            rejection: { command_rejected: { code: 'INVALID_TYPED_SYMBOL_CONFIG_SYMBOL' } },
+        });
+
+        expect(validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.ACCOUNT_SYMBOL_CONFIG,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'spot',
+            accountId: 'default',
+            clientOrderId: 'config-3',
+            symbol: 'BTCUSDT',
+        })).toMatchObject({ ok: false });
+    });
+
+    // Leverage names one contract and one whole number: applied to the wrong
+    // contract it reprices every position on it, and the exchange takes integers
+    // only, so a fraction is refused here rather than by a signed request.
+    it('accepts a leverage change and names every field it refuses', () => {
+        const validCommand = {
+            action: TRADING_COMMAND_ACTIONS.SET_LEVERAGE,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'futures',
+            accountId: 'default',
+            clientOrderId: 'leverage-1',
+            symbol: 'btcusdt',
+            leverage: 20,
+        };
+        expect(validateTypedTradingCommand(validCommand, { selectedSymbol: 'ETHUSDT' })).toEqual({
+            ok: true,
+            command: {
+                action: TRADING_COMMAND_ACTIONS.SET_LEVERAGE,
+                version: TRADE_COMMAND_VERSION,
+                marketType: 'futures',
+                accountId: 'default',
+                clientOrderId: 'leverage-1',
+                symbol: 'BTCUSDT',
+                leveragePayload: { symbol: 'BTCUSDT', leverage: 20 },
+            },
+        });
+
+        expect(validateTypedTradingCommand(
+            { ...validCommand, symbol: undefined },
+            { selectedSymbol: 'ETHUSDT' },
+        )).toMatchObject({
+            ok: false,
+            rejection: { command_rejected: { code: 'INVALID_TYPED_LEVERAGE_SYMBOL' } },
+        });
+
+        for (const leverage of [0, -5, 2.5, 126, 'twenty', undefined]) {
+            expect(validateTypedTradingCommand({ ...validCommand, leverage })).toMatchObject({
+                ok: false,
+                rejection: { command_rejected: { code: 'INVALID_TYPED_LEVERAGE_VALUE' } },
+            });
+        }
+
+        expect(validateTypedTradingCommand({ ...validCommand, marketType: 'spot' }))
+            .toMatchObject({ ok: false });
+    });
+
     // Margin transfers move real money and name one position. The symbol has no
     // fallback to the selected contract precisely because the fallback would
     // land the transfer on a position the operator never clicked.

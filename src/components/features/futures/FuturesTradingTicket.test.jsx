@@ -68,6 +68,49 @@ describe('FuturesTradingTicket', () => {
     expect(screen.getByText('READY')).toBeInTheDocument()
   })
 
+  // Nothing on the desk stated the multiple an entry is taken at, and the margin
+  // it costs is the notional divided by it — at 20× a 250 USDT position holds
+  // 12.50, which is the number an operator sizes against.
+  it('states the leverage of the contract and what an entry costs in margin', () => {
+    const onLeverageEdit = vi.fn()
+    const { rerender } = render(
+      <FuturesTradingTicket
+        state={createState()}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+        leverage={20}
+        onLeverageEdit={onLeverageEdit}
+        draftPrice="58445.0"
+      />,
+    )
+    sizeTo(25)
+    expect(screen.getByTitle('Notional ÷ 20× leverage')).toBeInTheDocument()
+    expect(screen.getByText('11.69 USDT')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Set BTCUSDT leverage' }))
+    expect(onLeverageEdit).toHaveBeenCalledWith('BTCUSDT', expect.objectContaining({
+      x: expect.any(Number),
+      y: expect.any(Number),
+    }))
+
+    // A leverage the exchange has not reported yet is absent, never 1×; the margin
+    // reading then states the whole notional, which overstates the cost rather
+    // than understating it.
+    rerender(
+      <FuturesTradingTicket
+        state={createState()}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+        leverage={null}
+        onLeverageEdit={onLeverageEdit}
+        draftPrice="58445.0"
+      />,
+    )
+    sizeTo(25)
+    expect(screen.getByRole('button', { name: 'Set BTCUSDT leverage' })).toHaveTextContent('Lev')
+    expect(screen.getByText('233.78 USDT')).toBeInTheDocument()
+  })
+
   it('starts unsized so a gesture cannot fire a size the operator never chose', () => {
     const state = createState()
     const { rerender } = render(
@@ -652,9 +695,15 @@ describe('FuturesTradingTicket', () => {
     fireEvent.click(screen.getByRole('tab', { name: /Positions/ }))
     const panel = screen.getByLabelText('Open positions')
     expect(panel).toHaveTextContent('LONG')
-    // /fapi/v3/positionRisk reports no leverage or margin mode, so the dead
-    // cell is gone rather than printing placeholders.
-    expect(panel).not.toHaveTextContent('ISOLATED')
+    // The liquidation price is a function of the margin, so the card that
+    // states one states the other — and names the mode, since only an isolated
+    // margin can be moved at all.
+    expect(panel).toHaveTextContent('Margin')
+    expect(panel).toHaveTextContent('285.00')
+    expect(panel).toHaveTextContent('ISO')
+    // /fapi/v3/positionRisk reports no leverage, so the dead cell that printed
+    // one stays gone rather than showing a placeholder.
+    expect(panel).not.toHaveTextContent('2×')
 
     fireEvent.click(within(panel).getByRole('button', { name: 'Close position' }))
     expect(onPositionClose).toHaveBeenCalledWith(position, expect.any(Object))

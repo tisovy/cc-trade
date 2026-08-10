@@ -4,10 +4,14 @@ import { describeFuturesOrderIntent } from '../../../utils/futuresOrderPresentat
 import {
   readFuturesSymbolHistory,
   rememberFuturesSymbol,
+  searchFuturesSymbols,
   toggleFuturesFavorite,
   writeFuturesSymbolHistory,
 } from '../../../utils/futuresSymbolHistory.js'
+import { FUTURES_WORKSTATION_INTERVALS } from '../../../utils/futuresWorkstationProtocolShared.js'
 import { clampUiScale, readUiScale, writeUiScale } from '../../../utils/uiScale.js'
+import QuickSwitchModal from '../tools/QuickSwitchModal.jsx'
+import FuturesLeverageEditor from './FuturesLeverageEditor.jsx'
 import FuturesOrderEditor from './FuturesOrderEditor.jsx'
 import FuturesPositionCloser from './FuturesPositionCloser.jsx'
 import FuturesPositionMarginEditor from './FuturesPositionMarginEditor.jsx'
@@ -42,7 +46,18 @@ export const FuturesProductionWorkstation = ({
   const [orderEditor, setOrderEditor] = useState(null)
   const [positionCloser, setPositionCloser] = useState(null)
   const [marginEditor, setMarginEditor] = useState(null)
+  const [leverageEditor, setLeverageEditor] = useState(null)
   const [sizeRequest, setSizeRequest] = useState(null)
+  // The same gesture Spot has: start typing and the pair list comes to the
+  // cursor. Reaching for a contract cost a trip to the rail's search box and a
+  // click on a row, on a desk where the pair changes far more often than anything
+  // else on screen.
+  const [quickSwitch, setQuickSwitch] = useState({
+    visible: false,
+    mode: 'pair',
+    query: '',
+    selectedIndex: 0,
+  })
   const gestureSequenceRef = useRef(0)
   const amendmentSequenceRef = useRef(0)
   const sizeSequenceRef = useRef(0)
@@ -78,11 +93,52 @@ export const FuturesProductionWorkstation = ({
     setSymbolHistory(previous => toggleFuturesFavorite(previous, favoriteSymbol))
   }, [])
 
+  // Every contract the catalogue knows, with the recency list in front of it so
+  // the pairs worked with lately are offered before an empty query is even typed
+  // — and so a recent contract is offered even before the catalogue arrives.
+  const quickSwitchResults = useMemo(() => {
+    if (!quickSwitch.visible) return []
+    if (quickSwitch.mode === 'interval') {
+      const query = quickSwitch.query.trim().toLowerCase()
+      return FUTURES_WORKSTATION_INTERVALS.filter(entry => (
+        query === '' || entry.toLowerCase().includes(query)
+      ))
+    }
+    const catalog = workstationState.resources.catalog?.contracts ?? []
+    return searchFuturesSymbols(
+      [...(symbolHistory.recent ?? []), ...catalog.map(entry => entry.symbol)],
+      quickSwitch.query,
+      symbolHistory,
+    )
+  }, [quickSwitch, symbolHistory, workstationState.resources.catalog])
+
+  const closeQuickSwitch = useCallback(() => {
+    setQuickSwitch(previous => ({ ...previous, visible: false, query: '', selectedIndex: 0 }))
+  }, [])
+
+  const handleQuickSwitchQueryChange = useCallback((value) => {
+    setQuickSwitch(previous => ({
+      ...previous,
+      query: previous.mode === 'pair' ? value.toUpperCase() : value,
+      selectedIndex: 0,
+    }))
+  }, [])
+
+  const moveQuickSwitchSelection = useCallback((delta) => {
+    const count = quickSwitchResults.length
+    if (count === 0) return
+    setQuickSwitch(previous => ({
+      ...previous,
+      selectedIndex: (previous.selectedIndex + delta + count) % count,
+    }))
+  }, [quickSwitchResults.length])
+
   // One panel at a time: opening any of them closes the others, so the cursor
   // never has two overlapping submissions under it.
   const handleOrderEdit = useCallback((order, anchor) => {
     setPositionCloser(null)
     setMarginEditor(null)
+    setLeverageEditor(null)
     setOrderEditor({ order, anchor })
   }, [])
 
@@ -91,6 +147,7 @@ export const FuturesProductionWorkstation = ({
   const handlePositionClose = useCallback((position, anchor) => {
     setOrderEditor(null)
     setMarginEditor(null)
+    setLeverageEditor(null)
     setPositionCloser({ position, anchor })
   }, [])
 
@@ -99,10 +156,20 @@ export const FuturesProductionWorkstation = ({
   const handleMarginEdit = useCallback((position, anchor) => {
     setOrderEditor(null)
     setPositionCloser(null)
+    setLeverageEditor(null)
     setMarginEditor({ position, anchor })
   }, [])
 
   const closeMarginEditor = useCallback(() => setMarginEditor(null), [])
+
+  const handleLeverageEdit = useCallback((leverageSymbol, anchor) => {
+    setOrderEditor(null)
+    setPositionCloser(null)
+    setMarginEditor(null)
+    setLeverageEditor({ symbol: leverageSymbol, anchor })
+  }, [])
+
+  const closeLeverageEditor = useCallback(() => setLeverageEditor(null), [])
 
   const handleUiScaleChange = useCallback((nextScale) => {
     const scale = clampUiScale(nextScale)
@@ -110,9 +177,55 @@ export const FuturesProductionWorkstation = ({
     writeUiScale(scale)
   }, [])
 
+  const handleQuickSwitchSelect = useCallback((value) => {
+    if (!value) return
+    if (quickSwitch.mode === 'pair') handleSymbolChange(value)
+    else setInterval(value)
+    closeQuickSwitch()
+  }, [closeQuickSwitch, handleSymbolChange, quickSwitch.mode])
+
+  // A letter opens the pair list, a digit the interval list — the workstation's
+  // own shortcuts are all mouse gestures and modifier keys, so neither is taken.
+  // Typing inside a field is typing, not a shortcut, and a workspace that is not
+  // the active market listens for nothing.
+  useEffect(() => {
+    if (!enabled) return undefined
+    const handleKeyDown = (event) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return
+      if (quickSwitch.visible) return
+      const target = event.target
+      if (target?.tagName === 'INPUT'
+        || target?.tagName === 'TEXTAREA'
+        || target?.isContentEditable) return
+      if (/^[a-zA-Z]$/.test(event.key)) {
+        event.preventDefault()
+        setQuickSwitch({
+          visible: true,
+          mode: 'pair',
+          query: event.key.toUpperCase(),
+          selectedIndex: 0,
+        })
+      } else if (/^[0-9]$/.test(event.key)) {
+        event.preventDefault()
+        setQuickSwitch({ visible: true, mode: 'interval', query: event.key, selectedIndex: 0 })
+      }
+    }
+    document.addEventListener('keydown', handleKeyDown)
+    return () => document.removeEventListener('keydown', handleKeyDown)
+  }, [enabled, quickSwitch.visible])
+
   useEffect(() => {
     writeFuturesSymbolHistory(symbolHistory)
   }, [symbolHistory])
+
+  // The leverage of the contract in hand, asked for whenever the contract
+  // changes: the position read reports neither the multiple nor the mode any more,
+  // and a desk that cannot state the leverage cannot state what an entry costs.
+  const loadSymbolConfig = executionState?.loadSymbolConfig
+  useEffect(() => {
+    if (!enabled || typeof loadSymbolConfig !== 'function') return
+    loadSymbolConfig(symbol)
+  }, [enabled, loadSymbolConfig, symbol])
 
   const handleTradingGesture = useCallback((gesture) => {
     gestureSequenceRef.current += 1
@@ -168,6 +281,17 @@ export const FuturesProductionWorkstation = ({
     return live ?? marginEditorTarget
   }, [executionPositions, marginEditorTarget])
 
+  // The leverage panel reads the live config and the live position for the
+  // contract it was opened on, so a leverage set from the exchange's own site
+  // while it is open is the number it shows.
+  const leverageConfig = leverageEditor
+    ? executionState?.symbolConfigs?.[leverageEditor.symbol] ?? null
+    : null
+  const leveragePosition = useMemo(() => {
+    if (!leverageEditor || !Array.isArray(executionPositions)) return null
+    return executionPositions.find(position => position.symbol === leverageEditor.symbol) ?? null
+  }, [executionPositions, leverageEditor])
+
   const catalogContracts = workstationState.resources.catalog?.contracts
   // Account rows span every symbol, so each one is rendered at its own
   // contract's precision rather than at the selected contract's.
@@ -182,6 +306,8 @@ export const FuturesProductionWorkstation = ({
       state={executionState}
       selectedSymbol={symbol}
       selectedContract={selectedContract}
+      leverage={executionState?.symbolConfigs?.[symbol]?.leverage ?? null}
+      onLeverageEdit={handleLeverageEdit}
       draftPrice={draftPrice}
       gestureRequest={gestureRequest}
       orderAmendRequest={orderAmendRequest}
@@ -203,6 +329,7 @@ export const FuturesProductionWorkstation = ({
       onCancelOrder={executionState?.cancelOrder}
       onOrderEdit={handleOrderEdit}
       onMarginEdit={handleMarginEdit}
+      onLeverageEdit={handleLeverageEdit}
       onSymbolChange={handleSymbolChange}
       onSizePick={handleSizePick}
       onLoadHistory={executionState?.loadHistory}
@@ -272,12 +399,37 @@ export const FuturesProductionWorkstation = ({
       {marginEditor && marginPosition ? (
         <FuturesPositionMarginEditor
           position={marginPosition}
+          contract={marginPosition.symbol === symbol ? selectedContract : null}
           availableUsdt={executionState?.balances?.USDT?.available ?? null}
           anchor={marginEditor.anchor}
           onSubmit={executionState?.adjustPositionMargin}
           onClose={closeMarginEditor}
         />
       ) : null}
+      {leverageEditor ? (
+        <FuturesLeverageEditor
+          symbol={leverageEditor.symbol}
+          leverage={leverageConfig?.leverage ?? null}
+          maxLeverage={leverageConfig?.maxLeverage ?? null}
+          maxNotionalValue={leverageConfig?.maxNotionalValue ?? null}
+          availableUsdt={executionState?.balances?.USDT?.available ?? null}
+          openPosition={leveragePosition}
+          anchor={leverageEditor.anchor}
+          onSubmit={executionState?.setLeverage}
+          onClose={closeLeverageEditor}
+        />
+      ) : null}
+      <QuickSwitchModal
+        visible={quickSwitch.visible}
+        mode={quickSwitch.mode}
+        query={quickSwitch.query}
+        results={quickSwitchResults}
+        selectedIndex={quickSwitch.selectedIndex}
+        onClose={closeQuickSwitch}
+        onQueryChange={handleQuickSwitchQueryChange}
+        onSelect={handleQuickSwitchSelect}
+        onMoveSelection={moveQuickSwitchSelection}
+      />
     </div>
   )
 }

@@ -82,6 +82,34 @@ export const toggleFuturesFavorite = (history, symbol) => {
   })
 }
 
+// Type-to-search over every contract: what the operator is reaching for is
+// usually what they were just on, so recency outranks the alphabet, and a symbol
+// that *starts* with what was typed outranks one that merely contains it —
+// typing `BT` should not offer WBTCUSDT before BTCUSDT.
+export const searchFuturesSymbols = (symbols, query = '', {
+  recent = [],
+  favorites = [],
+  limit = 30,
+} = {}) => {
+  const needle = String(query ?? '').trim().toUpperCase()
+  const recentRank = new Map(recent.map((symbol, index) => [symbol, index]))
+  const favoriteSet = new Set(favorites)
+  const rank = symbol => (
+    recentRank.has(symbol)
+      ? recentRank.get(symbol)
+      : favoriteSet.has(symbol) ? FUTURES_RECENT_SYMBOL_LIMIT : FUTURES_RECENT_SYMBOL_LIMIT + 1
+  )
+  const matched = new Set()
+  for (const entry of Array.isArray(symbols) ? symbols : []) {
+    const symbol = normalizeSymbol(entry)
+    if (symbol && (needle === '' || symbol.includes(needle))) matched.add(symbol)
+  }
+  const leads = symbol => (needle === '' || symbol.startsWith(needle) ? 0 : 1)
+  return [...matched].sort((left, right) => (
+    leads(left) - leads(right) || rank(left) - rank(right) || left.localeCompare(right)
+  )).slice(0, limit)
+}
+
 // Recent first (most recent leftmost), then favourites, then everything else
 // alphabetically — the order a trader scans when reaching for a contract.
 export const orderFuturesContracts = (contracts, { recent = [], favorites = [] } = {}) => {

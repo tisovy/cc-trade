@@ -18,6 +18,12 @@ const exactText = value => (
   typeof value === 'string' && value.length > 0 ? value : (value ?? '—')
 )
 
+// Short enough for a table cell, and never guessed: a read that established no
+// mode says nothing rather than defaulting to one of the two.
+const marginModeLabel = mode => (
+  mode === 'ISOLATED' ? 'ISO' : mode === 'CROSS' ? 'CROSS' : ''
+)
+
 // Positions and working orders live under the chart because they are what a
 // trader watches continuously — a tab you have to open is a tab you forget.
 export const FuturesPortfolioDock = ({
@@ -30,6 +36,7 @@ export const FuturesPortfolioDock = ({
   onCancelOrder,
   onOrderEdit,
   onMarginEdit,
+  onLeverageEdit,
   onSymbolChange,
   onSizePick,
   onLoadHistory,
@@ -87,7 +94,11 @@ export const FuturesPortfolioDock = ({
                 role="row"
                 key={`${position.symbol}:${position.positionSide}`}
               >
-                <span role="cell">
+                {/* The contract and the leverage it is carried at, the way the
+                    exchange's own position list reads them: the multiple is a
+                    property of the instrument, not of the money, and it is the
+                    control that sets it. */}
+                <span role="cell" className="futures-workstation-dock-instrument">
                   <button
                     type="button"
                     className="futures-workstation-dock-symbol"
@@ -96,6 +107,22 @@ export const FuturesPortfolioDock = ({
                   >
                     {position.symbol}
                   </button>
+                  {typeof onLeverageEdit === 'function' ? (
+                    <button
+                      type="button"
+                      className="futures-workstation-dock-leverage"
+                      aria-label={`Set ${position.symbol} leverage`}
+                      title={position.leverage
+                        ? `${position.leverage}× leverage — click to change it`
+                        : 'Leverage not reported yet — click to set it'}
+                      onClick={event => onLeverageEdit(position.symbol, {
+                        x: event.clientX,
+                        y: event.clientY,
+                      })}
+                    >
+                      {position.leverage ? `${position.leverage}×` : 'Lev'}
+                    </button>
+                  ) : null}
                 </span>
                 <span role="cell" className={`futures-workstation-dock-side is-${presentation.tone}`}>
                   {presentation.positionSide}
@@ -127,7 +154,11 @@ export const FuturesPortfolioDock = ({
                 {/* The denominator of the ROE beside it, and the only property
                     of a live position the operator can change without trading.
                     Cross rows open the panel too — it is where the reason they
-                    cannot be adjusted is stated. */}
+                    cannot be adjusted is stated. The mode is spelled out rather
+                    than left to the underline: the two are not two styles of
+                    one thing, only one of them can be moved at all. It leads the
+                    amount rather than trailing it — after the digits it read as
+                    part of the number, like a stray fraction of a cent. */}
                 <span role="cell">
                   {margin.margin !== null && typeof onMarginEdit === 'function' ? (
                     <button
@@ -142,13 +173,24 @@ export const FuturesPortfolioDock = ({
                         y: event.clientY,
                       })}
                     >
+                      <em>{marginModeLabel(margin.marginMode)}</em>
                       {formatUsdt(margin.margin)}
                     </button>
                   ) : (
-                    <span>{margin.margin === null ? '—' : formatUsdt(margin.margin)}</span>
+                    <span className="futures-workstation-dock-margin is-static">
+                      <em>{marginModeLabel(margin.marginMode)}</em>
+                      {margin.margin === null ? '—' : formatUsdt(margin.margin)}
+                    </span>
                   )}
                 </span>
-                <span role="cell" className={`futures-workstation-dock-pnl is-${presentation.pnlTone}`}>
+                {/* Both figures in the title as well as on screen: the column is
+                    the narrowest thing carrying the widest number, and a uPnL that
+                    outgrows it must still be readable exactly. */}
+                <span
+                  role="cell"
+                  className={`futures-workstation-dock-pnl is-${presentation.pnlTone}`}
+                  title={`${formatSignedUsdt(presentation.unrealizedPnl)} USDT · ${formatSignedPercent(presentation.roePercent)} on margin`}
+                >
                   <strong>{formatSignedUsdt(presentation.unrealizedPnl)}</strong>
                   <em>{formatSignedPercent(presentation.roePercent)}</em>
                 </span>
@@ -197,7 +239,10 @@ export const FuturesPortfolioDock = ({
               aria-selected={ordersTab === 'tradeHistory'}
               onClick={() => openHistory('tradeHistory')}
             >
-              Trades (PnL)
+              {/* Named for what it lists, so it cannot be read as a filtered view
+                  of the live positions panel above it — which is exactly how it
+                  was read when it still showed open rounds. */}
+              Closed positions
             </button>
           </div>
           {ordersTab === 'working' ? null : (
@@ -217,7 +262,8 @@ export const FuturesPortfolioDock = ({
             view={ordersTab}
             symbol={selectedSymbol}
             history={history}
-            tickSize={tickSizes[selectedSymbol] ?? null}
+            tickSizes={tickSizes}
+            onSymbolChange={onSymbolChange}
           />
         ) : openOrders.length === 0 ? (
           <p className="futures-workstation-empty">No working orders.</p>

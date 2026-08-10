@@ -197,7 +197,10 @@ carries none of those shows no margin rather than a zero.
 
 That read no longer reports `marginType` either, so the margin mode is taken
 from the isolated wallet instead of inferred: isolating a position *is* walling
-funds off behind it, and a cross position has none.
+funds off behind it, and a cross position has none. The mode is then named in
+words — `ISO` or `CROSS` on the row and in the position card, spelled out in the
+panel — because the two are not two styles of one thing: only an isolated margin
+can be moved at all.
 
 Clicking the figure opens a panel at the cursor that adds margin to or removes
 it from that one position, as `trade.adjustPositionMargin` →
@@ -206,17 +209,93 @@ it from that one position, as `trade.adjustPositionMargin` →
 capping a top-up could block the transfer that would have prevented a
 liquidation. The panel refuses only what is a fact about the account: a
 non-positive amount, an increase above the available USDT, a decrease above the
-margin the position holds, and any adjustment to a cross position, which
-Binance backs with the whole account and cannot assign to one row. The exact
-removable amount is Binance's to decide — it is smaller than the committed
-margin by the maintenance requirement — and its refusal is shown with its own
-code and text.
+margin the position holds, a decrease that would take the position below its
+maintenance requirement, and any adjustment to a cross position, which Binance
+backs with the whole account and cannot assign to one row. Anything smaller than
+that is Binance's to refuse, with its own code and text.
+
+The panel draws the **liquidation floor** to scale: the maintenance requirement
+the read reports, the margin standing above it, and a ghost segment for the
+amount being typed. Every term is read from the exchange —
+`marginBalance = margin + min(0, unrealizedPnl)`, and the buffer is that less
+the maintenance requirement. Unrealized profit is excluded because it is not in
+the wallet and cannot be withdrawn; unrealized loss is subtracted because it has
+already been taken. The buffer moves by exactly the amount transferred: the
+notional does not change, so neither does the requirement under it.
+
+The amount is dragged on the order ticket's own size slider or typed. The two
+directions are bounded by different facts, and the slider names which one it is
+showing (`of 258426 available`, `of 2549 removable`): adding is bounded by the
+wallet, removing by the buffer above the maintenance requirement. Capping a
+top-up at the margin already committed made a wallet holding 258k offer the same
+ceiling as a withdrawal, and an unnamed ceiling reads as a refusal. Typing past
+the range stretches it.
+
+Under the drawing the panel states the **liquidation price** and where the
+transfer would put it — `54680.0 → 54180.0`, the projection coloured by whether
+it helps or hurts. Margin does not change the size of a position, so every USDT
+transferred buys exactly one contract's worth of price: `Δprice = amount ÷ size`,
+away from the entry when adding and toward it when removing. It is labelled a
+projection because the maintenance requirement is itself a share of the notional
+at that price, which bends the answer by well under a percent of the move;
+Binance sets the exact price. A position for which the exchange reports no
+liquidation price falls back to stating the spare margin instead. The summary
+also carries the **liquidation risk**, the maintenance requirement as a share of
+the margin balance with liquidation at 100%, before and after.
+
+That buffer is the point at which liquidation becomes *certain*, not the amount
+Binance will release. The exchange's own limit is stricter — its leverage
+brackets hold back more — and `/fapi/v3/positionRisk` reports no leverage to
+reproduce it from. So the desk draws the floor, refuses anything past it, and
+lets the exchange refuse the rest in its own words. A cross position gets no
+buffer reading at all: that headroom belongs to the account, not to one row.
 
 Pausing trading refuses a decrease and allows an increase: pausing exists to
 stop risk being taken, and taking margin out takes risk. A transfer carries no
 client order id the exchange would echo, so an unanswered one is reported as
 unresolved and settled by re-reading the account, never by resending — a
 repeated transfer moves the amount twice.
+
+### Contract leverage
+
+`/fapi/v3/positionRisk` reports neither leverage nor margin mode, so both are read
+from `/fapi/v1/symbolConfig` (weight 5) and merged into the position rows by
+symbol. The desk asks for the contract in hand whenever the contract changes
+(`account.symbolConfig`), and for every symbol holding a position after each
+account refresh, capped at eight. A leverage the exchange has not answered for is
+absent, never `1×`: the badge reads `Lev` and the margin estimate states the full
+notional, which overstates the cost rather than understating it.
+
+The multiple is shown where it is decided and where it is carried: on the order
+ticket beside the contract, and on each position row beside its symbol. Both are
+the control — clicking either opens a panel at the cursor with the stops Binance
+offers (`1× … 125×`, filtered to the contract's own ceiling, which comes from
+bracket 1 of `/fapi/v1/leverageBracket`), a slider, what the wallet can carry at
+that multiple, the bracket's notional cap where the exchange reports one, and a
+warning when a position on that contract is already open — raising leverage on an
+open position moves the price it liquidates at. Applying sends `trade.setLeverage`
+→ `POST /fapi/v1/leverage`; the panel then re-reads the config and the account,
+because Binance lowers a setting a position is too large for rather than refusing
+it, and the figure on screen must be the one it applied. Pausing trading refuses a
+leverage change for the same reason it refuses a margin withdrawal.
+
+The order ticket states **Est. margin** for the draft — `notional ÷ leverage`,
+what the entry actually holds out of the wallet. Order sizing itself is
+deliberately still measured against the available balance rather than against
+balance × leverage: the ticket's 100% is a position worth the wallet, not one
+worth twenty of them.
+
+### Closing a position
+
+`Close` on a position row opens a panel at the cursor. `Close at market` sends the
+whole position as a reduce-only MARKET order in one click. Size is dragged on a
+slider in percent of the open position — quantised to the contract's step size,
+held as integers so a 100% close is exactly the position and never a hair over
+it — or typed as a quantity, and the two always agree. The summary states what the
+exit settles: what is left holding, the value coming off the table, and the
+estimated PnL at that price (`(exit − entry) × size`, signed by the leg), which
+for a limit close is measured at the limit rather than at the mark. Fees are not
+included and the panel says so.
 
 Configuration, account-resource, stream, and command failures feed the sliding
 notification system. Identical retries are deduplicated; recovery re-arms the
@@ -354,6 +433,12 @@ The market header carries last price, 24h change/high/low/volume and funding
 coloured by sign. Mark price and basis are not repeated there; mark price
 remains in the position rows and the risk display.
 
+The day's volume is the **quote** leg (`quoteVolume`, `q` on the stream),
+abbreviated by magnitude and labelled in USDT: `641.1M`. The base leg is the
+same day counted in contracts, and a USDT abbreviation over it overstates the
+market by whatever the contract is priced at — BMT reads `19.9B` of BMT against
+`571M` of USDT. Both legs stay in the cell's title, each with its unit named.
+
 The order book is denominated in USDT: each row shows the level's value and the
 cumulative value from the top of the book, computed with exact decimal
 arithmetic. `Step` groups levels by a multiple of the contract's tick size —
@@ -370,14 +455,41 @@ rendered at the contract's tick precision, so an averaged entry price arrives as
 `3.3450` instead of `3.3449999999999998`. Return on margin is derived from the
 margin Binance reports (`initialMargin`, then `isolatedMargin`); when neither is
 reported it reads `—` rather than `0.00%`. `/fapi/v3/positionRisk` returns
-neither leverage nor margin mode, so neither is displayed.
+neither leverage nor margin mode, so both are read from `/fapi/v1/symbolConfig`
+instead (see *Contract leverage*).
 
-`Order history` and `Trades (PnL)` in the dock read `/fapi/v1/allOrders` and
-`/fapi/v1/userTrades` for the selected contract through the typed
-`account.history` command, bounded to the most recent 100 rows. Trades show the
-fee and the signed realized PnL. A failed history read is reported inside the
-history view only: positions, working orders and balances are never disturbed
-by it, and history is discarded when the contract changes.
+`Order history` and `Closed positions` in the dock read `/fapi/v1/allOrders` and
+`/fapi/v1/userTrades` through the typed `account.history` command, bounded to the
+most recent 100 rows per contract.
+
+Both span the **account**, not the contract on screen: a session is reviewed
+whole, and half of it was traded on pairs the operator has since switched away
+from. Every USDⓈ-M history endpoint requires a symbol, so the backend first asks
+which contracts were traded — `/fapi/v1/income?incomeType=REALIZED_PNL` over the
+last seven days, the only read that answers without being told a contract — and
+then fans out over at most eight of them: the contract on screen, then the ones
+holding positions or working orders, then the rest by recency. Anything dropped
+by that bound is logged. Each read is admitted by the futures limiter, one
+contract failing removes only its own rows (the payload reports which contracts
+it covers), and only a total failure is reported as an error. Every row names its
+contract and is priced at that contract's own tick.
+
+`Closed positions` reports finished round trips, not executions and not open ones.
+`buildFuturesTradeRounds` folds the fills of each contract — separately, since one
+contract's exposure says nothing about another's — into round trips: a position
+opens when exposure is taken and closes when it returns to flat, so one market
+close arriving as five fills is one row carrying the summed PnL and fees. Sizes
+are held as integers, because `0.1 + 0.2 − 0.3` is `5.5e-17` in floating point and
+a round that never reaches flat swallows every fill after it. A round still
+running is excluded entirely: it has no exit and no result, and the live positions
+table above is where it belongs. A round whose opening fills are older than the
+window keeps its entry price all the same — the exchange's realized PnL states it
+exactly (`entry = exit ∓ pnl/size`, realized PnL being reported before
+commission), and the row says in its title that the entry was recovered rather
+than read. The fee is stated in the PnL cell's title together with the net.
+
+A failed history read is reported inside the history view only: positions,
+working orders and balances are never disturbed by it.
 
 The bounded tape filters and coalesces trades before renderer delivery. Its
 component-lifetime settings survive symbol and interval changes:

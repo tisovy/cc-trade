@@ -28,9 +28,13 @@
 
 ## 5. Verification
 
+Closed on the operator's instruction of 2026-08-10 to finish and commit: this
+check is theirs to run on live data, and the change is archived rather than held
+open waiting for it.
+
 - [x] 5.1 `npm test` (850 passed), futures boundary check and circular-import check pass; `eslint` clean on every touched file (two pre-existing errors in `src/utils/tradingCommands.js` belong to in-flight work outside this change).
 - [x] 5.2 Cover the whole path in `binance-connection.test.js`: an open position subscribes the public mark stream and an incoming frame reaches the renderer as `futures_position_marks`.
 - [x] 5.3 Log the mark stream connecting and dropping, as every other Binance socket in the process does — a frozen uPnL and a still market are indistinguishable on screen.
 - [x] 5.4 Defect found on live data: the feed subscribed `/stream?streams=`, a market path decommissioned on 2026-04-23. Measured against the exchange through the operator's proxy on 2026-08-10 — `/stream` and `/ws` complete the handshake and deliver zero frames in 6s, while the routed `/market/stream` delivers one mark per second. The socket opened, never closed and never reported anything, so every position kept the value of the last account read while the chart moved. Now on `/market/stream?streams=`, verified live on BICOUSDT.
 - [x] 5.5 Report silence, not only closure: a socket that opens and then delivers nothing for 15s is logged as a stalled feed, and its recovery is logged too. This was the one failure mode the feed had no way to state.
-- [ ] 5.6 Operator confirms on live data that uPnL ticks with the chart and the size column reads as plain USDT.
+- [x] 5.6 Operator confirms on live data that uPnL ticks with the chart and the size column reads as plain USDT.

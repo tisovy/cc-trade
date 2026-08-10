@@ -49,6 +49,14 @@ const moduleMocks = vi.hoisted(() => {
             findOrder: vi.fn().mockResolvedValue({ exists: false, report: null }),
             getOrderHistory: vi.fn().mockResolvedValue([{ orderId: 1, status: 'FILLED' }]),
             getTradeHistory: vi.fn().mockResolvedValue([{ id: 2, realizedPnl: '-96.74' }]),
+            // Every USDⓈ-M history endpoint takes a symbol, so a review of the
+            // account starts by asking which contracts it was traded on.
+            getTradedSymbols: vi.fn().mockResolvedValue(['BTCUSDT']),
+            getSymbolConfig: vi.fn().mockResolvedValue({
+                symbol: 'BTCUSDT', leverage: 20, marginType: 'CROSSED', maxNotionalValue: '5000000',
+            }),
+            getMaxLeverage: vi.fn().mockResolvedValue(125),
+            setLeverage: vi.fn().mockResolvedValue({ symbol: 'BTCUSDT', leverage: 20 }),
             getAccountRefreshOperations: vi.fn(() => []),
             createUserDataStreamListenKey: vi.fn().mockResolvedValue('futures-listen-key'),
             renewUserDataStreamListenKey: vi.fn().mockResolvedValue({}),
@@ -2476,6 +2484,22 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(futuresUpdates.length).toBeGreaterThanOrEqual(2);
     });
 
+    // Every history read is spaced by the futures limiter, so the handler only
+    // completes as the clock moves: the fan-out is several admissions, not one.
+    const runFuturesCommand = async (command) => {
+        const pending = moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                version: 1,
+                marketType: 'futures',
+                accountId: 'default',
+                ...command,
+            }),
+        });
+        await vi.advanceTimersByTimeAsync(5_000);
+        await pending;
+    };
+
     it('answers a futures history command without touching account resources', async () => {
         setupBinanceConnection({
             localWebSocketAccess: { host: '127.0.0.1' },
@@ -2486,16 +2510,10 @@ describe('setupBinanceConnection user-data orchestration', () => {
         });
         await activateMarket('futures-live');
 
-        await moduleMocks.rendererHandlers.message({
-            type: 'utf8',
-            utf8Data: JSON.stringify({
-                action: 'account.history',
-                version: 1,
-                marketType: 'futures',
-                accountId: 'default',
-                clientOrderId: 'history-1',
-                symbol: 'BTCUSDT',
-            }),
+        await runFuturesCommand({
+            action: 'account.history',
+            clientOrderId: 'history-1',
+            symbol: 'BTCUSDT',
         });
 
         expect(moduleMocks.futuresAdapter.getOrderHistory).toHaveBeenCalledWith({ symbol: 'BTCUSDT' });
@@ -2505,9 +2523,145 @@ describe('setupBinanceConnection user-data orchestration', () => {
             .filter(payload => payload.futures_history);
         expect(history.futures_history).toMatchObject({
             symbol: 'BTCUSDT',
+            symbols: ['BTCUSDT'],
             orders: [{ orderId: 1, status: 'FILLED' }],
             trades: [{ id: 2, realizedPnl: '-96.74' }],
             error: null,
+        });
+    });
+
+    // A session spans the contracts it was traded on, not the one on screen. The
+    // symbols come from income history, which is the only USDⓈ-M read that answers
+    // the question without being told a contract first.
+    it('reads the history of every contract the account traded lately', async () => {
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1' },
+        });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        moduleMocks.futuresAdapter.getTradedSymbols.mockResolvedValueOnce([
+            'BICOUSDT', 'BTCUSDT', 'BEATUSDT',
+        ]);
+        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({ symbol }) => (
+            Promise.resolve([{ id: 2, symbol, realizedPnl: '1', time: symbol === 'BICOUSDT' ? 9 : 1 }])
+        ));
+        // One contract refusing must not blank the rest of the review.
+        moduleMocks.futuresAdapter.getOrderHistory.mockImplementation(({ symbol }) => (
+            symbol === 'BEATUSDT'
+                ? Promise.reject(Object.assign(new Error('nope'), { code: -1121 }))
+                : Promise.resolve([{ orderId: 1, symbol, status: 'FILLED', time: 1 }])
+        ));
+
+        await runFuturesCommand({
+            action: 'account.history',
+            clientOrderId: 'history-3',
+            symbol: 'ETHUSDT',
+        });
+
+        const requested = moduleMocks.futuresAdapter.getTradeHistory.mock.calls
+            .map(([{ symbol }]) => symbol);
+        // The contract on screen leads the list, then what the account traded.
+        expect(requested).toEqual(['ETHUSDT', 'BICOUSDT', 'BTCUSDT', 'BEATUSDT']);
+        const [history] = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.futures_history);
+        expect(history.futures_history.error).toBeNull();
+        expect(history.futures_history.symbols).not.toContain('BEATUSDT');
+        // Newest first across contracts, whichever contract they are on.
+        expect(history.futures_history.trades[0].symbol).toBe('BICOUSDT');
+        expect(history.futures_history.trades).toHaveLength(3);
+    });
+
+    // The position read reports neither leverage nor margin mode any more, so both
+    // are asked for per contract and pushed to whoever is watching.
+    it('answers a contract configuration read with the leverage and its ceiling', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+
+        await runFuturesCommand({
+            action: 'account.symbolConfig',
+            clientOrderId: 'config-1',
+            symbol: 'BTCUSDT',
+        });
+
+        expect(moduleMocks.futuresAdapter.getSymbolConfig).toHaveBeenCalledWith('BTCUSDT');
+        expect(moduleMocks.futuresAdapter.getMaxLeverage).toHaveBeenCalledWith('BTCUSDT');
+        const [configs] = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.futures_symbol_configs);
+        expect(configs.futures_symbol_configs.BTCUSDT).toMatchObject({
+            symbol: 'BTCUSDT',
+            leverage: 20,
+            maxLeverage: 125,
+            marginType: 'CROSSED',
+        });
+    });
+
+    // Leverage places no order, but it changes what every entry costs and where an
+    // open position liquidates, so it re-reads both the config and the account.
+    it('applies a leverage change and reports the leverage the exchange applied', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        // Binance lowers a setting a position is too large for rather than
+        // refusing it, so the figure shown is the one it answered with.
+        moduleMocks.futuresAdapter.getSymbolConfig.mockResolvedValue({
+            symbol: 'BTCUSDT', leverage: 20, marginType: 'CROSSED', maxNotionalValue: '5000000',
+        });
+
+        await runFuturesCommand({
+            action: 'trade.setLeverage',
+            clientOrderId: 'leverage-1',
+            symbol: 'BTCUSDT',
+            leverage: 50,
+        });
+
+        expect(moduleMocks.futuresAdapter.setLeverage)
+            .toHaveBeenCalledWith({ symbol: 'BTCUSDT', leverage: 50 });
+        const payloads = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message));
+        const [configs] = payloads.filter(payload => payload.futures_symbol_configs);
+        expect(configs.futures_symbol_configs.BTCUSDT.leverage).toBe(20);
+        expect(payloads.some(payload => payload.command_rejected)).toBe(false);
+    });
+
+    it('refuses a leverage change while trading is paused and reports the refusal', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        await runFuturesCommand({
+            action: 'trade.setTradingPaused',
+            clientOrderId: 'pause-1',
+            paused: true,
+        });
+
+        await runFuturesCommand({
+            action: 'trade.setLeverage',
+            clientOrderId: 'leverage-2',
+            symbol: 'BTCUSDT',
+            leverage: 50,
+        });
+
+        expect(moduleMocks.futuresAdapter.setLeverage).not.toHaveBeenCalled();
+        const [rejection] = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.command_rejected);
+        expect(rejection.command_rejected).toMatchObject({
+            code: 'FUTURES_TRADING_PAUSED',
+            request: 'trade.setLeverage',
         });
     });
 
@@ -2523,18 +2677,12 @@ describe('setupBinanceConnection user-data orchestration', () => {
         const refusal = Object.assign(new Error('Invalid API-key, IP, or permissions for action'), {
             code: -2015,
         });
-        moduleMocks.futuresAdapter.getOrderHistory.mockRejectedValueOnce(refusal);
+        moduleMocks.futuresAdapter.getOrderHistory.mockRejectedValue(refusal);
 
-        await moduleMocks.rendererHandlers.message({
-            type: 'utf8',
-            utf8Data: JSON.stringify({
-                action: 'account.history',
-                version: 1,
-                marketType: 'futures',
-                accountId: 'default',
-                clientOrderId: 'history-2',
-                symbol: 'BTCUSDT',
-            }),
+        await runFuturesCommand({
+            action: 'account.history',
+            clientOrderId: 'history-2',
+            symbol: 'BTCUSDT',
         });
 
         const payloads = moduleMocks.rendererConnection.sendUTF.mock.calls

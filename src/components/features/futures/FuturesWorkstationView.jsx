@@ -11,7 +11,7 @@ import {
   futuresBookWallKeys,
   groupFuturesBookLevels,
 } from '../../../utils/futuresOrderBook.js'
-import { formatCompactUsdt } from '../../../utils/futuresPriceFormat.js'
+import { formatCompactUsdt, formatExchangePrice } from '../../../utils/futuresPriceFormat.js'
 import {
   normalizeTapeNotional,
   readStoredTapeSettings,
@@ -209,6 +209,14 @@ export const FuturesWorkstationView = ({
   const trades = selectionOwned ? resources.trades : null
   const liveTrades = trades?.rows ?? EMPTY_ROWS
   const selectedContract = contracts.find(contract => contract.symbol === selectedSymbol) ?? null
+  const baseAsset = selectedContract?.baseAsset ?? selectedSymbol.replace(/USDT$/, '')
+  // Both legs of the day's volume, each with its unit named. The quote leg is the
+  // figure the cell abbreviates; the base leg is the same day counted in contracts
+  // and belongs beside it rather than instead of it.
+  const volumeDetail = [
+    header?.quoteVolume ? `${header.quoteVolume} USDT` : null,
+    header?.volume ? `${header.volume} ${baseAsset}` : null,
+  ].filter(Boolean).join(' · ') || undefined
   const aggregateState = !selectionOwned || state.status === 'idle' ? 'loading' : state.status
   const resourceState = resource => resource?.state ?? aggregateState
   const contractsUnavailable = selectionOwned && state.status === 'unavailable'
@@ -237,6 +245,7 @@ export const FuturesWorkstationView = ({
       : 'Contracts are unavailable. Fix the reported connection issue, then retry.'
 
   const favorites = useMemo(() => new Set(symbolHistory.favorites), [symbolHistory.favorites])
+  const recentSymbols = useMemo(() => new Set(symbolHistory.recent ?? EMPTY_ROWS), [symbolHistory.recent])
   // The recency list is local state; it must not wait on a catalogue round-trip.
   // Until the catalogue confirms a recent contract, the rail lists it as pending
   // so a restart never shows an empty instrument panel.
@@ -457,6 +466,12 @@ export const FuturesWorkstationView = ({
     ?? header?.lastPrice
     ?? lastTrade?.price
     ?? null
+  // The stream pads its prices: a kline close arrives as `2.6010000` and a mark
+  // as `58500.00`, and those zeros are the payload's fixed width rather than the
+  // contract's precision. They are dropped for display only — the raw value still
+  // seeds order drafts and the step description, where an exact decimal matters —
+  // and nothing is rounded away, so a coin quoted at 0.00123 keeps every digit.
+  const lastPriceText = formatExchangePrice(lastPrice, null, '—')
   // Direction is the change from the price previously on screen. Taking it from
   // the newest displayed trade's maker flag would report the side of a print
   // the filter left on screen long after the market moved past it. The first
@@ -610,10 +625,17 @@ export const FuturesWorkstationView = ({
             maxLength={20}
           />
         </label>
+        {/* The recency list already sorts to the front, but a recent contract that
+            the catalogue has confirmed used to read `PERPETUAL` like the four
+            hundred behind it — so the block at the top was not legible as the
+            operator's own. It is marked whether it came from the catalogue or from
+            storage, and the rows carry the accent as a group. */}
         <div className="futures-workstation-contract-list">
           {visibleContracts.map(contract => (
             <div
-              className={`futures-workstation-contract${contract.symbol === selectedSymbol ? ' is-selected' : ''}`}
+              className={`futures-workstation-contract${
+                recentSymbols.has(contract.symbol) ? ' is-recent' : ''
+              }${contract.symbol === selectedSymbol ? ' is-selected' : ''}`}
               key={contract.symbol}
             >
               <button
@@ -632,7 +654,11 @@ export const FuturesWorkstationView = ({
                 aria-pressed={contract.symbol === selectedSymbol}
               >
                 <strong>{contract.symbol}</strong>
-                <span>{contract.pending ? 'recent' : contract.contractType}</span>
+                <span>
+                  {recentSymbols.has(contract.symbol) || contract.pending
+                    ? 'recent'
+                    : contract.contractType}
+                </span>
               </button>
             </div>
           ))}
@@ -661,14 +687,26 @@ export const FuturesWorkstationView = ({
           <small>{selectedContract?.status ?? 'LOADING'}</small>
         </div>
         <dl>
-          <div className="is-primary"><dt>Last</dt><dd>{lastPrice ?? '—'}</dd></div>
+          <div className="is-primary"><dt>Last</dt><dd>{lastPriceText}</dd></div>
           <div className={`is-change is-${changeTone}`}>
             <dt>24h change</dt>
             <dd>{displayPercent(header?.priceChangePercent)}</dd>
           </div>
           <div><dt>24h high</dt><dd>{header?.highPrice ?? '—'}</dd></div>
           <div><dt>24h low</dt><dd>{header?.lowPrice ?? '—'}</dd></div>
-          <div><dt>24h volume</dt><dd>{header?.volume ?? '—'}</dd></div>
+          {/* A day's volume is eight or ten digits, and read for its magnitude:
+              nobody compares the last three. Abbreviated it is a size the eye
+              takes in at once, and the exact figure stays in the title.
+              It is the quote leg — what the exchange's own app shows and what a
+              trader means by "volume". The base count is the same day measured in
+              contracts, and a USDT abbreviation over it reads as a lie: 19.9B of
+              BMT is 571M of USDT. It stays in the title, where its unit is named. */}
+          <div className="is-volume">
+            <dt>24h volume, USDT</dt>
+            <dd title={volumeDetail}>
+              {formatCompactUsdt(header?.quoteVolume, '—', 1)}
+            </dd>
+          </div>
           {/* Funding is a cost or an income depending on the leg; its sign is
               the whole point, so it is coloured like one. */}
           <div className={`is-change is-${fundingTone}`}>
@@ -823,7 +861,7 @@ export const FuturesWorkstationView = ({
         {/* The row between the sides carries the only number worth reading
             there: what just traded, and which way it went. */}
         <div className={`futures-workstation-book-last is-${lastDirection}`}>
-          <strong>{lastPrice ?? '—'}</strong>
+          <strong>{lastPriceText}</strong>
           {lastDirection === 'flat' ? null : (
             <span className="futures-workstation-book-last-arrow" aria-hidden="true">
               {lastDirection === 'up' ? '↑' : '↓'}

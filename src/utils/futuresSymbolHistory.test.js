@@ -4,6 +4,7 @@ import {
   orderFuturesContracts,
   readFuturesSymbolHistory,
   rememberFuturesSymbol,
+  searchFuturesSymbols,
   toggleFuturesFavorite,
   writeFuturesSymbolHistory,
 } from './futuresSymbolHistory.js'
@@ -65,5 +66,37 @@ describe('futures symbol history', () => {
     }).map(contract => contract.symbol)).toEqual([
       'SOLUSDT', 'ETHUSDT', 'BTCUSDT', 'AAVEUSDT',
     ])
+  })
+})
+
+describe('searchFuturesSymbols', () => {
+  const catalog = ['AAVEUSDT', 'BTCUSDT', 'BTCDOMUSDT', 'WBTCUSDT', 'ETHUSDT', 'SOLUSDT']
+
+  // Typing `BT` must not offer WBTCUSDT before BTCUSDT: what the query starts is
+  // what the operator is reaching for.
+  it('ranks a symbol that starts with the query above one that only contains it', () => {
+    expect(searchFuturesSymbols(catalog, 'BTC'))
+      .toEqual(['BTCDOMUSDT', 'BTCUSDT', 'WBTCUSDT'])
+  })
+
+  // Recency outranks the alphabet — usually the pair being reached for is the one
+  // just left.
+  it('offers the contracts worked with lately first', () => {
+    expect(searchFuturesSymbols(catalog, '', { recent: ['SOLUSDT', 'ETHUSDT'], favorites: ['AAVEUSDT'] }))
+      .toEqual(['SOLUSDT', 'ETHUSDT', 'AAVEUSDT', 'BTCDOMUSDT', 'BTCUSDT', 'WBTCUSDT'])
+    expect(searchFuturesSymbols(catalog, 'USDT', { recent: ['ETHUSDT'] })[0]).toBe('ETHUSDT')
+  })
+
+  it('offers a stored contract the catalogue has not delivered yet', () => {
+    expect(searchFuturesSymbols(['BICOUSDT', ...catalog], 'BICO', { recent: ['BICOUSDT'] }))
+      .toEqual(['BICOUSDT'])
+  })
+
+  it('deduplicates, ignores unreadable entries and bounds the list', () => {
+    expect(searchFuturesSymbols(['BTCUSDT', 'BTCUSDT', 'btcusdt', null, 'X', 42], 'BTC'))
+      .toEqual(['BTCUSDT'])
+    expect(searchFuturesSymbols(catalog, '', { limit: 2 })).toHaveLength(2)
+    expect(searchFuturesSymbols(null, 'BTC')).toEqual([])
+    expect(searchFuturesSymbols()).toEqual([])
   })
 })

@@ -140,9 +140,35 @@ export const describeFuturesPositionMargin = (position) => {
   const margin = marginMode === 'ISOLATED'
     ? (isolatedAmount ?? sharedAmount)
     : marginMode === 'CROSS' ? sharedAmount : null
+
+  // What the exchange requires the position to keep. Liquidation is the moment
+  // the margin balance reaches it, so it is the floor under everything below.
+  const maintenanceMargin = toFiniteNumber(position?.maintenanceMargin)
+  const unrealizedPnl = toFiniteNumber(position?.unrealizedPnl) ?? 0
+  // Unrealized profit is not counted: it is not in the wallet and cannot be
+  // withdrawn. Unrealized loss is, because it has already been taken out.
+  const marginBalance = margin === null ? null : margin + Math.min(0, unrealizedPnl)
+  // The distance to liquidation measured in money rather than in price — and
+  // only for an isolated position, because a cross position's buffer is the
+  // whole account's and cannot be attributed to one row.
+  //
+  // This is where liquidation becomes certain, not the amount Binance will
+  // release: its leverage brackets hold back more, and the v3 read reports no
+  // leverage to reproduce that from. The exchange refuses the rest itself.
+  const liquidationBuffer = marginMode === 'ISOLATED'
+    && marginBalance !== null
+    && maintenanceMargin !== null
+    ? marginBalance - maintenanceMargin
+    : null
   return Object.freeze({
     marginMode,
     margin,
+    maintenanceMargin,
+    marginBalance,
+    liquidationBuffer,
+    // What can be taken out without putting the position under: never negative,
+    // because a position already below its floor has nothing spare to give.
+    removable: liquidationBuffer === null ? null : Math.max(0, liquidationBuffer),
     // Binance moves margin on isolated positions only; a cross position's
     // margin is the whole account's and cannot be assigned to one row.
     adjustable: marginMode === 'ISOLATED' && margin !== null,
@@ -181,6 +207,60 @@ export const describeFuturesPosition = (position) => {
     pnlTone: unrealizedPnl === null || unrealizedPnl === 0
       ? 'flat'
       : unrealizedPnl > 0 ? 'positive' : 'negative',
+  })
+}
+
+// Where moving margin would put the liquidation price. Margin does not change
+// the size of the position, so every USDT transferred buys exactly one
+// contract's worth of price: the exchange closes the position when the loss eats
+// the margin, and the loss per unit of price is the quantity. Adding pushes the
+// price away from the entry, removing pulls it in.
+//
+// An estimate, and labelled as one on screen: the maintenance requirement is
+// itself a share of the notional at the liquidation price, which bends the true
+// answer by that rate — well under a percent of the move. Binance sets the price;
+// this says which way it goes and how far, which is what nothing on this panel
+// said before.
+export const projectLiquidationPrice = ({
+  liquidationPrice,
+  quantity,
+  positionSide,
+  marginDelta,
+} = {}) => {
+  const liquidation = toFiniteNumber(liquidationPrice)
+  const size = Math.abs(toFiniteNumber(quantity) ?? 0)
+  const delta = toFiniteNumber(marginDelta)
+  // A position with no liquidation price reported has none to move: Binance
+  // sends 0 for that, and 0 is not a price this may do arithmetic on.
+  if (liquidation === null || liquidation <= 0) return null
+  if (!(size > 0) || delta === null || delta === 0) return null
+  const shift = delta / size
+  const moved = positionSide === 'SHORT' ? liquidation + shift : liquidation - shift
+  return moved > 0 ? moved : 0
+}
+
+// What an exit at this price would settle: the amount coming off the table and
+// the profit taken with it. Both are estimates by nature — a market exit pays
+// whatever the book pays — and neither carries the exchange's fees, so the panel
+// says so where it shows them.
+export const describeFuturesCloseOutcome = ({
+  positionSide,
+  entryPrice,
+  quantity,
+  exitPrice,
+} = {}) => {
+  const size = toFiniteNumber(quantity)
+  const exit = toFiniteNumber(exitPrice)
+  const entry = toFiniteNumber(entryPrice)
+  const usable = size !== null && size > 0 && exit !== null && exit > 0
+  const direction = normalizePositionSide(positionSide) === 'SHORT' ? -1 : 1
+  return Object.freeze({
+    notional: usable ? size * exit : null,
+    // Never a confident zero: without an entry price there is no profit to
+    // state, and 0.00 would read as a break-even exit.
+    realizedPnl: usable && entry !== null && entry > 0
+      ? (exit - entry) * size * direction
+      : null,
   })
 }
 

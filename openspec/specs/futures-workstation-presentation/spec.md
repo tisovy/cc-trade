@@ -391,3 +391,322 @@ last-print row SHALL remain visible in every mode.
 - **WHEN** the operator selects another contract
 - **THEN** the side mode is kept, because it is a way of reading a book rather than a property of one contract
 
+### Requirement: A margin panel states the liquidation price it would move to
+A panel that moves margin on a position SHALL state that position's liquidation
+price, and, while an amount is entered, the price the transfer would move it to:
+away from the entry when margin is added and toward it when margin is removed, by
+the amount transferred spread over the position's size. The projected price SHALL
+be presented as a projection, at the precision the contract quotes, and SHALL be
+omitted when the exchange reports no liquidation price for the position. The panel
+SHALL NOT present a margin amount as though it were a price.
+
+#### Scenario: Margin is added to a long position
+- **WHEN** an amount to add is entered on a long position
+- **THEN** the panel shows the current liquidation price and the lower price the transfer would move it to
+
+#### Scenario: Margin is removed
+- **WHEN** an amount to remove is entered
+- **THEN** the projected liquidation price is closer to the position's entry than the current one
+
+#### Scenario: The position is short
+- **WHEN** margin is added to a short position
+- **THEN** the projected liquidation price is above the current one, because a short is liquidated above itself
+
+#### Scenario: The exchange reports no liquidation price
+- **WHEN** the account read carries no liquidation price for the position
+- **THEN** no price is projected and the margin standing above the liquidation floor is stated instead
+
+#### Scenario: The maintenance requirement is displayed
+- **WHEN** the maintenance requirement is shown
+- **THEN** it is shown as an amount of margin, never as a price and never labelled as a price level
+
+### Requirement: An amount control names the bound it spans
+A control that spans a bound SHALL name the bound it is showing, and SHALL span
+the bound that actually applies to the action it is used for. Adding margin to a
+position SHALL be bounded by the balance available in the wallet, and removing
+margin by the margin standing above the liquidation floor; the two SHALL NOT share
+one ceiling. An amount typed past the bound SHALL stretch the control rather than
+contradict the value shown, and SHALL NOT be treated as permission — the refusal
+that applies still applies.
+
+#### Scenario: Margin is added from a large wallet
+- **WHEN** the operator selects the add direction on a position whose committed margin is a small part of the wallet
+- **THEN** the control spans the available balance and its readout names that figure as what is available
+
+#### Scenario: Margin is removed
+- **WHEN** the operator selects the remove direction
+- **THEN** the control spans the margin above the liquidation floor and its readout names that figure as what is removable
+
+#### Scenario: An amount is typed past the bound
+- **WHEN** the operator types an amount larger than the bound
+- **THEN** the control stretches to the typed amount, the amount is refused with the bound stated, and nothing is submitted
+
+### Requirement: An amount too large to read is abbreviated by magnitude
+An amount whose magnitude is what it is read for SHALL be shown abbreviated —
+thousands, millions and billions — rather than as its full digit string, and the
+exact figure SHALL remain available on the element. No abbreviation SHALL leave a
+suffix that abbreviates nothing, such as thousands of millions.
+
+An abbreviated amount SHALL name the unit it is stated in, and SHALL be the leg
+that unit measures: a day's volume in USDT is the quote leg, never the count of
+contracts traded. Where both legs exist, the other SHALL remain available on the
+element with its own unit named.
+
+#### Scenario: A daily volume is displayed
+- **WHEN** the market header shows a 24-hour volume of tens of millions
+- **THEN** it is shown as a magnitude with one decimal and its unit, and the exact figure is on the element's title
+
+#### Scenario: An amount reaches the billions
+- **WHEN** an abbreviated amount is a billion or more
+- **THEN** it carries a billions suffix rather than being printed as a four-digit millions figure
+
+#### Scenario: The contract trades billions of units of a cheap asset
+- **WHEN** a contract's 24-hour base volume is billions of contracts and its quote volume is hundreds of millions of USDT
+- **THEN** the header states the quote volume against a USDT label, and the base count is on the element's title with the base asset named
+
+### Requirement: A price is shown at its own precision, not the stream's width
+A price taken from an exchange stream SHALL be displayed without the padding the
+payload carries, and SHALL NOT be re-quantized in a way that drops a digit the
+contract trades at.
+
+#### Scenario: A padded close arrives
+- **WHEN** a kline close arrives as `2.6010000`
+- **THEN** the desk shows `2.601`
+
+#### Scenario: The contract is quoted in fractions of a cent
+- **WHEN** a price arrives as `0.00123000`
+- **THEN** every trading digit is kept and only the padding is dropped
+
+### Requirement: A reading is never silently sliced by its column
+A cell whose content can outgrow it SHALL keep the whole of the reading the
+operator is looking for and SHALL carry the exact figures on the element. Where a
+cell holds a primary amount and a secondary percentage, the percentage SHALL NOT
+be the part that is cut.
+
+A column of money SHALL be sized for the amounts the account can actually reach —
+five figures and two decimals — rather than for the amounts it holds today. Where a
+table cannot fit every reading in the width it has, a component of a result SHALL
+give up its column to the element's title before the result itself does.
+
+#### Scenario: A uPnL and its ROE together outgrow the column
+- **WHEN** an unrealized PnL and the ROE beside it are wider than the column allows
+- **THEN** the percentage is shown whole, the amount gives way with an ellipsis, and both figures are stated exactly in the cell's title
+
+#### Scenario: A five-figure amount is reported beside its percentage
+- **WHEN** a position's unrealized PnL reaches five figures and two decimals
+- **THEN** both the amount and its percentage are shown whole, with neither shortened
+
+#### Scenario: A history table has more readings than width
+- **WHEN** the closed-position history cannot fit every reading in the dock's width
+- **THEN** the realized PnL keeps its column and the fee is stated in that cell's title together with the net
+
+### Requirement: The rail marks the contracts recently worked with
+The instrument rail SHALL mark a contract the operator has recently selected as
+recent, whether the row came from the catalogue or from stored history, and SHALL
+keep the recency list across a restart of the app.
+
+#### Scenario: A recent contract is confirmed by the catalogue
+- **WHEN** the catalogue delivers a contract that is in the recency list
+- **THEN** the row is marked as recent rather than carrying only its contract type, and it is not listed twice
+
+#### Scenario: The app is restarted
+- **WHEN** the operator selects a contract, closes the app and reopens it
+- **THEN** the rail lists that contract first, marked as recent, before the catalogue arrives
+
+### Requirement: Typing opens the contract and interval picker
+Typing a bare letter SHALL open a picker over every known contract, and typing a
+bare digit SHALL open a picker over the chart intervals, in both cases seeded with
+the character typed. Results SHALL rank a symbol the query starts above one it only
+contains, and recency above the alphabet. Picking an entry SHALL change the
+selection and close the picker.
+
+#### Scenario: A letter is typed on the workstation
+- **WHEN** the operator types a letter with no modifier held and no field focused
+- **THEN** the picker opens on that letter, listing the contracts worked with lately first
+
+#### Scenario: A digit is typed
+- **WHEN** the operator types a digit
+- **THEN** the picker offers the chart intervals matching it, and picking one changes the interval
+
+#### Scenario: The keystroke belongs to something else
+- **WHEN** the keystroke lands in a text field, or a modifier is held, or the market is not the active one
+- **THEN** no picker opens and the keystroke is left to whatever it was meant for
+
+### Requirement: A panel opened at the cursor stays wholly inside the window
+A panel anchored at the pointer SHALL be placed so that its whole height and
+width remain inside the window, wherever the operator clicked and whatever the
+window's size and position on the desktop. The placement SHALL follow the
+panel's actual rendered height rather than an assumed one, and SHALL be
+corrected when the panel's content changes size while it is open.
+
+#### Scenario: The click lands near the bottom edge
+- **WHEN** the operator opens a panel by clicking near the bottom of the window
+- **THEN** the panel is placed above that point so that its last control is visible, rather than extending past the window's edge
+
+#### Scenario: The panel grows after it opens
+- **WHEN** a panel's content grows while it is open
+- **THEN** its position is corrected so it still ends inside the window
+
+#### Scenario: The panel is taller than the window
+- **WHEN** a panel cannot fit in the window at all
+- **THEN** it is aligned to the top edge, so that its heading and its first controls are the part that is reachable
+
+### Requirement: A panel's drag handle does not swallow the controls on it
+A panel's drag handle SHALL start a drag only for a press that did not land on
+a control. A press that begins on a button, field or link inside the handle
+SHALL reach that control.
+
+#### Scenario: The close button is pressed
+- **WHEN** the operator presses the close button that sits on a panel's drag handle
+- **THEN** no drag begins and the panel closes
+
+### Requirement: Dock columns line up with the headings above them
+Every row of a dock table SHALL resolve to the same column widths as its
+heading row. No column in a dock table SHALL be sized by its own content,
+because a heading and the cells beneath it never hold the same content and a
+content-sized column therefore shifts every flexible column beside it.
+
+#### Scenario: A table with an action column is rendered
+- **WHEN** the positions or orders table renders a row carrying an action control and a heading row that carries none
+- **THEN** the values sit under the headings that name them
+
+### Requirement: Position size is stated as an unsigned USDT amount
+The positions dock SHALL state the size of a position as the USDT amount it is
+worth at the current mark price, without a direction sign, under a header that
+names the unit. Direction SHALL be carried by the side badge and the row accent
+that already state it. The exact contract quantity SHALL remain available on
+the cell without occupying the column.
+
+#### Scenario: A short is displayed
+- **WHEN** a position of `-0.5` contracts is marked at `60600`
+- **THEN** the size cell reads `30300.00` with no leading sign, and the row still states `SHORT`
+
+#### Scenario: Contract quantity is still needed
+- **WHEN** the operator inspects the size cell of a position of `-0.5` contracts
+- **THEN** the cell's title states `-0.5 contracts`
+
+### Requirement: Row controls are rendered as part of their row
+Every interactive cell in the positions dock SHALL carry an explicit style that
+matches the row's own typography, colour and alignment, and SHALL express its
+affordance through hover and keyboard focus rather than through a
+browser-default control face. A cell SHALL NOT change its appearance merely
+because its row is the selected contract.
+
+#### Scenario: The selected contract's size cell is interactive
+- **WHEN** the row of the selected contract offers the size shortcut
+- **THEN** the cell reads as the same text as any other size cell, and reveals its affordance on hover and on keyboard focus
+
+#### Scenario: A position on another contract
+- **WHEN** the row belongs to a contract that is not selected
+- **THEN** no size shortcut is offered and the cell reads identically to the selected row's cell
+
+### Requirement: Position rows are valued at the live mark price
+Between account snapshots, position rows SHALL be re-valued from the live mark
+price feed: mark price, USDT size, unrealized PnL and return on margin SHALL
+all follow the incoming mark, and the dock total SHALL be the sum of the
+re-valued rows. Unrealized PnL SHALL be derived as
+`(mark price − entry price) × signed quantity`. A position whose entry price,
+quantity or mark is unusable SHALL be left exactly as the account snapshot
+reported it, rather than partially re-valued.
+
+#### Scenario: The market moves with no account event
+- **WHEN** a mark of `0.03600` arrives for a `-446082` contract position entered at `0.03140`
+- **THEN** the row's mark, USDT size, unrealized PnL and return on margin all change, and the dock total changes with them
+
+#### Scenario: The mark feed is not connected
+- **WHEN** the feed reports no mark for a symbol
+- **THEN** the row shows the mark and unrealized PnL from the account snapshot, and no aged mark is presented as a live one
+
+#### Scenario: A mark arrives for a symbol with no open position
+- **WHEN** a mark arrives for a symbol that is not in the position list
+- **THEN** no row is created or changed
+
+### Requirement: The chart opens on enough history to read the market
+Opening a contract SHALL present substantially more than the live streaming
+window of candles. The workstation SHALL request candle history once the
+contract's live window is on screen, and SHALL present the history and the live
+window as one continuous series ordered by open time, with no duplicated or
+missing bar at the seam.
+
+#### Scenario: A contract is opened
+- **WHEN** the contract's bootstrap completes and history is delivered
+- **THEN** the chart shows the live window plus the requested history as one series, ordered by open time
+
+#### Scenario: History overlaps the live window
+- **WHEN** a delivered history page contains a candle whose open time is already in the live window
+- **THEN** the live window's row is kept and the duplicate is discarded
+
+### Requirement: Candle history is delivered as bounded pages
+Candle history SHALL be delivered as pages that respect the same per-event row
+and byte bounds as every other resource, each page stating its offset, the
+total number of rows in the response, and whether it completes the response.
+The renderer SHALL buffer pages and apply them only once the response is
+complete, and SHALL discard a buffer whose generation, total or offset does not
+continue the one in progress. The live candle window, its per-tick update path
+and its frame bound SHALL NOT be changed by history delivery.
+
+#### Scenario: A history response exceeds one event
+- **WHEN** the requested history is larger than one event may carry
+- **THEN** it arrives as consecutive pages and is applied as a single series once the final page is delivered
+
+#### Scenario: A page arrives out of order
+- **WHEN** a page's offset does not continue the buffered rows
+- **THEN** the buffer is discarded and no partial history is presented
+
+#### Scenario: The market ticks while history loads
+- **WHEN** a live candle update arrives during a history response
+- **THEN** the live window updates as it always has, unaffected by the history in flight
+
+### Requirement: Scrolling left loads older candles
+When the visible range reaches the oldest loaded candle, the workstation SHALL
+request the next page of history behind it and prepend the result, keeping the
+bars the operator is looking at in place rather than jumping the viewport. Only
+one history request SHALL be in flight at a time. When a response returns fewer
+candles than requested, the chart SHALL treat that as the start of the
+contract's history and SHALL stop requesting more.
+
+#### Scenario: The operator scrolls to the left edge
+- **WHEN** the visible range reaches the oldest loaded candle and history is not exhausted
+- **THEN** one request for the candles behind it is issued, and the prepended result leaves the visible bars where they were
+
+#### Scenario: The operator keeps scrolling while a page is loading
+- **WHEN** the left edge is reached again before the outstanding response arrives
+- **THEN** no second request is issued
+
+#### Scenario: The contract's history is exhausted
+- **WHEN** a history response returns fewer candles than were requested
+- **THEN** no further history is requested for that contract and interval
+
+### Requirement: Loaded candle history survives a restart
+A closed candle SHALL NOT be read from the exchange twice. Delivered history
+SHALL be stored locally per contract and interval and reused after a restart:
+a page the store can satisfy SHALL be applied without issuing any request. Only
+closed candles SHALL be stored, the store SHALL be bounded per contract and
+interval, and a store that is unavailable or unreadable SHALL degrade to
+fetching rather than fail the chart.
+
+#### Scenario: The contract is reopened after a restart
+- **WHEN** history for a contract and interval was loaded in an earlier run and is requested again
+- **THEN** it is served from the local store and no history request is sent
+
+#### Scenario: The app was closed for days
+- **WHEN** the stored history no longer reaches the live window
+- **THEN** the missing range is fetched and no gap is presented as continuous data
+
+#### Scenario: The local store cannot be opened
+- **WHEN** IndexedDB is unavailable
+- **THEN** history is fetched as usual and the chart behaves exactly as it does without a store
+
+### Requirement: History belongs to one contract and interval
+Loaded history SHALL be discarded when the contract or the interval changes,
+and a history response SHALL be ignored unless it matches the contract,
+interval and subscription that asked for it.
+
+#### Scenario: The interval changes
+- **WHEN** the operator switches from 15m to 1h
+- **THEN** the 15m history is discarded and the 1h chart shows no candle from the previous interval
+
+#### Scenario: A late response arrives after a symbol change
+- **WHEN** a history response for the previous contract arrives after the operator switched contracts
+- **THEN** it is ignored
+

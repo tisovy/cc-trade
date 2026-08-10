@@ -263,15 +263,18 @@
   background: transparent;
 }
 
+/* Flex rather than two fixed tracks: the contract now carries its leverage badge
+   beside it, and a third child in a two-column grid pushed the gesture label onto
+   its own row. The label still ends the line, whether the badge is there or not. */
 .futures-production-ticket-symbol {
-  display: grid;
-  grid-template-columns: 1fr auto;
+  display: flex;
+  flex-wrap: wrap;
   gap: 2px 8px;
   align-items: baseline;
 }
 
 .futures-production-ticket-symbol > span {
-  grid-column: 1 / -1;
+  flex: 1 0 100%;
   color: var(--production-muted);
   font-size: calc(var(--fx-ui-scale, 1) * 12px);
   font-weight: 800;
@@ -285,9 +288,29 @@
 }
 
 .futures-production-ticket-symbol > code {
+  margin-left: auto;
   color: #f4ca43;
   font-size: calc(var(--fx-ui-scale, 1) * 12px);
   text-transform: uppercase;
+}
+
+/* The same badge as the dock's position rows, so the multiple reads the same
+   wherever it appears and is set from either place. */
+.futures-production-ticket-leverage {
+  padding: 1px 6px;
+  border: 1px solid rgba(244, 202, 67, 0.4);
+  border-radius: 3px;
+  background: rgba(244, 202, 67, 0.12);
+  color: #f4ca43;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.futures-production-ticket-leverage:hover {
+  border-color: rgba(244, 202, 67, 0.75);
+  background: rgba(244, 202, 67, 0.22);
 }
 
 .futures-production-ticket-symbol > code.is-long {
@@ -910,6 +933,17 @@
   color: #93a6b7;
 }
 
+/* Leads the amount, for the same reason as in the dock: after the digits the
+   tag read as part of the number rather than as the mode. */
+.futures-production-margin-mode {
+  margin-right: 4px;
+  color: #7cc0f5;
+  font-size: calc(var(--fx-ui-scale, 1) * 10px);
+  font-style: normal;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+}
+
 /* ── Open order rows ──────────────────────────────────────────────────────── */
 
 .futures-production-order-rows {
@@ -1160,10 +1194,174 @@
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
+/* A projected result, coloured like every other result in this workstation: the
+   sign is what the operator reads first when deciding whether to take the exit. */
+.futures-order-editor-summary dd.is-positive {
+  color: #2bc48a;
+}
+
+.futures-order-editor-summary dd.is-negative {
+  color: #ff8490;
+}
+
 .futures-order-editor p {
   margin: 0;
   color: #e8c65a;
   font-size: calc(var(--fx-ui-scale, 1) * 11.5px);
+}
+
+/* ── Position margin: mode and liquidation floor ──────────────────────────── */
+
+.futures-order-editor p.futures-margin-mode {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: #8fa2b6;
+}
+
+.futures-margin-mode strong {
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: calc(var(--fx-ui-scale, 1) * 10.5px);
+  font-weight: 800;
+  letter-spacing: 0.06em;
+}
+
+.futures-margin-mode.is-isolated strong {
+  background: rgba(79, 154, 216, 0.18);
+  color: #7cc0f5;
+}
+
+.futures-margin-mode.is-cross strong {
+  background: rgba(143, 162, 182, 0.16);
+  color: #b3c3d3;
+}
+
+/* The margin behind a position, drawn to scale: the part the exchange will not
+   let go of, and the part that is still spare. A figure alone answers "how
+   much"; only the proportion answers "how close". */
+.futures-margin-meter {
+  display: grid;
+  gap: 4px;
+}
+
+.futures-margin-meter-track {
+  display: flex;
+  overflow: hidden;
+  height: 13px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.futures-margin-meter-track > span {
+  height: 100%;
+}
+
+.futures-margin-meter-track .is-maintenance {
+  background: #ef5b69;
+}
+
+.futures-margin-meter-track .is-spare {
+  background: #4f9ad8;
+}
+
+/* Margin on its way out is still on the bar, hollowed out — the operator can
+   see the slice they are taking rather than only the remainder. Both ghosts
+   carry a hard edge against the segment they meet: a few hundred USDT against
+   a few thousand is a narrow band, and a border is what makes a narrow band
+   read as a boundary that moved rather than as a smudge. */
+.futures-margin-meter-track .is-removed {
+  border-left: 1px solid #eef5fa;
+  background: repeating-linear-gradient(
+    -45deg,
+    rgba(79, 154, 216, 0.5) 0 3px,
+    rgba(79, 154, 216, 0.14) 3px 6px
+  );
+}
+
+.futures-margin-meter-track .is-added {
+  border-left: 1px solid #eef5fa;
+  background: #2bc48a;
+}
+
+.futures-margin-meter.is-breached .futures-margin-meter-track .is-maintenance {
+  background: #ff8490;
+  box-shadow: 0 0 0 1px #ff8490;
+}
+
+.futures-margin-meter-legend {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: calc(var(--fx-ui-scale, 1) * 10.5px);
+  font-variant-numeric: tabular-nums;
+}
+
+.futures-margin-meter-legend .is-spare {
+  color: #7cc0f5;
+}
+
+/* The liquidation price, and where the transfer would put it. The current price
+   is stated plainly; the projected one carries the only colour, because the
+   question being answered is whether this move helps or hurts. */
+.futures-margin-meter-legend .is-liquidation {
+  color: #7f93a6;
+}
+
+.futures-margin-meter-legend .is-liquidation b {
+  color: #cfdcea;
+  font-weight: 700;
+}
+
+.futures-margin-meter-legend .is-liquidation .is-safer {
+  color: #2bc48a;
+}
+
+.futures-margin-meter-legend .is-liquidation .is-riskier {
+  color: #ff8490;
+}
+
+/* Eleven stops rather than two, so the row wraps into a keypad. Auto-fit rather
+   than a fixed count: a contract capped at 10× offers five stops and should not
+   leave six empty cells. */
+.futures-order-editor-modes.is-leverage {
+  grid-template-columns: repeat(auto-fit, minmax(46px, 1fr));
+}
+
+/* Raising leverage on a position that is already open moves its liquidation
+   price. The line says so in the same red the projected price uses. */
+.futures-order-editor p[role='status'].is-riskier {
+  color: #ff8490;
+}
+
+/* The editors' own slider, borrowing the order ticket's size control whole: the
+   same gesture, so moving margin or cutting a position needs nothing new
+   learned. Shared by both panels — a close panel measures percent of a position
+   and a margin panel measures USDT, and neither needs its own control. */
+.futures-editor-slider > span {
+  color: #7f93a6;
+  font-size: calc(var(--fx-ui-scale, 1) * 11px);
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.futures-editor-slider-value {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: #eef5fa;
+}
+
+.futures-editor-slider-value strong {
+  color: #f4ca43;
+  font-size: calc(var(--fx-ui-scale, 1) * 13px);
+}
+
+.futures-editor-slider-value b {
+  color: #7f93a6;
+  font-size: calc(var(--fx-ui-scale, 1) * 11px);
+  font-weight: 700;
 }
 
 .futures-order-editor-actions {
@@ -1257,22 +1455,15 @@
 
 /* ── Position close panel ─────────────────────────────────────────────────── */
 
-.futures-order-editor-modes,
-.futures-order-editor-anchors {
+.futures-order-editor-modes {
   display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 4px;
 }
 
-.futures-order-editor-modes {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.futures-order-editor-anchors {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-}
-
-.futures-order-editor-modes button,
-.futures-order-editor-anchors button {
+/* The close panel's percentage anchors were replaced by a slider: four stops out
+   of a hundred, each costing a click to find out it was the wrong one. */
+.futures-order-editor-modes button {
   padding: 5px 4px;
   border: 1px solid rgba(126, 143, 166, 0.3);
   border-radius: 4px;

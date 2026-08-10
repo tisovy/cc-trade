@@ -908,8 +908,25 @@ export function setupBinanceConnection({
         });
     };
 
+    // How far back "which contracts did this account trade" reaches. Income
+    // history is the only read that answers it without naming a symbol first;
+    // every other history endpoint on USDⓈ-M requires one.
+    const FUTURES_HISTORY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+    // Each contract costs two signed reads at weight 5. Eight is a session's worth
+    // of contracts against a 800/minute budget, and anything dropped is logged
+    // rather than silently missing from the table.
+    const FUTURES_HISTORY_MAX_SYMBOLS = 8;
+    const FUTURES_HISTORY_READ_WEIGHT = 5;
+    const FUTURES_INCOME_READ_WEIGHT = 30;
+    const FUTURES_SYMBOL_CONFIG_WEIGHT = 5;
+    const FUTURES_LEVERAGE_BRACKET_WEIGHT = 1;
+
     let _futuresAccountRefreshInFlight = false;
     let futuresAccountResources = createInitialFuturesAccountResources();
+    // Leverage and margin mode per contract. /fapi/v3/positionRisk reports neither
+    // any more, so without this read nothing on the desk can state the leverage a
+    // position is carried at — or set it.
+    const futuresSymbolConfigs = new Map();
     const futuresAccountPayloadKeys = Object.freeze({
         balances: 'futures_balances',
         positions: 'futures_positions',
@@ -919,6 +936,48 @@ export function setupBinanceConnection({
     const broadcastFuturesAccountState = () => {
         // Versioned renderer contract: futures_account_state.
         broadcastToRenderers(createFuturesAccountStateEnvelope(futuresAccountResources));
+    };
+
+    // Sent per contract rather than as one map: the reads arrive one symbol at a
+    // time — the contract on screen, then each open position — and a renderer that
+    // merges them keeps the answers it already has.
+    const broadcastFuturesSymbolConfigs = (configs) => {
+        const entries = configs.filter(config => config !== null);
+        if (entries.length === 0) return;
+        broadcastToRenderers({
+            futures_symbol_configs: Object.fromEntries(entries.map(config => [config.symbol, config])),
+        });
+    };
+
+    // What the account is set to for one contract: the leverage, its ceiling and
+    // the margin mode. The ceiling comes from the contract's own leverage bracket,
+    // which is what Binance refuses a higher setting against.
+    const readFuturesSymbolConfig = async (symbol, { withCeiling = false } = {}) => {
+        if (!futuresTradingAdapter || !symbol) return null;
+        try {
+            const config = await futuresRestLimiter.execute(
+                () => futuresTradingAdapter.getSymbolConfig(symbol),
+                FUTURES_SYMBOL_CONFIG_WEIGHT,
+            );
+            if (config === null) return null;
+            const ceiling = withCeiling
+                ? await futuresRestLimiter.execute(
+                    () => futuresTradingAdapter.getMaxLeverage(symbol),
+                    FUTURES_LEVERAGE_BRACKET_WEIGHT,
+                ).catch(() => null)
+                : futuresSymbolConfigs.get(config.symbol)?.maxLeverage ?? null;
+            // A bracket read that failed does not un-know a ceiling that was read
+            // before it: the panel would silently offer the whole 1–125 range.
+            const entry = {
+                ...config,
+                maxLeverage: ceiling ?? futuresSymbolConfigs.get(config.symbol)?.maxLeverage ?? null,
+            };
+            futuresSymbolConfigs.set(entry.symbol, entry);
+            return entry;
+        } catch (error) {
+            logger.warn(`[futures-config] ${symbol} configuration read failed:`, error?.code || error?.message);
+            return null;
+        }
     };
 
     // positionRisk is only re-read on an account event, so without this the
@@ -946,6 +1005,20 @@ export function setupBinanceConnection({
     let futuresActivationGeneration = 0;
     const noteFuturesMutation = () => {
         futuresMutationEpoch += 1;
+    };
+
+    // The leverage of every contract the account is actually holding. Bounded by
+    // the same ceiling as the history fan-out: an account in eight positions is
+    // eight reads at weight 5, and a ninth row states no leverage rather than
+    // spending the minute's budget on it.
+    const refreshFuturesPositionConfigs = async (positions) => {
+        const symbols = [...new Set((Array.isArray(positions) ? positions : [])
+            .filter(position => Number(position?.quantity) !== 0)
+            .map(position => String(position?.symbol ?? '').toUpperCase())
+            .filter(Boolean))].slice(0, FUTURES_HISTORY_MAX_SYMBOLS);
+        if (symbols.length === 0) return;
+        const configs = await Promise.all(symbols.map(symbol => readFuturesSymbolConfig(symbol)));
+        broadcastFuturesSymbolConfigs(configs);
     };
 
     const runFuturesAccountRefreshPass = async () => {
@@ -985,6 +1058,10 @@ export function setupBinanceConnection({
             );
             if (operation.type === 'positions') {
                 futuresMarkPriceFeed?.track(payload[payloadKey]);
+                // Every open position's leverage, so the dock can state what each
+                // one is carried at. Not awaited: the account state is already
+                // correct without it, and this only adds a reading to it.
+                void refreshFuturesPositionConfigs(payload[payloadKey]);
             }
             broadcastFuturesAccountState();
         }, operation.weight).catch((error) => {
@@ -1788,30 +1865,145 @@ export function setupBinanceConnection({
             }
         };
 
+        // Which contracts this account traded lately. On USDⓈ-M every history
+        // endpoint takes a symbol, so a review of the session has to be told where
+        // to look: income history is the one read that answers without being asked
+        // about a contract first. The contract on screen and everything the account
+        // is currently in lead the list — those are the rows the operator came for.
+        const collectFuturesHistorySymbols = async (selectedSymbol) => {
+            const symbols = [];
+            const remember = (value) => {
+                const symbol = String(value ?? '').toUpperCase();
+                if (symbol && !symbols.includes(symbol)) symbols.push(symbol);
+            };
+            remember(selectedSymbol);
+            for (const position of futuresAccountResources.positions?.data ?? []) {
+                remember(position?.symbol);
+            }
+            for (const resource of ['regularOrders', 'algoOrders']) {
+                for (const order of futuresAccountResources[resource]?.data ?? []) {
+                    remember(order?.symbol);
+                }
+            }
+            try {
+                const traded = await futuresRestLimiter.execute(
+                    () => futuresTradingAdapter.getTradedSymbols({
+                        startTime: Date.now() - FUTURES_HISTORY_WINDOW_MS,
+                    }),
+                    FUTURES_INCOME_READ_WEIGHT,
+                );
+                for (const symbol of traded) remember(symbol);
+            } catch (error) {
+                // The fan-out still covers what the desk already knows about; only
+                // contracts closed and switched away from go unlisted.
+                logger.warn('[futures-history] traded-symbol discovery failed:', error?.code || error?.message);
+            }
+            if (symbols.length > FUTURES_HISTORY_MAX_SYMBOLS) {
+                logger.info(`[futures-history] ${symbols.length} contracts traded; reading the ${FUTURES_HISTORY_MAX_SYMBOLS} most relevant: ${symbols.slice(0, FUTURES_HISTORY_MAX_SYMBOLS).join(', ')}`);
+            }
+            return symbols.slice(0, FUTURES_HISTORY_MAX_SYMBOLS);
+        };
+
         // A history read must never disturb trading state: a failure is reported
         // inside the history payload itself, not as an account resource error.
+        //
+        // It spans the account rather than one contract, because that is what a
+        // session is: the operator reviews the trades they made, and half of them
+        // were on pairs they have since switched away from. One contract failing
+        // does not blank the others — only a total failure is reported as an error.
         const handleFuturesHistory = async (command) => {
             const { symbol } = command;
-            try {
-                const [orders, trades] = await Promise.all([
-                    futuresTradingAdapter.getOrderHistory({ symbol }),
-                    futuresTradingAdapter.getTradeHistory({ symbol }),
-                ]);
-                emit({ futures_history: { symbol, orders, trades, error: null } });
-            } catch (error) {
-                logger.error('[futures-history] request failed:', error?.code || error?.message);
+            const symbols = await collectFuturesHistorySymbols(symbol);
+            const orders = [];
+            const trades = [];
+            const unavailable = [];
+            const failures = [];
+            await Promise.all(symbols.map(async (historySymbol) => {
+                try {
+                    const [symbolOrders, symbolTrades] = await Promise.all([
+                        futuresRestLimiter.execute(
+                            () => futuresTradingAdapter.getOrderHistory({ symbol: historySymbol }),
+                            FUTURES_HISTORY_READ_WEIGHT,
+                        ),
+                        futuresRestLimiter.execute(
+                            () => futuresTradingAdapter.getTradeHistory({ symbol: historySymbol }),
+                            FUTURES_HISTORY_READ_WEIGHT,
+                        ),
+                    ]);
+                    orders.push(...symbolOrders);
+                    trades.push(...symbolTrades);
+                } catch (error) {
+                    unavailable.push(historySymbol);
+                    failures.push(error);
+                    logger.error(`[futures-history] ${historySymbol} request failed:`, error?.code || error?.message);
+                }
+            }));
+            if (symbols.length > 0 && unavailable.length === symbols.length) {
+                const [failure] = failures;
                 emit({
                     futures_history: {
                         symbol,
+                        symbols,
                         orders: [],
                         trades: [],
                         error: {
                             code: 'FUTURES_API_ERROR',
-                            binanceCode: error?.code ?? null,
-                            message: describeFuturesApiError(error),
+                            binanceCode: failure?.code ?? null,
+                            message: describeFuturesApiError(failure),
                         },
                     },
                 });
+                return;
+            }
+            emit({
+                futures_history: {
+                    symbol,
+                    symbols: symbols.filter(entry => !unavailable.includes(entry)),
+                    orders: orders.sort((left, right) => right.time - left.time),
+                    trades: trades.sort((left, right) => right.time - left.time),
+                    error: null,
+                },
+            });
+        };
+
+        // The leverage of one contract, on demand: sent whenever the desk changes
+        // contract, and again after a leverage change, so what is on screen is what
+        // the exchange holds rather than what was asked for.
+        const handleFuturesSymbolConfig = async (command) => {
+            const config = await readFuturesSymbolConfig(command.symbol, { withCeiling: true });
+            broadcastFuturesSymbolConfigs([config]);
+        };
+
+        // Leverage places no order, but it is not a read either: it changes what
+        // every future entry on this contract costs in margin and, on a position
+        // already open, the price the exchange closes it at. Pausing trading stops
+        // it for the same reason it stops taking margin out — both raise risk.
+        const handleFuturesSetLeverage = async (command) => {
+            const { symbol, leverage } = command.leveragePayload;
+            if (futuresTradingPaused) {
+                emit(createCommandRejection(
+                    TRADING_COMMAND_ACTIONS.SET_LEVERAGE,
+                    'FUTURES_TRADING_PAUSED',
+                    'Futures trading is paused — resume to change leverage.',
+                    { marketType: FUTURES_MARKET_TYPE },
+                ));
+                return;
+            }
+            try {
+                logger.info(`[futures-leverage] ${symbol} → ${leverage}x`);
+                await futuresRestLimiter.execute(
+                    () => futuresTradingAdapter.setLeverage({ symbol, leverage }),
+                    1,
+                );
+                noteFuturesMutation();
+                // The exchange's figure, not the requested one: Binance lowers a
+                // setting a position is too large for rather than refusing it.
+                const config = await readFuturesSymbolConfig(symbol, { withCeiling: true });
+                broadcastFuturesSymbolConfigs([config]);
+                // Margin requirements and the liquidation price both moved.
+                await refreshFuturesAccountState();
+            } catch (error) {
+                emitFuturesApiRejection(TRADING_COMMAND_ACTIONS.SET_LEVERAGE, error);
             }
         };
 
@@ -2046,6 +2238,12 @@ export function setupBinanceConnection({
                         break;
                     case TRADING_COMMAND_ACTIONS.ACCOUNT_HISTORY:
                         await handleFuturesHistory(command);
+                        break;
+                    case TRADING_COMMAND_ACTIONS.ACCOUNT_SYMBOL_CONFIG:
+                        await handleFuturesSymbolConfig(command);
+                        break;
+                    case TRADING_COMMAND_ACTIONS.SET_LEVERAGE:
+                        await handleFuturesSetLeverage(command);
                         break;
                     case TRADING_COMMAND_ACTIONS.SET_TRADING_PAUSED:
                         futuresTradingPaused = command.paused;
@@ -2909,6 +3107,8 @@ export function setupBinanceConnection({
                     case TRADING_COMMAND_ACTIONS.ACCOUNT_HISTORY:
                     case TRADING_COMMAND_ACTIONS.SET_TRADING_PAUSED:
                     case TRADING_COMMAND_ACTIONS.ADJUST_POSITION_MARGIN:
+                    case TRADING_COMMAND_ACTIONS.ACCOUNT_SYMBOL_CONFIG:
+                    case TRADING_COMMAND_ACTIONS.SET_LEVERAGE:
                         await handleTypedTradingCommand(data);
                         break;
                 }

@@ -1,12 +1,11 @@
-## Purpose
+# futures-position-margin Specification
 
+## Purpose
 The margin behind an open position is what its liquidation price is computed
 from, and it is the one property of a live position the operator can change
 without trading. This capability makes it visible on the position row and
 adjustable from it.
-
-## ADDED Requirements
-
+## Requirements
 ### Requirement: Every open position states the margin committed to it
 The positions dock SHALL display, for each open position, the margin the
 exchange reports as committed to it, next to the ROE that is measured against
@@ -101,6 +100,29 @@ of it.
 - **WHEN** the account read reports no maintenance margin for the position
 - **THEN** no floor is drawn and no buffer is claimed, and the panel refuses only above the committed margin
 
+#### Scenario: The effect of a small adjustment is still readable
+- **WHEN** the amount is small beside the margin already behind the position, so that it moves the drawing by a sliver
+- **THEN** the panel also states the liquidation risk — the maintenance requirement as a share of the margin balance, liquidation at 100% — before and after the adjustment
+
+### Requirement: The margin amount can be dragged
+The margin amount SHALL be adjustable by a slider as well as by typing, using
+the same control as the order ticket's size, and the drawing of the liquidation
+floor SHALL follow it as it moves. The slider's range SHALL be measured against
+the position rather than against the account balance, so that a realistic
+adjustment occupies a usable part of its travel.
+
+#### Scenario: The slider is dragged
+- **WHEN** the operator drags the margin slider
+- **THEN** the amount, the drawing and the resulting figures all follow it
+
+#### Scenario: The slider's range
+- **WHEN** an increase is being made
+- **THEN** the slider runs to the smaller of the available balance and the margin the position already holds, and an amount typed past that stretches the range rather than contradicting it
+
+#### Scenario: The slider's range for a decrease
+- **WHEN** a decrease is being made
+- **THEN** the slider runs to the margin standing above the liquidation floor, so its far end is the last amount that does not cross it
+
 ### Requirement: The margin mode is stated in words wherever margin is shown
 Every surface that shows a position's margin SHALL name the margin mode in
 words. Colour, line style or the presence of a control SHALL NOT be the only
@@ -159,3 +181,4 @@ amount twice.
 #### Scenario: The adjustment is unanswered
 - **WHEN** a margin adjustment fails in a way that does not establish whether the exchange applied it
 - **THEN** the outcome is reported as unknown, the account is re-read, and the command is not sent again
+

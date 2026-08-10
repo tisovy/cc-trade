@@ -107,6 +107,11 @@ describe('FuturesPortfolioDock', () => {
     expect(table).toHaveTextContent('Margin')
     expect(table).toHaveTextContent('3000.00')
     expect(table).toHaveTextContent('−10.00%')
+    // The amount and the percentage together outgrew the column, which clips its
+    // overflow: the percent sign was being sliced off. Both readings stay exact in
+    // the cell's title whatever the dock's width does to the text.
+    expect(within(table).getByTitle('−300.00 USDT · −10.00% on margin'))
+      .toHaveTextContent('−300.00')
   })
 
   it('opens the margin panel at the cursor for the position that was clicked', () => {
@@ -142,7 +147,27 @@ describe('FuturesPortfolioDock', () => {
       name: 'Adjust margin on the BTCUSDT SHORT position',
     })
     expect(marginCell).toHaveClass('is-cross')
+    expect(marginCell).toHaveTextContent('CROSS')
     expect(marginCell).toHaveAttribute('title', 'Cross margin — backed by the whole account')
+  })
+
+  // Only one of the two modes can be adjusted at all, so the difference cannot
+  // rest on an underline style the operator has to already know about.
+  it('names the margin mode on the row rather than only styling it', () => {
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[{ ...position, marginType: undefined, isolatedWallet: '3000' }]}
+        onMarginEdit={vi.fn()}
+      />,
+    )
+    const marginCell = screen.getByRole('button', {
+      name: 'Adjust margin on the BTCUSDT SHORT position',
+    })
+    expect(marginCell).toHaveTextContent('3000.00')
+    // Ahead of the digits, not after them: trailing the amount it read as part
+    // of the number — a stray fraction of a cent rather than a mode.
+    expect(marginCell).toHaveTextContent(/^ISO\s*3000\.00$/)
   })
 
   it('shows no margin at all when the account read carried none', () => {
@@ -247,6 +272,32 @@ describe('FuturesPortfolioDock', () => {
     expect(onOrderEdit).toHaveBeenCalledTimes(1)
   })
 
+  // The multiple a position is carried at is the difference between a position
+  // that survives a 3% move and one that does not, and nothing on the desk said it.
+  it('states the leverage each position is carried at and opens the control from it', () => {
+    const onLeverageEdit = vi.fn()
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[
+          { ...position, leverage: 20 },
+          { ...position, symbol: 'BICOUSDT', quantity: '3000', leverage: undefined },
+        ]}
+        onLeverageEdit={onLeverageEdit}
+      />,
+    )
+    const [btc, bico] = screen.getAllByRole('button', { name: /leverage$/ })
+    expect(btc).toHaveTextContent('20×')
+    expect(btc).toHaveAttribute('title', '20× leverage — click to change it')
+    // Not reported yet is not 1×: the badge says nothing about the multiple and
+    // still offers to set it.
+    expect(bico).toHaveTextContent('Lev')
+    expect(bico).toHaveAttribute('title', 'Leverage not reported yet — click to set it')
+
+    fireEvent.click(btc, { clientX: 480, clientY: 260 })
+    expect(onLeverageEdit).toHaveBeenCalledWith('BTCUSDT', { x: 480, y: 260 })
+  })
+
   it('renders account prices at the contract tick instead of raw exchange floats', () => {
     render(
       <FuturesPortfolioDock
@@ -291,9 +342,11 @@ describe('FuturesPortfolioDock', () => {
         }}
       />,
     )
-    fireEvent.click(screen.getByRole('tab', { name: /Trades/ }))
+    // The tab lists positions now, not executions: fills are folded into the
+    // round trips they belong to before anything is drawn.
+    fireEvent.click(screen.getByRole('tab', { name: 'Closed positions' }))
     expect(onLoadHistory).toHaveBeenCalledWith('BTCUSDT')
-    expect(screen.getByRole('table', { name: 'Trade history' })).toHaveTextContent('+12.50')
+    expect(screen.getByRole('table', { name: 'Position history' })).toHaveTextContent('+12.50')
     expect(screen.queryByRole('table', { name: 'Working orders' })).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('tab', { name: /Working/ }))

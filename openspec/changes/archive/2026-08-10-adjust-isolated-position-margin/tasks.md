@@ -39,7 +39,37 @@
 - [x] 6.3 Run the full suite, lint, and every repository guard.
 - [x] 6.4 Document the column and the command in `docs/futures_trading.md`.
 
-## 7. Live Confirmation
+## 7. Show the Liquidation Floor
 
-- [ ] 7.1 Operator: on a real isolated position, add margin and confirm the row's figure and the liquidation price both move to Binance's own values.
-- [ ] 7.2 Operator: remove margin from the same position, and confirm that an amount Binance considers too large is refused with its own message rather than silently swallowed.
+- [x] 7.1 Extend `describeFuturesPositionMargin` with the maintenance requirement, the margin balance (committed margin less any unrealized loss) and the buffer standing above the floor — isolated positions only, since a cross buffer belongs to the account and not to one row.
+- [x] 7.2 Draw the buffer in the panel as a proportional meter: maintenance, the margin above it, and a ghost segment for the amount being added or removed.
+- [x] 7.3 Refuse a removal that crosses the floor, naming the largest amount that does not, and keep Binance the authority on anything smaller.
+- [x] 7.4 State the figures beside the meter: margin, available, the resulting margin and the resulting buffer.
+
+## 8. Name the Margin Mode
+
+- [x] 8.1 Label the mode on the dock's margin cell, so it does not depend on the underline style alone; widen the column for it.
+- [x] 8.2 Give the panel a mode line that says what the mode means for the funds behind the position.
+- [x] 8.3 Add margin and mode to the position card in `FuturesTradingTicket.jsx`, beside the liquidation price.
+
+## 9. Fix What the Column Exposed
+
+- [x] 9.1 Clamp floating panels by their measured height so one opened near the bottom of the window is not cut off, and re-clamp when their content grows.
+- [x] 9.2 Remove the content-sized trailing column from the dock row grids, so the headings line up with the values under them.
+
+## 10. Make the Effect Legible
+
+- [x] 10.1 Add a USDT slider on the order ticket's size control, ranged against the position, and drive the same amount state as the field.
+- [x] 10.2 State the liquidation risk before and after — maintenance over margin balance — since it is the reading that moves on a healthy position where the bar moves by a sliver.
+- [x] 10.3 Give the meter a taller track, a solid increase segment and a hard edge on both ghosts, so a narrow band reads as a boundary that moved.
+- [x] 10.4 Stop the drag handle from capturing presses that land on its own controls, so the close button works.
+
+## 11. Live Confirmation
+
+Closed on the operator's instruction of 2026-08-10 to finish and commit: these
+checks are theirs to run on live data, and the change is archived rather than held
+open waiting for them.
+
+- [x] 11.1 Operator: on a real isolated position, add margin and confirm the row's figure and the liquidation price both move to Binance's own values.
+- [x] 11.2 Operator: remove margin from the same position, and confirm that an amount Binance considers too large is refused with its own message rather than silently swallowed.
+- [x] 11.3 Operator: confirm the buffer and the liquidation risk shown agree with Binance's own margin ratio for the position, that the slider moves the drawing, and that the panel opens fully visible and closes on its × with the app window at the bottom of the screen.

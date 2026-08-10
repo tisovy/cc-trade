@@ -33,6 +33,13 @@ position, so the figure needs no new account read and no new rate-limit weight.
   validation, market-activation gate, `POST /fapi/v1/positionMargin`.
 - Cross-margin positions display their margin and refuse the adjustment with the
   reason, rather than offering a control the exchange would reject.
+- The panel draws the **liquidation floor**: the maintenance requirement, the
+  margin standing above it, and where the amount being typed would leave that
+  margin. The number that matters while adjusting margin is not the balance in
+  the wallet — it is how much of this position's margin is still spare.
+- The **margin mode is named in words** on every surface that shows a margin
+  figure, because the two modes are not two styles of the same thing: only one
+  of them can be adjusted at all.
 
 ## Decisions
 
@@ -51,6 +58,16 @@ available USDT balance, and you cannot remove more than the position holds — a
 Binance remains the authority on the exact removable amount, which is smaller
 than the isolated wallet by the maintenance margin.
 
+**The floor is drawn, the ceiling is not claimed.** The point at which the
+margin balance reaches the maintenance requirement is arithmetic: below it the
+position is liquidated, and the read carries every term. Binance's own removable
+limit is *stricter* than that — its leverage brackets hold back more — and it is
+not reproducible from this read, since `/fapi/v3/positionRisk` reports no
+leverage. So the meter draws the floor as the point where liquidation is
+certain, refuses anything past it, and lets the exchange refuse the rest in its
+own words. Unrealized profit is excluded from the buffer (it is not in the
+wallet) and unrealized loss is subtracted from it (it has already been taken).
+
 **Pausing trading blocks removal, not addition.** The pause switch exists so the
 operator can stop taking risk. Removing margin takes risk and is refused while
 paused; adding margin reduces it and stays available, as cancelling does.
@@ -67,6 +84,13 @@ text, which `report-execution-state-truthfully` is already improving.
 - `futures-position-margin`: the margin committed to each open position is
   visible on the position row, and an isolated position's margin can be
   increased or decreased from it.
+
+### Modified Capabilities
+
+- `futures-workstation-presentation`: a panel anchored at the cursor is placed
+  by its measured height, so it cannot open partly off-screen; dock tables size
+  no column by its content, so headings stay above their values. Both defects
+  are older than this change — the ninth column is what made them visible.
 
 ## Impact
 

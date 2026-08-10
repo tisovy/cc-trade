@@ -11,8 +11,11 @@ import {
     normalizeFuturesHistoryOrder,
     normalizeFuturesHistoryTrade,
     normalizeFuturesPositions,
+    normalizeFuturesSymbolConfig,
     normalizeFuturesUserDataStreamEvent,
     parseFuturesExchangeFilters,
+    readFuturesMaxLeverage,
+    readFuturesTradedSymbols,
 } from './futures-trading-adapter.js';
 
 const requests = [];
@@ -401,6 +404,89 @@ describe('futures history reads', () => {
             time: 4_000,
         });
         expect(normalizeFuturesHistoryTrade({}).realizedPnl).toBe('0');
+    });
+});
+
+describe('futures contract configuration', () => {
+    // /fapi/v3/positionRisk reports neither leverage nor margin mode any more, so
+    // both are read from the endpoint Binance moved them to.
+    it('reads the leverage and margin mode of one contract', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestResponse = [
+            { symbol: 'ETHUSDT', marginType: 'CROSSED', leverage: 10, maxNotionalValue: '1000000' },
+            { symbol: 'BTCUSDT', marginType: 'ISOLATED', leverage: 20, maxNotionalValue: '5000000' },
+        ];
+        const config = await adapter.getSymbolConfig('BTCUSDT');
+        const params = new URLSearchParams(requests[0].url.split('?')[1]);
+        expect(requests[0].url).toContain('/fapi/v1/symbolConfig');
+        expect(params.get('symbol')).toBe('BTCUSDT');
+        expect(params.get('signature')).toMatch(/^[0-9a-f]{64}$/);
+        // The right contract out of the reply, not the first one in it.
+        expect(config).toEqual({
+            symbol: 'BTCUSDT',
+            leverage: 20,
+            marginType: 'ISOLATED',
+            maxNotionalValue: '5000000',
+        });
+    });
+
+    it('reports a leverage the exchange did not state as absent rather than as 1×', () => {
+        expect(normalizeFuturesSymbolConfig({ symbol: 'BTCUSDT', leverage: '0' }).leverage).toBeNull();
+        expect(normalizeFuturesSymbolConfig({ symbol: 'BTCUSDT' }).leverage).toBeNull();
+        expect(normalizeFuturesSymbolConfig({ leverage: 20 })).toBeNull();
+    });
+
+    // Bracket 1 is the lowest notional band and carries the highest multiple: that
+    // is the ceiling the exchange refuses a higher setting against.
+    it('takes the ceiling from the contract’s own leverage bracket', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestResponse = [{
+            symbol: 'BTCUSDT',
+            brackets: [
+                { bracket: 2, initialLeverage: 50, notionalCap: 500000 },
+                { bracket: 1, initialLeverage: 125, notionalCap: 50000 },
+            ],
+        }];
+        await expect(adapter.getMaxLeverage('BTCUSDT')).resolves.toBe(125);
+        expect(requests[0].url).toContain('/fapi/v1/leverageBracket');
+        expect(readFuturesMaxLeverage([])).toBeNull();
+        expect(readFuturesMaxLeverage({ brackets: [{ initialLeverage: '0' }] })).toBeNull();
+    });
+
+    it('reports the leverage the exchange applied, not the one that was asked for', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestResponse = { symbol: 'BTCUSDT', leverage: 20, maxNotionalValue: '5000000' };
+        const applied = await adapter.setLeverage({ symbol: 'BTCUSDT', leverage: 50 });
+        const request = requests.find(entry => entry.url.endsWith('/fapi/v1/leverage'));
+        expect(request.options.method).toBe('POST');
+        const params = new URLSearchParams(request.body);
+        expect(params.get('symbol')).toBe('BTCUSDT');
+        expect(params.get('leverage')).toBe('50');
+        expect(applied).toMatchObject({ symbol: 'BTCUSDT', leverage: 20 });
+    });
+
+    // Every USDⓈ-M history endpoint takes a symbol, so reviewing a whole session
+    // has to start by asking which contracts it was traded on.
+    it('discovers the contracts traded in a window, newest first', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestResponse = [
+            { symbol: 'BICOUSDT', incomeType: 'REALIZED_PNL', income: '78', time: 2_000 },
+            { symbol: 'BTCUSDT', incomeType: 'REALIZED_PNL', income: '-96', time: 9_000 },
+            { symbol: 'bicousdt', incomeType: 'REALIZED_PNL', income: '4', time: 1_000 },
+            { incomeType: 'FUNDING_FEE', income: '-0.1', time: 3_000 },
+        ];
+        const symbols = await adapter.getTradedSymbols({ startTime: 1_000, limit: 5_000 });
+        const params = new URLSearchParams(requests[0].url.split('?')[1]);
+        expect(requests[0].url).toContain('/fapi/v1/income');
+        expect(params.get('incomeType')).toBe('REALIZED_PNL');
+        expect(params.get('startTime')).toBe('1000');
+        expect(params.get('limit')).toBe('1000');
+        expect(symbols).toEqual(['BTCUSDT', 'BICOUSDT']);
+        expect(readFuturesTradedSymbols(null)).toEqual([]);
     });
 });
 

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  calculateFuturesClosePercent,
   calculateFuturesEntryBudget,
   calculateFuturesExitBudget,
   calculateFuturesNotionalForPercent,
@@ -12,6 +13,7 @@ import {
   isFuturesDraftAmountWithinBudget,
   normalizeFuturesDraftPrice,
   quantizeFuturesNotionalUsdt,
+  remainingFuturesQuantity,
 } from './futuresOrderDraft.js'
 
 describe('futuresOrderDraft', () => {
@@ -249,5 +251,41 @@ describe('futuresOrderDraft', () => {
         leverage: 1,
       })).toMatchObject({ ok: true, price: '500', quantity: '0.5' })
     })
+  })
+})
+
+describe('closing part of a position', () => {
+  // Read as floats, 0.15 of 0.5 is 29.999…% and the slider would sit a stop below
+  // the size the operator just typed, then drift again on the next read.
+  it('states the share of the position exactly', () => {
+    expect(calculateFuturesClosePercent({ openQuantity: '0.5', quantity: '0.15' })).toBe(30)
+    expect(calculateFuturesClosePercent({ openQuantity: '0.5', quantity: '0.5' })).toBe(100)
+    expect(calculateFuturesClosePercent({ openQuantity: '3', quantity: '1' })).toBe(33)
+  })
+
+  // A slider cannot show more than the whole position, whatever was typed beside
+  // it — the refusal for that is the panel's to give, not the control's.
+  it('never reports more than the whole position', () => {
+    expect(calculateFuturesClosePercent({ openQuantity: '0.5', quantity: '2' })).toBe(100)
+  })
+
+  it('reports no share at all when there is nothing to divide', () => {
+    expect(calculateFuturesClosePercent({ openQuantity: '0.5', quantity: '' })).toBeNull()
+    expect(calculateFuturesClosePercent({ openQuantity: '0', quantity: '0.1' })).toBeNull()
+    expect(calculateFuturesClosePercent()).toBeNull()
+  })
+
+  // 0.5 − 0.2 in floating point is 0.30000000000000004, and no position ever held
+  // that: the remainder is computed on atoms like every other size here.
+  it('states what the position would still hold, exactly', () => {
+    expect(remainingFuturesQuantity({ openQuantity: '0.5', quantity: '0.2' })).toBe('0.3')
+    expect(remainingFuturesQuantity({ openQuantity: '0.5', quantity: '0.5' })).toBe('0')
+    expect(remainingFuturesQuantity({ openQuantity: '136439', quantity: '45000' })).toBe('91439')
+  })
+
+  it('reports nothing rather than a negative remainder', () => {
+    expect(remainingFuturesQuantity({ openQuantity: '0.5', quantity: '0.6' })).toBeNull()
+    expect(remainingFuturesQuantity({ openQuantity: '0.5', quantity: 'abc' })).toBeNull()
+    expect(remainingFuturesQuantity()).toBeNull()
   })
 })
