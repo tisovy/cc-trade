@@ -192,7 +192,10 @@ export const formatDeskDiagnosticSummary = (summary, { day = null } = {}) => {
   out.push('', `Resynchronizations (${summary.resynchronizations.length})`)
   if (summary.resynchronizations.length === 0) out.push('  (none)')
   for (const entry of summary.resynchronizations) {
-    out.push(`  ${entry.at}  ${entry.state.padEnd(16)} ${String(entry.symbol).padEnd(12)} ${entry.code ?? '-'}`)
+    out.push(
+      `  ${entry.at ?? '-'}  ${String(entry.state).padEnd(16)}`
+      + ` ${String(entry.symbol ?? '-').padEnd(12)} ${entry.code ?? '-'}`,
+    )
   }
 
   out.push('', 'Slowest phases')
@@ -217,8 +220,11 @@ export const formatDeskDiagnosticSummary = (summary, { day = null } = {}) => {
   if (summary.commands.length > 0) {
     out.push('', `Commands (${summary.commands.length})`)
     for (const entry of summary.commands) {
+      // Every field is coerced: the record is a file on the operator's disk, and
+      // a summary that throws over one edited line is a summary of nothing.
       out.push(
-        `  ${entry.at}  ${entry.action.padEnd(24)} ${String(entry.market).padEnd(8)}`
+        `  ${entry.at ?? '-'}  ${String(entry.action ?? '-').padEnd(24)}`
+        + ` ${String(entry.market ?? '-').padEnd(8)}`
         + ` ${String(entry.symbol ?? '-').padEnd(12)} ${entry.side ?? '-'}`
         + ` ${entry.orderType ?? '-'} ${entry.identity ?? '-'}`,
       )

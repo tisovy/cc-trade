@@ -11,6 +11,7 @@
 // the desk exactly as it would be with no record at all.
 import fs from 'node:fs';
 import path from 'node:path';
+import { TRADING_COMMAND_ACTIONS } from '../../src/utils/tradingCommands.js';
 
 export const DESK_DIAGNOSTIC_RECORD = Object.freeze({
     // Measured on 2026-08-11 against the live exchange, one contract, 63s: the
@@ -188,23 +189,42 @@ export const readDeskDiagnosticOutboundEvent = (payload) => {
     return null;
 };
 
+// Reads the desk asks for on its own beat, not things it did. While an order
+// rests, the account is re-read every thirty seconds and the contract's
+// configuration on every switch; recorded, those alone would be two thousand
+// lines a day saying only that the desk was running. Their timings and their
+// failures are already kept. The set names the reads, not the writes, so a
+// command added later is recorded until someone decides otherwise.
+const UNRECORDED_COMMAND_ACTIONS = Object.freeze(new Set([
+    TRADING_COMMAND_ACTIONS.ACCOUNT_REFRESH,
+    TRADING_COMMAND_ACTIONS.ACCOUNT_HISTORY,
+    TRADING_COMMAND_ACTIONS.ACCOUNT_SYMBOL_CONFIG,
+]));
+
 /**
  * The command as it was issued, before anything was sent.
  *
  * The outcome envelopes above say how a command ended but not what it was; only
  * the validated command carries the side and the type.
  */
-export const readDeskDiagnosticCommandEvent = command => describeDeskDiagnosticEvent('command', {
-    action: command?.action,
-    market: command?.marketType,
-    symbol: command?.symbol ?? null,
-    side: command?.side ?? null,
-    orderType: command?.orderType ?? null,
-    // The order's identity, not the command's: a cancellation names the order
-    // it is cancelling, and a placement's own client id *is* that order's. This
-    // is what ties a command to the outcome that answers it.
-    identity: command?.origClientOrderId ?? command?.orderId ?? command?.clientOrderId ?? null,
-});
+export const readDeskDiagnosticCommandEvent = command => (
+    UNRECORDED_COMMAND_ACTIONS.has(command?.action)
+        ? null
+        : describeDeskDiagnosticEvent('command', {
+            action: command?.action,
+            market: command?.marketType,
+            symbol: command?.symbol ?? null,
+            side: command?.side ?? null,
+            orderType: command?.orderType ?? null,
+            // The order's identity, not the command's: a cancellation names the
+            // order it is cancelling, and a placement's own client id *is* that
+            // order's. This is what ties a command to the outcome answering it.
+            identity: command?.origClientOrderId
+                ?? command?.orderId
+                ?? command?.clientOrderId
+                ?? null,
+        })
+);
 
 // What the desk uses when no record is configured — the tests' baseline, and
 // the answer to "does anything change when the record is not there".
@@ -246,6 +266,7 @@ export const createDeskDiagnosticRecord = ({
     let bytesSincePrune = 0;
     let stalledAt = null;
     let statedFailure = false;
+    let backedUp = false;
 
     // A record that is failing says so once. Saying it per line would cost the
     // desk more than the missing record does, and the console is where the desk
@@ -337,6 +358,13 @@ export const createDeskDiagnosticRecord = ({
             stalledAt = now();
             stateFailure('a write failed', error);
         });
+        // A disk that stops accepting writes must cost the desk a line, not
+        // memory: past the stream's own buffer the record stops handing lines
+        // over until the disk has caught up.
+        opened.on('drain', () => {
+            backedUp = false;
+        });
+        backedUp = false;
         stream = opened;
         openDay = day;
         openSegment = index;
@@ -376,10 +404,14 @@ export const createDeskDiagnosticRecord = ({
         try {
             const at = now();
             if (!ensureStream(utcDay(at))) return false;
+            if (backedUp) return false;
             const line = `${JSON.stringify({ at: new Date(at).toISOString(), ...event })}\n`;
             const bytes = Buffer.byteLength(line, 'utf8');
             if (bytes > DESK_DIAGNOSTIC_RECORD.MAX_LINE_BYTES) return false;
-            stream.write(line);
+            if (stream.write(line) === false) {
+                backedUp = true;
+                stateFailure('the disk is not keeping up', null);
+            }
             segmentBytes += bytes;
             bytesSincePrune += bytes;
             if (bytesSincePrune >= DESK_DIAGNOSTIC_RECORD.PRUNE_INTERVAL_BYTES) prune();

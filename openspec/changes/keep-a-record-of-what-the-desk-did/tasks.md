@@ -2,7 +2,7 @@
 
 - [x] 0.1 List what the desk already reports and would therefore land in the record: `onTiming` phases, `onInternalError` phases and codes, the history read's own lines, and the status reason codes the workspace emits. State the rate each of them reaches in normal running and during a resync, so the bounds below are sized against something measured.
   - Measured 2026-08-11 by driving the real production runtime against the live exchange (BTCUSDT, 63 s, then a switch to ETHUSDT), counting every reporter.
-  - **Steady running: nothing at all.** After the bootstrap the desk emits no timing and no fault line; the 19 frames/s it delivers to the renderer are market data, not diagnostics.
+  - **Steady running: nothing at all.** After the bootstrap the desk emits no timing and no fault line; the 19 frames/s it delivers to the renderer are market data, not diagnostics. This holds only because the reads the desk asks for on its own beat are excluded from the record — see 6.9.
   - **Opening a contract: 10 lines, ~1 KB** — 8 timing phases (`exchange-info`, `contract-klines`, `index-klines`, `premium-index`, `ticker`, `upstream-streams`, `depth`, `aggregate-ready`) and 2 status lines (`loading`, `live`). A contract switch costs the same again, and a resync pays the same bootstrap.
   - **A desk that cannot reach the exchange:** 13 reconnect cycles in 80 s — 13 timing + 13 fault + 26 status = ~39 lines/min, ~2.1 KB/min, **~3 MB/day**. This is the realistic ceiling.
   - **The pathological case:** a contract whose every depth frame is refused emits one `oversized-frame:<bytes>` timing line per frame. At the measured 10 diffs/s that is ~600 lines/min, **~79 MB/day** — the case the byte bound, not the day bound, has to stop.
@@ -49,6 +49,9 @@
 - [x] 6.6 Test: the summary reports counts, resynchronization causes and slowest phases from a fixture day.
 - [x] 6.7 Test: the seams are live — a command, its outcome and a workspace status line reach the record through the connection itself, not only through the module under test. Proved load-bearing by removing each seam.
 - [x] 6.8 Test: every shape the live desk was seen to state is accepted. Added after a live run found `cache: 'hit' | 'miss'` being refused as a non-boolean, which silently dropped every `exchange-info` reading.
+- [x] 6.9 Test: the reads the desk asks for on its own beat are not recorded as commands. Found by audit: while any order rests, `account.refresh` is sent every 30 s (`ACCOUNT_RECONCILE_INTERVAL_MS`), and `account.symbolConfig` on every contract switch — ~2 900 lines a day saying only that the desk was running, which also falsified the "steady running writes nothing" measurement in 0.1.
+- [x] 6.10 Test: past the stream's own buffer the record stops handing lines over and resumes on `drain`. Found by audit: `write()` was called without reading its answer, so a stalled disk would have grown the main process's memory instead of losing a line — the one thing 4.1 says it may do.
+- [x] 6.11 Test: the summary reports a day whose lines are missing fields rather than failing on them. Found by audit: the record is a file on the operator's disk and can be edited or truncated; one such line used to throw the whole reading away.
 
 ## 7. Verification
 

@@ -54,11 +54,18 @@ const createMemoryDisk = ({ failOn = new Set() } = {}) => {
             const stream = {
                 name,
                 ended: false,
+                stalled: false,
                 write: (line) => {
                     refuse('write', 'ENOSPC');
                     const file = files.get(name);
                     files.set(name, { text: file.text + line, declared: file.declared });
-                    return true;
+                    // A stream past its buffer answers false and asks the writer
+                    // to wait for `drain`.
+                    return !stream.stalled;
+                },
+                drain: () => {
+                    stream.stalled = false;
+                    handlers.get('drain')?.();
                 },
                 end: () => {
                     stream.ended = true;
@@ -206,6 +213,26 @@ describe('what may not reach the record', () => {
             identity: 'f-m9x2k1-4a7bd0e2',
         });
         expect(JSON.stringify(event)).not.toMatch(/58400|0\.010|GTC/);
+    });
+
+    // While an order rests the account is re-read every thirty seconds, and the
+    // contract's configuration on every switch. Recorded, those two alone would
+    // fill the record with lines saying only that the desk was running.
+    it('keeps the commands that changed something and not the reads', () => {
+        for (const action of ['account.refresh', 'account.history', 'account.symbolConfig']) {
+            expect(readDeskDiagnosticCommandEvent({
+                action, marketType: 'futures', symbol: 'BTCUSDT',
+            })).toBeNull();
+        }
+        for (const action of [
+            'trade.placeOrder', 'trade.cancelOrder', 'trade.replaceOrder', 'trade.cancelAll',
+            'trade.setLeverage', 'trade.setMarginType', 'trade.adjustPositionMargin',
+            'trade.setTradingPaused',
+        ]) {
+            expect(readDeskDiagnosticCommandEvent({
+                action, marketType: 'futures', symbol: 'BTCUSDT', clientOrderId: 'f-1',
+            })).toMatchObject({ kind: 'command', action });
+        }
     });
 
     it('names the order a cancellation was aimed at', () => {
@@ -463,6 +490,24 @@ describe('what the record costs the desk', () => {
         });
         clock.now += 1;
         expect(record.record('fault', { phase: 'bootstrap', code: 'C' })).toBe(true);
+    });
+
+    // Past the stream's own buffer, the alternative to dropping a line is
+    // holding it in the main process's memory — which is the desk's memory.
+    it('stops handing lines over when the disk stops keeping up, and resumes on drain', () => {
+        const disk = createMemoryDisk();
+        const { record, warn } = createRecord(disk);
+        record.record('fault', { phase: 'bootstrap', code: 'A' });
+        disk.streams[0].stalled = true;
+        expect(record.record('fault', { phase: 'bootstrap', code: 'B' })).toBe(true);
+        expect(record.record('fault', { phase: 'bootstrap', code: 'C' })).toBe(false);
+        expect(record.record('fault', { phase: 'bootstrap', code: 'D' })).toBe(false);
+        expect(warn).toHaveBeenCalledTimes(1);
+        expect(warn.mock.calls[0][0]).toMatch(/not keeping up/);
+
+        disk.streams[0].drain();
+        expect(record.record('fault', { phase: 'bootstrap', code: 'E' })).toBe(true);
+        expect(disk.lines(TODAY).map(entry => entry.code)).toEqual(['A', 'B', 'E']);
     });
 
     it('behaves exactly as no record when no directory is configured', () => {

@@ -88,6 +88,21 @@ describe('summarizeDeskDiagnosticRecord', () => {
     expect(torn.lines).toBe(13)
   })
 
+  // The record is a file on the operator's disk: it can be edited, truncated,
+  // or concatenated by hand. A summary that throws over one line summarizes
+  // nothing.
+  it('reports a day whose lines are missing fields rather than failing on them', () => {
+    const damaged = summarizeDeskDiagnosticRecord([
+      DAY,
+      line({ kind: 'command' }),
+      line({ at: '2026-08-10T15:02:00.000Z', kind: 'status', state: 'resynchronizing' }),
+      line({ at: '2026-08-10T15:03:00.000Z', kind: 'timing', phase: 'depth' }),
+    ].join(''))
+    expect(damaged.refused).toBe(0)
+    expect(() => formatDeskDiagnosticSummary(damaged, { day: '2026-08-10' })).not.toThrow()
+    expect(formatDeskDiagnosticSummary(damaged)).toContain('Commands (2)')
+  })
+
   it('answers an empty record without failing', () => {
     const empty = summarizeDeskDiagnosticRecord('')
     expect(empty).toMatchObject({ lines: 0, refused: 0, from: null, to: null })
