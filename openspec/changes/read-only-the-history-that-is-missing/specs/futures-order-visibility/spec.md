@@ -60,3 +60,24 @@ boundary timestamp.
 #### Scenario: Income rows share a page-boundary timestamp
 - **WHEN** a full discovery page ends at the same millisecond as rows on the next page
 - **THEN** discovery reads the next numbered page with the same inclusive time bounds and includes contracts from both pages
+
+### Requirement: Cancelled orders do not clutter the visible review
+The order-history presentation SHALL omit rows whose normalized status is
+`CANCELED` or `CANCELLED`. The held reading, persisted records, and coverage
+cursors SHALL retain those rows so presentation filtering cannot create a gap
+in subsequent exchange reads.
+
+#### Scenario: The reading contains cancelled and filled orders
+- **WHEN** the operator opens order history for a reading containing cancelled and filled orders
+- **THEN** filled orders are shown, cancelled orders are not shown, and the underlying reading remains unchanged
+
+### Requirement: Dense market bursts do not stall the application
+The renderer SHALL process aggregate market input of at least 2 MiB per 100 ms
+cycle as individually bounded valid workstation events. At each completed cycle
+the latest event SHALL reach the visible Futures workspace, the workspace SHALL
+remain live, and an operator control SHALL remain responsive. Existing
+per-event byte and shape limits SHALL remain unchanged.
+
+#### Scenario: The renderer receives consecutive dense market cycles
+- **WHEN** the live Futures App receives at least 2 MiB of valid bounded workstation events for each consecutive 100 ms cycle
+- **THEN** the newest cycle is visible after each boundary, no event backlog grows across cycles, and an operator control still responds

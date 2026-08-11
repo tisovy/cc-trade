@@ -238,6 +238,29 @@ describe('FuturesHistoryPanel', () => {
     expect(table).toHaveTextContent('FILLED')
   })
 
+  it('hides both cancelled spellings without changing the held order reading', () => {
+    const heldOrders = [
+      { ...history.orders[0], orderId: 4, status: 'CANCELED' },
+      { ...history.orders[0], orderId: 5, status: 'CANCELLED' },
+      { ...history.orders[0], orderId: 6, status: 'FILLED' },
+    ]
+    render(
+      <FuturesHistoryPanel
+        view="orderHistory"
+        symbol="BTCUSDT"
+        history={{ ...history, orders: heldOrders }}
+        tickSizes={ticks}
+      />,
+    )
+
+    const table = screen.getByRole('table', { name: 'Order history' })
+    expect(screen.getAllByRole('row')).toHaveLength(2)
+    expect(table).toHaveTextContent('FILLED')
+    expect(table).not.toHaveTextContent('CANCELED')
+    expect(table).not.toHaveTextContent('CANCELLED')
+    expect(heldOrders.map(order => order.status)).toEqual(['CANCELED', 'CANCELLED', 'FILLED'])
+  })
+
   // A market order carries no limit price and an order that has not filled carries
   // no average: Binance reports 0 for both, and `0.000` in a price column reads as
   // a level the market could reach rather than as an absence.

@@ -10,6 +10,7 @@ import { exactFuturesDeskTime, formatFuturesDeskTime } from '../../../utils/futu
 
 const EMPTY_ROWS = Object.freeze([])
 const EMPTY_TICKS = Object.freeze({})
+const HIDDEN_ORDER_HISTORY_STATUSES = new Set(['CANCELED', 'CANCELLED'])
 
 const sideTone = side => (String(side).toUpperCase() === 'SELL' ? 'sell' : 'buy')
 
@@ -40,7 +41,14 @@ export const FuturesHistoryPanel = ({
   onSymbolChange,
 }) => {
   const status = history?.status ?? 'idle'
-  const orders = Array.isArray(history?.orders) ? history.orders : EMPTY_ROWS
+  const heldOrders = Array.isArray(history?.orders) ? history.orders : EMPTY_ROWS
+  // Cancellation still belongs to the held reading: retaining it keeps the
+  // cursor honest and prevents every refresh from rediscovering the same row.
+  // It is only presentation noise in the operator's order review.
+  const orders = useMemo(() => heldOrders.filter((order) => {
+    const orderStatus = String(order?.status ?? '').trim().toUpperCase()
+    return !HIDDEN_ORDER_HISTORY_STATUSES.has(orderStatus)
+  }), [heldOrders])
   const trades = Array.isArray(history?.trades) ? history.trades : EMPTY_ROWS
   // How wide the read actually was. An empty table means "nothing here" only if
   // the operator knows what was looked at — the backend reads a bounded set of

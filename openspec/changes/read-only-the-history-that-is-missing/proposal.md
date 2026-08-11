@@ -42,6 +42,13 @@ filled order and an executed trade never change either.
   a full re-read.
 - **A full re-read stays available and stays explicit** — the operator asks for
   it, and it costs what it costs.
+- **Cancelled orders do not clutter the visible order history.** They remain in
+  the held and persisted reading so exchange cursors and coverage stay exact,
+  but rows whose status is `CANCELED` or `CANCELLED` are omitted by the panel.
+- **The renderer is exercised at burst load, not only with small fixtures.** An
+  App-level stress simulation sends at least 2 MiB of valid bounded workstation
+  events per 100 ms cycle and proves the latest reading reaches the screen while
+  the desk remains live and interactive.
 
 ## Trade-offs this accepts
 
@@ -70,6 +77,8 @@ filled order and an executed trade never change either.
   `futuresCandleHistoryCache.js`.
 - `src/utils/futuresHeldHistory.js` — the held review knows what each contract
   is covered from, and hands that to the read.
+- App-level stress coverage — generated bounded market events exercise the real
+  renderer ingress and Futures state/render path at 2 MiB per 100 ms cycle.
 - `electron/services/binance-connection.js` — the history command takes a
   per-contract starting point and a discovery it may skip.
 - `electron/services/futures-trading-adapter.js` — `getOrderHistory` and

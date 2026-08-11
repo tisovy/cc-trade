@@ -200,6 +200,40 @@ plus two reads for twelve contracts at weight 5: 360 weight and 32 admissions.
 The idle refresh is therefore 1/36 of that weight (about 2.8%) without changing
 either operational limit.
 
+### 7. Filter cancelled orders only at the presentation boundary
+
+`FuturesHistoryPanel` derives its visible order rows from the held reading and
+omits normalized `CANCELED` and `CANCELLED` statuses. The hook, held review,
+IndexedDB store, and backend payload remain unchanged. Keeping cancelled rows
+underneath the panel preserves the greatest order identity as the next cursor
+and prevents a cosmetic preference from making the next gap read start too far
+back or claim incomplete coverage.
+
+Filtering both spellings accepts Binance's canonical `CANCELED` value and older
+or normalized payloads that use `CANCELLED`. The visible reach statement is
+derived from the visible rows, while contract coverage continues to describe
+the unmodified exchange reading.
+
+### 8. Stress the aggregate App ingress without weakening per-frame bounds
+
+The stress proof renders `App` with its real Gateway, Futures workspace,
+workstation hook, protocol parser, and visible workstation view. It generates
+valid depth events below the existing 256 KiB per-event ceiling until each
+synthetic 100 ms market cycle carries at least 2 MiB in aggregate. Consecutive
+cycles advance generation/revision identities exactly as production events do.
+
+After every cycle, React is allowed to settle and the proof requires the newest
+book identity to be visible, the workstation to remain live, and an operator
+control to answer. Reaching the newest event at each boundary is also the
+observable proof that the renderer has no growing event backlog. The fixture
+counts UTF-8 bytes from the serialized frames rather than estimating object
+size, and keeps both the cycle count and row counts fixed so the full suite
+remains deterministic.
+
+A single 2 MiB event is deliberately not used: production events have a 256 KiB
+defensive limit. Disabling that protection for a load test would test a wire
+shape the application is designed to refuse rather than real aggregate load.
+
 ## Risks / Trade-offs
 
 - [A very large gap can require several forward pages] → Stop on a short or
@@ -216,6 +250,12 @@ either operational limit.
 - [Old renderer/backend versions meet] → New command and payload fields are
   optional; absent coverage follows the existing full read, and absent
   `readFrom` is interpreted as replacement/full semantics.
+- [A presentation filter could corrupt pagination state] → Filter only the
+  panel's derived rows and retain every terminal order in held/persisted state.
+- [A wall-clock benchmark can be flaky across machines] → Simulate the 100 ms
+  cadence with fixed observed times, assert the newest cycle is fully applied at
+  every boundary, and record exact serialized byte volume instead of imposing a
+  machine-speed threshold.
 
 ## Migration Plan
 
