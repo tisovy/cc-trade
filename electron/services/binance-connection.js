@@ -967,6 +967,12 @@ export function setupBinanceConnection({
     // Income is paged forward from the oldest end of the window. The pages are
     // bounded: this walks to the recent end of a busy week, it does not download it.
     const FUTURES_INCOME_MAX_PAGES = 4;
+    // How long the contracts an income walk found are held before it is walked
+    // again. The walk costs up to eight pages at weight 30 — the most expensive
+    // thing a review does — and it answers a question that only moves when a
+    // trade is made somewhere other than this desk. Trades made here seed the
+    // fan-out directly and need no walk at all.
+    const FUTURES_HISTORY_DISCOVERY_HOLD_MS = 10 * 60 * 1000;
     const FUTURES_HISTORY_READ_WEIGHT = 5;
     const FUTURES_INCOME_READ_WEIGHT = 30;
     const FUTURES_SYMBOL_CONFIG_WEIGHT = 5;
@@ -1096,6 +1102,8 @@ export function setupBinanceConnection({
     // Bumped whenever the Futures market is deactivated, so a read that began
     // under an earlier activation cannot land on a desk that has moved on.
     let futuresActivationGeneration = 0;
+    // The contracts the last income walk found, and when it found them.
+    let futuresHistoryDiscovery = null;
     const noteFuturesMutation = () => {
         futuresMutationEpoch += 1;
     };
@@ -1277,8 +1285,10 @@ export function setupBinanceConnection({
         futuresUserDataRequested = false;
         futuresUserDataReconnecting = false;
         // A leverage held for an account nobody is on is not a reading, it is a
-        // memory. The next activation reads its own.
+        // memory. The next activation reads its own. The same goes for which
+        // contracts that account traded.
         forgetFuturesSymbolConfigs();
+        futuresHistoryDiscovery = null;
         // No Futures renderer is watching: nothing to mark to market.
         futuresMarkPriceFeed?.track([]);
         if (futuresKeepAliveInterval) {
@@ -2132,6 +2142,10 @@ export function setupBinanceConnection({
                     remember(order?.symbol);
                 }
             }
+            // What the account seeds on its own, this time. Held discovery is
+            // remembered apart from it, so a contract stays on the list because
+            // it was traded rather than because it was once held.
+            const seeded = new Set(symbols);
             // Walked from the oldest end of the range to the newest, because that
             // is the only direction the endpoint offers. Each full page means there
             // is a newer one behind it; the pages are then read back to front, so
@@ -2179,6 +2193,22 @@ export function setupBinanceConnection({
                 }
             };
             const now = Date.now();
+            // Walking income is the most expensive thing a review does: up to
+            // eight pages at weight 30, against an 800-weight minute. What it
+            // answers — which contracts the account traded this week — changes
+            // when a trade is made, and a trade made on this desk is already in
+            // the seeds above. So the walk is for trades made somewhere else,
+            // and asking for those on every press of refresh is asking far more
+            // often than the answer moves.
+            if (futuresHistoryDiscovery !== null
+                && now - futuresHistoryDiscovery.at < FUTURES_HISTORY_DISCOVERY_HOLD_MS) {
+                for (const symbol of futuresHistoryDiscovery.symbols) remember(symbol);
+                return {
+                    symbols: symbols.slice(0, FUTURES_HISTORY_MAX_SYMBOLS),
+                    discovered: symbols.length,
+                    discoveryComplete: futuresHistoryDiscovery.complete,
+                };
+            }
             const recentFrom = now - FUTURES_HISTORY_RECENT_WINDOW_MS;
             const recent = await walkIncome(recentFrom, null);
             let complete = recent.complete;
@@ -2196,6 +2226,15 @@ export function setupBinanceConnection({
             if (symbols.length > FUTURES_HISTORY_MAX_SYMBOLS) {
                 logger.info(`[futures-history] ${symbols.length} contracts traded; reading the ${FUTURES_HISTORY_MAX_SYMBOLS} most relevant: ${symbols.slice(0, FUTURES_HISTORY_MAX_SYMBOLS).join(', ')}`);
             }
+            // Held as what the walk found, not as what the fan-out chose: the
+            // seeds are re-read from the account each time, and folding them in
+            // here would let a contract the desk merely held a position on
+            // outlive the position.
+            futuresHistoryDiscovery = Object.freeze({
+                at: now,
+                symbols: Object.freeze(symbols.filter(symbol => !seeded.has(symbol))),
+                complete,
+            });
             return {
                 symbols: symbols.slice(0, FUTURES_HISTORY_MAX_SYMBOLS),
                 discovered: symbols.length,

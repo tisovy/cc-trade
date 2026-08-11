@@ -1,8 +1,8 @@
 ## 0. Counted Before Changing
 
-- [ ] 0.1 One refresh is up to 360 weight: income discovery up to 8 pages × 30 = 240, plus 12 contracts × 2 reads × 5 = 120. The account bucket is 800 a minute.
-- [ ] 0.2 It is also ~4.8 seconds before any network time: 32 admissions at the limiter's 150ms spacing.
-- [ ] 0.3 Nothing survives a restart: the review is rebuilt from zero every run, while closed candles beside it are served from a local store for exactly the reason that applies here — a settled order never changes.
+- [x] 0.1 One refresh is up to 360 weight: income discovery up to 8 pages × 30 = 240, plus 12 contracts × 2 reads × 5 = 120. The account bucket is 800 a minute.
+- [x] 0.2 It is also ~4.8 seconds before any network time: 32 admissions at the limiter's 150ms spacing.
+- [x] 0.3 Nothing survives a restart: the review is rebuilt from zero every run, while closed candles beside it are served from a local store for exactly the reason that applies here — a settled order never changes.
 
 ## 1. The Store
 
@@ -21,9 +21,12 @@
 
 ## 3. Discovery Is Asked For A Reason
 
-- [ ] 3.1 Income discovery runs when the store names no contract, when what it names has aged past the window, or on a full re-read.
-- [ ] 3.2 A refresh the store can answer issues no income read.
-- [ ] 3.3 The panel keeps saying how many contracts the review covers and whether discovery was complete — a store-answered refresh must not read as a wider review than it is.
+- [x] 3.1 The contracts an income walk found are held for ten minutes; a refresh inside that reuses them and issues no income read. The walk answers which contracts were traded *somewhere other than this desk* — a trade made here already seeds the fan-out from the account's own positions and orders.
+- [x] 3.2 What is held is what the walk found, not what the fan-out chose: the seeds are re-read from the account each time, so a contract cannot outlive the position that put it on the list.
+- [x] 3.3 The held answer carries the walk's own `discoveryComplete`, so a held refresh cannot read as a wider review than the walk was.
+- [x] 3.4 Deactivating the market drops it, like every other held reading.
+- [x] 3.5 Test: two refreshes in a row walk income once and cover the same contracts; past the hold it is walked again.
+- [ ] 3.6 Persisting it across runs, so a launch does not walk at all, waits on the store in §1.
 
 ## 4. Proof
 
@@ -32,7 +35,7 @@
 - [ ] 4.3 Test: a contract that did not trade is not read.
 - [ ] 4.4 Test: a stream reconnect makes the next refresh read every contract.
 - [ ] 4.5 Test: the rotation re-reads a skipped contract within the stated number of refreshes.
-- [ ] 4.6 Test: a refresh the store answers issues no income page.
+- [x] 4.6 Test: a refresh inside the hold issues no income page (see 3.5).
 - [ ] 4.7 Test: a full re-read walks discovery and reads the whole window.
 - [ ] 4.8 Test: an unreadable store behaves exactly as no store.
 - [ ] 4.9 Weight test: a refresh after an idle minute costs a fraction of a full read, and the numbers are stated.

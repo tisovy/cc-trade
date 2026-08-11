@@ -2727,6 +2727,46 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(history.futures_history.discoveryComplete).toBe(true);
     });
 
+    // Walking income is the most expensive thing a review does — up to eight
+    // pages at weight 30, against an 800-weight minute — and it answers a
+    // question that only moves when a trade is made somewhere other than this
+    // desk. Trades made here seed the fan-out directly.
+    it('holds the contracts a walk found instead of walking on every refresh', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        moduleMocks.futuresAdapter.getTradedSymbolPage
+            .mockResolvedValue({ symbols: ['B1USDT'], full: false, lastTime: 900 });
+
+        await runFuturesCommand({
+            action: 'account.history', clientOrderId: 'history-hold-1', symbol: 'ETHUSDT',
+        });
+        const afterFirst = moduleMocks.futuresAdapter.getTradedSymbolPage.mock.calls.length;
+        expect(afterFirst).toBeGreaterThan(0);
+
+        await runFuturesCommand({
+            action: 'account.history', clientOrderId: 'history-hold-2', symbol: 'ETHUSDT',
+        });
+        expect(moduleMocks.futuresAdapter.getTradedSymbolPage)
+            .toHaveBeenCalledTimes(afterFirst);
+        // Held, not dropped: the second review covers the same contracts.
+        const reviews = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.futures_history);
+        expect(reviews.at(-1).futures_history.symbols).toEqual(['ETHUSDT', 'B1USDT']);
+
+        // Past the hold, a trade made in Binance's own app is looked for again.
+        await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+        await runFuturesCommand({
+            action: 'account.history', clientOrderId: 'history-hold-3', symbol: 'ETHUSDT',
+        });
+        expect(moduleMocks.futuresAdapter.getTradedSymbolPage.mock.calls.length)
+            .toBeGreaterThan(afterFirst);
+    });
+
     // The fan-out reads twelve contracts. Once the last day alone has named that
     // many, reading further back cannot add one — and the review must say that the
     // rest of the week went unlooked-at rather than report a complete discovery.
