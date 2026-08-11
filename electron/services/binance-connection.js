@@ -1119,11 +1119,16 @@ export function setupBinanceConnection({
             .map(position => String(position?.symbol ?? '').toUpperCase())
             .filter(Boolean))];
         if (symbols.length === 0) return;
-        const held = symbols
-            .map(symbol => heldFuturesSymbolConfig(symbol))
-            .filter(config => config !== null);
-        const unread = symbols
-            .filter(symbol => heldFuturesSymbolConfig(symbol) === null)
+        // Asked once per symbol: the hold is measured against the clock, so
+        // asking twice could put the same contract in both lists on the
+        // millisecond it expires.
+        const holdings = symbols.map(symbol => [symbol, heldFuturesSymbolConfig(symbol)]);
+        const held = holdings
+            .filter(([, config]) => config !== null)
+            .map(([, config]) => config);
+        const unread = holdings
+            .filter(([, config]) => config === null)
+            .map(([symbol]) => symbol)
             .slice(0, FUTURES_POSITION_CONFIG_MAX_SYMBOLS);
         const configs = await Promise.all(unread.map(symbol => readFuturesSymbolConfig(symbol)));
         broadcastFuturesSymbolConfigs([...held, ...configs]);
@@ -1286,9 +1291,12 @@ export function setupBinanceConnection({
         futuresUserDataReconnecting = false;
         // A leverage held for an account nobody is on is not a reading, it is a
         // memory. The next activation reads its own. The same goes for which
-        // contracts that account traded.
+        // contracts that account traded, and for which of its orders the stream
+        // reported settled — that one guards reads against a stream this
+        // account no longer has.
         forgetFuturesSymbolConfigs();
         futuresHistoryDiscovery = null;
+        futuresSettledOrders.forget();
         // No Futures renderer is watching: nothing to mark to market.
         futuresMarkPriceFeed?.track([]);
         if (futuresKeepAliveInterval) {

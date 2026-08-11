@@ -178,6 +178,58 @@ describe('production workstation hook isolation', () => {
     })
   })
 
+  // The panel states how far past the best price its rows reach, and the backend
+  // buys the page that covers it. It states it when the reading changes — and a
+  // new subscription for the same contract is not a change the panel notices, so
+  // the reading has to be carried to it here or the book opens too shallow and
+  // stays there.
+  it('re-states the reading to the subscription that will carry it', () => {
+    const socket = new LocalSocket()
+    const sendMessage = vi.fn(() => true)
+    const { result } = renderHook(
+      props => useFuturesProductionWorkstation(props),
+      { initialProps: defaultProps(socket, sendMessage) },
+    )
+
+    act(() => {
+      expect(result.current.configureDepth('1.4')).toBe(true)
+    })
+    expect(sendMessage.mock.calls.at(-1)[0]).toMatchObject({
+      action: FUTURES_PRODUCTION_WORKSTATION_ACTIONS.CONFIGURE_DEPTH,
+      requestId: result.current.requestId,
+      range: '1.4',
+    })
+
+    act(() => result.current.retry())
+    const actions = sendMessage.mock.calls.slice(-2).map(([message]) => message.action)
+    expect(actions).toEqual([
+      FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SUBSCRIBE,
+      FUTURES_PRODUCTION_WORKSTATION_ACTIONS.CONFIGURE_DEPTH,
+    ])
+    expect(sendMessage.mock.calls.at(-1)[0]).toMatchObject({
+      requestId: result.current.requestId,
+      range: '1.4',
+    })
+  })
+
+  // A range is a distance in the contract's own quote currency, so the one
+  // stated for the contract being left says nothing about the one being opened.
+  it('does not carry a reading across to another contract', () => {
+    const socket = new LocalSocket()
+    const sendMessage = vi.fn(() => true)
+    const { result, rerender } = renderHook(
+      props => useFuturesProductionWorkstation(props),
+      { initialProps: defaultProps(socket, sendMessage) },
+    )
+
+    act(() => {
+      expect(result.current.configureDepth('1.4')).toBe(true)
+    })
+    rerender(defaultProps(socket, sendMessage, { symbol: 'ETHUSDT' }))
+    expect(sendMessage.mock.calls.at(-1)[0].action)
+      .toBe(FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SELECT_SYMBOL)
+  })
+
   it('replays StrictMode with a fresh subscription owner and no interval selection', () => {
     const socket = new LocalSocket()
     const sendMessage = vi.fn(() => true)

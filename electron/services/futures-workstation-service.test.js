@@ -1808,6 +1808,52 @@ describe('the book is bought as deep as it is read', () => {
         expect(readDepthSnapshot).toHaveBeenCalledOnce();
     });
 
+    // A band big enough for the rows that the market has walked out of needs the
+    // same page again, centred where the market is now — not a deeper one. Left
+    // to deepen on every walk, a busy contract would climb to the thousand
+    // levels this change exists to stop buying.
+    it('re-reads the page it holds when the market walks out of a band that fits', async () => {
+        const { runtime, readDepthSnapshot } = await openContract('depth-page-walk');
+        const session = runtime.service.current;
+        session.depthRange = '0.5';
+        session.orderBook.rangeShortfall = () => 1;
+        runtime.service.ensureDepthCovers(session);
+        await vi.waitFor(() => expect(readDepthSnapshot.mock.calls.length).toBe(2));
+        expect(readDepthSnapshot.mock.calls.at(-1)[0]).toMatchObject({ limit: 50 });
+        expect(runtime.service.depthPage).toBe(0);
+    });
+
+    // The deepest page has nothing above it to buy. A book that answered a walk
+    // only by buying deeper would, at the top of the ladder, stop answering at
+    // all — and keep dropping every level outside a band it had left for good.
+    it('re-reads at the deepest page too, where there is nothing deeper to buy', async () => {
+        const { runtime, readDepthSnapshot } = await openContract('depth-page-deepest');
+        const session = runtime.service.current;
+        runtime.service.depthPage = 3;
+        session.depthRange = '0.5';
+        session.orderBook.rangeShortfall = () => 1;
+        runtime.service.ensureDepthCovers(session);
+        await vi.waitFor(() => expect(readDepthSnapshot.mock.calls.length).toBe(2));
+        expect(readDepthSnapshot.mock.calls.at(-1)[0]).toMatchObject({ limit: 1_000 });
+    });
+
+    // The range is a distance in the contract's own quote currency. Carried into
+    // the next contract, a step of one on a contract priced in dollars reads as
+    // an impossible range on one priced in ten-thousandths.
+    it('opens a contract on its own reading, not the one stated for the last', async () => {
+        const { runtime, readDepthSnapshot } = await openContract('depth-page-switch');
+        await runtime.service.handleRequest(
+            productionDepthRequest('depth-page-switch', '5'),
+            { emit: () => {} },
+        );
+        await vi.waitFor(() => expect(readDepthSnapshot.mock.calls.length).toBeGreaterThan(1));
+        await runtime.service.handleRequest(productionRequest('depth-page-next'), {
+            emit: () => {},
+        });
+        expect(runtime.service.current.depthRange).toBeNull();
+        expect(readDepthSnapshot.mock.calls.at(-1)[0]).toMatchObject({ limit: 50 });
+    });
+
     it('refuses a range stated by anyone but the subscription that owns the book', async () => {
         const { runtime } = await openContract('depth-page-owner');
         await expect(runtime.service.handleRequest(

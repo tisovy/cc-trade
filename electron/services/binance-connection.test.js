@@ -809,6 +809,80 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(loads.balances.mock.calls.length).toBeGreaterThan(afterSetup.balances);
     });
 
+    // Which orders the stream reported settled is what keeps a read that left
+    // before the settle from putting one back. It is a memory of one account's
+    // stream, and an account nobody is on has no stream — held across a market
+    // put away and picked up again, it would silently hide a working order the
+    // next read is right about.
+    it('forgets which orders settled when the market is put away', async () => {
+        const loads = {
+            balances: vi.fn().mockResolvedValue({
+                futures_balances: { USDT: { available: '100', total: '100' } },
+            }),
+            regularOrders: vi.fn().mockResolvedValue({
+                futures_regular_orders: [{
+                    symbol: 'TUTUSDT', orderId: 21, orderKind: 'REGULAR', status: 'NEW', transactTime: 1_000,
+                }],
+            }),
+            algoOrders: vi.fn().mockResolvedValue({ futures_algo_orders: [] }),
+            positions: vi.fn().mockResolvedValue({ futures_positions: [] }),
+        };
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue(
+            ['balances', 'regularOrders', 'algoOrders', 'positions'].map(type => ({
+                type,
+                weight: 5,
+                errorLabel: type,
+                loadPayload: loads[type],
+            })),
+        );
+        const activate = async (marketMode) => {
+            await moduleMocks.rendererHandlers.message({
+                type: 'utf8',
+                utf8Data: JSON.stringify({ action: 'activate_market', marketMode }),
+            });
+            await vi.advanceTimersByTimeAsync(2_000);
+            await flushMicrotasks();
+        };
+
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activate('futures-live');
+        moduleMocks.futuresUserDataSockets[0].handlers.open();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+
+        const workingOrders = () => moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.type === 'futures_account_state')
+            .at(-1).resources.regularOrders.data;
+        expect(workingOrders().map(order => order.orderId)).toEqual([21]);
+
+        // The order settles on the stream: the read above is now older than the
+        // exchange, and anything it says about order 21 is disbelieved.
+        moduleMocks.futuresUserDataSockets[0].handlers.message(JSON.stringify({
+            e: 'ORDER_TRADE_UPDATE',
+            E: 3_000,
+            o: {
+                s: 'TUTUSDT', i: 21, X: 'FILLED', S: 'BUY', o: 'LIMIT', p: '1', q: '5', z: '5', T: 3_000,
+            },
+        }));
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+        expect(workingOrders()).toEqual([]);
+
+        await activate('spot');
+        await activate('futures-live');
+        moduleMocks.futuresUserDataSockets.at(-1).handlers.open();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+
+        // The same read, believed this time.
+        expect(workingOrders().map(order => order.orderId)).toEqual([21]);
+    });
+
     it('connects live user data and coalesces adapter-owned stream refreshes', async () => {
         let resolveUserDataConnection;
         const userDataConnectionPromise = new Promise((resolve) => {

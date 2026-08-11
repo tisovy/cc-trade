@@ -105,9 +105,15 @@ const useFuturesProductionWorkstation = ({
   // re-sent on the first subscription, instead of the tape running at defaults
   // while the panel displays the restored values.
   const tapeSettingsRef = useRef(readStoredTapeSettings())
-  // Reset with the subscription: a range stated for the contract being left says
-  // nothing about the one being opened.
+  // The reading the panel last stated, and the contract it stated it for. Held
+  // rather than reset with the subscription, because the panel states it as the
+  // contract opens — which is before the subscription that will carry it exists,
+  // a child's effect running before its parent's. What was stated for the
+  // contract being left is dropped by the symbol, not by the reset.
   const depthRangeRef = useRef(null)
+  // What the current subscription was actually told, so a range restated
+  // unchanged is not sent twice.
+  const sentDepthRangeRef = useRef(null)
   const ownerRef = useRef(0)
   const historyRequestRef = useRef(null)
   const historySelectionRef = useRef(null)
@@ -143,10 +149,13 @@ const useFuturesProductionWorkstation = ({
   // deeper when the snapshot it holds does not prove that far, and opens a
   // contract on the cheapest page — a book bought as deep as the coarsest step
   // could ever want costs ten times a read at the finest.
-  const configureDepth = useCallback((range) => {
+  const sendDepthRange = useCallback((range, forSymbol) => {
     const activeSubscription = activeSubscriptionRef.current
-    if (activeSubscription === null) return false
-    if (typeof range !== 'string' || depthRangeRef.current === range) return false
+    // Never to a subscription for another contract: the panel states the range
+    // of the contract it is opening while the one it is leaving is still the
+    // subscription on hand, and that range would buy a page for the wrong book.
+    if (activeSubscription === null || activeSubscription.symbol !== forSymbol) return false
+    if (sentDepthRangeRef.current === range) return false
     try {
       const sent = activeSubscription.sendMessage(
         createFuturesProductionWorkstationConfigureDepthRequest({
@@ -154,12 +163,21 @@ const useFuturesProductionWorkstation = ({
           range,
         }),
       ) !== false
-      if (sent) depthRangeRef.current = range
+      if (sent) sentDepthRangeRef.current = range
       return sent
     } catch {
       return false
     }
   }, [])
+
+  const configureDepth = useCallback((range) => {
+    if (typeof range !== 'string') return false
+    // Remembered whether or not it can be sent right now. A subscription that
+    // arrives afterwards re-states it, so a contract opened before the panel
+    // could speak still gets the page its rows need.
+    depthRangeRef.current = Object.freeze({ symbol, range })
+    return sendDepthRange(range, symbol)
+  }, [sendDepthRange, symbol])
 
   const configureTape = useCallback((settings) => {
     const activeSubscription = activeSubscriptionRef.current
@@ -386,8 +404,16 @@ const useFuturesProductionWorkstation = ({
         }),
       }))
     } else if (sent) {
-      activeSubscriptionRef.current = Object.freeze({ requestId, sendMessage })
-      depthRangeRef.current = null
+      activeSubscriptionRef.current = Object.freeze({ requestId, sendMessage, symbol })
+      sentDepthRangeRef.current = null
+      // Re-stated for the subscription that will carry it, the way the tape
+      // settings below are: the panel states its reading when the reading
+      // changes, and a new subscription for the same contract is not a change
+      // it would notice.
+      const depthRange = depthRangeRef.current
+      if (depthRange !== null && depthRange.symbol === symbol) {
+        sendDepthRange(depthRange.range, symbol)
+      }
       const tapeSettings = tapeSettingsRef.current
       if (tapeSettings.throttleEnabled !== FUTURES_WORKSTATION_DEFAULT_TAPE_SETTINGS.throttleEnabled
         || tapeSettings.timeoutMs !== FUTURES_WORKSTATION_DEFAULT_TAPE_SETTINGS.timeoutMs
@@ -411,7 +437,7 @@ const useFuturesProductionWorkstation = ({
       wsConnection.removeEventListener('close', handleClose)
       wsConnection.removeEventListener('error', handleError)
     }
-  }, [enabled, interval, retryNonce, sendMessage, symbol, wsConnection])
+  }, [enabled, interval, retryNonce, sendDepthRange, sendMessage, symbol, wsConnection])
 
   // History is accumulated outside the resource snapshot: a resource is what the
   // exchange says now, while history is what the operator has already pulled

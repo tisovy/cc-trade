@@ -281,8 +281,11 @@ export class FuturesWorkstationOrderBook {
      * anything is worth.
      */
     rangeShortfall(range) {
+        // No band at all — a snapshot that came back with a side empty. Nothing
+        // is being dropped, so there is nothing the rows can fall outside of,
+        // and reading the same page again would not produce a band either.
+        if (this.band === null) return 0;
         if (this.coversRange(range)) return 0;
-        if (this.band === null) return Number.POSITIVE_INFINITY;
         const span = Number(subtractFuturesWorkstationDecimals(this.band.ceiling, this.band.floor));
         const bid = bestPrice(this.bids, true);
         const ask = bestPrice(this.asks, false);

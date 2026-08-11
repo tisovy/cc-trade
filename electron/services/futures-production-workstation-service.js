@@ -301,9 +301,20 @@ export class FuturesProductionWorkstationService {
         if (session.depthDeepenedAt !== null
             && now - session.depthDeepenedAt
                 < FUTURES_PRODUCTION_WORKSTATION_BOOK_RECOVERY.COOLDOWN_MS) return;
-        // Already at the deepest page the exchange publishes: the book shows what
-        // it can prove, which is the whole point of proving it.
-        if (!this.deepenDepthPage(shortfall)) return;
+        // Two different things end up here, and only one of them is worth a
+        // deeper page. A band whose own span falls short of the reading buys
+        // one — and at the deepest page the exchange publishes there is none to
+        // buy, so the book keeps showing what it can prove rather than re-reading
+        // the same page forever. A band wide enough that the market has simply
+        // walked out of it needs no deeper page at all: the same page, re-read,
+        // is a band centred where the market is now. That is the case every page
+        // must answer, the deepest one included — a book that stopped covering
+        // its rows and could not ask again would stay short for the session.
+        //
+        // An unmeasurable shortfall is the second case: a side emptied by the
+        // walk states no spread to size a page against, so it is re-read as it
+        // is and sized on the next reading, which will have both sides.
+        if (Number.isFinite(shortfall) && shortfall > 1 && !this.deepenDepthPage(shortfall)) return;
         session.depthDeepenedAt = now;
         void this.recoverBook(session, 'DEPTH_RANGE_SHORT');
     }
@@ -497,7 +508,17 @@ export class FuturesProductionWorkstationService {
         // the book deepens within a diff or two if that range needs it — one
         // cheap read is a smaller price than every contract paying for the
         // deepest reading of the session.
-        if (reconnectAttempt === 0) this.depthPage = 0;
+        //
+        // The range goes with it. It is a distance in the contract's own quote
+        // currency, so the one stated for the contract being left says nothing
+        // about the one being opened — carried across, a step of 1 on a contract
+        // priced in whole dollars would read as an impossible range on one
+        // priced in ten-thousandths and buy the deepest page to cover it. A
+        // reconnect keeps it: that is the same contract, still on screen.
+        if (reconnectAttempt === 0) {
+            this.depthPage = 0;
+            this.depthRange = null;
+        }
         const session = {
             request,
             requestId: request.requestId,

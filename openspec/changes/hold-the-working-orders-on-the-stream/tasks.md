@@ -27,6 +27,7 @@
 
 - [x] 3.1 The reconnect path already marks both order resources stale until a read lands, and still does — covered by the existing user-data lifecycle test.
 - [x] 3.2 A fold into a set that has never been read is refused: a list built from the one report that happened to arrive would present a one-order account as the whole of it.
+- [x] 3.3 The settled memory is dropped with the market, beside the held leverages and the held discovery. It is a memory of one account's stream, and an account nobody is on has no stream — held across a market put away and picked up again, it would silently hide a working order the next read is right about. (Audit, 2026-08-11.)
 
 ## 4. Proof
 
@@ -39,11 +40,12 @@
 - [x] 4.7 Test: a stale `NEW` report does not put back an order the stream settled; a read that left before the settle does not either.
 - [x] 4.8 Test: the settled memory is bounded and drops the oldest.
 - [x] 4.9 Test: a report for an order kind the stream does not speak for is ignored.
+- [x] 4.10 Test: a market put away and picked up again believes the read it disbelieved before — proved discriminating, it fails without the drop. (Audit, 2026-08-11.)
 
 ## 5. Verification
 
 - [x] 5.1 `npm run lint`, `npm test` (1349 tests, 97 files), `npm run check:futures-production`, `npm run check:command-path`.
-- [ ] 5.2 Operator confirms on live data: placing, filling and cancelling orders keeps the working-orders list exactly right without waiting for a refresh, and an order cancelled from Binance's app disappears within the beat.
+- [ ] 5.2 Operator confirms on live data (gathered as item 5 of the third pass in `verify-the-desk-in-one-sitting/runbook.md`): placing, filling and cancelling orders keeps the working-orders list exactly right without waiting for a refresh, and an order cancelled from Binance's app disappears within the beat.
 
 ## 6. Stated Limits, Not Fixed Here
 

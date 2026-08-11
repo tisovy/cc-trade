@@ -330,6 +330,14 @@ describe('the band a snapshot proves', () => {
         expect(book.rangeShortfall('6')).toBeCloseTo(13 / 3, 6);
     });
 
+    // A snapshot that came back with one side empty proves no band, so the book
+    // filters nothing and there is nothing the rows can fall outside of. Reading
+    // the same page again would not produce a band either.
+    it('is short of nothing when there is no band', () => {
+        const book = new FuturesWorkstationOrderBook();
+        expect(book.rangeShortfall('6')).toBe(0);
+    });
+
     it('forgets the band when the book is rebuilt or stopped', () => {
         const book = banded();
         expect(book.coversRange('1')).toBe(true);
