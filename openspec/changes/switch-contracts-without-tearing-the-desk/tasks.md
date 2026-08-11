@@ -19,12 +19,12 @@
 
 - [x] 3.1 Start the requested generation even when releasing the previous session reported a failure (`handleRequest`).
 - [x] 3.2 Prove by test that a select-symbol request following a failing teardown still starts the new contract's session.
-- [ ] 3.3 Prove by test that a rapid sequence of contract selections leaves exactly one live session, and that no earlier selection's frame is delivered after the last one starts.
+- [x] 3.3 Prove by test that a rapid sequence of contract selections leaves exactly one live session, and that no earlier selection's frame is delivered after the last one starts.
 
 ## 4. Timers Cannot Outlive Their Session
 
-- [ ] 4.1 Make the reconnect, interval-reconnect and freshness callbacks no-ops once their session is no longer current.
-- [ ] 4.2 Prove by test that a timer belonging to a released session performs no read and emits nothing.
+- [x] 4.1 Make the reconnect, interval-reconnect and freshness callbacks no-ops once their session is no longer current. No code change was needed: all three already open with `isCurrent(session)`, which is false for a released session on both counts — `this.current` no longer points at it and its abort signal is set. The guards are load-bearing, not incidental: removing them fails 4.2's test.
+- [x] 4.2 Prove by test that a timer belonging to a released session performs no read and emits nothing.
 
 ## 5. Verification
 

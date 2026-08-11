@@ -680,6 +680,153 @@ describe('production Futures workstation service', () => {
         expect(base.getActiveTimerCount()).toBe(1);
     });
 
+    // The operator switching contracts faster than a bootstrap completes: each
+    // selection releases the one before it while that one is still reading, and
+    // only the last one may reach the desk when they all settle.
+    it('leaves one live session when contracts are selected in quick succession', async () => {
+        const clock = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport();
+        const heldDepthReads = new Map();
+        const subscribers = new Map();
+        // The held read answers late and answers well: what must stop a released
+        // generation is the release, not an abort its read happened to observe.
+        const readDepthSnapshot = vi.fn(options => new Promise((resolve) => {
+            heldDepthReads.set(options.symbol, () => resolve(
+                FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols[options.symbol].depthSnapshot,
+            ));
+        }));
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock: clock.clock,
+            transport: {
+                ...base,
+                readDepthSnapshot,
+                connect: (options) => {
+                    subscribers.set(options.symbol, options);
+                    return base.connect(options);
+                },
+            },
+        }));
+        const events = { BTCUSDT: [], ETHUSDT: [], SOLUSDT: [] };
+        const select = (requestId, symbol) => runtime.service.handleRequest(
+            productionRequest(requestId, symbol),
+            { emit: event => events[symbol].push(event) },
+        );
+
+        const pendingA = select('rapid-a', 'BTCUSDT');
+        await vi.waitFor(() => expect(heldDepthReads.has('BTCUSDT')).toBe(true));
+        const pendingB = select('rapid-b', 'ETHUSDT');
+        await vi.waitFor(() => expect(heldDepthReads.has('ETHUSDT')).toBe(true));
+        const pendingC = select('rapid-c', 'SOLUSDT');
+        await vi.waitFor(() => expect(heldDepthReads.has('SOLUSDT')).toBe(true));
+        const abandoned = { BTCUSDT: events.BTCUSDT.length, ETHUSDT: events.ETHUSDT.length };
+
+        heldDepthReads.get('SOLUSDT')();
+        await pendingC;
+        // The reads the released generations were waiting on answer late, and
+        // the sockets they opened deliver after the last selection is live.
+        // Neither reaches the desk.
+        heldDepthReads.get('BTCUSDT')();
+        heldDepthReads.get('ETHUSDT')();
+        await pendingA;
+        await pendingB;
+        subscribers.get('BTCUSDT').onMessage(productionTradeFrame({ aggregateTradeId: 7001 }));
+        subscribers.get('ETHUSDT').onMessage(productionTradeFrame({ aggregateTradeId: 7002 }));
+
+        expect(events.BTCUSDT).toHaveLength(abandoned.BTCUSDT);
+        expect(events.ETHUSDT).toHaveLength(abandoned.ETHUSDT);
+        expect(events.SOLUSDT.at(-1)).toMatchObject({
+            symbol: 'SOLUSDT',
+            resource: 'status',
+            state: 'live',
+        });
+        expect(runtime.service.current).toMatchObject({
+            requestId: 'rapid-c',
+            symbol: 'SOLUSDT',
+            generation: 3,
+        });
+        // One open stream and one freshness monitor: the two released contracts
+        // left nothing of themselves running.
+        expect(base.getActiveTimerCount()).toBe(1);
+        expect(clock.intervalCount()).toBe(1);
+        expect(clock.timeoutCount()).toBe(0);
+    });
+
+    // A timer can outlive the session that armed it — a clear that fails, or a
+    // callback already off the queue when the release runs. What it must not do
+    // is read or emit for a contract the desk has left.
+    it('performs no read and emits nothing when a released session\'s timers fire', async () => {
+        const manual = createManualClock();
+        const armed = [];
+        const clock = {
+            ...manual.clock,
+            setInterval: (callback, delay) => {
+                armed.push({ kind: 'interval', callback });
+                return manual.clock.setInterval(callback, delay);
+            },
+            setTimeout: (callback, delay) => {
+                armed.push({ kind: 'timeout', callback });
+                return manual.clock.setTimeout(callback, delay);
+            },
+        };
+        const base = createFuturesProductionWorkstationFakeTransport();
+        const reads = {
+            loadExchangeInfo: vi.fn(options => base.loadExchangeInfo(options)),
+            bootstrapIndependent: vi.fn(options => base.bootstrapIndependent(options)),
+            readDepthSnapshot: vi.fn(options => base.readDepthSnapshot(options)),
+            bootstrapInterval: vi.fn(options => base.bootstrapInterval(options)),
+        };
+        const readCounts = () => Object.fromEntries(
+            Object.entries(reads).map(([name, read]) => [name, read.mock.calls.length]),
+        );
+        let subscriber;
+        const connect = vi.fn((options) => {
+            if (options.symbol === 'BTCUSDT') subscriber = options;
+            return base.connect(options);
+        });
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock,
+            transport: { ...base, ...reads, connect },
+        }));
+        const releasedEvents = [];
+        await runtime.service.handleRequest(productionRequest('released-timers'), {
+            emit: event => releasedEvents.push(event),
+        });
+        const freshness = armed.filter(timer => timer.kind === 'interval');
+        expect(freshness).toHaveLength(1);
+
+        const beforeCandleDisconnect = armed.length;
+        subscriber.onCandleDisconnect('CLOSED');
+        const intervalReconnect = armed.slice(beforeCandleDisconnect);
+        expect(intervalReconnect).toHaveLength(1);
+
+        const beforeDisconnect = armed.length;
+        subscriber.onDisconnect('SOCKET_CLOSED');
+        const reconnect = armed.slice(beforeDisconnect);
+        expect(reconnect).toHaveLength(1);
+
+        const nextEvents = [];
+        await runtime.service.handleRequest(
+            productionRequest('released-timers-next', 'ETHUSDT'),
+            { emit: event => nextEvents.push(event) },
+        );
+        const emitted = releasedEvents.length;
+        const readsBefore = readCounts();
+        const connectsBefore = connect.mock.calls.length;
+
+        for (const timer of [...freshness, ...intervalReconnect, ...reconnect]) timer.callback();
+        await Promise.resolve();
+
+        expect(releasedEvents).toHaveLength(emitted);
+        expect(readCounts()).toEqual(readsBefore);
+        expect(connect).toHaveBeenCalledTimes(connectsBefore);
+        expect(nextEvents.at(-1)).toMatchObject({ symbol: 'ETHUSDT', state: 'live' });
+        expect(runtime.service.current).toMatchObject({
+            requestId: 'released-timers-next',
+            symbol: 'ETHUSDT',
+        });
+        expect(base.getActiveTimerCount()).toBe(1);
+    });
+
     it('drops stale interval bootstraps during a rapid A → B → C switch', async () => {
         const base = createFuturesProductionWorkstationFakeTransport();
         const deferred = new Map();
