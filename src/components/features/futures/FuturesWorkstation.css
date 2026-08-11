@@ -240,7 +240,7 @@
        for. Left on `auto`, its row took its content's height out of the book's
        row first, and the book — which cannot shrink below its own floor — was
        pushed out of its area and drawn over the tape. */
-    grid-template-rows: auto auto minmax(0, 1.15fr) minmax(0, 1fr) auto;
+    grid-template-rows: auto auto minmax(0, 65fr) minmax(0, 35fr) auto;
   }
 
 
@@ -1433,6 +1433,46 @@
   display: grid;
   gap: 2px;
   min-width: 0;
+}
+
+/* These are the two dense data lists the operator keeps under the pointer. The
+   target Electron renderer gets an exact six-pixel control; engines without
+   Chromium's scrollbar pseudo-elements fall back to their compact standard
+   control. Keeping the fallback gated avoids `scrollbar-width: thin`
+   overriding the exact Chromium dimensions. */
+@supports not selector(::-webkit-scrollbar) {
+  :is(.futures-workstation-trade-rows, .futures-workstation-dock-table) {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(126, 143, 166, 0.5) transparent;
+  }
+}
+
+:is(.futures-workstation-trade-rows, .futures-workstation-dock-table)::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+:is(.futures-workstation-trade-rows, .futures-workstation-dock-table)::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+:is(.futures-workstation-trade-rows, .futures-workstation-dock-table)::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+:is(.futures-workstation-trade-rows, .futures-workstation-dock-table)::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+:is(.futures-workstation-trade-rows, .futures-workstation-dock-table)::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(126, 143, 166, 0.5);
+}
+
+:is(.futures-workstation-trade-rows, .futures-workstation-dock-table)::-webkit-scrollbar-thumb:hover {
+  background: rgba(126, 143, 166, 0.78);
 }
 
 /* The trailing action column is sized, never `auto`: a content-sized track

@@ -927,6 +927,26 @@ describe('instrument recency and interface scale', () => {
     expect(recentRule).not.toMatch(/max-height\s*:/)
   })
 
+  it('reserves the desktop market rail at 65/35 without changing the mobile stack', () => {
+    const stylesheet = readFileSync(
+      'src/components/features/futures/FuturesWorkstation.css',
+      'utf8',
+    )
+    const desktopRule = stylesheet.match(
+      /@media \(min-width: 761px\) \{[\s\S]*?\.futures-workstation\s*\{(?<declarations>[^}]*)\}/,
+    )?.groups?.declarations
+    const mobileRule = stylesheet.match(
+      /@media \(max-width: 760px\) \{[\s\S]*?\.futures-workstation\s*\{(?<declarations>[^}]*)\}/,
+    )?.groups?.declarations
+
+    expect(desktopRule).toContain(
+      'grid-template-rows: auto auto minmax(0, 65fr) minmax(0, 35fr) auto;',
+    )
+    expect(mobileRule).toContain(
+      'grid-template-rows: auto auto auto minmax(390px, 56vh) auto auto;',
+    )
+  })
+
   it('lists persisted recent contracts before the catalogue arrives', () => {
     const state = createState()
     renderView({

@@ -457,6 +457,40 @@ describe('FuturesPortfolioDock', () => {
     }
   })
 
+  it('gives only the tape and dock tables complete compact scrollbar chrome', () => {
+    const stylesheet = readFileSync(
+      'src/components/features/futures/FuturesWorkstation.css',
+      'utf8',
+    )
+    const owners = ':is(.futures-workstation-trade-rows, .futures-workstation-dock-table)'
+    const declarationsFor = selector => {
+      const ruleStart = stylesheet.indexOf(`${selector} {`)
+      expect(ruleStart, `${selector} rule exists`).toBeGreaterThan(-1)
+      const bodyStart = stylesheet.indexOf('{', ruleStart) + 1
+      return stylesheet.slice(bodyStart, stylesheet.indexOf('}', bodyStart))
+    }
+
+    const fallback = declarationsFor(owners)
+    expect(fallback).toContain('scrollbar-width: thin;')
+    expect(fallback).toContain('scrollbar-color:')
+
+    const axes = declarationsFor(`${owners}::-webkit-scrollbar`)
+    expect(axes).toContain('width: 6px;')
+    expect(axes).toContain('height: 6px;')
+    expect(declarationsFor(`${owners}::-webkit-scrollbar-track`))
+      .toContain('background: transparent;')
+    expect(declarationsFor(`${owners}::-webkit-scrollbar-corner`))
+      .toContain('background: transparent;')
+    expect(declarationsFor(`${owners}::-webkit-scrollbar-button`))
+      .toContain('display: none;')
+
+    const thumb = declarationsFor(`${owners}::-webkit-scrollbar-thumb`)
+    expect(thumb).toContain('border-radius: 999px;')
+    expect(thumb).toContain('background: rgba(126, 143, 166, 0.5);')
+    expect(declarationsFor(`${owners}::-webkit-scrollbar-thumb:hover`))
+      .toContain('background: rgba(126, 143, 166, 0.78);')
+  })
+
   // "No open positions" and "not read yet" call for opposite actions, and the
   // dock used to give the first reading for both.
   it('does not report an empty account before the first read answers', () => {
