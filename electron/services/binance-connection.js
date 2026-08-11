@@ -72,6 +72,7 @@ import WebSocket from 'ws';
 import {
     createFuturesProductionWorkstationRuntime,
 } from './futures-production-workstation-composition.js';
+import { DESK_DIAGNOSTICS_UNRECORDED } from './desk-diagnostic-record.js';
 import {
     isPotentialFuturesProductionWorkstationFrame,
 } from '../../src/utils/futuresProductionWorkstationProtocol.js';
@@ -658,6 +659,9 @@ const safeDisconnect = async (socket, label) => {
 
 export function setupBinanceConnection({
     localWebSocketAccess = createLocalWebSocketAccess(),
+    // Where the desk's own diagnostics are kept. Absent, the desk behaves
+    // exactly as it did before there was a record at all.
+    diagnosticRecord = DESK_DIAGNOSTICS_UNRECORDED,
 } = {}) {
     const credentialPreflight = evaluateBinanceCredentialPreflight(process.env);
     const startupEnvelope = createBinanceStartupEnvelope(credentialPreflight);
@@ -1755,6 +1759,7 @@ export function setupBinanceConnection({
                         `[futures-production-workstation:timing] ${phase} ${durationMs}ms ${outcome}`
                         + (cache === null ? '' : ` cache=${cache}`),
                     );
+                    diagnosticRecord.record('timing', { phase, durationMs, outcome, cache });
                 },
                 // The faults the desk absorbs without telling the operator: a
                 // book that could not bridge, a recovery, a rejected frame, a
@@ -1762,6 +1767,7 @@ export function setupBinanceConnection({
                 // badly; only this says what was wrong with it.
                 onInternalError: ({ phase, code }) => {
                     logger.warn(`[futures-production-workstation:fault] ${phase} ${code}`);
+                    diagnosticRecord.record('fault', { phase, code });
                 },
             })
             : null;
@@ -2930,6 +2936,9 @@ export function setupBinanceConnection({
             }
 
             const command = validation.command;
+            // What the desk was told to do, before anything is sent: the outcome
+            // envelopes say how a command ended but never what it was.
+            diagnosticRecord.observeCommand(command);
             const authenticatedAdapter = command.marketType === FUTURES_MARKET_TYPE
                 ? futuresTradingAdapter
                 : spotTradingAdapter;
@@ -3005,6 +3014,9 @@ export function setupBinanceConnection({
 
         // Legacy emit for backward compatibility
         const emit = (payload, overrideRequestId) => {
+            // How a trading command ended reaches the operator here and nowhere
+            // else; the record recognizes those envelopes and ignores the rest.
+            diagnosticRecord.observeOutbound(payload);
             const reqId = overrideRequestId ?? activeRequestId;
             if (reqId) {
                 sendJSON(connection, { requestId: reqId, ...payload });
@@ -3719,7 +3731,14 @@ export function setupBinanceConnection({
                 try {
                     await futuresProductionWorkstationRuntime.service.handleRequest(
                         workstationFrame,
-                        { emit: payload => sendJSON(connection, payload) },
+                        {
+                            // The workspace's status line is the only place a
+                            // resynchronization names its cause.
+                            emit: (payload) => {
+                                diagnosticRecord.observeOutbound(payload);
+                                sendJSON(connection, payload);
+                            },
+                        },
                     );
                 } catch (error) {
                     logger.warn(`[futures-production-workstation] request rejected (${error?.code || error?.name || 'unknown'})`);

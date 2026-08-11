@@ -3,6 +3,10 @@ import {
     FUTURES_PRODUCTION_WORKSTATION_EVENT_TYPE,
     createFuturesProductionWorkstationSubscribeRequest,
 } from '../../src/utils/futuresProductionWorkstationProtocol.js';
+import {
+    readDeskDiagnosticCommandEvent,
+    readDeskDiagnosticOutboundEvent,
+} from './desk-diagnostic-record.js';
 
 const moduleMocks = vi.hoisted(() => {
     const state = {};
@@ -4262,6 +4266,85 @@ describe('setupBinanceConnection user-data orchestration', () => {
         // Reduce-only market close is exempt regardless of size.
         await sendOrder({ side: 'SELL', orderType: 'MARKET', quantity: '10', positionSide: 'LONG', reduceOnly: true });
         expect(moduleMocks.futuresAdapter.placeOrder).toHaveBeenCalledTimes(2);
+    });
+
+    // A record wired to nothing is the same failure the fault reporter already
+    // had: the desk states everything, and none of it lands anywhere.
+    describe('what reaches the desk record', () => {
+        const kept = [];
+        const record = {
+            directory: '/desk/diagnostics',
+            record: (kind, value) => kept.push({ kind, ...value }) > 0,
+            observeOutbound: payload => kept.push(
+                readDeskDiagnosticOutboundEvent(payload) ?? { kind: 'ignored' },
+            ) > 0,
+            observeCommand: command => kept.push(
+                readDeskDiagnosticCommandEvent(command) ?? { kind: 'ignored' },
+            ) > 0,
+            close: () => {},
+        };
+        const held = kind => kept.filter(entry => entry.kind === kind);
+
+        const connectRecordedRenderer = async (marketMode = 'futures-live') => {
+            kept.length = 0;
+            setupBinanceConnection({
+                localWebSocketAccess: { host: '127.0.0.1' },
+                diagnosticRecord: record,
+            });
+            moduleMocks.websocketServerHandlers.request({
+                origin: 'http://localhost:5174',
+                accept: vi.fn(() => moduleMocks.rendererConnection),
+            });
+            if (marketMode) await activateMarket(marketMode);
+        };
+
+        it('keeps the command as issued and the outcome that answered it', async () => {
+            await connectRecordedRenderer();
+            moduleMocks.futuresAdapter.placeOrder.mockRejectedValueOnce(
+                Object.assign(new Error('refused'), { code: -2019, msg: 'Margin is insufficient.' }),
+            );
+
+            await placeFuturesOrder('recorded-1');
+
+            expect(held('command')).toContainEqual({
+                kind: 'command',
+                action: 'trade.placeOrder',
+                market: 'futures',
+                symbol: 'BTCUSDT',
+                side: 'BUY',
+                orderType: 'LIMIT',
+                identity: 'recorded-1',
+            });
+            expect(held('outcome')[0]).toMatchObject({
+                action: 'trade.placeOrder',
+                result: 'rejected',
+                market: 'futures',
+            });
+            // The price and the size the command carried are not in any of it.
+            expect(JSON.stringify(kept)).not.toMatch(/50000|0\.01\b|Margin is insufficient/);
+        });
+
+        // The workspace's status line is the only place a resynchronization
+        // states its cause, and it goes to the renderer over its own emitter —
+        // not through the one every other payload uses.
+        it('keeps the state the workspace reported for a contract', async () => {
+            await connectRecordedRenderer();
+
+            await moduleMocks.rendererHandlers.message({
+                type: 'utf8',
+                utf8Data: JSON.stringify(createFuturesProductionWorkstationSubscribeRequest({
+                    requestId: 'recorded-workstation-1',
+                    symbol: 'BTCUSDT',
+                    interval: '1m',
+                })),
+            });
+            await flushMicrotasks();
+
+            expect(held('status').length).toBeGreaterThan(0);
+            expect(held('status')[0]).toMatchObject({ kind: 'status', symbol: 'BTCUSDT' });
+            // The book and the tape that arrived on the same emitter are not in it.
+            expect(kept.every(entry => entry.kind !== 'book' && entry.kind !== 'tape')).toBe(true);
+        });
     });
 
     // The backend used to do market work for whichever market asked, including

@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url'
 import { shouldOpenDevTools } from './devtools.js'
 import { installRendererZoomControls } from './renderer-zoom.js'
 import { setupBinanceConnection } from './services/binance-connection.js'
+import { createDeskDiagnosticRecord } from './services/desk-diagnostic-record.js'
 import {
   createLocalWebSocketAccess,
 } from './services/local-websocket-access.js'
@@ -108,6 +109,7 @@ const localWebSocketAccess = {
 };
 const rendererRuntimeRegistry = createRendererRuntimeRegistry(ipcMain)
 let binanceController = null
+let deskDiagnosticRecord = null
 let isExecutionShutdownStarted = false
 
 // Get proxy URL from environment (supports http_proxy, HTTP_PROXY, https_proxy, HTTPS_PROXY)
@@ -238,8 +240,18 @@ function createWindow() {
 app.whenReady().then(async () => {
   if (!hasExclusiveExecutionOwnership) return
 
+  // The desk keeps its own record of what it did, under its own data directory.
+  // The path is stated once, here, because a record the operator cannot find is
+  // a record that does not exist.
+  deskDiagnosticRecord = createDeskDiagnosticRecord({
+    directory: path.join(app.getPath('userData'), 'diagnostics'),
+  })
+  console.log('[Electron] Desk record:', deskDiagnosticRecord.directory)
+  deskDiagnosticRecord.record('session', { event: 'started', version: app.getVersion() })
+
   binanceController = setupBinanceConnection({
     localWebSocketAccess,
+    diagnosticRecord: deskDiagnosticRecord,
   })
 
   installRendererAppProtocol({
@@ -279,11 +291,17 @@ app.on('before-quit', (event) => {
   if (!binanceController || isExecutionShutdownStarted) return
   event.preventDefault()
   isExecutionShutdownStarted = true
+  // A run that ended is a fact the next reading needs: without it, a desk that
+  // was closed and one that died look the same in the record.
+  deskDiagnosticRecord?.record('session', { event: 'stopped', version: app.getVersion() })
   void binanceController.close()
     .catch((error) => {
       console.error('[Electron] Execution shutdown failed:', error)
     })
-    .finally(() => app.quit())
+    .finally(() => {
+      deskDiagnosticRecord?.close()
+      app.quit()
+    })
 })
 
 app.on('window-all-closed', () => {

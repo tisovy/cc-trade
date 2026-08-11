@@ -1,0 +1,421 @@
+// The desk states its faults and its timings and then throws them away: started
+// from a launcher the lines go nowhere, started from a terminal they live until
+// it is closed. This is the file they land in — the same structured events, one
+// per line, kept long enough to answer "what happened yesterday" and bounded
+// tightly enough that a trading desk never loses its disk to its own log.
+//
+// Two rules hold the whole design up. Only the desk's own structured events are
+// written, through the exact field list each kind declares below — so nothing
+// arrives in whatever shape it happened to have. And nothing here may raise:
+// a record that cannot be opened, written or rotated loses the line and leaves
+// the desk exactly as it would be with no record at all.
+import fs from 'node:fs';
+import path from 'node:path';
+
+export const DESK_DIAGNOSTIC_RECORD = Object.freeze({
+    // Measured on 2026-08-11 against the live exchange, one contract, 63s: the
+    // bootstrap costs 10 lines (~1 KB) and a healthy desk then writes *nothing*
+    // in steady running; a contract switch costs another 10. A desk that cannot
+    // reach the exchange retries in a loop at ~39 lines/min (~2.1 KB/min,
+    // ~3 MB/day) — the realistic ceiling, which the day bound below governs.
+    // The pathological one is a contract whose every depth frame is refused: at
+    // the measured 10 diffs/s that is ~600 lines/min, ~79 MB/day, and only the
+    // byte bound can stop it in time.
+    MAX_DAYS: 14,
+    MAX_TOTAL_BYTES: 32 * 1024 * 1024,
+    // One file the operator can actually open, and the granularity at which the
+    // record forgets: the byte bound drops whole segments, oldest first.
+    MAX_SEGMENT_BYTES: 4 * 1024 * 1024,
+    // No event this record accepts comes near this. A line that does is a line
+    // whose shape is wrong, and it is dropped rather than written.
+    MAX_LINE_BYTES: 2048,
+    // How much may be written between two sweeps. Rotating on the day boundary
+    // alone would let the pathological case above sit hours past the byte bound.
+    PRUNE_INTERVAL_BYTES: 1024 * 1024,
+    // A record that failed is retried, but not per line: the disk that refused
+    // one write refuses the next thousand just as fast.
+    REOPEN_COOLDOWN_MS: 60_000,
+    FILE_PREFIX: 'desk-',
+    FILE_SUFFIX: '.jsonl',
+    DAY_MS: 86_400_000,
+});
+
+const SEGMENT_NAME = /^desk-(\d{4}-\d{2}-\d{2})-(\d{3})\.jsonl$/;
+
+// The desk's own vocabulary. Every pattern is an identifier the desk already
+// emits — none of them can spell a decimal amount, which is what keeps a price
+// or a size from arriving under a field name that was meant for a code.
+const PHASE = /^[a-z][a-z0-9-]{0,32}(?::\d{1,12})?$/;
+const CODE = /^[A-Z][A-Z0-9_]{0,95}$/;
+const STATE = /^[a-z][a-z-]{0,31}$/;
+const SYMBOL = /^[A-Z0-9]{1,24}$/;
+const ACTION = /^[a-z][A-Za-z0-9._-]{0,63}$/;
+const MARKET = /^[a-z][a-z-]{0,15}$/;
+const SIDE = /^(?:BUY|SELL)$/;
+const ORDER_TYPE = /^[A-Z][A-Z_]{0,31}$/;
+// Binance permits `.`, `:` and `/` in a client order id; this desk mints only
+// `<market>-<base36 time>-<base36 suffix>`, and the exchange's own identities
+// are digits. Kept to that, because a rule this narrow cannot spell an amount —
+// an identity from somewhere else loses its line rather than widening it.
+const IDENTITY = /^[A-Za-z0-9_-]{1,64}$/;
+const OUTCOME = /^[a-z][a-z-]{0,31}$/;
+// Whether a read was answered from the shared exchange-info cache. Only the
+// reads that have a cache carry it; the rest state nothing.
+const CACHE = /^(?:hit|miss)$/;
+const RESULT = /^(?:rejected|unresolved|resolved)$/;
+const EVENT = /^(?:started|stopped)$/;
+const VERSION = /^[0-9][0-9A-Za-z.+-]{0,31}$/;
+
+const text = pattern => value => (
+    typeof value === 'string' && pattern.test(value) ? value : undefined
+);
+const count = value => (Number.isSafeInteger(value) && value >= 0 ? value : undefined);
+// An order identity arrives as a number from the exchange and as a string from
+// the desk's own client ids. Both name the same thing.
+const identity = (value) => {
+    if (Number.isSafeInteger(value) && value >= 0) return String(value);
+    return text(IDENTITY)(value);
+};
+const optional = read => value => (
+    value === null || value === undefined ? null : read(value)
+);
+
+// Each kind states exactly the fields it may carry. Nothing else is copied, so
+// a credential, a signature or a money value offered alongside cannot reach the
+// file; a field that is present but malformed refuses the whole event, so a
+// line is never half a fact.
+const RECORDED_FIELDS = Object.freeze({
+    session: Object.freeze([
+        ['event', text(EVENT)],
+        ['version', optional(text(VERSION))],
+    ]),
+    timing: Object.freeze([
+        ['phase', text(PHASE)],
+        ['durationMs', count],
+        ['outcome', text(OUTCOME)],
+        ['cache', optional(text(CACHE))],
+    ]),
+    fault: Object.freeze([
+        ['phase', text(PHASE)],
+        ['code', text(CODE)],
+    ]),
+    status: Object.freeze([
+        ['symbol', text(SYMBOL)],
+        ['state', text(STATE)],
+        ['code', optional(text(CODE))],
+    ]),
+    // What the desk was told to do — contract, side, type, identity — and never
+    // what it was worth. A trade journal is a different decision.
+    command: Object.freeze([
+        ['action', text(ACTION)],
+        ['market', text(MARKET)],
+        ['symbol', optional(text(SYMBOL))],
+        ['side', optional(text(SIDE))],
+        ['orderType', optional(text(ORDER_TYPE))],
+        ['identity', optional(identity)],
+    ]),
+    outcome: Object.freeze([
+        ['action', text(ACTION)],
+        ['result', text(RESULT)],
+        ['code', text(CODE)],
+        ['market', optional(text(MARKET))],
+        ['symbol', optional(text(SYMBOL))],
+        ['identity', optional(identity)],
+    ]),
+});
+
+export const DESK_DIAGNOSTIC_RECORD_KINDS = Object.freeze(Object.keys(RECORDED_FIELDS));
+
+/**
+ * The whole of what may be written, and the only way in.
+ *
+ * Answers a frozen event, or `null` when the kind is not one this record keeps
+ * or a field it declares is missing or malformed.
+ */
+export const describeDeskDiagnosticEvent = (kind, value) => {
+    const fields = typeof kind === 'string' && Object.hasOwn(RECORDED_FIELDS, kind)
+        ? RECORDED_FIELDS[kind]
+        : null;
+    if (fields === null
+        || value === null
+        || typeof value !== 'object'
+        || Array.isArray(value)) return null;
+    const event = { kind };
+    for (const [name, read] of fields) {
+        const carried = read(value[name]);
+        if (carried === undefined) return null;
+        event[name] = carried;
+    }
+    return Object.freeze(event);
+};
+
+const OUTCOME_ENVELOPES = Object.freeze([
+    Object.freeze(['command_rejected', 'rejected']),
+    Object.freeze(['command_unresolved', 'unresolved']),
+    Object.freeze(['command_resolved', 'resolved']),
+]);
+
+/**
+ * Recognizes the two facts the desk states to the renderer and nowhere else:
+ * the workspace's own status line — which is where a resynchronization names
+ * its cause — and the end of a trading command.
+ *
+ * This runs on every outbound frame, so it reads a handful of properties and
+ * answers `null` for everything else.
+ */
+export const readDeskDiagnosticOutboundEvent = (payload) => {
+    if (payload === null || typeof payload !== 'object') return null;
+    if (payload.resource === 'status') {
+        return describeDeskDiagnosticEvent('status', {
+            symbol: payload.symbol,
+            state: payload.state,
+            code: payload.payload?.reasonCode ?? null,
+        });
+    }
+    for (const [key, result] of OUTCOME_ENVELOPES) {
+        const envelope = payload[key];
+        if (envelope === null || typeof envelope !== 'object') continue;
+        const details = envelope.details;
+        return describeDeskDiagnosticEvent('outcome', {
+            action: envelope.request,
+            result,
+            code: envelope.code,
+            market: details?.marketType ?? null,
+            symbol: details?.symbol ?? null,
+            identity: details?.orderId ?? details?.origClientOrderId ?? details?.clientOrderId ?? null,
+        });
+    }
+    return null;
+};
+
+/**
+ * The command as it was issued, before anything was sent.
+ *
+ * The outcome envelopes above say how a command ended but not what it was; only
+ * the validated command carries the side and the type.
+ */
+export const readDeskDiagnosticCommandEvent = command => describeDeskDiagnosticEvent('command', {
+    action: command?.action,
+    market: command?.marketType,
+    symbol: command?.symbol ?? null,
+    side: command?.side ?? null,
+    orderType: command?.orderType ?? null,
+    // The order's identity, not the command's: a cancellation names the order
+    // it is cancelling, and a placement's own client id *is* that order's. This
+    // is what ties a command to the outcome that answers it.
+    identity: command?.origClientOrderId ?? command?.orderId ?? command?.clientOrderId ?? null,
+});
+
+// What the desk uses when no record is configured — the tests' baseline, and
+// the answer to "does anything change when the record is not there".
+export const DESK_DIAGNOSTICS_UNRECORDED = Object.freeze({
+    directory: null,
+    record: () => false,
+    observeOutbound: () => false,
+    observeCommand: () => false,
+    close: () => {},
+});
+
+const utcDay = timestamp => new Date(timestamp).toISOString().slice(0, 10);
+
+const segmentName = (day, index) => (
+    `${DESK_DIAGNOSTIC_RECORD.FILE_PREFIX}${day}-${String(index).padStart(3, '0')}`
+    + DESK_DIAGNOSTIC_RECORD.FILE_SUFFIX
+);
+
+/**
+ * Opens the record under `directory`, one file per day, appended to, and keeps
+ * it inside both bounds.
+ *
+ * `fileSystem` and `now` are injected the way the desk's other on-disk setting
+ * injects them, so every degradation below is provable without a disk that has
+ * to be made to fail.
+ */
+export const createDeskDiagnosticRecord = ({
+    directory,
+    fileSystem = fs,
+    now = () => Date.now(),
+    logger = console,
+} = {}) => {
+    if (typeof directory !== 'string' || directory === '') return DESK_DIAGNOSTICS_UNRECORDED;
+
+    let stream = null;
+    let openDay = null;
+    let openSegment = 0;
+    let segmentBytes = 0;
+    let bytesSincePrune = 0;
+    let stalledAt = null;
+    let statedFailure = false;
+
+    // A record that is failing says so once. Saying it per line would cost the
+    // desk more than the missing record does, and the console is where the desk
+    // already speaks.
+    const stateFailure = (what, error) => {
+        if (statedFailure) return;
+        statedFailure = true;
+        try {
+            logger?.warn?.(
+                `[desk-record] ${what} (${error?.code || error?.message || 'unknown'});`
+                + ' the record is degraded',
+            );
+        } catch {
+            // Even saying so must not raise.
+        }
+    };
+
+    const sizeOf = (name) => {
+        try {
+            return fileSystem.statSync(path.join(directory, name)).size ?? 0;
+        } catch {
+            return 0;
+        }
+    };
+
+    const listSegments = () => {
+        const segments = [];
+        for (const name of fileSystem.readdirSync(directory)) {
+            const match = SEGMENT_NAME.exec(name);
+            if (match === null) continue;
+            segments.push(Object.freeze({ name, day: match[1], index: Number(match[2]) }));
+        }
+        // The name sorts chronologically by construction: day first, then a
+        // zero-padded segment.
+        return segments.sort((left, right) => (left.name < right.name ? -1 : 1));
+    };
+
+    // Whatever the day bound leaves, the byte bound finishes. A failure here
+    // leaves the record usable — but not silently over its bound.
+    const prune = () => {
+        bytesSincePrune = 0;
+        try {
+            const current = openDay === null ? null : segmentName(openDay, openSegment);
+            const oldestKeptDay = utcDay(
+                now() - ((DESK_DIAGNOSTIC_RECORD.MAX_DAYS - 1) * DESK_DIAGNOSTIC_RECORD.DAY_MS),
+            );
+            const survivors = [];
+            for (const entry of listSegments()) {
+                if (entry.name === current) continue;
+                if (entry.day < oldestKeptDay) {
+                    fileSystem.unlinkSync(path.join(directory, entry.name));
+                    continue;
+                }
+                survivors.push(Object.freeze({ name: entry.name, bytes: sizeOf(entry.name) }));
+            }
+            let total = survivors.reduce((sum, entry) => sum + entry.bytes, segmentBytes);
+            for (const entry of survivors) {
+                if (total <= DESK_DIAGNOSTIC_RECORD.MAX_TOTAL_BYTES) break;
+                fileSystem.unlinkSync(path.join(directory, entry.name));
+                total -= entry.bytes;
+            }
+        } catch (error) {
+            stateFailure('the record could not be rotated', error);
+        }
+    };
+
+    // `forcedIndex` is the segment a full one rolls into. Re-reading the size of
+    // the file just declared full would work only as long as the disk answers
+    // faster than the desk writes, which is not a thing to depend on.
+    const open = (day, forcedIndex = null) => {
+        fileSystem.mkdirSync(directory, { recursive: true });
+        const sameDay = forcedIndex === null
+            ? listSegments().filter(entry => entry.day === day)
+            : [];
+        let index = forcedIndex ?? (sameDay.length === 0 ? 0 : sameDay[sameDay.length - 1].index);
+        let bytes = sameDay.length === 0 ? 0 : sizeOf(segmentName(day, index));
+        if (bytes >= DESK_DIAGNOSTIC_RECORD.MAX_SEGMENT_BYTES) {
+            index += 1;
+            bytes = 0;
+        }
+        const opened = fileSystem.createWriteStream(
+            path.join(directory, segmentName(day, index)),
+            { flags: 'a' },
+        );
+        // A stream reports its failures asynchronously; unhandled, that error
+        // reaches the process rather than the line that caused it.
+        opened.on('error', (error) => {
+            stream = null;
+            stalledAt = now();
+            stateFailure('a write failed', error);
+        });
+        stream = opened;
+        openDay = day;
+        openSegment = index;
+        segmentBytes = bytes;
+        statedFailure = false;
+    };
+
+    const ensureStream = (day) => {
+        const full = segmentBytes >= DESK_DIAGNOSTIC_RECORD.MAX_SEGMENT_BYTES;
+        if (stream !== null && openDay === day && !full) return true;
+        if (stream === null
+            && stalledAt !== null
+            && now() - stalledAt < DESK_DIAGNOSTIC_RECORD.REOPEN_COOLDOWN_MS) return false;
+        const rolling = stream !== null && openDay === day && full;
+        if (stream !== null) {
+            try {
+                stream.end();
+            } catch {
+                // A segment that will not close is still a segment we are done with.
+            }
+            stream = null;
+        }
+        try {
+            open(day, rolling ? openSegment + 1 : null);
+        } catch (error) {
+            stalledAt = now();
+            stateFailure('the record could not be opened', error);
+            return false;
+        }
+        stalledAt = null;
+        prune();
+        return true;
+    };
+
+    const writeEvent = (event) => {
+        if (event === null) return false;
+        try {
+            const at = now();
+            if (!ensureStream(utcDay(at))) return false;
+            const line = `${JSON.stringify({ at: new Date(at).toISOString(), ...event })}\n`;
+            const bytes = Buffer.byteLength(line, 'utf8');
+            if (bytes > DESK_DIAGNOSTIC_RECORD.MAX_LINE_BYTES) return false;
+            stream.write(line);
+            segmentBytes += bytes;
+            bytesSincePrune += bytes;
+            if (bytesSincePrune >= DESK_DIAGNOSTIC_RECORD.PRUNE_INTERVAL_BYTES) prune();
+            return true;
+        } catch (error) {
+            stream = null;
+            stalledAt = now();
+            stateFailure('a line could not be written', error);
+            return false;
+        }
+    };
+
+    return Object.freeze({
+        directory,
+        record: (kind, value) => writeEvent(describeDeskDiagnosticEvent(kind, value)),
+        observeOutbound: (payload) => {
+            try {
+                return writeEvent(readDeskDiagnosticOutboundEvent(payload));
+            } catch {
+                return false;
+            }
+        },
+        observeCommand: (command) => {
+            try {
+                return writeEvent(readDeskDiagnosticCommandEvent(command));
+            } catch {
+                return false;
+            }
+        },
+        close: () => {
+            try {
+                stream?.end();
+            } catch {
+                // Closing a record that is already broken changes nothing.
+            }
+            stream = null;
+        },
+    });
+};

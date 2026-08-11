@@ -62,12 +62,18 @@ to land in.
 
 ## Impact
 
-- `electron/services/desk-diagnostic-record.js` (new) — the sink: format,
-  rotation, bounds, and the degradation when the disk says no.
-- `electron/services/binance-connection.js` — the existing `onTiming` and
-  `onInternalError` reporters gain the file beside the console.
+- `electron/services/desk-diagnostic-record.js` (new) — the sink: the field list
+  each kind may carry, the format, the rotation, the bounds, and the degradation
+  when the disk says no.
+- `electron/services/binance-connection.js` — four seams. The existing `onTiming`
+  and `onInternalError` reporters gain the file beside the console; the
+  workstation's own emitter, which is the only place a resynchronization names
+  its cause; the renderer emitter, which is where a command's outcome is stated;
+  and `handleTypedTradingCommand`, which is the only place a command's side and
+  type exist. Absent a record, the connection behaves exactly as before.
 - `electron/main.js` — the record's directory, taken from the app's own data
-  path, and stated once at startup so the operator can find it.
+  path, stated once at startup so the operator can find it, and a line for the
+  start and the end of each run.
 - `scripts/read-desk-record.mjs` (new) — the summary over a day.
 - `openspec/changes/verify-the-desk-in-one-sitting/runbook.md` — where the
   operator's own confirmation is gathered.
