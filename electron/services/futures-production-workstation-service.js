@@ -564,6 +564,7 @@ export class FuturesProductionWorkstationService {
             bookRecovering: false,
             bookRecoveredAt: null,
             frameRefusedAt: null,
+            frameRefusalStated: false,
             orderBook: new FuturesWorkstationOrderBook(),
             bootstrapped: false,
             pendingEvents: [],
@@ -1036,6 +1037,14 @@ export class FuturesProductionWorkstationService {
                     FUTURES_WORKSTATION_STATES.LIVE,
                     session.lastDepthView,
                 );
+                // The reason line holds the last code it was given until another
+                // status replaces it. A refusal the desk stated and then repaired
+                // would otherwise sit there for the rest of the session, naming a
+                // condition that is over — so the repair says so once.
+                if (session.frameRefusalStated) {
+                    session.frameRefusalStated = false;
+                    this.emitStatus(session, FUTURES_WORKSTATION_STATES.LIVE, true, null);
+                }
                 return;
             }
         } finally {
@@ -1152,11 +1161,18 @@ export class FuturesProductionWorkstationService {
             // settles, and while a reconnect owns the session, the fault log is
             // the whole report.
             if (!session.bootstrapped || session.reconnectTimer !== null) return;
-            const now = this.observedNow(session);
+            // The window is measured against the clock the session has already
+            // observed, the way the tape's is. Reading the clock here instead
+            // would let a regression discovered on a refused frame set the
+            // session's regression flag inside a `catch` that swallows it — and
+            // a regression the freshness monitor can no longer raise is a desk
+            // that never resynchronizes over it.
+            const now = session.lastClock;
             if (session.frameRefusedAt !== null
                 && now - session.frameRefusedAt
                     < FUTURES_PRODUCTION_WORKSTATION_FRAME_REFUSAL.REPORT_COOLDOWN_MS) return;
             session.frameRefusedAt = now;
+            session.frameRefusalStated = true;
             this.emitStatus(session, FUTURES_WORKSTATION_STATES.LIVE, true, reasonCode);
         } catch {
             // Stating a refused frame must not cost more than the frame did:

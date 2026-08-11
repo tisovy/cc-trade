@@ -201,6 +201,20 @@ describe('the store across runs', () => {
     expect(restoreFuturesHistoryFromStore(await store.readContracts()).readAt).toBe(READ_AT)
   })
 
+  it('takes its stamp from the contracts that put rows on screen', async () => {
+    const { store } = createMemoryStore()
+    // Read days ago and holding nothing — it says nothing about how fresh the
+    // rows below are, so it must not age them.
+    await store.writeReading({
+      symbols: ['SOLUSDT'], orders: [], trades: [], readAt: READ_AT - 259_200_000,
+    })
+    await store.writeReading({
+      symbols: ['BTCUSDT'], orders: [order(5)], trades: [], readAt: READ_AT,
+    })
+
+    expect(restoreFuturesHistoryFromStore(await store.readContracts()).readAt).toBe(READ_AT)
+  })
+
   it('leaves the review unread when nothing is stored', async () => {
     const { store } = createMemoryStore()
     expect(restoreFuturesHistoryFromStore(await store.readContracts())).toBeNull()

@@ -166,6 +166,12 @@ export const restoreFuturesHistoryFromStore = (records) => {
   const trades = usable.flatMap(record => asArray(record.trades)).sort(newestFirst)
   if (orders.length === 0 && trades.length === 0) return null
   const symbols = usable.map(record => futuresHistoryContractKey(record.symbol))
+  // Stamped from the contracts that actually put rows on screen. A contract read
+  // days ago and holding nothing says nothing about how fresh the review is, and
+  // letting it set the stamp would age a reading taken a minute ago.
+  const stamps = usable
+    .filter(record => asArray(record.orders).length > 0 || asArray(record.trades).length > 0)
+    .map(record => record.readAt)
   return Object.freeze({
     ...createHeldFuturesHistory(),
     status: 'ready',
@@ -179,7 +185,7 @@ export const restoreFuturesHistoryFromStore = (records) => {
     discoveryComplete: false,
     // A review is only as fresh as its stalest contract, and this is the stamp
     // the desk prints beside ↻.
-    readAt: Math.min(...usable.map(record => record.readAt)),
+    readAt: Math.min(...stamps),
     coverage: Object.freeze(Object.fromEntries(usable.map(record => [
       futuresHistoryContractKey(record.symbol),
       Object.freeze({

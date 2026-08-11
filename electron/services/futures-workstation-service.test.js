@@ -1394,9 +1394,16 @@ describe('production Futures workstation service', () => {
             { phase: 'stream-frame', code: 'STREAM_FRAME_REFUSED' },
         ]);
 
+        // The window is the session's own clock, which moves when the session
+        // observes the market — five seconds of it is five seconds of frames.
         clock.advance(5_000);
+        subscriber.onMessage(productionTradeFrame({ cycle: 3, aggregateTradeId: 5_003 }));
         subscriber.onFrameRefused('STREAM_FRAME_REFUSED');
-        expect(events.slice(settled)).toHaveLength(2);
+
+        const stated = events
+            .slice(settled)
+            .filter(event => event.payload?.reasonCode === 'STREAM_FRAME_REFUSED');
+        expect(stated).toHaveLength(2);
         expect(events.at(-1)).toMatchObject({
             state: 'live',
             payload: { reasonCode: 'STREAM_FRAME_REFUSED' },
@@ -1484,6 +1491,72 @@ describe('production Futures workstation service', () => {
                 .toBe(Number(quantity));
         }
         expect(view.lastUpdateId).toBe(String(lastFrame.data.u));
+    });
+
+    // The reason line holds what it was last given. A refusal that was stated
+    // and then repaired would name a condition that is over for the rest of the
+    // session.
+    it('takes a refused frame off the reason line once the book is whole', async () => {
+        const clock = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport({ clock: clock.clock });
+        const parsedSnapshot = JSON.parse(
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.depthSnapshot,
+        );
+        // The rebuilt book is read at a snapshot ahead of every diff the desk has
+        // seen, which is what a rebuild on a quiet book looks like.
+        const readDepthSnapshot = vi.fn(async options => (
+            readDepthSnapshot.mock.calls.length === 1
+                ? base.readDepthSnapshot(options)
+                : JSON.stringify({ ...parsedSnapshot, lastUpdateId: 1_005 })
+        ));
+        let subscriber;
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock: clock.clock,
+            transport: {
+                ...base,
+                readDepthSnapshot,
+                connect: (options) => {
+                    subscriber = options;
+                    return base.connect(options);
+                },
+            },
+        }));
+        const events = [];
+        await runtime.service.handleRequest(productionRequest('refusal-cleared'), {
+            emit: event => events.push(event),
+        });
+        subscriber.onFrameRefused('STREAM_FRAME_REFUSED');
+        expect(events.at(-1)).toMatchObject({
+            state: 'live',
+            payload: { reasonCode: 'STREAM_FRAME_REFUSED' },
+        });
+
+        // The frame the desk dropped left a gap, and the book rebuilds itself
+        // around it without touching the session.
+        const recovery = runtime.service.recoverBook(
+            runtime.service.current,
+            'DEPTH_SEQUENCE_GAP',
+        );
+        await vi.waitFor(() => expect(clock.timeoutCount()).toBe(1));
+        clock.runTimeouts();
+        await recovery;
+
+        expect(events.at(-1)).toMatchObject({
+            resource: 'status',
+            state: 'live',
+            payload: { connected: true, reasonCode: null },
+        });
+        // Said once: a second rebuild has nothing left to take off the line.
+        const settled = events.length;
+        runtime.service.current.bookRecoveredAt = null;
+        const second = runtime.service.recoverBook(
+            runtime.service.current,
+            'DEPTH_SEQUENCE_GAP',
+        );
+        await vi.waitFor(() => expect(clock.timeoutCount()).toBe(1));
+        clock.runTimeouts();
+        await second;
+        expect(events.slice(settled).some(event => event.resource === 'status')).toBe(false);
     });
 
     it('resynchronizes under the name of the ending it was given', async () => {
