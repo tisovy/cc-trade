@@ -1138,3 +1138,60 @@ rather than by extending the book past what it can prove.
 #### Scenario: A grouped row would span unproven ground
 - **WHEN** the rows on screen would need more range than the band proves
 - **THEN** the panel shows the rows it can prove until the deeper snapshot lands, rather than rows built on partial levels
+
+### Requirement: Releasing a contract releases all of it
+Stopping a Futures workstation session SHALL release every resource it holds —
+its upstream sockets, its order book, its freshness, reconnect and
+interval-reconnect timers, and its queued events — and SHALL complete that
+release even when one of those steps fails. A failure in one step SHALL NOT
+prevent the others, and SHALL be reported rather than raised to the caller.
+
+#### Scenario: A socket is still connecting when the contract changes
+- **WHEN** the operator selects another contract while an upstream socket has not finished its handshake
+- **THEN** the session is released in full, no exception escapes the release, and the socket does not remain open
+
+#### Scenario: A timer outlives its session
+- **WHEN** a reconnect or freshness timer of a released session fires
+- **THEN** it performs no work, because the session it belonged to is no longer current
+
+### Requirement: A contract switch starts the contract that was asked for
+A request that selects another contract SHALL start that contract's session even
+when releasing the previous one reported a failure. The desk SHALL NOT be left
+with the previous contract's data, with no session at all, or with the local
+connection torn down.
+
+#### Scenario: The previous session fails to release cleanly
+- **WHEN** releasing the previous contract reports a failure and the operator has asked for another contract
+- **THEN** the new contract's session is started and the failure is reported as a diagnostic, not as a refusal of the request
+
+#### Scenario: The operator switches contract repeatedly
+- **WHEN** the operator selects several contracts in quick succession
+- **THEN** only the last selection delivers data, and no frame of an earlier selection reaches the desk after it
+
+### Requirement: A burst of market data does not end the market data
+An upstream frame that exceeds the desk's frame ceiling SHALL NOT terminate the
+session it arrived on. The desk SHALL keep delivering depth, trades, header and
+candles across such a frame, recovering whatever state the dropped frame carried
+without a full resynchronization of the workspace.
+
+#### Scenario: A depth frame exceeds the ceiling during a sharp move
+- **WHEN** a depth frame larger than the ceiling arrives on a live session
+- **THEN** the session stays live and the book is recovered, rather than the workspace going to `RESYNCHRONIZING`
+
+#### Scenario: A stream genuinely disconnects
+- **WHEN** an upstream socket closes for any reason other than a frame this desk refused
+- **THEN** the session resynchronizes as it does today
+
+### Requirement: A resynchronization names its cause
+A resynchronization SHALL carry a reason that distinguishes a connection lost by
+the exchange, a connection this desk closed on its own rule, and a resource that
+went stale without a close.
+
+#### Scenario: The desk closed the connection itself
+- **WHEN** the desk terminates a stream because of its own limit
+- **THEN** the reason shown to the operator names that limit rather than reporting a plain socket disconnect
+
+#### Scenario: The desk refused a frame and kept the stream
+- **WHEN** the desk drops an upstream frame that exceeds its own ceiling
+- **THEN** the refusal is named on the workspace's reason line under a code of its own, the session stays live, and a burst of such frames is stated once rather than once per frame
+

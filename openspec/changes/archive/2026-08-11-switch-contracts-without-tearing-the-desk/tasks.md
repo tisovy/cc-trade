@@ -29,7 +29,7 @@
 ## 5. Verification
 
 - [x] 5.1 `npm run lint`, `npm test`, `npm run check:futures-production`.
-- [ ] 5.2 Operator confirms on live data: switching between contracts repeatedly — including while a chart is still loading — leaves no flicker between contracts, no `RESYNCHRONIZING` that does not resolve, and no `WebSocket was closed before the connection was established` in the main-process log.
+- [ ] 5.2 Operator confirms on live data (gathered as item 3 of the third pass in `verify-the-desk-in-one-sitting/runbook.md`): switching between contracts repeatedly — including while a chart is still loading — leaves no flicker between contracts, no `RESYNCHRONIZING` that does not resolve, and no `WebSocket was closed before the connection was established` in the main-process log.
 
 ## 6. Stated Limits, Not Fixed Here
 

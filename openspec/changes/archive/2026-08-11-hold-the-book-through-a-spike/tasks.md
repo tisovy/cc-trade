@@ -34,4 +34,4 @@
 ## 5. Verification
 
 - [x] 5.1 `npm run lint`, `npm test`, `npm run check:futures-production`, `check:command-path`, `check:circular`, `check:runtime-mock`.
-- [ ] 5.2 Operator confirms on live data during a volatile session: a sharp move no longer sends the workspace to `RESYNCHRONIZING`, and any resync that does happen states a cause they can act on.
+- [ ] 5.2 Operator confirms on live data (gathered as item 2 of the third pass in `verify-the-desk-in-one-sitting/runbook.md`) during a volatile session: a sharp move no longer sends the workspace to `RESYNCHRONIZING`, and any resync that does happen states a cause they can act on.
