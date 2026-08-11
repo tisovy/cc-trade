@@ -957,6 +957,11 @@ export function setupBinanceConnection({
     // Leverage per open position is a different read with a different budget; it
     // is bounded on its own so that widening the history fan-out does not widen it.
     const FUTURES_POSITION_CONFIG_MAX_SYMBOLS = 8;
+    // How long a contract's leverage and margin mode are held before an
+    // automatic refresh reads them again. Long enough that a busy minute pays
+    // nothing for them, short enough that a leverage changed in Binance's own
+    // app appears on its own — selecting the contract still reads it at once.
+    const FUTURES_SYMBOL_CONFIG_HOLD_MS = 10 * 60 * 1000;
     // Income is paged forward from the oldest end of the window. The pages are
     // bounded: this walks to the recent end of a busy week, it does not download it.
     const FUTURES_INCOME_MAX_PAGES = 4;
@@ -974,6 +979,16 @@ export function setupBinanceConnection({
     // any more, so without this read nothing on the desk can state the leverage a
     // position is carried at — or set it.
     const futuresSymbolConfigs = new Map();
+    // When each of them was read. Leverage and margin mode change when somebody
+    // sets them — this desk, which reads them straight back, or the operator in
+    // Binance's own app, which no stream reports. Re-reading every position's
+    // contract on every automatic refresh spent up to 40 weight of an
+    // 800-weight minute re-asking a question whose answer changes a few times a
+    // day. What is held is reused until it is old enough that a change made
+    // elsewhere is worth looking for — the renderer's 30-second beat and the
+    // operator's refresh are the same command, so time held is what separates
+    // "read again" from "read every time".
+    const futuresSymbolConfigReadAt = new Map();
     const futuresAccountPayloadKeys = Object.freeze({
         balances: 'futures_balances',
         positions: 'futures_positions',
@@ -1004,6 +1019,19 @@ export function setupBinanceConnection({
     // used to be set at, and there is nothing behind it to correct the record until
     // the next refresh. A read that outlived its market activation is dropped for
     // the same reason.
+    const heldFuturesSymbolConfig = (symbol) => {
+        const key = String(symbol ?? '').toUpperCase();
+        const readAt = futuresSymbolConfigReadAt.get(key);
+        if (!Number.isFinite(readAt)
+            || Date.now() - readAt >= FUTURES_SYMBOL_CONFIG_HOLD_MS) return null;
+        return futuresSymbolConfigs.get(key) ?? null;
+    };
+
+    const forgetFuturesSymbolConfigs = () => {
+        futuresSymbolConfigs.clear();
+        futuresSymbolConfigReadAt.clear();
+    };
+
     const readFuturesSymbolConfig = async (symbol, { withCeiling = false } = {}) => {
         if (!futuresTradingAdapter || !symbol) return null;
         const epoch = futuresMutationEpoch;
@@ -1030,6 +1058,7 @@ export function setupBinanceConnection({
                 maxLeverage: ceiling ?? futuresSymbolConfigs.get(config.symbol)?.maxLeverage ?? null,
             };
             futuresSymbolConfigs.set(entry.symbol, entry);
+            futuresSymbolConfigReadAt.set(entry.symbol, Date.now());
             return entry;
         } catch (error) {
             logger.warn(`[futures-config] ${symbol} configuration read failed:`, error?.code || error?.message);
@@ -1066,15 +1095,23 @@ export function setupBinanceConnection({
 
     // The leverage of every contract the account is actually holding. Bounded:
     // an account in eight positions is eight reads at weight 5, and a ninth row
-    // states no leverage rather than spending the minute's budget on it.
+    // states no leverage rather than spending the minute's budget on it. The
+    // bound applies to what is actually read, so reusing what is held cannot
+    // silently widen it.
     const refreshFuturesPositionConfigs = async (positions) => {
         const symbols = [...new Set((Array.isArray(positions) ? positions : [])
             .filter(position => Number(position?.quantity) !== 0)
             .map(position => String(position?.symbol ?? '').toUpperCase())
-            .filter(Boolean))].slice(0, FUTURES_POSITION_CONFIG_MAX_SYMBOLS);
+            .filter(Boolean))];
         if (symbols.length === 0) return;
-        const configs = await Promise.all(symbols.map(symbol => readFuturesSymbolConfig(symbol)));
-        broadcastFuturesSymbolConfigs(configs);
+        const held = symbols
+            .map(symbol => heldFuturesSymbolConfig(symbol))
+            .filter(config => config !== null);
+        const unread = symbols
+            .filter(symbol => heldFuturesSymbolConfig(symbol) === null)
+            .slice(0, FUTURES_POSITION_CONFIG_MAX_SYMBOLS);
+        const configs = await Promise.all(unread.map(symbol => readFuturesSymbolConfig(symbol)));
+        broadcastFuturesSymbolConfigs([...held, ...configs]);
     };
 
     const runFuturesAccountRefreshPass = async () => {
@@ -1202,6 +1239,9 @@ export function setupBinanceConnection({
         futuresUserDataGeneration += 1;
         futuresUserDataRequested = false;
         futuresUserDataReconnecting = false;
+        // A leverage held for an account nobody is on is not a reading, it is a
+        // memory. The next activation reads its own.
+        forgetFuturesSymbolConfigs();
         // No Futures renderer is watching: nothing to mark to market.
         futuresMarkPriceFeed?.track([]);
         if (futuresKeepAliveInterval) {

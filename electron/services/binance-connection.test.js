@@ -2738,6 +2738,124 @@ describe('setupBinanceConnection user-data orchestration', () => {
         });
     });
 
+    // A position's contract configuration was re-read on every account refresh —
+    // up to eight contracts at weight 5, added to a pass that already costs 90,
+    // against a bucket of 800 a minute. Leverage changes when somebody sets it,
+    // and nothing on the stream reports it, so asking on every refresh is asking
+    // the same question at whatever rate the account happens to be busy.
+    const positionsRefreshOperation = symbols => ({
+        type: 'positions',
+        weight: 5,
+        errorLabel: 'positions',
+        loadPayload: vi.fn().mockResolvedValue({
+            futures_positions: symbols.map(symbol => ({
+                symbol,
+                positionSide: 'BOTH',
+                quantity: '100',
+                entryPrice: '1',
+                markPrice: '1',
+                unrealizedPnl: '0',
+            })),
+        }),
+    });
+
+    const refreshAccountTwice = async (secondDelayMs = 0) => {
+        await runFuturesCommand({
+            action: 'account.refresh', clientOrderId: 'refresh-1', symbol: 'BTCUSDT',
+        });
+        await flushMicrotasks();
+        if (secondDelayMs > 0) await vi.advanceTimersByTimeAsync(secondDelayMs);
+        await runFuturesCommand({
+            action: 'account.refresh', clientOrderId: 'refresh-2', symbol: 'BTCUSDT',
+        });
+        await flushMicrotasks();
+    };
+
+    const configuredSymbols = () => moduleMocks.futuresAdapter.getSymbolConfig.mock.calls
+        .map(([symbol]) => symbol);
+
+    it('reads a position contract configuration once, not on every refresh', async () => {
+        moduleMocks.futuresAdapter.getSymbolConfig
+            .mockImplementation(async symbol => ({
+                symbol, leverage: 20, marginType: 'CROSSED', maxNotionalValue: '5000000',
+            }));
+        moduleMocks.futuresAdapter.getAccountRefreshOperations
+            .mockReturnValue([positionsRefreshOperation(['BMTUSDT'])]);
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+
+        await refreshAccountTwice();
+
+        expect(configuredSymbols().filter(symbol => symbol === 'BMTUSDT')).toHaveLength(1);
+        // Both refreshes still state the multiple: reusing a reading is not the
+        // same as withholding it.
+        const configs = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.futures_symbol_configs)
+            .filter(payload => payload.futures_symbol_configs.BMTUSDT?.leverage === 20);
+        expect(configs.length).toBeGreaterThanOrEqual(2);
+    });
+
+    // Held, not forgotten about: a leverage changed in Binance's own app reaches
+    // the desk on its own, without the operator knowing to press anything.
+    it('reads it again once it is old enough to have changed elsewhere', async () => {
+        moduleMocks.futuresAdapter.getSymbolConfig
+            .mockImplementation(async symbol => ({
+                symbol, leverage: 20, marginType: 'CROSSED', maxNotionalValue: '5000000',
+            }));
+        moduleMocks.futuresAdapter.getAccountRefreshOperations
+            .mockReturnValue([positionsRefreshOperation(['BMTUSDT'])]);
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+
+        await refreshAccountTwice(10 * 60 * 1000);
+
+        expect(configuredSymbols().filter(symbol => symbol === 'BMTUSDT')).toHaveLength(2);
+    });
+
+    it('reads only the contracts nothing is held for', async () => {
+        moduleMocks.futuresAdapter.getSymbolConfig
+            .mockImplementation(async symbol => ({
+                symbol, leverage: 20, marginType: 'CROSSED', maxNotionalValue: '5000000',
+            }));
+        moduleMocks.futuresAdapter.getAccountRefreshOperations
+            .mockReturnValue([positionsRefreshOperation(['BMTUSDT'])]);
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+
+        await runFuturesCommand({
+            action: 'account.refresh', clientOrderId: 'refresh-1', symbol: 'BTCUSDT',
+        });
+        await flushMicrotasks();
+        moduleMocks.futuresAdapter.getAccountRefreshOperations
+            .mockReturnValue([positionsRefreshOperation(['BMTUSDT', 'EPICUSDT'])]);
+        await runFuturesCommand({
+            action: 'account.refresh', clientOrderId: 'refresh-2', symbol: 'BTCUSDT',
+        });
+        await flushMicrotasks();
+
+        expect(configuredSymbols()).toEqual(['BMTUSDT', 'EPICUSDT']);
+        const [latest] = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.futures_symbol_configs)
+            .slice(-1);
+        // The contract that was not read is still stated, from what is held.
+        expect(Object.keys(latest.futures_symbol_configs).sort())
+            .toEqual(['BMTUSDT', 'EPICUSDT']);
+    });
+
     // Leverage places no order, but it changes what every entry costs and where an
     // open position liquidates, so it re-reads both the config and the account.
     it('applies a leverage change and reports the leverage the exchange applied', async () => {
