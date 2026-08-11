@@ -254,11 +254,13 @@ export const createFuturesHistoryStore = ({
     const request = store.getAll()
     request.onsuccess = () => deliver(Array.isArray(request.result) ? request.result : [])
   }),
-  write = record => withStore('readwrite', (store) => {
+  write = record => withStore('readwrite', (store, deliver) => {
     store.put(record)
+    deliver(true)
   }),
-  remove = key => withStore('readwrite', (store) => {
+  remove = key => withStore('readwrite', (store, deliver) => {
     store.delete(key)
+    deliver(true)
   }),
 } = {}) => ({
   async readContracts() {
@@ -313,11 +315,17 @@ export const createFuturesHistoryStore = ({
       const keptKeys = new Set(kept.map(record => record.key ?? record.symbol))
       for (const record of byKey.values()) {
         const key = record.key ?? record.symbol
-        if (!keptKeys.has(key)) await remove(key)
+        if (!keptKeys.has(key)) {
+          const removed = await remove(key)
+          if (removed === null || removed === false) return false
+        }
       }
       for (const contract of contracts) {
         const record = kept.find(entry => (entry.key ?? entry.symbol) === contract.symbol)
-        if (record) await write(record)
+        if (record) {
+          const written = await write(record)
+          if (written === null || written === false) return false
+        }
       }
       return true
     } catch {

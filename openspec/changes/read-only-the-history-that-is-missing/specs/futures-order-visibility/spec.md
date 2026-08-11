@@ -22,7 +22,8 @@ rather than for the whole window, using the identity the exchange pages from. A
 contract whose held rows the authenticated stream has kept current SHALL NOT be
 read at all, and a stream disconnection SHALL end that assumption for every
 contract. A bounded rotation SHALL re-read contracts that have been skipped, so
-a missed event cannot hide indefinitely.
+a missed event cannot hide indefinitely. A read that outlives its renderer's
+Futures activation SHALL NOT publish or restore state into a later activation.
 
 #### Scenario: A contract traded since the last read
 - **WHEN** the operator refreshes the review and a contract has had fills since the last read
@@ -36,11 +37,17 @@ a missed event cannot hide indefinitely.
 - **WHEN** the authenticated stream dropped since the last read
 - **THEN** the next refresh reads every contract the review covers, because nothing can vouch for what happened while it was down
 
+#### Scenario: A read outlives the Futures activation
+- **WHEN** the renderer leaves Futures or disconnects while a history request is in flight
+- **THEN** the obsolete request publishes no answer, restores no discovery, and the next activation discovers its own contracts
+
 ### Requirement: Contract discovery is asked only when the store cannot answer
 The income walk that names which contracts the account traded SHALL be issued
 when the store names none, when what it names has aged past the review's window,
 or when the operator asks for a full re-read. A refresh the store can answer
-SHALL issue no income read.
+SHALL issue no income read. A paged income walk SHALL retain its inclusive time
+bounds and SHALL NOT omit contracts merely because multiple rows share the page
+boundary timestamp.
 
 #### Scenario: The store names the contracts
 - **WHEN** the operator refreshes the review and the store holds contracts within the window
@@ -49,3 +56,7 @@ SHALL issue no income read.
 #### Scenario: The operator asks for a full re-read
 - **WHEN** the operator asks for the review to be read in full
 - **THEN** discovery runs and every contract it names is read across the whole window
+
+#### Scenario: Income rows share a page-boundary timestamp
+- **WHEN** a full discovery page ends at the same millisecond as rows on the next page
+- **THEN** discovery reads the next numbered page with the same inclusive time bounds and includes contracts from both pages

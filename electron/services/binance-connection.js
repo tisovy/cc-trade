@@ -2313,8 +2313,12 @@ export function setupBinanceConnection({
         // is currently in lead the list — those are the rows the operator came for.
         const collectFuturesHistorySymbols = async (
             selectedSymbol,
-            { coverage = {}, full = false } = {},
+            { coverage = {}, full = false, isObsolete = () => false } = {},
         ) => {
+            const activation = futuresActivationGeneration;
+            const isCurrent = () => (
+                activation === futuresActivationGeneration && !isObsolete()
+            );
             const symbols = [];
             const remember = (value) => {
                 const symbol = String(value ?? '').toUpperCase();
@@ -2341,11 +2345,12 @@ export function setupBinanceConnection({
             // remembered apart from it, so a contract stays on the list because
             // it was traded rather than because it was once held.
             const seeded = new Set(symbols);
-            // Walked from the oldest end of the range to the newest, because that
-            // is the only direction the endpoint offers. Each full page means there
-            // is a newer one behind it; the pages are then read back to front, so
-            // the contract traded most recently leads the list and the cap below
-            // drops the stalest rather than the newest.
+            // Walked from the oldest end of the range to the newest. Each full page
+            // means there is another numbered page behind it; the pages are then
+            // read back to front, so the contract traded most recently leads the
+            // list and the cap below drops the stalest rather than the newest. The
+            // time bounds stay fixed across pages: advancing past a page's last
+            // timestamp can skip income rows that share that millisecond.
             //
             // A page that fails is caught where it happens rather than around the
             // walk: the pages already in hand are contracts the review can cover,
@@ -2354,12 +2359,21 @@ export function setupBinanceConnection({
             const walkIncome = async (from, until) => {
                 const pages = [];
                 let complete = true;
-                let startTime = from;
                 for (let page = 0; page < FUTURES_INCOME_MAX_PAGES; page += 1) {
+                    if (!isCurrent()) {
+                        complete = false;
+                        break;
+                    }
                     let traded = null;
                     try {
                         traded = await futuresRestLimiter.execute(
-                            () => futuresTradingAdapter.getTradedSymbolPage({ startTime, endTime: until }),
+                            () => (isCurrent()
+                                ? futuresTradingAdapter.getTradedSymbolPage({
+                                    startTime: from,
+                                    endTime: until,
+                                    page: page + 1,
+                                })
+                                : null),
                             FUTURES_INCOME_READ_WEIGHT,
                         );
                     } catch (error) {
@@ -2369,9 +2383,12 @@ export function setupBinanceConnection({
                         complete = false;
                         break;
                     }
+                    if (!isCurrent()) {
+                        complete = false;
+                        break;
+                    }
                     pages.push(traded?.symbols ?? []);
-                    if (!traded?.full || !Number.isFinite(traded?.lastTime)) break;
-                    startTime = traded.lastTime + 1;
+                    if (!traded?.full) break;
                     // The last page still came back full: there are contracts behind it
                     // this walk will not reach, and the review must not imply otherwise.
                     if (page === FUTURES_INCOME_MAX_PAGES - 1) complete = false;
@@ -2435,10 +2452,16 @@ export function setupBinanceConnection({
             }
             const recentFrom = now - FUTURES_HISTORY_RECENT_WINDOW_MS;
             const recent = await walkIncome(recentFrom, null);
+            if (!isCurrent()) {
+                return { symbols: [], discovered: 0, discoveryComplete: false };
+            }
             let complete = recent.complete;
             rememberPages(recent.pages);
             if (full || symbols.length < FUTURES_HISTORY_MAX_SYMBOLS) {
                 const older = await walkIncome(now - FUTURES_HISTORY_WINDOW_MS, recentFrom - 1);
+                if (!isCurrent()) {
+                    return { symbols: [], discovered: 0, discoveryComplete: false };
+                }
                 complete = complete && older.complete;
                 rememberPages(older.pages);
             } else {
@@ -2482,9 +2505,17 @@ export function setupBinanceConnection({
                 coverage = {},
                 full = false,
             } = command;
+            const activation = futuresActivationGeneration;
+            const rendererActivation = marketActivationGeneration;
+            const isObsolete = () => (
+                activation !== futuresActivationGeneration
+                || rendererActivation !== marketActivationGeneration
+                || activeMarketMode !== MARKET_MODES.FUTURES
+            );
             const {
                 symbols, discovered, discoveryComplete,
-            } = await collectFuturesHistorySymbols(symbol, { coverage, full });
+            } = await collectFuturesHistorySymbols(symbol, { coverage, full, isObsolete });
+            if (isObsolete()) return;
             const readSymbols = chooseFuturesHistoryReadSymbols(symbols, coverage, { full });
             const orders = [];
             const trades = [];
@@ -2507,10 +2538,12 @@ export function setupBinanceConnection({
                             limit: FUTURES_HISTORY_LIMIT,
                             identityOf: order => order?.orderId,
                             load: from => futuresRestLimiter.execute(
-                                () => futuresTradingAdapter.getOrderHistory({
-                                    symbol: historySymbol,
-                                    ...(from === null ? {} : { fromOrderId: from }),
-                                }),
+                                () => (isObsolete()
+                                    ? []
+                                    : futuresTradingAdapter.getOrderHistory({
+                                        symbol: historySymbol,
+                                        ...(from === null ? {} : { fromOrderId: from }),
+                                    })),
                                 FUTURES_HISTORY_READ_WEIGHT,
                             ),
                         }),
@@ -2519,10 +2552,12 @@ export function setupBinanceConnection({
                             limit: FUTURES_TRADE_HISTORY_LIMIT,
                             identityOf: trade => trade?.id,
                             load: from => futuresRestLimiter.execute(
-                                () => futuresTradingAdapter.getTradeHistory({
-                                    symbol: historySymbol,
-                                    ...(from === null ? {} : { fromTradeId: from }),
-                                }),
+                                () => (isObsolete()
+                                    ? []
+                                    : futuresTradingAdapter.getTradeHistory({
+                                        symbol: historySymbol,
+                                        ...(from === null ? {} : { fromTradeId: from }),
+                                    })),
                                 FUTURES_HISTORY_READ_WEIGHT,
                             ),
                         }),
@@ -2548,6 +2583,7 @@ export function setupBinanceConnection({
                     logger.error(`[futures-history] ${historySymbol} request failed:`, error?.code || error?.message);
                 }
             }));
+            if (isObsolete()) return;
             if (readSymbols.length > 0 && unavailable.length === readSymbols.length) {
                 const [failure] = failures;
                 emit({
@@ -3996,7 +4032,15 @@ export function setupBinanceConnection({
                     futuresKeepAliveInterval = null;
                 }
                 futuresUserDataRequested = false;
+                // This branch performs the shared teardown inline instead of
+                // calling stopSharedFuturesConnections. Advance the same activation
+                // guard before any in-flight account/history read can settle.
+                futuresActivationGeneration += 1;
                 futuresUserDataGeneration += 1;
+                // Nulling the socket before disconnecting makes its close handler
+                // intentionally ignore the stale instance. End history trust here
+                // explicitly as part of the same physical disconnect.
+                forgetFuturesHistoryState();
             } else {
                 if (spotRendererConnections.size === 0) {
                     void stopSharedSpotConnections();

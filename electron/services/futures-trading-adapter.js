@@ -814,12 +814,19 @@ export class FuturesTradingAdapter {
     // traded in the window, and the amounts on these rows are never read.
     //
     // One page of it, not the window. Binance answers a `startTime` with the
-    // oldest rows after it, so a week that overruns the page hands back the
+    // oldest rows after it, so a week that overruns the first page hands back the
     // contracts the account traded seven days ago and never reaches this
-    // morning's. The page therefore reports whether it came back full and where
-    // it ended, which is what lets the caller walk forward to the recent end.
-    async getTradedSymbolPage({ startTime, endTime = null, limit = FUTURES_INCOME_PAGE_LIMIT }) {
+    // morning's. Keep the time window fixed and use the endpoint's page number:
+    // moving `startTime` past the last timestamp would skip rows when a page ends
+    // in the middle of several income entries recorded in the same millisecond.
+    async getTradedSymbolPage({
+        startTime,
+        endTime = null,
+        page = 1,
+        limit = FUTURES_INCOME_PAGE_LIMIT,
+    }) {
         const bounded = Math.min(Math.max(Number(limit) || FUTURES_INCOME_PAGE_LIMIT, 1), 1000);
+        const selectedPage = Math.max(Math.floor(Number(page) || 1), 1);
         const data = await this.#signedRequest('GET', '/fapi/v1/income', {
             incomeType: 'REALIZED_PNL',
             startTime,
@@ -827,6 +834,7 @@ export class FuturesTradingAdapter {
             // the week on its own: without it every walk starts at the oldest row
             // in the whole window and spends its pages getting back to today.
             ...(Number.isFinite(Number(endTime)) ? { endTime: Number(endTime) } : {}),
+            page: selectedPage,
             limit: bounded,
         });
         const rows = Array.isArray(data) ? data : [];

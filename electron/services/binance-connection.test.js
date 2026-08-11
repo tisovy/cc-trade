@@ -2829,6 +2829,44 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(history.futures_history.discoveryComplete).toBe(true);
     });
 
+    it('keeps identical-timestamp income rows across a page boundary', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        moduleMocks.futuresAdapter.getTradedSymbolPage.mockImplementation(({
+            endTime, page,
+        }) => {
+            if (endTime !== null) {
+                return Promise.resolve({ symbols: [], full: false, lastTime: null });
+            }
+            return Promise.resolve(page === 1
+                ? { symbols: ['SAMEAUSDT'], full: true, lastTime: 900 }
+                : { symbols: ['SAMEBUSDT'], full: false, lastTime: 900 });
+        });
+
+        await runFuturesCommand({
+            action: 'account.history',
+            clientOrderId: 'history-same-time-page',
+            symbol: 'ETHUSDT',
+        });
+
+        const recentCalls = moduleMocks.futuresAdapter.getTradedSymbolPage.mock.calls
+            .map(([request]) => request)
+            .filter(request => request.endTime === null);
+        expect(recentCalls.map(request => request.page)).toEqual([1, 2]);
+        expect(new Set(recentCalls.map(request => request.startTime)).size).toBe(1);
+        const [history] = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.futures_history);
+        expect(history.futures_history.symbols).toEqual(expect.arrayContaining([
+            'SAMEAUSDT', 'SAMEBUSDT',
+        ]));
+        expect(history.futures_history.discoveryComplete).toBe(true);
+    });
+
     // Walking income is the most expensive thing a review does — up to eight
     // pages at weight 30, against an 800-weight minute — and it answers a
     // question that only moves when a trade is made somewhere other than this
@@ -3022,6 +3060,146 @@ describe('setupBinanceConnection user-data orchestration', () => {
             .map(([{ symbol }]) => symbol))).toEqual(new Set(symbols));
         expect(new Set(moduleMocks.futuresAdapter.getTradeHistory.mock.calls
             .map(([{ symbol }]) => symbol))).toEqual(new Set(symbols));
+    });
+
+    it('drops held history discovery when the last renderer disconnects', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        await openFuturesHistoryStream();
+        moduleMocks.futuresAdapter.getTradedSymbolPage.mockResolvedValue({
+            symbols: ['OLDUSDT'], full: false, lastTime: 900,
+        });
+        await runFuturesCommand({
+            action: 'account.history', clientOrderId: 'history-renderer-1', symbol: 'BTCUSDT',
+        });
+        expect(moduleMocks.futuresAdapter.getTradedSymbolPage.mock.calls.length)
+            .toBeGreaterThan(0);
+
+        moduleMocks.rendererConnection.close();
+        await flushMicrotasks();
+        moduleMocks.rendererConnection.connected = true;
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        moduleMocks.futuresAdapter.getTradedSymbolPage.mockClear();
+        moduleMocks.futuresAdapter.getTradedSymbolPage.mockResolvedValue({
+            symbols: ['NEWUSDT'], full: false, lastTime: 1_000,
+        });
+
+        await runFuturesCommand({
+            action: 'account.history', clientOrderId: 'history-renderer-2', symbol: 'BTCUSDT',
+        });
+
+        expect(moduleMocks.futuresAdapter.getTradedSymbolPage.mock.calls.length)
+            .toBeGreaterThan(0);
+        expect(futuresHistoryAnswers().at(-1).symbols).toContain('NEWUSDT');
+        expect(futuresHistoryAnswers().at(-1).symbols).not.toContain('OLDUSDT');
+    });
+
+    it('cannot restore discovery from an income read that outlives the last renderer', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        let answerDetachedDiscovery;
+        moduleMocks.futuresAdapter.getTradedSymbolPage.mockReturnValueOnce(new Promise((resolve) => {
+            answerDetachedDiscovery = resolve;
+        }));
+        const detachedRead = moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'account.history',
+                version: 1,
+                marketType: 'futures',
+                accountId: 'default',
+                clientOrderId: 'history-detached-1',
+                symbol: 'BTCUSDT',
+            }),
+        });
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(answerDetachedDiscovery).toEqual(expect.any(Function));
+
+        moduleMocks.rendererConnection.close();
+        answerDetachedDiscovery({ symbols: ['OLDUSDT'], full: false, lastTime: 900 });
+        await vi.advanceTimersByTimeAsync(5_000);
+        await detachedRead;
+        expect(futuresHistoryAnswers()).toEqual([]);
+
+        moduleMocks.rendererConnection.connected = true;
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        moduleMocks.futuresAdapter.getTradedSymbolPage.mockClear();
+        moduleMocks.futuresAdapter.getTradedSymbolPage.mockResolvedValue({
+            symbols: ['NEWUSDT'], full: false, lastTime: 1_000,
+        });
+
+        await runFuturesCommand({
+            action: 'account.history', clientOrderId: 'history-detached-2', symbol: 'BTCUSDT',
+        });
+
+        expect(moduleMocks.futuresAdapter.getTradedSymbolPage.mock.calls.length)
+            .toBeGreaterThan(0);
+        expect(futuresHistoryAnswers().at(-1).symbols).toContain('NEWUSDT');
+        expect(futuresHistoryAnswers().at(-1).symbols).not.toContain('OLDUSDT');
+    });
+
+    it('drops a history read and its discovery when market deactivation overtakes it', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        let answerOldDiscovery;
+        moduleMocks.futuresAdapter.getTradedSymbolPage.mockReturnValueOnce(new Promise((resolve) => {
+            answerOldDiscovery = resolve;
+        }));
+        const obsoleteRead = moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'account.history',
+                version: 1,
+                marketType: 'futures',
+                accountId: 'default',
+                clientOrderId: 'history-obsolete-1',
+                symbol: 'BTCUSDT',
+            }),
+        });
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(answerOldDiscovery).toEqual(expect.any(Function));
+
+        await activateMarket('spot');
+        await activateMarket('futures-live');
+        answerOldDiscovery({ symbols: ['OLDUSDT'], full: true, lastTime: 900 });
+        await vi.advanceTimersByTimeAsync(5_000);
+        await obsoleteRead;
+
+        expect(futuresHistoryAnswers()).toEqual([]);
+        expect(moduleMocks.futuresAdapter.getTradedSymbolPage).toHaveBeenCalledOnce();
+        moduleMocks.futuresAdapter.getTradedSymbolPage.mockReset();
+        moduleMocks.futuresAdapter.getTradedSymbolPage.mockResolvedValue({
+            symbols: ['NEWUSDT'], full: false, lastTime: 1_000,
+        });
+
+        await runFuturesCommand({
+            action: 'account.history', clientOrderId: 'history-obsolete-2', symbol: 'BTCUSDT',
+        });
+
+        expect(moduleMocks.futuresAdapter.getTradedSymbolPage.mock.calls.length)
+            .toBeGreaterThan(0);
+        expect(futuresHistoryAnswers().at(-1).symbols).toContain('NEWUSDT');
+        expect(futuresHistoryAnswers().at(-1).symbols).not.toContain('OLDUSDT');
     });
 
     it('keeps coverage learned after discovery cached in the reconnect fan-out', async () => {

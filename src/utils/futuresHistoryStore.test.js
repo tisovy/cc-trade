@@ -316,6 +316,34 @@ describe('the store across runs', () => {
       symbols: ['BTCUSDT'], orders: [order(5)], trades: [], readAt: READ_AT,
     })).resolves.toBe(false)
   })
+
+  it('reports an aborted physical put or delete as a failed write', async () => {
+    const putFailed = createFuturesHistoryStore({
+      readAll: async () => [],
+      write: async () => null,
+    })
+    await expect(putFailed.writeReading({
+      symbols: ['BTCUSDT'], orders: [order(5)], trades: [], readAt: READ_AT,
+    })).resolves.toBe(false)
+
+    const fullStore = Array.from({ length: FUTURES_HISTORY_STORE_MAX_CONTRACTS }, (_, index) => ({
+      key: `OLD${index}USDT`,
+      symbol: `OLD${index}USDT`,
+      orders: [],
+      trades: [],
+      orderCursor: null,
+      tradeCursor: null,
+      readAt: READ_AT + index,
+    }))
+    const deleteFailed = createFuturesHistoryStore({
+      readAll: async () => fullStore,
+      remove: async () => null,
+      write: async () => true,
+    })
+    await expect(deleteFailed.writeReading({
+      symbols: ['NEWUSDT'], orders: [], trades: [], readAt: READ_AT + 1_000,
+    })).resolves.toBe(false)
+  })
 })
 
 describe('boundFuturesHistoryContracts', () => {

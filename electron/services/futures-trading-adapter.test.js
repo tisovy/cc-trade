@@ -556,15 +556,16 @@ describe('futures contract configuration', () => {
         expect(requests[0].url).toContain('/fapi/v1/income');
         expect(params.get('incomeType')).toBe('REALIZED_PNL');
         expect(params.get('startTime')).toBe('1000');
+        expect(params.get('page')).toBe('1');
         expect(params.get('limit')).toBe('1000');
         expect(page.symbols).toEqual(['BTCUSDT', 'BICOUSDT']);
         expect(readFuturesTradedSymbols(null)).toEqual([]);
     });
 
     // The endpoint answers a start time with the *oldest* rows after it, so a page
-    // that comes back full is a page with newer rows behind it. Saying so is what
-    // lets the caller walk to the recent end instead of reviewing last Tuesday.
-    it('reports a full income page and where it ended, so the walk can continue', async () => {
+    // that comes back full is a page with newer rows behind it. The numbered page
+    // keeps the timestamp boundary inclusive while the caller walks forward.
+    it('reports a full income page and sends the selected page number', async () => {
         const adapter = createAdapter();
         adapter.serverTimeOffsetMs = 0;
         globalThis.__futuresTestResponse = [
@@ -573,8 +574,10 @@ describe('futures contract configuration', () => {
         ];
         expect(await adapter.getTradedSymbolPage({ startTime: 1_000, limit: 2 }))
             .toMatchObject({ full: true, lastTime: 9_000 });
-        expect(await adapter.getTradedSymbolPage({ startTime: 1_000, limit: 3 }))
+        expect(await adapter.getTradedSymbolPage({ startTime: 1_000, page: 3, limit: 3 }))
             .toMatchObject({ full: false, lastTime: 9_000 });
+        const params = new URLSearchParams(requests[1].url.split('?')[1]);
+        expect(params.get('page')).toBe('3');
     });
 
     // The fills are folded back into positions, so the read has to reach past the

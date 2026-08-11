@@ -109,6 +109,12 @@ only when the requesting renderer supplies those same cursors; this prevents a
 new or second renderer with an older local reading from borrowing another
 renderer's newer proof and leaving its own gap unread.
 
+Every history command is also bound to both the shared Futures activation and
+the requesting renderer's market activation. Deactivation stops further REST
+admissions and suppresses the obsolete answer. Closing the last renderer
+advances the shared activation before clearing discovery, so a request already
+in flight cannot repopulate the cache after teardown.
+
 For an ordinary refresh, contracts with no coverage, an unvouched epoch, or new
 activity are read from their supplied cursors. From the remaining skipped set,
 one round-robin contract is also read. With a fan-out of at most twelve, a stable
@@ -159,6 +165,13 @@ If no fresh coverage exists, the existing recent-day-then-rest-of-week income
 walk runs. The backend's ten-minute in-memory discovery remains the first cache
 inside a run. `full: true` bypasses both caches, walks the complete bounded
 window, and reads every selected fan-out contract without cursors.
+
+Each income half-window keeps its inclusive `startTime`/`endTime` fixed and
+advances Binance's numbered `page`. Advancing `startTime` from the last row is
+not safe: a full page may end in the middle of several income rows sharing one
+millisecond, and moving beyond it would silently omit the remaining contracts.
+A short numbered page still proves completion; a full fourth page keeps the
+existing bounded walk and reports discovery as incomplete.
 
 Fresh coverage is still unioned into an in-memory discovery answer. Coverage can
 grow after that answer was created when a stream event names a newly closed
