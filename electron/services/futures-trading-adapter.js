@@ -376,6 +376,11 @@ export const normalizeFuturesPositions = (positionEntries = []) => (
         }))
 );
 
+// What a fill actually changes that no stream states in full: the wallet and the
+// position it moved. The working orders are not among them — the report carries
+// the order itself, and re-reading the account for it cost weight 40 twice.
+const FUTURES_FILL_REFRESH_RESOURCES = Object.freeze(['balances', 'positions']);
+
 export const normalizeFuturesUserDataStreamEvent = (payload = {}) => {
     if (payload?.e === 'ORDER_TRADE_UPDATE') {
         const executionReport = normalizeFuturesExecutionReport(payload);
@@ -385,6 +390,7 @@ export const normalizeFuturesUserDataStreamEvent = (payload = {}) => {
             rendererPayload: { futures_execution_update: executionReport },
             shouldRefreshAccount: executionReport.status === 'FILLED'
                 || executionReport.status === 'PARTIALLY_FILLED',
+            refreshResources: FUTURES_FILL_REFRESH_RESOURCES,
         };
     }
     if (payload?.e === 'ACCOUNT_UPDATE') {
@@ -392,6 +398,7 @@ export const normalizeFuturesUserDataStreamEvent = (payload = {}) => {
             type: 'accountUpdate',
             rendererPayload: null,
             shouldRefreshAccount: true,
+            refreshResources: FUTURES_FILL_REFRESH_RESOURCES,
         };
     }
     if (payload?.e === 'listenKeyExpired') {

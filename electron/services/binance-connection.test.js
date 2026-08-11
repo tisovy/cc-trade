@@ -727,6 +727,88 @@ describe('setupBinanceConnection user-data orchestration', () => {
         });
     });
 
+    // A fill used to drag the whole account behind it: 90 weight a pass, of
+    // which 80 was reading back the two order lists the exchange had just
+    // reported on the stream. The wallet and the position are what a fill
+    // actually moves — those are still read, at 5 each.
+    it('keeps the working orders from the stream without reading them back', async () => {
+        const loads = {
+            balances: vi.fn().mockResolvedValue({
+                futures_balances: { USDT: { available: '100', total: '100' } },
+            }),
+            regularOrders: vi.fn().mockResolvedValue({
+                futures_regular_orders: [{
+                    symbol: 'TUTUSDT', orderId: 11, orderKind: 'REGULAR', status: 'NEW', transactTime: 1_000,
+                }],
+            }),
+            algoOrders: vi.fn().mockResolvedValue({ futures_algo_orders: [] }),
+            positions: vi.fn().mockResolvedValue({ futures_positions: [] }),
+        };
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue(
+            ['balances', 'regularOrders', 'algoOrders', 'positions'].map(type => ({
+                type,
+                weight: 5,
+                errorLabel: type,
+                loadPayload: loads[type],
+            })),
+        );
+
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({ action: 'activate_market', marketMode: 'futures-live' }),
+        });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+        const socket = moduleMocks.futuresUserDataSockets[0];
+        socket.handlers.open();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+
+        const workingOrders = () => moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.type === 'futures_account_state')
+            .at(-1).resources.regularOrders.data;
+        expect(workingOrders().map(order => order.orderId)).toEqual([11]);
+        const afterSetup = Object.fromEntries(
+            Object.entries(loads).map(([type, load]) => [type, load.mock.calls.length]),
+        );
+
+        // A second order opens.
+        socket.handlers.message(JSON.stringify({
+            e: 'ORDER_TRADE_UPDATE',
+            E: 2_000,
+            o: {
+                s: 'TUTUSDT', i: 12, X: 'NEW', S: 'BUY', o: 'LIMIT', p: '1', q: '5', T: 2_000,
+            },
+        }));
+        await flushMicrotasks();
+        expect(workingOrders().map(order => order.orderId)).toEqual([11, 12]);
+
+        // And fills.
+        socket.handlers.message(JSON.stringify({
+            e: 'ORDER_TRADE_UPDATE',
+            E: 3_000,
+            o: {
+                s: 'TUTUSDT', i: 12, X: 'FILLED', S: 'BUY', o: 'LIMIT', p: '1', q: '5', z: '5', T: 3_000,
+            },
+        }));
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+        expect(workingOrders().map(order => order.orderId)).toEqual([11]);
+
+        // Neither order list was read for any of it; the wallet and the
+        // position were.
+        expect(loads.regularOrders).toHaveBeenCalledTimes(afterSetup.regularOrders);
+        expect(loads.algoOrders).toHaveBeenCalledTimes(afterSetup.algoOrders);
+        expect(loads.positions.mock.calls.length).toBeGreaterThan(afterSetup.positions);
+        expect(loads.balances.mock.calls.length).toBeGreaterThan(afterSetup.balances);
+    });
+
     it('connects live user data and coalesces adapter-owned stream refreshes', async () => {
         let resolveUserDataConnection;
         const userDataConnectionPromise = new Promise((resolve) => {

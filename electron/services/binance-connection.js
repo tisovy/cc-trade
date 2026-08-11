@@ -56,8 +56,10 @@ import {
     createFuturesMarkPriceFeed,
 } from './futures-mark-price-feed.js';
 import {
+    FuturesSettledOrderMemory,
     createFuturesAccountStateEnvelope,
     createInitialFuturesAccountResources,
+    foldFuturesWorkingOrder,
     markFuturesOrderResourcesStale,
     markFuturesResourceFailed,
     markFuturesResourceIdle,
@@ -975,6 +977,11 @@ export function setupBinanceConnection({
 
     let _futuresAccountRefreshInFlight = false;
     let futuresAccountResources = createInitialFuturesAccountResources();
+    // Which orders the stream has reported settled. It keeps a late report from
+    // putting one back, and keeps a read that left before the settle from doing
+    // the same — now that a fill no longer drags an account-wide read behind it,
+    // that read can be older than the stream.
+    const futuresSettledOrders = new FuturesSettledOrderMemory();
     // Leverage and margin mode per contract. /fapi/v3/positionRisk reports neither
     // any more, so without this read nothing on the desk can state the leverage a
     // position is carried at — or set it.
@@ -1114,8 +1121,14 @@ export function setupBinanceConnection({
         broadcastFuturesSymbolConfigs([...held, ...configs]);
     };
 
-    const runFuturesAccountRefreshPass = async () => {
-        const operations = futuresTradingAdapter.getAccountRefreshOperations();
+    // `resources` names which of them this pass is for; `null` is all four. A
+    // fill asks for the wallet and the position it moved — the working orders
+    // arrive on the stream that reported the fill, and reading them back cost 80
+    // of the pass's 90.
+    const runFuturesAccountRefreshPass = async (resources = null) => {
+        const requested = resources === null ? null : new Set(resources);
+        const operations = futuresTradingAdapter.getAccountRefreshOperations()
+            .filter(operation => requested === null || requested.has(operation.type));
         if (operations.length === 0) return;
         const epoch = futuresMutationEpoch;
         const activation = futuresActivationGeneration;
@@ -1147,7 +1160,12 @@ export function setupBinanceConnection({
             futuresAccountResources = markFuturesResourceReady(
                 futuresAccountResources,
                 operation.type,
-                payload[payloadKey],
+                // A read that left before the stream reported an order settled
+                // describes a world already moved past. The settled memory is
+                // what decides what the read is allowed to say.
+                operation.type === 'regularOrders'
+                    ? futuresSettledOrders.filterRead(payload[payloadKey])
+                    : payload[payloadKey],
             );
             if (operation.type === 'positions') {
                 futuresMarkPriceFeed?.track(payload[payloadKey]);
@@ -1175,23 +1193,42 @@ export function setupBinanceConnection({
     // Ctrl+R. It is queued instead: at most one follow-up is pending, because
     // any number of requests collapse into "read the account again once this
     // read finishes".
+    // Passes asked for while one runs collapse into the union of what they
+    // asked for, never into less: a fill's two resources queued behind a full
+    // read must not turn that read into a partial one, and vice versa.
     let _futuresAccountRefreshQueued = false;
-    const refreshFuturesAccountState = async () => {
+    let _futuresAccountRefreshQueuedResources = null;
+    const queueFuturesAccountRefresh = (resources) => {
+        _futuresAccountRefreshQueued = true;
+        if (resources === null || _futuresAccountRefreshQueuedResources === null) {
+            _futuresAccountRefreshQueuedResources = null;
+            return;
+        }
+        _futuresAccountRefreshQueuedResources = [
+            ...new Set([..._futuresAccountRefreshQueuedResources, ...resources]),
+        ];
+    };
+    const refreshFuturesAccountState = async ({ resources = null } = {}) => {
         broadcastFuturesTradingPaused();
         if (!futuresTradingAdapter) return;
         if (_futuresAccountRefreshInFlight) {
-            _futuresAccountRefreshQueued = true;
+            queueFuturesAccountRefresh(resources);
             return;
         }
         _futuresAccountRefreshInFlight = true;
         try {
-            do {
+            let requested = resources;
+            for (;;) {
                 _futuresAccountRefreshQueued = false;
-                await runFuturesAccountRefreshPass();
-            } while (_futuresAccountRefreshQueued);
+                _futuresAccountRefreshQueuedResources = [];
+                await runFuturesAccountRefreshPass(requested);
+                if (!_futuresAccountRefreshQueued) break;
+                requested = _futuresAccountRefreshQueuedResources;
+            }
         } finally {
             _futuresAccountRefreshInFlight = false;
             _futuresAccountRefreshQueued = false;
+            _futuresAccountRefreshQueuedResources = null;
         }
     };
 
@@ -1321,6 +1358,16 @@ export function setupBinanceConnection({
                 if (streamEvent.type === 'executionReport') {
                     const report = streamEvent.executionReport;
                     logger.info(`[futures-stream] ${report.symbol} ${report.side} ${report.status}`);
+                    // The exchange has just said what this order is. Folding it
+                    // into the held set is what the account-wide read used to be
+                    // for, at weight 40 twice on every fill.
+                    const folded = foldFuturesWorkingOrder(futuresAccountResources, report, {
+                        settled: futuresSettledOrders,
+                    });
+                    if (folded !== futuresAccountResources) {
+                        futuresAccountResources = folded;
+                        broadcastFuturesAccountState();
+                    }
                     broadcastToRenderers(streamEvent.rendererPayload);
                 }
                 if (streamEvent.type === 'listenKeyExpired') {
@@ -1331,7 +1378,9 @@ export function setupBinanceConnection({
                     return;
                 }
                 if (streamEvent.shouldRefreshAccount) {
-                    void refreshFuturesAccountState();
+                    void refreshFuturesAccountState({
+                        resources: streamEvent.refreshResources ?? null,
+                    });
                 }
             });
             socket.on('error', (err) => {

@@ -197,6 +197,112 @@ export const markFuturesOrderResourcesStale = (
         : markFuturesResourceFailed(nextResources, resource, error, now)
 ), resources);
 
+// An order the exchange still holds. Everything else — filled, cancelled,
+// expired, liquidation-issued — leaves the working list. Written as the set that
+// stays rather than the set that goes, so a status nobody anticipated drops out
+// instead of resting there forever.
+const FUTURES_WORKING_ORDER_STATUSES = Object.freeze(new Set(['NEW', 'PARTIALLY_FILLED']));
+
+export const futuresOrderIdentity = (order) => {
+    const symbol = String(order?.symbol ?? order?.s ?? '');
+    const orderId = String(order?.orderId ?? order?.i ?? '');
+    return symbol === '' || orderId === '' ? null : `${symbol}:${orderId}`;
+};
+
+const orderStampOf = (order) => {
+    const stamp = Number(order?.transactTime ?? order?.T ?? order?.updateTime);
+    return Number.isFinite(stamp) ? stamp : null;
+};
+
+// Which orders the stream has already reported settled, and when. Two things
+// need it: a late execution report must not put a settled order back, and a
+// read that left before the settle must not either — the read describes a world
+// the stream has already moved past. Bounded, because it is a memory of the
+// recent past and not a ledger.
+export class FuturesSettledOrderMemory {
+    constructor({ maximum = 256 } = {}) {
+        this.maximum = maximum;
+        this.entries = new Map();
+    }
+
+    settle(identity, at) {
+        if (identity === null) return;
+        this.entries.delete(identity);
+        this.entries.set(identity, Number.isFinite(at) ? at : Date.now());
+        while (this.entries.size > this.maximum) {
+            const [oldest] = this.entries.keys();
+            this.entries.delete(oldest);
+        }
+    }
+
+    // A row is allowed through when nothing settled it, or when it is newer than
+    // what settled it — an order id is reused by nothing, but a stamp can be.
+    allows(order) {
+        const settledAt = this.entries.get(futuresOrderIdentity(order));
+        if (settledAt === undefined) return true;
+        const stamp = orderStampOf(order);
+        return stamp !== null && stamp > settledAt;
+    }
+
+    filterRead(rows) {
+        if (!Array.isArray(rows)) return rows;
+        const kept = rows.filter(row => this.allows(row));
+        return kept.length === rows.length ? rows : Object.freeze(kept);
+    }
+
+    forget() {
+        this.entries.clear();
+    }
+}
+
+/**
+ * Folds one execution report into the held working orders.
+ *
+ * The exchange has just said what this order is, on a stream the desk is already
+ * listening to. Reading the whole account back to learn the same thing cost
+ * weight 40 twice — `/fapi/v1/openOrders` without a symbol, and the algo list
+ * beside it — on every fill.
+ *
+ * Returns the resources unchanged when there is nothing to fold, so the caller
+ * can broadcast only on a real change.
+ */
+export const foldFuturesWorkingOrder = (resources, report, { settled, now = Date.now() } = {}) => {
+    const resource = resources?.regularOrders;
+    // Nothing has been read yet. A list built from the one report that happened
+    // to arrive would present a one-order account as the whole of it.
+    if (!resource || resource.lastSuccessfulAt === null) return resources;
+    const identity = futuresOrderIdentity(report);
+    if (identity === null) return resources;
+    if (String(report?.orderKind ?? 'REGULAR') !== 'REGULAR') return resources;
+    const rows = Array.isArray(resource.data) ? resource.data : [];
+    const held = rows.find(row => futuresOrderIdentity(row) === identity) ?? null;
+    const reportedAt = orderStampOf(report);
+    const heldAt = orderStampOf(held);
+    // A report describing a state already replaced changes nothing.
+    if (held !== null && reportedAt !== null && heldAt !== null && reportedAt < heldAt) {
+        return resources;
+    }
+    const working = FUTURES_WORKING_ORDER_STATUSES.has(String(report?.status ?? report?.X ?? ''));
+    // The stream updated the list; it did not prove it. Status and the time of
+    // the last successful read are left as they are, so a set marked stale after
+    // a reconnect stays stale until a read says otherwise.
+    const withRows = rows => replaceResource(resources, 'regularOrders', {
+        ...resource,
+        data: Object.freeze(rows),
+        updatedAt: now,
+    });
+    if (!working) {
+        settled?.settle(identity, reportedAt ?? now);
+        if (held === null) return resources;
+        return withRows(rows.filter(row => futuresOrderIdentity(row) !== identity));
+    }
+    // Working, but already settled once: a report that arrived out of order.
+    if (settled && !settled.allows(report)) return resources;
+    return withRows(held === null
+        ? [...rows, report]
+        : rows.map(row => (futuresOrderIdentity(row) === identity ? report : row)));
+};
+
 export const createFuturesAccountStateEnvelope = (
     resources,
     now = Date.now(),
