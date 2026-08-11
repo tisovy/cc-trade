@@ -34,6 +34,10 @@ import {
   createHeldFuturesHistory,
   foldExecutionIntoFuturesHistory,
 } from '../utils/futuresHeldHistory.js'
+import {
+  futuresHistoryStore,
+  restoreFuturesHistoryFromStore,
+} from '../utils/futuresHistoryStore.js'
 
 const OPEN_ORDER_STATUSES = new Set(['NEW', 'PARTIALLY_FILLED'])
 // Slow enough to stay a fraction of the exchange's weight budget — one account
@@ -271,7 +275,13 @@ const stampGeneration = (command, generation) => (
   Number.isSafeInteger(generation) ? { ...command, generation } : command
 )
 
-const useFuturesTrading = ({ enabled, symbol, wsConnection, marketGeneration = null } = {}) => {
+const useFuturesTrading = ({
+  enabled,
+  symbol,
+  wsConnection,
+  marketGeneration = null,
+  historyStore = futuresHistoryStore,
+} = {}) => {
   const [state, setState] = useState(() => createInitialState({
     enabled,
     connection: wsConnection,
@@ -293,6 +303,39 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection, marketGeneration = n
   useEffect(() => {
     generationRef.current = marketGeneration
   }, [marketGeneration])
+
+  // Read inside the connection effect, which must not re-run because the store
+  // it writes to was passed as a new object.
+  const historyStoreRef = useRef(historyStore)
+  useEffect(() => {
+    historyStoreRef.current = historyStore
+  }, [historyStore])
+
+  // The review is on screen before anything is asked of the exchange. A settled
+  // order and an executed trade do not change while the desk is closed, so what
+  // an earlier run read is presented from the local store — stamped with when it
+  // was read, so nobody mistakes it for a reading taken now. A store that will
+  // not open leaves the review exactly as it is without one.
+  useEffect(() => {
+    if (!enabled) return undefined
+    let abandoned = false
+    void (async () => {
+      let restored = null
+      try {
+        restored = restoreFuturesHistoryFromStore(await historyStore?.readContracts?.())
+      } catch {
+        restored = null
+      }
+      if (abandoned || restored === null) return
+      setState((previous) => {
+        // A read answered while the store was opening. The exchange's own answer
+        // is the newer of the two and wins outright.
+        if (previous.history.readAt !== null) return previous
+        return { ...previous, history: restored }
+      })
+    })()
+    return () => { abandoned = true }
+  }, [enabled, historyStore])
 
   // Commands whose answer somebody is waiting on. Held in a ref rather than in
   // state: nothing renders from them, and a pending answer must survive every
@@ -429,6 +472,22 @@ const useFuturesTrading = ({ enabled, symbol, wsConnection, marketGeneration = n
           connected: true,
           history: applyFuturesHistoryReading(previous.history, history, readAt),
         }))
+        // What the exchange just proved settled outlives this run. A failed read
+        // proves nothing, and a store that will not write is not a failed read.
+        if (!history.error) {
+          void (async () => {
+            try {
+              await historyStoreRef.current?.writeReading?.({
+                symbols: history.symbols,
+                orders: history.orders,
+                trades: history.trades,
+                readAt,
+              })
+            } catch {
+              // A review that cannot be stored is still a review that was read.
+            }
+          })()
+        }
       }
       if (typeof payload.futures_trading_paused === 'boolean'
         || Object.hasOwn(payload, 'futures_max_order_usdt')) {

@@ -6,10 +6,10 @@
 
 ## 1. The Store
 
-- [ ] 1.1 A local store per contract, modelled on `futuresCandleHistoryCache.js`: terminal orders and trades, bounded, with the identity and time each contract is covered up to.
-- [ ] 1.2 Only terminal rows are stored — a working order is not history.
-- [ ] 1.3 An unreadable or unavailable store degrades to reading, never fails the review.
-- [ ] 1.4 The store is presented on launch before any read is issued, stamped with when each contract was read.
+- [x] 1.1 A local store per contract, modelled on `futuresCandleHistoryCache.js`: terminal orders and trades, bounded, with the identity and time each contract is covered up to. `src/utils/futuresHistoryStore.js`: IndexedDB `FuturesAccountHistory`, one record per contract holding the rows, `orderCursor`, `tradeCursor` and `readAt`. Bounds: 200 orders and 1 000 trades a contract — the read's own depth — and 24 contracts, twice the fan-out, dropped by oldest reading first. Cursors are derived from the rows rather than tracked beside them, so they cannot drift from what is actually held, and they are compared as integers, which is what an `orderId` past 2⁵³ needs.
+- [x] 1.2 Only terminal rows are stored — a working order is not history. A `NEW` or `PARTIALLY_FILLED` order is dropped on the way in: stored, it would present itself as settled in the next run, when the exchange may have filled or cancelled it while the desk was closed.
+- [x] 1.3 An unreadable or unavailable store degrades to reading, never fails the review. Both store methods answer "nothing stored" / `false` rather than raising, whatever the layer beneath them does — no caller can be broken by it.
+- [x] 1.4 The store is presented on launch before any read is issued, stamped with when each contract was read. `restoreFuturesHistoryFromStore` builds the held review from the records; the hook seeds it on mount and steps aside if an exchange answer arrived first. The whole review is stamped with its *stalest* contract's reading — a review is only as fresh as the oldest thing in it — and per-contract stamps live in the new `coverage` field on the held review, which §2.2 is what carries into the command. `discoveryComplete` is `false` for a restored review: the store names what it holds, which is no claim about what the account traded.
 
 ## 2. The Read Asks For The Gap
 
@@ -30,14 +30,14 @@
 
 ## 4. Proof
 
-- [ ] 4.1 Test: a launch with a populated store presents the review with no request issued.
+- [x] 4.1 Test: a launch with a populated store presents the review with no request issued. `useFuturesTrading.test.js` — "presents the review the store holds without issuing a read": rows, stamp and coverage on screen, and the only frame sent is the account refresh the subscription always sends. Two tests beside it: a reading that succeeded is stored and a reading that failed is not, and a store that answers after the exchange did does not overwrite the newer reading.
 - [ ] 4.2 Test: a contract that traded is read from its last identity, not from the window's start.
 - [ ] 4.3 Test: a contract that did not trade is not read.
 - [ ] 4.4 Test: a stream reconnect makes the next refresh read every contract.
 - [ ] 4.5 Test: the rotation re-reads a skipped contract within the stated number of refreshes.
 - [x] 4.6 Test: a refresh inside the hold issues no income page (see 3.5).
 - [ ] 4.7 Test: a full re-read walks discovery and reads the whole window.
-- [ ] 4.8 Test: an unreadable store behaves exactly as no store.
+- [x] 4.8 Test: an unreadable store behaves exactly as no store. `futuresHistoryStore.test.js` — a store whose reads answer nothing and whose writes throw leaves the review unread and reports a write that did not happen, and a store that raises on open does the same rather than propagating.
 - [ ] 4.9 Weight test: a refresh after an idle minute costs a fraction of a full read, and the numbers are stated.
 
 ## 5. Verification

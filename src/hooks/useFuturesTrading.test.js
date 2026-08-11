@@ -1,4 +1,4 @@
-import { act, renderHook } from '@testing-library/react'
+import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import useFuturesTrading from './useFuturesTrading.js'
 
@@ -289,6 +289,140 @@ describe('useFuturesTrading', () => {
     // A failed history read never disturbs live trading state.
     expect(result.current.openOrders).toEqual([])
     expect(result.current.lastError).toBeNull()
+  })
+
+  // A settled order does not change while the desk is closed, so the review of
+  // the last run is on screen before anything is asked of the exchange.
+  it('presents the review the store holds without issuing a read', async () => {
+    const socket = createSocket()
+    const historyStore = {
+      readContracts: async () => [{
+        key: 'BTCUSDT',
+        symbol: 'BTCUSDT',
+        orders: [{ orderId: 4, symbol: 'BTCUSDT', status: 'FILLED', time: 1_784_000_000_000 }],
+        trades: [{ id: 9, symbol: 'BTCUSDT', realizedPnl: '3.5', time: 1_784_000_000_000 }],
+        orderCursor: '4',
+        tradeCursor: '9',
+        readAt: 1_784_000_000_000,
+      }],
+      writeReading: vi.fn(async () => true),
+    }
+    const { result } = renderHook(() => useFuturesTrading({
+      enabled: true,
+      symbol: 'BTCUSDT',
+      wsConnection: socket,
+      historyStore,
+    }))
+
+    await waitFor(() => expect(result.current.history.status).toBe('ready'))
+    expect(result.current.history.orders).toHaveLength(1)
+    expect(result.current.history.trades).toHaveLength(1)
+    // Stamped with when it was read, so nobody mistakes it for a reading taken
+    // now, and carrying what each contract is covered up to.
+    expect(result.current.history.readAt).toBe(1_784_000_000_000)
+    expect(result.current.history.coverage.BTCUSDT).toMatchObject({
+      orderCursor: '4',
+      tradeCursor: '9',
+    })
+    // The store names what it holds; it does not know what the account traded.
+    expect(result.current.history.discoveryComplete).toBe(false)
+    // Nothing was asked of the exchange for any of it — only the account refresh
+    // the subscription always sends.
+    expect(socket.sent.map(frame => frame.action)).toEqual(['account.refresh'])
+    expect(historyStore.writeReading).not.toHaveBeenCalled()
+  })
+
+  it('stores a reading that succeeded and never one that failed', async () => {
+    const socket = createSocket()
+    const historyStore = {
+      readContracts: async () => [],
+      writeReading: vi.fn(async () => true),
+    }
+    const { result } = renderHook(() => useFuturesTrading({
+      enabled: true,
+      symbol: 'BTCUSDT',
+      wsConnection: socket,
+      historyStore,
+    }))
+
+    act(() => {
+      socket.receive({
+        futures_history: {
+          symbol: 'BTCUSDT',
+          orders: [{ orderId: 1, symbol: 'BTCUSDT', side: 'BUY', status: 'FILLED' }],
+          trades: [{ id: 7, symbol: 'BTCUSDT', realizedPnl: '12.5' }],
+          symbols: ['BTCUSDT', 'BICOUSDT'],
+          discovered: 2,
+          error: null,
+        },
+      })
+    })
+    await waitFor(() => expect(historyStore.writeReading).toHaveBeenCalledTimes(1))
+    expect(historyStore.writeReading.mock.calls[0][0]).toMatchObject({
+      symbols: ['BTCUSDT', 'BICOUSDT'],
+      orders: [{ orderId: 1 }],
+      trades: [{ id: 7 }],
+    })
+    expect(Number.isSafeInteger(historyStore.writeReading.mock.calls[0][0].readAt)).toBe(true)
+
+    act(() => {
+      socket.receive({
+        futures_history: {
+          symbol: 'BTCUSDT',
+          orders: [],
+          trades: [],
+          error: { code: 'FUTURES_API_ERROR', message: 'refused' },
+        },
+      })
+    })
+    // A read that failed proves nothing about what the account holds.
+    expect(historyStore.writeReading).toHaveBeenCalledTimes(1)
+    expect(result.current.history.trades).toHaveLength(1)
+  })
+
+  it('keeps the review the exchange answered when the store answers late', async () => {
+    const socket = createSocket()
+    let deliverStore
+    const historyStore = {
+      readContracts: () => new Promise((resolve) => { deliverStore = resolve }),
+      writeReading: vi.fn(async () => true),
+    }
+    const { result } = renderHook(() => useFuturesTrading({
+      enabled: true,
+      symbol: 'BTCUSDT',
+      wsConnection: socket,
+      historyStore,
+    }))
+
+    act(() => {
+      socket.receive({
+        futures_history: {
+          symbol: 'ETHUSDT',
+          orders: [{ orderId: 21, symbol: 'ETHUSDT', side: 'SELL', status: 'FILLED' }],
+          trades: [],
+          symbols: ['ETHUSDT'],
+          discovered: 1,
+          error: null,
+        },
+      })
+    })
+    await act(async () => {
+      deliverStore([{
+        key: 'BTCUSDT',
+        symbol: 'BTCUSDT',
+        orders: [{ orderId: 4, symbol: 'BTCUSDT', status: 'FILLED', time: 1 }],
+        trades: [],
+        orderCursor: '4',
+        tradeCursor: null,
+        readAt: 1_784_000_000_000,
+      }])
+      await Promise.resolve()
+    })
+
+    // The exchange's own answer is the newer of the two and is not replaced by
+    // the store opening behind it.
+    expect(result.current.history.orders).toEqual([expect.objectContaining({ orderId: 21 })])
+    expect(result.current.history.symbols).toEqual(['ETHUSDT'])
   })
 
   // /fapi/v3/positionRisk reports neither leverage nor margin mode any more, so

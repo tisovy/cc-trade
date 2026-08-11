@@ -35,6 +35,10 @@ export const createHeldFuturesHistory = () => Object.freeze({
   // When the held rows were read. `null` means nothing has ever been read, which
   // is the one case where an empty panel is honest.
   readAt: null,
+  // What each contract is covered up to, keyed by contract: the identities the
+  // exchange pages from and when that contract was last read. Filled from the
+  // local store, which is what holds the review across runs.
+  coverage: Object.freeze({}),
   // Identities the stream added since the read. Kept apart so the panel can say
   // so, and so a later read can tell what it is allowed to drop.
   foldedOrders: Object.freeze([]),
