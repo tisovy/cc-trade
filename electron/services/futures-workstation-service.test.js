@@ -2346,3 +2346,79 @@ describe('the book is bought as deep as it is read', () => {
         )).rejects.toMatchObject({ code: 'DEPTH_OWNER_UNAVAILABLE' });
     });
 });
+
+// The reading decided which page to buy and was then ignored when deciding what
+// to send: a thousand levels a side crossed to draw forty rows, ten times a
+// second. The book keeps its depth in this process; only the delivery is bounded.
+describe('the reading bounds what the desk delivers', () => {
+    const openContract = async (requestId) => {
+        const runtime = track(createFuturesProductionWorkstationRuntime());
+        const events = [];
+        await runtime.service.handleRequest(productionRequest(requestId), {
+            emit: event => events.push(event),
+        });
+        const session = runtime.service.current;
+        const readings = [];
+        const view = session.orderBook.toRendererView.bind(session.orderBook);
+        session.orderBook.toRendererView = (range) => {
+            readings.push(range);
+            return view(range);
+        };
+        return { runtime, events, readings, session };
+    };
+
+    const depthEvents = events => events.filter(event => event.resource === 'depth');
+
+    it('states the reading to the book when the reading changes', async () => {
+        const { runtime, readings } = await openContract('depth-reading-stated');
+        await runtime.service.handleRequest(
+            productionDepthRequest('depth-reading-stated', '0.25'),
+            { emit: () => {} },
+        );
+        expect(readings).toEqual(['0.25']);
+    });
+
+    // Waiting for the next diff would answer a coarsened step within a diff or
+    // two on a busy contract and never on a quiet one — and a quiet contract is
+    // the one most likely to be read at a coarse step.
+    it('redelivers from the book in hand rather than waiting for the next diff', async () => {
+        const { runtime, events } = await openContract('depth-reading-redeliver');
+        const before = depthEvents(events).length;
+        await runtime.service.handleRequest(
+            productionDepthRequest('depth-reading-redeliver', '0.25'),
+            { emit: () => {} },
+        );
+        expect(depthEvents(events)).toHaveLength(before + 1);
+        expect(depthEvents(events).at(-1)).toMatchObject({ state: 'live' });
+        expect(depthEvents(events).at(-1).payload.bids.length).toBeGreaterThan(0);
+    });
+
+    // The trim is on delivery alone. A reading that changes must never cost a
+    // read: the levels are already held, proven and bridged.
+    it('buys nothing to answer a reading the band already covers', async () => {
+        const base = createFuturesProductionWorkstationFakeTransport();
+        const readDepthSnapshot = vi.fn(options => base.readDepthSnapshot(options));
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            transport: { ...base, readDepthSnapshot },
+        }));
+        await runtime.service.handleRequest(productionRequest('depth-reading-free'), {
+            emit: () => {},
+        });
+        await runtime.service.handleRequest(
+            productionDepthRequest('depth-reading-free', '0.25'),
+            { emit: () => {} },
+        );
+        await Promise.resolve();
+        expect(readDepthSnapshot).toHaveBeenCalledOnce();
+        expect(runtime.service.current.orderBook.bids.size).toBe(48);
+    });
+
+    // A level is what it rests at and how much rests there. The running total
+    // was computed, serialized, parsed, validated, frozen and then discarded,
+    // because a total over raw levels is not a total over grouped rows.
+    it('delivers a level as price and quantity', async () => {
+        const { events } = await openContract('depth-reading-shape');
+        const level = depthEvents(events).at(-1).payload.bids[0];
+        expect(Object.keys(level)).toEqual(['price', 'quantity']);
+    });
+});

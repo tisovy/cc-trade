@@ -7,13 +7,11 @@ export const FUTURES_APP_STRESS_CYCLES = 3
 
 const LEVELS_PER_SIDE = 1_000
 const LEVEL_QUANTITY = '1.123456789012345678'
-const LEVEL_TOTAL = '1.123456789012345678901234567890'
 const utf8Bytes = value => new TextEncoder().encode(value).byteLength
 
 const frozenLevel = price => Object.freeze({
   price,
   quantity: LEVEL_QUANTITY,
-  total: LEVEL_TOTAL,
 })
 
 // The first level changes with every revision so the rendered book proves which

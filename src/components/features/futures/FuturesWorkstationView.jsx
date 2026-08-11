@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   FUTURES_WORKSTATION_DEFAULT_TAPE_SETTINGS,
+  FUTURES_WORKSTATION_DEPTH_MIN_LEVELS_PER_SIDE,
   FUTURES_WORKSTATION_INTERVALS,
   FUTURES_WORKSTATION_TAPE_LIMITS,
 } from '../../../utils/futuresWorkstationProtocolShared.js'
@@ -42,8 +43,10 @@ const IGNORE_PRICE_PICK = () => {}
 const VISIBLE_DEPTH_LEVELS_PER_SIDE = 14
 const BOOK_ROW_HEIGHT_PX = 14
 // A ceiling, not a setting: a very tall panel must not ask the grouper for an
-// unbounded number of rows.
-const MAX_DEPTH_LEVELS_PER_SIDE = 200
+// unbounded number of rows. Shared with the floor the delivery keeps under the
+// stated range, so a panel can never ask for more rows than a delivery carries
+// levels — ungrouped, that is one level per row.
+const MAX_DEPTH_LEVELS_PER_SIDE = FUTURES_WORKSTATION_DEPTH_MIN_LEVELS_PER_SIDE
 const BOOK_SIDE_MODE_LABELS = Object.freeze({
   both: 'Show both book sides',
   bids: 'Show buy side only',

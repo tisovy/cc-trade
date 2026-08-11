@@ -3,6 +3,7 @@ import {
     FuturesWorkstationDecimalError,
     addFuturesWorkstationDecimals,
     compareFuturesWorkstationDecimals,
+    isFuturesWorkstationDecimal,
     normalizeFuturesWorkstationDecimal,
     subtractFuturesWorkstationDecimals,
     toFuturesWorkstationPercent,
@@ -46,4 +47,15 @@ describe('Futures workstation exact decimal arithmetic', () => {
         (value) => expect(() => normalizeFuturesWorkstationDecimal(value))
             .toThrow(FuturesWorkstationDecimalError),
     );
+
+    // For a caller that has to decide rather than fail: on the delivery path an
+    // unreadable range means "no reading stated", not "stop sending the book".
+    it('answers whether a value is a decimal without raising on one that is not', () => {
+        for (const value of ['0', '-1.5', '900719925474099312345.0001']) {
+            expect(isFuturesWorkstationDecimal(value)).toBe(true);
+        }
+        for (const value of ['01', '1e3', '', ' 1', '9'.repeat(65), null, undefined, 5, {}]) {
+            expect(isFuturesWorkstationDecimal(value)).toBe(false);
+        }
+    });
 });

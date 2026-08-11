@@ -82,6 +82,15 @@ export const toFuturesWorkstationPercent = (value) => {
     );
 };
 
+// Whether a value can be read as a decimal at all, for a caller that has to
+// decide rather than fail. The predicates below answer a question *about* a
+// decimal and raise on anything that is not one, which is right where the value
+// arrived through a validator — and wrong on the delivery path, where an
+// unreadable value means "no reading stated", not "stop sending the book".
+export const isFuturesWorkstationDecimal = value => (
+    typeof value === 'string' && value.length <= 64 && DECIMAL_PATTERN.test(value)
+);
+
 export const isPositiveFuturesWorkstationDecimal = value => (
     parseFuturesWorkstationDecimal(value).coefficient > 0n
 );

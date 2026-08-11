@@ -115,8 +115,8 @@ const payloads = Object.freeze({
   }),
   [FUTURES_WORKSTATION_RESOURCES.DEPTH]: Object.freeze({
     lastUpdateId: '9007199254740993',
-    bids: Object.freeze([Object.freeze({ price: '58420', quantity: '2', total: '2' })]),
-    asks: Object.freeze([Object.freeze({ price: '58421', quantity: '3', total: '3' })]),
+    bids: Object.freeze([Object.freeze({ price: '58420', quantity: '2' })]),
+    asks: Object.freeze([Object.freeze({ price: '58421', quantity: '3' })]),
     spread: '1',
   }),
   [FUTURES_WORKSTATION_RESOURCES.TRADES]: Object.freeze({
@@ -145,8 +145,11 @@ const createEventValues = resource => ({
 })
 
 describe('Futures workstation environment-specific protocols', () => {
-  it('uses protocol revision 5 for bounded tape configuration', () => {
-    expect(FUTURES_WORKSTATION_PROTOCOL_VERSION).toBe('6')
+  // Bumped with the delivered level's shape: a main process and a renderer that
+  // disagree about whether a level carries a running total must refuse each
+  // other rather than read one field as another.
+  it('uses protocol revision 7 for a level of price and quantity', () => {
+    expect(FUTURES_WORKSTATION_PROTOCOL_VERSION).toBe('7')
   })
 
   it('preserves an unavailable per-symbol algo limit instead of inventing one', () => {
@@ -456,7 +459,6 @@ describe('Futures workstation environment-specific protocols', () => {
     const level = index => ({
       price: `${900_000 + index}.123456789012345678`,
       quantity: '184467440737.09551615',
-      total: `${184_467_440_737 * (index + 1)}.09551615`,
     })
     const event = createFuturesProductionWorkstationEvent({
       ...createEventValues('depth'),

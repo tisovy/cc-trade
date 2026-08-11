@@ -1,6 +1,7 @@
 import {
     addFuturesWorkstationDecimals,
     compareFuturesWorkstationDecimals,
+    isFuturesWorkstationDecimal,
     isNonNegativeFuturesWorkstationDecimal,
     isPositiveFuturesWorkstationDecimal,
     normalizeFuturesWorkstationDecimal,
@@ -9,6 +10,7 @@ import {
 } from './futures-workstation-decimal.js';
 import {
     FUTURES_WORKSTATION_DEPTH_LEVELS_PER_SIDE,
+    FUTURES_WORKSTATION_DEPTH_MIN_LEVELS_PER_SIDE,
     FUTURES_WORKSTATION_DIFF_LEVELS_PER_SIDE,
     FUTURES_WORKSTATION_UINT64_MAX,
 } from '../../src/utils/futuresWorkstationProtocolShared.js';
@@ -23,8 +25,14 @@ export const FUTURES_WORKSTATION_ORDER_BOOK_LIMITS = Object.freeze({
     // read the desk already paid weight 20 for.
     RETAINED_LEVELS_PER_SIDE: 1_000,
     // Shared with the renderer's own bound so the two can never drift apart:
-    // a delivered book larger than the protocol accepts is dropped whole.
+    // a delivered book larger than the protocol accepts is dropped whole. This
+    // is the ceiling on a delivery, not the delivery: what crosses is bounded by
+    // the range the panel stated it reads. See `toRendererView`.
     RENDERER_LEVELS_PER_SIDE: FUTURES_WORKSTATION_DEPTH_LEVELS_PER_SIDE,
+    // And the floor under it, for the reading a range cannot describe: ungrouped,
+    // a row is one raw level and the distance the rows span is wherever the
+    // market happens to rest.
+    MIN_DELIVERED_LEVELS_PER_SIDE: FUTURES_WORKSTATION_DEPTH_MIN_LEVELS_PER_SIDE,
     // What one *diff* may carry, which is not what a snapshot holds: a diff
     // restates every level that changed, and a sweep with the makers re-posting
     // behind it changes more levels than the book is deep. Bounding a diff by
@@ -219,13 +227,35 @@ const bestPrice = (side, descending) => {
     return best;
 };
 
-const formatSide = (side, descending, limit) => {
-    const entries = sortedByPrice(side, descending).slice(0, limit);
-    let total = '0';
-    return Object.freeze(entries.map(({ price, quantity }) => {
-        total = addFuturesWorkstationDecimals(total, quantity);
-        return Object.freeze({ price, quantity, total });
-    }));
+// The levels the panel stated it reads, and no more.
+//
+// `range` is a distance in the contract's own quote currency: the rows on screen
+// times the step they are grouped by. A grouped row's boundary sits at most one
+// step the wrong side of the best price, so the deepest row a panel of `rows`
+// rows can draw ends strictly inside `rows × step` of it — the stated range
+// fills every row it was computed from, with nothing to spare and nothing owed.
+//
+// Below the floor the range is ignored: ungrouped it describes the wrong thing
+// entirely, naming a distance in ticks for rows that are levels.
+const formatSide = (side, descending, limit, range) => {
+    const entries = sortedByPrice(side, descending);
+    const best = entries.length > 0 ? entries[0].price : null;
+    const edge = best === null || range === null
+        ? null
+        : (descending
+            ? subtractFuturesWorkstationDecimals(best, range)
+            : addFuturesWorkstationDecimals(best, range));
+    const levels = [];
+    for (const { price, quantity } of entries) {
+        if (levels.length >= limit) break;
+        if (edge !== null
+            && levels.length >= FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.MIN_DELIVERED_LEVELS_PER_SIDE) {
+            const comparison = compareFuturesWorkstationDecimals(price, edge);
+            if (descending ? comparison < 0 : comparison > 0) break;
+        }
+        levels.push(Object.freeze({ price, quantity }));
+    }
+    return Object.freeze(levels);
 };
 
 export class FuturesWorkstationOrderBook {
@@ -424,18 +454,34 @@ export class FuturesWorkstationOrderBook {
         }
     }
 
-    toRendererView() {
+    /**
+     * The book as the renderer reads it, bounded by the range the panel stated.
+     *
+     * The trim is on delivery alone: everything the snapshot bought is still
+     * held, still bridged and still proven, so widening the reading is answered
+     * from the book in hand rather than by another read. A range that has not
+     * been stated yet, or one that cannot be read as a distance, delivers at the
+     * ceiling — a first book must not arrive short of the rows the panel is
+     * about to ask for.
+     */
+    toRendererView(range = null) {
         if (this.phase !== FUTURES_WORKSTATION_ORDER_BOOK_PHASES.LIVE
             || this.lastUpdateId === null) return null;
+        const bound = isFuturesWorkstationDecimal(range)
+            && isPositiveFuturesWorkstationDecimal(range)
+            ? range
+            : null;
         const bids = formatSide(
             this.bids,
             true,
             FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.RENDERER_LEVELS_PER_SIDE,
+            bound,
         );
         const asks = formatSide(
             this.asks,
             false,
             FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.RENDERER_LEVELS_PER_SIDE,
+            bound,
         );
         const spread = bids[0] && asks[0]
             ? subtractFuturesWorkstationDecimals(asks[0].price, bids[0].price)

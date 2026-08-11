@@ -1,5 +1,5 @@
 export const FUTURES_WORKSTATION_MARKET_TYPE = 'USD_M_FUTURES'
-export const FUTURES_WORKSTATION_PROTOCOL_VERSION = '6'
+export const FUTURES_WORKSTATION_PROTOCOL_VERSION = '7'
 export const FUTURES_WORKSTATION_REQUEST_MAX_BYTES = 1_024
 // Sized around the largest frame the desk actually sends — a full depth view.
 // The bound exists so a hostile frame can never force an unbounded parse, not to
@@ -8,13 +8,28 @@ export const FUTURES_WORKSTATION_REQUEST_MAX_BYTES = 1_024
 export const FUTURES_WORKSTATION_EVENT_MAX_BYTES = 256 * 1_024
 export const FUTURES_WORKSTATION_UINT64_MAX = '18446744073709551615'
 
-// How much of the book crosses to the renderer. This is a count of *raw*
-// exchange levels, but the book is displayed *grouped*: 14 rows at a 50× step
-// consume 700 levels. Sizing this below rows × step makes the book look empty
-// far from the mid — the feed ran out, not the market. It is pinned to the
+// The most of the book that may ever cross to the renderer. This is a count of
+// *raw* exchange levels, but the book is displayed *grouped*: 14 rows at a 50×
+// step consume 700 levels. Sizing this below rows × step makes the book look
+// empty far from the mid — the feed ran out, not the market. It is pinned to the
 // thousand levels per side Binance serves, which is the deepest book that can
 // be delivered complete rather than guessed at.
+//
+// It is a ceiling, not the delivery: what actually crosses is bounded by the
+// range the panel stated it reads. See `FUTURES_WORKSTATION_DEPTH_RANGE_MAX_LENGTH`
+// below and `toRendererView`.
 export const FUTURES_WORKSTATION_DEPTH_LEVELS_PER_SIDE = 1_000
+
+// The fewest levels a delivery carries, whatever range was stated.
+//
+// Ungrouped, a row is one raw level, so the panel needs one level per row and
+// the price distance they span is whatever the market happens to rest at — a
+// contract quoting a tick of 0.000001 with levels every tenth of a percent puts
+// fourteen rows far outside fourteen ticks. The stated range is rows × step,
+// which assumes a level on every step, so on a sparse book it names a distance
+// the rows overflow. This is the panel's own row cap, so a delivery is never
+// shorter than the rows it can draw, and it costs a fifth of the ceiling.
+export const FUTURES_WORKSTATION_DEPTH_MIN_LEVELS_PER_SIDE = 200
 
 // A full depth frame is the node-densest event the desk sends: every level is
 // an object plus three strings. Deriving the parser's node budget from the level
@@ -593,9 +608,15 @@ const validateCandleHistory = (value) => (
   && value.rows.every(validateCandle)
 )
 
+// A level is what it rests at and how much rests there. It carries no running
+// total: a total accumulated over raw levels is not a total over the grouped
+// rows the panel draws, so the panel builds the only cumulative column it can
+// display from the notional of the rows it grouped. A second one cost a decimal
+// addition per level, a third of every frame's bytes, and a validation pass —
+// to be discarded on arrival.
 const validateDepthLevel = (value) => (
-  hasExactFuturesWorkstationKeys(value, ['price', 'quantity', 'total'])
-  && [value.price, value.quantity, value.total].every(isCanonicalFuturesDecimal)
+  hasExactFuturesWorkstationKeys(value, ['price', 'quantity'])
+  && [value.price, value.quantity].every(isCanonicalFuturesDecimal)
 )
 
 const validateDepth = (value) => (

@@ -8,6 +8,7 @@ import {
 import {
     FUTURES_WORKSTATION_EVENT_MAX_BYTES,
 } from '../../src/utils/futuresWorkstationProtocolShared.js';
+import { groupFuturesBookLevels } from '../../src/utils/futuresOrderBook.js';
 
 const snapshot = (overrides = {}) => ({
     lastUpdateId: '100',
@@ -34,14 +35,14 @@ const liveBook = () => {
 };
 
 describe('authoritative Futures local order book', () => {
-    it('buffers before snapshot and exposes a bounded cumulative live view', () => {
+    it('buffers before snapshot and exposes a bounded live view', () => {
         const book = liveBook();
         const view = book.toRendererView();
         expect(book.phase).toBe(FUTURES_WORKSTATION_ORDER_BOOK_PHASES.LIVE);
         expect(view.lastUpdateId).toBe('101');
-        expect(view.bids[0]).toEqual({ price: '10', quantity: '2.5', total: '2.5' });
-        expect(view.bids[1].total).toBe('5.5');
-        expect(view.asks[0]).toEqual({ price: '11', quantity: '3.5', total: '3.5' });
+        expect(view.bids[0]).toEqual({ price: '10', quantity: '2.5' });
+        expect(view.bids[1]).toEqual({ price: '9', quantity: '3' });
+        expect(view.asks[0]).toEqual({ price: '11', quantity: '3.5' });
         expect(view.spread).toBe('1');
     });
 
@@ -60,7 +61,7 @@ describe('authoritative Futures local order book', () => {
         const book = new FuturesWorkstationOrderBook();
         expect(book.bootstrap(snapshot())).toEqual({ live: true, reason: 'bootstrapped' });
         expect(book.toRendererView().lastUpdateId).toBe('100');
-        expect(book.toRendererView().bids[0]).toEqual({ price: '10', quantity: '2', total: '2' });
+        expect(book.toRendererView().bids[0]).toEqual({ price: '10', quantity: '2' });
     });
 
     it('pays the owed bridge with a first diff that spans the snapshot', () => {
@@ -414,5 +415,131 @@ describe('the band a snapshot proves', () => {
         expect(book.coversRange('1')).toBe(false);
         book.stop();
         expect(book.coversRange('1')).toBe(false);
+    });
+});
+
+// The panel already states how much of the book it reads — the rows on screen
+// times the step they are grouped by — and the desk used that to decide which
+// page to buy and then ignored it when deciding what to send. A thousand levels
+// a side crossed to draw forty rows, ten times a second, and everything
+// downstream of the socket is priced per level.
+describe('the reading bounds the delivery', () => {
+    const DEEP_LEVELS_PER_SIDE = 400;
+    // Whole numbers a tick apart: the grouping arithmetic below is then readable
+    // as prices rather than as decimal-string bookkeeping.
+    const deepBook = () => {
+        const book = new FuturesWorkstationOrderBook();
+        book.push(delta({ bids: [], asks: [] }), 1);
+        expect(book.bootstrap(snapshot({
+            bids: Array.from({ length: DEEP_LEVELS_PER_SIDE },
+                (_, index) => [`${1_000_000 - index}`, '1']),
+            asks: Array.from({ length: DEEP_LEVELS_PER_SIDE },
+                (_, index) => [`${1_000_001 + index}`, '1']),
+        })).live).toBe(true);
+        return book;
+    };
+
+    it('carries the levels within the stated range on each side', () => {
+        const view = deepBook().toRendererView('250');
+        expect(view.bids).toHaveLength(251);
+        expect(view.asks).toHaveLength(251);
+        expect(view.bids.at(-1).price).toBe('999750');
+        expect(view.asks.at(-1).price).toBe('1000251');
+    });
+
+    // The panel has not spoken yet, or has stated something that is not a
+    // distance. A first book must not arrive short of the rows it is about to be
+    // asked for, so the ceiling stands until a reading replaces it.
+    it('delivers at the ceiling when no range has been stated', () => {
+        const book = deepBook();
+        for (const range of [undefined, null, '0', 'wide', 5]) {
+            expect(book.toRendererView(range).bids).toHaveLength(DEEP_LEVELS_PER_SIDE);
+        }
+    });
+
+    it('delivers what the book holds when the reading reaches past it', () => {
+        const view = deepBook().toRendererView('10000');
+        expect(view.bids).toHaveLength(DEEP_LEVELS_PER_SIDE);
+        expect(view.asks).toHaveLength(DEEP_LEVELS_PER_SIDE);
+    });
+
+    // Ungrouped a row is one raw level, and the distance those rows span is
+    // wherever the market happens to rest — a contract quoting a tick of a
+    // millionth with levels a tenth of a percent apart puts fourteen rows far
+    // outside fourteen ticks. The stated range assumes a level on every step, so
+    // under the floor it describes the wrong thing and is ignored.
+    it('keeps a floor under the range for the rows a range cannot describe', () => {
+        const view = deepBook().toRendererView('1');
+        expect(view.bids).toHaveLength(
+            FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.MIN_DELIVERED_LEVELS_PER_SIDE,
+        );
+        expect(view.asks).toHaveLength(
+            FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.MIN_DELIVERED_LEVELS_PER_SIDE,
+        );
+    });
+
+    // The trim is on delivery and never on what is retained, proven or bridged.
+    // A coarser step is answered out of the book already in hand — buying the
+    // page again would put the operator behind the market for a read.
+    it('answers a wider reading from the book already held', () => {
+        const book = deepBook();
+        expect(book.toRendererView('250').bids).toHaveLength(251);
+        expect(book.bids.size).toBe(DEEP_LEVELS_PER_SIDE);
+        expect(book.toRendererView('300').bids).toHaveLength(301);
+        expect(book.phase).toBe(FUTURES_WORKSTATION_ORDER_BOOK_PHASES.LIVE);
+    });
+
+    // What the operator actually reads. Forty-four rows at a five-tick step is
+    // the reading the audit measured, and every row of it — its price, its size
+    // and its cumulative column — has to come out the same as it did when the
+    // whole book crossed.
+    it('draws the same rows from the trimmed delivery as from the whole book', () => {
+        const book = deepBook();
+        const rows = 44;
+        const step = '5';
+        const range = String(rows * Number(step));
+        const trimmed = book.toRendererView(range);
+        const whole = book.toRendererView();
+        for (const side of ['bids', 'asks']) {
+            const grouped = levels => groupFuturesBookLevels({
+                levels,
+                side: side === 'bids' ? 'bid' : 'ask',
+                step,
+                limit: rows,
+            });
+            const fromTrimmed = grouped(trimmed[side]);
+            expect(fromTrimmed).toHaveLength(rows);
+            expect(fromTrimmed).toEqual(grouped(whole[side]));
+        }
+    });
+
+    // A total accumulated over raw levels is not a total over grouped rows, so
+    // the panel computes the only cumulative column it can display and the
+    // delivered one was computed, serialized, parsed, validated, frozen and
+    // discarded — a third of every frame.
+    it('delivers a level as price and quantity, with no running total', () => {
+        const view = deepBook().toRendererView('250');
+        for (const side of [view.bids, view.asks]) {
+            expect(Object.keys(side[0])).toEqual(['price', 'quantity']);
+        }
+    });
+
+    // The saving, stated as the thing that was actually wrong: the frame. A
+    // retained book at the ceiling, read at forty-four rows and a five-tick
+    // step — the reading the audit measured — is the comparison that matters.
+    it('is a fraction of the frame the whole book was', () => {
+        const { RETAINED_LEVELS_PER_SIDE } = FUTURES_WORKSTATION_ORDER_BOOK_LIMITS;
+        const book = new FuturesWorkstationOrderBook();
+        book.push(delta({ bids: [], asks: [] }), 1);
+        expect(book.bootstrap(snapshot({
+            bids: Array.from({ length: RETAINED_LEVELS_PER_SIDE },
+                (_, index) => [`${1_000_000 - index}`, '1.123456789012345678']),
+            asks: Array.from({ length: RETAINED_LEVELS_PER_SIDE },
+                (_, index) => [`${1_000_001 + index}`, '1.123456789012345678']),
+        })).live).toBe(true);
+        const bytes = view => Buffer.byteLength(JSON.stringify(view), 'utf8');
+        const whole = bytes(book.toRendererView());
+        expect(bytes(book.toRendererView('220')) * 4).toBeLessThan(whole);
+        expect(whole).toBeLessThanOrEqual(FUTURES_WORKSTATION_EVENT_MAX_BYTES);
     });
 });

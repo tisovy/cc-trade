@@ -86,7 +86,6 @@ const bookLevels = (best, direction, count) => Object.freeze(
   Array.from({ length: count }, (unused, index) => Object.freeze({
     price: (best + (direction * index * 0.1)).toFixed(2),
     quantity: '1',
-    total: String(index + 1),
   })),
 )
 
@@ -175,8 +174,8 @@ const createState = (overrides = {}) => Object.freeze({
     }),
     depth: Object.freeze({
       lastUpdateId: '90071992547409931234',
-      bids: Object.freeze([Object.freeze({ price: '58420.00', quantity: '2', total: '2' })]),
-      asks: Object.freeze([Object.freeze({ price: '58420.50', quantity: '3', total: '3' })]),
+      bids: Object.freeze([Object.freeze({ price: '58420.00', quantity: '2' })]),
+      asks: Object.freeze([Object.freeze({ price: '58420.50', quantity: '3' })]),
       spread: '0.5',
       state: 'live',
       observedAt: 1_784_000_000_000,
@@ -285,12 +284,10 @@ describe('pure Futures workstation presentation', () => {
     const asks = Object.freeze(Array.from({ length: 16 }, (_, index) => Object.freeze({
       price: `0.0095${String(11 + index).padStart(2, '0')}`,
       quantity: String(100_000 + index),
-      total: String((index + 1) * 100_000),
     })))
     const bids = Object.freeze(Array.from({ length: 16 }, (_, index) => Object.freeze({
       price: `0.0094${String(99 - index).padStart(2, '0')}`,
       quantity: String(200_000 + index),
-      total: String((index + 1) * 200_000),
     })))
     const { container } = renderView({
       state: createState({
@@ -613,12 +610,12 @@ describe('pure Futures workstation presentation', () => {
           depth: Object.freeze({
             ...state.resources.depth,
             bids: Object.freeze([
-              Object.freeze({ price: '58420.00', quantity: '2', total: '2' }),
-              Object.freeze({ price: '57000.00', quantity: '2', total: '4' }),
+              Object.freeze({ price: '58420.00', quantity: '2' }),
+              Object.freeze({ price: '57000.00', quantity: '2' }),
             ]),
             asks: Object.freeze([
-              Object.freeze({ price: '58420.50', quantity: '3', total: '3' }),
-              Object.freeze({ price: '59000.00', quantity: '3', total: '6' }),
+              Object.freeze({ price: '58420.50', quantity: '3' }),
+              Object.freeze({ price: '59000.00', quantity: '3' }),
             ]),
           }),
         }),
@@ -638,7 +635,7 @@ describe('pure Futures workstation presentation', () => {
           depth: Object.freeze({
             ...state.resources.depth,
             bids: Object.freeze([
-              Object.freeze({ price: '58420.07', quantity: '2', total: '2' }),
+              Object.freeze({ price: '58420.07', quantity: '2' }),
             ]),
           }),
         }),
@@ -1053,12 +1050,12 @@ describe('instrument recency and interface scale', () => {
           depth: Object.freeze({
             ...state.resources.depth,
             bids: Object.freeze([
-              Object.freeze({ price: '58419.90', quantity: '2', total: '2' }),
-              Object.freeze({ price: '58419.60', quantity: '2', total: '4' }),
+              Object.freeze({ price: '58419.90', quantity: '2' }),
+              Object.freeze({ price: '58419.60', quantity: '2' }),
             ]),
             asks: Object.freeze([
-              Object.freeze({ price: '58420.10', quantity: '3', total: '3' }),
-              Object.freeze({ price: '58420.60', quantity: '1', total: '4' }),
+              Object.freeze({ price: '58420.10', quantity: '3' }),
+              Object.freeze({ price: '58420.60', quantity: '1' }),
             ]),
           }),
         }),
@@ -1087,13 +1084,13 @@ describe('instrument recency and interface scale', () => {
           depth: Object.freeze({
             ...state.resources.depth,
             bids: Object.freeze([
-              Object.freeze({ price: '100.7', quantity: '10', total: '10' }),
-              Object.freeze({ price: '100.6', quantity: '1', total: '11' }),
-              Object.freeze({ price: '100.5', quantity: '9', total: '20' }),
-              Object.freeze({ price: '100.4', quantity: '1', total: '21' }),
-              Object.freeze({ price: '100.3', quantity: '8', total: '29' }),
-              Object.freeze({ price: '100.2', quantity: '7', total: '36' }),
-              Object.freeze({ price: '100.1', quantity: '6', total: '42' }),
+              Object.freeze({ price: '100.7', quantity: '10' }),
+              Object.freeze({ price: '100.6', quantity: '1' }),
+              Object.freeze({ price: '100.5', quantity: '9' }),
+              Object.freeze({ price: '100.4', quantity: '1' }),
+              Object.freeze({ price: '100.3', quantity: '8' }),
+              Object.freeze({ price: '100.2', quantity: '7' }),
+              Object.freeze({ price: '100.1', quantity: '6' }),
             ]),
           }),
         }),
@@ -1121,8 +1118,8 @@ describe('instrument recency and interface scale', () => {
           depth: Object.freeze({
             ...state.resources.depth,
             // 300 USDT resting on the bid against 100 on the ask.
-            bids: Object.freeze([Object.freeze({ price: '100', quantity: '3', total: '3' })]),
-            asks: Object.freeze([Object.freeze({ price: '100', quantity: '1', total: '1' })]),
+            bids: Object.freeze([Object.freeze({ price: '100', quantity: '3' })]),
+            asks: Object.freeze([Object.freeze({ price: '100', quantity: '1' })]),
           }),
         }),
       }),
@@ -1462,7 +1459,7 @@ describe('production workstation container', () => {
         depth: Object.freeze({
           ...initialState.resources.depth,
           bids: Object.freeze([
-            Object.freeze({ price: '58419.50', quantity: '4', total: '4' }),
+            Object.freeze({ price: '58419.50', quantity: '4' }),
           ]),
         }),
       }),

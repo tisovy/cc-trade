@@ -303,6 +303,23 @@ export class FuturesProductionWorkstationService {
         this.depthRange = request.range;
         session.depthRange = request.range;
         if (!session.bootstrapped) return;
+        // The reading bounds the delivery, so a new reading is a new delivery —
+        // from the book already in hand, since the trim was never on what is
+        // retained. Waiting for the next diff would answer a coarsened step
+        // within a diff or two on a busy contract and never on a quiet one,
+        // which is the contract most likely to be read at a coarse step.
+        const view = session.orderBook.toRendererView(session.depthRange);
+        if (view !== null) {
+            session.lastDepthView = view;
+            this.emitResource(
+                session,
+                FUTURES_WORKSTATION_RESOURCES.DEPTH,
+                session.staleResources.has(FUTURES_WORKSTATION_RESOURCES.DEPTH)
+                    ? FUTURES_WORKSTATION_STATES.STALE
+                    : FUTURES_WORKSTATION_STATES.LIVE,
+                view,
+            );
+        }
         this.ensureDepthCovers(session);
     }
 
@@ -779,7 +796,7 @@ export class FuturesProductionWorkstationService {
             session.pendingEvents = [];
             if (!this.isCurrent(session)) return;
             if (bookResult.live) {
-                session.lastDepthView = session.orderBook.toRendererView();
+                session.lastDepthView = session.orderBook.toRendererView(session.depthRange);
                 this.emitResource(
                     session,
                     FUTURES_WORKSTATION_RESOURCES.DEPTH,
@@ -936,7 +953,7 @@ export class FuturesProductionWorkstationService {
                 else if (result.applied && session.bootstrapped) {
                     session.lastDepthAt = this.observedNow(session);
                     session.staleResources.delete(FUTURES_WORKSTATION_RESOURCES.DEPTH);
-                    session.lastDepthView = session.orderBook.toRendererView();
+                    session.lastDepthView = session.orderBook.toRendererView(session.depthRange);
                     this.emitResource(
                         session,
                         FUTURES_WORKSTATION_RESOURCES.DEPTH,
@@ -1030,7 +1047,7 @@ export class FuturesProductionWorkstationService {
                 }
                 session.lastDepthAt = this.observedNow(session);
                 session.staleResources.delete(FUTURES_WORKSTATION_RESOURCES.DEPTH);
-                session.lastDepthView = session.orderBook.toRendererView();
+                session.lastDepthView = session.orderBook.toRendererView(session.depthRange);
                 this.emitResource(
                     session,
                     FUTURES_WORKSTATION_RESOURCES.DEPTH,
@@ -1117,7 +1134,7 @@ export class FuturesProductionWorkstationService {
                     this.markResourceStale(
                         session,
                         FUTURES_WORKSTATION_RESOURCES.DEPTH,
-                        session.orderBook.toRendererView(),
+                        session.orderBook.toRendererView(session.depthRange),
                     );
                 }
                 if (now - session.lastTradesAt > FUTURES_PRODUCTION_WORKSTATION_FRESHNESS.TRADES_MS) {
