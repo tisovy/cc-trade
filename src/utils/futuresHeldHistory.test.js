@@ -137,4 +137,63 @@ describe('futuresHeldHistory', () => {
     expect(reread.symbols).toEqual(['BTCUSDT', 'ETHUSDT'])
     expect(reread.discovered).toBe(4)
   })
+
+  // The account read is a fan-out over a bounded, discovered set of contracts,
+  // and any of them can drop out of it: a failure on that contract, a discovery
+  // that ran short, a contract that no longer holds a position to seed it. What
+  // it read stands; what it did not look at is not thereby untrue. A position
+  // closed an hour ago used to disappear from the closed-position list the
+  // moment a later read stopped covering the contract it was on.
+  it('replaces only the contracts the read covered', () => {
+    const first = applyFuturesHistoryReading(createHeldFuturesHistory(), {
+      ...READING,
+      orders: [
+        { symbol: 'BTCUSDT', orderId: 1, status: 'FILLED', time: 1_000 },
+        { symbol: 'BEATUSDT', orderId: 5, status: 'FILLED', time: 2_000 },
+      ],
+      trades: [
+        { symbol: 'BTCUSDT', id: 7, realizedPnl: '12.5', time: 1_000 },
+        { symbol: 'BEATUSDT', id: 9, realizedPnl: '-44.1', time: 2_000 },
+      ],
+      symbols: ['BTCUSDT', 'BEATUSDT'],
+      discovered: 2,
+    }, 5_000)
+
+    // The next read reaches BTC only — BEAT failed, or fell out of the twelve.
+    const narrower = applyFuturesHistoryReading(first, {
+      ...READING,
+      orders: [{ symbol: 'BTCUSDT', orderId: 1, status: 'FILLED', time: 1_000 }],
+      trades: [{ symbol: 'BTCUSDT', id: 7, realizedPnl: '12.5', time: 1_000 }],
+      symbols: ['BTCUSDT'],
+      discovered: 1,
+    }, 12_000)
+
+    expect(narrower.trades.map(trade => trade.symbol)).toEqual(['BEATUSDT', 'BTCUSDT'])
+    expect(narrower.orders.map(order => order.symbol)).toEqual(['BEATUSDT', 'BTCUSDT'])
+    // Carried rows were read, so they widen the scope statement and are not
+    // counted among what the stream added since.
+    expect(narrower.symbols).toEqual(['BTCUSDT', 'BEATUSDT'])
+    expect(narrower.discovered).toBe(2)
+    expect(narrower.foldedTrades).toEqual([])
+  })
+
+  // A read that did cover the contract is still the authority on it: a row it
+  // dropped is a row the exchange no longer reports, not one to hold on to.
+  it('drops a row the read covered and did not return', () => {
+    const first = applyFuturesHistoryReading(createHeldFuturesHistory(), {
+      ...READING,
+      trades: [
+        { symbol: 'BTCUSDT', id: 7, realizedPnl: '12.5', time: 1_000 },
+        { symbol: 'BTCUSDT', id: 8, realizedPnl: '1.0', time: 2_000 },
+      ],
+      symbols: ['BTCUSDT'],
+    }, 5_000)
+    const again = applyFuturesHistoryReading(first, {
+      ...READING,
+      trades: [{ symbol: 'BTCUSDT', id: 7, realizedPnl: '12.5', time: 1_000 }],
+      symbols: ['BTCUSDT'],
+    }, 12_000)
+
+    expect(again.trades.map(trade => trade.id)).toEqual([7])
+  })
 })

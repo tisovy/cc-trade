@@ -1085,9 +1085,16 @@ export const FuturesWorkstationChart = ({
               ? `${liftedMark.side} ${liftedMark.label} order being placed at ${liftedMark.price}; nothing rests at that price yet`
               : `${liftedMark.side} ${liftedMark.label} order lifted off the book, following the pointer at ${liftedMark.price}`}
           >
-            <b>{liftedMark.label}</b>
-            <span>{liftedMark.price}</span>
-            <em>{liftedMark.placing ? 'placing…' : `${liftedMark.notional ?? '—'} USDT`}</em>
+            {/* The same plate a resting order is drawn on. Left as bare children
+                of the handle, the label and the value fell outside every rule
+                that sizes a handle's text — the value rendered at the desk's
+                body size inside a 16px plate and broke out of it, which is what
+                a dragged order looked like on screen. */}
+            <span className="futures-workstation-owned-order-plate">
+              <b>{liftedMark.label}</b>
+              <span>{liftedMark.price}</span>
+              <em>{liftedMark.placing ? 'placing…' : `${liftedMark.notional ?? '—'} USDT`}</em>
+            </span>
           </div>
         )}
         {/* The coordinate pass settles a frame later than the lift does, so the

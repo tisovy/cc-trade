@@ -45,7 +45,13 @@ const symbolOf = fill => (typeof fill?.symbol === 'string' ? fill.symbol.toUpper
 // `mayBeClosing` is false for the leftover of a fill that flipped the position:
 // that part is known to be opening, and its fill's realized PnL was made on the
 // way out of the position it just closed.
-const openRound = (fill, buy, mayBeClosing) => {
+//
+// `fromFlat` records whether the walk actually saw this round start from no
+// position at all. The first round of a contract did not — the window of fills
+// begins wherever the read reached, and the operator may already have been in
+// the trade — and neither did one that follows a round closing a position older
+// than the window.
+const openRound = (fill, buy, mayBeClosing, fromFlat) => {
   // A fill that already realizes PnL is closing something: the position it belongs
   // to was opened before this window of trades, and its entry price is not in the
   // data. Its leg is the one being closed, not the side of the fill — a BUY that
@@ -67,7 +73,27 @@ const openRound = (fill, buy, mayBeClosing) => {
     fee: 0,
     fills: 0,
     partial: closing,
+    fromFlat,
   }
+}
+
+// A reducing fill larger than the round is holding has two readings: the
+// position flipped, or it was bigger than this window of fills shows and the
+// excess is closing what was open before the window began. The exchange settles
+// it — realized PnL is reported per fill and against the position's own entry,
+// so a flip realizes exactly what closing the part the walk can see would
+// realize. Anything else means more was closed than the walk knows about.
+const flipIsConsistent = (round, { fill, held, price }) => {
+  const size = Number(fromAtoms(held))
+  const entryQuantity = Number(fromAtoms(round.entryAtoms))
+  if (!(size > 0) || !(entryQuantity > 0)) return false
+  const entryPrice = round.entryNotional / entryQuantity
+  const flipPnl = (round.positionSide === 'SHORT' ? entryPrice - price : price - entryPrice) * size
+  // One per cent of what the closing part is worth: realized PnL is exact
+  // arithmetic on both sides of this comparison, and the slack is only there so
+  // that a rounded price cannot decide it.
+  const tolerance = Math.abs(price * size) * 0.01
+  return Math.abs(toNumber(fill.realizedPnl) - flipPnl) <= tolerance
 }
 
 const applyFill = (round, { fill, atoms, price, share, increasing }) => {
@@ -154,12 +180,16 @@ const foldContractFills = (fills) => {
   const rounds = []
   let round = null
   let running = 0n
+  // The walk has not seen a flat position yet: the contract's first round may
+  // have been open before these fills begin.
+  let openedFromFlat = false
   for (const entry of fills) {
     const buy = isBuy(entry.fill)
     let remaining = entry.atoms
     while (remaining > 0n) {
       if (round === null) {
-        round = openRound(entry.fill, buy, remaining === entry.atoms)
+        round = openRound(entry.fill, buy, remaining === entry.atoms, openedFromFlat)
+        openedFromFlat = false
         running = 0n
       }
       const increasing = buy === (round.positionSide === 'LONG')
@@ -172,6 +202,18 @@ const foldContractFills = (fills) => {
         continue
       }
       const held = running < 0n ? -running : running
+      // The position was open before this window began: what looked like a flip
+      // is the rest of it being closed. Absorb the whole fill instead, and let
+      // the entry come from the realized PnL — which states the position's true
+      // average entry, where the fills in hand only state part of it. Read as a
+      // flip, this invented a position in the opposite direction, priced at both
+      // ends, and filed it in the closed-position review beside real ones.
+      if (!increasing && !round.partial && !round.fromFlat && remaining > held
+        && !flipIsConsistent(round, { fill: entry.fill, held, price: entry.price })) {
+        round.partial = true
+        round.entryAtoms = 0n
+        round.entryNotional = 0
+      }
       // Reducing more than the position holds closes it and opens the opposite
       // one with what is left over.
       const take = increasing || round.partial || remaining <= held ? remaining : held
@@ -188,6 +230,10 @@ const foldContractFills = (fills) => {
         if (running === 0n) {
           rounds.push(finishRound(round, false))
           round = null
+          // The walk has now seen the position reach flat, so whatever opens
+          // next is a position it can size — and a later fill that reduces past
+          // it really did flip.
+          openedFromFlat = true
         }
       }
     }

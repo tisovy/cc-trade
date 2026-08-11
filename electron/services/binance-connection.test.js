@@ -2603,10 +2603,11 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(history.futures_history.trades).toHaveLength(3);
     });
 
-    // Income is answered oldest-first from the start time given, so a week that
-    // overruns one page hands back the contracts traded a week ago and never
-    // reaches this morning's. The walk goes forward until a page comes back short.
-    it('walks income to the recent end and reports the contracts it could not read', async () => {
+    // Income is answered oldest-first from the start time given, so a walk across
+    // the whole week spends its pages on last Tuesday and never reaches this
+    // morning. The last day is therefore walked on its own and first; the rest of
+    // the week follows only while the fan-out still has room for what it may find.
+    it('walks the last day of income before the rest of the week', async () => {
         setupBinanceConnection({
             localWebSocketAccess: { host: '127.0.0.1' },
         });
@@ -2615,34 +2616,67 @@ describe('setupBinanceConnection user-data orchestration', () => {
             accept: vi.fn(() => moduleMocks.rendererConnection),
         });
         await activateMarket('futures-live');
-        const older = ['A1USDT', 'A2USDT', 'A3USDT', 'A4USDT', 'A5USDT', 'A6USDT', 'A7USDT'];
-        const newer = ['B1USDT', 'B2USDT', 'B3USDT', 'B4USDT', 'B5USDT', 'B6USDT'];
+        const today = ['B1USDT', 'B2USDT'];
+        const older = ['A1USDT', 'A2USDT'];
         moduleMocks.futuresAdapter.getTradedSymbolPage
-            .mockResolvedValueOnce({ symbols: older, full: true, lastTime: 100 })
-            .mockResolvedValueOnce({ symbols: newer, full: false, lastTime: 900 });
+            .mockResolvedValueOnce({ symbols: today, full: false, lastTime: 900 })
+            .mockResolvedValueOnce({ symbols: older, full: false, lastTime: 100 });
 
+        const before = Date.now();
         await runFuturesCommand({
             action: 'account.history',
             clientOrderId: 'history-4',
             symbol: 'ETHUSDT',
         });
 
-        const [, secondPage] = moduleMocks.futuresAdapter.getTradedSymbolPage.mock.calls;
-        expect(secondPage[0].startTime).toBe(101);
+        const day = 24 * 60 * 60 * 1000;
+        const [[recentPage], [olderPage]] = moduleMocks.futuresAdapter.getTradedSymbolPage.mock.calls;
+        // The first read covers the last day and is bounded at neither end above it.
+        expect(recentPage.startTime).toBeGreaterThanOrEqual(before - day);
+        expect(recentPage.endTime).toBeNull();
+        // The second covers the rest of the week and stops where the first began.
+        expect(olderPage.startTime).toBeLessThanOrEqual(before - (7 * day) + 5);
+        expect(olderPage.endTime).toBe(recentPage.startTime - 1);
         const [history] = moduleMocks.rendererConnection.sendUTF.mock.calls
             .map(([message]) => JSON.parse(message))
             .filter(payload => payload.futures_history);
-        const { symbols, discovered } = history.futures_history;
-        // Fourteen contracts are known and twelve are read: the contract on screen,
-        // then everything from the newest page, then the oldest page until the cap.
+        // Today's contracts lead the list, behind only the one on screen.
+        expect(history.futures_history.symbols).toEqual(['ETHUSDT', ...today, ...older]);
+        expect(history.futures_history.discoveryComplete).toBe(true);
+    });
+
+    // The fan-out reads twelve contracts. Once the last day alone has named that
+    // many, reading further back cannot add one — and the review must say that the
+    // rest of the week went unlooked-at rather than report a complete discovery.
+    it('stops discovering once the recent end has filled the fan-out, and says so', async () => {
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1' },
+        });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        const today = ['B1USDT', 'B2USDT', 'B3USDT', 'B4USDT', 'B5USDT', 'B6USDT',
+            'B7USDT', 'B8USDT', 'B9USDT', 'B10USDT', 'B11USDT', 'B12USDT', 'B13USDT'];
+        moduleMocks.futuresAdapter.getTradedSymbolPage
+            .mockResolvedValueOnce({ symbols: today, full: false, lastTime: 900 });
+
+        await runFuturesCommand({
+            action: 'account.history',
+            clientOrderId: 'history-4b',
+            symbol: 'ETHUSDT',
+        });
+
+        expect(moduleMocks.futuresAdapter.getTradedSymbolPage).toHaveBeenCalledOnce();
+        const [history] = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.futures_history);
+        const { symbols, discovered, discoveryComplete } = history.futures_history;
         expect(discovered).toBe(14);
         expect(symbols).toHaveLength(12);
-        expect(symbols.slice(0, 7)).toEqual(['ETHUSDT', ...newer]);
-        expect(symbols).not.toContain('A6USDT');
-        expect(symbols).not.toContain('A7USDT');
-        // The walk ended because a page came back short, so the count above is
-        // the whole set the fan-out was choosing from.
-        expect(history.futures_history.discoveryComplete).toBe(true);
+        expect(symbols.slice(0, 7)).toEqual(['ETHUSDT', ...today.slice(0, 6)]);
+        expect(discoveryComplete).toBe(false);
     });
 
     // The count of traded contracts is itself a read. When it fails halfway, the

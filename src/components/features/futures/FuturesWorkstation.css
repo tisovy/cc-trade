@@ -232,17 +232,25 @@
        a 690px floor plus a 420px floor under the chart is how the page itself
        gained a scrollbar on a short screen. */
     min-height: 0;
-    grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+    /* The tape has a share of the height rather than whatever its contents ask
+       for. Left on `auto`, its row took its content's height out of the book's
+       row first, and the book — which cannot shrink below its own floor — was
+       pushed out of its area and drawn over the tape. */
+    grid-template-rows: auto auto minmax(0, 1.15fr) minmax(0, 1fr) auto;
   }
+
 
   /* With the rail no longer scrolling, the list takes the room the ticket does
      not: three visible contracts in a 180px box was the rail's own doing. */
   .futures-workstation-instruments > .futures-workstation-contract-list {
-    /* Basis zero: the list takes what the ticket does not need, rather than
-       bidding its own four-thousand-pixel content height into the split and
-       squeezing the trading surface to a line. */
-    flex: 1 1 0;
-    max-height: none;
+    /* Both parts of the rail are sized from a basis rather than from their own
+       content, and both give ground in proportion to it. A list with basis zero
+       could not shrink at all — the whole shortfall came out of the ticket, and
+       on a 768px screen the ticket was left at fifty-five pixels: a header and a
+       scrollbar where the order buttons belong. */
+    flex: 1 1 140px;
+    min-height: 56px;
+    max-height: 220px;
   }
 
   /* The ticket keeps its natural height while there is room. Where there is not,
@@ -252,8 +260,12 @@
   .futures-workstation-instruments > .futures-production-execution-ticket {
     display: flex;
     flex-direction: column;
-    flex: 0 1 auto;
+    flex: 3 1 320px;
     min-height: 0;
+    /* Its own border is inside its width. At `width: 100%` in a content-box it
+       was two pixels wider than the rail that holds it, and the rail clipped
+       them. */
+    box-sizing: border-box;
   }
 
   .futures-workstation-instruments .futures-production-execution-body {
@@ -266,8 +278,10 @@
   .futures-workstation-dock-panel {
     /* A fixed 260px is a quarter of a short screen. It keeps its height where
        there is room and gives some back to the chart and the rail where there
-       is not. */
-    height: clamp(168px, 26vh, 260px);
+       is not — and it takes a fifth of the window rather than a quarter, because
+       every pixel it holds comes out of the book and the tape above it, which
+       were left with three prints and ten levels a side on a 1080p screen. */
+    height: clamp(150px, 20vh, 210px);
     max-height: none;
   }
 }
@@ -730,13 +744,17 @@
 
 /* A lifted order is not resting anywhere: it was cancelled when the drag picked
    it up, and nothing stands at this price until the exchange accepts the
-   placement. Dashed, and never drawn like a working order. */
+   placement. Dashed, and never drawn like a working order — on the plate, which
+   is the part of a handle that is actually drawn. */
 .futures-workstation-owned-order.is-lifted {
+  cursor: ns-resize;
+  pointer-events: none;
+}
+
+.futures-workstation-owned-order.is-lifted .futures-workstation-owned-order-plate {
   border-style: dashed;
   background: rgba(5, 12, 19, 0.72);
   box-shadow: 0 0 0 1px rgba(5, 12, 19, 0.9), 0 6px 18px rgba(0, 0, 0, 0.45);
-  cursor: ns-resize;
-  pointer-events: none;
 }
 
 /* The window between the cancellation and the placement, shown as the window it
@@ -1224,23 +1242,31 @@
 }
 
 /* Below this the two dock panels cannot both hold their tables: the positions
-   row alone needs about 780px and the split gives it 699. Stacked, each table
-   has the whole width and neither scrolls sideways. */
-@media (max-width: 1400px) {
+   row needs about 780px and the wider of the two panels only reaches that once
+   the desk is around 1425px across. Stacked, each table has the whole width and
+   neither scrolls sideways — but stacking costs the chart a second panel's
+   height, so the panels are shorter while they are stacked. */
+@media (max-width: 1460px) {
   .futures-workstation-dock {
     grid-template-columns: minmax(0, 1fr);
   }
+
+  .futures-workstation-dock-panel {
+    height: clamp(112px, 14vh, 160px);
+    max-height: 160px;
+  }
 }
 
-
 .futures-workstation-dock-panel {
-  overflow: hidden;
   display: flex;
   flex-direction: column;
   min-width: 0;
   max-height: 260px;
   padding: 8px 10px 10px;
-  overflow: auto;
+  /* The panel does not scroll: its table does. A scrolling panel takes its own
+     heading and its totals away with it, and it is what drew the sideways bar
+     under the positions table across the panel's whole width. */
+  overflow: hidden;
   background: var(--futures-shell);
 }
 
@@ -1327,12 +1353,17 @@
   /* Every money track is cut for five figures and two decimals — 10 000.00 — plus
      what sits beside it: the leverage badge after the symbol, the mode before the
      margin, the ROE after the uPnL. An account that grows past the column is an
-     account reading its own numbers through an ellipsis. */
+     account reading its own numbers through an ellipsis.
+     One set of tracks at every width, not two: the wider set needed 901px and the
+     panel that holds it never exceeds about 907, so the pair of breakpoints that
+     chose between them left a band — a 1600px window among them — where the wide
+     set was picked for a panel that could not hold it, and a sideways scrollbar
+     appeared under the positions table. */
   grid-template-columns:
-    minmax(116px, 1.1fr) 54px minmax(92px, 0.9fr) minmax(72px, 0.9fr)
-    minmax(72px, 0.9fr) minmax(72px, 0.9fr) minmax(104px, 1fr)
-    minmax(176px, 1.3fr) 62px;
-  gap: 8px;
+    minmax(96px, 1.1fr) 48px minmax(84px, 0.9fr) minmax(64px, 0.9fr)
+    minmax(64px, 0.9fr) minmax(64px, 0.9fr) minmax(88px, 1fr)
+    minmax(148px, 1.3fr) 56px;
+  gap: 6px;
   align-items: center;
   padding: 5px 7px;
   border-left: 3px solid transparent;
@@ -1347,29 +1378,8 @@
 
 .futures-workstation-dock-row.is-orders {
   grid-template-columns:
-    minmax(74px, 1fr) 54px minmax(96px, 1.2fr) minmax(76px, 1fr)
-    minmax(86px, 0.9fr) minmax(66px, 0.9fr) 74px;
-}
-
-/* Between the point where the dock splits into two columns and the width where
-   the positions row's own minimums fit inside the wider of them, the row was
-   wider than its panel — a horizontal scrollbar under a table that fits at every
-   other size. The tracks tighten instead; every value keeps its exact form in
-   the cell's title. */
-@media (max-width: 1560px) {
-  .futures-workstation-dock-row {
-    grid-template-columns:
-      minmax(96px, 1.1fr) 48px minmax(84px, 0.9fr) minmax(64px, 0.9fr)
-      minmax(64px, 0.9fr) minmax(64px, 0.9fr) minmax(88px, 1fr)
-      minmax(148px, 1.3fr) 56px;
-    gap: 6px;
-  }
-
-  .futures-workstation-dock-row.is-orders {
-    grid-template-columns:
-      minmax(68px, 1fr) 48px minmax(84px, 1.2fr) minmax(70px, 1fr)
-      minmax(78px, 0.9fr) minmax(60px, 0.9fr) 68px;
-  }
+    minmax(68px, 1fr) 48px minmax(84px, 1.2fr) minmax(70px, 1fr)
+    minmax(78px, 0.9fr) minmax(60px, 0.9fr) 68px;
 }
 
 .futures-workstation-dock-row > span {
@@ -1670,12 +1680,18 @@
 .futures-workstation-owned-order {
   gap: 4px;
   padding: 0;
+  /* The handle itself is a positioning box, nothing more: what is drawn is the
+     plate inside it. It kept the border of the plate it used to be, which drew a
+     second outline around every handle — and around the dragged one, an outline
+     the dragged plate then broke out of. */
+  border: 0;
   background: none;
   cursor: default;
 }
 
 .futures-workstation-owned-order-grip,
-.futures-workstation-owned-order-cancel {
+.futures-workstation-owned-order-cancel,
+.futures-workstation-owned-order-plate {
   display: flex;
   align-items: center;
   gap: 4px;
@@ -1704,10 +1720,20 @@
   letter-spacing: 0.04em;
 }
 
-.futures-workstation-owned-order-grip span {
+.futures-workstation-owned-order-grip span,
+.futures-workstation-owned-order-plate span,
+.futures-workstation-owned-order-plate em {
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: calc(var(--fx-ui-scale, 1) * 8.75px);
   font-variant-numeric: tabular-nums;
+}
+
+/* What the dragged order is worth, or that it is being placed. Sized with the
+   rest of the plate rather than left at the size the chart layer inherits. */
+.futures-workstation-owned-order-plate em {
+  padding: 0 1px;
+  color: #93a6b7;
+  font-style: normal;
 }
 
 .futures-workstation-owned-order-cancel {
@@ -1931,10 +1957,14 @@
 
 /* History spans the account, so both tables lead with the contract: a row that
    does not name its own pair is unreadable once more than one is in the list. */
+/* Eight tracks in the narrower of the two dock panels: the minimums are what
+   that panel can actually hold at the width where the dock splits, so the review
+   is read rather than scrolled sideways to. Anything longer than its track keeps
+   its exact form in the cell's title. */
 .futures-workstation-dock-row.is-order-history {
   grid-template-columns:
-    minmax(104px, 1fr) minmax(84px, 0.9fr) 54px minmax(80px, 0.9fr)
-    minmax(88px, 1fr) minmax(96px, 1.1fr) minmax(88px, 1fr) minmax(84px, 0.9fr);
+    minmax(68px, 1fr) minmax(64px, 0.9fr) 44px minmax(56px, 0.9fr)
+    minmax(66px, 1fr) minmax(72px, 1.1fr) minmax(66px, 1fr) minmax(60px, 0.9fr);
 }
 
 /* One row per closed position rather than per execution, so it carries both ends
@@ -1943,8 +1973,8 @@
    PnL is the one column the panel exists for. */
 .futures-workstation-dock-row.is-rounds {
   grid-template-columns:
-    minmax(104px, 1fr) minmax(80px, 0.8fr) minmax(64px, 0.7fr) minmax(84px, 1fr)
-    minmax(76px, 1fr) minmax(76px, 1fr) minmax(112px, 1.2fr);
+    minmax(88px, 1fr) minmax(68px, 0.8fr) minmax(56px, 0.7fr) minmax(68px, 1fr)
+    minmax(64px, 1fr) minmax(64px, 1fr) minmax(96px, 1.2fr);
 }
 
 .futures-workstation-dock-status {
@@ -2142,4 +2172,61 @@
 
 .futures-workstation-history-notice.is-error {
   color: #ff8490;
+}
+
+/* ── The desk fits the window ──────────────────────────────────────────────── */
+
+/* Last in the file on purpose. Every rule below overrides a floor declared by
+   the panel it names, and a media query carries no extra weight of its own —
+   written earlier, each of these lost to the very declaration it exists to
+   undo, and the desk went on overflowing exactly as before.
+   No panel in this grid may demand more height than the row the window can give
+   it. The book asked for 390px inside a row a 1080p screen leaves 170px for, and
+   a grid item that cannot shrink does not shrink: it overflows its area and
+   paints across the one below it. That is what put the book on top of the tape.
+   Here the grid decides the heights and each panel clips or scrolls inside what
+   it is given. Below 761px the panels are stacked in one column and size
+   themselves, so none of this applies. */
+@media (min-width: 761px) {
+  .futures-workstation-chart,
+  .futures-workstation-chart-frame,
+  .futures-workstation-chart-canvas,
+  .futures-workstation-depth,
+  .futures-workstation-trades {
+    min-height: 0;
+  }
+
+  .futures-workstation-depth,
+  .futures-workstation-trades {
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* The book body is a flex item of the panel now, so the two sides divide what
+     the panel has and the renderer draws the number of levels that fits. */
+  .futures-workstation-book-body {
+    flex: 1 1 0;
+  }
+
+  /* The tape fills the room its panel has rather than a fixed 160px, so the
+     right-hand column ends exactly where the dock begins. */
+  .futures-workstation-trade-rows {
+    flex: 1 1 0;
+    min-height: 0;
+    max-height: none;
+  }
+
+  /* Heights are declared, so the borders and padding belong inside them: the
+     dock panel's 260px was 278 on screen, and every handle on the chart stood
+     three pixels taller than the row it was drawn on. */
+  .futures-workstation-dock-panel {
+    box-sizing: border-box;
+  }
+}
+
+.futures-workstation-owned-order,
+.futures-workstation-owned-order-grip,
+.futures-workstation-owned-order-cancel,
+.futures-workstation-owned-order-plate {
+  box-sizing: border-box;
 }

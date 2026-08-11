@@ -47,16 +47,41 @@ const isHeld = history => history?.readAt !== null && history?.readAt !== undefi
 export const futuresHistoryOrderKey = order => `${order?.symbol ?? ''}:${order?.orderId ?? ''}`
 export const futuresHistoryTradeKey = trade => `${trade?.symbol ?? ''}:${trade?.id ?? ''}`
 
+const contractOf = row => String(row?.symbol ?? '').toUpperCase()
+
 const newestFirst = (left, right) => (Number(right?.time) || 0) - (Number(left?.time) || 0)
 
 // Read rows win over folded ones: the exchange's own record of an order is more
 // complete than the report that announced it.
-const mergeRows = (readRows, heldRows, foldedKeys, keyOf) => {
+//
+// What survives a read is the second half of it, and it is what makes this a
+// review rather than a snapshot. The account read is a fan-out over a bounded
+// set of contracts — twelve at most, discovered from income, and any of them may
+// come back as a failure — so two reads minutes apart can cover different
+// contracts. Replacing everything with what the newer one returned deletes the
+// rows of every contract it did not reach: a position closed an hour ago
+// vanished from the closed-position list because the contract it was on no
+// longer had a position or a working order to put it back in the read.
+//
+// A contract the read covered is replaced by what it says. A contract it did not
+// cover keeps what the last read that did cover it said. The past does not
+// change, and a completed trade is not un-completed by a narrower look.
+const mergeRows = (readRows, heldRows, foldedKeys, keyOf, covered) => {
   const read = new Set(readRows.map(keyOf))
-  const survivors = heldRows.filter(row => foldedKeys.has(keyOf(row)) && !read.has(keyOf(row)))
+  const survivors = heldRows.filter((row) => {
+    if (read.has(keyOf(row))) return false
+    return foldedKeys.has(keyOf(row)) || !covered.has(contractOf(row))
+  })
   return {
     rows: Object.freeze([...readRows, ...survivors].sort(newestFirst)),
-    folded: Object.freeze(survivors.map(keyOf)),
+    // Only what the stream added is still counted as added: a row held because
+    // this read did not look at its contract was read, and saying otherwise
+    // would inflate the "added since" the panel states.
+    folded: Object.freeze(survivors.filter(row => foldedKeys.has(keyOf(row))).map(keyOf)),
+    // Contracts whose rows are here because an *earlier read* covered them. A
+    // folded row's contract is not one of these: the stream is not a read, and
+    // the scope statement beneath the table counts reads.
+    carried: survivors.filter(row => !foldedKeys.has(keyOf(row))).map(contractOf),
   }
 }
 
@@ -91,18 +116,33 @@ export const applyFuturesHistoryReading = (history, payload, now) => {
       error: payload.error,
     })
   }
+  // Which contracts this read actually looked at. A payload that does not say —
+  // an older backend, or a read that named none — is taken at face value for the
+  // contracts its rows mention, which is the behaviour that was there before.
+  const read = asArray(payload?.symbols).map(entry => String(entry ?? '').toUpperCase())
+  const covered = new Set(read.length > 0
+    ? read
+    : [...asArray(payload?.orders), ...asArray(payload?.trades)].map(contractOf))
   const orders = mergeRows(
     asArray(payload?.orders),
     history.orders,
     new Set(history.foldedOrders),
     futuresHistoryOrderKey,
+    covered,
   )
   const trades = mergeRows(
     asArray(payload?.trades),
     history.trades,
     new Set(history.foldedTrades),
     futuresHistoryTradeKey,
+    covered,
   )
+  // Every contract the review now covers, each of them from a read that happened
+  // — this one, or the one that last reached it. Stating only this read's set
+  // would undercount a panel that is showing more than this read returned.
+  const symbols = [...new Set([...read, ...orders.carried, ...trades.carried])]
+    .filter(symbol => symbol !== '')
+  const discovered = Number.isSafeInteger(payload?.discovered) ? payload.discovered : 0
   return Object.freeze({
     ...history,
     symbol: typeof payload?.symbol === 'string' ? payload.symbol : history.symbol,
@@ -111,8 +151,8 @@ export const applyFuturesHistoryReading = (history, payload, now) => {
     trades: trades.rows,
     foldedOrders: orders.folded,
     foldedTrades: trades.folded,
-    symbols: Object.freeze(asArray(payload?.symbols)),
-    discovered: Number.isSafeInteger(payload?.discovered) ? payload.discovered : 0,
+    symbols: Object.freeze(symbols),
+    discovered: Math.max(discovered, symbols.length),
     discoveryComplete: payload?.discoveryComplete !== false,
     error: null,
     readAt: now,

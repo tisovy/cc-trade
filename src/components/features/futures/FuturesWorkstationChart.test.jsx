@@ -772,6 +772,38 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     expect(screen.queryByRole('status', { name: /lifted off the book|being placed/ }))
       .not.toBeInTheDocument()
   })
+  // Every label and value on a handle is sized by the rules that style its
+  // plate. Left as bare children of the handle, the dragged order's value fell
+  // outside all of them and rendered at the desk's body size inside a 16px
+  // plate — the drag looked broken on screen for as long as it lasted.
+  it('draws the lifted order on the same plate a resting one is drawn on', async () => {
+    const props = {
+      ...properties([candle(1_784_000_000_000)]),
+      ownedOrders: [workingOrder({ orderId: '93', side: 'BUY', positionEffect: 'ENTRY' })],
+    }
+    render(<FuturesWorkstationChart {...props} />)
+    const canvas = screen.getByTestId('futures-workstation-chart')
+    canvas.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 320, height: 320, right: 320, bottom: 320,
+    })
+    const handle = await screen.findByRole('button', {
+      name: 'Move BUY LONG order at 59900 with Ctrl or Alt drag',
+    })
+
+    fireEvent.pointerDown(handle, { pointerId: 5, button: 0, altKey: true })
+    await settle()
+    fireEvent.pointerMove(dragSurface(), { pointerId: 5, clientY: 80, altKey: true })
+
+    const lifted = screen.getByRole('status', { name: /lifted off the book/ })
+    const plate = lifted.querySelector('.futures-workstation-owned-order-plate')
+    expect(plate).not.toBeNull()
+    // Nothing is drawn outside it: the handle is a positioning box only.
+    expect(lifted.children).toHaveLength(1)
+    expect(plate).toHaveTextContent('LONG')
+    expect(plate).toHaveTextContent('59920')
+    expect(plate).toHaveTextContent('29950 USDT')
+  })
+
   // The order is gone from the book the moment the drag starts, so the level it
   // was lifted from carries one faint, unlabelled mark and nothing else.
   it('marks the price it was lifted from once, faintly and without an axis label', async () => {

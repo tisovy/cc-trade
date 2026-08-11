@@ -10,6 +10,20 @@ clip it behind a scrollbar it does not own.
 - **WHEN** the workspace is rendered in a window shorter than its preferred layout
 - **THEN** the page does not scroll, and every panel remains readable at the reduced size
 
+### Requirement: No panel is drawn over another
+Every panel of the workspace SHALL be contained within the area the layout gives
+it. No panel SHALL declare a minimum size that the layout cannot satisfy, and no
+panel's content SHALL be painted across the panel below or beside it, at any
+window size the desk supports.
+
+#### Scenario: The window leaves the order book less height than it prefers
+- **WHEN** the window is short enough that the order book's preferred height does not fit its row
+- **THEN** the book shows fewer levels within its own area, and nothing of it is drawn over the aggregate-trade tape
+
+#### Scenario: A table is wider than the panel holding it
+- **WHEN** a portfolio dock table's columns need more width than its panel has
+- **THEN** the table's own tracks are what give way, and the panel itself neither scrolls nor overflows
+
 ### Requirement: The market header never hides the contract's numbers
 The market header SHALL present the last price, the day's change, high, low and
 volume, and the funding readings, without any of them being placed outside the

@@ -938,6 +938,14 @@ export function setupBinanceConnection({
     // history is the only read that answers it without naming a symbol first;
     // every other history endpoint on USDⓈ-M requires one.
     const FUTURES_HISTORY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+    // The part of that window a session review is actually about, walked first
+    // and on its own. Income is paged from the *oldest* end of whatever range it
+    // is given — Binance offers no other direction — so a single walk across the
+    // week spends its page budget on last Tuesday and never reaches this
+    // morning. An account that realizes more than four thousand times a week
+    // therefore discovered no contract it traded today, and the review covered
+    // only what the account still holds a position or an order on.
+    const FUTURES_HISTORY_RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
     // Each contract costs two signed reads at weight 5. Twelve is a session's worth
     // of contracts against a 800/minute budget — eight was not: the contract on
     // screen, the contracts holding positions and the contracts holding working
@@ -2035,7 +2043,7 @@ export function setupBinanceConnection({
                     remember(order?.symbol);
                 }
             }
-            // Walked from the oldest end of the window to the newest, because that
+            // Walked from the oldest end of the range to the newest, because that
             // is the only direction the endpoint offers. Each full page means there
             // is a newer one behind it; the pages are then read back to front, so
             // the contract traded most recently leads the list and the cap below
@@ -2045,32 +2053,56 @@ export function setupBinanceConnection({
             // walk: the pages already in hand are contracts the review can cover,
             // and throwing them away because the third read timed out would drop
             // history the desk had already paid for.
-            const pages = [];
-            let complete = true;
-            let startTime = Date.now() - FUTURES_HISTORY_WINDOW_MS;
-            for (let page = 0; page < FUTURES_INCOME_MAX_PAGES; page += 1) {
-                let traded = null;
-                try {
-                    traded = await futuresRestLimiter.execute(
-                        () => futuresTradingAdapter.getTradedSymbolPage({ startTime }),
-                        FUTURES_INCOME_READ_WEIGHT,
-                    );
-                } catch (error) {
-                    // The fan-out still covers what the desk already knows about;
-                    // only contracts closed and switched away from go unlisted.
-                    logger.warn('[futures-history] traded-symbol discovery failed:', error?.code || error?.message);
-                    complete = false;
-                    break;
+            const walkIncome = async (from, until) => {
+                const pages = [];
+                let complete = true;
+                let startTime = from;
+                for (let page = 0; page < FUTURES_INCOME_MAX_PAGES; page += 1) {
+                    let traded = null;
+                    try {
+                        traded = await futuresRestLimiter.execute(
+                            () => futuresTradingAdapter.getTradedSymbolPage({ startTime, endTime: until }),
+                            FUTURES_INCOME_READ_WEIGHT,
+                        );
+                    } catch (error) {
+                        // The fan-out still covers what the desk already knows about;
+                        // only contracts closed and switched away from go unlisted.
+                        logger.warn('[futures-history] traded-symbol discovery failed:', error?.code || error?.message);
+                        complete = false;
+                        break;
+                    }
+                    pages.push(traded?.symbols ?? []);
+                    if (!traded?.full || !Number.isFinite(traded?.lastTime)) break;
+                    startTime = traded.lastTime + 1;
+                    // The last page still came back full: there are contracts behind it
+                    // this walk will not reach, and the review must not imply otherwise.
+                    if (page === FUTURES_INCOME_MAX_PAGES - 1) complete = false;
                 }
-                pages.push(traded?.symbols ?? []);
-                if (!traded?.full || !Number.isFinite(traded?.lastTime)) break;
-                startTime = traded.lastTime + 1;
-                // The last page still came back full: there are contracts behind it
-                // this walk will not reach, and the review must not imply otherwise.
-                if (page === FUTURES_INCOME_MAX_PAGES - 1) complete = false;
-            }
-            for (const page of pages.reverse()) {
-                for (const symbol of page) remember(symbol);
+                return { pages, complete };
+            };
+            // Today first, and the rest of the week only if there is still room to
+            // read a contract it might find. A page budget spent on the far end of
+            // the window is how a review of *this* session came back covering none
+            // of it.
+            const rememberPages = (pages) => {
+                for (const page of [...pages].reverse()) {
+                    for (const symbol of page) remember(symbol);
+                }
+            };
+            const now = Date.now();
+            const recentFrom = now - FUTURES_HISTORY_RECENT_WINDOW_MS;
+            const recent = await walkIncome(recentFrom, null);
+            let complete = recent.complete;
+            rememberPages(recent.pages);
+            if (symbols.length < FUTURES_HISTORY_MAX_SYMBOLS) {
+                const older = await walkIncome(now - FUTURES_HISTORY_WINDOW_MS, recentFrom - 1);
+                complete = complete && older.complete;
+                rememberPages(older.pages);
+            } else {
+                // The read is already at its ceiling, so the older end of the week
+                // was not looked at. Saying the discovery was complete would claim
+                // a look that did not happen.
+                complete = false;
             }
             if (symbols.length > FUTURES_HISTORY_MAX_SYMBOLS) {
                 logger.info(`[futures-history] ${symbols.length} contracts traded; reading the ${FUTURES_HISTORY_MAX_SYMBOLS} most relevant: ${symbols.slice(0, FUTURES_HISTORY_MAX_SYMBOLS).join(', ')}`);

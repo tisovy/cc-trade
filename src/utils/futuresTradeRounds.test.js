@@ -187,6 +187,52 @@ describe('buildFuturesTradeRounds', () => {
     expect(rounds[0].key).not.toBe(rounds[1].key)
   })
 
+  // The read reaches a bounded number of fills, so its window regularly opens
+  // while the operator is already in a position. Adding to that position and
+  // then closing all of it reduces more than the fills in hand say is held —
+  // which was read as a flip, and put a position that never existed, priced at
+  // both ends, into the closed-position review.
+  it('closes the whole position when the window opened inside it', () => {
+    const rounds = buildFuturesTradeRounds([
+      // 3000 were already held; only these 2000 are in the window.
+      fill({ id: 1, side: 'BUY', price: '1.5', quantity: '2000', time: 1000 }),
+      fill({ id: 2, side: 'SELL', price: '1.4', quantity: '5000', realizedPnl: '-500', time: 2000 }),
+      fill({ id: 3, side: 'BUY', price: '1.546', quantity: '3133', time: 3000 }),
+    ])
+
+    expect(rounds).toHaveLength(2)
+    // The position that is running now, at its true size.
+    expect(rounds[0]).toMatchObject({ positionSide: 'LONG', quantity: '3133', open: true })
+    // One closed position, of everything that was closed — and its entry is the
+    // exchange's own, recovered from what the close realized rather than
+    // averaged over the part of the entry that happens to be in the window.
+    expect(rounds[1]).toMatchObject({
+      positionSide: 'LONG',
+      quantity: '5000',
+      entryPrice: 1.5,
+      entryImplied: true,
+      exitPrice: 1.4,
+      realizedPnl: -500,
+      open: false,
+    })
+  })
+
+  // The same shape, where the position really did flip. Realized PnL settles it:
+  // a flip realizes exactly what closing the part in hand realizes, and here it
+  // does, so the short that was opened is reported.
+  it('still reports a flip the fills account for', () => {
+    const rounds = buildFuturesTradeRounds([
+      fill({ id: 1, side: 'BUY', price: '1.5', quantity: '5000', time: 1000 }),
+      fill({ id: 2, side: 'SELL', price: '1.4', quantity: '8000', realizedPnl: '-500', time: 2000 }),
+    ])
+
+    expect(rounds).toHaveLength(2)
+    expect(rounds[0]).toMatchObject({ positionSide: 'SHORT', quantity: '3000', open: true })
+    expect(rounds[1]).toMatchObject({
+      positionSide: 'LONG', quantity: '5000', entryPrice: 1.5, realizedPnl: -500, open: false,
+    })
+  })
+
   it('orders the fills itself rather than trusting the order they arrive in', () => {
     const rounds = buildFuturesTradeRounds([
       fill({ id: 3, side: 'SELL', price: '3', quantity: '100', realizedPnl: '100', time: 3000 }),
