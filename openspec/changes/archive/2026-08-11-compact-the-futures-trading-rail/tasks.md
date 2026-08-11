@@ -34,8 +34,8 @@
 - [x] 5.2b Re-run repository-wide lint after the pre-existing `no-undef` references in `electron/services/binance-connection.js` were fixed independently on `master`; confirm this UX change did not modify the Electron service.
 - [x] 5.3 Run `OPENSPEC_TELEMETRY=0 openspec validate compact-the-futures-trading-rail`, `git diff --check`, and GitNexus change detection for all working-tree changes; verify only the expected symbols, direct dependants, and production Futures flow are affected before committing to `master`.
 - [x] 5.3a Audit GitNexus's aggregate `HIGH` change-detection rating: confirm individual production-symbol impacts remain `MEDIUM`/`LOW`, all direct callers are covered, and the affected processes stay inside the Futures workstation/Context renderer path.
-- [ ] 5.4 Restart the full application/backend to clear any non-persistent pre-existing pause, then have the operator verify on live data at the narrow Electron size: recent pills/search, `LIVE` ↔ `SYNC`, retained failures/retries, compact ticket, book levels, last price, and tape disclosure/update/scroll behavior.
-- [ ] 5.5 After operator confirmation, mark live verification complete and archive `compact-the-futures-trading-rail`; otherwise record every discovered issue as an explicit unfinished or follow-up task instead of archiving it.
+- [x] 5.4 Restart the full application/backend to clear any non-persistent pre-existing pause, then have the operator verify on live data at the narrow Electron size: recent pills/search, `LIVE` ↔ `SYNC`, retained failures/retries, compact ticket, book levels, last price, and tape disclosure/update/scroll behavior.
+- [x] 5.5 After operator confirmation, mark live verification complete and archive `compact-the-futures-trading-rail`; otherwise record every discovered issue as an explicit unfinished or follow-up task instead of archiving it.
 
 ## 6. Post-implementation Audit
 
