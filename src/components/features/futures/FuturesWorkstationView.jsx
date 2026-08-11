@@ -6,6 +6,7 @@ import {
 } from '../../../utils/futuresWorkstationProtocolShared.js'
 import { orderFuturesContracts } from '../../../utils/futuresSymbolHistory.js'
 import {
+  futuresBookDepthRange,
   futuresBookGroupKey,
   futuresBookGroupSteps,
   futuresBookWallKeys,
@@ -139,6 +140,7 @@ export const FuturesWorkstationView = ({
   onOrderEdit,
   onRetry,
   onTapeConfigurationChange,
+  onDepthRangeChange,
   onSymbolChange,
   onIntervalChange,
 }) => {
@@ -513,6 +515,19 @@ export const FuturesWorkstationView = ({
     step: activeGroupStep,
     limit: depthLevelsPerSide,
   }), [activeGroupStep, depth, depthLevelsPerSide])
+  // The book is bought as deep as it is read, and this is the reading: the rows
+  // on screen times the step they are grouped by. Stated whenever it changes —
+  // a coarser step, a taller panel, another contract — so the backend can buy
+  // the page that covers it instead of the deepest page every time.
+  const depthRange = futuresBookDepthRange({
+    step: activeGroupStep ?? selectedContract?.filters?.price?.tickSize ?? null,
+    rows: depthLevelsPerSide,
+  })
+  useEffect(() => {
+    if (depthRange === null) return
+    onDepthRangeChange?.(depthRange)
+  }, [depthRange, onDepthRangeChange, selectedSymbol])
+
   // The heaviest levels on each visible side. Only the size is thickened: the
   // wall is the size, and a whole bold row would drag its price and its running
   // total into the marking with it — five loud rows instead of five walls.

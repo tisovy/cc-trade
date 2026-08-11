@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   FUTURES_PRODUCTION_WORKSTATION_ENVIRONMENT,
+  createFuturesProductionWorkstationConfigureDepthRequest,
   createFuturesProductionWorkstationConfigureTapeRequest,
   createFuturesProductionWorkstationLoadCandleHistoryRequest,
   createFuturesProductionWorkstationSelectIntervalRequest,
@@ -104,6 +105,9 @@ const useFuturesProductionWorkstation = ({
   // re-sent on the first subscription, instead of the tape running at defaults
   // while the panel displays the restored values.
   const tapeSettingsRef = useRef(readStoredTapeSettings())
+  // Reset with the subscription: a range stated for the contract being left says
+  // nothing about the one being opened.
+  const depthRangeRef = useRef(null)
   const ownerRef = useRef(0)
   const historyRequestRef = useRef(null)
   const historySelectionRef = useRef(null)
@@ -132,6 +136,29 @@ const useFuturesProductionWorkstation = ({
     catalogBufferRef.current = null
     activeSubscriptionRef.current = null
     setRetryNonce(previous => previous + 1)
+  }, [])
+
+  // How far past the best price the rows on screen reach: how many of them,
+  // times the step they are grouped by. The backend buys the book one page
+  // deeper when the snapshot it holds does not prove that far, and opens a
+  // contract on the cheapest page — a book bought as deep as the coarsest step
+  // could ever want costs ten times a read at the finest.
+  const configureDepth = useCallback((range) => {
+    const activeSubscription = activeSubscriptionRef.current
+    if (activeSubscription === null) return false
+    if (typeof range !== 'string' || depthRangeRef.current === range) return false
+    try {
+      const sent = activeSubscription.sendMessage(
+        createFuturesProductionWorkstationConfigureDepthRequest({
+          requestId: activeSubscription.requestId,
+          range,
+        }),
+      ) !== false
+      if (sent) depthRangeRef.current = range
+      return sent
+    } catch {
+      return false
+    }
   }, [])
 
   const configureTape = useCallback((settings) => {
@@ -360,6 +387,7 @@ const useFuturesProductionWorkstation = ({
       }))
     } else if (sent) {
       activeSubscriptionRef.current = Object.freeze({ requestId, sendMessage })
+      depthRangeRef.current = null
       const tapeSettings = tapeSettingsRef.current
       if (tapeSettings.throttleEnabled !== FUTURES_WORKSTATION_DEFAULT_TAPE_SETTINGS.throttleEnabled
         || tapeSettings.timeoutMs !== FUTURES_WORKSTATION_DEFAULT_TAPE_SETTINGS.timeoutMs
@@ -465,6 +493,7 @@ const useFuturesProductionWorkstation = ({
       : EMPTY_CANDLE_HISTORY,
     retry,
     configureTape,
+    configureDepth,
     loadCandleHistory,
   }
 }

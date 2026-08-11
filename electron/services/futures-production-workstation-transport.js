@@ -24,6 +24,11 @@ export const FUTURES_PRODUCTION_WORKSTATION_ROUTES = Object.freeze({
 
 export const FUTURES_PRODUCTION_WORKSTATION_WEIGHTS = Object.freeze({
     EXCHANGE_INFO: 1,
+    // Binance charges depth by page. 5, 10, 20 and 50 all cost 2, so 50 is the
+    // free maximum and there is never a reason to ask for less.
+    DEPTH_50: 2,
+    DEPTH_100: 5,
+    DEPTH_500: 10,
     DEPTH_1000: 20,
     KLINES_99: 1,
     // Binance charges klines by page size: 100 → 1, 1000 → 5.
@@ -32,6 +37,16 @@ export const FUTURES_PRODUCTION_WORKSTATION_WEIGHTS = Object.freeze({
     PREMIUM_INDEX_SYMBOL: 1,
     TICKER_SYMBOL: 1,
 });
+
+// Deepest first is not the order they are climbed — this is the ladder, read
+// from the cheapest rung. A contract is opened on the first one and only buys a
+// deeper page when the rows on screen need range the current one does not prove.
+export const FUTURES_PRODUCTION_WORKSTATION_DEPTH_PAGES = Object.freeze([
+    Object.freeze({ limit: 50, weight: 2 }),
+    Object.freeze({ limit: 100, weight: 5 }),
+    Object.freeze({ limit: 500, weight: 10 }),
+    Object.freeze({ limit: 1_000, weight: 20 }),
+]);
 
 export const FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS = Object.freeze({
     DEPTH: 1_000,
@@ -493,13 +508,24 @@ export const createFuturesProductionWorkstationReviewedTransport = ({
         const cache = EXCHANGE_INFO_CACHE.inFlight === null ? 'miss' : 'shared';
         return waitAndReport(startExchangeInfoRefresh(), cache);
     };
-    const readDepthSnapshot = async ({ symbol, signal, retryAttempt = 0 } = {}) => {
+    const readDepthSnapshot = async ({
+        symbol,
+        signal,
+        retryAttempt = 0,
+        limit = FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.DEPTH,
+    } = {}) => {
         if (!isBoundedExchangeIdentity(symbol, SYMBOL_PATTERN)) fail('INVALID_SELECTION');
+        // Only the pages the exchange prices are askable: an unlisted limit is
+        // answered at the next page up and charged for it, which would put the
+        // desk's own accounting out of step with what it is billed.
+        const page = FUTURES_PRODUCTION_WORKSTATION_DEPTH_PAGES
+            .find(entry => entry.limit === limit);
+        if (!page) fail('INVALID_SELECTION');
         return timedWeightedGet(
             retryAttempt > 0 ? 'depth-retry' : 'depth',
-            FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.DEPTH_1000,
+            page.weight,
             FUTURES_PRODUCTION_WORKSTATION_ROUTES.DEPTH,
-            { symbol, limit: String(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.DEPTH) },
+            { symbol, limit: String(page.limit) },
             FUTURES_WORKSTATION_BODY_LIMITS.DEPTH,
             signal,
             backendProxy,

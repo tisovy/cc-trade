@@ -165,11 +165,43 @@ const trimSide = (side, descending) => {
     }
 };
 
-const applyLevels = (side, levels) => {
+const applyLevels = (side, levels, band = null) => {
     for (const [price, quantity] of levels) {
+        // Outside the band the snapshot proved, a level is one the desk cannot
+        // account for: its neighbours were never read, so keeping it would build
+        // a row out of one known level and an unknown gap. A removal is always
+        // applied — forgetting a level is never a lie.
+        if (band !== null && quantity !== '0' && !band.contains(price)) continue;
         if (quantity === '0') side.delete(price);
         else side.set(price, quantity);
     }
+};
+
+// The stretch of price a snapshot actually covered. Within it every level is
+// either from the snapshot or from a diff applied since, so the book is exact.
+// Beyond it the book knows only the levels a diff happened to touch, which is
+// not a book — it is a book with holes in it, and a grouped row drawn across
+// those holes understates the market.
+const bandOfSnapshot = (snapshot) => {
+    const floor = snapshot.bids.reduce(
+        (lowest, [price]) => (lowest === null || compareFuturesWorkstationDecimals(price, lowest) < 0
+            ? price
+            : lowest),
+        null,
+    );
+    const ceiling = snapshot.asks.reduce(
+        (highest, [price]) => (highest === null || compareFuturesWorkstationDecimals(price, highest) > 0
+            ? price
+            : highest),
+        null,
+    );
+    if (floor === null || ceiling === null) return null;
+    return Object.freeze({
+        floor,
+        ceiling,
+        contains: price => compareFuturesWorkstationDecimals(price, floor) >= 0
+            && compareFuturesWorkstationDecimals(price, ceiling) <= 0,
+    });
 };
 
 // The best price on a side is a minimum, not an ordering — taking it by sorting
@@ -204,6 +236,7 @@ export class FuturesWorkstationOrderBook {
         this.asks = new Map();
         this.buffer = [];
         this.bufferedBytes = 0;
+        this.band = null;
     }
 
     beginBootstrap() {
@@ -213,6 +246,55 @@ export class FuturesWorkstationOrderBook {
         this.asks.clear();
         this.buffer = [];
         this.bufferedBytes = 0;
+        this.band = null;
+    }
+
+    /**
+     * Whether the band still reaches `range` past the best price on both sides.
+     *
+     * The rows on screen — how many, times the step they are grouped by — are
+     * what has to be covered. When the market walks far enough that it is not,
+     * the answer is a fresh snapshot, not a book extended past what it proves.
+     */
+    coversRange(range) {
+        if (this.band === null) return false;
+        if (typeof range !== 'string' || !isPositiveFuturesWorkstationDecimal(range)) return true;
+        const bid = bestPrice(this.bids, true);
+        const ask = bestPrice(this.asks, false);
+        if (bid === null || ask === null) return false;
+        return compareFuturesWorkstationDecimals(
+            subtractFuturesWorkstationDecimals(bid, range),
+            this.band.floor,
+        ) >= 0 && compareFuturesWorkstationDecimals(
+            addFuturesWorkstationDecimals(ask, range),
+            this.band.ceiling,
+        ) <= 0;
+    }
+
+    /**
+     * How many times deeper the band would have to be to cover `range`; 0 when
+     * it already does.
+     *
+     * A ratio rather than a verdict, so a step three sizes coarser buys the page
+     * it needs in one read instead of climbing to it one read at a time. Read as
+     * ordinary numbers on purpose: it decides how much to ask for, never what
+     * anything is worth.
+     */
+    rangeShortfall(range) {
+        if (this.coversRange(range)) return 0;
+        if (this.band === null) return Number.POSITIVE_INFINITY;
+        const span = Number(subtractFuturesWorkstationDecimals(this.band.ceiling, this.band.floor));
+        const bid = bestPrice(this.bids, true);
+        const ask = bestPrice(this.asks, false);
+        if (bid === null || ask === null) return Number.POSITIVE_INFINITY;
+        const needed = Number(addFuturesWorkstationDecimals(
+            subtractFuturesWorkstationDecimals(ask, bid),
+            addFuturesWorkstationDecimals(range, range),
+        ));
+        if (!Number.isFinite(span) || !Number.isFinite(needed) || span <= 0) {
+            return Number.POSITIVE_INFINITY;
+        }
+        return Math.max(1, needed / span);
     }
 
     push(rawDelta, frameBytes = 0) {
@@ -264,6 +346,7 @@ export class FuturesWorkstationOrderBook {
             return Object.freeze({ live: false, reason: 'snapshot-not-bridged', resync: true });
         }
 
+        this.band = bandOfSnapshot(snapshot);
         applyLevels(this.bids, snapshot.bids);
         applyLevels(this.asks, snapshot.asks);
         this.lastUpdateId = snapshot.lastUpdateId;
@@ -286,8 +369,8 @@ export class FuturesWorkstationOrderBook {
     }
 
     applyDelta(delta) {
-        applyLevels(this.bids, delta.bids);
-        applyLevels(this.asks, delta.asks);
+        applyLevels(this.bids, delta.bids, this.band);
+        applyLevels(this.asks, delta.asks, this.band);
         trimSide(this.bids, true);
         trimSide(this.asks, false);
         this.lastUpdateId = delta.finalUpdateIdBigInt;
@@ -330,5 +413,6 @@ export class FuturesWorkstationOrderBook {
         this.asks.clear();
         this.buffer = [];
         this.bufferedBytes = 0;
+        this.band = null;
     }
 }

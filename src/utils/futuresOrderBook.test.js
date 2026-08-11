@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  futuresBookDepthRange,
   futuresBookGroupKey,
   futuresBookGroupSteps,
   futuresBookWallKeys,
@@ -7,6 +8,26 @@ import {
 } from './futuresOrderBook.js'
 
 const level = (price, quantity) => ({ price, quantity })
+
+describe('futuresBookDepthRange', () => {
+  // The reading the backend buys the book against: fourteen rows at a tick of
+  // 0.000001 reach fourteen millionths past the best price, and a book bought
+  // deeper than that costs ten times the weight for nothing.
+  it('states how far the rows on screen reach, exactly', () => {
+    expect(futuresBookDepthRange({ step: '0.000001', rows: 14 })).toBe('0.000014')
+    expect(futuresBookDepthRange({ step: '0.5', rows: 200 })).toBe('100')
+    expect(futuresBookDepthRange({ step: '0.1', rows: 3 })).toBe('0.3')
+  })
+
+  it('states nothing it cannot state exactly', () => {
+    expect(futuresBookDepthRange({ step: '0', rows: 14 })).toBeNull()
+    expect(futuresBookDepthRange({ step: '-1', rows: 14 })).toBeNull()
+    expect(futuresBookDepthRange({ step: null, rows: 14 })).toBeNull()
+    expect(futuresBookDepthRange({ step: '0.1', rows: 0 })).toBeNull()
+    expect(futuresBookDepthRange({ step: '0.1', rows: 1.5 })).toBeNull()
+    expect(futuresBookDepthRange()).toBeNull()
+  })
+})
 
 describe('futuresBookGroupSteps', () => {
   it('derives steps from the contract tick so a step is always tradable', () => {

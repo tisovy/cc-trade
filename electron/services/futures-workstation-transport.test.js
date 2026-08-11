@@ -33,6 +33,7 @@ vi.mock('ws', () => {
 
 import {
     FUTURES_PRODUCTION_WORKSTATION_BOOTSTRAP_CONCURRENCY,
+    FUTURES_PRODUCTION_WORKSTATION_DEPTH_PAGES,
     FUTURES_PRODUCTION_WORKSTATION_EXCHANGE_INFO_CACHE_TTL_MS,
     FUTURES_PRODUCTION_WORKSTATION_EXCHANGE_INFO_STALE_SERVE_MS,
     FUTURES_PRODUCTION_WORKSTATION_READ_BUDGET,
@@ -959,6 +960,9 @@ describe('reviewed environment-specific Futures workstation transports', () => {
     it('freezes the documented route and request-weight registries', () => {
         expect(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS).toEqual({
             EXCHANGE_INFO: 1,
+            DEPTH_50: 2,
+            DEPTH_100: 5,
+            DEPTH_500: 10,
             DEPTH_1000: 20,
             KLINES_99: 1,
             KLINES_1000: 5,
@@ -966,11 +970,20 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             PREMIUM_INDEX_SYMBOL: 1,
             TICKER_SYMBOL: 1,
         });
-        expect(Object.values(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS)
-            .reduce((total, weight) => total + weight, 0)).toBe(30);
-        expect(Object.entries(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS)
-            .filter(([name]) => name !== 'EXCHANGE_INFO')
-            .reduce((total, [, weight]) => total + weight, 0)).toBe(29);
+        // One contract switch at the cheapest page against one at the deepest.
+        const switchAt = depth => depth + FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.KLINES_99
+            + FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.INDEX_KLINES_99
+            + FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.PREMIUM_INDEX_SYMBOL
+            + FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.TICKER_SYMBOL;
+        expect(switchAt(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.DEPTH_50)).toBe(6);
+        expect(switchAt(FUTURES_PRODUCTION_WORKSTATION_WEIGHTS.DEPTH_1000)).toBe(24);
+        // The ladder is read from the cheapest rung, and every rung is a page
+        // the exchange actually prices — an unlisted limit is answered at the
+        // next page up and charged for it.
+        expect(FUTURES_PRODUCTION_WORKSTATION_DEPTH_PAGES.map(page => [page.limit, page.weight]))
+            .toEqual([[50, 2], [100, 5], [500, 10], [1_000, 20]]);
+        expect(FUTURES_PRODUCTION_WORKSTATION_DEPTH_PAGES.at(-1).limit)
+            .toBe(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS.DEPTH);
         expect(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS).toEqual({
             DEPTH: 1_000,
             KLINES: 99,

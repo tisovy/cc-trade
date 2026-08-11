@@ -22,6 +22,7 @@ export const FUTURES_PRODUCTION_WORKSTATION_ACTIONS = Object.freeze({
   SELECT_SYMBOL: 'futures.production.workstation.select-symbol',
   SELECT_INTERVAL: 'futures.production.workstation.select-interval',
   CONFIGURE_TAPE: 'futures.production.workstation.configure-tape',
+  CONFIGURE_DEPTH: 'futures.production.workstation.configure-depth',
   LOAD_CANDLE_HISTORY: 'futures.production.workstation.load-candle-history',
   UNSUBSCRIBE: 'futures.production.workstation.unsubscribe',
 })
@@ -48,6 +49,10 @@ export const createFuturesProductionWorkstationSelectIntervalRequest = value => 
 
 export const createFuturesProductionWorkstationConfigureTapeRequest = value => (
   createRequest(FUTURES_PRODUCTION_WORKSTATION_ACTIONS.CONFIGURE_TAPE, value)
+)
+
+export const createFuturesProductionWorkstationConfigureDepthRequest = value => (
+  createRequest(FUTURES_PRODUCTION_WORKSTATION_ACTIONS.CONFIGURE_DEPTH, value)
 )
 
 export const createFuturesProductionWorkstationLoadCandleHistoryRequest = value => (

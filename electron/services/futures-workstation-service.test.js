@@ -10,6 +10,7 @@ import {
     FUTURES_PRODUCTION_WORKSTATION_FIXTURE,
 } from './futures-production-workstation-fixtures.js';
 import {
+    createFuturesProductionWorkstationConfigureDepthRequest,
     createFuturesProductionWorkstationConfigureTapeRequest,
     createFuturesProductionWorkstationLoadCandleHistoryRequest,
     createFuturesProductionWorkstationSelectIntervalRequest,
@@ -51,6 +52,10 @@ const productionTapeRequest = (requestId, overrides = {}) => JSON.stringify(
         minNotionalUsdt: '0',
         ...overrides,
     }),
+);
+
+const productionDepthRequest = (requestId, range) => JSON.stringify(
+    createFuturesProductionWorkstationConfigureDepthRequest({ requestId, range }),
 );
 
 const productionTradeFrame = ({
@@ -1757,5 +1762,57 @@ describe('production Futures workstation service', () => {
         const serialized = JSON.stringify(events);
         expect(serialized).not.toMatch(/apiKey|apiSecret|signature|listenKey|authorization|credential/i);
         expect(serialized).not.toMatch(/placeOrder|cancelOrder|quantityDraft|executionIntent/i);
+    });
+});
+
+// Binance charges depth by page: 50 levels cost 2, a thousand cost 20. The desk
+// draws fourteen rows a side, which at the finest step spans fourteen ticks —
+// so it bought the deepest page the coarsest possible step could ever want,
+// on every contract switch, before knowing whether the operator wanted it.
+describe('the book is bought as deep as it is read', () => {
+    const openContract = async (requestId) => {
+        const base = createFuturesProductionWorkstationFakeTransport();
+        const readDepthSnapshot = vi.fn(options => base.readDepthSnapshot(options));
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            transport: { ...base, readDepthSnapshot },
+        }));
+        await runtime.service.handleRequest(productionRequest(requestId), { emit: () => {} });
+        return { runtime, readDepthSnapshot };
+    };
+
+    it('opens a contract on the cheapest page', async () => {
+        const { readDepthSnapshot } = await openContract('depth-page-cheap');
+        expect(readDepthSnapshot).toHaveBeenCalledOnce();
+        expect(readDepthSnapshot.mock.calls[0][0]).toMatchObject({ limit: 50 });
+    });
+
+    it('buys a deeper page when the rows reach past what the snapshot proved', async () => {
+        const { runtime, readDepthSnapshot } = await openContract('depth-page-deepen');
+        // The fixture book spans about ±2.40 around the mid; fourteen rows at a
+        // step this coarse reach five past the best price on each side.
+        await runtime.service.handleRequest(
+            productionDepthRequest('depth-page-deepen', '5'),
+            { emit: () => {} },
+        );
+        await vi.waitFor(() => expect(readDepthSnapshot.mock.calls.length).toBeGreaterThan(1));
+        expect(readDepthSnapshot.mock.calls.at(-1)[0].limit).toBeGreaterThan(50);
+    });
+
+    it('asks for nothing when the reading already fits the page it holds', async () => {
+        const { runtime, readDepthSnapshot } = await openContract('depth-page-fits');
+        await runtime.service.handleRequest(
+            productionDepthRequest('depth-page-fits', '0.5'),
+            { emit: () => {} },
+        );
+        await Promise.resolve();
+        expect(readDepthSnapshot).toHaveBeenCalledOnce();
+    });
+
+    it('refuses a range stated by anyone but the subscription that owns the book', async () => {
+        const { runtime } = await openContract('depth-page-owner');
+        await expect(runtime.service.handleRequest(
+            productionDepthRequest('someone-else', '5'),
+            { emit: () => {} },
+        )).rejects.toMatchObject({ code: 'DEPTH_OWNER_UNAVAILABLE' });
     });
 });

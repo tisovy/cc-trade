@@ -417,6 +417,7 @@ export const FuturesProductionWorkstation = ({
         onOrderEdit={handleOrderEdit}
         onRetry={workstationState.retry}
         onTapeConfigurationChange={workstationState.configureTape}
+        onDepthRangeChange={workstationState.configureDepth}
         onSymbolChange={handleSymbolChange}
         onIntervalChange={setInterval}
       />

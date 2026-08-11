@@ -11,6 +11,7 @@ import {
 } from './futuresWorkstationProtocolShared.js'
 import {
   FUTURES_PRODUCTION_WORKSTATION_ACTIONS,
+  createFuturesProductionWorkstationConfigureDepthRequest,
   createFuturesProductionWorkstationConfigureTapeRequest,
   createFuturesProductionWorkstationEvent,
   createFuturesProductionWorkstationSelectIntervalRequest,
@@ -236,6 +237,39 @@ describe('Futures workstation environment-specific protocols', () => {
       minNotionalUsdt: '0',
       ...override,
     })).toThrowError(expect.objectContaining({ code: 'INVALID_TAPE_CONFIGURATION' }))
+  })
+
+  // How far past the best price the rows on screen reach — the rows times the
+  // step they are grouped by. One decimal, because the count and the step are
+  // the renderer's to know and their product is all the backend needs to pick
+  // which page of the book to buy.
+  it('round-trips a bounded depth reading without market authority', () => {
+    const request = createFuturesProductionWorkstationConfigureDepthRequest({
+      requestId: requestValues.requestId,
+      range: '0.000014',
+    })
+
+    expect(request).toEqual(expect.objectContaining({
+      action: FUTURES_PRODUCTION_WORKSTATION_ACTIONS.CONFIGURE_DEPTH,
+      range: '0.000014',
+    }))
+    expect(request).not.toHaveProperty('symbol')
+    expect(request).not.toHaveProperty('interval')
+    expect(readFuturesProductionWorkstationRequest(JSON.stringify(request))).toEqual(request)
+    expect(Object.isFrozen(request)).toBe(true)
+  })
+
+  it.each([
+    ['a negative range', '-1'],
+    ['a non-finite range', 'Infinity'],
+    ['a non-canonical range', '01'],
+    ['a range that is not a string', 14],
+    ['a range longer than the bound', `0.${'0'.repeat(64)}1`],
+  ])('rejects %s in a bounded depth reading', (_label, range) => {
+    expect(() => createFuturesProductionWorkstationConfigureDepthRequest({
+      requestId: requestValues.requestId,
+      range,
+    })).toThrowError(expect.objectContaining({ code: 'INVALID_DEPTH_CONFIGURATION' }))
   })
 
   it('rejects extra request fields including network and execution authority', () => {

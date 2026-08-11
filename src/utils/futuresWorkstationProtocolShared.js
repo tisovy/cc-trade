@@ -66,6 +66,12 @@ export const FUTURES_WORKSTATION_DEFAULT_TAPE_SETTINGS = Object.freeze({
   minNotionalUsdt: '0',
 })
 
+// How far past the best price the rows on screen reach: how many of them, times
+// the step they are grouped by. The desk buys the book one page deeper when the
+// snapshot it holds does not prove that far — a book bought deeper than it is
+// read costs ten times the weight of one read at the finest step.
+export const FUTURES_WORKSTATION_DEPTH_RANGE_MAX_LENGTH = 64
+
 // One request reads at most this many candles behind the live window. Binance
 // serves 1500 per call; 1000 keeps the read at weight 5 and the response inside
 // the transport's body bound, and deeper history is simply more requests.
@@ -696,6 +702,27 @@ export const validateFuturesWorkstationRequest = ({
     return freezeFuturesWorkstationValue(value)
   }
 
+  // How far past the best price the rows on screen reach. One decimal, in the
+  // contract's own quote currency, because the step and the row count are the
+  // renderer's to know and their product is all the backend needs.
+  if (value.action === actions.CONFIGURE_DEPTH) {
+    if (!hasExactFuturesWorkstationKeys(value, [
+      'channelId',
+      'version',
+      'marketType',
+      'environment',
+      'action',
+      'requestId',
+      'range',
+    ])
+      || typeof value.range !== 'string'
+      || value.range.length > FUTURES_WORKSTATION_DEPTH_RANGE_MAX_LENGTH
+      || !NONNEGATIVE_DECIMAL_PATTERN.test(value.range)) {
+      fail('INVALID_DEPTH_CONFIGURATION')
+    }
+    return freezeFuturesWorkstationValue(value)
+  }
+
   // Reading behind the live window is bounded on both sides: a point in time to
   // read back from, and how many candles that one read may return.
   if (value.action === actions.LOAD_CANDLE_HISTORY) {
@@ -789,6 +816,7 @@ export const createFuturesWorkstationRequest = ({
   throttleEnabled,
   timeoutMs,
   minNotionalUsdt,
+  range,
   actions,
 }) => validateFuturesWorkstationRequest({
   value: {
@@ -802,9 +830,11 @@ export const createFuturesWorkstationRequest = ({
       ? {}
       : action === actions.CONFIGURE_TAPE
         ? { throttleEnabled, timeoutMs, minNotionalUsdt }
-        : action === actions.LOAD_CANDLE_HISTORY
-          ? { symbol, interval, endTime, limit }
-          : { symbol, interval }),
+        : action === actions.CONFIGURE_DEPTH
+          ? { range }
+          : action === actions.LOAD_CANDLE_HISTORY
+            ? { symbol, interval, endTime, limit }
+            : { symbol, interval }),
   },
   channelId,
   environment,

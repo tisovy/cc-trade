@@ -271,3 +271,71 @@ describe('authoritative Futures local order book', () => {
         expect(book.toRendererView()).toBeNull();
     });
 });
+
+// A snapshot proves a stretch of price. Inside it the book is exact; outside it
+// the book knows only the levels a diff happened to touch, and a grouped row
+// drawn across those holes understates the market. That is why the desk can buy
+// fifty levels for weight 2 instead of a thousand for 20 — as long as it keeps
+// to what it proved.
+describe('the band a snapshot proves', () => {
+    const banded = () => {
+        const book = new FuturesWorkstationOrderBook();
+        book.push(delta(), 200);
+        book.bootstrap(snapshot());
+        return book;
+    };
+
+    it('does not keep a level beyond what the snapshot covered', () => {
+        const book = banded();
+        book.push(delta({
+            firstUpdateId: '102',
+            finalUpdateId: '103',
+            previousFinalUpdateId: '101',
+            bids: [['8.00', '7.0'], ['9.50', '1.5']],
+            asks: [['13.00', '9.0'], ['11.50', '2.5']],
+        }), 200);
+        const view = book.toRendererView();
+        expect(view.bids.map(row => row.price)).toEqual(['10', '9.5', '9']);
+        expect(view.asks.map(row => row.price)).toEqual(['11', '11.5', '12']);
+    });
+
+    // Forgetting a level is never a lie: a removal is applied wherever it lands.
+    it('applies a removal outside the band', () => {
+        const book = banded();
+        book.push(delta({
+            firstUpdateId: '102',
+            finalUpdateId: '103',
+            previousFinalUpdateId: '101',
+            bids: [['9.00', '0']],
+            asks: [],
+        }), 200);
+        expect(book.toRendererView().bids.map(row => row.price)).toEqual(['10']);
+    });
+
+    it('says whether it still reaches as far as the rows on screen', () => {
+        const book = banded();
+        // Best bid 10, best ask 11; the band runs 9 to 12.
+        expect(book.coversRange('1')).toBe(true);
+        expect(book.coversRange('1.5')).toBe(false);
+        // No range asked for is nothing to fall short of.
+        expect(book.coversRange('0')).toBe(true);
+    });
+
+    // A ratio rather than a verdict, so a step three sizes coarser buys the page
+    // it needs in one read instead of climbing to it one read at a time.
+    it('states how many times deeper it would have to be', () => {
+        const book = banded();
+        expect(book.rangeShortfall('1')).toBe(0);
+        // Band spans 3; covering ±6 around a spread of 1 needs 13.
+        expect(book.rangeShortfall('6')).toBeCloseTo(13 / 3, 6);
+    });
+
+    it('forgets the band when the book is rebuilt or stopped', () => {
+        const book = banded();
+        expect(book.coversRange('1')).toBe(true);
+        book.beginBootstrap();
+        expect(book.coversRange('1')).toBe(false);
+        book.stop();
+        expect(book.coversRange('1')).toBe(false);
+    });
+});

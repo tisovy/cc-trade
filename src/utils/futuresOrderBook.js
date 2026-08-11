@@ -43,6 +43,22 @@ export const futuresBookGroupSteps = (tickSize) => {
   })).filter(entry => entry.step !== null))
 }
 
+/**
+ * How far past the best price the rows on screen reach: how many of them, times
+ * the step they are grouped by.
+ *
+ * Exact, in the contract's own quote currency. The backend buys the book one
+ * page deeper when the snapshot it holds does not prove that far — and opens
+ * every contract on the cheapest page, which is a tenth of the weight of the
+ * thousand levels a 500-tick step would need.
+ */
+export const futuresBookDepthRange = ({ step, rows } = {}) => {
+  const stepAtoms = parseAtoms(typeof step === 'string' ? step : '')
+  if (stepAtoms === null || stepAtoms <= 0n) return null
+  if (!Number.isSafeInteger(rows) || rows <= 0) return null
+  return formatAtoms(stepAtoms * BigInt(rows))
+}
+
 const alignAtoms = (priceAtoms, stepAtoms, roundUp) => {
   const remainder = priceAtoms % stepAtoms
   if (remainder === 0n) return priceAtoms

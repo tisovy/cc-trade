@@ -264,6 +264,11 @@ for (const [name, source] of [[PRODUCTION_PROTOCOL, productionProtocol]]) {
         'select-symbol',
         'select-interval',
         'configure-tape',
+        // Reviewed read: how far past the best price the rows on screen reach.
+        // It carries one decimal and no market authority; all it decides is
+        // which page of the depth route already in the reviewed set is asked
+        // for — a shallower one than the desk used to buy unconditionally.
+        'configure-depth',
         // Reviewed read: candles behind the live window, over the public klines
         // route already in the reviewed set, bounded by contract, interval, a
         // point in time and a page size. It reads nothing the subscription
@@ -271,7 +276,7 @@ for (const [name, source] of [[PRODUCTION_PROTOCOL, productionProtocol]]) {
         'load-candle-history',
         'unsubscribe',
     ]);
-    if (actions.length !== 7 || actions.some(action => !allowed.has(action))) {
+    if (actions.length !== 8 || actions.some(action => !allowed.has(action))) {
         fail(`${name} exposes an action outside the exact read-only workstation protocol`);
     }
 }

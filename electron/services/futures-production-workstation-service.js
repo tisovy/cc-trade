@@ -10,6 +10,9 @@ import {
     FUTURES_WORKSTATION_STATES,
 } from '../../src/utils/futuresWorkstationProtocolShared.js';
 import {
+    FUTURES_PRODUCTION_WORKSTATION_DEPTH_PAGES,
+} from './futures-production-workstation-transport.js';
+import {
     FUTURES_WORKSTATION_MARKET_LIMITS,
     appendFuturesWorkstationTrade,
     createFuturesWorkstationCatalogFrames,
@@ -139,6 +142,32 @@ export class FuturesProductionWorkstationService {
         this.current = null;
         this.stopped = false;
         this.tapeSettings = FUTURES_WORKSTATION_DEFAULT_TAPE_SETTINGS;
+        // How far past the best price the rows on screen reach, and which page
+        // of the book that took. Both are kept across a contract switch: the
+        // operator reads the next contract the way they read the last one, so
+        // opening at the page that reading needs saves climbing to it.
+        this.depthRange = null;
+        this.depthPage = 0;
+    }
+
+    depthPageLimit() {
+        const pages = FUTURES_PRODUCTION_WORKSTATION_DEPTH_PAGES;
+        return pages[Math.min(this.depthPage, pages.length - 1)].limit;
+    }
+
+    // Up by however much is short, never back down on its own: a market that
+    // walks out of a band it has already outgrown would otherwise buy the same
+    // page again and again. `factor` is how many times deeper the band has to
+    // be, so a step three sizes coarser buys its page in one read.
+    deepenDepthPage(factor = 1) {
+        const pages = FUTURES_PRODUCTION_WORKSTATION_DEPTH_PAGES;
+        if (this.depthPage >= pages.length - 1) return false;
+        const wanted = pages[this.depthPage].limit * Math.max(1, factor);
+        const target = pages.findIndex(page => page.limit >= wanted);
+        this.depthPage = target < 0
+            ? pages.length - 1
+            : Math.max(this.depthPage + 1, target);
+        return true;
     }
 
     async handleRequest(raw, { emit } = {}) {
@@ -151,6 +180,10 @@ export class FuturesProductionWorkstationService {
             this.configureTape(request);
             return;
         }
+        if (request.action === FUTURES_PRODUCTION_WORKSTATION_ACTIONS.CONFIGURE_DEPTH) {
+            this.configureDepth(request);
+            return;
+        }
         if (request.action === FUTURES_PRODUCTION_WORKSTATION_ACTIONS.LOAD_CANDLE_HISTORY) {
             await this.loadCandleHistory(request);
             return;
@@ -159,6 +192,8 @@ export class FuturesProductionWorkstationService {
             if (this.current?.requestId === request.requestId) {
                 this.stopCurrent();
                 this.tapeSettings = FUTURES_WORKSTATION_DEFAULT_TAPE_SETTINGS;
+                this.depthRange = null;
+                this.depthPage = 0;
             }
             return;
         }
@@ -235,6 +270,42 @@ export class FuturesProductionWorkstationService {
             );
             if (!emitted) return;
         }
+    }
+
+    // The rows on screen reach this far past the best price. If the book on hand
+    // cannot prove that far, a deeper page is bought and bridged — the operator
+    // asked for the range by choosing the step, so the weight is paid for
+    // something asked for.
+    configureDepth(request) {
+        const session = this.current;
+        if (!session || !this.isCurrent(session) || session.requestId !== request.requestId) {
+            throw new FuturesProductionWorkstationServiceError('DEPTH_OWNER_UNAVAILABLE');
+        }
+        this.depthRange = request.range;
+        session.depthRange = request.range;
+        if (!session.bootstrapped) return;
+        this.ensureDepthCovers(session);
+    }
+
+    ensureDepthCovers(session) {
+        if (!this.isCurrent(session)
+            || !session.bootstrapped
+            || session.reconnectTimer !== null
+            || session.bookRecovering
+            || session.depthRange === null) return;
+        const shortfall = session.orderBook.rangeShortfall(session.depthRange);
+        if (shortfall === 0) return;
+        // Backed off like a recovery, and for the same reason: every diff that
+        // lands on a book too shallow asks for the next page again.
+        const now = this.observedNow(session);
+        if (session.depthDeepenedAt !== null
+            && now - session.depthDeepenedAt
+                < FUTURES_PRODUCTION_WORKSTATION_BOOK_RECOVERY.COOLDOWN_MS) return;
+        // Already at the deepest page the exchange publishes: the book shows what
+        // it can prove, which is the whole point of proving it.
+        if (!this.deepenDepthPage(shortfall)) return;
+        session.depthDeepenedAt = now;
+        void this.recoverBook(session, 'DEPTH_RANGE_SHORT');
     }
 
     configureTape(request) {
@@ -421,6 +492,12 @@ export class FuturesProductionWorkstationService {
     async startGeneration(request, emit, reconnectAttempt) {
         this.stopCurrent();
         this.generation += 1;
+        // A contract is opened on the cheapest page, whatever the last one
+        // needed. The renderer states its range as soon as it subscribes, and
+        // the book deepens within a diff or two if that range needs it — one
+        // cheap read is a smaller price than every contract paying for the
+        // deepest reading of the session.
+        if (reconnectAttempt === 0) this.depthPage = 0;
         const session = {
             request,
             requestId: request.requestId,
@@ -459,6 +536,8 @@ export class FuturesProductionWorkstationService {
             indexCandles: Object.freeze([]),
             trades: Object.freeze([]),
             tapeSettings: this.tapeSettings,
+            depthRange: this.depthRange,
+            depthDeepenedAt: null,
             pendingTapeTimer: null,
             pendingTapeEmission: false,
             lastTapeEmittedAt: null,
@@ -606,6 +685,7 @@ export class FuturesProductionWorkstationService {
             const depthValue = await this.transport.readDepthSnapshot({
                 symbol: session.symbol,
                 signal: bootstrapAbort.signal,
+                limit: this.depthPageLimit(),
             });
             if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
             session.bootstrapDepthSnapshot = normalizeFuturesWorkstationDepthSnapshot(
@@ -636,6 +716,7 @@ export class FuturesProductionWorkstationService {
                     symbol: session.symbol,
                     signal: bootstrapAbort.signal,
                     retryAttempt: depthRetryAttempt,
+                    limit: this.depthPageLimit(),
                 });
                 if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
                 session.bootstrapDepthSnapshot = normalizeFuturesWorkstationDepthSnapshot(
@@ -810,6 +891,11 @@ export class FuturesProductionWorkstationService {
                         FUTURES_WORKSTATION_STATES.LIVE,
                         session.lastDepthView,
                     );
+                    // The market moves; the band the snapshot proved does not.
+                    // When it stops reaching as far as the rows on screen, the
+                    // answer is a fresh snapshot — not a book extended past what
+                    // it can account for.
+                    this.ensureDepthCovers(session);
                 }
                 return;
             }
@@ -878,6 +964,7 @@ export class FuturesProductionWorkstationService {
                         symbol: session.symbol,
                         signal: session.abortController.signal,
                         retryAttempt: attempt,
+                        limit: this.depthPageLimit(),
                     });
                     if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
                     const snapshot = normalizeFuturesWorkstationDepthSnapshot(
