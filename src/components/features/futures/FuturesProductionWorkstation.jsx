@@ -36,7 +36,7 @@ export const FuturesProductionWorkstation = ({
   // the rail lists it from the first frame instead of after the first click.
   const [symbolHistory, setSymbolHistory] = useState(() => {
     const stored = readFuturesSymbolHistory()
-    return stored.lastSymbol ? rememberFuturesSymbol(stored, stored.lastSymbol) : stored
+    return rememberFuturesSymbol(stored, stored.lastSymbol ?? DEFAULT_FUTURES_SYMBOL)
   })
   const [symbol, setSymbol] = useState(() => (
     readFuturesSymbolHistory().lastSymbol ?? DEFAULT_FUTURES_SYMBOL

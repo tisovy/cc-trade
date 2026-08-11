@@ -1,5 +1,6 @@
 import { render } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { readFuturesSymbolHistory } from '../../../utils/futuresSymbolHistory.js'
 import FuturesProductionWorkstation from './FuturesProductionWorkstation.jsx'
 
 const productionWorkstationMocks = vi.hoisted(() => ({
@@ -41,9 +42,22 @@ const executionState = (overrides = {}) => ({
 
 afterEach(() => {
   vi.clearAllMocks()
+  localStorage.clear()
 })
 
 describe('FuturesProductionWorkstation account review', () => {
+  it('seeds a fresh recent list with the active starting contract', () => {
+    localStorage.clear()
+    render(
+      <FuturesProductionWorkstation enabled executionState={executionState()} />,
+    )
+
+    expect(productionWorkstationMocks.viewRender.mock.lastCall[0].symbolHistory)
+      .toMatchObject({ recent: ['BTCUSDT'], lastSymbol: 'BTCUSDT' })
+    expect(readFuturesSymbolHistory())
+      .toMatchObject({ recent: ['BTCUSDT'], lastSymbol: 'BTCUSDT' })
+  })
+
   // Read once, when the workspace opens on a contract it can name. The hook
   // above it is mounted by the workspace and never told the symbol, so a read
   // issued there arrives without one and the backend completes it from the

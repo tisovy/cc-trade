@@ -36,3 +36,13 @@
 - [x] 5.3a Audit GitNexus's aggregate `HIGH` change-detection rating: confirm individual production-symbol impacts remain `MEDIUM`/`LOW`, all direct callers are covered, and the affected processes stay inside the Futures workstation/Context renderer path.
 - [ ] 5.4 Restart the full application/backend to clear any non-persistent pre-existing pause, then have the operator verify on live data at the narrow Electron size: recent pills/search, `LIVE` ↔ `SYNC`, retained failures/retries, compact ticket, book levels, last price, and tape disclosure/update/scroll behavior.
 - [ ] 5.5 After operator confirmation, mark live verification complete and archive `compact-the-futures-trading-rail`; otherwise record every discovered issue as an explicit unfinished or follow-up task instead of archiving it.
+
+## 6. Post-implementation Audit
+
+- [x] 6.1 Re-audit the implementation on the current `master` after concurrent changes: re-run GitNexus impact/context checks, trace every requirement to current renderer code and tests, and inspect responsive, accessibility, state-precedence, persistence, and command-safety edge cases.
+- [x] 6.1a Hide the ordinary catalogue list when search is empty, retain the recent-pill group as the only idle contract list, preserve one unified selectable list for active search, and add focused regression tests for both modes.
+- [x] 6.1b Seed an otherwise empty recent history with the active starting contract so a fresh installation still renders the retained pill list, persists it normally, and has production-container regression coverage.
+- [x] 6.2 Run the targeted and broader relevant test suites plus a narrow-layout production render; fix every confirmed functional regression in scope with focused automated coverage, and repeat the narrow render after each responsive correction.
+- [x] 6.3 Re-run repository lint/build, Futures boundary and command-path checks, OpenSpec validation, diff hygiene, and staged GitNexus change detection; review the final diff and commit the audited change directly to `master`.
+- [x] 6.3a Audit GitNexus's aggregate `HIGH` staged rating: confirm it is the combined count from OpenSpec headings plus the two renderer components, while individual production impacts remain `MEDIUM`/`LOW`, no Electron/main file is staged, and every d=1 dependant is covered by the targeted and full suite.
+- [x] 6.3b Record the concurrent verification boundary: repository-wide lint passed after the audited UI implementation, then a final rerun encountered the unrelated in-progress `bootstrap-the-book-on-a-quiet-market` `depthBootstrapCode` `no-undef`; scoped lint for every staged JSX/test file still passes and none of that concurrent change is staged here.

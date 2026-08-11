@@ -6,8 +6,9 @@ after a restart as a distinct wrapping group of compact pills, before the
 contract catalogue has arrived. Each pill SHALL remain selectable while its
 catalogue metadata is pending, and the rail SHALL state that the catalogue is
 still loading rather than showing an empty list. Once the catalogue arrives, a
-recent contract SHALL adopt its confirmed metadata in place and SHALL NOT also
-appear in the ordinary contract list while the recent-pill group is shown.
+recent contract SHALL adopt its confirmed metadata in place. With an empty
+search query the rail SHALL NOT render a second ordinary catalogue list beneath
+the recent-pill group.
 
 #### Scenario: Application restarts
 - **WHEN** the workstation mounts with a persisted recency list and no catalogue yet
@@ -15,7 +16,7 @@ appear in the ordinary contract list while the recent-pill group is shown.
 
 #### Scenario: Catalogue arrives
 - **WHEN** the catalogue delivers metadata for contracts already shown in the recent-pill group
-- **THEN** each pill remains in recency order with confirmed metadata and no matching duplicate appears in the ordinary contract list
+- **THEN** each pill remains in recency order with confirmed metadata and no ordinary catalogue list appears beneath the group
 
 ### Requirement: Chrome states only what the desk reads
 The market header SHALL NOT repeat mark price or basis, SHALL colour funding by
@@ -89,20 +90,27 @@ rows carrying a `recent` suffix. The group SHALL preserve most-recent-first orde
 across an app restart and SHALL allow several ordinary USDⓈ-M symbols to occupy
 one line at the instrument rail's supported width. Each pill SHALL expose the
 contract selection and favorite state as accessible controls and SHALL disclose
-which contract is selected.
+which contract is selected. When no persisted recent contract exists, the
+workstation's active starting contract SHALL seed the group so the retained idle
+list is never absent on a fresh installation.
 
-When the search field is empty, a contract shown in the pill group SHALL be
-omitted from the ordinary contract list below it. When a search query is active,
-the pill group SHALL yield to one unified matching list so every result appears
-once.
+When the search field is empty, the recent-pill group SHALL be the only contract
+list and the rail SHALL NOT render the ordinary catalogue beneath it. When a
+search query is active, the pill group SHALL yield to one unified matching list
+so every result appears once and the operator can discover contracts outside
+the recent set.
 
 #### Scenario: A recent contract is confirmed by the catalogue
 - **WHEN** the catalogue delivers a contract that is in the recency list
-- **THEN** it remains a confirmed recent-contract pill rather than a full-width row carrying only its contract type, and it is not listed twice
+- **THEN** it remains a confirmed recent-contract pill rather than a full-width row carrying only its contract type, and no second catalogue list is rendered
 
 #### Scenario: Several recent contracts are available
 - **WHEN** the rail has several ordinary-length recent USDⓈ-M symbols and no search query
 - **THEN** they wrap as compact pills with more than one fitting on a line instead of consuming one full row each
+
+#### Scenario: Search is empty
+- **WHEN** the search field has no query
+- **THEN** the rail renders the recent-pill group without a second ordinary catalogue list beneath it
 
 #### Scenario: A recent contract is selected
 - **WHEN** the operator activates a recent-contract pill
@@ -116,9 +124,13 @@ once.
 - **WHEN** the operator selects a contract, closes the app and reopens it
 - **THEN** the rail shows that contract first in the recent-pill group before the catalogue arrives
 
+#### Scenario: The app has no stored contract history
+- **WHEN** the workstation opens with an empty persisted recency list
+- **THEN** its active starting contract is shown as the first recent pill and is persisted through the normal symbol-history path
+
 #### Scenario: Operator searches contracts
 - **WHEN** the search field contains a query
-- **THEN** the recent-pill group yields to a unified matching list in which a recent contract appears no more than once
+- **THEN** the recent-pill group yields to a unified matching catalogue list in which a recent contract appears no more than once and non-recent matches remain selectable
 
 ## ADDED Requirements
 

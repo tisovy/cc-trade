@@ -31,8 +31,9 @@ components, with no HIGH or CRITICAL result.
 
 - Recover vertical space without reducing market-data density or order-entry
   safety.
-- Derive recent-contract pills and the ordinary catalogue deterministically,
-  with no duplicate symbols in either empty-search or active-search modes.
+- Derive recent-contract pills and active-search results deterministically,
+  showing no second catalogue list in empty-search mode and no duplicate symbols
+  in active-search mode.
 - Give `LIVE`/`SYNC` one owner while preserving non-routine market-state and
   actionable failure disclosure.
 - Preserve keyboard and assistive-technology meaning after visible table-like
@@ -53,15 +54,18 @@ components, with no HIGH or CRITICAL result.
 
 ## Decisions
 
-### 1. Derive a separate recent-pill model before deriving the ordinary list
+### 1. Derive recent pills separately from active-search results
 
 When search is empty, `FuturesWorkstationView` will resolve persisted history
 against catalogue entries and render it as a most-recent-first wrapping pill
 group. A symbol missing from the catalogue will use its pending representation
-and remain selectable. The ordinary list will exclude every symbol already in
-that group. When search is non-empty, the pill group will not render; one
-deduplicated matching list will contain both catalogue-backed and pending
-recent results.
+and remain selectable. No ordinary catalogue list will render beneath this
+group. When search is non-empty, the pill group will not render; one
+deduplicated matching list will contain catalogue-backed matches and pending
+recent matches, so a new contract remains discoverable without duplicating a
+recent one. `FuturesProductionWorkstation` will fold its active starting symbol
+into an otherwise empty persisted history before the view's first render, so
+removing the idle catalogue cannot leave a fresh installation with no pills.
 
 Each pill will be a small compound control: selecting the contract and toggling
 its favorite remain separate accessible actions, while selected/favorite state
@@ -71,8 +75,9 @@ rail can be resized.
 
 Alternatives considered:
 
-- Restyling the existing full-width rows as pills would preserve the current
-  duplicate-prone list model and make search behavior ambiguous.
+- Keeping a second full-width catalogue beneath the pills would duplicate the
+  same contract-navigation purpose and spend the vertical space the compact
+  rail is intended to recover.
 - A fixed CSS grid would create unused space or truncation for longer symbols.
 
 ### 2. Pass an explicit account-synchronizing signal to the view

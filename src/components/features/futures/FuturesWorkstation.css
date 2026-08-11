@@ -244,8 +244,9 @@
   }
 
 
-  /* With the rail no longer scrolling, the list takes the room the ticket does
-     not: three visible contracts in a 180px box was the rail's own doing. */
+  /* Active search results take the room the ticket does not. With an empty
+     query this element is not mounted, so the recent pills hand the recovered
+     height directly to the ticket instead of reserving a blank catalogue. */
   .futures-workstation-instruments > .futures-workstation-contract-list {
     /* Both parts of the rail are sized from a basis rather than from their own
        content, and both give ground in proportion to it. A list with basis zero
@@ -389,11 +390,11 @@
 
 .futures-workstation-recent-select {
   min-width: 0;
-  padding: 3px 3px 3px 7px;
+  padding: 3px 0 3px 4px;
 }
 
 .futures-workstation-recent-select strong {
-  font-size: calc(var(--fx-ui-scale, 1) * 12px);
+  font-size: calc(var(--fx-ui-scale, 1) * 11px);
   white-space: nowrap;
 }
 

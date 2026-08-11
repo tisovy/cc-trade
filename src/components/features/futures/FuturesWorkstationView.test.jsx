@@ -198,6 +198,7 @@ const renderView = (properties = {}) => {
       state={createState()}
       selectedSymbol="BTCUSDT"
       selectedInterval="1m"
+      symbolHistory={{ recent: ['BTCUSDT'], favorites: [] }}
       onSymbolChange={onSymbolChange}
       onIntervalChange={onIntervalChange}
       {...properties}
@@ -907,8 +908,7 @@ describe('instrument recency and interface scale', () => {
     expect(within(recent).getAllByRole('listitem')).toHaveLength(2)
     expect(within(recent).getAllByRole('button', { name: /^(?:BTC|ETH)USDT/ })
       .map(button => button.textContent)).toEqual(['ETHUSDT', 'BTCUSDT'])
-    expect(container.querySelector('.futures-workstation-contract-list'))
-      .not.toHaveTextContent(/(?:BTC|ETH)USDT/)
+    expect(container.querySelector('.futures-workstation-contract-list')).toBeNull()
   })
 
   it('lists persisted recent contracts before the catalogue arrives', () => {
@@ -957,8 +957,7 @@ describe('instrument recency and interface scale', () => {
     const recent = screen.getByRole('list', { name: 'Recent contracts' })
     expect(within(recent).getAllByRole('button', { name: /^BTCUSDT/ })).toHaveLength(1)
     expect(screen.getByRole('listitem')).not.toHaveAttribute('data-pending')
-    expect(container.querySelector('.futures-workstation-contract-list'))
-      .not.toHaveTextContent('BTCUSDT')
+    expect(container.querySelector('.futures-workstation-contract-list')).toBeNull()
     expect(screen.queryByText('Loading contracts…')).not.toBeInTheDocument()
   })
 
@@ -985,19 +984,28 @@ describe('instrument recency and interface scale', () => {
   })
 
   it('yields recent pills to one deduplicated list while search is active', () => {
-    const { container } = renderView({
+    const { container, onSymbolChange } = renderView({
       symbolHistory: { recent: ['BTCUSDT'], favorites: [] },
     })
     expect(screen.getByRole('list', { name: 'Recent contracts' })).toBeInTheDocument()
+    expect(container.querySelector('.futures-workstation-contract-list')).toBeNull()
     fireEvent.change(screen.getByLabelText('Search Futures contracts'), {
-      target: { value: 'BTC' },
+      target: { value: 'USDT' },
     })
 
     expect(screen.queryByRole('list', { name: 'Recent contracts' })).not.toBeInTheDocument()
-    const results = within(container.querySelector('.futures-workstation-contract-list'))
-      .getAllByRole('button', { name: /^BTCUSDT/ })
-    expect(results).toHaveLength(1)
-    expect(results[0]).toHaveTextContent('PERPETUAL')
+    const results = container.querySelector('.futures-workstation-contract-list')
+    expect(within(results).getAllByRole('button', { name: /^BTCUSDT/ })).toHaveLength(1)
+    const eth = within(results).getByRole('button', { name: /^ETHUSDT/ })
+    expect(eth).toHaveTextContent('PERPETUAL')
+    fireEvent.click(eth)
+    expect(onSymbolChange).toHaveBeenCalledExactlyOnceWith('ETHUSDT')
+
+    fireEvent.change(screen.getByLabelText('Search Futures contracts'), {
+      target: { value: '' },
+    })
+    expect(screen.getByRole('list', { name: 'Recent contracts' })).toBeInTheDocument()
+    expect(container.querySelector('.futures-workstation-contract-list')).toBeNull()
   })
 
   it('groups the order book by a chosen price step', () => {

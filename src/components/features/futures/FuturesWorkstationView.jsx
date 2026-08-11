@@ -266,22 +266,17 @@ export const FuturesWorkstationView = ({
       })
     ))
   }, [contracts, symbolHistory.recent])
-  const recentContractSymbols = useMemo(
-    () => new Set(recentContracts.map(contract => contract.symbol)),
-    [recentContracts],
-  )
   const visibleContracts = useMemo(() => {
+    if (!searchQuery) return EMPTY_ROWS
     const bySymbol = new Map(contracts.map(contract => [contract.symbol, contract]))
     for (const contract of recentContracts) {
       if (!bySymbol.has(contract.symbol)) bySymbol.set(contract.symbol, contract)
     }
-    const candidates = searchQuery
-      ? [...bySymbol.values()].filter(contract => (
-        contract.symbol.includes(searchQuery) || contract.baseAsset.includes(searchQuery)
-      ))
-      : contracts.filter(contract => !recentContractSymbols.has(contract.symbol))
+    const candidates = [...bySymbol.values()].filter(contract => (
+      contract.symbol.includes(searchQuery) || contract.baseAsset.includes(searchQuery)
+    ))
     return orderFuturesContracts(candidates, symbolHistory).slice(0, 128)
-  }, [contracts, recentContractSymbols, recentContracts, searchQuery, symbolHistory])
+  }, [contracts, recentContracts, searchQuery, symbolHistory])
   const catalogPending = contracts.length === 0 && !contractsUnavailable
 
   const pickPrice = useCallback((price) => {
@@ -691,45 +686,46 @@ export const FuturesWorkstationView = ({
             ))}
           </div>
         ) : null}
-        <div className="futures-workstation-contract-list">
-          {visibleContracts.map(contract => (
-            <div
-              className={`futures-workstation-contract${
-                contract.symbol === selectedSymbol ? ' is-selected' : ''
-              }`}
-              key={contract.symbol}
-            >
-              <button
-                type="button"
-                className="futures-workstation-favorite"
-                aria-label={`${favorites.has(contract.symbol) ? 'Remove' : 'Add'} ${contract.symbol} favorite`}
-                aria-pressed={favorites.has(contract.symbol)}
-                onClick={() => toggleFavorite(contract.symbol)}
+        {searchQuery ? (
+          <div className="futures-workstation-contract-list">
+            {visibleContracts.map(contract => (
+              <div
+                className={`futures-workstation-contract${
+                  contract.symbol === selectedSymbol ? ' is-selected' : ''
+                }`}
+                key={contract.symbol}
               >
-                {favorites.has(contract.symbol) ? '★' : '☆'}
-              </button>
-              <button
-                type="button"
-                className="futures-workstation-contract-select"
-                onClick={() => onSymbolChange(contract.symbol)}
-                aria-pressed={contract.symbol === selectedSymbol}
-              >
-                <strong>{contract.symbol}</strong>
-                <span>{contract.pending ? 'loading' : contract.contractType}</span>
-              </button>
-            </div>
-          ))}
-          {visibleContracts.length === 0
-            && (searchQuery || recentContracts.length === 0)
-            && !contractsUnavailable ? (
-            <p className="futures-workstation-empty">
-              {catalogPending ? 'Loading contracts…' : 'No matching USDⓈ-M contract.'}
-            </p>
-          ) : null}
-          {(visibleContracts.length > 0 || recentContracts.length > 0) && catalogPending ? (
-            <p className="futures-workstation-empty">Loading contracts…</p>
-          ) : null}
-        </div>
+                <button
+                  type="button"
+                  className="futures-workstation-favorite"
+                  aria-label={`${favorites.has(contract.symbol) ? 'Remove' : 'Add'} ${contract.symbol} favorite`}
+                  aria-pressed={favorites.has(contract.symbol)}
+                  onClick={() => toggleFavorite(contract.symbol)}
+                >
+                  {favorites.has(contract.symbol) ? '★' : '☆'}
+                </button>
+                <button
+                  type="button"
+                  className="futures-workstation-contract-select"
+                  onClick={() => onSymbolChange(contract.symbol)}
+                  aria-pressed={contract.symbol === selectedSymbol}
+                >
+                  <strong>{contract.symbol}</strong>
+                  <span>{contract.pending ? 'loading' : contract.contractType}</span>
+                </button>
+              </div>
+            ))}
+            {catalogPending ? (
+              <p className="futures-workstation-empty">Loading contracts…</p>
+            ) : visibleContracts.length === 0 && !contractsUnavailable ? (
+              <p className="futures-workstation-empty">No matching USDⓈ-M contract.</p>
+            ) : null}
+          </div>
+        ) : catalogPending ? (
+          <p className="futures-workstation-empty">Loading contracts…</p>
+        ) : recentContracts.length === 0 && !contractsUnavailable ? (
+          <p className="futures-workstation-empty">No recent contracts. Search to select one.</p>
+        ) : null}
         {contractsUnavailable ? (
           <div className="futures-workstation-contract-retry" role="alert">
             <span>{contractsUnavailableMessage}</span>
