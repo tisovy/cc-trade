@@ -48,8 +48,24 @@ export const FUTURES_PRODUCTION_WORKSTATION_EXCHANGE_INFO_STALE_SERVE_MS = 6 * 6
 export const FUTURES_PRODUCTION_WORKSTATION_BOOTSTRAP_CONCURRENCY = 5;
 export const FUTURES_PRODUCTION_WORKSTATION_RESOURCE_RETRIES = 2;
 
+// Binance answers USDⓈ-M public reads against 2400 weight per minute per
+// address, of which the account reader claims at most 800 (`RateLimiter` in
+// `binance-connection.js`). A quarter of the exchange's minute leaves a
+// thousand of it unspent with both readers at their ceilings.
+//
+// Sized against what the desk costs rather than left at a bare default: one
+// contract switch is 24 — a 1000-level book at 20 and four reads at 1 — and a
+// single book-recovery round on a thin contract is up to 60. The 120 this
+// started at was five switches, or two recoveries, for a whole minute.
+export const FUTURES_PRODUCTION_WORKSTATION_READ_BUDGET = Object.freeze({
+    MAXIMUM_WEIGHT: 600,
+    WINDOW_MS: 60_000,
+});
+
 const ROUTE_SET = new Set(Object.values(FUTURES_PRODUCTION_WORKSTATION_ROUTES));
 const PUBLIC_READ_BUDGET = new FuturesWorkstationReadBudget({
+    maximumWeight: FUTURES_PRODUCTION_WORKSTATION_READ_BUDGET.MAXIMUM_WEIGHT,
+    windowMs: FUTURES_PRODUCTION_WORKSTATION_READ_BUDGET.WINDOW_MS,
     maximumConcurrent: FUTURES_PRODUCTION_WORKSTATION_BOOTSTRAP_CONCURRENCY,
 });
 const EXCHANGE_INFO_CACHE = {

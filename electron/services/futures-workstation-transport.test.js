@@ -35,6 +35,7 @@ import {
     FUTURES_PRODUCTION_WORKSTATION_BOOTSTRAP_CONCURRENCY,
     FUTURES_PRODUCTION_WORKSTATION_EXCHANGE_INFO_CACHE_TTL_MS,
     FUTURES_PRODUCTION_WORKSTATION_EXCHANGE_INFO_STALE_SERVE_MS,
+    FUTURES_PRODUCTION_WORKSTATION_READ_BUDGET,
     FUTURES_PRODUCTION_WORKSTATION_REST_ORIGIN,
     FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS,
     FUTURES_PRODUCTION_WORKSTATION_ROUTES,
@@ -981,6 +982,32 @@ describe('reviewed environment-specific Futures workstation transports', () => {
         expect(Object.isFrozen(FUTURES_PRODUCTION_WORKSTATION_ROUTES)).toBe(true);
         expect(Object.isFrozen(FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS)).toBe(true);
         expect(FUTURES_PRODUCTION_WORKSTATION_BOOTSTRAP_CONCURRENCY).toBe(5);
+    });
+
+    // The ceiling is sized against what the desk costs. At 120 the operator ran
+    // out of it by switching contracts five times in a minute.
+    it('budgets a window against what a contract switch costs', () => {
+        const {
+            DEPTH_1000,
+            KLINES_99,
+            INDEX_KLINES_99,
+            PREMIUM_INDEX_SYMBOL,
+            TICKER_SYMBOL,
+        } = FUTURES_PRODUCTION_WORKSTATION_WEIGHTS;
+        // One switch: the book, the two candle series, the funding and the day.
+        const contractSwitch = DEPTH_1000 + KLINES_99 + INDEX_KLINES_99
+            + PREMIUM_INDEX_SYMBOL + TICKER_SYMBOL;
+        expect(contractSwitch).toBe(24);
+        expect(FUTURES_PRODUCTION_WORKSTATION_READ_BUDGET.WINDOW_MS).toBe(60_000);
+        expect(Math.floor(
+            FUTURES_PRODUCTION_WORKSTATION_READ_BUDGET.MAXIMUM_WEIGHT / contractSwitch,
+        )).toBeGreaterThanOrEqual(20);
+        // Binance answers USDⓈ-M public reads against 2400 weight a minute per
+        // address; the account reader claims at most 800 of it. Both readers at
+        // their ceilings must still leave the exchange's minute unspent.
+        expect(FUTURES_PRODUCTION_WORKSTATION_READ_BUDGET.MAXIMUM_WEIGHT + 800)
+            .toBeLessThan(2_400);
+        expect(Object.isFrozen(FUTURES_PRODUCTION_WORKSTATION_READ_BUDGET)).toBe(true);
     });
 
     it('reports depth snapshot reads with a distinct retry phase', async () => {
