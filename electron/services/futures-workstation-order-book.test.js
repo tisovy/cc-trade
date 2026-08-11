@@ -53,6 +53,75 @@ describe('authoritative Futures local order book', () => {
         expect(book.toRendererView().lastUpdateId).toBe('101');
     });
 
+    // A contract nobody is trading publishes no diff at all — the stream carries
+    // only what changed — so there is nothing to bridge with and never will be.
+    // The snapshot is not stale in that case; it is the book.
+    it('goes live on a snapshot no diff has contradicted', () => {
+        const book = new FuturesWorkstationOrderBook();
+        expect(book.bootstrap(snapshot())).toEqual({ live: true, reason: 'bootstrapped' });
+        expect(book.toRendererView().lastUpdateId).toBe('100');
+        expect(book.toRendererView().bids[0]).toEqual({ price: '10', quantity: '2', total: '2' });
+    });
+
+    it('pays the owed bridge with a first diff that spans the snapshot', () => {
+        const book = new FuturesWorkstationOrderBook();
+        expect(book.bootstrap(snapshot()).live).toBe(true);
+        // `pu` names a diff this book never saw, and that is expected: it is the
+        // one the exchange published before the snapshot was taken.
+        expect(book.push(delta({ firstUpdateId: '99', previousFinalUpdateId: '98' }), 100))
+            .toEqual({ applied: true, reason: 'live' });
+        expect(book.toRendererView().lastUpdateId).toBe('101');
+    });
+
+    it('pays the owed bridge with a first diff that continues from the snapshot', () => {
+        const book = new FuturesWorkstationOrderBook();
+        expect(book.bootstrap(snapshot()).live).toBe(true);
+        expect(book.push(delta({
+            firstUpdateId: '101',
+            finalUpdateId: '101',
+            previousFinalUpdateId: '100',
+        }), 100)).toEqual({ applied: true, reason: 'live' });
+        expect(book.toRendererView().lastUpdateId).toBe('101');
+    });
+
+    it('owes the bridge only once', () => {
+        const book = new FuturesWorkstationOrderBook();
+        expect(book.bootstrap(snapshot()).live).toBe(true);
+        expect(book.push(delta({ firstUpdateId: '99', previousFinalUpdateId: '98' }), 100).applied)
+            .toBe(true);
+        expect(book.push(delta({
+            firstUpdateId: '102',
+            finalUpdateId: '103',
+            previousFinalUpdateId: '77',
+        }), 100)).toEqual({ applied: false, reason: 'gap', resync: true });
+    });
+
+    it('asks for a rebuild when the first diff begins beyond the quiet snapshot', () => {
+        const book = new FuturesWorkstationOrderBook();
+        expect(book.bootstrap(snapshot()).live).toBe(true);
+        expect(book.push(delta({
+            firstUpdateId: '102',
+            finalUpdateId: '103',
+            previousFinalUpdateId: '101',
+        }), 100)).toEqual({ applied: false, reason: 'gap', resync: true });
+        expect(book.toRendererView()).toBeNull();
+    });
+
+    // A re-bootstrap empties the buffer while the socket keeps running, so
+    // "nothing buffered" would otherwise re-admit a snapshot a diff already read
+    // has proven stale.
+    it('refuses a quiet snapshot behind a diff it has already seen', () => {
+        const book = new FuturesWorkstationOrderBook();
+        book.push(delta({ firstUpdateId: '101', finalUpdateId: '102' }), 100);
+        expect(book.bootstrap(snapshot()).live).toBe(false);
+        book.beginBootstrap();
+        expect(book.bootstrap(snapshot())).toEqual({
+            live: false,
+            reason: 'snapshot-not-bridged',
+            resync: true,
+        });
+    });
+
     it('requires the first buffered event to bridge lastUpdateId', () => {
         const book = new FuturesWorkstationOrderBook();
         book.push(delta({ firstUpdateId: '101', finalUpdateId: '102' }), 100);

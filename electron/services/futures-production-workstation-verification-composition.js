@@ -7,9 +7,13 @@ import {
 
 export const FUTURES_PRODUCTION_WORKSTATION_DETERMINISTIC_VERIFICATION = true;
 
-export const createFuturesProductionWorkstationRuntime = ({ onTiming } = {}) => {
+export const createFuturesProductionWorkstationRuntime = ({ onTiming, onInternalError } = {}) => {
     const transport = createFuturesProductionWorkstationFakeTransport();
-    const service = new FuturesProductionWorkstationService({ transport, onTiming });
+    const service = new FuturesProductionWorkstationService({
+        transport,
+        onTiming,
+        ...(onInternalError ? { onInternalError } : {}),
+    });
     return Object.freeze({
         mode: 'deterministic-fake',
         transport,

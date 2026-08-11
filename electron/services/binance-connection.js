@@ -1593,6 +1593,13 @@ export function setupBinanceConnection({
                         + (cache === null ? '' : ` cache=${cache}`),
                     );
                 },
+                // The faults the desk absorbs without telling the operator: a
+                // book that could not bridge, a recovery, a rejected frame, a
+                // history read that failed. A timing line says a phase ended
+                // badly; only this says what was wrong with it.
+                onInternalError: ({ phase, code }) => {
+                    logger.warn(`[futures-production-workstation:fault] ${phase} ${code}`);
+                },
             })
             : null;
 

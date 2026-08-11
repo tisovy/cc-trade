@@ -237,6 +237,14 @@ export class FuturesWorkstationOrderBook {
         this.buffer = [];
         this.bufferedBytes = 0;
         this.band = null;
+        // Set when a snapshot went live without a diff to bridge it, so the
+        // first diff that arrives is held to the bootstrap rule rather than the
+        // live one. See `bootstrap`.
+        this.awaitingBridge = false;
+        // The furthest the stream has ever been seen to reach, kept across a
+        // re-bootstrap because the socket is the same one. A snapshot behind it
+        // is stale however empty the buffer happens to be.
+        this.observedUpdateId = null;
     }
 
     beginBootstrap() {
@@ -247,6 +255,7 @@ export class FuturesWorkstationOrderBook {
         this.buffer = [];
         this.bufferedBytes = 0;
         this.band = null;
+        this.awaitingBridge = false;
     }
 
     /**
@@ -306,6 +315,9 @@ export class FuturesWorkstationOrderBook {
         }
         const delta = validateDelta(rawDelta);
         if (!Number.isSafeInteger(frameBytes) || frameBytes < 0) fail('INVALID_DEPTH_FRAME_SIZE');
+        if (this.observedUpdateId === null || delta.finalUpdateIdBigInt > this.observedUpdateId) {
+            this.observedUpdateId = delta.finalUpdateIdBigInt;
+        }
         if (this.phase === FUTURES_WORKSTATION_ORDER_BOOK_PHASES.BUFFERING) {
             if (this.buffer.length >= FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.BUFFERED_EVENTS
                 || this.bufferedBytes + frameBytes
@@ -325,10 +337,20 @@ export class FuturesWorkstationOrderBook {
         if (delta.finalUpdateIdBigInt <= this.lastUpdateId) {
             return Object.freeze({ applied: false, reason: 'duplicate' });
         }
-        if (delta.previousFinalUpdateIdBigInt !== this.lastUpdateId) {
+        // A book that went live on an unbridged snapshot still owes its bridge,
+        // and this is the diff that pays it: the exchange's own rule for the
+        // first diff after a snapshot, which spans the snapshot's update id
+        // rather than starting from it. Everything else — and every diff
+        // afterwards — chains on `pu` as before. A diff that begins beyond the
+        // snapshot proves updates were published while nothing was listening,
+        // and that is the gap it has always been.
+        const bridges = this.awaitingBridge
+            && delta.firstUpdateIdBigInt <= this.lastUpdateId;
+        if (!bridges && delta.previousFinalUpdateIdBigInt !== this.lastUpdateId) {
             this.phase = FUTURES_WORKSTATION_ORDER_BOOK_PHASES.RESYNC_REQUIRED;
             return Object.freeze({ applied: false, reason: 'gap', resync: true });
         }
+        this.awaitingBridge = false;
         this.applyDelta(delta);
         return Object.freeze({ applied: true, reason: 'live' });
     }
@@ -340,9 +362,25 @@ export class FuturesWorkstationOrderBook {
         const snapshot = validateSnapshot(rawSnapshot);
         const retained = this.buffer.filter(delta => delta.finalUpdateIdBigInt >= snapshot.lastUpdateId);
         const first = retained[0];
-        if (!first
-            || first.firstUpdateIdBigInt > snapshot.lastUpdateId
-            || first.finalUpdateIdBigInt < snapshot.lastUpdateId) {
+        // A diff that *begins* beyond the snapshot is proof that updates were
+        // published between the two and nothing was holding them: the snapshot
+        // cannot be bridged and has to be read again.
+        //
+        // No diff at all is not that proof. `<symbol>@depth@100ms` publishes
+        // only when a level changes, so a contract nobody is trading delivers
+        // nothing to bridge with, and never will — the exchange returned the
+        // same `lastUpdateId` on four consecutive snapshots of PYPLUSDT while
+        // this was measured. Refusing it left the operator with an empty book on
+        // every quiet contract. That snapshot is not stale; it is the book, and
+        // the bridge is owed to whichever diff arrives first.
+        //
+        // "No diff" means none the desk has ever seen on this stream, not none
+        // still buffered: a re-bootstrap empties the buffer, and a snapshot
+        // behind a diff already read is stale whether or not that diff is still
+        // in hand.
+        const quiet = first === undefined
+            && (this.observedUpdateId === null || this.observedUpdateId <= snapshot.lastUpdateId);
+        if (first ? first.firstUpdateIdBigInt > snapshot.lastUpdateId : !quiet) {
             this.phase = FUTURES_WORKSTATION_ORDER_BOOK_PHASES.RESYNC_REQUIRED;
             this.buffer = [];
             this.bufferedBytes = 0;
@@ -353,6 +391,7 @@ export class FuturesWorkstationOrderBook {
         applyLevels(this.bids, snapshot.bids);
         applyLevels(this.asks, snapshot.asks);
         this.lastUpdateId = snapshot.lastUpdateId;
+        this.awaitingBridge = first === undefined;
         for (const delta of retained) {
             if (delta.finalUpdateIdBigInt <= this.lastUpdateId) continue;
             if (delta !== first && delta.previousFinalUpdateIdBigInt !== this.lastUpdateId) {
@@ -417,5 +456,8 @@ export class FuturesWorkstationOrderBook {
         this.buffer = [];
         this.bufferedBytes = 0;
         this.band = null;
+        this.awaitingBridge = false;
+        // The stream this was observed on is going away with the session.
+        this.observedUpdateId = null;
     }
 }

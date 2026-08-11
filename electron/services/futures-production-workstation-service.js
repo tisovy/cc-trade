@@ -80,6 +80,18 @@ const isDepthStreamFrame = raw => (
     typeof raw === 'string' && DEPTH_STREAM_NAME.test(raw.slice(0, 256))
 );
 
+// The two ways a bootstrap can fail to bridge are two different faults — the
+// snapshot could not be tied to the stream, or the buffered diffs had a hole in
+// them — and an operator reading the log can only act on the one that names
+// itself.
+const DEPTH_BOOTSTRAP_CODES = Object.freeze({
+    'snapshot-not-bridged': 'DEPTH_BOOTSTRAP_NOT_BRIDGED',
+    'buffer-gap': 'DEPTH_BOOTSTRAP_BUFFER_GAP',
+});
+const depthBootstrapCode = reason => (
+    DEPTH_BOOTSTRAP_CODES[reason] ?? 'DEPTH_BOOTSTRAP_GAP'
+);
+
 const safeCode = error => (
     typeof error?.code === 'string' && /^[A-Z0-9_-]{1,96}$/.test(error.code)
         ? error.code.replace(/-/g, '_')
@@ -746,9 +758,6 @@ export class FuturesProductionWorkstationService {
                 );
                 bookResult = session.orderBook.bootstrap(session.bootstrapDepthSnapshot);
             }
-            if (!bookResult.live) {
-                throw new FuturesProductionWorkstationServiceError('DEPTH_BOOTSTRAP_GAP');
-            }
             session.bootstrapped = true;
             const now = this.observedNow(session);
             session.lastHeaderAt = now;
@@ -759,17 +768,29 @@ export class FuturesProductionWorkstationService {
             for (const event of session.pendingEvents) this.applyStreamEvent(session, event);
             session.pendingEvents = [];
             if (!this.isCurrent(session)) return;
-            session.lastDepthView = session.orderBook.toRendererView();
-            this.emitResource(
-                session,
-                FUTURES_WORKSTATION_RESOURCES.DEPTH,
-                FUTURES_WORKSTATION_STATES.LIVE,
-                session.lastDepthView,
-            );
+            if (bookResult.live) {
+                session.lastDepthView = session.orderBook.toRendererView();
+                this.emitResource(
+                    session,
+                    FUTURES_WORKSTATION_RESOURCES.DEPTH,
+                    FUTURES_WORKSTATION_STATES.LIVE,
+                    session.lastDepthView,
+                );
+            }
             session.reconnectAttempt = 0;
             this.emitStatus(session, FUTURES_WORKSTATION_STATES.LIVE, true, null);
-            this.emitAggregateTiming(session, 'ok');
+            this.emitAggregateTiming(session, bookResult.live ? 'ok' : 'no-book');
             this.startFreshnessMonitor(session);
+            // A book that could not be bridged is a stale book, not a dead desk.
+            // The chart, the candles, the header and the tape are all here and
+            // none of them comes from the book — throwing here instead closed
+            // every stream and rebuilt the generation, so a contract too quiet
+            // to bridge took the whole workspace down with it, eight times, and
+            // then gave up. The recovery keeps asking on its own cooldown, which
+            // is what a live book already does with a sequence gap.
+            if (!bookResult.live) {
+                void this.recoverBook(session, depthBootstrapCode(bookResult.reason));
+            }
         } catch (error) {
             if (!this.isCurrent(session)) return;
             this.emitAggregateTiming(session, 'error');

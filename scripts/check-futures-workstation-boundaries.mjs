@@ -226,6 +226,24 @@ const allCompositions = [
 if (/process\s*\.\s*env|import\s*\.\s*meta\s*\.\s*env/.test(allCompositions)) {
     fail('A workstation transport interlock is environment-selectable');
 }
+for (const composition of [productionComposition, productionVerificationComposition]) {
+    if (!/createFuturesProductionWorkstationRuntime\s*=\s*\(\{\s*onTiming,\s*onInternalError\s*\}/
+        .test(composition)) {
+        fail('A workstation composition drops the fault reporter before the service');
+    }
+}
+// The faults the desk absorbs — a book that could not bridge, a recovery, a
+// rejected frame — reach the operator only through this reporter, and it
+// defaults to a no-op. Unwired, the operator watched a bootstrap fail four
+// times a cycle with nothing in the log saying why.
+const operatorConnection = fs.readFileSync(
+    path.join(ROOT, 'electron/services/binance-connection.js'),
+    'utf8',
+);
+if (!/onInternalError:\s*\(\{\s*phase,\s*code\s*\}\)\s*=>\s*\{[^}]*futures-production-workstation:fault/
+    .test(operatorConnection)) {
+    fail('The operator connection does not log the faults the workstation absorbs');
+}
 
 const viteConfig = fs.readFileSync(path.join(ROOT, 'vite.config.js'), 'utf8');
 for (const buildMode of ['safe-dev', 'smoke']) {

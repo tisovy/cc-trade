@@ -267,27 +267,109 @@ describe('production Futures workstation service', () => {
             .toEqual(['loading', 'live']);
     });
 
-    it('never exposes a depth snapshot that lacks a buffered stream bridge', async () => {
+    // `<symbol>@depth@100ms` publishes only when a level changes, so a contract
+    // nobody is trading delivers nothing to bridge the snapshot with, and never
+    // will. Requiring one read the same snapshot four times a cycle, showed an
+    // empty book, and resynchronized the workspace until it gave up.
+    it('opens the book of a contract too quiet to publish a diff', async () => {
         const base = createFuturesProductionWorkstationFakeTransport();
+        const readDepthSnapshot = vi.fn(options => base.readDepthSnapshot(options));
         const close = vi.fn();
         const transport = {
             ...base,
+            readDepthSnapshot,
             connect: () => ({ ready: Promise.resolve(true), close }),
         };
         const runtime = track(createFuturesProductionWorkstationRuntimeForTest({ transport }));
         const events = [];
 
-        await runtime.service.handleRequest(productionRequest('depth-snapshot-barrier'), {
+        await runtime.service.handleRequest(productionRequest('depth-quiet-market'), {
             emit: event => events.push(event),
         });
 
-        expect(events.some(event => event.resource === 'depth')).toBe(false);
-        expect(events.at(-1)).toMatchObject({
-            resource: 'status',
-            state: 'resynchronizing',
-            payload: { reasonCode: 'DEPTH_BOOTSTRAP_GAP' },
+        expect(readDepthSnapshot).toHaveBeenCalledOnce();
+        const depth = events.filter(event => event.resource === 'depth');
+        expect(depth).toHaveLength(1);
+        expect(depth[0].state).toBe('live');
+        expect(depth[0].payload.bids.length).toBeGreaterThan(0);
+        expect(events.at(-1)).toMatchObject({ resource: 'status', state: 'live' });
+        expect(close).not.toHaveBeenCalled();
+    });
+
+    // A book that genuinely cannot be bridged is a stale book, not a dead desk:
+    // the chart, the candles, the header and the tape are all here and none of
+    // them comes from the book.
+    it('comes live without the book when no snapshot can be bridged', async () => {
+        const manual = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport({ clock: manual.clock });
+        const parsedSnapshot = JSON.parse(
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.depthSnapshot,
+        );
+        // Older than every buffered diff, on every attempt: the bridge is never
+        // made and the retries cannot heal it.
+        const staleSnapshot = JSON.stringify({ ...parsedSnapshot, lastUpdateId: 1 });
+        // Level with the furthest diff the stream has been seen to reach, so the
+        // recovery's snapshot is one nothing contradicts.
+        const healedSnapshot = JSON.stringify({ ...parsedSnapshot, lastUpdateId: 1002 });
+        let snapshotBody = staleSnapshot;
+        const readDepthSnapshot = vi.fn(async () => snapshotBody);
+        const faults = [];
+        const timings = [];
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock: manual.clock,
+            onInternalError: fault => faults.push(fault),
+            onTiming: timing => timings.push(timing),
+            transport: { ...base, readDepthSnapshot },
+        }));
+        const events = [];
+        const pending = runtime.service.handleRequest(productionRequest('depth-unbridgeable'), {
+            emit: event => events.push(event),
         });
-        expect(close).toHaveBeenCalledOnce();
+        for (let retry = 0; retry < 3; retry += 1) {
+            await vi.waitFor(() => expect(manual.timeoutCount()).toBeGreaterThan(0));
+            manual.advance(1_000);
+            manual.runTimeouts();
+        }
+        await pending;
+
+        expect(readDepthSnapshot).toHaveBeenCalledTimes(4);
+        expect(events.filter(event => event.resource === 'status').map(event => event.state))
+            .toEqual(['loading', 'live']);
+        expect(events.some(event => event.resource === 'candles' && event.state === 'live'))
+            .toBe(true);
+        expect(events.some(event => event.resource === 'depth')).toBe(false);
+        expect(faults).toContainEqual({
+            phase: 'book-recovery',
+            code: 'DEPTH_BOOTSTRAP_NOT_BRIDGED',
+        });
+        expect(timings).toContainEqual(expect.objectContaining({
+            phase: 'aggregate-ready',
+            outcome: 'no-book',
+        }));
+
+        // And the book is not lost for the session: the recovery that was left
+        // running delivers it as soon as one snapshot bridges.
+        snapshotBody = healedSnapshot;
+        await vi.waitFor(() => expect(manual.timeoutCount()).toBeGreaterThan(0));
+        manual.advance(1_000);
+        manual.runTimeouts();
+        await vi.waitFor(() => expect(events.at(-1)).toMatchObject({
+            resource: 'depth',
+            state: 'live',
+        }));
+        expect(events.filter(event => event.resource === 'status').map(event => event.state))
+            .toEqual(['loading', 'live']);
+    });
+
+    // The reporter defaults to a no-op, so a composition that drops it silences
+    // every fault the desk absorbs.
+    it('carries the fault reporter from the composition to the service', () => {
+        const onInternalError = vi.fn();
+        const runtime = track(createFuturesProductionWorkstationRuntime({
+            onTiming: () => {},
+            onInternalError,
+        }));
+        expect(runtime.service.onInternalError).toBe(onInternalError);
     });
 
     it.each([
