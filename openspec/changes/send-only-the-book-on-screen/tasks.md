@@ -35,7 +35,7 @@
 
 - [x] 5.1 Re-measure frame size and the per-frame cost of `toRendererView`, both serializations, and the renderer's parse-validate path at a realistic range. Recorded below.
 - [x] 5.2 `npm run lint`, `npm test` (1497 passed), `npm run check:futures-production`.
-- [ ] 5.3 Operator confirms on live data that the book on a liquid contract draws the same rows, the same sizes and the same cumulative column as before, at every grouping step the contract offers — including 1× on a contract whose levels rest far apart, which is what §1.5 exists for.
+- [ ] 5.3 Operator confirms on live data that the book on a liquid contract draws the same rows, the same sizes and the same cumulative column as before, at every grouping step the contract offers — including 1× on a contract whose levels rest far apart, which is what §1.5 exists for, and a step change on a quiet contract, which is what §1.6 exists for. Written as a step in `verify-the-desk-in-one-sitting/runbook.md` rather than left here, so the operator runs one list.
 
 ### Measured
 
