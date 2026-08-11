@@ -354,7 +354,13 @@ const createSocket = (url, onMessage, onDisconnect, backendProxy, onOversizedFra
             resolve(value);
         };
     });
-    const lifetime = setTimeout(() => socket.close(1000, '24h connection rotation'), 86_400_000);
+    // A connection this desk retires on its own schedule is not the exchange
+    // going away, and the resync it causes says so.
+    let rotated = false;
+    const lifetime = setTimeout(() => {
+        rotated = true;
+        socket.close(1000, '24h connection rotation');
+    }, 86_400_000);
     lifetime.unref?.();
     socket.once('open', () => settleReady(true));
     socket.on('message', (data, isBinary) => {
@@ -383,7 +389,7 @@ const createSocket = (url, onMessage, onDisconnect, backendProxy, onOversizedFra
         if (closed) return;
         closed = true;
         clearTimeout(lifetime);
-        onDisconnect('SOCKET_CLOSED');
+        onDisconnect(rotated ? 'CONNECTION_ROTATED' : 'SOCKET_CLOSED');
     });
     socket.once('error', () => {
         settleReady(false);
@@ -680,12 +686,14 @@ export const createFuturesProductionWorkstationReviewedTransport = ({
             onMessage,
             onDisconnect,
             onCandleDisconnect,
+            onFrameRefused = () => {},
             signal,
         } = {}) => {
             assertSelection(symbol, interval);
             if (typeof onMessage !== 'function'
                 || typeof onDisconnect !== 'function'
-                || typeof onCandleDisconnect !== 'function') fail('INVALID_SUBSCRIBER');
+                || typeof onCandleDisconnect !== 'function'
+                || typeof onFrameRefused !== 'function') fail('INVALID_SUBSCRIBER');
             const lower = symbol.toLowerCase();
             const publicUrl = `${FUTURES_PRODUCTION_WORKSTATION_WSS_ORIGIN}/public/stream?streams=${lower}@depth@100ms`;
             const marketUrl = `${FUTURES_PRODUCTION_WORKSTATION_WSS_ORIGIN}/market/stream?streams=${[
@@ -695,9 +703,12 @@ export const createFuturesProductionWorkstationReviewedTransport = ({
             ].join('/')}`;
             // A dropped frame is a fact the operator's log should carry: it is
             // the difference between a market that went quiet and a desk that
-            // refused what the market sent.
+            // refused what the market sent. The size goes to the timing line;
+            // the refusal itself goes to the session, which is what puts it in
+            // front of the operator under its own name.
             const reportOversizedFrame = (bytes) => {
                 emitTiming(onTiming, `oversized-frame:${bytes}`, Date.now(), 'error');
+                onFrameRefused('STREAM_FRAME_REFUSED');
             };
             const publicSocket = createSocket(
                 publicUrl,

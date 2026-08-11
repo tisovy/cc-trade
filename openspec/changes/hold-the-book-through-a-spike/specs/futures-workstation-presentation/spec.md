@@ -22,3 +22,7 @@ went stale without a close.
 #### Scenario: The desk closed the connection itself
 - **WHEN** the desk terminates a stream because of its own limit
 - **THEN** the reason shown to the operator names that limit rather than reporting a plain socket disconnect
+
+#### Scenario: The desk refused a frame and kept the stream
+- **WHEN** the desk drops an upstream frame that exceeds its own ceiling
+- **THEN** the refusal is named on the workspace's reason line under a code of its own, the session stays live, and a burst of such frames is stated once rather than once per frame

@@ -73,6 +73,13 @@ export const FUTURES_PRODUCTION_WORKSTATION_BOOK_RECOVERY = Object.freeze({
     COOLDOWN_MS: 5_000,
 });
 
+// A ceiling the market trips, it trips repeatedly: the frames that reach it come
+// from one burst. The refusal is stated once per window, so the reason line
+// carries the fact rather than a count of it.
+export const FUTURES_PRODUCTION_WORKSTATION_FRAME_REFUSAL = Object.freeze({
+    REPORT_COOLDOWN_MS: 5_000,
+});
+
 // Which stream a frame came from, read without parsing it — the frame that
 // lands here is the one the parser has already refused.
 const DEPTH_STREAM_NAME = /"stream"\s*:\s*"[a-z0-9_]{1,32}@depth/;
@@ -556,6 +563,7 @@ export class FuturesProductionWorkstationService {
             lastDepthView: null,
             bookRecovering: false,
             bookRecoveredAt: null,
+            frameRefusedAt: null,
             orderBook: new FuturesWorkstationOrderBook(),
             bootstrapped: false,
             pendingEvents: [],
@@ -623,6 +631,7 @@ export class FuturesProductionWorkstationService {
                 onMessage: raw => this.handleStreamFrame(session, raw),
                 onDisconnect: reason => this.handleDisconnect(session, reason),
                 onCandleDisconnect: reason => this.handleCandleDisconnect(session, reason),
+                onFrameRefused: reason => this.handleFrameRefused(session, reason),
             });
             if (!session.stream
                 || typeof session.stream.close !== 'function'
@@ -1113,17 +1122,46 @@ export class FuturesProductionWorkstationService {
         session.freshnessTimer?.unref?.();
     }
 
+    // A connection the exchange dropped, one this desk closed on a rule of its
+    // own, and one that failed outright are three different facts, and only the
+    // one that names itself can be acted on. The resync carries the reason the
+    // socket gave rather than flattening every ending into one code — that flat
+    // `SOCKET_DISCONNECTED` is the line the operator was left staring at.
     handleDisconnect(session, reason) {
         if (!this.isCurrent(session)) return;
-        this.emitStatus(
-            session,
-            FUTURES_WORKSTATION_STATES.DISCONNECTED,
-            false,
-            typeof reason === 'string' && /^[A-Z0-9_]{1,96}$/.test(reason)
-                ? reason
-                : 'SOCKET_DISCONNECTED',
-        );
-        this.scheduleResync(session, 'SOCKET_DISCONNECTED');
+        const reasonCode = typeof reason === 'string' && /^[A-Z0-9_]{1,96}$/.test(reason)
+            ? reason
+            : 'SOCKET_DISCONNECTED';
+        this.emitStatus(session, FUTURES_WORKSTATION_STATES.DISCONNECTED, false, reasonCode);
+        this.scheduleResync(session, reasonCode);
+    }
+
+    // A frame this desk refused on its own ceiling is neither a market that went
+    // quiet nor a frame the desk could not read, and it costs the book rather
+    // than the session — the sequence gap it leaves is recovered by the book's
+    // own path. What it owes the operator is its name, on the reason line, while
+    // the desk keeps trading around it.
+    handleFrameRefused(session, reason) {
+        if (!this.isCurrent(session)) return;
+        const reasonCode = typeof reason === 'string' && /^[A-Z0-9_]{1,96}$/.test(reason)
+            ? reason
+            : 'STREAM_FRAME_REFUSED';
+        try {
+            this.onInternalError({ phase: 'stream-frame', code: reasonCode });
+            // Only a desk that is actually live may say so. Before the bootstrap
+            // settles, and while a reconnect owns the session, the fault log is
+            // the whole report.
+            if (!session.bootstrapped || session.reconnectTimer !== null) return;
+            const now = this.observedNow(session);
+            if (session.frameRefusedAt !== null
+                && now - session.frameRefusedAt
+                    < FUTURES_PRODUCTION_WORKSTATION_FRAME_REFUSAL.REPORT_COOLDOWN_MS) return;
+            session.frameRefusedAt = now;
+            this.emitStatus(session, FUTURES_WORKSTATION_STATES.LIVE, true, reasonCode);
+        } catch {
+            // Stating a refused frame must not cost more than the frame did:
+            // this runs on the socket's own callback.
+        }
     }
 
     handleCandleDisconnect(session, reason) {

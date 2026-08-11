@@ -942,6 +942,55 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             .toHaveBeenCalledWith(1003, 'binary frame rejected');
     });
 
+    // The market is what makes a frame big. Hanging up over one took depth,
+    // tape, header and candles away at the moment they were needed most; the
+    // frame is dropped instead, and the refusal is named to the session so the
+    // desk can state it rather than going quiet about it.
+    it('drops an oversized market frame and names the refusal rather than hanging up', () => {
+        vi.useFakeTimers();
+        const messages = [];
+        const disconnects = [];
+        const refusals = [];
+        const timings = [];
+        createFuturesProductionWorkstationReviewedTransport({
+            onTiming: timing => timings.push(timing),
+        }).connect({
+            symbol: 'BTCUSDT',
+            interval: '1m',
+            onMessage: raw => messages.push(raw),
+            onDisconnect: reason => disconnects.push(reason),
+            onCandleDisconnect: () => {},
+            onFrameRefused: reason => refusals.push(reason),
+        });
+        const oversized = `{"stream":"btcusdt@depth","data":"${'x'.repeat(516_096)}"}`;
+        socketMock.instances[0].emit('message', Buffer.from(oversized), false);
+
+        expect(messages).toEqual([]);
+        expect(disconnects).toEqual([]);
+        expect(refusals).toEqual(['STREAM_FRAME_REFUSED']);
+        expect(socketMock.instances[0].close).not.toHaveBeenCalled();
+        expect(timings.map(timing => timing.phase))
+            .toContain(`oversized-frame:${Buffer.byteLength(oversized, 'utf8')}`);
+    });
+
+    // Two endings that used to read the same. Only one of them is the exchange.
+    it('separates a connection the exchange dropped from one the desk retired', () => {
+        vi.useFakeTimers();
+        const disconnects = [];
+        createFuturesProductionWorkstationReviewedTransport().connect({
+            symbol: 'BTCUSDT',
+            interval: '1m',
+            onMessage: () => {},
+            onDisconnect: reason => disconnects.push(reason),
+            onCandleDisconnect: () => {},
+        });
+        socketMock.instances[0].emit('close');
+        vi.advanceTimersByTime(86_400_000);
+        socketMock.instances[1].emit('close');
+
+        expect(disconnects).toEqual(['SOCKET_CLOSED', 'CONNECTION_ROTATED']);
+    });
+
     it('closes a reviewed WSS connection at the fixed 24-hour lifetime', () => {
         vi.useFakeTimers();
         const transport = createFuturesProductionWorkstationReviewedTransport();

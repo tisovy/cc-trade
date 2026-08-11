@@ -80,6 +80,27 @@ const productionTradeFrame = ({
     return JSON.stringify(frame);
 };
 
+// The frame a spike actually sends: the cycle's own depth diff, in sequence,
+// restating a full ladder on both sides instead of a level each. A sweep that
+// lifts the book with the makers re-posting behind it is exactly this shape.
+const burstDepthFrame = (cycle, levelsPerSide) => {
+    const frame = JSON.parse(
+        FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.streams.makeCycle(cycle)[0],
+    );
+    const price = cents => `${Math.trunc(cents / 100)}.${String(cents % 100).padStart(2, '0')}`;
+    const topBid = Math.round(Number(frame.data.b[0][0]) * 100);
+    const topAsk = Math.round(Number(frame.data.a[0][0]) * 100);
+    frame.data.b = Array.from({ length: levelsPerSide }, (_, index) => [
+        price(topBid - (index * 10)),
+        `${1 + ((cycle + index) % 9)}.00000000`,
+    ]);
+    frame.data.a = Array.from({ length: levelsPerSide }, (_, index) => [
+        price(topAsk + (index * 10)),
+        `${1 + ((cycle + index) % 7)}.00000000`,
+    ]);
+    return JSON.stringify(frame);
+};
+
 const track = runtime => {
     runtimes.push(runtime);
     return runtime;
@@ -1332,6 +1353,167 @@ describe('production Futures workstation service', () => {
         subscriber.onMessage('{"stream":"btcusdt@aggTrade","data":');
         expect(failures.at(-1).phase).toBe('stream');
         expect(events.at(-1)).toMatchObject({ state: 'resynchronizing' });
+    });
+
+    // A frame the desk refused on its own ceiling is not the market going quiet
+    // and not a frame the desk could not read. It says so under its own name,
+    // once per burst, and the desk keeps trading around it.
+    it('names a refused frame on the reason line without leaving live', async () => {
+        const base = createFuturesProductionWorkstationFakeTransport();
+        let subscriber;
+        const clock = createManualClock();
+        const faults = [];
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            transport: {
+                ...base,
+                connect: (options) => {
+                    subscriber = options;
+                    return base.connect(options);
+                },
+            },
+            clock: clock.clock,
+            onInternalError: fault => faults.push(fault),
+        }));
+        const events = [];
+        await runtime.service.handleRequest(productionRequest('refused-frame'), {
+            emit: event => events.push(event),
+        });
+        const settled = events.length;
+
+        subscriber.onFrameRefused('STREAM_FRAME_REFUSED');
+        subscriber.onFrameRefused('STREAM_FRAME_REFUSED');
+
+        expect(events.slice(settled)).toEqual([expect.objectContaining({
+            resource: 'status',
+            state: 'live',
+            payload: { connected: true, reasonCode: 'STREAM_FRAME_REFUSED' },
+        })]);
+        // Every refusal reaches the fault log; only the first reaches the desk.
+        expect(faults).toEqual([
+            { phase: 'stream-frame', code: 'STREAM_FRAME_REFUSED' },
+            { phase: 'stream-frame', code: 'STREAM_FRAME_REFUSED' },
+        ]);
+
+        clock.advance(5_000);
+        subscriber.onFrameRefused('STREAM_FRAME_REFUSED');
+        expect(events.slice(settled)).toHaveLength(2);
+        expect(events.at(-1)).toMatchObject({
+            state: 'live',
+            payload: { reasonCode: 'STREAM_FRAME_REFUSED' },
+        });
+    });
+
+    // The moment the desk exists for, driven end to end: ten seconds of diffs at
+    // the exchange's own hundred-millisecond cadence, each restating two thousand
+    // levels a side, with twenty prints a tick on the tape beside them. The
+    // session must not notice.
+    it('holds a live session through a burst of full-width diffs and a heavy tape', async () => {
+        const TICKS = 100;
+        const LEVELS_PER_SIDE = 2_000;
+        const PRINTS_PER_TICK = 20;
+        const clock = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport({ clock: clock.clock });
+        let subscriber;
+        const faults = [];
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock: clock.clock,
+            onInternalError: fault => faults.push(fault),
+            transport: {
+                ...base,
+                // The desk's own frames only: the fixture's background cycle would
+                // interleave its own sequence into the burst.
+                connect: (options) => {
+                    subscriber = options;
+                    options.onMessage(
+                        FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.streams.bridgeDepth,
+                    );
+                    return Object.freeze({ ready: Promise.resolve(true), close: () => {} });
+                },
+            },
+        }));
+        const events = [];
+        await runtime.service.handleRequest(productionRequest('spike-burst'), {
+            emit: event => events.push(event),
+        });
+        expect(events.at(-1)).toMatchObject({ resource: 'status', state: 'live' });
+        const settled = events.length;
+
+        for (let tick = 1; tick <= TICKS; tick += 1) {
+            const [, trade, kline, mark, ticker] = FUTURES_PRODUCTION_WORKSTATION_FIXTURE
+                .symbols.BTCUSDT.streams.makeCycle(tick);
+            subscriber.onMessage(burstDepthFrame(tick, LEVELS_PER_SIDE));
+            subscriber.onMessage(trade);
+            for (let print = 0; print < PRINTS_PER_TICK; print += 1) {
+                subscriber.onMessage(productionTradeFrame({
+                    cycle: tick,
+                    aggregateTradeId: 9_100_000 + (tick * PRINTS_PER_TICK) + print,
+                }));
+            }
+            subscriber.onMessage(kline);
+            subscriber.onMessage(mark);
+            subscriber.onMessage(ticker);
+            clock.advance(100);
+            clock.runTimeouts();
+        }
+        // The freshness monitor reads the session it was left with.
+        clock.runIntervals();
+
+        const burst = events.slice(settled);
+        const depth = burst.filter(event => event.resource === 'depth');
+        expect(depth).toHaveLength(TICKS);
+        expect(burst.every(event => event.state === 'live')).toBe(true);
+        expect(burst.every(event => event.generation === 1)).toBe(true);
+        expect(faults).toEqual([]);
+        expect(runtime.service.current).toMatchObject({
+            symbol: 'BTCUSDT',
+            generation: 1,
+            bootstrapped: true,
+            reconnectTimer: null,
+        });
+        expect(runtime.service.current.staleResources.size).toBe(0);
+        // The book states the last diff, not the last one it managed to keep up
+        // with: the levels the final frame posted carry the quantities it posted.
+        const lastFrame = JSON.parse(burstDepthFrame(TICKS, LEVELS_PER_SIDE));
+        const view = depth.at(-1).payload;
+        for (const [price, quantity] of [lastFrame.data.b[0], lastFrame.data.b[1]]) {
+            expect(Number(view.bids.find(row => row.price === price)?.quantity))
+                .toBe(Number(quantity));
+        }
+        for (const [price, quantity] of [lastFrame.data.a[0], lastFrame.data.a[1]]) {
+            expect(Number(view.asks.find(row => row.price === price)?.quantity))
+                .toBe(Number(quantity));
+        }
+        expect(view.lastUpdateId).toBe(String(lastFrame.data.u));
+    });
+
+    it('resynchronizes under the name of the ending it was given', async () => {
+        const base = createFuturesProductionWorkstationFakeTransport();
+        let subscriber;
+        const clock = createManualClock();
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            transport: {
+                ...base,
+                connect: (options) => {
+                    subscriber = options;
+                    return base.connect(options);
+                },
+            },
+            clock: clock.clock,
+        }));
+        const events = [];
+        await runtime.service.handleRequest(productionRequest('named-resync'), {
+            emit: event => events.push(event),
+        });
+        const settled = events.length;
+
+        // The desk closed this one itself. Reported as a plain socket
+        // disconnect, the operator had nothing to act on.
+        subscriber.onDisconnect('BINARY_FRAME_REJECTED');
+
+        expect(events.slice(settled).map(event => [event.state, event.payload.reasonCode])).toEqual([
+            ['disconnected', 'BINARY_FRAME_REJECTED'],
+            ['resynchronizing', 'BINARY_FRAME_REJECTED'],
+        ]);
     });
 
     it.each([

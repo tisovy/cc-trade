@@ -19,7 +19,15 @@ book.
 - **The full book is rebuilt and sent on every depth frame.** There is no
   throttle or coalescing on the futures workstation depth path
   (`electron/services/futures-production-workstation-service.js:764`), and the
-  book is now 1000 levels per side.
+  book is now 1000 levels per side. Measured for
+  `hold-the-book-through-a-spike` 4.2: one such frame is 118 KB, and the
+  renderer's *data* path — parse, validate, apply, group both sides, mark the
+  walls — costs 2.75 ms of it, 4.4 ms at a coarse grouping step. At the
+  exchange's 100 ms cadence that is under 5 % of the tick, so the data path is
+  not what is at risk. What is unmeasured, and what this change is about, is
+  that each of those frames replaces `resources.depth` with a new object and
+  re-renders the whole workstation subtree: the chart and the ticket are
+  memoized, the view is not.
 - **The workstation sets state during render.**
   `src/components/features/futures/FuturesWorkstationView.jsx:480` calls
   `setLastTick` in the render body. React discards the render in progress and
