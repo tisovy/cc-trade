@@ -106,7 +106,7 @@ const isUsableSocket = (connection) => isOpenSocket(connection)
   && typeof connection?.addEventListener === 'function'
   && typeof connection?.removeEventListener === 'function'
 
-const createInitialState = ({ enabled, connection }) => ({
+const createInitialState = ({ enabled, connection, historyStoreReady = false }) => ({
   connected: Boolean(enabled && isUsableSocket(connection)),
   balances: null,
   openOrders: [],
@@ -129,6 +129,10 @@ const createInitialState = ({ enabled, connection }) => ({
   tradingPaused: false,
   maxOrderNotionalUsdt: null,
   history: createHeldFuturesHistory(),
+  // The opening history decision waits for IndexedDB to answer. Without this
+  // gate the workstation can send a full discovery command while the persisted
+  // coverage that would have answered it is still opening.
+  historyStoreReady,
 })
 
 const normalizeOrderSource = (order, fallback = 'REGULAR') => {
@@ -282,9 +286,13 @@ const useFuturesTrading = ({
   marketGeneration = null,
   historyStore = futuresHistoryStore,
 } = {}) => {
+  const historyStoreUnavailable = typeof historyStore?.readContracts !== 'function'
+    || (historyStore === futuresHistoryStore
+      && typeof globalThis.indexedDB?.open !== 'function')
   const [state, setState] = useState(() => createInitialState({
     enabled,
     connection: wsConnection,
+    historyStoreReady: historyStoreUnavailable,
   }))
   const symbolRef = useRef(symbol)
   // Read inside the connection effect, which must not re-run when only the
@@ -317,7 +325,7 @@ const useFuturesTrading = ({
   // was read, so nobody mistakes it for a reading taken now. A store that will
   // not open leaves the review exactly as it is without one.
   useEffect(() => {
-    if (!enabled) return undefined
+    if (!enabled || historyStoreUnavailable) return undefined
     let abandoned = false
     void (async () => {
       let restored = null
@@ -326,16 +334,18 @@ const useFuturesTrading = ({
       } catch {
         restored = null
       }
-      if (abandoned || restored === null) return
+      if (abandoned) return
       setState((previous) => {
         // A read answered while the store was opening. The exchange's own answer
         // is the newer of the two and wins outright.
-        if (previous.history.readAt !== null) return previous
-        return { ...previous, history: restored }
+        const history = restored !== null && previous.history.readAt === null
+          ? restored
+          : previous.history
+        return { ...previous, history, historyStoreReady: true }
       })
     })()
     return () => { abandoned = true }
-  }, [enabled, historyStore])
+  }, [enabled, historyStore, historyStoreUnavailable])
 
   // Commands whose answer somebody is waiting on. Held in a ref rather than in
   // state: nothing renders from them, and a pending answer must survive every
@@ -481,6 +491,7 @@ const useFuturesTrading = ({
                 symbols: history.symbols,
                 orders: history.orders,
                 trades: history.trades,
+                readFrom: history.readFrom,
                 readAt,
               })
             } catch {
@@ -782,9 +793,14 @@ const useFuturesTrading = ({
     }))
   }, [sendCommand])
 
-  const loadHistory = useCallback((targetSymbol) => {
+  const loadHistory = useCallback((targetSymbol, { full = false } = {}) => {
+    if (!state.historyStoreReady) return false
     const symbolToLoad = targetSymbol ?? symbolRef.current
-    const sent = sendCommand(createFuturesAccountHistoryCommand({ symbol: symbolToLoad }))
+    const sent = sendCommand(createFuturesAccountHistoryCommand({
+      coverage: state.history.coverage,
+      full,
+      symbol: symbolToLoad,
+    }))
     // The rows already read stay on screen while the read is in flight: emptying
     // them makes the operator wait a second time for what they were reading.
     setState(previous => ({
@@ -792,7 +808,7 @@ const useFuturesTrading = ({
       history: beginFuturesHistoryRead(previous.history, { symbol: symbolToLoad, sent }),
     }))
     return sent
-  }, [sendCommand])
+  }, [sendCommand, state.history.coverage, state.historyStoreReady])
 
   // The opening read is not issued here. This hook is mounted by the workspace,
   // which is not told which contract is on screen — `symbolRef` is undefined for

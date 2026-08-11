@@ -296,11 +296,14 @@ export const createFuturesAccountRefreshCommand = ({
     symbol,
 });
 
-// History is a read: it never touches the book, so it carries only the contract
-// whose past the operator asked to see.
+// History is a read: it never touches the book. The renderer carries the
+// per-contract identities it already holds so Electron can ask only for the
+// gap; the command boundary validates and bounds them before they are used.
 export const createFuturesAccountHistoryCommand = ({
     accountId,
     clientOrderId,
+    coverage = {},
+    full = false,
     symbol,
 } = {}) => ({
     ...buildBaseCommand({
@@ -310,6 +313,8 @@ export const createFuturesAccountHistoryCommand = ({
         clientOrderId,
         symbol,
     }),
+    coverage,
+    full: full === true,
     symbol,
 });
 

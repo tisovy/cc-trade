@@ -379,7 +379,7 @@ describe('futures history reads', () => {
         expect(params.get('symbol')).toBe('BTCUSDT');
         expect(params.get('limit')).toBe('500');
         expect(params.get('signature')).toMatch(/^[0-9a-f]{64}$/);
-        expect(orders.map(order => order.orderId)).toEqual([2, 1]);
+        expect(orders.map(order => order.orderId)).toEqual(['2', '1']);
     });
 
     // Reading the gap rather than the week: the exchange pages both endpoints
@@ -423,7 +423,7 @@ describe('futures history reads', () => {
         const trades = await adapter.getTradeHistory({ symbol: 'BTCUSDT' });
         expect(requests[0].url).toContain('/fapi/v1/userTrades');
         expect(trades).toEqual([expect.objectContaining({
-            id: 9,
+            id: '9',
             realizedPnl: '-96.74',
             commission: '0.0234',
             commissionAsset: 'USDT',
@@ -437,7 +437,7 @@ describe('futures history reads', () => {
             price: '58000', avgPrice: '57999.9', origQty: '0.004', executedQty: '0.004',
             cumQuote: '232', reduceOnly: true, updateTime: 4_000, secret: 'never',
         })).toEqual({
-            orderId: 3,
+            orderId: '3',
             clientOrderId: null,
             symbol: 'BTCUSDT',
             side: 'BUY',
@@ -453,6 +453,17 @@ describe('futures history reads', () => {
             time: 4_000,
         });
         expect(normalizeFuturesHistoryTrade({}).realizedPnl).toBe('0');
+    });
+
+    it('keeps safe and string exchange identities exact and drops rounded numbers', () => {
+        expect(normalizeFuturesHistoryOrder({ orderId: 42 }).orderId).toBe('42');
+        expect(normalizeFuturesHistoryOrder({ orderId: '9223372036854775807' }).orderId)
+            .toBe('9223372036854775807');
+        expect(normalizeFuturesHistoryOrder({ orderId: Number.MAX_SAFE_INTEGER + 1 }).orderId)
+            .toBeNull();
+        expect(normalizeFuturesHistoryTrade({ id: 9, orderId: 42 })).toMatchObject({
+            id: '9', orderId: '42',
+        });
     });
 });
 

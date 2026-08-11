@@ -199,10 +199,15 @@ const pagingIdentity = (value) => {
     return /^\d{1,20}$/.test(identity) ? identity : null;
 };
 
+const historyIdentity = (value) => {
+    if (typeof value === 'string') return pagingIdentity(value);
+    return Number.isSafeInteger(value) && value >= 0 ? String(value) : null;
+};
+
 // History rows are read-only and never re-enter the execution path, so they are
 // projected to exactly the fields the review surface renders.
 export const normalizeFuturesHistoryOrder = (order = {}) => Object.freeze({
-    orderId: order.orderId ?? null,
+    orderId: historyIdentity(order.orderId),
     clientOrderId: order.clientOrderId ?? null,
     symbol: order.symbol ?? null,
     side: order.side ?? null,
@@ -219,8 +224,8 @@ export const normalizeFuturesHistoryOrder = (order = {}) => Object.freeze({
 });
 
 export const normalizeFuturesHistoryTrade = (trade = {}) => Object.freeze({
-    id: trade.id ?? null,
-    orderId: trade.orderId ?? null,
+    id: historyIdentity(trade.id),
+    orderId: historyIdentity(trade.orderId),
     symbol: trade.symbol ?? null,
     side: trade.side ?? null,
     positionSide: trade.positionSide ?? 'BOTH',

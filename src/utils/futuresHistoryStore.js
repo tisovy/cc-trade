@@ -9,6 +9,8 @@
 // review that fails.
 
 import {
+  FUTURES_HELD_HISTORY_MAX_ORDERS_PER_CONTRACT,
+  FUTURES_HELD_HISTORY_MAX_TRADES_PER_CONTRACT,
   TERMINAL_FUTURES_ORDER_STATUSES,
   createHeldFuturesHistory,
 } from './futuresHeldHistory.js'
@@ -21,8 +23,8 @@ const STORE_NAME = 'contracts'
 // and `userTrades` a thousand, and the thousand is not a list — fills are folded
 // back into the positions they formed, so a fold that starts mid-position states
 // a round it cannot name the entry of.
-export const FUTURES_HISTORY_STORE_MAX_ORDERS = 200
-export const FUTURES_HISTORY_STORE_MAX_TRADES = 1_000
+export const FUTURES_HISTORY_STORE_MAX_ORDERS = FUTURES_HELD_HISTORY_MAX_ORDERS_PER_CONTRACT
+export const FUTURES_HISTORY_STORE_MAX_TRADES = FUTURES_HELD_HISTORY_MAX_TRADES_PER_CONTRACT
 // The fan-out reads twelve contracts. Holding twice that keeps a rotation's
 // worth of them without the store growing for the life of the account.
 export const FUTURES_HISTORY_STORE_MAX_CONTRACTS = 24
@@ -87,15 +89,20 @@ export const mergeFuturesHistoryContract = (stored, {
 } = {}, {
   maxOrders = FUTURES_HISTORY_STORE_MAX_ORDERS,
   maxTrades = FUTURES_HISTORY_STORE_MAX_TRADES,
+  replaceOrders = false,
+  replaceTrades = false,
 } = {}) => {
   const key = futuresHistoryContractKey(symbol ?? stored?.symbol)
   const mergedOrders = boundedRows(
-    [...asArray(stored?.orders), ...asArray(orders).filter(isTerminalOrder)],
+    [
+      ...(replaceOrders ? [] : asArray(stored?.orders)),
+      ...asArray(orders).filter(isTerminalOrder),
+    ],
     orderIdentity,
     maxOrders,
   )
   const mergedTrades = boundedRows(
-    [...asArray(stored?.trades), ...asArray(trades)],
+    [...(replaceTrades ? [] : asArray(stored?.trades)), ...asArray(trades)],
     tradeIdentity,
     maxTrades,
   )
@@ -164,14 +171,7 @@ export const restoreFuturesHistoryFromStore = (records) => {
   if (usable.length === 0) return null
   const orders = usable.flatMap(record => asArray(record.orders)).sort(newestFirst)
   const trades = usable.flatMap(record => asArray(record.trades)).sort(newestFirst)
-  if (orders.length === 0 && trades.length === 0) return null
-  const symbols = usable.map(record => futuresHistoryContractKey(record.symbol))
-  // Stamped from the contracts that actually put rows on screen. A contract read
-  // days ago and holding nothing says nothing about how fresh the review is, and
-  // letting it set the stamp would age a reading taken a minute ago.
-  const stamps = usable
-    .filter(record => asArray(record.orders).length > 0 || asArray(record.trades).length > 0)
-    .map(record => record.readAt)
+  const symbols = [...new Set(usable.map(record => futuresHistoryContractKey(record.symbol)))]
   return Object.freeze({
     ...createHeldFuturesHistory(),
     status: 'ready',
@@ -184,8 +184,9 @@ export const restoreFuturesHistoryFromStore = (records) => {
     // panel is told the list may be short of the account.
     discoveryComplete: false,
     // A review is only as fresh as its stalest contract, and this is the stamp
-    // the desk prints beside ↻.
-    readAt: Math.min(...stamps),
+    // the desk prints beside ↻. An empty-but-covered contract participates too:
+    // "there were no rows" is a reading, not an absence of one.
+    readAt: Math.min(...usable.map(record => record.readAt)),
     coverage: Object.freeze(Object.fromEntries(usable.map(record => [
       futuresHistoryContractKey(record.symbol),
       Object.freeze({
@@ -274,6 +275,11 @@ export const createFuturesHistoryStore = ({
   async writeReading(reading) {
     const readAt = Number.isSafeInteger(reading?.readAt) ? reading.readAt : null
     const contracts = splitFuturesHistoryReading(reading)
+    const readFrom = reading?.readFrom !== null
+      && typeof reading?.readFrom === 'object'
+      && !Array.isArray(reading.readFrom)
+      ? reading.readFrom
+      : null
     if (contracts.length === 0) return false
     try {
       const stored = await readAll()
@@ -282,9 +288,25 @@ export const createFuturesHistoryStore = ({
         .filter(record => futuresHistoryContractKey(record?.symbol) !== '')
         .map(record => [futuresHistoryContractKey(record.symbol), record]))
       for (const contract of contracts) {
+        const hasOrigins = readFrom !== null
+          && Object.hasOwn(readFrom, contract.symbol)
+          && readFrom[contract.symbol] !== null
+          && typeof readFrom[contract.symbol] === 'object'
+          && !Array.isArray(readFrom[contract.symbol])
+        const origins = hasOrigins ? readFrom[contract.symbol] : {}
         byKey.set(
           contract.symbol,
-          mergeFuturesHistoryContract(byKey.get(contract.symbol), { ...contract, readAt }),
+          mergeFuturesHistoryContract(
+            byKey.get(contract.symbol),
+            { ...contract, readAt },
+            {
+              // A cursor-origin page is a gap and joins the stored rows. A null
+              // origin (and an old payload with no origins) is a full endpoint
+              // reading and must replace that endpoint in persistent state too.
+              replaceOrders: !hasOrigins || identityOf(origins.orderCursor) === null,
+              replaceTrades: !hasOrigins || identityOf(origins.tradeCursor) === null,
+            },
+          ),
         )
       }
       const kept = boundFuturesHistoryContracts([...byKey.values()])

@@ -232,7 +232,7 @@ describe('useFuturesTrading', () => {
     expect(result.current.openOrders[0].origQty).toBe('0.012')
   })
 
-  it('loads bounded history on request and keeps it per contract', () => {
+  it('loads bounded history on request and keeps it per contract', async () => {
     const socket = createSocket()
     const { result } = renderHook(() => useFuturesTrading({
       enabled: true,
@@ -240,6 +240,7 @@ describe('useFuturesTrading', () => {
       wsConnection: socket,
     }))
 
+    await waitFor(() => expect(result.current.historyStoreReady).toBe(true))
     act(() => {
       result.current.loadHistory('BTCUSDT')
     })
@@ -332,6 +333,50 @@ describe('useFuturesTrading', () => {
     expect(historyStore.writeReading).not.toHaveBeenCalled()
   })
 
+  it('carries the stored coverage on an incremental read and marks an explicit full read', async () => {
+    const socket = createSocket()
+    const historyStore = {
+      readContracts: async () => [{
+        key: 'BTCUSDT',
+        symbol: 'BTCUSDT',
+        orders: [],
+        trades: [],
+        orderCursor: '90071992547409931234',
+        tradeCursor: '90071992547409931235',
+        readAt: 1_784_000_000_000,
+      }],
+      writeReading: vi.fn(async () => true),
+    }
+    const { result } = renderHook(() => useFuturesTrading({
+      enabled: true,
+      symbol: 'BTCUSDT',
+      wsConnection: socket,
+      historyStore,
+    }))
+
+    await waitFor(() => expect(result.current.historyStoreReady).toBe(true))
+    act(() => { result.current.loadHistory('BTCUSDT') })
+    expect(socket.sent.at(-1)).toMatchObject({
+      action: 'account.history',
+      symbol: 'BTCUSDT',
+      full: false,
+      coverage: {
+        BTCUSDT: {
+          readAt: 1_784_000_000_000,
+          orderCursor: '90071992547409931234',
+          tradeCursor: '90071992547409931235',
+        },
+      },
+    })
+
+    act(() => { result.current.loadHistory('BTCUSDT', { full: true }) })
+    expect(socket.sent.at(-1)).toMatchObject({
+      action: 'account.history',
+      symbol: 'BTCUSDT',
+      full: true,
+    })
+  })
+
   it('stores a reading that succeeded and never one that failed', async () => {
     const socket = createSocket()
     const historyStore = {
@@ -353,6 +398,10 @@ describe('useFuturesTrading', () => {
           trades: [{ id: 7, symbol: 'BTCUSDT', realizedPnl: '12.5' }],
           symbols: ['BTCUSDT', 'BICOUSDT'],
           discovered: 2,
+          readFrom: {
+            BTCUSDT: { orderCursor: '1', tradeCursor: '7' },
+            BICOUSDT: { orderCursor: null, tradeCursor: null },
+          },
           error: null,
         },
       })
@@ -362,6 +411,10 @@ describe('useFuturesTrading', () => {
       symbols: ['BTCUSDT', 'BICOUSDT'],
       orders: [{ orderId: 1 }],
       trades: [{ id: 7 }],
+      readFrom: {
+        BTCUSDT: { orderCursor: '1', tradeCursor: '7' },
+        BICOUSDT: { orderCursor: null, tradeCursor: null },
+      },
     })
     expect(Number.isSafeInteger(historyStore.writeReading.mock.calls[0][0].readAt)).toBe(true)
 
@@ -1421,9 +1474,10 @@ describe('useFuturesTrading held account review', () => {
     expect(result.current.history.trades).toHaveLength(2)
   })
 
-  it('holds the rows through a refresh and states when the reading was taken', () => {
+  it('holds the rows through a refresh and states when the reading was taken', async () => {
     const socket = createSocket()
     const { result } = subscribe(socket)
+    await waitFor(() => expect(result.current.historyStoreReady).toBe(true))
     readingArrives(socket)
     const readAt = result.current.history.readAt
     expect(readAt).toBeGreaterThan(0)

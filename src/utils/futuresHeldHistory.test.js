@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
+  FUTURES_HELD_HISTORY_MAX_ORDERS_PER_CONTRACT,
+  FUTURES_HELD_HISTORY_MAX_TRADES_PER_CONTRACT,
   applyFuturesHistoryReading,
   beginFuturesHistoryRead,
   createHeldFuturesHistory,
@@ -125,6 +127,79 @@ describe('futuresHeldHistory', () => {
     expect(reread.foldedOrders).toEqual([])
     expect(reread.foldedTrades).toEqual([])
     expect(reread.readAt).toBe(12_000)
+  })
+
+  it('merges a cursor gap without replacing older rows or untouched coverage', () => {
+    const first = applyFuturesHistoryReading(createHeldFuturesHistory(), {
+      ...READING,
+      orders: [
+        { symbol: 'BTCUSDT', orderId: '9007199254740993', status: 'FILLED', time: 1_000 },
+        { symbol: 'ETHUSDT', orderId: '2', status: 'FILLED', time: 900 },
+      ],
+      trades: [
+        { symbol: 'BTCUSDT', id: '7', realizedPnl: '12.5', time: 1_000 },
+        { symbol: 'BTCUSDT', id: '8', realizedPnl: '2.5', time: 1_100 },
+      ],
+      symbols: ['BTCUSDT', 'ETHUSDT'],
+    }, 5_000)
+
+    const gap = applyFuturesHistoryReading(first, {
+      symbol: 'BTCUSDT',
+      symbols: ['BTCUSDT'],
+      orders: [
+        { symbol: 'BTCUSDT', orderId: '9007199254740993', status: 'FILLED', time: 1_000 },
+        { symbol: 'BTCUSDT', orderId: '9007199254740995', status: 'FILLED', time: 2_000 },
+      ],
+      // This endpoint had no cursor, so its full answer replaces BTC trades.
+      trades: [{ symbol: 'BTCUSDT', id: '9', realizedPnl: '3.5', time: 2_000 }],
+      readFrom: {
+        BTCUSDT: { orderCursor: '9007199254740993', tradeCursor: null },
+      },
+      discovered: 2,
+      error: null,
+    }, 12_000)
+
+    expect(gap.orders.map(row => row.orderId)).toEqual([
+      '9007199254740995', '9007199254740993', '2',
+    ])
+    expect(gap.trades.map(row => row.id)).toEqual(['9'])
+    expect(gap.coverage.BTCUSDT).toEqual({
+      readAt: 12_000,
+      orderCursor: '9007199254740995',
+      tradeCursor: '9',
+    })
+    expect(gap.coverage.ETHUSDT.readAt).toBe(5_000)
+    expect(gap.readAt).toBe(5_000)
+  })
+
+  it('bounds REST rows and stream folds per contract for the whole session', () => {
+    const orders = Array.from(
+      { length: FUTURES_HELD_HISTORY_MAX_ORDERS_PER_CONTRACT },
+      (_, index) => ({
+        symbol: 'BTCUSDT', orderId: index + 1, status: 'FILLED', time: index + 1,
+      }),
+    )
+    const trades = Array.from(
+      { length: FUTURES_HELD_HISTORY_MAX_TRADES_PER_CONTRACT },
+      (_, index) => ({
+        symbol: 'BTCUSDT', id: index + 1, realizedPnl: '1', time: index + 1,
+      }),
+    )
+    const first = applyFuturesHistoryReading(createHeldFuturesHistory(), {
+      symbol: 'BTCUSDT', symbols: ['BTCUSDT'], orders, trades, error: null,
+    }, 5_000)
+    const next = foldExecutionIntoFuturesHistory(first, fill({
+      orderId: FUTURES_HELD_HISTORY_MAX_ORDERS_PER_CONTRACT + 1,
+      tradeId: FUTURES_HELD_HISTORY_MAX_TRADES_PER_CONTRACT + 1,
+      time: 9_000,
+    }))
+
+    expect(next.orders).toHaveLength(FUTURES_HELD_HISTORY_MAX_ORDERS_PER_CONTRACT)
+    expect(next.trades).toHaveLength(FUTURES_HELD_HISTORY_MAX_TRADES_PER_CONTRACT)
+    expect(next.orders.at(-1).orderId).toBe(2)
+    expect(next.trades.at(-1).id).toBe(2)
+    expect(next.foldedOrders).toContain('BTCUSDT:201')
+    expect(next.foldedTrades).toContain('BTCUSDT:1001')
   })
 
   it('keeps a folded entry the next read did not cover, and counts it apart', () => {

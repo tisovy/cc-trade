@@ -43,6 +43,8 @@ import {
 } from '../../src/utils/futuresOrderDraft.js';
 import { LOCAL_WEBSOCKET_AUTH_CLOSE_CODE } from '../../src/utils/localWebSocketAccess.js';
 import {
+    FUTURES_HISTORY_LIMIT,
+    FUTURES_TRADE_HISTORY_LIMIT,
     FUTURES_STREAM_ORIGIN,
     FuturesTradingAdapter,
     describeFuturesApiError,
@@ -1104,6 +1106,78 @@ export function setupBinanceConnection({
     let futuresActivationGeneration = 0;
     // The contracts the last income walk found, and when it found them.
     let futuresHistoryDiscovery = null;
+    // A contract can be skipped only when one uninterrupted authenticated
+    // stream interval has vouched for it since a successful REST reading. The
+    // epoch invalidates every proof at once; revisions make a stream event that
+    // races a REST read impossible to clear accidentally.
+    let futuresHistoryStreamConnected = false;
+    let futuresHistoryStreamEpoch = 0;
+    let futuresHistoryActivityRevision = 0;
+    let futuresHistoryRotationOffset = 0;
+    const futuresHistoryActivityBySymbol = new Map();
+    const futuresHistoryProofBySymbol = new Map();
+
+    const normalizeFuturesHistoryCursor = (value) => {
+        const cursor = typeof value === 'string' ? value.trim() : '';
+        return /^\d{1,20}$/.test(cursor) ? cursor : null;
+    };
+
+    const normalizeFuturesHistoryIdentity = (value) => {
+        if (typeof value === 'string') return normalizeFuturesHistoryCursor(value);
+        return Number.isSafeInteger(value) && value >= 0 ? String(value) : null;
+    };
+
+    const invalidateFuturesHistoryStream = () => {
+        futuresHistoryStreamConnected = false;
+        futuresHistoryStreamEpoch += 1;
+    };
+
+    const noteFuturesHistoryActivity = (value) => {
+        const symbol = String(value ?? '').trim().toUpperCase();
+        if (!symbol) return;
+        futuresHistoryActivityRevision += 1;
+        futuresHistoryActivityBySymbol.set(symbol, futuresHistoryActivityRevision);
+    };
+
+    const futuresHistoryActivityOf = symbol => (
+        futuresHistoryActivityBySymbol.get(symbol) ?? 0
+    );
+
+    const captureFuturesHistoryProof = symbol => ({
+        connected: futuresHistoryStreamConnected,
+        epoch: futuresHistoryStreamEpoch,
+        activity: futuresHistoryActivityOf(symbol),
+    });
+
+    const retainFuturesHistoryProof = (symbol, captured, cursors) => {
+        if (!captured.connected
+            || !futuresHistoryStreamConnected
+            || captured.epoch !== futuresHistoryStreamEpoch
+            || captured.activity !== futuresHistoryActivityOf(symbol)) return;
+        futuresHistoryProofBySymbol.set(symbol, Object.freeze({
+            epoch: captured.epoch,
+            activity: captured.activity,
+            orderCursor: cursors.orderCursor,
+            tradeCursor: cursors.tradeCursor,
+        }));
+    };
+
+    const futuresHistoryIsVouched = (symbol, held) => {
+        if (!futuresHistoryStreamConnected) return false;
+        const proof = futuresHistoryProofBySymbol.get(symbol);
+        return proof?.epoch === futuresHistoryStreamEpoch
+            && proof.activity === futuresHistoryActivityOf(symbol)
+            && proof.orderCursor === normalizeFuturesHistoryCursor(held?.orderCursor)
+            && proof.tradeCursor === normalizeFuturesHistoryCursor(held?.tradeCursor);
+    };
+
+    const forgetFuturesHistoryState = () => {
+        invalidateFuturesHistoryStream();
+        futuresHistoryActivityBySymbol.clear();
+        futuresHistoryProofBySymbol.clear();
+        futuresHistoryRotationOffset = 0;
+        futuresHistoryDiscovery = null;
+    };
     const noteFuturesMutation = () => {
         futuresMutationEpoch += 1;
     };
@@ -1254,6 +1328,7 @@ export function setupBinanceConnection({
     let futuresUserDataGeneration = 0;
 
     const markFuturesUserDataLoading = () => {
+        invalidateFuturesHistoryStream();
         futuresAccountResources = markFuturesResourceLoading(
             futuresAccountResources,
             'userDataStream',
@@ -1261,6 +1336,7 @@ export function setupBinanceConnection({
         broadcastFuturesAccountState();
     };
     const markFuturesUserDataReady = () => {
+        futuresHistoryStreamConnected = true;
         futuresAccountResources = markFuturesResourceReady(
             futuresAccountResources,
             'userDataStream',
@@ -1269,6 +1345,7 @@ export function setupBinanceConnection({
         broadcastFuturesAccountState();
     };
     const markFuturesUserDataFailed = (error) => {
+        invalidateFuturesHistoryStream();
         futuresAccountResources = markFuturesOrderResourcesStale(
             futuresAccountResources,
             error,
@@ -1295,7 +1372,7 @@ export function setupBinanceConnection({
         // reported settled — that one guards reads against a stream this
         // account no longer has.
         forgetFuturesSymbolConfigs();
-        futuresHistoryDiscovery = null;
+        forgetFuturesHistoryState();
         futuresSettledOrders.forget();
         // No Futures renderer is watching: nothing to mark to market.
         futuresMarkPriceFeed?.track([]);
@@ -1375,6 +1452,7 @@ export function setupBinanceConnection({
                 if (!streamEvent) return;
                 if (streamEvent.type === 'executionReport') {
                     const report = streamEvent.executionReport;
+                    noteFuturesHistoryActivity(report.symbol);
                     logger.info(`[futures-stream] ${report.symbol} ${report.side} ${report.status}`);
                     // The exchange has just said what this order is. Folding it
                     // into the held set is what the account-wide read used to be
@@ -1459,6 +1537,91 @@ export function setupBinanceConnection({
             && (futuresUserDataWs || futuresUserDataReconnecting)) return;
         futuresUserDataRequested = true;
         void startFuturesUserDataStream();
+    };
+
+    const readFuturesHistoryGap = async ({ cursor, limit, identityOf, load }) => {
+        const origin = normalizeFuturesHistoryCursor(cursor);
+        if (origin === null) return load(null);
+
+        const rows = [];
+        const identities = new Set();
+        const newestIdentityFirst = (left, right) => {
+            const leftIdentity = normalizeFuturesHistoryIdentity(identityOf(left));
+            const rightIdentity = normalizeFuturesHistoryIdentity(identityOf(right));
+            if (leftIdentity !== null && rightIdentity !== null) {
+                if (leftIdentity === rightIdentity) return 0;
+                return BigInt(leftIdentity) > BigInt(rightIdentity) ? -1 : 1;
+            }
+            if (leftIdentity !== null) return -1;
+            if (rightIdentity !== null) return 1;
+            return Number(right?.time ?? 0) - Number(left?.time ?? 0);
+        };
+        let next = origin;
+        for (;;) {
+            const page = await load(next);
+            const entries = Array.isArray(page) ? page : [];
+            let furthest = null;
+            for (const entry of entries) {
+                const identity = normalizeFuturesHistoryIdentity(identityOf(entry));
+                if (identity === null) {
+                    rows.push(entry);
+                    continue;
+                }
+                if (!identities.has(identity)) {
+                    identities.add(identity);
+                    rows.push(entry);
+                }
+                if (furthest === null || BigInt(identity) > BigInt(furthest)) {
+                    furthest = identity;
+                }
+            }
+            rows.sort(newestIdentityFirst);
+            if (rows.length > limit) rows.length = limit;
+            identities.clear();
+            for (const entry of rows) {
+                const identity = normalizeFuturesHistoryIdentity(identityOf(entry));
+                if (identity !== null) identities.add(identity);
+            }
+            if (entries.length < limit
+                || furthest === null
+                || BigInt(furthest) <= BigInt(next)) break;
+            next = furthest;
+        }
+        return rows.sort((left, right) => Number(right?.time ?? 0) - Number(left?.time ?? 0));
+    };
+
+    const futuresHistoryCursorAfter = (origin, rows, identityOf) => {
+        let cursor = normalizeFuturesHistoryCursor(origin);
+        for (const row of rows) {
+            const identity = normalizeFuturesHistoryIdentity(identityOf(row));
+            if (identity !== null
+                && (cursor === null || BigInt(identity) > BigInt(cursor))) cursor = identity;
+        }
+        return cursor;
+    };
+
+    const chooseFuturesHistoryReadSymbols = (symbols, coverage, { full = false } = {}) => {
+        if (full) return [...symbols];
+        const required = new Set(symbols.filter(symbol => (
+            !Object.hasOwn(coverage, symbol)
+            || !futuresHistoryIsVouched(symbol, coverage[symbol])
+        )));
+        if (symbols.length === 0 || required.size === symbols.length) {
+            return symbols.filter(symbol => required.has(symbol));
+        }
+
+        // One skipped contract is proved again on each ordinary refresh. Scan
+        // past already-dirty contracts so their mandatory reads do not consume
+        // the rotation slot.
+        for (let step = 0; step < symbols.length; step += 1) {
+            const index = (futuresHistoryRotationOffset + step) % symbols.length;
+            const candidate = symbols[index];
+            if (required.has(candidate)) continue;
+            required.add(candidate);
+            futuresHistoryRotationOffset = (index + 1) % symbols.length;
+            break;
+        }
+        return symbols.filter(symbol => required.has(symbol));
     };
 
     wsServer.on("request", (request) => {
@@ -2142,7 +2305,10 @@ export function setupBinanceConnection({
         // to look: income history is the one read that answers without being asked
         // about a contract first. The contract on screen and everything the account
         // is currently in lead the list — those are the rows the operator came for.
-        const collectFuturesHistorySymbols = async (selectedSymbol) => {
+        const collectFuturesHistorySymbols = async (
+            selectedSymbol,
+            { coverage = {}, full = false } = {},
+        ) => {
             const symbols = [];
             const remember = (value) => {
                 const symbol = String(value ?? '').toUpperCase();
@@ -2156,6 +2322,14 @@ export function setupBinanceConnection({
                 for (const order of futuresAccountResources[resource]?.data ?? []) {
                     remember(order?.symbol);
                 }
+            }
+            // An event for a contract that is no longer open still names history
+            // the operator may need. Once a successful REST read proves that
+            // revision, persisted coverage or the held discovery keeps naming it.
+            for (const [activitySymbol, revision] of futuresHistoryActivityBySymbol) {
+                const proof = futuresHistoryProofBySymbol.get(activitySymbol);
+                if (proof?.epoch !== futuresHistoryStreamEpoch
+                    || proof.activity !== revision) remember(activitySymbol);
             }
             // What the account seeds on its own, this time. Held discovery is
             // remembered apart from it, so a contract stays on the list because
@@ -2208,6 +2382,11 @@ export function setupBinanceConnection({
                 }
             };
             const now = Date.now();
+            const persisted = full ? [] : Object.entries(coverage)
+                .filter(([, entry]) => Number.isSafeInteger(entry?.readAt)
+                    && entry.readAt >= now - FUTURES_HISTORY_WINDOW_MS
+                    && entry.readAt <= now)
+                .sort(([, left], [, right]) => right.readAt - left.readAt);
             // Walking income is the most expensive thing a review does: up to
             // eight pages at weight 30, against an 800-weight minute. What it
             // answers — which contracts the account traded this week — changes
@@ -2215,20 +2394,44 @@ export function setupBinanceConnection({
             // the seeds above. So the walk is for trades made somewhere else,
             // and asking for those on every press of refresh is asking far more
             // often than the answer moves.
-            if (futuresHistoryDiscovery !== null
+            if (!full
+                && futuresHistoryDiscovery !== null
                 && now - futuresHistoryDiscovery.at < FUTURES_HISTORY_DISCOVERY_HOLD_MS) {
                 for (const symbol of futuresHistoryDiscovery.symbols) remember(symbol);
+                // Coverage can grow after this in-memory answer was created (for
+                // example when a stream event names a newly closed contract).
+                // Keep every fresh covered contract eligible for reconnect and
+                // rotation reads instead of hiding it until the hold expires.
+                for (const [persistedSymbol] of persisted) remember(persistedSymbol);
                 return {
                     symbols: symbols.slice(0, FUTURES_HISTORY_MAX_SYMBOLS),
                     discovered: symbols.length,
                     discoveryComplete: futuresHistoryDiscovery.complete,
                 };
             }
+            // The renderer's store is the persisted discovery cache. A fresh
+            // empty contract is still useful here: it proves where the prior
+            // review looked even though it has no row to contribute.
+            if (persisted.length > 0) {
+                for (const [persistedSymbol] of persisted) remember(persistedSymbol);
+                futuresHistoryDiscovery = Object.freeze({
+                    at: now,
+                    symbols: Object.freeze(symbols.filter(entry => !seeded.has(entry))),
+                    // A bounded local store names what it has seen; it cannot
+                    // claim this is every contract traded at the exchange.
+                    complete: false,
+                });
+                return {
+                    symbols: symbols.slice(0, FUTURES_HISTORY_MAX_SYMBOLS),
+                    discovered: symbols.length,
+                    discoveryComplete: false,
+                };
+            }
             const recentFrom = now - FUTURES_HISTORY_RECENT_WINDOW_MS;
             const recent = await walkIncome(recentFrom, null);
             let complete = recent.complete;
             rememberPages(recent.pages);
-            if (symbols.length < FUTURES_HISTORY_MAX_SYMBOLS) {
+            if (full || symbols.length < FUTURES_HISTORY_MAX_SYMBOLS) {
                 const older = await walkIncome(now - FUTURES_HISTORY_WINDOW_MS, recentFrom - 1);
                 complete = complete && older.complete;
                 rememberPages(older.pages);
@@ -2268,42 +2471,87 @@ export function setupBinanceConnection({
         // were on pairs they have since switched away from. One contract failing
         // does not blank the others — only a total failure is reported as an error.
         const handleFuturesHistory = async (command) => {
-            const { symbol } = command;
+            const {
+                symbol,
+                coverage = {},
+                full = false,
+            } = command;
             const {
                 symbols, discovered, discoveryComplete,
-            } = await collectFuturesHistorySymbols(symbol);
+            } = await collectFuturesHistorySymbols(symbol, { coverage, full });
+            const readSymbols = chooseFuturesHistoryReadSymbols(symbols, coverage, { full });
             const orders = [];
             const trades = [];
             const unavailable = [];
             const failures = [];
-            await Promise.all(symbols.map(async (historySymbol) => {
+            const readFrom = {};
+            await Promise.all(readSymbols.map(async (historySymbol) => {
+                const held = coverage[historySymbol] ?? {};
+                const orderCursor = full
+                    ? null
+                    : normalizeFuturesHistoryCursor(held.orderCursor);
+                const tradeCursor = full
+                    ? null
+                    : normalizeFuturesHistoryCursor(held.tradeCursor);
+                const proof = captureFuturesHistoryProof(historySymbol);
                 try {
                     const [symbolOrders, symbolTrades] = await Promise.all([
-                        futuresRestLimiter.execute(
-                            () => futuresTradingAdapter.getOrderHistory({ symbol: historySymbol }),
-                            FUTURES_HISTORY_READ_WEIGHT,
-                        ),
-                        futuresRestLimiter.execute(
-                            () => futuresTradingAdapter.getTradeHistory({ symbol: historySymbol }),
-                            FUTURES_HISTORY_READ_WEIGHT,
-                        ),
+                        readFuturesHistoryGap({
+                            cursor: orderCursor,
+                            limit: FUTURES_HISTORY_LIMIT,
+                            identityOf: order => order?.orderId,
+                            load: from => futuresRestLimiter.execute(
+                                () => futuresTradingAdapter.getOrderHistory({
+                                    symbol: historySymbol,
+                                    ...(from === null ? {} : { fromOrderId: from }),
+                                }),
+                                FUTURES_HISTORY_READ_WEIGHT,
+                            ),
+                        }),
+                        readFuturesHistoryGap({
+                            cursor: tradeCursor,
+                            limit: FUTURES_TRADE_HISTORY_LIMIT,
+                            identityOf: trade => trade?.id,
+                            load: from => futuresRestLimiter.execute(
+                                () => futuresTradingAdapter.getTradeHistory({
+                                    symbol: historySymbol,
+                                    ...(from === null ? {} : { fromTradeId: from }),
+                                }),
+                                FUTURES_HISTORY_READ_WEIGHT,
+                            ),
+                        }),
                     ]);
                     orders.push(...symbolOrders);
                     trades.push(...symbolTrades);
+                    readFrom[historySymbol] = { orderCursor, tradeCursor };
+                    retainFuturesHistoryProof(historySymbol, proof, {
+                        orderCursor: futuresHistoryCursorAfter(
+                            orderCursor,
+                            symbolOrders,
+                            order => order?.orderId,
+                        ),
+                        tradeCursor: futuresHistoryCursorAfter(
+                            tradeCursor,
+                            symbolTrades,
+                            trade => trade?.id,
+                        ),
+                    });
                 } catch (error) {
                     unavailable.push(historySymbol);
                     failures.push(error);
                     logger.error(`[futures-history] ${historySymbol} request failed:`, error?.code || error?.message);
                 }
             }));
-            if (symbols.length > 0 && unavailable.length === symbols.length) {
+            if (readSymbols.length > 0 && unavailable.length === readSymbols.length) {
                 const [failure] = failures;
                 emit({
                     futures_history: {
                         symbol,
-                        symbols,
+                        symbols: readSymbols,
                         discovered,
                         discoveryComplete,
+                        readFrom: {},
+                        full: full === true,
                         orders: [],
                         trades: [],
                         error: {
@@ -2318,13 +2566,15 @@ export function setupBinanceConnection({
             emit({
                 futures_history: {
                     symbol,
-                    symbols: symbols.filter(entry => !unavailable.includes(entry)),
+                    symbols: readSymbols.filter(entry => !unavailable.includes(entry)),
                     // How many contracts the account actually traded in the window,
                     // against how many were read. The review surface states the
                     // difference: an operator who cannot see yesterday's losses must
                     // be told the list is bounded, not left to conclude there were none.
                     discovered,
                     discoveryComplete,
+                    readFrom,
+                    full: full === true,
                     orders: orders.sort((left, right) => right.time - left.time),
                     trades: trades.sort((left, right) => right.time - left.time),
                     error: null,

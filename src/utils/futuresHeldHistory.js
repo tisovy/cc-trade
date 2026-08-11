@@ -18,6 +18,11 @@ export const TERMINAL_FUTURES_ORDER_STATUSES = Object.freeze(new Set([
   'REJECTED',
 ]))
 
+// Shared by the live held review and its persistent store. Gap pages and stream
+// folds must not turn a bounded review into session-long unbounded memory.
+export const FUTURES_HELD_HISTORY_MAX_ORDERS_PER_CONTRACT = 200
+export const FUTURES_HELD_HISTORY_MAX_TRADES_PER_CONTRACT = 1_000
+
 export const createHeldFuturesHistory = () => Object.freeze({
   symbol: null,
   status: 'idle',
@@ -55,6 +60,38 @@ const contractOf = row => String(row?.symbol ?? '').toUpperCase()
 
 const newestFirst = (left, right) => (Number(right?.time) || 0) - (Number(left?.time) || 0)
 
+const boundNewestByContract = (rows, limit) => {
+  const counts = new Map()
+  return rows.filter((row) => {
+    const contract = contractOf(row)
+    const count = counts.get(contract) ?? 0
+    if (count >= limit) return false
+    counts.set(contract, count + 1)
+    return true
+  })
+}
+
+const identityOf = value => (
+  value === null || value === undefined || value === '' ? null : String(value)
+)
+
+const higherIdentity = (left, right) => {
+  if (left === null) return right
+  if (right === null) return left
+  if (/^\d+$/.test(left) && /^\d+$/.test(right)) {
+    return BigInt(left) >= BigInt(right) ? left : right
+  }
+  return left
+}
+
+const cursorOf = (rows, keyOf) => rows.reduce(
+  (highest, row) => higherIdentity(highest, identityOf(keyOf(row))),
+  null,
+)
+
+const orderIdentity = order => order?.orderId
+const tradeIdentity = trade => trade?.id
+
 // Read rows win over folded ones: the exchange's own record of an order is more
 // complete than the report that announced it.
 //
@@ -67,25 +104,38 @@ const newestFirst = (left, right) => (Number(right?.time) || 0) - (Number(left?.
 // vanished from the closed-position list because the contract it was on no
 // longer had a position or a working order to put it back in the read.
 //
-// A contract the read covered is replaced by what it says. A contract it did not
-// cover keeps what the last read that did cover it said. The past does not
-// change, and a completed trade is not un-completed by a narrower look.
-const mergeRows = (readRows, heldRows, foldedKeys, keyOf, covered) => {
+// A full endpoint read replaces the contract it covered. A gap read appends to
+// that contract instead, while a contract the read did not cover keeps what the
+// last read that did cover it said. The past does not change, and a completed
+// trade is not un-completed by a narrower look.
+const mergeRows = (readRows, heldRows, foldedKeys, keyOf, covered, incremental, limit) => {
   const read = new Set(readRows.map(keyOf))
   const survivors = heldRows.filter((row) => {
     if (read.has(keyOf(row))) return false
-    return foldedKeys.has(keyOf(row)) || !covered.has(contractOf(row))
+    return foldedKeys.has(keyOf(row))
+      || !covered.has(contractOf(row))
+      || incremental.has(contractOf(row))
   })
+  const rows = boundNewestByContract(
+    [...readRows, ...survivors].sort(newestFirst),
+    limit,
+  )
+  const retained = new Set(rows.map(keyOf))
+  const retainedSurvivors = survivors.filter(row => retained.has(keyOf(row)))
   return {
-    rows: Object.freeze([...readRows, ...survivors].sort(newestFirst)),
+    rows: Object.freeze(rows),
     // Only what the stream added is still counted as added: a row held because
     // this read did not look at its contract was read, and saying otherwise
     // would inflate the "added since" the panel states.
-    folded: Object.freeze(survivors.filter(row => foldedKeys.has(keyOf(row))).map(keyOf)),
+    folded: Object.freeze(retainedSurvivors
+      .filter(row => foldedKeys.has(keyOf(row)))
+      .map(keyOf)),
     // Contracts whose rows are here because an *earlier read* covered them. A
     // folded row's contract is not one of these: the stream is not a read, and
     // the scope statement beneath the table counts reads.
-    carried: survivors.filter(row => !foldedKeys.has(keyOf(row))).map(contractOf),
+    carried: retainedSurvivors
+      .filter(row => !foldedKeys.has(keyOf(row)))
+      .map(contractOf),
   }
 }
 
@@ -123,30 +173,80 @@ export const applyFuturesHistoryReading = (history, payload, now) => {
   // Which contracts this read actually looked at. A payload that does not say —
   // an older backend, or a read that named none — is taken at face value for the
   // contracts its rows mention, which is the behaviour that was there before.
-  const read = asArray(payload?.symbols).map(entry => String(entry ?? '').toUpperCase())
-  const covered = new Set(read.length > 0
-    ? read
-    : [...asArray(payload?.orders), ...asArray(payload?.trades)].map(contractOf))
+  const readOrders = asArray(payload?.orders)
+  const readTrades = asArray(payload?.trades)
+  const named = asArray(payload?.symbols)
+    .map(entry => String(entry ?? '').toUpperCase())
+    .filter(Boolean)
+  const read = [...new Set(named.length > 0
+    ? named
+    : [...readOrders, ...readTrades].map(contractOf).filter(Boolean))]
+  const covered = new Set(read)
+  const readFrom = payload?.readFrom !== null
+    && typeof payload?.readFrom === 'object'
+    && !Array.isArray(payload.readFrom)
+    ? payload.readFrom
+    : {}
+  const incrementalOrders = new Set(read.filter(symbol => (
+    identityOf(readFrom[symbol]?.orderCursor) !== null
+  )))
+  const incrementalTrades = new Set(read.filter(symbol => (
+    identityOf(readFrom[symbol]?.tradeCursor) !== null
+  )))
   const orders = mergeRows(
-    asArray(payload?.orders),
+    readOrders,
     history.orders,
     new Set(history.foldedOrders),
     futuresHistoryOrderKey,
     covered,
+    incrementalOrders,
+    FUTURES_HELD_HISTORY_MAX_ORDERS_PER_CONTRACT,
   )
   const trades = mergeRows(
-    asArray(payload?.trades),
+    readTrades,
     history.trades,
     new Set(history.foldedTrades),
     futuresHistoryTradeKey,
     covered,
+    incrementalTrades,
+    FUTURES_HELD_HISTORY_MAX_TRADES_PER_CONTRACT,
   )
+  const coverage = { ...(history.coverage ?? {}) }
+  for (const symbol of read) {
+    const previous = coverage[symbol] ?? {}
+    const orderCursor = cursorOf(
+      readOrders.filter(row => contractOf(row) === symbol),
+      orderIdentity,
+    )
+    const tradeCursor = cursorOf(
+      readTrades.filter(row => contractOf(row) === symbol),
+      tradeIdentity,
+    )
+    coverage[symbol] = Object.freeze({
+      readAt: now,
+      orderCursor: incrementalOrders.has(symbol)
+        ? higherIdentity(identityOf(previous.orderCursor), orderCursor)
+        : orderCursor,
+      tradeCursor: incrementalTrades.has(symbol)
+        ? higherIdentity(identityOf(previous.tradeCursor), tradeCursor)
+        : tradeCursor,
+    })
+  }
+  const frozenCoverage = Object.freeze(coverage)
   // Every contract the review now covers, each of them from a read that happened
   // — this one, or the one that last reached it. Stating only this read's set
   // would undercount a panel that is showing more than this read returned.
-  const symbols = [...new Set([...read, ...orders.carried, ...trades.carried])]
+  const symbols = [...new Set([
+    ...Object.keys(frozenCoverage),
+    ...read,
+    ...orders.carried,
+    ...trades.carried,
+  ])]
     .filter(symbol => symbol !== '')
   const discovered = Number.isSafeInteger(payload?.discovered) ? payload.discovered : 0
+  const stamps = Object.values(frozenCoverage)
+    .map(entry => entry?.readAt)
+    .filter(Number.isSafeInteger)
   return Object.freeze({
     ...history,
     symbol: typeof payload?.symbol === 'string' ? payload.symbol : history.symbol,
@@ -159,7 +259,8 @@ export const applyFuturesHistoryReading = (history, payload, now) => {
     discovered: Math.max(discovered, symbols.length),
     discoveryComplete: payload?.discoveryComplete !== false,
     error: null,
-    readAt: now,
+    readAt: stamps.length > 0 ? Math.min(...stamps) : now,
+    coverage: frozenCoverage,
   })
 }
 
@@ -196,14 +297,19 @@ const tradeRowFromReport = report => Object.freeze({
   time: Number(report.time ?? report.T) || 0,
 })
 
-const upsert = (rows, folded, row, keyOf) => {
+const upsert = (rows, folded, row, keyOf, limit) => {
   const key = keyOf(row)
   const without = rows.filter(existing => keyOf(existing) !== key)
+  const bounded = boundNewestByContract([row, ...without].sort(newestFirst), limit)
+  const retained = new Set(bounded.map(keyOf))
+  const nextFolded = folded.filter(entry => retained.has(entry))
   return {
-    rows: Object.freeze([row, ...without].sort(newestFirst)),
+    rows: Object.freeze(bounded),
     // Recorded once: an identity already folded in stays folded, and a second
     // report about the same order replaces the row rather than adding one.
-    folded: Object.freeze(folded.includes(key) ? folded : [...folded, key]),
+    folded: Object.freeze(!retained.has(key) || nextFolded.includes(key)
+      ? nextFolded
+      : [...nextFolded, key]),
   }
 }
 
@@ -228,6 +334,7 @@ export const foldExecutionIntoFuturesHistory = (history, report) => {
       next.foldedOrders,
       orderRowFromReport(report),
       futuresHistoryOrderKey,
+      FUTURES_HELD_HISTORY_MAX_ORDERS_PER_CONTRACT,
     )
     next = Object.freeze({ ...next, orders: merged.rows, foldedOrders: merged.folded })
   }
@@ -237,6 +344,7 @@ export const foldExecutionIntoFuturesHistory = (history, report) => {
       next.foldedTrades,
       tradeRowFromReport(report),
       futuresHistoryTradeKey,
+      FUTURES_HELD_HISTORY_MAX_TRADES_PER_CONTRACT,
     )
     next = Object.freeze({ ...next, trades: merged.rows, foldedTrades: merged.folded })
   }

@@ -74,6 +74,25 @@ describe('FuturesProductionWorkstation account review', () => {
     expect(state.loadHistory).toHaveBeenCalledOnce()
   })
 
+  it('waits for store hydration and does not auto-read a review restored from it', () => {
+    const loading = executionState({
+      historyStoreReady: false,
+      history: { readAt: null },
+    })
+    const { rerender } = render(
+      <FuturesProductionWorkstation enabled executionState={loading} />,
+    )
+    expect(loading.loadHistory).not.toHaveBeenCalled()
+
+    const restored = {
+      ...loading,
+      historyStoreReady: true,
+      history: { readAt: 1_784_000_000_000 },
+    }
+    rerender(<FuturesProductionWorkstation enabled executionState={restored} />)
+    expect(restored.loadHistory).not.toHaveBeenCalled()
+  })
+
   it('waits for a connection to read on, and does not read without one', () => {
     const disconnected = executionState({ connected: false })
     const { rerender } = render(

@@ -201,10 +201,48 @@ describe('the store across runs', () => {
     expect(restoreFuturesHistoryFromStore(await store.readContracts()).readAt).toBe(READ_AT)
   })
 
-  it('takes its stamp from the contracts that put rows on screen', async () => {
+  it('merges cursor gaps but replaces full endpoints in persistent state', async () => {
     const { store } = createMemoryStore()
-    // Read days ago and holding nothing — it says nothing about how fresh the
-    // rows below are, so it must not age them.
+    await store.writeReading({
+      symbols: ['BTCUSDT'],
+      orders: [order(5)],
+      trades: [trade(1)],
+      readAt: READ_AT,
+    })
+    await store.writeReading({
+      symbols: ['BTCUSDT'],
+      orders: [order(6, { time: READ_AT + 1 })],
+      trades: [trade(2, { time: READ_AT + 1 })],
+      readFrom: {
+        BTCUSDT: { orderCursor: '5', tradeCursor: null },
+      },
+      readAt: READ_AT + 1,
+    })
+
+    const [record] = await store.readContracts()
+    expect(record.orders.map(row => row.orderId)).toEqual([6, 5])
+    expect(record.trades.map(row => row.id)).toEqual([2])
+    expect(record).toMatchObject({ orderCursor: '6', tradeCursor: '2' })
+
+    await store.writeReading({
+      symbols: ['BTCUSDT'],
+      orders: [],
+      trades: [],
+      readFrom: {
+        BTCUSDT: { orderCursor: null, tradeCursor: null },
+      },
+      readAt: READ_AT + 2,
+    })
+    const [cleared] = await store.readContracts()
+    expect(cleared).toMatchObject({
+      orders: [], trades: [], orderCursor: null, tradeCursor: null,
+    })
+  })
+
+  it('lets an empty-but-covered contract age the review it proves', async () => {
+    const { store } = createMemoryStore()
+    // "No rows" is still the result of a read and still names persisted
+    // discovery, so the review is only as fresh as that oldest proof.
     await store.writeReading({
       symbols: ['SOLUSDT'], orders: [], trades: [], readAt: READ_AT - 259_200_000,
     })
@@ -212,17 +250,30 @@ describe('the store across runs', () => {
       symbols: ['BTCUSDT'], orders: [order(5)], trades: [], readAt: READ_AT,
     })
 
-    expect(restoreFuturesHistoryFromStore(await store.readContracts()).readAt).toBe(READ_AT)
+    expect(restoreFuturesHistoryFromStore(await store.readContracts()).readAt)
+      .toBe(READ_AT - 259_200_000)
   })
 
   it('leaves the review unread when nothing is stored', async () => {
     const { store } = createMemoryStore()
     expect(restoreFuturesHistoryFromStore(await store.readContracts())).toBeNull()
-    // A store that holds contracts but no rows is not a review either.
+  })
+
+  it('restores a contract that was read and had no terminal rows', async () => {
+    const { store } = createMemoryStore()
     await store.writeReading({
       symbols: ['BTCUSDT'], orders: [], trades: [], readAt: READ_AT,
     })
-    expect(restoreFuturesHistoryFromStore(await store.readContracts())).toBeNull()
+    expect(restoreFuturesHistoryFromStore(await store.readContracts())).toMatchObject({
+      status: 'ready',
+      readAt: READ_AT,
+      symbols: ['BTCUSDT'],
+      orders: [],
+      trades: [],
+      coverage: {
+        BTCUSDT: { readAt: READ_AT, orderCursor: null, tradeCursor: null },
+      },
+    })
   })
 
   it('keeps the contracts most recently read and drops the rest', async () => {

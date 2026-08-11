@@ -652,6 +652,42 @@ describe('backend trading command validation', () => {
         })).toMatchObject({ ok: false });
     });
 
+    it('bounds and normalizes futures history coverage without rounding identities', () => {
+        const coverage = Object.fromEntries([
+            ['btcusdt', {
+                readAt: 1_784_000_000_000,
+                orderCursor: '9223372036854775807',
+                tradeCursor: 17,
+            }],
+            ['bad symbol', { readAt: 1, orderCursor: '1', tradeCursor: '2' }],
+            ...Array.from({ length: 30 }, (_, index) => [
+                `SYM${index}USDT`,
+                { readAt: index + 1, orderCursor: String(index + 1), tradeCursor: null },
+            ]),
+        ]);
+        const result = validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.ACCOUNT_HISTORY,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'futures',
+            accountId: 'default',
+            clientOrderId: 'history-coverage',
+            symbol: 'BTCUSDT',
+            coverage,
+            full: true,
+        });
+
+        expect(result.ok).toBe(true);
+        expect(Object.keys(result.command.coverage)).toHaveLength(24);
+        expect(result.command.coverage.BTCUSDT).toEqual({
+            readAt: 1_784_000_000_000,
+            orderCursor: '9223372036854775807',
+            // A numeric identity is rejected rather than rounded in transit.
+            tradeCursor: null,
+        });
+        expect(result.command.coverage).not.toHaveProperty('bad symbol');
+        expect(result.command.full).toBe(true);
+    });
+
     // Reading a contract's configuration touches nothing, so it may fall back to
     // the contract on screen — unlike setting leverage, which may not.
     it('accepts a contract configuration read and refuses it for spot', () => {

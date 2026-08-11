@@ -10,14 +10,16 @@
 - [x] 1.2 Only terminal rows are stored — a working order is not history. A `NEW` or `PARTIALLY_FILLED` order is dropped on the way in: stored, it would present itself as settled in the next run, when the exchange may have filled or cancelled it while the desk was closed.
 - [x] 1.3 An unreadable or unavailable store degrades to reading, never fails the review. Both store methods answer "nothing stored" / `false` rather than raising, whatever the layer beneath them does — no caller can be broken by it.
 - [x] 1.4 The store is presented on launch before any read is issued, stamped with when each contract was read. `restoreFuturesHistoryFromStore` builds the held review from the records; the hook seeds it on mount and steps aside if an exchange answer arrived first. The whole review is stamped with its *stalest* contract's reading — a review is only as fresh as the oldest thing in it — and per-contract stamps live in the new `coverage` field on the held review, which §2.2 is what carries into the command. `discoveryComplete` is `false` for a restored review: the store names what it holds, which is no claim about what the account traded.
+- [x] 1.5 Restore an empty-but-covered contract as a valid reading: `restoreFuturesHistoryFromStore` now retains its symbol, coverage and age even when both row lists are empty; store tests cover the empty reading.
 
 ## 2. The Read Asks For The Gap
 
 - [x] 2.1 `getOrderHistory` and `getTradeHistory` read forward from an identity — `orderId` and `fromId`, which is how the exchange pages them. `fromOrderId` / `fromTradeId` on the adapter, carried as digits because an `orderId` outgrows a double and one rounded into the query asks for a row that does not exist; an identity that is not digits reads the newest page, as before. Both endpoints answer from the identity *forward*, oldest first, so an answer that fills the limit means the gap was deeper than a page and the caller asks again from the last identity it received. Nothing calls it with an identity yet — that is 2.2.
-- [ ] 2.2 The held review states, per contract, what it is covered up to, and the command carries it.
-- [ ] 2.3 A contract with no stream activity since its last read is not read, while the stream has been connected throughout.
-- [ ] 2.4 A stream disconnection marks every contract as unvouched-for, so the next refresh reads them all.
-- [ ] 2.5 A bounded rotation re-reads skipped contracts across successive refreshes, so a missed event surfaces within a stated number of them.
+- [x] 2.2 The held review states per-contract `readAt`/order/trade cursors and `createFuturesAccountHistoryCommand` carries that coverage with the incremental/full choice.
+- [x] 2.3 Electron records stream activity revisions and skips a covered contract only when its successful REST proof still matches the uninterrupted authenticated stream epoch.
+- [x] 2.4 Loading, failure, close, replacement and deactivation invalidate stream trust; the next refresh consequently reads every covered contract.
+- [x] 2.5 A round-robin slot advances across one otherwise skipped contract per refresh and scans past already-required contracts, proving a stable twelve-contract set within twelve refreshes.
+- [x] 2.6 Typed-command validation bounds coverage to 24 uppercase contracts, keeps only safe timestamps and digit-string cursors, and successful payloads return per-endpoint `readFrom` origins for correct gap/full merging.
 
 ## 3. Discovery Is Asked For A Reason
 
@@ -26,26 +28,37 @@
 - [x] 3.3 The held answer carries the walk's own `discoveryComplete`, so a held refresh cannot read as a wider review than the walk was.
 - [x] 3.4 Deactivating the market drops it, like every other held reading.
 - [x] 3.5 Test: two refreshes in a row walk income once and cover the same contracts; past the hold it is walked again.
-- [ ] 3.6 Persisting it across runs, so a launch does not walk at all, waits on the store in §1.
+- [x] 3.6 Fresh store coverage is used as persisted discovery without an income request; workstation opening waits for hydration and presents a restored review without an automatic read.
+- [x] 3.7 The ordinary ↻ sends coverage for an incremental read; a separate visible `Full` control sends `full: true` and bypasses persisted and in-memory discovery.
 
 ## 4. Proof
 
 - [x] 4.1 Test: a launch with a populated store presents the review with no request issued. `useFuturesTrading.test.js` — "presents the review the store holds without issuing a read": rows, stamp and coverage on screen, and the only frame sent is the account refresh the subscription always sends. Two tests beside it: a reading that succeeded is stored and a reading that failed is not, and a store that answers after the exchange did does not overwrite the newer reading.
-- [ ] 4.2 Test: a contract that traded is read from its last identity, not from the window's start.
-- [ ] 4.3 Test: a contract that did not trade is not read.
-- [ ] 4.4 Test: a stream reconnect makes the next refresh read every contract.
-- [ ] 4.5 Test: the rotation re-reads a skipped contract within the stated number of refreshes.
+- [x] 4.2 Test: `reads a stream-dirty cursor gap...` proves inclusive multi-page forward reads start at the supplied order/trade identities, stop on a short page, and deduplicate the boundary row.
+- [x] 4.3 Test: the same three-contract scenario proves the dirty contract plus one rotation read while the other unchanged contract issues no endpoint read.
+- [x] 4.4 Test: `invalidates every history proof...` disconnects the authenticated socket and proves the next refresh reads all covered contracts.
+- [x] 4.5 Test: `rotates one idle contract...` proves exactly one endpoint pair per refresh and all twelve contracts within twelve refreshes.
 - [x] 4.6 Test: a refresh inside the hold issues no income page (see 3.5).
-- [ ] 4.7 Test: a full re-read walks discovery and reads the whole window.
+- [x] 4.7 Test: `bypasses persisted and in-memory discovery...` first primes both caches, then proves Full walks recent and older discovery and reads every named contract with null origins.
 - [x] 4.8 Test: an unreadable store behaves exactly as no store. `futuresHistoryStore.test.js` — a store whose reads answer nothing and whose writes throw leaves the review unread and reports a write that did not happen, and a store that raises on open does the same rather than propagating.
-- [ ] 4.9 Weight test: a refresh after an idle minute costs a fraction of a full read, and the numbers are stated.
+- [x] 4.9 Weight test states and proves idle = 2 endpoint admissions × 5 = 10, full = 8 income × 30 + 24 endpoint admissions × 5 = 360, so idle is 1/36 (about 2.8%).
+- [x] 4.10 Tests cover empty-contract restoration, bounded command normalization, incremental per-endpoint row merging, store hydration gating and the explicit Full control.
+- [x] 4.11 Discovered during the targeted run: when the standard IndexedDB store is provably unavailable, initialize hydration as ready instead of scheduling a redundant state update; this removed the new React `act(...)` warnings without changing the real IndexedDB path.
+- [x] 4.12 Discovered during manual audit: union fresh coverage into a held in-memory discovery answer, so a contract learned after the cache was created remains in rotation and is included in the next post-disconnect all-contract read; a three-read reconnect regression test covers it.
+- [x] 4.13 Discovered during persistence audit: pass `readFrom` to the store, merge cursor-origin endpoints and replace null-origin endpoints, preventing a full read's removed rows from reappearing after restart; the mixed order-gap/trade-full and empty-full store test covers it.
+- [x] 4.14 Discovered against the design's memory bound: cap Electron's multi-page gap accumulator to the endpoint depth and cap held REST/stream rows per contract to the store's shared 200-order/1,000-trade limits; backend and held-review tests cover page-boundary deduplication and eviction.
+- [x] 4.15 Discovered during multi-renderer audit: bind stream proofs to the resulting order/trade cursors and require the requesting coverage to match, so a stale second renderer reads its own gap; a rotation-positioned two-contract test proves it.
+- [x] 4.16 Discovered in the real adapter path: normalize safe numeric and string history IDs to digit strings before pagination and discard already-rounded unsafe numbers; adapter tests cover safe, 64-bit string and unsafe-number cases.
 
 ## 5. Verification
 
-- [ ] 5.1 `npm run lint`, `npm test`, `npm run check:futures-production`.
+- [x] 5.1 Final verification passed after all audit fixes: targeted history/protocol/UI/backend tests (9 files / 259 tests), `npm run lint`, full `npm test` on the exact staged snapshot (98 files / 1,436 tests), `npm run build`, `npm run check:futures-production`, and `npm run check:command-path`; additional circular-import and runtime-mock guards also passed.
 - [ ] 5.2 Operator confirms on live data: the review is on screen immediately at launch; ↻ is fast; a position closed a minute ago is in closed positions; and a trade made in Binance's app appears after a full re-read.
+- [x] 5.3 Record the repository-wide mandatory implementation order in `AGENTS.md`: production code first, tests for that behaviour only afterward.
+- [x] 5.4 Discovered by the production boundary check: remove a storage implementation name from the isolated workstation's source comment; the component still receives only hydrated state, and the rerun passed.
+- [x] 5.5 Discovered during final staging: concurrent desk-diagnostic edits shared the backend and its test file. Keep every diagnostic hunk in the working copy but outside this change's index, then verify the exact staged snapshot and audit all 90 GitNexus changed symbols, 106 direct edges and 86 affected flows.
 
 ## 6. Stated Limits, Not Fixed Here
 
-- [ ] 6.1 The 150ms admission spacing stays as it is — the operator's call. Fewer reads is what makes ↻ fast, not a tighter spacing.
-- [ ] 6.2 The fan-out bound of twelve contracts stays. What changes is how often each of them is actually read.
+- [x] 6.1 Confirmed unchanged in code and design: `new RateLimiter(800, 60000, 150)` still owns Futures REST admission; the optimization removes reads and does not alter spacing.
+- [x] 6.2 Confirmed unchanged in code and tests: `FUTURES_HISTORY_MAX_SYMBOLS` remains 12, every discovery return still slices to it, and the rotation/weight tests exercise the full twelve-contract bound.

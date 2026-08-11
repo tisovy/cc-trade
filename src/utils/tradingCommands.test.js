@@ -12,6 +12,7 @@ import {
     TRADING_COMMAND_ACTIONS,
     createAccountRefreshCommand,
     createFuturesAdjustPositionMarginCommand,
+    createFuturesAccountHistoryCommand,
     createSpotCancelAllCommand,
     createSpotCancelOrderCommand,
     createSpotPlaceOrderCommand,
@@ -186,6 +187,25 @@ describe('trading command contract', () => {
         expect(command).not.toHaveProperty('side');
         expect(command).not.toHaveProperty('quantity');
         expect(command).not.toHaveProperty('price');
+    });
+
+    it('carries history coverage as exact identities and keeps full reads explicit', () => {
+        const coverage = {
+            BTCUSDT: {
+                readAt: 1_784_000_000_000,
+                orderCursor: '9223372036854775807',
+                tradeCursor: '17',
+            },
+        };
+        expect(createFuturesAccountHistoryCommand({
+            symbol: 'BTCUSDT', coverage, full: true,
+        })).toMatchObject({
+            action: TRADING_COMMAND_ACTIONS.ACCOUNT_HISTORY,
+            marketType: FUTURES_MARKET_TYPE,
+            symbol: 'BTCUSDT',
+            coverage,
+            full: true,
+        });
     });
 
     it('rejects legacy adaptation for unsupported command families', () => {

@@ -19,6 +19,7 @@ const FUTURES_ORDER_TYPES = new Set(['LIMIT', 'MARKET']);
 const FUTURES_POSITION_SIDES = new Set(['BOTH', 'LONG', 'SHORT']);
 const POSITION_MARGIN_DIRECTION_VALUES = new Set(Object.values(POSITION_MARGIN_DIRECTIONS));
 const FUTURES_MARGIN_TYPE_VALUES = new Set(FUTURES_MARGIN_TYPES);
+const FUTURES_HISTORY_COVERAGE_LIMIT = 24;
 
 const isCommandPayloadObject = (payload) => (
     payload !== null &&
@@ -69,6 +70,29 @@ const normalizeOrderId = (value) => {
         return /^[1-9]\d*$/.test(trimmed) ? trimmed : null;
     }
     return null;
+};
+
+const normalizeFuturesHistoryCursor = (value) => {
+    const cursor = typeof value === 'string' ? value.trim() : '';
+    return /^\d{1,20}$/.test(cursor) ? cursor : null;
+};
+
+const normalizeFuturesHistoryCoverage = (value) => {
+    if (!isCommandPayloadObject(value)) return Object.freeze({});
+    const entries = [];
+    for (const [rawSymbol, rawCoverage] of Object.entries(value)) {
+        if (entries.length >= FUTURES_HISTORY_COVERAGE_LIMIT) break;
+        const symbol = normalizeTextField(rawSymbol)?.toUpperCase();
+        if (!symbol || !/^[A-Z0-9]{2,24}$/.test(symbol)) continue;
+        if (!isCommandPayloadObject(rawCoverage)) continue;
+        if (!Number.isSafeInteger(rawCoverage.readAt) || rawCoverage.readAt < 0) continue;
+        entries.push([symbol, Object.freeze({
+            readAt: rawCoverage.readAt,
+            orderCursor: normalizeFuturesHistoryCursor(rawCoverage.orderCursor),
+            tradeCursor: normalizeFuturesHistoryCursor(rawCoverage.tradeCursor),
+        })]);
+    }
+    return Object.freeze(Object.fromEntries(entries));
 };
 
 export const createCommandRejection = (request, code, message, details = {}) => ({
@@ -739,7 +763,16 @@ export const validateTypedTradingCommand = (payload, { selectedSymbol } = {}) =>
                     ),
                 };
             }
-            return { ok: true, command: { ...baseCommand, symbol } };
+            const coverage = normalizeFuturesHistoryCoverage(payload.coverage);
+            return {
+                ok: true,
+                command: {
+                    ...baseCommand,
+                    symbol,
+                    ...(Object.keys(coverage).length > 0 ? { coverage } : {}),
+                    ...(payload.full === true ? { full: true } : {}),
+                },
+            };
         }
         case TRADING_COMMAND_ACTIONS.SET_TRADING_PAUSED: {
             if (baseCommand.marketType !== FUTURES_MARKET_TYPE) {

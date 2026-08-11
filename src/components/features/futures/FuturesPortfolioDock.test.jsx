@@ -362,9 +362,12 @@ describe('FuturesPortfolioDock', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Closed positions' }))
     expect(onLoadHistory).toHaveBeenCalledTimes(0)
 
-    // The refresh control is the operator's own read, and the only one.
+    // The ordinary refresh is incremental; the wider read is a separate,
+    // explicit operator choice.
     fireEvent.click(screen.getByRole('button', { name: 'Re-read account history' }))
     expect(onLoadHistory).toHaveBeenCalledExactlyOnceWith('BTCUSDT')
+    fireEvent.click(screen.getByRole('button', { name: 'Read full account history' }))
+    expect(onLoadHistory).toHaveBeenNthCalledWith(2, 'BTCUSDT', { full: true })
   })
 
   it('states how old the reading is and refuses a second read while one is in flight', () => {
@@ -393,6 +396,7 @@ describe('FuturesPortfolioDock', () => {
     )
     expect(screen.getByText('reading…')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Re-read account history' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Read full account history' })).toBeDisabled()
   })
 
   // A contract change re-reads nothing: the review spans the account, not the

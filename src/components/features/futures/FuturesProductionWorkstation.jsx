@@ -110,14 +110,24 @@ export const FuturesProductionWorkstation = ({
   // history view renders what is held; the stream keeps it current.
   const loadHistory = executionState?.loadHistory
   const executionConnected = executionState?.connected === true
+  const historyStoreReady = executionState?.historyStoreReady !== false
+  const historyHeld = executionState?.history?.readAt !== null
+    && executionState?.history?.readAt !== undefined
   const historyReadRef = useRef(false)
   useEffect(() => {
     if (!enabled || !executionConnected || typeof loadHistory !== 'function') return
     if (historyReadRef.current) return
+    // The persisted-history cache owns discovery. Sending while it is still opening
+    // turns a cheap launch into the full income walk the store exists to avoid.
+    if (!historyStoreReady) return
+    if (historyHeld) {
+      historyReadRef.current = true
+      return
+    }
     // Armed until a frame actually leaves: a read that could not be sent must be
     // performed by the next usable connection, not silently skipped.
     if (loadHistory(symbol)) historyReadRef.current = true
-  }, [enabled, executionConnected, loadHistory, symbol])
+  }, [enabled, executionConnected, historyHeld, historyStoreReady, loadHistory, symbol])
 
   const handleToggleFavorite = useCallback((favoriteSymbol) => {
     setSymbolHistory(previous => toggleFuturesFavorite(previous, favoriteSymbol))

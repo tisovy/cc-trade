@@ -300,11 +300,21 @@ export const FuturesPortfolioDock = ({
                 type="button"
                 className="futures-workstation-dock-close"
                 aria-label="Re-read account history"
-                title="Read the account history from Binance again"
+                title="Read only the account history that may have changed"
                 disabled={historyReading || typeof onLoadHistory !== 'function'}
                 onClick={() => onLoadHistory?.(selectedSymbol)}
               >
                 ↻
+              </button>
+              <button
+                type="button"
+                className="futures-workstation-dock-close"
+                aria-label="Read full account history"
+                title="Run discovery and read the full account history window"
+                disabled={historyReading || typeof onLoadHistory !== 'function'}
+                onClick={() => onLoadHistory?.(selectedSymbol, { full: true })}
+              >
+                Full
               </button>
             </div>
           )}
