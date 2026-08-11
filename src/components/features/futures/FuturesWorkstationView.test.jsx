@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { createEvent, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import FuturesWorkstationView from './FuturesWorkstationView.jsx'
@@ -909,6 +910,21 @@ describe('instrument recency and interface scale', () => {
     expect(within(recent).getAllByRole('button', { name: /^(?:BTC|ETH)USDT/ })
       .map(button => button.textContent)).toEqual(['ETHUSDT', 'BTCUSDT'])
     expect(container.querySelector('.futures-workstation-contract-list')).toBeNull()
+  })
+
+  it('lets recent pills use free rail height before enabling vertical overflow', () => {
+    const stylesheet = readFileSync(
+      'src/components/features/futures/FuturesWorkstation.css',
+      'utf8',
+    )
+    const recentRule = stylesheet.match(
+      /\.futures-workstation-recent-contracts\s*\{(?<declarations>[^}]*)\}/,
+    )?.groups?.declarations
+
+    expect(recentRule).toContain('flex: 0 1 auto;')
+    expect(recentRule).toContain('min-height: 0;')
+    expect(recentRule).toContain('overflow-y: auto;')
+    expect(recentRule).not.toMatch(/max-height\s*:/)
   })
 
   it('lists persisted recent contracts before the catalogue arrives', () => {

@@ -98,7 +98,11 @@ When the search field is empty, the recent-pill group SHALL be the only contract
 list and the rail SHALL NOT render the ordinary catalogue beneath it. When a
 search query is active, the pill group SHALL yield to one unified matching list
 so every result appears once and the operator can discover contracts outside
-the recent set.
+the recent set. The recent-pill group SHALL grow to its wrapped content height
+while unused vertical space remains below the execution ticket. It SHALL become
+internally scrollable only when showing all recent pills would exhaust the
+rail's available height, and SHALL NOT reserve a fixed short scroll viewport
+while otherwise usable rail space remains empty.
 
 #### Scenario: A recent contract is confirmed by the catalogue
 - **WHEN** the catalogue delivers a contract that is in the recency list
@@ -131,6 +135,14 @@ the recent set.
 #### Scenario: Operator searches contracts
 - **WHEN** the search field contains a query
 - **THEN** the recent-pill group yields to a unified matching catalogue list in which a recent contract appears no more than once and non-recent matches remain selectable
+
+#### Scenario: The rail has unused vertical space
+- **WHEN** recent pills wrap onto additional lines and the execution ticket still leaves unused space below it
+- **THEN** the recent-pill group expands to show those lines without an internal vertical scrollbar
+
+#### Scenario: Recent pills exhaust the rail height
+- **WHEN** showing every wrapped recent pill would leave insufficient height for the execution ticket within the rail
+- **THEN** the recent-pill group is constrained to the remaining height and becomes internally scrollable without pushing the ticket outside the rail
 
 ## ADDED Requirements
 

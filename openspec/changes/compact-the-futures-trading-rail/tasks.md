@@ -46,3 +46,10 @@
 - [x] 6.3 Re-run repository lint/build, Futures boundary and command-path checks, OpenSpec validation, diff hygiene, and staged GitNexus change detection; review the final diff and commit the audited change directly to `master`.
 - [x] 6.3a Audit GitNexus's aggregate `HIGH` staged rating: confirm it is the combined count from OpenSpec headings plus the two renderer components, while individual production impacts remain `MEDIUM`/`LOW`, no Electron/main file is staged, and every d=1 dependant is covered by the targeted and full suite.
 - [x] 6.3b Record the concurrent verification boundary: repository-wide lint passed after the audited UI implementation, then a final rerun encountered the unrelated in-progress `bootstrap-the-book-on-a-quiet-market` `depthBootstrapCode` `no-undef`; scoped lint for every staged JSX/test file still passes and none of that concurrent change is staged here.
+
+## 7. Adaptive Recent-Pill Height
+
+- [x] 7.1 Re-run GitNexus impact analysis for the current contract-rail owner and inspect the live rail/flex layout before editing; report and stop if the refreshed risk is HIGH or CRITICAL.
+- [x] 7.2 Make the recent-pill group use its wrapped content height while the rail has spare vertical space, then constrain it to the genuinely available height and enable internal scrolling only when needed without pushing the execution ticket out of the rail.
+- [x] 7.3 Add focused regression coverage for the content-first overflow contract and visually verify both a roomy narrow rail and a shorter rail where scrolling is required.
+- [x] 7.4 Run the targeted Futures tests, scoped lint, production build, OpenSpec validation, diff hygiene, and staged GitNexus change detection; review and commit only this follow-up directly to `master`.

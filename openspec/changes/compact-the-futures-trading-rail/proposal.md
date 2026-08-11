@@ -4,7 +4,7 @@ The Futures workstation spends scarce vertical space on one-contract-per-row rec
 
 ## What Changes
 
-- Present recently selected contracts as a compact wrapping group of selectable pills, so several ordinary USDⓈ-M symbols fit on one line while persisted recency, selection, and favorite access remain intact. The active starting contract seeds an otherwise empty history. With no search query, this group is the only contract list; the ordinary catalogue appears only as one unified list of active search results.
+- Present recently selected contracts as a compact wrapping group of selectable pills, so several ordinary USDⓈ-M symbols fit on one line while persisted recency, selection, and favorite access remain intact. The active starting contract seeds an otherwise empty history. With no search query, this group is the only contract list; it expands into otherwise unused rail height before becoming internally scrollable, and the ordinary catalogue appears only as one unified list of active search results.
 - Make the workstation identity bar the single routine state location: while authenticated account resources are synchronizing it shows `SYNC` in place of `LIVE`; remove the duplicate contract-section state and the ticket's `READY`/reason plus `Pause trading` header.
 - Keep the percentage slider and its percentage/USDT readout, but remove the five percentage anchor buttons and the derived `Quantity` row. Exact exchange quantity remains enforced and remains visible in the order confirmation.
 - Remove the mouse-shortcut help block, the passive `Awaiting shortcut`/last-action label, successful submission feedback, cancellation acknowledgements, and the passive last-execution acknowledgement card.

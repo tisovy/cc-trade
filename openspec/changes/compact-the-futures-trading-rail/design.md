@@ -71,7 +71,11 @@ Each pill will be a small compound control: selecting the contract and toggling
 its favorite remain separate accessible actions, while selected/favorite state
 is exposed programmatically. CSS flex wrapping and content-sized pills are used
 instead of a fixed column count because symbols vary in length and the Electron
-rail can be resized.
+rail can be resized. The pill container will use its wrapped content height while
+the rail has spare vertical room; a fixed short `max-height` must not create a
+scrollbar above an otherwise empty lower rail. The rail layout will constrain
+the group and enable internal overflow only once its content and the execution
+ticket together consume the available column height.
 
 Alternatives considered:
 
@@ -168,8 +172,9 @@ boundary and trading flow.
 - [`SYNC` masks a market outage] → Allow the account-sync override only when
   the underlying market state is `LIVE`; non-routine state always wins.
 - [Long recent symbols reduce the number of pills per line] → Use intrinsic
-  pill width, wrapping, and bounded overflow; test ordinary and long symbols at
-  the supported narrow Electron width.
+  pill width, wrapping, and content-first bounded overflow; test ordinary and
+  long symbols at the supported narrow Electron width and at heights both above
+  and below the point where internal scrolling is required.
 - [Favorite and select actions interfere inside a compact pill] → Keep them
   as separate controls, stop favorite activation from selecting, and test both
   pointer and accessible names/states.

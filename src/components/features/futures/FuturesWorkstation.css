@@ -356,13 +356,18 @@
 
 .futures-workstation-recent-contracts {
   display: flex;
-  flex: 0 0 auto;
+  /* The wrapped content owns its natural height while the rail has room. As a
+     shrinkable scroll container it gives height back only when the ticket and
+     the fixed selector chrome genuinely exhaust the rail; a fixed two-row cap
+     used to show a scrollbar above an otherwise empty lower column. */
+  flex: 0 1 auto;
   flex-wrap: wrap;
   align-content: flex-start;
   gap: 4px;
-  max-height: 54px;
+  min-height: 0;
   margin-bottom: 5px;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
   scrollbar-color: rgba(126, 143, 166, 0.25) transparent;
 }
 
