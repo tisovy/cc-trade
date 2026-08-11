@@ -382,6 +382,35 @@ describe('futures history reads', () => {
         expect(orders.map(order => order.orderId)).toEqual([2, 1]);
     });
 
+    // Reading the gap rather than the week: the exchange pages both endpoints
+    // from an identity, and the desk holds the identity each contract is covered
+    // up to.
+    it('reads forward from the identity it already holds', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestResponse = [];
+        await adapter.getOrderHistory({ symbol: 'BTCUSDT', fromOrderId: '9223372036854775806' });
+        await adapter.getTradeHistory({ symbol: 'BTCUSDT', fromTradeId: 4_311 });
+
+        const orderParams = new URLSearchParams(requests[0].url.split('?')[1]);
+        const tradeParams = new URLSearchParams(requests[1].url.split('?')[1]);
+        // Carried as digits: an identity past what a double can count, rounded
+        // into the query, asks for a row that does not exist.
+        expect(orderParams.get('orderId')).toBe('9223372036854775806');
+        expect(tradeParams.get('fromId')).toBe('4311');
+    });
+
+    it('reads the newest page when it holds no identity to read from', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestResponse = [];
+        await adapter.getOrderHistory({ symbol: 'BTCUSDT' });
+        await adapter.getTradeHistory({ symbol: 'BTCUSDT', fromTradeId: 'not-an-identity' });
+
+        expect(requests[0].url).not.toContain('orderId=');
+        expect(requests[1].url).not.toContain('fromId=');
+    });
+
     it('carries the realized PnL and fee of every trade', async () => {
         const adapter = createAdapter();
         adapter.serverTimeOffsetMs = 0;

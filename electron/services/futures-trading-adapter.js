@@ -191,6 +191,14 @@ const historyNumber = (value) => {
     return Number.isFinite(parsed) ? parsed : null;
 };
 
+// An exchange identity a history read may page from. Carried as digits rather
+// than as a number: an `orderId` outgrows a double, and one rounded on the way
+// into the query asks for a row that does not exist.
+const pagingIdentity = (value) => {
+    const identity = String(value ?? '').trim();
+    return /^\d{1,20}$/.test(identity) ? identity : null;
+};
+
 // History rows are read-only and never re-enter the execution path, so they are
 // projected to exactly the fields the review surface renders.
 export const normalizeFuturesHistoryOrder = (order = {}) => Object.freeze({
@@ -724,20 +732,31 @@ export class FuturesTradingAdapter {
 
     // History is bounded at the source: a desk reviews the last session, not the
     // last year, and an unbounded reply would have to be trimmed here anyway.
-    async getOrderHistory({ symbol, limit = FUTURES_HISTORY_LIMIT }) {
+    //
+    // It can also be read forward from a row already held. Binance answers
+    // `allOrders` with orders at or after `orderId` and `userTrades` with trades
+    // at or after `fromId`, oldest first — so a read from an identity is a read
+    // of the gap, and the row the caller already had is the first thing it
+    // returns. An answer that fills the limit means the gap was deeper than one
+    // page, and the caller asks again from the last identity it received.
+    async getOrderHistory({ symbol, limit = FUTURES_HISTORY_LIMIT, fromOrderId = null }) {
+        const from = pagingIdentity(fromOrderId);
         const data = await this.#signedRequest('GET', '/fapi/v1/allOrders', {
             symbol,
             limit: Math.min(Math.max(Number(limit) || FUTURES_HISTORY_LIMIT, 1), 500),
+            ...(from === null ? {} : { orderId: from }),
         });
         return (Array.isArray(data) ? data : [])
             .map(order => normalizeFuturesHistoryOrder(order))
             .sort((left, right) => right.time - left.time);
     }
 
-    async getTradeHistory({ symbol, limit = FUTURES_TRADE_HISTORY_LIMIT }) {
+    async getTradeHistory({ symbol, limit = FUTURES_TRADE_HISTORY_LIMIT, fromTradeId = null }) {
+        const from = pagingIdentity(fromTradeId);
         const data = await this.#signedRequest('GET', '/fapi/v1/userTrades', {
             symbol,
             limit: Math.min(Math.max(Number(limit) || FUTURES_TRADE_HISTORY_LIMIT, 1), 1000),
+            ...(from === null ? {} : { fromId: from }),
         });
         return (Array.isArray(data) ? data : [])
             .map(trade => normalizeFuturesHistoryTrade(trade))

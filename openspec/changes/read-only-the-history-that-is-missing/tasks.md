@@ -13,7 +13,7 @@
 
 ## 2. The Read Asks For The Gap
 
-- [ ] 2.1 `getOrderHistory` and `getTradeHistory` read forward from an identity — `orderId` and `fromId`, which is how the exchange pages them.
+- [x] 2.1 `getOrderHistory` and `getTradeHistory` read forward from an identity — `orderId` and `fromId`, which is how the exchange pages them. `fromOrderId` / `fromTradeId` on the adapter, carried as digits because an `orderId` outgrows a double and one rounded into the query asks for a row that does not exist; an identity that is not digits reads the newest page, as before. Both endpoints answer from the identity *forward*, oldest first, so an answer that fills the limit means the gap was deeper than a page and the caller asks again from the last identity it received. Nothing calls it with an identity yet — that is 2.2.
 - [ ] 2.2 The held review states, per contract, what it is covered up to, and the command carries it.
 - [ ] 2.3 A contract with no stream activity since its last read is not read, while the stream has been connected throughout.
 - [ ] 2.4 A stream disconnection marks every contract as unvouched-for, so the next refresh reads them all.
