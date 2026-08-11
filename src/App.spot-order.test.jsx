@@ -400,10 +400,13 @@ describe('App spot order payloads', () => {
     expect(screen.getByTestId('futures-workstation-chart')).toBeInTheDocument()
     expect(screen.getByText('Contracts', { selector: '.futures-workstation-section-heading span' }))
       .toBeInTheDocument()
+    // The compacted rail carries the contract's own name at its head; the
+    // contract-type chip that used to sit there is gone. What this test is
+    // about is unchanged: with nothing selected, the ticket says so.
     expect(screen.getByLabelText('Futures trading ticket'))
-      .toHaveTextContent('CONTRACTSelect an active USDⓈ-M contract.')
+      .toHaveTextContent('Select an active USDⓈ-M contract.')
     expect(screen.getByRole('slider', { name: 'Order size percent' })).toBeDisabled()
-    expect(screen.getByLabelText('Futures order size and shortcuts'))
+    expect(screen.getByLabelText('Futures order size'))
       .toHaveTextContent('0%— USDT')
     expect(screen.queryByText('BLOCKED', { exact: true })).not.toBeInTheDocument()
   })
