@@ -23,90 +23,11 @@
   font: inherit;
 }
 
-.futures-production-execution-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 9px 10px;
-  border-bottom: 1px solid var(--production-border);
-  background: var(--production-panel-raised);
-}
-
-.futures-production-execution-header > div {
-  display: grid;
-  gap: 2px;
-}
-
-.futures-production-execution-market {
-  color: #f4f8fb;
-  font-size: calc(var(--fx-ui-scale, 1) * 12.5px);
-  font-weight: 900;
-  letter-spacing: 0.1em;
-}
-
-.futures-production-execution-header strong,
 .futures-production-execution-ticket code,
 .futures-production-execution-ticket dd,
 .futures-production-execution-ticket input,
 .futures-production-execution-ticket output {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-}
-
-.futures-production-execution-header strong {
-  color: #aebdca;
-  font-size: calc(var(--fx-ui-scale, 1) * 12.5px);
-  letter-spacing: 0.04em;
-}
-
-.futures-production-live {
-  padding: 3px 6px;
-  border: 1px solid #73434a;
-  border-radius: 999px;
-  background: rgba(255, 107, 120, 0.08);
-  color: #ff8792;
-  font-size: calc(var(--fx-ui-scale, 1) * 12px);
-  font-weight: 900;
-  letter-spacing: 0.05em;
-  white-space: nowrap;
-}
-
-.futures-production-live.is-armed {
-  border-color: #2b8c69;
-  background: rgba(43, 196, 138, 0.12);
-  color: #69ddb5;
-  box-shadow: 0 0 12px rgba(43, 196, 138, 0.16);
-}
-
-.futures-production-live.is-ready {
-  border-color: #2b8c69;
-  background: rgba(43, 196, 138, 0.12);
-  color: #69ddb5;
-  box-shadow: 0 0 12px rgba(43, 196, 138, 0.16);
-}
-
-.futures-production-live.is-loading {
-  border-color: #7d6729;
-  background: rgba(240, 185, 11, 0.08);
-  color: #f1ca4e;
-}
-
-.futures-production-readiness {
-  display: grid;
-  justify-items: end;
-  gap: 3px;
-  min-width: 0;
-  max-width: 168px;
-}
-
-.futures-production-readiness small {
-  overflow: hidden;
-  max-width: 100%;
-  color: var(--production-muted);
-  font-size: calc(var(--fx-ui-scale, 1) * 11px);
-  line-height: 1.25;
-  text-align: right;
-  text-overflow: ellipsis;
 }
 
 .futures-production-tabs {
@@ -201,14 +122,6 @@
   overflow-wrap: anywhere;
 }
 
-.futures-production-feedback.is-submitted {
-  border-color: rgba(43, 196, 138, 0.45);
-}
-
-.futures-production-feedback.is-submitted strong {
-  color: #63dbae;
-}
-
 .futures-production-feedback.is-ignored {
   border-color: rgba(244, 202, 67, 0.45);
 }
@@ -229,10 +142,6 @@
 
 .futures-production-feedback > button:hover {
   color: #fff;
-}
-
-.futures-production-backend-card.is-ack > strong {
-  color: #63dbae;
 }
 
 /* An unconfirmed outcome is neither a success nor a refusal, so it reads as
@@ -287,13 +196,6 @@
   font-size: calc(var(--fx-ui-scale, 1) * 18px);
 }
 
-.futures-production-ticket-symbol > code {
-  margin-left: auto;
-  color: #f4ca43;
-  font-size: calc(var(--fx-ui-scale, 1) * 12px);
-  text-transform: uppercase;
-}
-
 /* The same badge as the dock's position rows, so the multiple reads the same
    wherever it appears and is set from either place. */
 .futures-production-ticket-leverage {
@@ -311,14 +213,6 @@
 .futures-production-ticket-leverage:hover {
   border-color: rgba(244, 202, 67, 0.75);
   background: rgba(244, 202, 67, 0.22);
-}
-
-.futures-production-ticket-symbol > code.is-long {
-  color: #63dbae;
-}
-
-.futures-production-ticket-symbol > code.is-short {
-  color: #ff8c96;
 }
 
 .futures-production-action.is-order > label,
@@ -446,13 +340,6 @@
   cursor: not-allowed;
 }
 
-.futures-production-size-anchors {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 3px;
-}
-
-.futures-production-size-anchors button,
 .futures-production-action button,
 .futures-production-positions button,
 .futures-production-portfolio-heading button,
@@ -465,18 +352,6 @@
   cursor: pointer;
 }
 
-.futures-production-size-anchors button {
-  padding: 4px 1px;
-  font-size: calc(var(--fx-ui-scale, 1) * 12px);
-}
-
-.futures-production-size-anchors button.is-selected {
-  border-color: #b38c0d;
-  background: rgba(240, 185, 11, 0.12);
-  color: #f5cc45;
-}
-
-.futures-production-size-anchors button:disabled,
 .futures-production-action button:disabled,
 .futures-production-positions button:disabled,
 .futures-production-portfolio-heading button:disabled,
@@ -524,57 +399,6 @@
   color: #e8c65a;
   font-size: calc(var(--fx-ui-scale, 1) * 12px);
   line-height: 1.4;
-}
-
-/* Four shortcuts on one line rather than two-by-two: this block is
-   discoverability, and it was costing the rail sixty pixels that the order
-   surface above it needs on a 900px screen. */
-.futures-production-shortcuts {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 3px 6px;
-  padding: 7px;
-  border: 1px solid #203746;
-  border-radius: 4px;
-  background: #081721;
-  color: #8ea1b1;
-}
-
-.futures-production-shortcuts span {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 2px 4px;
-  align-items: center;
-  min-width: 0;
-  font-size: calc(var(--fx-ui-scale, 1) * 11px);
-}
-
-.futures-production-shortcuts kbd {
-  padding: 1px 3px;
-  border: 1px solid #405668;
-  border-radius: 3px;
-  background: #122432;
-  color: #dbe7ef;
-  font: calc(var(--fx-ui-scale, 1) * 11px) ui-monospace, monospace;
-}
-
-.futures-production-shortcuts b {
-  color: #b8c7d3;
-  font-weight: 800;
-  white-space: nowrap;
-}
-
-.futures-production-shortcuts em {
-  overflow: hidden;
-  font-style: normal;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.futures-production-shortcuts small {
-  grid-column: 1 / -1;
-  color: #64798a;
-  font-size: calc(var(--fx-ui-scale, 1) * 11px);
 }
 
 .futures-production-gesture-confirmation {
@@ -833,42 +657,6 @@
 .futures-production-safety-actions {
   display: grid;
   gap: 4px;
-}
-
-@media (max-width: 620px) {
-  .futures-production-shortcuts {
-    grid-template-columns: 1fr;
-  }
-
-  .futures-production-shortcuts small {
-    grid-column: auto;
-  }
-}
-
-.futures-production-pause-toggle {
-  flex: none;
-  padding: 5px 9px;
-  border: 1px solid var(--production-border);
-  border-radius: 6px;
-  background: transparent;
-  color: inherit;
-  font-size: calc(var(--fx-ui-scale, 1) * 14px);
-  cursor: pointer;
-}
-
-.futures-production-pause-toggle:hover:not(:disabled) {
-  border-color: var(--futures-accent, #e34f5e);
-}
-
-.futures-production-pause-toggle.is-paused {
-  background: var(--futures-accent, #e34f5e);
-  border-color: var(--futures-accent, #e34f5e);
-  color: #fff;
-}
-
-.futures-production-pause-toggle:disabled {
-  opacity: 0.5;
-  cursor: default;
 }
 
 /* Side is the primary signal in a list of orders: colour by BUY/SELL, because a

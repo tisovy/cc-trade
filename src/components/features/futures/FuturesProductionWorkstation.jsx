@@ -72,6 +72,10 @@ export const FuturesProductionWorkstation = ({
   const selectedContract = workstationState.resources.catalog?.contracts?.find(
     contract => contract.symbol === symbol,
   ) ?? null
+  const accountSynchronizing = executionState?.connected === true
+    && Object.values(executionState?.accountResources ?? {}).some(resource => (
+      resource?.status === 'idle' || resource?.status === 'loading'
+    ))
 
   // Dragging an order lifts it off the book: the cancellation is sent when the
   // drag begins, and from that moment the desk owes the operator a replacement.
@@ -406,6 +410,7 @@ export const FuturesProductionWorkstation = ({
         tradingRail={tradingRail}
         portfolioDock={portfolioDock}
         symbolHistory={symbolHistory}
+        accountSynchronizing={accountSynchronizing}
         uiScale={uiScale}
         onToggleFavorite={handleToggleFavorite}
         onUiScaleChange={handleUiScaleChange}

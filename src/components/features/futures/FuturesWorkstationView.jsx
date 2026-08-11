@@ -129,6 +129,7 @@ export const FuturesWorkstationView = ({
   tradingRail,
   portfolioDock = null,
   symbolHistory = EMPTY_SYMBOL_HISTORY,
+  accountSynchronizing = false,
   uiScale = UI_SCALE_DEFAULT,
   onToggleFavorite,
   onUiScaleChange,
@@ -221,9 +222,11 @@ export const FuturesWorkstationView = ({
     header?.volume ? `${header.volume} ${baseAsset}` : null,
   ].filter(Boolean).join(' · ') || undefined
   const aggregateState = !selectionOwned || state.status === 'idle' ? 'loading' : state.status
+  const identityState = aggregateState === 'live' && accountSynchronizing
+    ? 'sync'
+    : aggregateState
   const resourceState = resource => resource?.state ?? aggregateState
   const contractsUnavailable = selectionOwned && state.status === 'unavailable'
-  const catalogState = contractsUnavailable ? 'unavailable' : resourceState(resources.catalog)
   const candlesState = resourceState(candles)
   const liveCandles = candles?.contract ?? EMPTY_ROWS
   // History is drawn behind the live window, never over it: the streaming rows
@@ -248,29 +251,37 @@ export const FuturesWorkstationView = ({
       : 'Contracts are unavailable. Fix the reported connection issue, then retry.'
 
   const favorites = useMemo(() => new Set(symbolHistory.favorites), [symbolHistory.favorites])
-  const recentSymbols = useMemo(() => new Set(symbolHistory.recent ?? EMPTY_ROWS), [symbolHistory.recent])
-  // The recency list is local state; it must not wait on a catalogue round-trip.
-  // Until the catalogue confirms a recent contract, the rail lists it as pending
-  // so a restart never shows an empty instrument panel.
-  const listedContracts = useMemo(() => {
-    const known = new Set(contracts.map(contract => contract.symbol))
-    const pending = (symbolHistory.recent ?? EMPTY_ROWS)
-      .filter(symbol => !known.has(symbol))
-      .map(symbol => Object.freeze({
+  const searchQuery = search.trim().toUpperCase()
+  // Recency belongs to local history, not to the asynchronous catalogue. Resolve
+  // each stored symbol in place when metadata arrives and keep a pending contract
+  // selectable before that happens.
+  const recentContracts = useMemo(() => {
+    const catalogBySymbol = new Map(contracts.map(contract => [contract.symbol, contract]))
+    return [...new Set(symbolHistory.recent ?? EMPTY_ROWS)].map(symbol => (
+      catalogBySymbol.get(symbol) ?? Object.freeze({
         symbol,
         baseAsset: symbol.replace(/USDT$/, ''),
         contractType: 'RECENT',
         pending: true,
-      }))
-    return pending.length === 0 ? contracts : [...contracts, ...pending]
+      })
+    ))
   }, [contracts, symbolHistory.recent])
-  const visibleContracts = useMemo(() => orderFuturesContracts(
-    listedContracts.filter((contract) => {
-      const query = search.trim().toUpperCase()
-      return !query || contract.symbol.includes(query) || contract.baseAsset.includes(query)
-    }),
-    symbolHistory,
-  ).slice(0, 128), [listedContracts, search, symbolHistory])
+  const recentContractSymbols = useMemo(
+    () => new Set(recentContracts.map(contract => contract.symbol)),
+    [recentContracts],
+  )
+  const visibleContracts = useMemo(() => {
+    const bySymbol = new Map(contracts.map(contract => [contract.symbol, contract]))
+    for (const contract of recentContracts) {
+      if (!bySymbol.has(contract.symbol)) bySymbol.set(contract.symbol, contract)
+    }
+    const candidates = searchQuery
+      ? [...bySymbol.values()].filter(contract => (
+        contract.symbol.includes(searchQuery) || contract.baseAsset.includes(searchQuery)
+      ))
+      : contracts.filter(contract => !recentContractSymbols.has(contract.symbol))
+    return orderFuturesContracts(candidates, symbolHistory).slice(0, 128)
+  }, [contracts, recentContractSymbols, recentContracts, searchQuery, symbolHistory])
   const catalogPending = contracts.length === 0 && !contractsUnavailable
 
   const pickPrice = useCallback((price) => {
@@ -489,6 +500,9 @@ export const FuturesWorkstationView = ({
     }
     setLastTick({ symbol: selectedSymbol, price: lastPrice, direction: lastDirection })
   }
+  const lastDirectionLabel = lastDirection === 'up'
+    ? 'moving up'
+    : lastDirection === 'down' ? 'moving down' : 'neutral'
   const groupSteps = useMemo(
     () => futuresBookGroupSteps(selectedContract?.filters?.price?.tickSize ?? null),
     [selectedContract],
@@ -588,7 +602,7 @@ export const FuturesWorkstationView = ({
     <section className="futures-workstation" aria-label={`${identity} live trading workstation`}>
       <div className="futures-workstation-identity" data-testid="futures-workstation-identity">
         <strong>{identity}</strong>
-        <StateBadge state={aggregateState} />
+        <StateBadge state={identityState} />
         {selectionOwned && state.reasonCode ? (
           <code className="futures-workstation-reason" aria-label="Futures workstation reason">
             reason {state.reasonCode}
@@ -629,7 +643,6 @@ export const FuturesWorkstationView = ({
             <span>Contracts</span>
             <strong>USDⓈ-M only</strong>
           </div>
-          <StateBadge state={catalogState} />
         </div>
         <label className="futures-workstation-search">
           <span>Search symbol</span>
@@ -641,17 +654,49 @@ export const FuturesWorkstationView = ({
             maxLength={20}
           />
         </label>
-        {/* The recency list already sorts to the front, but a recent contract that
-            the catalogue has confirmed used to read `PERPETUAL` like the four
-            hundred behind it — so the block at the top was not legible as the
-            operator's own. It is marked whether it came from the catalogue or from
-            storage, and the rows carry the accent as a group. */}
+        {!searchQuery && recentContracts.length > 0 ? (
+          <div
+            className="futures-workstation-recent-contracts"
+            aria-label="Recent contracts"
+            role="list"
+          >
+            {recentContracts.map(contract => (
+              <div
+                className={`futures-workstation-recent-contract${
+                  contract.symbol === selectedSymbol ? ' is-selected' : ''
+                }`}
+                data-pending={contract.pending ? 'true' : undefined}
+                key={contract.symbol}
+                role="listitem"
+              >
+                <button
+                  type="button"
+                  className="futures-workstation-recent-select"
+                  aria-pressed={contract.symbol === selectedSymbol}
+                  title={contract.pending ? `${contract.symbol} catalogue loading` : contract.symbol}
+                  onClick={() => onSymbolChange(contract.symbol)}
+                >
+                  <strong>{contract.symbol}</strong>
+                </button>
+                <button
+                  type="button"
+                  className="futures-workstation-recent-favorite"
+                  aria-label={`${favorites.has(contract.symbol) ? 'Remove' : 'Add'} ${contract.symbol} favorite`}
+                  aria-pressed={favorites.has(contract.symbol)}
+                  onClick={() => toggleFavorite(contract.symbol)}
+                >
+                  {favorites.has(contract.symbol) ? '★' : '☆'}
+                </button>
+              </div>
+            ))}
+          </div>
+        ) : null}
         <div className="futures-workstation-contract-list">
           {visibleContracts.map(contract => (
             <div
               className={`futures-workstation-contract${
-                recentSymbols.has(contract.symbol) ? ' is-recent' : ''
-              }${contract.symbol === selectedSymbol ? ' is-selected' : ''}`}
+                contract.symbol === selectedSymbol ? ' is-selected' : ''
+              }`}
               key={contract.symbol}
             >
               <button
@@ -670,20 +715,18 @@ export const FuturesWorkstationView = ({
                 aria-pressed={contract.symbol === selectedSymbol}
               >
                 <strong>{contract.symbol}</strong>
-                <span>
-                  {recentSymbols.has(contract.symbol) || contract.pending
-                    ? 'recent'
-                    : contract.contractType}
-                </span>
+                <span>{contract.pending ? 'loading' : contract.contractType}</span>
               </button>
             </div>
           ))}
-          {visibleContracts.length === 0 && !contractsUnavailable ? (
+          {visibleContracts.length === 0
+            && (searchQuery || recentContracts.length === 0)
+            && !contractsUnavailable ? (
             <p className="futures-workstation-empty">
               {catalogPending ? 'Loading contracts…' : 'No matching USDⓈ-M contract.'}
             </p>
           ) : null}
-          {visibleContracts.length > 0 && catalogPending ? (
+          {(visibleContracts.length > 0 || recentContracts.length > 0) && catalogPending ? (
             <p className="futures-workstation-empty">Loading contracts…</p>
           ) : null}
         </div>
@@ -848,7 +891,6 @@ export const FuturesWorkstationView = ({
             </label>
           ) : null}
         </div>
-        <div className="futures-workstation-book-head"><span>Price</span><span>USDT</span><span>Total</span></div>
         <div className="futures-workstation-book-body">
         {bookSideMode === 'bids' ? null : (
         <div className="futures-workstation-book-side is-ask" ref={askSideRef}>
@@ -860,6 +902,7 @@ export const FuturesWorkstationView = ({
               title={ownBookLevels.ask.get(level.groupKey)
                 ? `${ownBookLevels.ask.get(level.groupKey)} working sell order here`
                 : undefined}
+              aria-label={`Ask book level: price ${level.price}; level ${formatCompactUsdt(level.notionalUsdt)} USDT; cumulative ${formatCompactUsdt(level.cumulativeUsdt)} USDT`}
               disabled={depthState !== 'live'}
               style={{ '--futures-depth-share': depthShare(level) }}
               onClick={event => handleBookClick(event, level.price)}
@@ -877,16 +920,12 @@ export const FuturesWorkstationView = ({
           ))}
         </div>
         )}
-        {/* The row between the sides carries the only number worth reading
-            there: what just traded, and which way it went. */}
-        <div className={`futures-workstation-book-last is-${lastDirection}`}>
+        <div
+          className={`futures-workstation-book-last is-${lastDirection}`}
+          role="group"
+          aria-label={`Last traded price ${lastPriceText}, ${lastDirectionLabel}`}
+        >
           <strong>{lastPriceText}</strong>
-          {lastDirection === 'flat' ? null : (
-            <span className="futures-workstation-book-last-arrow" aria-hidden="true">
-              {lastDirection === 'up' ? '↑' : '↓'}
-            </span>
-          )}
-          <span>last</span>
         </div>
         {bookSideMode === 'asks' ? null : (
         <div className="futures-workstation-book-side is-bid" ref={bidSideRef}>
@@ -898,6 +937,7 @@ export const FuturesWorkstationView = ({
               title={ownBookLevels.bid.get(level.groupKey)
                 ? `${ownBookLevels.bid.get(level.groupKey)} working buy order here`
                 : undefined}
+              aria-label={`Bid book level: price ${level.price}; level ${formatCompactUsdt(level.notionalUsdt)} USDT; cumulative ${formatCompactUsdt(level.cumulativeUsdt)} USDT`}
               disabled={depthState !== 'live'}
               style={{ '--futures-depth-share': depthShare(level) }}
               onClick={event => handleBookClick(event, level.price)}
@@ -943,52 +983,61 @@ export const FuturesWorkstationView = ({
       </aside>
 
       <aside className="futures-workstation-trades" data-state={tradesState}>
-        <div className="futures-workstation-section-heading">
-          <div><span>Aggregate trades</span><strong>Bounded tape</strong></div>
-          <button type="button" onClick={toggleTape}>
-            {tapePaused ? 'Resume' : 'Pause'}
-          </button>
-        </div>
-        <form className="futures-workstation-tape-controls" onSubmit={applyTapeSettings}>
-          <label className="futures-workstation-tape-toggle">
-            <input
-              type="checkbox"
-              checked={tapeThrottleInput}
-              onChange={event => setTapeThrottleInput(event.target.checked)}
-            />
-            <span>Throttle</span>
-          </label>
-          <label>
-            <span>Timeout (ms)</span>
-            <input
-              aria-label="Tape timeout in ms"
-              inputMode="numeric"
-              value={tapeTimeoutInput}
-              onChange={event => setTapeTimeoutInput(event.target.value)}
-            />
-          </label>
-          <label>
-            <span>Min trade (USDT)</span>
-            <input
-              aria-label="Minimum displayed trade in USDT"
-              inputMode="decimal"
-              value={tapeNotionalInput}
-              onChange={event => setTapeNotionalInput(event.target.value)}
-            />
-          </label>
-          <button type="submit">Apply</button>
-          <output className="futures-workstation-tape-effective" aria-live="polite">
-            Effective: {tapeSettings.throttleEnabled ? 'throttled' : 'unthrottled'} ·{' '}
-            {tapeSettings.timeoutMs} ms · ≥ {tapeSettings.minNotionalUsdt} USDT
-          </output>
-          {tapeSettingsError ? (
-            <span className="futures-workstation-tape-error" role="alert">{tapeSettingsError}</span>
-          ) : null}
-        </form>
-        <div className="futures-workstation-trade-head"><span>Price</span><span>USDT</span><span>Time</span></div>
+        <details className="futures-workstation-tape-disclosure">
+          <summary>
+            <span>Aggregate trades</span>
+            <strong>Bounded tape</strong>
+          </summary>
+          <div className="futures-workstation-tape-settings">
+            <button type="button" className="futures-workstation-tape-pause" onClick={toggleTape}>
+              {tapePaused ? 'Resume' : 'Pause'}
+            </button>
+            <form className="futures-workstation-tape-controls" onSubmit={applyTapeSettings}>
+              <label className="futures-workstation-tape-toggle">
+                <input
+                  type="checkbox"
+                  checked={tapeThrottleInput}
+                  onChange={event => setTapeThrottleInput(event.target.checked)}
+                />
+                <span>Throttle</span>
+              </label>
+              <label>
+                <span>Timeout (ms)</span>
+                <input
+                  aria-label="Tape timeout in ms"
+                  inputMode="numeric"
+                  value={tapeTimeoutInput}
+                  onChange={event => setTapeTimeoutInput(event.target.value)}
+                />
+              </label>
+              <label>
+                <span>Min trade (USDT)</span>
+                <input
+                  aria-label="Minimum displayed trade in USDT"
+                  inputMode="decimal"
+                  value={tapeNotionalInput}
+                  onChange={event => setTapeNotionalInput(event.target.value)}
+                />
+              </label>
+              <button type="submit">Apply</button>
+              <output className="futures-workstation-tape-effective" aria-live="polite">
+                Effective: {tapeSettings.throttleEnabled ? 'throttled' : 'unthrottled'} ·{' '}
+                {tapeSettings.timeoutMs} ms · ≥ {tapeSettings.minNotionalUsdt} USDT
+              </output>
+              {tapeSettingsError ? (
+                <span className="futures-workstation-tape-error" role="alert">{tapeSettingsError}</span>
+              ) : null}
+            </form>
+          </div>
+        </details>
         <div className="futures-workstation-trade-rows">
           {displayedTrades.map(trade => (
-            <div className={trade.buyerMaker ? 'is-sell' : 'is-buy'} key={trade.aggregateTradeId}>
+            <div
+              className={trade.buyerMaker ? 'is-sell' : 'is-buy'}
+              key={trade.aggregateTradeId}
+              role="group"
+              aria-label={`Aggregate trade: price ${trade.price}; notional ${formatCompactUsdt(tradeNotionalUsdt(trade))} USDT; time ${formatTime(trade.tradeTime)}`}
+            >
               <span>{trade.price}</span>
               <span title={`${trade.quantity} base`}>{formatCompactUsdt(tradeNotionalUsdt(trade))}</span>
               <span>{formatTime(trade.tradeTime)}</span>

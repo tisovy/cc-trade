@@ -54,7 +54,7 @@ const confirmStagedOrder = () => {
 }
 
 describe('FuturesTradingTicket', () => {
-  it('reaches READY with a tradable contract and synced balances', () => {
+  it('keeps the ready order controls without routine status or redundant chrome', () => {
     render(
       <FuturesTradingTicket
         state={createState()}
@@ -65,7 +65,14 @@ describe('FuturesTradingTicket', () => {
     )
     expect(screen.getByRole('slider', { name: 'Order size percent' })).toBeEnabled()
     sizeTo(25)
-    expect(screen.getByText('READY')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'LONG entry' })).toBeEnabled()
+    expect(screen.queryByText('READY')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Pause trading|Resume trading/ }))
+      .not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Order size anchors')).not.toBeInTheDocument()
+    expect(screen.queryByText('Quantity')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Futures mouse shortcuts')).not.toBeInTheDocument()
+    expect(screen.queryByText('Awaiting shortcut')).not.toBeInTheDocument()
   })
 
   // Nothing on the desk stated the multiple an entry is taken at, and the margin
@@ -122,7 +129,8 @@ describe('FuturesTradingTicket', () => {
       />,
     )
     expect(screen.getByRole('slider', { name: 'Order size percent' })).toHaveValue('0')
-    expect(screen.getByRole('button', { name: '0%' })).toHaveClass('is-selected')
+    expect(screen.getByRole('status', { name: 'Size 0' })).toHaveTextContent('0%')
+    expect(screen.queryByRole('button', { name: '0%' })).not.toBeInTheDocument()
 
     rerender(
       <FuturesTradingTicket
@@ -201,8 +209,8 @@ describe('FuturesTradingTicket', () => {
     expect(screen.getByRole('slider', { name: 'Order size percent' })).toHaveValue('0')
   })
 
-  it('states readiness and pause only, and colours direction by side', () => {
-    const { container } = render(
+  it('keeps decision context and colours direction without a readiness header', () => {
+    render(
       <FuturesTradingTicket
         state={createState({
           balances: {
@@ -227,14 +235,10 @@ describe('FuturesTradingTicket', () => {
         draftPrice="58445.0"
       />,
     )
-    // The identity bar and the market header already say which market and
-    // which contract this is; the rail header only answers "can I trade?".
     sizeTo(25)
-    const header = container.querySelector('.futures-production-execution-header')
-    expect(header).not.toHaveTextContent('FUTURES · USDⓈ-M')
-    expect(header).not.toHaveTextContent('orders submit immediately')
-    expect(header).toHaveTextContent('READY')
-    expect(header).toHaveTextContent('Pause trading')
+    expect(screen.queryByText('READY')).not.toBeInTheDocument()
+    expect(screen.queryByText('orders submit immediately')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Pause trading' })).not.toBeInTheDocument()
 
     const actions = screen.getByLabelText('Manual Futures orders')
     expect(within(actions).getByRole('button', { name: 'LONG entry' })).toHaveClass('is-long', 'is-entry')
@@ -324,7 +328,8 @@ describe('FuturesTradingTicket', () => {
 
     // 25% of the 1000 USDT balance is 250 USDT, over the 200 USDT cap.
     sizeTo(25)
-    expect(screen.getByText('RISK CAP')).toBeInTheDocument()
+    expect(screen.getByText('Order notional exceeds the local 200 USDT limit.'))
+      .toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'LONG entry' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'SHORT entry' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'LONG exit' })).toBeEnabled()
@@ -334,7 +339,8 @@ describe('FuturesTradingTicket', () => {
     expect(slider).toBeEnabled()
     fireEvent.change(slider, { target: { value: '20' } })
 
-    expect(screen.getByText('READY')).toBeInTheDocument()
+    expect(screen.queryByText('Order notional exceeds the local 200 USDT limit.'))
+      .not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'LONG entry' })).toBeEnabled()
     expect(screen.getByRole('button', { name: 'SHORT entry' })).toBeEnabled()
   })
@@ -354,7 +360,7 @@ describe('FuturesTradingTicket', () => {
 
     expect(screen.getByRole('slider', { name: 'Order size percent' })).toBeEnabled()
     sizeTo(25)
-    expect(screen.getByText('READY')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'LONG entry' })).toBeEnabled()
     fireEvent.click(screen.getByRole('button', { name: 'LONG entry' }))
     expect(state.placeOrder).toHaveBeenCalledWith({
       symbol: 'TUTUSDT',
@@ -365,16 +371,19 @@ describe('FuturesTradingTicket', () => {
     })
   })
 
-  it('shows fail-closed reasons while state is incomplete', () => {
+  it('shows contextual fail-closed reasons without restoring status labels', () => {
     const { rerender } = render(
       <FuturesTradingTicket state={createState({ connected: false })} selectedSymbol="BTCUSDT" />,
     )
-    expect(screen.getByText('OFFLINE')).toBeInTheDocument()
+    expect(screen.getByText('Local backend connection unavailable — reconnect.'))
+      .toBeInTheDocument()
+    expect(screen.queryByText('OFFLINE')).not.toBeInTheDocument()
 
     rerender(
       <FuturesTradingTicket state={createState()} selectedSymbol="BTCUSDT" selectedContract={null} />,
     )
-    expect(screen.getByText('CONTRACT')).toBeInTheDocument()
+    expect(screen.getByText('Select an active USDⓈ-M contract.')).toBeInTheDocument()
+    expect(screen.queryByText('CONTRACT')).not.toBeInTheDocument()
 
     rerender(
       <FuturesTradingTicket
@@ -383,7 +392,8 @@ describe('FuturesTradingTicket', () => {
         selectedContract={contract}
       />,
     )
-    expect(screen.getByText('SYNC')).toBeInTheDocument()
+    expect(screen.getByRole('slider', { name: 'Order size percent' })).toBeDisabled()
+    expect(screen.queryByText('SYNC')).not.toBeInTheDocument()
   })
 
   it('places a limit order with exact rounding once a chart gesture is confirmed', () => {
@@ -448,6 +458,8 @@ describe('FuturesTradingTicket', () => {
     const staged = within(screen.getByRole('alertdialog'))
       .getByTitle(/contracts$/)
       .getAttribute('title')
+    expect(staged).toBe('0.008 contracts')
+    expect(screen.queryByText('Quantity')).not.toBeInTheDocument()
     rerender(
       <FuturesTradingTicket
         state={createState({
@@ -740,7 +752,7 @@ describe('FuturesTradingTicket', () => {
       .toHaveTextContent('exceeds the confirmed available USDT balance')
   })
 
-  it('cancels a staged order on Escape and says nothing was sent', () => {
+  it('cancels a staged order on Escape without adding a passive status banner', () => {
     const state = createState()
     const props = {
       state, selectedSymbol: 'BTCUSDT', selectedContract: contract, draftPrice: '58445.0',
@@ -758,8 +770,7 @@ describe('FuturesTradingTicket', () => {
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument()
     expect(state.placeOrder).not.toHaveBeenCalled()
-    expect(screen.getByLabelText('Futures gesture feedback'))
-      .toHaveTextContent('Nothing was sent to the exchange.')
+    expect(screen.queryByLabelText('Futures gesture feedback')).not.toBeInTheDocument()
   })
 
   it('cancels a staged order when the operator clicks outside the panel', () => {
@@ -917,7 +928,7 @@ describe('FuturesTradingTicket', () => {
     expect(onPositionClose).toHaveBeenCalledWith(position, expect.any(Object))
   })
 
-  it('shows PAUSED, blocks gestures, and toggles the pause state', () => {
+  it('keeps backend pause enforcement without rendering a pause control', () => {
     const state = createState({ tradingPaused: true, setTradingPaused: vi.fn(() => true) })
     render(
       <FuturesTradingTicket
@@ -930,18 +941,19 @@ describe('FuturesTradingTicket', () => {
         }}
       />,
     )
-    expect(screen.getByText('PAUSED')).toBeInTheDocument()
+    expect(screen.getByText('Trading is paused — new orders are blocked until you resume.'))
+      .toBeInTheDocument()
+    expect(screen.queryByText('PAUSED')).not.toBeInTheDocument()
     expect(state.placeOrder).not.toHaveBeenCalled()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Resume trading' }))
-    expect(state.setTradingPaused).toHaveBeenCalledWith(false)
+    expect(screen.queryByRole('button', { name: 'Resume trading' })).not.toBeInTheDocument()
+    expect(state.setTradingPaused).not.toHaveBeenCalled()
   })
 
   // A drag no longer amends anything: it cancels the order and places its
   // replacement, so the ceiling, the reduce-only exemption and the paused-desk
   // refusal are proved where they now live — `useFuturesOrderDrag.test.js`.
 
-  it('confirms a submitted gesture in the feedback card', () => {
+  it('submits a confirmed gesture without adding a passive success banner', () => {
     const state = createState()
     const { rerender } = render(
       <FuturesTradingTicket
@@ -964,12 +976,24 @@ describe('FuturesTradingTicket', () => {
       />,
     )
     confirmStagedOrder()
-    const feedback = screen.getByLabelText('Futures gesture feedback')
-    expect(feedback).toHaveTextContent('LONG entry submitted')
-    expect(feedback).toHaveTextContent('@ 58445')
-
-    fireEvent.click(within(feedback).getByRole('button', { name: 'Dismiss feedback' }))
+    expect(state.placeOrder).toHaveBeenCalledOnce()
     expect(screen.queryByLabelText('Futures gesture feedback')).not.toBeInTheDocument()
+  })
+
+  it('keeps a locally unsent order visible after removing passive success feedback', () => {
+    const state = createState({ placeOrder: vi.fn(() => false) })
+    render(
+      <FuturesTradingTicket
+        state={state}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+        draftPrice="58445.0"
+      />,
+    )
+    sizeTo(25)
+    fireEvent.click(screen.getByRole('button', { name: 'LONG entry' }))
+    expect(screen.getByLabelText('Futures gesture feedback')).toHaveTextContent('LONG entry NOT sent')
+    expect(screen.getByLabelText('Futures gesture feedback')).toHaveTextContent('reconnect')
   })
 
   it('explains why a gesture was ignored instead of dropping it silently', () => {
@@ -1018,7 +1042,7 @@ describe('FuturesTradingTicket', () => {
       .toHaveTextContent('Size is below the Binance minimum')
   })
 
-  it('shows the last execution acknowledgement when there is no rejection', () => {
+  it('does not render a passive last-execution acknowledgement', () => {
     render(
       <FuturesTradingTicket
         state={createState({
@@ -1031,9 +1055,7 @@ describe('FuturesTradingTicket', () => {
         selectedContract={contract}
       />,
     )
-    const ack = screen.getByLabelText('Last Futures execution')
-    expect(ack).toHaveTextContent('BTCUSDT BUY · NEW')
-    expect(ack).toHaveTextContent('LIMIT 0.004 @ 58445.00')
+    expect(screen.queryByLabelText('Last Futures execution')).not.toBeInTheDocument()
   })
 
   // The price band is Binance's filter, not the desk's. A local copy of it is
@@ -1147,23 +1169,24 @@ describe('FuturesTradingTicket', () => {
   // A background synchronization failure is not an answer about the order the
   // operator just sent, and used to displace it entirely.
   it('shows a command rejection with its exchange code beside an account failure', () => {
+    const state = createState({
+      accountResources: {
+        balances: {
+          status: 'error',
+          data: null,
+          lastSuccessfulAt: 100,
+          error: { code: 'BALANCE_READ_FAILED', message: 'Balance read failed.' },
+        },
+      },
+      lastError: {
+        code: 'FUTURES_API_ERROR',
+        message: 'Margin is insufficient.',
+        details: { marketType: 'futures', binanceCode: -2019 },
+      },
+    })
     render(
       <FuturesTradingTicket
-        state={createState({
-          accountResources: {
-            balances: {
-              status: 'error',
-              data: null,
-              lastSuccessfulAt: 100,
-              error: { code: 'BALANCE_READ_FAILED', message: 'Balance read failed.' },
-            },
-          },
-          lastError: {
-            code: 'FUTURES_API_ERROR',
-            message: 'Margin is insufficient.',
-            details: { marketType: 'futures', binanceCode: -2019 },
-          },
-        })}
+        state={state}
         selectedSymbol="BTCUSDT"
         selectedContract={contract}
       />,
@@ -1174,5 +1197,7 @@ describe('FuturesTradingTicket', () => {
     expect(rejection).toHaveTextContent('Binance -2019')
     expect(screen.getByLabelText('Futures account synchronization errors'))
       .toHaveTextContent('Balance read failed.')
+    fireEvent.click(screen.getByRole('button', { name: 'Retry account sync' }))
+    expect(state.refresh).toHaveBeenCalledExactlyOnceWith('BTCUSDT')
   })
 })

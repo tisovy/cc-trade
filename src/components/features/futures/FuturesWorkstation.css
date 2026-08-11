@@ -113,6 +113,12 @@
   color: #52dba8;
 }
 
+.futures-workstation-state.is-sync {
+  border-color: rgba(240, 185, 11, 0.62);
+  background: rgba(240, 185, 11, 0.14);
+  color: #f4ca43;
+}
+
 .futures-workstation-state.is-loading,
 .futures-workstation-state.is-resynchronizing {
   border-color: rgba(240, 185, 11, 0.55);
@@ -142,8 +148,6 @@
   grid-template-columns: auto minmax(72px, 1fr) minmax(82px, 1fr) auto;
   gap: 5px;
   align-items: end;
-  padding: 5px 0;
-  border-block: 1px solid rgba(126, 143, 166, 0.13);
 }
 
 .futures-workstation-tape-controls label {
@@ -349,6 +353,58 @@
   box-shadow: 0 0 0 2px var(--futures-accent-soft);
 }
 
+.futures-workstation-recent-contracts {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 4px;
+  max-height: 54px;
+  margin-bottom: 5px;
+  overflow: auto;
+  scrollbar-color: rgba(126, 143, 166, 0.25) transparent;
+}
+
+.futures-workstation-recent-contract {
+  display: inline-flex;
+  max-width: 100%;
+  min-height: 24px;
+  border: 1px solid rgba(240, 185, 11, 0.24);
+  border-radius: 5px;
+  overflow: hidden;
+  background: rgba(240, 185, 11, 0.06);
+}
+
+.futures-workstation-recent-contract.is-selected {
+  border-color: var(--futures-accent);
+  background: var(--futures-accent-soft);
+}
+
+.futures-workstation-recent-select,
+.futures-workstation-recent-favorite {
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.futures-workstation-recent-select {
+  min-width: 0;
+  padding: 3px 3px 3px 7px;
+}
+
+.futures-workstation-recent-select strong {
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
+  white-space: nowrap;
+}
+
+.futures-workstation-recent-favorite {
+  flex: 0 0 21px;
+  width: 21px;
+  padding: 0 3px;
+  color: #f0b90b !important;
+  font-size: calc(var(--fx-ui-scale, 1) * 14px);
+}
+
 /* `grid-auto-rows: min-content` is what keeps this list visible at all. The list
    is a flex item with a definite height, so its rows are auto tracks inside a box
    whose size is already decided — and each row clips its own overflow, which makes
@@ -451,17 +507,6 @@
 .futures-workstation-contract-select span {
   color: #718399;
   font-size: calc(var(--fx-ui-scale, 1) * 12px);
-}
-
-/* The contracts the operator actually works with, at the top of the list and
-   marked as theirs: sorted first is not visible on its own when four hundred rows
-   below look exactly the same. */
-.futures-workstation-contract.is-recent {
-  background: rgba(240, 185, 11, 0.05);
-}
-
-.futures-workstation-contract.is-recent .futures-workstation-contract-select span {
-  color: #c8a03a;
 }
 
 .futures-workstation-contract-inspector {
@@ -830,8 +875,6 @@
   overflow: hidden;
 }
 
-.futures-workstation-book-head,
-.futures-workstation-trade-head,
 .futures-workstation-book-side button,
 .futures-workstation-trade-rows > div {
   display: grid;
@@ -840,20 +883,11 @@
   align-items: center;
 }
 
-.futures-workstation-book-head > span,
 .futures-workstation-book-side button > span {
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
-}
-
-.futures-workstation-book-head,
-.futures-workstation-trade-head {
-  padding: 6px 4px;
-  color: #617387;
-  font-size: calc(var(--fx-ui-scale, 1) * 12px);
-  text-align: right;
 }
 
 /* The sides split whatever the panel has left, and the renderer puts exactly
@@ -978,14 +1012,65 @@
 
 .futures-workstation-trades {
   grid-area: trades;
+  display: flex;
+  flex-direction: column;
   min-height: 190px;
   padding: 8px;
   overflow: hidden;
 }
 
 .futures-workstation-trade-rows {
-  max-height: 160px;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow: auto;
+}
+
+.futures-workstation-tape-disclosure {
+  flex: 0 0 auto;
+}
+
+.futures-workstation-tape-disclosure > summary {
+  min-height: 34px;
+  padding: 7px 2px;
+  color: #718399;
+  font-size: calc(var(--fx-ui-scale, 1) * 12.5px);
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+
+.futures-workstation-tape-disclosure > summary::marker {
+  color: #8192a4;
+}
+
+.futures-workstation-tape-disclosure > summary strong {
+  margin-left: 7px;
+  color: #dbe6f0;
+  font-size: calc(var(--fx-ui-scale, 1) * 15px);
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.futures-workstation-tape-disclosure[open] > summary {
+  border-bottom: 1px solid rgba(126, 143, 166, 0.13);
+}
+
+.futures-workstation-tape-settings {
+  display: grid;
+  gap: 5px;
+  padding: 5px 0;
+}
+
+.futures-workstation-tape-pause {
+  justify-self: end;
+  padding: 4px 8px;
+  border: 1px solid var(--futures-border);
+  border-radius: 4px;
+  background: var(--futures-accent-soft);
+  color: #cde3f6;
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
+  cursor: pointer;
 }
 
 .futures-workstation-trade-rows > div {
@@ -1869,12 +1954,10 @@
 .futures-workstation-book-last {
   display: flex;
   flex: 0 0 auto;
-  align-items: baseline;
+  align-items: center;
   justify-content: center;
-  gap: 7px;
-  margin: 4px 0;
-  padding: 5px 4px;
-  border-block: 1px solid rgba(126, 143, 166, 0.13);
+  margin: 2px 0;
+  padding: 3px 4px;
 }
 
 .futures-workstation-book-last strong {
@@ -1887,32 +1970,12 @@
   color: #dbe6f0;
 }
 
-/* Direction is carried by the arrow as well as the colour, so it survives a
-   monochrome screen and an operator who cannot separate the two hues. */
-.futures-workstation-book-last.is-up strong,
-.futures-workstation-book-last.is-up .futures-workstation-book-last-arrow {
+.futures-workstation-book-last.is-up strong {
   color: #3dd69c;
 }
 
-.futures-workstation-book-last.is-down strong,
-.futures-workstation-book-last.is-down .futures-workstation-book-last-arrow {
+.futures-workstation-book-last.is-down strong {
   color: #ff7380;
-}
-
-.futures-workstation-book-last .futures-workstation-book-last-arrow {
-  margin-left: -4px;
-  font-size: calc(var(--fx-ui-scale, 1) * 14px);
-  font-weight: 800;
-  letter-spacing: 0;
-  text-transform: none;
-}
-
-.futures-workstation-book-last span {
-  color: #617387;
-  font-size: calc(var(--fx-ui-scale, 1) * 11px);
-  font-weight: 800;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
 }
 
 .futures-workstation-depth {

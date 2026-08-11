@@ -206,6 +206,13 @@ const renderView = (properties = {}) => {
   return { ...result, onSymbolChange, onIntervalChange }
 }
 
+const getTapeDisclosure = () => screen.getByText('Aggregate trades').closest('details')
+const openTapeSettings = () => {
+  const disclosure = getTapeDisclosure()
+  if (!disclosure.open) fireEvent.click(disclosure.querySelector('summary'))
+  return disclosure
+}
+
 afterEach(() => {
   while (bookPanelRestores.length > 0) bookPanelRestores.pop()()
   vi.clearAllMocks()
@@ -244,6 +251,31 @@ describe('pure Futures workstation presentation', () => {
     expect(screen.queryByText('Spread')).not.toBeInTheDocument()
     // The tape is denominated in USDT like its own filter: 0.25 × 58420.25.
     expect(screen.getByTitle('0.25 base')).toHaveTextContent('14.6k')
+  })
+
+  it('shows account synchronization only in place of a routine live identity state', () => {
+    const { rerender } = renderView({ accountSynchronizing: true })
+    const identity = screen.getByTestId('futures-workstation-identity')
+    expect(identity).toHaveTextContent('SYNC')
+    expect(identity).not.toHaveTextContent('LIVE')
+    expect(within(screen.getByLabelText('USDⓈ-M contract selector')).queryByRole('status'))
+      .not.toBeInTheDocument()
+
+    const staleState = createState({ status: 'stale', reasonCode: 'MARKET_STALE' })
+    rerender(
+      <FuturesWorkstationView
+        identity="USDⓈ-M PRODUCTION · REAL MONEY"
+        state={staleState}
+        selectedSymbol="BTCUSDT"
+        selectedInterval="1m"
+        accountSynchronizing
+        onSymbolChange={vi.fn()}
+        onIntervalChange={vi.fn()}
+      />,
+    )
+    expect(identity).toHaveTextContent('STALE')
+    expect(identity).not.toHaveTextContent('SYNC')
+    expect(identity).toHaveTextContent('reason MARKET_STALE')
   })
 
   it('shows the nearest exact depth levels as complete USDT rows', () => {
@@ -290,6 +322,40 @@ describe('pure Futures workstation presentation', () => {
     expect(askRows.at(-1).children[2].textContent).toBe('951')
     expect(container).not.toHaveTextContent('0.009525')
     expect(container).not.toHaveTextContent('0.009484')
+  })
+
+  it('keeps compact market rows named while tape settings toggle without remounting data', () => {
+    const { container } = renderView()
+    const depth = container.querySelector('.futures-workstation-depth')
+    const tape = container.querySelector('.futures-workstation-trades')
+    const disclosure = getTapeDisclosure()
+    const rows = tape.querySelector('.futures-workstation-trade-rows')
+    const firstTrade = rows.firstElementChild
+
+    expect(disclosure.open).toBe(false)
+    expect(depth.querySelector('.futures-workstation-book-head')).toBeNull()
+    expect(tape.querySelector('.futures-workstation-trade-head')).toBeNull()
+    expect(screen.getByRole('button', {
+      name: 'Ask book level: price 58420.50; level 175.3k USDT; cumulative 175.3k USDT',
+    })).toBeInTheDocument()
+    expect(screen.getByRole('group', {
+      name: /Aggregate trade: price 58420\.25; notional 14\.6k USDT; time /,
+    })).toBe(firstTrade)
+
+    rows.scrollTop = 37
+    fireEvent.click(disclosure.querySelector('summary'))
+    expect(disclosure.open).toBe(true)
+    fireEvent.change(screen.getByLabelText('Tape timeout in ms'), { target: { value: '375' } })
+    fireEvent.click(disclosure.querySelector('summary'))
+    expect(disclosure.open).toBe(false)
+    expect(tape.querySelector('.futures-workstation-trade-rows')).toBe(rows)
+    expect(rows.firstElementChild).toBe(firstTrade)
+    expect(rows.scrollTop).toBe(37)
+    expect(rows).toHaveTextContent('58420.25')
+
+    fireEvent.click(disclosure.querySelector('summary'))
+    expect(disclosure.open).toBe(true)
+    expect(screen.getByLabelText('Tape timeout in ms')).toHaveValue('375')
   })
 
   it('renders a removed per-symbol algo limit as unavailable', () => {
@@ -353,7 +419,7 @@ describe('pure Futures workstation presentation', () => {
     expect(screen.getByTestId('mock-futures-chart')).toHaveTextContent('drawings 1')
     fireEvent.click(screen.getByRole('button', { name: 'Add display alert' }))
     expect(screen.getByTestId('mock-futures-chart')).toHaveTextContent('alerts 1')
-    fireEvent.click(screen.getByRole('button', { name: /^58420\.50/ }))
+    fireEvent.click(screen.getByRole('button', { name: /^Ask book level: price 58420\.50/ }))
     expect(onSymbolChange).not.toHaveBeenCalled()
     expect(onIntervalChange).not.toHaveBeenCalled()
   })
@@ -361,8 +427,8 @@ describe('pure Futures workstation presentation', () => {
   it('maps exact order-book double-click gestures without bypassing the parent intent handler', () => {
     const onTradingGesture = vi.fn()
     renderView({ onTradingGesture })
-    const ask = screen.getByRole('button', { name: /^58420\.50/ })
-    const bid = screen.getByRole('button', { name: /^58420\.00/ })
+    const ask = screen.getByRole('button', { name: /^Ask book level: price 58420\.50/ })
+    const bid = screen.getByRole('button', { name: /^Bid book level: price 58420\.00/ })
 
     fireEvent.click(bid, { altKey: true, button: 0 })
     fireEvent.click(bid, { ctrlKey: true, button: 0 })
@@ -414,6 +480,7 @@ describe('pure Futures workstation presentation', () => {
   it('freezes the displayed tape while backend rows continue to change', () => {
     const state = createState()
     const { rerender } = renderView({ state })
+    openTapeSettings()
     fireEvent.click(screen.getByRole('button', { name: 'Pause' }))
     const nextState = createState({
       resources: Object.freeze({
@@ -446,6 +513,7 @@ describe('pure Futures workstation presentation', () => {
   it('validates and explains effective upstream tape controls', () => {
     const onTapeConfigurationChange = vi.fn(() => true)
     renderView({ onTapeConfigurationChange })
+    openTapeSettings()
 
     expect(screen.getByText(/Effective: throttled · 250 ms · ≥ 0 USDT/)).toBeInTheDocument()
     fireEvent.change(screen.getByLabelText('Tape timeout in ms'), {
@@ -487,6 +555,7 @@ describe('pure Futures workstation presentation', () => {
     const { rerender } = render(
       <FuturesWorkstationView {...properties} selectedSymbol="BTCUSDT" />,
     )
+    openTapeSettings()
     fireEvent.change(screen.getByLabelText('Tape timeout in ms'), {
       target: { value: '500' },
     })
@@ -601,6 +670,7 @@ describe('pure Futures workstation presentation', () => {
       onIntervalChange: () => {},
     }
     const first = render(<FuturesWorkstationView {...properties} />)
+    openTapeSettings()
     fireEvent.change(screen.getByLabelText('Tape timeout in ms'), { target: { value: '750' } })
     fireEvent.change(screen.getByLabelText('Minimum displayed trade in USDT'), {
       target: { value: '300' },
@@ -609,6 +679,7 @@ describe('pure Futures workstation presentation', () => {
     first.unmount()
 
     render(<FuturesWorkstationView {...properties} />)
+    openTapeSettings()
     expect(screen.getByLabelText('Tape timeout in ms')).toHaveValue('750')
     expect(screen.getByLabelText('Minimum displayed trade in USDT')).toHaveValue('300')
     expect(screen.getByText(/Effective: throttled · 750 ms · ≥ 300 USDT/))
@@ -626,12 +697,14 @@ describe('pure Futures workstation presentation', () => {
       onIntervalChange: () => {},
     }
     const first = render(<FuturesWorkstationView {...properties} />)
+    openTapeSettings()
     fireEvent.change(screen.getByLabelText('Tape timeout in ms'), { target: { value: '900' } })
     fireEvent.click(screen.getByRole('button', { name: 'Apply' }))
     expect(screen.getByRole('alert')).toBeInTheDocument()
     first.unmount()
 
     render(<FuturesWorkstationView {...properties} />)
+    openTapeSettings()
     expect(screen.getByLabelText('Tape timeout in ms')).toHaveValue('250')
   })
 
@@ -689,7 +762,7 @@ describe('pure Futures workstation presentation', () => {
     renderView({ state })
     fireEvent.click(screen.getByRole('button', { name: 'Pick chart price' }))
     expect(screen.getByRole('button', { name: 'Add display alert' })).toBeEnabled()
-    expect(screen.getByRole('button', { name: /^58420\.50/ })).toBeEnabled()
+    expect(screen.getByRole('button', { name: /^Ask book level: price 58420\.50/ })).toBeEnabled()
     expect(screen.queryByText('RESYNCHRONIZING', { selector: '.futures-workstation-overlay strong' }))
       .not.toBeInTheDocument()
     expect(screen.getByTestId('futures-workstation-identity')).toHaveTextContent('RESYNCHRONIZING')
@@ -706,7 +779,8 @@ describe('pure Futures workstation presentation', () => {
     expect(screen.getAllByRole('button', { name: /BTCUSDT|ETHUSDT/ })).not.toHaveLength(0)
     expect(screen.getByLabelText('Futures market header')).toHaveTextContent('ETHUSDT')
     expect(screen.getByLabelText('Futures market header')).not.toHaveTextContent('58420.25')
-    expect(screen.queryByRole('button', { name: /^58420\.(?:00|50)/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /book level: price 58420\.(?:00|50)/ }))
+      .not.toBeInTheDocument()
     expect(screen.getByTestId('futures-workstation-identity')).toHaveTextContent('LOADING')
     expect(screen.queryByLabelText('Futures workstation reason')).not.toBeInTheDocument()
     expect(screen.getByText('LOADING', { selector: '.futures-workstation-overlay strong' }))
@@ -731,6 +805,7 @@ describe('pure Futures workstation presentation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Horizontal drawing' }))
     fireEvent.click(screen.getByRole('button', { name: 'Pick chart price' }))
     fireEvent.click(screen.getByRole('button', { name: 'Add display alert' }))
+    openTapeSettings()
     fireEvent.click(screen.getByRole('button', { name: 'Pause' }))
 
     rerender(
@@ -743,6 +818,7 @@ describe('pure Futures workstation presentation', () => {
     expect(screen.getByTestId('mock-futures-chart')).toHaveTextContent('draft none')
     expect(screen.getByTestId('mock-futures-chart')).toHaveTextContent('drawings 0')
     expect(screen.getByTestId('mock-futures-chart')).toHaveTextContent('alerts 0')
+    openTapeSettings()
     expect(screen.getByRole('button', { name: 'Pause' })).toBeInTheDocument()
   })
 
@@ -759,8 +835,8 @@ describe('pure Futures workstation presentation', () => {
     const { rerender } = render(
       <FuturesWorkstationView {...properties} selectedSymbol="BTCUSDT" />,
     )
-    fireEvent.click(screen.getByRole('button', { name: /^58420\.00/ }), { altKey: true })
-    fireEvent.contextMenu(screen.getByRole('button', { name: /^58420\.50/ }), { altKey: true })
+    fireEvent.click(screen.getByRole('button', { name: /^Bid book level: price 58420\.00/ }), { altKey: true })
+    fireEvent.contextMenu(screen.getByRole('button', { name: /^Ask book level: price 58420\.50/ }), { altKey: true })
 
     rerender(
       <FuturesWorkstationView
@@ -769,8 +845,8 @@ describe('pure Futures workstation presentation', () => {
         selectedSymbol="ETHUSDT"
       />,
     )
-    const bid = screen.getByRole('button', { name: /^58420\.00/ })
-    const ask = screen.getByRole('button', { name: /^58420\.50/ })
+    const bid = screen.getByRole('button', { name: /^Bid book level: price 58420\.00/ })
+    const ask = screen.getByRole('button', { name: /^Ask book level: price 58420\.50/ })
     fireEvent.click(bid, { altKey: true })
     fireEvent.contextMenu(ask, { altKey: true })
     expect(onTradingGesture).not.toHaveBeenCalled()
@@ -821,15 +897,18 @@ const productionExecutionState = Object.freeze({
 })
 
 describe('instrument recency and interface scale', () => {
-  it('orders the single contract list by recency without a duplicate strip', () => {
-    renderView({
+  it('renders recent contracts as a distinct wrapping pill group', () => {
+    const { container } = renderView({
       selectedSymbol: 'BTCUSDT',
       symbolHistory: { recent: ['ETHUSDT', 'BTCUSDT'], favorites: [] },
     })
-    expect(screen.queryByLabelText('Recently traded contracts')).not.toBeInTheDocument()
-    const listed = screen.getAllByRole('button', { name: /^(?:BTC|ETH)USDT/ })
-    expect(listed[0]).toHaveTextContent('ETHUSDT')
-    expect(listed[1]).toHaveTextContent('BTCUSDT')
+    const recent = screen.getByRole('list', { name: 'Recent contracts' })
+    expect(recent).toHaveClass('futures-workstation-recent-contracts')
+    expect(within(recent).getAllByRole('listitem')).toHaveLength(2)
+    expect(within(recent).getAllByRole('button', { name: /^(?:BTC|ETH)USDT/ })
+      .map(button => button.textContent)).toEqual(['ETHUSDT', 'BTCUSDT'])
+    expect(container.querySelector('.futures-workstation-contract-list'))
+      .not.toHaveTextContent(/(?:BTC|ETH)USDT/)
   })
 
   it('lists persisted recent contracts before the catalogue arrives', () => {
@@ -845,24 +924,80 @@ describe('instrument recency and interface scale', () => {
       }),
     })
 
-    const listed = screen.getAllByRole('button', { name: /^(?:BLUAI|BICO)USDT/ })
+    const recent = screen.getByRole('list', { name: 'Recent contracts' })
+    const listed = within(recent).getAllByRole('button', { name: /^(?:BLUAI|BICO)USDT/ })
     expect(listed[0]).toHaveTextContent('BLUAIUSDT')
     expect(listed[1]).toHaveTextContent('BICOUSDT')
+    expect(listed[0].closest('[role="listitem"]')).toHaveAttribute('data-pending', 'true')
     expect(screen.getByText('Loading contracts…')).toBeInTheDocument()
   })
 
-  it('replaces a pending recent entry with its catalogue row once it arrives', () => {
-    renderView({
+  it('reconciles a pending recent pill with catalogue metadata without duplication', () => {
+    const state = createState()
+    const properties = {
+      identity: 'USDⓈ-M PRODUCTION · REAL MONEY',
       selectedSymbol: 'BTCUSDT',
+      selectedInterval: '1m',
+      symbolHistory: { recent: ['BTCUSDT'], favorites: [] },
+      onSymbolChange: vi.fn(),
+      onIntervalChange: vi.fn(),
+    }
+    const pendingState = createState({
+      resources: Object.freeze({
+        ...state.resources,
+        catalog: Object.freeze({ ...state.resources.catalog, contracts: Object.freeze([]) }),
+      }),
+    })
+    const { rerender, container } = render(
+      <FuturesWorkstationView {...properties} state={pendingState} />,
+    )
+    expect(screen.getByRole('listitem')).toHaveAttribute('data-pending', 'true')
+
+    rerender(<FuturesWorkstationView {...properties} state={state} />)
+    const recent = screen.getByRole('list', { name: 'Recent contracts' })
+    expect(within(recent).getAllByRole('button', { name: /^BTCUSDT/ })).toHaveLength(1)
+    expect(screen.getByRole('listitem')).not.toHaveAttribute('data-pending')
+    expect(container.querySelector('.futures-workstation-contract-list'))
+      .not.toHaveTextContent('BTCUSDT')
+    expect(screen.queryByText('Loading contracts…')).not.toBeInTheDocument()
+  })
+
+  it('keeps recent selection and favorite as isolated accessible controls', () => {
+    const onToggleFavorite = vi.fn()
+    const { onSymbolChange } = renderView({
+      symbolHistory: { recent: ['ETHUSDT', 'BTCUSDT'], favorites: ['BTCUSDT'] },
+      onToggleFavorite,
+    })
+    const recent = screen.getByRole('list', { name: 'Recent contracts' })
+    const eth = within(recent).getByRole('button', { name: 'ETHUSDT' })
+    const btc = within(recent).getByRole('button', { name: 'BTCUSDT' })
+    expect(eth).toHaveAttribute('aria-pressed', 'false')
+    expect(btc).toHaveAttribute('aria-pressed', 'true')
+    expect(within(recent).getByRole('button', { name: 'Remove BTCUSDT favorite' }))
+      .toHaveAttribute('aria-pressed', 'true')
+
+    fireEvent.click(within(recent).getByRole('button', { name: 'Add ETHUSDT favorite' }))
+    expect(onToggleFavorite).toHaveBeenCalledExactlyOnceWith('ETHUSDT')
+    expect(onSymbolChange).not.toHaveBeenCalled()
+
+    fireEvent.click(eth)
+    expect(onSymbolChange).toHaveBeenCalledExactlyOnceWith('ETHUSDT')
+  })
+
+  it('yields recent pills to one deduplicated list while search is active', () => {
+    const { container } = renderView({
       symbolHistory: { recent: ['BTCUSDT'], favorites: [] },
     })
-    const listed = screen.getAllByRole('button', { name: /^BTCUSDT/ })
-    expect(listed).toHaveLength(1)
-    // Still marked as the operator's own once the catalogue confirms it: sorted to
-    // the front is not a signal when every row below reads the same.
-    expect(listed[0]).toHaveTextContent('recent')
-    expect(listed[0].closest('.futures-workstation-contract')).toHaveClass('is-recent')
-    expect(screen.queryByText('Loading contracts…')).not.toBeInTheDocument()
+    expect(screen.getByRole('list', { name: 'Recent contracts' })).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Search Futures contracts'), {
+      target: { value: 'BTC' },
+    })
+
+    expect(screen.queryByRole('list', { name: 'Recent contracts' })).not.toBeInTheDocument()
+    const results = within(container.querySelector('.futures-workstation-contract-list'))
+      .getAllByRole('button', { name: /^BTCUSDT/ })
+    expect(results).toHaveLength(1)
+    expect(results[0]).toHaveTextContent('PERPETUAL')
   })
 
   it('groups the order book by a chosen price step', () => {
@@ -1055,15 +1190,20 @@ describe('instrument recency and interface scale', () => {
 
     // A first reading is not a move.
     expect(bookLast()).toHaveClass('is-flat')
-    expect(bookLast()).not.toHaveTextContent('↑')
+    expect(bookLast()).toHaveAttribute('aria-label', 'Last traded price 58500, neutral')
+    expect(bookLast()).toHaveTextContent('58500')
+    expect(bookLast()).not.toHaveTextContent(/↑|↓|last/i)
+    expect(bookLast().children).toHaveLength(1)
 
     show('58600.00')
     expect(bookLast()).toHaveClass('is-up')
-    expect(bookLast()).toHaveTextContent('↑')
+    expect(bookLast()).toHaveAttribute('aria-label', 'Last traded price 58600, moving up')
+    expect(bookLast()).not.toHaveTextContent(/↑|↓|last/i)
 
     show('58400.00')
     expect(bookLast()).toHaveClass('is-down')
-    expect(bookLast()).toHaveTextContent('↓')
+    expect(bookLast()).toHaveAttribute('aria-label', 'Last traded price 58400, moving down')
+    expect(bookLast()).not.toHaveTextContent(/↑|↓|last/i)
 
     // An unchanged price is not a reversal: the row keeps the way it was going.
     show('58400.00')
@@ -1072,6 +1212,7 @@ describe('instrument recency and interface scale', () => {
     // A direction belongs to one book.
     show('2000.00', 'ETHUSDT')
     expect(bookLast()).toHaveClass('is-flat')
+    expect(bookLast()).toHaveAttribute('aria-label', 'Last traded price 2000, neutral')
   })
 
   // Sizing the sides by content let flex shrink take the panel's shortfall out
@@ -1285,7 +1426,8 @@ describe('production workstation container', () => {
 
     rerender(workstation(nextState))
 
-    expect(screen.getByRole('button', { name: /^58419\.50/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Bid book level: price 58419\.50/ }))
+      .toBeInTheDocument()
     expect(workstationViewMocks.chartRender).toHaveBeenCalledTimes(initialChartRenders)
     expect(workstationViewMocks.ticketRender).toHaveBeenCalledTimes(initialTicketRenders)
   })
@@ -1340,7 +1482,7 @@ describe('production workstation container', () => {
     const first = render(workstation())
     const listed = () => screen.getAllByRole('button', { name: /^(?:BICO|BEAT)USDT/ })
     expect(listed().map(button => button.textContent))
-      .toEqual(['BICOUSDTrecent', 'BEATUSDTrecent'])
+      .toEqual(['BICOUSDT', 'BEATUSDT'])
 
     fireEvent.click(listed()[1])
     expect(JSON.parse(localStorage.getItem('cc-trade:futures-symbols:v1')))
@@ -1349,7 +1491,7 @@ describe('production workstation container', () => {
     first.unmount()
     render(workstation())
     expect(listed().map(button => button.textContent))
-      .toEqual(['BEATUSDTrecent', 'BICOUSDTrecent'])
+      .toEqual(['BEATUSDT', 'BICOUSDT'])
   })
 
   // Spot parity: the pair changes more often than anything else on the desk, and

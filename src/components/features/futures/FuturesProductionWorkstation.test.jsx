@@ -1,6 +1,10 @@
 import { render } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import FuturesProductionWorkstation from './FuturesProductionWorkstation.jsx'
+
+const productionWorkstationMocks = vi.hoisted(() => ({
+  viewRender: vi.fn(),
+}))
 
 // The container is the only surface that knows which contract is on screen.
 // Everything it renders is mocked away: what is under test is the one read it
@@ -17,7 +21,10 @@ vi.mock('../../../hooks/useFuturesProductionWorkstation.js', () => ({
   }),
 }))
 vi.mock('./FuturesWorkstationView.jsx', () => ({
-  default: () => <div data-testid="view" />,
+  default: properties => {
+    productionWorkstationMocks.viewRender(properties)
+    return <div data-testid="view" />
+  },
 }))
 vi.mock('./FuturesPortfolioDock.jsx', () => ({ default: () => <div /> }))
 vi.mock('./FuturesTradingTicket.jsx', () => ({ default: () => <div /> }))
@@ -30,6 +37,10 @@ const executionState = (overrides = {}) => ({
   loadHistory: vi.fn(() => true),
   loadSymbolConfig: vi.fn(),
   ...overrides,
+})
+
+afterEach(() => {
+  vi.clearAllMocks()
 })
 
 describe('FuturesProductionWorkstation account review', () => {
@@ -74,5 +85,34 @@ describe('FuturesProductionWorkstation account review', () => {
     const recovered = { ...state, loadHistory: vi.fn(() => true) }
     rerender(<FuturesProductionWorkstation enabled executionState={recovered} />)
     expect(recovered.loadHistory).toHaveBeenCalledExactlyOnceWith('BTCUSDT')
+  })
+
+  it('passes account synchronization only for connected idle or loading resources', () => {
+    const synchronizing = executionState({
+      accountResources: {
+        balances: { status: 'ready' },
+        positions: { status: 'loading' },
+      },
+    })
+    const { rerender } = render(
+      <FuturesProductionWorkstation enabled executionState={synchronizing} />,
+    )
+    expect(productionWorkstationMocks.viewRender.mock.lastCall[0].accountSynchronizing).toBe(true)
+
+    const settled = executionState({
+      accountResources: {
+        balances: { status: 'ready' },
+        positions: { status: 'ready' },
+      },
+    })
+    rerender(<FuturesProductionWorkstation enabled executionState={settled} />)
+    expect(productionWorkstationMocks.viewRender.mock.lastCall[0].accountSynchronizing).toBe(false)
+
+    const disconnected = executionState({
+      connected: false,
+      accountResources: { balances: { status: 'idle' } },
+    })
+    rerender(<FuturesProductionWorkstation enabled executionState={disconnected} />)
+    expect(productionWorkstationMocks.viewRender.mock.lastCall[0].accountSynchronizing).toBe(false)
   })
 })

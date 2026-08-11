@@ -23,11 +23,13 @@ import {
   formatPriceOrAbsent,
   formatUsdtAmount,
 } from '../../../utils/futuresPriceFormat.js'
-import { deriveFuturesReadiness } from '../../../utils/futuresReadiness.js'
+import {
+  deriveFuturesReadiness,
+  FUTURES_READINESS_CODES,
+} from '../../../utils/futuresReadiness.js'
 import FuturesOrderConfirmation from './FuturesOrderConfirmation.jsx'
 import './FuturesProductionExecutionTicket.css'
 
-const SIZE_ANCHORS = Object.freeze([0, 25, 50, 75, 100])
 const EXACT_POSITIVE_DECIMAL = /^(?:[1-9][0-9]*|0\.[0-9]*[1-9][0-9]*|[1-9][0-9]*\.[0-9]+)$/
 
 const ORDER_ACTIONS = Object.freeze([
@@ -239,11 +241,7 @@ const FuturesTradingTicket = ({
       ...(action.positionEffect === 'EXIT' ? { reduceOnly: true } : {}),
     })
     setFeedback(accepted
-      ? {
-          tone: 'submitted',
-          title: `${action.label} submitted`,
-          detail: `LIMIT ${draft.quantity} @ ${draft.price}`,
-        }
+      ? null
       : { tone: 'ignored', title: `${action.label} NOT sent`, detail: SEND_FAILED_MESSAGE })
     return accepted
   }
@@ -263,16 +261,10 @@ const FuturesTradingTicket = ({
     })
   }
 
-  // Cancelling says so out loud: silence after a gesture is indistinguishable
-  // from an order that was quietly sent.
   const cancelPendingOrder = () => {
     if (!pendingOrder) return
     setPendingOrder(null)
-    setFeedback({
-      tone: 'ignored',
-      title: `${pendingOrder.action.label} cancelled`,
-      detail: 'Nothing was sent to the exchange.',
-    })
+    setFeedback(null)
   }
 
   // A gesture prepares the order; it does not send it.
@@ -386,14 +378,13 @@ const FuturesTradingTicket = ({
     })
     : null
 
-  const gestureAction = ORDER_ACTIONS.find(candidate => (
-    candidate.side === gestureRequest?.side
-    && candidate.positionSide === gestureRequest?.positionSide
-    && candidate.positionEffect === gestureRequest?.positionEffect
-  )) ?? null
-  const draftReason = orderDraft.ok
+  const readinessBlockReason = !readiness.ready
+    && readiness.code !== FUTURES_READINESS_CODES.ACCOUNT_LOADING
+    ? readiness.reason
+    : null
+  const draftReason = readinessBlockReason ?? (orderDraft.ok
     ? (!amountWithinBudget && sizingReady ? 'Order size exceeds the available balance' : null)
-    : (price ? DRAFT_REASON_MESSAGES[orderDraft.reason] ?? null : 'Pick a chart or order-book price')
+    : (price ? DRAFT_REASON_MESSAGES[orderDraft.reason] ?? null : 'Pick a chart or order-book price'))
   const selectedOpenOrders = openOrders.filter(order => order.symbol === selectedSymbol)
   const lastError = safeState.lastError ?? null
   const unresolvedCommand = safeState.unresolvedCommand ?? null
@@ -421,23 +412,6 @@ const FuturesTradingTicket = ({
 
   return (
     <aside className="futures-production-execution-ticket" aria-label="Futures trading ticket">
-      {/* The market and the symbol are already stated by the identity bar and
-          the market header; this rail only has to answer "can I trade now?". */}
-      <header className="futures-production-execution-header">
-        <div className="futures-production-readiness">
-          <span className={`futures-production-live is-${readiness.tone}`}>{readiness.label}</span>
-          {readiness.ready ? null : <small role="status">{readiness.reason}</small>}
-        </div>
-        <button
-          type="button"
-          className={`futures-production-pause-toggle${tradingPaused ? ' is-paused' : ''}`}
-          disabled={safeState.connected !== true || typeof safeState.setTradingPaused !== 'function'}
-          onClick={() => safeState.setTradingPaused?.(!tradingPaused)}
-        >
-          {tradingPaused ? 'Resume trading' : 'Pause trading'}
-        </button>
-      </header>
-
       {feedback ? (
         <div
           className={`futures-production-feedback is-${feedback.tone}`}
@@ -466,7 +440,7 @@ const FuturesTradingTicket = ({
 
       <div className="futures-production-execution-body">
         {tab === 'trade' ? (
-          <section className="futures-production-action is-order" aria-label="Futures order size and shortcuts">
+          <section className="futures-production-action is-order" aria-label="Futures order size">
             <div className="futures-production-ticket-symbol">
               <strong>{selectedSymbol}</strong>
               {/* The multiple every entry on this contract is taken at, stated
@@ -488,9 +462,6 @@ const FuturesTradingTicket = ({
                   {entryLeverage === null ? 'Lev' : `${entryLeverage}×`}
                 </button>
               ) : null}
-              <code className={gestureAction ? `is-${gestureAction.positionSide.toLowerCase()}` : ''}>
-                {gestureAction ? gestureAction.label : 'Awaiting shortcut'}
-              </code>
             </div>
             <label className="futures-production-price-field">
               <span>Selected price</span>
@@ -526,22 +497,6 @@ const FuturesTradingTicket = ({
                 }}
               />
             </label>
-            <div className="futures-production-size-anchors" aria-label="Order size anchors">
-              {SIZE_ANCHORS.map(value => (
-                <button
-                  type="button"
-                  key={value}
-                  className={displayedSizePercent === value ? 'is-selected' : ''}
-                  disabled={!sizingControlsReady}
-                  onClick={() => {
-                    setCustomNotionalUsdt(null)
-                    setSizePercent(value)
-                  }}
-                >
-                  {value}%
-                </button>
-              ))}
-            </div>
             <label className="futures-production-notional-field">
               <span>Notional, USDT</span>
               <input
@@ -556,7 +511,6 @@ const FuturesTradingTicket = ({
             </label>
             <dl className="futures-production-order-summary">
               <div><dt>Price</dt><dd>{orderDraft.ok ? orderDraft.price : exactText(price)}</dd></div>
-              <div><dt>Quantity</dt><dd>{orderDraft.ok ? orderDraft.quantity : '—'}</dd></div>
               {/* Six and seven figures: the cents never change a decision and
                   cost a glance on every read, so funds are stated whole. */}
               <div>
@@ -594,7 +548,9 @@ const FuturesTradingTicket = ({
                 </dd>
               </div>
             </dl>
-            {draftReason ? <p className="futures-production-draft-reason" role="status">{draftReason}</p> : null}
+            {!feedback && draftReason ? (
+              <p className="futures-production-draft-reason" role="status">{draftReason}</p>
+            ) : null}
             <div className="futures-production-manual-actions" aria-label="Manual Futures orders">
               {ORDER_ACTIONS.map(action => (
                 <button
@@ -607,13 +563,6 @@ const FuturesTradingTicket = ({
                   {action.label}
                 </button>
               ))}
-            </div>
-            <div className="futures-production-shortcuts" aria-label="Futures mouse shortcuts">
-              <span><kbd>Alt</kbd><b>×2 left</b><em>LONG entry</em></span>
-              <span><kbd>Alt</kbd><b>×2 right</b><em>LONG exit</em></span>
-              <span><kbd>Ctrl</kbd><b>×2 right</b><em>SHORT entry</em></span>
-              <span><kbd>Ctrl</kbd><b>×2 left</b><em>SHORT exit</em></span>
-              <small>Ctrl/Alt + drag an order: it is cancelled and placed where you drop it</small>
             </div>
           </section>
         ) : tab === 'orders' ? (
@@ -843,21 +792,6 @@ const FuturesTradingTicket = ({
             <button type="button" onClick={() => safeState.refresh?.(selectedSymbol)}>
               Retry account sync
             </button>
-          </section>
-        ) : null}
-        {!unresolvedCommand && !lastError && accountFailures.length === 0 && safeState.lastExecution ? (
-          <section className="futures-production-backend-card is-ack" aria-label="Last Futures execution">
-            <strong>
-              {safeState.lastExecution.symbol} {safeState.lastExecution.side}
-              {' · '}
-              {safeState.lastExecution.status}
-            </strong>
-            <code>
-              {safeState.lastExecution.type ?? 'LIMIT'} {safeState.lastExecution.origQty}
-              {safeState.lastExecution.price && safeState.lastExecution.price !== '0'
-                ? ` @ ${safeState.lastExecution.price}`
-                : ''}
-            </code>
           </section>
         ) : null}
       </div>
