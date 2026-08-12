@@ -33,13 +33,15 @@
 
 ## 4. The Parse Runs At The Platform's Speed
 
-- [ ] 4.1 Replace `parseBoundedFuturesWorkstationJson` with the platform parser at both call sites — the renderer's workstation events and the main process's upstream stream frames.
-- [ ] 4.2 Keep the byte ceiling enforced before parsing, so an unbounded frame is still refused without being read.
-- [ ] 4.3 Keep every structural validator unchanged — exact keys, canonical decimals, identities, timestamps, level counts — since that is what rejects a malformed or hostile payload.
-- [ ] 4.4 Keep lone-surrogate rejection wherever a value survives validation as free text; state where that is, rather than assuming the decimal and identity patterns cover it.
-- [ ] 4.5 Retire the node budget as a derived bound, or state what it still protects against once the byte ceiling and the validators are both in place.
-- [ ] 4.6 Run `/security-review` on this section specifically, and record the outcome in this change before it lands.
-- [ ] 4.7 Prove by test that every payload the bounded parser refused is still refused, using the existing parser rejection cases.
+- [x] 4.1 Replace `parseBoundedFuturesWorkstationJson` with the platform parser at ~~both call sites — the renderer's workstation events and the main process's upstream stream frames~~ the local protocol's two call sites: the renderer's workstation events and the main process's reading of renderer requests. See 4.8 for why the upstream frames keep their own reading.
+- [x] 4.2 Keep the byte ceiling enforced before parsing, so an unbounded frame is still refused without being read.
+- [x] 4.3 Keep every structural validator unchanged — exact keys, canonical decimals, identities, timestamps, level counts — since that is what rejects a malformed or hostile payload.
+- [x] 4.4 Keep lone-surrogate rejection wherever a value survives validation as free text; state where that is, rather than assuming the decimal and identity patterns cover it. It is three fields: a contract's `contractType` and `status`, and a header's `contractStatus` — the exchange's own words, whose only rule is a length. Every other string the rules accept is spelled by a pattern, and no pattern here can spell half a surrogate pair.
+- [x] 4.5 Retire the node budget as a derived bound, or state what it still protects against once the byte ceiling and the validators are both in place. Retired for the local protocol: what it protected against was an unbounded parse, and the byte ceiling bounds that before a frame is read. The upstream parser keeps its own, with its own reading.
+- [ ] 4.6 Run `/security-review` on this section specifically, and record the outcome in this change before it lands. The operator runs it; 4.8 and 4.9 below are the list it should be run against.
+- [x] 4.7 Prove by test that every payload the bounded parser refused is still refused, using the existing parser rejection cases — except the three in 4.9, which are proven to be *accepted* instead, so the change is weighed rather than discovered.
+- [x] 4.8 Keep the upstream parser, and state why it cannot be the platform's. *(Discovered: it does not answer numbers at all. It answers an integer as a token holding its exact digits, and `readFuturesWorkstationIdentity` validates that against the full uint64 range — because Binance's depth sequence numbers are uint64 and the whole bridge from snapshot to diff is an exact comparison of them. `JSON.parse` would round anything past 2^53 to a number that is close, and the book would bridge against an identity the exchange never sent. That is a silent corruption of the one thing the order book is built on, so the upstream reading stays as it is.)*
+- [x] 4.9 State every refusal given up, rather than claiming equivalence. *(Discovered while proving 4.7. Three refusals of **notation** are gone: a duplicate key is no longer refused — the last value stands and it is the one validated; an integer written in exponent form is read as the integer it denotes; and an integer past what a JavaScript number holds exactly is rounded rather than refused. None of the three changes what a validated frame *means*, all three are on the loopback socket that carries the desk's own frames between its own two halves behind a session token, and the one place the distinction has teeth — exact wide integers — is on the upstream path, which kept its parser. This is the list `/security-review` should be run against.)*
 
 ## 5. Verification
 
@@ -56,16 +58,17 @@ against the working tree; each side driven through its own code, on the same
 frame, with the same clock. Sections 1 to 3 only; section 4 is not in these
 numbers.
 
-| | before | after |
-| --- | --- | --- |
-| Renderer, reading one delivered frame | 2.930 ms | **1.920 ms** |
-| Main process, putting one event on the wire | 0.279 ms | **0.144 ms** |
+| | before | after §1–3 | after §4 |
+| --- | --- | --- | --- |
+| Renderer, reading one delivered frame | 2.956 ms | 1.920 ms | **0.736 ms** |
+| Main process, putting one event on the wire | 0.272 ms | **0.141 ms** | 0.141 ms |
 
 The renderer's before is four readings of the same bytes — the socket hook
 parsing and normalizing, the gateway parsing, the trading hook parsing, the
-workstation parsing and validating. The after is one. What is left is the
-protocol's own reading: the bounded parser and the validators, which is what
-section 4 is about.
+workstation parsing and validating. After section 3 it is one reading, and after
+section 4 that one reading is the platform's parser rather than a JSON parser
+written out by hand a character at a time. Four times less work per frame than
+the desk was doing, on the path the operator reads the market through.
 
 And the delay the change is actually for — a fill issued into a one-second
 backlog on a socket that has stopped accepting bytes, at the exchange's measured
@@ -75,7 +78,7 @@ ten books a second:
 | --- | --- | --- |
 | Books written ahead of the fill | 10 | **0** |
 | Bytes written ahead of the fill | 0.86 MiB | **0** |
-| Renderer reading spent before the fill is read | 29.3 ms | **0 ms** |
+| Renderer reading spent before the fill is read | 29.6 ms | **0 ms** |
 
 Before, the fill left the desk behind every book produced during the burst and
 the renderer read every one of them before reaching it. After, the fill is

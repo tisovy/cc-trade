@@ -93,10 +93,22 @@ of degrading it, so the bounds SHALL be proven against the widest payload the
 rules call legal rather than against a representative one.
 
 The byte ceiling SHALL be enforced before a frame is parsed, so an unbounded
-frame is refused without being read. What a parsed frame is then permitted to
-contain SHALL be decided by the structural validators — exact keys, canonical
-decimals, exchange identities, timestamps and level counts — rather than by a
-budget counted during parsing.
+frame is refused without being read. What a parsed frame of the desk's own local
+protocol is then permitted to contain SHALL be decided by the structural
+validators — exact keys, canonical decimals, exchange identities, timestamps and
+level counts — rather than by a budget counted during parsing.
+
+A frame from the exchange SHALL keep its own reading. It carries sequence
+numbers the whole order book is bridged on, and those are unsigned 64-bit
+integers: read as numbers they round, and a book bridged against an identity the
+exchange never sent is corrupt in the one place nothing else checks. That
+reading SHALL answer such a value as its exact digits, and SHALL keep the bounds
+it counts while doing so.
+
+Where a value survives validation as free text — bounded by a length and by no
+pattern — it SHALL be rejected if it carries an unpaired surrogate, and those
+fields SHALL be named rather than assumed to be covered by the patterns that
+spell every other string.
 
 #### Scenario: The deepest legal book is delivered
 - **WHEN** an event carries a full book at the longest decimals and identities the payload rules accept
@@ -112,4 +124,12 @@ budget counted during parsing.
 
 #### Scenario: A frame is within the ceiling but malformed
 - **WHEN** a frame within the byte ceiling carries a payload the rules do not accept
-- **THEN** the structural validators reject it, and every payload refused before this change is still refused
+- **THEN** the structural validators reject it, and every payload refused before this change is still refused, except refusals of notation alone — which are stated, one by one, rather than claimed equivalent
+
+#### Scenario: A depth sequence number is wider than a number holds
+- **WHEN** the exchange sends an update identity past what a JavaScript number holds exactly
+- **THEN** it is read as its exact digits and compared as such, rather than rounded to a value the exchange never sent
+
+#### Scenario: A contract carries the exchange's own words
+- **WHEN** a contract's type or status, or a header's contract status, carries an unpaired surrogate
+- **THEN** the frame is refused, because those are the fields whose only rule is a length

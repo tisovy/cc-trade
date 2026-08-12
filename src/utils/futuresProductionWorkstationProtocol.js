@@ -1,6 +1,5 @@
 import {
   FUTURES_WORKSTATION_EVENT_MAX_BYTES,
-  FUTURES_WORKSTATION_EVENT_MAX_NODES,
   FUTURES_WORKSTATION_MARKET_TYPE,
   FUTURES_WORKSTATION_PROTOCOL_VERSION,
   FUTURES_WORKSTATION_REQUEST_MAX_BYTES,
@@ -66,9 +65,6 @@ export const createFuturesProductionWorkstationUnsubscribeRequest = value => (
 export const readFuturesProductionWorkstationRequest = (raw) => {
   const value = parseBoundedFuturesWorkstationJson(raw, {
     maxBytes: FUTURES_WORKSTATION_REQUEST_MAX_BYTES,
-    maxDepth: 2,
-    maxNodes: 16,
-    maxStringBytes: 128,
   })
   return validateFuturesWorkstationRequest({
     value,
@@ -99,7 +95,6 @@ export const readFuturesProductionWorkstationEvent = value => validateFuturesWor
 export const parseFuturesProductionWorkstationEvent = raw => (
   readFuturesProductionWorkstationEvent(parseBoundedFuturesWorkstationJson(raw, {
     maxBytes: FUTURES_WORKSTATION_EVENT_MAX_BYTES,
-    maxNodes: FUTURES_WORKSTATION_EVENT_MAX_NODES,
   }))
 )
 

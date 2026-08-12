@@ -91,10 +91,12 @@ is when an execution report is the one frame the operator is waiting for.
   `src/hooks/useWebSocket.js`, `src/context/GatewayContext.jsx`,
   `src/hooks/useFuturesTrading.js`,
   `src/hooks/useFuturesProductionWorkstation.js`.
-- Security-relevant: the parse of untrusted upstream frames changes. §4 below
-  keeps the byte ceiling as the bound and requires the change to be reviewed on
-  that basis. That section can be dropped without affecting the rest of this
-  change.
+- Security-relevant: the parse of local protocol frames changes. §4 below keeps
+  the byte ceiling as the bound and requires the change to be reviewed on that
+  basis. The upstream parse does *not* change: it answers an exchange identity as
+  its exact digits, which is what the order book bridges on, and the platform's
+  parser would round it — see §4.8. That section can be dropped without affecting
+  the rest of this change.
 - Adds requirements to `futures-workstation-presentation` and
   `futures-order-visibility`, and modifies the one that names the parser's node
   budget as a derived bound.

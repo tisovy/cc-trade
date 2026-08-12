@@ -332,12 +332,19 @@ describe('Futures workstation environment-specific protocols', () => {
     }
   })
 
-  it('rejects duplicate keys before object materialization', () => {
-    const raw = JSON.stringify(createFuturesProductionWorkstationSubscribeRequest(requestValues))
-      .replace('"symbol":"BTCUSDT"', '"symbol":"BTCUSDT","symbol":"ETHUSDT"')
-    expect(() => readFuturesProductionWorkstationRequest(raw)).toThrowError(
-      expect.objectContaining({ code: 'DUPLICATE_JSON_KEY' }),
-    )
+  // A duplicate key is no longer a refusal of its own: the platform's parser
+  // keeps the last value and that is the one the rules are applied to. Stated as
+  // a test rather than left to be discovered, because it is a refusal the desk
+  // used to make and does not.
+  it('validates the last of a duplicated key rather than refusing the frame', () => {
+    const duplicate = second => JSON.stringify(
+      createFuturesProductionWorkstationSubscribeRequest(requestValues),
+    ).replace('"symbol":"BTCUSDT"', `"symbol":"BTCUSDT","symbol":"${second}"`)
+
+    expect(readFuturesProductionWorkstationRequest(duplicate('ETHUSDT')).symbol).toBe('ETHUSDT')
+    // Which means the value that stands is the value that must pass.
+    expect(() => readFuturesProductionWorkstationRequest(duplicate('btcusdt')))
+      .toThrow(FuturesWorkstationProtocolError)
   })
 
   it.each(['btcusdt', ' BTCUSDT', 'BTC/USDT', 'A'.repeat(21)])(
@@ -425,10 +432,9 @@ describe('Futures workstation environment-specific protocols', () => {
       .toThrowError(expect.objectContaining({ code: 'INVALID_JSON_ENCODING' }))
   })
 
-  // The parser counts a string's bytes instead of encoding it, and takes an
-  // unescaped span verbatim instead of re-parsing it. Both shortcuts sit on the
-  // depth hot path and both are security-relevant, so they are held against the
-  // things they replaced rather than assumed equivalent.
+  // The ceiling is the desk's own code and it is what stands between an
+  // unbounded frame and a parse, so it is measured against what a UTF-8 encoder
+  // says rather than against a character count.
   it.each([
     'plain',
     'кириллица',
@@ -437,32 +443,61 @@ describe('Futures workstation environment-specific protocols', () => {
     'quote \\" and backslash \\\\',
     'escaped \\u0416 codepoint',
     'tab\\tnewline\\n',
-  ])('decodes and measures %s exactly as JSON and TextEncoder do', (encoded) => {
+  ])('measures the ceiling for %s in bytes, not characters', (encoded) => {
     const raw = `{"value":"${encoded}"}`
-    const expected = JSON.parse(raw).value
-    expect(parseBoundedFuturesWorkstationJson(raw, { maxBytes: 1_000 }).value).toBe(expected)
-    const bytes = new TextEncoder().encode(expected).byteLength
-    expect(parseBoundedFuturesWorkstationJson(raw, { maxBytes: 1_000, maxStringBytes: bytes }).value)
-      .toBe(expected)
-    expect(() => parseBoundedFuturesWorkstationJson(raw, {
-      maxBytes: 1_000,
-      maxStringBytes: bytes - 1,
-    })).toThrowError(expect.objectContaining({ code: 'JSON_RESOURCE_LIMIT' }))
-    expect(() => parseBoundedFuturesWorkstationJson(raw, {
-      maxBytes: new TextEncoder().encode(raw).byteLength - 1,
-    })).toThrowError(expect.objectContaining({ code: 'INVALID_JSON_ENCODING' }))
-  })
+    const bytes = new TextEncoder().encode(raw).byteLength
 
-  it('rejects a lone surrogate rather than counting it as a pair', () => {
-    expect(() => parseBoundedFuturesWorkstationJson('{"value":"\ud83d"}', { maxBytes: 100 }))
+    expect(parseBoundedFuturesWorkstationJson(raw, { maxBytes: bytes }).value)
+      .toBe(JSON.parse(raw).value)
+    expect(() => parseBoundedFuturesWorkstationJson(raw, { maxBytes: bytes - 1 }))
       .toThrowError(expect.objectContaining({ code: 'INVALID_JSON_ENCODING' }))
   })
 
-  it('rejects unsafe and floating JSON numbers', () => {
-    expect(() => parseBoundedFuturesWorkstationJson('{"value":9007199254740993}', { maxBytes: 100 }))
-      .toThrowError(expect.objectContaining({ code: 'UNSAFE_JSON_INTEGER' }))
-    expect(() => parseBoundedFuturesWorkstationJson('{"value":1.5}', { maxBytes: 100 }))
-      .toThrowError(expect.objectContaining({ code: 'INVALID_JSON_NUMBER' }))
+  it('refuses a frame it cannot read at all', () => {
+    for (const raw of ['{"a":1}x', '{"a":01}', '{', 'not json', '']) {
+      expect(() => parseBoundedFuturesWorkstationJson(raw, { maxBytes: 100 }))
+        .toThrowError(expect.objectContaining({ code: 'INVALID_JSON' }))
+    }
+    expect(() => parseBoundedFuturesWorkstationJson(null, { maxBytes: 100 }))
+      .toThrowError(expect.objectContaining({ code: 'INVALID_JSON_ENCODING' }))
+  })
+
+  // Half a surrogate pair used to be refused by the parser, over the whole
+  // frame. It is refused where it can still survive: the three fields whose rule
+  // is a length and nothing else. Everywhere else a pattern spells the value,
+  // and no pattern here can spell half a pair.
+  it('refuses a lone surrogate in the exchange words a contract carries', () => {
+    for (const field of ['contractType', 'status']) {
+      expect(() => createFuturesProductionWorkstationEvent({
+        ...createEventValues('catalog'),
+        payload: {
+          ...payloads.catalog,
+          contracts: [{ ...payloads.catalog.contracts[0], [field]: 'PERPETUAL\ud83d' }],
+        },
+      })).toThrow(FuturesWorkstationProtocolError)
+    }
+    expect(() => createFuturesProductionWorkstationEvent({
+      ...createEventValues('header'),
+      payload: { ...payloads.header, contractStatus: 'TRADING\ud83d' },
+    })).toThrow(FuturesWorkstationProtocolError)
+  })
+
+  // A number that is not the integer a field calls for is still refused — by the
+  // rules rather than by the reading. What is no longer refused is *notation*:
+  // an integer written as an exponent, and one past what a JavaScript number
+  // holds exactly, which is rounded to one. Both are stated here so the change
+  // is weighed rather than found later. Exact wide integers are read by the
+  // upstream parser, which keeps its own reading for that reason.
+  it('refuses a number that is not the integer the rules call for', () => {
+    expect(() => createFuturesProductionWorkstationEvent({
+      ...createEventValues('status'),
+      revision: 1.5,
+    })).toThrow(FuturesWorkstationProtocolError)
+
+    const exponent = JSON.stringify(createFuturesProductionWorkstationEvent(
+      createEventValues('status'),
+    )).replace('"revision":1', '"revision":1e2')
+    expect(parseFuturesProductionWorkstationEvent(exponent).revision).toBe(100)
   })
 
   it.each(Object.values(FUTURES_WORKSTATION_RESOURCES))(

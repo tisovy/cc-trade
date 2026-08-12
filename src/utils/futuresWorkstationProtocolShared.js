@@ -31,13 +31,15 @@ export const FUTURES_WORKSTATION_DEPTH_LEVELS_PER_SIDE = 1_000
 // shorter than the rows it can draw, and it costs a fifth of the ceiling.
 export const FUTURES_WORKSTATION_DEPTH_MIN_LEVELS_PER_SIDE = 200
 
-// A full depth frame is the node-densest event the desk sends: every level is
-// an object plus three strings. Deriving the parser's node budget from the level
-// count keeps it from being the bound that silently kills the book — a frame the
-// payload rules accept but the parser refuses is a feed that simply stops.
-export const FUTURES_WORKSTATION_EVENT_MAX_NODES = (
-  (FUTURES_WORKSTATION_DEPTH_LEVELS_PER_SIDE * 2 * 4) + 256
-)
+// The node budget an event was read under is gone with the parser that counted
+// it. What it protected against was an unbounded parse, and the byte ceiling
+// above already bounds that: no frame is read before its bytes are counted, and
+// a bounded number of bytes cannot describe an unbounded number of nodes. What
+// the frame is then permitted to *contain* was never the budget's job — that is
+// the structural validators below, which is where it stays.
+//
+// The upstream parser keeps its own budget, for its own reason: see
+// `FUTURES_WORKSTATION_STREAM_MAX_NODES`.
 
 // A diff is not a snapshot, and bounding it like one is what took the desk off
 // the market at every sharp move.
@@ -128,8 +130,6 @@ const STATE_VALUES = new Set(Object.values(FUTURES_WORKSTATION_STATES))
 const INTERVAL_VALUES = new Set(FUTURES_WORKSTATION_INTERVALS)
 const EXCHANGE_IDENTITY_MAX_BYTES = 64
 const UTF8_ENCODER = new TextEncoder()
-const JSON_WHITESPACE = new Set([' ', '\n', '\r', '\t'])
-const JSON_STRING_ESCAPES = new Set(['"', '\\', '/', 'b', 'f', 'n', 'r', 't'])
 const EXCHANGE_IDENTITY_CHARACTERS = '[\\p{Lu}\\p{Lt}\\p{Lo}\\p{N}]'
 const SYMBOL_PATTERN = new RegExp(
   `^(?:${EXCHANGE_IDENTITY_CHARACTERS}{1,20}|${EXCHANGE_IDENTITY_CHARACTERS}{1,13}_[0-9]{6})$`,
@@ -157,6 +157,19 @@ export class FuturesWorkstationProtocolError extends Error {
 const fail = (code) => {
   throw new FuturesWorkstationProtocolError(code)
 }
+
+// The three places a value survives validation as free text: the exchange's own
+// words for what a contract is and whether it is trading. Every other string the
+// rules accept is spelled by a pattern — a decimal, an identity, a symbol, a
+// reason code — and none of those patterns can spell half a surrogate pair. Here
+// the rule is a length and nothing else, so the scalar check that used to run
+// over the whole frame runs over these instead.
+const isBoundedFuturesWorkstationText = (value, maxLength) => (
+  typeof value === 'string'
+  && value.length > 0
+  && value.length <= maxLength
+  && hasOnlyUnicodeScalars(value)
+)
 
 export const isFuturesWorkstationRecord = value => (
   value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -247,174 +260,40 @@ const hasOnlyUnicodeScalars = (value) => {
   return true
 }
 
-export const parseBoundedFuturesWorkstationJson = (
-  text,
-  {
-    maxBytes,
-    maxDepth = 12,
-    maxNodes = 8_192,
-    maxStringBytes = 8_192,
-  },
-) => {
-  if (typeof text !== 'string'
-    || utf8Length(text) > maxBytes
-    || !hasOnlyUnicodeScalars(text)) {
+/**
+ * Reads a frame of the desk's own local protocol.
+ *
+ * The ceiling is enforced on the bytes, before anything is read, so an
+ * unbounded frame is refused without being parsed. What the frame is then
+ * permitted to contain is decided by the structural validators below — exact
+ * keys, canonical decimals, exchange identities, timestamps, level counts —
+ * which is what actually rejects a malformed payload and always was.
+ *
+ * This used to be a JSON parser written out by hand, a character at a time,
+ * preceded by two more full passes over the string. On a real book that was
+ * 1.369 ms against the platform's 0.390 — three and a half times — ten times a
+ * second, on the path the operator reads the market through.
+ *
+ * What the hand-written parser refused and this does not, stated so it can be
+ * weighed rather than discovered: a duplicate key is no longer a refusal (the
+ * last value stands, and it is the one the validators check); an integer
+ * written in exponent form is read as the integer it denotes; and an integer
+ * past what a JavaScript number holds exactly is rounded to one rather than
+ * refused. All three are refusals of *notation*, on a socket that carries the
+ * desk's own frames between its own two halves, bound to the loopback and
+ * gated by a session token. Notation is not what the validators are for, and
+ * exact wide integers — the one place the distinction has teeth — are read by
+ * the upstream parser, which keeps its own reading for exactly that reason.
+ */
+export const parseBoundedFuturesWorkstationJson = (text, { maxBytes }) => {
+  if (typeof text !== 'string' || utf8Length(text) > maxBytes) {
     fail('INVALID_JSON_ENCODING')
   }
-
-  let cursor = 0
-  let nodes = 0
-  const countNode = () => {
-    nodes += 1
-    if (nodes > maxNodes) fail('JSON_RESOURCE_LIMIT')
+  try {
+    return JSON.parse(text)
+  } catch {
+    return fail('INVALID_JSON')
   }
-  const skipWhitespace = () => {
-    while (JSON_WHITESPACE.has(text[cursor])) cursor += 1
-  }
-  const parseString = () => {
-    if (text[cursor] !== '"') fail('INVALID_JSON')
-    const start = cursor
-    cursor += 1
-    let closed = false
-    let escaped = false
-    while (cursor < text.length) {
-      const character = text[cursor]
-      const unit = text.charCodeAt(cursor)
-      if (character === '"') {
-        cursor += 1
-        closed = true
-        break
-      }
-      if (unit < 0x20) fail('INVALID_JSON')
-      if (character === '\\') {
-        escaped = true
-        cursor += 1
-        const escape = text[cursor]
-        if (escape === 'u') {
-          if (!/^[0-9a-fA-F]{4}$/.test(text.slice(cursor + 1, cursor + 5))) {
-            fail('INVALID_JSON')
-          }
-          cursor += 5
-          continue
-        }
-        if (!JSON_STRING_ESCAPES.has(escape)) {
-          fail('INVALID_JSON')
-        }
-        cursor += 1
-        continue
-      }
-      cursor += 1
-    }
-    if (!closed) fail('INVALID_JSON')
-    let value
-    // The loop above already proved the span is a well-formed JSON string, and
-    // a span with no escape in it decodes to itself. Prices, sizes and IDs are
-    // never escaped, so the whole book takes this exit.
-    if (!escaped) {
-      value = text.slice(start + 1, cursor - 1)
-    } else {
-      try {
-        value = JSON.parse(text.slice(start, cursor))
-      } catch {
-        fail('INVALID_JSON')
-      }
-    }
-    if (!hasOnlyUnicodeScalars(value) || utf8Length(value) > maxStringBytes) {
-      fail('JSON_RESOURCE_LIMIT')
-    }
-    return value
-  }
-  const parseInteger = () => {
-    const start = cursor
-    if (text[cursor] === '-') cursor += 1
-    if (text[cursor] === '0') {
-      cursor += 1
-      if (/^[0-9]$/.test(text[cursor] ?? '')) fail('INVALID_JSON')
-    } else {
-      if (!/^[1-9]$/.test(text[cursor] ?? '')) fail('INVALID_JSON')
-      while (/^[0-9]$/.test(text[cursor] ?? '')) cursor += 1
-    }
-    if (['.', 'e', 'E'].includes(text[cursor])) fail('INVALID_JSON_NUMBER')
-    const value = Number(text.slice(start, cursor))
-    if (!Number.isSafeInteger(value)) fail('UNSAFE_JSON_INTEGER')
-    return value
-  }
-  const parseObject = (depth) => {
-    cursor += 1
-    skipWhitespace()
-    const result = Object.create(null)
-    const keys = new Set()
-    if (text[cursor] === '}') {
-      cursor += 1
-      return result
-    }
-    while (cursor < text.length) {
-      const key = parseString()
-      if (keys.has(key)) fail('DUPLICATE_JSON_KEY')
-      keys.add(key)
-      skipWhitespace()
-      if (text[cursor] !== ':') fail('INVALID_JSON')
-      cursor += 1
-      result[key] = parseValue(depth)
-      skipWhitespace()
-      if (text[cursor] === '}') {
-        cursor += 1
-        return result
-      }
-      if (text[cursor] !== ',') fail('INVALID_JSON')
-      cursor += 1
-      skipWhitespace()
-    }
-    fail('INVALID_JSON')
-  }
-  const parseArray = (depth) => {
-    cursor += 1
-    skipWhitespace()
-    const result = []
-    if (text[cursor] === ']') {
-      cursor += 1
-      return result
-    }
-    while (cursor < text.length) {
-      result.push(parseValue(depth))
-      skipWhitespace()
-      if (text[cursor] === ']') {
-        cursor += 1
-        return result
-      }
-      if (text[cursor] !== ',') fail('INVALID_JSON')
-      cursor += 1
-      skipWhitespace()
-    }
-    fail('INVALID_JSON')
-  }
-  const parseValue = (depth) => {
-    if (depth > maxDepth) fail('JSON_RESOURCE_LIMIT')
-    countNode()
-    skipWhitespace()
-    if (text[cursor] === '"') return parseString()
-    if (text[cursor] === '{') return parseObject(depth + 1)
-    if (text[cursor] === '[') return parseArray(depth + 1)
-    if (text.slice(cursor, cursor + 4) === 'true') {
-      cursor += 4
-      return true
-    }
-    if (text.slice(cursor, cursor + 5) === 'false') {
-      cursor += 5
-      return false
-    }
-    if (text.slice(cursor, cursor + 4) === 'null') {
-      cursor += 4
-      return null
-    }
-    return parseInteger()
-  }
-
-  skipWhitespace()
-  const result = parseValue(0)
-  skipWhitespace()
-  if (cursor !== text.length) fail('INVALID_JSON')
-  return result
 }
 
 export const freezeFuturesWorkstationValue = (value) => {
@@ -479,12 +358,8 @@ const validateContract = (value) => (
   ])
   && isFuturesWorkstationSymbol(value.symbol)
   && isBoundedFuturesWorkstationExchangeIdentity(value.pair, PAIR_PATTERN, 20)
-  && typeof value.contractType === 'string'
-  && value.contractType.length > 0
-  && value.contractType.length <= 32
-  && typeof value.status === 'string'
-  && value.status.length > 0
-  && value.status.length <= 32
+  && isBoundedFuturesWorkstationText(value.contractType, 32)
+  && isBoundedFuturesWorkstationText(value.status, 32)
   && isBoundedFuturesWorkstationExchangeIdentity(value.baseAsset, PAIR_PATTERN, 16)
   && isBoundedFuturesWorkstationExchangeIdentity(value.quoteAsset, PAIR_PATTERN, 16)
   && value.marginAsset === 'USDT'
@@ -558,9 +433,7 @@ const validateHeader = (value) => (
   ].every(isCanonicalFuturesDecimal)
   && isSafeTimestamp(value.nextFundingTime)
   && isSafeTimestamp(value.eventTime)
-  && typeof value.contractStatus === 'string'
-  && value.contractStatus.length > 0
-  && value.contractStatus.length <= 32
+  && isBoundedFuturesWorkstationText(value.contractStatus, 32)
 )
 
 const validateCandle = (value) => (
