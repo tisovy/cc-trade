@@ -5034,7 +5034,10 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 payload.command_rejected?.code === 'FUTURES_TRADING_PAUSED'
             ))).toBe(true);
 
-            await adjust();
+            // A second intent, and therefore a second identity: the same one
+            // twice is a redelivery of one command, which is answered from the
+            // record rather than submitted again.
+            await adjust({ clientOrderId: 'margin-2' });
             expect(moduleMocks.futuresAdapter.adjustPositionMargin).toHaveBeenCalledOnce();
         });
 
@@ -5082,6 +5085,162 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 code: 'FUTURES_API_ERROR',
                 details: { marketType: 'futures', binanceCode: -4051 },
             });
+        });
+    });
+
+    // The renderer's socket handler is async and `ws` does not wait for it, so
+    // two frames arriving back to back used to run against Binance at the same
+    // time: one command submitted twice, and an amendment and a cancellation
+    // that could reach the exchange in the order they were not sent in.
+    describe('one command, one submission, in the order it was accepted', () => {
+        const amendFuturesOrder = (clientOrderId, overrides = {}) => moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'trade.replaceOrder',
+                version: 1,
+                marketType: 'futures',
+                accountId: 'default',
+                clientOrderId,
+                symbol: 'BTCUSDT',
+                side: 'BUY',
+                orderId: '1',
+                price: '49000',
+                quantity: '0.01',
+                ...overrides,
+            }),
+        });
+
+        const cancelFuturesOrder = (clientOrderId, overrides = {}) => moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'trade.cancelOrder',
+                version: 1,
+                marketType: 'futures',
+                accountId: 'default',
+                clientOrderId,
+                symbol: 'BTCUSDT',
+                orderId: '1',
+                ...overrides,
+            }),
+        });
+
+        // A command held at the exchange, so the next one has something to
+        // queue behind.
+        const holdAt = (method) => {
+            let release;
+            const reached = [];
+            moduleMocks.futuresAdapter[method].mockImplementationOnce(async (...args) => {
+                reached.push(args);
+                await new Promise((resolve) => { release = resolve; });
+                return { e: 'executionReport', symbol: 'BTCUSDT', status: 'NEW', orderId: 1 };
+            });
+            return { reached, release: () => release() };
+        };
+
+        it('places one order when the same frame is delivered twice at once', async () => {
+            await connectRenderer();
+
+            await Promise.all([
+                placeFuturesOrder('redelivered-1'),
+                placeFuturesOrder('redelivered-1'),
+            ]);
+
+            expect(moduleMocks.futuresAdapter.placeOrder).toHaveBeenCalledOnce();
+            // Both copies are answered, and with the same answer: the second may
+            // have arrived on a socket that was never told the first.
+            const updates = emitted().filter(payload => payload.futures_execution_update);
+            expect(updates).toHaveLength(2);
+            expect(updates[0]).toEqual(updates[1]);
+        });
+
+        it('answers a command redelivered after it finished without asking Binance again', async () => {
+            await connectRenderer();
+
+            await placeFuturesOrder('redelivered-2');
+            const answer = emitted().filter(payload => payload.futures_execution_update);
+            expect(answer).toHaveLength(1);
+
+            moduleMocks.rendererConnection.sendUTF.mockClear();
+            await placeFuturesOrder('redelivered-2');
+
+            expect(moduleMocks.futuresAdapter.placeOrder).toHaveBeenCalledOnce();
+            expect(emitted()).toEqual(answer);
+        });
+
+        it('sends the amendment before the cancellation that followed it', async () => {
+            await connectRenderer();
+            const amendment = holdAt('modifyOrder');
+
+            const amend = amendFuturesOrder('amend-1');
+            const cancel = cancelFuturesOrder('cancel-1');
+            await flushMicrotasks();
+
+            // The cancellation was accepted and has not reached Binance: the
+            // amendment it followed is still in flight.
+            expect(amendment.reached).toHaveLength(1);
+            expect(moduleMocks.futuresAdapter.cancelOrder).not.toHaveBeenCalled();
+
+            amendment.release();
+            await Promise.all([amend, cancel]);
+
+            expect(moduleMocks.futuresAdapter.cancelOrder).toHaveBeenCalledOnce();
+        });
+
+        it('lets a second contract through while the first is in flight', async () => {
+            await connectRenderer();
+            const held = holdAt('placeOrder');
+
+            const btc = placeFuturesOrder('lane-btc');
+            const eth = moduleMocks.rendererHandlers.message({
+                type: 'utf8',
+                utf8Data: JSON.stringify({
+                    action: 'trade.placeOrder',
+                    version: 1,
+                    marketType: 'futures',
+                    accountId: 'default',
+                    clientOrderId: 'lane-eth',
+                    symbol: 'ETHUSDT',
+                    side: 'BUY',
+                    orderType: 'LIMIT',
+                    timeInForce: 'GTC',
+                    price: '2500',
+                    quantity: '0.1',
+                }),
+            });
+            await flushMicrotasks();
+
+            // Two contracts have nothing to say to each other; only one book is
+            // ever ordered against itself.
+            expect(moduleMocks.futuresAdapter.placeOrder).toHaveBeenCalledTimes(2);
+
+            held.release();
+            await Promise.all([btc, eth]);
+        });
+
+        it('keeps reading the account while a mutating command holds its lane', async () => {
+            await connectRenderer();
+            const held = holdAt('placeOrder');
+
+            const place = placeFuturesOrder('lane-read');
+            const refresh = moduleMocks.rendererHandlers.message({
+                type: 'utf8',
+                utf8Data: JSON.stringify({
+                    action: 'account.symbolConfig',
+                    version: 1,
+                    marketType: 'futures',
+                    accountId: 'default',
+                    clientOrderId: 'config-1',
+                    symbol: 'BTCUSDT',
+                }),
+            });
+            // The read is spaced by the futures limiter, so it only completes as
+            // the clock moves; the placement is held by the test, not the clock.
+            await vi.advanceTimersByTimeAsync(5_000);
+
+            expect(moduleMocks.futuresAdapter.getSymbolConfig).toHaveBeenCalled();
+
+            held.release();
+            await Promise.all([place, refresh]);
         });
     });
 

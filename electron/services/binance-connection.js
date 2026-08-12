@@ -33,6 +33,10 @@ import {
     createCommandUnresolved,
     isIndeterminateTradingFailure,
 } from './trading-command-outcome.js';
+import {
+    createTradingCommandRegistry,
+    isMutatingTradingCommand,
+} from './trading-command-registry.js';
 // The ceiling rule itself lives with the draft evaluator the renderer uses, so
 // both sides measure an order the same way. This evaluation is still the main
 // process's own: it runs on the command as received, never on a verdict the
@@ -1235,6 +1239,13 @@ export function setupBinanceConnection({
     const noteFuturesMutation = () => {
         futuresMutationEpoch += 1;
     };
+
+    // One registry for the whole main process, deliberately outside the
+    // per-connection closure: a renderer that drops its socket and reconnects
+    // resends the command it believes never left, and the copy arrives on a
+    // connection that has no memory of the first. The registry does, and answers
+    // the new socket from what the old one was told.
+    const tradingCommandRegistry = createTradingCommandRegistry();
 
     // The leverage of every contract the account is actually holding. Bounded:
     // an account in eight positions is eight reads at weight 5, and a ninth row
@@ -3051,6 +3062,21 @@ export function setupBinanceConnection({
                 ));
                 return;
             }
+            // A mutating command goes through the registry: once per identity,
+            // and one at a time per contract. A read does not — an account
+            // refresh may be asked for as often as the desk likes, and the
+            // history fan-out depends on staying concurrent.
+            if (isMutatingTradingCommand(command)) {
+                await tradingCommandRegistry.submit(command, {
+                    emit,
+                    execute: () => dispatchTypedTradingCommand(command),
+                });
+                return;
+            }
+            await dispatchTypedTradingCommand(command);
+        };
+
+        const dispatchTypedTradingCommand = async (command) => {
             if (command.marketType === FUTURES_MARKET_TYPE) {
                 switch (command.action) {
                     case TRADING_COMMAND_ACTIONS.PLACE_ORDER:
@@ -3115,6 +3141,10 @@ export function setupBinanceConnection({
             // How a trading command ended reaches the operator here and nowhere
             // else; the record recognizes those envelopes and ignores the rest.
             diagnosticRecord.observeOutbound(payload);
+            // And the registry keeps the same envelopes against the command that
+            // caused them, so a second copy of that command can be answered
+            // without asking Binance again. Outside a command this does nothing.
+            tradingCommandRegistry.recordOutcome(payload);
             const reqId = overrideRequestId ?? activeRequestId;
             if (reqId) {
                 sendJSON(connection, { requestId: reqId, ...payload });
