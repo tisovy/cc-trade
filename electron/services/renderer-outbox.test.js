@@ -132,30 +132,64 @@ describe('createRendererOutbox', () => {
         expect(connection.sent).toEqual(['filled-the-buffer', 'contract-2', 'index-1']);
     });
 
-    // A frame that states no resource cannot be replaced by a newer one, so the
-    // queue length is the only thing bounding it.
-    it('bounds market frames that nothing can supersede, and counts what it drops', () => {
+    // Past the queue's length, a book that a newer book has already replaced is
+    // what gives way — never the pages the renderer is assembling beside it.
+    it('drops a replaceable frame to make room, and counts it', () => {
         const connection = createConnection();
         const backlog = vi.fn();
         const outbox = createRendererOutbox(connection, { onBacklog: backlog });
-        const tick = { lane: RENDERER_OUTBOX_LANES.MARKET, resource: 'ticker' };
+        const page = offset => ({
+            lane: RENDERER_OUTBOX_LANES.MARKET,
+            resource: 'catalog',
+            symbol: 'BTCUSDT',
+            text: `page-${offset}`,
+        });
 
         connection.stall();
-        outbox.send('filled-the-buffer', tick);
-        for (let index = 0; index < RENDERER_OUTBOX.MARKET_QUEUE_FRAMES + 5; index += 1) {
-            outbox.send(`batch-${index}`, tick);
+        outbox.send('filled-the-buffer', book('BTCUSDT'));
+        for (let offset = 0; offset < RENDERER_OUTBOX.MARKET_QUEUE_FRAMES - 1; offset += 1) {
+            outbox.send(`page-${offset}`, page(offset));
         }
-
-        expect(outbox.pending().market).toBe(RENDERER_OUTBOX.MARKET_QUEUE_FRAMES);
+        outbox.send('book-1', book('ETHUSDT'));
+        outbox.send('page-last', page('last'));
         connection.drain();
 
-        expect(connection.sent[1]).toBe('batch-5');
+        // Every catalog page arrived; the book that had to give way is the one
+        // a newer frame could have stood in for.
+        const delivered = connection.sent.filter(text => text.startsWith('page-'));
+        expect(delivered).toHaveLength(RENDERER_OUTBOX.MARKET_QUEUE_FRAMES);
+        expect(connection.sent).not.toContain('book-1');
         expect(backlog).toHaveBeenCalledWith({
-            resource: 'ticker',
-            symbol: null,
+            resource: 'depth',
+            symbol: 'ETHUSDT',
             superseded: 0,
-            dropped: 5,
+            dropped: 1,
         });
+    });
+
+    // The desk sends a catalog as up to a hundred and twenty-eight pages back to
+    // back, and the socket blocks partway through every time. Dropping one of
+    // them left the operator with no contract list at all.
+    it('holds a whole catalog through a socket that stopped accepting bytes', () => {
+        const connection = createConnection();
+        const outbox = createRendererOutbox(connection);
+        const pages = 128;
+
+        connection.stall();
+        outbox.send('filled-the-buffer', book('BTCUSDT'));
+        for (let offset = 0; offset < pages; offset += 1) {
+            outbox.send(`page-${offset}`, {
+                lane: RENDERER_OUTBOX_LANES.MARKET,
+                resource: 'catalog',
+                symbol: 'BTCUSDT',
+            });
+        }
+        connection.drain();
+
+        expect(connection.sent.filter(text => text.startsWith('page-'))).toHaveLength(pages);
+        expect(connection.sent.slice(1)).toEqual(
+            Array.from({ length: pages }, (unused, offset) => `page-${offset}`),
+        );
     });
 
     // The alternative is a renderer quietly served a hole in its own account

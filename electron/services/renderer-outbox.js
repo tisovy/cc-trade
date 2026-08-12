@@ -31,9 +31,15 @@ export const RENDERER_OUTBOX = Object.freeze({
     // reading at all. Sized well above any real burst — a busy contract produces
     // a few account frames a second, so this is minutes of traffic, not seconds.
     ACCOUNT_QUEUE_FRAMES: 4096,
-    // Market frames that state no resource cannot be superseded, so this is what
-    // bounds them. Reached only by a socket that has been blocked for seconds.
+    // When this many market frames are waiting, a frame a newer one has already
+    // replaced is worth dropping. Nothing else is: the desk sends a catalog as
+    // up to a hundred and twenty-eight pages back to back, and a renderer that
+    // loses one of them discards the whole contract list.
     MARKET_QUEUE_FRAMES: 64,
+    // And the end of "queued rather than dropped", for the same reason the
+    // account lane has one: a renderer holding this many frames it cannot be
+    // relieved of is not reading.
+    MARKET_QUEUE_LIMIT: 1_024,
     // What was superseded is worth one line in the record, not one line per
     // frame: the pathological case is a socket blocked for a minute at ten books
     // a second, and that is exactly when the record must not become the problem.
@@ -124,6 +130,9 @@ export const createRendererOutbox = (connection, {
                 text,
                 resource,
                 symbol,
+                // Whether a newer frame may stand in for this one — which is
+                // also the only thing that makes it droppable.
+                replaceable: supersede === true && resource !== null,
                 key: keyOf(resource, symbol, variant),
                 tallyKey: tallyKeyOf(resource, symbol),
             };
@@ -143,7 +152,7 @@ export const createRendererOutbox = (connection, {
                 account.push(frame);
                 return true;
             }
-            if (supersede && resource !== null) {
+            if (frame.replaceable) {
                 const index = market.findIndex(queued => queued.key === frame.key);
                 if (index !== -1) {
                     tally(market[index], 'superseded');
@@ -154,7 +163,21 @@ export const createRendererOutbox = (connection, {
                 }
             }
             if (market.length >= RENDERER_OUTBOX.MARKET_QUEUE_FRAMES) {
-                tally(market.shift(), 'dropped');
+                // Only a frame a newer one could have replaced is dropped. A
+                // catalog page, a history page and a status line each state part
+                // of something the renderer assembles, and losing one loses the
+                // whole of it — the contract list, the history, the cause.
+                const droppable = market.findIndex(queued => queued.replaceable);
+                if (droppable !== -1) {
+                    tally(market[droppable], 'dropped');
+                    market.splice(droppable, 1);
+                } else if (market.length >= RENDERER_OUTBOX.MARKET_QUEUE_LIMIT) {
+                    abandoned = true;
+                    report(true);
+                    onOverflow();
+                    connection.close();
+                    return false;
+                }
             }
             market.push(frame);
             return true;

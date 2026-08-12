@@ -15,9 +15,11 @@ whole of what they are, so the newer frame says everything the undelivered older
 one said. A catalog page, a history page and a status line do not: a catalog is
 assembled by offset and a dropped page discards the whole of it, a history page
 is the answer to one request, and a status line names a cause the next line does
-not repeat. Those SHALL be queued as market data and never replaced. A resource
-carried on more than one series SHALL be superseded per series, since one series
-is not a newer statement of another.
+not repeat. Those SHALL be queued as market data and never replaced, and SHALL
+NOT be dropped to make room either: what may not be superseded may not be
+discarded, since the renderer assembles it and a missing part loses the whole.
+A resource carried on more than one series SHALL be superseded per series, since
+one series is not a newer statement of another.
 
 The transport SHALL account for what the socket has not yet accepted, and SHALL
 supersede rather than stack when it is behind. What was superseded SHALL be
@@ -46,6 +48,10 @@ in its own account state, and reads the account again when it reconnects.
 #### Scenario: A paged resource is queued while the transport is behind
 - **WHEN** a catalog page, a history page or a status line is queued behind an unaccepted send
 - **THEN** it is delivered rather than replaced by a later frame of the same resource, because it states part of something and not the whole of it
+
+#### Scenario: A catalog is sent as more pages than the queue is sized for
+- **WHEN** the desk sends a contract catalog as pages back to back and the socket stops accepting bytes partway through
+- **THEN** every page is delivered — a book already replaced by a newer one gives way first, and the queue grows rather than losing a page the renderer is assembling
 
 #### Scenario: A contract's two candle series are both waiting
 - **WHEN** the contract's own series and the index series are queued for the same contract
