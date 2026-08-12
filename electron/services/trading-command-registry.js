@@ -22,6 +22,22 @@
 //
 // It never decides *whether* a command may run: validation, the order cap and
 // the pause gate all already answered that before anything reaches here.
+//
+// Two properties it depends on, stated so they are not quietly removed:
+//
+// - `recordOutcome` is reached from the connection's `emit` and nowhere else,
+//   and every outcome envelope that goes through `emit` is emitted by a command
+//   handler. The user-data stream broadcasts instead (`broadcastToRenderers`),
+//   which is what keeps a fill for an unrelated order from being recorded as a
+//   running command's answer. Routing stream traffic through `emit` would break
+//   that, and this is the comment that says so.
+// - A lane is held for as long as its command takes, and a mutating command is
+//   bounded: every REST call times out at 10 s, and the worst path — an
+//   indeterminate failure followed by three reconciliation lookups and their
+//   backoff — is around 40 s. That is the ceiling on how long the next command
+//   *on the same contract* can wait, and it is the price of the ordering. It is
+//   also exactly the window in which the desk has already told the operator it
+//   does not know what happened.
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { TRADING_COMMAND_ACTIONS } from '../../src/utils/tradingCommands.js';
@@ -90,8 +106,9 @@ export const readTradingCommandIdentity = (command) => {
 // contracts have nothing to say to each other and stay concurrent, which is the
 // whole reason the lane is not simply global.
 //
-// A mutating command with no symbol would be unordered against everything, so it
-// takes the market's shared lane rather than none at all.
+// Validation requires a symbol on every mutating command, so the fallback below
+// is unreachable by anything that gets this far. It is there because the
+// alternative to a shared lane is a command ordered against nothing at all.
 export const readTradingCommandLane = command => [
     command?.marketType ?? '',
     command?.accountId ?? '',
@@ -185,6 +202,13 @@ export const createTradingCommandRegistry = ({
          * answered with what that command produced — after waiting for it, if it
          * has not finished. `emit` is the caller's own, because the second copy
          * may arrive on a socket that never saw the first answer.
+         *
+         * Whatever the command produced is what a second copy gets, including a
+         * refusal the desk decided on its own — trading paused, or past the
+         * order cap. That is deliberate: an identity is minted per operator
+         * intent, so the same one arriving twice is one intent delivered twice,
+         * never two. Pressing the button again is a new intent with a new
+         * identity, and runs.
          *
          * Returns true when the command was executed, false when it was answered
          * from the record.

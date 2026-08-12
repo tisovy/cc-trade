@@ -5153,6 +5153,40 @@ describe('setupBinanceConnection user-data orchestration', () => {
             expect(updates[0]).toEqual(updates[1]);
         });
 
+        // The registry is keyed by market, so Spot has its own record and its
+        // own lanes — and the same guarantee.
+        it('places one Spot order when the same frame is delivered twice at once', async () => {
+            await connectRenderer('spot');
+            const placeSpot = () => moduleMocks.rendererHandlers.message({
+                type: 'utf8',
+                utf8Data: JSON.stringify({
+                    action: 'trade.placeOrder',
+                    version: 1,
+                    marketType: 'spot',
+                    accountId: 'default',
+                    clientOrderId: 'spot-redelivered',
+                    symbol: 'BTCUSDT',
+                    side: 'BUY',
+                    orderType: 'LIMIT',
+                    timeInForce: 'GTC',
+                    price: '12346',
+                    quantity: '99.9',
+                }),
+            });
+
+            const first = placeSpot();
+            const second = placeSpot();
+            // The account read that follows a Spot placement is rate-limited, so
+            // the command only finishes as the clock moves.
+            await vi.advanceTimersByTimeAsync(5_000);
+            await Promise.all([first, second]);
+
+            expect(moduleMocks.spotClient.restAPI.newOrder).toHaveBeenCalledOnce();
+            const updates = emitted().filter(payload => payload.execution_update);
+            expect(updates).toHaveLength(2);
+            expect(updates[0]).toEqual(updates[1]);
+        });
+
         it('answers a command redelivered after it finished without asking Binance again', async () => {
             await connectRenderer();
 
