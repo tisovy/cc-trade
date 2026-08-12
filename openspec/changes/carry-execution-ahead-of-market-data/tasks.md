@@ -42,7 +42,40 @@
 
 ## 5. Verification
 
-- [ ] 5.1 Re-measure the renderer's per-frame parse-and-validate cost and the main process's per-frame outbound cost, and record before and after.
-- [ ] 5.2 Measure the delay from an execution report arriving at the main process to the trading hook applying it, with a depth backlog present and without one.
-- [ ] 5.3 `npm run lint`, `npm test`, `npm run check:futures-production`.
-- [ ] 5.4 Operator confirms on live data that a fill on a liquid contract leaves the working-orders list and the chart promptly during a fast move, not after it.
+- [x] 5.1 Re-measure the renderer's per-frame parse-and-validate cost and the main process's per-frame outbound cost, and record before and after. Recorded below.
+- [x] 5.2 Measure the delay from an execution report arriving at the main process to the trading hook applying it, with a depth backlog present and without one. Recorded below.
+- [x] 5.3 `npm run lint`, `npm test` (1557 passed), `npm run check:futures-production`.
+- [ ] 5.4 Operator confirms on live data that a fill on a liquid contract leaves the working-orders list and the chart promptly during a fast move, not after it. Written as a step in `verify-the-desk-in-one-sitting/runbook.md` rather than left here, so the operator runs one list.
+
+### Measured
+
+One delivered book at the exchange's own precision — a thousand levels a side,
+88.3 KiB on the wire. The repository at 799931d, copied out with `git archive`,
+against the working tree; each side driven through its own code, on the same
+frame, with the same clock. Sections 1 to 3 only; section 4 is not in these
+numbers.
+
+| | before | after |
+| --- | --- | --- |
+| Renderer, reading one delivered frame | 2.930 ms | **1.920 ms** |
+| Main process, putting one event on the wire | 0.279 ms | **0.144 ms** |
+
+The renderer's before is four readings of the same bytes — the socket hook
+parsing and normalizing, the gateway parsing, the trading hook parsing, the
+workstation parsing and validating. The after is one. What is left is the
+protocol's own reading: the bounded parser and the validators, which is what
+section 4 is about.
+
+And the delay the change is actually for — a fill issued into a one-second
+backlog on a socket that has stopped accepting bytes, at the exchange's measured
+ten books a second:
+
+| | before | after |
+| --- | --- | --- |
+| Books written ahead of the fill | 10 | **0** |
+| Bytes written ahead of the fill | 0.86 MiB | **0** |
+| Renderer reading spent before the fill is read | 29.3 ms | **0 ms** |
+
+Before, the fill left the desk behind every book produced during the burst and
+the renderer read every one of them before reaching it. After, the fill is
+written first and the ten books collapse to the one that is still true.
