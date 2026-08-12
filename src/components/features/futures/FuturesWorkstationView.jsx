@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   FUTURES_WORKSTATION_DEFAULT_TAPE_SETTINGS,
   FUTURES_WORKSTATION_DEPTH_MIN_LEVELS_PER_SIDE,
@@ -179,9 +179,16 @@ export const FuturesWorkstationView = ({
   )
   const [bookViewSymbol, setBookViewSymbol] = useState(selectedSymbol)
   const [measuredBookRows, setMeasuredBookRows] = useState(null)
-  // The price previously shown, with the contract it belonged to: a direction
-  // is only a direction within one book.
-  const [lastTick, setLastTick] = useState(NEUTRAL_TICK)
+  // Which way the price last moved, and the price it is measured from.
+  //
+  // The direction is stated, because it is drawn; the price it is measured from
+  // is only held, because nothing draws it. That split is the point: the price
+  // changes on every tick and the direction changes far less often, so a tick
+  // now renders the workstation once and only a turn costs a second pass.
+  // Deciding this during the render made React throw the render away and run
+  // the whole component again on every tick of a liquid contract.
+  const [lastDirection, setLastDirection] = useState('flat')
+  const lastTickRef = useRef(NEUTRAL_TICK)
   const askSideRef = useRef(null)
   const bidSideRef = useRef(null)
   const lastBookLeftClickRef = useRef({ at: 0, price: null, modifier: null, symbol: null })
@@ -539,18 +546,31 @@ export const FuturesWorkstationView = ({
   // the filter left on screen long after the market moved past it. The first
   // price of a contract is a reading rather than a move, and an unchanged price
   // keeps the direction it last had instead of dropping to neutral.
-  const carriedTick = lastTick.symbol === selectedSymbol
-  let lastDirection = carriedTick ? lastTick.direction : 'flat'
-  if (lastPrice !== null && (!carriedTick || lastTick.price !== lastPrice)) {
-    const moved = Number(lastPrice) - Number(lastTick.price)
-    if (carriedTick && Number.isFinite(moved) && moved !== 0) {
-      lastDirection = moved > 0 ? 'up' : 'down'
-    }
-    setLastTick({ symbol: selectedSymbol, price: lastPrice, direction: lastDirection })
-  }
   const lastDirectionLabel = lastDirection === 'up'
     ? 'moving up'
     : lastDirection === 'down' ? 'moving down' : 'neutral'
+  // Before the browser paints, so a turn is never drawn a frame late — but after
+  // the render, so reading what was on screen before is not something the render
+  // itself does.
+  useLayoutEffect(() => {
+    if (lastPrice === null) return
+    const carried = lastTickRef.current.symbol === selectedSymbol ? lastTickRef.current : null
+    lastTickRef.current = { symbol: selectedSymbol, price: lastPrice }
+    // Stated here and nowhere else: a direction is a comparison with what was on
+    // screen before, which is a fact about the commit that just happened rather
+    // than about the props this render was given.
+    if (carried === null) {
+      // The first price of a contract is a reading, not a move.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setLastDirection('flat')
+      return
+    }
+    const movedBy = Number(lastPrice) - Number(carried.price)
+    // An unchanged price keeps the direction it last had rather than going
+    // neutral, and costs no render at all.
+    if (!Number.isFinite(movedBy) || movedBy === 0) return
+    setLastDirection(movedBy > 0 ? 'up' : 'down')
+  }, [lastPrice, selectedSymbol])
   const groupSteps = useMemo(
     () => futuresBookGroupSteps(selectedContract?.filters?.price?.tickSize ?? null),
     [selectedContract],

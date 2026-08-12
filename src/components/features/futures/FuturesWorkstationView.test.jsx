@@ -8,7 +8,17 @@ import FuturesTradingTicket from './FuturesTradingTicket.jsx'
 const workstationViewMocks = vi.hoisted(() => ({
   chartRender: vi.fn(),
   ticketRender: vi.fn(),
+  formatExchangePrice: vi.fn(),
 }))
+
+// The view calls this once per render pass, for the last traded price, and the
+// two children that also call it are mocked out here — so counting it counts
+// passes over the workstation. A pass React throws away is still a pass.
+vi.mock('../../../utils/futuresPriceFormat.js', async (importOriginal) => {
+  const actual = await importOriginal()
+  workstationViewMocks.formatExchangePrice.mockImplementation(actual.formatExchangePrice)
+  return { ...actual, formatExchangePrice: workstationViewMocks.formatExchangePrice }
+})
 
 vi.mock('./FuturesWorkstationChart.jsx', async () => {
   const { memo } = await import('react')
@@ -1152,6 +1162,83 @@ describe('instrument recency and interface scale', () => {
     expect(listed[1]).toHaveTextContent('BICOUSDT')
     expect(listed[0].closest('[role="listitem"]')).toHaveAttribute('data-pending', 'true')
     expect(screen.getByText('Loading contracts…')).toBeInTheDocument()
+  })
+
+  // Deciding the price direction during the render made React throw that render
+  // away and run the whole workstation again — on every tick of a liquid
+  // contract, which is ten times a second before the tape is counted. It is
+  // decided after the render now, so a tick costs one pass and only a turn of
+  // the market costs a second.
+  describe('what a price tick costs', () => {
+    const properties = {
+      identity: 'USDⓈ-M PRODUCTION · REAL MONEY',
+      selectedSymbol: 'BTCUSDT',
+      selectedInterval: '1m',
+      symbolHistory: { recent: ['BTCUSDT'], favorites: [] },
+      onSymbolChange: vi.fn(),
+      onIntervalChange: vi.fn(),
+    }
+    const atPrice = (close) => {
+      const base = createState()
+      return Object.freeze({
+        ...base,
+        resources: Object.freeze({
+          ...base.resources,
+          candles: Object.freeze({
+            ...base.resources.candles,
+            contract: Object.freeze([candle(close)]),
+          }),
+        }),
+      })
+    }
+    const passes = () => workstationViewMocks.formatExchangePrice.mock.calls.length
+
+    it('renders once for a tick that keeps going the same way', () => {
+      const { rerender } = render(
+        <FuturesWorkstationView {...properties} state={atPrice('58420.25')} />,
+      )
+      rerender(<FuturesWorkstationView {...properties} state={atPrice('58421.00')} />)
+
+      workstationViewMocks.formatExchangePrice.mockClear()
+      rerender(<FuturesWorkstationView {...properties} state={atPrice('58422.00')} />)
+
+      expect(passes()).toBe(1)
+      expect(screen.getByLabelText(/Last traded price .*, moving up/)).toBeInTheDocument()
+    })
+
+    it('renders once for a price that did not move', () => {
+      const { rerender } = render(
+        <FuturesWorkstationView {...properties} state={atPrice('58420.25')} />,
+      )
+      rerender(<FuturesWorkstationView {...properties} state={atPrice('58421.00')} />)
+
+      workstationViewMocks.formatExchangePrice.mockClear()
+      rerender(<FuturesWorkstationView {...properties} state={atPrice('58421.00')} />)
+
+      // An unchanged price keeps the direction it last had rather than going
+      // neutral, and costs nothing to keep it.
+      expect(passes()).toBe(1)
+      expect(screen.getByLabelText(/Last traded price .*, moving up/)).toBeInTheDocument()
+    })
+
+    it('states the turn on the frame it happened, at the cost of one more pass', () => {
+      const { rerender } = render(
+        <FuturesWorkstationView {...properties} state={atPrice('58420.25')} />,
+      )
+      rerender(<FuturesWorkstationView {...properties} state={atPrice('58421.00')} />)
+
+      workstationViewMocks.formatExchangePrice.mockClear()
+      rerender(<FuturesWorkstationView {...properties} state={atPrice('58419.00')} />)
+
+      expect(passes()).toBe(2)
+      expect(screen.getByLabelText(/Last traded price .*, moving down/)).toBeInTheDocument()
+    })
+
+    it('reads the first price of a contract rather than calling it a move', () => {
+      render(<FuturesWorkstationView {...properties} state={atPrice('58420.25')} />)
+
+      expect(screen.getByLabelText(/Last traded price .*, neutral/)).toBeInTheDocument()
+    })
   })
 
   it('reconciles a pending recent pill with catalogue metadata without duplication', () => {

@@ -17,8 +17,10 @@
 
 ## 4. No State Updates During Render
 
-- [ ] 4.1 Derive the last-tick direction without calling `setLastTick` in the render body of `FuturesWorkstationView`.
-- [ ] 4.2 Prove by test that a price tick renders the workstation once.
+- [x] 4.1 Derive the last-tick direction without calling `setLastTick` in the render body of `FuturesWorkstationView`.
+- [x] 4.2 Prove by test that a price tick renders the workstation once — and state what still costs two. A tick that keeps going the same way, and a price that did not move, each cost one pass; a **turn** costs two, because a direction is a comparison with what was on screen before and nothing in the props carries that. It used to be two on every tick. Counted through the one helper the view calls once per render pass.
+- [x] 4.3 Keep the direction on the frame the turn happened. *(Discovered: deciding it after the commit is what removes the second pass, but an ordinary effect runs after the browser paints, so a turn would have been drawn a frame late — a red price shown green for one frame, on the surface the operator reads fastest. It is decided in a layout effect, before the paint.)*
+- [x] 4.4 Do not read what was on screen before during the render. *(Discovered: holding the previous price in a ref and reading it in the render body is the obvious shape and the lint rule refuses it, correctly — a render that reads mutable state outside React is not a pure render. The previous price is written after the commit and read only there.)*
 
 ## 5. Verification
 
