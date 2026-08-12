@@ -20,6 +20,11 @@
 // state the whole of what they are: the newer one says everything the older one
 // said. Only a resource that carries its complete current picture may state
 // `supersede`; a paged catalog, a history page and a status line may not.
+//
+// Which makes `supersede` the one gate on a queued frame leaving this queue any
+// way but through the socket. Being replaced and being dropped are the same
+// removal seen from two sides, so they ask the same question of the frame that
+// would go — and a frame that answers no is passed over by both.
 
 export const RENDERER_OUTBOX_LANES = Object.freeze({
     ACCOUNT: 'account',
@@ -105,6 +110,7 @@ export const createRendererOutbox = (connection, {
     };
 
     const flush = () => {
+        if (connection.connected !== true) return;
         while (!blocked && account.length > 0) write(account.shift());
         while (!blocked && market.length > 0) write(market.shift());
         // The backlog is what is being reported, so the line is written when it
@@ -153,7 +159,16 @@ export const createRendererOutbox = (connection, {
                 return true;
             }
             if (frame.replaceable) {
-                const index = market.findIndex(queued => queued.key === frame.key);
+                // Both halves of the test matter. `replaceable` is the one gate
+                // on removing a queued frame at all — superseding a frame is
+                // removing it — and the key alone does not name the market a
+                // frame belongs to: Spot sends a `depth` for a contract under
+                // the same resource and symbol the futures workstation does. A
+                // queued frame that may not be replaced is passed over here for
+                // the same reason it is passed over when the queue is full.
+                const index = market.findIndex(queued => (
+                    queued.replaceable && queued.key === frame.key
+                ));
                 if (index !== -1) {
                     tally(market[index], 'superseded');
                     // Replaced where it stands, so the order the desk stated

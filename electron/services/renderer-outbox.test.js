@@ -192,6 +192,28 @@ describe('createRendererOutbox', () => {
         );
     });
 
+    // Two markets name a resource the same way. Spot's book for a contract and
+    // the futures workstation's book for that contract are `depth` for the same
+    // symbol, and only one of them says it may be replaced — so the newer one
+    // must not stand in for the older, which is neither the same market's
+    // statement nor even the same shape.
+    it('does not let a supersedable book stand in for one that is not', () => {
+        const connection = createConnection();
+        const outbox = createRendererOutbox(connection);
+
+        connection.stall();
+        outbox.send('filled-the-buffer', book('BTCUSDT'));
+        outbox.send('spot-book', {
+            lane: RENDERER_OUTBOX_LANES.MARKET,
+            resource: 'depth',
+            symbol: 'BTCUSDT',
+        });
+        outbox.send('workstation-book', book('BTCUSDT'));
+        connection.drain();
+
+        expect(connection.sent.slice(1)).toEqual(['spot-book', 'workstation-book']);
+    });
+
     // The alternative is a renderer quietly served a hole in its own account
     // state. It reconnects and reads it again.
     it('closes a renderer that stops draining its account traffic', () => {

@@ -21,6 +21,11 @@ discarded, since the renderer assembles it and a missing part loses the whole.
 A resource carried on more than one series SHALL be superseded per series, since
 one series is not a newer statement of another.
 
+Whether a queued frame may leave the queue unsent SHALL be decided by that frame
+and not by the one arriving. Being replaced and being dropped are one removal, so
+a frame that may not be dropped SHALL NOT be superseded either — including by a
+frame of another market that names the same resource for the same contract.
+
 The transport SHALL account for what the socket has not yet accepted, and SHALL
 supersede rather than stack when it is behind. What was superseded SHALL be
 counted per resource and made available to the diagnostic record, because a frame
@@ -52,6 +57,10 @@ in its own account state, and reads the account again when it reconnects.
 #### Scenario: A catalog is sent as more pages than the queue is sized for
 - **WHEN** the desk sends a contract catalog as pages back to back and the socket stops accepting bytes partway through
 - **THEN** every page is delivered — a book already replaced by a newer one gives way first, and the queue grows rather than losing a page the renderer is assembling
+
+#### Scenario: Two markets name one resource for one contract
+- **WHEN** a frame that may be replaced and a frame that may not are queued for the same contract under the same resource name
+- **THEN** the one that may not be replaced is delivered, because what may be removed is decided by the frame that would go
 
 #### Scenario: A contract's two candle series are both waiting
 - **WHEN** the contract's own series and the index series are queued for the same contract
