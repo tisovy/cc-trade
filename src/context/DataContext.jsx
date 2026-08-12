@@ -1210,16 +1210,14 @@ export const DataProvider = ({
     notifications
   ]);
 
-  const handleSocketUpdate = useCallback((event, _connection) => {
+  const handleSocketUpdate = useCallback((event, _connection, frame) => {
     if (!event || !event.data) return;
 
-    // Try to parse the raw message
-    let rawMessage;
-    try {
-      rawMessage = JSON.parse(event.data);
-    } catch {
-      return;
-    }
+    // Read once, at the socket boundary. The legacy reading below still works
+    // from the frame's own text: it answers with a shape this context builds
+    // from, not with the frame, and untangling that is its own change.
+    const rawMessage = frame?.payload;
+    if (rawMessage === null || typeof rawMessage !== 'object') return;
 
     // A refused or unconfirmed Spot command used to reach only the main-process
     // log, so a failed order was invisible at the desk. Futures owns its own

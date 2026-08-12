@@ -8,16 +8,27 @@ describe('useWebSocket', () => {
 
     beforeEach(() => {
         originalWebSocket = global.WebSocket
+        // Frames reach the desk through `addEventListener` now, because the
+        // boundary that reads them fans them out to several subscribers.
+        const listeners = new Map()
         mockWebSocket = {
             send: vi.fn(),
             close: vi.fn(),
             readyState: 1, // WebSocket.OPEN
             onopen: null,
-            onmessage: null,
             onclose: null,
             onerror: null,
-            addEventListener: vi.fn(),
-            removeEventListener: vi.fn(),
+            addEventListener: vi.fn((type, listener) => {
+                const held = listeners.get(type) ?? new Set()
+                held.add(listener)
+                listeners.set(type, held)
+            }),
+            removeEventListener: vi.fn((type, listener) => {
+                listeners.get(type)?.delete(listener)
+            }),
+            deliver: (type, event) => {
+                for (const listener of [...(listeners.get(type) ?? [])]) listener(event)
+            },
         }
 
         global.WebSocket = vi.fn(function () {
@@ -81,16 +92,47 @@ describe('useWebSocket', () => {
         // Test with valid JSON message
         const jsonEvent = { data: JSON.stringify({ type: 'test', payload: 'data' }) }
         act(() => {
-            mockWebSocket.onmessage(jsonEvent)
+            mockWebSocket.deliver('message', jsonEvent)
         })
 
-        // Handler receives (event, ws, normalizedMessage)
+        // Handler receives (event, ws, frame) — the frame already read and named
         expect(handleMessage).toHaveBeenCalled()
-        const [receivedEvent, receivedWs, normalizedMsg] = handleMessage.mock.calls[0]
+        const [receivedEvent, receivedWs, frame] = handleMessage.mock.calls[0]
         expect(receivedEvent).toEqual(jsonEvent)
         expect(receivedWs).toBe(mockWebSocket)
-        // normalizedMessage is the parsed result
-        expect(normalizedMsg).toBeDefined()
+        expect(frame).toEqual({
+            kind: 'account',
+            payload: { type: 'test', payload: 'data' },
+        })
+    })
+
+    // Four subscribers used to parse the same frame four times, each to find out
+    // whether it wanted it.
+    it('reads a delivered frame once however many subscribers are listening', async () => {
+        const parse = vi.spyOn(JSON, 'parse')
+        const { ensureDeskFrameRouter, DESK_FRAME_KINDS } = await import('../utils/deskFrameRouter')
+        renderHook(() => useWebSocket('ws://test.com', {}, vi.fn()))
+
+        act(() => {
+            mockWebSocket.onopen()
+        })
+        const router = ensureDeskFrameRouter(mockWebSocket)
+        const account = vi.fn()
+        const market = vi.fn()
+        router.subscribe(DESK_FRAME_KINDS.ACCOUNT, account)
+        router.subscribe(DESK_FRAME_KINDS.ACCOUNT, vi.fn())
+        router.subscribe(DESK_FRAME_KINDS.MARKET, market)
+
+        parse.mockClear()
+        act(() => {
+            mockWebSocket.deliver('message', { data: JSON.stringify({ type: 'futures_account_state' }) })
+        })
+
+        expect(parse).toHaveBeenCalledTimes(1)
+        expect(account).toHaveBeenCalledOnce()
+        // The subscriber that reads quotes is never handed an account frame.
+        expect(market).not.toHaveBeenCalled()
+        parse.mockRestore()
     })
 
     it('should attempt to reconnect on close', () => {

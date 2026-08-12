@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { createSubscribeRequest, createUnsubscribeRequest, normalizeMessage, CHANNEL_TYPES } from '../utils/channels';
+import { createSubscribeRequest, createUnsubscribeRequest, CHANNEL_TYPES } from '../utils/channels';
+import { DESK_FRAME_KINDS, ensureDeskFrameRouter } from '../utils/deskFrameRouter';
 import {
     LOCAL_WEBSOCKET_AUTH_CLOSE_CODE,
     redactLocalWebSocketAccess,
@@ -217,21 +218,14 @@ const useWebSocket = (url, detailSubscription, handleMessage, frameMessage = nul
                 setConnection(ws);
             };
 
-            ws.onmessage = (event) => {
-                if (messageHandlerRef.current) {
-                    // Parse message to detect format
-                    try {
-                        const rawMessage = JSON.parse(event.data);
-                        const normalized = normalizeMessage(rawMessage);
-
-                        // Pass both raw event and normalized message to handler
-                        messageHandlerRef.current(event, ws, normalized);
-                    } catch {
-                        // If parsing fails, pass raw event
-                        messageHandlerRef.current(event, ws, null);
-                    }
-                }
-            };
+            // The frame is read once, here, and every subscriber below is handed
+            // the parsed, named frame. Subscribing first is what puts the
+            // gateway's own reading ahead of the hooks that mount on this
+            // socket afterwards — it writes the activation they send under.
+            ensureDeskFrameRouter(ws)?.subscribe(
+                Object.values(DESK_FRAME_KINDS),
+                (frame, event) => messageHandlerRef.current?.(event, ws, frame),
+            );
 
             ws.onclose = (event) => {
                 console.log('WebSocket Closed:', event.code);

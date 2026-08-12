@@ -8,6 +8,7 @@ import {
   useState,
 } from 'react'
 import useWebSocket from '../hooks/useWebSocket.js'
+import { DESK_FRAME_KINDS } from '../utils/deskFrameRouter.js'
 import { useNotifications } from '../hooks/useNotifications.js'
 import {
   getRendererLocalWebSocketAccess,
@@ -136,18 +137,18 @@ export const GatewayProvider = ({
       localWebSocketAccess,
     )
 
-  const handleSocketUpdate = useCallback((event, connection, normalized) => {
-    let payload
-    try {
-      payload = JSON.parse(event?.data)
-    } catch {
-      payload = null
-    }
+  // The frame arrives already read and already named: the socket boundary is the
+  // one place it is parsed, and this used to be the second of four passes over
+  // the same bytes.
+  const handleSocketUpdate = useCallback((event, connection, frame) => {
+    const payload = frame?.payload ?? null
 
-    const nextStartupStatus = normalizeStartupStatus(payload)
-    if (nextStartupStatus) {
-      setStartupSnapshot({ connection, status: nextStartupStatus })
-      return
+    if (frame?.kind === DESK_FRAME_KINDS.STARTUP) {
+      const nextStartupStatus = normalizeStartupStatus(payload)
+      if (nextStartupStatus) {
+        setStartupSnapshot({ connection, status: nextStartupStatus })
+        return
+      }
     }
 
     // The backend's acknowledgement that a market is now the activated one.
@@ -159,7 +160,7 @@ export const GatewayProvider = ({
     // to one socket: after a reconnect the backend has no activated market
     // again, and carrying the old one across would open the workspace before
     // anything had been activated for it.
-    if (payload?.type === 'market_activation'
+    if (frame?.kind === DESK_FRAME_KINDS.ACTIVATION
       && typeof payload.marketMode === 'string'
       && Number.isSafeInteger(payload.generation)) {
       activationRef.current = {
@@ -172,7 +173,7 @@ export const GatewayProvider = ({
     }
 
     for (const listener of messageListenersRef.current) {
-      listener(event, connection, normalized)
+      listener(event, connection, frame)
     }
   }, [])
 

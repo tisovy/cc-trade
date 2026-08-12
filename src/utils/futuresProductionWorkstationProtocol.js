@@ -85,18 +85,23 @@ export const createFuturesProductionWorkstationEvent = value => createFuturesWor
   ...value,
 })
 
-export const parseFuturesProductionWorkstationEvent = (raw) => {
-  const value = parseBoundedFuturesWorkstationJson(raw, {
+// What a frame must satisfy once it has been read. Split from the reading itself
+// so a boundary that already parsed the frame — because four subscribers were
+// each parsing it again to find out whether they wanted it — can state the same
+// rules without parsing it a second time.
+export const readFuturesProductionWorkstationEvent = value => validateFuturesWorkstationEvent({
+  value,
+  channelId: FUTURES_PRODUCTION_WORKSTATION_CHANNEL_ID,
+  environment: FUTURES_PRODUCTION_WORKSTATION_ENVIRONMENT,
+  eventType: FUTURES_PRODUCTION_WORKSTATION_EVENT_TYPE,
+})
+
+export const parseFuturesProductionWorkstationEvent = raw => (
+  readFuturesProductionWorkstationEvent(parseBoundedFuturesWorkstationJson(raw, {
     maxBytes: FUTURES_WORKSTATION_EVENT_MAX_BYTES,
     maxNodes: FUTURES_WORKSTATION_EVENT_MAX_NODES,
-  })
-  return validateFuturesWorkstationEvent({
-    value,
-    channelId: FUTURES_PRODUCTION_WORKSTATION_CHANNEL_ID,
-    environment: FUTURES_PRODUCTION_WORKSTATION_ENVIRONMENT,
-    eventType: FUTURES_PRODUCTION_WORKSTATION_EVENT_TYPE,
-  })
-}
+  }))
+)
 
 export const isPotentialFuturesProductionWorkstationFrame = raw => (
   typeof raw === 'string'

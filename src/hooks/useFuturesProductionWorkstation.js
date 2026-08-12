@@ -8,8 +8,8 @@ import {
   createFuturesProductionWorkstationSelectSymbolRequest,
   createFuturesProductionWorkstationSubscribeRequest,
   createFuturesProductionWorkstationUnsubscribeRequest,
-  parseFuturesProductionWorkstationEvent,
 } from '../utils/futuresProductionWorkstationProtocol.js'
+import { DESK_FRAME_KINDS, ensureDeskFrameRouter } from '../utils/deskFrameRouter.js'
 import {
   FUTURES_WORKSTATION_CANDLE_HISTORY_LIMITS,
   FUTURES_WORKSTATION_DEFAULT_TAPE_SETTINGS,
@@ -296,14 +296,14 @@ const useFuturesProductionWorkstation = ({
       })
     })
 
-    const handleMessage = (event) => {
+    // Read and validated at the socket boundary, under the same protocol rules
+    // this hook used to apply itself — the ownership guards below are what this
+    // hook still owns, and they work on the typed event exactly as they did on
+    // the one it parsed.
+    const handleMessage = (frame) => {
       if (!owned()) return
-      let message
-      try {
-        message = parseFuturesProductionWorkstationEvent(event?.data)
-      } catch {
-        return
-      }
+      let message = frame?.payload
+      if (message === undefined || message === null) return
       if (message.requestId !== requestId || message.symbol !== symbol) return
       if (message.resource === 'catalog') {
         const currentBuffer = catalogBufferRef.current
@@ -380,7 +380,10 @@ const useFuturesProductionWorkstation = ({
       ))
     }
 
-    wsConnection.addEventListener('message', handleMessage)
+    const unsubscribe = ensureDeskFrameRouter(wsConnection)?.subscribe(
+      DESK_FRAME_KINDS.WORKSTATION,
+      handleMessage,
+    ) ?? (() => {})
     wsConnection.addEventListener('close', handleClose)
     wsConnection.addEventListener('error', handleError)
     // The reading already stated for the contract being opened travels with the
@@ -451,7 +454,7 @@ const useFuturesProductionWorkstation = ({
     return () => {
       active = false
       catalogBufferRef.current = null
-      wsConnection.removeEventListener('message', handleMessage)
+      unsubscribe()
       wsConnection.removeEventListener('close', handleClose)
       wsConnection.removeEventListener('error', handleError)
     }

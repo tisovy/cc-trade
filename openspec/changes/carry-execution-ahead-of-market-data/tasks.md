@@ -20,12 +20,15 @@
 
 ## 3. An Event Is Parsed Once, At The Boundary
 
-- [ ] 3.1 Parse and classify each incoming frame once, at the local socket boundary, and hand subscribers the parsed, typed event instead of the raw frame.
-- [ ] 3.2 Remove the second parse in `GatewayContext.handleSocketUpdate`; route on the already-parsed value.
-- [ ] 3.3 Deliver to each subscriber only the event kinds it handles, so the trading hook never receives a depth frame and never parses one.
-- [ ] 3.4 Keep every subscriber's ownership guards — request id, symbol, generation, revision — working on the typed event exactly as they work today.
-- [ ] 3.5 Prove by test that a depth frame reaches the workstation subscriber and reaches no account subscriber.
-- [ ] 3.6 Prove by test that one delivered frame is parsed once, whatever the number of subscribers.
+- [x] 3.1 Parse and classify each incoming frame once, at the local socket boundary, and hand subscribers the parsed, typed event instead of the raw frame.
+- [x] 3.2 Remove the second parse in `GatewayContext.handleSocketUpdate`; route on the already-parsed value.
+- [x] 3.3 Deliver to each subscriber only the event kinds it handles, so the trading hook never receives a depth frame and never parses one.
+- [x] 3.4 Keep every subscriber's ownership guards — request id, symbol, generation, revision — working on the typed event exactly as they work today.
+- [x] 3.5 Prove by test that a depth frame reaches the workstation subscriber and reaches no account subscriber.
+- [x] 3.6 Prove by test that one delivered frame is parsed once, whatever the number of subscribers.
+- [x] 3.7 Do not lose a frame that merely names the workstation channel. *(Discovered: the cheap text sniff that decides whether to read a frame under the workstation's rules matches any frame containing the channel's name — and a command rejection about the channel carries that name in its `request` field. Reading it strictly and dropping it on failure would have swallowed the one frame that says why the workstation would not open. It falls through and is read as what it is.)*
+- [x] 3.8 Stop normalizing every frame for a reader that does not exist. *(Discovered: the socket hook ran `normalizeMessage` over every parsed frame and passed the result to the gateway, which passed it to its listeners, whose only listener ignores it. A pass over every frame, ten times a second, for a value nothing reads.)*
+- [x] 3.9 State where a second reading of a frame remains. *(Discovered: the Spot context's legacy branch still calls `parseData(event.data, …)`, which takes the frame's text and answers a shape that context builds from. It is mounted in the Spot workspace only, so it is not on the futures desk's path at all; untangling it is Spot's own change and is named here rather than left for the next reader to find.)*
 
 ## 4. The Parse Runs At The Platform's Speed
 

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { MARKET_WORKSPACES } from '../utils/marketWorkspaceStorage.js'
 import { NotificationProvider } from './NotificationProvider.jsx'
 import { GatewayProvider, useGatewayContext } from './GatewayContext.jsx'
+import { readDeskFrame } from '../utils/deskFrameRouter.js'
 
 // `sendMessage` records the frame as it reaches the socket — after the
 // decorator the provider hands the transport. The real hook's channel helpers
@@ -29,7 +30,13 @@ const mocks = vi.hoisted(() => {
 
 vi.mock('../hooks/useWebSocket.js', () => ({
   default: vi.fn((_url, _detailSubscription, handleMessage, frameMessage) => {
-    mocks.handleMessage = handleMessage
+    // Standing in for the socket boundary, which is where a frame is read and
+    // named before any of this is handed it.
+    mocks.handleMessage = (event, connection) => handleMessage(
+      event,
+      connection,
+      readDeskFrame(event?.data),
+    )
     mocks.frameMessage = frameMessage ?? null
     return {
       connection: mocks.connection,

@@ -20,6 +20,7 @@ import {
   createFuturesSetTradingPausedCommand,
   createFuturesSymbolConfigCommand,
 } from '../utils/tradingCommands.js'
+import { DESK_FRAME_KINDS, ensureDeskFrameRouter } from '../utils/deskFrameRouter.js'
 import { createUnsentCommandStore } from '../utils/unsentTradingCommand.js'
 import { answersUnresolvedCommand } from '../utils/unresolvedCommandIdentity.js'
 import {
@@ -411,14 +412,13 @@ const useFuturesTrading = ({
 
     let active = true
 
-    const handleMessage = (event) => {
+    // Account frames only. This used to read every frame the desk delivered —
+    // parsing a hundred-and-eighteen-kilobyte book ten times a second in order
+    // to find out it was not an account envelope, on the path whose job is to
+    // take a filled order off the screen.
+    const handleMessage = (frame) => {
       if (!active) return
-      let payload
-      try {
-        payload = JSON.parse(event?.data)
-      } catch {
-        return
-      }
+      const payload = frame?.payload
       if (payload === null || typeof payload !== 'object') return
 
       if (payload.type === 'futures_account_state') {
@@ -581,7 +581,10 @@ const useFuturesTrading = ({
       }))
     }
 
-    wsConnection.addEventListener('message', handleMessage)
+    const unsubscribe = ensureDeskFrameRouter(wsConnection)?.subscribe(
+      DESK_FRAME_KINDS.ACCOUNT,
+      handleMessage,
+    ) ?? (() => {})
     wsConnection.addEventListener('close', handleDisconnect)
     wsConnection.addEventListener('error', handleDisconnect)
 
@@ -596,7 +599,7 @@ const useFuturesTrading = ({
 
     return () => {
       active = false
-      wsConnection.removeEventListener('message', handleMessage)
+      unsubscribe()
       wsConnection.removeEventListener('close', handleDisconnect)
       wsConnection.removeEventListener('error', handleDisconnect)
     }

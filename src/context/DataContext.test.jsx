@@ -6,6 +6,7 @@ import { DataProvider, useDataContext } from './DataContext'
 import { GatewayProvider } from './GatewayContext.jsx'
 import { NotificationProvider } from './NotificationProvider'
 import { useNotifications } from '../hooks/useNotifications'
+import { readDeskFrame } from '../utils/deskFrameRouter'
 
 const webSocketMocks = vi.hoisted(() => ({
     connection: { readyState: 1 },
@@ -16,7 +17,13 @@ const webSocketMocks = vi.hoisted(() => ({
 // Mock dependencies
 vi.mock('../hooks/useWebSocket', () => ({
     default: vi.fn((_url, _detail, handleMessage) => {
-        webSocketMocks.handleMessage = handleMessage
+        // Standing in for the socket boundary, which is where a frame is read
+        // and named before any of this is handed it.
+        webSocketMocks.handleMessage = (event, connection) => handleMessage(
+            event,
+            connection,
+            readDeskFrame(event?.data),
+        )
         return {
             send: vi.fn(),
             readyState: 1,
