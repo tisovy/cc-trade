@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
     createFuturesMarkPriceFeed,
     futuresMarkPriceStreamUrl,
+    readFuturesLastTradeEvent,
     readFuturesMarkPriceEvent,
     readFuturesPositionSymbols,
 } from './futures-mark-price-feed.js';
@@ -13,6 +14,11 @@ const STREAM_ORIGIN = 'wss://stream.test';
 const markFrame = (symbol, price, eventTime = 1_700_000_000_000) => JSON.stringify({
     stream: `${symbol.toLowerCase()}@markPrice@1s`,
     data: { e: 'markPriceUpdate', E: eventTime, s: symbol, p: price },
+});
+
+const tradeFrame = (symbol, price, tradeTime = 1_700_000_000_500) => JSON.stringify({
+    stream: `${symbol.toLowerCase()}@aggTrade`,
+    data: { e: 'aggTrade', E: tradeTime, s: symbol, p: price, T: tradeTime },
 });
 
 const createHarness = () => {
@@ -90,10 +96,29 @@ describe('readFuturesMarkPriceEvent', () => {
     });
 });
 
+describe('readFuturesLastTradeEvent', () => {
+    it('reads a combined-stream print', () => {
+        expect(readFuturesLastTradeEvent(JSON.parse(tradeFrame('BTCUSDT', '60612.40'))))
+            .toEqual({ symbol: 'BTCUSDT', lastPrice: '60612.40', tradedAt: 1_700_000_000_500 });
+    });
+
+    // The mark and the last price are two different numbers, and only one of
+    // them decides a liquidation. Neither reader answers for the other.
+    it('refuses anything that is not a usable print', () => {
+        expect(readFuturesLastTradeEvent({ e: 'markPriceUpdate', s: 'BTCUSDT', p: '1' })).toBeNull();
+        expect(readFuturesLastTradeEvent({ e: 'aggTrade', s: 'BTCUSDT', p: '0' })).toBeNull();
+        expect(readFuturesLastTradeEvent({ e: 'aggTrade', s: 'BTCUSDT' })).toBeNull();
+        expect(readFuturesLastTradeEvent(null)).toBeNull();
+    });
+});
+
 describe('futuresMarkPriceStreamUrl', () => {
-    it('subscribes one second stream per symbol on the routed market path', () => {
+    // The mark for what the exchange says the position is worth, the prints for
+    // what it is worth between two marks.
+    it('subscribes to the mark and the prints of every symbol on the routed market path', () => {
         expect(futuresMarkPriceStreamUrl(STREAM_ORIGIN, ['BTCUSDT', 'ETHUSDT']))
-            .toBe(`${STREAM_ORIGIN}/market/stream?streams=btcusdt@markPrice@1s/ethusdt@markPrice@1s`);
+            .toBe(`${STREAM_ORIGIN}/market/stream?streams=btcusdt@markPrice@1s/btcusdt@aggTrade`
+                + '/ethusdt@markPrice@1s/ethusdt@aggTrade');
     });
 
     // The decommissioned path is not a connection error: it opens, stays open
@@ -141,13 +166,59 @@ describe('createFuturesMarkPriceFeed', () => {
         }]);
     });
 
-    it('ignores frames that are not mark updates and marks for untracked symbols', () => {
+    it('ignores frames it does not read and prices for untracked symbols', () => {
         harness.feed.track([{ symbol: 'BMTUSDT', quantity: '-1' }]);
         harness.sockets[0].emit('message', 'not json');
-        harness.sockets[0].emit('message', JSON.stringify({ e: 'aggTrade', s: 'BMTUSDT', p: '1' }));
+        harness.sockets[0].emit('message', JSON.stringify({ e: 'forceOrder', s: 'BMTUSDT' }));
         harness.sockets[0].emit('message', markFrame('ETHUSDT', '2500'));
+        harness.sockets[0].emit('message', tradeFrame('ETHUSDT', '2501'));
         harness.runTimers();
         expect(harness.broadcasts).toHaveLength(0);
+    });
+
+    it('carries the prints between two marks beside the mark', () => {
+        harness.feed.track([{ symbol: 'BMTUSDT', quantity: '-446082' }]);
+        harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03523'));
+        harness.sockets[0].emit('message', tradeFrame('BMTUSDT', '0.03531'));
+        harness.runTimers();
+        expect(harness.broadcasts).toEqual([{
+            type: 'futures_position_marks',
+            version: 1,
+            marks: {
+                BMTUSDT: {
+                    markPrice: '0.03523',
+                    updatedAt: 1_700_000_000_000,
+                    lastPrice: '0.03531',
+                    lastPriceAt: 1_700_000_000_500,
+                },
+            },
+        }]);
+    });
+
+    // The mark is what a position is confirmed at, so an entry with no mark is
+    // an estimate of nothing.
+    it('holds a print until the symbol has a mark to sit beside', () => {
+        harness.feed.track([{ symbol: 'BMTUSDT', quantity: '-1' }]);
+        harness.sockets[0].emit('message', tradeFrame('BMTUSDT', '0.03531'));
+        harness.runTimers();
+        expect(harness.broadcasts).toHaveLength(0);
+    });
+
+    // A contract can go a minute without a print and be perfectly alive. Only
+    // the mark, which is contracted at one a second, proves the feed delivers.
+    it('does not let prints stand in for the mark the stall check watches', () => {
+        harness.feed.track([{ symbol: 'BMTUSDT', quantity: '-1' }]);
+        harness.sockets[0].emit('open');
+        harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03523'));
+        harness.runTimers();
+        harness.broadcasts.length = 0;
+        harness.sockets[0].emit('message', tradeFrame('BMTUSDT', '0.03531'));
+        // The stall window closes with prints arriving and no mark behind them.
+        harness.runTimers();
+        harness.runTimers();
+        expect(harness.logger.warn).toHaveBeenCalledWith(
+            expect.stringContaining('delivered nothing'),
+        );
     });
 
     it('keeps the socket when a later snapshot reports the same symbols', () => {

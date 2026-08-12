@@ -714,7 +714,12 @@ const FuturesTradingTicket = ({
                       {presentation.positionSide}
                     </span>
                   </header>
-                  <div className={`futures-production-position-pnl is-${presentation.pnlTone}`}>
+                  <div
+                    className={`futures-production-position-pnl is-${presentation.pnlTone}${presentation.pnlEstimated ? ' is-estimated' : ''}`}
+                    title={presentation.pnlEstimated
+                      ? 'From the last traded price; the mark confirms it once a second'
+                      : 'On the exchange’s own mark'}
+                  >
                     <strong>{formatSignedUsdt(presentation.unrealizedPnl)} USDT</strong>
                     <em>{formatSignedPercent(presentation.roePercent)}</em>
                   </div>

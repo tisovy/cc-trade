@@ -301,7 +301,9 @@ describe('FuturesHistoryPanel', () => {
         history={{
           ...history,
           orders: [
-            { ...history.orders[0], orderId: 7, time: Date.now() - 60_000 },
+            // Now, not a minute ago: in the first minute after midnight a
+            // minute ago is yesterday, and the row correctly showed a date.
+            { ...history.orders[0], orderId: 7, time: Date.now() },
             { ...history.orders[0], orderId: 8, time: 1_784_000_000_000 },
           ],
         }}

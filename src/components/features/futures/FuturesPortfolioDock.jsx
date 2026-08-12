@@ -120,7 +120,15 @@ export const FuturesPortfolioDock = ({
               <span role="columnheader">Mark</span>
               <span role="columnheader">Liq.</span>
               <span role="columnheader">Margin</span>
-              <span role="columnheader">uPnL (ROE)</span>
+              {/* The rule, stated once where the number it governs is read. */}
+              <span
+                role="columnheader"
+                title={'Between two marks the uPnL is the desk\u2019s arithmetic on the last '
+                  + 'traded price and is underlined; on a mark it is the exchange\u2019s own '
+                  + 'figure. Liquidation is always the mark.'}
+              >
+                uPnL (ROE)
+              </span>
               <span role="columnheader" />
             </div>
             {describedPositions.map(({ position, presentation, margin }) => (
@@ -223,8 +231,8 @@ export const FuturesPortfolioDock = ({
                     outgrows it must still be readable exactly. */}
                 <span
                   role="cell"
-                  className={`futures-workstation-dock-pnl is-${presentation.pnlTone}`}
-                  title={`${formatSignedUsdt(presentation.unrealizedPnl)} USDT · ${formatSignedPercent(presentation.roePercent)} on margin`}
+                  className={`futures-workstation-dock-pnl is-${presentation.pnlTone}${presentation.pnlEstimated ? ' is-estimated' : ''}`}
+                  title={`${formatSignedUsdt(presentation.unrealizedPnl)} USDT · ${formatSignedPercent(presentation.roePercent)} on margin${presentation.pnlEstimated ? ' · from the last traded price, until the next mark confirms it' : ''}`}
                 >
                   <strong>{formatSignedUsdt(presentation.unrealizedPnl)}</strong>
                   <em>{formatSignedPercent(presentation.roePercent)}</em>

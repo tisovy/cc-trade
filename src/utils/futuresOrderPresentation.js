@@ -207,6 +207,10 @@ export const describeFuturesPosition = (position) => {
     pnlTone: unrealizedPnl === null || unrealizedPnl === 0
       ? 'flat'
       : unrealizedPnl > 0 ? 'positive' : 'negative',
+    // The PnL beside it was computed on the last traded price rather than on a
+    // confirmed mark. True only between two marks, and never true of the
+    // liquidation price, which is the mark's by definition.
+    pnlEstimated: position?.valuationEstimated === true,
   })
 }
 

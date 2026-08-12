@@ -634,7 +634,8 @@ describe('setupBinanceConnection user-data orchestration', () => {
         // was decommissioned on 2026-04-23 and answers the handshake with a
         // socket that never delivers a frame.
         expect(MockWebSocket.mock.calls[streamIndex][0])
-            .toBe('wss://fstream.binance.com/market/stream?streams=bmtusdt@markPrice@1s');
+            .toBe('wss://fstream.binance.com/market/stream?streams='
+                + 'bmtusdt@markPrice@1s/bmtusdt@aggTrade');
 
         const markSocket = MockWebSocket.mock.results[streamIndex].value;
         markSocket.handlers.message(JSON.stringify({

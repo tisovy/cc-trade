@@ -712,6 +712,13 @@
   font-style: normal;
 }
 
+/* Estimated from the last traded price; see the dock's rule for why the mark is
+   a dotted underline and nothing louder. */
+.futures-production-position-pnl.is-estimated strong {
+  text-decoration: underline dotted currentColor;
+  text-underline-offset: 3px;
+}
+
 .futures-production-position-pnl.is-positive {
   color: #3fd79b;
 }

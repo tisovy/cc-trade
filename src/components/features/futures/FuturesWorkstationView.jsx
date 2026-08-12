@@ -528,11 +528,16 @@ export const FuturesWorkstationView = ({
   // anything under the operator's minimum notional on ingestion and only arms
   // its throttle when an eligible print arrives. Reading a price off it means
   // a desk set to "≥ 400 USDT" watches a frozen number while depth and the
-  // chart run. The newest candle's close is the same last trade the chart is
-  // drawing, at the kline stream's own cadence, and no display setting can
-  // filter it; the ticker is next, and the tape only if there is nothing else.
-  const lastPrice = (candlesState === 'live' ? liveCandles.at(-1)?.close : null)
-    ?? header?.lastPrice
+  // chart run.
+  //
+  // The header's last price is every print the contract makes, taken before the
+  // tape's filter is applied and stated at most five times a second — the price
+  // the contract actually traded at, arriving ahead of the ticker that reports
+  // the same number. The newest candle's close is the same figure at the kline
+  // stream's cadence and stands in while the header has none; the tape is the
+  // last resort it has always been.
+  const lastPrice = header?.lastPrice
+    ?? (candlesState === 'live' ? liveCandles.at(-1)?.close : null)
     ?? lastTrade?.price
     ?? null
   // The stream pads its prices: a kline close arrives as `2.6010000` and a mark

@@ -1186,15 +1186,16 @@ describe('instrument recency and interface scale', () => {
       onSymbolChange: vi.fn(),
       onIntervalChange: vi.fn(),
     }
-    const atPrice = (close) => {
+    const atPrice = (price) => {
       const base = createState()
       return Object.freeze({
         ...base,
         resources: Object.freeze({
           ...base.resources,
+          header: Object.freeze({ ...base.resources.header, lastPrice: price }),
           candles: Object.freeze({
             ...base.resources.candles,
-            contract: Object.freeze([candle(close)]),
+            contract: Object.freeze([candle(price)]),
           }),
         }),
       })
@@ -1545,10 +1546,11 @@ describe('instrument recency and interface scale', () => {
   // while depth and the chart ran on.
   it('reads the last price from a source the tape filter cannot freeze', () => {
     const base = createState()
-    const withCandle = close => createState({
+    const withCandle = price => createState({
       resources: Object.freeze({
         ...base.resources,
-        candles: Object.freeze({ ...base.resources.candles, contract: Object.freeze([candle(close)]) }),
+        header: Object.freeze({ ...base.resources.header, lastPrice: price }),
+        candles: Object.freeze({ ...base.resources.candles, contract: Object.freeze([candle(price)]) }),
       }),
     })
     const { container, rerender } = renderView({ state: withCandle('58500.00') })
@@ -1579,14 +1581,47 @@ describe('instrument recency and interface scale', () => {
     expect(bookLast()).toHaveClass('is-up')
   })
 
+  // The header's last price is every print the contract makes, taken before the
+  // tape's filter and stated ahead of the ticker that reports the same number.
+  // The candle close is the same figure at the kline stream's cadence.
+  it('reads the print ahead of the candle close, and the close when there is no print', () => {
+    const base = createState()
+    const stateWith = (lastPrice, close) => createState({
+      resources: Object.freeze({
+        ...base.resources,
+        header: Object.freeze({ ...base.resources.header, lastPrice }),
+        candles: Object.freeze({
+          ...base.resources.candles,
+          contract: Object.freeze([candle(close)]),
+        }),
+      }),
+    })
+    const { container, rerender } = renderView({ state: stateWith('58610.00', '58500.00') })
+    const bookLast = () => container.querySelector('.futures-workstation-book-last')
+    expect(bookLast()).toHaveTextContent('58610')
+
+    rerender(
+      <FuturesWorkstationView
+        identity="USDⓈ-M PRODUCTION · REAL MONEY"
+        state={stateWith(null, '58500.00')}
+        selectedSymbol="BTCUSDT"
+        selectedInterval="1m"
+        onSymbolChange={() => {}}
+        onIntervalChange={() => {}}
+      />,
+    )
+    expect(bookLast()).toHaveTextContent('58500')
+  })
+
   // Binance pads a kline close to a fixed width: BLUAIUSDT trades at 2.601 and
   // arrives as `2.6010000`, which read as a price with four digits of noise on it.
   it('drops the stream’s padding from the last price without rounding it', () => {
     const base = createState()
-    const withCandle = close => createState({
+    const withCandle = price => createState({
       resources: Object.freeze({
         ...base.resources,
-        candles: Object.freeze({ ...base.resources.candles, contract: Object.freeze([candle(close)]) }),
+        header: Object.freeze({ ...base.resources.header, lastPrice: price }),
+        candles: Object.freeze({ ...base.resources.candles, contract: Object.freeze([candle(price)]) }),
       }),
     })
     const { container, rerender } = renderView({ state: withCandle('2.6010000') })
@@ -1611,11 +1646,12 @@ describe('instrument recency and interface scale', () => {
 
   it('states the last move as a direction rather than as a maker side', () => {
     const base = createState()
-    const withCandle = (close, symbol = 'BTCUSDT') => createState({
+    const withCandle = (price, symbol = 'BTCUSDT') => createState({
       symbol,
       resources: Object.freeze({
         ...base.resources,
-        candles: Object.freeze({ ...base.resources.candles, contract: Object.freeze([candle(close)]) }),
+        header: Object.freeze({ ...base.resources.header, lastPrice: price }),
+        candles: Object.freeze({ ...base.resources.candles, contract: Object.freeze([candle(price)]) }),
       }),
     })
     const { container, rerender } = renderView({ state: withCandle('58500.00') })

@@ -8,7 +8,10 @@
 
 export const FUTURES_MARK_PRICE_TYPE = 'futures_position_marks';
 export const FUTURES_MARK_PRICE_VERSION = 1;
-export const FUTURES_MARK_PRICE_BATCH_MS = 500;
+// One batch per repaint window. The mark arrives once a second, but the prints
+// between two marks are what carries a position's value through a fast move, so
+// the window is the rate the operator can actually read rather than the mark's.
+export const FUTURES_MARK_PRICE_BATCH_MS = 200;
 export const FUTURES_MARK_PRICE_RECONNECT_MS = 5000;
 // One mark per symbol per second is the contract, so silence this long is not a
 // quiet market — it is a feed that stopped delivering without closing.
@@ -36,8 +39,16 @@ export const readFuturesPositionSymbols = (positions) => {
 // snapshot gave it while the chart moves on.
 export const FUTURES_MARK_PRICE_ROUTED_PREFIX = '/market/stream?streams=';
 
+// Two streams per symbol: the mark the exchange values and liquidates the
+// position at, and the prints that happen between two marks. Binance publishes
+// no mark faster than one a second, so the second stream is the only way a
+// position's value can move with a fast market — and it is the price the
+// contract actually traded at, not a display of it, so nothing the operator sets
+// on the tape can hold it still.
 export const futuresMarkPriceStreamUrl = (streamOrigin, symbols) => {
-    const streams = symbols.map(symbol => `${symbol.toLowerCase()}@markPrice@1s`).join('/');
+    const streams = symbols
+        .flatMap(symbol => [`${symbol.toLowerCase()}@markPrice@1s`, `${symbol.toLowerCase()}@aggTrade`])
+        .join('/');
     return `${streamOrigin}${FUTURES_MARK_PRICE_ROUTED_PREFIX}${streams}`;
 };
 
@@ -49,6 +60,18 @@ export const readFuturesMarkPriceEvent = (payload) => {
     if (!symbol || markPrice === null || !(Number(markPrice) > 0)) return null;
     const eventTime = Number.isSafeInteger(event.E) ? event.E : null;
     return { symbol, markPrice, updatedAt: eventTime };
+};
+
+// The last price the contract traded at. Separate from the mark on purpose: the
+// two are different numbers, and only one of them decides a liquidation.
+export const readFuturesLastTradeEvent = (payload) => {
+    const event = payload?.data ?? payload;
+    if (!event || typeof event !== 'object' || event.e !== 'aggTrade') return null;
+    const symbol = typeof event.s === 'string' ? event.s.toUpperCase() : '';
+    const lastPrice = typeof event.p === 'string' ? event.p : null;
+    if (!symbol || lastPrice === null || !(Number(lastPrice) > 0)) return null;
+    const tradeTime = Number.isSafeInteger(event.T) ? event.T : null;
+    return { symbol, lastPrice, tradedAt: tradeTime };
 };
 
 const sameSymbols = (left, right) => left.length === right.length
@@ -207,10 +230,33 @@ export const createFuturesMarkPriceFeed = ({
 
         opened.on('message', (raw) => {
             if (socket !== opened) return;
-            const event = readFuturesMarkPriceEvent(parseFrame(raw));
-            if (!event || !symbols.includes(event.symbol)) return;
-            markSeenSinceCheck = true;
-            marks.set(event.symbol, { markPrice: event.markPrice, updatedAt: event.updatedAt });
+            const frame = parseFrame(raw);
+            const mark = readFuturesMarkPriceEvent(frame);
+            if (mark !== null) {
+                if (!symbols.includes(mark.symbol)) return;
+                // Liveness is the mark's alone: a contract can go minutes
+                // without a print and the feed is not stalled for it.
+                markSeenSinceCheck = true;
+                marks.set(mark.symbol, {
+                    ...marks.get(mark.symbol),
+                    markPrice: mark.markPrice,
+                    updatedAt: mark.updatedAt,
+                });
+                scheduleFlush();
+                return;
+            }
+            const trade = readFuturesLastTradeEvent(frame);
+            if (trade === null || !symbols.includes(trade.symbol)) return;
+            const held = marks.get(trade.symbol);
+            // Nothing to attach it to yet. The first mark is a second away, and
+            // a price with no mark beside it has no confirmed reading to be an
+            // estimate of.
+            if (held === undefined) return;
+            marks.set(trade.symbol, {
+                ...held,
+                lastPrice: trade.lastPrice,
+                lastPriceAt: trade.tradedAt,
+            });
             scheduleFlush();
         });
         opened.on('error', (error) => {

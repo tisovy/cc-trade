@@ -1776,6 +1776,65 @@ describe('production Futures workstation service', () => {
         expect(runtime.service.current.staleResources.has('trades')).toBe(false);
     });
 
+    // The minimum notional is a setting about the tape. The last traded price is
+    // not a display of anything — it is what the contract traded at — and a desk
+    // set to "≥ 25 USDT" watched a frozen number while the market ran under it.
+    it('moves the last price on a print the tape filter drops, at a bounded rate', async () => {
+        const clock = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport({ clock: clock.clock });
+        let subscriber;
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock: clock.clock,
+            transport: {
+                ...base,
+                connect: (options) => {
+                    subscriber = options;
+                    return base.connect(options);
+                },
+            },
+        }));
+        const events = [];
+        await runtime.service.handleRequest(productionRequest('tape-last-price'), {
+            emit: event => events.push(event),
+        });
+        await runtime.service.handleRequest(productionTapeRequest('tape-last-price', {
+            minNotionalUsdt: '25',
+        }), { emit: event => events.push(event) });
+        const tapeFrames = () => events.filter(event => event.resource === 'trades').length;
+        const lastHeader = () => events.filter(event => event.resource === 'header').at(-1);
+        const tapeFramesBefore = tapeFrames();
+
+        // 24.75 USDT: under the operator's minimum, so the tape never sees it.
+        subscriber.onMessage(productionTradeFrame({
+            cycle: 1,
+            aggregateTradeId: 4001,
+            price: '99',
+            quantity: '0.25',
+        }));
+        expect(tapeFrames()).toBe(tapeFramesBefore);
+        expect(lastHeader().payload).toMatchObject({ lastPrice: '99', lastQuantity: '0.25' });
+
+        // Bounded: a burst inside one window states one price, not one each.
+        const headerFrames = events.filter(event => event.resource === 'header').length;
+        clock.advance(50);
+        subscriber.onMessage(productionTradeFrame({
+            cycle: 2,
+            aggregateTradeId: 4002,
+            price: '98',
+            quantity: '0.25',
+        }));
+        expect(events.filter(event => event.resource === 'header')).toHaveLength(headerFrames);
+
+        clock.advance(200);
+        subscriber.onMessage(productionTradeFrame({
+            cycle: 3,
+            aggregateTradeId: 4003,
+            price: '97',
+            quantity: '0.25',
+        }));
+        expect(lastHeader().payload).toMatchObject({ lastPrice: '97' });
+    });
+
     it('keeps eligible trades in the tape while small prints churn past the bound', async () => {
         const clock = createManualClock();
         const base = createFuturesProductionWorkstationFakeTransport({ clock: clock.clock });

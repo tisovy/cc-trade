@@ -41,6 +41,10 @@ export const FUTURES_PRODUCTION_WORKSTATION_FRESHNESS = Object.freeze({
     DEPTH_MS: 3_000,
     TRADES_MS: 5_000,
     CHECK_MS: 1_000,
+    // How often a print may move the header's last price. Trades arrive in
+    // bursts of dozens; the operator reads one number, and five updates a second
+    // is already faster than the eye resolves.
+    LAST_PRICE_MS: 200,
     RECONNECT_BASE_MS: 500,
     RECONNECT_MAX_MS: 30_000,
     RECONNECT_ATTEMPTS: 8,
@@ -642,6 +646,7 @@ export class FuturesProductionWorkstationService {
             pendingTapeTimer: null,
             pendingTapeEmission: false,
             lastTapeEmittedAt: null,
+            lastHeaderEmittedAt: null,
             lastTapeFingerprint: null,
             lastHeaderAt: 0,
             lastCandlesAt: 0,
@@ -899,6 +904,34 @@ export class FuturesProductionWorkstationService {
         )));
     }
 
+    // The header carries the last traded price, and a print moves it. Sent on
+    // the leading edge of a window rather than debounced behind a timer: prints
+    // arrive continuously, so the next one carries whatever this one is holding
+    // back, and the ticker states the same number twice a second regardless.
+    // That leaves nothing for a timer to flush, and no timer to leak.
+    //
+    // Sent at whatever state the header is already in, because a print proves
+    // this contract's stream is alive, not that the mark and the funding beside
+    // it are current.
+    noteHeaderPrint(session, now) {
+        const window = FUTURES_PRODUCTION_WORKSTATION_FRESHNESS.LAST_PRICE_MS;
+        if (session.lastHeaderEmittedAt !== null
+            && now - session.lastHeaderEmittedAt < window) return;
+        this.emitHeader(session, now);
+    }
+
+    emitHeader(session, now) {
+        session.lastHeaderEmittedAt = now;
+        this.emitResource(
+            session,
+            FUTURES_WORKSTATION_RESOURCES.HEADER,
+            session.staleResources.has(FUTURES_WORKSTATION_RESOURCES.HEADER)
+                ? FUTURES_WORKSTATION_STATES.STALE
+                : FUTURES_WORKSTATION_STATES.LIVE,
+            session.header,
+        );
+    }
+
     clearPendingTapeTimer(session) {
         if (session?.pendingTapeTimer !== null && session?.pendingTapeTimer !== undefined) {
             this.clock.clearTimeout(session.pendingTapeTimer);
@@ -1141,6 +1174,11 @@ export class FuturesProductionWorkstationService {
             // print still means the tape is live.
             session.lastTradesAt = now;
             session.staleResources.delete(FUTURES_WORKSTATION_RESOURCES.TRADES);
+            // The last traded price, before the tape decides whether the print
+            // is one it displays. A desk set to "≥ 400 USDT" watched a frozen
+            // number while the market ran; the filter is about the tape.
+            session.header = updateFuturesWorkstationHeader(session.header, event);
+            this.noteHeaderPrint(session, now);
             // Filter on ingestion so the bounded buffer accumulates trades the
             // operator asked for. Filtering only on delivery let small prints
             // evict the large ones and left the tape almost empty.
@@ -1157,12 +1195,7 @@ export class FuturesProductionWorkstationService {
             session.header = updateFuturesWorkstationHeader(session.header, event);
             session.lastHeaderAt = now;
             session.staleResources.delete(FUTURES_WORKSTATION_RESOURCES.HEADER);
-            this.emitResource(
-                session,
-                FUTURES_WORKSTATION_RESOURCES.HEADER,
-                FUTURES_WORKSTATION_STATES.LIVE,
-                session.header,
-            );
+            this.emitHeader(session, now);
         }
     }
 

@@ -1789,6 +1789,16 @@
   opacity: 0.85;
 }
 
+/* A PnL computed on the last price the contract traded at rather than on the
+   exchange's own mark. The figure keeps its size and its colour — it is the
+   desk's best reading of right now — and carries the mark of something not yet
+   confirmed. The confirmation is at most a second away, so anything heavier
+   would flicker on and off with every mark. */
+.futures-workstation-dock-pnl.is-estimated strong {
+  text-decoration: underline dotted currentColor;
+  text-underline-offset: 3px;
+}
+
 .futures-workstation-dock-pnl.is-positive {
   color: #3fd79b;
 }

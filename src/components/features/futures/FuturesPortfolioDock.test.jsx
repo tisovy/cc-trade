@@ -2,6 +2,12 @@ import { readFileSync } from 'node:fs'
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import FuturesPortfolioDock from './FuturesPortfolioDock.jsx'
+import { describeFuturesPosition } from '../../../utils/futuresOrderPresentation.js'
+
+vi.mock('../../../utils/futuresOrderPresentation.js', async (importOriginal) => {
+  const actual = await importOriginal()
+  return { ...actual, describeFuturesPosition: vi.fn(actual.describeFuturesPosition) }
+})
 
 const position = Object.freeze({
   symbol: 'BTCUSDT',
@@ -47,6 +53,63 @@ describe('FuturesPortfolioDock', () => {
     expect(size.textContent).not.toContain('−')
     expect(screen.getByRole('table', { name: 'Open positions' }))
       .toHaveTextContent('Size (USDT)')
+  })
+
+  // Between two marks the figure is the desk's arithmetic on the last traded
+  // price, not the exchange's on its own mark. The operator never has to wonder
+  // which of the two they are reading — and the liquidation price, which is the
+  // mark's by definition, is not marked and does not move with it.
+  it('says when the PnL is the last trade rather than the confirmed mark', () => {
+    const { rerender } = render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[{
+          ...position,
+          unrealizedPnl: '-450',
+          valuationPrice: '60900',
+          valuationEstimated: true,
+        }]}
+      />,
+    )
+    const pnl = () => screen.getByRole('table', { name: 'Open positions' })
+      .querySelector('.futures-workstation-dock-pnl')
+    expect(pnl()).toHaveClass('is-estimated')
+    expect(pnl().getAttribute('title')).toContain('last traded price')
+    expect(pnl()).toHaveTextContent('−450.00')
+    expect(screen.getByRole('table', { name: 'Open positions' })).toHaveTextContent('71000')
+
+    rerender(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[{ ...position, valuationPrice: '60600', valuationEstimated: false }]}
+      />,
+    )
+    expect(pnl()).not.toHaveClass('is-estimated')
+    expect(pnl().getAttribute('title')).not.toContain('last traded price')
+  })
+
+  // The estimate ticks five times a second. What it may cost is the position
+  // rows: a tick that changes nothing about the positions must not re-describe
+  // them, and one that does must describe only them.
+  it('re-describes the position rows a tick moves, and nothing when none moved', () => {
+    const positions = [position]
+    const { rerender } = render(
+      <FuturesPortfolioDock selectedSymbol="BTCUSDT" positions={positions} />,
+    )
+    describeFuturesPosition.mockClear()
+    // The same positions, a different unrelated prop.
+    rerender(
+      <FuturesPortfolioDock selectedSymbol="ETHUSDT" positions={positions} />,
+    )
+    expect(describeFuturesPosition).not.toHaveBeenCalled()
+
+    rerender(
+      <FuturesPortfolioDock
+        selectedSymbol="ETHUSDT"
+        positions={[{ ...position, unrealizedPnl: '-450', valuationEstimated: true }]}
+      />,
+    )
+    expect(describeFuturesPosition).toHaveBeenCalledTimes(1)
   })
 
   it('re-values the row when a fresher mark arrives without an account event', () => {

@@ -733,6 +733,18 @@ export const updateFuturesWorkstationHeader = (current, event) => {
             eventTime: Math.max(current.eventTime, event.eventTime),
         });
     }
+    // A print *is* the last traded price. It arrives ahead of the ticker that
+    // states the same number, and no display setting stands between it and the
+    // header — the tape's minimum notional filters what the tape shows, never
+    // what the contract last traded at.
+    if (event.kind === 'trade') {
+        return cloneFrozen({
+            ...current,
+            lastPrice: event.row.price,
+            lastQuantity: event.row.quantity,
+            eventTime: Math.max(current.eventTime, event.row.tradeTime),
+        });
+    }
     if (event.kind === 'ticker') {
         return cloneFrozen({
             ...current,
