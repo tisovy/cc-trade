@@ -813,6 +813,89 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(loads.balances.mock.calls.length).toBeGreaterThan(afterSetup.balances);
     });
 
+    // The blink. Binance's REST services are eventually consistent with its
+    // streams — the same property the ambiguous-outcome reconciliation is built
+    // around — so a read of the working orders issued around a placement can
+    // answer without the order the stream has already reported. Letting that
+    // read remove it is what made a newly placed order flash on and off the
+    // chart until a read caught up.
+    it('keeps an order the stream reported while a read of the orders was in flight', async () => {
+        let answerOrdersRead = null;
+        const loads = {
+            balances: vi.fn().mockResolvedValue({
+                futures_balances: { USDT: { available: '100', total: '100' } },
+            }),
+            regularOrders: vi.fn().mockResolvedValue({
+                futures_regular_orders: [{
+                    symbol: 'TUTUSDT', orderId: 31, orderKind: 'REGULAR', status: 'NEW', transactTime: 1_000,
+                }],
+            }),
+            algoOrders: vi.fn().mockResolvedValue({ futures_algo_orders: [] }),
+            positions: vi.fn().mockResolvedValue({ futures_positions: [] }),
+        };
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue(
+            ['balances', 'regularOrders', 'algoOrders', 'positions'].map(type => ({
+                type,
+                weight: 5,
+                errorLabel: type,
+                loadPayload: loads[type],
+            })),
+        );
+
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({ action: 'activate_market', marketMode: 'futures-live' }),
+        });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+        const socket = moduleMocks.futuresUserDataSockets[0];
+        socket.handlers.open();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+
+        const workingOrders = () => moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.type === 'futures_account_state')
+            .at(-1).resources.regularOrders.data;
+        expect(workingOrders().map(order => order.orderId)).toEqual([31]);
+
+        // The next read is held open, exactly as one that left before the
+        // placement would be.
+        loads.regularOrders.mockImplementationOnce(() => new Promise((resolve) => {
+            answerOrdersRead = resolve;
+        }));
+        socket.handlers.open();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+        expect(answerOrdersRead).not.toBeNull();
+
+        // The order is placed and the stream says so while that read is out.
+        socket.handlers.message(JSON.stringify({
+            e: 'ORDER_TRADE_UPDATE',
+            E: 5_000,
+            o: {
+                s: 'TUTUSDT', i: 32, X: 'NEW', S: 'BUY', o: 'LIMIT', p: '1', q: '5', T: 5_000,
+            },
+        }));
+        await flushMicrotasks();
+        expect(workingOrders().map(order => order.orderId)).toEqual([31, 32]);
+
+        // The read answers without it, because it left before the order existed.
+        answerOrdersRead({
+            futures_regular_orders: [{
+                symbol: 'TUTUSDT', orderId: 31, orderKind: 'REGULAR', status: 'NEW', transactTime: 1_000,
+            }],
+        });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+        expect(workingOrders().map(order => order.orderId)).toEqual([31, 32]);
+    });
+
     // Which orders the stream reported settled is what keeps a read that left
     // before the settle from putting one back. It is a memory of one account's
     // stream, and an account nobody is on has no stream — held across a market

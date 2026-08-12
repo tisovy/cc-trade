@@ -63,6 +63,7 @@ import {
 } from './futures-mark-price-feed.js';
 import {
     FuturesSettledOrderMemory,
+    FuturesStreamedOrderMemory,
     createFuturesAccountStateEnvelope,
     createInitialFuturesAccountResources,
     foldFuturesWorkingOrder,
@@ -71,6 +72,7 @@ import {
     markFuturesResourceIdle,
     markFuturesResourceLoading,
     markFuturesResourceReady,
+    reconcileFuturesWorkingOrderRead,
 } from './futures-account-state.js';
 import WebSocket from 'ws';
 import {
@@ -1048,6 +1050,9 @@ export function setupBinanceConnection({
     // the same — now that a fill no longer drags an account-wide read behind it,
     // that read can be older than the stream.
     const futuresSettledOrders = new FuturesSettledOrderMemory();
+    // The other half of the same guard: what the stream has reported *working*,
+    // and when, so a read that left before that report does not remove it.
+    const futuresStreamedOrders = new FuturesStreamedOrderMemory();
     // Leverage and margin mode per contract. /fapi/v3/positionRisk reports neither
     // any more, so without this read nothing on the desk can state the leverage a
     // position is carried at — or set it.
@@ -1297,6 +1302,10 @@ export function setupBinanceConnection({
         // admissions, but the round-trips overlap, so the ticket reaches
         // READY in roughly one round-trip instead of serial endpoint latency.
         await Promise.all(operations.map(operation => futuresRestLimiter.execute(async () => {
+            // When this read actually leaves, not when the pass was asked for:
+            // anything the stream reports from here on is news the read cannot
+            // carry, and that is what the reconciliation below compares against.
+            const issuedAt = Date.now();
             const payload = await operation.loadPayload();
             const payloadKey = futuresAccountPayloadKeys[operation.type];
             if (!payloadKey || !Object.hasOwn(payload, payloadKey)) {
@@ -1312,11 +1321,20 @@ export function setupBinanceConnection({
             futuresAccountResources = markFuturesResourceReady(
                 futuresAccountResources,
                 operation.type,
-                // A read that left before the stream reported an order settled
-                // describes a world already moved past. The settled memory is
-                // what decides what the read is allowed to say.
+                // A read that left before the stream spoke describes a world
+                // already moved past — in both directions. The settled memory
+                // refuses what it lists and should not, the streamed memory
+                // restores what it omits and should not.
                 operation.type === 'regularOrders'
-                    ? futuresSettledOrders.filterRead(payload[payloadKey])
+                    ? reconcileFuturesWorkingOrderRead(
+                        futuresAccountResources,
+                        payload[payloadKey],
+                        {
+                            settled: futuresSettledOrders,
+                            streamed: futuresStreamedOrders,
+                            since: issuedAt,
+                        },
+                    )
                     : payload[payloadKey],
             );
             if (operation.type === 'positions') {
@@ -1439,6 +1457,7 @@ export function setupBinanceConnection({
         forgetFuturesSymbolConfigs();
         forgetFuturesHistoryState();
         futuresSettledOrders.forget();
+        futuresStreamedOrders.forgetAll();
         // No Futures renderer is watching: nothing to mark to market.
         futuresMarkPriceFeed?.track([]);
         if (futuresKeepAliveInterval) {
@@ -1524,6 +1543,7 @@ export function setupBinanceConnection({
                     // for, at weight 40 twice on every fill.
                     const folded = foldFuturesWorkingOrder(futuresAccountResources, report, {
                         settled: futuresSettledOrders,
+                        streamed: futuresStreamedOrders,
                     });
                     if (folded !== futuresAccountResources) {
                         futuresAccountResources = folded;

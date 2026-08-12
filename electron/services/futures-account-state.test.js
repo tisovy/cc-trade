@@ -3,6 +3,7 @@
 import { describe, expect, it } from 'vitest';
 import {
     FuturesSettledOrderMemory,
+    FuturesStreamedOrderMemory,
     createFuturesAccountStateEnvelope,
     createInitialFuturesAccountResources,
     foldFuturesWorkingOrder,
@@ -10,6 +11,7 @@ import {
     markFuturesResourceFailed,
     markFuturesResourceLoading,
     markFuturesResourceReady,
+    reconcileFuturesWorkingOrderRead,
     sanitizeFuturesAccountError,
 } from './futures-account-state.js';
 
@@ -320,5 +322,112 @@ describe('the memory of settled orders', () => {
         expect(settled.entries.size).toBe(2);
         expect(settled.allows({ symbol: 'A', orderId: 1, transactTime: 0 })).toBe(true);
         expect(settled.allows({ symbol: 'C', orderId: 3, transactTime: 0 })).toBe(false);
+    });
+});
+
+describe('what a read of the working orders is allowed to say', () => {
+    const order = (overrides = {}) => ({
+        symbol: 'TUTUSDT',
+        orderId: 11,
+        orderKind: 'REGULAR',
+        status: 'NEW',
+        transactTime: 1_000,
+        ...overrides,
+    });
+
+    const heldOrders = rows => markFuturesResourceReady(
+        createInitialFuturesAccountResources(),
+        'regularOrders',
+        rows,
+        1_000,
+    );
+
+    // The blink: a placement, the stream reporting it within milliseconds, and
+    // an `/fapi/v1/openOrders` read that left before any of it and answers
+    // without the order. Left alone it removes the order; the next read puts it
+    // back. That is what the operator sees flashing on the chart.
+    it('keeps an order the stream reported after the read left', () => {
+        const streamed = new FuturesStreamedOrderMemory();
+        const held = foldFuturesWorkingOrder(heldOrders([]), order({ orderId: 12 }), {
+            streamed,
+            now: 2_000,
+        });
+        const reconciled = reconcileFuturesWorkingOrderRead(held, [], {
+            streamed,
+            since: 1_500,
+        });
+        expect(reconciled.map(row => row.orderId)).toEqual([12]);
+    });
+
+    // The read is the newer statement here, and an order it omits is gone —
+    // cancelled from the Binance app, or filled while the desk was not looking.
+    it('removes an order the stream has said nothing newer about', () => {
+        const streamed = new FuturesStreamedOrderMemory();
+        const held = foldFuturesWorkingOrder(heldOrders([]), order({ orderId: 12 }), {
+            streamed,
+            now: 2_000,
+        });
+        expect(reconcileFuturesWorkingOrderRead(held, [], { streamed, since: 3_000 }))
+            .toEqual([]);
+    });
+
+    it('leaves the read alone when it already lists what the stream reported', () => {
+        const streamed = new FuturesStreamedOrderMemory();
+        const held = foldFuturesWorkingOrder(heldOrders([]), order({ orderId: 12 }), {
+            streamed,
+            now: 2_000,
+        });
+        const rows = [order({ orderId: 12, price: '3' })];
+        expect(reconcileFuturesWorkingOrderRead(held, rows, { streamed, since: 1_500 }))
+            .toBe(rows);
+    });
+
+    // Both guards at once, in the two directions they run in.
+    it('refuses a settled order the read lists and restores one it omits', () => {
+        const settled = new FuturesSettledOrderMemory();
+        const streamed = new FuturesStreamedOrderMemory();
+        let held = foldFuturesWorkingOrder(heldOrders([]), order({ orderId: 12 }), {
+            settled,
+            streamed,
+            now: 2_000,
+        });
+        held = foldFuturesWorkingOrder(held, order({ orderId: 13, status: 'FILLED' }), {
+            settled,
+            streamed,
+            now: 2_100,
+        });
+        const reconciled = reconcileFuturesWorkingOrderRead(
+            held,
+            [order({ orderId: 13 })],
+            { settled, streamed, since: 1_500 },
+        );
+        expect(reconciled.map(row => row.orderId)).toEqual([12]);
+    });
+
+    it('forgets an order the stream reports settled, so a later read may remove it', () => {
+        const streamed = new FuturesStreamedOrderMemory();
+        let held = foldFuturesWorkingOrder(heldOrders([]), order({ orderId: 12 }), {
+            streamed,
+            now: 2_000,
+        });
+        // The desk holds it again from a read, then the stream settles it.
+        held = markFuturesResourceReady(held, 'regularOrders', [order({ orderId: 12 })], 2_500);
+        const settledOff = foldFuturesWorkingOrder(
+            held,
+            order({ orderId: 12, status: 'CANCELED' }),
+            { streamed, now: 2_600 },
+        );
+        expect(settledOff.regularOrders.data).toEqual([]);
+        expect(streamed.notedSince('TUTUSDT:12', 1_500)).toBe(false);
+    });
+
+    it('is a memory of the recent past, not a ledger', () => {
+        const streamed = new FuturesStreamedOrderMemory({ maximum: 2 });
+        streamed.note('A:1', 1);
+        streamed.note('B:2', 2);
+        streamed.note('C:3', 3);
+        expect(streamed.entries.size).toBe(2);
+        expect(streamed.notedSince('A:1', 0)).toBe(false);
+        expect(streamed.notedSince('C:3', 0)).toBe(true);
     });
 });

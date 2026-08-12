@@ -255,6 +255,85 @@ export class FuturesSettledOrderMemory {
     }
 }
 
+// When the stream last said each order is working, on the desk's own clock.
+//
+// The mirror image of the settled memory, and it exists for the mirror-image
+// reason: Binance's REST services are eventually consistent with its streams, so
+// a read of `/fapi/v1/openOrders` issued moments after a placement can answer
+// without the order the stream has already reported. Left alone, that read
+// removes the order and the next one puts it back — the order blinking on and
+// off the chart after it is placed.
+//
+// Local time rather than the exchange's, because the comparison is against the
+// moment *this process* issued the read. Mixing the two clocks would make the
+// protection depend on how far apart they drift.
+export class FuturesStreamedOrderMemory {
+    constructor({ maximum = 256 } = {}) {
+        this.maximum = maximum;
+        this.entries = new Map();
+    }
+
+    note(identity, at) {
+        if (identity === null) return;
+        this.entries.delete(identity);
+        this.entries.set(identity, Number.isFinite(at) ? at : Date.now());
+        while (this.entries.size > this.maximum) {
+            const [oldest] = this.entries.keys();
+            this.entries.delete(oldest);
+        }
+    }
+
+    forget(identity) {
+        if (identity === null) return;
+        this.entries.delete(identity);
+    }
+
+    // Did the stream speak about this order after the read left? Only then is the
+    // read's silence about it uninformed rather than authoritative.
+    notedSince(identity, since) {
+        const notedAt = this.entries.get(identity);
+        return notedAt !== undefined && Number.isFinite(since) && notedAt >= since;
+    }
+
+    forgetAll() {
+        this.entries.clear();
+    }
+}
+
+/**
+ * What a read of the working orders is allowed to say.
+ *
+ * Two things the read cannot know about, in the two directions: an order the
+ * stream reported settled after the read left, which the settled memory refuses,
+ * and an order the stream reported working after the read left, which the read
+ * simply does not contain. The second is put back here.
+ *
+ * `since` is when the read was issued, on the same clock the stream reports are
+ * noted on.
+ */
+export const reconcileFuturesWorkingOrderRead = (
+    resources,
+    rows,
+    { settled = null, streamed = null, since = null } = {},
+) => {
+    const filtered = settled === null ? rows : settled.filterRead(rows);
+    if (streamed === null || !Number.isFinite(since)) return filtered;
+    const held = Array.isArray(resources?.regularOrders?.data)
+        ? resources.regularOrders.data
+        : [];
+    if (held.length === 0) return filtered;
+    const read = Array.isArray(filtered) ? filtered : [];
+    const listed = new Set(read.map(row => futuresOrderIdentity(row)));
+    const missing = held.filter((row) => {
+        const identity = futuresOrderIdentity(row);
+        if (identity === null || listed.has(identity)) return false;
+        if (!FUTURES_WORKING_ORDER_STATUSES.has(String(row?.status ?? row?.X ?? ''))) return false;
+        if (settled !== null && !settled.allows(row)) return false;
+        return streamed.notedSince(identity, since);
+    });
+    return missing.length === 0 ? filtered : Object.freeze([...read, ...missing]);
+};
+
 /**
  * Folds one execution report into the held working orders.
  *
@@ -266,7 +345,11 @@ export class FuturesSettledOrderMemory {
  * Returns the resources unchanged when there is nothing to fold, so the caller
  * can broadcast only on a real change.
  */
-export const foldFuturesWorkingOrder = (resources, report, { settled, now = Date.now() } = {}) => {
+export const foldFuturesWorkingOrder = (
+    resources,
+    report,
+    { settled, streamed = null, now = Date.now() } = {},
+) => {
     const resource = resources?.regularOrders;
     // Nothing has been read yet. A list built from the one report that happened
     // to arrive would present a one-order account as the whole of it.
@@ -293,11 +376,15 @@ export const foldFuturesWorkingOrder = (resources, report, { settled, now = Date
     });
     if (!working) {
         settled?.settle(identity, reportedAt ?? now);
+        streamed?.forget(identity);
         if (held === null) return resources;
         return withRows(rows.filter(row => futuresOrderIdentity(row) !== identity));
     }
     // Working, but already settled once: a report that arrived out of order.
     if (settled && !settled.allows(report)) return resources;
+    // Noted on the local clock: a read already in flight cannot have seen this,
+    // so its silence about the order must not remove it.
+    streamed?.note(identity, now);
     return withRows(held === null
         ? [...rows, report]
         : rows.map(row => (futuresOrderIdentity(row) === identity ? report : row)));
