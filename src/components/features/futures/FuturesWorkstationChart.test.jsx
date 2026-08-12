@@ -660,6 +660,138 @@ describe('FuturesWorkstationChart viewport ownership', () => {
       name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
     })).toHaveTextContent('29950 USDT')
     expect(screen.queryByRole('status', { name: /lifted off the book/ })).not.toBeInTheDocument()
+    // Nor the mark the gesture followed while the answer was outstanding.
+    expect(screen.queryByRole('status', { name: /heading for/ })).not.toBeInTheDocument()
+  })
+
+  // The gesture does not wait on a round trip to Binance. The cancellation runs
+  // beside it; what waits for the answer is what the chart claims, not what it
+  // follows.
+  it('follows the pointer while the cancellation is still in flight', async () => {
+    let confirmLift = null
+    const props = {
+      ...properties([candle(1_784_000_000_000)]),
+      onOrderLift: vi.fn(() => new Promise((resolve) => { confirmLift = resolve })),
+      ownedOrders: [workingOrder()],
+    }
+    render(<FuturesWorkstationChart {...props} />)
+    const canvas = screen.getByTestId('futures-workstation-chart')
+    canvas.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 320, height: 320, right: 320, bottom: 320,
+    })
+    const order = await screen.findByRole('button', {
+      name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
+    })
+    const series = chartMock.charts[0].series[0]
+
+    fireEvent.pointerDown(order, { pointerId: 21, button: 0, ctrlKey: true })
+    await settle()
+    // Drawn as a destination: no axis label, because no order is there.
+    const pendingLine = priceLinesOf(series).find(line => line.lineStyle === 'Dotted')
+    expect(pendingLine).toMatchObject({ price: 59900, axisLabelVisible: false })
+
+    const surface = dragSurface()
+    fireEvent.pointerMove(surface, { pointerId: 21, clientY: 80, ctrlKey: true })
+    await settle()
+    expect(pendingLine.applyOptions).toHaveBeenCalledWith({ price: 59920 })
+
+    // Moving already, and saying outright that nothing has been lifted yet.
+    expect(screen.getByRole('status', { name: /heading for 59920/ }))
+      .toHaveClass('is-pending')
+    // The order it stands for is still on the book, still drawn where it rests.
+    expect(screen.getByRole('button', {
+      name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
+    })).toHaveTextContent('lifting…')
+
+    const drawnBeforeConfirmation = priceLinesOf(series).length
+    confirmLift({ ok: true })
+    await settle()
+    expect(screen.getByRole('status', {
+      name: /lifted off the book, following the pointer at 59920/,
+    })).not.toHaveClass('is-pending')
+    // Confirmed gone: the resting mark is the one that goes now, and the level
+    // it left is marked where it actually was, not where the pointer had got to.
+    expect(screen.queryByRole('button', {
+      name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
+    })).not.toBeInTheDocument()
+    expect(series.removePriceLine).toHaveBeenCalledWith(pendingLine)
+    expect(priceLinesOf(series).slice(drawnBeforeConfirmation)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ price: 59900, lineStyle: 'Dotted', axisLabelVisible: false }),
+        expect.objectContaining({ price: 59920, lineStyle: 'Dashed', axisLabelVisible: true }),
+      ]),
+    )
+  })
+
+  // A drag fast enough to finish inside the round trip is the ordinary case now
+  // that it starts on the pointer. The drop is the operator's move, and it is
+  // honoured where it landed.
+  it('places the replacement where a drop that beat the answer landed', async () => {
+    let confirmLift = null
+    const props = {
+      ...properties([candle(1_784_000_000_000)]),
+      onOrderLift: vi.fn(() => new Promise((resolve) => { confirmLift = resolve })),
+      ownedOrders: [workingOrder()],
+    }
+    render(<FuturesWorkstationChart {...props} />)
+    const canvas = screen.getByTestId('futures-workstation-chart')
+    canvas.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 320, height: 320, right: 320, bottom: 320,
+    })
+    const order = await screen.findByRole('button', {
+      name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
+    })
+
+    fireEvent.pointerDown(order, { pointerId: 22, button: 0, ctrlKey: true })
+    await settle()
+    const surface = dragSurface()
+    fireEvent.pointerMove(surface, { pointerId: 22, clientY: 80, ctrlKey: true })
+    fireEvent.pointerUp(surface, { pointerId: 22, clientY: 80, ctrlKey: true })
+    await settle()
+    // Nothing is owed until the cancellation is confirmed.
+    expect(props.onOrderDrop).not.toHaveBeenCalled()
+
+    confirmLift({ ok: true })
+    await settle()
+    expect(props.onOrderDrop).toHaveBeenCalledExactlyOnceWith({
+      order: expect.objectContaining({ orderId: '71' }),
+      price: '59920',
+      restored: false,
+    })
+  })
+
+  it('restores the origin when a drag is abandoned before the answer arrives', async () => {
+    let confirmLift = null
+    const props = {
+      ...properties([candle(1_784_000_000_000)]),
+      onOrderLift: vi.fn(() => new Promise((resolve) => { confirmLift = resolve })),
+      ownedOrders: [workingOrder()],
+    }
+    render(<FuturesWorkstationChart {...props} />)
+    const canvas = screen.getByTestId('futures-workstation-chart')
+    canvas.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 320, height: 320, right: 320, bottom: 320,
+    })
+    const order = await screen.findByRole('button', {
+      name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
+    })
+
+    fireEvent.pointerDown(order, { pointerId: 23, button: 0, ctrlKey: true })
+    await settle()
+    const surface = dragSurface()
+    fireEvent.pointerMove(surface, { pointerId: 23, clientY: 80, ctrlKey: true })
+    // The modifier was let go before the drop: the drag is abandoned, and the
+    // answer that arrives afterwards puts the order back where it came from.
+    fireEvent.pointerUp(surface, { pointerId: 23, clientY: 80 })
+    await settle()
+
+    confirmLift({ ok: true })
+    await settle()
+    expect(props.onOrderDrop).toHaveBeenCalledExactlyOnceWith({
+      order: expect.objectContaining({ orderId: '71' }),
+      price: '59900',
+      restored: true,
+    })
   })
 
   it('leaves every other order untouched while one is being dragged', async () => {

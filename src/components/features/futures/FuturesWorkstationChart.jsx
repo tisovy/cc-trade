@@ -851,26 +851,39 @@ export const FuturesWorkstationChart = ({
   // What the chart shows once the order has left the book: a dashed line at the
   // price being aimed at, and one faint unlabelled mark at the level it was
   // lifted from. Neither is a working order, and neither is drawn like one.
-  const drawDragLines = useCallback((order, price) => {
+  //
+  // Before the cancellation is answered the order is still on the book and still
+  // drawn there with its own line, so there is nothing to mark an emptied level
+  // with: the faint marker is what says the level is uncovered, and that only
+  // becomes true on the confirmation. Passing no origin is what says so, and the
+  // aim is then drawn thinner, dimmer and without an axis label, because at that
+  // point it is a destination rather than an order.
+  const drawDragLines = useCallback((order, { price, originPrice = null }) => {
     const series = seriesRef.current?.contractSeries
     const value = toNumber(price)
     removeDragPriceLine()
     if (!series || value === null || value <= 0) return
     const intent = describeFuturesOrderIntent(order)
-    dragOriginLineRef.current = series.createPriceLine({
-      price: value,
-      color: 'rgba(126, 143, 166, 0.45)',
-      lineWidth: 1,
-      lineStyle: LineStyle.Dotted,
-      axisLabelVisible: false,
-      title: '',
-    })
+    const origin = toNumber(originPrice)
+    const lifted = origin !== null && origin > 0
+    if (lifted) {
+      dragOriginLineRef.current = series.createPriceLine({
+        price: origin,
+        color: 'rgba(126, 143, 166, 0.45)',
+        lineWidth: 1,
+        lineStyle: LineStyle.Dotted,
+        axisLabelVisible: false,
+        title: '',
+      })
+    }
     dragPriceLineRef.current = series.createPriceLine({
       price: value,
-      color: intent.tone === 'buy' ? '#2bc48a' : '#ef5b69',
-      lineWidth: 2,
-      lineStyle: LineStyle.Dashed,
-      axisLabelVisible: true,
+      color: lifted
+        ? (intent.tone === 'buy' ? '#2bc48a' : '#ef5b69')
+        : (intent.tone === 'buy' ? 'rgba(43, 196, 138, 0.5)' : 'rgba(239, 91, 105, 0.5)'),
+      lineWidth: lifted ? 2 : 1,
+      lineStyle: lifted ? LineStyle.Dashed : LineStyle.Dotted,
+      axisLabelVisible: lifted,
       title: '',
     })
   }, [removeDragPriceLine])
@@ -903,9 +916,14 @@ export const FuturesWorkstationChart = ({
     })
   }, [applyDragLinePrice, publishOrderDrag, releaseDrag])
 
-  // Picking an order up cancels it. The drag begins on the exchange's answer,
-  // never on the fact that the cancellation was sent: a refusal leaves the order
-  // alone, and an unanswered cancellation starts nothing at all.
+  // Picking an order up cancels it, and the gesture runs beside that
+  // cancellation rather than behind it: waiting for the exchange before the mark
+  // would move meant half a second of a chart that ignored the pointer.
+  //
+  // What waits for the answer is what the chart *claims*. Until the cancellation
+  // is confirmed the order is still drawn where it rests, still labelled as being
+  // lifted, and the mark under the pointer is drawn as pending — a refusal
+  // removes that mark and leaves the order exactly where it was.
   const beginOrderDrag = useCallback((event, order) => {
     if (order?.orderKind !== 'REGULAR'
       || event.button !== 0
@@ -930,10 +948,15 @@ export const FuturesWorkstationChart = ({
       status: 'lifting',
       abandoned: false,
       releasedEarly: false,
+      // Where a gesture that finished inside the round trip left the order. The
+      // drop is honoured at the price it landed on once the answer arrives —
+      // restoring the origin instead would throw away the operator's move.
+      releasedRestored: true,
     }
     orderDragRef.current = drag
     shellRef.current?.setPointerCapture?.(event.pointerId)
     publishOrderDrag(drag)
+    drawDragLines(order, { price: drag.price })
     Promise.resolve(onOrderLiftRef.current(order)).then((outcome) => {
       if (outcome?.ok !== true) {
         // Nothing was lifted: the order is still drawn where it rests, and the
@@ -942,8 +965,9 @@ export const FuturesWorkstationChart = ({
         return
       }
       if (drag.abandoned || orderDragRef.current !== drag) {
-        // The gesture ended before Binance answered — the order was cancelled
-        // all the same, so it goes straight back where it was lifted from.
+        // The contract changed under the drag, or the chart was torn down. The
+        // order was cancelled all the same, so it goes back where it was lifted
+        // from — the gesture's own price belongs to a chart that is gone.
         onOrderDropRef.current?.({
           order: drag.order,
           price: drag.originPrice,
@@ -952,9 +976,9 @@ export const FuturesWorkstationChart = ({
         return
       }
       drag.status = 'moving'
-      drawDragLines(order, drag.price)
+      drawDragLines(order, { price: drag.price, originPrice: drag.originPrice })
       publishOrderDrag(drag)
-      if (drag.releasedEarly) settleOrderDrag(drag, { restored: true })
+      if (drag.releasedEarly) settleOrderDrag(drag, { restored: drag.releasedRestored })
     }).catch(() => {
       if (orderDragRef.current === drag) releaseDrag(drag)
     })
@@ -964,9 +988,12 @@ export const FuturesWorkstationChart = ({
     const drag = orderDragRef.current
     const container = containerRef.current
     const series = seriesRef.current?.contractSeries
+    // `lifting` follows the pointer too: the cancellation is in flight, and the
+    // mark that follows is a destination, not a claim that the order has moved.
     if (!drag
       || drag.pointerId !== event.pointerId
-      || drag.status !== 'moving'
+      || (drag.status !== 'moving' && drag.status !== 'lifting')
+      || drag.releasedEarly
       || !container
       || !series) return
     const rect = container.getBoundingClientRect()
@@ -986,17 +1013,20 @@ export const FuturesWorkstationChart = ({
     if (!drag || drag.pointerId !== event.pointerId) return
     event.preventDefault()
     event.stopPropagation()
-    if (drag.status === 'lifting') {
-      // Released before the exchange answered. The lift decides what happens
-      // next; it already knows the gesture is over.
-      drag.releasedEarly = true
-      return
-    }
-    if (drag.status !== 'moving') return
+    if (drag.status !== 'moving' && drag.status !== 'lifting') return
     const modifierHeld = drag.modifier === 'alt'
       ? event.altKey && !event.ctrlKey
       : event.ctrlKey && !event.altKey
-    settleOrderDrag(drag, { restored: canceled || !modifierHeld })
+    const restored = canceled || !modifierHeld
+    if (drag.status === 'lifting') {
+      // Released before the exchange answered. The lift discharges it when the
+      // answer arrives — at the price the gesture actually ended on, which is
+      // why that verdict is recorded here rather than assumed to be the origin.
+      drag.releasedEarly = true
+      drag.releasedRestored = restored
+      return
+    }
+    settleOrderDrag(drag, { restored })
   }, [settleOrderDrag])
 
   // Letting the modifier go abandons the drag rather than leaving it hanging:
@@ -1018,7 +1048,7 @@ export const FuturesWorkstationChart = ({
   // so it carries what the operator needs to recognise it — side and size — and
   // says outright whether it is following the pointer or being placed.
   const liftedMark = useMemo(() => {
-    if (orderDrag === null || orderDrag.status === 'lifting' || orderDrag.y === null) return null
+    if (orderDrag === null || orderDrag.y === null) return null
     const intent = describeFuturesOrderIntent(orderDrag.order)
     return Object.freeze({
       tone: intent.tone,
@@ -1028,6 +1058,9 @@ export const FuturesWorkstationChart = ({
       price: orderDrag.price,
       y: orderDrag.y,
       placing: orderDrag.status === 'placing',
+      // Following the pointer while the order it stands for is still on the
+      // book. Drawn as a destination, not as an order.
+      pending: orderDrag.status === 'lifting',
     })
   }, [orderDrag])
 
@@ -1078,12 +1111,14 @@ export const FuturesWorkstationChart = ({
       <div className="futures-workstation-owned-order-layer" aria-label="Owned Futures orders">
         {liftedMark === null ? null : (
           <div
-            className={`futures-workstation-owned-order is-${liftedMark.tone} is-lifted${liftedMark.placing ? ' is-placing' : ''}`}
+            className={`futures-workstation-owned-order is-${liftedMark.tone} is-lifted${liftedMark.placing ? ' is-placing' : ''}${liftedMark.pending ? ' is-pending' : ''}`}
             style={{ top: `${liftedMark.y}px` }}
             role="status"
             aria-label={liftedMark.placing
               ? `${liftedMark.side} ${liftedMark.label} order being placed at ${liftedMark.price}; nothing rests at that price yet`
-              : `${liftedMark.side} ${liftedMark.label} order lifted off the book, following the pointer at ${liftedMark.price}`}
+              : liftedMark.pending
+                ? `${liftedMark.side} ${liftedMark.label} order heading for ${liftedMark.price}; it is still working where it rests until the cancellation is confirmed`
+                : `${liftedMark.side} ${liftedMark.label} order lifted off the book, following the pointer at ${liftedMark.price}`}
           >
             {/* The same plate a resting order is drawn on. Left as bare children
                 of the handle, the label and the value fell outside every rule

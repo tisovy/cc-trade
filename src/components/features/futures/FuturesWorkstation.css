@@ -819,6 +819,20 @@
   50% { opacity: 0.45; }
 }
 
+/* The mark following the pointer while the cancellation is still in flight. It
+   stands for where the order is going, not for an order — the real one is drawn
+   at its resting price at the same time. Held at half strength and outlined
+   rather than filled, so the two are never read as two orders. */
+.futures-workstation-owned-order.is-lifted.is-pending {
+  opacity: 0.55;
+}
+
+.futures-workstation-owned-order.is-lifted.is-pending .futures-workstation-owned-order-plate {
+  border-style: dotted;
+  background: rgba(5, 12, 19, 0.5);
+  box-shadow: none;
+}
+
 /* The cancellation that lifts it is still in flight, so the order is still on
    the book and still drawn as one — dimmed, because it is on its way off. */
 .futures-workstation-owned-order.is-lifting {
