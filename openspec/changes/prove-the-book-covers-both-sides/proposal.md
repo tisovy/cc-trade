@@ -69,7 +69,12 @@ book badged `LIVE` for all of it — during the move they opened the contract fo
 - `electron/services/futures-workstation-order-book.js`,
   `electron/services/futures-production-workstation-service.js`,
   `src/utils/futuresWorkstationProtocolShared.js`,
-  `src/hooks/useFuturesProductionWorkstation.js`.
+  `src/hooks/useFuturesProductionWorkstation.js`,
+  `src/components/features/futures/FuturesWorkstationView.jsx` (it restores a
+  contract's stored step while rendering, so the reading it states is the one the
+  request carries, and it keeps the levels of a short book selectable).
+- The protocol revision goes to 8: the request that selects a contract may carry
+  the reading its rows need.
 - The operator sees `STALE` on the book where they saw a green badge over missing
   rows. Nothing that was drawn correctly changes.
 - Modifies two requirements in `futures-workstation-presentation`.
