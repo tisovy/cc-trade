@@ -9,6 +9,7 @@ import {
 import {
     FUTURES_PRODUCTION_WORKSTATION_FIXTURE,
 } from './futures-production-workstation-fixtures.js';
+import { FUTURES_WORKSTATION_EVENT_MAX_BYTES } from '../../src/utils/futuresWorkstationProtocolShared.js';
 import {
     createFuturesProductionWorkstationConfigureDepthRequest,
     createFuturesProductionWorkstationConfigureTapeRequest,
@@ -153,6 +154,62 @@ describe('production Futures workstation service', () => {
         expect(header.channelId).toBe('futures-production-workstation');
         expect(header.payload.lastPrice).toBe('58445.00');
         expect(events.at(-1)).toMatchObject({ resource: 'status', state: 'live' });
+    });
+
+    // The string measured against the byte ceiling used to be thrown away and
+    // built again on the way out of the main process. On a real book that is
+    // 0.15 ms a frame, ten frames a second, for a number the first serialization
+    // already knew.
+    it('hands the frame it measured to whatever delivers it', async () => {
+        const runtime = track(createFuturesProductionWorkstationRuntime());
+        const delivered = [];
+        await runtime.service.handleRequest(productionRequest('service-serialized-once'), {
+            emit: (event, frame) => delivered.push([event, frame]),
+        });
+
+        expect(delivered.length).toBeGreaterThan(0);
+        for (const [event, frame] of delivered) {
+            expect(typeof frame).toBe('string');
+            expect(frame).toBe(JSON.stringify(event));
+        }
+    });
+
+    // Measuring the string that is sent must not change what happens to a frame
+    // too large to send: it is refused, and nothing is delivered.
+    it('still refuses an event past the byte ceiling', async () => {
+        const runtime = track(createFuturesProductionWorkstationRuntime());
+        const delivered = [];
+        await runtime.service.handleRequest(productionRequest('service-oversized'), {
+            emit: event => delivered.push(event),
+        });
+        const session = runtime.service.current;
+        const before = delivered.length;
+
+        // Structurally valid to the last level — a full ladder of the longest
+        // decimals the protocol accepts — and still past what may be sent.
+        const decimal = `1${'0'.repeat(30)}.${'1'.repeat(30)}`;
+        const side = Array.from({ length: 1_000 }, () => Object.freeze({
+            price: decimal,
+            quantity: decimal,
+        }));
+        let refusal = null;
+        try {
+            runtime.service.emitResource(
+                session,
+                'depth',
+                'live',
+                Object.freeze({
+                    lastUpdateId: '1',
+                    bids: side,
+                    asks: side,
+                    spread: '0.01',
+                }),
+            );
+        } catch (error) {
+            refusal = error;
+        }
+        expect(refusal?.code).toBe('OUTBOUND_FRAME_TOO_LARGE');
+        expect(delivered).toHaveLength(before);
     });
 
     it('reports a bounded aggregate-ready duration without exposing market payloads', async () => {

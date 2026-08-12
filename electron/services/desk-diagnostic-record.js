@@ -73,6 +73,9 @@ const RESULT = /^(?:rejected|unresolved|resolved)$/;
 const EXCHANGE_CODE_NUMBER = /^-?\d{1,6}$/;
 const EXCHANGE_CODE_NAME = /^[A-Z][A-Z0-9_]{0,39}$/;
 const EVENT = /^(?:started|stopped)$/;
+// The desk's own name for a stream of market data — `depth`, `candles`,
+// `trades`, `ticker`. Same shape as the workstation protocol's resource names.
+const RESOURCE = /^[a-z][a-zA-Z0-9]{0,31}$/;
 const VERSION = /^[0-9][0-9A-Za-z.+-]{0,31}$/;
 
 const text = pattern => value => (
@@ -127,6 +130,17 @@ const RECORDED_FIELDS = Object.freeze({
         ['symbol', text(SYMBOL)],
         ['state', text(STATE)],
         ['code', optional(text(CODE))],
+    ]),
+    // Market data the desk did not send because a newer frame for the same thing
+    // was already waiting on a socket the renderer had not drained. Written when
+    // the backlog clears, one line per resource, never one per frame — the case
+    // worth recording is a socket blocked for a minute at ten books a second, and
+    // that is exactly the case where the record must not become the problem.
+    backlog: Object.freeze([
+        ['resource', optional(text(RESOURCE))],
+        ['symbol', optional(text(SYMBOL))],
+        ['superseded', count],
+        ['dropped', count],
     ]),
     // What the desk was told to do — contract, side, type, identity — and never
     // what it was worth. A trade journal is a different decision.

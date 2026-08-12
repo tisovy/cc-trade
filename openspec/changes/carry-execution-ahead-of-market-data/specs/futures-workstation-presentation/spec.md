@@ -9,10 +9,27 @@ latest-wins: a frame still waiting to be accepted by the socket SHALL be replace
 by a newer frame for the same resource rather than both being queued behind each
 other.
 
+Only a resource that repeats everything the frame before it said may be
+superseded. A book, a header, a tape window and a candle series each state the
+whole of what they are, so the newer frame says everything the undelivered older
+one said. A catalog page, a history page and a status line do not: a catalog is
+assembled by offset and a dropped page discards the whole of it, a history page
+is the answer to one request, and a status line names a cause the next line does
+not repeat. Those SHALL be queued as market data and never replaced. A resource
+carried on more than one series SHALL be superseded per series, since one series
+is not a newer statement of another.
+
 The transport SHALL account for what the socket has not yet accepted, and SHALL
 supersede rather than stack when it is behind. What was superseded SHALL be
 counted per resource and made available to the diagnostic record, because a frame
-dropped without a count is indistinguishable from a market that went quiet.
+dropped without a count is indistinguishable from a market that went quiet. That
+count SHALL be stated when a backlog clears rather than per superseded frame: the
+backlog worth recording is a socket blocked for a minute at the exchange's full
+cadence, which is exactly when a line per frame would cost more than it tells.
+
+"Without loss" SHALL have a stated end. A renderer that has not accepted a
+bounded number of queued account frames SHALL be closed rather than served a hole
+in its own account state, and reads the account again when it reconnects.
 
 #### Scenario: A fill lands during a depth backlog
 - **WHEN** an execution report is issued while depth frames are queued and not yet accepted by the socket
@@ -25,6 +42,18 @@ dropped without a count is indistinguishable from a market that went quiet.
 #### Scenario: Account traffic is never superseded
 - **WHEN** two account frames are queued and the transport is behind
 - **THEN** both are delivered, because an account fact is not replaced by a later one the way a quote is
+
+#### Scenario: A paged resource is queued while the transport is behind
+- **WHEN** a catalog page, a history page or a status line is queued behind an unaccepted send
+- **THEN** it is delivered rather than replaced by a later frame of the same resource, because it states part of something and not the whole of it
+
+#### Scenario: A contract's two candle series are both waiting
+- **WHEN** the contract's own series and the index series are queued for the same contract
+- **THEN** each is superseded only by a newer frame of its own series
+
+#### Scenario: A renderer stops taking its account traffic
+- **WHEN** a renderer has not accepted a bounded number of queued account frames
+- **THEN** it is closed rather than served a hole in its account state, and reads the account again on reconnect
 
 ### Requirement: A delivered frame is serialized once and parsed once
 A workstation event SHALL be serialized once on the way out: the representation

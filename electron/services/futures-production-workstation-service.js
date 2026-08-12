@@ -529,10 +529,15 @@ export class FuturesProductionWorkstationService {
             observedAt: this.observedNow(session),
             payload,
         });
-        if (Buffer.byteLength(JSON.stringify(event), 'utf8') > FUTURES_WORKSTATION_EVENT_MAX_BYTES) {
+        // Serialized once. The string measured against the ceiling is the string
+        // that is sent — measuring one and sending another meant serializing a
+        // hundred-and-eighteen-kilobyte book twice, ten times a second, for a
+        // number the first serialization already knew.
+        const frame = JSON.stringify(event);
+        if (Buffer.byteLength(frame, 'utf8') > FUTURES_WORKSTATION_EVENT_MAX_BYTES) {
             throw new FuturesProductionWorkstationServiceError('OUTBOUND_FRAME_TOO_LARGE');
         }
-        session.emit(event);
+        session.emit(event, frame);
         return true;
     }
 

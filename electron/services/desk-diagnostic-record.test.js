@@ -146,6 +146,34 @@ describe('describeDeskDiagnosticEvent', () => {
         }
     });
 
+    // What a renderer that fell behind was not sent. It is a count of frames,
+    // never the frames themselves.
+    it('keeps what a backlog superseded and what it dropped', () => {
+        expect(describeDeskDiagnosticEvent('backlog', {
+            resource: 'depth',
+            symbol: 'BTCUSDT',
+            superseded: 19,
+            dropped: 0,
+        })).toEqual({
+            kind: 'backlog',
+            resource: 'depth',
+            symbol: 'BTCUSDT',
+            superseded: 19,
+            dropped: 0,
+        });
+        // A frame nothing names — a ticker batch — states no resource and no
+        // contract, and is still worth counting.
+        expect(describeDeskDiagnosticEvent('backlog', {
+            resource: 'ticker',
+            symbol: null,
+            superseded: 0,
+            dropped: 5,
+        })).not.toBeNull();
+        expect(describeDeskDiagnosticEvent('backlog', {
+            resource: 'depth', symbol: 'BTCUSDT', superseded: '19', dropped: 0,
+        })).toBeNull();
+    });
+
     it('refuses a kind it does not keep', () => {
         expect(describeDeskDiagnosticEvent('console', { line: 'anything' })).toBeNull();
         expect(describeDeskDiagnosticEvent('toString', { phase: 'a', code: 'B' })).toBeNull();

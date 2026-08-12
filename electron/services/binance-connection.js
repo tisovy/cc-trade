@@ -73,6 +73,7 @@ import {
     createFuturesProductionWorkstationRuntime,
 } from './futures-production-workstation-composition.js';
 import { DESK_DIAGNOSTICS_UNRECORDED } from './desk-diagnostic-record.js';
+import { RENDERER_OUTBOX_LANES, createRendererOutbox } from './renderer-outbox.js';
 import {
     isPotentialFuturesProductionWorkstationFrame,
 } from '../../src/utils/futuresProductionWorkstationProtocol.js';
@@ -585,10 +586,61 @@ const applyLogMasking = (() => {
     };
 })();
 
-const sendJSON = (connection, payload) => {
+// Which lane a frame leaves on is stated where it is sent, by the code that
+// knows what the frame is — not derived at the far end from its shape, and not
+// guessed here. Account traffic is the default: mistaking market data for
+// account traffic costs the desk an optimization, mistaking account traffic for
+// market data costs the operator a fill.
+const ACCOUNT_FRAME = Object.freeze({ lane: RENDERER_OUTBOX_LANES.ACCOUNT });
+const marketFrame = (resource, symbol = null, { supersede = false, variant = null } = {}) => (
+    Object.freeze({
+        lane: RENDERER_OUTBOX_LANES.MARKET,
+        resource,
+        symbol,
+        variant,
+        supersede,
+    })
+);
+
+// A book, a header, a tape and a candle series each state the whole of what they
+// are, so a newer frame says everything an undelivered older one said and may
+// stand in its place. The three left out cannot: a catalog arrives in pages a
+// renderer assembles by offset, a history page is the answer to one request, and
+// a status line names a cause that the next line does not repeat.
+const SUPERSEDABLE_WORKSTATION_RESOURCES = new Set(['depth', 'header', 'candles', 'trades']);
+
+// The whole workstation is market data — its account traffic goes out on the
+// futures envelopes, not on this channel. Kept in one lane and in one order, so
+// a status line still arrives after the book it describes.
+const workstationFrameDelivery = payload => marketFrame(
+    typeof payload?.resource === 'string' ? payload.resource : null,
+    typeof payload?.symbol === 'string' ? payload.symbol : null,
+    {
+        supersede: SUPERSEDABLE_WORKSTATION_RESOURCES.has(payload?.resource),
+        // The contract's own series and the index series replace themselves
+        // independently; one is not a newer statement of the other.
+        variant: typeof payload?.payload?.series === 'string' ? payload.payload.series : null,
+    },
+);
+
+// Every renderer connection carries one of these from the moment it is accepted.
+// Held beside the connection rather than on it, so nothing this desk sends can
+// collide with a property the WebSocket library owns.
+const rendererOutboxes = new WeakMap();
+
+const sendFrameText = (connection, text, delivery = ACCOUNT_FRAME) => {
+    const outbox = rendererOutboxes.get(connection);
+    if (outbox) return outbox.send(text, delivery);
     if (connection && connection.connected) {
-        connection.sendUTF(JSON.stringify(payload));
+        connection.sendUTF(text);
+        return true;
     }
+    return false;
+};
+
+const sendJSON = (connection, payload, delivery = ACCOUNT_FRAME) => {
+    if (!connection || !connection.connected) return false;
+    return sendFrameText(connection, JSON.stringify(payload), delivery);
 };
 
 // Simple Depth Cache to maintain order book state
@@ -877,12 +929,10 @@ export function setupBinanceConnection({
     const futuresRendererConnections = new Set();
 
     // Broadcast to all connected renderers
-    const broadcastToRenderers = (payload) => {
+    const broadcastToRenderers = (payload, delivery = ACCOUNT_FRAME) => {
         const message = JSON.stringify(payload);
         for (const conn of rendererConnections) {
-            if (conn.connected) {
-                conn.sendUTF(message);
-            }
+            sendFrameText(conn, message, delivery);
         }
     };
 
@@ -1654,6 +1704,18 @@ export function setupBinanceConnection({
         
         // Track this renderer connection
         rendererConnections.add(connection);
+
+        // Two lanes out of here from this point on: account traffic ahead of
+        // market data, and market data replaced rather than stacked when this
+        // renderer is behind. What was replaced is stated to the record when the
+        // backlog clears; a renderer that will not take its account traffic at
+        // all is closed rather than served a hole in it.
+        rendererOutboxes.set(connection, createRendererOutbox(connection, {
+            onBacklog: entry => diagnosticRecord.record('backlog', entry),
+            onOverflow: () => logger.warn(
+                '[renderer-outbox] Closing a renderer that stopped draining its account traffic',
+            ),
+        }));
 
         let panelSettings = {};
         let activeRequestId = null;
@@ -3096,7 +3158,11 @@ export function setupBinanceConnection({
                 message.last_tick = extra;
             }
 
-            sendJSON(connection, message);
+            // Market data, but not superseded: what a legacy channel frame
+            // carries — a chart page, a trade batch — is not always the whole of
+            // what it describes, and only a frame that repeats everything the
+            // last one said may replace it.
+            sendJSON(connection, message, marketFrame(type, channel.symbol));
         };
 
         /**
@@ -3127,7 +3193,7 @@ export function setupBinanceConnection({
                     const snapshot = await ensureTickerSnapshot();
                     if (snapshot?.length) {
                         const payload = snapshot.map((entry) => ({ ...entry }));
-                        sendJSON(connection, { ticker: payload });
+                        sendJSON(connection, { ticker: payload }, marketFrame('ticker'));
                     }
                 } catch (err) {
                     logger.error("Ticker24 Error:", err);
@@ -3226,7 +3292,9 @@ export function setupBinanceConnection({
                             });
                             if (batch.length) {
                                 // Broadcast a single coalesced frame to ALL renderers.
-                                broadcastToRenderers({ ticker_batch: batch });
+                                // A batch states what changed, not what is, so a
+                                // newer one cannot stand in for it.
+                                broadcastToRenderers({ ticker_batch: batch }, marketFrame('ticker'));
                             }
                         });
                         globalWsConnection.on('error', (err) => {
@@ -3770,9 +3838,13 @@ export function setupBinanceConnection({
                         {
                             // The workspace's status line is the only place a
                             // resynchronization names its cause.
-                            emit: (payload) => {
+                            emit: (payload, frame) => {
                                 diagnosticRecord.observeOutbound(payload);
-                                sendJSON(connection, payload);
+                                sendFrameText(
+                                    connection,
+                                    frame ?? JSON.stringify(payload),
+                                    workstationFrameDelivery(payload),
+                                );
                             },
                         },
                     );
@@ -3984,6 +4056,8 @@ export function setupBinanceConnection({
             logger.info("Peer " + connection.remoteAddress + " disconnected.");
 
             // Remove this renderer from tracking
+            rendererOutboxes.get(connection)?.dispose();
+            rendererOutboxes.delete(connection);
             rendererConnections.delete(connection);
             spotRendererConnections.delete(connection);
             futuresRendererConnections.delete(connection);

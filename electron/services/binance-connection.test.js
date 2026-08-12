@@ -4782,6 +4782,72 @@ describe('setupBinanceConnection user-data orchestration', () => {
         });
     });
 
+    // Account traffic and market data used to leave here down one pipe in one
+    // order: "the order was filled" is a few hundred bytes and it waited behind
+    // every book the renderer had not drained.
+    describe('the two lanes out of the main process', () => {
+        const sendWorkstationSubscribe = () => moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify(createFuturesProductionWorkstationSubscribeRequest({
+                requestId: 'lanes-1',
+                symbol: 'BTCUSDT',
+                interval: '1m',
+            })),
+        });
+
+        it('delivers a command outcome ahead of the market frames already queued', async () => {
+            await connectRenderer('futures-live');
+            // The socket takes the frame that fills it and buffers everything
+            // after — which is exactly when the lanes matter.
+            moduleMocks.rendererConnection.outputBufferFull = true;
+            await sendWorkstationSubscribe();
+            await flushMicrotasks();
+            expect(moduleMocks.rendererConnection.sendUTF.mock.calls.length).toBeGreaterThan(0);
+
+            const queuedBefore = moduleMocks.rendererConnection.sendUTF.mock.calls.length;
+            await placeFuturesOrder('lane-order-1');
+            await flushMicrotasks();
+            expect(moduleMocks.rendererConnection.sendUTF).toHaveBeenCalledTimes(queuedBefore);
+
+            moduleMocks.rendererConnection.outputBufferFull = false;
+            moduleMocks.rendererHandlers.drain();
+
+            const drained = emitted().slice(queuedBefore);
+            const outcome = drained.findIndex(payload => payload.futures_execution_update);
+            const marketFrame = drained.findIndex(payload => (
+                payload.type === FUTURES_PRODUCTION_WORKSTATION_EVENT_TYPE
+            ));
+            expect(outcome).toBeGreaterThanOrEqual(0);
+            expect(marketFrame).toBeGreaterThanOrEqual(0);
+            expect(outcome).toBeLessThan(marketFrame);
+        });
+
+        // The string measured against the byte ceiling is the string that is
+        // sent. It used to be measured, thrown away, and built again on the way
+        // out — 0.15 ms a frame, ten frames a second, for a number the first one
+        // already knew.
+        it('serializes a workstation event once', async () => {
+            const stringify = vi.spyOn(JSON, 'stringify');
+            try {
+                await connectRenderer('futures-live');
+                stringify.mockClear();
+                await sendWorkstationSubscribe();
+                await flushMicrotasks();
+
+                const serializations = stringify.mock.calls.filter(([value]) => (
+                    value?.type === FUTURES_PRODUCTION_WORKSTATION_EVENT_TYPE
+                ));
+                const delivered = emitted().filter(payload => (
+                    payload.type === FUTURES_PRODUCTION_WORKSTATION_EVENT_TYPE
+                ));
+                expect(delivered.length).toBeGreaterThan(0);
+                expect(serializations).toHaveLength(delivered.length);
+            } finally {
+                stringify.mockRestore();
+            }
+        });
+    });
+
     // The audit's amendment case, checked where the renderer cannot be trusted
     // to have checked it: these frames are hand-built and never passed through
     // any renderer gate.
