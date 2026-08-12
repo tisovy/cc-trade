@@ -58,6 +58,7 @@ export const describeFuturesOrderConfirmation = ({
   notionalUsdt = null,
   leverage = null,
   positions = [],
+  priceReading = null,
 } = {}) => {
   if (!action) return null
   const orderQuantity = toFiniteNumber(quantity)
@@ -118,6 +119,10 @@ export const describeFuturesOrderConfirmation = ({
     price,
     quantity,
     notionalUsdt,
+    // Where this price was taken from, when it was taken off a surface that
+    // could not vouch for it. A price the operator typed carries none, and the
+    // panel states nothing about its age — there is nothing to state.
+    priceReading: priceReading?.live === false ? priceReading : null,
     // The terms the position will be carried at. A whole multiple the exchange
     // stated, or null: a leverage nobody reported must not become a number here
     // of all places, and an operator reading "1×" where the contract is at 20×

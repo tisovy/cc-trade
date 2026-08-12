@@ -44,6 +44,11 @@ export const FuturesProductionWorkstation = ({
   const [interval, setInterval] = useState(DEFAULT_FUTURES_INTERVAL)
   const [uiScale, setUiScale] = useState(() => readUiScale())
   const [draftPrice, setDraftPrice] = useState(null)
+  // Where the working price came from, when it came off a surface rather than a
+  // keyboard. It rides beside the price rather than inside it so a typed price
+  // stays exactly what it has always been: the operator's own number, with no
+  // reading and no age to state about it.
+  const [draftPriceReading, setDraftPriceReading] = useState(null)
   const [gestureRequest, setGestureRequest] = useState(null)
   const [orderEditor, setOrderEditor] = useState(null)
   const [positionCloser, setPositionCloser] = useState(null)
@@ -96,8 +101,14 @@ export const FuturesProductionWorkstation = ({
     setSizeRequest({ id: sizeSequenceRef.current, quantity })
   }, [])
 
+  const handleDraftPriceChange = useCallback((price, reading = null) => {
+    setDraftPrice(price)
+    setDraftPriceReading(reading ?? null)
+  }, [])
+
   const handleSymbolChange = useCallback((nextSymbol) => {
     setDraftPrice(null)
+    setDraftPriceReading(null)
     setGestureRequest(null)
     setOrderEditor(null)
     setSizeRequest(null)
@@ -289,6 +300,7 @@ export const FuturesProductionWorkstation = ({
   const handleTradingGesture = useCallback((gesture) => {
     gestureSequenceRef.current += 1
     setDraftPrice(gesture.price)
+    setDraftPriceReading(gesture.reading ?? null)
     setGestureRequest({ ...gesture, id: gestureSequenceRef.current })
   }, [])
 
@@ -297,7 +309,12 @@ export const FuturesProductionWorkstation = ({
   const handleOrderLift = useCallback(order => orderDrag.lift(order), [orderDrag])
 
   const handleOrderDrop = useCallback(({ price, restored }) => {
-    if (!restored && typeof price === 'string') setDraftPrice(price)
+    // A dragged price is the operator's own placement, not a reading taken off
+    // a surface, so it clears whatever reading the draft was carrying.
+    if (!restored && typeof price === 'string') {
+      setDraftPrice(price)
+      setDraftPriceReading(null)
+    }
     return orderDrag.drop({ price, restored })
   }, [orderDrag])
 
@@ -374,9 +391,10 @@ export const FuturesProductionWorkstation = ({
       leverage={executionState?.symbolConfigs?.[symbol]?.leverage ?? null}
       onLeverageEdit={handleLeverageEdit}
       draftPrice={draftPrice}
+      draftPriceReading={draftPriceReading}
       gestureRequest={gestureRequest}
       sizeRequest={sizeRequest}
-      onDraftPriceChange={setDraftPrice}
+      onDraftPriceChange={handleDraftPriceChange}
       onOrderEdit={handleOrderEdit}
       onPositionClose={handlePositionClose}
     />
@@ -424,7 +442,7 @@ export const FuturesProductionWorkstation = ({
         uiScale={uiScale}
         onToggleFavorite={handleToggleFavorite}
         onUiScaleChange={handleUiScaleChange}
-        onDraftPriceChange={setDraftPrice}
+        onDraftPriceChange={handleDraftPriceChange}
         onTradingGesture={handleTradingGesture}
         onOrderLift={handleOrderLift}
         onOrderDrop={handleOrderDrop}

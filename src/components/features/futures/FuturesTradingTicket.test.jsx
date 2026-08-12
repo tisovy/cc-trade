@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import FuturesTradingTicket from './FuturesTradingTicket.jsx'
 
@@ -687,6 +687,108 @@ describe('FuturesTradingTicket', () => {
     const panel = screen.getByRole('alertdialog')
     expect(within(panel).getByTitle('This position will be carried at 20× leverage'))
       .toHaveTextContent('20×')
+  })
+
+  // The desk stopped refusing a click on a chart that is not live, so the thing
+  // it owes the operator instead is the age of the number that click produced —
+  // in the last second before the order goes.
+  it('confirms a price taken off a non-live surface with its age', () => {
+    const state = createState()
+    const props = {
+      state, selectedSymbol: 'BTCUSDT', selectedContract: contract, draftPrice: '58445.0',
+    }
+    const reading = Object.freeze({
+      surface: 'chart',
+      surfaceLabel: 'chart',
+      state: 'quiet',
+      live: false,
+      observedAt: Date.now() - 47_000,
+    })
+    const { rerender } = render(<FuturesTradingTicket {...props} draftPriceReading={reading} />)
+    sizeTo(25)
+    // Stated on the ticket too, while the operator is still sizing the order.
+    expect(document.querySelector('.futures-production-price-age'))
+      .toHaveTextContent(/^QUIET chart · 4[67]s old$/)
+
+    rerender(<FuturesTradingTicket
+      {...props}
+      draftPriceReading={reading}
+      gestureRequest={{
+        id: 1, side: 'BUY', positionSide: 'LONG', positionEffect: 'ENTRY', price: '58445.0', reading,
+      }}
+    />)
+    const panel = screen.getByRole('alertdialog')
+    expect(within(panel).getByText(/^QUIET chart · 4[67]s old$/)).toBeInTheDocument()
+  })
+
+  it('states no age for a live reading or for a price the operator typed', () => {
+    const state = createState()
+    const props = {
+      state, selectedSymbol: 'BTCUSDT', selectedContract: contract, draftPrice: '58445.0',
+    }
+    const live = Object.freeze({
+      surface: 'order-book',
+      surfaceLabel: 'order book',
+      state: 'live',
+      live: true,
+      observedAt: Date.now() - 47_000,
+    })
+    const { rerender } = render(<FuturesTradingTicket {...props} draftPriceReading={live} />)
+    sizeTo(25)
+    expect(document.querySelector('.futures-production-price-age')).toBeNull()
+
+    rerender(<FuturesTradingTicket
+      {...props}
+      draftPriceReading={live}
+      gestureRequest={{
+        id: 1, side: 'BUY', positionSide: 'LONG', positionEffect: 'ENTRY', price: '58445.0', reading: live,
+      }}
+    />)
+    expect(within(screen.getByRole('alertdialog')).queryByText(/old$/)).not.toBeInTheDocument()
+
+    // A typed price carries no reading at all, and the panel says nothing about
+    // an age it has no business claiming to know.
+    rerender(<FuturesTradingTicket
+      {...props}
+      draftPriceReading={null}
+      gestureRequest={{
+        id: 2, side: 'BUY', positionSide: 'LONG', positionEffect: 'ENTRY', price: '58445.0',
+      }}
+    />)
+    expect(within(screen.getByRole('alertdialog')).queryByText(/old$/)).not.toBeInTheDocument()
+  })
+
+  // A panel left open while the operator thinks about it must not still claim
+  // the price is four seconds old a minute later.
+  it('counts the age up while the confirmation stays open', () => {
+    vi.useFakeTimers()
+    try {
+      const state = createState()
+      const reading = Object.freeze({
+        surface: 'chart',
+        surfaceLabel: 'chart',
+        state: 'stale',
+        live: false,
+        observedAt: Date.now() - 4_000,
+      })
+      const props = {
+        state, selectedSymbol: 'BTCUSDT', selectedContract: contract, draftPrice: '58445.0',
+      }
+      const { rerender } = render(<FuturesTradingTicket {...props} />)
+      sizeTo(25)
+      rerender(<FuturesTradingTicket
+        {...props}
+        gestureRequest={{
+          id: 1, side: 'BUY', positionSide: 'LONG', positionEffect: 'ENTRY', price: '58445.0', reading,
+        }}
+      />)
+      const panel = screen.getByRole('alertdialog')
+      expect(within(panel).getByText('STALE chart · 4s old')).toBeInTheDocument()
+      act(() => { vi.advanceTimersByTime(30_000) })
+      expect(within(panel).getByText('STALE chart · 34s old')).toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   // A multiple nobody reported must not be printed as one: an operator reading

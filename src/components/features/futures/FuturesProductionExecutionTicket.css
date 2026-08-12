@@ -1345,3 +1345,41 @@
   font-size: calc(var(--fx-ui-scale, 1) * 11.5px);
   font-weight: 700;
 }
+
+/* How old the price is, stated where it is acted on. Read at the weight of a
+   reading rather than a warning: the desk is not objecting to the order, it is
+   telling the operator what the number behind it is. */
+.futures-production-price-age,
+.futures-order-confirm-age {
+  margin: 0;
+  color: var(--production-muted);
+  font-size: calc(var(--fx-ui-scale, 1) * 11px);
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+.futures-order-confirm-age {
+  padding: 0 2px;
+}
+
+/* Nothing failed on a quiet market, so nothing here is coloured as a failure. */
+.futures-production-price-age.is-quiet,
+.futures-order-confirm-age.is-quiet {
+  color: #9fb0c2;
+}
+
+.futures-production-price-age.is-stale,
+.futures-production-price-age.is-disconnected,
+.futures-production-price-age.is-unavailable,
+.futures-order-confirm-age.is-stale,
+.futures-order-confirm-age.is-disconnected,
+.futures-order-confirm-age.is-unavailable {
+  color: #ff8490;
+}
+
+.futures-production-price-age.is-loading,
+.futures-production-price-age.is-resynchronizing,
+.futures-order-confirm-age.is-loading,
+.futures-order-confirm-age.is-resynchronizing {
+  color: #f0c94e;
+}

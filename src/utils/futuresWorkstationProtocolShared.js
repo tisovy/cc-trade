@@ -964,6 +964,19 @@ export const transitionFuturesWorkstationConnectionState = (state, status, reaso
   })
 }
 
+// When this resource was last live, carried forward across every state that is
+// not. A resource the freshness monitor marks stale is re-emitted with the time
+// of the *marking*, not the time its data arrived, so `observedAt` alone dates
+// the desk's own bookkeeping and is younger than the reading by the whole
+// freshness window. A price picked off a surface is confirmed with the age of
+// the last reading the desk could vouch for, and understating that age is the
+// one direction that costs the operator money.
+const carryLiveObservedAt = (previous, event) => (
+  event.state === FUTURES_WORKSTATION_STATES.LIVE
+    ? event.observedAt
+    : previous?.liveObservedAt ?? null
+)
+
 export const applyFuturesWorkstationEvent = (state, event) => {
   const generationChanged = event.generation > state.generation
   const generationResources = generationChanged
@@ -1012,12 +1025,14 @@ export const applyFuturesWorkstationEvent = (state, event) => {
       [event.payload.series]: event.payload.rows,
       state: event.state,
       observedAt: event.observedAt,
+      liveObservedAt: carryLiveObservedAt(previous, event),
     })
   } else {
     nextResources[event.resource] = Object.freeze({
       ...event.payload,
       state: event.state,
       observedAt: event.observedAt,
+      liveObservedAt: carryLiveObservedAt(baseResources[event.resource], event),
     })
   }
 

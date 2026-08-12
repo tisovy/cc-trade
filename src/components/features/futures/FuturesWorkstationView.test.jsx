@@ -13,7 +13,7 @@ const workstationViewMocks = vi.hoisted(() => ({
 vi.mock('./FuturesWorkstationChart.jsx', async () => {
   const { memo } = await import('react')
   const MockFuturesWorkstationChart = (
-    { onPricePick, onTradingGesture, priceTickSize, draftPrice, drawings, alerts },
+    { onPricePick, onTradingGesture, onOrderLift, priceTickSize, draftPrice, drawings, alerts },
   ) => {
     workstationViewMocks.chartRender()
     return (
@@ -22,6 +22,13 @@ vi.mock('./FuturesWorkstationChart.jsx', async () => {
         <button type="button" onClick={() => onTradingGesture?.({
           side: 'BUY', positionSide: 'LONG', positionEffect: 'ENTRY', price: '58420.25', source: 'chart',
         })}>Chart LONG shortcut</button>
+        <button
+          type="button"
+          disabled={typeof onOrderLift !== 'function'}
+          onClick={() => onOrderLift?.({ orderId: '77' })}
+        >
+          Lift chart order
+        </button>
         <span>price tick {priceTickSize ?? 'unavailable'}</span>
         <span>draft {draftPrice ?? 'none'}</span>
         <span>drawings {drawings.length}</span>
@@ -164,13 +171,17 @@ const createState = (overrides = {}) => Object.freeze({
       state: 'live',
       observedAt: 1_784_000_000_000,
     }),
+    // A candle on it, at the header's own last price so nothing that reads the
+    // last price reads differently for it. A chart with no candle at all is a
+    // chart with no price to pick, which is its own case and has its own tests.
     candles: Object.freeze({
       interval: '1m',
-      contract: Object.freeze([]),
+      contract: Object.freeze([candle('58420.25')]),
       mark: Object.freeze([]),
       index: Object.freeze([]),
       state: 'live',
       observedAt: 1_784_000_000_000,
+      liveObservedAt: 1_784_000_000_000,
     }),
     depth: Object.freeze({
       lastUpdateId: '90071992547409931234',
@@ -440,6 +451,15 @@ describe('pure Futures workstation presentation', () => {
       label: 'Exit SHORT',
       price: '58420.00',
       source: 'order-book',
+      // The level was picked off a live book, so the confirmation states no age:
+      // the reading travels with the price either way.
+      reading: {
+        surface: 'order-book',
+        surfaceLabel: 'order book',
+        state: 'live',
+        live: true,
+        observedAt: 1_784_000_000_000,
+      },
       // The confirmation panel opens where the operator clicked.
       anchor: { x: 0, y: 0 },
     })
@@ -707,24 +727,138 @@ describe('pure Futures workstation presentation', () => {
     expect(screen.getByLabelText('Tape timeout in ms')).toHaveValue('250')
   })
 
-  it.each(['loading', 'stale', 'disconnected', 'resynchronizing', 'unavailable'])(
-    'renders the explicit %s chart state',
+  // The chart's own state, with `connected` telling the desk whether the silence
+  // belongs to the market or to the transport.
+  const chartInState = (status, { connected = true, agedMs = 3_000, rows } = {}) => createState({
+    status,
+    resources: Object.freeze({
+      ...createState().resources,
+      status: Object.freeze({
+        ...createState().resources.status,
+        connected,
+        state: connected ? 'live' : status,
+      }),
+      candles: Object.freeze({
+        ...createState().resources.candles,
+        ...(rows === undefined ? {} : { contract: rows }),
+        state: status,
+        liveObservedAt: Date.now() - agedMs,
+      }),
+    }),
+  })
+
+  const readingNotice = () => document.querySelector('.futures-workstation-reading-notice')
+
+  it.each(['loading', 'resynchronizing', 'unavailable'])(
+    'states the %s chart reading beside the candles instead of over them',
     (status) => {
-      const state = createState({
-        status,
-        resources: Object.freeze({
-          ...createState().resources,
-          candles: Object.freeze({
-            ...createState().resources.candles,
-            state: status,
-          }),
-        }),
-      })
-      renderView({ state })
-      expect(screen.getByText(status.toUpperCase(), { selector: '.futures-workstation-overlay strong' }))
-        .toBeInTheDocument()
+      renderView({ state: chartInState(status) })
+      expect(readingNotice()).toHaveTextContent(
+        new RegExp(`^${status.toUpperCase()} chart · \\d+s old$`),
+      )
+      expect(document.querySelector('.futures-workstation-overlay')).toBeNull()
     },
   )
+
+  it('calls a silent stream on a live connection quiet, not stale', () => {
+    renderView({ state: chartInState('stale', { connected: true }) })
+    expect(readingNotice()).toHaveTextContent(/^QUIET chart · \d+s old$/)
+    expect(readingNotice()).toHaveClass('is-quiet')
+  })
+
+  it('leaves a stale reading stale when the transport cannot vouch for it', () => {
+    renderView({ state: chartInState('stale', { connected: false }) })
+    expect(readingNotice()).toHaveTextContent(/^STALE chart · \d+s old$/)
+    expect(readingNotice()).toHaveClass('is-stale')
+  })
+
+  it('dates a reading from when it was last live, not from when it was marked', () => {
+    renderView({ state: chartInState('stale', { agedMs: 125_000 }) })
+    expect(readingNotice()).toHaveTextContent(/^QUIET chart · 2m \d+s old$/)
+  })
+
+  it('covers only a chart that carries no candle at all', () => {
+    renderView({ state: chartInState('loading', { rows: Object.freeze([]) }) })
+    expect(document.querySelector('.futures-workstation-overlay strong'))
+      .toHaveTextContent('LOADING')
+    expect(screen.getByText('No candle has arrived for this contract yet.')).toBeInTheDocument()
+    expect(readingNotice()).toBeNull()
+  })
+
+  it('keeps the chart and the book armed while the data is not live', () => {
+    const onTradingGesture = vi.fn()
+    renderView({ state: chartInState('stale'), onTradingGesture })
+    fireEvent.click(screen.getByRole('button', { name: 'Pick chart price' }))
+    expect(screen.getByRole('button', { name: 'Add display alert' })).toBeEnabled()
+    // The chart's own shortcut, on a chart the desk cannot vouch for: it opens
+    // the confirmation and carries the reading it was taken off.
+    fireEvent.click(screen.getByRole('button', { name: 'Chart LONG shortcut' }))
+    expect(onTradingGesture).toHaveBeenLastCalledWith(expect.objectContaining({
+      source: 'chart',
+      price: '58420.25',
+      reading: expect.objectContaining({ surface: 'chart', state: 'quiet', live: false }),
+    }))
+    onTradingGesture.mockClear()
+    const bid = screen.getByRole('button', { name: /^Bid book level: price 58420\.00/ })
+    expect(bid).toBeEnabled()
+    fireEvent.click(bid, { ctrlKey: true, button: 0 })
+    fireEvent.click(bid, { ctrlKey: true, button: 0 })
+    expect(onTradingGesture).toHaveBeenCalledOnce()
+    // The gesture carries what the price is worth knowing about: where it came
+    // from and when that surface was last live.
+    expect(onTradingGesture.mock.calls[0][0].reading).toMatchObject({
+      surface: 'order-book',
+      live: true,
+    })
+  })
+
+  // The book's own case: a level on screen is a level the exchange published,
+  // and the state of the resource that delivered it does not unpublish it.
+  it('keeps book levels pickable while the depth resource is not live', () => {
+    const bookInState = (status, levels) => createState({
+      resources: Object.freeze({
+        ...createState().resources,
+        depth: Object.freeze({
+          ...createState().resources.depth,
+          ...(levels === undefined ? {} : levels),
+          state: status,
+        }),
+      }),
+    })
+    const { unmount } = renderView({ state: bookInState('disconnected') })
+    expect(screen.getByRole('button', { name: /^Bid book level: price 58420\.00/ })).toBeEnabled()
+    unmount()
+
+    renderView({
+      state: bookInState('live', {
+        bids: Object.freeze([]),
+        asks: Object.freeze([]),
+      }),
+    })
+    expect(screen.queryByRole('button', { name: /book level/ })).not.toBeInTheDocument()
+  })
+
+  it('refuses a price pick only where the chart has no price on it', () => {
+    const onDraftPriceChange = vi.fn()
+    renderView({ state: chartInState('live', { rows: Object.freeze([]) }), onDraftPriceChange })
+    fireEvent.click(screen.getByRole('button', { name: 'Pick chart price' }))
+    expect(onDraftPriceChange).not.toHaveBeenCalled()
+  })
+
+  // The order being lifted is the desk's own, working on the exchange's book. It
+  // has nothing to do with the market-data path, and an empty chart is no reason
+  // to strand a drag the operator has already started.
+  it('lets an order be lifted off the chart whatever the market data is doing', () => {
+    const onOrderLift = vi.fn()
+    const { unmount } = renderView({ state: chartInState('disconnected'), onOrderLift })
+    fireEvent.click(screen.getByRole('button', { name: 'Lift chart order' }))
+    expect(onOrderLift).toHaveBeenCalledWith({ orderId: '77' })
+    unmount()
+
+    renderView({ state: chartInState('loading', { rows: Object.freeze([]) }), onOrderLift })
+    fireEvent.click(screen.getByRole('button', { name: 'Lift chart order' }))
+    expect(onOrderLift).toHaveBeenCalledTimes(2)
+  })
 
   it('shows the normalized backend reason for an unavailable workstation', () => {
     renderView({

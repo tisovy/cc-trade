@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { formatUsdtAmount } from '../../../utils/futuresPriceFormat.js'
 import useFloatingPanel from '../../../hooks/useFloatingPanel.js'
+import FuturesReadingNotice from './FuturesReadingNotice.jsx'
 
 const PANEL_WIDTH = 236
 
@@ -80,6 +81,15 @@ export const FuturesOrderConfirmation = ({
         </div>
         <div><dt>Position</dt><dd>{positionLine}</dd></div>
       </dl>
+
+      {/* The price on this panel came off a surface that could not vouch for it.
+          Saying so here, rather than refusing the click that produced it, is the
+          whole trade this desk makes: the operator acts, and knows what they are
+          acting on. The age counts up while the panel is open. */}
+      <FuturesReadingNotice
+        reading={confirmation.priceReading}
+        className="futures-order-confirm-age"
+      />
 
       {confirmation.warning ? (
         <p className="futures-order-confirm-warning" role="alert">{confirmation.warning.message}</p>

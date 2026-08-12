@@ -8,6 +8,7 @@ import {
   FuturesWorkstationProtocolError,
   applyFuturesWorkstationEvent,
   parseBoundedFuturesWorkstationJson,
+  transitionFuturesWorkstationConnectionState,
 } from './futuresWorkstationProtocolShared.js'
 import {
   FUTURES_PRODUCTION_WORKSTATION_ACTIONS,
@@ -617,5 +618,77 @@ describe('Futures workstation environment-specific protocols', () => {
     expect(transitioned.status).toBe('resynchronizing')
     expect(transitioned.resources.header.state).toBe('resynchronizing')
     expect(transitioned.resources.header.observedAt).toBe(resynchronizing.observedAt)
+  })
+
+  // A price picked off a surface is confirmed with the age of the reading behind
+  // it. `observedAt` cannot supply that age once the surface stops being live:
+  // the desk re-emits a resource it marks stale stamped with the moment of the
+  // marking, which is younger than the reading by the whole freshness window.
+  it('remembers when each resource was last live, separately from when it last spoke', () => {
+    const initial = Object.freeze({
+      status: 'live',
+      symbol: 'BTCUSDT',
+      generation: 1,
+      revision: 0,
+      observedAt: 1_784_000_000_000,
+      resources: Object.freeze({
+        status: null,
+        catalog: null,
+        header: null,
+        candles: null,
+        candleHistory: null,
+        depth: null,
+        trades: null,
+      }),
+    })
+    const live = createFuturesProductionWorkstationEvent(createEventValues('depth'))
+    const afterLive = applyFuturesWorkstationEvent(initial, live)
+    expect(afterLive.resources.depth.liveObservedAt).toBe(live.observedAt)
+
+    const marked = createFuturesProductionWorkstationEvent({
+      ...createEventValues('depth'),
+      revision: 2,
+      state: FUTURES_WORKSTATION_STATES.STALE,
+      observedAt: live.observedAt + 5_000,
+    })
+    const afterStale = applyFuturesWorkstationEvent(afterLive, marked)
+    expect(afterStale.resources.depth.state).toBe(FUTURES_WORKSTATION_STATES.STALE)
+    expect(afterStale.resources.depth.observedAt).toBe(live.observedAt + 5_000)
+    expect(afterStale.resources.depth.liveObservedAt).toBe(live.observedAt)
+
+    // A resource that has never been live has no last-live time to state, and a
+    // reading with no age says so rather than reading as a fresh one.
+    const neverLive = applyFuturesWorkstationEvent(initial, createFuturesProductionWorkstationEvent({
+      ...createEventValues('candles'),
+      state: FUTURES_WORKSTATION_STATES.STALE,
+    }))
+    expect(neverLive.resources.candles.liveObservedAt).toBeNull()
+  })
+
+  it('carries the last-live time through a connection transition', () => {
+    const live = createFuturesProductionWorkstationEvent(createEventValues('depth'))
+    const afterLive = applyFuturesWorkstationEvent(Object.freeze({
+      status: 'live',
+      symbol: 'BTCUSDT',
+      generation: 1,
+      revision: 0,
+      observedAt: 1_784_000_000_000,
+      resources: Object.freeze({
+        status: null,
+        catalog: null,
+        header: null,
+        candles: null,
+        candleHistory: null,
+        depth: null,
+        trades: null,
+      }),
+    }), live)
+    const dropped = transitionFuturesWorkstationConnectionState(
+      afterLive,
+      FUTURES_WORKSTATION_STATES.DISCONNECTED,
+      'SOCKET_CLOSED',
+    )
+    expect(dropped.resources.depth.state).toBe(FUTURES_WORKSTATION_STATES.DISCONNECTED)
+    expect(dropped.resources.depth.liveObservedAt).toBe(live.observedAt)
   })
 })

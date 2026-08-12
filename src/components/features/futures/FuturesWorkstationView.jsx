@@ -31,6 +31,8 @@ import {
   stepUiScale,
 } from '../../../utils/uiScale.js'
 import { resolveFuturesTradingGesture } from '../../../utils/futuresTradingGestures.js'
+import { describeFuturesPriceReading } from '../../../utils/futuresPriceReading.js'
+import FuturesReadingNotice from './FuturesReadingNotice.jsx'
 import FuturesWorkstationChart from './FuturesWorkstationChart.jsx'
 import './FuturesWorkstation.css'
 
@@ -257,13 +259,30 @@ export const FuturesWorkstationView = ({
     return behind.length === 0 ? liveCandles : [...behind, ...liveCandles]
   }, [candleHistory, liveCandles, selectedInterval, selectedSymbol])
   const depthState = resourceState(depth)
-  // A level the exchange proved is worth picking whether or not the book still
-  // covers every row on screen. A click seeds the ticket's draft price and the
-  // operator confirms at the cursor, and a book delivered short is a book of
-  // exact, current levels — fewer of them. Gated on `live` alone, every level
-  // went dead the moment the badge did: on a contract the exchange does not
-  // publish deep enough for the step it is read at, permanently.
-  const bookLevelsPickable = depthState === 'live' || depthState === 'stale'
+  const transportConnected = resources.status?.connected === true
+  // `liveObservedAt`, not `observedAt`: the reducer keeps the last time each
+  // resource was live, because the event that marks one stale is stamped with
+  // the moment of the marking rather than the moment its data stopped.
+  const chartObservedAt = candles?.liveObservedAt ?? candles?.observedAt ?? null
+  const bookObservedAt = depth?.liveObservedAt ?? depth?.observedAt ?? null
+  // What a price picked off each surface remembers about where it came from.
+  // Nothing here decides whether the surface may be acted on — it decides what
+  // the operator is told about the number they are acting on.
+  const chartReading = useMemo(() => describeFuturesPriceReading({
+    surface: 'chart',
+    state: candlesState,
+    observedAt: chartObservedAt,
+    connected: transportConnected,
+  }), [candlesState, chartObservedAt, transportConnected])
+  const bookReading = useMemo(() => describeFuturesPriceReading({
+    surface: 'order-book',
+    state: depthState,
+    observedAt: bookObservedAt,
+    connected: transportConnected,
+  }), [bookObservedAt, depthState, transportConnected])
+  // A chart with no candle on it has no price to pick, and that is the only
+  // thing that can take the pick away. Everything else is a reading with an age.
+  const chartPickable = chartCandles.length > 0
   const tradesState = resourceState(trades)
   const contractsUnavailableMessage = state.reasonCode === 'RECONNECT_EXHAUSTED'
     ? 'Contracts stream stopped after repeated reconnect failures.'
@@ -300,8 +319,11 @@ export const FuturesWorkstationView = ({
   }, [contracts, recentContracts, searchQuery, symbolHistory])
   const catalogPending = contracts.length === 0 && !contractsUnavailable
 
-  const pickPrice = useCallback((price) => {
-    if (typeof onDraftPriceChange === 'function') onDraftPriceChange(price)
+  // The reading travels with the price: what the ticket and the confirmation
+  // state about a number depends on where it was taken from, and a price the
+  // operator typed carries no reading at all.
+  const pickPrice = useCallback((price, reading = null) => {
+    if (typeof onDraftPriceChange === 'function') onDraftPriceChange(price, reading)
     else setLocalDraftPrice(price)
     if (drawingMode) {
       setDrawings(previous => Object.freeze([
@@ -310,6 +332,15 @@ export const FuturesWorkstationView = ({
       ]))
     }
   }, [drawingMode, onDraftPriceChange])
+
+  const pickChartPrice = useCallback(
+    price => pickPrice(price, chartReading),
+    [chartReading, pickPrice],
+  )
+  const emitChartGesture = useCallback(
+    gesture => onTradingGesture?.({ ...gesture, reading: chartReading }),
+    [chartReading, onTradingGesture],
+  )
 
   const emitBookGesture = useCallback((event, button, price) => {
     const gesture = resolveFuturesTradingGesture({
@@ -326,12 +357,13 @@ export const FuturesWorkstationView = ({
       ...gesture,
       price,
       source: 'order-book',
+      reading: bookReading,
       // The confirmation opens on the level the operator clicked, not across
       // the workspace in the trading rail.
       anchor: { x: event.clientX, y: event.clientY },
     })
     return true
-  }, [onTradingGesture])
+  }, [bookReading, onTradingGesture])
 
   const handleBookContextMenu = useCallback((event, price) => {
     const gesture = resolveFuturesTradingGesture({
@@ -359,7 +391,7 @@ export const FuturesWorkstationView = ({
   }, [emitBookGesture, selectedSymbol])
 
   const handleBookClick = useCallback((event, price) => {
-    pickPrice(price)
+    pickPrice(price, bookReading)
     const gesture = resolveFuturesTradingGesture({
       button: 'left',
       altKey: event.altKey,
@@ -381,7 +413,7 @@ export const FuturesWorkstationView = ({
       || previous.symbol !== selectedSymbol) return
     lastBookLeftClickRef.current = { at: 0, price: null, modifier: null, symbol: null }
     emitBookGesture(event, 'left', price)
-  }, [emitBookGesture, pickPrice, selectedSymbol])
+  }, [bookReading, emitBookGesture, pickPrice, selectedSymbol])
 
   // How many rows the panel can actually hold. Sizing the sides by content and
   // letting flex shrink take the difference clipped the last five rows of each
@@ -545,6 +577,12 @@ export const FuturesWorkstationView = ({
     step: activeGroupStep,
     limit: depthLevelsPerSide,
   }), [activeGroupStep, depth, depthLevelsPerSide])
+  // A level on screen is a level the exchange published, whatever the badge above
+  // it says. Gated on the resource's state, every level went dead the moment the
+  // state did — during a resync, on a quiet contract, on a book the exchange does
+  // not publish deep enough for the step it is read at. What actually makes a
+  // level unpickable is there being no level: a book delivered empty.
+  const bookLevelsPickable = visibleAsks.length > 0 || visibleBids.length > 0
   // The book is bought as deep as it is read, and this is the reading: the rows
   // on screen times the step they are grouped by. Stated whenever it changes —
   // a coarser step, a taller panel, another contract — so the backend can buy
@@ -813,7 +851,7 @@ export const FuturesWorkstationView = ({
               type="button"
               className={drawingMode ? 'is-selected' : ''}
               aria-pressed={drawingMode}
-              disabled={candlesState !== 'live'}
+              disabled={!chartPickable}
               onClick={() => setDrawingMode(previous => !previous)}
             >
               Horizontal drawing
@@ -821,7 +859,7 @@ export const FuturesWorkstationView = ({
             <button type="button" onClick={() => setDrawings(EMPTY_ROWS)} disabled={drawings.length === 0}>
               Clear drawings
             </button>
-            <button type="button" onClick={addDisplayAlert} disabled={!selectedDraftPrice || candlesState !== 'live'}>
+            <button type="button" onClick={addDisplayAlert} disabled={!selectedDraftPrice || !chartPickable}>
               Add display alert
             </button>
             <button type="button" onClick={() => setAlerts(EMPTY_ROWS)} disabled={alerts.length === 0}>
@@ -843,19 +881,32 @@ export const FuturesWorkstationView = ({
             alerts={alerts}
             ownedOrders={ownedOrders}
             positions={ownedPositions}
-            onPricePick={candlesState === 'live' ? pickPrice : IGNORE_PRICE_PICK}
-            onTradingGesture={candlesState === 'live' ? onTradingGesture : undefined}
-            onOrderLift={candlesState === 'live' ? onOrderLift : undefined}
+            onPricePick={chartPickable ? pickChartPrice : IGNORE_PRICE_PICK}
+            onTradingGesture={chartPickable ? emitChartGesture : undefined}
+            onOrderLift={onOrderLift}
             onOrderDrop={onOrderDrop}
             onOrderCancel={onOrderCancel}
             onOrderEdit={onOrderEdit}
           />
-          {candlesState !== 'live' ? (
-            <div className={`futures-workstation-overlay is-${candlesState}`}>
-              <strong>{candlesState.toUpperCase()}</strong>
-              <span>Chart remains read-only until authoritative data is live.</span>
-            </div>
-          ) : null}
+          {/* A chart that has candles on it is readable, and covering it with a
+              state was the desk hiding the only thing the operator came for. The
+              state is stated in the corner with the age of the reading, and the
+              full cover is kept for the chart that genuinely has nothing on it. */}
+          {chartPickable
+            ? (chartReading?.live === false
+              ? (
+                <FuturesReadingNotice
+                  reading={chartReading}
+                  className="futures-workstation-reading-notice"
+                />
+              )
+              : null)
+            : (
+              <div className={`futures-workstation-overlay is-${candlesState}`}>
+                <strong>{candlesState.toUpperCase()}</strong>
+                <span>No candle has arrived for this contract yet.</span>
+              </div>
+            )}
         </div>
       </main>
 
@@ -866,7 +917,7 @@ export const FuturesWorkstationView = ({
       >
         <div className="futures-workstation-section-heading">
           <div><span>Order book</span><strong>USDT</strong></div>
-          <StateBadge state={depthState} />
+          <StateBadge state={bookReading?.state ?? depthState} />
         </div>
         {/* The side control shares the step's line on purpose: the panel is
             already short of the room its rows need, and a control row of its

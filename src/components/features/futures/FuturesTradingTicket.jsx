@@ -28,6 +28,7 @@ import {
   FUTURES_READINESS_CODES,
 } from '../../../utils/futuresReadiness.js'
 import FuturesOrderConfirmation from './FuturesOrderConfirmation.jsx'
+import FuturesReadingNotice from './FuturesReadingNotice.jsx'
 import './FuturesProductionExecutionTicket.css'
 
 const EXACT_POSITIVE_DECIMAL = /^(?:[1-9][0-9]*|0\.[0-9]*[1-9][0-9]*|[1-9][0-9]*\.[0-9]+)$/
@@ -82,6 +83,7 @@ const FuturesTradingTicket = ({
   leverage = null,
   onLeverageEdit,
   draftPrice = null,
+  draftPriceReading = null,
   gestureRequest = null,
   sizeRequest = null,
   onDraftPriceChange,
@@ -305,6 +307,10 @@ const FuturesTradingTicket = ({
       price: draft.price,
       quantity: draft.quantity,
       notionalUsdt,
+      // The reading the price came off, frozen with the order it is staged for.
+      // The age it states keeps counting; where the number came from does not
+      // change because the market moved on afterwards.
+      priceReading: gestureRequest.reading ?? null,
       anchor: gestureRequest.anchor ?? null,
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -375,6 +381,7 @@ const FuturesTradingTicket = ({
       // lands while the confirmation is open changes them.
       leverage: entryLeverage,
       positions,
+      priceReading: pendingOrder.priceReading,
     })
     : null
 
@@ -472,6 +479,12 @@ const FuturesTradingTicket = ({
                 placeholder="Click chart or order book"
                 value={price}
                 onChange={event => updatePrice(event.target.value)}
+              />
+              {/* Only for a price taken off a surface that was not live. A typed
+                  price is the operator's own number and carries no reading. */}
+              <FuturesReadingNotice
+                reading={draftPriceReading}
+                className="futures-production-price-age"
               />
             </label>
             <label className="futures-production-size-slider">
