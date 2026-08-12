@@ -183,7 +183,14 @@ describe('production workstation hook isolation', () => {
   // new subscription for the same contract is not a change the panel notices, so
   // the reading has to be carried to it here or the book opens too shallow and
   // stays there.
-  it('re-states the reading to the subscription that will carry it', () => {
+  //
+  // It is carried on the request itself rather than behind it: the snapshot that
+  // opens the contract is bought before a second message could arrive, so a
+  // reading stated in a message of its own is a reading stated too late to buy
+  // the page it asks for. Which is also why nothing follows the request — the
+  // subscription was opened at that reading, so restating it would be a message
+  // saying what the desk already did.
+  it('opens the subscription at the reading already stated for the contract', () => {
     const socket = new LocalSocket()
     const sendMessage = vi.fn(() => true)
     const { result } = renderHook(
@@ -201,15 +208,27 @@ describe('production workstation hook isolation', () => {
     })
 
     act(() => result.current.retry())
-    const actions = sendMessage.mock.calls.slice(-2).map(([message]) => message.action)
-    expect(actions).toEqual([
-      FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SUBSCRIBE,
-      FUTURES_PRODUCTION_WORKSTATION_ACTIONS.CONFIGURE_DEPTH,
-    ])
     expect(sendMessage.mock.calls.at(-1)[0]).toMatchObject({
+      action: FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SUBSCRIBE,
       requestId: result.current.requestId,
       range: '1.4',
     })
+  })
+
+  // Nothing has been drawn for the first contract of a session, so there is no
+  // reading to carry. The request states none rather than inventing one, and the
+  // desk opens the book at the cheapest page exactly as it always did.
+  it('opens a contract nothing has been stated for without a reading', () => {
+    const socket = new LocalSocket()
+    const sendMessage = vi.fn(() => true)
+    renderHook(
+      props => useFuturesProductionWorkstation(props),
+      { initialProps: defaultProps(socket, sendMessage) },
+    )
+
+    const opening = sendMessage.mock.calls.at(-1)[0]
+    expect(opening.action).toBe(FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SUBSCRIBE)
+    expect('range' in opening).toBe(false)
   })
 
   // A range is a distance in the contract's own quote currency, so the one

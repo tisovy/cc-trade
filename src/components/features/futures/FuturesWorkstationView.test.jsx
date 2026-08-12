@@ -821,6 +821,61 @@ describe('pure Futures workstation presentation', () => {
     expect(screen.getByRole('button', { name: 'Pause' })).toBeInTheDocument()
   })
 
+  // The request that opens a contract carries the reading its rows need, and the
+  // panel states that reading as the contract opens. Restored from an effect
+  // instead, the step arrives one commit later — after the subscription has gone
+  // out — so the first snapshot is bought for a step this contract is not being
+  // read at, and the book opens short and climbs to itself.
+  it('states the reading of the contract being opened, not of the one being left', () => {
+    localStorage.setItem('futures.bookView', JSON.stringify({
+      ETHUSDT: { sideMode: 'both', stepMultiplier: 50 },
+    }))
+    const onDepthRangeChange = vi.fn()
+    const properties = {
+      identity: 'USDⓈ-M PRODUCTION · REAL MONEY',
+      state: createState(),
+      selectedInterval: '1m',
+      onDepthRangeChange,
+      onSymbolChange: () => {},
+      onIntervalChange: () => {},
+    }
+    const { rerender } = render(
+      <FuturesWorkstationView {...properties} selectedSymbol="BTCUSDT" />,
+    )
+    // Fourteen rows at this contract's tick, which is what BTCUSDT is read at.
+    expect(onDepthRangeChange).toHaveBeenLastCalledWith('1.4')
+    onDepthRangeChange.mockClear()
+
+    rerender(
+      <FuturesWorkstationView
+        {...properties}
+        state={createState({ symbol: 'ETHUSDT' })}
+        selectedSymbol="ETHUSDT"
+      />,
+    )
+    // Fourteen rows at fifty ticks — stated once, and never at the step the
+    // contract being left was read at.
+    expect(onDepthRangeChange.mock.calls).toEqual([['70']])
+  })
+
+  // A book delivered short is a book of exact, current levels — fewer of them.
+  // Gated on a live badge alone, every level went dead the moment the badge did;
+  // on a contract the exchange does not publish deep enough for the step it is
+  // read at, permanently.
+  it('keeps the levels of a book it could not prove pickable', () => {
+    const state = createState()
+    renderView({
+      state: createState({
+        resources: Object.freeze({
+          ...state.resources,
+          depth: Object.freeze({ ...state.resources.depth, state: 'stale' }),
+        }),
+      }),
+    })
+    expect(screen.getByRole('button', { name: /^Ask book level: price 58420\.50/ })).toBeEnabled()
+    expect(screen.getByRole('button', { name: /^Bid book level: price 58420\.00/ })).toBeEnabled()
+  })
+
   it('never combines order-book click candidates across symbol ownership', () => {
     const onTradingGesture = vi.fn()
     const properties = {

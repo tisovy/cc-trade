@@ -191,22 +191,32 @@ const applyLevels = (side, levels, band = null) => {
 // not a book — it is a book with holes in it, and a grouped row drawn across
 // those holes understates the market.
 const bandOfSnapshot = (snapshot) => {
-    const floor = snapshot.bids.reduce(
-        (lowest, [price]) => (lowest === null || compareFuturesWorkstationDecimals(price, lowest) < 0
+    const extreme = (levels, further) => levels.reduce(
+        (found, [price]) => (found === null
+            || (further ? compareFuturesWorkstationDecimals(price, found) < 0
+                : compareFuturesWorkstationDecimals(price, found) > 0)
             ? price
-            : lowest),
+            : found),
         null,
     );
-    const ceiling = snapshot.asks.reduce(
-        (highest, [price]) => (highest === null || compareFuturesWorkstationDecimals(price, highest) > 0
-            ? price
-            : highest),
-        null,
-    );
+    const floor = extreme(snapshot.bids, true);
+    const bestBid = extreme(snapshot.bids, false);
+    const ceiling = extreme(snapshot.asks, false);
+    const bestAsk = extreme(snapshot.asks, true);
     if (floor === null || ceiling === null) return null;
     return Object.freeze({
         floor,
         ceiling,
+        // How far past the best price this page reached on each side at the
+        // moment it was read — which is what reading the same page again would
+        // reach. The distance from the *current* best price to the edge is what
+        // the band still covers; this is what it was bought to cover. The
+        // difference between the two is the difference between a market that has
+        // walked out of a wide enough band and a page too shallow to have
+        // covered the rows in the first place, and only the second is worth
+        // buying a deeper page for.
+        provenBelow: subtractFuturesWorkstationDecimals(bestBid, floor),
+        provenAbove: subtractFuturesWorkstationDecimals(ceiling, bestAsk),
         contains: price => compareFuturesWorkstationDecimals(price, floor) >= 0
             && compareFuturesWorkstationDecimals(price, ceiling) <= 0,
     });
@@ -318,6 +328,10 @@ export class FuturesWorkstationOrderBook {
      * it needs in one read instead of climbing to it one read at a time. Read as
      * ordinary numbers on purpose: it decides how much to ask for, never what
      * anything is worth.
+     *
+     * Measured on each side against its own edge and reported as the worse of
+     * the two. Exactly 1 means no side's page is short and the market has walked
+     * out from between them, which the same page re-read answers.
      */
     rangeShortfall(range) {
         // No band at all — a snapshot that came back with a side empty. Nothing
@@ -325,18 +339,35 @@ export class FuturesWorkstationOrderBook {
         // and reading the same page again would not produce a band either.
         if (this.band === null) return 0;
         if (this.coversRange(range)) return 0;
-        const span = Number(subtractFuturesWorkstationDecimals(this.band.ceiling, this.band.floor));
         const bid = bestPrice(this.bids, true);
         const ask = bestPrice(this.asks, false);
         if (bid === null || ask === null) return Number.POSITIVE_INFINITY;
-        const needed = Number(addFuturesWorkstationDecimals(
-            subtractFuturesWorkstationDecimals(ask, bid),
-            addFuturesWorkstationDecimals(range, range),
-        ));
-        if (!Number.isFinite(span) || !Number.isFinite(needed) || span <= 0) {
-            return Number.POSITIVE_INFINITY;
+        const needed = Number(range);
+        if (!Number.isFinite(needed) || needed <= 0) return 0;
+        // Each side is sized against its own edge, never against the total span.
+        // Measured on the span, a side reaching far past the rows pays for one
+        // that falls short of them: bids from 10 down to 9.9 and asks from 10.1
+        // up to 12, read at a range of 1, state a span of 2.1 against a need of
+        // 2.1 — sufficient, exactly — and buy nothing, while the bid side stays
+        // short by nine tenths of the reading. For the whole session, because
+        // every re-read of that page returns the same asymmetry.
+        let deepest = 0;
+        for (const proven of [this.band.provenBelow, this.band.provenAbove]) {
+            const reach = Number(proven);
+            // This side's page did reach the rows when it was read, so the
+            // market has walked rather than the page being short: a deeper one
+            // buys nothing this side needs.
+            if (Number.isFinite(reach) && reach >= needed) continue;
+            // A side that proved no distance at all cannot be sized — one
+            // distinct price is not a spacing to multiply. Re-read as it is and
+            // sized on the next reading, which will have a side to measure.
+            if (!Number.isFinite(reach) || reach <= 0) return Number.POSITIVE_INFINITY;
+            deepest = Math.max(deepest, needed / reach);
         }
-        return Math.max(1, needed / span);
+        // Both pages reach far enough and the market has simply walked out from
+        // between them: the same page, read again, is a band centred where the
+        // market is now.
+        return Math.max(1, deepest);
     }
 
     push(rawDelta, frameBytes = 0) {

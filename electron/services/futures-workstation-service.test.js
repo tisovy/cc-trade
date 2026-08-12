@@ -25,8 +25,8 @@ afterEach(() => {
     vi.restoreAllMocks();
 });
 
-const productionRequest = (requestId, symbol = 'BTCUSDT', interval = '1m') => JSON.stringify(
-    createFuturesProductionWorkstationSubscribeRequest({ requestId, symbol, interval }),
+const productionRequest = (requestId, symbol = 'BTCUSDT', interval = '1m', range) => JSON.stringify(
+    createFuturesProductionWorkstationSubscribeRequest({ requestId, symbol, interval, range }),
 );
 
 const productionIntervalRequest = (requestId, symbol, interval) => JSON.stringify(
@@ -2344,6 +2344,145 @@ describe('the book is bought as deep as it is read', () => {
             productionDepthRequest('someone-else', '5'),
             { emit: () => {} },
         )).rejects.toMatchObject({ code: 'DEPTH_OWNER_UNAVAILABLE' });
+    });
+});
+
+// The screenshot the operator brought back: a full ask ladder over seven bid
+// rows, badged LIVE. The book was right — it could not prove the bid side — and
+// the badge was wrong, and the desk took ten to fifteen seconds to fix either.
+describe('the book states the side it cannot prove', () => {
+    // The deterministic fixture returns the same forty-eight levels whatever page
+    // is asked for, so nothing built on it can tell a page that covered the rows
+    // from one that did not. This one prices its band by the page it is asked
+    // for, which is what the exchange does: fifty levels five cents apart reach
+    // 2.50 past the best price, five hundred reach 25.
+    const pagedTransport = () => {
+        const base = createFuturesProductionWorkstationFakeTransport();
+        const template = JSON.parse(
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.depthSnapshot,
+        );
+        const cents = value => `${value / 100n}.${String(value % 100n).padStart(2, '0')}`;
+        const mid = 5_842_000n;
+        let reads = 0;
+        const readDepthSnapshot = vi.fn(async ({ limit } = {}) => {
+            reads += 1;
+            return JSON.stringify({
+                ...template,
+                // The first read is the fixture's own, so it bridges against the
+                // stream the way the fixture intends. A later one is a fresh
+                // reading of a contract whose diffs have moved on, and states an
+                // update id ahead of them.
+                lastUpdateId: template.lastUpdateId + ((reads - 1) * 1_000_000),
+                bids: Array.from({ length: limit }, (_, index) => [
+                    cents(mid - (BigInt(index) + 1n) * 5n),
+                    '1.00000000',
+                ]),
+                asks: Array.from({ length: limit }, (_, index) => [
+                    cents(mid + (BigInt(index) + 1n) * 5n),
+                    '1.00000000',
+                ]),
+            });
+        });
+        return {
+            readDepthSnapshot,
+            transport: { ...base, readDepthSnapshot },
+            pages: () => readDepthSnapshot.mock.calls.map(call => call[0].limit),
+        };
+    };
+
+    const openContract = async (requestId, range) => {
+        const { readDepthSnapshot, transport, pages } = pagedTransport();
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({ transport }));
+        const events = [];
+        await runtime.service.handleRequest(
+            productionRequest(requestId, 'BTCUSDT', '1m', range),
+            { emit: event => events.push(event) },
+        );
+        return { runtime, events, readDepthSnapshot, pages };
+    };
+
+    const depthEvents = events => events.filter(event => event.resource === 'depth');
+
+    // A short book is still worth reading — the rows it can prove are the market
+    // and they are exact. What it is not is live.
+    it('delivers a book it cannot prove on one side as stale, carrying its rows', async () => {
+        const { runtime, events } = await openContract('short-side-stale');
+        await runtime.service.handleRequest(
+            productionDepthRequest('short-side-stale', '5'),
+            { emit: event => events.push(event) },
+        );
+        const delivered = depthEvents(events).at(-1);
+        expect(delivered.state).toBe('stale');
+        expect(delivered.payload.bids.length).toBeGreaterThan(0);
+        expect(delivered.payload.asks.length).toBeGreaterThan(0);
+    });
+
+    // Stated on the request that opens the contract, so the page that covers the
+    // reading is bought against the first band the snapshot proves rather than
+    // after the operator has read a short book for a while. The rung is chosen by
+    // how short it is, so a reading four pages deeper is one read, not four.
+    it('opens a contract at the page its stated reading needs', async () => {
+        const { pages } = await openContract('short-side-open', '10');
+        await vi.waitFor(() => expect(pages()).toHaveLength(2));
+        expect(pages()).toEqual([50, 500]);
+    });
+
+    // And a reading nothing has been stated for opens where it always did.
+    it('opens a contract stating no reading on the cheapest page', async () => {
+        const { pages } = await openContract('short-side-silent');
+        await Promise.resolve();
+        expect(pages()).toEqual([50]);
+    });
+
+    // Without waiting for a status to say so: the state a delivery carries is
+    // decided by the book that delivery contains.
+    it('reads live again on the first delivery that covers both sides', async () => {
+        const { events, pages } = await openContract('short-side-repaired', '10');
+        await vi.waitFor(() => expect(depthEvents(events).at(-1).state).toBe('live'));
+        expect(pages()).toEqual([50, 500]);
+        expect(depthEvents(events).map(event => event.state)).toContain('stale');
+        expect(depthEvents(events).at(-1).payload.bids.length).toBeGreaterThan(0);
+    });
+
+    // Four rungs that ratchet one way cannot loop, so making a deepening wait out
+    // the recovery backoff bought nothing and cost five seconds a rung — on the
+    // one book the operator opened the contract to read.
+    it('buys the rung the rows need without waiting out the recovery backoff', async () => {
+        const { runtime, readDepthSnapshot } = await openContract('short-side-nowait');
+        const session = runtime.service.current;
+        // A recovery has just run and stamped the backoff every read after it
+        // used to wait for.
+        session.bookRecoveredAt = runtime.service.observedNow(session);
+        session.depthRange = '5';
+        session.orderBook.rangeShortfall = () => 4;
+        runtime.service.ensureDepthCovers(session);
+        await vi.waitFor(() => expect(readDepthSnapshot.mock.calls.length).toBe(2));
+        expect(readDepthSnapshot.mock.calls.at(-1)[0]).toMatchObject({ limit: 500 });
+    });
+
+    // The exemption is for the rung, not for the read. A shortfall that no rung
+    // answers must not become a snapshot read per diff.
+    it('keeps backing off a re-read, and stops asking when the ladder runs out', async () => {
+        const { runtime, readDepthSnapshot } = await openContract('short-side-backoff');
+        const session = runtime.service.current;
+        session.depthRange = '5';
+        // A band wide enough that the market walked out of it: re-read, no rung.
+        session.orderBook.rangeShortfall = () => 1;
+        runtime.service.ensureDepthCovers(session);
+        await vi.waitFor(() => expect(readDepthSnapshot.mock.calls.length).toBe(2));
+        runtime.service.ensureDepthCovers(session);
+        await Promise.resolve();
+        expect(readDepthSnapshot).toHaveBeenCalledTimes(2);
+
+        // And at the top of the ladder there is no rung to buy, so a shortfall
+        // that only a deeper page could answer stops asking rather than reading
+        // the same page on every diff.
+        runtime.service.depthPage = 3;
+        session.depthDeepenedAt = null;
+        session.orderBook.rangeShortfall = () => 4;
+        runtime.service.ensureDepthCovers(session);
+        await Promise.resolve();
+        expect(readDepthSnapshot).toHaveBeenCalledTimes(2);
     });
 });
 

@@ -145,11 +145,13 @@ const createEventValues = resource => ({
 })
 
 describe('Futures workstation environment-specific protocols', () => {
-  // Bumped with the delivered level's shape: a main process and a renderer that
-  // disagree about whether a level carries a running total must refuse each
-  // other rather than read one field as another.
-  it('uses protocol revision 7 for a level of price and quantity', () => {
-    expect(FUTURES_WORKSTATION_PROTOCOL_VERSION).toBe('7')
+  // Bumped with the shape of what crosses: revision 7 dropped the running total
+  // from a delivered level, and 8 lets the request that opens a contract carry
+  // the reading its rows need. A renderer that states a range on a request an
+  // older desk validates by exact keys would have every subscription refused, so
+  // the two refuse each other on the version instead — once, legibly.
+  it('uses protocol revision 8 for a contract opened at a stated reading', () => {
+    expect(FUTURES_WORKSTATION_PROTOCOL_VERSION).toBe('8')
   })
 
   it('preserves an unavailable per-symbol algo limit instead of inventing one', () => {
@@ -273,6 +275,44 @@ describe('Futures workstation environment-specific protocols', () => {
       requestId: requestValues.requestId,
       range,
     })).toThrowError(expect.objectContaining({ code: 'INVALID_DEPTH_CONFIGURATION' }))
+  })
+
+  // The snapshot that opens a contract is bought before a second message could
+  // arrive, so a reading stated in a message of its own is stated too late to
+  // buy the page it asks for. It travels with the request instead — and is read
+  // by the same rule, because a range the desk would accept from one message and
+  // refuse from another is a range whose meaning depends on how it arrived.
+  it('opens a contract at the reading its rows need', () => {
+    const request = createFuturesProductionWorkstationSubscribeRequest({
+      ...requestValues,
+      range: '0.0220',
+    })
+    expect(request).toEqual(expect.objectContaining({
+      action: FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SUBSCRIBE,
+      symbol: requestValues.symbol,
+      range: '0.0220',
+    }))
+    expect(readFuturesProductionWorkstationRequest(JSON.stringify(request))).toEqual(request)
+  })
+
+  // Nothing has been drawn for the first contract of a session. Such a request
+  // states no reading rather than inventing one, and opens at the cheapest page.
+  it('opens a contract that states no reading', () => {
+    const request = createFuturesProductionWorkstationSubscribeRequest(requestValues)
+    expect(request).not.toHaveProperty('range')
+    expect(readFuturesProductionWorkstationRequest(JSON.stringify(request))).toEqual(request)
+  })
+
+  it.each([
+    ['a negative range', '-1'],
+    ['a non-canonical range', '01'],
+    ['a range that is not a string', 14],
+    ['a range longer than the bound', `0.${'0'.repeat(64)}1`],
+  ])('rejects %s on the request that opens a contract', (_label, range) => {
+    expect(() => createFuturesProductionWorkstationSubscribeRequest({
+      ...requestValues,
+      range,
+    })).toThrowError(expect.objectContaining({ code: 'INVALID_REQUEST_SHAPE' }))
   })
 
   it('rejects extra request fields including network and execution authority', () => {

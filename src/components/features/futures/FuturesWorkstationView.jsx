@@ -175,6 +175,7 @@ export const FuturesWorkstationView = ({
   const [bookSideMode, setBookSideMode] = useState(
     () => readStoredBookView(selectedSymbol).sideMode,
   )
+  const [bookViewSymbol, setBookViewSymbol] = useState(selectedSymbol)
   const [measuredBookRows, setMeasuredBookRows] = useState(null)
   // The price previously shown, with the contract it belonged to: a direction
   // is only a direction within one book.
@@ -200,12 +201,22 @@ export const FuturesWorkstationView = ({
     setAlerts(EMPTY_ROWS)
     setTapePaused(false)
     setPausedTrades(EMPTY_ROWS)
-    // Not a reset: the book opens the way this contract was last read, and at
-    // both sides and 1× for a contract never configured.
+  }, [selectedSymbol])
+
+  // Not a reset: the book opens the way this contract was last read, and at both
+  // sides and 1× for a contract never configured.
+  //
+  // Applied while rendering rather than from an effect. The reading the rows
+  // need is this step times the rows on screen, and the request that opens the
+  // contract carries it — so a step restored one commit later is a step restored
+  // after the subscription has gone out, and the first snapshot is bought for a
+  // step this contract is not being read at.
+  if (bookViewSymbol !== selectedSymbol) {
     const storedBookView = readStoredBookView(selectedSymbol)
+    setBookViewSymbol(selectedSymbol)
     setBookGrouping(storedBookView.stepMultiplier)
     setBookSideMode(storedBookView.sideMode)
-  }, [selectedSymbol])
+  }
 
   const resources = state.resources
   const selectionOwned = state.symbol === selectedSymbol
@@ -246,6 +257,13 @@ export const FuturesWorkstationView = ({
     return behind.length === 0 ? liveCandles : [...behind, ...liveCandles]
   }, [candleHistory, liveCandles, selectedInterval, selectedSymbol])
   const depthState = resourceState(depth)
+  // A level the exchange proved is worth picking whether or not the book still
+  // covers every row on screen. A click seeds the ticket's draft price and the
+  // operator confirms at the cursor, and a book delivered short is a book of
+  // exact, current levels — fewer of them. Gated on `live` alone, every level
+  // went dead the moment the badge did: on a contract the exchange does not
+  // publish deep enough for the step it is read at, permanently.
+  const bookLevelsPickable = depthState === 'live' || depthState === 'stale'
   const tradesState = resourceState(trades)
   const contractsUnavailableMessage = state.reasonCode === 'RECONNECT_EXHAUSTED'
     ? 'Contracts stream stopped after repeated reconnect failures.'
@@ -902,7 +920,7 @@ export const FuturesWorkstationView = ({
                 ? `${ownBookLevels.ask.get(level.groupKey)} working sell order here`
                 : undefined}
               aria-label={`Ask book level: price ${level.price}; level ${formatCompactUsdt(level.notionalUsdt)} USDT; cumulative ${formatCompactUsdt(level.cumulativeUsdt)} USDT`}
-              disabled={depthState !== 'live'}
+              disabled={!bookLevelsPickable}
               style={{ '--futures-depth-share': depthShare(level) }}
               onClick={event => handleBookClick(event, level.price)}
               onContextMenu={event => handleBookContextMenu(event, level.price)}
@@ -937,7 +955,7 @@ export const FuturesWorkstationView = ({
                 ? `${ownBookLevels.bid.get(level.groupKey)} working buy order here`
                 : undefined}
               aria-label={`Bid book level: price ${level.price}; level ${formatCompactUsdt(level.notionalUsdt)} USDT; cumulative ${formatCompactUsdt(level.cumulativeUsdt)} USDT`}
-              disabled={depthState !== 'live'}
+              disabled={!bookLevelsPickable}
               style={{ '--futures-depth-share': depthShare(level) }}
               onClick={event => handleBookClick(event, level.price)}
               onContextMenu={event => handleBookContextMenu(event, level.price)}

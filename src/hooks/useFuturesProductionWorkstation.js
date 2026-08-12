@@ -383,9 +383,24 @@ const useFuturesProductionWorkstation = ({
     wsConnection.addEventListener('message', handleMessage)
     wsConnection.addEventListener('close', handleClose)
     wsConnection.addEventListener('error', handleError)
+    // The reading already stated for the contract being opened travels with the
+    // request that opens it, so the first snapshot is bought against the rows
+    // that will be drawn from it rather than against a range that arrives a
+    // message later. A contract nothing has been stated for — the first of a
+    // session, chosen before any book has been drawn — carries none and opens at
+    // the cheapest page, as every contract did.
+    const statedRange = depthRangeRef.current
+    const openingRange = statedRange !== null && statedRange.symbol === symbol
+      ? statedRange.range
+      : undefined
     let sent = false
     try {
-      sent = sendMessage(createRequest({ requestId, symbol, interval })) !== false
+      sent = sendMessage(createRequest({
+        requestId,
+        symbol,
+        interval,
+        range: openingRange,
+      })) !== false
     } catch {
       sent = false
     }
@@ -405,7 +420,10 @@ const useFuturesProductionWorkstation = ({
       }))
     } else if (sent) {
       activeSubscriptionRef.current = Object.freeze({ requestId, sendMessage, symbol })
-      sentDepthRangeRef.current = null
+      // What the subscription was opened with counts as stated, so a reading
+      // that travelled with the request is not immediately restated as a second
+      // message saying the same thing.
+      sentDepthRangeRef.current = openingRange ?? null
       // Re-stated for the subscription that will carry it, the way the tape
       // settings below are: the panel states its reading when the reading
       // changes, and a new subscription for the same contract is not a change

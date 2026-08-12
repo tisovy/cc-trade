@@ -1,5 +1,5 @@
 export const FUTURES_WORKSTATION_MARKET_TYPE = 'USD_M_FUTURES'
-export const FUTURES_WORKSTATION_PROTOCOL_VERSION = '7'
+export const FUTURES_WORKSTATION_PROTOCOL_VERSION = '8'
 export const FUTURES_WORKSTATION_REQUEST_MAX_BYTES = 1_024
 // Sized around the largest frame the desk actually sends — a full depth view.
 // The bound exists so a hostile frame can never force an unbounded parse, not to
@@ -196,6 +196,16 @@ export const isFuturesWorkstationSymbol = value => (
 )
 
 export const isFuturesWorkstationInterval = value => INTERVAL_VALUES.has(value)
+
+// A reading, wherever it is stated. The panel restates it on the request that
+// opens a contract as well as on its own, and one rule reads both — a range the
+// desk would accept from one message and refuse from the other is a range whose
+// meaning depends on how it arrived.
+const isFuturesWorkstationDepthRange = value => (
+  typeof value === 'string'
+  && value.length <= FUTURES_WORKSTATION_DEPTH_RANGE_MAX_LENGTH
+  && NONNEGATIVE_DECIMAL_PATTERN.test(value)
+)
 
 const isSafeTimestamp = value => Number.isSafeInteger(value) && value >= 0
 const isPositiveSafeInteger = value => Number.isSafeInteger(value) && value > 0
@@ -736,9 +746,7 @@ export const validateFuturesWorkstationRequest = ({
       'requestId',
       'range',
     ])
-      || typeof value.range !== 'string'
-      || value.range.length > FUTURES_WORKSTATION_DEPTH_RANGE_MAX_LENGTH
-      || !NONNEGATIVE_DECIMAL_PATTERN.test(value.range)) {
+      || !isFuturesWorkstationDepthRange(value.range)) {
       fail('INVALID_DEPTH_CONFIGURATION')
     }
     return freezeFuturesWorkstationValue(value)
@@ -769,7 +777,14 @@ export const validateFuturesWorkstationRequest = ({
     return freezeFuturesWorkstationValue(value)
   }
 
-  if (!hasExactFuturesWorkstationKeys(value, [
+  // A contract is selected with the reading its rows need, when the panel
+  // already has one for it: the page that covers that reading is then bought
+  // against the first band the snapshot proves, rather than after a second
+  // message that arrives once the book is already open and short. The key is
+  // optional because the first contract of a session is selected before any
+  // book has been drawn — such a request opens at the cheapest page, as every
+  // request did before.
+  const selectionKeys = [
     'channelId',
     'version',
     'marketType',
@@ -778,9 +793,12 @@ export const validateFuturesWorkstationRequest = ({
     'requestId',
     'symbol',
     'interval',
-  ])
+  ]
+  const statesRange = hasExactFuturesWorkstationKeys(value, [...selectionKeys, 'range'])
+  if ((!statesRange && !hasExactFuturesWorkstationKeys(value, selectionKeys))
     || !isFuturesWorkstationSymbol(value.symbol)
-    || !isFuturesWorkstationInterval(value.interval)) {
+    || !isFuturesWorkstationInterval(value.interval)
+    || (statesRange && !isFuturesWorkstationDepthRange(value.range))) {
     fail('INVALID_REQUEST_SHAPE')
   }
   return freezeFuturesWorkstationValue(value)
@@ -855,7 +873,10 @@ export const createFuturesWorkstationRequest = ({
           ? { range }
           : action === actions.LOAD_CANDLE_HISTORY
             ? { symbol, interval, endTime, limit }
-            : { symbol, interval }),
+            // The reading is carried only when there is one to carry: a request
+            // that states no range is the request that opened every contract
+            // before this, and it still opens one at the cheapest page.
+            : { symbol, interval, ...(range === undefined ? {} : { range }) }),
   },
   channelId,
   environment,

@@ -396,8 +396,66 @@ describe('the band a snapshot proves', () => {
     it('states how many times deeper it would have to be', () => {
         const book = banded();
         expect(book.rangeShortfall('1')).toBe(0);
-        // Band spans 3; covering ±6 around a spread of 1 needs 13.
-        expect(book.rangeShortfall('6')).toBeCloseTo(13 / 3, 6);
+        // Each side proved one unit of price past its best; rows reaching six
+        // need six times the page that proved it.
+        expect(book.rangeShortfall('6')).toBeCloseTo(6, 6);
+    });
+
+    // The book the operator brought back: a full ask ladder over seven bid rows,
+    // badged live. Measured on the total span the two sides pay for each other —
+    // a span of 2.1 against a need of 2.1 is sufficient, exactly — and the desk
+    // re-reads the same page, gets the same asymmetry, and the bid side stays
+    // short for the session.
+    it('measures the side that falls short, not the span the two sides make', () => {
+        const book = new FuturesWorkstationOrderBook();
+        book.push(delta({ bids: [], asks: [] }), 200);
+        expect(book.bootstrap(snapshot({
+            bids: [['10.00', '2.0'], ['9.90', '3.0']],
+            asks: [['10.10', '4.0'], ['12.00', '5.0']],
+        })).live).toBe(true);
+        expect(book.coversRange('1')).toBe(false);
+        // The ask side proved 1.9 and reaches; the bid side proved 0.1 and is
+        // ten times short of the reading. Ten is what has to be bought.
+        expect(book.rangeShortfall('1')).toBeCloseTo(10, 6);
+    });
+
+    // A page that did reach the rows on both sides when it was read is not a
+    // page too shallow — the market has walked out from between its edges, and
+    // the same page read again is a band centred where the market is now. A
+    // shortfall of exactly 1 is what says so: short, but not by depth.
+    it('asks for the same page when the market walked out of a wide enough band', () => {
+        const book = new FuturesWorkstationOrderBook();
+        book.push(delta({ bids: [], asks: [] }), 200);
+        expect(book.bootstrap(snapshot({
+            bids: [['10.00', '2.0'], ['9.00', '3.0']],
+            asks: [['10.10', '4.0'], ['11.10', '5.0']],
+        })).live).toBe(true);
+        book.push(delta({
+            firstUpdateId: '102',
+            finalUpdateId: '103',
+            previousFinalUpdateId: '101',
+            bids: [['10.80', '1.0']],
+            asks: [['10.10', '0'], ['10.90', '1.0']],
+        }), 200);
+        // The ask side now reaches 0.2 where the rows need 1 — but the page it
+        // was bought at proved 1, so there is nothing deeper worth buying.
+        expect(book.coversRange('1')).toBe(false);
+        expect(book.rangeShortfall('1')).toBe(1);
+    });
+
+    // A side the walk emptied states no distance to size a page against. It is
+    // still a book that cannot prove its rows, so it still asks for a reading —
+    // one that will have two sides to measure.
+    it('asks for a fresh reading when a side states no distance at all', () => {
+        const book = banded();
+        book.push(delta({
+            firstUpdateId: '102',
+            finalUpdateId: '103',
+            previousFinalUpdateId: '101',
+            bids: [['10.00', '0'], ['9.00', '0']],
+            asks: [],
+        }), 200);
+        expect(book.rangeShortfall('1')).toBe(Number.POSITIVE_INFINITY);
     });
 
     // A snapshot that came back with one side empty proves no band, so the book
