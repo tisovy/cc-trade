@@ -89,6 +89,7 @@ export const summarizeDeskDiagnosticRecord = (text) => {
   const kinds = new Map()
   const durations = new Map()
   const resynchronizations = []
+  const refusals = new Map()
   const sessions = []
   const commands = []
   let refused = 0
@@ -128,6 +129,11 @@ export const summarizeDeskDiagnosticRecord = (text) => {
       resynchronizations.push({
         at: line.at, symbol: line.symbol, state: line.state, code: line.code ?? null,
       })
+    }
+    // A command the exchange resolved is a warning being withdrawn, not a
+    // refusal. Only the two that ended badly are counted here.
+    if (line.kind === 'outcome' && (line.result === 'rejected' || line.result === 'unresolved')) {
+      bump(refusals, line.exchangeCode ?? '(the exchange stated none)')
     }
     if (line.kind === 'session') sessions.push({ at: line.at, event: line.event, version: line.version ?? null })
     if (line.kind === 'command') {
@@ -169,6 +175,7 @@ export const summarizeDeskDiagnosticRecord = (text) => {
     kinds: descending(kinds.entries()),
     codes: descending(codes.entries()),
     resynchronizations,
+    refusals: descending(refusals.entries()),
     sessions,
     commands,
     phases,
@@ -196,6 +203,16 @@ export const formatDeskDiagnosticSummary = (summary, { day = null } = {}) => {
       `  ${entry.at ?? '-'}  ${String(entry.state).padEnd(16)}`
       + ` ${String(entry.symbol ?? '-').padEnd(12)} ${entry.code ?? '-'}`,
     )
+  }
+
+  // Only when there were any: a day with nothing refused should not carry an
+  // empty heading saying so.
+  if (summary.refusals.length > 0) {
+    const refused = summary.refusals.reduce((sum, entry) => sum + entry.count, 0)
+    out.push('', `Refusals by the code the exchange gave (${refused})`)
+    for (const { key, count } of summary.refusals) {
+      out.push(`  ${String(count).padStart(6)}  ${key}`)
+    }
   }
 
   out.push('', 'Slowest phases')

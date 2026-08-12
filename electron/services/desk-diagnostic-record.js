@@ -64,6 +64,14 @@ const OUTCOME = /^[a-z][a-z-]{0,31}$/;
 // reads that have a cache carry it; the rest state nothing.
 const CACHE = /^(?:hit|miss)$/;
 const RESULT = /^(?:rejected|unresolved|resolved)$/;
+// The exchange's own name for a refusal. Binance answers with a small signed
+// integer (-2019, "insufficient margin"); a request that never reached an answer
+// carries the transport's uppercase name instead (ECONNRESET, ETIMEDOUT).
+// Neither shape has a decimal point in it, which is the whole reason this field
+// may sit beside a rule that keeps amounts out — the exchange's *message* may
+// not, and does not.
+const EXCHANGE_CODE_NUMBER = /^-?\d{1,6}$/;
+const EXCHANGE_CODE_NAME = /^[A-Z][A-Z0-9_]{0,39}$/;
 const EVENT = /^(?:started|stopped)$/;
 const VERSION = /^[0-9][0-9A-Za-z.+-]{0,31}$/;
 
@@ -77,8 +85,23 @@ const identity = (value) => {
     if (Number.isSafeInteger(value) && value >= 0) return String(value);
     return text(IDENTITY)(value);
 };
+const exchangeCode = (value) => {
+    const named = text(EXCHANGE_CODE_NAME)(value);
+    if (named !== undefined) return named;
+    const numbered = Number.isSafeInteger(value) ? String(value) : value;
+    return typeof numbered === 'string' && EXCHANGE_CODE_NUMBER.test(numbered)
+        ? numbered
+        : undefined;
+};
 const optional = read => value => (
     value === null || value === undefined ? null : read(value)
+);
+// The one field whose refusal costs the field and not the line. A command the
+// exchange refused is worth recording even when the exchange named the refusal
+// in a shape this record will not repeat — the alternative is losing the fact
+// that it happened at all.
+const tolerated = read => value => (
+    value === null || value === undefined ? null : read(value) ?? null
 );
 
 // Each kind states exactly the fields it may carry. Nothing else is copied, so
@@ -122,6 +145,10 @@ const RECORDED_FIELDS = Object.freeze({
         ['market', optional(text(MARKET))],
         ['symbol', optional(text(SYMBOL))],
         ['identity', optional(identity)],
+        // `FUTURES_API_ERROR` above is the desk's word for every refusal there
+        // is. This is the exchange's own, and it is the difference between an
+        // evening of refusals being one cause or five.
+        ['exchangeCode', tolerated(exchangeCode)],
     ]),
 });
 
@@ -184,6 +211,9 @@ export const readDeskDiagnosticOutboundEvent = (payload) => {
             market: details?.marketType ?? null,
             symbol: details?.symbol ?? null,
             identity: details?.orderId ?? details?.origClientOrderId ?? details?.clientOrderId ?? null,
+            // Present on every envelope the exchange itself refused; absent on
+            // the desk's own refusals, which never asked it anything.
+            exchangeCode: details?.binanceCode ?? null,
         });
     }
     return null;

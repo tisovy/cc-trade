@@ -286,7 +286,60 @@ describe('the events the desk states to the renderer', () => {
             market: 'futures',
             symbol: 'BTCUSDT',
             identity: 'f-m9x2k1-4a7bd0e2',
+            exchangeCode: null,
         });
+    });
+
+    // `FUTURES_API_ERROR` is the desk's word for every refusal there is. These
+    // are the shapes the exchange's own answer arrives in.
+    it('names the code the exchange gave for a refusal', () => {
+        const refusal = (details, result = 'command_rejected') => readDeskDiagnosticOutboundEvent({
+            [result]: {
+                request: 'trade.placeOrder',
+                code: 'FUTURES_API_ERROR',
+                message: 'Margin is insufficient. — insufficient margin for this order.',
+                details: { marketType: 'futures', symbol: 'CYSUSDT', ...details },
+                timestamp: AT,
+            },
+        });
+
+        // Binance answered, and said which refusal it was.
+        expect(refusal({ binanceCode: -2019 })).toMatchObject({ exchangeCode: '-2019' });
+        // The Spot client nests its code; `spotBinanceCode` has already unnested
+        // it by the time the envelope is built.
+        expect(refusal({ marketType: 'spot', binanceCode: -2010 }))
+            .toMatchObject({ market: 'spot', exchangeCode: '-2010' });
+        // The request never reached an answer.
+        expect(refusal({ binanceCode: 'ECONNRESET' }, 'command_unresolved'))
+            .toMatchObject({ result: 'unresolved', exchangeCode: 'ECONNRESET' });
+        expect(refusal({ binanceCode: 'ETIMEDOUT' })).toMatchObject({ exchangeCode: 'ETIMEDOUT' });
+        // The desk refused it on its own account and asked the exchange nothing.
+        expect(refusal({})).toMatchObject({ exchangeCode: null });
+        // And the message the exchange wrote for a human stays out of it: it is
+        // the one shape that can quote a quantity back.
+        expect(JSON.stringify(refusal({ binanceCode: -2019 })))
+            .not.toMatch(/Margin is insufficient|insufficient margin/);
+    });
+
+    it('drops a refusal code it cannot vouch for without dropping the refusal', () => {
+        for (const binanceCode of [
+            '20.5',
+            'Order notional must be no smaller than 20',
+            { code: -2019 },
+            -12345678901,
+            'lowercase',
+        ]) {
+            const event = readDeskDiagnosticOutboundEvent({
+                command_rejected: {
+                    request: 'trade.placeOrder',
+                    code: 'FUTURES_API_ERROR',
+                    message: 'refused',
+                    details: { marketType: 'futures', symbol: 'CYSUSDT', binanceCode },
+                    timestamp: AT,
+                },
+            });
+            expect(event).toMatchObject({ kind: 'outcome', result: 'rejected', exchangeCode: null });
+        }
     });
 
     it('leaves every market frame alone', () => {

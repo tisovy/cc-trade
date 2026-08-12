@@ -4497,9 +4497,49 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 action: 'trade.placeOrder',
                 result: 'rejected',
                 market: 'futures',
+                // The desk's own word for a refusal is the same for every
+                // refusal there is; this is the exchange's.
+                exchangeCode: '-2019',
             });
-            // The price and the size the command carried are not in any of it.
+            // The price and the size the command carried are not in any of it,
+            // and neither is the sentence the exchange wrote for a human.
             expect(JSON.stringify(kept)).not.toMatch(/50000|0\.01\b|Margin is insufficient/);
+        });
+
+        // Spot travels the same road with its own code, which the Spot client
+        // nests one level deeper than Futures does.
+        it('keeps the code the exchange gave for a refused Spot order', async () => {
+            await connectRecordedRenderer('spot');
+            moduleMocks.spotClient.restAPI.newOrder.mockRejectedValueOnce(Object.assign(
+                new Error('Filter failure: MIN_NOTIONAL'),
+                { status: 400, response: { data: { code: -1013 } } },
+            ));
+
+            await moduleMocks.rendererHandlers.message({
+                type: 'utf8',
+                utf8Data: JSON.stringify({
+                    action: 'trade.placeOrder',
+                    version: 1,
+                    marketType: 'spot',
+                    accountId: 'default',
+                    clientOrderId: 'spot-recorded-1',
+                    symbol: 'PAXUSDT',
+                    side: 'BUY',
+                    orderType: 'LIMIT',
+                    timeInForce: 'GTC',
+                    price: '0.9990',
+                    quantity: '20',
+                }),
+            });
+
+            expect(held('outcome')[0]).toMatchObject({
+                action: 'trade.placeOrder',
+                result: 'rejected',
+                market: 'spot',
+                identity: 'spot-recorded-1',
+                exchangeCode: '-1013',
+            });
+            expect(JSON.stringify(kept)).not.toMatch(/0\.9990|MIN_NOTIONAL/);
         });
 
         // The workspace's status line is the only place a resynchronization

@@ -28,23 +28,27 @@ const DAY = [
   line({ at: '2026-08-10T14:21:02.100Z', kind: 'timing', phase: 'oversized-frame:41022', durationMs: 0, outcome: 'error', cache: null }),
   line({ at: '2026-08-10T14:21:03.000Z', kind: 'fault', phase: 'stream-frame', code: 'STREAM_FRAME_REFUSED' }),
   line({ at: '2026-08-10T15:00:00.000Z', kind: 'command', action: 'trade.placeOrder', market: 'futures', symbol: 'BTCUSDT', side: 'BUY', orderType: 'LIMIT', identity: 'f-m9x2k1-4a7bd0e2' }),
-  line({ at: '2026-08-10T15:00:00.400Z', kind: 'outcome', action: 'trade.placeOrder', result: 'rejected', code: 'FUTURES_MIN_NOTIONAL', market: 'futures', symbol: 'BTCUSDT', identity: 'f-m9x2k1-4a7bd0e2' }),
+  line({ at: '2026-08-10T15:00:00.400Z', kind: 'outcome', action: 'trade.placeOrder', result: 'rejected', code: 'FUTURES_MIN_NOTIONAL', market: 'futures', symbol: 'BTCUSDT', identity: 'f-m9x2k1-4a7bd0e2', exchangeCode: '-4164' }),
+  line({ at: '2026-08-10T15:01:00.000Z', kind: 'outcome', action: 'trade.placeOrder', result: 'rejected', code: 'FUTURES_API_ERROR', market: 'futures', symbol: 'BTCUSDT', identity: 'f-m9x2k1-4a7bd0e3', exchangeCode: '-2019' }),
+  line({ at: '2026-08-10T15:02:00.000Z', kind: 'outcome', action: 'trade.cancelOrder', result: 'rejected', code: 'FUTURES_API_ERROR', market: 'futures', symbol: 'BTCUSDT', identity: '84213377', exchangeCode: '-2019' }),
+  line({ at: '2026-08-10T15:03:00.000Z', kind: 'outcome', action: 'trade.placeOrder', result: 'unresolved', code: 'FUTURES_OUTCOME_PENDING', market: 'futures', symbol: 'BTCUSDT', identity: 'f-m9x2k1-4a7bd0e4', exchangeCode: null }),
+  line({ at: '2026-08-10T15:03:20.000Z', kind: 'outcome', action: 'trade.placeOrder', result: 'resolved', code: 'FUTURES_OUTCOME_EXECUTED', market: 'futures', symbol: 'BTCUSDT', identity: 'f-m9x2k1-4a7bd0e4', exchangeCode: null }),
 ].join('')
 
 describe('summarizeDeskDiagnosticRecord', () => {
   const summary = summarizeDeskDiagnosticRecord(DAY)
 
   it('counts what happened, by kind and by code', () => {
-    expect(summary.lines).toBe(13)
+    expect(summary.lines).toBe(17)
     expect(Object.fromEntries(summary.kinds.map(entry => [entry.key, entry.count]))).toEqual({
-      timing: 5, status: 3, fault: 2, session: 1, command: 1, outcome: 1,
+      timing: 5, outcome: 5, status: 3, fault: 2, session: 1, command: 1,
     })
     expect(summary.codes.slice(0, 2)).toEqual([
       { key: 'DEPTH_SEQUENCE_GAP', count: 2 },
-      { key: 'CONNECTION_ROTATED', count: 1 },
+      { key: 'FUTURES_API_ERROR', count: 2 },
     ])
     expect(summary.from).toBe('2026-08-10T09:00:00.000Z')
-    expect(summary.to).toBe('2026-08-10T15:00:00.400Z')
+    expect(summary.to).toBe('2026-08-10T15:03:20.000Z')
   })
 
   it('names the cause every resynchronization stated', () => {
@@ -75,6 +79,28 @@ describe('summarizeDeskDiagnosticRecord', () => {
     })
   })
 
+  // "Nine orders refused, all -2019" is one cause. "Nine FUTURES_API_ERROR" is
+  // what the record said before the exchange's own word was kept.
+  it('counts refusals by the code the exchange gave', () => {
+    expect(summary.refusals).toEqual([
+      { key: '-2019', count: 2 },
+      { key: '(the exchange stated none)', count: 1 },
+      { key: '-4164', count: 1 },
+    ])
+    const report = formatDeskDiagnosticSummary(summary)
+    expect(report).toContain('Refusals by the code the exchange gave (4)')
+    // The command that ended well is a warning being withdrawn, not a refusal.
+    expect(summary.kinds.find(entry => entry.key === 'outcome').count).toBe(5)
+  })
+
+  it('says nothing about refusals on a day that had none', () => {
+    const quiet = summarizeDeskDiagnosticRecord(
+      line({ at: '2026-08-10T09:00:00.000Z', kind: 'fault', phase: 'stream', code: 'A' }),
+    )
+    expect(quiet.refusals).toEqual([])
+    expect(formatDeskDiagnosticSummary(quiet)).not.toContain('Refusals')
+  })
+
   it('gathers a burst of refused frames under one phase', () => {
     // Each refusal names its own byte count, so counting them by phase verbatim
     // would report a thousand phases seen once each.
@@ -85,7 +111,7 @@ describe('summarizeDeskDiagnosticRecord', () => {
   it('counts a line it cannot read rather than guessing at it', () => {
     const torn = summarizeDeskDiagnosticRecord(`${DAY}{"at":"2026-08-10T15:01:00.000Z","kind":"fa`)
     expect(torn.refused).toBe(1)
-    expect(torn.lines).toBe(13)
+    expect(torn.lines).toBe(17)
   })
 
   // The record is a file on the operator's disk: it can be edited, truncated,
@@ -143,7 +169,7 @@ describe('the summary as the operator runs it', () => {
 
     expect(runDeskRecordSummary(['--dir', directory, '--day', '2026-08-10'])).toBe(true)
     const report = printed.join('\n')
-    expect(report).toContain('Desk record for 2026-08-10 — 14 events')
+    expect(report).toContain('Desk record for 2026-08-10 — 18 events')
     expect(report).toContain('CLOCK_REGRESSION')
     expect(report).toContain('DEPTH_SEQUENCE_GAP')
     expect(report).toMatch(/depth\s+n=\s*2/)
