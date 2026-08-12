@@ -9,11 +9,13 @@
 - [ ] 2.2 Avoid copying the whole candle array in `applyTradeToChart` when only the last candle changes.
 - [ ] 2.3 Prove by test that a trade that only moves the last candle produces no full-series work.
 
-## 3. Depth Frames Are Coalesced
+## 3. A Frame Redraws Only Its Own Panel
 
-- [ ] 3.1 Coalesce futures depth deliveries to at most one book per animation interval, with the newest frame replacing a pending one.
-- [ ] 3.2 Keep the delivered book complete — coalescing drops intermediate frames, never levels.
-- [ ] 3.3 Prove by test that a burst of depth frames delivers one book and that the delivered book is the newest.
+- [x] 3.1 ~~Coalesce futures depth deliveries to at most one book per animation interval, with the newest frame replacing a pending one.~~ Measured before building: the exchange sends `@depth@100ms` ten times a second, the tape is throttled to four, the klines about four and the mark once — around twenty renderer events a second against the sixty an animation interval allows. There is nothing to coalesce at the exchange's cadence, and the burst case the section was written for is already collapsed in the transport by `carry-execution-ahead-of-market-data`, where an undelivered book is replaced by the newer one. Building it would have bought nothing and made every hook test asynchronous.
+- [x] 3.2 ~~Keep the delivered book complete — coalescing drops intermediate frames, never levels.~~ Nothing is coalesced, so nothing is dropped.
+- [x] 3.3 Redraw the book only for a frame that changed the book, and the tape only for a frame that changed the tape. *(Discovered by measuring where the burst actually cost anything. The chart, the ticket, the history panel and the portfolio dock are memoized; the two panels the operator reads fastest are not — the ladders and the tape rows are built in the view's own body, so every frame of either kind rebuilt both. On a twenty-four-level book, 152 of the 175 number formats one print cost belonged to a book that had not moved, and 78 of the 251 a book update cost belonged to a tape that had not printed.)*
+- [x] 3.4 Hold the two panels by element identity rather than splitting them into components. *(Discovered: React skips a subtree whose element is the one it already has, so a `useMemo` per panel buys the same saving as a memoized child without plumbing twenty props through a new boundary — and leaves the markup where a reader of this file already expects it. It needs the handlers and the depth scale to be stable, which cost one `useCallback`.)*
+- [x] 3.5 Prove by test that a print costs the same whatever the book on screen is worth, and a book update the same whatever the tape holds — measured through the formatter every row calls, at two panel sizes, so what did not change contributes nothing to the difference. Proven against the pre-change view in a scratch checkout: it fails there at 175 against 23, and 251 against 173.
 
 ## 4. No State Updates During Render
 

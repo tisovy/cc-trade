@@ -1,18 +1,30 @@
 ## ADDED Requirements
 
-### Requirement: Depth delivery is coalesced, not dropped in part
-The workstation SHALL deliver at most one order book per animation interval. A
-frame arriving while a delivery is pending SHALL replace it. A delivered book
-SHALL be complete for the depth in force; coalescing SHALL drop intermediate
-frames, never levels within a frame.
+### Requirement: A frame redraws the panel it belongs to and no other
+The workstation SHALL redraw the order book only for a frame that changes the
+book, and the tape only for a frame that changes the tape. What a frame costs to
+draw SHALL NOT depend on how much of the panel it did not change: a print SHALL
+cost the same whether two levels a side are on screen or twenty-four.
 
-#### Scenario: A burst of depth frames
-- **WHEN** several depth frames arrive within one animation interval
-- **THEN** one book is delivered, and it is built from the newest frame
+This replaces coalescing depth deliveries to an animation interval, which was
+measured and does not pay. The exchange sends depth ten times a second and the
+tape is throttled to four; against the sixty an animation interval allows there
+is nothing to coalesce, and the one case there was — a burst on a socket that
+stopped accepting bytes — is already collapsed in the transport, where the newer
+book replaces the undelivered older one. What the burst actually cost was paid in
+the panel: every frame of either kind rebuilt both ladders and every tape row.
 
-#### Scenario: Quiet book
-- **WHEN** frames arrive slower than the interval
-- **THEN** each frame is delivered as it arrives
+#### Scenario: A print arrives
+- **WHEN** a tape frame arrives and the book has not changed
+- **THEN** the tape rows are redrawn and the book rows are not
+
+#### Scenario: A book update arrives
+- **WHEN** a depth frame arrives and the tape has not printed
+- **THEN** the book rows are redrawn and the tape rows are not
+
+#### Scenario: A frame changes both
+- **WHEN** a frame carries both a new book and a new print
+- **THEN** both are redrawn, because both are what changed
 
 ### Requirement: A price tick does not restart the render
 The workstation SHALL derive the last-print direction without updating state

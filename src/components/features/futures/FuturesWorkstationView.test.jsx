@@ -9,15 +9,23 @@ const workstationViewMocks = vi.hoisted(() => ({
   chartRender: vi.fn(),
   ticketRender: vi.fn(),
   formatExchangePrice: vi.fn(),
+  formatCompactUsdt: vi.fn(),
 }))
 
 // The view calls this once per render pass, for the last traded price, and the
 // two children that also call it are mocked out here — so counting it counts
 // passes over the workstation. A pass React throws away is still a pass.
+// And this one is called three times by every book row and twice by every tape
+// row, so counting it counts how much of the panel a frame actually rebuilt.
 vi.mock('../../../utils/futuresPriceFormat.js', async (importOriginal) => {
   const actual = await importOriginal()
   workstationViewMocks.formatExchangePrice.mockImplementation(actual.formatExchangePrice)
-  return { ...actual, formatExchangePrice: workstationViewMocks.formatExchangePrice }
+  workstationViewMocks.formatCompactUsdt.mockImplementation(actual.formatCompactUsdt)
+  return {
+    ...actual,
+    formatExchangePrice: workstationViewMocks.formatExchangePrice,
+    formatCompactUsdt: workstationViewMocks.formatCompactUsdt,
+  }
 })
 
 vi.mock('./FuturesWorkstationChart.jsx', async () => {
@@ -1238,6 +1246,124 @@ describe('instrument recency and interface scale', () => {
       render(<FuturesWorkstationView {...properties} state={atPrice('58420.25')} />)
 
       expect(screen.getByLabelText(/Last traded price .*, neutral/)).toBeInTheDocument()
+    })
+  })
+
+  // The book and the tape arrive on different frames, roughly ten and four a
+  // second, and each used to redraw the other. Measured by what a frame costs at
+  // two panel sizes: if the part that did not change contributes nothing to the
+  // difference, it was not redrawn.
+  describe('what one frame redraws', () => {
+    const properties = {
+      identity: 'USDⓈ-M PRODUCTION · REAL MONEY',
+      selectedSymbol: 'BTCUSDT',
+      selectedInterval: '1m',
+      symbolHistory: { recent: ['BTCUSDT'], favorites: [] },
+      onSymbolChange: vi.fn(),
+      onIntervalChange: vi.fn(),
+    }
+    // A frame replaces one resource and leaves the others exactly as they were,
+    // which is what the workstation hook does — and the whole reason a frame can
+    // be told from the panel it does not belong to.
+    const panelOf = ({ levelsPerSide, tradeRows }) => {
+      const base = createState()
+      return createState({
+        resources: Object.freeze({
+          ...base.resources,
+          depth: Object.freeze({
+            ...base.resources.depth,
+            bids: bookLevels(58420, -1, levelsPerSide),
+            asks: bookLevels(58420.5, 1, levelsPerSide),
+          }),
+          trades: Object.freeze({
+            ...base.resources.trades,
+            rows: Object.freeze(
+              Array.from({ length: tradeRows }, (unused, index) => trade(String(900000 + index))),
+            ),
+          }),
+        }),
+      })
+    }
+    const printArrivesOn = (state, tradeRows) => Object.freeze({
+      ...state,
+      revision: state.revision + 1,
+      resources: Object.freeze({
+        ...state.resources,
+        trades: Object.freeze({
+          ...state.resources.trades,
+          rows: Object.freeze(
+            Array.from({ length: tradeRows }, (unused, index) => trade(String(910000 + index))),
+          ),
+        }),
+      }),
+    })
+    const bookMovesOn = state => Object.freeze({
+      ...state,
+      revision: state.revision + 1,
+      resources: Object.freeze({
+        ...state.resources,
+        depth: Object.freeze({
+          ...state.resources.depth,
+          lastUpdateId: '90071992547409931299',
+          bids: bookLevels(58421, -1, state.resources.depth.bids.length),
+          asks: bookLevels(58421.5, 1, state.resources.depth.asks.length),
+        }),
+      }),
+    })
+    const formats = () => workstationViewMocks.formatCompactUsdt.mock.calls.length
+    // What one frame costs, with the panel sized as given and the other half of
+    // the panel left exactly as it was.
+    const costOf = (before, after) => {
+      stubBookSideHeight(600)
+      const { rerender, unmount } = render(
+        <FuturesWorkstationView {...properties} state={before} />,
+      )
+      workstationViewMocks.formatCompactUsdt.mockClear()
+      rerender(<FuturesWorkstationView {...properties} state={after} />)
+      const cost = formats()
+      unmount()
+      return cost
+    }
+
+    it('does not redraw the book for a print, however deep the book is', () => {
+      const printArrives = (levelsPerSide) => {
+        const panel = panelOf({ levelsPerSide, tradeRows: 1 })
+        return costOf(panel, printArrivesOn(panel, 2))
+      }
+
+      // A print costs the same whether two levels a side are on screen or
+      // twenty-four. It used to cost 152 number formats more.
+      expect(printArrives(24)).toBe(printArrives(2))
+    })
+
+    it('does not redraw the tape for a book update, however long the tape is', () => {
+      const bookMoves = (tradeRows) => {
+        const panel = panelOf({ levelsPerSide: 24, tradeRows })
+        return costOf(panel, bookMovesOn(panel))
+      }
+
+      expect(bookMoves(40)).toBe(bookMoves(1))
+    })
+
+    // The rows still have to arrive when they are the ones that changed.
+    it('redraws the side the frame belongs to', () => {
+      stubBookSideHeight(600)
+      const panel = panelOf({ levelsPerSide: 4, tradeRows: 1 })
+      const { container, rerender } = render(
+        <FuturesWorkstationView {...properties} state={panel} />,
+      )
+      rerender(
+        <FuturesWorkstationView
+          {...properties}
+          state={bookMovesOn(printArrivesOn(panel, 3))}
+        />,
+      )
+
+      expect(container.querySelectorAll('.futures-workstation-trade-rows > [role="group"]'))
+        .toHaveLength(3)
+      expect(
+        container.querySelector('.futures-workstation-book-side.is-bid button')?.textContent,
+      ).toContain('58421')
     })
   })
 

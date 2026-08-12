@@ -645,10 +645,10 @@ export const FuturesWorkstationView = ({
     (deepest, level) => (level.cumulativeUsdt > deepest ? level.cumulativeUsdt : deepest),
     0,
   )
-  const depthShare = (level) => {
+  const depthShare = useCallback((level) => {
     if (deepestVisibleTotal <= 0) return '0%'
     return `${Math.min(100, (level.cumulativeUsdt / deepestVisibleTotal) * 100).toFixed(2)}%`
-  }
+  }, [deepestVisibleTotal])
   // Which side is leaning on the book: the resting USDT on each visible side,
   // measured over exactly the levels on screen, so changing the step changes
   // how wide a range the reading covers.
@@ -671,6 +671,111 @@ export const FuturesWorkstationView = ({
     if (reach <= 0) return null
     return `±${reach < 0.01 ? '<0.01' : reach.toFixed(2)}%`
   }, [lastPrice, visibleAsks, visibleBids])
+
+  // The book and the tape are drawn from different frames, and each was redrawn
+  // on the other's. A print arrives about four times a second and a book about
+  // ten, and every one of them rebuilt both ladders and every tape row: on a
+  // thirty-level book, 152 of the 175 number formats one print cost belonged to
+  // a book that had not moved, and 78 of the 251 a book update cost belonged to
+  // a tape that had not printed.
+  //
+  // Held by identity here rather than split into components: React skips a
+  // subtree whose element is the one it already has, so the rows whose own frame
+  // arrived are the rows that reconcile. The markup below is what it was — this
+  // states which frame each part of it belongs to.
+  const askLadder = useMemo(() => (bookSideMode === 'bids' ? null : (
+    <div className="futures-workstation-book-side is-ask" ref={askSideRef}>
+      {visibleAsks.map(level => (
+        <button
+          type="button"
+          key={`ask-${level.price}`}
+          className={ownBookLevels.ask.has(level.groupKey) ? 'has-own-order' : undefined}
+          title={ownBookLevels.ask.get(level.groupKey)
+            ? `${ownBookLevels.ask.get(level.groupKey)} working sell order here`
+            : undefined}
+          aria-label={`Ask book level: price ${level.price}; level ${formatCompactUsdt(level.notionalUsdt)} USDT; cumulative ${formatCompactUsdt(level.cumulativeUsdt)} USDT`}
+          disabled={!bookLevelsPickable}
+          style={{ '--futures-depth-share': depthShare(level) }}
+          onClick={event => handleBookClick(event, level.price)}
+          onContextMenu={event => handleBookContextMenu(event, level.price)}
+        >
+          {ownBookLevels.ask.has(level.groupKey)
+            ? <i className="futures-workstation-book-own is-sell" aria-hidden="true" />
+            : null}
+          <span>{level.price}</span>
+          <span className={bookWalls.ask.has(level.groupKey) ? 'is-wall' : undefined}>
+            {formatCompactUsdt(level.notionalUsdt)}
+          </span>
+          <span>{formatCompactUsdt(level.cumulativeUsdt)}</span>
+        </button>
+      ))}
+    </div>
+  )), [
+    bookLevelsPickable,
+    bookSideMode,
+    bookWalls,
+    depthShare,
+    handleBookClick,
+    handleBookContextMenu,
+    ownBookLevels,
+    visibleAsks,
+  ])
+
+  const bidLadder = useMemo(() => (bookSideMode === 'asks' ? null : (
+    <div className="futures-workstation-book-side is-bid" ref={bidSideRef}>
+      {visibleBids.map(level => (
+        <button
+          type="button"
+          key={`bid-${level.price}`}
+          className={ownBookLevels.bid.has(level.groupKey) ? 'has-own-order' : undefined}
+          title={ownBookLevels.bid.get(level.groupKey)
+            ? `${ownBookLevels.bid.get(level.groupKey)} working buy order here`
+            : undefined}
+          aria-label={`Bid book level: price ${level.price}; level ${formatCompactUsdt(level.notionalUsdt)} USDT; cumulative ${formatCompactUsdt(level.cumulativeUsdt)} USDT`}
+          disabled={!bookLevelsPickable}
+          style={{ '--futures-depth-share': depthShare(level) }}
+          onClick={event => handleBookClick(event, level.price)}
+          onContextMenu={event => handleBookContextMenu(event, level.price)}
+        >
+          {ownBookLevels.bid.has(level.groupKey)
+            ? <i className="futures-workstation-book-own is-buy" aria-hidden="true" />
+            : null}
+          <span>{level.price}</span>
+          <span className={bookWalls.bid.has(level.groupKey) ? 'is-wall' : undefined}>
+            {formatCompactUsdt(level.notionalUsdt)}
+          </span>
+          <span>{formatCompactUsdt(level.cumulativeUsdt)}</span>
+        </button>
+      ))}
+    </div>
+  )), [
+    bookLevelsPickable,
+    bookSideMode,
+    bookWalls,
+    depthShare,
+    handleBookClick,
+    handleBookContextMenu,
+    ownBookLevels,
+    visibleBids,
+  ])
+
+  const tapeRows = useMemo(() => (
+    <div className="futures-workstation-trade-rows">
+      {displayedTrades.map(trade => (
+        <div
+          className={trade.buyerMaker ? 'is-sell' : 'is-buy'}
+          key={trade.aggregateTradeId}
+          role="group"
+          aria-label={`Aggregate trade: price ${trade.price}; notional ${formatCompactUsdt(tradeNotionalUsdt(trade))} USDT; time ${formatTime(trade.tradeTime)}`}
+        >
+          <span>{trade.price}</span>
+          <span title={`${trade.quantity} base`}>{formatCompactUsdt(tradeNotionalUsdt(trade))}</span>
+          <span>{formatTime(trade.tradeTime)}</span>
+        </div>
+      ))}
+      {displayedTrades.length === 0 ? <p className="futures-workstation-empty">Waiting for aggregate trades…</p> : null}
+    </div>
+  ), [displayedTrades])
 
   return (
     <section className="futures-workstation" aria-label={`${identity} live trading workstation`}>
@@ -980,34 +1085,7 @@ export const FuturesWorkstationView = ({
           ) : null}
         </div>
         <div className="futures-workstation-book-body">
-        {bookSideMode === 'bids' ? null : (
-        <div className="futures-workstation-book-side is-ask" ref={askSideRef}>
-          {visibleAsks.map(level => (
-            <button
-              type="button"
-              key={`ask-${level.price}`}
-              className={ownBookLevels.ask.has(level.groupKey) ? 'has-own-order' : undefined}
-              title={ownBookLevels.ask.get(level.groupKey)
-                ? `${ownBookLevels.ask.get(level.groupKey)} working sell order here`
-                : undefined}
-              aria-label={`Ask book level: price ${level.price}; level ${formatCompactUsdt(level.notionalUsdt)} USDT; cumulative ${formatCompactUsdt(level.cumulativeUsdt)} USDT`}
-              disabled={!bookLevelsPickable}
-              style={{ '--futures-depth-share': depthShare(level) }}
-              onClick={event => handleBookClick(event, level.price)}
-              onContextMenu={event => handleBookContextMenu(event, level.price)}
-            >
-              {ownBookLevels.ask.has(level.groupKey)
-                ? <i className="futures-workstation-book-own is-sell" aria-hidden="true" />
-                : null}
-              <span>{level.price}</span>
-              <span className={bookWalls.ask.has(level.groupKey) ? 'is-wall' : undefined}>
-                {formatCompactUsdt(level.notionalUsdt)}
-              </span>
-              <span>{formatCompactUsdt(level.cumulativeUsdt)}</span>
-            </button>
-          ))}
-        </div>
-        )}
+        {askLadder}
         <div
           className={`futures-workstation-book-last is-${lastDirection}`}
           role="group"
@@ -1015,34 +1093,7 @@ export const FuturesWorkstationView = ({
         >
           <strong>{lastPriceText}</strong>
         </div>
-        {bookSideMode === 'asks' ? null : (
-        <div className="futures-workstation-book-side is-bid" ref={bidSideRef}>
-          {visibleBids.map(level => (
-            <button
-              type="button"
-              key={`bid-${level.price}`}
-              className={ownBookLevels.bid.has(level.groupKey) ? 'has-own-order' : undefined}
-              title={ownBookLevels.bid.get(level.groupKey)
-                ? `${ownBookLevels.bid.get(level.groupKey)} working buy order here`
-                : undefined}
-              aria-label={`Bid book level: price ${level.price}; level ${formatCompactUsdt(level.notionalUsdt)} USDT; cumulative ${formatCompactUsdt(level.cumulativeUsdt)} USDT`}
-              disabled={!bookLevelsPickable}
-              style={{ '--futures-depth-share': depthShare(level) }}
-              onClick={event => handleBookClick(event, level.price)}
-              onContextMenu={event => handleBookContextMenu(event, level.price)}
-            >
-              {ownBookLevels.bid.has(level.groupKey)
-                ? <i className="futures-workstation-book-own is-buy" aria-hidden="true" />
-                : null}
-              <span>{level.price}</span>
-              <span className={bookWalls.bid.has(level.groupKey) ? 'is-wall' : undefined}>
-                {formatCompactUsdt(level.notionalUsdt)}
-              </span>
-              <span>{formatCompactUsdt(level.cumulativeUsdt)}</span>
-            </button>
-          ))}
-        </div>
-        )}
+        {bidLadder}
         </div>
         {bookDepthUsdt > 0 ? (
           <div
@@ -1118,21 +1169,7 @@ export const FuturesWorkstationView = ({
             </form>
           </div>
         </details>
-        <div className="futures-workstation-trade-rows">
-          {displayedTrades.map(trade => (
-            <div
-              className={trade.buyerMaker ? 'is-sell' : 'is-buy'}
-              key={trade.aggregateTradeId}
-              role="group"
-              aria-label={`Aggregate trade: price ${trade.price}; notional ${formatCompactUsdt(tradeNotionalUsdt(trade))} USDT; time ${formatTime(trade.tradeTime)}`}
-            >
-              <span>{trade.price}</span>
-              <span title={`${trade.quantity} base`}>{formatCompactUsdt(tradeNotionalUsdt(trade))}</span>
-              <span>{formatTime(trade.tradeTime)}</span>
-            </div>
-          ))}
-          {displayedTrades.length === 0 ? <p className="futures-workstation-empty">Waiting for aggregate trades…</p> : null}
-        </div>
+        {tapeRows}
       </aside>
 
       {portfolioDock}
