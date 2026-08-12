@@ -210,15 +210,19 @@ and a quantity in the plate the desk reads levels from is read as a level.
 - **THEN** the last bar's volume is not labelled on the price scale
 
 ### Requirement: The instrument rail carries no exchange-filter reference panel
-The instrument rail SHALL NOT present a contract-filter reference panel. Exchange filters SHALL remain enforced on every order draft and SHALL be reported only when they block a specific action.
+The instrument rail SHALL NOT present a contract-filter reference panel. The price tick, the quantity step, the contract's quantity range and its minimum notional SHALL remain enforced on every order draft and SHALL be reported only when they block a specific action. Every other exchange filter SHALL be left to the exchange, and its refusal SHALL be reported to the operator with the exchange's own code and message.
 
 #### Scenario: A contract is selected
 - **WHEN** the operator selects a contract
 - **THEN** no tick-size, step-size, percent-price, max-orders, or minimum-notional reference panel is rendered
 
 #### Scenario: A draft violates a filter
-- **WHEN** a draft order violates a symbol filter
+- **WHEN** a draft order violates the price tick, the quantity step, the quantity range, or the minimum notional
 - **THEN** the ticket states the violated constraint for that draft
+
+#### Scenario: A draft violates a filter only the exchange enforces
+- **WHEN** a draft order violates a filter the desk no longer evaluates locally
+- **THEN** the submission reaches the exchange and its refusal is presented with the exchange's code and message
 
 ### Requirement: The default chart interval is 15m
 A contract SHALL open on the `15m` interval unless the operator selects another interval.
@@ -1194,4 +1198,47 @@ went stale without a close.
 #### Scenario: The desk refused a frame and kept the stream
 - **WHEN** the desk drops an upstream frame that exceeds its own ceiling
 - **THEN** the refusal is named on the workspace's reason line under a code of its own, the session stays live, and a burst of such frames is stated once rather than once per frame
+
+### Requirement: The workspace fits the window it is given
+The Futures workspace SHALL lay out within the height and width of its window
+without the page itself scrolling, at every window size the desk supports. A
+panel that cannot show all of its content SHALL reduce what it shows rather than
+clip it behind a scrollbar it does not own.
+
+#### Scenario: A short window
+- **WHEN** the workspace is rendered in a window shorter than its preferred layout
+- **THEN** the page does not scroll, and every panel remains readable at the reduced size
+
+### Requirement: No panel is drawn over another
+Every panel of the workspace SHALL be contained within the area the layout gives
+it. No panel SHALL declare a minimum size that the layout cannot satisfy, and no
+panel's content SHALL be painted across the panel below or beside it, at any
+window size the desk supports.
+
+#### Scenario: The window leaves the order book less height than it prefers
+- **WHEN** the window is short enough that the order book's preferred height does not fit its row
+- **THEN** the book shows fewer levels within its own area, and nothing of it is drawn over the aggregate-trade tape
+
+#### Scenario: A table is wider than the panel holding it
+- **WHEN** a portfolio dock table's columns need more width than its panel has
+- **THEN** the table's own tracks are what give way, and the panel itself neither scrolls nor overflows
+
+### Requirement: The market header never hides the contract's numbers
+The market header SHALL present the last price, the day's change, high, low and
+volume, and the funding readings, without any of them being placed outside the
+visible area of the header.
+
+#### Scenario: The header is given less height than its content prefers
+- **WHEN** the grid gives the header less height than its content
+- **THEN** the header's values remain visible, and the header does not scroll
+
+### Requirement: Scrolling belongs to the unbounded lists
+Only the contract list, the aggregate-trade tape and the portfolio dock's tables
+SHALL scroll. The instrument rail as a whole, the trading ticket, the market
+header, the chart column and the order book SHALL NOT introduce a scrollbar of
+their own.
+
+#### Scenario: The rail holds more than fits
+- **WHEN** the contract list is longer than the rail is tall
+- **THEN** the list scrolls inside itself and the trading ticket below it stays in place
 

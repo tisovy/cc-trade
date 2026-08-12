@@ -128,6 +128,12 @@ Each transition into a new configuration, account-resource, user-data-stream, or
 ### Requirement: Real-money readiness is derived from disclosed gates
 The system SHALL enable real-money order controls only after startup credential preflight succeeds, transport is connected, the operator pause is clear, the selected contract is currently tradable, exact exchange quantity and price filters are available, the required account state is usable, and the draft can be sized from a confirmed available USDT balance. Every unmet condition SHALL have an operator-visible reason.
 
+The configured per-order USDT ceiling SHALL apply to every submission that can
+increase exposure, including an amendment of a working order and a close that
+is not reduce-only, and SHALL be evaluated against the notional the submission
+would result in rather than the notional it replaces. A reduce-only exit SHALL
+remain exempt so an open position can always be closed.
+
 #### Scenario: TUTUSDT is tradable and account state is ready
 - **WHEN** Binance reports `TUTUSDT` as trading with valid filters and all live account gates are satisfied
 - **THEN** the order controls are enabled subject to draft validation and configured risk limits
@@ -151,6 +157,14 @@ The system SHALL enable real-money order controls only after startup credential 
 #### Scenario: Draft exceeds the local notional ceiling
 - **WHEN** an exposure-increasing order draft exceeds the configured per-order USDT ceiling
 - **THEN** submission is rejected with the configured ceiling shown and no exchange order is sent
+
+#### Scenario: Amendment would exceed the ceiling
+- **WHEN** an amendment of a working order would raise its notional above the configured per-order USDT ceiling
+- **THEN** the amendment is refused with the ceiling shown, on every surface that can produce it, and no exchange request is made
+
+#### Scenario: Reduce-only exit under an active ceiling
+- **WHEN** a reduce-only exit is submitted for a position larger than the configured ceiling
+- **THEN** the ceiling does not block it and the exit proceeds
 
 ### Requirement: Readiness cannot be inferred from decorative labels
 The system SHALL derive control availability and status labels from the same structured credential, synchronization, contract, and risk state. A production-styled heading SHALL NOT be sufficient to claim that real-money execution is ready.
@@ -205,3 +219,109 @@ holding a mark that has stopped updating.
 #### Scenario: A malformed frame arrives
 - **WHEN** the mark price socket delivers a frame that is not a mark price update
 - **THEN** it is ignored, and no mark is broadcast for it
+
+### Requirement: An account reading states whether it is still confirmed
+A held account snapshot SHALL carry whether it is confirmed by the current
+transport connection. Losing the transport SHALL mark the held resources
+unconfirmed while retaining their last values for reference. A resource SHALL
+become confirmed again only when a read answers on the current connection, not
+when a read is requested. Order sizing SHALL require a confirmed balance and
+SHALL state the unconfirmed balance as the reason when it refuses.
+
+#### Scenario: Transport reconnects
+- **WHEN** the local transport drops and reconnects and the account refresh has been sent but not answered
+- **THEN** the balance is presented as unconfirmed, order sizing is refused with that reason, and the last known values remain readable
+
+#### Scenario: Refresh answers after reconnect
+- **WHEN** the account read answers on the new connection
+- **THEN** the balance is confirmed again and order sizing is available
+
+### Requirement: A stalled market reading is not presented as current
+When a streamed market reading — mark price above all — stops arriving for
+longer than its stall window, the system SHALL present it as stale rather than
+as the current value, and SHALL attempt to restore the stream. Numbers derived
+from a stale reading SHALL be presented as derived from a stale reading.
+
+#### Scenario: Mark price stream goes quiet
+- **WHEN** no mark price arrives for longer than the stall window
+- **THEN** the mark and every number derived from it are presented as stale, and the feed attempts to restore the stream
+
+#### Scenario: Stream resumes
+- **WHEN** mark prices arrive again
+- **THEN** the readings are presented as current and the staleness is withdrawn
+
+### Requirement: An unknown account reading is not presented as an empty one
+Position and order surfaces SHALL distinguish "not yet read", "read failed" and
+"none open". A surface with no rows and no successful read SHALL NOT state a
+count of zero or describe the account as flat.
+
+#### Scenario: Before the first successful account read
+- **WHEN** the workspace opens and no account read has answered
+- **THEN** the dock states that positions and orders are not yet known, and shows no count
+
+#### Scenario: Account read failed
+- **WHEN** the positions read fails
+- **THEN** the dock states that the reading failed rather than reporting no open positions
+
+### Requirement: A command outcome is not displaced by a background failure
+The outcome of the operator's own last command SHALL remain visible while a
+background account synchronization failure is being reported. An unresolved
+outcome SHALL continue to rank above both. A rejection SHALL carry the
+exchange-reported code when the exchange supplied one.
+
+#### Scenario: Rejection during an account synchronization failure
+- **WHEN** an order is rejected while an account resource is failing to refresh
+- **THEN** both are readable, and the rejection names the exchange's own code
+
+#### Scenario: Unresolved outcome outranks both
+- **WHEN** a command outcome is unresolved
+- **THEN** it is presented above the rejection and the synchronization failure, and offers no retry control
+
+### Requirement: Local pre-validation is confined to submittability
+The system SHALL locally evaluate only the filters required to build a
+submittable order — the price tick, the quantity step, the contract's quantity
+range, and its minimum notional — together with the configured per-order USDT
+ceiling. It SHALL NOT locally evaluate the price minimum or maximum, the
+percent-price band, or the maximum permitted number of open orders; those SHALL
+be left to the exchange, whose refusal SHALL be reported to the operator with
+the code and message Binance returned.
+
+A single evaluator SHALL decide every submission draft, so that the trading
+ticket, the order editor, the chart drag amendment and the position closer
+refuse the same draft for the same stated reason.
+
+The operator has accepted that a draft may therefore be reported ready and then
+refused by the exchange. That outcome SHALL be presented as an exchange
+rejection carrying the exchange's own reason, never as a local defect and never
+silently.
+
+#### Scenario: Price outside a band the exchange enforces
+- **WHEN** a draft has a valid tick, step and notional but a price the exchange refuses on its price or percent-price filter
+- **THEN** the submission is sent, the exchange rejection is presented with its code and message, and no local filter check blocked it beforehand
+
+#### Scenario: Open order count is exhausted
+- **WHEN** the account already holds the contract's maximum number of open orders
+- **THEN** the submission is sent and the exchange's refusal is presented to the operator
+
+#### Scenario: Tick, step, quantity range or minimum notional is violated
+- **WHEN** a draft violates the price tick, the quantity step, the contract's quantity range, or its minimum notional
+- **THEN** the draft is refused locally with the violated constraint named and no exchange request is made
+
+#### Scenario: The same draft is typed on a different surface
+- **WHEN** a draft that one submission surface refuses is entered on another
+- **THEN** it is refused there too, for the same stated reason
+
+### Requirement: Order limits are enforced independently of the renderer
+The main process SHALL evaluate the configured per-order ceiling for every
+placement, amendment and close it receives, regardless of any validation the
+renderer performed. A command failing that evaluation SHALL be rejected with a
+stable market-scoped reason and SHALL NOT be forwarded to the exchange.
+
+#### Scenario: A command arrives without renderer validation
+- **WHEN** a trading command reaches the main process having bypassed the renderer's draft evaluation
+- **THEN** the main process refuses it on the same ceiling rules and no exchange request is made
+
+#### Scenario: Renderer and backend disagree
+- **WHEN** a command the renderer accepted fails the main process evaluation
+- **THEN** the main process rejection is authoritative and the operator sees the command as rejected
+

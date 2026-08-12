@@ -36,7 +36,7 @@
 - [x] 4.1 `npm run lint`, `npm test`, `npm run check:futures-production`, `check:circular`, `check:runtime-mock`, `check:command-path`.
 - [x] 4.2 Re-read the operator's existing record with the new summary. 2026-08-11 (644 events, written before this change) reads unchanged and reports its two refusals as `(the exchange stated none)`; 2026-08-12 has no refusals and carries no section for them.
 - [x] 4.3 Add the operator's confirmation to `verify-the-desk-in-one-sitting/runbook.md`, in Russian.
-- [ ] 4.4 Operator confirms on live data: a deliberately refused order names the exchange's code in the record, and the exchange's message is not in it. — *`verify-the-desk-in-one-sitting/runbook.md`, «Дописано 2026-08-12: отказ называет код биржи», пункт 1*
+- [ ] 4.4 Operator confirms on live data: a deliberately refused order names the exchange's code in the record, and the exchange's message is not in it. — *`verify-the-desk-in-one-sitting/runbook.md`, «Дописано 2026-08-12: отказ называет код биржи», пункт 1* **Confirmed by the operator on 2026-08-12** — a refused placement on APRUSDT landed as `rejected FUTURES_API_ERROR … exchangeCode="-4164"` at 07:40:50Z, and the exchange's message ("notional must be no smaller than 5") is nowhere in the file.
 
 ## 5. Stated Limits, Not Fixed Here
 

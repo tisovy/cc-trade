@@ -35,4 +35,4 @@
 - [x] 5.1 State in `docs/futures_trading.md` that `FUTURES_MAX_ORDER_USDT` covers amendments and non-reduce-only closes, and that price-band and order-count filters are enforced by Binance rather than locally.
 - [x] 5.2 Run unit and integration suites and the production-guard checks.
 - [x] 5.3 Remove the "Interim Operational Risk" section from the proposal once the guarantees hold, so the accepted risk is not carried into the archive as if it still applied.
-- [ ] 5.4 Record a live confirmation that an over-cap amendment on a real working order is refused before any exchange request is made.
+- [ ] 5.4 Record a live confirmation that an over-cap amendment on a real working order is refused before any exchange request is made. **Confirmed by the operator on 2026-08-12** — the amendment panel refused it. The record corroborates the stronger half of the claim: not one `trade.replaceOrder` reached the backend all day, so nothing was asked of the exchange.
