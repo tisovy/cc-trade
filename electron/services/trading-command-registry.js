@@ -18,7 +18,7 @@
 //
 // This module is the one place both are decided. It records what each mutating
 // command did, answers a second copy from that record, and holds one lane per
-// contract so commands on the same book run in the order they were accepted.
+// order so commands about the same order run in the order they were accepted.
 //
 // It never decides *whether* a command may run: validation, the order cap and
 // the pause gate all already answered that before anything reaches here.
@@ -35,9 +35,11 @@
 //   bounded: every REST call times out at 10 s, and the worst path — an
 //   indeterminate failure followed by three reconciliation lookups and their
 //   backoff — is around 40 s. That is the ceiling on how long the next command
-//   *on the same contract* can wait, and it is the price of the ordering. It is
+//   *about the same order* can wait, and it is the price of the ordering. It is
 //   also exactly the window in which the desk has already told the operator it
-//   does not know what happened.
+//   does not know what happened. A command that speaks for a whole contract —
+//   cancel-all, leverage, margin type — holds every order on it for that long,
+//   which is the reason it is the narrower lane that is the default.
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { TRADING_COMMAND_ACTIONS } from '../../src/utils/tradingCommands.js';
@@ -101,10 +103,9 @@ export const readTradingCommandIdentity = (command) => {
     ].join(SEPARATOR);
 };
 
-// One lane per contract per account per market. An amendment and a cancellation
-// of one order share a symbol, so a symbol lane is what orders them; two
-// contracts have nothing to say to each other and stay concurrent, which is the
-// whole reason the lane is not simply global.
+// The contract a command acts on, per account per market. Two contracts have
+// nothing to say to each other and stay concurrent, which is why ordering is
+// not simply global.
 //
 // Validation requires a symbol on every mutating command, so the fallback below
 // is unreachable by anything that gets this far. It is there because the
@@ -116,6 +117,47 @@ export const readTradingCommandLane = command => [
         ? command.symbol
         : '*',
 ].join(SEPARATOR);
+
+// What speaks for a whole contract rather than for one order on it. Cancel-all
+// is about every order there is; leverage, margin type and position margin are
+// properties of the contract and change what any order on it means. Each runs
+// alone: every order command already accepted on that contract finishes first,
+// and every one accepted after it waits for it.
+export const CONTRACT_WIDE_TRADING_ACTIONS = Object.freeze(new Set([
+    TRADING_COMMAND_ACTIONS.CANCEL_ALL,
+    TRADING_COMMAND_ACTIONS.SET_LEVERAGE,
+    TRADING_COMMAND_ACTIONS.SET_MARGIN_TYPE,
+    TRADING_COMMAND_ACTIONS.ADJUST_POSITION_MARGIN,
+]));
+
+// The order a command names, or null when it speaks for the contract.
+//
+// Ordering exists for two commands about *one* order: an amendment and a
+// cancellation accepted in that order could otherwise reach Binance in the
+// other, and the order the operator cancelled comes back amended. Two commands
+// about different orders have nothing to say to each other, even on one
+// contract — and holding them apart was what made the operator's three resting
+// orders movable only one at a time, each lift waiting a full round trip for a
+// placement it had no relationship with.
+//
+// An order is named by the exchange's own id wherever the desk has one and by
+// the client id the desk minted only until that id exists, at every call site
+// that names one, so two commands about one order always spell it the same way.
+// A placement names the order it creates: the id it mints is the only name that
+// order has until Binance answers, and it is the name a cancellation arriving
+// behind it would use. A command that carries both names is keyed by the
+// exchange id, because that is the one every other command prefers.
+export const readTradingCommandOrderLane = (command) => {
+    if (!isMutatingTradingCommand(command)) return null;
+    if (CONTRACT_WIDE_TRADING_ACTIONS.has(command.action)) return null;
+    const named = command.action === TRADING_COMMAND_ACTIONS.PLACE_ORDER
+        ? command.clientOrderId
+        : command.orderId ?? command.origClientOrderId;
+    // Named by nothing the desk can order it against. It takes the contract,
+    // which is the only thing left that is narrower than everything.
+    if (named === null || named === undefined || named === '') return null;
+    return [readTradingCommandLane(command), String(named)].join(SEPARATOR);
+};
 
 // Long enough to cover a renderer that drops its socket, reconnects and resends
 // what it believes never left; short enough that the record is about the recent
@@ -145,7 +187,10 @@ export const createTradingCommandRegistry = ({
     // Insertion-ordered, which is what makes eviction by age a walk from the
     // front rather than a sort.
     const records = new Map();
+    // One lane per order, and one gate per contract holding the commands that
+    // speak for the whole of it.
     const lanes = new Map();
+    const contracts = new Map();
     // The recording travels with the command's own async execution, so an
     // outcome emitted after three awaits and a reconciliation is still
     // attributed to the command that caused it — and a command running
@@ -168,13 +213,57 @@ export const createTradingCommandRegistry = ({
         }
     };
 
-    const runInLane = (key, task) => {
-        const previous = lanes.get(key) ?? RESOLVED;
-        const settled = previous.then(task);
+    const contractGate = (key) => {
+        const held = contracts.get(key);
+        if (held !== undefined) return held;
+        const gate = { barrier: RESOLVED, members: new Set() };
+        contracts.set(key, gate);
+        return gate;
+    };
+
+    // A contract is remembered only while something is ordered against it.
+    const forgetContract = (key) => {
+        const gate = contracts.get(key);
+        if (gate !== undefined && gate.barrier === RESOLVED && gate.members.size === 0) {
+            contracts.delete(key);
+        }
+    };
+
+    // What a command must not overtake, and what must not overtake it.
+    //
+    // An order command waits for the last command about that same order, and for
+    // the last contract-wide command — which speaks for its order too. A
+    // contract-wide command waits for the last contract-wide command and for
+    // every order command already accepted on that contract, and everything
+    // accepted after it waits for it.
+    const runInLane = (command, task) => {
+        const contractKey = readTradingCommandLane(command);
+        const orderKey = readTradingCommandOrderLane(command);
+        const gate = contractGate(contractKey);
+        const after = orderKey === null
+            ? Promise.all([gate.barrier, ...gate.members])
+            : Promise.all([lanes.get(orderKey) ?? RESOLVED, gate.barrier]);
+        const settled = after.then(task);
         const tail = settled.then(IGNORE, IGNORE);
-        lanes.set(key, tail);
+
+        if (orderKey === null) {
+            gate.barrier = tail;
+            // Every member it waited for is accounted for by the barrier now;
+            // only what is accepted after it has anything left to wait on.
+            gate.members.clear();
+            void tail.then(() => {
+                if (gate.barrier === tail) gate.barrier = RESOLVED;
+                forgetContract(contractKey);
+            });
+            return settled;
+        }
+
+        lanes.set(orderKey, tail);
+        gate.members.add(tail);
         void tail.then(() => {
-            if (lanes.get(key) === tail) lanes.delete(key);
+            if (lanes.get(orderKey) === tail) lanes.delete(orderKey);
+            gate.members.delete(tail);
+            forgetContract(contractKey);
         });
         return settled;
     };
@@ -236,7 +325,7 @@ export const createTradingCommandRegistry = ({
 
             try {
                 return await runInLane(
-                    readTradingCommandLane(command),
+                    command,
                     () => recording.run(record, execute).then(() => true),
                 );
             } finally {
@@ -251,6 +340,6 @@ export const createTradingCommandRegistry = ({
 
         // What the record holds, for the test that proves it stays bounded.
         size: () => records.size,
-        laneCount: () => lanes.size,
+        laneCount: () => lanes.size + contracts.size,
     };
 };

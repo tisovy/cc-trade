@@ -4,9 +4,11 @@ The operator moved one order, then reached for a second before the first had
 landed, and nothing happened. No refusal, no message, no order lifted — the
 drag simply did not start.
 
-There were **two** gates, not one, and the first fix reached only the inner one.
-The operator tried again after it shipped and reported the same thing, which is
-how the second came to light.
+There were **three** gates, and each fix reached only the innermost one left.
+The operator retested after each and reported the same symptom, which is how the
+next one came to light. The third is the one that made their own case — three
+orders resting side by side on one contract — fail while the two fixes above it
+were already in.
 
 ### The gate in the hook
 
@@ -56,6 +58,39 @@ drawing and wrong about the pointer. Measured against the chart before this
 change, the second `pointerdown` never reached the lift at all — `onOrderLift`
 called once where it should be twice — so the desk's own hook never got a say.
 
+### The gate in the main process
+
+The one that was actually costing the operator their move, and the one both
+earlier fixes were written around rather than at. The command registry holds
+mutating commands in lanes, and the lane was the contract:
+
+```js
+export const readTradingCommandLane = command => [
+    command?.marketType ?? '',
+    command?.accountId ?? '',
+    ...
+```
+(`electron/services/trading-command-registry.js:112`)
+
+Moving an order is a cancellation and then a placement. With one lane per
+contract, the cancellation that begins the *next* move waits behind the
+placement that ends the previous one — a full round trip through the operator's
+proxy, 340–800 ms measured, for two orders that have nothing to say to each
+other. Three orders side by side cost two such waits, which is exactly what the
+operator described: "пока один не закончил ставиться - другой не двигается".
+
+Measured before this change: with a placement held in flight, a cancellation of
+a *different* order on the same contract does not execute. `expected
+[ 'place:start' ] to deeply equal [ 'place:start', 'lift:another-order' ]`.
+
+The lane was also stricter than the requirement it was built for.
+`serialize-and-deduplicate-trading-commands` asks for commands "that target the
+same order identity, and the same symbol" to be serialized; the contract lane
+serialized every command on a contract whether or not it named the same order.
+What the coarse lane did buy, and what a naive narrowing would throw away, is
+that a cancel-all cannot run beside a placement it is meant to sweep away — so
+that is stated on its own rather than left as a side effect of the lane width.
+
 ## What Changes
 
 - The desk tracks what it owes per order rather than one obligation at a time.
@@ -74,6 +109,13 @@ called once where it should be twice — so the desk's own hook never got a say.
   in the single drag slot. It keeps drawing exactly what it drew — the dashed
   aim and the faint mark at the level it was lifted from — for as long as the
   placement is travelling, and the pointer is free the instant the gesture ends.
+- The main process orders commands by the order they name rather than by the
+  contract they sit on. Two orders on one contract are worked at once; two
+  commands about one order stay serialized exactly as before.
+- A command that speaks for a whole contract — cancel-all, leverage, margin
+  type, position margin — runs alone on it. That was previously a side effect of
+  the lane being the contract; it is now the rule, so narrowing the lane cannot
+  quietly let a placement survive a sweep.
 
 ## Non-goals
 
@@ -83,16 +125,21 @@ called once where it should be twice — so the desk's own hook never got a say.
   change's.
 - No change to how a single drag is drawn on the chart. The chart already holds
   one pointer drag at a time and continues to.
-- Serialization on the backend stays exactly as it is: one lane per contract,
-  so two moves on the same contract still reach Binance in the order the
-  operator made them.
+- The cancel-then-place pair itself stays serialized against the order it is
+  about. A second command on one order still waits, and the 40-second worst case
+  the registry documents is unchanged for that case.
+- Deduplication is untouched: identity still decides whether a command runs at
+  all, and ordering only decides when.
 
 ## Impact
 
 - `src/hooks/useFuturesOrderDrag.js`,
   `src/components/features/futures/FuturesWorkstationChart.jsx`,
   `src/components/features/futures/FuturesOrderDragAlert.jsx`,
-  `src/components/features/futures/FuturesProductionWorkstation.jsx`.
+  `src/components/features/futures/FuturesProductionWorkstation.jsx`,
+  `electron/services/trading-command-registry.js`,
+  `electron/services/binance-connection.js`.
 - The operator can work a book at the speed they think at, instead of at the
   speed of the proxy.
-- Modifies one requirement in `futures-order-visibility`.
+- Modifies one requirement in `futures-order-visibility`; adds one to
+  `trading-command-integrity`.

@@ -262,13 +262,17 @@ describe('what the record keeps', () => {
     });
 });
 
-describe('commands on one contract', () => {
+describe('commands on one order', () => {
     it('runs them in the order they were accepted', async () => {
         const registry = createTradingCommandRegistry();
         const amendment = deferred();
         const order = [];
 
-        const amend = registry.submit(command({ action: 'trade.replaceOrder', clientOrderId: 'f-amend' }), {
+        const amend = registry.submit(command({
+            action: 'trade.replaceOrder',
+            clientOrderId: 'f-amend',
+            orderId: 4110,
+        }), {
             emit: vi.fn(),
             execute: async () => {
                 order.push('amend:start');
@@ -276,20 +280,217 @@ describe('commands on one contract', () => {
                 order.push('amend:end');
             },
         });
-        const cancel = registry.submit(command({ action: 'trade.cancelOrder', clientOrderId: 'f-cancel' }), {
+        const cancel = registry.submit(command({
+            action: 'trade.cancelOrder',
+            clientOrderId: 'f-cancel',
+            orderId: 4110,
+        }), {
             emit: vi.fn(),
             execute: async () => { order.push('cancel'); },
         });
         await flush();
 
         // The cancellation is accepted, and has not reached the exchange: the
-        // amendment it followed is still in flight.
+        // amendment of the same order it followed is still in flight.
         expect(order).toEqual(['amend:start']);
 
         amendment.settle();
         await Promise.all([amend, cancel]);
 
         expect(order).toEqual(['amend:start', 'amend:end', 'cancel']);
+    });
+
+    // Before an order has an exchange id there is only the id the desk minted,
+    // and both the placement and anything about it afterwards spell it that way.
+    it('orders a command that names the order by the client id the desk minted', async () => {
+        const registry = createTradingCommandRegistry();
+        const placement = deferred();
+        const order = [];
+
+        const place = registry.submit(command({ clientOrderId: 'f-new' }), {
+            emit: vi.fn(),
+            execute: async () => {
+                order.push('place:start');
+                await placement.promise;
+                order.push('place:end');
+            },
+        });
+        const cancel = registry.submit(command({
+            action: 'trade.cancelOrder',
+            clientOrderId: 'f-cancel',
+            origClientOrderId: 'f-new',
+        }), {
+            emit: vi.fn(),
+            execute: async () => { order.push('cancel'); },
+        });
+        await flush();
+
+        expect(order).toEqual(['place:start']);
+
+        placement.settle();
+        await Promise.all([place, cancel]);
+
+        expect(order).toEqual(['place:start', 'place:end', 'cancel']);
+    });
+
+    // A cancellation that names no order at all cannot be ordered against
+    // anything narrower than the contract, so it takes the contract.
+    it('falls back to the contract when a command names no order', async () => {
+        const registry = createTradingCommandRegistry();
+        const placement = deferred();
+        const order = [];
+
+        const place = registry.submit(command({ clientOrderId: 'f-new' }), {
+            emit: vi.fn(),
+            execute: async () => {
+                order.push('place:start');
+                await placement.promise;
+                order.push('place:end');
+            },
+        });
+        const cancel = registry.submit(command({ action: 'trade.cancelOrder', clientOrderId: 'f-blind' }), {
+            emit: vi.fn(),
+            execute: async () => { order.push('cancel'); },
+        });
+        await flush();
+
+        expect(order).toEqual(['place:start']);
+
+        placement.settle();
+        await Promise.all([place, cancel]);
+
+        expect(order).toEqual(['place:start', 'place:end', 'cancel']);
+    });
+});
+
+describe('commands on one contract', () => {
+    // The operator had three orders resting side by side and moved them one
+    // after another. Moving one is a cancellation and then a placement, and the
+    // cancellation that begins the *next* move used to wait behind that
+    // placement — a round trip through the proxy, 340-800 ms measured, for two
+    // orders that have nothing to say to each other. Three moves cost two such
+    // waits, and on screen the next order simply would not budge.
+    it('lifts one order while a placement for another is still travelling', async () => {
+        const registry = createTradingCommandRegistry();
+        const placement = deferred();
+        const order = [];
+
+        const place = registry.submit(command({ clientOrderId: 'f-replacement' }), {
+            emit: vi.fn(),
+            execute: async () => {
+                order.push('place:start');
+                await placement.promise;
+                order.push('place:end');
+            },
+        });
+        const cancel = registry.submit(command({
+            action: 'trade.cancelOrder',
+            clientOrderId: 'f-lift-the-next',
+            orderId: 907,
+        }), {
+            emit: vi.fn(),
+            execute: async () => { order.push('lift:another-order'); },
+        });
+        await flush();
+
+        expect(order).toEqual(['place:start', 'lift:another-order']);
+
+        placement.settle();
+        await Promise.all([place, cancel]);
+    });
+
+    // The three below do not bite the code that ordered every command on a
+    // contract — that was stricter than this. They bite the obvious wrong
+    // version of narrowing it: order lanes and nothing else, under which a
+    // cancel-all runs beside the placement it is supposed to sweep away.
+    it('sweeps a contract with nothing else on it in flight', async () => {
+        const registry = createTradingCommandRegistry();
+        const placement = deferred();
+        const order = [];
+
+        const place = registry.submit(command({ clientOrderId: 'f-resting' }), {
+            emit: vi.fn(),
+            execute: async () => {
+                order.push('place:start');
+                await placement.promise;
+                order.push('place:end');
+            },
+        });
+        const sweep = registry.submit(command({ action: 'trade.cancelAll', clientOrderId: 'f-sweep' }), {
+            emit: vi.fn(),
+            execute: async () => { order.push('cancel-all'); },
+        });
+        await flush();
+
+        // An order placed before the sweep was accepted must be on the book for
+        // the sweep to take it: running beside it is how one survives.
+        expect(order).toEqual(['place:start']);
+
+        placement.settle();
+        await Promise.all([place, sweep]);
+
+        expect(order).toEqual(['place:start', 'place:end', 'cancel-all']);
+    });
+
+    it('holds every order on the contract behind a sweep that is still running', async () => {
+        const registry = createTradingCommandRegistry();
+        const sweeping = deferred();
+        const order = [];
+
+        const sweep = registry.submit(command({ action: 'trade.cancelAll', clientOrderId: 'f-sweep' }), {
+            emit: vi.fn(),
+            execute: async () => {
+                order.push('cancel-all:start');
+                await sweeping.promise;
+                order.push('cancel-all:end');
+            },
+        });
+        const place = registry.submit(command({ clientOrderId: 'f-after' }), {
+            emit: vi.fn(),
+            execute: async () => { order.push('place'); },
+        });
+        await flush();
+
+        expect(order).toEqual(['cancel-all:start']);
+
+        sweeping.settle();
+        await Promise.all([sweep, place]);
+
+        expect(order).toEqual(['cancel-all:start', 'cancel-all:end', 'place']);
+    });
+
+    // Leverage decides what an order costs in margin, so a placement must not
+    // be in flight while it changes. Margin type and position margin are the
+    // same kind of statement about the contract as a whole.
+    it.each([
+        ['trade.setLeverage'],
+        ['trade.setMarginType'],
+        ['trade.adjustPositionMargin'],
+    ])('runs %s alone on its contract', async (action) => {
+        const registry = createTradingCommandRegistry();
+        const placement = deferred();
+        const order = [];
+
+        const place = registry.submit(command({ clientOrderId: 'f-order' }), {
+            emit: vi.fn(),
+            execute: async () => {
+                order.push('place:start');
+                await placement.promise;
+                order.push('place:end');
+            },
+        });
+        const wide = registry.submit(command({ action, clientOrderId: 'f-wide' }), {
+            emit: vi.fn(),
+            execute: async () => { order.push('contract-wide'); },
+        });
+        await flush();
+
+        expect(order).toEqual(['place:start']);
+
+        placement.settle();
+        await Promise.all([place, wide]);
+
+        expect(order).toEqual(['place:start', 'place:end', 'contract-wide']);
     });
 
     it('lets a failed command out of the way of the next one', async () => {

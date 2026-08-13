@@ -3321,7 +3321,8 @@ export function setupBinanceConnection({
                 return;
             }
             // A mutating command goes through the registry: once per identity,
-            // and one at a time per contract. A read does not — an account
+            // and one at a time per order — or per contract, for the commands
+            // that speak for the whole of one. A read does not: an account
             // refresh may be asked for as often as the desk likes, and the
             // history fan-out depends on staying concurrent.
             try {

@@ -3,7 +3,7 @@
 - [x] 1.1 Hold outstanding obligations keyed by the order each one is for, rather than a single slot, so discharging one cannot discharge or block another.
 - [x] 1.2 Refuse a second lift of the *same* order — that one is already gone from the book — while allowing a lift of any other.
 - [x] 1.3 Keep one pointer to one drag: what is removed is the wait for the previous drag to land, not the ability to drag two orders at once.
-- [x] 1.4 Leave the backend's per-contract lane untouched, so two moves on one contract still reach the exchange in the order they were made.
+- [x] 1.4 ~~Leave the backend's per-contract lane untouched~~ — **wrong, and it was the whole remaining blocker.** See §1c.
 
 ## 1b. The Chart Lets Go Of The Pointer Before The Placement Lands
 
@@ -16,6 +16,22 @@ symptom. The hook was not the only gate, and it was the inner one.
 - [x] 1b.4 Take every order that is off the book out of the resting-order pass, not just the one the pointer holds, so a settling order is never drawn twice.
 - [x] 1b.5 End settling drags with the contract they belong to: their replacements are still owed and still travel, but their marks must not survive onto the next contract's chart.
 - [x] 1b.6 Prove by test that a second drag begins while the first replacement is still travelling. **Bites:** against the pre-change chart, `onOrderLift` is called once where it should be twice — the second gesture never reached the desk at all, which is exactly what the operator saw.
+
+## 1c. The Lane Is The Order, Not The Contract
+
+Found after the chart fix shipped and the operator reported the same symptom a
+third time, with their own case named: three orders resting side by side on one
+contract. Both earlier gates were in the renderer; this one is in the main
+process, and it is the one that was actually costing the move.
+
+- [x] 1c.1 Key the command lane by the order a command names rather than by the contract it sits on, so a lift of one order does not wait on a placement for another.
+- [x] 1c.2 Name an order by the exchange's id where the desk has one and by the minted client id until it does — the convention every call site already follows — and key a placement by the id it mints, which is the only name its order has until Binance answers.
+- [x] 1c.3 Keep a command that names no order the desk can identify ordered against its whole contract: the alternative is ordering it against nothing.
+- [x] 1c.4 State the contract-wide barrier as a rule of its own — cancel-all, leverage, margin type and position margin run alone on their contract — instead of leaving it to be a side effect of how wide the lane happened to be.
+- [x] 1c.5 Prove by test that a cancellation of one order runs while a placement for another on the same contract is still travelling. **Bites:** against the pre-change registry, `expected [ 'place:start' ] to deeply equal [ 'place:start', 'lift:another-order' ]` — the operator's symptom, reproduced at the layer that caused it.
+- [x] 1c.6 Prove by test that the barrier survives the narrowing. Five tests — the sweep behind a placement, an order behind a sweep, and one per contract-wide action. **Bites the obvious wrong fix, not the old code:** against a registry given order lanes and no barrier (`orderId ?? origClientOrderId ?? clientOrderId`), six tests fail, including a cancel-all running beside the placement it exists to sweep away. Against the *old* code they pass, because the contract lane was stricter than this — so they are guards there and findings only against the naive narrowing.
+- [x] 1c.7 **Guard, named as one:** the explicit `CONTRACT_WIDE_TRADING_ACTIONS` set changes nothing today — none of those builders emits an order id, so they reach the contract by the fallback in 1c.3 anyway. Removing the set alone leaves all 36 tests green. It is kept because it states which actions speak for a contract, rather than leaving that to be inferred from which fields a builder happens not to set.
+- [x] 1c.8 Keep the ordering guarantee that exists: two commands about one order stay serialized. The pre-existing test now names one order explicitly instead of relying on neither command naming any.
 
 ## 2. Nothing Refuses In Silence
 
@@ -42,5 +58,7 @@ symptom. The hook was not the only gate, and it was the inner one.
     - `refuses a second lift of the same order, in words` — still refused, because that order is no longer on the book, but now with a statement instead of silence.
 
     One existing test had to go: `lifts nothing while the desk still owes an order` asserted the limit this change removes. Its replacement asserts the opposite, and the baseline above is the record of what it used to prove.
-- [x] 4.3 Full suite green.
-- [x] 4.4 Added as step 39 of `verify-the-desk-in-one-sitting`. Not marked done there.
+- [x] 4.3 Full suite green — 1874 passed.
+- [x] 4.4 Added as step 40 of `verify-the-desk-in-one-sitting` (renumbered by the session that owns the runbook). Not marked done there.
+- [x] 4.5 Measured against the pre-change registry with the operator's own case, three orders on one contract. Baseline verbatim: `expected [ 'place:start' ] to deeply equal [ 'place:start', 'lift:another-order' ]` — the lift of the second order did not reach the exchange while the first replacement was in flight.
+- [x] 4.6 Checked that nothing else depended on the contract lane's width: the local order cap was already delegated to the exchange, and the notional ceiling is evaluated per order in the renderer before anything is sent.
