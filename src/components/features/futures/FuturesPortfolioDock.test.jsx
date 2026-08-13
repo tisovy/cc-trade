@@ -466,6 +466,70 @@ describe('FuturesPortfolioDock', () => {
     expect(screen.getByRole('button', { name: 'Read full account history' })).toBeDisabled()
   })
 
+  it('collapses to a live truthful summary and expands back to the full dock', () => {
+    const read = { status: 'ready', data: [], lastSuccessfulAt: 1000, error: null }
+    const accountResources = { positions: read, regularOrders: read, algoOrders: read }
+    const { rerender } = render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[position]}
+        openOrders={[order]}
+        accountResources={accountResources}
+      />,
+    )
+
+    const collapse = screen.getByRole('button', { name: 'Collapse portfolio dock' })
+    expect(collapse).toHaveAttribute('aria-expanded', 'true')
+    expect(screen.queryByLabelText('Collapsed portfolio dock summary')).toBeNull()
+    fireEvent.click(collapse)
+
+    let summary = screen.getByLabelText('Collapsed portfolio dock summary')
+    expect(summary).toHaveTextContent(/Positions\s*1/)
+    expect(summary).toHaveTextContent(/Working\s*1/)
+    expect(summary).toHaveTextContent('−300.00 USDT')
+    expect(screen.queryByRole('table', { name: 'Open positions' })).toBeNull()
+    expect(screen.queryByRole('table', { name: 'Working orders' })).toBeNull()
+
+    rerender(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[{ ...position, unrealizedPnl: '-450' }]}
+        openOrders={[]}
+        accountResources={accountResources}
+      />,
+    )
+    summary = screen.getByLabelText('Collapsed portfolio dock summary')
+    expect(summary).toHaveTextContent(/Working\s*0/)
+    expect(summary).toHaveTextContent('−450.00 USDT')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand portfolio dock' }))
+    expect(screen.getByRole('table', { name: 'Open positions' })).toBeInTheDocument()
+    expect(screen.getByText('No working orders.')).toBeInTheDocument()
+  })
+
+  it('keeps the selected order view across collapse and does not invent unread counts', () => {
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        history={{
+          symbol: 'BTCUSDT', status: 'ready', readAt: 1000, orders: [], trades: [], error: null,
+        }}
+      />,
+    )
+    fireEvent.click(screen.getByRole('tab', { name: 'Order history' }))
+    expect(screen.getByRole('tab', { name: 'Order history' }))
+      .toHaveAttribute('aria-selected', 'true')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse portfolio dock' }))
+    const summary = screen.getByLabelText('Collapsed portfolio dock summary')
+    expect(within(summary).getAllByText('—')).toHaveLength(2)
+    expect(within(summary).getByText('— USDT')).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Expand portfolio dock' }))
+    expect(screen.getByRole('tab', { name: 'Order history' }))
+      .toHaveAttribute('aria-selected', 'true')
+  })
+
   // A contract change re-reads nothing: the review spans the account, not the
   // contract on screen.
   it('keeps the held reading when the selected contract changes', () => {
@@ -526,6 +590,32 @@ describe('FuturesPortfolioDock', () => {
     for (const name of new Set(rendered)) {
       expect(stylesheet, `${name} has no rule`).toContain(`.${name}`)
     }
+  })
+
+  it('uses calm structural colors while retaining semantic gain and loss colors', () => {
+    const stylesheet = readFileSync(
+      'src/components/features/futures/FuturesWorkstation.css',
+      'utf8',
+    )
+    const workstationRules = [...stylesheet.matchAll(
+      /\.futures-production-workstation\s*\{(?<declarations>[^}]*)\}/g,
+    )]
+    const preview = workstationRules.at(-1)?.groups?.declarations
+
+    expect(preview).toContain('--futures-accent: #4f8fc7;')
+    expect(preview).toContain('--futures-accent-soft: rgba(79, 143, 199, 0.16);')
+    expect(preview).toContain('--futures-border: rgba(105, 122, 140, 0.32);')
+    expect(preview).toContain('--futures-shell: #0b1118;')
+    expect(preview).not.toContain('#e34f5e')
+
+    const positiveRule = stylesheet.match(
+      /\.futures-workstation-dock-total\.is-positive\s*\{(?<declarations>[^}]*)\}/,
+    )?.groups?.declarations
+    const negativeRule = stylesheet.match(
+      /\.futures-workstation-dock-total\.is-negative\s*\{(?<declarations>[^}]*)\}/,
+    )?.groups?.declarations
+    expect(positiveRule).toContain('rgba(43, 196, 138, 0.45)')
+    expect(negativeRule).toContain('rgba(239, 91, 105, 0.45)')
   })
 
   it('gives every deliberate workstation scroll owner compact chrome', () => {

@@ -64,6 +64,7 @@ export const FuturesPortfolioDock = ({
   onLoadHistory,
 }) => {
   const [ordersTab, setOrdersTab] = useState('working')
+  const [isCollapsed, setIsCollapsed] = useState(false)
   const describedPositions = useMemo(() => positions.map(position => ({
     position,
     presentation: describeFuturesPosition(position),
@@ -93,6 +94,50 @@ export const FuturesPortfolioDock = ({
   const historyReading = historyStatus === 'loading' || historyStatus === 'refreshing'
   const historyReadAt = history?.readAt ?? null
 
+  if (isCollapsed) {
+    return (
+      <section
+        className="futures-workstation-dock is-collapsed"
+        aria-label="Futures positions and working orders"
+      >
+        <div className="futures-workstation-dock-summary" aria-label="Collapsed portfolio dock summary">
+          <div className="futures-workstation-dock-summary-title">
+            <span>Portfolio</span>
+            <strong>Collapsed</strong>
+          </div>
+          <div className="futures-workstation-dock-summary-reading">
+            <span>Positions</span>
+            <strong>{positionsAvailability.known ? positions.length : '—'}</strong>
+          </div>
+          <div className="futures-workstation-dock-summary-reading">
+            <span>Working</span>
+            <strong>{ordersAvailability.known ? openOrders.length : '—'}</strong>
+          </div>
+          <div className={`futures-workstation-dock-total is-${totalTone}`}>
+            <span>Total uPnL</span>
+            <strong>
+              {positionsAvailability.known
+                ? `${formatSignedUsdt(totalUnrealizedPnl)} USDT`
+                : '— USDT'}
+            </strong>
+          </div>
+          <button
+            type="button"
+            className="futures-workstation-dock-toggle"
+            aria-label="Expand portfolio dock"
+            aria-expanded="false"
+            title="Expand portfolio dock"
+            onClick={() => setIsCollapsed(false)}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+              <path d="m6 15 6-6 6 6" />
+            </svg>
+          </button>
+        </div>
+      </section>
+    )
+  }
+
   return (
     <section className="futures-workstation-dock" aria-label="Futures positions and working orders">
       <div className="futures-workstation-dock-panel">
@@ -105,6 +150,18 @@ export const FuturesPortfolioDock = ({
             <span>Total uPnL</span>
             <strong>{formatSignedUsdt(totalUnrealizedPnl)} USDT</strong>
           </div>
+          <button
+            type="button"
+            className="futures-workstation-dock-toggle"
+            aria-label="Collapse portfolio dock"
+            aria-expanded="true"
+            title="Collapse portfolio dock"
+            onClick={() => setIsCollapsed(true)}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+              <path d="m6 9 6 6 6-6" />
+            </svg>
+          </button>
         </header>
         {describedPositions.length === 0 ? (
           <p className="futures-workstation-empty">
