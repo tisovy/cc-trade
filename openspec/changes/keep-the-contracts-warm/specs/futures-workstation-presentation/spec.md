@@ -48,3 +48,7 @@ session when it is not the failing one, SHALL continue.
 #### Scenario: A session that failed unwatched is selected
 - **WHEN** a held session lost its stream or fell out of sync while it was not being shown, and the operator selects it
 - **THEN** it is delivered in the state it is actually in, rather than as current
+
+#### Scenario: A background session reconnects
+- **WHEN** a held session that is not being shown rebuilds itself after losing its stream
+- **THEN** the contract being shown does not change, and the rebuilt session keeps the place in the pool it already had

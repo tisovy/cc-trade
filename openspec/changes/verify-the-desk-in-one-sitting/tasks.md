@@ -16,7 +16,7 @@
 ## 3. The Record Becomes The Marks
 
 - [ ] 3.1 Write the record into the live-verification ledger created by `state-only-verified-completion`, naming the date, the account, and the desk revision it was run against.
-- [ ] 3.2 Check the confirmation items in `send-only-the-confirmed-order`, `answer-the-command-that-asked`, `say-which-readings-are-stale`, `keep-the-chart-loadable`, `isolate-markets-and-runtime`, `verify-live-futures-account-read` and `name-the-algo-order-that-fired` from that record, and only those the record supports.
+- [ ] 3.2 Check the confirmation items in `send-only-the-confirmed-order`, `answer-the-command-that-asked`, `say-which-readings-are-stale`, `keep-the-chart-loadable`, `isolate-markets-and-runtime`, `verify-live-futures-account-read`, `name-the-algo-order-that-fired`, `hear-the-exchange-out` and `keep-the-contracts-warm` from that record, and only those the record supports.
 - [ ] 3.3 Record the items marked `COVERED BY TEST ONLY` as exactly that in the ledger, naming the tests that cover them — a guarantee verified by test is not a guarantee unverified, and the difference belongs in writing.
 - [ ] 3.4 Open a defect for every `FAIL` before checking anything else in that change.
 

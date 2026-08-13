@@ -1,5 +1,6 @@
 import {
     FuturesProductionWorkstationService,
+    readFuturesProductionWorkstationHeldContracts,
 } from './futures-production-workstation-service.js';
 import {
     createFuturesProductionWorkstationFakeTransport,
@@ -12,6 +13,7 @@ export const createFuturesProductionWorkstationRuntime = ({ onTiming, onInternal
     const service = new FuturesProductionWorkstationService({
         transport,
         onTiming,
+        heldContracts: readFuturesProductionWorkstationHeldContracts(),
         ...(onInternalError ? { onInternalError } : {}),
     });
     return Object.freeze({

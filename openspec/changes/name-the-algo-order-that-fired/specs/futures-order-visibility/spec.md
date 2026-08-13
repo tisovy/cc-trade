@@ -71,11 +71,16 @@ the operator can still move and one they cannot.
 - **WHEN** Binance reports an algorithmic order whose spawned-order identity is the documented empty value
 - **THEN** that value is retained as reported, and the order is not read as having fired
 
-### Requirement: Orders the stream does not report are read on their own beat
-Order kinds the authenticated stream does not report — the algorithmic orders
-the desk lists and cancels but cannot place — SHALL be read on the periodic
-reconciliation and on an operator-requested refresh, and SHALL NOT be read in
-response to an execution report or a position change.
+### Requirement: Orders the desk does not learn from the stream are read on their own beat
+Order kinds the desk does not learn from the authenticated stream — the
+algorithmic orders it lists and cancels but cannot place — SHALL be read on the
+periodic reconciliation and on an operator-requested refresh, and SHALL NOT be
+read in response to an execution report or a position change.
+
+This SHALL be stated as what the desk does, not as what the exchange sends. The
+exchange documents an `ALGO_UPDATE` event on this stream; whether it is
+delivered to this desk is unverified, and nothing here SHALL depend on it until
+a received frame says so.
 
 The one exception SHALL be an execution report whose order identity is one a
 listed algorithmic order reports having spawned. That parent SHALL be resolved

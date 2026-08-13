@@ -11,6 +11,8 @@ import {
 } from './futures-production-workstation-fixtures.js';
 import {
     FUTURES_PRODUCTION_WORKSTATION_FRESHNESS,
+    FUTURES_PRODUCTION_WORKSTATION_HELD_CONTRACTS,
+    readFuturesProductionWorkstationHeldContracts,
 } from './futures-production-workstation-service.js';
 import { FUTURES_WORKSTATION_EVENT_MAX_BYTES } from '../../src/utils/futuresWorkstationProtocolShared.js';
 import {
@@ -64,13 +66,14 @@ const productionDepthRequest = (requestId, range) => JSON.stringify(
 );
 
 const productionTradeFrame = ({
+    symbol = 'BTCUSDT',
     cycle = 1,
     aggregateTradeId,
     price,
     quantity,
 } = {}) => {
     const frame = JSON.parse(
-        FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.streams.makeCycle(cycle)[1],
+        FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols[symbol].streams.makeCycle(cycle)[1],
     );
     if (aggregateTradeId !== undefined) {
         frame.data.a = aggregateTradeId;
@@ -730,6 +733,10 @@ describe('production Futures workstation service', () => {
     // statement of the teardown — so the streams stayed open, the timers stayed
     // armed, and the request that was supposed to start the next contract
     // rejected instead. Two contracts on one desk.
+    //
+    // Held at a bound of one, because this is a test about a release that goes
+    // wrong and a pool only releases when it runs out of room. The same release
+    // runs on eviction at any bound.
     it('starts the next contract even when releasing the previous one throws', async () => {
         const base = createFuturesProductionWorkstationFakeTransport();
         const connect = vi.fn((options) => {
@@ -744,6 +751,7 @@ describe('production Futures workstation service', () => {
             });
         });
         const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            heldContracts: 1,
             transport: { ...base, connect },
         }));
         const events = [];
@@ -762,10 +770,12 @@ describe('production Futures workstation service', () => {
         expect(base.getActiveTimerCount()).toBe(1);
     });
 
-    // The operator switching contracts faster than a bootstrap completes: each
-    // selection releases the one before it while that one is still reading, and
-    // only the last one may reach the desk when they all settle.
-    it('leaves one live session when contracts are selected in quick succession', async () => {
+    // The operator switching contracts faster than a bootstrap completes. Three
+    // bootstraps are in flight at once, all of them finish, and only the last
+    // selection may reach the desk. Under the pool this is the harder version of
+    // the case: the two contracts left behind are not released, they go on
+    // running and go on being right — and they still say nothing.
+    it('lets only the last of three rapid selections reach the desk', async () => {
         const clock = createManualClock();
         const base = createFuturesProductionWorkstationFakeTransport();
         const heldDepthReads = new Map();
@@ -811,8 +821,17 @@ describe('production Futures workstation service', () => {
         heldDepthReads.get('ETHUSDT')();
         await pendingA;
         await pendingB;
+        // Each socket delivers a print of its own contract. Sending BTCUSDT's
+        // frame down the ETHUSDT socket used to pass, because the session it
+        // reached had already been released and ignored everything; now that the
+        // pool keeps it, a frame for the wrong contract is a malformed frame and
+        // resynchronizes the session — the right answer to a thing the transport
+        // never does, and the wrong test.
         subscribers.get('BTCUSDT').onMessage(productionTradeFrame({ aggregateTradeId: 7001 }));
-        subscribers.get('ETHUSDT').onMessage(productionTradeFrame({ aggregateTradeId: 7002 }));
+        subscribers.get('ETHUSDT').onMessage(productionTradeFrame({
+            symbol: 'ETHUSDT',
+            aggregateTradeId: 7002,
+        }));
 
         expect(events.BTCUSDT).toHaveLength(abandoned.BTCUSDT);
         expect(events.ETHUSDT).toHaveLength(abandoned.ETHUSDT);
@@ -826,10 +845,13 @@ describe('production Futures workstation service', () => {
             symbol: 'SOLUSDT',
             generation: 3,
         });
-        // One open stream and one freshness monitor: the two released contracts
-        // left nothing of themselves running.
-        expect(base.getActiveTimerCount()).toBe(1);
-        expect(clock.intervalCount()).toBe(1);
+        // Three open streams and three freshness monitors: the contracts left
+        // behind are held, not released, and each is keeping itself current.
+        expect(runtime.service.sessions.size).toBe(3);
+        expect(base.getActiveTimerCount()).toBe(3);
+        expect(clock.intervalCount()).toBe(3);
+        // And no timer is left armed to deliver a tape into an emitter that has
+        // stopped being read.
         expect(clock.timeoutCount()).toBe(0);
     });
 
@@ -865,8 +887,12 @@ describe('production Futures workstation service', () => {
             if (options.symbol === 'BTCUSDT') subscriber = options;
             return base.connect(options);
         });
+        // A bound of one, because this test is about the timers of a session
+        // that was released. A pool releases when it runs out of room; the
+        // callbacks below are the same ones eviction leaves behind at any bound.
         const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
             clock,
+            heldContracts: 1,
             transport: { ...base, ...reads, connect },
         }));
         const releasedEvents = [];
@@ -2914,16 +2940,6 @@ describe('the reading bounds what the desk delivers', () => {
 // decided whether a book was rebuilt and a socket reconnected. The two are now
 // asked separately, which is what lets a second contract exist at all.
 describe('a session stops being the service', () => {
-    const tradeFrameFor = (symbol, aggregateTradeId) => {
-        const frame = JSON.parse(
-            FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols[symbol].streams.makeCycle(2)[1],
-        );
-        frame.data.a = aggregateTradeId;
-        frame.data.f = aggregateTradeId;
-        frame.data.l = aggregateTradeId;
-        return JSON.stringify(frame);
-    };
-
     it('runs two contracts at once, and a failed release of one leaves the other delivering', async () => {
         const clock = createManualClock();
         const base = createFuturesProductionWorkstationFakeTransport();
@@ -2970,7 +2986,7 @@ describe('a session stops being the service', () => {
         // and says nothing to the renderer.
         const held = runtime.service.sessions.get('BTCUSDT');
         const silent = events.BTCUSDT.length;
-        subscribers.get('BTCUSDT').onMessage(tradeFrameFor('BTCUSDT', 9_001));
+        subscribers.get('BTCUSDT').onMessage(productionTradeFrame({ cycle: 2, aggregateTradeId: 9001 }));
         expect(held.trades.at(-1).aggregateTradeId).toBe('9001');
         expect(events.BTCUSDT).toHaveLength(silent);
 
@@ -2988,7 +3004,7 @@ describe('a session stops being the service', () => {
         expect(clock.intervalCount()).toBe(1);
 
         const delivered = events.ETHUSDT.length;
-        subscribers.get('ETHUSDT').onMessage(tradeFrameFor('ETHUSDT', 9_002));
+        subscribers.get('ETHUSDT').onMessage(productionTradeFrame({ symbol: 'ETHUSDT', cycle: 2, aggregateTradeId: 9002 }));
         expect(events.ETHUSDT.length).toBeGreaterThan(delivered);
         expect(events.ETHUSDT.at(-1)).toMatchObject({
             symbol: 'ETHUSDT',
@@ -3209,5 +3225,120 @@ describe('selecting is not subscribing', () => {
         // A tape filtered at a million USDT shows nothing from this fixture, and
         // that is the panel's setting being obeyed rather than the contract's.
         expect(back.find(event => event.resource === 'trades').payload.rows).toEqual([]);
+    });
+});
+
+// The pool is bounded, and the bound is a number the operator moves.
+describe('the pool is bounded', () => {
+    const openPool = (heldContracts) => {
+        // The manual clock is the service's alone, so `intervalCount` counts
+        // freshness monitors and nothing else; the transport's own cycle timers
+        // are counted by `getActiveTimerCount`.
+        const clock = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport();
+        const subscribers = new Map();
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock: clock.clock,
+            heldContracts,
+            transport: {
+                ...base,
+                connect: (options) => {
+                    subscribers.set(options.symbol, options);
+                    return base.connect(options);
+                },
+            },
+        }));
+        const events = { BTCUSDT: [], ETHUSDT: [], SOLUSDT: [] };
+        const open = (requestId, symbol) => runtime.service.handleRequest(
+            productionRequest(requestId, symbol),
+            { emit: event => events[symbol].push(event) },
+        );
+        return { clock, base, runtime, subscribers, events, open };
+    };
+
+    // Least recently *shown*, not least recently opened. A contract selected
+    // again goes to the back of the queue, or the pool would evict whichever
+    // contract the operator opened first however often they came back to it.
+    it('releases the contract gone longest without being shown, and nothing else', async () => {
+        const { clock, base, runtime, open } = openPool(2);
+
+        await open('bound-btc', 'BTCUSDT');
+        await open('bound-eth', 'ETHUSDT');
+        await open('bound-sol', 'SOLUSDT');
+
+        expect([...runtime.service.sessions.keys()].sort()).toEqual(['ETHUSDT', 'SOLUSDT']);
+        expect(base.getActiveTimerCount()).toBe(2);
+        expect(clock.intervalCount()).toBe(2);
+        expect(clock.timeoutCount()).toBe(0);
+
+        // ETHUSDT is the older of the two by when it was opened, and the newer
+        // by when it was last shown.
+        await open('bound-eth-again', 'ETHUSDT');
+        await open('bound-btc-again', 'BTCUSDT');
+
+        expect([...runtime.service.sessions.keys()].sort()).toEqual(['BTCUSDT', 'ETHUSDT']);
+        expect(base.getActiveTimerCount()).toBe(2);
+        expect(clock.intervalCount()).toBe(2);
+    });
+
+    it('holds the bound over a long rotation and leaves nothing running behind it', async () => {
+        const { clock, base, runtime, open } = openPool(2);
+        const rotation = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'];
+
+        for (let round = 0; round < 12; round += 1) {
+            const symbol = rotation[round % rotation.length];
+            await open(`bound-rotate-${round}`, symbol);
+            expect(runtime.service.sessions.size).toBeLessThanOrEqual(2);
+        }
+
+        expect(runtime.service.sessions.size).toBe(2);
+        expect(base.getActiveTimerCount()).toBe(2);
+        expect(clock.intervalCount()).toBe(2);
+        expect(clock.timeoutCount()).toBe(0);
+    });
+
+    // A held contract that loses its socket rebuilds itself on its own ladder.
+    // What it must not do is arrive back on the screen: the operator is looking
+    // at something else, and a reconnect is not a selection.
+    it('does not put a reconnecting background contract on the screen', async () => {
+        const { clock, runtime, subscribers, events, open } = openPool(2);
+        await open('reconnect-bg-btc', 'BTCUSDT');
+        await open('reconnect-bg-eth', 'ETHUSDT');
+        const before = runtime.service.sessions.get('BTCUSDT');
+        const quiet = events.BTCUSDT.length;
+
+        subscribers.get('BTCUSDT').onDisconnect('SOCKET_DISCONNECTED');
+        clock.runTimeouts();
+        await vi.waitFor(() => expect(runtime.service.sessions.get('BTCUSDT')).not.toBe(before));
+
+        // Rebuilt, held, and still not the one being shown.
+        expect(runtime.service.shown).toMatchObject({ symbol: 'ETHUSDT' });
+        expect(runtime.service.sessions.size).toBe(2);
+        expect(events.BTCUSDT).toHaveLength(quiet);
+        // And it keeps its place in the pool's order rather than looking like
+        // the contract the operator has gone longest without.
+        expect(runtime.service.sessions.get('BTCUSDT').shownOrder).toBe(before.shownOrder);
+
+        const delivered = events.ETHUSDT.length;
+        subscribers.get('ETHUSDT').onMessage(productionTradeFrame({
+            symbol: 'ETHUSDT',
+            cycle: 2,
+            aggregateTradeId: 4242,
+        }));
+        expect(events.ETHUSDT.length).toBeGreaterThan(delivered);
+    });
+
+    // A bound the operator typed wrong should say so at startup rather than
+    // quietly run at something else.
+    it('reads the bound from the environment and refuses a value it cannot mean', () => {
+        expect(readFuturesProductionWorkstationHeldContracts(undefined))
+            .toBe(FUTURES_PRODUCTION_WORKSTATION_HELD_CONTRACTS);
+        expect(readFuturesProductionWorkstationHeldContracts('')).
+            toBe(FUTURES_PRODUCTION_WORKSTATION_HELD_CONTRACTS);
+        expect(readFuturesProductionWorkstationHeldContracts('4')).toBe(4);
+        for (const refused of ['0', '-1', '33', '2.5', 'two']) {
+            expect(() => readFuturesProductionWorkstationHeldContracts(refused))
+                .toThrow(expect.objectContaining({ code: 'INVALID_POOL_BOUND' }));
+        }
     });
 });

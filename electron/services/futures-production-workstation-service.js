@@ -134,15 +134,48 @@ const tapeFingerprint = (state, rows) => (
     `${state}:${rows.map(row => row.aggregateTradeId).join(',')}`
 );
 
-// How many contracts the pool holds at once.
-//
-// One is what the desk has always held, and it stays the default until the
-// bound becomes a setting: everything below is written for a pool, and at a
-// bound of one a pool releases exactly what the single-session service
-// released. Raising it is a number, not a rewrite — the per-contract cost is
-// linear and measured (§0.2 of `keep-the-contracts-warm`: +28.4 KiB/s,
-// +3.35 ms/s of parse, +3 sockets).
-export const FUTURES_PRODUCTION_WORKSTATION_HELD_CONTRACTS = 1;
+/**
+ * How many contracts the desk keeps running at once, of which it shows one.
+ *
+ * This is the setting. It is a number the operator moves, not a rebuild, and
+ * the cost of moving it is linear and measured — one BTCUSDT-class contract is
+ * 28.4 KiB/s, 3.35 ms of parse per second and three sockets:
+ *
+ * | held | Mbit/s | share of a 600 Mbit link | ms/s parse | one core | sockets |
+ * |------|--------|--------------------------|------------|----------|---------|
+ * | 1    | 0.23   | 0.04%                    | 3.35       | 0.3%     | 3       |
+ * | 4    | 0.93   | 0.16%                    | 13.4       | 1.3%     | 12      |
+ * | 8    | 1.86   | 0.31%                    | 26.8       | 2.7%     | 24      |
+ * | 16   | 3.73   | 0.62%                    | 53.6       | 5.4%     | 48      |
+ *
+ * Eight covers a working day's rotation with room to spare. What stops it being
+ * larger is not bandwidth or CPU — both are noise at this scale — but sockets:
+ * twenty-four connections against the three the desk used to hold, each on
+ * Binance's twenty-four-hour rotation, which is about one reconnect an hour
+ * across the pool. That is only tolerable because a reconnect is scoped to the
+ * session it happens on and is invisible unless it lands on the shown contract.
+ *
+ * `CC_TRADE_FUTURES_HELD_CONTRACTS` overrides it for a run. A value outside
+ * 1..32 is refused rather than clamped: a bound the operator typed wrong should
+ * say so at startup, not quietly run at something else.
+ */
+export const FUTURES_PRODUCTION_WORKSTATION_HELD_CONTRACTS = 8;
+export const FUTURES_PRODUCTION_WORKSTATION_HELD_CONTRACTS_MAX = 32;
+
+export const readFuturesProductionWorkstationHeldContracts = (
+    value = process.env?.CC_TRADE_FUTURES_HELD_CONTRACTS,
+) => {
+    if (value === undefined || value === null || value === '') {
+        return FUTURES_PRODUCTION_WORKSTATION_HELD_CONTRACTS;
+    }
+    const parsed = Number(value);
+    if (!Number.isSafeInteger(parsed)
+        || parsed < 1
+        || parsed > FUTURES_PRODUCTION_WORKSTATION_HELD_CONTRACTS_MAX) {
+        throw new FuturesProductionWorkstationServiceError('INVALID_POOL_BOUND');
+    }
+    return parsed;
+};
 
 export class FuturesProductionWorkstationService {
     constructor({
@@ -152,7 +185,9 @@ export class FuturesProductionWorkstationService {
         onTiming = () => {},
         heldContracts = FUTURES_PRODUCTION_WORKSTATION_HELD_CONTRACTS,
     } = {}) {
-        if (!Number.isSafeInteger(heldContracts) || heldContracts < 1) {
+        if (!Number.isSafeInteger(heldContracts)
+            || heldContracts < 1
+            || heldContracts > FUTURES_PRODUCTION_WORKSTATION_HELD_CONTRACTS_MAX) {
             throw new FuturesProductionWorkstationServiceError('INVALID_POOL_BOUND');
         }
         if (!transport
@@ -589,6 +624,13 @@ export class FuturesProductionWorkstationService {
     // here rather than at release time, so the pool can name the contract the
     // operator has gone longest without.
     showSession(session) {
+        // A tape payload the outgoing contract was holding back is dropped
+        // rather than left armed. It has nothing to deliver any more — the
+        // emitter would refuse it — and a timer that fires to do nothing is
+        // still a timer per held contract, arming and firing forever.
+        if (this.shown !== null && this.shown !== session) {
+            this.clearPendingTapeTimer(this.shown);
+        }
         this.selection += 1;
         session.shownOrder = this.selection;
         this.shown = session;
@@ -724,7 +766,10 @@ export class FuturesProductionWorkstationService {
         }
         let shortfall = null;
         if (session.bootstrapped) {
-            if (candles) {
+            // An interval bootstrap in flight has already emptied the series and
+            // will deliver the new one. Sending what is there now would draw an
+            // empty chart badged live over a contract that has candles coming.
+            if (candles && !session.intervalBootstrapping) {
                 const candleState = session.staleResources.has(
                     FUTURES_WORKSTATION_RESOURCES.CANDLES,
                 )
@@ -795,6 +840,14 @@ export class FuturesProductionWorkstationService {
         // place in the pool, which the contracts held for longest without being
         // shown make room for.
         const previous = this.sessions.get(request.symbol) ?? null;
+        // Whether this generation is entitled to the screen, decided before the
+        // session it replaces is released. A contract the desk is opening for
+        // the first time is: the operator asked for it. A contract rebuilding
+        // itself is entitled to exactly what it already had — a held session
+        // whose socket dropped reconnects on its own ladder, and it must not
+        // pull the display onto a contract nobody is looking at while silencing
+        // the one they are.
+        const takesTheScreen = previous === null || this.shown === previous;
         this.releaseSession(previous);
         this.makeRoomForSession(request.symbol);
         this.generation += 1;
@@ -861,7 +914,10 @@ export class FuturesProductionWorkstationService {
                 : (previous?.depthRange ?? null),
             depthPage: openingFresh ? 0 : (previous?.depthPage ?? 0),
             depthDeepenedAt: null,
-            shownOrder: 0,
+            // A rebuild inherits its place in the pool's order. Left at zero, a
+            // background contract that reconnected would look like the one the
+            // operator had gone longest without and be the first evicted.
+            shownOrder: previous?.shownOrder ?? 0,
             // The last status this session stated, kept so it can state it
             // again to whoever selects the contract next.
             status: null,
@@ -880,7 +936,7 @@ export class FuturesProductionWorkstationService {
             startedAt: this.clock.now(),
         };
         this.sessions.set(session.symbol, session);
-        this.showSession(session);
+        if (takesTheScreen) this.showSession(session);
         // An attempt past the ceiling does not get to call itself loading. By
         // then the operator is reading a notice that says the feed stopped and
         // is still being retried, with the retry beside it, and `loading` takes
