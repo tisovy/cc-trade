@@ -1,3 +1,38 @@
+## 0. Measured So Far, Before The Work Starts
+
+Left by the session that closed `name-the-algo-order-that-fired` on 2026-08-13.
+None of the tasks below are started; this is only what is already measured, so
+the next session does not pay for it twice.
+
+- **The exchange → main-process leg is 345ms.** Event time `E` against local
+  receive, n=200, over the desk's own endpoint and socket options, clock skew
+  corrected against `/fapi/v1/time` (skew p50 170ms over 7 REST round trips of
+  ~670ms): p50 345ms, p90 347ms, p99 351ms, max 362ms. The skew estimate assumes
+  a symmetric round trip, so treat this as "a third of a second" with roughly
+  ±50ms of uncertainty — it is a floor for 1.1→1.2, not a stage reading.
+- **The account read beat is 30.0s**, median gap between consecutive `read`
+  lines in `~/.config/cc-trade/diagnostics/desk-2026-08-13-000.jsonl` (n=127;
+  108 gaps in 20–45s, median 30.0s). Useful as a sanity check that the record's
+  timestamps are trustworthy at the second scale before anything is built on
+  them at the millisecond scale.
+- **Watch which path a bench connects on.** On this machine `/ws/<stream>` and
+  `/stream?streams=` open and then deliver nothing, while `/market/stream` and
+  `/public/stream` — the paths the desk itself uses — deliver normally. Whatever
+  listens on `127.0.0.1:1080` routes by path. A measurement harness that reaches
+  for Binance's documented path will sit at zero frames and read as a stall that
+  is not there.
+
+Stale premise to resolve before doing 5.2: it asks for a baseline run "on master
+before any other change in this batch lands", and most of the batch has already
+landed. Either restate it as a baseline at the revision it is actually run
+against, or say plainly that the pre-batch baseline is no longer obtainable.
+
+Not started because the files are hot: `binance-connection.js`,
+`futures-production-workstation-service.js`, `desk-diagnostic-record.js` and
+`useFuturesProductionWorkstation.js` were all committed to within the last few
+hours by another session, which also has a stream-recovery fix expected to land
+in `binance-connection.js`. Coordinate before opening 1.1–2.3.
+
 ## 1. A Frame Carries Where It Has Been
 
 - [ ] 1.1 Mark a frame with the exchange's own event time where the payload states one, and with the time the main process received it.
