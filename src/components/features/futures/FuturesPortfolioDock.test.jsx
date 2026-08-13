@@ -290,6 +290,71 @@ describe('FuturesPortfolioDock', () => {
     expect(screen.getByTitle('0.01 contracts')).toHaveTextContent('570')
   })
 
+  // The operator watched a stop sit on the dock at its trigger price after the
+  // market had gone through it. A row that reads like a working order is one
+  // they can act on, and there is nothing there to act on.
+  it('states an algo order that has fired rather than listing it as working', () => {
+    const onOrderEdit = vi.fn()
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        openOrders={[{
+          ...order,
+          orderId: 42,
+          orderKind: 'ALGO',
+          price: '0',
+          triggerPrice: '57000.00',
+          actualOrderId: '990281234',
+          actualPrice: '56980.10',
+        }]}
+        onOrderEdit={onOrderEdit}
+      />,
+    )
+    const row = screen.getAllByRole('row').find(entry => (
+      entry.classList.contains('is-orders') && !entry.classList.contains('is-head')
+    ))
+
+    expect(row).toHaveTextContent('triggered')
+    expect(row).toHaveTextContent('fired')
+    // Priced where it fired, not where it was waiting to; the trigger it was
+    // placed against stays reachable rather than being replaced silently.
+    expect(row).toHaveTextContent('56980.10')
+    expect(within(row).getByTitle('fired from a trigger at 57000.00')).toBeInTheDocument()
+    expect(within(row).getByTitle(/no longer working, so it cannot be moved or cancelled/))
+      .toBeInTheDocument()
+
+    // Nothing on a fired parent may open the editor: the exchange has acted.
+    fireEvent.click(row)
+    expect(onOrderEdit).not.toHaveBeenCalled()
+    expect(within(row).queryByRole('button', { name: /^Cancel/ })).toBeNull()
+  })
+
+  // An algo that has not fired is what the exchange reports with an empty
+  // string, and it is still an order resting at its trigger.
+  it('leaves an algo order that has not fired reading as working', () => {
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        openOrders={[{
+          ...order,
+          orderId: 42,
+          orderKind: 'ALGO',
+          price: '0',
+          triggerPrice: '57000.00',
+          actualOrderId: '',
+          actualPrice: '',
+        }]}
+      />,
+    )
+    const row = screen.getAllByRole('row').find(entry => (
+      entry.classList.contains('is-orders') && !entry.classList.contains('is-head')
+    ))
+    expect(row).toHaveTextContent('57000.00')
+    expect(row).toHaveTextContent('on Binance')
+    expect(row).not.toHaveTextContent('triggered')
+    expect(row.classList.contains('is-triggered')).toBe(false)
+  })
+
   it('closes positions and cancels orders straight from the dock', () => {
     const onClosePosition = vi.fn()
     const onCancelOrder = vi.fn()

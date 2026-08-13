@@ -1115,6 +1115,43 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     expect(series.removePriceLine).toHaveBeenCalledWith(originLine)
   })
 
+  // The chart is what the operator trades from, and a marker there at a price
+  // the market has already gone through is the whole complaint: it reads as an
+  // order that is still on the book.
+  it('draws an algo that has fired as triggered rather than as working at its trigger', async () => {
+    const props = {
+      ...properties([candle(1_784_000_000_000)]),
+      ownedOrders: [
+        workingOrder({
+          orderKind: 'ALGO',
+          orderId: '82',
+          positionSide: 'SHORT',
+          positionEffect: 'ENTRY',
+          price: '59850',
+          actualOrderId: '990281234',
+          actualPrice: '59848.3',
+        }),
+      ],
+    }
+    render(<FuturesWorkstationChart {...props} />)
+    screen.getByTestId('futures-workstation-chart').getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 320, height: 320, right: 320, bottom: 320,
+    })
+
+    const fired = await screen.findByRole('note', { name: /triggered at 59850/ })
+    expect(fired.getAttribute('aria-label'))
+      .toContain('fired into order 990281234 and is awaiting confirmation')
+    expect(fired.getAttribute('aria-label')).toContain('cannot be moved or cancelled')
+    expect(fired).toHaveClass('is-triggered')
+    expect(fired).toHaveTextContent('triggered')
+    // A fired stop is not worth a resting order's notional: it is not resting.
+    expect(fired).not.toHaveTextContent('USDT')
+
+    // And the wording it used to carry — the one that said it was still managed
+    // and merely undraggable — is gone.
+    expect(screen.queryByRole('note', { name: /price is managed by Binance/ })).toBeNull()
+  })
+
   it('keeps REGULAR and ALGO rows distinct when Binance reuses a client order id', async () => {
     const sharedClientOrderId = 'shared-client-order-id'
     const props = {

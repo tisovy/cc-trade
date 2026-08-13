@@ -58,6 +58,44 @@ describe('FuturesProductionWorkstation account review', () => {
       .toMatchObject({ recent: ['BTCUSDT'], lastSymbol: 'BTCUSDT' })
   })
 
+  // The chart marker, the dock row and the rail row have to price one order the
+  // same way. A parent that has fired is priced where it fired; one still
+  // resting is priced at its trigger, as it always was.
+  it('draws an algo that has fired at the price it fired at, not at its trigger', () => {
+    const algo = {
+      symbol: 'BTCUSDT',
+      orderKind: 'ALGO',
+      orderId: 42,
+      algoId: 42,
+      side: 'SELL',
+      status: 'NEW',
+      price: '0',
+      triggerPrice: '57000.00',
+      origQty: '0.01',
+    }
+    const { rerender } = render(
+      <FuturesProductionWorkstation
+        enabled
+        executionState={executionState({
+          openOrders: [{ ...algo, actualOrderId: '990281234', actualPrice: '56980.10' }],
+        })}
+      />,
+    )
+    expect(productionWorkstationMocks.viewRender.mock.lastCall[0].ownedOrders[0])
+      .toMatchObject({ orderKind: 'ALGO', price: '56980.10', triggerPrice: '57000.00' })
+
+    rerender(
+      <FuturesProductionWorkstation
+        enabled
+        executionState={executionState({
+          openOrders: [{ ...algo, actualOrderId: '', actualPrice: '' }],
+        })}
+      />,
+    )
+    expect(productionWorkstationMocks.viewRender.mock.lastCall[0].ownedOrders[0])
+      .toMatchObject({ orderKind: 'ALGO', price: '57000.00' })
+  })
+
   // Read once, when the workspace opens on a contract it can name. The hook
   // above it is mounted by the workspace and never told the symbol, so a read
   // issued there arrives without one and the backend completes it from the

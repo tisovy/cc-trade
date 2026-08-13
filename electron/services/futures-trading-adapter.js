@@ -314,6 +314,19 @@ export const normalizeFuturesAlgoOrder = (order = {}) => {
         workingType: order.workingType,
         priceProtect: order.priceProtect,
         algoType: order.algoType,
+        // The regular order this algo spawned when it fired, and the price that
+        // order was placed at. Without them the desk cannot connect the two
+        // facts it already holds — an execution report for order X, and the
+        // algo parent whose X it is — so it goes on drawing a fired stop as
+        // resting at a price the market has left.
+        //
+        // Retained exactly as the exchange states them. Binance reports an algo
+        // that has not fired with an empty string; a null or a zero would read
+        // as "fired at nothing", which is the opposite of what it means. A
+        // response that never mentioned the field says nothing either way, so
+        // absent stays absent.
+        ...(order.actualOrderId === undefined ? {} : { actualOrderId: order.actualOrderId }),
+        ...(order.actualPrice === undefined ? {} : { actualPrice: order.actualPrice }),
     });
 };
 

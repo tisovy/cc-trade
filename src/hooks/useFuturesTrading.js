@@ -20,6 +20,7 @@ import {
   createFuturesSetTradingPausedCommand,
   createFuturesSymbolConfigCommand,
 } from '../utils/tradingCommands.js'
+import { describeFuturesAlgoTrigger } from '../utils/futuresOrderPresentation.js'
 import { DESK_FRAME_KINDS, ensureDeskFrameRouter } from '../utils/deskFrameRouter.js'
 import { createUnsentCommandStore } from '../utils/unsentTradingCommand.js'
 import { answersUnresolvedCommand } from '../utils/unresolvedCommandIdentity.js'
@@ -198,6 +199,48 @@ const settledReportIdentity = (report) => {
     : null
 }
 
+// Which listed algorithmic parent each spawned regular order belongs to. Only a
+// parent that has fired names one; one still resting reports the exchange's
+// empty value and claims nothing.
+//
+// Keyed by contract as well as by id, for the same reason `orderIdentity` is:
+// Binance numbers orders per symbol, so the same id on another contract is
+// another order, and resolving a parent from it would take a live stop off the
+// screen because something unrelated filled.
+const spawnedParentKey = (symbol, spawnedOrderId) => `${symbol ?? ''}:${spawnedOrderId}`
+
+const readSpawnedParents = (openOrders) => {
+  const parents = new Map()
+  for (const order of openOrders) {
+    const trigger = describeFuturesAlgoTrigger(order)
+    if (!trigger.triggered) continue
+    parents.set(spawnedParentKey(order.symbol, trigger.spawnedOrderId), orderIdentity(order))
+  }
+  return parents
+}
+
+// The parent a report belongs to, or null when no listed parent claims it. The
+// exchange states the spawned identity as a string and the stream states its
+// own as a number, so the two are compared as trimmed text: `'123'` and `123`
+// are the same order, and comparing them by type would never match.
+const spawnedParentIdentity = (spawnedParents, report) => {
+  const spawnedOrderId = String(report?.orderId ?? report?.i ?? '').trim()
+  if (spawnedOrderId === '') return null
+  return spawnedParents.get(spawnedParentKey(report?.symbol ?? report?.s, spawnedOrderId)) ?? null
+}
+
+// Bounded for the same reason the settled memory is: this is a guard against a
+// burst of reports about one trigger, not a record of the account.
+const RESOLVED_PARENT_MEMORY = 64
+
+const rememberResolvedParent = (resolvedParents, identity) => {
+  const next = new Set(resolvedParents)
+  next.delete(identity)
+  next.add(identity)
+  while (next.size > RESOLVED_PARENT_MEMORY) next.delete(next.values().next().value)
+  return next
+}
+
 const isOpenSnapshotOrder = order => (
   !TERMINAL_FUTURES_ORDER_STATUSES.has(String(order?.status ?? '').toUpperCase())
 )
@@ -312,6 +355,25 @@ const useFuturesTrading = ({
   useEffect(() => {
     generationRef.current = marketGeneration
   }, [marketGeneration])
+
+  // Which listed algorithmic parent each spawned regular order belongs to.
+  // Mirrored into a ref because it is consulted on the stream's own path, which
+  // must not re-subscribe every time the account list changes.
+  const spawnedParentsRef = useRef(new Map())
+  const openOrders = state.openOrders
+  useEffect(() => {
+    spawnedParentsRef.current = readSpawnedParents(openOrders)
+  }, [openOrders])
+
+  // Which parents this connection has already read for, so a burst of fills
+  // against one of them stays one read.
+  const resolvedParentsRef = useRef(new Set())
+
+  // Assigned rather than closed over: the stream handler is installed once per
+  // connection, and `sendCommand` is rebuilt whenever the market activation
+  // changes. Closing over it would re-subscribe, which resends the opening
+  // account refresh.
+  const sendCommandRef = useRef(null)
 
   // Read inside the connection effect, which must not re-run because the store
   // it writes to was passed as a new object.
@@ -444,11 +506,32 @@ const useFuturesTrading = ({
       }
       if (payload.futures_execution_update) {
         const report = payload.futures_execution_update
+        // The stream never reports algorithmic orders, so a parent that fires
+        // would sit on the chart at its trigger price until the beat came
+        // round. It does not have to: the desk already holds the identity of
+        // the regular order that parent spawned, and this is that order's
+        // report. Matching the two is the whole of the exception — a report
+        // naming no listed parent still reads nothing.
+        const parentIdentity = spawnedParentIdentity(
+          spawnedParentsRef.current,
+          report,
+        )
+        const parentSettled = parentIdentity !== null
+          && TERMINAL_FUTURES_ORDER_STATUSES.has(String(report?.status ?? '').toUpperCase())
         setState((previous) => {
           const settled = settledReportIdentity(report)
-          const settledOrders = settled === null
+          const withReport = settled === null
             ? previous.settledOrders
             : rememberSettledOrder(previous.settledOrders, settled)
+          // A spawned order that filled or was cancelled has finished what its
+          // parent was placed to do. The parent is remembered as settled for
+          // the same reason any other settled order is: the algo snapshot is
+          // read from a different Binance service than the stream and can still
+          // describe it as resting.
+          const settledOrders = parentSettled
+            ? rememberSettledOrder(withReport, parentIdentity)
+            : withReport
+          const merged = mergeOrderUpdate(previous.openOrders, report, settledOrders)
           return {
             ...previous,
             connected: true,
@@ -465,7 +548,9 @@ const useFuturesTrading = ({
               ? null
               : previous.unresolvedCommand,
             settledOrders,
-            openOrders: mergeOrderUpdate(previous.openOrders, report, settledOrders),
+            openOrders: parentSettled
+              ? merged.filter(order => orderIdentity(order) !== parentIdentity)
+              : merged,
             // The review of the past is maintained by the same stream the live
             // panels are: an order that settles or a fill that closes a position
             // belongs in it without asking Binance for the account again.
@@ -473,6 +558,20 @@ const useFuturesTrading = ({
           }
         })
         answerCommandWatchers({ kind: 'execution', report })
+        // One read for the match, and only for the match. The parent is already
+        // off the screen by the line above; this confirms it against the list
+        // the stream cannot report, and picks up whatever the same trigger left
+        // behind. Deduplicated by parent, so a burst of fills on one spawned
+        // order is one read rather than one read per fill.
+        if (parentIdentity !== null && !resolvedParentsRef.current.has(parentIdentity)) {
+          resolvedParentsRef.current = rememberResolvedParent(
+            resolvedParentsRef.current,
+            parentIdentity,
+          )
+          sendCommandRef.current?.(createFuturesAccountRefreshCommand({
+            symbol: symbolRef.current,
+          }))
+        }
       }
       if (payload.futures_history && typeof payload.futures_history === 'object') {
         const history = payload.futures_history
@@ -622,6 +721,10 @@ const useFuturesTrading = ({
       return false
     }
   }, [enabled, marketGeneration, unsentCommands, wsConnection])
+
+  useEffect(() => {
+    sendCommandRef.current = sendCommand
+  }, [sendCommand])
 
   // Sends a command and answers with what the exchange did with it, rather than
   // with whether the frame left. A drag that lifts an order off the book cannot

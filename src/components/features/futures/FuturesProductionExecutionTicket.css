@@ -792,6 +792,13 @@
   cursor: default;
 }
 
+/* Fired: still listed, no longer working. Dimmed for the same reason the dock
+   dims it — an order that reads at full weight is one the operator can act on. */
+.futures-production-order-row.is-triggered {
+  opacity: 0.62;
+  border-style: dashed;
+}
+
 .futures-production-order-row.is-buy {
   border-left-color: var(--production-positive);
 }

@@ -9,6 +9,7 @@ import {
 } from 'lightweight-charts'
 import { buildVolumeHistogramPresentation } from '../../../utils/chartVolume.js'
 import {
+  describeFuturesAlgoTrigger,
   describeFuturesOrderIntent,
   describeFuturesPosition,
   orderNotionalUsdt,
@@ -1193,21 +1194,32 @@ export const FuturesWorkstationChart = ({
           const displaced = Math.abs(anchorY - y) > 0.5
           const intent = describeFuturesOrderIntent(order)
           const notional = orderNotionalUsdt(order)
+          const trigger = describeFuturesAlgoTrigger(order)
           const content = (
             <>
               <b>{order.orderKind === 'ALGO' ? 'ALGO ' : ''}{intent.label}</b>
-              <span>{lifting ? 'lifting…' : `${notional ?? '—'} USDT`}</span>
+              <span>
+                {lifting ? 'lifting…' : null}
+                {/* A fired stop is not resting here for the operator to reach
+                    for. It is drawn at the price it fired at because that is
+                    where it happened, and it says so instead of pricing itself
+                    like something still on the book. */}
+                {!lifting && trigger.triggered ? 'triggered' : null}
+                {!lifting && !trigger.triggered ? `${notional ?? '—'} USDT` : null}
+              </span>
             </>
           )
           if (order.orderKind === 'ALGO') {
             return (
               <div
-                className={`futures-workstation-owned-order is-${intent.tone} is-algo${displaced ? ' is-displaced' : ''}`}
+                className={`futures-workstation-owned-order is-${intent.tone} is-algo${trigger.triggered ? ' is-triggered' : ''}${displaced ? ' is-displaced' : ''}`}
                 key={orderIdentity}
                 style={{ top: `${top}px` }}
                 data-anchor-y={anchorY}
                 role="note"
-                aria-label={`ALGO ${intent.side} ${intent.label} order at ${order.price}; price is managed by Binance and is not draggable`}
+                aria-label={trigger.triggered
+                  ? `ALGO ${intent.side} ${intent.label} order triggered at ${order.price}; it fired into order ${trigger.spawnedOrderId} and is awaiting confirmation, so it is no longer working and cannot be moved or cancelled`
+                  : `ALGO ${intent.side} ${intent.label} order at ${order.price}; price is managed by Binance and is not draggable`}
               >
                 {content}
               </div>

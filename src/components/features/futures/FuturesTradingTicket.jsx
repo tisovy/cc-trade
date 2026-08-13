@@ -8,6 +8,7 @@ import {
   quantizeFuturesNotionalUsdt,
 } from '../../../utils/futuresOrderDraft.js'
 import {
+  describeFuturesAlgoTrigger,
   describeFuturesOrderIntent,
   describeFuturesPosition,
   describeFuturesPositionMargin,
@@ -622,9 +623,10 @@ const FuturesTradingTicket = ({
                   {openOrders.map((order) => {
                     const intent = describeFuturesOrderIntent(order)
                     const isAlgo = order.orderKind === 'ALGO'
+                    const trigger = describeFuturesAlgoTrigger(order)
                     return (
                       <div
-                        className={`futures-production-order-row is-${intent.tone}${order.symbol === selectedSymbol ? ' is-current-symbol' : ''}`}
+                        className={`futures-production-order-row is-${intent.tone}${order.symbol === selectedSymbol ? ' is-current-symbol' : ''}${trigger.triggered ? ' is-triggered' : ''}`}
                         role="row"
                         key={`${order.orderKind ?? 'REGULAR'}:${order.symbol}:${order.orderId}`}
                         onDoubleClick={event => (isAlgo ? undefined : onOrderEdit?.(order, {
@@ -644,15 +646,32 @@ const FuturesTradingTicket = ({
                             carry information, and in this column it wrapped onto a
                             second line. An order carrying neither price reads as
                             absent rather than as resting at zero. */}
-                        <span role="cell">
-                          <code>{formatPriceOrAbsent(order.triggerPrice ?? order.price, tickOf(order.symbol))}</code>
+                        <span
+                          role="cell"
+                          title={trigger.spawnedPrice === null
+                            ? undefined
+                            : `fired from a trigger at ${order.triggerPrice ?? order.price}`}
+                        >
+                          <code>
+                            {formatPriceOrAbsent(
+                              // A parent that fired is priced where it fired,
+                              // not where it was waiting to.
+                              trigger.spawnedPrice ?? order.triggerPrice ?? order.price,
+                              tickOf(order.symbol),
+                            )}
+                          </code>
                         </span>
                         <span role="cell" title={orderSizeTitle(order)}>
                           <b>{orderNotionalUsdt(order) ?? '—'}</b>
                         </span>
                         <span role="cell">
                           {isAlgo ? (
-                            <em title="Managed on Binance">ALGO</em>
+                            <em title={trigger.triggered
+                              ? `Fired into order ${trigger.spawnedOrderId}; awaiting confirmation. It is no longer working, so it cannot be moved or cancelled.`
+                              : 'Managed on Binance'}
+                            >
+                              {trigger.triggered ? 'FIRED' : 'ALGO'}
+                            </em>
                           ) : (
                             <button
                               type="button"

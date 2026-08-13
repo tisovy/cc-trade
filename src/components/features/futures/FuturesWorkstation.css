@@ -900,6 +900,14 @@
   touch-action: auto;
 }
 
+/* Drawn where it fired, not where it rested, and drawn as a reference rather
+   than as something on the book — a marker at full weight on a price the market
+   has left is what sent the operator reaching for it. */
+.futures-workstation-owned-order.is-algo.is-triggered {
+  border-style: dotted;
+  opacity: 0.5;
+}
+
 .futures-workstation-owned-order span,
 .futures-workstation-owned-order strong {
   padding: 1px 4px;
@@ -2331,6 +2339,13 @@
 
 .futures-workstation-dock-row.is-editable:hover {
   background: rgba(255, 255, 255, 0.06);
+}
+
+/* An algo that has fired is a record of something that already happened. It
+   stays listed until the exchange drops it, and it stops competing for the eye
+   with the orders that are still working. */
+.futures-workstation-dock-row.is-triggered {
+  opacity: 0.62;
 }
 
 /* ── Book pressure ────────────────────────────────────────────────────────── */

@@ -646,6 +646,192 @@ describe('useFuturesTrading', () => {
     expect(result.current.openOrders.some(order => order.symbol === 'BTCUSDT')).toBe(true)
   })
 
+  // Algorithmic orders are not reported by the authenticated stream, so a stop
+  // that fired went on being drawn at its trigger price until the thirty-second
+  // beat came round. The desk is already told which regular order the parent
+  // spawned; this is that order's report.
+  describe('an execution resolves the algorithmic parent that spawned it', () => {
+    const listAlgoParent = (socket, algoOrder) => {
+      act(() => {
+        socket.receive({
+          version: 1,
+          type: 'futures_account_state',
+          resources: {
+            balances: {
+              status: 'ready',
+              data: { USDT: { available: '25', total: '25' } },
+              lastSuccessfulAt: 100,
+            },
+            positions: { status: 'ready', data: [], lastSuccessfulAt: 100 },
+            regularOrders: { status: 'ready', data: [], lastSuccessfulAt: 100 },
+            algoOrders: { status: 'ready', data: [algoOrder], lastSuccessfulAt: 100 },
+            userDataStream: {
+              status: 'ready', data: { connected: true }, lastSuccessfulAt: 100,
+            },
+          },
+        })
+      })
+    }
+
+    const firedParent = {
+      symbol: 'TUTUSDT',
+      orderId: 42,
+      algoId: 42,
+      status: 'NEW',
+      orderKind: 'ALGO',
+      triggerPrice: '0.0123',
+      actualOrderId: '990281234',
+      actualPrice: '0.0121',
+    }
+
+    const refreshesIn = socket => socket.sent.filter(frame => frame.action === 'account.refresh')
+
+    it('takes the parent off the desk on the fill, and reads once for the match', () => {
+      const socket = createSocket()
+      const { result } = renderHook(() => useFuturesTrading({
+        enabled: true,
+        symbol: 'TUTUSDT',
+        wsConnection: socket,
+      }))
+      listAlgoParent(socket, firedParent)
+      expect(result.current.openOrders).toHaveLength(1)
+      const refreshesBefore = refreshesIn(socket).length
+
+      act(() => {
+        socket.receive({
+          futures_execution_update: {
+            symbol: 'TUTUSDT',
+            orderId: 990281234,
+            status: 'FILLED',
+            orderKind: 'REGULAR',
+          },
+        })
+      })
+
+      // Resolved from the report, not from the beat.
+      expect(result.current.openOrders).toHaveLength(0)
+      expect(refreshesIn(socket)).toHaveLength(refreshesBefore + 1)
+      expect(refreshesIn(socket).at(-1)).toMatchObject({ symbol: 'TUTUSDT' })
+    })
+
+    // Binance keeps a fired parent listed for a moment. While it is, several
+    // reports can land against the order it spawned — and they are all the same
+    // trigger.
+    it('answers a burst of fills on one spawned order with one read', () => {
+      const socket = createSocket()
+      const { result } = renderHook(() => useFuturesTrading({
+        enabled: true,
+        symbol: 'TUTUSDT',
+        wsConnection: socket,
+      }))
+      listAlgoParent(socket, firedParent)
+      const refreshesBefore = refreshesIn(socket).length
+
+      for (const executedQty of ['0.2', '0.5', '0.9']) {
+        act(() => {
+          socket.receive({
+            futures_execution_update: {
+              symbol: 'TUTUSDT',
+              orderId: 990281234,
+              status: 'PARTIALLY_FILLED',
+              orderKind: 'REGULAR',
+              z: executedQty,
+            },
+          })
+        })
+      }
+
+      expect(refreshesIn(socket)).toHaveLength(refreshesBefore + 1)
+      // Still working on the exchange, so still listed — and still stated as
+      // the fired parent it is.
+      expect(result.current.openOrders.some(order => (
+        order.orderKind === 'ALGO' && order.actualOrderId === '990281234'
+      ))).toBe(true)
+    })
+
+    it('resolves a parent whose spawned order was cancelled the same way', () => {
+      const socket = createSocket()
+      const { result } = renderHook(() => useFuturesTrading({
+        enabled: true,
+        symbol: 'TUTUSDT',
+        wsConnection: socket,
+      }))
+      listAlgoParent(socket, firedParent)
+      const refreshesBefore = refreshesIn(socket).length
+
+      act(() => {
+        socket.receive({
+          futures_execution_update: {
+            symbol: 'TUTUSDT',
+            orderId: 990281234,
+            status: 'CANCELED',
+            orderKind: 'REGULAR',
+          },
+        })
+      })
+
+      expect(result.current.openOrders).toHaveLength(0)
+      expect(refreshesIn(socket)).toHaveLength(refreshesBefore + 1)
+    })
+
+    // Binance numbers orders per contract, so the same id on another contract
+    // is another order. Matching on the number alone would take a live stop off
+    // the screen because something unrelated filled.
+    it('does not resolve a parent from the same order id on another contract', () => {
+      const socket = createSocket()
+      const { result } = renderHook(() => useFuturesTrading({
+        enabled: true,
+        symbol: 'TUTUSDT',
+        wsConnection: socket,
+      }))
+      listAlgoParent(socket, firedParent)
+      const sentBefore = socket.sent.length
+
+      act(() => {
+        socket.receive({
+          futures_execution_update: {
+            symbol: 'BTCUSDT',
+            orderId: 990281234,
+            status: 'FILLED',
+            orderKind: 'REGULAR',
+          },
+        })
+      })
+
+      expect(socket.sent).toHaveLength(sentBefore)
+      expect(result.current.openOrders).toHaveLength(1)
+      expect(result.current.openOrders[0]).toMatchObject({ symbol: 'TUTUSDT', orderKind: 'ALGO' })
+    })
+
+    // The exception is the match and nothing else. Everything the audit before
+    // this one closed — reading the account on every fill — stays closed.
+    it('reads nothing for a fill that no listed parent spawned', () => {
+      const socket = createSocket()
+      const { result } = renderHook(() => useFuturesTrading({
+        enabled: true,
+        symbol: 'TUTUSDT',
+        wsConnection: socket,
+      }))
+      listAlgoParent(socket, { ...firedParent, actualOrderId: '', actualPrice: '' })
+      const sentBefore = socket.sent.length
+
+      act(() => {
+        socket.receive({
+          futures_execution_update: {
+            symbol: 'TUTUSDT',
+            orderId: 990281234,
+            status: 'FILLED',
+            orderKind: 'REGULAR',
+          },
+        })
+      })
+
+      expect(socket.sent).toHaveLength(sentBefore)
+      // The parent that never claimed that order is still listed, untouched.
+      expect(result.current.openOrders).toHaveLength(1)
+    })
+  })
+
   // An order placed as a level breaks fills instantly, and the stream's FILLED
   // overtakes the reply to the placement itself. The reply describes the order
   // as it left — NEW — and put it back in the list, where nothing removed it

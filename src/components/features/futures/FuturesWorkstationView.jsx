@@ -14,6 +14,7 @@ import {
   groupFuturesBookLevels,
 } from '../../../utils/futuresOrderBook.js'
 import { formatCompactUsdt, formatExchangePrice } from '../../../utils/futuresPriceFormat.js'
+import { describeFuturesAlgoTrigger } from '../../../utils/futuresOrderPresentation.js'
 import {
   normalizeTapeNotional,
   readStoredTapeSettings,
@@ -643,6 +644,11 @@ export const FuturesWorkstationView = ({
     const marks = { bid: new Map(), ask: new Map() }
     for (const order of ownedOrders) {
       if (order.symbol !== selectedSymbol) continue
+      // An algorithmic parent that has fired is not resting anywhere: the
+      // exchange has replaced it with the order it spawned, and that order
+      // reports itself. A mark left here says "my order is at this level" about
+      // a level the order has left — the same claim the chart marker was making.
+      if (describeFuturesAlgoTrigger(order).triggered) continue
       const side = order.side === 'BUY' ? 'bid' : 'ask'
       const key = futuresBookGroupKey({ price: order.price, side, step: activeGroupStep })
       if (key === null) continue

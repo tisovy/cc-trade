@@ -316,6 +316,50 @@ describe('FuturesTradingTicket', () => {
       .toBeInTheDocument()
   })
 
+  // The working-orders list is one of the three surfaces that drew a fired stop
+  // as an order resting at its trigger. It is the list the operator scans for
+  // what is still on the book.
+  it('states a fired algo in the working-orders list instead of listing it as working', () => {
+    const onOrderEdit = vi.fn()
+    render(
+      <FuturesTradingTicket
+        state={createState({
+          openOrders: [
+            {
+              symbol: 'BTCUSDT',
+              orderId: 7,
+              side: 'SELL',
+              orderKind: 'ALGO',
+              price: '0',
+              triggerPrice: '60000',
+              origQty: '0.5',
+              actualOrderId: '990281234',
+              actualPrice: '59980.1',
+            },
+          ],
+        })}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+        draftPrice="58445.0"
+        onOrderEdit={onOrderEdit}
+      />,
+    )
+    fireEvent.click(screen.getByRole('tab', { name: /^Orders/ }))
+    const row = screen.getByRole('table', { name: 'Working orders' })
+      .querySelector('.futures-production-order-row')
+
+    expect(row).toHaveClass('is-triggered')
+    expect(row).toHaveTextContent('FIRED')
+    expect(row).not.toHaveTextContent('60000')
+    expect(row).toHaveTextContent('59980.1')
+    expect(within(row).getByTitle(/no longer working, so it cannot be moved or cancelled/))
+      .toBeInTheDocument()
+
+    // The editor never opened on an algo row and must not start now.
+    fireEvent.doubleClick(row)
+    expect(onOrderEdit).not.toHaveBeenCalled()
+  })
+
   it('keeps sizing and reduce-only exits usable while the local entry cap is exceeded', () => {
     render(
       <FuturesTradingTicket

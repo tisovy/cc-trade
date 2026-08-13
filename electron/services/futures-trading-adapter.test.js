@@ -712,6 +712,55 @@ describe('futures normalization', () => {
         });
     });
 
+    // Without the spawned identity the desk cannot connect the execution report
+    // for order X to the algo parent whose X it is, and goes on drawing a stop
+    // that has already fired as resting at its trigger price.
+    it('carries the regular order an algo spawned, and the empty value when it has not', () => {
+        const base = {
+            symbol: 'TUTUSDT',
+            algoId: 42,
+            clientAlgoId: 'algo-client-42',
+            algoType: 'CONDITIONAL',
+            orderType: 'STOP_MARKET',
+            side: 'SELL',
+            algoStatus: 'NEW',
+            quantity: '100',
+            triggerPrice: '0.0123',
+            updateTime: 1000,
+        };
+
+        expect(normalizeFuturesAlgoOrder({
+            ...base,
+            actualOrderId: '990281234',
+            actualPrice: '0.0121',
+        })).toMatchObject({
+            algoId: 42,
+            actualOrderId: '990281234',
+            actualPrice: '0.0121',
+            // The spawned order lives in the regular namespace; naming it here
+            // must not move the parent out of the ALGO one.
+            orderKind: 'ALGO',
+            orderId: 42,
+            triggerPrice: '0.0123',
+        });
+
+        // Binance states "has not fired" as an empty string. A null or a zero
+        // here would read as an order that fired at nothing, which is the
+        // opposite of what the exchange said.
+        const resting = normalizeFuturesAlgoOrder({
+            ...base,
+            actualOrderId: '',
+            actualPrice: '',
+        });
+        expect(resting.actualOrderId).toBe('');
+        expect(resting.actualPrice).toBe('');
+
+        // A response that never mentioned the fields says nothing either way.
+        const unmentioned = normalizeFuturesAlgoOrder(base);
+        expect(unmentioned).not.toHaveProperty('actualOrderId');
+        expect(unmentioned).not.toHaveProperty('actualPrice');
+    });
+
     it('classifies user data stream events', () => {
         expect(normalizeFuturesUserDataStreamEvent({
             e: 'ORDER_TRADE_UPDATE',

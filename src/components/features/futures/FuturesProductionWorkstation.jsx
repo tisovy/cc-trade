@@ -2,7 +2,10 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import useFuturesProductionWorkstation from '../../../hooks/useFuturesProductionWorkstation.js'
 import useFuturesOrderDrag from '../../../hooks/useFuturesOrderDrag.js'
 import useFuturesContractDefaults from '../../../hooks/useFuturesContractDefaults.js'
-import { describeFuturesOrderIntent } from '../../../utils/futuresOrderPresentation.js'
+import {
+  describeFuturesAlgoTrigger,
+  describeFuturesOrderIntent,
+} from '../../../utils/futuresOrderPresentation.js'
 import {
   readFuturesSymbolHistory,
   rememberFuturesSymbol,
@@ -331,11 +334,16 @@ export const FuturesProductionWorkstation = ({
         .filter(order => order.symbol === symbol)
         .map((order) => {
           const intent = describeFuturesOrderIntent(order)
+          const trigger = describeFuturesAlgoTrigger(order)
           return {
             ...order,
             orderKind: order.orderKind === 'ALGO' ? 'ALGO' : 'REGULAR',
+            // A parent that has fired is drawn where it fired, not where it was
+            // waiting to: the trigger is a level the market has already gone
+            // through, and the dock and the rail price it the same way. An algo
+            // still resting is drawn at its trigger, as it always was.
             price: order.orderKind === 'ALGO'
-              ? (order.triggerPrice ?? order.price)
+              ? (trigger.spawnedPrice ?? order.triggerPrice ?? order.price)
               : order.price,
             // The exchange's own leg, kept beside the derived one: a one-way
             // account reports BOTH, and an order placed with the LONG a label

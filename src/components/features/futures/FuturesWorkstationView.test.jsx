@@ -719,6 +719,42 @@ describe('pure Futures workstation presentation', () => {
     expect(screen.getByTitle('1 working buy order here')).toBeInTheDocument()
   })
 
+  // A fired algo is not resting at any level: the exchange replaced it with the
+  // order it spawned. A mark left in the book claims otherwise.
+  it('marks no level for an algorithmic parent that has already fired', () => {
+    renderView({
+      ownedOrders: [
+        {
+          symbol: 'BTCUSDT',
+          orderId: 5,
+          orderKind: 'ALGO',
+          side: 'BUY',
+          price: '58420.00',
+          status: 'NEW',
+          actualOrderId: '990281234',
+        },
+      ],
+    })
+    expect(screen.queryByTitle('1 working buy order here')).not.toBeInTheDocument()
+  })
+
+  it('still marks the level of an algorithmic parent that has not fired', () => {
+    renderView({
+      ownedOrders: [
+        {
+          symbol: 'BTCUSDT',
+          orderId: 5,
+          orderKind: 'ALGO',
+          side: 'BUY',
+          price: '58420.00',
+          status: 'NEW',
+          actualOrderId: '',
+        },
+      ],
+    })
+    expect(screen.getByTitle('1 working buy order here')).toBeInTheDocument()
+  })
+
   it('marks no level when the working orders belong to another contract', () => {
     renderView({
       ownedOrders: [

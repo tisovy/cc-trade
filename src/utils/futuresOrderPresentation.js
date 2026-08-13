@@ -33,6 +33,39 @@ export const describeFuturesOrderIntent = (order) => {
   })
 }
 
+const NOT_TRIGGERED = Object.freeze({
+  triggered: false,
+  spawnedOrderId: null,
+  spawnedPrice: null,
+})
+
+// Whether an algorithmic order has already fired, and what it fired into.
+//
+// An algo that fires does not disappear from the exchange's open-algo list at
+// once: it stays there for a moment, now naming the regular order it spawned.
+// Read as a plain working order, that is a marker resting at a trigger price
+// the market has already gone through — the operator reaches for it to move or
+// cancel something the exchange has acted on.
+//
+// The exchange states "has not fired" as an empty string, so emptiness is the
+// question this asks. A missing field is not a denial either: a response that
+// never mentioned it says nothing, and nothing reads as still resting, exactly
+// as the desk behaved before it was told at all.
+export const describeFuturesAlgoTrigger = (order) => {
+  if (String(order?.orderKind ?? '') !== 'ALGO') return NOT_TRIGGERED
+  const spawnedOrderId = String(order?.actualOrderId ?? '').trim()
+  if (spawnedOrderId === '') return NOT_TRIGGERED
+  const spawnedPrice = String(order?.actualPrice ?? '').trim()
+  return Object.freeze({
+    triggered: true,
+    spawnedOrderId,
+    // The price it fired at, when the exchange states one. A triggered algo
+    // whose spawned order is still working has no fill price yet, and an empty
+    // string there is that absence rather than a price of nothing.
+    spawnedPrice: spawnedPrice === '' ? null : spawnedPrice,
+  })
+}
+
 // What an order is worth, unrounded. Every surface that prices an order — the
 // row, the editor, the chart label, the ticket's total — goes through here, so
 // none of them can price the same order differently.

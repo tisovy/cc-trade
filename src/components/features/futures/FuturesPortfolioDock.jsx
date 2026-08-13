@@ -1,5 +1,6 @@
 import { memo, useMemo, useState } from 'react'
 import {
+  describeFuturesAlgoTrigger,
   describeFuturesOrderIntent,
   describeFuturesPosition,
   describeFuturesPositionMargin,
@@ -410,10 +411,11 @@ export const FuturesPortfolioDock = ({
             </div>
             {openOrders.map((order) => {
               const intent = describeFuturesOrderIntent(order)
+              const trigger = describeFuturesAlgoTrigger(order)
               const editable = order.orderKind !== 'ALGO' && typeof onOrderEdit === 'function'
               return (
                 <div
-                  className={`futures-workstation-dock-row is-orders is-${intent.tone}${order.symbol === selectedSymbol ? ' is-current-symbol' : ''}${editable ? ' is-editable' : ''}`}
+                  className={`futures-workstation-dock-row is-orders is-${intent.tone}${order.symbol === selectedSymbol ? ' is-current-symbol' : ''}${editable ? ' is-editable' : ''}${trigger.triggered ? ' is-triggered' : ''}`}
                   role="row"
                   key={`${order.orderKind ?? 'REGULAR'}:${order.symbol}:${order.orderId}`}
                   // Every order surface opens the same editor; the row's own
@@ -440,8 +442,20 @@ export const FuturesPortfolioDock = ({
                   </span>
                   <span role="cell">
                     {order.orderKind === 'ALGO' ? 'ALGO · ' : ''}{intent.label}
+                    {trigger.triggered ? ' · triggered' : ''}
                   </span>
-                  <span role="cell">{exactText(order.triggerPrice ?? order.price)}</span>
+                  {/* A triggered parent is priced at the price it fired at when
+                      the exchange states one: its trigger is where it stopped
+                      being an order, not where it rests. Both are kept on hover
+                      so the row never loses the number it was placed against. */}
+                  <span
+                    role="cell"
+                    title={trigger.spawnedPrice === null
+                      ? undefined
+                      : `fired from a trigger at ${exactText(order.triggerPrice ?? order.price)}`}
+                  >
+                    {exactText(trigger.spawnedPrice ?? order.triggerPrice ?? order.price)}
+                  </span>
                   {/* Sized the way the ticket, the editor and the chart label
                       size it, so one order reads as one number everywhere. The
                       contract count is what the exchange works in, so it stays
@@ -451,8 +465,20 @@ export const FuturesPortfolioDock = ({
                   </span>
                   <span role="cell">{exactText(order.z ?? '0')}</span>
                   <span role="cell">
+                    {/* Cancel is not offered on an algo at all — the desk lists
+                        and cancels them on Binance — and on one that has fired
+                        the exchange would refuse it anyway. The cell says which
+                        of the two it is, rather than leaving the operator to
+                        read an absence. */}
                     {order.orderKind === 'ALGO' ? (
-                      <em className="futures-workstation-dock-managed">on Binance</em>
+                      <em
+                        className="futures-workstation-dock-managed"
+                        title={trigger.triggered
+                          ? `Fired into order ${trigger.spawnedOrderId}; awaiting confirmation. It is no longer working, so it cannot be moved or cancelled.`
+                          : 'Managed on Binance'}
+                      >
+                        {trigger.triggered ? 'fired' : 'on Binance'}
+                      </em>
                     ) : (
                       <button
                         type="button"

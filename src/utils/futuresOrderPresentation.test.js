@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  describeFuturesAlgoTrigger,
   describeFuturesCloseOutcome,
   describeFuturesOrderIntent,
   describeFuturesPosition,
@@ -49,6 +50,54 @@ describe('totalOrderNotionalUsdt', () => {
 
   it('still totals the rows it can price when one of them it cannot', () => {
     expect(totalOrderNotionalUsdt([order('100', '2'), order(undefined, '3')])).toBe(200)
+  })
+})
+
+describe('describeFuturesAlgoTrigger', () => {
+  const algo = extra => ({ orderKind: 'ALGO', triggerPrice: '57000', ...extra })
+
+  it('names the regular order a fired parent spawned, and the price it fired at', () => {
+    expect(describeFuturesAlgoTrigger(algo({
+      actualOrderId: '990281234',
+      actualPrice: '56980.1',
+    }))).toMatchObject({
+      triggered: true,
+      spawnedOrderId: '990281234',
+      spawnedPrice: '56980.1',
+    })
+  })
+
+  // The exchange states "has not fired" as an empty string. Read as a missing
+  // value it would be a null; read as a number it would be a zero; read as
+  // truthiness it would be false either way — and only one of those is what
+  // Binance said.
+  it('reads the exchange\'s empty value as an order still resting', () => {
+    expect(describeFuturesAlgoTrigger(algo({ actualOrderId: '', actualPrice: '' })).triggered)
+      .toBe(false)
+    expect(describeFuturesAlgoTrigger(algo({ actualOrderId: '   ' })).triggered).toBe(false)
+    // A response that never mentioned the field says nothing either way, which
+    // is how the desk behaved before it was told at all.
+    expect(describeFuturesAlgoTrigger(algo()).triggered).toBe(false)
+  })
+
+  // A fired parent whose spawned order has not printed yet has no fill price.
+  // An empty string there is that absence, not a price of nothing.
+  it('separates a spawned order with no price from one priced at zero', () => {
+    expect(describeFuturesAlgoTrigger(algo({
+      actualOrderId: '990281234', actualPrice: '',
+    })).spawnedPrice).toBeNull()
+    expect(describeFuturesAlgoTrigger(algo({
+      actualOrderId: '990281234', actualPrice: '0',
+    })).spawnedPrice).toBe('0')
+  })
+
+  // Identity lives in two namespaces. A regular order carrying the same fields
+  // is not an algorithmic parent, and must never be read as one.
+  it('claims nothing about an order that is not algorithmic', () => {
+    expect(describeFuturesAlgoTrigger({
+      orderKind: 'REGULAR', actualOrderId: '990281234',
+    }).triggered).toBe(false)
+    expect(describeFuturesAlgoTrigger(undefined).triggered).toBe(false)
   })
 })
 
