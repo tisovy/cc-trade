@@ -16,6 +16,30 @@ export const FUTURES_READINESS_CODES = Object.freeze({
   ORDER_CAP: 'ORDER_CAP',
 })
 
+/**
+ * Whether the desk has a balance it may act on.
+ *
+ * A resource being read is not a resource the desk knows nothing about. The
+ * account refresh marks every resource `loading` and keeps its last values, so
+ * a balance that has answered once stays exactly as usable while the next read
+ * is in flight — it is the same number the desk sized the last order from a
+ * second ago, and the read is what is about to make it fresher.
+ *
+ * Treating `loading` as unknown withdrew the desk's readiness for the length of
+ * every account read. With a read after every command, that refused the
+ * operator's next order, blanked the sizing panel and flashed the SYNC badge —
+ * for a number that had not changed and was not in doubt.
+ *
+ * `stale` and `error` are different and still block: the first says the reading
+ * is not confirmed by the connection that is up now, the second that the last
+ * attempt failed.
+ */
+export const isFuturesBalanceConfirmed = balanceResource => (
+  balanceResource?.status === 'ready'
+  || (balanceResource?.status === 'loading'
+    && Number.isFinite(balanceResource?.lastSuccessfulAt))
+)
+
 const result = (code, tone, label, reason, ready = false) => Object.freeze({
   code,
   tone,
@@ -81,7 +105,8 @@ export const deriveFuturesReadiness = ({
   }
 
   const balanceStatus = balanceResource?.status
-  if (!balanceStatus || balanceStatus === 'idle' || balanceStatus === 'loading') {
+  if (!isFuturesBalanceConfirmed(balanceResource)
+    && (!balanceStatus || balanceStatus === 'idle' || balanceStatus === 'loading')) {
     return result(
       FUTURES_READINESS_CODES.ACCOUNT_LOADING,
       'loading',

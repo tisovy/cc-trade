@@ -814,6 +814,102 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(loads.balances.mock.calls.length).toBeGreaterThan(afterSetup.balances);
     });
 
+    const futuresAccountLoads = () => {
+        const loads = {
+            balances: vi.fn().mockResolvedValue({
+                futures_balances: { USDT: { available: '100', total: '100' } },
+            }),
+            regularOrders: vi.fn().mockResolvedValue({ futures_regular_orders: [] }),
+            algoOrders: vi.fn().mockResolvedValue({ futures_algo_orders: [] }),
+            positions: vi.fn().mockResolvedValue({ futures_positions: [] }),
+        };
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue(
+            ['balances', 'regularOrders', 'algoOrders', 'positions'].map(type => ({
+                type,
+                weight: 5,
+                errorLabel: type,
+                loadPayload: loads[type],
+            })),
+        );
+        return loads;
+    };
+
+    const startFuturesDesk = async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({ action: 'activate_market', marketMode: 'futures-live' }),
+        });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+    };
+
+    // Not awaited before the clock moves: the account read this command may
+    // queue waits on the limiter's own spacing timer, and awaiting the command
+    // first would hold the clock that has to fire it.
+    const sendFuturesPlacement = async () => {
+        const handled = moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                version: 1,
+                marketType: 'futures',
+                action: 'trade.placeOrder',
+                accountId: 'default',
+                symbol: 'TUTUSDT',
+                side: 'BUY',
+                orderType: 'LIMIT',
+                timeInForce: 'GTC',
+                price: '1',
+                quantity: '5',
+            }),
+        });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+        await handled;
+    };
+
+    // What the operator hit on the live desk. Every command re-read the whole
+    // account — ninety of the minute's eight hundred weight, four requests, and
+    // every resource marked `loading` while they ran, which withdrew the desk's
+    // own readiness and refused the next order. Past eight commands a minute the
+    // budget was spent and the limiter held the next read for the rest of the
+    // window. The stream reports the order; there is nothing to read back.
+    it('reads nothing back after a command the stream reports', async () => {
+        const loads = futuresAccountLoads();
+        await startFuturesDesk();
+        moduleMocks.futuresUserDataSockets[0].handlers.open();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+        const afterSetup = Object.fromEntries(
+            Object.entries(loads).map(([type, load]) => [type, load.mock.calls.length]),
+        );
+
+        await sendFuturesPlacement();
+
+        expect(moduleMocks.futuresAdapter.placeOrder).toHaveBeenCalledOnce();
+        for (const [type, load] of Object.entries(loads)) {
+            expect(load, type).toHaveBeenCalledTimes(afterSetup[type]);
+        }
+    });
+
+    // With no stream there is nothing else to learn it from, and the read is
+    // the only way the desk finds out what its own command did.
+    it('reads the account back after a command no stream can report', async () => {
+        const loads = futuresAccountLoads();
+        await startFuturesDesk();
+
+        await sendFuturesPlacement();
+
+        expect(moduleMocks.futuresAdapter.placeOrder).toHaveBeenCalledOnce();
+        for (const [type, load] of Object.entries(loads)) {
+            expect(load.mock.calls.length, type).toBeGreaterThan(0);
+        }
+    });
+
     // The blink. Binance's REST services are eventually consistent with its
     // streams — the same property the ambiguous-outcome reconciliation is built
     // around — so a read of the working orders issued around a placement can
@@ -4588,6 +4684,47 @@ describe('setupBinanceConnection user-data orchestration', () => {
             // The price and the size the command carried are not in any of it,
             // and neither is the sentence the exchange wrote for a human.
             expect(JSON.stringify(kept)).not.toMatch(/50000|0\.01\b|Margin is insufficient/);
+        });
+
+        // The command's own line says when it was asked for and nothing said
+        // when it was done. Without the pair, a desk that feels slow can only be
+        // described, and the record cannot say whether the wait was the
+        // exchange's or the desk's own.
+        it('keeps how long the desk took to answer the command', async () => {
+            await connectRecordedRenderer();
+
+            await placeFuturesOrder('measured-1');
+
+            const answer = held('answer')[0];
+            expect(answer).toMatchObject({
+                action: 'trade.placeOrder',
+                market: 'futures',
+                symbol: 'BTCUSDT',
+                identity: 'measured-1',
+                outcome: 'ok',
+            });
+            expect(Number.isSafeInteger(answer.durationMs)).toBe(true);
+            // Paired with the command by the identity both carry.
+            expect(held('command')[0].identity).toBe(answer.identity);
+        });
+
+        // Reads the desk asks for on its own beat are not commands and are not
+        // recorded; their answers are not either, or the record would fill with
+        // the desk's own housekeeping.
+        it('keeps no answer for a read the record does not keep', async () => {
+            await connectRecordedRenderer();
+
+            await moduleMocks.rendererHandlers.message({
+                type: 'utf8',
+                utf8Data: JSON.stringify({
+                    version: 1,
+                    marketType: 'futures',
+                    action: 'trade.accountRefresh',
+                    accountId: 'default',
+                }),
+            });
+
+            expect(held('answer')).toEqual([]);
         });
 
         // Spot travels the same road with its own code, which the Spot client

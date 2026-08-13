@@ -152,6 +152,19 @@ const RECORDED_FIELDS = Object.freeze({
         ['orderType', optional(text(ORDER_TYPE))],
         ['identity', optional(identity)],
     ]),
+    // How long the desk was busy with the command above, from the validated
+    // command to the end of handling it. The `command` line says what was asked
+    // and when; without its answer the record cannot be asked the one question
+    // an operator asks of a slow desk — how long an order actually took, and
+    // whether the wait was the exchange's or the desk's own.
+    answer: Object.freeze([
+        ['action', text(ACTION)],
+        ['market', text(MARKET)],
+        ['durationMs', count],
+        ['outcome', text(OUTCOME)],
+        ['symbol', optional(text(SYMBOL))],
+        ['identity', optional(identity)],
+    ]),
     outcome: Object.freeze([
         ['action', text(ACTION)],
         ['result', text(RESULT)],

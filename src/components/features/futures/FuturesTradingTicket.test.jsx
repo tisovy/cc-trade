@@ -1117,6 +1117,36 @@ describe('FuturesTradingTicket', () => {
     expect(feedback).toHaveTextContent('Loading Futures account state')
   })
 
+  // The desk re-reads the account, and the read marks the balance `loading`
+  // while it runs. Blanking the size and refusing the order for that window
+  // made the sizing panel flash and the next order bounce every time the
+  // operator traded — for a balance the desk was holding the whole time.
+  it('keeps sizing and sends the order while the balance is being read again', () => {
+    const state = createState({
+      accountResources: {
+        balances: {
+          status: 'loading',
+          data: { USDT: { available: '1000', total: '1000' } },
+          lastSuccessfulAt: 1_000,
+          error: null,
+        },
+      },
+    })
+    render(
+      <FuturesTradingTicket
+        state={state}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+        draftPrice="58445.0"
+      />,
+    )
+    sizeTo(25)
+    fireEvent.click(screen.getByRole('button', { name: 'LONG entry' }))
+
+    expect(state.placeOrder).toHaveBeenCalledOnce()
+    expect(screen.queryByText(/Loading Futures account state/)).not.toBeInTheDocument()
+  })
+
   it('explains gestures blocked by exchange filters', () => {
     const state = createState({ balances: { USDT: { available: '10', total: '10' } } })
     const { rerender } = render(

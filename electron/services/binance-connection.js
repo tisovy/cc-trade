@@ -1404,6 +1404,41 @@ export function setupBinanceConnection({
         }
     };
 
+    const futuresStreamCarriesOrders = () => (
+        futuresAccountResources?.userDataStream?.status === 'ready'
+    );
+
+    /**
+     * What a command owes the account once the exchange has answered it.
+     *
+     * With the authenticated stream up: nothing. It reports the order within
+     * milliseconds and the fold puts it straight into the held set, and the
+     * wallet and position it moved arrive as their own ACCOUNT_UPDATE, which
+     * asks for exactly the two resources that changed.
+     *
+     * The account-wide read that used to follow every command learned the same
+     * thing over again — ninety of the minute's eight hundred weight, four
+     * requests spaced by the limiter — and marked every resource `loading`
+     * while it ran. That is what refused the operator's next order, blanked the
+     * sizing panel and flashed the SYNC badge. Past eight commands in a minute
+     * the budget was spent and the limiter held the next read for the rest of
+     * the window, so the desk sat unable to trade for tens of seconds.
+     *
+     * `streamCannotReport` names resources the stream does not carry — the
+     * algorithmic orders, which are read and cancelled but never streamed.
+     *
+     * With no stream there is nothing else to learn any of it from, so the
+     * whole read stands.
+     */
+    const reconcileAfterFuturesCommand = async ({ streamCannotReport = null } = {}) => {
+        if (!futuresStreamCarriesOrders()) {
+            await refreshFuturesAccountState();
+            return;
+        }
+        if (streamCannotReport === null) return;
+        await refreshFuturesAccountState({ resources: streamCannotReport });
+    };
+
     // Lazily started the first time the renderer touches futures trading, so
     // spot-only usage (or a key without futures permission) stays quiet.
     let futuresUserDataWs = null;
@@ -2382,7 +2417,7 @@ export function setupBinanceConnection({
                 const report = await futuresTradingAdapter.placeOrder(order);
                 noteFuturesMutation();
                 emit({ futures_execution_update: report });
-                await refreshFuturesAccountState();
+                await reconcileAfterFuturesCommand();
             } catch (error) {
                 await reportFuturesCommandFailure({
                     action: TRADING_COMMAND_ACTIONS.PLACE_ORDER,
@@ -2841,7 +2876,7 @@ export function setupBinanceConnection({
                 const report = await futuresTradingAdapter.modifyOrder(amendment);
                 noteFuturesMutation();
                 emit({ futures_execution_update: report });
-                await refreshFuturesAccountState();
+                await reconcileAfterFuturesCommand();
             } catch (error) {
                 await reportFuturesCommandFailure({
                     action: TRADING_COMMAND_ACTIONS.REPLACE_ORDER,
@@ -2874,7 +2909,7 @@ export function setupBinanceConnection({
                 const report = await futuresTradingAdapter.cancelOrder(command);
                 noteFuturesMutation();
                 emit({ futures_execution_update: report });
-                await refreshFuturesAccountState();
+                await reconcileAfterFuturesCommand();
             } catch (error) {
                 await reportFuturesCommandFailure({
                     action: TRADING_COMMAND_ACTIONS.CANCEL_ORDER,
@@ -2940,7 +2975,10 @@ export function setupBinanceConnection({
             const failures = outcomes.filter(outcome => !outcome.ok);
             if (failures.length === 0) {
                 noteFuturesMutation();
-                await refreshFuturesAccountState();
+                // The regular orders leave on the stream that reported them.
+                // The algorithmic ones are never streamed, so what is left of
+                // them is only knowable by reading.
+                await reconcileAfterFuturesCommand({ streamCannotReport: ['algoOrders'] });
                 return;
             }
             // Whatever did cancel, cancelled: the account read below is what the
@@ -3069,7 +3107,26 @@ export function setupBinanceConnection({
             const command = validation.command;
             // What the desk was told to do, before anything is sent: the outcome
             // envelopes say how a command ended but never what it was.
-            diagnosticRecord.observeCommand(command);
+            const commandRecorded = diagnosticRecord.observeCommand(command);
+            const commandAskedAt = Date.now();
+            // And how long it then took. Paired with the line above by the
+            // identity both carry, this is what lets a slow desk be measured
+            // instead of described: the command's own line says when it was
+            // asked for and nothing said when it was done.
+            const noteCommandAnswer = (outcome) => {
+                if (!commandRecorded) return;
+                diagnosticRecord.record('answer', {
+                    action: command.action,
+                    market: command.marketType,
+                    durationMs: Math.max(0, Date.now() - commandAskedAt),
+                    outcome,
+                    symbol: command.symbol ?? null,
+                    identity: command.origClientOrderId
+                        ?? command.orderId
+                        ?? command.clientOrderId
+                        ?? null,
+                });
+            };
             const authenticatedAdapter = command.marketType === FUTURES_MARKET_TYPE
                 ? futuresTradingAdapter
                 : spotTradingAdapter;
@@ -3088,14 +3145,20 @@ export function setupBinanceConnection({
             // and one at a time per contract. A read does not — an account
             // refresh may be asked for as often as the desk likes, and the
             // history fan-out depends on staying concurrent.
-            if (isMutatingTradingCommand(command)) {
-                await tradingCommandRegistry.submit(command, {
-                    emit,
-                    execute: () => dispatchTypedTradingCommand(command),
-                });
-                return;
+            try {
+                if (isMutatingTradingCommand(command)) {
+                    await tradingCommandRegistry.submit(command, {
+                        emit,
+                        execute: () => dispatchTypedTradingCommand(command),
+                    });
+                } else {
+                    await dispatchTypedTradingCommand(command);
+                }
+            } catch (error) {
+                noteCommandAnswer('error');
+                throw error;
             }
-            await dispatchTypedTradingCommand(command);
+            noteCommandAnswer('ok');
         };
 
         const dispatchTypedTradingCommand = async (command) => {

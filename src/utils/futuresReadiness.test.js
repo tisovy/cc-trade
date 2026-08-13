@@ -47,6 +47,32 @@ describe('deriveFuturesReadiness', () => {
     })
   })
 
+  // The desk re-reads the account, and every read marks the balance `loading`
+  // while it runs. Treating that as "unknown" withdrew readiness for the length
+  // of every read — with a read behind every command, the operator's next order
+  // was refused for a number that had not changed and was not in doubt. A first
+  // read, which has nothing behind it, still blocks: that is the case above.
+  it('stays ready while a balance it already holds is being read again', () => {
+    expect(deriveFuturesReadiness({
+      ...readyInput,
+      balanceResource: {
+        status: 'loading',
+        data: { USDT: { available: '100' } },
+        lastSuccessfulAt: 100,
+      },
+    })).toMatchObject({ code: 'READY', ready: true })
+  })
+
+  // Neither of the other two withheld readings becomes usable by being re-read:
+  // stale says the connection that is up now has not confirmed it, error that
+  // the last attempt failed.
+  it.each(['stale', 'error'])('does not trade on a %s reading being read again', (status) => {
+    expect(deriveFuturesReadiness({
+      ...readyInput,
+      balanceResource: { status, error: { message: 'x' }, lastSuccessfulAt: 100 },
+    })).toMatchObject({ ready: false })
+  })
+
   // A reduce-only exit releases margin instead of consuming it, and under any
   // leverage the position outvalues the balance left over. Budgeting the exit
   // would lock the operator out of closing at the worst possible moment.

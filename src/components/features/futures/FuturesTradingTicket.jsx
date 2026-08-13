@@ -26,6 +26,7 @@ import {
 import {
   deriveFuturesReadiness,
   FUTURES_READINESS_CODES,
+  isFuturesBalanceConfirmed,
 } from '../../../utils/futuresReadiness.js'
 import FuturesOrderConfirmation from './FuturesOrderConfirmation.jsx'
 import FuturesReadingNotice from './FuturesReadingNotice.jsx'
@@ -140,7 +141,10 @@ const FuturesTradingTicket = ({
   const sizingBudget = availableUsdt !== null && isExactPositiveDecimal(availableUsdt)
     ? availableUsdt
     : null
-  const sizingReady = balanceResource.status === 'ready'
+  // A balance being re-read is still the balance the desk holds: blanking the
+  // size while the read is in flight is what made the panel flash on every
+  // account refresh.
+  const sizingReady = isFuturesBalanceConfirmed(balanceResource)
     && sizingBudget !== null
     && hasFilters
   // Whole USDT only: a slider that reports 66030.478842815 makes the operator

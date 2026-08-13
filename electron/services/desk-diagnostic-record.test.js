@@ -104,6 +104,34 @@ describe('describeDeskDiagnosticEvent', () => {
         })).toEqual({ kind: 'fault', phase: 'book-recovery', code: 'DEPTH_SEQUENCE_GAP' });
     });
 
+    // The answer to a command, which is what makes the command's own line
+    // measurable rather than merely present.
+    it('keeps a command answer under its declared fields and no amount beside it', () => {
+        expect(describeDeskDiagnosticEvent('answer', {
+            action: 'trade.placeOrder',
+            market: 'futures',
+            durationMs: 812,
+            outcome: 'ok',
+            symbol: 'TUTUSDT',
+            identity: '1933678626',
+            price: '0.0431',
+        })).toEqual({
+            kind: 'answer',
+            action: 'trade.placeOrder',
+            market: 'futures',
+            durationMs: 812,
+            outcome: 'ok',
+            symbol: 'TUTUSDT',
+            identity: '1933678626',
+        });
+        expect(describeDeskDiagnosticEvent('answer', {
+            action: 'trade.placeOrder',
+            market: 'futures',
+            durationMs: -1,
+            outcome: 'ok',
+        })).toBeNull();
+    });
+
     it('names the byte count a refused frame reported', () => {
         expect(describeDeskDiagnosticEvent('timing', {
             phase: 'oversized-frame:40657',

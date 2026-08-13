@@ -92,6 +92,10 @@ export const summarizeDeskDiagnosticRecord = (text) => {
   const refusals = new Map()
   const sessions = []
   const commands = []
+  // How long each kind of command took to answer. Keyed by the action, because
+  // a placement and a cancellation are not the same wait and averaging them
+  // hides whichever is the slow one.
+  const answers = new Map()
   let refused = 0
   let first = null
   let last = null
@@ -135,6 +139,11 @@ export const summarizeDeskDiagnosticRecord = (text) => {
     if (line.kind === 'outcome' && (line.result === 'rejected' || line.result === 'unresolved')) {
       bump(refusals, line.exchangeCode ?? '(the exchange stated none)')
     }
+    if (line.kind === 'answer' && typeof line.action === 'string') {
+      const observed = answers.get(line.action) ?? []
+      observed.push({ durationMs: Number(line.durationMs) || 0, at: line.at, outcome: line.outcome })
+      answers.set(line.action, observed)
+    }
     if (line.kind === 'session') sessions.push({ at: line.at, event: line.event, version: line.version ?? null })
     if (line.kind === 'command') {
       commands.push({
@@ -149,15 +158,15 @@ export const summarizeDeskDiagnosticRecord = (text) => {
     }
   }
 
-  const phases = [...durations.entries()]
-    .map(([phase, observed]) => {
+  const observedAs = entries => [...entries]
+    .map(([key, observed]) => {
       const values = observed.map(entry => entry.durationMs)
       const slowest = observed.reduce(
         (worst, entry) => (entry.durationMs > worst.durationMs ? entry : worst),
         observed[0],
       )
       return {
-        phase,
+        key,
         count: observed.length,
         medianMs: median(values),
         slowestMs: slowest.durationMs,
@@ -166,6 +175,9 @@ export const summarizeDeskDiagnosticRecord = (text) => {
       }
     })
     .sort((left, right) => right.slowestMs - left.slowestMs)
+
+  const phases = observedAs(durations.entries())
+    .map(({ key, ...rest }) => ({ phase: key, ...rest }))
 
   return {
     lines: [...kinds.values()].reduce((sum, count) => sum + count, 0),
@@ -179,6 +191,7 @@ export const summarizeDeskDiagnosticRecord = (text) => {
     sessions,
     commands,
     phases,
+    answers: observedAs(answers.entries()),
   }
 }
 
@@ -225,6 +238,19 @@ export const formatDeskDiagnosticSummary = (summary, { day = null } = {}) => {
       + (phase.slowestAt === null ? '' : ` at ${phase.slowestAt}`)
       + (phase.errors === 0 ? '' : `  (${phase.errors} failed)`),
     )
+  }
+
+  if (summary.answers.length > 0) {
+    out.push('', 'How long commands took to answer')
+    for (const answer of summary.answers) {
+      out.push(
+        `  ${answer.key.padEnd(22)} n=${String(answer.count).padStart(5)}`
+        + `  median ${String(answer.medianMs).padStart(6)}ms`
+        + `  slowest ${String(answer.slowestMs).padStart(6)}ms`
+        + (answer.slowestAt === null ? '' : ` at ${answer.slowestAt}`)
+        + (answer.errors === 0 ? '' : `  (${answer.errors} failed)`),
+      )
+    }
   }
 
   if (summary.sessions.length > 0) {
