@@ -74,8 +74,19 @@ false-positive margins below are the worst case rather than a typical one.
 
 - [x] 5.1 `OPENSPEC_TELEMETRY=0 openspec validate hear-the-exchange-out --strict` before and after.
 - [x] 5.2 Full suite green — 1853 tests, 110 files. Every new test was run against the tree before its own change first, and the readings are recorded in 1.7, 2.4, 3.8 and 4.5: **eleven bite, five are guards.**
-- [ ] 5.3 Add to `verify-the-desk-in-one-sitting` the checks only the operator can make: that an algorithmic order placed on the live account produces an `ALGO_UPDATE`, and that changing leverage from the phone moves the desk without a read.
-- [ ] 5.4 Leave `streamCannotReport: ['algoOrders']` in place until 5.3 answers. If it answers that the event arrives, propose its removal as its own change rather than folding it into this one.
+- [x] 5.3 Added to `verify-the-desk-in-one-sitting` as steps 36, 37 and 38 — never to be marked done there, and not to be archived without the operator's word. Step 36 is a measurement, not a check: its answer decides 5.4. Step 37 also asks the operator to confirm what will *not* happen — a margin mode changed on the phone stays invisible until a read, because the exchange's frame has no such field. Step 38 says plainly that stopping the proxy will most likely be caught by the ordinary close path, and that the silence watchdogs stay covered by test only unless the named reason code appears.
+- [x] 5.4 Left in place, and so is the thirty-second beat. Nothing in this change removes a read.
+
+## Notes on what this change did not settle
+
+`name-the-algo-order-that-fired` — 16 of 17 tasks done — rests on the premise
+that the authenticated stream does not report algorithmic orders at all, and
+step 33 of the runbook states that to the operator as fact. Binance's own page
+for `ALGO_UPDATE` says otherwise, and its payload carries `o.ai`, the spawned
+order id that change goes to REST for. Its inference keeps its value either way —
+it depends on no event whose delivery is unproven — but if step 36 sees the event
+arrive, both that premise and step 33's wording need correcting, and the session
+holding that change should be the one to do it.
 
 ## Notes
 
