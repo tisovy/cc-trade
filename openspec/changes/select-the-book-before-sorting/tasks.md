@@ -43,6 +43,13 @@
 - [x] 7.3 Re-read `master`, HEAD, and status; if HEAD advanced, rebuild and reverify the owned staged tree over the new HEAD.
 - [x] 7.4 Commit only the owned production, test, new-change, and permitted planning-debt paths directly to `master`, then report the verified commit without archiving either active change.
 
+## 8. Post-Commit Audit And Archive
+
+- [x] 8.1 Differentially compare the committed formatter with an independent exact-decimal full-sort oracle across randomized sizes, insertion orders, valid/invalid range modes, and retained-state immutability.
+- [x] 8.2 Repair the test oracle's intermediate decimal-string overflow and add a biting range-length-boundary regression after confirming production already satisfies the specified floor and ceiling behavior.
+- [ ] 8.3 Rebuild an owned staged tree on the current `master`, run focused/full verification, strict validation, diff audit, and GitNexus `detect_changes`, then commit the audit correction alone.
+- [ ] 8.4 Sync the verified delta spec into the main capability spec, archive the completed change, validate the archive result, and commit only the sync/archive paths.
+
 ## Measurement Record
 
 ### GitNexus Impact Record
@@ -106,14 +113,20 @@ prefix without converting a price to `Number`.
 
 ### Regression Classification
 
-- Biting tests: 1 (`sorts only the selected subset for a bounded 1000-level side`).
+- Biting tests: 2 (`sorts only the selected subset for a bounded 1000-level side`
+  and `keeps exact floor and ceiling output at the accepted range-length
+  boundary`).
 - Guard tests: 5 new equivalence/retention cases; they pass on the starting ref
   and therefore describe preserved behavior rather than discovered regressions.
 - Starting-ref command: `fnm exec --using 24.11.0 ./node_modules/.bin/vitest run electron/services/futures-workstation-order-book.test.js`
   in `/tmp/select-book-baseline.yjUJwP` after copying only the changed test file.
-- Starting-ref result: expected failure, 49/50 passed. The biting assertion saw
-  sort lengths `[1000, 1000]` from the old formatter instead of `[221, 221]`;
-  the same file passes 50/50 with the production implementation.
+- Starting-ref result after the post-commit audit: expected failure, 49/51
+  passed. One biting assertion saw sort lengths `[1000, 1000]` from the old
+  formatter instead of `[221, 221]`; the other exposed its intermediate
+  edge-string overflow as
+  `FuturesWorkstationDecimalError:INVALID_FUTURES_WORKSTATION_DECIMAL` for an
+  accepted 64-character range. The same file passes 51/51 with the production
+  implementation.
 
 ### Staged Verification
 
@@ -157,3 +170,43 @@ prefix without converting a price to `Number`.
   `d7ca75caa336934073fd0b085eba2f5e5e225664`. The owned staged tree had already
   been rebuilt and fully verified on that base after the earlier HEAD advance;
   shared unrelated work remains outside the temporary index.
+
+### Post-Commit Differential Audit
+
+- An independent temporary oracle compared 180 deterministic books and 3,240
+  renderer calls across empty, floor-adjacent, realistic, and 1,000-level side
+  sizes; mixed decimal scales; wide prices; shuffled insertion orders; and
+  absent, invalid, non-positive, tiny, edge-aligned, wider-than-book, and
+  maximum-length positive ranges. Every current view matched the mathematical
+  full-sort JSON bytes, repeated calls were deterministic, retained Maps were
+  unchanged, and every observed sort length equalled the corresponding
+  delivered side length.
+- Every successful parent-formatter result also matched. In 320 extreme-scale
+  cases the parent did not produce bytes: it constructed an exact edge string
+  longer than the input parser's 64-character boundary and then rejected that
+  internal value. The bounded implementation already avoids that round trip,
+  so the correction is confined to the test oracle and permanent regression
+  coverage; no production hunk was required.
+- `fullSortSideReference` upstream impact after refreshing GitNexus on the
+  post-commit HEAD is LOW: one direct caller, two upstream symbols, one affected
+  module, and zero execution flows.
+- `coversRange` and `rangeShortfall` retain the same pre-existing internal-edge
+  limitation for protocol-boundary ranges. Band coverage is an explicit
+  non-goal of this delivery-selection change, so it is recorded rather than
+  folded into the archive under a false ownership claim.
+
+### Post-Commit Staged Verification
+
+- Base: `cb5e455b45f50f68383cc4c2ce9b483c64b36050`; temporary index
+  `/tmp/select-book-audit-stage.bvNs2n/index`; tree
+  `3c5980627e22e9f93881d4a0fb877112d88dd8a2`; archive
+  `/tmp/select-book-audit-tree.8u9eIl`; Node `v24.11.0`. Production, test, and
+  tasks hashes matched the workspace inputs, and the isolated diff contained
+  only the order-book test and this tasks file.
+- Focused order-book Vitest: 51/51 passed. `npm run test:all`: 109/109 files and
+  1,793/1,793 tests passed, followed by lint, renderer/Electron builds,
+  circular-import, runtime-mock, Futures production-boundary, and command-path
+  checks. Strict OpenSpec validation and both owned diff checks passed.
+- GitNexus `detect_changes({ scope: "staged" })` through the temporary index
+  reported LOW risk, 2 files, 32 conservatively file-mapped symbols, zero
+  affected execution flows, and no production-file change.

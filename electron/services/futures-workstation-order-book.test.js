@@ -10,11 +10,11 @@ import {
 } from '../../src/utils/futuresWorkstationProtocolShared.js';
 import { groupFuturesBookLevels } from '../../src/utils/futuresOrderBook.js';
 import {
-    addFuturesWorkstationDecimals,
     compareFuturesWorkstationDecimals,
     isFuturesWorkstationDecimal,
     isPositiveFuturesWorkstationDecimal,
     normalizeFuturesWorkstationDecimal,
+    parseFuturesWorkstationDecimal,
     subtractFuturesWorkstationDecimals,
 } from './futures-workstation-decimal.js';
 
@@ -51,24 +51,36 @@ const bookFromLevels = (bids, asks) => {
 // The behavior being preserved, deliberately written as a full exact-decimal
 // sort rather than sharing the production selection implementation.
 const fullSortSideReference = (side, descending, range) => {
-    const entries = Array.from(side, ([price, quantity]) => ({ price, quantity }));
+    const rangeDecimal = range === null ? null : parseFuturesWorkstationDecimal(range);
+    const entries = Array.from(side, ([price, quantity]) => ({
+        price,
+        quantity,
+        decimal: parseFuturesWorkstationDecimal(price),
+        key: 0n,
+    }));
+    const scale = Math.max(
+        rangeDecimal?.scale ?? 0,
+        ...entries.map(entry => entry.decimal.scale),
+    );
+    const alignedKey = decimal => (
+        decimal.coefficient * (10n ** BigInt(scale - decimal.scale))
+    );
+    for (const entry of entries) entry.key = alignedKey(entry.decimal);
     entries.sort((left, right) => {
-        const comparison = compareFuturesWorkstationDecimals(left.price, right.price);
+        const comparison = left.key < right.key ? -1 : left.key > right.key ? 1 : 0;
         return descending ? -comparison : comparison;
     });
-    const best = entries.length > 0 ? entries[0].price : null;
-    const edge = best === null || range === null
+    const bestKey = entries.length > 0 ? entries[0].key : null;
+    const rangeKey = rangeDecimal === null ? null : alignedKey(rangeDecimal);
+    const edgeKey = bestKey === null || rangeKey === null
         ? null
-        : (descending
-            ? subtractFuturesWorkstationDecimals(best, range)
-            : addFuturesWorkstationDecimals(best, range));
+        : (descending ? bestKey - rangeKey : bestKey + rangeKey);
     const levels = [];
-    for (const { price, quantity } of entries) {
+    for (const { price, quantity, key } of entries) {
         if (levels.length >= FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.RENDERER_LEVELS_PER_SIDE) break;
-        if (edge !== null
+        if (edgeKey !== null
             && levels.length >= FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.MIN_DELIVERED_LEVELS_PER_SIDE) {
-            const comparison = compareFuturesWorkstationDecimals(price, edge);
-            if (descending ? comparison < 0 : comparison > 0) break;
+            if (descending ? key < edgeKey : key > edgeKey) break;
         }
         levels.push({ price, quantity });
     }
@@ -747,6 +759,22 @@ describe('bounded delivery selects before full ordering', () => {
                 .toBe(JSON.stringify(fullSortRendererViewReference(book, range)));
             expect(actual.bids).toHaveLength(1_000);
             expect(actual.asks).toHaveLength(1_000);
+        }
+    });
+
+    it('keeps exact floor and ceiling output at the accepted range-length boundary', () => {
+        const book = realisticBook();
+        const ranges = [
+            { range: `0.${'0'.repeat(61)}1`, expectedLevels: 200 },
+            { range: '9'.repeat(64), expectedLevels: 1_000 },
+        ];
+        for (const { range, expectedLevels } of ranges) {
+            expect(range).toHaveLength(64);
+            const actual = book.toRendererView(range);
+            expect(JSON.stringify(actual))
+                .toBe(JSON.stringify(fullSortRendererViewReference(book, range)));
+            expect(actual.bids).toHaveLength(expectedLevels);
+            expect(actual.asks).toHaveLength(expectedLevels);
         }
     });
 
