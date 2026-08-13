@@ -114,6 +114,22 @@ Both experiments are the operator's own words, recorded during the run.
       under "Дописано 2026-08-13: рынок возвращается сам". Not checked off here;
       the runbook is where operator verification lives.
 
+      Confirmed live on 2026-08-13 at the third attempt, and the two failed
+      attempts are worth keeping because both failed the same way — the check was
+      spoiled by touching the desk during the outage. First: the operator
+      switched to Spot and back, which rebuilds the session and resets the
+      ladder, so the successful attempt was the eighth of a fresh ladder and the
+      old code would have reached it too. Second: the operator pressed Retry 5.3
+      seconds before the desk's own next attempt was due, which proved the button
+      and pre-empted the thing being measured. Third, untouched: outage 15:25:32,
+      ceiling at 15:27:03.62 after 91.4 s against the 91.5 predicted, and
+      **attempt nine at 15:27:33.62 — exactly 30.1 s later, on the desk's own
+      timer**. Live at 15:27:35.36.
+
+      The proof is the existence of attempt nine, not the recovery time. Past the
+      ceiling the old code had destroyed the session and every timer with it, so
+      there was nothing left to fire.
+
 ## Notes
 
 `futures-production-workstation-service.js` is shared and hot.
