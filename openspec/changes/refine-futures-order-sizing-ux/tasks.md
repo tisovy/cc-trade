@@ -26,4 +26,4 @@
 - [x] 4.3 Re-run `OPENSPEC_TELEMETRY=0 openspec validate refine-futures-order-sizing-ux` and `gitnexus detect-changes` to verify the implementation affects only the expected symbols and flows.
 - [ ] 4.4 Have the operator confirm the ticket, working-order editor, and shortcut-confirmation sizing surfaces against live account/position data at normal and enlarged UI scales; do not archive the change before that confirmation.
 - [x] 4.5 Re-run the focused sizing/editor/ticket tests plus lint, production build, and the Futures workstation boundary check after the confirmation correction.
-- [ ] 4.6 Re-run OpenSpec validation and staged GitNexus change detection for the corrected implementation before committing.
+- [x] 4.6 Re-run OpenSpec validation and staged GitNexus change detection for the corrected implementation before committing.
