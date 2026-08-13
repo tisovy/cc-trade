@@ -16,6 +16,7 @@ import {
     normalizeFuturesSymbolConfig,
     normalizeFuturesAccountUpdate,
     normalizeFuturesUserDataStreamEvent,
+    FUTURES_USER_DATA_EVENTS_IGNORED,
     parseFuturesExchangeFilters,
     readFuturesMaxLeverage,
     readFuturesTradedSymbols,
@@ -809,7 +810,158 @@ describe('futures normalization', () => {
             .toMatchObject({ type: 'accountUpdate' });
         expect(normalizeFuturesUserDataStreamEvent({ e: 'listenKeyExpired' }))
             .toMatchObject({ type: 'listenKeyExpired' });
-        expect(normalizeFuturesUserDataStreamEvent({ e: 'MARGIN_CALL' })).toBeNull();
+        expect(normalizeFuturesUserDataStreamEvent({ e: 'WHAT_IS_THIS' })).toBeNull();
+    });
+
+    // Binance's own payload, from the Margin Call event's page. Guidance, in its
+    // own words — and in a fast market the position may already be gone by the
+    // time it arrives, which is why it is carried as the exchange's statement
+    // rather than folded into the desk's own liquidation reckoning.
+    it('reads the positions a margin call names', () => {
+        const event = normalizeFuturesUserDataStreamEvent({
+            e: 'MARGIN_CALL',
+            E: 1587727187525,
+            cw: '3.16812045',
+            p: [{
+                s: 'ETHUSDT',
+                ps: 'LONG',
+                pa: '1.327',
+                mt: 'crossed',
+                iw: '0',
+                mp: '187.17127',
+                up: '-1.166074',
+                mm: '1.614445',
+            }],
+        });
+
+        expect(event).toMatchObject({ type: 'marginCall' });
+        expect(event.marginCall).toEqual({
+            crossWallet: '3.16812045',
+            positions: [{
+                symbol: 'ETHUSDT',
+                positionSide: 'LONG',
+                quantity: '1.327',
+                marginType: 'CROSSED',
+                isolatedWallet: '0',
+                markPrice: '187.17127',
+                unrealizedPnl: '-1.166074',
+                maintenanceMargin: '1.614445',
+            }],
+        });
+        expect(event.rendererPayload).toEqual({ futures_margin_call: event.marginCall });
+        // A call that names nothing is not a call.
+        expect(normalizeFuturesUserDataStreamEvent({ e: 'MARGIN_CALL', p: [] })).toBeNull();
+    });
+
+    // The frame carries a pair's leverage and the account-wide Multi-Assets
+    // switch, and no per-contract margin mode at all.
+    it('reads the leverage an account configuration update states, and no margin mode', () => {
+        const event = normalizeFuturesUserDataStreamEvent({
+            e: 'ACCOUNT_CONFIG_UPDATE',
+            E: 1611646737479,
+            T: 1611646737476,
+            ac: { s: 'BTCUSDT', l: 25 },
+        });
+
+        expect(event).toMatchObject({ type: 'accountConfigUpdate' });
+        expect(event.accountConfigUpdate)
+            .toEqual({ symbol: 'BTCUSDT', leverage: 25, multiAssetsMargin: null });
+        expect(event.accountConfigUpdate).not.toHaveProperty('marginType');
+        expect(event.rendererPayload).toBeNull();
+
+        expect(normalizeFuturesUserDataStreamEvent({
+            e: 'ACCOUNT_CONFIG_UPDATE',
+            ai: { j: true },
+        }).accountConfigUpdate)
+            .toEqual({ symbol: null, leverage: null, multiAssetsMargin: true });
+        // A frame that states neither states nothing.
+        expect(normalizeFuturesUserDataStreamEvent({ e: 'ACCOUNT_CONFIG_UPDATE' })).toBeNull();
+    });
+
+    // `ai` is the regular order the algo spawned — the same identity the
+    // reconciliation beat reads as `actualOrderId`, arriving on the frame that
+    // caused it instead of up to thirty seconds later.
+    it('reads what an algo update states, including the order it spawned', () => {
+        const event = normalizeFuturesUserDataStreamEvent({
+            e: 'ALGO_UPDATE',
+            T: 1750515742297,
+            E: 1750515742303,
+            o: {
+                caid: 'Q5xaq5EGKgXXa0fD7fs0Ip',
+                aid: 2148719,
+                at: 'CONDITIONAL',
+                o: 'TAKE_PROFIT',
+                s: 'BNBUSDT',
+                S: 'SELL',
+                ps: 'BOTH',
+                f: 'GTC',
+                q: '0.01',
+                X: 'CANCELED',
+                ai: '',
+                ap: '0.00000',
+                aq: '0.00000',
+                tp: '750',
+                p: '750',
+                wt: 'CONTRACT_PRICE',
+                cp: false,
+                pP: false,
+                R: false,
+                rm: 'Reduce Only reject',
+                ia: false,
+            },
+        });
+
+        expect(event).toMatchObject({ type: 'algoUpdate' });
+        expect(event.algoUpdate).toMatchObject({
+            symbol: 'BNBUSDT',
+            algoId: 2148719,
+            clientAlgoId: 'Q5xaq5EGKgXXa0fD7fs0Ip',
+            algoType: 'CONDITIONAL',
+            orderType: 'TAKE_PROFIT',
+            side: 'SELL',
+            status: 'CANCELED',
+            triggerPrice: '750',
+            // The documented "has not fired" value, carried as the exchange sent
+            // it rather than coerced to a null or a zero.
+            actualOrderId: '',
+            failureReason: 'Reduce Only reject',
+            activated: false,
+        });
+        expect(normalizeFuturesUserDataStreamEvent({ e: 'ALGO_UPDATE', o: {} })).toBeNull();
+    });
+
+    // The one ending no read explains: the stop triggered and the engine refused
+    // it, so at the next reconciliation the order is simply gone.
+    it('reads the reason a triggered conditional order was refused', () => {
+        const event = normalizeFuturesUserDataStreamEvent({
+            e: 'CONDITIONAL_ORDER_TRIGGER_REJECT',
+            E: 1685517224945,
+            T: 1685517224955,
+            or: {
+                s: 'ETHUSDT',
+                i: 155618472834,
+                r: 'Due to the order could not be filled immediately, the FOK order has been rejected.',
+            },
+        });
+
+        expect(event).toMatchObject({ type: 'conditionalTriggerReject' });
+        expect(event.triggerReject).toEqual({
+            symbol: 'ETHUSDT',
+            orderId: 155618472834,
+            reason: 'Due to the order could not be filled immediately, the FOK order has been rejected.',
+        });
+        expect(event.rendererPayload)
+            .toEqual({ futures_conditional_trigger_reject: event.triggerReject });
+    });
+
+    // Guard. These three answer `null` before this change and after it; what is
+    // new is that the decision is written down instead of being an absence.
+    it('names the events it is sent and deliberately does not act on', () => {
+        expect(Object.keys(FUTURES_USER_DATA_EVENTS_IGNORED))
+            .toEqual(['TRADE_LITE', 'STRATEGY_UPDATE', 'GRID_UPDATE']);
+        for (const event of Object.keys(FUTURES_USER_DATA_EVENTS_IGNORED)) {
+            expect(normalizeFuturesUserDataStreamEvent({ e: event })).toBeNull();
+        }
     });
 
     // The frame is the account change, not a signal that one happened. Reading

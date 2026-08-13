@@ -482,6 +482,140 @@ export const normalizeFuturesAccountUpdate = (payload = {}) => {
     };
 };
 
+/**
+ * What a `MARGIN_CALL` actually says.
+ *
+ * Binance's own framing, quoted from the event's page: risk guidance only, and
+ * in a highly volatile market the position may already have been liquidated by
+ * the time this arrives. It is carried apart from the liquidation price the desk
+ * computes for exactly that reason — one is the desk's reckoning, the other is
+ * the exchange raising its hand.
+ */
+export const normalizeFuturesMarginCall = (payload = {}) => {
+    if (payload?.e !== 'MARGIN_CALL') return null;
+    const positions = (Array.isArray(payload.p) ? payload.p : [])
+        .filter(entry => typeof entry?.s === 'string' && entry.s.length > 0)
+        .map(entry => ({
+            symbol: entry.s,
+            positionSide: entry.ps ?? 'BOTH',
+            quantity: entry.pa,
+            marginType: (entry.mt ?? '').toUpperCase() || undefined,
+            isolatedWallet: entry.iw,
+            markPrice: entry.mp,
+            unrealizedPnl: entry.up,
+            // What the exchange says has to stand behind the position for it to
+            // survive.
+            maintenanceMargin: entry.mm,
+        }));
+    if (positions.length === 0) return null;
+    return {
+        // Sent only with a crossed position's call.
+        crossWallet: typeof payload.cw === 'string' ? payload.cw : null,
+        positions,
+    };
+};
+
+/**
+ * What an `ACCOUNT_CONFIG_UPDATE` actually says — and what it does not.
+ *
+ * It carries a trade pair's leverage in `ac`, and the account-wide Multi-Assets
+ * switch in `ai.j`. It carries no per-contract margin mode at all: a contract's
+ * mode reaches the desk as `mt` on an `ACCOUNT_UPDATE` position, so a mode
+ * changed on a contract the operator is flat in is not announced by anything,
+ * and only a read will find it. Written down here because the field's absence is
+ * otherwise indistinguishable from an oversight.
+ */
+export const normalizeFuturesAccountConfigUpdate = (payload = {}) => {
+    if (payload?.e !== 'ACCOUNT_CONFIG_UPDATE') return null;
+    const pair = payload.ac ?? null;
+    const account = payload.ai ?? null;
+    const symbol = typeof pair?.s === 'string' && pair.s.length > 0 ? pair.s : null;
+    // Unlike almost everything else on this stream, the leverage arrives as a
+    // number rather than a decimal string.
+    const leverage = Number(pair?.l);
+    const carried = {
+        symbol,
+        leverage: symbol !== null && Number.isFinite(leverage) && leverage > 0 ? leverage : null,
+        multiAssetsMargin: typeof account?.j === 'boolean' ? account.j : null,
+    };
+    if (carried.leverage === null && carried.multiAssetsMargin === null) return null;
+    return carried;
+};
+
+/**
+ * What an `ALGO_UPDATE` actually says.
+ *
+ * The desk lists and cancels algorithmic orders but cannot place them, and it
+ * reads them on a thirty-second beat. This frame is the exchange stating the
+ * same thing as it happens — including `ai`, the regular order the algo spawned,
+ * which is the identity `normalizeFuturesAlgoOrder` goes to REST for as
+ * `actualOrderId`, and `rm`, the reason it failed, which no read carries at all.
+ */
+export const normalizeFuturesAlgoUpdate = (payload = {}) => {
+    if (payload?.e !== 'ALGO_UPDATE') return null;
+    const order = payload.o ?? {};
+    if (typeof order.s !== 'string' || order.s.length === 0) return null;
+    return {
+        symbol: order.s,
+        algoId: order.aid,
+        clientAlgoId: order.caid,
+        algoType: order.at,
+        orderType: order.o,
+        side: order.S,
+        positionSide: order.ps ?? 'BOTH',
+        timeInForce: order.f,
+        quantity: order.q,
+        // NEW, CANCELED, TRIGGERING, TRIGGERED, FINISHED, REJECTED, EXPIRED.
+        status: order.X,
+        triggerPrice: order.tp,
+        price: order.p,
+        workingType: order.wt,
+        closePosition: order.cp,
+        priceProtect: order.pP,
+        reduceOnly: order.R,
+        // Empty until the algo is triggered and placed in the matching engine,
+        // which is the same contract the read reports.
+        actualOrderId: order.ai,
+        actualPrice: order.ap,
+        executedQuantity: order.aq,
+        failureReason: typeof order.rm === 'string' && order.rm.length > 0 ? order.rm : null,
+        // Only meaningful for a trailing algo.
+        activated: typeof order.ia === 'boolean' ? order.ia : null,
+    };
+};
+
+/**
+ * A stop that met its trigger and was then refused by the matching engine.
+ *
+ * This is the one ending where the operator's stop does not become a position
+ * and no read explains why: the order is simply gone at the next reconciliation.
+ * The exchange states the reason in words, and those words are the whole value
+ * of the frame.
+ */
+export const normalizeFuturesConditionalTriggerReject = (payload = {}) => {
+    if (payload?.e !== 'CONDITIONAL_ORDER_TRIGGER_REJECT') return null;
+    const refused = payload.or ?? {};
+    if (typeof refused.s !== 'string' || refused.s.length === 0) return null;
+    return {
+        symbol: refused.s,
+        orderId: refused.i,
+        reason: typeof refused.r === 'string' && refused.r.length > 0 ? refused.r : null,
+    };
+};
+
+// Events this desk is sent and deliberately does not act on. Written down rather
+// than left to fall through, so the next reader is not left to infer a decision
+// from an absence — which is how four months of a silent stream went unnoticed.
+export const FUTURES_USER_DATA_EVENTS_IGNORED = Object.freeze({
+    // A thinner copy of `ORDER_TRADE_UPDATE` carrying only TRADE executions. The
+    // desk folds the full frame; taking both would fold every fill twice.
+    TRADE_LITE: 'duplicate of ORDER_TRADE_UPDATE',
+    // Binance's own grid and TWAP strategies, created in their app. This desk
+    // neither places them nor lists them.
+    STRATEGY_UPDATE: 'strategy this desk does not run',
+    GRID_UPDATE: 'deprecated, and a strategy this desk does not run',
+});
+
 export const normalizeFuturesUserDataStreamEvent = (payload = {}) => {
     if (payload?.e === 'ORDER_TRADE_UPDATE') {
         const executionReport = normalizeFuturesExecutionReport(payload);
@@ -504,6 +638,45 @@ export const normalizeFuturesUserDataStreamEvent = (payload = {}) => {
             rendererPayload: null,
         };
     }
+    if (payload?.e === 'MARGIN_CALL') {
+        const marginCall = normalizeFuturesMarginCall(payload);
+        if (marginCall === null) return null;
+        return {
+            type: 'marginCall',
+            marginCall,
+            rendererPayload: { futures_margin_call: marginCall },
+        };
+    }
+    if (payload?.e === 'ACCOUNT_CONFIG_UPDATE') {
+        const accountConfigUpdate = normalizeFuturesAccountConfigUpdate(payload);
+        if (accountConfigUpdate === null) return null;
+        return {
+            type: 'accountConfigUpdate',
+            accountConfigUpdate,
+            // The change is folded into the held account state, which broadcasts
+            // itself; a second payload would state it twice.
+            rendererPayload: null,
+        };
+    }
+    if (payload?.e === 'ALGO_UPDATE') {
+        const algoUpdate = normalizeFuturesAlgoUpdate(payload);
+        if (algoUpdate === null) return null;
+        return {
+            type: 'algoUpdate',
+            algoUpdate,
+            rendererPayload: null,
+        };
+    }
+    if (payload?.e === 'CONDITIONAL_ORDER_TRIGGER_REJECT') {
+        const triggerReject = normalizeFuturesConditionalTriggerReject(payload);
+        if (triggerReject === null) return null;
+        return {
+            type: 'conditionalTriggerReject',
+            triggerReject,
+            rendererPayload: { futures_conditional_trigger_reject: triggerReject },
+        };
+    }
+    if (FUTURES_USER_DATA_EVENTS_IGNORED[payload?.e] !== undefined) return null;
     return null;
 };
 
