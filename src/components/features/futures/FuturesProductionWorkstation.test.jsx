@@ -65,6 +65,7 @@ describe('FuturesProductionWorkstation account review', () => {
     const algo = {
       symbol: 'BTCUSDT',
       orderKind: 'ALGO',
+      algoType: 'CONDITIONAL',
       orderId: 42,
       algoId: 42,
       side: 'SELL',

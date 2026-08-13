@@ -1,19 +1,26 @@
 ## ADDED Requirements
 
 ### Requirement: An algorithmic order that has fired does not read as resting
-An algorithmic order that has spawned a regular order SHALL be presented as
-triggered and awaiting confirmation, not as an order resting at its trigger
-price. Every surface that draws working orders — the chart marker, the
-working-orders list and the portfolio dock — SHALL state it the same way, and
-SHALL withhold the controls that apply only to a working order, because a marker
-drawn at a price the market has left invites the operator to move or cancel
-something the exchange has already acted on.
+An algorithmic order that is finished by the regular order it spawned SHALL,
+once it reports one, be presented as triggered and awaiting confirmation, not as
+an order resting at its trigger price. Every surface that draws working orders —
+the chart marker, the working-orders list and the portfolio dock — SHALL state it
+the same way, and SHALL withhold the controls that apply only to a working order,
+because a marker drawn at a price the market has left invites the operator to
+move or cancel something the exchange has already acted on.
+
+An algorithmic order that outlives the order it spawned — a scheduled algorithm
+that fills one child and places the next, naming the current one in the same
+field — SHALL NOT be read this way. It is still working, and reading a child's
+settlement as the parent's own would take a running algorithm off the desk. The
+kinds that are finished by their spawned order SHALL be named explicitly, and a
+kind the desk has not been shown SHALL read as still working.
 
 A control the exchange still accepts on a triggered parent SHALL remain
 available, and one it does not SHALL be stated rather than silently absent.
 
 #### Scenario: A stop fires
-- **WHEN** an algorithmic order reports a spawned regular order
+- **WHEN** a conditional algorithmic order reports a spawned regular order
 - **THEN** it reads as triggered and awaiting confirmation on every surface that draws it, rather than as a working order at its trigger price
 
 #### Scenario: The operator reaches for a triggered parent
@@ -23,6 +30,14 @@ available, and one it does not SHALL be stated rather than silently absent.
 #### Scenario: The order has not fired
 - **WHEN** an algorithmic order reports no spawned order
 - **THEN** it reads as working at its trigger price, exactly as it does today
+
+#### Scenario: A scheduled algorithm names its current child
+- **WHEN** an algorithmic order that outlives the orders it spawns names one of them
+- **THEN** it reads as working, and the settlement of that child neither removes it from the desk nor keeps it from being listed again
+
+#### Scenario: The exchange reports a kind the desk has not been shown
+- **WHEN** an algorithmic order names a spawned order under a kind the desk does not recognize
+- **THEN** it reads as working, as it did before spawned orders were carried at all
 
 ## MODIFIED Requirements
 

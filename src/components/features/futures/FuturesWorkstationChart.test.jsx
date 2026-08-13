@@ -1124,6 +1124,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
       ownedOrders: [
         workingOrder({
           orderKind: 'ALGO',
+          algoType: 'CONDITIONAL',
           orderId: '82',
           positionSide: 'SHORT',
           positionEffect: 'ENTRY',

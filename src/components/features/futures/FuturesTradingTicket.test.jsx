@@ -330,6 +330,7 @@ describe('FuturesTradingTicket', () => {
               orderId: 7,
               side: 'SELL',
               orderKind: 'ALGO',
+              algoType: 'CONDITIONAL',
               price: '0',
               triggerPrice: '60000',
               origQty: '0.5',

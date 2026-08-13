@@ -54,7 +54,12 @@ describe('totalOrderNotionalUsdt', () => {
 })
 
 describe('describeFuturesAlgoTrigger', () => {
-  const algo = extra => ({ orderKind: 'ALGO', triggerPrice: '57000', ...extra })
+  const algo = extra => ({
+    orderKind: 'ALGO',
+    algoType: 'CONDITIONAL',
+    triggerPrice: '57000',
+    ...extra,
+  })
 
   it('names the regular order a fired parent spawned, and the price it fired at', () => {
     expect(describeFuturesAlgoTrigger(algo({
@@ -98,6 +103,46 @@ describe('describeFuturesAlgoTrigger', () => {
       orderKind: 'REGULAR', actualOrderId: '990281234',
     }).triggered).toBe(false)
     expect(describeFuturesAlgoTrigger(undefined).triggered).toBe(false)
+  })
+
+  // A scheduled algo names its current child order in exactly the field a
+  // conditional order names the order that finished it. Read the same way, the
+  // first child's fill would settle a parent that is still running — and a
+  // settled identity is refused by every later snapshot, so a working TWAP
+  // would leave the desk and not come back.
+  it('claims nothing about an algo that outlives the order it spawned', () => {
+    for (const algoType of ['TWAP', 'VP']) {
+      expect(describeFuturesAlgoTrigger(algo({
+        algoType,
+        actualOrderId: '990281234',
+        actualPrice: '56980.1',
+      }))).toMatchObject({ triggered: false, spawnedOrderId: null })
+    }
+  })
+
+  // An algo type the desk has not been shown is read as still working, which is
+  // how it read before it was told about spawned orders at all. Being too narrow
+  // costs this change its effect on that type; being too wide costs an order off
+  // the screen.
+  it('reads an unrecognized algo type as still working', () => {
+    expect(describeFuturesAlgoTrigger(algo({
+      algoType: 'SOMETHING_BINANCE_ADDS_LATER',
+      actualOrderId: '990281234',
+    })).triggered).toBe(false)
+    expect(describeFuturesAlgoTrigger(algo({
+      algoType: undefined,
+      actualOrderId: '990281234',
+    })).triggered).toBe(false)
+  })
+
+  // The exchange states its enums in upper case and the desk does not rewrite
+  // them, but a comparison that assumed the case would silently make the whole
+  // rule unreachable if it ever changed.
+  it('does not depend on the case the exchange states the type in', () => {
+    expect(describeFuturesAlgoTrigger(algo({
+      algoType: 'conditional',
+      actualOrderId: '990281234',
+    })).triggered).toBe(true)
   })
 })
 

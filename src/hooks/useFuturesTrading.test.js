@@ -679,6 +679,7 @@ describe('useFuturesTrading', () => {
       algoId: 42,
       status: 'NEW',
       orderKind: 'ALGO',
+      algoType: 'CONDITIONAL',
       triggerPrice: '0.0123',
       actualOrderId: '990281234',
       actualPrice: '0.0121',
@@ -801,6 +802,43 @@ describe('useFuturesTrading', () => {
       expect(socket.sent).toHaveLength(sentBefore)
       expect(result.current.openOrders).toHaveLength(1)
       expect(result.current.openOrders[0]).toMatchObject({ symbol: 'TUTUSDT', orderKind: 'ALGO' })
+    })
+
+    // A scheduled algo names its current child in the same field a conditional
+    // order names the order that finished it. Settling the parent on that
+    // child's fill would be permanent: a settled identity is filtered out of
+    // every later snapshot, so a TWAP that is still working would leave the
+    // desk and never come back — uncancellable and invisible until reload.
+    it('leaves an algo that outlives its spawned order listed, and readable again', () => {
+      const socket = createSocket()
+      const { result } = renderHook(() => useFuturesTrading({
+        enabled: true,
+        symbol: 'TUTUSDT',
+        wsConnection: socket,
+      }))
+      const scheduled = { ...firedParent, algoType: 'TWAP' }
+      listAlgoParent(socket, scheduled)
+      const sentBefore = socket.sent.length
+
+      act(() => {
+        socket.receive({
+          futures_execution_update: {
+            symbol: 'TUTUSDT',
+            orderId: 990281234,
+            status: 'FILLED',
+            orderKind: 'REGULAR',
+          },
+        })
+      })
+
+      expect(socket.sent).toHaveLength(sentBefore)
+      expect(result.current.openOrders).toHaveLength(1)
+
+      // And the next read still lists it. This is the half that would have been
+      // permanent: nothing may have been remembered as settled.
+      listAlgoParent(socket, { ...scheduled, actualOrderId: '990281299' })
+      expect(result.current.openOrders).toHaveLength(1)
+      expect(result.current.openOrders[0]).toMatchObject({ orderKind: 'ALGO', algoType: 'TWAP' })
     })
 
     // The exception is the match and nothing else. Everything the audit before

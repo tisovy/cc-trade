@@ -86,11 +86,77 @@ renderer's `account.refresh`, which the diagnostic record already names `refresh
 ## 4. Verification
 
 - [x] 4.1 `npm run lint`, `npm test` (1786 passed, 109 files), `npm run check:futures-production`.
-- [x] 4.2 Measured in §0: 30.0s beat (mean 15.0s of delay) replaced by a 345ms stream leg. Recorded before the code was written.
-- [ ] 4.3 Operator confirms on live data that a stop which fires stops being drawn as a working order within the stream's own latency, and that the position it opened or closed is stated correctly.
+- [x] 4.2 Measured in §0: 30.0s beat (mean 15.0s of delay) replaced by a 345ms stream leg. Recorded before the code was written. **Restated by the audit below** — that factor applies to the parent leaving the desk once its spawned order settles, not to the desk learning that the trigger fired.
+- [ ] 4.3 Operator confirms on live data that a fired parent stops being drawn as a working order, and that it leaves the desk on the stream rather than on the beat.
   → handed to `verify-the-desk-in-one-sitting/runbook.md`, section
   "Дописано 2026-08-13: сработавший ALGO перестаёт быть рабочим ордером"
-  (4 steps), and listed in that change's task 3.2.
+  (5 steps), and listed in that change's task 3.2. Rewritten by the audit: step 1
+  is now a measurement of what the exchange actually reports on a fired algo,
+  because the two facts this change stands on — `algoType` and `algoStatus` —
+  cannot be established from here.
+
+## 4a. Audit After The Fact
+
+Run 2026-08-13 after the change was committed as `f3e135e`, at the operator's
+request. Two defects, one of them in the same family as the one the pre-commit
+audit caught, and one overstated claim.
+
+**Defect: a scheduled algorithm was removed from the desk permanently.**
+`actualOrderId` names "the regular order this algo spawned", and the change read
+that as "the order that finished it". For a conditional order the two are the
+same. For Binance's scheduled algorithms — TWAP, VP — they are not: the parent
+fills one child, places the next, and names the current one in the same field. On
+the first child's terminal report the change put the parent into the settled-order
+memory, which `applyAccountEnvelope` filters every later snapshot against — so a
+running algorithm left the desk and could not come back until the application was
+reloaded. Uncancellable and invisible, which is strictly worse than the fifteen
+seconds this change set out to remove.
+
+Fixed in `describeFuturesAlgoTrigger`, which now answers "fired" only for algo
+kinds that are finished by the order they spawn. It is an allow-list — currently
+`CONDITIONAL`, the only value this repository has ever seen — so a kind the desk
+has not been shown reads as still working, exactly as it did before the change.
+The cost of being too narrow is that the change does nothing for that kind; the
+cost of being too wide is an order off a trading screen. Step 1 of the runbook
+asks the operator for the value their stops actually carry.
+
+**Overstated claim: this does not shorten the trigger-to-screen delay.** The
+proposal, the commit message and the first runbook step all read as though a stop
+that fires is stated as fired within the stream's latency. It is not, and cannot
+be from here. The parent-to-spawned-order mapping exists only in the algo list,
+which is read on the beat; at the instant of firing the desk still holds the
+parent's pre-firing snapshot, where `actualOrderId` is the empty string, so
+nothing matches. What the change actually delivers is:
+
+- a parent that is listed as fired is no longer drawn as a working order at a
+  price the market has left — correctness, on every surface, for as long as it is
+  listed;
+- and when its spawned order finally settles, the parent leaves the desk on the
+  stream rather than on the beat — the 30s → 0.35s figure, at that moment.
+
+For a `STOP_MARKET` whose spawned order fills instantly, neither window is open
+long enough to see, and the desk behaves as it did before. The runbook was
+rewritten to say so and to test the case that is actually served.
+
+**Not fixed, recorded instead — the read that would close the gap.** The
+prohibition on reading algo orders from an execution report exists because a full
+account read costs weight 90. A symbol-scoped algo read does not: this
+repository's own reference puts `GET /fapi/v1/openAlgoOrders` at **weight 1 with
+a symbol** and 40 without (`docs/futures_hardening_roadmap.md:475`). Reading just
+the algo list on a report that no listed parent claims, while any algo is listed
+on the contract, would cut the trigger-to-screen delay from ≤30s to one round trip
+for every algo kind, without a heuristic and for a hundredth of the weight the
+prohibition was written about. It is not built here because the rule it would
+amend is in flight in `stop-reading-what-the-desk-can-count`, and because it
+belongs to whoever owns that rule. It is the change that would answer the
+operator's original complaint.
+
+**Checked and found sound:** the electron-side `futuresOrderIdentity` is
+`symbol:orderId` with no order kind, which would collide across the two
+namespaces — but it is applied only to `regularOrders`
+(`binance-connection.js:1289-1293`), so the algo list never passes through it.
+`algoType` does survive the adapter into the renderer
+(`futures-trading-adapter.js:316`), so the fix above is reachable.
 
 ## 5. Do The Tests Bite?
 
@@ -127,3 +193,15 @@ unit tests fail on the old tree only because the function does not exist there
 (`TypeError: ... is not a function`). They pin the empty-string contract, the
 absent-field case, the `'0'`-versus-empty distinction and the two namespaces, so
 they are worth keeping; they are not evidence of a defect found.
+
+Added by the audit, run the same way against `HEAD` (which is this change as
+first committed, so these bite against its own defect rather than against the
+code before it):
+
+- presentation: claims nothing about an algo that outlives the order it spawned — bites
+- presentation: reads an unrecognized algo type as still working — bites
+- hook: leaves an algo that outlives its spawned order listed, and readable again — bites
+- presentation: does not depend on the case the exchange states the type in —
+  **guard**. It passes on the old code, where there was no type comparison to be
+  case-sensitive about. It is here so the allow-list cannot be made unreachable
+  by an enum the exchange states differently.

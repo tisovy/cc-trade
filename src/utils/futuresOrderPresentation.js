@@ -39,6 +39,25 @@ const NOT_TRIGGERED = Object.freeze({
   spawnedPrice: null,
 })
 
+// Which algorithmic orders are finished by the order they spawned.
+//
+// `actualOrderId` names "the regular order this algo spawned", and for a
+// conditional order that is the whole of its life: it fires once, into one
+// order, and is done. Binance's scheduled algos are not like that — a TWAP
+// spawns a child, fills it, spawns the next, and names the current one in the
+// same field. Reading a running TWAP as "fired and awaiting confirmation" would
+// be false twice over: it is still working, and the desk would settle it on the
+// first child's fill and refuse to list it ever again, because a settled
+// identity is filtered out of every later snapshot. A running algo would
+// disappear from the desk until the application was reloaded.
+//
+// So this is an allow-list rather than a deny-list, and an algo type the desk
+// has not been shown reads as still working — which is what it did before it
+// was told about spawned orders at all. The cost of being too narrow is that
+// this change does nothing for that type; the cost of being too wide is an
+// order vanishing off a trading screen.
+const SPENT_BY_ONE_ORDER_ALGO_TYPES = new Set(['CONDITIONAL'])
+
 // Whether an algorithmic order has already fired, and what it fired into.
 //
 // An algo that fires does not disappear from the exchange's open-algo list at
@@ -53,6 +72,9 @@ const NOT_TRIGGERED = Object.freeze({
 // as the desk behaved before it was told at all.
 export const describeFuturesAlgoTrigger = (order) => {
   if (String(order?.orderKind ?? '') !== 'ALGO') return NOT_TRIGGERED
+  if (!SPENT_BY_ONE_ORDER_ALGO_TYPES.has(String(order?.algoType ?? '').toUpperCase())) {
+    return NOT_TRIGGERED
+  }
   const spawnedOrderId = String(order?.actualOrderId ?? '').trim()
   if (spawnedOrderId === '') return NOT_TRIGGERED
   const spawnedPrice = String(order?.actualPrice ?? '').trim()
