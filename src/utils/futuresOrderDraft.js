@@ -58,9 +58,9 @@ export const quantizeFuturesNotionalUsdt = (notionalUsdt) => {
 
 export const calculateFuturesNotionalForPercent = (maximumNotionalUsdt, percent) => {
   const maximumAtoms = parseDecimalAtoms(maximumNotionalUsdt, { positive: true })
+  if (maximumAtoms === null || typeof percent !== 'number') return null
   const halfSteps = percent * 2
-  if (maximumAtoms === null
-    || !Number.isSafeInteger(halfSteps)
+  if (!Number.isSafeInteger(halfSteps)
     || halfSteps < 0
     || halfSteps > 200) return null
   const notionalAtoms = (maximumAtoms * BigInt(halfSteps)) / 200n

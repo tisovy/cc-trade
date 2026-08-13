@@ -115,6 +115,12 @@ const FuturesTradingTicket = ({
   }
   const openOrders = Array.isArray(safeState.openOrders) ? safeState.openOrders : []
   const positions = Array.isArray(safeState.positions) ? safeState.positions : []
+  const positionsResource = safeState.accountResources?.positions ?? null
+  const positionSizingReady = positionsResource === null
+    ? Array.isArray(safeState.positions)
+    : positionsResource.status === 'ready'
+      || (positionsResource.status === 'loading'
+        && Number.isFinite(positionsResource.lastSuccessfulAt))
   const [tab, setTab] = useState('trade')
   // Sizing starts at zero, never at a share of the balance: a size the operator
   // never chose is a size they will not read on the confirmation either.
@@ -288,6 +294,7 @@ const FuturesTradingTicket = ({
   }
 
   const pendingExitPosition = pendingOrder?.action.positionEffect === 'EXIT'
+    && positionSizingReady
     ? positions.find((position) => {
       if (position.symbol !== pendingOrder.symbol) return false
       const description = describeFuturesPosition(position)

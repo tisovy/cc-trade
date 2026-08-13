@@ -101,6 +101,21 @@ describe('futures order confirmation', () => {
     expect(confirmation.positionAfterUsdt).toBeCloseTo(5844.5, 6)
   })
 
+  it('leaves the projection unknown when an invalid resized draft has no quantity', () => {
+    const confirmation = describeFuturesOrderConfirmation({
+      action: LONG_ENTRY,
+      symbol: 'BTCUSDT',
+      price: '58445',
+      quantity: null,
+      notionalUsdt: '5',
+      positions: longPosition,
+    })
+    expect(confirmation.positionBefore).toBe(0.5)
+    expect(confirmation.positionAfter).toBeNull()
+    expect(confirmation.positionAfterUsdt).toBeNull()
+    expect(confirmation.warning).toBeNull()
+  })
+
   // One-way accounts sign the quantity; hedge accounts report both legs
   // positive and name the side. Net exposure has to read the same either way.
   it('nets hedge legs and signed one-way quantities alike', () => {
@@ -116,6 +131,9 @@ describe('futures order confirmation', () => {
 
     expect(netFuturesPositionQuantity([], 'BTCUSDT')).toBe(0)
     expect(netFuturesPositionQuantity(null, 'BTCUSDT')).toBeNull()
+    expect(netFuturesPositionQuantity([
+      { symbol: 'BTCUSDT', positionSide: 'LONG', quantity: null },
+    ], 'BTCUSDT')).toBeNull()
   })
 
   it('reports an unknown position rather than guessing at flat', () => {

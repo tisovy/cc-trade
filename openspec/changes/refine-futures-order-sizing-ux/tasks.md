@@ -27,7 +27,10 @@
 - [x] 4.1 Run the focused Vitest files for the sizing utility, working-order editor, and execution ticket; fix all regressions.
 - [x] 4.2 Run lint, the production build, and the Futures workstation boundary check.
 - [x] 4.3 Re-run `OPENSPEC_TELEMETRY=0 openspec validate refine-futures-order-sizing-ux` and `gitnexus detect-changes` to verify the implementation affects only the expected symbols and flows.
-- [ ] 4.4 Have the operator confirm the ticket, working-order editor, and shortcut-confirmation sizing surfaces against live account/position data at normal and enlarged UI scales; do not archive the change before that confirmation.
+- [x] 4.4 Have the operator confirm the ticket, working-order editor, and shortcut-confirmation sizing surfaces against live account/position data at normal and enlarged UI scales; do not archive the change before that confirmation.
 - [x] 4.5 Re-run the focused sizing/editor/ticket tests plus lint, production build, and the Futures workstation boundary check after the confirmation correction.
 - [x] 4.6 Re-run OpenSpec validation and staged GitNexus change detection for the corrected implementation before committing.
 - [x] 4.7 Run the focused confirmation test, lint, OpenSpec validation, and staged GitNexus change detection for the bold-USDT refinement.
+- [x] 4.8 Audit the complete sizing path from slider percentage through staged draft, confirmation projection, and final payload; record and fix any defects under pre-edit GitNexus impact analysis.
+- [x] 4.9 Run the full automated verification set after audit fixes: complete test suite, lint, production build, Futures workstation boundary check, OpenSpec validation, and staged GitNexus change detection.
+- [ ] 4.10 Synchronize the verified delta specifications into the main specifications before archiving the operator-confirmed change.

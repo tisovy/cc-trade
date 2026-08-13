@@ -1,10 +1,11 @@
-import { render } from '@testing-library/react'
+import { act, render } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { readFuturesSymbolHistory } from '../../../utils/futuresSymbolHistory.js'
 import FuturesProductionWorkstation from './FuturesProductionWorkstation.jsx'
 
 const productionWorkstationMocks = vi.hoisted(() => ({
   viewRender: vi.fn(),
+  orderEditorRender: vi.fn(),
 }))
 
 // The container is the only surface that knows which contract is on screen.
@@ -29,6 +30,12 @@ vi.mock('./FuturesWorkstationView.jsx', () => ({
 }))
 vi.mock('./FuturesPortfolioDock.jsx', () => ({ default: () => <div /> }))
 vi.mock('./FuturesTradingTicket.jsx', () => ({ default: () => <div /> }))
+vi.mock('./FuturesOrderEditor.jsx', () => ({
+  default: properties => {
+    productionWorkstationMocks.orderEditorRender(properties)
+    return <div data-testid="order-editor" />
+  },
+}))
 
 const executionState = (overrides = {}) => ({
   connected: true,
@@ -186,5 +193,41 @@ describe('FuturesProductionWorkstation account review', () => {
     })
     rerender(<FuturesProductionWorkstation enabled executionState={disconnected} />)
     expect(productionWorkstationMocks.viewRender.mock.lastCall[0].accountSynchronizing).toBe(false)
+  })
+
+  it('withholds a stale exit-position reference from the working-order editor', () => {
+    const position = { symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '2' }
+    const exitOrder = {
+      symbol: 'BTCUSDT', orderId: 11, side: 'SELL', positionSide: 'LONG', reduceOnly: true,
+    }
+    const stale = executionState({
+      positions: [position],
+      accountResources: {
+        positions: { status: 'stale', data: [position], lastSuccessfulAt: 100, error: null },
+      },
+    })
+    const { rerender } = render(
+      <FuturesProductionWorkstation enabled executionState={stale} />,
+    )
+    act(() => {
+      productionWorkstationMocks.viewRender.mock.lastCall[0]
+        .onOrderEdit(exitOrder, { x: 100, y: 100 })
+    })
+    expect(productionWorkstationMocks.orderEditorRender.mock.lastCall[0].positionQuantity)
+      .toBeNull()
+
+    rerender(
+      <FuturesProductionWorkstation
+        enabled
+        executionState={{
+          ...stale,
+          accountResources: {
+            positions: { status: 'loading', data: [position], lastSuccessfulAt: 100, error: null },
+          },
+        }}
+      />,
+    )
+    expect(productionWorkstationMocks.orderEditorRender.mock.lastCall[0].positionQuantity)
+      .toBe('2')
   })
 })

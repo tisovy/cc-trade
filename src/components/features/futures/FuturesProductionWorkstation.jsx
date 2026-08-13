@@ -316,6 +316,12 @@ export const FuturesProductionWorkstation = ({
     && typeof executionState?.balances?.USDT?.available === 'string'
     ? executionState.balances.USDT.available
     : null
+  const editorPositionsResource = executionState?.accountResources?.positions ?? null
+  const editorPositionsConfirmed = editorPositionsResource === null
+    ? Array.isArray(executionPositions)
+    : editorPositionsResource.status === 'ready'
+      || (editorPositionsResource.status === 'loading'
+        && Number.isFinite(editorPositionsResource.lastSuccessfulAt))
 
   const handleTradingGesture = useCallback((gesture) => {
     gestureSequenceRef.current += 1
@@ -376,7 +382,7 @@ export const FuturesProductionWorkstation = ({
   ), [executionPositions, symbol])
 
   const orderEditorPositionQuantity = useMemo(() => {
-    if (!orderEditor || !Array.isArray(executionPositions)) return null
+    if (!orderEditor || !editorPositionsConfirmed || !Array.isArray(executionPositions)) return null
     const intent = describeFuturesOrderIntent(orderEditor.order)
     if (intent.positionEffect !== 'EXIT') return null
     const position = executionPositions.find((candidate) => {
@@ -387,7 +393,7 @@ export const FuturesProductionWorkstation = ({
         && description.absoluteQuantity > 0
     })
     return position?.quantity ?? null
-  }, [executionPositions, orderEditor])
+  }, [editorPositionsConfirmed, executionPositions, orderEditor])
 
   // The panel is opened from a row, but it stays open while the account keeps
   // refreshing. It reads the live position rather than the snapshot it was

@@ -651,8 +651,68 @@ describe('FuturesTradingTicket', () => {
     expect(within(panel).getByText('250 USDT')).toBeInTheDocument()
   })
 
+  it('does not resize an exit from a stale position snapshot', () => {
+    const position = {
+      symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '10', entryPrice: '90', markPrice: '100',
+    }
+    const state = createState({
+      positions: [position],
+      accountResources: {
+        positions: { status: 'stale', data: [position], lastSuccessfulAt: 100, error: null },
+      },
+    })
+    const props = {
+      state,
+      selectedSymbol: 'BTCUSDT',
+      selectedContract: contract,
+      draftPrice: '100.0',
+    }
+    const { rerender } = render(<FuturesTradingTicket {...props} />)
+    sizeTo(25)
+    rerender(
+      <FuturesTradingTicket
+        {...props}
+        gestureRequest={{
+          id: 205,
+          side: 'SELL',
+          positionSide: 'LONG',
+          positionEffect: 'EXIT',
+          price: '100.0',
+        }}
+      />,
+    )
+
+    const slider = within(screen.getByRole('alertdialog'))
+      .getByRole('slider', { name: 'Confirmation order size percent' })
+    expect(slider).toBeDisabled()
+
+    rerender(
+      <FuturesTradingTicket
+        {...props}
+        state={{
+          ...state,
+          accountResources: {
+            positions: { status: 'loading', data: [position], lastSuccessfulAt: 100, error: null },
+          },
+        }}
+        gestureRequest={{
+          id: 205,
+          side: 'SELL',
+          positionSide: 'LONG',
+          positionEffect: 'EXIT',
+          price: '100.0',
+        }}
+      />,
+    )
+    expect(slider).toBeEnabled()
+  })
+
   it('blocks Send when the confirmation slider selects an invalid low stop', () => {
-    const state = createState()
+    const state = createState({
+      positions: [{
+        symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '0.5', entryPrice: '58000', markPrice: '58445',
+      }],
+    })
     const props = {
       state,
       selectedSymbol: 'BTCUSDT',
@@ -683,6 +743,8 @@ describe('FuturesTradingTicket', () => {
     expect(within(panel).getByText('5 USDT')).toBeInTheDocument()
     expect(within(panel).getByRole('button', { name: 'Send · Enter' })).toBeDisabled()
     expect(within(panel).getByRole('status')).toHaveTextContent('below the Binance minimum')
+    expect(within(panel).getByText('Position').parentElement).toHaveTextContent('Position—')
+    expect(panel).not.toHaveTextContent('This does NOT close your LONG')
     expect(state.placeOrder).not.toHaveBeenCalled()
   })
 
