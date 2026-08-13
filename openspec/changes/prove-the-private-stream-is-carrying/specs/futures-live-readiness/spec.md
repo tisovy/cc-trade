@@ -1,5 +1,28 @@
 ## ADDED Requirements
 
+### Requirement: The authenticated stream connects on the route the exchange serves
+The futures user-data stream SHALL be opened on the routed path the exchange
+currently serves, and that path SHALL be registered in the same place the market
+routes are, so a decommissioning notice cannot apply to it silently. The
+migration and its date SHALL be stated where the URL is built.
+
+An unrouted path SHALL NOT be reachable by accident, for the reason the market
+routes already record: an unrouted path completes its handshake and holds the
+socket open while delivering nothing, so it fails as silence rather than as an
+error.
+
+#### Scenario: The desk opens the authenticated stream
+- **WHEN** the futures user-data stream is started
+- **THEN** it connects on the routed private path, not on the legacy unrouted one
+
+#### Scenario: The registry is asked where the authenticated stream lives
+- **WHEN** the recorded WebSocket routes are read
+- **THEN** the user-data endpoint is among them, with the same prefix rule the market routes carry
+
+#### Scenario: An event type the desk folds is not subscribed
+- **WHEN** the connection form in use takes an explicit list of event types
+- **THEN** every event the desk folds is named in it, so a missing type cannot become a new silence
+
 ### Requirement: A private stream that is not carrying is not presented as ready
 The authenticated futures user-data stream SHALL be presented as carrying only
 while the exchange is demonstrably still talking on the socket. An open socket

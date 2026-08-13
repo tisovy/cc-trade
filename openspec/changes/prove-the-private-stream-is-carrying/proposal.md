@@ -1,7 +1,42 @@
 ## Why
 
-The desk's own record says the authenticated futures stream is not reliably
-coming up, and says nothing about why.
+**The cause is known, and it is a path.** Binance retired
+`wss://fstream.binance.com/ws` and `/stream` on **2026-04-23** and split the
+service into `/public`, `/market` and `/private`. The notice is explicit about
+what happens to anything not migrated: "any connections not migrated will ONLY be
+able to receive data from `wss://fstream.binance.com/public`. Channels under
+`/market` and `/private` will stop pushing data." The user-data stream moved to
+`wss://fstream.binance.com/private/ws/<listenKey>` — the same shape, one prefix
+different.
+
+This desk opens the private stream on `wss://fstream.binance.com/ws/<listenKey>`
+(`binance-connection.js:1644`). It is the only `/ws/` left in the codebase; the
+market feeds were migrated to `/market/stream?streams=` and carry normally. So
+the private socket connects to a host that still answers, completes a handshake
+that still succeeds, and is then never sent anything — which is precisely the
+failure this repository already documented for the market paths at
+`futures-mark-price-feed.js:33`: "the handshake still succeeds and the socket
+stays open, so nothing reports an error — it simply never delivers a frame."
+
+The desk has therefore been trading with no authenticated stream since April.
+
+**Measured, not inferred.** In `desk-2026-08-13-000.jsonl` the desk sent 31 order
+placements, 18 cancellations and one margin-type change. Every execution report
+schedules a one-resource `unstated` read (`binance-connection.js:1685`, no
+condition on that path). The file holds 489 account reads and **every one of them
+is a four-resource, weight-90 pass**: `bootstrap` 17, `stream` 11, `refresh` 461,
+`unstated` **0**. Not one one-resource read exists. Coalescing cannot account for
+it — a queued read only merges while a pass is in flight, roughly two seconds out
+of every thirty — so the conclusion is that the socket opened eleven times and
+folded nothing, ever.
+
+**And the desk could not say any of it.** That is the second half of this change,
+and the reason it is worth building even now that the path is known. Eleven
+openings were recorded and every one of them was a lie by omission: `ready` means
+"the socket opened", the desk then skips the reads it believes the stream will
+make unnecessary, and nothing anywhere notices four months of silence. A liveness
+rule would have caught this in April. Without one, the next transport change
+costs another four months.
 
 `reason: 'stream'` has exactly one call site — the user-data socket's `open`
 handler (`electron/services/binance-connection.js:1656`) — so a `stream` line in
@@ -21,9 +56,12 @@ The 11:42 session ran 110 minutes and reconciled 220 times without the private
 socket opening once. The 13:32 session's single opening came at 13:38:10, after
 thirteen weight-90 beats, and only because the operator cycled the proxy and
 forced a reconnect — so even the rows with an opening are not evidence that
-starting one works. Across all three journal days there is not one read with
-reason `unstated`, which an execution report is supposed to schedule — the same
-fact from the other side.
+starting one works.
+
+Read only 2026-08-13 for this. The two older journal files hold no `read` records
+at all — read recording began that day — so their silence is the feature not
+existing rather than the stream not delivering, and a claim across "all three
+days" would not survive anyone checking it.
 
 Nothing in that record says whether the socket was never asked for, was refused,
 opened and died, or opened and delivered nothing. The code has a path for each
@@ -83,8 +121,8 @@ are inert when the stream is not carrying, and neither can tell that it is not.
 
 ## Non-goals
 
-- Not a transport rewrite, and not a change to what the stream carries once it is
-  carrying. This change is about knowing.
+- Not a transport rewrite. The path correction above is one prefix on one URL,
+  and everything else here is about knowing.
 - Not the frame-timing marks of `time-the-frame-from-exchange-to-screen`. That
   change times a leg that is delivering; this one establishes whether it is.
 - No new diagnostic event kind. The record's existing `fault` and `read` kinds
@@ -94,7 +132,7 @@ are inert when the stream is not carrying, and neither can tell that it is not.
 ## Impact
 
 - `electron/services/binance-connection.js` — the futures user-data stream's
-  start, ready-marking and close handling.
+  path, start, ready-marking and close handling.
 - Adds two requirements to `futures-live-readiness` and modifies one.
 - Depends on nothing; `name-the-algo-order-that-fired` and
   `let-the-stream-state-the-account` depend on it in the sense that neither
