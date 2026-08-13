@@ -4,7 +4,13 @@ The operator moved one order, then reached for a second before the first had
 landed, and nothing happened. No refusal, no message, no order lifted — the
 drag simply did not start.
 
-The cause is one line, and it is deliberate:
+There were **two** gates, not one, and the first fix reached only the inner one.
+The operator tried again after it shipped and reported the same thing, which is
+how the second came to light.
+
+### The gate in the hook
+
+The first, and it is deliberate:
 
 ```js
 // While the desk still owes an order, nothing else may be lifted: two
@@ -33,6 +39,23 @@ What is not sound is the shape of the answer. Two things are wrong with it:
   order on the desk is unmovable, on every contract, including ones the first
   drag has nothing to do with.
 
+### The gate in the chart
+
+`beginOrderDrag` refuses to start while any drag is held:
+
+```js
+if (orderDragRef.current !== null || typeof onOrderLiftRef.current !== 'function') return
+```
+(`src/components/features/futures/FuturesWorkstationChart.jsx:954`)
+
+and `settleOrderDrag` keeps the drag in that slot until the placement is
+answered, because what it drew has to stay: "the mark stays on the chart,
+dashed, until the placement is answered: the level is uncovered until then, and
+drawing a working order there would be a lie". That reasoning is right about the
+drawing and wrong about the pointer. Measured against the chart before this
+change, the second `pointerdown` never reached the lift at all — `onOrderLift`
+called once where it should be twice — so the desk's own hook never got a say.
+
 ## What Changes
 
 - The desk tracks what it owes per order rather than one obligation at a time.
@@ -47,6 +70,10 @@ What is not sound is the shape of the answer. Two things are wrong with it:
 - One pointer still drives one drag: the operator can only be dragging a single
   order at any instant. What changes is that the *previous* drag no longer has
   to have landed for the next one to start.
+- The chart hands a settled drag to a channel of its own instead of holding it
+  in the single drag slot. It keeps drawing exactly what it drew — the dashed
+  aim and the faint mark at the level it was lifted from — for as long as the
+  placement is travelling, and the pointer is free the instant the gesture ends.
 
 ## Non-goals
 
@@ -63,6 +90,7 @@ What is not sound is the shape of the answer. Two things are wrong with it:
 ## Impact
 
 - `src/hooks/useFuturesOrderDrag.js`,
+  `src/components/features/futures/FuturesWorkstationChart.jsx`,
   `src/components/features/futures/FuturesOrderDragAlert.jsx`,
   `src/components/features/futures/FuturesProductionWorkstation.jsx`.
 - The operator can work a book at the speed they think at, instead of at the

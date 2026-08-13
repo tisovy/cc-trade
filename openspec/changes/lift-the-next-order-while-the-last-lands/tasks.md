@@ -5,6 +5,18 @@
 - [x] 1.3 Keep one pointer to one drag: what is removed is the wait for the previous drag to land, not the ability to drag two orders at once.
 - [x] 1.4 Leave the backend's per-contract lane untouched, so two moves on one contract still reach the exchange in the order they were made.
 
+## 1b. The Chart Lets Go Of The Pointer Before The Placement Lands
+
+Found only after the first attempt shipped and the operator reported the same
+symptom. The hook was not the only gate, and it was the inner one.
+
+- [x] 1b.1 Give the chart a settling channel beside the pointer drag, so a drag whose gesture is over stops occupying the slot `beginOrderDrag` guards.
+- [x] 1b.2 Hand the settled drag's own price lines over with it rather than removing them: the level it is aimed at is uncovered until the placement is answered, and that is what the dashed mark says.
+- [x] 1b.3 Draw a mark per drag — the one under the pointer and every one still settling — instead of one mark for the single slot.
+- [x] 1b.4 Take every order that is off the book out of the resting-order pass, not just the one the pointer holds, so a settling order is never drawn twice.
+- [x] 1b.5 End settling drags with the contract they belong to: their replacements are still owed and still travel, but their marks must not survive onto the next contract's chart.
+- [x] 1b.6 Prove by test that a second drag begins while the first replacement is still travelling. **Bites:** against the pre-change chart, `onOrderLift` is called once where it should be twice — the second gesture never reached the desk at all, which is exactly what the operator saw.
+
 ## 2. Nothing Refuses In Silence
 
 - [x] 2.1 Give every path out of a lift a statement — including the one that refuses because the same order is already lifted, which returned `{ ok: false }` and said nothing.

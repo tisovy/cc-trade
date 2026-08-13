@@ -603,6 +603,54 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     })
   })
 
+  // The operator dropped one order and reached straight for the next, and the
+  // chart did not begin the gesture at all: the settling drag still held the
+  // single drag slot until its placement was answered — one round trip through
+  // their proxy, 340–800 ms, during which the chart looked like it had stopped
+  // listening.
+  it('begins the next drag while the last replacement is still travelling', async () => {
+    let settlePlacement
+    const props = {
+      ...properties([candle(1_784_000_000_000)]),
+      ownedOrders: [workingOrder(), workingOrder({ orderId: '72', price: '59700' })],
+      onOrderDrop: vi.fn(() => new Promise((resolve) => { settlePlacement = resolve })),
+    }
+    render(<FuturesWorkstationChart {...props} />)
+    const canvas = screen.getByTestId('futures-workstation-chart')
+    canvas.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 320, height: 320, right: 320, bottom: 320,
+    })
+
+    const first = await screen.findByRole('button', {
+      name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
+    })
+    fireEvent.pointerDown(first, { pointerId: 7, button: 0, ctrlKey: true })
+    await settle()
+    const surface = dragSurface()
+    fireEvent.pointerMove(surface, { pointerId: 7, clientY: 80, ctrlKey: true })
+    fireEvent.pointerUp(surface, { pointerId: 7, clientY: 80, ctrlKey: true })
+    await settle()
+    expect(props.onOrderDrop).toHaveBeenCalledOnce()
+
+    // Still travelling, and still drawn — the level it is aimed at is uncovered
+    // until Binance answers.
+    expect(screen.getByText('placing…')).toBeInTheDocument()
+
+    const second = await screen.findByRole('button', {
+      name: 'Move SELL LONG order at 59700 with Ctrl or Alt drag',
+    })
+    fireEvent.pointerDown(second, { pointerId: 8, button: 0, ctrlKey: true })
+    await settle()
+
+    expect(props.onOrderLift).toHaveBeenCalledTimes(2)
+    expect(props.onOrderLift).toHaveBeenLastCalledWith(
+      expect.objectContaining({ orderId: '72' }),
+    )
+
+    settlePlacement(true)
+    await settle()
+  })
+
   it('places the order again where it was lifted from when the drag is abandoned', async () => {
     const props = { ...properties([candle(1_784_000_000_000)]), ownedOrders: [workingOrder()] }
     render(<FuturesWorkstationChart {...props} />)
