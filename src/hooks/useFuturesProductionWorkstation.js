@@ -13,6 +13,7 @@ import { DESK_FRAME_KINDS, ensureDeskFrameRouter } from '../utils/deskFrameRoute
 import {
   FUTURES_WORKSTATION_CANDLE_HISTORY_LIMITS,
   FUTURES_WORKSTATION_DEFAULT_TAPE_SETTINGS,
+  FUTURES_WORKSTATION_STATES,
   applyFuturesWorkstationEvent,
   transitionFuturesWorkstationConnectionState,
 } from '../utils/futuresWorkstationProtocolShared.js'
@@ -50,6 +51,11 @@ const EMPTY_CANDLE_HISTORY = Object.freeze({
   interval: null,
   rows: Object.freeze([]),
   exhausted: false,
+  // Whether the last read of older candles could not be served. Held beside the
+  // run rather than raised as an alert: what the operator needs to know is that
+  // the left edge of this chart is where a read failed, not that something
+  // happened a moment ago.
+  readFailed: false,
 })
 
 // Older rows arrive in front of what is already loaded; an open time that is
@@ -119,6 +125,8 @@ const applyCandleHistoryPage = (previous, { symbol, interval, rows, exhausted })
     interval,
     exhausted: base.exhausted || exhausted || !deepened,
     rows: merged,
+    // A page that arrived is the answer the failed one never gave.
+    readFailed: false,
   })
 }
 
@@ -519,13 +527,43 @@ const useFuturesProductionWorkstation = ({
       || selection.interval !== historyResponse.interval) return
     if (selection.endTime !== historyResponse.endTime) return
     historyRequestRef.current = null
+    // The read is answered, so it is no longer the read being waited on. Said
+    // here rather than left standing, because a connection transition rewrites
+    // every resource — same page, same endTime, new object — and this effect
+    // would apply an answer it already applied. Harmless once, until a page
+    // that cannot deepen the run began to mean the history has a start: a
+    // dropped connection would have told the chart there was nothing older.
+    historySelectionRef.current = null
+    // A read that could not be served answers the request without carrying a
+    // page. The lock is released above so the next scroll asks again, the run
+    // on screen is left exactly as it was, and nothing about it is taken for
+    // the exchange saying there is nothing older.
+    if (historyResponse.state === FUTURES_WORKSTATION_STATES.UNAVAILABLE) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setCandleHistory((previous) => {
+        // Named for the contract it failed on, or it is a failure the desk
+        // holds for a chart nobody is looking at: what is handed back is gated
+        // on the selection, and an unnamed run is gated out.
+        const base = previous.symbol === state.symbol
+          && previous.interval === historyResponse.interval
+          ? previous
+          : EMPTY_CANDLE_HISTORY
+        if (base === previous && previous.readFailed) return previous
+        return Object.freeze({
+          ...base,
+          symbol: state.symbol,
+          interval: historyResponse.interval,
+          readFailed: true,
+        })
+      })
+      return
+    }
     // Written back so the next run of the app starts where this one left off.
     void candleHistoryCache.writePage({
       symbol: state.symbol,
       interval: historyResponse.interval,
       rows: historyResponse.rows,
     })
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setCandleHistory(previous => applyCandleHistoryPage(previous, {
       symbol: state.symbol,
       interval: historyResponse.interval,

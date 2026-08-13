@@ -119,6 +119,7 @@ const EMPTY_CANDLE_HISTORY = Object.freeze({
   interval: null,
   rows: Object.freeze([]),
   exhausted: false,
+  readFailed: false,
 })
 
 export const FuturesWorkstationView = ({
@@ -1064,6 +1065,16 @@ export const FuturesWorkstationView = ({
             onOrderCancel={onOrderCancel}
             onOrderEdit={onOrderEdit}
           />
+          {/* Said at the edge the operator scrolled to, and left there. A read
+              that could not be served is not a moment's news to be dismissed:
+              it is where this chart stops until another scroll asks again, and
+              a line that disappears leaves the chart looking like the contract
+              simply has no more history. */}
+          {candleHistory.readFailed ? (
+            <p className="futures-workstation-history-notice" role="status">
+              Older candles could not be loaded — scroll again to retry.
+            </p>
+          ) : null}
           {/* A chart that has candles on it is readable, and covering it with a
               state was the desk hiding the only thing the operator came for. The
               state is stated in the corner with the age of the reading, and the

@@ -14,6 +14,28 @@ the canvas.
 - **WHEN** a re-read differs only in the newest candle
 - **THEN** the chart takes the cheap path and updates that candle alone
 
+### Requirement: A failed futures history read leaves history loadable
+A read of older candles that cannot be served SHALL be answered rather than
+passed over in silence, and the answer SHALL name the read it belongs to. The
+renderer SHALL release its in-flight read on that answer so the next scroll
+issues a new one, SHALL leave the run on screen exactly as it was, and SHALL NOT
+take the failure for the exchange saying there is nothing older. The operator
+SHALL be told at the chart, and told until a read succeeds — a notice that
+withdraws itself leaves the chart looking like a contract whose history ends
+there.
+
+#### Scenario: The exchange read fails
+- **WHEN** the backend cannot serve a read of older candles
+- **THEN** the failure is answered, the renderer's in-flight read is released, and the next scroll issues a new read
+
+#### Scenario: The failure answers a read the chart moved on from
+- **WHEN** a failure arrives naming a read other than the one being waited on
+- **THEN** it is ignored and the read in flight is still in flight
+
+#### Scenario: A page arrives after a failure
+- **WHEN** a later read is served
+- **THEN** the operator is no longer told that older candles could not be loaded
+
 ### Requirement: The bars the live window drops are kept behind it
 The window of candles the stream re-sends is bounded and slides. The renderer
 SHALL keep the closed candles that leave it, joined to the end of the history

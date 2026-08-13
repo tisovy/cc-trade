@@ -1,12 +1,13 @@
 ## 1. A Failed History Read Does Not Lock The Chart
 
 - [x] 1.1 Emit a failure answer for a Spot `load_chart_history` read that could not be served, carrying the request it answers.
-- [ ] 1.2 Emit the equivalent failure from the futures workstation service instead of returning silently.
+- [x] 1.2 Emit the equivalent failure from the futures workstation service instead of returning silently. Sent as the `candleHistory` resource in state `unavailable`, carrying the `endTime` it answers — the shape of the answer it replaces, so an empty page of it is never read as the exchange saying there is nothing older.
 - [x] 1.3 Release the Spot renderer's in-flight lock when a failure answers, so the next scroll retries.
-- [ ] 1.4 Release the futures renderer's in-flight lock the same way, once 1.2 gives it something to release on.
+- [x] 1.4 Release the futures renderer's in-flight lock the same way, once 1.2 gives it something to release on.
+- [x] 1.4b Tell the futures operator, at the edge they scrolled to, and leave it there. Unlike Spot's transient notification this one stays until a read succeeds: a line that disappears leaves the chart looking like a contract whose history simply ends there.
 - [x] 1.5 Tell the operator that older candles could not be loaded, once per failure rather than per scroll.
 - [x] 1.6 Prove by test that a failed Spot read leaves history loadable, and that a subsequent scroll issues a new request.
-- [ ] 1.7 Prove the same for the futures chart.
+- [x] 1.7 Prove the same for the futures chart: the service states the failure, the hook releases the lock and the next scroll issues a new read, the failure is forgotten once a page is served, and the view says so.
 
 ## 2. The Ceiling Is Enforced Where The Series Grows
 
@@ -88,9 +89,9 @@ them. The §4 fix made the redraw honest about it; it did not put the bars back.
 
 ## 6. Verification
 
-- [x] 6.1 `npm run lint`, `npm test` — 108 files, 1757 tests, clean. `check:circular`, `check:runtime-mock`, `check:futures-production`, `check:command-path` all pass.
-- [ ] 6.2 Operator confirms on live data that scrolling left recovers after a dropped connection.
-- [ ] 6.3 Operator confirms on live data that a monthly chart keeps its loaded history across a 31-day month.
+- [x] 6.1 `npm run lint`, `npm test` — 109 files, 1769 tests, clean. `check:circular`, `check:runtime-mock`, `check:futures-production`, `check:command-path` all pass.
+- [x] 6.2 → handed to the operator runbook, `verify-the-desk-in-one-sitting` Шаг 9, now covering both markets rather than warning that Futures is unfixed.
+- [x] 6.3 → handed to the same step, as the monthly part of it.
 
 ## 7. Every Test Was Run Against The Code Before The Fix
 
@@ -107,10 +108,17 @@ symlinked) before the fix landed, and failed there:
 - `keeps a bar that fell out of the window` — held nothing at all.
 - `joins what leaves the window to the end of the history already read` — 38 rows against 40.
 - `counts no row whose open time it could not read` — counted two.
+- `does not read a dropped connection as the end of the contract history` — a regression this change's own 2.4 introduced, found auditing it: a connection transition rewrites every resource, the history effect applied an answer it had already applied, and a page that cannot deepen the run now means the history has a start. A dropped connection told the chart there was nothing older. Fixed by clearing the selection when the read is answered.
+- `states a read that failed and leaves the live session alone` — the service emitted nothing at all.
+- `releases the lock so the next scroll asks again, and says why` — no second read was ever issued.
+- `forgets the failure once a page is served` — nothing to forget.
+- `says so at the edge the operator scrolled to` — no notice existed.
 
 Tests kept as guards rather than proofs, and said so rather than counted as
 finds: `still writes the last bar alone when only the last bar moved` (4.2 — the
 cheap path was already there, and the point is that it survived), the
-identity/`timeOf` cases in `chartSeriesDraw.test.js`, and the two refusal cases
+identity/`timeOf` cases in `chartSeriesDraw.test.js`, the two refusal cases
 in 4b.2 (a jumped window, rows that never closed) — the old code held nothing in
-either case, so there was nothing there to break.
+either case, so there was nothing there to break — and `answers only the read it
+was issued for`, whose failure against the old code is incidental (the field did
+not exist) rather than a defect it proves.

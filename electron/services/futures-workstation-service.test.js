@@ -2380,7 +2380,12 @@ describe('production Futures workstation service', () => {
             }
         });
 
-        it('drops a read that fails and leaves the live session alone', async () => {
+        // Saying nothing left the renderer holding its request forever: one
+        // failed read disabled scrolling left for the rest of the session, with
+        // nothing on screen to say why. The failure answers the request it
+        // belongs to, and is `unavailable` rather than `live` so an empty page
+        // of it is never read as the exchange saying there is nothing older.
+        it('states a read that failed and leaves the live session alone', async () => {
             const { runtime, events } = await historyRuntime('history-failure', {
                 readCandleHistory: async () => {
                     throw new Error('network down');
@@ -2391,8 +2396,18 @@ describe('production Futures workstation service', () => {
                 emit: event => events.push(event),
             });
 
-            expect(events).toEqual([]);
+            expect(events).toMatchObject([{
+                resource: 'candleHistory',
+                state: 'unavailable',
+                payload: { series: 'contract', interval: '1m', complete: true, total: 0, rows: [] },
+            }]);
+            // The failure carries the read it answers, so a renderer holding one
+            // request can tell it from the answer to a request it abandoned.
+            expect(events[0].payload.endTime).toBe(1_784_000_000_000);
+            // A failed history read is never a reason to resync a healthy
+            // session, and it writes nothing to the live window.
             expect(runtime.service.current.requestId).toBe('history-failure');
+            expect(events.some(event => event.resource === 'candles')).toBe(false);
         });
     });
 

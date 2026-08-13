@@ -1933,6 +1933,29 @@ describe('instrument recency and interface scale', () => {
   })
 })
 
+// One failed read used to disable scrolling left for the rest of the session,
+// with nothing on screen to say why. The chart looked exactly like a contract
+// whose history simply ends there.
+describe('a history read that could not be served', () => {
+  const history = extra => ({
+    symbol: 'BTCUSDT', interval: '1m', rows: [], exhausted: false, readFailed: false, ...extra,
+  })
+
+  it('says so at the edge the operator scrolled to, and offers the retry', () => {
+    renderView({ candleHistory: history({ readFailed: true }) })
+
+    const notice = screen.getByText(/Older candles could not be loaded/)
+    expect(notice).toHaveAttribute('role', 'status')
+    expect(notice.textContent).toContain('scroll again to retry')
+  })
+
+  it('says nothing while reads are being served', () => {
+    renderView({ candleHistory: history() })
+
+    expect(screen.queryByText(/Older candles could not be loaded/)).toBeNull()
+  })
+})
+
 describe('production workstation container', () => {
   it('adds no chart or execution-ticket render for a depth-only workstation commit', () => {
     const initialState = createState()

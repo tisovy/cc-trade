@@ -961,6 +961,27 @@
   pointer-events: none;
 }
 
+/* Bottom-left, under the reading notice rather than over it: this one is about
+   the far edge of the chart, where the older candles would have arrived, and
+   both can be true at once. Amber, because unlike a quiet market this is a read
+   that failed and a retry the operator has to ask for. */
+.futures-workstation-history-notice {
+  position: absolute;
+  bottom: 8px;
+  left: 8px;
+  z-index: 4;
+  margin: 0;
+  padding: 2px 8px;
+  border: 1px solid rgba(214, 158, 46, 0.42);
+  border-radius: 999px;
+  background: rgba(5, 12, 19, 0.82);
+  color: #d69e2e;
+  font-size: calc(var(--fx-ui-scale, 1) * 11px);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
 /* Quiet is not a fault: nothing failed, the market simply has nothing to say,
    so it is the colour of a reading rather than the colour of a problem. */
 .futures-workstation-reading-notice.is-quiet {

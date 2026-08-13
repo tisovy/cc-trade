@@ -854,6 +854,130 @@ describe('useFuturesProductionWorkstation candle history', () => {
     expect(result.current.candleHistory.exhausted).toBe(true)
   })
 
+  // One failed read used to hold the request forever: scrolling left did
+  // nothing for the rest of the session, and nothing on screen said why.
+  describe('a read that could not be served', () => {
+    const failHistory = (socket, requestId, revision, endTime) => {
+      socket.emitMessage(createFuturesProductionWorkstationEvent(eventValues(requestId, {
+        revision,
+        resource: 'candleHistory',
+        state: 'unavailable',
+        payload: Object.freeze({
+          series: 'contract',
+          interval: '1m',
+          endTime,
+          offset: 0,
+          total: 0,
+          complete: true,
+          rows: Object.freeze([]),
+        }),
+      })))
+    }
+
+    it('releases the lock so the next scroll asks again, and says why', async () => {
+      const socket = new LocalSocket()
+      const sendMessage = vi.fn(() => true)
+      const { result } = renderHook(props => useFuturesProductionWorkstation(props), {
+        initialProps: defaultProps(socket, sendMessage, { candleHistoryCache: missingCache() }),
+      })
+      const requestId = sendMessage.mock.calls[0][0].requestId
+      const reads = () => sendMessage.mock.calls
+        .filter(([message]) => message.action === FUTURES_PRODUCTION_WORKSTATION_ACTIONS.LOAD_CANDLE_HISTORY)
+
+      await act(async () => { await result.current.loadCandleHistory(START) })
+      expect(reads()).toHaveLength(1)
+      // While one read is in flight, a second scroll asks for nothing.
+      await act(async () => { await result.current.loadCandleHistory(START) })
+      expect(reads()).toHaveLength(1)
+
+      await act(async () => failHistory(socket, requestId, 3, START))
+
+      expect(result.current.candleHistory.readFailed).toBe(true)
+      // The run on screen is untouched, and nothing about the failure is taken
+      // for the exchange saying there is nothing older.
+      expect(result.current.candleHistory.exhausted).toBe(false)
+
+      await act(async () => { await result.current.loadCandleHistory(START) })
+      expect(reads()).toHaveLength(2)
+    })
+
+    it('answers only the read it was issued for', async () => {
+      const socket = new LocalSocket()
+      const sendMessage = vi.fn(() => true)
+      const { result } = renderHook(props => useFuturesProductionWorkstation(props), {
+        initialProps: defaultProps(socket, sendMessage, { candleHistoryCache: missingCache() }),
+      })
+      const requestId = sendMessage.mock.calls[0][0].requestId
+
+      await act(async () => { await result.current.loadCandleHistory(START) })
+      // The answer to a read the chart has moved on from.
+      await act(async () => failHistory(socket, requestId, 3, START - (5_000 * MINUTE)))
+
+      expect(result.current.candleHistory.readFailed).toBe(false)
+      const reads = sendMessage.mock.calls
+        .filter(([message]) => message.action === FUTURES_PRODUCTION_WORKSTATION_ACTIONS.LOAD_CANDLE_HISTORY)
+      await act(async () => { await result.current.loadCandleHistory(START) })
+      expect(sendMessage.mock.calls
+        .filter(([message]) => message.action === FUTURES_PRODUCTION_WORKSTATION_ACTIONS.LOAD_CANDLE_HISTORY)).toHaveLength(reads.length)
+    })
+
+    it('forgets the failure once a page is served', async () => {
+      const socket = new LocalSocket()
+      const sendMessage = vi.fn(() => true)
+      const { result } = renderHook(props => useFuturesProductionWorkstation(props), {
+        initialProps: defaultProps(socket, sendMessage, { candleHistoryCache: missingCache() }),
+      })
+      const requestId = sendMessage.mock.calls[0][0].requestId
+
+      await act(async () => { await result.current.loadCandleHistory(START) })
+      await act(async () => failHistory(socket, requestId, 3, START))
+      expect(result.current.candleHistory.readFailed).toBe(true)
+
+      await act(async () => { await result.current.loadCandleHistory(START) })
+      await act(async () => emitHistoryPage(socket, requestId, 4, {
+        offset: 0, total: 20, complete: true, rows: historyRows(-20, 0),
+      }))
+
+      expect(result.current.candleHistory.readFailed).toBe(false)
+      expect(result.current.candleHistory.rows).toHaveLength(20)
+    })
+  })
+
+  // A connection transition rewrites every resource — same page, same endTime,
+  // a new object — and the effect that applies a history answer would apply the
+  // one it had already applied. That was harmless until a page that cannot
+  // deepen the run came to mean the history has a start: a dropped connection
+  // then told the chart there was nothing older, and the contract could load no
+  // more depth until the operator changed symbol or interval.
+  it('does not read a dropped connection as the end of the contract history', async () => {
+    const socket = new LocalSocket()
+    const sendMessage = vi.fn(() => true)
+    const { result } = renderHook(props => useFuturesProductionWorkstation(props), {
+      initialProps: defaultProps(socket, sendMessage, { candleHistoryCache: missingCache() }),
+    })
+    const requestId = sendMessage.mock.calls[0][0].requestId
+
+    await act(async () => { await result.current.loadCandleHistory(START) })
+    const page = historyRows(-1_000, 0)
+    for (let offset = 0; offset < page.length; offset += 80) {
+      const rows = page.slice(offset, offset + 80)
+      await act(async () => emitHistoryPage(socket, requestId, 3 + (offset / 80), {
+        offset,
+        total: page.length,
+        complete: offset + rows.length === page.length,
+        rows,
+      }))
+    }
+    expect(result.current.candleHistory.rows).toHaveLength(1_000)
+    expect(result.current.candleHistory.exhausted).toBe(false)
+
+    await act(async () => { socket.closeLocally() })
+
+    expect(result.current.status).toBe('disconnected')
+    expect(result.current.candleHistory.rows).toHaveLength(1_000)
+    expect(result.current.candleHistory.exhausted).toBe(false)
+  })
+
   // The window the stream re-sends is bounded and slides: when a bar opens, the
   // oldest one in it is not in the next frame. History was read behind where
   // the window stood then, so a bar that leaves afterwards was in neither run,

@@ -262,6 +262,18 @@ export class FuturesProductionWorkstationService {
             // operator can scroll again. It is never a reason to resync a live
             // session that is otherwise healthy.
             this.onInternalError({ phase: 'candle-history', code: safeCode(error) });
+            // Returning here and saying nothing left the renderer holding its
+            // request forever: one failed read disabled scrolling left for the
+            // rest of the session, with nothing on screen to say why. The
+            // failure answers the request it belongs to — same contract, same
+            // interval, same `endTime` — so the lock is released and the next
+            // scroll asks again.
+            if (this.isCurrent(session)
+                && session.requestId === request.requestId
+                && session.symbol === request.symbol
+                && session.interval === interval) {
+                this.emitCandleHistoryFailure(session, { endTime, interval });
+            }
             return;
         }
         // The session may have moved to another contract or interval while the
@@ -271,6 +283,27 @@ export class FuturesProductionWorkstationService {
             || session.symbol !== request.symbol
             || session.interval !== interval) return;
         this.emitCandleHistory(session, { endTime, interval, rows });
+    }
+
+    // A read that could not be served, in the shape of the answer it replaces:
+    // the same resource, carrying the request it answers, and `unavailable`
+    // rather than `live` so no row of it is mistaken for the exchange saying
+    // there is nothing older.
+    emitCandleHistoryFailure(session, { endTime, interval }) {
+        this.emitResource(
+            session,
+            FUTURES_WORKSTATION_RESOURCES.CANDLE_HISTORY,
+            FUTURES_WORKSTATION_STATES.UNAVAILABLE,
+            Object.freeze({
+                series: 'contract',
+                interval,
+                endTime,
+                offset: 0,
+                total: 0,
+                complete: true,
+                rows: Object.freeze([]),
+            }),
+        );
     }
 
     emitCandleHistory(session, { endTime, interval, rows }) {
