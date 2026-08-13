@@ -84,6 +84,14 @@ feels, and it now states its depth.
 The line is still written when the backlog ends, so what it carries is the peak
 reached rather than the nothing that remains.
 
+Corrected by the audit of 2026-08-13: the reader printed the deepest backlog in
+frames, the heaviest in bytes and one timestamp, in a single run of text — and
+the two peaks need not be the same line. One book alone outweighs three status
+frames, so the KB figure read as having happened at a minute it did not. The
+time is now attached to the reading it was measured on and the other is named
+`heaviest`. The test that covers it now uses two lines whose peaks differ, so
+the format cannot silently go back to implying one event.
+
 ## 3. The Record Takes The Marks
 
 - [ ] 3.1 Add a diagnostic event kind for a frame's timing, with a recognized phase and code, so the record accepts it under the rule it already enforces.

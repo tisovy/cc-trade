@@ -166,6 +166,11 @@ export const summarizeDeskDiagnosticRecord = (text) => {
       observed.count += 1
       observed.superseded += Number(line.superseded) || 0
       observed.dropped += Number(line.dropped) || 0
+      // The deepest single backlog, and the time it happened — one line's two
+      // readings, kept together. The heaviest backlog is tracked separately
+      // because it need not be the same one: a hundred status lines and one
+      // book are different shapes of behind, and a time attached to the wrong
+      // one would send the operator to the wrong minute of the record.
       const frames = Number(line.frames) || 0
       if (frames > observed.peakFrames) {
         observed.peakFrames = frames
@@ -308,10 +313,10 @@ export const formatDeskDiagnosticSummary = (summary, { day = null } = {}) => {
       out.push(
         `  ${entry.key.padEnd(22)} n=${String(entry.count).padStart(5)}`
         + `  deepest ${String(entry.peakFrames).padStart(4)} frames`
-        + ` / ${String(Math.round(entry.peakBytes / 1024)).padStart(6)} KB`
+        + (entry.worstAt === null ? '' : ` at ${entry.worstAt}`)
+        + `  heaviest ${String(Math.round(entry.peakBytes / 1024)).padStart(6)} KB`
         + `  superseded ${String(entry.superseded).padStart(5)}`
-        + `  dropped ${String(entry.dropped).padStart(4)}`
-        + (entry.worstAt === null ? '' : `  worst at ${entry.worstAt}`),
+        + `  dropped ${String(entry.dropped).padStart(4)}`,
       )
     }
   }

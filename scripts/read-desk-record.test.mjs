@@ -162,7 +162,7 @@ describe('summarizeDeskDiagnosticRecord', () => {
         superseded: 19,
         dropped: 0,
         frames: 1,
-        bytes: 118_784,
+        bytes: 512_000,
       }),
       line({
         at: '2026-08-10T09:04:00.000Z',
@@ -193,7 +193,7 @@ describe('summarizeDeskDiagnosticRecord', () => {
         superseded: 23,
         dropped: 1,
         peakFrames: 3,
-        peakBytes: 356_352,
+        peakBytes: 512_000,
         worstAt: '2026-08-10T09:04:00.000Z',
       },
       {
@@ -207,11 +207,16 @@ describe('summarizeDeskDiagnosticRecord', () => {
       },
     ])
 
+    // The deepest backlog and the heaviest one are different lines here — one
+    // book alone outweighs three status frames — so the time may be attached
+    // only to the reading it was measured on. Printed as one run of text, the
+    // KB figure would read as having happened at that moment too, and would
+    // send the operator to the wrong minute of the record.
     const printed = formatDeskDiagnosticSummary(behind)
     expect(printed).toContain('How far behind the renderer fell')
-    expect(printed).toContain('deepest    3 frames')
-    expect(printed).toContain('348 KB')
-    expect(printed).toContain('worst at 2026-08-10T09:04:00.000Z')
+    expect(printed).toContain(
+      'deepest    3 frames at 2026-08-10T09:04:00.000Z  heaviest    500 KB',
+    )
   })
 
   it('answers an empty record without failing', () => {
