@@ -1920,6 +1920,15 @@
   color: #f0c94e;
 }
 
+/* The exchange's own warning, not the desk's reckoning of the same distance.
+   It has to be readable at a glance from across the desk, so it takes the loss
+   red the rest of the workspace uses for a position going the wrong way rather
+   than the amber of an ordinary liquidation figure. */
+.futures-workstation-dock-liquidation.is-margin-call {
+  color: #ff5c5c;
+  font-weight: 600;
+}
+
 /* Reads as a figure, behaves as a control — the same treatment as the size
    shortcut, so the row still reads as a row. A cross position keeps the figure
    but drops the affordance colour: it opens the panel only to say why it

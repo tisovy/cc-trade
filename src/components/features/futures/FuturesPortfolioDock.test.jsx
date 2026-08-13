@@ -35,6 +35,44 @@ const order = Object.freeze({
 })
 
 describe('FuturesPortfolioDock', () => {
+  // The liquidation price beside a position is the desk's own reckoning of how
+  // far away the edge is. A margin call is Binance saying the position's risk
+  // ratio is too high, and the operator has to be able to tell the two apart
+  // without reading the number twice.
+  it('marks the position the exchange itself warned about, and only that one', () => {
+    const other = { ...position, symbol: 'ETHUSDT', liquidationPrice: '1200' }
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[position, other]}
+        marginCalls={{
+          'BTCUSDT:BOTH': {
+            symbol: 'BTCUSDT',
+            positionSide: 'BOTH',
+            at: 1_700_000_000_000,
+            quantity: 0.5,
+            isolatedWallet: null,
+            maintenanceMargin: 1.614445,
+            markPrice: 60600,
+          },
+        }}
+      />,
+    )
+
+    expect(screen.getByLabelText('BTCUSDT margin call')).toBeInTheDocument()
+    expect(screen.queryByLabelText('ETHUSDT margin call')).toBeNull()
+    expect(screen.getByLabelText('BTCUSDT margin call').closest('span[role="cell"]'))
+      .toHaveClass('is-margin-call')
+  })
+
+  // Guard against the marker leaking onto every row: with nothing sent, nothing
+  // is marked.
+  it('marks nothing when the exchange has warned about nothing', () => {
+    render(<FuturesPortfolioDock selectedSymbol="BTCUSDT" positions={[position]} />)
+
+    expect(screen.queryByLabelText('BTCUSDT margin call')).toBeNull()
+  })
+
   it('shows the direction and signed PnL of every position without opening a tab', () => {
     render(<FuturesPortfolioDock selectedSymbol="BTCUSDT" positions={[position]} />)
     const table = screen.getByRole('table', { name: 'Open positions' })

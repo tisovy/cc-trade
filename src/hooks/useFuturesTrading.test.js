@@ -478,6 +478,57 @@ describe('useFuturesTrading', () => {
     expect(result.current.history.symbols).toEqual(['ETHUSDT'])
   })
 
+  // The exchange sends no event for the risk passing, so what takes a warning
+  // back down is the position itself: closed, smaller, or better backed.
+  it('holds a margin call against its position until the position says otherwise', () => {
+    const socket = createSocket()
+    const { result } = renderHook(() => useFuturesTrading({
+      enabled: true,
+      symbol: 'BTCUSDT',
+      wsConnection: socket,
+    }))
+    const statePositions = rows => ({
+      version: 1,
+      type: 'futures_account_state',
+      resources: { positions: { status: 'ready', data: rows, lastSuccessfulAt: 100 } },
+    })
+
+    act(() => {
+      socket.receive(statePositions([
+        { symbol: 'BTCUSDT', positionSide: 'BOTH', quantity: '0.5', isolatedWallet: '5' },
+      ]))
+    })
+    act(() => socket.receive({
+      futures_margin_call: {
+        positions: [{
+          symbol: 'BTCUSDT',
+          positionSide: 'BOTH',
+          quantity: '0.5',
+          isolatedWallet: '5',
+          maintenanceMargin: '1.61',
+        }],
+      },
+    }))
+    expect(result.current.marginCalls['BTCUSDT:BOTH'])
+      .toMatchObject({ symbol: 'BTCUSDT', maintenanceMargin: 1.61 })
+
+    // The position is still there, unchanged. So is the warning.
+    act(() => {
+      socket.receive(statePositions([
+        { symbol: 'BTCUSDT', positionSide: 'BOTH', quantity: '0.5', isolatedWallet: '5' },
+      ]))
+    })
+    expect(result.current.marginCalls['BTCUSDT:BOTH']).toBeDefined()
+
+    // Margin added behind it. The warning goes.
+    act(() => {
+      socket.receive(statePositions([
+        { symbol: 'BTCUSDT', positionSide: 'BOTH', quantity: '0.5', isolatedWallet: '40' },
+      ]))
+    })
+    expect(result.current.marginCalls).toEqual({})
+  })
+
   // /fapi/v3/positionRisk reports neither leverage nor margin mode any more, so
   // both are asked for per contract and folded into the rows that display them.
   it('states the leverage a position is carried at once the config arrives', () => {

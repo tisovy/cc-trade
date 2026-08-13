@@ -10,11 +10,13 @@ import {
   orderNotionalUsdt,
 } from '../../../utils/futuresOrderPresentation.js'
 import { formatExchangePrice } from '../../../utils/futuresPriceFormat.js'
+import { futuresMarginCallKey } from '../../../utils/futuresMarginCall.js'
 import { exactFuturesDeskTime, formatFuturesDeskTime } from '../../../utils/futuresDeskTime.js'
 import FuturesHistoryPanel from './FuturesHistoryPanel.jsx'
 
 const EMPTY_ROWS = Object.freeze([])
 const EMPTY_TICKS = Object.freeze({})
+const EMPTY_MARGIN_CALLS = Object.freeze({})
 
 const exactText = value => (
   typeof value === 'string' && value.length > 0 ? value : (value ?? '—')
@@ -66,6 +68,7 @@ export const FuturesPortfolioDock = ({
   openOrders = EMPTY_ROWS,
   accountResources = EMPTY_RESOURCES,
   tickSizes = EMPTY_TICKS,
+  marginCalls = EMPTY_MARGIN_CALLS,
   history = null,
   onClosePosition,
   onCancelOrder,
@@ -82,7 +85,11 @@ export const FuturesPortfolioDock = ({
     position,
     presentation: describeFuturesPosition(position),
     margin: describeFuturesPositionMargin(position),
-  })), [positions])
+    // The exchange's own warning about this position, if it sent one. Kept
+    // apart from the liquidation price beside it: that number is the desk's
+    // reckoning, this is Binance saying the risk ratio is too high.
+    marginCall: marginCalls[futuresMarginCallKey(position)] ?? null,
+  })), [positions, marginCalls])
   const totalUnrealizedPnl = useMemo(() => describedPositions.reduce((total, entry) => (
     entry.presentation.unrealizedPnl === null ? total : total + entry.presentation.unrealizedPnl
   ), 0), [describedPositions])
@@ -201,7 +208,7 @@ export const FuturesPortfolioDock = ({
               </span>
               <span role="columnheader" />
             </div>
-            {describedPositions.map(({ position, presentation, margin }) => (
+            {describedPositions.map(({ position, presentation, margin, marginCall }) => (
               <div
                 className={`futures-workstation-dock-row is-${presentation.tone}${position.symbol === selectedSymbol ? ' is-current-symbol' : ''}`}
                 role="row"
@@ -261,7 +268,22 @@ export const FuturesPortfolioDock = ({
                 </span>
                 <span role="cell">{priceOf(position.symbol, position.entryPrice)}</span>
                 <span role="cell">{priceOf(position.symbol, position.markPrice)}</span>
-                <span role="cell" className="futures-workstation-dock-liquidation">
+                {/* The exchange raising its hand, stated where the desk's own
+                    liquidation reckoning already is. It carries when it was
+                    sent, because Binance sends nothing when the risk passes and
+                    a warning with no age behind it reads as current forever. */}
+                <span
+                  role="cell"
+                  className={`futures-workstation-dock-liquidation${
+                    marginCall === null ? '' : ' is-margin-call'}`}
+                  title={marginCall === null ? undefined : `Margin call from the exchange at ${
+                    exactFuturesDeskTime(marginCall.at)
+                  }${marginCall.maintenanceMargin === null ? '' : ` — maintenance margin required ${
+                    marginCall.maintenanceMargin}`}`}
+                >
+                  {marginCall === null ? null : (
+                    <span aria-label={`${position.symbol} margin call`} role="img">⚠ </span>
+                  )}
                   {priceOf(position.symbol, position.liquidationPrice)}
                 </span>
                 {/* The denominator of the ROE beside it, and the only property

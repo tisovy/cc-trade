@@ -64,16 +64,16 @@ false-positive margins below are the worst case rather than a typical one.
 
 ## 4. What The Operator Is Told
 
-- [ ] 4.1 State a margin call on the position rows it names, beside the liquidation price already drawn there.
-- [ ] 4.2 Let the statement stand while it is true and withdraw it when the exchange's own account update says the position no longer warrants it, rather than on a timer.
-- [ ] 4.3 Carry a leverage change from the stream to the surfaces that state leverage, without a read and without a flicker through an unknown value.
-- [ ] 4.4 Redact nothing that matters and record nothing that must not be recorded: these frames carry position sizes and wallet balances, and `desk-diagnostic-record` already forbids money values in the journal.
-- [ ] 4.5 Prove by test that a margin call appears on the named position and only on it, that it clears on the update that resolves it, and that a leverage change from the stream reaches the surfaces that state it.
+- [x] 4.1 State a margin call on the position rows it names, beside the liquidation price already drawn there — the desk's own reckoning of the edge in amber, the exchange raising its hand in the loss red the workspace already uses, so the two are not read as one number twice.
+- [x] 4.2 **The withdrawal rule had to be rewritten against what is knowable.** The proposal said the statement would be withdrawn "on the account update that shows the position no longer warrants it". There is no such account update: Binance sends `MARGIN_CALL` and sends nothing at all when the risk passes. What the desk can honestly withdraw on is the exchange's own account of the position — closed, smaller than when the warning came, or with more margin walled off behind it. Nothing else, and in particular not a timer: a warning that expires while the danger is still there is worse than one never made. Because it can outlive the danger, it carries the time the exchange sent it. The spec delta now says this instead of what the first draft assumed.
+- [x] 4.3 A leverage change from the stream already reaches every surface that states leverage: the backend broadcasts `futures_symbol_configs` and the renderer merges it per contract, which is the path a read already takes. No renderer change was needed, and none was made.
+- [x] 4.4 Nothing from these frames reaches the diagnostic record. The margin call is logged by contract name only — the frame carries position sizes, wallet balances and maintenance margins, and `desk-diagnostic-record` forbids money values.
+- [x] 4.5 Proved by test against `bf5d8c1` first. **Bites:** the dock marks only the position the exchange named, and the hook holds the call against its position until the position says otherwise — both fail pre-change with "Unable to find a label with the text of: BTCUSDT margin call". **Guard:** `marks nothing when the exchange has warned about nothing` passes pre-change. Five unit tests on the reader and the withdrawal rule sit alongside; their baseline is a module that does not exist yet, so they are coverage rather than findings.
 
 ## 5. Verification
 
-- [ ] 5.1 `OPENSPEC_TELEMETRY=0 openspec validate hear-the-exchange-out --strict` before and after.
-- [ ] 5.2 Full suite green, and every new test run against the pre-change tree first with the result recorded here — what passed there is a guard, not a finding, and is to be called one.
+- [x] 5.1 `OPENSPEC_TELEMETRY=0 openspec validate hear-the-exchange-out --strict` before and after.
+- [x] 5.2 Full suite green — 1853 tests, 110 files. Every new test was run against the tree before its own change first, and the readings are recorded in 1.7, 2.4, 3.8 and 4.5: **eleven bite, five are guards.**
 - [ ] 5.3 Add to `verify-the-desk-in-one-sitting` the checks only the operator can make: that an algorithmic order placed on the live account produces an `ALGO_UPDATE`, and that changing leverage from the phone moves the desk without a read.
 - [ ] 5.4 Leave `streamCannotReport: ['algoOrders']` in place until 5.3 answers. If it answers that the event arrives, propose its removal as its own change rather than folding it into this one.
 

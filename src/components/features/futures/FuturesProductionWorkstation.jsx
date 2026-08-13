@@ -446,6 +446,7 @@ export const FuturesProductionWorkstation = ({
       openOrders={executionState?.openOrders}
       accountResources={executionState?.accountResources}
       tickSizes={tickSizes}
+      marginCalls={executionState?.marginCalls}
       history={executionState?.history}
       onClosePosition={handlePositionClose}
       onCancelOrder={executionState?.cancelOrder}

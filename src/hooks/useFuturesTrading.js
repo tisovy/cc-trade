@@ -4,6 +4,10 @@ import {
   readFuturesPositionMarks,
 } from '../utils/futuresPositionMarks.js'
 import {
+  pruneFuturesMarginCalls,
+  readFuturesMarginCall,
+} from '../utils/futuresMarginCall.js'
+import {
   mergeFuturesPositionConfigs,
   readFuturesSymbolConfigs,
 } from '../utils/futuresSymbolConfig.js'
@@ -122,6 +126,10 @@ const createInitialState = ({ enabled, connection, historyStoreReady = false }) 
   // Leverage and margin mode, keyed by symbol: the two things the position read
   // stopped reporting. Held beside the snapshot for the same reason as the marks.
   symbolConfigs: {},
+  // Positions the exchange has itself warned about, keyed by contract and side.
+  // Distinct from the liquidation price drawn beside them, which is the desk's
+  // own reckoning rather than Binance raising its hand.
+  marginCalls: {},
   accountResources: createInitialAccountResources(),
   lastExecution: null,
   lastError: null,
@@ -307,6 +315,10 @@ const applyAccountEnvelope = (previous, payload) => {
     accountResources,
     balances,
     positions,
+    // The exchange's warning stands until the position it names says it should
+    // not: closed, smaller, or with more margin behind it. Nothing else takes it
+    // down, because nothing else is the exchange talking about that position.
+    marginCalls: pruneFuturesMarginCalls(previous.marginCalls, positions),
     openOrders: [...regularOrders, ...algoOrders]
       .filter(isOpenSnapshotOrder)
       .filter(order => !previous.settledOrders.has(orderIdentity(order)))
@@ -504,13 +516,26 @@ const useFuturesTrading = ({
           }))
         }
       }
+      if (payload.futures_margin_call) {
+        const marginCalls = readFuturesMarginCall(payload.futures_margin_call)
+        // Merged rather than replaced: the exchange sends a call for the
+        // positions at risk now, and says nothing about one it warned of a
+        // minute ago — an absence here is not an all-clear.
+        if (marginCalls !== null) {
+          setState(previous => ({
+            ...previous,
+            marginCalls: { ...previous.marginCalls, ...marginCalls },
+          }))
+        }
+      }
       if (payload.futures_execution_update) {
         const report = payload.futures_execution_update
-        // The stream never reports algorithmic orders, so a parent that fires
-        // would sit on the chart at its trigger price until the beat came
-        // round. It does not have to: the desk already holds the identity of
-        // the regular order that parent spawned, and this is that order's
-        // report. Matching the two is the whole of the exception — a report
+        // A parent that fires would sit on the chart at its trigger price until
+        // the beat came round. It does not have to: the desk already holds the
+        // identity of the regular order that parent spawned, and this is that
+        // order's report. The stream also carries `ALGO_UPDATE` for the parent
+        // itself, which the backend folds — this path stands on its own because
+        // it needs no event whose delivery to this account is unproven. Matching the two is the whole of the exception — a report
         // naming no listed parent still reads nothing.
         const parentIdentity = spawnedParentIdentity(
           spawnedParentsRef.current,
