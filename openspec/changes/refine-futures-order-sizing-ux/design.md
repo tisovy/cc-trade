@@ -57,6 +57,10 @@ derives a new whole-USDT notional and exact draft at the already staged price,
 then replaces only the staged size fields. It does not update the underlying
 ticket amount and does not call the command path.
 
+The confirmation's USDT size cell receives a dedicated presentation hook and
+bold weight. The selector is scoped to that value so `Price` and `Position`
+retain their existing visual hierarchy.
+
 Entry confirmation sizing uses the same confirmed available-USDT reference as
 the ticket. Exit confirmation sizing finds the live matching LONG or SHORT
 position and values its absolute quantity at the staged price. When no required

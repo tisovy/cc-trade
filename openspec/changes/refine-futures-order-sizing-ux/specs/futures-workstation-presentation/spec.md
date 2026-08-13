@@ -21,7 +21,9 @@ the current available-USDT sizing capacity. For an exit, one hundred percent
 SHALL represent the matching open position valued at the staged price. The
 confirmation slider SHALL update only the staged whole-USDT notional, exact
 exchange-quantized quantity, and projected position; it SHALL NOT submit an
-order until the operator activates `Send`.
+order until the operator activates `Send`. The confirmation's displayed USDT
+size SHALL use bold weight so the amount being approved remains visually
+prominent beside the compact slider.
 
 If the required confirmation sizing reference is unavailable, only that slider
 SHALL be disabled and the already staged order SHALL remain confirmable under
@@ -57,7 +59,7 @@ removal SHALL NOT remove any of those safety-critical messages.
 
 #### Scenario: Order reaches confirmation
 - **WHEN** an order action stages a valid draft
-- **THEN** the confirmation states the exact exchange-quantized quantity and presents a compact synchronized percentage slider even though the ticket summary omits its `Quantity` row
+- **THEN** the confirmation states the exact exchange-quantized quantity, renders its USDT size in bold, and presents a compact synchronized percentage slider even though the ticket summary omits its `Quantity` row
 
 #### Scenario: Operator resizes a staged entry
 - **WHEN** the operator moves an entry confirmation slider to `37.5%`

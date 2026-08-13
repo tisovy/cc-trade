@@ -1375,6 +1375,10 @@
   padding: 2px 1px 0;
 }
 
+.futures-order-confirm-notional {
+  font-weight: 800;
+}
+
 /* How old the price is, stated where it is acted on. Read at the weight of a
    reading rather than a warning: the desk is not objecting to the order, it is
    telling the operator what the number behind it is. */

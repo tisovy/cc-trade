@@ -80,7 +80,10 @@ export const FuturesOrderConfirmation = ({
         <div><dt>Price</dt><dd>{confirmation.price}</dd></div>
         <div>
           <dt>Size</dt>
-          <dd title={confirmation.quantity ? `${confirmation.quantity} contracts` : undefined}>
+          <dd
+            className="futures-order-confirm-notional"
+            title={confirmation.quantity ? `${confirmation.quantity} contracts` : undefined}
+          >
             {confirmation.notionalUsdt ? `${confirmation.notionalUsdt} USDT` : '—'}
           </dd>
         </div>

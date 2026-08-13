@@ -555,7 +555,7 @@ describe('FuturesTradingTicket', () => {
     expect(slider).toHaveValue('25')
 
     fireEvent.change(slider, { target: { value: '37.5' } })
-    expect(within(panel).getByText('375 USDT')).toBeInTheDocument()
+    expect(within(panel).getByText('375 USDT')).toHaveClass('futures-order-confirm-notional')
     expect(within(panel).getByTitle('0.006 contracts')).toBeInTheDocument()
     expect(state.placeOrder).not.toHaveBeenCalled()
 
