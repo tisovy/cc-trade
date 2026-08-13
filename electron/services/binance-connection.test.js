@@ -891,6 +891,120 @@ describe('setupBinanceConnection user-data orchestration', () => {
         return loads;
     };
 
+    // The desk assumed the authenticated stream said nothing about algorithmic
+    // orders and read them on a thirty-second beat because of it. Binance's own
+    // page for the event says it is pushed when an algo is created or its status
+    // changes, and `ai` is the regular order the algo spawned — the identity the
+    // read goes and asks for.
+    it('applies an algo update from the stream without reading the algo list', async () => {
+        const loads = futuresAccountLoads();
+        loads.algoOrders.mockResolvedValue({
+            futures_algo_orders: [{
+                orderKind: 'ALGO',
+                orderId: 77,
+                algoId: 77,
+                symbol: 'TUTUSDT',
+                side: 'SELL',
+                status: 'NEW',
+                triggerPrice: '9',
+                actualOrderId: '',
+            }],
+        });
+        await startFuturesDesk();
+        const socket = moduleMocks.futuresUserDataSockets[0];
+        socket.handlers.open();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+        const algoOrders = () => moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.type === 'futures_account_state')
+            .at(-1).resources.algoOrders.data;
+        expect(algoOrders().map(order => order.status)).toEqual(['NEW']);
+        const reads = loads.algoOrders.mock.calls.length;
+
+        socket.handlers.message(JSON.stringify({
+            e: 'ALGO_UPDATE',
+            E: 2_000,
+            o: { s: 'TUTUSDT', aid: 77, X: 'TRIGGERED', ai: 4242, tp: '9' },
+        }));
+        await flushMicrotasks();
+        expect(algoOrders()).toMatchObject([{ status: 'TRIGGERED', actualOrderId: 4242 }]);
+
+        // And the exchange says it is finished.
+        socket.handlers.message(JSON.stringify({
+            e: 'ALGO_UPDATE',
+            E: 3_000,
+            o: { s: 'TUTUSDT', aid: 77, X: 'FINISHED', ai: 4242 },
+        }));
+        await flushMicrotasks();
+
+        expect(algoOrders()).toEqual([]);
+        expect(loads.algoOrders).toHaveBeenCalledTimes(reads);
+    });
+
+    // A liquidation price the desk draws is the desk's own reckoning. This is
+    // the exchange raising its hand, and the two must not read the same.
+    it('states a margin call the exchange sent, naming the position it is about', async () => {
+        futuresAccountLoads();
+        await startFuturesDesk();
+        const socket = moduleMocks.futuresUserDataSockets[0];
+        socket.handlers.open();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+
+        socket.handlers.message(JSON.stringify({
+            e: 'MARGIN_CALL',
+            E: 4_000,
+            cw: '3.16812045',
+            p: [{
+                s: 'TUTUSDT',
+                ps: 'LONG',
+                pa: '1.327',
+                mt: 'crossed',
+                iw: '0',
+                mp: '187.17127',
+                up: '-1.166074',
+                mm: '1.614445',
+            }],
+        }));
+        await flushMicrotasks();
+
+        const [call] = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.futures_margin_call);
+        expect(call.futures_margin_call.positions.map(position => position.symbol))
+            .toEqual(['TUTUSDT']);
+        expect(call.futures_margin_call.positions[0].maintenanceMargin).toBe('1.614445');
+    });
+
+    // The one ending no read explains: at the next reconciliation the order is
+    // simply gone, and these words are the only reason there will ever be.
+    it('states the exchange reason a triggered conditional order was refused', async () => {
+        futuresAccountLoads();
+        await startFuturesDesk();
+        const socket = moduleMocks.futuresUserDataSockets[0];
+        socket.handlers.open();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+
+        socket.handlers.message(JSON.stringify({
+            e: 'CONDITIONAL_ORDER_TRIGGER_REJECT',
+            E: 5_000,
+            T: 5_010,
+            or: { s: 'TUTUSDT', i: 155618472834, r: 'Margin is insufficient.' },
+        }));
+        await flushMicrotasks();
+
+        const [refusal] = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.futures_conditional_trigger_reject);
+        expect(refusal.futures_conditional_trigger_reject).toEqual({
+            symbol: 'TUTUSDT',
+            orderId: 155618472834,
+            reason: 'Margin is insufficient.',
+        });
+    });
+
     const startFuturesDesk = async () => {
         setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
         moduleMocks.websocketServerHandlers.request({
@@ -3961,6 +4075,77 @@ describe('setupBinanceConnection user-data orchestration', () => {
             maxLeverage: 125,
             marginType: 'CROSSED',
         });
+    });
+
+    // A leverage set in Binance's own app is announced on the authenticated
+    // stream. The desk held what it last read until the hold expired, and stated
+    // a multiple the account was no longer carried at.
+    it('takes a leverage set elsewhere from the stream instead of re-reading it', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        await runFuturesCommand({
+            action: 'account.symbolConfig',
+            clientOrderId: 'config-1',
+            symbol: 'BTCUSDT',
+        });
+        const reads = moduleMocks.futuresAdapter.getSymbolConfig.mock.calls.length;
+        const socket = moduleMocks.futuresUserDataSockets[0];
+        socket.handlers.open();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+
+        socket.handlers.message(JSON.stringify({
+            e: 'ACCOUNT_CONFIG_UPDATE',
+            E: 1611646737479,
+            T: 1611646737476,
+            ac: { s: 'BTCUSDT', l: 25 },
+        }));
+        await flushMicrotasks();
+
+        const stated = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.futures_symbol_configs?.BTCUSDT)
+            .at(-1).futures_symbol_configs.BTCUSDT;
+        // The ceiling and the margin mode are what the read said; the frame
+        // carries neither, and inventing them is how a desk states what nobody
+        // told it.
+        expect(stated).toMatchObject({
+            symbol: 'BTCUSDT',
+            leverage: 25,
+            maxLeverage: 125,
+            marginType: 'CROSSED',
+        });
+        expect(moduleMocks.futuresAdapter.getSymbolConfig).toHaveBeenCalledTimes(reads);
+    });
+
+    // A contract the desk holds nothing for gets nothing invented for it.
+    it('does not invent a contract configuration from a leverage frame alone', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+        const socket = moduleMocks.futuresUserDataSockets[0];
+        socket.handlers.open();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+
+        socket.handlers.message(JSON.stringify({
+            e: 'ACCOUNT_CONFIG_UPDATE',
+            ac: { s: 'NEVERREADUSDT', l: 40 },
+        }));
+        await flushMicrotasks();
+
+        expect(moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.futures_symbol_configs?.NEVERREADUSDT)).toEqual([]);
     });
 
     // A position's contract configuration was re-read on every account refresh —

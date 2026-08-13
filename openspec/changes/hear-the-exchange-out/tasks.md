@@ -50,13 +50,17 @@ false-positive margins below are the worst case rather than a typical one.
     - `ALGO_UPDATE` — `o.aid`, `o.X` status, `o.tp` trigger price, `o.rm` failure reason, `o.ia` activation, and `o.ai`, the id of the regular order the algo spawned.
     - `CONDITIONAL_ORDER_TRIGGER_REJECT` — `or.s`/`or.i`/`or.r`, the last being the refusal in the exchange's own words.
     - `STRATEGY_UPDATE`, `GRID_UPDATE` (deprecated), `TRADE_LITE` — for strategies this desk does not run, and a thinner copy of a frame it already folds.
-- [ ] 3.2 Normalize `MARGIN_CALL` into the positions it names and what the exchange says stands behind them, and carry that the exchange said it — not that the desk computed it.
-- [ ] 3.3 Normalize `ACCOUNT_CONFIG_UPDATE` and apply the leverage it carries to the held contract configuration, so a change made on the phone reaches the desk on the frame that announced it rather than on the next read. Write beside it that margin mode is not in this frame and where it does come from.
-- [ ] 3.4 Normalize `ALGO_UPDATE` and fold it into the listed algorithmic orders, leaving the thirty-second beat and the post-command read exactly as they are.
-- [ ] 3.5 Normalize `CONDITIONAL_ORDER_TRIGGER_REJECT` and put the exchange's reason in front of the operator, on the path `name-the-refusal-the-exchange-gave` already built for a refusal that has words of its own.
-- [ ] 3.6 Answer `TRADE_LITE`, `STRATEGY_UPDATE` and `GRID_UPDATE` under their own names with a written reason for ignoring each, so the next reader is not left to infer a decision from an absence.
-- [ ] 3.7 Keep the fold's shape: an event the desk cannot use still answers `null`, and no event added here reads the account back over REST to learn what it was just handed.
-- [ ] 3.8 Prove by test that each of the seven is answered as intended and that an unknown event still answers `null`. State plainly in this file that these are guards on handling and prove nothing about delivery — a synthetic frame fed to the normalizer says only that the desk would cope if the frame arrived.
+- [x] 3.2 Normalize `MARGIN_CALL` into the positions it names and what the exchange says stands behind them, and carry that the exchange said it — not that the desk computed it.
+- [x] 3.3 Normalize `ACCOUNT_CONFIG_UPDATE` and apply the leverage it carries to the held contract configuration, so a change made on the phone reaches the desk on the frame that announced it rather than on the next read. Write beside it that margin mode is not in this frame and where it does come from.
+- [x] 3.4 Normalize `ALGO_UPDATE` and fold it into the listed algorithmic orders, leaving the thirty-second beat and the post-command read exactly as they are.
+- [x] 3.5 Normalize `CONDITIONAL_ORDER_TRIGGER_REJECT` and put the exchange's reason in front of the operator, on the path `name-the-refusal-the-exchange-gave` already built for a refusal that has words of its own.
+- [x] 3.6 Answer `TRADE_LITE`, `STRATEGY_UPDATE` and `GRID_UPDATE` under their own names with a written reason for ignoring each, so the next reader is not left to infer a decision from an absence.
+- [x] 3.7 Keep the fold's shape: an event the desk cannot use still answers `null`, and no event added here reads the account back over REST to learn what it was just handed.
+- [x] 3.8 Proved by test at both levels, each run against the tree before the change first.
+    - Against `ae4196b` (normalizers absent), four of five adapter tests fail with `expected null to match object`: margin call, account configuration, algo update, trigger reject. The fifth asserts the ignore registry and is a **guard**.
+    - Against `9fd2673` (normalizers present, nothing wired), four of five connection tests fail: the algo list does not move, the stated leverage stays at what was read, and neither the margin call nor the refusal reaches the renderer at all. `does not invent a contract configuration from a leverage frame alone` passes there and is a **guard**.
+    - Three unit tests on `foldFuturesAlgoUpdate` cover what the wiring tests do not reach: an algo the desk has not listed, a frame before the first read, and a frame that states less than the read did. Their baseline is an export that does not exist yet, so they are named as coverage rather than as findings.
+    - **All of this proves handling, and none of it proves delivery.** Every frame here was written by hand from Binance's documentation and fed to the desk's own code. Whether the exchange sends any of them to this account is 5.3's question, and until it answers, nothing is taken away.
 
 ## 4. What The Operator Is Told
 

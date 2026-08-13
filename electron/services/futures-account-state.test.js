@@ -6,6 +6,7 @@ import {
     FuturesStreamedOrderMemory,
     createFuturesAccountStateEnvelope,
     createInitialFuturesAccountResources,
+    foldFuturesAlgoUpdate,
     foldFuturesAccountUpdate,
     reconcileFuturesUnstatedBalanceRead,
     reconcileFuturesUnstatedPositionRead,
@@ -742,5 +743,57 @@ describe('which reason a pass answering two requests carries', () => {
     // gain the narrowing of a frame's read on the way.
     it('does not carry a narrowing reason onto a read that stated none', () => {
         expect(widenFuturesAccountReadReason('unstated', null)).toBeNull();
+    });
+
+    // The desk lists and cancels algorithmic orders but cannot place them, so an
+    // algo it has never listed was made elsewhere, and the read is what puts it
+    // on the desk whole rather than a single frame standing in for the set.
+    it('leaves an algo update for an order it has not listed to the beat', () => {
+        let resources = createInitialFuturesAccountResources();
+        resources = markFuturesResourceReady(
+            resources,
+            'algoOrders',
+            [{ orderKind: 'ALGO', algoId: 9, status: 'NEW' }],
+            40,
+        );
+
+        expect(foldFuturesAlgoUpdate(resources, { algoId: 11, status: 'TRIGGERED' }))
+            .toBe(resources);
+        expect(foldFuturesAlgoUpdate(resources, { algoId: null, status: 'TRIGGERED' }))
+            .toBe(resources);
+    });
+
+    // A list built from the one frame that happened to arrive would present a
+    // one-order account as the whole of it.
+    it('states nothing about algos before the first read of them', () => {
+        const resources = createInitialFuturesAccountResources();
+
+        expect(foldFuturesAlgoUpdate(resources, { algoId: 9, status: 'TRIGGERED' }))
+            .toBe(resources);
+    });
+
+    // The frame carries a status and, once it has fired, the order it spawned.
+    // It does not carry the trigger price the read gave, and what it does not
+    // state must not be un-known.
+    it('keeps what the read stated and an algo update does not', () => {
+        let resources = createInitialFuturesAccountResources();
+        resources = markFuturesResourceReady(
+            resources,
+            'algoOrders',
+            [{ orderKind: 'ALGO', algoId: 9, status: 'NEW', triggerPrice: '750', symbol: 'BNBUSDT' }],
+            40,
+        );
+
+        const folded = foldFuturesAlgoUpdate(resources, { algoId: 9, status: 'TRIGGERING' });
+
+        expect(folded.algoOrders.data).toEqual([{
+            orderKind: 'ALGO',
+            algoId: 9,
+            status: 'TRIGGERING',
+            triggerPrice: '750',
+            symbol: 'BNBUSDT',
+        }]);
+        // A frame that changes nothing changes nothing.
+        expect(foldFuturesAlgoUpdate(folded, { algoId: 9, status: 'TRIGGERING' })).toBe(folded);
     });
 });

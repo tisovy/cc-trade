@@ -471,6 +471,54 @@ export const foldFuturesWorkingOrder = (
         : rows.map(row => (futuresOrderIdentity(row) === identity ? report : row)));
 };
 
+// The statuses that leave an algorithmic order on the desk. Everything else —
+// `CANCELED`, `FINISHED`, `REJECTED`, `EXPIRED` — is the exchange saying it is
+// gone, and Binance names all seven on the event's own page.
+const FUTURES_WORKING_ALGO_STATUSES = Object.freeze(new Set(['NEW', 'TRIGGERING', 'TRIGGERED']));
+
+/**
+ * Apply what an `ALGO_UPDATE` states to the listed algorithmic orders.
+ *
+ * The desk lists and cancels algorithmic orders but cannot place them, so it
+ * reads them on a thirty-second beat. This is the exchange stating the same
+ * thing as it happens, and the beat stays exactly where it is: an algo the desk
+ * has not listed is left to it, because one appearing out of nowhere was made
+ * elsewhere and the read is what puts it on the desk whole.
+ */
+export const foldFuturesAlgoUpdate = (resources, update, { now = Date.now() } = {}) => {
+    const resource = resources?.algoOrders;
+    // Nothing has been read yet, so there is no list for this to be part of.
+    if (!resource || resource.lastSuccessfulAt === null) return resources;
+    const algoId = update?.algoId;
+    if (algoId === null || algoId === undefined || algoId === '') return resources;
+    const rows = Array.isArray(resource.data) ? resource.data : [];
+    const index = rows.findIndex(row => String(row?.algoId ?? '') === String(algoId));
+    if (index === -1) return resources;
+    const withRows = next => replaceResource(resources, 'algoOrders', {
+        ...resource,
+        data: Object.freeze(next),
+        updatedAt: now,
+    });
+    if (!FUTURES_WORKING_ALGO_STATUSES.has(String(update?.status ?? ''))) {
+        return withRows(rows.filter((_, position) => position !== index));
+    }
+    const held = rows[index];
+    // Only what the frame states. A field the frame does not carry does not
+    // un-know what the read did.
+    const folded = Object.freeze({
+        ...held,
+        status: update.status,
+        ...(update.actualOrderId === undefined ? {} : { actualOrderId: update.actualOrderId }),
+        ...(update.actualPrice === undefined ? {} : { actualPrice: update.actualPrice }),
+        ...(update.triggerPrice === undefined ? {} : { triggerPrice: update.triggerPrice }),
+    });
+    if (held.status === folded.status
+        && held.actualOrderId === folded.actualOrderId
+        && held.actualPrice === folded.actualPrice
+        && held.triggerPrice === folded.triggerPrice) return resources;
+    return withRows(rows.map((row, position) => (position === index ? folded : row)));
+};
+
 // Where a position is held: one contract may carry two of them on a hedged
 // account, and folding a LONG onto a SHORT would state the wrong exposure.
 const futuresPositionKey = position => (

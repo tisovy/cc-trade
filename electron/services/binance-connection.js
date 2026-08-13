@@ -69,6 +69,7 @@ import {
     createFuturesAccountStateEnvelope,
     createInitialFuturesAccountResources,
     foldFuturesAccountUpdate,
+    foldFuturesAlgoUpdate,
     foldFuturesWorkingOrder,
     markFuturesOrderResourcesStale,
     markFuturesResourceFailed,
@@ -1065,7 +1066,10 @@ export function setupBinanceConnection({
     const futuresSymbolConfigs = new Map();
     // When each of them was read. Leverage and margin mode change when somebody
     // sets them — this desk, which reads them straight back, or the operator in
-    // Binance's own app, which no stream reports. Re-reading every position's
+    // Binance's own app. A leverage set elsewhere is announced on the
+    // authenticated stream as `ACCOUNT_CONFIG_UPDATE` and folded in below; a
+    // margin mode set elsewhere is announced by nothing at all, and only this
+    // read will find it. Re-reading every position's
     // contract on every automatic refresh spent up to 40 weight of an
     // 800-weight minute re-asking a question whose answer changes a few times a
     // day. What is held is reused until it is old enough that a change made
@@ -1082,6 +1086,25 @@ export function setupBinanceConnection({
     const broadcastFuturesAccountState = () => {
         // Versioned renderer contract: futures_account_state.
         broadcastToRenderers(createFuturesAccountStateEnvelope(futuresAccountResources));
+    };
+
+    // The exchange announces a leverage change on the authenticated stream, so
+    // one made in Binance's own app does not have to wait for the hold below to
+    // expire. Only a contract the desk already holds a configuration for is
+    // updated: the frame carries a leverage and nothing else, and a row invented
+    // from it would state a margin mode and a ceiling nobody read.
+    const applyFuturesLeverageFromStream = ({ symbol = null, leverage = null } = {}) => {
+        if (symbol === null || leverage === null) return;
+        const key = String(symbol).toUpperCase();
+        const held = futuresSymbolConfigs.get(key) ?? null;
+        if (held === null) return;
+        // The desk's own leverage change is echoed back here. Nothing moved, but
+        // the exchange has just confirmed what is held, so the hold restarts.
+        futuresSymbolConfigReadAt.set(key, Date.now());
+        if (held.leverage === leverage) return;
+        const entry = { ...held, leverage };
+        futuresSymbolConfigs.set(key, entry);
+        broadcastFuturesSymbolConfigs([entry]);
     };
 
     // Sent per contract rather than as one map: the reads arrive one symbol at a
@@ -1715,6 +1738,39 @@ export function setupBinanceConnection({
                         }
                     }
                     scheduleFuturesUnstatedRead(unstated);
+                }
+                if (streamEvent.type === 'marginCall') {
+                    // The exchange raising its hand, not the desk's own
+                    // reckoning of a liquidation price. Logged by contract only:
+                    // the frame carries position sizes and wallet balances, and
+                    // the record is forbidden money values.
+                    logger.warn(`[futures-stream] margin call: ${
+                        streamEvent.marginCall.positions.map(position => position.symbol).join(', ')
+                    }`);
+                    broadcastToRenderers(streamEvent.rendererPayload);
+                }
+                if (streamEvent.type === 'conditionalTriggerReject') {
+                    // A stop that met its trigger and was then refused. No read
+                    // explains this one: at the next reconciliation the order is
+                    // simply gone, and the words here are the only reason there
+                    // will ever be.
+                    logger.warn(`[futures-stream] trigger refused ${
+                        streamEvent.triggerReject.symbol
+                    }: ${streamEvent.triggerReject.reason ?? 'no reason given'}`);
+                    broadcastToRenderers(streamEvent.rendererPayload);
+                }
+                if (streamEvent.type === 'accountConfigUpdate') {
+                    applyFuturesLeverageFromStream(streamEvent.accountConfigUpdate);
+                }
+                if (streamEvent.type === 'algoUpdate') {
+                    const folded = foldFuturesAlgoUpdate(
+                        futuresAccountResources,
+                        streamEvent.algoUpdate,
+                    );
+                    if (folded !== futuresAccountResources) {
+                        futuresAccountResources = folded;
+                        broadcastFuturesAccountState();
+                    }
                 }
                 if (streamEvent.type === 'listenKeyExpired') {
                     const error = new Error('Futures listen key expired');
