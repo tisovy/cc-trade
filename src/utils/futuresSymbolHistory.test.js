@@ -4,6 +4,7 @@ import {
   orderFuturesContracts,
   readFuturesSymbolHistory,
   rememberFuturesSymbol,
+  removeFuturesRecentSymbol,
   searchFuturesSymbols,
   toggleFuturesFavorite,
   writeFuturesSymbolHistory,
@@ -55,6 +56,32 @@ describe('futures symbol history', () => {
     expect(withFavorite.favorites).toEqual(['ETHUSDT'])
     expect(withFavorite.recent).toEqual(['ETHUSDT'])
     expect(toggleFuturesFavorite(withFavorite, 'ETHUSDT').favorites).toEqual([])
+  })
+
+  it('removes persisted recency without disturbing favorites and falls back safely', () => {
+    const storage = createStorage()
+    const history = {
+      recent: ['BTCUSDT', 'ETHUSDT', 'SOLUSDT'],
+      favorites: ['ETHUSDT'],
+      lastSymbol: 'BTCUSDT',
+    }
+    const withoutEth = removeFuturesRecentSymbol(history, 'ETHUSDT')
+    expect(withoutEth).toEqual({
+      recent: ['BTCUSDT', 'SOLUSDT'],
+      favorites: ['ETHUSDT'],
+      lastSymbol: 'BTCUSDT',
+    })
+
+    const withoutLast = removeFuturesRecentSymbol(withoutEth, 'BTCUSDT')
+    expect(withoutLast).toEqual({
+      recent: ['SOLUSDT'],
+      favorites: ['ETHUSDT'],
+      lastSymbol: 'SOLUSDT',
+    })
+    writeFuturesSymbolHistory(withoutLast, storage)
+    expect(readFuturesSymbolHistory(storage)).toEqual(withoutLast)
+    expect(removeFuturesRecentSymbol(withoutLast, 'AAVEUSDT')).toBe(withoutLast)
+    expect(removeFuturesRecentSymbol(withoutLast, 'not a symbol')).toBe(withoutLast)
   })
 
   it('orders contracts by recency, then favourites, then alphabetically', () => {

@@ -1103,7 +1103,7 @@ const productionExecutionState = Object.freeze({
 })
 
 describe('instrument recency and interface scale', () => {
-  it('renders recent contracts as a distinct wrapping pill group', () => {
+  it('renders recent contracts as a distinct three-column pill group', () => {
     const { container } = renderView({
       selectedSymbol: 'BTCUSDT',
       symbolHistory: { recent: ['ETHUSDT', 'BTCUSDT'], favorites: [] },
@@ -1125,10 +1125,33 @@ describe('instrument recency and interface scale', () => {
       /\.futures-workstation-recent-contracts\s*\{(?<declarations>[^}]*)\}/,
     )?.groups?.declarations
 
+    expect(recentRule).toContain('display: grid;')
+    expect(recentRule).toContain('grid-template-columns: repeat(3, minmax(0, 1fr));')
     expect(recentRule).toContain('flex: 0 1 auto;')
     expect(recentRule).toContain('min-height: 0;')
     expect(recentRule).toContain('overflow-y: auto;')
     expect(recentRule).not.toMatch(/max-height\s*:/)
+  })
+
+  it('constrains a long recent symbol while disclosing its full value', () => {
+    const longSymbol = 'VERYLONGTOKENUSDT'
+    renderView({
+      symbolHistory: { recent: [longSymbol, 'BTCUSDT'], favorites: [] },
+    })
+    const recent = screen.getByRole('list', { name: 'Recent contracts' })
+    expect(within(recent).getByRole('button', { name: longSymbol }))
+      .toHaveAttribute('title', `${longSymbol} catalogue loading`)
+
+    const stylesheet = readFileSync(
+      'src/components/features/futures/FuturesWorkstation.css',
+      'utf8',
+    )
+    const symbolRule = stylesheet.match(
+      /\.futures-workstation-recent-select strong\s*\{(?<declarations>[^}]*)\}/,
+    )?.groups?.declarations
+    expect(symbolRule).toContain('overflow: hidden;')
+    expect(symbolRule).toContain('text-overflow: ellipsis;')
+    expect(symbolRule).toContain('white-space: nowrap;')
   })
 
   it('reserves the desktop market rail at 65/35 without changing the mobile stack', () => {
@@ -1397,31 +1420,44 @@ describe('instrument recency and interface scale', () => {
     expect(screen.queryByText('Loading contracts…')).not.toBeInTheDocument()
   })
 
-  it('keeps recent selection and favorite as isolated accessible controls', () => {
-    const onToggleFavorite = vi.fn()
+  it('keeps recent selection and removal as isolated accessible controls', () => {
+    const onRemoveRecent = vi.fn()
     const { onSymbolChange } = renderView({
       symbolHistory: { recent: ['ETHUSDT', 'BTCUSDT'], favorites: ['BTCUSDT'] },
-      onToggleFavorite,
+      onRemoveRecent,
     })
     const recent = screen.getByRole('list', { name: 'Recent contracts' })
     const eth = within(recent).getByRole('button', { name: 'ETHUSDT' })
     const btc = within(recent).getByRole('button', { name: 'BTCUSDT' })
     expect(eth).toHaveAttribute('aria-pressed', 'false')
     expect(btc).toHaveAttribute('aria-pressed', 'true')
-    expect(within(recent).getByRole('button', { name: 'Remove BTCUSDT favorite' }))
-      .toHaveAttribute('aria-pressed', 'true')
+    const activeRemove = within(recent).getByRole('button', {
+      name: 'Cannot remove active BTCUSDT from recent contracts',
+    })
+    expect(activeRemove).toBeDisabled()
+    expect(activeRemove).toHaveAttribute(
+      'title',
+      'Select another contract before removing BTCUSDT',
+    )
+    expect(within(recent).queryByRole('button', { name: /favorite/i })).toBeNull()
 
-    fireEvent.click(within(recent).getByRole('button', { name: 'Add ETHUSDT favorite' }))
-    expect(onToggleFavorite).toHaveBeenCalledExactlyOnceWith('ETHUSDT')
+    fireEvent.click(within(recent).getByRole('button', {
+      name: 'Remove ETHUSDT from recent contracts',
+    }))
+    expect(onRemoveRecent).toHaveBeenCalledExactlyOnceWith('ETHUSDT')
     expect(onSymbolChange).not.toHaveBeenCalled()
+    fireEvent.click(activeRemove)
+    expect(onRemoveRecent).toHaveBeenCalledTimes(1)
 
     fireEvent.click(eth)
     expect(onSymbolChange).toHaveBeenCalledExactlyOnceWith('ETHUSDT')
   })
 
   it('yields recent pills to one deduplicated list while search is active', () => {
+    const onToggleFavorite = vi.fn()
     const { container, onSymbolChange } = renderView({
       symbolHistory: { recent: ['BTCUSDT'], favorites: [] },
+      onToggleFavorite,
     })
     expect(screen.getByRole('list', { name: 'Recent contracts' })).toBeInTheDocument()
     expect(container.querySelector('.futures-workstation-contract-list')).toBeNull()
@@ -1434,6 +1470,9 @@ describe('instrument recency and interface scale', () => {
     expect(within(results).getAllByRole('button', { name: /^BTCUSDT/ })).toHaveLength(1)
     const eth = within(results).getByRole('button', { name: /^ETHUSDT/ })
     expect(eth).toHaveTextContent('PERPETUAL')
+    fireEvent.click(within(results).getByRole('button', { name: 'Add ETHUSDT favorite' }))
+    expect(onToggleFavorite).toHaveBeenCalledExactlyOnceWith('ETHUSDT')
+    expect(onSymbolChange).not.toHaveBeenCalled()
     fireEvent.click(eth)
     expect(onSymbolChange).toHaveBeenCalledExactlyOnceWith('ETHUSDT')
 
@@ -1944,7 +1983,7 @@ describe('production workstation container', () => {
   // the recency list on mount, floats the contract that is picked to its front, and
   // writes it through, so a restart opens on the contracts the operator works with
   // even before the catalogue arrives.
-  it('carries the recent contracts across a restart', () => {
+  it('carries recent contracts and explicit cleanup across a restart', () => {
     localStorage.setItem('cc-trade:futures-symbols:v1', JSON.stringify({
       recent: ['BICOUSDT', 'BEATUSDT'],
       favorites: [],
@@ -1967,10 +2006,16 @@ describe('production workstation container', () => {
     expect(JSON.parse(localStorage.getItem('cc-trade:futures-symbols:v1')))
       .toMatchObject({ recent: ['BEATUSDT', 'BICOUSDT'], lastSymbol: 'BEATUSDT' })
 
+    fireEvent.click(screen.getByRole('button', {
+      name: 'Remove BICOUSDT from recent contracts',
+    }))
+    expect(JSON.parse(localStorage.getItem('cc-trade:futures-symbols:v1')))
+      .toMatchObject({ recent: ['BEATUSDT'], favorites: [], lastSymbol: 'BEATUSDT' })
+
     first.unmount()
     render(workstation())
     expect(listed().map(button => button.textContent))
-      .toEqual(['BEATUSDT', 'BICOUSDT'])
+      .toEqual(['BEATUSDT'])
   })
 
   // Spot parity: the pair changes more often than anything else on the desk, and

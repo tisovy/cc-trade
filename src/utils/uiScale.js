@@ -3,7 +3,7 @@
 // it to their display without touching every stylesheet.
 
 export const UI_SCALE_STORAGE_KEY = 'cc-trade:ui-scale:v1'
-export const UI_SCALE_MIN = 0.85
+export const UI_SCALE_MIN = 0.7
 export const UI_SCALE_MAX = 1.6
 export const UI_SCALE_STEP = 0.05
 export const UI_SCALE_DEFAULT = 1

@@ -11,6 +11,7 @@ import {
 
 describe('ui scale', () => {
   it('clamps to a legible range and falls back to the default', () => {
+    expect(UI_SCALE_MIN).toBe(0.7)
     expect(clampUiScale(5)).toBe(UI_SCALE_MAX)
     expect(clampUiScale(0.1)).toBe(UI_SCALE_MIN)
     expect(clampUiScale('nope')).toBe(UI_SCALE_DEFAULT)
@@ -20,6 +21,8 @@ describe('ui scale', () => {
   it('steps by a fixed increment without drifting past the bounds', () => {
     expect(stepUiScale(1, 1)).toBe(1.05)
     expect(stepUiScale(1, -1)).toBe(0.95)
+    expect(stepUiScale(0.75, -1)).toBe(0.7)
+    expect(stepUiScale(0.7, -1)).toBe(0.7)
     expect(stepUiScale(UI_SCALE_MAX, 1)).toBe(UI_SCALE_MAX)
     expect(stepUiScale(UI_SCALE_MIN, -1)).toBe(UI_SCALE_MIN)
   })

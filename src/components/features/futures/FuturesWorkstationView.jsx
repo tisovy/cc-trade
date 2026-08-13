@@ -136,6 +136,7 @@ export const FuturesWorkstationView = ({
   symbolHistory = EMPTY_SYMBOL_HISTORY,
   accountSynchronizing = false,
   uiScale = UI_SCALE_DEFAULT,
+  onRemoveRecent,
   onToggleFavorite,
   onUiScaleChange,
   onDraftPriceChange,
@@ -465,6 +466,11 @@ export const FuturesWorkstationView = ({
   const toggleFavorite = useCallback((symbol) => {
     onToggleFavorite?.(symbol)
   }, [onToggleFavorite])
+
+  const removeRecent = useCallback((symbol) => {
+    if (symbol === selectedSymbol) return
+    onRemoveRecent?.(symbol)
+  }, [onRemoveRecent, selectedSymbol])
 
   const addDisplayAlert = useCallback(() => {
     if (!selectedDraftPrice) return
@@ -864,12 +870,17 @@ export const FuturesWorkstationView = ({
                 </button>
                 <button
                   type="button"
-                  className="futures-workstation-recent-favorite"
-                  aria-label={`${favorites.has(contract.symbol) ? 'Remove' : 'Add'} ${contract.symbol} favorite`}
-                  aria-pressed={favorites.has(contract.symbol)}
-                  onClick={() => toggleFavorite(contract.symbol)}
+                  className="futures-workstation-recent-remove"
+                  aria-label={contract.symbol === selectedSymbol
+                    ? `Cannot remove active ${contract.symbol} from recent contracts`
+                    : `Remove ${contract.symbol} from recent contracts`}
+                  disabled={contract.symbol === selectedSymbol}
+                  title={contract.symbol === selectedSymbol
+                    ? `Select another contract before removing ${contract.symbol}`
+                    : `Remove ${contract.symbol} from recent contracts`}
+                  onClick={() => removeRecent(contract.symbol)}
                 >
-                  {favorites.has(contract.symbol) ? '★' : '☆'}
+                  ×
                 </button>
               </div>
             ))}

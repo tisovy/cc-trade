@@ -6,6 +6,7 @@ import { describeFuturesOrderIntent } from '../../../utils/futuresOrderPresentat
 import {
   readFuturesSymbolHistory,
   rememberFuturesSymbol,
+  removeFuturesRecentSymbol,
   searchFuturesSymbols,
   toggleFuturesFavorite,
   writeFuturesSymbolHistory,
@@ -143,6 +144,11 @@ export const FuturesProductionWorkstation = ({
   const handleToggleFavorite = useCallback((favoriteSymbol) => {
     setSymbolHistory(previous => toggleFuturesFavorite(previous, favoriteSymbol))
   }, [])
+
+  const handleRemoveRecent = useCallback((recentSymbol) => {
+    if (recentSymbol === symbol) return
+    setSymbolHistory(previous => removeFuturesRecentSymbol(previous, recentSymbol))
+  }, [symbol])
 
   // Every contract the catalogue knows, with the recency list in front of it so
   // the pairs worked with lately are offered before an empty query is even typed
@@ -440,6 +446,7 @@ export const FuturesProductionWorkstation = ({
         symbolHistory={symbolHistory}
         accountSynchronizing={accountSynchronizing}
         uiScale={uiScale}
+        onRemoveRecent={handleRemoveRecent}
         onToggleFavorite={handleToggleFavorite}
         onUiScaleChange={handleUiScaleChange}
         onDraftPriceChange={handleDraftPriceChange}

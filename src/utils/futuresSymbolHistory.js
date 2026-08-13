@@ -69,6 +69,20 @@ export const rememberFuturesSymbol = (history, symbol) => {
   })
 }
 
+export const removeFuturesRecentSymbol = (history, symbol) => {
+  const normalized = normalizeSymbol(symbol)
+  if (!normalized) return history
+  const recent = normalizeSymbolList(history?.recent, FUTURES_RECENT_SYMBOL_LIMIT)
+  if (!recent.includes(normalized)) return history
+  const nextRecent = recent.filter(entry => entry !== normalized)
+  const lastSymbol = normalizeSymbol(history?.lastSymbol)
+  return Object.freeze({
+    recent: nextRecent,
+    favorites: normalizeSymbolList(history?.favorites, 32),
+    lastSymbol: lastSymbol === normalized ? nextRecent[0] ?? null : lastSymbol,
+  })
+}
+
 export const toggleFuturesFavorite = (history, symbol) => {
   const normalized = normalizeSymbol(symbol)
   if (!normalized) return history
