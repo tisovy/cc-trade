@@ -20,7 +20,27 @@ the next session does not pay for it twice.
   `/public/stream` — the paths the desk itself uses — deliver normally. Whatever
   listens on `127.0.0.1:1080` routes by path. A measurement harness that reaches
   for Binance's documented path will sit at zero frames and read as a stall that
-  is not there.
+  is not there. This is not new: `futures-mark-price-feed.js:33` records that the
+  unrouted market paths were decommissioned on 2026-04-23 and that "the handshake
+  still succeeds and the socket stays open, so nothing reports an error — it
+  simply never delivers a frame."
+
+- **Prove the private leg is delivering before any bound is set on it.** The
+  record already answers this without new code: `reason: 'stream'` is written by
+  exactly one call site, the futures user-data socket's `open` handler
+  (`binance-connection.js:1656`), so a `stream` line is "the private socket
+  opened". In `desk-2026-08-13-000.jsonl` the session that began 11:42:06 ran ~95
+  minutes with `{bootstrap: 1, refresh: 190}` and **no `stream` line at all**,
+  while earlier sessions the same day got theirs (1, 3 and 2 lines). 190 refresh
+  beats means orders rested for the whole of it and the desk was told nothing by
+  the stream. Across all three journal days there is also not one read with
+  reason `unstated`, which an execution report is supposed to schedule.
+
+  So a burst case that asserts "the execution is applied within N ms" can pass on
+  a bench while the leg it stands for delivers nothing at all in production. 4.2's
+  bound is worth only as much as the evidence that the leg is alive; 5.3 should
+  ask the operator for that evidence first, and the check is a record reading
+  rather than a terminal watch.
 
 Stale premise to resolve before doing 5.2: it asks for a baseline run "on master
 before any other change in this batch lands", and most of the batch has already
