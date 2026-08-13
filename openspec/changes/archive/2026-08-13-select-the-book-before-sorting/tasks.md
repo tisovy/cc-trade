@@ -47,8 +47,8 @@
 
 - [x] 8.1 Differentially compare the committed formatter with an independent exact-decimal full-sort oracle across randomized sizes, insertion orders, valid/invalid range modes, and retained-state immutability.
 - [x] 8.2 Repair the test oracle's intermediate decimal-string overflow and add a biting range-length-boundary regression after confirming production already satisfies the specified floor and ceiling behavior.
-- [ ] 8.3 Rebuild an owned staged tree on the current `master`, run focused/full verification, strict validation, diff audit, and GitNexus `detect_changes`, then commit the audit correction alone.
-- [ ] 8.4 Sync the verified delta spec into the main capability spec, archive the completed change, validate the archive result, and commit only the sync/archive paths.
+- [x] 8.3 Rebuild an owned staged tree on the current `master`, run focused/full verification, strict validation, diff audit, and GitNexus `detect_changes`, then commit the audit correction alone.
+- [x] 8.4 Sync the verified delta spec into the main capability spec, archive the completed change, validate the archive result, and commit only the sync/archive paths.
 
 ## Measurement Record
 
