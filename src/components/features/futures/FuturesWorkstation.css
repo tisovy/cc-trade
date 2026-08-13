@@ -398,6 +398,8 @@
 }
 
 .futures-workstation-recent-select {
+  display: flex;
+  align-items: center;
   min-width: 0;
   overflow: hidden;
   padding: 2px 1px 2px 4px;
@@ -406,10 +408,11 @@
 
 .futures-workstation-recent-select strong {
   display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-size: calc(var(--fx-ui-scale, 1) * 11px);
-  white-space: nowrap;
+  line-height: 1.05;
+  white-space: normal;
 }
 
 .futures-workstation-recent-remove {
@@ -678,18 +681,29 @@
 
 .futures-workstation-chart-toolbar {
   display: flex;
+  align-items: center;
   justify-content: space-between;
   gap: 8px;
+  min-width: 0;
   padding: 7px 8px;
   border-bottom: 1px solid rgba(126, 143, 166, 0.15);
-  overflow-x: auto;
+  overflow: hidden;
 }
 
 .futures-workstation-intervals,
 .futures-workstation-drawing-tools {
   display: flex;
   gap: 3px;
+  min-width: 0;
   white-space: nowrap;
+}
+
+.futures-workstation-intervals {
+  flex: 0 1 auto;
+}
+
+.futures-workstation-drawing-tools {
+  flex: 0 0 auto;
 }
 
 .futures-workstation-chart-toolbar button {
@@ -712,6 +726,21 @@
 .futures-workstation-chart-toolbar button:disabled {
   opacity: 0.35;
   cursor: default;
+}
+
+.futures-workstation-drawing-tools button {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 28px;
+  width: 28px;
+  height: 28px;
+  padding: 4px;
+}
+
+.futures-workstation-drawing-tools svg {
+  width: clamp(11px, calc(var(--fx-ui-scale, 1) * 15px), 18px);
+  height: clamp(11px, calc(var(--fx-ui-scale, 1) * 15px), 18px);
+  pointer-events: none;
 }
 
 .futures-workstation-chart-frame {
@@ -1244,11 +1273,6 @@
     gap: 8px;
   }
 
-  .futures-workstation-drawing-tools button {
-    max-width: 105px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
 }
 
 @media (max-width: 760px) {
@@ -1519,43 +1543,43 @@
   min-width: 0;
 }
 
-/* These are the two dense data lists the operator keeps under the pointer. The
-   target Electron renderer gets an exact six-pixel control; engines without
-   Chromium's scrollbar pseudo-elements fall back to their compact standard
-   control. Keeping the fallback gated avoids `scrollbar-width: thin`
-   overriding the exact Chromium dimensions. */
+/* Every deliberate local scroll owner uses the same native control. The target
+   Electron renderer gets an exact six-pixel scrollbar; engines without
+   Chromium's pseudo-elements fall back to their compact standard control.
+   Keeping the fallback gated avoids `scrollbar-width: thin` overriding the
+   exact Chromium dimensions. */
 @supports not selector(::-webkit-scrollbar) {
-  :is(.futures-workstation-trade-rows, .futures-workstation-dock-table) {
+  :is(.futures-workstation-recent-contracts, .futures-workstation-contract-list, .futures-production-execution-body, .futures-workstation-trade-rows, .futures-workstation-dock-table) {
     scrollbar-width: thin;
     scrollbar-color: rgba(126, 143, 166, 0.5) transparent;
   }
 }
 
-:is(.futures-workstation-trade-rows, .futures-workstation-dock-table)::-webkit-scrollbar {
+:is(.futures-workstation-recent-contracts, .futures-workstation-contract-list, .futures-production-execution-body, .futures-workstation-trade-rows, .futures-workstation-dock-table)::-webkit-scrollbar {
   width: 6px;
   height: 6px;
 }
 
-:is(.futures-workstation-trade-rows, .futures-workstation-dock-table)::-webkit-scrollbar-track {
+:is(.futures-workstation-recent-contracts, .futures-workstation-contract-list, .futures-production-execution-body, .futures-workstation-trade-rows, .futures-workstation-dock-table)::-webkit-scrollbar-track {
   background: transparent;
 }
 
-:is(.futures-workstation-trade-rows, .futures-workstation-dock-table)::-webkit-scrollbar-corner {
+:is(.futures-workstation-recent-contracts, .futures-workstation-contract-list, .futures-production-execution-body, .futures-workstation-trade-rows, .futures-workstation-dock-table)::-webkit-scrollbar-corner {
   background: transparent;
 }
 
-:is(.futures-workstation-trade-rows, .futures-workstation-dock-table)::-webkit-scrollbar-button {
+:is(.futures-workstation-recent-contracts, .futures-workstation-contract-list, .futures-production-execution-body, .futures-workstation-trade-rows, .futures-workstation-dock-table)::-webkit-scrollbar-button {
   display: none;
   width: 0;
   height: 0;
 }
 
-:is(.futures-workstation-trade-rows, .futures-workstation-dock-table)::-webkit-scrollbar-thumb {
+:is(.futures-workstation-recent-contracts, .futures-workstation-contract-list, .futures-production-execution-body, .futures-workstation-trade-rows, .futures-workstation-dock-table)::-webkit-scrollbar-thumb {
   border-radius: 999px;
   background: rgba(126, 143, 166, 0.5);
 }
 
-:is(.futures-workstation-trade-rows, .futures-workstation-dock-table)::-webkit-scrollbar-thumb:hover {
+:is(.futures-workstation-recent-contracts, .futures-workstation-contract-list, .futures-production-execution-body, .futures-workstation-trade-rows, .futures-workstation-dock-table)::-webkit-scrollbar-thumb:hover {
   background: rgba(126, 143, 166, 0.78);
 }
 

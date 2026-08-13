@@ -11,3 +11,8 @@
 - [x] 2.2 Update workstation React tests for three-up styling, inactive removal, active removal protection, long-symbol disclosure, and retained favorite management in search results.
 - [x] 2.3 Run the focused utility and workstation test suites, then run the repository's relevant quality checks and resolve regressions caused by this change.
 - [x] 2.4 Revalidate the OpenSpec change and run GitNexus change detection to confirm only the intended presentation, scale, and symbol-history flows are affected.
+
+## 3. Live-review follow-up
+
+- [x] 3.1 Replace recent-symbol ellipsis with full in-slot wrapping while preserving the three-column grid and separate remove target.
+- [x] 3.2 Update the focused presentation proof for visible full-symbol wrapping, rerun validation and tests, and record the live-review correction in the isolated stable commit.

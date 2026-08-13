@@ -528,12 +528,12 @@ describe('FuturesPortfolioDock', () => {
     }
   })
 
-  it('gives only the tape and dock tables complete compact scrollbar chrome', () => {
+  it('gives every deliberate workstation scroll owner compact chrome', () => {
     const stylesheet = readFileSync(
       'src/components/features/futures/FuturesWorkstation.css',
       'utf8',
     )
-    const owners = ':is(.futures-workstation-trade-rows, .futures-workstation-dock-table)'
+    const owners = ':is(.futures-workstation-recent-contracts, .futures-workstation-contract-list, .futures-production-execution-body, .futures-workstation-trade-rows, .futures-workstation-dock-table)'
     const declarationsFor = selector => {
       const ruleStart = stylesheet.indexOf(`${selector} {`)
       expect(ruleStart, `${selector} rule exists`).toBeGreaterThan(-1)

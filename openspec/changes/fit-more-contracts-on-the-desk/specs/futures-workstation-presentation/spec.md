@@ -30,7 +30,7 @@ contract rows or rows carrying a `recent` suffix. The group SHALL preserve
 most-recent-first order across an app restart, and each row SHALL hold three
 equal-width pill slots at the instrument rail's supported workstation width.
 Long symbols SHALL remain within their slot and expose their full value without
-changing the grid tracks.
+changing the grid tracks or replacing any visible characters with truncation.
 
 Each pill SHALL expose contract selection and removal as separate accessible
 controls and SHALL disclose which contract is selected. Removing an inactive
@@ -63,7 +63,7 @@ while otherwise usable rail space remains empty.
 
 #### Scenario: A long recent symbol is shown
 - **WHEN** a recent symbol is wider than its one-third rail slot
-- **THEN** it is visually truncated within that slot while its selection control still exposes the full symbol
+- **THEN** its full value wraps within that slot, the row grows as needed, and no character is hidden or replaced by an ellipsis
 
 #### Scenario: Search is empty
 - **WHEN** the search field has no query

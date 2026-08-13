@@ -17,8 +17,8 @@ already stable and do not need a migration.
 
 - Preserve the current five-point scale interaction while adding three smaller
   persisted values.
-- Make pill density deterministic at the workstation width and keep long symbols
-  operable.
+- Make pill density deterministic at the workstation width and keep every long
+  symbol visibly readable without shortening it.
 - Give recent-history removal one pure state transition and keep selection and
   favorite mutations independent.
 
@@ -69,13 +69,14 @@ because a cleanup action must not switch live trading context. Allowing selected
 removal without switching was rejected because startup restoration would either
 reinsert the contract or silently reopen on a different one.
 
-### Use a three-track grid and constrain content inside each track
+### Use a three-track grid and wrap complete symbols inside each track
 
 The recent group will use `grid-template-columns: repeat(3, minmax(0, 1fr))`.
 Each pill and selection button will have a zero minimum width; the symbol will
-ellipsis rather than expanding its track, with the full symbol retained in the
-button's accessible name and title. The remove target will use a narrow fixed
-track while preserving a practical minimum pill height.
+wrap within its fixed track rather than expand the track or lose characters.
+The full symbol will also remain in the button's accessible name and title. The
+remove target will use a narrow fixed track while the grid row grows to the
+tallest wrapped pill in that row.
 
 Flex wrapping with calculated widths was considered, but borders, gaps, font
 rounding, and long symbols can still cause a nominal third item to wrap. Explicit
@@ -85,8 +86,9 @@ grid tracks make three-per-row an invariant.
 
 - [70% can be difficult to read on some displays] → Keep the choice opt-in,
   retain a one-action 100% reset, and do not change existing stored values.
-- [Three-up pills reduce horizontal text space] → Ellipsize only visually and
-  retain the complete symbol in title/accessibility text.
+- [Three-up pills reduce horizontal text space] → Wrap long symbols inside the
+  fixed slot and let only the affected grid row grow, retaining every character
+  on screen as well as in title/accessibility text.
 - [A narrower secondary action can become hard to target] → Keep the pill row at
   a practical minimum height, test the control independently, and use a visible
   `×` rather than an icon-font glyph.

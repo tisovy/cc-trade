@@ -991,20 +991,55 @@ export const FuturesWorkstationView = ({
             <button
               type="button"
               className={drawingMode ? 'is-selected' : ''}
+              aria-label="Horizontal drawing"
               aria-pressed={drawingMode}
+              title="Horizontal drawing"
               disabled={!chartPickable}
               onClick={() => setDrawingMode(previous => !previous)}
             >
-              Horizontal drawing
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true" focusable="false">
+                <path d="M3 12h18" />
+                <path d="M6 8v8M18 8v8" />
+              </svg>
             </button>
-            <button type="button" onClick={() => setDrawings(EMPTY_ROWS)} disabled={drawings.length === 0}>
-              Clear drawings
+            <button
+              type="button"
+              aria-label="Clear drawings"
+              title="Clear drawings"
+              onClick={() => setDrawings(EMPTY_ROWS)}
+              disabled={drawings.length === 0}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+                <path d="m4 15 8-8 5 5-6 6H7l-3-3Z" />
+                <path d="M11 18h9" />
+              </svg>
             </button>
-            <button type="button" onClick={addDisplayAlert} disabled={!selectedDraftPrice || !chartPickable}>
-              Add display alert
+            <button
+              type="button"
+              aria-label="Add display alert"
+              title="Add display alert"
+              onClick={addDisplayAlert}
+              disabled={!selectedDraftPrice || !chartPickable}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+                <path d="M17 10a5 5 0 0 0-10 0c0 5-2 6-2 8h14c0-2-2-3-2-8" />
+                <path d="M10 21h4" />
+                <path d="M18 3v5M15.5 5.5h5" />
+              </svg>
             </button>
-            <button type="button" onClick={() => setAlerts(EMPTY_ROWS)} disabled={alerts.length === 0}>
-              Clear alerts
+            <button
+              type="button"
+              aria-label="Clear alerts"
+              title="Clear alerts"
+              onClick={() => setAlerts(EMPTY_ROWS)}
+              disabled={alerts.length === 0}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" focusable="false">
+                <path d="M16.5 10.5c.3 4 2.5 5.5 2.5 7.5H7" />
+                <path d="M7 18c0-2 2-3 2-8 0-.8.2-1.6.5-2.3" />
+                <path d="M10 21h4" />
+                <path d="m4 4 16 16" />
+              </svg>
             </button>
           </div>
         </div>

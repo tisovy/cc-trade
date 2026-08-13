@@ -10,7 +10,8 @@ execution surfaces visible without making contract-history cleanup ambiguous.
 - Extend the persisted futures interface-scale control down to 70% in the
   existing five-percentage-point steps, while keeping 100% as the reset value.
 - Lay out recent-contract pills in a stable three-column grid at the supported
-  workstation width, with truncation and full-symbol disclosure for long names.
+  workstation width, keeping every symbol fully visible by wrapping long names
+  inside their own grid slot rather than shortening them.
 - Replace the favorite-star control inside recent pills with an explicit `×`
   action that removes an inactive contract from persisted recency without
   selecting it or changing its favorite state.

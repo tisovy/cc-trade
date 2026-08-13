@@ -435,6 +435,39 @@ describe('pure Futures workstation presentation', () => {
     expect(onIntervalChange).toHaveBeenCalledWith('5m')
   })
 
+  it('keeps chart tools compact without hiding their complete names', () => {
+    renderView()
+    const group = screen.getByRole('group', { name: 'Display-only chart tools' })
+    const actionNames = [
+      'Horizontal drawing',
+      'Clear drawings',
+      'Add display alert',
+      'Clear alerts',
+    ]
+
+    for (const name of actionNames) {
+      const action = within(group).getByRole('button', { name })
+      expect(action).toHaveAttribute('title', name)
+      expect(action.textContent).toBe('')
+      expect(action.querySelector('svg')).toHaveAttribute('aria-hidden', 'true')
+    }
+
+    const stylesheet = readFileSync(
+      'src/components/features/futures/FuturesWorkstation.css',
+      'utf8',
+    )
+    const toolbarRule = stylesheet.match(
+      /\.futures-workstation-chart-toolbar\s*\{(?<declarations>[^}]*)\}/,
+    )?.groups?.declarations
+    const actionRule = stylesheet.match(
+      /\.futures-workstation-drawing-tools button\s*\{(?<declarations>[^}]*)\}/,
+    )?.groups?.declarations
+    expect(toolbarRule).toContain('overflow: hidden;')
+    expect(toolbarRule).not.toMatch(/overflow-x\s*:\s*auto/)
+    expect(actionRule).toContain('width: 28px;')
+    expect(actionRule).toContain('height: 28px;')
+  })
+
   it('turns chart and book clicks into a shared limit-price draft', () => {
     const { onSymbolChange, onIntervalChange } = renderView()
     expect(screen.getByRole('button', { name: 'Add display alert' })).toBeDisabled()
@@ -1133,7 +1166,7 @@ describe('instrument recency and interface scale', () => {
     expect(recentRule).not.toMatch(/max-height\s*:/)
   })
 
-  it('constrains a long recent symbol while disclosing its full value', () => {
+  it('wraps every character of a long recent symbol inside its grid slot', () => {
     const longSymbol = 'VERYLONGTOKENUSDT'
     renderView({
       symbolHistory: { recent: [longSymbol, 'BTCUSDT'], favorites: [] },
@@ -1149,9 +1182,9 @@ describe('instrument recency and interface scale', () => {
     const symbolRule = stylesheet.match(
       /\.futures-workstation-recent-select strong\s*\{(?<declarations>[^}]*)\}/,
     )?.groups?.declarations
-    expect(symbolRule).toContain('overflow: hidden;')
-    expect(symbolRule).toContain('text-overflow: ellipsis;')
-    expect(symbolRule).toContain('white-space: nowrap;')
+    expect(symbolRule).toContain('overflow-wrap: anywhere;')
+    expect(symbolRule).toContain('white-space: normal;')
+    expect(symbolRule).not.toMatch(/text-overflow\s*:/)
   })
 
   it('reserves the desktop market rail at 65/35 without changing the mobile stack', () => {
