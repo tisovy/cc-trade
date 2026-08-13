@@ -349,11 +349,11 @@ describe('what one Spot print redraws', () => {
         expect(draw.redrawn('HistogramSeries')).toBe(0)
         expect(draw.written('CandlestickSeries')).toBe(1)
         expect(draw.written('HistogramSeries')).toBe(1)
-        // One line is the moving average, written as one point. The other is the
-        // RSI pane's own line, which computes over every bar and redraws whole —
-        // it is what §2 left, and it is stated rather than counted as nothing.
-        expect(draw.written('LineSeries')).toBe(1)
-        expect(draw.redrawn('LineSeries')).toBe(1)
+        // Two lines, one point each: the moving average and the RSI pane's own
+        // line. Neither is redrawn, which is the whole claim — a print costs one
+        // bar on every series the chart holds, not on three of the four.
+        expect(draw.written('LineSeries')).toBe(2)
+        expect(draw.redrawn('LineSeries')).toBe(0)
     })
 
     it('writes the one bar that opened, and redraws nothing', () => {
@@ -364,7 +364,8 @@ describe('what one Spot print redraws', () => {
         expect(draw.redrawn('HistogramSeries')).toBe(0)
         expect(draw.written('CandlestickSeries')).toBe(1)
         expect(draw.written('HistogramSeries')).toBe(1)
-        expect(draw.written('LineSeries')).toBe(1)
+        expect(draw.written('LineSeries')).toBe(2)
+        expect(draw.redrawn('LineSeries')).toBe(0)
     })
 
     // A bar settling behind the last one is the close of the candle just past —
@@ -407,5 +408,8 @@ describe('what one Spot print redraws', () => {
         expect(writesOf(mockSetData, 'CandlestickSeries')).toHaveLength(2)
         expect(writesOf(mockSetData, 'HistogramSeries')).toHaveLength(2)
         expect(writesOf(mockUpdate, 'CandlestickSeries')).toHaveLength(0)
+        // The RSI pane holds its own record of what it drew, and its own chart,
+        // so it has the same second mount to survive.
+        expect(writesOf(mockUpdate, 'LineSeries')).toHaveLength(0)
     })
 })

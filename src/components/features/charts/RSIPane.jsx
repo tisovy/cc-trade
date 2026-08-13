@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useCallback, useState, memo } from 'react';
 import { createChart, ColorType, LineSeries, CrosshairMode } from 'lightweight-charts';
-import { calculateRSI, RSI_CONFIG } from './chart-plugins/RSIIndicator';
+import { advanceRSI, calculateRSISeries, RSI_CONFIG } from './chart-plugins/RSIIndicator';
+import { planSpotSeriesDraw } from '../../../utils/spotChartHistory';
 import './RSIPane.css';
 
 /**
@@ -35,10 +36,10 @@ const RSIPane = memo(({
     const [isDragging, setIsDragging] = useState(false);
     const dragStartRef = useRef({ y: 0, height: 0 });
 
-    // Calculate RSI data
-    const rsiData = React.useMemo(() => {
-        return calculateRSI(data, period);
-    }, [data, period]);
+    // The bars this line is drawn from, and the state it ends on. Held rather
+    // than derived, because the whole point is not to walk the bars again: a
+    // print moves the last one and the line answers it with its last point.
+    const drawnRef = useRef({ rows: null, period: null, tail: null });
 
     // Initialize chart
     useEffect(() => {
@@ -105,6 +106,11 @@ const RSIPane = memo(({
             },
         });
         rsiSeriesRef.current = rsiSeries;
+        // This series has drawn nothing yet, whatever the last one drew. React
+        // mounts, tears down and mounts again in development, and a record of
+        // what was drawn that outlived its series would have the next print
+        // written onto an empty line.
+        drawnRef.current = { rows: null, period: null, tail: null };
 
         // Add level lines
         const levels = [
@@ -156,9 +162,36 @@ const RSIPane = memo(({
 
     // Update RSI data
     useEffect(() => {
-        if (!rsiSeriesRef.current || rsiData.length === 0) return;
-        rsiSeriesRef.current.setData(rsiData);
-    }, [rsiData]);
+        if (!rsiSeriesRef.current) return;
+        const drawn = drawnRef.current;
+        const plan = drawn.period === period
+            ? planSpotSeriesDraw(drawn.rows, data)
+            : 'full';
+        if (plan === 'none') return;
+
+        if (plan !== 'full') {
+            // Wilder's smoothing is recursive from the first bar, so the line's
+            // last point is a step from the state behind it rather than a
+            // function of the bars in view. Carried, that step is the same
+            // arithmetic the whole calculation does — and it is the whole
+            // calculation this saves, on every print.
+            const advanced = advanceRSI(drawn.tail, data, period, {
+                appended: plan === 'append',
+            });
+            if (advanced) {
+                rsiSeriesRef.current.update(advanced.point);
+                drawnRef.current = { rows: data, period, tail: advanced.tail };
+                return;
+            }
+            // No tail to step from — the line is short enough that its last
+            // point is its first. Falls through and is drawn whole.
+        }
+
+        const { points, tail } = calculateRSISeries(data, period);
+        if (points.length === 0) return;
+        rsiSeriesRef.current.setData(points);
+        drawnRef.current = { rows: data, period, tail };
+    }, [data, period]);
 
     // Sync time scale with parent chart
     useEffect(() => {

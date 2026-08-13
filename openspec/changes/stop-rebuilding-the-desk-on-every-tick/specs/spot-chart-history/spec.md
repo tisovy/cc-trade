@@ -35,8 +35,10 @@ change of selection SHALL each redraw the series whole: none of them is one bar'
 news, and the close of the candle just past — its true high, low and volume —
 reaches the chart through the same series a tick does.
 
-What one print still costs after this is the RSI pane, which computes over every
-bar and redraws its line whole. It is stated rather than claimed as removed.
+This holds for every series the chart draws, including the RSI line, whose
+smoothing is recursive from the first bar: it SHALL carry the state its last
+point steps from rather than walk the bars again, and the point it produces SHALL
+be the one a full calculation would have produced.
 
 #### Scenario: A print moves the newest candle
 - **WHEN** a trade updates the newest candle
