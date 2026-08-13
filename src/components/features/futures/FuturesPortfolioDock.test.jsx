@@ -66,6 +66,7 @@ describe('FuturesPortfolioDock', () => {
         positions={[{
           ...position,
           unrealizedPnl: '-450',
+          markUnrealizedPnl: '-300',
           valuationPrice: '60900',
           valuationEstimated: true,
         }]}
@@ -76,6 +77,9 @@ describe('FuturesPortfolioDock', () => {
     expect(pnl()).toHaveClass('is-estimated')
     expect(pnl().getAttribute('title')).toContain('last traded price')
     expect(pnl()).toHaveTextContent('−450.00')
+    // What it is an estimate of, exactly, without leaving the row: the number
+    // Binance itself is showing at the same moment.
+    expect(pnl().getAttribute('title')).toContain('mark −300.00 USDT')
     expect(screen.getByRole('table', { name: 'Open positions' })).toHaveTextContent('71000')
 
     rerender(

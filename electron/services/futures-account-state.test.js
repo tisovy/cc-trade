@@ -430,4 +430,19 @@ describe('what a read of the working orders is allowed to say', () => {
         expect(streamed.notedSince('A:1', 0)).toBe(false);
         expect(streamed.notedSince('C:3', 0)).toBe(true);
     });
+
+    // One order leaves by `drop`, all of them by `forget` — the same word the
+    // settled memory beside it uses for the same thing. Named apart because a
+    // `forget(identity)` here would have read like the sibling's reset and
+    // cleared nothing.
+    it('drops one order and forgets all of them', () => {
+        const streamed = new FuturesStreamedOrderMemory();
+        streamed.note('A:1', 1);
+        streamed.note('B:2', 2);
+        streamed.drop('A:1');
+        expect(streamed.notedSince('A:1', 0)).toBe(false);
+        expect(streamed.notedSince('B:2', 0)).toBe(true);
+        streamed.forget();
+        expect(streamed.entries.size).toBe(0);
+    });
 });

@@ -86,6 +86,10 @@ describe('mergeFuturesPositionMarks', () => {
       valuationEstimated: true,
     })
     expect(merged.liquidationPrice).toBe(position.liquidationPrice)
+    // And the mark's own arithmetic is kept beside the estimate: every margin
+    // reading is measured from it, and the reading states it as its confirmation.
+    // (0.03600 - 0.03140) × -446082 contracts.
+    expect(Number(merged.markUnrealizedPnl)).toBeCloseTo(-2051.98, 2)
   })
 
   it('lets a mark replace the estimate the print made', () => {

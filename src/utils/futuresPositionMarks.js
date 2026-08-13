@@ -69,6 +69,12 @@ export const mergeFuturesPositionMarks = (positions, marks) => {
       valuationPrice: estimated ? mark.lastPrice : mark.markPrice,
       valuationEstimated: estimated,
       unrealizedPnl: String((valuation - entryPrice) * quantity),
+      // The same figure on the mark, kept whatever the reading above is. Every
+      // margin number is measured from it — the margin balance, the distance to
+      // liquidation, and the amount the desk will let the operator take out —
+      // and none of those may move with an estimate. It is also what the reading
+      // states as its confirmation.
+      markUnrealizedPnl: String((markPrice - entryPrice) * quantity),
     }
   })
   return changed ? merged : positions

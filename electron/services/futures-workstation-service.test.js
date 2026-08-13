@@ -1835,6 +1835,49 @@ describe('production Futures workstation service', () => {
         expect(lastHeader().payload).toMatchObject({ lastPrice: '97' });
     });
 
+    // A print is the one frame that can arrive before the header exists — the
+    // mark and the ticker are what build it. Moving a header that is not there
+    // raises, and a raise on a stream frame resynchronizes the whole workspace:
+    // an ordinary trade would have taken the desk off the market.
+    it('lets a print arrive before there is a header to move', async () => {
+        const clock = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport({ clock: clock.clock });
+        const faults = [];
+        let subscriber;
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock: clock.clock,
+            transport: {
+                ...base,
+                connect: (options) => {
+                    subscriber = options;
+                    return base.connect(options);
+                },
+            },
+            onInternalError: fault => faults.push(fault),
+        }));
+        const events = [];
+        await runtime.service.handleRequest(productionRequest('headerless-print'), {
+            emit: event => events.push(event),
+        });
+        // The state a session is in before its bootstrap has built one.
+        runtime.service.current.header = null;
+        const settled = events.length;
+
+        subscriber.onMessage(productionTradeFrame({
+            cycle: 1,
+            aggregateTradeId: 4101,
+            price: '99',
+            quantity: '5',
+        }));
+
+        expect(faults).toEqual([]);
+        expect(runtime.service.current.header).toBeNull();
+        expect(events.slice(settled).every(event => event.resource !== 'header')).toBe(true);
+        // The tape took it, which is what proves the frame was handled and not
+        // dropped on the floor by a raise.
+        expect(events.slice(settled).some(event => event.resource === 'trades')).toBe(true);
+    });
+
     it('keeps eligible trades in the tape while small prints churn past the bound', async () => {
         const clock = createManualClock();
         const base = createFuturesProductionWorkstationFakeTransport({ clock: clock.clock });

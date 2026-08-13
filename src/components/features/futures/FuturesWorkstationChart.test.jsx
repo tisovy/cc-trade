@@ -760,6 +760,50 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     })
   })
 
+  // Letting the modifier go abandons the drag. That was only ever reachable
+  // once the exchange had answered; now that the gesture runs during the round
+  // trip, a drag that kept following the pointer after the operator let go
+  // would be the desk ignoring them.
+  it('abandons a drag whose modifier is released before the answer arrives', async () => {
+    let confirmLift = null
+    const props = {
+      ...properties([candle(1_784_000_000_000)]),
+      onOrderLift: vi.fn(() => new Promise((resolve) => { confirmLift = resolve })),
+      ownedOrders: [workingOrder()],
+    }
+    render(<FuturesWorkstationChart {...props} />)
+    const canvas = screen.getByTestId('futures-workstation-chart')
+    canvas.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 320, height: 320, right: 320, bottom: 320,
+    })
+    const order = await screen.findByRole('button', {
+      name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
+    })
+
+    fireEvent.pointerDown(order, { pointerId: 24, button: 0, ctrlKey: true })
+    await settle()
+    const surface = dragSurface()
+    fireEvent.pointerMove(surface, { pointerId: 24, clientY: 80, ctrlKey: true })
+    await settle()
+    expect(screen.getByRole('status', { name: /heading for 59920/ })).toBeInTheDocument()
+
+    // The modifier goes while the pointer is still down and the cancellation is
+    // still out.
+    fireEvent.keyUp(globalThis, { key: 'Control' })
+    fireEvent.pointerMove(surface, { pointerId: 24, clientY: 40, ctrlKey: false })
+    await settle()
+    // The mark stopped where the operator let go rather than following on.
+    expect(screen.getByRole('status', { name: /heading for 59920/ })).toBeInTheDocument()
+
+    confirmLift({ ok: true })
+    await settle()
+    expect(props.onOrderDrop).toHaveBeenCalledExactlyOnceWith({
+      order: expect.objectContaining({ orderId: '71' }),
+      price: '59900',
+      restored: true,
+    })
+  })
+
   it('restores the origin when a drag is abandoned before the answer arrives', async () => {
     let confirmLift = null
     const props = {

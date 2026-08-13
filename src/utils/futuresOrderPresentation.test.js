@@ -188,6 +188,20 @@ describe('describeFuturesPositionMargin', () => {
     })).toMatchObject({ marginBalance: 1200, liquidationBuffer: 1160 })
   })
 
+  // Between two marks the visible uPnL is the desk's arithmetic on the last
+  // traded price. Everything here is a statement about liquidation, which is the
+  // mark's by definition — measuring the buffer from an estimate would put a
+  // wrong distance under a real liquidation, and would offer margin for
+  // withdrawal that the position may not actually be able to spare.
+  it('measures the buffer from the mark, never from the estimate beside it', () => {
+    expect(describeFuturesPositionMargin({
+      isolatedWallet: '1200',
+      maintenanceMargin: '40',
+      unrealizedPnl: '-100',
+      markUnrealizedPnl: '-300',
+    })).toMatchObject({ marginBalance: 900, liquidationBuffer: 860 })
+  })
+
   it('reports nothing removable when the position is already under its floor', () => {
     expect(describeFuturesPositionMargin({
       isolatedWallet: '1200', maintenanceMargin: '40', unrealizedPnl: '-1180',

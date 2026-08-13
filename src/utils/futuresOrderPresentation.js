@@ -144,7 +144,13 @@ export const describeFuturesPositionMargin = (position) => {
   // What the exchange requires the position to keep. Liquidation is the moment
   // the margin balance reaches it, so it is the floor under everything below.
   const maintenanceMargin = toFiniteNumber(position?.maintenanceMargin)
-  const unrealizedPnl = toFiniteNumber(position?.unrealizedPnl) ?? 0
+  // The mark's figure, never the estimate beside it. Everything below this line
+  // is a statement about liquidation, and liquidation is the mark's by
+  // definition — an estimate here would put a wrong distance under a real one,
+  // and would tell the operator they may withdraw margin they may not.
+  const unrealizedPnl = toFiniteNumber(position?.markUnrealizedPnl)
+    ?? toFiniteNumber(position?.unrealizedPnl)
+    ?? 0
   // Unrealized profit is not counted: it is not in the wallet and cannot be
   // withdrawn. Unrealized loss is, because it has already been taken out.
   const marginBalance = margin === null ? null : margin + Math.min(0, unrealizedPnl)
@@ -211,6 +217,9 @@ export const describeFuturesPosition = (position) => {
     // confirmed mark. True only between two marks, and never true of the
     // liquidation price, which is the mark's by definition.
     pnlEstimated: position?.valuationEstimated === true,
+    // The exchange's own arithmetic on its own mark, kept beside the reading so
+    // a surface showing an estimate can always state what it is an estimate of.
+    confirmedUnrealizedPnl: toFiniteNumber(position?.markUnrealizedPnl) ?? unrealizedPnl,
   })
 }
 

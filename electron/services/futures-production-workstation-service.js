@@ -1177,8 +1177,15 @@ export class FuturesProductionWorkstationService {
             // The last traded price, before the tape decides whether the print
             // is one it displays. A desk set to "≥ 400 USDT" watched a frozen
             // number while the market ran; the filter is about the tape.
-            session.header = updateFuturesWorkstationHeader(session.header, event);
-            this.noteHeaderPrint(session, now);
+            //
+            // Only once the bootstrap has built a header for the print to move.
+            // There is nothing to update before that, and raising over it would
+            // resynchronize the whole workspace on an ordinary trade — the one
+            // frame type that arrives before the mark and the ticker do.
+            if (session.header !== null) {
+                session.header = updateFuturesWorkstationHeader(session.header, event);
+                this.noteHeaderPrint(session, now);
+            }
             // Filter on ingestion so the bounded buffer accumulates trades the
             // operator asked for. Filtering only on delivery let small prints
             // evict the large ones and left the tape almost empty.

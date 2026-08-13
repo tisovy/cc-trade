@@ -232,7 +232,7 @@ export const FuturesPortfolioDock = ({
                 <span
                   role="cell"
                   className={`futures-workstation-dock-pnl is-${presentation.pnlTone}${presentation.pnlEstimated ? ' is-estimated' : ''}`}
-                  title={`${formatSignedUsdt(presentation.unrealizedPnl)} USDT · ${formatSignedPercent(presentation.roePercent)} on margin${presentation.pnlEstimated ? ' · from the last traded price, until the next mark confirms it' : ''}`}
+                  title={`${formatSignedUsdt(presentation.unrealizedPnl)} USDT · ${formatSignedPercent(presentation.roePercent)} on margin${presentation.pnlEstimated ? ` · from the last traded price; on the exchange’s mark ${formatSignedUsdt(presentation.confirmedUnrealizedPnl)} USDT` : ''}`}
                 >
                   <strong>{formatSignedUsdt(presentation.unrealizedPnl)}</strong>
                   <em>{formatSignedPercent(presentation.roePercent)}</em>

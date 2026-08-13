@@ -283,8 +283,12 @@ export class FuturesStreamedOrderMemory {
         }
     }
 
-    forget(identity) {
-        if (identity === null) return;
+    // One order, because the stream said it settled. Named apart from `forget`
+    // so it cannot be confused with the settled memory's `forget()`, which
+    // clears everything — calling that one by mistake here would have deleted
+    // nothing and read like a reset.
+    drop(identity) {
+        if (identity === null || identity === undefined) return;
         this.entries.delete(identity);
     }
 
@@ -295,7 +299,7 @@ export class FuturesStreamedOrderMemory {
         return notedAt !== undefined && Number.isFinite(since) && notedAt >= since;
     }
 
-    forgetAll() {
+    forget() {
         this.entries.clear();
     }
 }
@@ -376,7 +380,7 @@ export const foldFuturesWorkingOrder = (
     });
     if (!working) {
         settled?.settle(identity, reportedAt ?? now);
-        streamed?.forget(identity);
+        streamed?.drop(identity);
         if (held === null) return resources;
         return withRows(rows.filter(row => futuresOrderIdentity(row) !== identity));
     }

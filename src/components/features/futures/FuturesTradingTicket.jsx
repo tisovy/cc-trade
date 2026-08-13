@@ -717,7 +717,7 @@ const FuturesTradingTicket = ({
                   <div
                     className={`futures-production-position-pnl is-${presentation.pnlTone}${presentation.pnlEstimated ? ' is-estimated' : ''}`}
                     title={presentation.pnlEstimated
-                      ? 'From the last traded price; the mark confirms it once a second'
+                      ? `From the last traded price; on the exchange’s mark ${formatSignedUsdt(presentation.confirmedUnrealizedPnl)} USDT`
                       : 'On the exchange’s own mark'}
                   >
                     <strong>{formatSignedUsdt(presentation.unrealizedPnl)} USDT</strong>

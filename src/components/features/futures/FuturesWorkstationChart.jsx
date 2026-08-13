@@ -1030,19 +1030,29 @@ export const FuturesWorkstationChart = ({
   }, [settleOrderDrag])
 
   // Letting the modifier go abandons the drag rather than leaving it hanging:
-  // the order goes back to the price it was lifted from.
-  const dragIsMoving = orderDrag?.status === 'moving'
+  // the order goes back to the price it was lifted from. It abandons one whose
+  // cancellation is still in flight too — the gesture follows the pointer from
+  // the moment it begins now, so a drag that ignored the modifier until the
+  // exchange answered would keep moving after the operator had let go.
+  const dragIsLive = orderDrag?.status === 'moving' || orderDrag?.status === 'lifting'
   useEffect(() => {
-    if (!dragIsMoving) return undefined
+    if (!dragIsLive) return undefined
     const handleModifierRelease = (event) => {
       const drag = orderDragRef.current
-      if (!drag || drag.status !== 'moving') return
+      if (!drag) return
       if (drag.modifier === 'alt' ? event.altKey : event.ctrlKey) return
+      if (drag.status === 'lifting') {
+        if (drag.releasedEarly) return
+        drag.releasedEarly = true
+        drag.releasedRestored = true
+        return
+      }
+      if (drag.status !== 'moving') return
       settleOrderDrag(drag, { restored: true })
     }
     globalThis.addEventListener?.('keyup', handleModifierRelease)
     return () => globalThis.removeEventListener?.('keyup', handleModifierRelease)
-  }, [dragIsMoving, settleOrderDrag])
+  }, [dragIsLive, settleOrderDrag])
 
   // The one mark standing for the order the drag holds. It is not on the book,
   // so it carries what the operator needs to recognise it — side and size — and

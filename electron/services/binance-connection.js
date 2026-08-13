@@ -1457,7 +1457,7 @@ export function setupBinanceConnection({
         forgetFuturesSymbolConfigs();
         forgetFuturesHistoryState();
         futuresSettledOrders.forget();
-        futuresStreamedOrders.forgetAll();
+        futuresStreamedOrders.forget();
         // No Futures renderer is watching: nothing to mark to market.
         futuresMarkPriceFeed?.track([]);
         if (futuresKeepAliveInterval) {
