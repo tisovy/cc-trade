@@ -4,37 +4,53 @@ Every bound in this change is a claim about how often the exchange speaks. None
 of them is guessed: each is measured on the operator's own proxy, on the streams
 the desk already subscribes to, before the code that enforces it is written.
 
-- [ ] 0.1 Measure the gap between consecutive frames on `@markPrice@1s`, `@depth@100ms` and `@aggTrade`, on a liquid contract and on the thinnest one the operator's rail carries, over `127.0.0.1:1080`, for long enough that the tail is real and not a sample of one.
-- [ ] 0.2 Measure how often the exchange sends a protocol ping on `/public/stream` and on `/market/stream`, and whether the two routes differ.
-- [ ] 0.3 Record the longest silence observed on the thin contract's book while its own tape was printing — this is the false-positive margin for §2, and it is the only number in this change that decides whether §2 is safe to build at all.
-- [ ] 0.4 Write the numbers here, and set each bound from them rather than from the docs. Where a bound and a measurement disagree, the measurement wins and the disagreement is written down.
+Measured 2026-08-13, seven minutes on four sockets through the operator's proxy,
+on the desk's own stream paths. The thin contract was chosen as the lowest
+24-hour quote volume on USDⓈ-M: **BITOUSDT**, 1 583 trades in 24 hours against
+BTCUSDT's 2 061 964 — which is thinner than anything the rail carries, so the
+false-positive margins below are the worst case rather than a typical one.
+
+- [x] 0.1 **The mark stream is the one thing that does not care whether anything trades.** `@markPrice@1s`: BTCUSDT p50 1000ms, p99 1022ms, max 1496ms (n=417); BITOUSDT p50 1000ms, p99 1480ms, max 1511ms (n=418). Seven minutes on a contract that printed **one** aggregate trade in the whole run, and the mark still arrived 418 times. Nothing else comes close: `@aggTrade` on BITOUSDT had a single frame in 420s, and `@depth@100ms` on it ran p50 1010ms, p99 4999ms, **max 12822ms**.
+- [x] 0.2 **Ping is exactly three minutes, and the two routes do not differ.** Intervals between consecutive server pings: `/market` 180002ms and 179965ms, `/public` 180264ms and 180003ms. Jitter is a quarter of a second on three minutes.
+- [x] 0.3 **The book is never silent through its own prints for as long as a quarter of a second on a thin contract.** Longest depth silence containing at least one aggregate trade: BITOUSDT **177ms** (1 print in it), BTCUSDT **1224ms** (42 prints in it). Read the BITOUSDT figure as an existence proof, not as a distribution — one print in seven minutes is one sample. The BTCUSDT figure is the one with a tail behind it, and it is 1.2s.
+- [x] 0.4 **The bounds, each from the measurement above:**
+    - **Unconditional cadence — 15s on the market socket.** Ten times the worst mark gap observed (1.5s), and the same number the account-side mark feed already uses for the same stream. The measurement would permit tighter; the margin is kept because a false positive costs a resynchronization of the whole workspace.
+    - **Connection traffic — 400s on every socket.** Two missed pings (360s) plus forty seconds, against a measured jitter of 264ms. The desk acts on its own account well before the exchange's own ten-minute pong deadline would.
+    - **Book against tape — 30s.** Twenty-five times the worst silence-through-prints observed on the liquid contract, and 170 times the thin one. §2 is safe to build.
+    - **No unconditional bound on depth or klines.** A 12.8s book silence on a live thin contract is legitimate, so any frame bound tight enough to be useful there would fire on a market that is merely quiet.
 
 ## 1. A Stream That Says Nothing Is Not A Live Stream
 
 - [ ] 1.1 Give the transport's socket a silence bound and a timer that enforces it, so a connection that stops delivering reports the same disconnection a closed one does and enters the reconnect ladder already built for it.
 - [ ] 1.2 Judge a stream that carries an unconditional cadence by its frames, and set that bound from 0.1 — `@markPrice@1s` on the market socket is the desk's one guaranteed heartbeat, and the account-side mark feed already treats fifteen seconds of it as a dead feed.
 - [ ] 1.3 Judge a stream whose silence can be legitimate by the connection's own traffic instead — frames or the exchange's protocol ping, whichever came last — at a bound of no fewer than two missed pings, so a thin contract that genuinely has nothing to say is never mistaken for a dead route.
-- [ ] 1.4 Name each bound in the disconnection reason, so the workspace's reason line distinguishes a route that went quiet from one that closed, as `futures-workstation-presentation` already requires of a resynchronization.
+- [ ] 1.4 Name each bound in the disconnection reason, so the workspace's reason line distinguishes a route that went quiet from one that closed, as `futures-workstation-presentation` already requires of a resynchronization. `handleDisconnect` carries the reason to the status line unchanged, and the operator has already sat in front of a flat code once: `STREAM_SILENT_15S` and `STREAM_INACTIVE_400S` say which bound was crossed, `SOCKET_CLOSED` does not.
 - [ ] 1.5 Keep the judgement in the transport, per socket, so it does not depend on which contract is displayed and does not touch the session bookkeeping `keep-the-contracts-warm` is rewriting.
 - [ ] 1.6 Clear the timers on close, on the 24-hour rotation and on teardown, so a released generation's watchdog cannot report a disconnection against a session that no longer exists.
 - [ ] 1.7 Prove by test that a socket which opens and then delivers nothing past its bound reports a disconnection, that one which keeps receiving pings on a quiet contract does not, that the reason names the bound, and that a torn-down socket's watchdog stays silent. Run each against the pre-change transport first and record which of them fail there.
 
 ## 2. A Book That Says Nothing While The Tape Prints Is A Dead Book
 
-- [ ] 2.1 Only if 0.3 leaves room for it: judge the depth socket's silence against the market socket's, since a trade printing against the book is a change to the book, and depth cannot be silent through one.
+- [ ] 2.1 0.3 left room for it — 30s against a worst observed 1.2s. Judge the depth socket's silence against the market socket's, since a trade printing against the book is a change to the book, and depth cannot be silent through one.
 - [ ] 2.2 Hold the rule to the same contract and the same session, and make it judge nothing when both streams are quiet — that is a quiet market, and the bound in 1.3 already covers it.
-- [ ] 2.3 Report it under its own reason, distinct from the cadence bound, because it says something different: not that a connection died, but that one of two routes did.
+- [ ] 2.3 Report it under its own reason — `BOOK_SILENT_THROUGH_TRADES_30S` — distinct from the cadence bound, because it says something different: not that a connection died, but that one of two independently served routes did.
 - [ ] 2.4 Prove by test that a book silent through printing trades is disconnected, that a book and tape silent together are not, and that the margin from 0.3 is left intact. If 0.3 shows the margin is not there, write that here and leave §2 unbuilt rather than shipping a rule that resynchronizes a live desk on a thin contract.
 
 ## 3. The Events The Desk Drops
 
-- [ ] 3.1 Read each event's field table off Binance's own page before writing a normalizer for it, and cite the page in the code, so the next reader can check the letters rather than trust them.
-- [ ] 3.2 Normalize `MARGIN_CALL` into the positions it names and what the exchange says stands behind them.
-- [ ] 3.3 Normalize `ACCOUNT_CONFIG_UPDATE` and apply the leverage and margin mode it carries to the held contract configuration, so a change made on the phone reaches the desk on the frame that announced it rather than on the next read.
+- [x] 3.1 **Read, and it changed the answer.** Binance's rendered USDⓈ-M user-data page (`/en/docs/products/derivatives-trading-usds-futures/user-data-streams`, read through the desk's own proxy because every plain fetch of that site returns the documentation shell) lists ten events, not the six this change was proposed against. What the field tables settled:
+    - `MARGIN_CALL` — `cw` cross wallet, `p[]` of `s`/`ps`/`pa`/`mt`/`iw`/`mp`/`up`/`mm`. Binance's own words: risk guidance only, and the position may already have been liquidated by the time it arrives.
+    - `ACCOUNT_CONFIG_UPDATE` — `ac.s`/`ac.l` for a pair's leverage, `ai.j` for the account's Multi-Assets mode. **No per-contract margin mode.** The proposal's first draft claimed it and was wrong; margin mode arrives only as `mt` on an `ACCOUNT_UPDATE` position, so a mode changed on a flat contract is not announced at all.
+    - `ALGO_UPDATE` — `o.aid`, `o.X` status, `o.tp` trigger price, `o.rm` failure reason, `o.ia` activation, and `o.ai`, the id of the regular order the algo spawned.
+    - `CONDITIONAL_ORDER_TRIGGER_REJECT` — `or.s`/`or.i`/`or.r`, the last being the refusal in the exchange's own words.
+    - `STRATEGY_UPDATE`, `GRID_UPDATE` (deprecated), `TRADE_LITE` — for strategies this desk does not run, and a thinner copy of a frame it already folds.
+- [ ] 3.2 Normalize `MARGIN_CALL` into the positions it names and what the exchange says stands behind them, and carry that the exchange said it — not that the desk computed it.
+- [ ] 3.3 Normalize `ACCOUNT_CONFIG_UPDATE` and apply the leverage it carries to the held contract configuration, so a change made on the phone reaches the desk on the frame that announced it rather than on the next read. Write beside it that margin mode is not in this frame and where it does come from.
 - [ ] 3.4 Normalize `ALGO_UPDATE` and fold it into the listed algorithmic orders, leaving the thirty-second beat and the post-command read exactly as they are.
-- [ ] 3.5 Answer `TRADE_LITE` under its own name with a written reason for ignoring it, so the next reader is not left to infer a decision from an absence.
-- [ ] 3.6 Keep the fold's shape: an event the desk cannot use still answers `null`, and no event added here reads the account back over REST to learn what it was just handed.
-- [ ] 3.7 Prove by test that each of the four is answered as intended and that an unknown event still answers `null`. State plainly in this file that these are guards on handling and prove nothing about delivery — a synthetic frame fed to the normalizer says only that the desk would cope if the frame arrived.
+- [ ] 3.5 Normalize `CONDITIONAL_ORDER_TRIGGER_REJECT` and put the exchange's reason in front of the operator, on the path `name-the-refusal-the-exchange-gave` already built for a refusal that has words of its own.
+- [ ] 3.6 Answer `TRADE_LITE`, `STRATEGY_UPDATE` and `GRID_UPDATE` under their own names with a written reason for ignoring each, so the next reader is not left to infer a decision from an absence.
+- [ ] 3.7 Keep the fold's shape: an event the desk cannot use still answers `null`, and no event added here reads the account back over REST to learn what it was just handed.
+- [ ] 3.8 Prove by test that each of the seven is answered as intended and that an unknown event still answers `null`. State plainly in this file that these are guards on handling and prove nothing about delivery — a synthetic frame fed to the normalizer says only that the desk would cope if the frame arrived.
 
 ## 4. What The Operator Is Told
 

@@ -36,25 +36,45 @@ not displayed has no freshness check at all, which is the state
 independently, and the desk currently has no way to tell that one of them went
 quiet while the other kept talking.
 
-### Four events are dropped unread
+### Seven events are dropped unread
 
 `normalizeFuturesUserDataStreamEvent` (`futures-trading-adapter.js:485`) answers
 `null` for everything that is not `ORDER_TRADE_UPDATE`, `ACCOUNT_UPDATE` or
-`listenKeyExpired`. Four documented events fall through it:
+`listenKeyExpired`. Binance's own USDⓈ-M user-data page lists ten events. Seven
+of them fall through:
 
-- **`MARGIN_CALL`** — the exchange saying a position is close to liquidation.
-  The desk draws a liquidation price in the dock and says nothing when the
-  exchange itself raises the alarm.
-- **`ACCOUNT_CONFIG_UPDATE`** — leverage or margin mode changed somewhere other
-  than this desk. Until the next read the desk shows the old one, and
-  `compute-the-unstated-values-beside-the-read` is about to divide by it.
-- **`ALGO_UPDATE`** — pushed, per Binance's own page for it, when an algorithmic
-  order is created or its status changes. `futures-order-visibility` currently
-  states the opposite as fact ("the algorithmic orders the desk lists and cancels
-  … the authenticated stream does not report"), and `binance-connection.js:3104`
-  spends a weight-40 read after every algo command on that basis.
-- **`TRADE_LITE`** — a lighter duplicate of `ORDER_TRADE_UPDATE`, correctly
-  ignored, and nowhere written down as deliberately ignored.
+- **`MARGIN_CALL`** — the exchange saying a position's risk ratio is too high,
+  naming each position with its mark price, unrealized PnL and the maintenance
+  margin required. The desk draws a liquidation price of its own reckoning in the
+  dock and says nothing when the exchange itself raises the alarm.
+- **`ACCOUNT_CONFIG_UPDATE`** — `ac.s`/`ac.l`: a contract's leverage changed
+  somewhere other than this desk. Until the next read the desk states the old
+  one, and `compute-the-unstated-values-beside-the-read` is about to divide by
+  it.
+- **`ALGO_UPDATE`** — pushed when an algorithmic order is created or its status
+  changes, carrying algo id, status (`NEW`, `TRIGGERING`, `TRIGGERED`,
+  `FINISHED`, `REJECTED`, `EXPIRED`), trigger price, the failure reason `rm`, and
+  in `o.ai` **the id of the regular order it spawned** — the same
+  `actualOrderId` that `name-the-algo-order-that-fired` goes to REST for.
+  `futures-order-visibility` currently states as fact that the stream does not
+  report algorithmic orders, and `binance-connection.js:3104` spends a weight-40
+  read after every algo command on that basis.
+- **`CONDITIONAL_ORDER_TRIGGER_REJECT`** — a TP/SL that met its trigger and was
+  then refused by the matching engine, with the refusal in words. This is the
+  one case where the operator's stop does not become a position and nothing on
+  the desk says why.
+- **`TRADE_LITE`**, **`STRATEGY_UPDATE`**, **`GRID_UPDATE`** — a lighter
+  duplicate of `ORDER_TRADE_UPDATE` and two events for strategies this desk does
+  not run. Correctly ignored, and nowhere written down as deliberately ignored.
+
+One thing the stream does **not** carry is a contract's margin mode.
+`ACCOUNT_CONFIG_UPDATE` has room for exactly two things — a trade pair's
+leverage in `ac`, and the account's Multi-Assets mode in `ai.j`, which this desk
+does not use. Margin mode reaches the desk only on `ACCOUNT_UPDATE`, in each
+position's `mt`, which the fold already reads — so a mode changed on a contract
+the operator is flat in is not announced at all, and only a read will find it.
+That is worth writing down rather than leaving the next reader to search for a
+field that is not there.
 
 ## What Changes
 
@@ -69,11 +89,15 @@ quiet while the other kept talking.
 - Depth silence is judged against the tape on the same contract: a book that
   says nothing while trades are printing against it is a dead book, not a quiet
   one.
-- `MARGIN_CALL` is stated on the positions it names.
-- `ACCOUNT_CONFIG_UPDATE` applies the leverage and margin mode it carries,
-  instead of the desk waiting for a read to learn what it was just told.
+- `MARGIN_CALL` is stated on the positions it names, as the exchange's own
+  warning rather than as the desk's reckoning.
+- `ACCOUNT_CONFIG_UPDATE` applies the leverage it carries, instead of the desk
+  waiting for a read to learn what it was just told.
 - `ALGO_UPDATE` is folded into the listed algorithmic orders when it arrives.
-- `TRADE_LITE` is ignored under its own name, with the reason recorded.
+- `CONDITIONAL_ORDER_TRIGGER_REJECT` puts the exchange's refusal in front of the
+  operator, on the path already built for a refusal that has words of its own.
+- `TRADE_LITE`, `STRATEGY_UPDATE` and `GRID_UPDATE` are ignored under their own
+  names, with the reason recorded.
 
 ## Non-goals
 
@@ -99,8 +123,8 @@ quiet while the other kept talking.
   learns from the desk what the exchange has already told it — a margin call, a
   leverage change made elsewhere, an algo that moved.
 - Adds two requirements to `futures-workstation-presentation`, one to
-  `futures-contract-leverage`, one to `futures-position-margin`, and modifies one
-  in `futures-order-visibility`.
+  `futures-contract-leverage`, one to `futures-position-margin`, and adds one and
+  modifies one in `futures-order-visibility`.
 - Touches the workstation transport but not the workstation service, so it does
   not collide with `keep-the-contracts-warm`; it serves it, because a per-socket
   watchdog is the one freshness check a contract that is not on screen still has.
