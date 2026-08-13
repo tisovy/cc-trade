@@ -27,12 +27,14 @@ export const createFuturesProductionWorkstationRuntimeForTest = ({
     clock,
     onInternalError,
     onTiming,
+    heldContracts,
 } = {}) => {
     const service = new FuturesProductionWorkstationService({
         transport,
         ...(clock ? { clock } : {}),
         ...(onInternalError ? { onInternalError } : {}),
         ...(onTiming ? { onTiming } : {}),
+        ...(heldContracts === undefined ? {} : { heldContracts }),
     });
     return Object.freeze({ transport, service, close: () => service.stop() });
 };

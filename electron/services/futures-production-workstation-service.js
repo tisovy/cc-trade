@@ -134,13 +134,27 @@ const tapeFingerprint = (state, rows) => (
     `${state}:${rows.map(row => row.aggregateTradeId).join(',')}`
 );
 
+// How many contracts the pool holds at once.
+//
+// One is what the desk has always held, and it stays the default until the
+// bound becomes a setting: everything below is written for a pool, and at a
+// bound of one a pool releases exactly what the single-session service
+// released. Raising it is a number, not a rewrite — the per-contract cost is
+// linear and measured (§0.2 of `keep-the-contracts-warm`: +28.4 KiB/s,
+// +3.35 ms/s of parse, +3 sockets).
+export const FUTURES_PRODUCTION_WORKSTATION_HELD_CONTRACTS = 1;
+
 export class FuturesProductionWorkstationService {
     constructor({
         transport,
         clock = systemClock,
         onInternalError = () => {},
         onTiming = () => {},
+        heldContracts = FUTURES_PRODUCTION_WORKSTATION_HELD_CONTRACTS,
     } = {}) {
+        if (!Number.isSafeInteger(heldContracts) || heldContracts < 1) {
+            throw new FuturesProductionWorkstationServiceError('INVALID_POOL_BOUND');
+        }
         if (!transport
             || typeof transport.loadExchangeInfo !== 'function'
             || typeof transport.bootstrapIndependent !== 'function'
@@ -162,35 +176,40 @@ export class FuturesProductionWorkstationService {
         this.onInternalError = onInternalError;
         this.onTiming = onTiming;
         this.generation = 0;
-        this.current = null;
+        this.heldContracts = heldContracts;
+        // The contracts the desk is running, and the one it is showing. They
+        // used to be the same object, and every question the service asked
+        // about a session answered both at once. A session is held because the
+        // desk is keeping it current; it is shown because the operator is
+        // looking at it, and only the second decides what reaches the renderer.
+        this.sessions = new Map();
+        this.shown = null;
+        // Which session was shown last, so the pool releases the one the
+        // operator has gone longest without. A counter rather than a clock: it
+        // orders selections and nothing else, so it cannot be wrong about the
+        // time and cannot regress.
+        this.selection = 0;
         this.stopped = false;
         this.tapeSettings = FUTURES_WORKSTATION_DEFAULT_TAPE_SETTINGS;
-        // How far past the best price the rows on screen reach, and which page
-        // of the book that took. Both belong to the contract on screen and are
-        // dropped when another is opened — the reading arrives again with the
-        // request that opens it, and the page is bought against that contract's
-        // own band.
-        this.depthRange = null;
-        this.depthPage = 0;
     }
 
-    depthPageLimit() {
+    depthPageLimit(session) {
         const pages = FUTURES_PRODUCTION_WORKSTATION_DEPTH_PAGES;
-        return pages[Math.min(this.depthPage, pages.length - 1)].limit;
+        return pages[Math.min(session.depthPage, pages.length - 1)].limit;
     }
 
     // Up by however much is short, never back down on its own: a market that
     // walks out of a band it has already outgrown would otherwise buy the same
     // page again and again. `factor` is how many times deeper the band has to
     // be, so a step three sizes coarser buys its page in one read.
-    deepenDepthPage(factor = 1) {
+    deepenDepthPage(session, factor = 1) {
         const pages = FUTURES_PRODUCTION_WORKSTATION_DEPTH_PAGES;
-        if (this.depthPage >= pages.length - 1) return false;
-        const wanted = pages[this.depthPage].limit * Math.max(1, factor);
+        if (session.depthPage >= pages.length - 1) return false;
+        const wanted = pages[session.depthPage].limit * Math.max(1, factor);
         const target = pages.findIndex(page => page.limit >= wanted);
-        this.depthPage = target < 0
+        session.depthPage = target < 0
             ? pages.length - 1
-            : Math.max(this.depthPage + 1, target);
+            : Math.max(session.depthPage + 1, target);
         return true;
     }
 
@@ -213,19 +232,17 @@ export class FuturesProductionWorkstationService {
             return;
         }
         if (request.action === FUTURES_PRODUCTION_WORKSTATION_ACTIONS.UNSUBSCRIBE) {
-            if (this.current?.requestId === request.requestId) {
-                this.stopCurrent();
+            if (this.shown?.requestId === request.requestId) {
+                this.releaseSession(this.shown);
                 this.tapeSettings = FUTURES_WORKSTATION_DEFAULT_TAPE_SETTINGS;
-                this.depthRange = null;
-                this.depthPage = 0;
             }
             return;
         }
         if (request.action === FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SELECT_INTERVAL
-            && this.current?.symbol === request.symbol
-            && this.current.bootstrapped === true
-            && this.current.reconnectTimer === null
-            && typeof this.current.stream?.selectInterval === 'function') {
+            && this.shown?.symbol === request.symbol
+            && this.shown.bootstrapped === true
+            && this.shown.reconnectTimer === null
+            && typeof this.shown.stream?.selectInterval === 'function') {
             await this.selectInterval(request, emit);
             return;
         }
@@ -236,9 +253,9 @@ export class FuturesProductionWorkstationService {
     // touches session.candles: the live series stays the single writer of the
     // tail, so a slow history read can never rewind what the stream just drew.
     async loadCandleHistory(request) {
-        const session = this.current;
+        const session = this.shown;
         if (!session
-            || !this.isCurrent(session)
+            || !this.isHeld(session)
             || session.requestId !== request.requestId
             || session.symbol !== request.symbol
             || session.interval !== request.interval) {
@@ -268,7 +285,7 @@ export class FuturesProductionWorkstationService {
             // failure answers the request it belongs to — same contract, same
             // interval, same `endTime` — so the lock is released and the next
             // scroll asks again.
-            if (this.isCurrent(session)
+            if (this.isHeld(session)
                 && session.requestId === request.requestId
                 && session.symbol === request.symbol
                 && session.interval === interval) {
@@ -278,7 +295,7 @@ export class FuturesProductionWorkstationService {
         }
         // The session may have moved to another contract or interval while the
         // read was in flight; that history belongs to nothing now.
-        if (!this.isCurrent(session)
+        if (!this.isHeld(session)
             || session.requestId !== request.requestId
             || session.symbol !== request.symbol
             || session.interval !== interval) return;
@@ -334,11 +351,10 @@ export class FuturesProductionWorkstationService {
     // asked for the range by choosing the step, so the weight is paid for
     // something asked for.
     configureDepth(request) {
-        const session = this.current;
-        if (!session || !this.isCurrent(session) || session.requestId !== request.requestId) {
+        const session = this.shown;
+        if (!session || !this.isHeld(session) || session.requestId !== request.requestId) {
             throw new FuturesProductionWorkstationServiceError('DEPTH_OWNER_UNAVAILABLE');
         }
-        this.depthRange = request.range;
         session.depthRange = request.range;
         if (!session.bootstrapped) return;
         // The reading bounds the delivery, so a new reading is a new delivery —
@@ -386,7 +402,7 @@ export class FuturesProductionWorkstationService {
     }
 
     ensureDepthCovers(session, shortfall = null) {
-        if (!this.isCurrent(session)
+        if (!this.isHeld(session)
             || !session.bootstrapped
             || session.reconnectTimer !== null
             || session.bookRecovering
@@ -409,7 +425,7 @@ export class FuturesProductionWorkstationService {
         // An unmeasurable shortfall is the second case: a side emptied by the
         // walk states no distance to size a page against, so it is re-read as it
         // is and sized on the next reading, which will have both sides.
-        const deepened = Number.isFinite(short) && short > 1 && this.deepenDepthPage(short);
+        const deepened = Number.isFinite(short) && short > 1 && this.deepenDepthPage(session, short);
         if (Number.isFinite(short) && short > 1 && !deepened) return;
         const now = this.observedNow(session);
         // Only the re-read is backed off, and for the reason a recovery is:
@@ -427,8 +443,8 @@ export class FuturesProductionWorkstationService {
     }
 
     configureTape(request) {
-        const session = this.current;
-        if (!session || !this.isCurrent(session) || session.requestId !== request.requestId) {
+        const session = this.shown;
+        if (!session || !this.isHeld(session) || session.requestId !== request.requestId) {
             throw new FuturesProductionWorkstationServiceError('TAPE_OWNER_UNAVAILABLE');
         }
         const settings = freezeTapeSettings(request);
@@ -447,7 +463,7 @@ export class FuturesProductionWorkstationService {
     }
 
     async selectInterval(request, emit, reconnectAttempt = 0) {
-        const session = this.current;
+        const session = this.shown;
         if (!session
             || session.symbol !== request.symbol
             || session.bootstrapped !== true
@@ -482,7 +498,7 @@ export class FuturesProductionWorkstationService {
         session.intervalBootstrapping = true;
         this.emitStatus(session, FUTURES_WORKSTATION_STATES.LOADING, true, null);
 
-        const isCurrentInterval = () => this.isCurrent(session)
+        const isCurrentInterval = () => this.isHeld(session)
             && session.reconnectTimer === null
             && session.intervalReconnectTimer === null
             && session.intervalEpoch === intervalEpoch
@@ -533,10 +549,50 @@ export class FuturesProductionWorkstationService {
         }
     }
 
-    isCurrent(session) {
+    /**
+     * Two questions, asked separately, because they are not the same question.
+     *
+     * `isHeld` asks whether the desk is still running this session — whether the
+     * work a callback is about to do still belongs to anything. `isShown` asks
+     * whether the operator is looking at it. One session was both at once for as
+     * long as the desk held exactly one contract, and every guard in this file
+     * asked the pair as a single `isCurrent`, so the answer to "is anyone
+     * watching?" silently decided whether a book was rebuilt, a socket was
+     * reconnected and a stale resource was noticed.
+     *
+     * A held session keeps its book, its tape and its candles current whether or
+     * not it is shown. So `isHeld` gates the work, and `isShown` gates exactly
+     * one thing: delivery to the renderer, at the single point it happens.
+     */
+    isHeld(session) {
         return !this.stopped
-            && this.current === session
+            && this.sessions.get(session.symbol) === session
             && !session.abortController.signal.aborted;
+    }
+
+    isShown(session) {
+        return this.shown === session;
+    }
+
+    // A session becomes the one the renderer is given. The order is recorded
+    // here rather than at release time, so the pool can name the contract the
+    // operator has gone longest without.
+    showSession(session) {
+        this.selection += 1;
+        session.shownOrder = this.selection;
+        this.shown = session;
+    }
+
+    // Room for one more contract. Least recently shown goes first, in full,
+    // through the same release a switch uses — a session released half-way is
+    // the fault this pool would otherwise multiply by its bound.
+    makeRoomForSession(symbol) {
+        if (this.sessions.has(symbol)) return;
+        const held = [...this.sessions.values()]
+            .sort((first, second) => first.shownOrder - second.shownOrder);
+        while (this.sessions.size >= this.heldContracts && held.length) {
+            this.releaseSession(held.shift());
+        }
     }
 
     observedNow(session) {
@@ -553,8 +609,13 @@ export class FuturesProductionWorkstationService {
         return now;
     }
 
+    // The one place a session reaches the renderer, and therefore the one place
+    // that asks whether anyone is looking. A held session that is not shown
+    // keeps every other line of this file running and stops here: it stays
+    // current and it stays silent, and the renderer never learns a contract it
+    // did not ask for exists.
     emitResource(session, resource, state, payload) {
-        if (!this.isCurrent(session)) return false;
+        if (!this.isHeld(session) || !this.isShown(session)) return false;
         session.revision += 1;
         const event = createFuturesProductionWorkstationEvent({
             requestId: session.requestId,
@@ -613,7 +674,13 @@ export class FuturesProductionWorkstationService {
     }
 
     async startGeneration(request, emit, reconnectAttempt) {
-        this.stopCurrent();
+        // A generation replaces whatever this contract was running — a first
+        // open, a resubscribe and a reconnect all arrive here — and takes a
+        // place in the pool, which the contracts held for longest without being
+        // shown make room for.
+        const previous = this.sessions.get(request.symbol) ?? null;
+        this.releaseSession(previous);
+        this.makeRoomForSession(request.symbol);
         this.generation += 1;
         // A contract is opened on the cheapest page, whatever the last one
         // needed: one cheap read is a smaller price than every contract paying
@@ -629,11 +696,10 @@ export class FuturesProductionWorkstationService {
         // contract; the page that covers it is then bought against the first
         // band the snapshot proves, rather than after the operator has read a
         // short book for a while. A reconnect keeps what the session had: that
-        // is the same contract, still on screen.
-        if (reconnectAttempt === 0) {
-            this.depthPage = 0;
-            this.depthRange = typeof request.range === 'string' ? request.range : null;
-        }
+        // is the same contract, still on screen. Both live on the session now,
+        // so what a reconnect keeps is read from the session it replaces rather
+        // than from a field the next contract would have inherited.
+        const openingFresh = reconnectAttempt === 0;
         const session = {
             request,
             requestId: request.requestId,
@@ -674,8 +740,12 @@ export class FuturesProductionWorkstationService {
             indexCandles: Object.freeze([]),
             trades: Object.freeze([]),
             tapeSettings: this.tapeSettings,
-            depthRange: this.depthRange,
+            depthRange: openingFresh
+                ? (typeof request.range === 'string' ? request.range : null)
+                : (previous?.depthRange ?? null),
+            depthPage: openingFresh ? 0 : (previous?.depthPage ?? 0),
             depthDeepenedAt: null,
+            shownOrder: 0,
             pendingTapeTimer: null,
             pendingTapeEmission: false,
             lastTapeEmittedAt: null,
@@ -690,7 +760,8 @@ export class FuturesProductionWorkstationService {
             clockRegressed: false,
             startedAt: this.clock.now(),
         };
-        this.current = session;
+        this.sessions.set(session.symbol, session);
+        this.showSession(session);
         // An attempt past the ceiling does not get to call itself loading. By
         // then the operator is reading a notice that says the feed stopped and
         // is still being retried, with the retry beside it, and `loading` takes
@@ -715,7 +786,7 @@ export class FuturesProductionWorkstationService {
             const exchangeInfo = await this.transport.loadExchangeInfo({
                 signal: session.abortController.signal,
             });
-            if (!this.isCurrent(session)) return;
+            if (!this.isHeld(session)) return;
             session.contracts = normalizeFuturesWorkstationExchangeInfo(exchangeInfo);
             for (const frame of createFuturesWorkstationCatalogFrames(session.contracts)) {
                 this.emitResource(
@@ -770,7 +841,7 @@ export class FuturesProductionWorkstationService {
             }
             const deliveredBootstrapResources = new Set();
             const deliverBootstrapResource = ({ resource, value } = {}) => {
-                if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
+                if (!this.isHeld(session) || session.reconnectTimer !== null) return;
                 if (deliveredBootstrapResources.has(resource)) return;
                 if (resource === 'contractKlines') {
                     session.candles = normalizeFuturesWorkstationKlines(value);
@@ -831,7 +902,7 @@ export class FuturesProductionWorkstationService {
                 return;
             }
             const streamReady = await session.stream.ready;
-            if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
+            if (!this.isHeld(session) || session.reconnectTimer !== null) return;
             if (streamReady !== true) {
                 this.scheduleResync(session, 'SOCKET_NOT_READY');
                 return;
@@ -841,15 +912,15 @@ export class FuturesProductionWorkstationService {
             const depthValue = await this.transport.readDepthSnapshot({
                 symbol: session.symbol,
                 signal: bootstrapAbort.signal,
-                limit: this.depthPageLimit(),
+                limit: this.depthPageLimit(session),
             });
-            if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
+            if (!this.isHeld(session) || session.reconnectTimer !== null) return;
             session.bootstrapDepthSnapshot = normalizeFuturesWorkstationDepthSnapshot(
                 depthValue,
                 session.symbol,
             );
             const bootstrap = await independentReads;
-            if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
+            if (!this.isHeld(session) || session.reconnectTimer !== null) return;
             for (const resource of [
                 'contractKlines',
                 'indexKlines',
@@ -867,14 +938,14 @@ export class FuturesProductionWorkstationService {
                 session.orderBook.beginBootstrap();
                 depthRetryAttempt += 1;
                 await this.delay(200 * (2 ** (depthRetryAttempt - 1)));
-                if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
+                if (!this.isHeld(session) || session.reconnectTimer !== null) return;
                 const retryValue = await this.transport.readDepthSnapshot({
                     symbol: session.symbol,
                     signal: bootstrapAbort.signal,
                     retryAttempt: depthRetryAttempt,
-                    limit: this.depthPageLimit(),
+                    limit: this.depthPageLimit(session),
                 });
-                if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
+                if (!this.isHeld(session) || session.reconnectTimer !== null) return;
                 session.bootstrapDepthSnapshot = normalizeFuturesWorkstationDepthSnapshot(
                     retryValue,
                     session.symbol,
@@ -890,7 +961,7 @@ export class FuturesProductionWorkstationService {
             this.emitTrades(session, FUTURES_WORKSTATION_STATES.LIVE, { force: true });
             for (const event of session.pendingEvents) this.applyStreamEvent(session, event);
             session.pendingEvents = [];
-            if (!this.isCurrent(session)) return;
+            if (!this.isHeld(session)) return;
             if (bookResult.live) {
                 const shortfall = session.orderBook.rangeShortfall(session.depthRange);
                 session.lastDepthView = session.orderBook.toRendererView(session.depthRange);
@@ -922,7 +993,7 @@ export class FuturesProductionWorkstationService {
                 void this.recoverBook(session, depthBootstrapCode(bookResult.reason));
             }
         } catch (error) {
-            if (!this.isCurrent(session)) return;
+            if (!this.isHeld(session)) return;
             this.emitAggregateTiming(session, 'error');
             this.onInternalError({ phase: 'bootstrap', code: safeCode(error) });
             this.scheduleResync(session, safeCode(error));
@@ -1040,7 +1111,7 @@ export class FuturesProductionWorkstationService {
         const generation = session.generation;
         session.pendingTapeTimer = this.clock.setTimeout(() => {
             session.pendingTapeTimer = null;
-            if (!this.isCurrent(session)
+            if (!this.isHeld(session)
                 || session.generation !== generation
                 || !session.pendingTapeEmission) return;
             session.pendingTapeEmission = false;
@@ -1050,7 +1121,7 @@ export class FuturesProductionWorkstationService {
     }
 
     handleStreamFrame(session, raw) {
-        if (!this.isCurrent(session)) return;
+        if (!this.isHeld(session)) return;
         try {
             const event = normalizeFuturesWorkstationStreamFrame(raw, {
                 symbol: session.symbol,
@@ -1114,7 +1185,7 @@ export class FuturesProductionWorkstationService {
             }
             this.applyStreamEvent(session, event);
         } catch (error) {
-            if (!this.isCurrent(session)) return;
+            if (!this.isHeld(session)) return;
             this.onInternalError({ phase: 'stream', code: safeCode(error) });
             // A depth frame the desk could not read is a book problem. Only a
             // frame from the streams the desk actually trades on — price,
@@ -1137,7 +1208,7 @@ export class FuturesProductionWorkstationService {
      * stale rather than escalating: nothing else on the desk depends on it.
      */
     async recoverBook(session, reasonCode, { immediate = false } = {}) {
-        if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
+        if (!this.isHeld(session) || session.reconnectTimer !== null) return;
         if (session.bookRecovering) return;
         const now = this.observedNow(session);
         // Backed off between rounds, because every diff arriving on a book that
@@ -1167,20 +1238,20 @@ export class FuturesProductionWorkstationService {
             for (let attempt = 1;
                 attempt <= FUTURES_PRODUCTION_WORKSTATION_BOOK_RECOVERY.ATTEMPTS;
                 attempt += 1) {
-                if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
+                if (!this.isHeld(session) || session.reconnectTimer !== null) return;
                 session.orderBook.beginBootstrap();
                 await this.delay(
                     FUTURES_PRODUCTION_WORKSTATION_BOOK_RECOVERY.BRIDGE_MS * (2 ** (attempt - 1)),
                 );
-                if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
+                if (!this.isHeld(session) || session.reconnectTimer !== null) return;
                 try {
                     const value = await this.transport.readDepthSnapshot({
                         symbol: session.symbol,
                         signal: session.abortController.signal,
                         retryAttempt: attempt,
-                        limit: this.depthPageLimit(),
+                        limit: this.depthPageLimit(session),
                     });
-                    if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
+                    if (!this.isHeld(session) || session.reconnectTimer !== null) return;
                     const snapshot = normalizeFuturesWorkstationDepthSnapshot(
                         value,
                         session.symbol,
@@ -1216,7 +1287,7 @@ export class FuturesProductionWorkstationService {
     }
 
     applyStreamEvent(session, event) {
-        if (!this.isCurrent(session)) return;
+        if (!this.isHeld(session)) return;
         const now = this.observedNow(session);
         if (event.kind === 'trade') {
             // Freshness is proven by the stream, not by eligibility: an ineligible
@@ -1273,7 +1344,7 @@ export class FuturesProductionWorkstationService {
 
     startFreshnessMonitor(session) {
         session.freshnessTimer = this.clock.setInterval(() => {
-            if (!this.isCurrent(session)) return;
+            if (!this.isHeld(session)) return;
             try {
                 const now = this.observedNow(session);
                 if (now - session.lastHeaderAt > FUTURES_PRODUCTION_WORKSTATION_FRESHNESS.HEADER_MS) {
@@ -1306,7 +1377,7 @@ export class FuturesProductionWorkstationService {
     // socket gave rather than flattening every ending into one code — that flat
     // `SOCKET_DISCONNECTED` is the line the operator was left staring at.
     handleDisconnect(session, reason) {
-        if (!this.isCurrent(session)) return;
+        if (!this.isHeld(session)) return;
         const reasonCode = typeof reason === 'string' && /^[A-Z0-9_]{1,96}$/.test(reason)
             ? reason
             : 'SOCKET_DISCONNECTED';
@@ -1320,7 +1391,7 @@ export class FuturesProductionWorkstationService {
     // own path. What it owes the operator is its name, on the reason line, while
     // the desk keeps trading around it.
     handleFrameRefused(session, reason) {
-        if (!this.isCurrent(session)) return;
+        if (!this.isHeld(session)) return;
         const reasonCode = typeof reason === 'string' && /^[A-Z0-9_]{1,96}$/.test(reason)
             ? reason
             : 'STREAM_FRAME_REFUSED';
@@ -1350,7 +1421,7 @@ export class FuturesProductionWorkstationService {
     }
 
     handleCandleDisconnect(session, reason) {
-        if (!this.isCurrent(session)) return;
+        if (!this.isHeld(session)) return;
         if (!session.bootstrapped) {
             this.scheduleResync(session, 'CANDLE_SOCKET_DISCONNECTED');
             return;
@@ -1363,7 +1434,7 @@ export class FuturesProductionWorkstationService {
     }
 
     scheduleIntervalResync(session, reasonCode) {
-        if (!this.isCurrent(session)
+        if (!this.isHeld(session)
             || session.reconnectTimer !== null
             || session.intervalReconnectTimer !== null) return;
 
@@ -1400,7 +1471,7 @@ export class FuturesProductionWorkstationService {
         const attempt = session.intervalReconnectAttempt + 1;
         session.intervalReconnectTimer = this.clock.setTimeout(() => {
             session.intervalReconnectTimer = null;
-            if (this.isCurrent(session)
+            if (this.isHeld(session)
                 && session.reconnectTimer === null
                 && session.requestId === request.requestId
                 && session.interval === request.interval) {
@@ -1411,7 +1482,7 @@ export class FuturesProductionWorkstationService {
     }
 
     scheduleResync(session, reasonCode) {
-        if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
+        if (!this.isHeld(session) || session.reconnectTimer !== null) return;
         // Running out of fast attempts ends the hurry, not the recovery. The
         // ladder spends 91.5 s — shorter than a proxy restart, a VPN
         // renegotiation or a laptop waking up. Halting here left the desk
@@ -1464,7 +1535,7 @@ export class FuturesProductionWorkstationService {
         );
         session.reconnectTimer = this.clock.setTimeout(() => {
             session.reconnectTimer = null;
-            if (this.isCurrent(session)) void this.startGeneration(request, emit, attempt);
+            if (this.isHeld(session)) void this.startGeneration(request, emit, attempt);
         }, delay);
         session.reconnectTimer?.unref?.();
     }
@@ -1481,10 +1552,13 @@ export class FuturesProductionWorkstationService {
         }
     }
 
-    stopCurrent() {
-        const session = this.current;
-        this.current = null;
+    // A session leaves the pool before anything is torn down, so every callback
+    // still in flight for it fails `isHeld` from the first step of the release
+    // rather than from whichever step happens to abort it.
+    releaseSession(session) {
         if (!session) return;
+        if (this.sessions.get(session.symbol) === session) this.sessions.delete(session.symbol);
+        if (this.shown === session) this.shown = null;
         this.release(() => session.abortController.abort());
         this.release(() => session.intervalAbortController?.abort());
         this.release(() => session.stream?.close?.());
@@ -1508,7 +1582,7 @@ export class FuturesProductionWorkstationService {
     stop() {
         if (this.stopped) return;
         this.stopped = true;
-        this.stopCurrent();
+        for (const session of [...this.sessions.values()]) this.releaseSession(session);
         this.transport.close();
     }
 }

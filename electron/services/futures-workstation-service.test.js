@@ -185,7 +185,7 @@ describe('production Futures workstation service', () => {
         await runtime.service.handleRequest(productionRequest('service-oversized'), {
             emit: event => delivered.push(event),
         });
-        const session = runtime.service.current;
+        const session = runtime.service.shown;
         const before = delivered.length;
 
         // Structurally valid to the last level — a full ladder of the longest
@@ -487,7 +487,7 @@ describe('production Futures workstation service', () => {
             state: 'resynchronizing',
             payload: { reasonCode: 'WORKSTATION_RESOURCE_REJECTED' },
         });
-        expect(runtime.service.current).not.toBeNull();
+        expect(runtime.service.shown).not.toBeNull();
     });
 
     it.each([
@@ -625,7 +625,7 @@ describe('production Futures workstation service', () => {
             .toEqual(['loading', 'live']);
         expect(events.filter(event => event.resource === 'depth').at(-1).payload.lastUpdateId)
             .toBe('1065');
-        expect(runtime.service.current.generation).toBe(1);
+        expect(runtime.service.shown.generation).toBe(1);
         expect(clock.timeoutCount()).toBe(0);
     });
 
@@ -720,7 +720,7 @@ describe('production Futures workstation service', () => {
         expect(switched.filter(event => event.resource === 'candles')
             .map(event => event.payload.series)).toEqual(['contract', 'index']);
         expect(switched.every(event => event.generation === 1)).toBe(true);
-        expect(runtime.service.current).toMatchObject({ generation: 1, interval: '5m' });
+        expect(runtime.service.shown).toMatchObject({ generation: 1, interval: '5m' });
         expect(base.getActiveTimerCount()).toBe(1);
     });
 
@@ -756,7 +756,7 @@ describe('production Futures workstation service', () => {
 
         // The new contract owns the desk, and the previous session left nothing
         // of itself running.
-        expect(runtime.service.current).toMatchObject({ symbol: 'ETHUSDT' });
+        expect(runtime.service.shown).toMatchObject({ symbol: 'ETHUSDT' });
         expect(connect).toHaveBeenCalledTimes(2);
         expect(base.getActiveTimerCount()).toBe(1);
     });
@@ -820,7 +820,7 @@ describe('production Futures workstation service', () => {
             resource: 'status',
             state: 'live',
         });
-        expect(runtime.service.current).toMatchObject({
+        expect(runtime.service.shown).toMatchObject({
             requestId: 'rapid-c',
             symbol: 'SOLUSDT',
             generation: 3,
@@ -901,7 +901,7 @@ describe('production Futures workstation service', () => {
         expect(readCounts()).toEqual(readsBefore);
         expect(connect).toHaveBeenCalledTimes(connectsBefore);
         expect(nextEvents.at(-1)).toMatchObject({ symbol: 'ETHUSDT', state: 'live' });
-        expect(runtime.service.current).toMatchObject({
+        expect(runtime.service.shown).toMatchObject({
             requestId: 'released-timers-next',
             symbol: 'ETHUSDT',
         });
@@ -954,7 +954,7 @@ describe('production Futures workstation service', () => {
         ]);
         expect(cEvents.filter(event => event.resource === 'candles')
             .every(event => event.payload.interval === '15m')).toBe(true);
-        expect(runtime.service.current).toMatchObject({
+        expect(runtime.service.shown).toMatchObject({
             requestId: 'interval-c',
             interval: '15m',
             generation: 1,
@@ -999,7 +999,7 @@ describe('production Futures workstation service', () => {
             generation: 2,
             state: 'live',
         });
-        expect(runtime.service.current).toMatchObject({
+        expect(runtime.service.shown).toMatchObject({
             requestId: 'interval-early-selected',
             interval: '5m',
             generation: 2,
@@ -1075,7 +1075,7 @@ describe('production Futures workstation service', () => {
 
         expect(manual.timeoutCount()).toBe(0);
         expect(connect).toHaveBeenCalledTimes(2);
-        expect(runtime.service.current).toMatchObject({
+        expect(runtime.service.shown).toMatchObject({
             requestId: 'interval-reconnect-selected',
             interval: '4h',
             generation: 2,
@@ -1325,7 +1325,7 @@ describe('production Futures workstation service', () => {
         expect(events.at(-1).payload).toEqual(book);
         expect(events.some(event => event.resource === 'status'
             && event.state === 'resynchronizing')).toBe(false);
-        expect(runtime.service.current).toMatchObject({ symbol: 'BTCUSDT' });
+        expect(runtime.service.shown).toMatchObject({ symbol: 'BTCUSDT' });
     });
 
     // The operator, on a violent move: the book is the last thing they are
@@ -1531,13 +1531,13 @@ describe('production Futures workstation service', () => {
         expect(burst.every(event => event.state === 'live')).toBe(true);
         expect(burst.every(event => event.generation === 1)).toBe(true);
         expect(faults).toEqual([]);
-        expect(runtime.service.current).toMatchObject({
+        expect(runtime.service.shown).toMatchObject({
             symbol: 'BTCUSDT',
             generation: 1,
             bootstrapped: true,
             reconnectTimer: null,
         });
-        expect(runtime.service.current.staleResources.size).toBe(0);
+        expect(runtime.service.shown.staleResources.size).toBe(0);
         // The book states the last diff, not the last one it managed to keep up
         // with: the levels the final frame posted carry the quantities it posted.
         const lastFrame = JSON.parse(burstDepthFrame(TICKS, LEVELS_PER_SIDE));
@@ -1594,7 +1594,7 @@ describe('production Futures workstation service', () => {
         // The frame the desk dropped left a gap, and the book rebuilds itself
         // around it without touching the session.
         const recovery = runtime.service.recoverBook(
-            runtime.service.current,
+            runtime.service.shown,
             'DEPTH_SEQUENCE_GAP',
         );
         await vi.waitFor(() => expect(clock.timeoutCount()).toBe(1));
@@ -1608,9 +1608,9 @@ describe('production Futures workstation service', () => {
         });
         // Said once: a second rebuild has nothing left to take off the line.
         const settled = events.length;
-        runtime.service.current.bookRecoveredAt = null;
+        runtime.service.shown.bookRecoveredAt = null;
         const second = runtime.service.recoverBook(
-            runtime.service.current,
+            runtime.service.shown,
             'DEPTH_SEQUENCE_GAP',
         );
         await vi.waitFor(() => expect(clock.timeoutCount()).toBe(1));
@@ -1688,8 +1688,8 @@ describe('production Futures workstation service', () => {
         expect(events.at(-1)).toMatchObject({ resource: 'status', state: 'live' });
         expect(events.some(event => event.state === 'resynchronizing')).toBe(false);
         expect(clock.timeoutCount()).toBe(1);
-        expect(runtime.service.current.pendingEvents).toHaveLength(0);
-        expect(runtime.service.current.trades).toHaveLength(128);
+        expect(runtime.service.shown.pendingEvents).toHaveLength(0);
+        expect(runtime.service.shown.trades).toHaveLength(128);
         clock.advance(250);
         clock.runTimeouts();
         const tape = events.filter(event => event.resource === 'trades').at(-1).payload.rows;
@@ -1775,8 +1775,8 @@ describe('production Futures workstation service', () => {
         clock.runTimeouts();
         expect(events.filter(event => event.resource === 'trades').at(-1).payload.rows)
             .toEqual([expect.objectContaining({ aggregateTradeId: '3002' })]);
-        expect(runtime.service.current.lastTradesAt).toBe(clock.clock.now() - 250);
-        expect(runtime.service.current.staleResources.has('trades')).toBe(false);
+        expect(runtime.service.shown.lastTradesAt).toBe(clock.clock.now() - 250);
+        expect(runtime.service.shown.staleResources.has('trades')).toBe(false);
     });
 
     // The minimum notional is a setting about the tape. The last traded price is
@@ -1863,7 +1863,7 @@ describe('production Futures workstation service', () => {
             emit: event => events.push(event),
         });
         // The state a session is in before its bootstrap has built one.
-        runtime.service.current.header = null;
+        runtime.service.shown.header = null;
         const settled = events.length;
 
         subscriber.onMessage(productionTradeFrame({
@@ -1874,7 +1874,7 @@ describe('production Futures workstation service', () => {
         }));
 
         expect(faults).toEqual([]);
-        expect(runtime.service.current.header).toBeNull();
+        expect(runtime.service.shown.header).toBeNull();
         expect(events.slice(settled).every(event => event.resource !== 'header')).toBe(true);
         // The tape took it, which is what proves the frame was handled and not
         // dropped on the floor by a raise.
@@ -1923,7 +1923,7 @@ describe('production Futures workstation service', () => {
 
         expect(events.filter(event => event.resource === 'trades').at(-1).payload.rows)
             .toEqual([expect.objectContaining({ aggregateTradeId: '4001' })]);
-        expect(runtime.service.current.staleResources.has('trades')).toBe(false);
+        expect(runtime.service.shown.staleResources.has('trades')).toBe(false);
     });
 
     it('treats an explicit zero-USDT threshold as no tape filter', async () => {
@@ -2059,16 +2059,16 @@ describe('production Futures workstation service', () => {
         subscriber.onMessage(productionTradeFrame({ cycle: 1, aggregateTradeId: 6001 }));
         subscriber.onMessage(productionTradeFrame({ cycle: 2, aggregateTradeId: 6002 }));
 
-        expect(runtime.service.current.pendingTapeTimer).not.toBeNull();
+        expect(runtime.service.shown.pendingTapeTimer).not.toBeNull();
         expect(clock.timeoutCount()).toBe(1);
         subscriber.onDisconnect('SOCKET_CLOSED');
 
-        expect(runtime.service.current.pendingTapeTimer).toBeNull();
-        expect(runtime.service.current.pendingTapeEmission).toBe(false);
+        expect(runtime.service.shown.pendingTapeTimer).toBeNull();
+        expect(runtime.service.shown.pendingTapeEmission).toBe(false);
         // The only remaining timeout belongs to the reconnect, not the tape.
         expect(clock.timeoutCount()).toBe(1);
         clock.runTimeouts();
-        await vi.waitFor(() => expect(runtime.service.current.generation).toBe(2));
+        await vi.waitFor(() => expect(runtime.service.shown.generation).toBe(2));
         await vi.waitFor(() => expect(events.at(-1)).toMatchObject({
             generation: 2,
             state: 'live',
@@ -2186,7 +2186,7 @@ describe('production Futures workstation service', () => {
             payload: { reasonCode: 'INVALID_PREMIUM_INDEX' },
         });
         expect(close).toHaveBeenCalledOnce();
-        expect(runtime.service.current).not.toBeNull();
+        expect(runtime.service.shown).not.toBeNull();
         expect(clock.intervalCount()).toBe(0);
         expect(clock.timeoutCount()).toBe(1);
         expect(base.getActiveTimerCount()).toBe(0);
@@ -2258,7 +2258,7 @@ describe('production Futures workstation service', () => {
         await runtime.service.handleRequest(createRequest('terminal-reconnect'), {
             emit: event => events.push(event),
         });
-        runtime.service.current.reconnectAttempt
+        runtime.service.shown.reconnectAttempt
             = FUTURES_PRODUCTION_WORKSTATION_FRESHNESS.RECONNECT_ATTEMPTS;
         subscriber.onDisconnect('SOCKET_DISCONNECTED');
         expect(events.at(-1)).toMatchObject({
@@ -2269,7 +2269,7 @@ describe('production Futures workstation service', () => {
         expect(close).toHaveBeenCalledOnce();
         // The outage that exhausts the ladder is the ordinary length of a proxy
         // restart. The session stays, and another attempt is already armed.
-        expect(runtime.service.current).not.toBeNull();
+        expect(runtime.service.shown).not.toBeNull();
         expect(clock.timeoutCount()).toBe(1);
 
         // The route comes back while the session is asking on the last rung.
@@ -2278,7 +2278,7 @@ describe('production Futures workstation service', () => {
             expect(events.at(-1)).toMatchObject({ resource: 'status', state: 'live' });
         });
         // And the fast ladder is available again for the next interruption.
-        expect(runtime.service.current.reconnectAttempt).toBe(0);
+        expect(runtime.service.shown.reconnectAttempt).toBe(0);
     });
 
     it.each([
@@ -2309,7 +2309,7 @@ describe('production Futures workstation service', () => {
         await runtime.service.handleRequest(createRequest('ceiling-loading'), {
             emit: event => events.push(event),
         });
-        runtime.service.current.reconnectAttempt
+        runtime.service.shown.reconnectAttempt
             = FUTURES_PRODUCTION_WORKSTATION_FRESHNESS.RECONNECT_ATTEMPTS;
         subscriber.onDisconnect('SOCKET_DISCONNECTED');
         const statedExhausted = events.length;
@@ -2373,7 +2373,7 @@ describe('production Futures workstation service', () => {
         };
         // A session that spends an afternoon without a route must not count its
         // attempts upwards: the number is only ever compared against the ceiling.
-        runtime.service.current.reconnectAttempt = RECONNECT_ATTEMPTS + 5;
+        runtime.service.shown.reconnectAttempt = RECONNECT_ATTEMPTS + 5;
         subscriber.onDisconnect('SOCKET_DISCONNECTED');
         clock.runTimeouts();
         await vi.waitFor(() => {
@@ -2409,7 +2409,7 @@ describe('production Futures workstation service', () => {
         await runtime.service.handleRequest(createRequest('released-reconnect'), {
             emit: () => {},
         });
-        runtime.service.current.reconnectAttempt
+        runtime.service.shown.reconnectAttempt
             = FUTURES_PRODUCTION_WORKSTATION_FRESHNESS.RECONNECT_ATTEMPTS;
         subscriber.onDisconnect('SOCKET_DISCONNECTED');
         expect(clock.timeoutCount()).toBe(1);
@@ -2417,7 +2417,7 @@ describe('production Futures workstation service', () => {
         // The guarantee the old halt provided, which this change must keep: a
         // session nobody wants any more arms nothing.
         runtime.service.stop();
-        expect(runtime.service.current).toBeNull();
+        expect(runtime.service.shown).toBeNull();
         expect(clock.timeoutCount()).toBe(0);
         expect(clock.intervalCount()).toBe(0);
         expect(base.getActiveTimerCount()).toBe(0);
@@ -2443,7 +2443,7 @@ describe('production Futures workstation service', () => {
             symbol: 'BTCUSDT',
             interval: '1m',
         }), () => {}, 7);
-        expect(runtime.service.current.reconnectAttempt).toBe(0);
+        expect(runtime.service.shown.reconnectAttempt).toBe(0);
     });
 
     describe('candle history', () => {
@@ -2561,7 +2561,7 @@ describe('production Futures workstation service', () => {
             expect(events[0].payload.endTime).toBe(1_784_000_000_000);
             // A failed history read is never a reason to resync a healthy
             // session, and it writes nothing to the live window.
-            expect(runtime.service.current.requestId).toBe('history-failure');
+            expect(runtime.service.shown.requestId).toBe('history-failure');
             expect(events.some(event => event.resource === 'candles')).toBe(false);
         });
     });
@@ -2627,13 +2627,13 @@ describe('the book is bought as deep as it is read', () => {
     // levels this change exists to stop buying.
     it('re-reads the page it holds when the market walks out of a band that fits', async () => {
         const { runtime, readDepthSnapshot } = await openContract('depth-page-walk');
-        const session = runtime.service.current;
+        const session = runtime.service.shown;
         session.depthRange = '0.5';
         session.orderBook.rangeShortfall = () => 1;
         runtime.service.ensureDepthCovers(session);
         await vi.waitFor(() => expect(readDepthSnapshot.mock.calls.length).toBe(2));
         expect(readDepthSnapshot.mock.calls.at(-1)[0]).toMatchObject({ limit: 50 });
-        expect(runtime.service.depthPage).toBe(0);
+        expect(session.depthPage).toBe(0);
     });
 
     // The deepest page has nothing above it to buy. A book that answered a walk
@@ -2641,8 +2641,8 @@ describe('the book is bought as deep as it is read', () => {
     // all — and keep dropping every level outside a band it had left for good.
     it('re-reads at the deepest page too, where there is nothing deeper to buy', async () => {
         const { runtime, readDepthSnapshot } = await openContract('depth-page-deepest');
-        const session = runtime.service.current;
-        runtime.service.depthPage = 3;
+        const session = runtime.service.shown;
+        session.depthPage = 3;
         session.depthRange = '0.5';
         session.orderBook.rangeShortfall = () => 1;
         runtime.service.ensureDepthCovers(session);
@@ -2663,7 +2663,7 @@ describe('the book is bought as deep as it is read', () => {
         await runtime.service.handleRequest(productionRequest('depth-page-next'), {
             emit: () => {},
         });
-        expect(runtime.service.current.depthRange).toBeNull();
+        expect(runtime.service.shown.depthRange).toBeNull();
         expect(readDepthSnapshot.mock.calls.at(-1)[0]).toMatchObject({ limit: 50 });
     });
 
@@ -2778,7 +2778,7 @@ describe('the book states the side it cannot prove', () => {
     // one book the operator opened the contract to read.
     it('buys the rung the rows need without waiting out the recovery backoff', async () => {
         const { runtime, readDepthSnapshot } = await openContract('short-side-nowait');
-        const session = runtime.service.current;
+        const session = runtime.service.shown;
         // A recovery has just run and stamped the backoff every read after it
         // used to wait for.
         session.bookRecoveredAt = runtime.service.observedNow(session);
@@ -2793,7 +2793,7 @@ describe('the book states the side it cannot prove', () => {
     // answers must not become a snapshot read per diff.
     it('keeps backing off a re-read, and stops asking when the ladder runs out', async () => {
         const { runtime, readDepthSnapshot } = await openContract('short-side-backoff');
-        const session = runtime.service.current;
+        const session = runtime.service.shown;
         session.depthRange = '5';
         // A band wide enough that the market walked out of it: re-read, no rung.
         session.orderBook.rangeShortfall = () => 1;
@@ -2806,7 +2806,7 @@ describe('the book states the side it cannot prove', () => {
         // And at the top of the ladder there is no rung to buy, so a shortfall
         // that only a deeper page could answer stops asking rather than reading
         // the same page on every diff.
-        runtime.service.depthPage = 3;
+        session.depthPage = 3;
         session.depthDeepenedAt = null;
         session.orderBook.rangeShortfall = () => 4;
         runtime.service.ensureDepthCovers(session);
@@ -2825,7 +2825,7 @@ describe('the reading bounds what the desk delivers', () => {
         await runtime.service.handleRequest(productionRequest(requestId), {
             emit: event => events.push(event),
         });
-        const session = runtime.service.current;
+        const session = runtime.service.shown;
         const readings = [];
         const view = session.orderBook.toRendererView.bind(session.orderBook);
         session.orderBook.toRendererView = (range) => {
@@ -2878,7 +2878,7 @@ describe('the reading bounds what the desk delivers', () => {
         );
         await Promise.resolve();
         expect(readDepthSnapshot).toHaveBeenCalledOnce();
-        expect(runtime.service.current.orderBook.bids.size).toBe(48);
+        expect(runtime.service.shown.orderBook.bids.size).toBe(48);
     });
 
     // A level is what it rests at and how much rests there. The running total
@@ -2888,5 +2888,172 @@ describe('the reading bounds what the desk delivers', () => {
         const { events } = await openContract('depth-reading-shape');
         const level = depthEvents(events).at(-1).payload.bids[0];
         expect(Object.keys(level)).toEqual(['price', 'quantity']);
+    });
+});
+
+// The desk held exactly one contract, and one object answered for both facts
+// about it: that it was running, and that it was on screen. Every guard in the
+// service asked the pair as a single question, so "is anyone watching?" quietly
+// decided whether a book was rebuilt and a socket reconnected. The two are now
+// asked separately, which is what lets a second contract exist at all.
+describe('a session stops being the service', () => {
+    const tradeFrameFor = (symbol, aggregateTradeId) => {
+        const frame = JSON.parse(
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols[symbol].streams.makeCycle(2)[1],
+        );
+        frame.data.a = aggregateTradeId;
+        frame.data.f = aggregateTradeId;
+        frame.data.l = aggregateTradeId;
+        return JSON.stringify(frame);
+    };
+
+    it('runs two contracts at once, and a failed release of one leaves the other delivering', async () => {
+        const clock = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport();
+        const subscribers = new Map();
+        const failingCloses = new Set();
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock: clock.clock,
+            heldContracts: 2,
+            transport: {
+                ...base,
+                connect: (options) => {
+                    subscribers.set(options.symbol, options);
+                    const handle = base.connect(options);
+                    return Object.freeze({
+                        ready: handle.ready,
+                        selectInterval: selection => handle.selectInterval(selection),
+                        close: () => {
+                            handle.close();
+                            if (failingCloses.has(options.symbol)) {
+                                throw new Error('SOCKET_CLOSE_FAILED');
+                            }
+                        },
+                    });
+                },
+            },
+        }));
+        const events = { BTCUSDT: [], ETHUSDT: [] };
+        const select = (requestId, symbol) => runtime.service.handleRequest(
+            productionRequest(requestId, symbol),
+            { emit: event => events[symbol].push(event) },
+        );
+
+        await select('pool-btc', 'BTCUSDT');
+        await select('pool-eth', 'ETHUSDT');
+
+        // Both contracts are running: two sockets, two freshness monitors. The
+        // single-session desk closed the first the moment the second opened.
+        expect(runtime.service.sessions.size).toBe(2);
+        expect(base.getActiveTimerCount()).toBe(2);
+        expect(clock.intervalCount()).toBe(2);
+        expect(runtime.service.shown).toMatchObject({ symbol: 'ETHUSDT' });
+
+        // The contract that is held but not shown keeps its own state current
+        // and says nothing to the renderer.
+        const held = runtime.service.sessions.get('BTCUSDT');
+        const silent = events.BTCUSDT.length;
+        subscribers.get('BTCUSDT').onMessage(tradeFrameFor('BTCUSDT', 9_001));
+        expect(held.trades.at(-1).aggregateTradeId).toBe('9001');
+        expect(events.BTCUSDT).toHaveLength(silent);
+
+        // A release that fails half-way costs its own contract and nothing
+        // else. Teardown and startup used to be one code path, which is how a
+        // throw during a handshake left the previous contract delivering into a
+        // desk that had moved on; a pool multiplies that fault by its bound
+        // unless every step of a release belongs to the session being released.
+        failingCloses.add('BTCUSDT');
+        runtime.service.releaseSession(held);
+
+        expect(runtime.service.sessions.size).toBe(1);
+        expect(base.getActiveTimerCount()).toBe(1);
+        // The steps after the one that threw still ran.
+        expect(clock.intervalCount()).toBe(1);
+
+        const delivered = events.ETHUSDT.length;
+        subscribers.get('ETHUSDT').onMessage(tradeFrameFor('ETHUSDT', 9_002));
+        expect(events.ETHUSDT.length).toBeGreaterThan(delivered);
+        expect(events.ETHUSDT.at(-1)).toMatchObject({
+            symbol: 'ETHUSDT',
+            resource: 'trades',
+            state: 'live',
+        });
+    });
+
+    // The page a contract had bought and the reading it was bought against used
+    // to live on the service, where a reconnect kept them by not touching them.
+    // On the session they have to be carried across on purpose, and a reconnect
+    // is the one generation that must: it is the same contract, still on screen,
+    // and making it buy the cheapest page again would put the operator back in
+    // front of a short book they had already paid to fill.
+    it('keeps the page and the reading a contract bought across a reconnect', async () => {
+        const clock = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport({ clock: clock.clock });
+        const readDepthSnapshot = vi.fn(options => base.readDepthSnapshot(options));
+        let subscriber;
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock: clock.clock,
+            transport: {
+                ...base,
+                readDepthSnapshot,
+                connect: (options) => {
+                    subscriber = options;
+                    return base.connect(options);
+                },
+            },
+        }));
+        await runtime.service.handleRequest(productionRequest('reconnect-page'), {
+            emit: () => {},
+        });
+        const before = runtime.service.shown;
+        expect(readDepthSnapshot.mock.calls.at(-1)[0]).toMatchObject({ limit: 50 });
+        before.depthPage = 3;
+        before.depthRange = '5';
+        const readsBeforeReconnect = readDepthSnapshot.mock.calls.length;
+
+        subscriber.onDisconnect('SOCKET_DISCONNECTED');
+        clock.runTimeouts();
+        await vi.waitFor(() => expect(runtime.service.shown).not.toBe(before));
+        await vi.waitFor(() => expect(
+            readDepthSnapshot.mock.calls.length,
+        ).toBeGreaterThan(readsBeforeReconnect));
+
+        expect(runtime.service.shown).toMatchObject({ depthPage: 3, depthRange: '5' });
+        expect(readDepthSnapshot.mock.calls[readsBeforeReconnect][0])
+            .toMatchObject({ limit: 1_000 });
+    });
+
+    // The other half of the same rule: another contract inherits neither. A
+    // reading is a distance in the contract's own quote currency, so one stated
+    // for a contract priced in whole dollars reads as an impossible range on one
+    // priced in ten-thousandths — and buys the deepest page to cover it.
+    it('opens another contract on the cheapest page and no reading at all', async () => {
+        const clock = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport({ clock: clock.clock });
+        const readDepthSnapshot = vi.fn(options => base.readDepthSnapshot(options));
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock: clock.clock,
+            heldContracts: 2,
+            transport: { ...base, readDepthSnapshot },
+        }));
+        await runtime.service.handleRequest(productionRequest('page-btc', 'BTCUSDT'), {
+            emit: () => {},
+        });
+        runtime.service.shown.depthPage = 3;
+        runtime.service.shown.depthRange = '5';
+
+        await runtime.service.handleRequest(productionRequest('page-eth', 'ETHUSDT'), {
+            emit: () => {},
+        });
+
+        expect(runtime.service.shown).toMatchObject({
+            symbol: 'ETHUSDT',
+            depthPage: 0,
+            depthRange: null,
+        });
+        expect(readDepthSnapshot.mock.calls.at(-1)[0]).toMatchObject({ limit: 50 });
+        // And the contract left behind keeps what it bought — it is still
+        // running, and it will be shown again.
+        expect(runtime.service.sessions.get('BTCUSDT')).toMatchObject({ depthPage: 3 });
     });
 });

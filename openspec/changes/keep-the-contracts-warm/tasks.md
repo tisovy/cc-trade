@@ -68,10 +68,23 @@
 
 ## 1. A Session Stops Being The Service
 
-- [ ] 1.1 Hold sessions in a map keyed by contract, with the shown contract named separately from the set held.
-- [ ] 1.2 Replace `isCurrent(session)` with ownership by that session's own identity, so a callback of one session cannot be silenced by another being shown. This is the single assumption the whole change turns on: `isCurrent` is asked in 14 places and today it answers two different questions at once — "is this session alive?" and "is this session on screen?". They stop being the same question.
-- [ ] 1.3 Route every timer, abort controller and pending queue through the session that owns it.
-- [ ] 1.4 Prove by test that two sessions run at once, and that stopping one leaves the other delivering.
+- [x] 1.1 Hold sessions in a map keyed by contract, with the shown contract named separately from the set held. *(`this.sessions`, keyed by symbol, and `this.shown`. `this.current` is gone. The bound arrives as a constructor option defaulting to **one**, so this lands as a pool that releases exactly what the single-session service released and changes nothing the operator can see; §3.2 makes it a setting and raises it to eight.)*
+
+- [x] 1.2 Replace `isCurrent(session)` with ownership by that session's own identity, so a callback of one session cannot be silenced by another being shown. This is the single assumption the whole change turns on: `isCurrent` is asked in 14 places and today it answers two different questions at once — "is this session alive?" and "is this session on screen?". They stop being the same question. *(Split into `isHeld` — the service is still running this session — and `isShown` — the operator is looking at it. There turned out to be 26 guard sites, not 14; each was classified one at a time rather than replaced wholesale, and every one of them gates **work**, so every one takes `isHeld`. `isShown` is asked in exactly one place: `emitResource`, the single point at which a session reaches the renderer. That is what makes a held session current and silent without a second code path anywhere — and it is why `startFreshnessMonitor` keeps running for a contract nobody is watching, which is what §4.3 needs.)*
+
+- [x] 1.3 Route every timer, abort controller and pending queue through the session that owns it. *(Timers, abort controllers and both pending queues were already per-session. What was not was the depth reading and the page bought to cover it: `this.depthRange` and `this.depthPage` sat on the service, where a reconnect kept them by not touching them and another contract lost them by an explicit reset. Both now live on the session, and both cases are carried across on purpose — a reconnect reads them from the session it replaces, another contract takes the reading from its own request and opens on the cheapest page.)*
+
+- [x] 1.4 Prove by test that two sessions run at once, and that stopping one leaves the other delivering. *(Three tests, and what each is worth is stated rather than assumed.)*
+
+  | test | against the pre-change desk | against the mistake it guards |
+  |---|---|---|
+  | two contracts at once, and a failed release of one leaves the other delivering | **bites** — one socket and one freshness monitor where the test wants two, on the transport's own count, naming no new API | **bites** — a `stream.close()` that throws outside `release(step)` leaves the freshness monitor armed |
+  | a reconnect keeps the page and the reading | guard — the pre-change desk keeps them too, by leaving service-level fields alone | **bites** — resetting `depthPage` on every generation |
+  | another contract opens on the cheapest page and no reading | guard — the pre-change desk resets them too | **bites** — inheriting the page and the reading from the contract shown before |
+
+  The two guards are guards, not findings: they cover behaviour this task **moved** from the service onto the session, where a reconnect and a switch stop being distinguished by which fields happen to be untouched. Both were written because the audit found nothing covering the move, and both were checked against the specific wrong version they exist to stop.
+
+- [x] 1.5 Editing `futures-production-workstation-composition.js` alone does nothing. `vite.config.js` rewrites that import to `futures-production-workstation-verification-composition.js` for every build and every test, so the two files have to be changed in step — the second one is what the suite actually loads. Cost a debugging round on a bound that silently stayed at one, with no error anywhere: the option was accepted, ignored, and defaulted. Recorded here because the next person to add a constructor option loses the same round.
 
 ## 2. Selecting Is Not Subscribing
 
@@ -80,10 +93,12 @@
 - [ ] 2.3 Shed rather than queue under load on the shown contract: coalesce depth deliveries to at most one book per frame and drop the tape's overflow, so a burst costs the book's freshness and never the price. Per §0.4 these are two mechanisms for two different bursts, and neither substitutes for the other: depth is fixed at 10 fps and swells in frame size (2 638 B average, 21 067 B peak), the tape is a fixed 205 B and swells in rate (4 → 115 fps).
 - [ ] 2.4 Keep the renderer's ownership checks intact: a frame still names the request and the generation it belongs to.
 - [ ] 2.5 Prove by test that returning to a held contract issues no bootstrap read, opens no socket and passes through no `loading`, and that its book is the one the session already held rather than a fresh snapshot.
+- [ ] 2.6 A session shown again delivers through the emitter of the request that selected it, and on the tape settings the panel is set to now. Both are captured when the session is opened: `session.emit` is the closure the first subscription handed over, and `session.tapeSettings` is a copy of the service's at that moment. Found while auditing §1 — harmless while the pool holds one contract, wrong the first time it holds two.
+- [ ] 2.7 A silent session does no delivery work, not merely no delivery. With `emitResource` refusing at the gate, a held session still rebuilds its renderer tape rows and re-fingerprints them on every print — up to 128 rows per trade, per held contract, built and thrown away. The cost is small beside §0.2's budget; the reason to fix it is that "silent" should mean the work is not done, not that the answer is discarded.
 
 ## 3. The Pool Is Bounded
 
-- [ ] 3.1 Release the least recently shown session when the bound is reached, in full, through the same total release the switch uses.
+- [ ] 3.1 Release the least recently shown session when the bound is reached, in full, through the same total release the switch uses. *(The mechanism landed with §1 — `makeRoomForSession` orders the held sessions by when each was last shown and releases from the front through `releaseSession`. At a bound of one it releases exactly what the single-session service released, which is why it could land there. What is still open is the proof: nothing exercises the ordering until the bound is above one.)*
 - [ ] 3.2 Make the bound a stated setting rather than a constant buried in the service, with §0.2's per-contract cost recorded beside it so it is moved from a number.
 - [ ] 3.3 Prove by test that the bound holds under a long sequence of selections and that nothing is left running behind it.
 
