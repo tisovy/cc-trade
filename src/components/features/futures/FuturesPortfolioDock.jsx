@@ -30,6 +30,7 @@ const openOrderEditorFromKeyboard = (event, order, onOrderEdit) => {
   if (event.target !== event.currentTarget) return
   if (event.key !== 'Enter' && event.key !== ' ') return
   if (event.key === ' ') event.preventDefault()
+  if (event.repeat) return
   const rowRect = event.currentTarget.getBoundingClientRect()
   onOrderEdit(order, {
     x: rowRect.left + (rowRect.width / 2),

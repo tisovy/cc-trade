@@ -432,6 +432,12 @@ describe('FuturesPortfolioDock', () => {
     expect(onOrderEdit).toHaveBeenCalledExactlyOnceWith(order, { x: 140, y: 75 })
 
     onOrderEdit.mockClear()
+    fireEvent.keyDown(row, { key: 'Enter', repeat: true })
+    const repeatedSpace = createEvent.keyDown(row, { key: ' ', repeat: true })
+    fireEvent(row, repeatedSpace)
+    expect(repeatedSpace.defaultPrevented).toBe(true)
+    expect(onOrderEdit).not.toHaveBeenCalled()
+
     fireEvent.keyDown(row, { key: 'ArrowDown' })
     expect(onOrderEdit).not.toHaveBeenCalled()
 

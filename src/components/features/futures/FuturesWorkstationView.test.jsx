@@ -1285,7 +1285,7 @@ describe('instrument recency and interface scale', () => {
       'utf8',
     )
     const desktopRule = stylesheet.match(
-      /@media \(min-width: 830px\) \{[\s\S]*?\.futures-workstation\s*\{(?<declarations>[^}]*)\}/,
+      /@media \(min-width: 845px\) \{[\s\S]*?\.futures-workstation\s*\{(?<declarations>[^}]*)\}/,
     )?.groups?.declarations
 
     expect(desktopRule).toContain(
@@ -1294,8 +1294,10 @@ describe('instrument recency and interface scale', () => {
 
     // The two integer-width media queries are complementary: no viewport falls
     // between them and no narrow width receives the desktop minimum tracks.
-    expect(stylesheet).toContain('@media (max-width: 829px)')
-    expect(stylesheet).toContain('@media (min-width: 830px)')
+    expect(stylesheet).toContain('@media (max-width: 844px)')
+    expect(stylesheet).toContain('@media (min-width: 845px)')
+    expect(stylesheet).toContain('@media (min-width: 845px) and (max-width: 984px)')
+    expect(stylesheet).toContain('@media (max-width: 980px)')
     expect(stylesheet).not.toMatch(/@media \((?:min-width: 761|max-width: 760)px\)/)
   })
 

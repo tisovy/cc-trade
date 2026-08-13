@@ -1069,6 +1069,12 @@ describe('FuturesTradingTicket', () => {
     expect(onOrderEdit).toHaveBeenCalledExactlyOnceWith(workingOrder, { x: 110, y: 120 })
 
     onOrderEdit.mockClear()
+    fireEvent.keyDown(row, { key: 'Enter', repeat: true })
+    const repeatedSpace = createEvent.keyDown(row, { key: ' ', repeat: true })
+    fireEvent(row, repeatedSpace)
+    expect(repeatedSpace.defaultPrevented).toBe(true)
+    expect(onOrderEdit).not.toHaveBeenCalled()
+
     fireEvent.keyDown(row, { key: 'Escape' })
     fireEvent.keyDown(within(row).getByRole('button', {
       name: 'Cancel BTCUSDT BUY order at 58445.00',
