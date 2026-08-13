@@ -19,6 +19,7 @@ import {
 import { readStoredTapeSettings } from '../utils/futuresTapeSettings.js'
 import {
   FUTURES_CANDLE_HISTORY_CACHE_MAX_ROWS,
+  FUTURES_CANDLE_HISTORY_INTERVAL_MS,
   futuresCandleHistoryCache,
 } from '../utils/futuresCandleHistoryCache.js'
 
@@ -67,6 +68,34 @@ const mergeCandleHistoryRows = (older, known) => {
   const merged = older.filter(row => row.openTime < oldest)
   if (merged.length === 0) return known
   return Object.freeze([...merged, ...known].slice(-FUTURES_CANDLE_HISTORY_CACHE_MAX_ROWS))
+}
+
+// The stream re-sends a bounded window of candles, and that window slides: when
+// a bar opens, the oldest one in it is not in the next frame. History was read
+// behind where the window stood at the time, so every bar that leaves the
+// window afterwards is in neither run — and the chart drew the two sides
+// against each other with nothing to say that minutes were missing between
+// them. What leaves the window is kept here, at the end of the run it
+// continues.
+//
+// Only when it continues it exactly. A window that jumped — a resync, a
+// reconnection over a gap — leaves rows that do not touch what is on screen,
+// and joining across that would present a hole as continuous data. Those are
+// dropped, which is the state the chart was already in.
+const holdRowsLeavingTheWindow = (held, leaving, oldestLive, intervalMs) => {
+  const closed = leaving.filter(row => row.closed === true)
+  if (closed.length === 0) return held
+  if (!Number.isSafeInteger(intervalMs) || closed.at(-1).openTime + intervalMs !== oldestLive) {
+    return held
+  }
+  if (held.length === 0) return Object.freeze(closed.slice(-FUTURES_CANDLE_HISTORY_CACHE_MAX_ROWS))
+  const newest = held.at(-1).openTime
+  const added = closed.filter(row => row.openTime > newest)
+  if (added.length === 0) return held
+  // The same contiguity, on the other side of the join: the run already held
+  // has to reach the first row being added, or there is a hole behind them.
+  if (newest + intervalMs !== added[0].openTime) return held
+  return Object.freeze([...held, ...added].slice(-FUTURES_CANDLE_HISTORY_CACHE_MAX_ROWS))
 }
 
 // A page belongs to the contract and interval it was read for, and to nothing
@@ -505,6 +534,35 @@ const useFuturesProductionWorkstation = ({
       exhausted: historyResponse.total < FUTURES_WORKSTATION_CANDLE_HISTORY_LIMITS.DEFAULT_ROWS,
     }))
   }, [candleHistoryCache, historyResponse, state.symbol])
+
+  // The window the stream re-sends, watched for what falls off its front. Held
+  // rather than derived, because a frame carries only where the window is now —
+  // the bar that left is gone from it, and this is the last place it exists.
+  const liveWindowRef = useRef(null)
+  const liveCandles = state.resources.candles?.contract ?? null
+  const liveInterval = state.resources.candles?.interval ?? null
+  useEffect(() => {
+    const previousWindow = liveWindowRef.current
+    liveWindowRef.current = liveCandles === null
+      ? null
+      : { symbol: state.symbol, interval: liveInterval, rows: liveCandles }
+    if (!Array.isArray(liveCandles) || liveCandles.length === 0) return
+    if (previousWindow === null
+      || previousWindow.symbol !== state.symbol
+      || previousWindow.interval !== liveInterval) return
+    const oldestLive = liveCandles[0].openTime
+    const leaving = previousWindow.rows.filter(row => row.openTime < oldestLive)
+    if (leaving.length === 0) return
+    const intervalMs = FUTURES_CANDLE_HISTORY_INTERVAL_MS[liveInterval]
+    setCandleHistory((previous) => {
+      const base = previous.symbol === state.symbol && previous.interval === liveInterval
+        ? previous
+        : EMPTY_CANDLE_HISTORY
+      const rows = holdRowsLeavingTheWindow(base.rows, leaving, oldestLive, intervalMs)
+      if (rows === base.rows) return previous
+      return Object.freeze({ ...base, symbol: state.symbol, interval: liveInterval, rows })
+    })
+  }, [liveCandles, liveInterval, state.symbol])
 
   const loadCandleHistory = useCallback(async (endTime) => {
     const activeSubscription = activeSubscriptionRef.current

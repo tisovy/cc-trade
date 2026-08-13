@@ -853,4 +853,86 @@ describe('useFuturesProductionWorkstation candle history', () => {
     // dropped on every scroll into the edge — so the chart stops asking.
     expect(result.current.candleHistory.exhausted).toBe(true)
   })
+
+  // The window the stream re-sends is bounded and slides: when a bar opens, the
+  // oldest one in it is not in the next frame. History was read behind where
+  // the window stood then, so a bar that leaves afterwards was in neither run,
+  // and the chart drew bar 19 against bar 23 with nothing to say that four
+  // minutes were missing between them.
+  describe('bars leaving the live window', () => {
+    const liveWindow = (from, to, closed = true) => Object.freeze(
+      historyRows(from, to).map(row => Object.freeze({ ...row, closed })),
+    )
+    const emitWindow = (socket, requestId, revision, rows, interval = '1m') => {
+      socket.emitMessage(createFuturesProductionWorkstationEvent(eventValues(requestId, {
+        revision,
+        resource: 'candles',
+        payload: Object.freeze({ series: 'contract', interval, rows }),
+      })))
+    }
+    const openWorkstation = () => {
+      const socket = new LocalSocket()
+      const sendMessage = vi.fn(() => true)
+      const { result } = renderHook(props => useFuturesProductionWorkstation(props), {
+        initialProps: defaultProps(socket, sendMessage, { candleHistoryCache: missingCache() }),
+      })
+      return { socket, result, requestId: sendMessage.mock.calls[0][0].requestId }
+    }
+
+    it('keeps a bar that fell out of the window, behind the window it left', async () => {
+      const { socket, result, requestId } = openWorkstation()
+      act(() => emitWindow(socket, requestId, 2, liveWindow(-20, 0)))
+      expect(result.current.candleHistory.rows).toHaveLength(0)
+
+      // Three bars later the window holds -17..3 and bars -20, -19 and -18 are
+      // in no frame the renderer will ever see again.
+      act(() => emitWindow(socket, requestId, 3, liveWindow(-17, 3)))
+
+      expect(result.current.candleHistory.rows.map(row => row.openTime)).toEqual(
+        liveWindow(-20, -17).map(row => row.openTime),
+      )
+      expect(result.current.candleHistory.symbol).toBe('BTCUSDT')
+      expect(result.current.candleHistory.interval).toBe('1m')
+    })
+
+    it('joins what leaves the window to the end of the history already read', async () => {
+      const { socket, result, requestId } = openWorkstation()
+      act(() => emitWindow(socket, requestId, 2, liveWindow(-20, 0)))
+      await act(async () => { await result.current.loadCandleHistory(START - (20 * MINUTE)) })
+      await act(async () => emitHistoryPage(socket, requestId, 3, {
+        endTime: START - (20 * MINUTE),
+        offset: 0,
+        total: 40,
+        complete: true,
+        rows: historyRows(-60, -20),
+      }))
+      expect(result.current.candleHistory.rows).toHaveLength(40)
+
+      act(() => emitWindow(socket, requestId, 4, liveWindow(-18, 2)))
+
+      // One run, in order, with no bar invented or lost where the two meet.
+      const rows = result.current.candleHistory.rows
+      expect(rows.map(row => row.openTime)).toEqual(historyRows(-60, -18).map(row => row.openTime))
+    })
+
+    // A window that jumped is not a window that slid. Joining across the jump
+    // would put a hole on screen and call it continuous data, which is the one
+    // thing a short chart may never become.
+    it('drops rows from a window that jumped instead of joining across the gap', () => {
+      const { socket, result, requestId } = openWorkstation()
+      act(() => emitWindow(socket, requestId, 2, liveWindow(-20, 0)))
+      act(() => emitWindow(socket, requestId, 3, liveWindow(60, 80)))
+
+      expect(result.current.candleHistory.rows).toHaveLength(0)
+    })
+
+    // A bar still open is not history: it is the bar the stream is moving.
+    it('keeps nothing from a window whose leaving rows never closed', () => {
+      const { socket, result, requestId } = openWorkstation()
+      act(() => emitWindow(socket, requestId, 2, liveWindow(-20, 0, false)))
+      act(() => emitWindow(socket, requestId, 3, liveWindow(-17, 3, false)))
+
+      expect(result.current.candleHistory.rows).toHaveLength(0)
+    })
+  })
 })

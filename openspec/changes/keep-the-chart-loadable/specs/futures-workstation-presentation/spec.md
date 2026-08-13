@@ -14,6 +14,20 @@ the canvas.
 - **WHEN** a re-read differs only in the newest candle
 - **THEN** the chart takes the cheap path and updates that candle alone
 
+### Requirement: The bars the live window drops are kept behind it
+The window of candles the stream re-sends is bounded and slides. The renderer
+SHALL keep the closed candles that leave it, joined to the end of the history
+already held, so the series drawn has no bar missing between the two. Rows that
+do not continue what is held SHALL NOT be joined across the gap between them.
+
+#### Scenario: A bar leaves the live window
+- **WHEN** a bar opens and the oldest bar in the re-sent window is no longer in it
+- **THEN** that bar is kept at the end of the held run and the drawn series stays continuous
+
+#### Scenario: The window jumped rather than slid
+- **WHEN** the window returns at a position that does not continue what is held
+- **THEN** the rows that left are dropped rather than joined across the gap
+
 ### Requirement: Futures chart history is bounded in the renderer
 The renderer SHALL bound the candle series it holds for a contract and interval
 to the same ceiling the disk cache applies, dropping the oldest rows when older

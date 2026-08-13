@@ -31,6 +31,15 @@ describe('countPrependedRows', () => {
         const rows = [{ openTime: 10 }, { openTime: 20 }, { openTime: 30 }];
         expect(countPrependedRows(30, rows, { timeOf: row => row?.openTime })).toBe(2);
     });
+
+    // An accessor answers a row it cannot read with `null`, and `Number(null)`
+    // is the epoch — which is in front of every candle there has ever been.
+    it('counts no row whose open time it could not read', () => {
+        const timeOf = row => (Number.isSafeInteger(row?.openTime) ? row.openTime : null);
+        const rows = [{ openTime: 'x' }, { openTime: 20 }, { openTime: 30 }];
+        expect(countPrependedRows(30, rows, { timeOf })).toBe(0);
+        expect(countPrependedRows(30, [{ openTime: 10 }, { openTime: 'x' }], { timeOf })).toBe(1);
+    });
 });
 
 describe('planSeriesDraw', () => {

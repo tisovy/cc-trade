@@ -60,10 +60,20 @@ export const planSeriesDraw = (drawn, next, { timeOf = rowTime, sameRow = identi
 
 // Older candles arriving in front shift every bar's index, so the chart has to
 // know how many before it can hold the viewport still.
+//
+// A row whose open time cannot be read is not counted. It looks like a detail
+// and is not: an accessor answers a row it cannot read with `null`, `Number`
+// reads that as the epoch, and the epoch is in front of every candle there has
+// ever been — one malformed row at the front would move the operator's viewport
+// by a bar that is not on the chart.
 export const countPrependedRows = (previousFirstTime, next, { timeOf = rowTime } = {}) => {
     if (!Number.isFinite(previousFirstTime)) return 0;
     const rows = Array.isArray(next) ? next : [];
     let count = 0;
-    while (count < rows.length && Number(timeOf(rows[count])) < previousFirstTime) count += 1;
+    while (count < rows.length) {
+        const time = Number(timeOf(rows[count]) ?? NaN);
+        if (!Number.isFinite(time) || time >= previousFirstTime) break;
+        count += 1;
+    }
     return count;
 };

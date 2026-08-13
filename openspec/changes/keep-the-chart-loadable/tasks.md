@@ -66,6 +66,21 @@ where it differs keeps the cost at the 80 rows the live window actually re-sends
 - [x] 4.4 Reuse one planner for both markets rather than two: `planSpotSeriesDraw` and `countPrependedRows` moved out of `spotChartHistory.js` into `chartSeriesDraw.js` as `planSeriesDraw` and `countPrependedRows`, taking where open time is kept and how two rows are compared. Callers updated: `ChartWrapper.jsx`, `RSIPane.jsx`, and `FuturesWorkstationChart.jsx`, which drops its own `canUpdateLastRow`, `countPrependedRows` and `rememberRows`.
 - [x] 4.5 Prove by test that a sliding live window with history in front of it is redrawn. Same endpoints, same length, one row gone from the middle — the shape the old comparison read as a tick.
 
+## 4b. The Seam Between History And The Live Window
+
+Found auditing §4, and the worst of everything in this change: the window the
+stream re-sends is bounded at 80 rows and slides, history was read behind where
+it stood at the time, so **every bar that leaves the window afterwards is in
+neither run**. Measured: three bars gone after three minutes on a 1m contract,
+and one more per bar for as long as the contract stays open — the chart drew bar
+19 against bar 23 with nothing to say that four minutes were missing between
+them. The §4 fix made the redraw honest about it; it did not put the bars back.
+
+- [x] 4b.1 Keep the closed bars that leave the live window, at the end of the run they continue.
+- [x] 4b.2 Refuse the join where the rows do not touch what is held — a window that jumped is not a window that slid, and joining across it would put a hole on screen and call it continuous.
+- [x] 4b.3 Prove by test that a bar leaving the window is kept, and that it joins the end of history already read.
+- [x] 4b.4 Fix `countPrependedRows` counting a row whose open time it could not read. The accessor answers an unreadable row with `null`, `Number(null)` is the epoch, and the epoch is in front of every candle there has ever been — one malformed row at the front moved the operator's viewport by a bar that is not on the chart. Found auditing 4.4; the first attempt at the fix was wrong the same way (`0` is finite) and was caught by the test.
+
 ## 5. The Spec States The Guarantee That Exists
 
 - [x] 5.1 Correct the `spot-chart-history` restart requirement to cover history pages, and state that the live bootstrap window is re-read on every start.
@@ -89,8 +104,13 @@ symlinked) before the fix landed, and failed there:
 - `holds the run to the ceiling the disk cache uses` — 6 000 rows.
 - `opens a monthly candle on the first of the month` — opened `2024-03-31`.
 - the monthly continuity seams — 6 of 11 seams of 2023 discarded the run behind them.
+- `keeps a bar that fell out of the window` — held nothing at all.
+- `joins what leaves the window to the end of the history already read` — 38 rows against 40.
+- `counts no row whose open time it could not read` — counted two.
 
-Two tests do not bite and are kept as guards, not proofs: `still writes the last
-bar alone when only the last bar moved` (4.2 — the cheap path was already there,
-and the point is that it survived) and the identity/`timeOf` cases in
-`chartSeriesDraw.test.js` covering a caller whose rows do not survive the frame.
+Tests kept as guards rather than proofs, and said so rather than counted as
+finds: `still writes the last bar alone when only the last bar moved` (4.2 — the
+cheap path was already there, and the point is that it survived), the
+identity/`timeOf` cases in `chartSeriesDraw.test.js`, and the two refusal cases
+in 4b.2 (a jumped window, rows that never closed) — the old code held nothing in
+either case, so there was nothing there to break.
