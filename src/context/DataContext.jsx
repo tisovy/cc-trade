@@ -11,10 +11,11 @@ import {
 } from '../utils/cache';
 import {
   SPOT_CHART_HISTORY_PAGE_ROWS,
-  SPOT_CHART_INTERVAL_MS,
+  SPOT_CHART_MAX_ROWS,
   mergeSpotChartSeries,
   spotChartHistoryEndTime,
-  spotChartIntervalSeconds,
+  spotChartNextOpenTime,
+  spotChartOpenTimeAt,
 } from '../utils/spotChartHistory';
 import { incrementTradeCount } from '../utils/pnl';
 import { answersUnresolvedCommand } from '../utils/unresolvedCommandIdentity.js';
@@ -28,10 +29,6 @@ import {
   requestActivityMetrics,
 } from '../utils/analytics';
 import { useGatewayContext } from './GatewayContext.jsx';
-
-// One table of interval lengths for the whole Spot chart. Two of them is how a
-// gap check ends up comparing one interval's idea of a bar against another's.
-const INTERVAL_TO_MS = SPOT_CHART_INTERVAL_MS;
 
 const DEFAULT_TRADE_PAIRS = ['PAXUSDT', 'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'ADAUSDT'];
 const MIN_TRADE_NOTIONAL_BTC = 0.01;
@@ -134,6 +131,17 @@ const sanitizeCandles = (candles = []) => {
   }, []);
 };
 
+// A bar opening is the one thing that makes the series longer, so it is where
+// the ceiling has to hold. Enforced only at the merge, it bounded the history a
+// scroll pages in and nothing else: a desk left open overnight grew the series,
+// its cache write and the cost of every redraw past the stated limit — at 1m,
+// past five thousand rows in under three days.
+const appendWithinCeiling = (series, candle) => (
+  series.length < SPOT_CHART_MAX_ROWS
+    ? [...series, candle]
+    : [...series.slice(series.length - SPOT_CHART_MAX_ROWS + 1), candle]
+);
+
 const upsertCandle = (series, candle, { allowAppend = true } = {}) => {
   if (!candle) {
     return { series, appended: false, changed: false };
@@ -156,7 +164,7 @@ const upsertCandle = (series, candle, { allowAppend = true } = {}) => {
   const lastTime = Number(currentSeries[lastIndex]?.time);
 
   if (allowAppend && candleTime > lastTime) {
-    return { series: [...currentSeries, candle], appended: true, changed: true };
+    return { series: appendWithinCeiling(currentSeries, candle), appended: true, changed: true };
   }
 
   for (let idx = lastIndex; idx >= 0; idx--) {
@@ -702,8 +710,7 @@ export const DataProvider = ({
       if (!trade) return;
       setChart((prev) => {
         if (!prev.length) return prev;
-        const intervalMs = INTERVAL_TO_MS[detailSubscription.interval];
-        if (!intervalMs) return prev;
+        const interval = detailSubscription.interval;
         const tradePrice = parseFloat(trade.p ?? trade.price ?? trade.lastPrice);
         if (!Number.isFinite(tradePrice)) return prev;
         const tradeTime = trade.T ?? trade.time ?? trade.E ?? Date.now();
@@ -714,13 +721,18 @@ export const DataProvider = ({
           typeof lastCandle.time === 'number' && lastCandle.time > 1e12
             ? lastCandle.time
             : lastCandle.time * 1000;
-        const candleEnd = candleStart + intervalMs;
+        // Where the next candle opens is the interval's own question, not a
+        // constant's: thirty days after the first of March is the thirty-first,
+        // and a monthly chart asked in thirty-day blocks opens April in the
+        // middle of a bar.
+        const candleEnd = spotChartNextOpenTime(candleStart / 1000, interval);
+        if (candleEnd === null) return prev;
 
-        if (tradeTime >= candleEnd) {
-          const intervalsAhead = Math.floor((tradeTime - candleStart) / intervalMs);
-          const newStart = candleStart + intervalsAhead * intervalMs;
+        if (tradeTime >= candleEnd * 1000) {
+          const newStart = spotChartOpenTimeAt(candleStart / 1000, tradeTime / 1000, interval);
+          if (newStart === null) return prev;
           const newCandle = {
-            time: Math.floor(newStart / 1000),
+            time: Math.floor(newStart),
             open: tradePrice,
             high: tradePrice,
             low: tradePrice,
@@ -728,7 +740,7 @@ export const DataProvider = ({
             volume: 0,
             isFinal: false,
           };
-          return [...prev, newCandle];
+          return appendWithinCeiling(prev, newCandle);
         }
 
         if (tradeTime < candleStart) {
@@ -1048,11 +1060,10 @@ export const DataProvider = ({
           // front of that depth instead, and only when the depth was read for
           // this same pair and interval.
           const pair = `${panel.selected}:${panel.interval}`;
-          const intervalSeconds = spotChartIntervalSeconds(panel.interval);
           const mergeWithHeldDepth = chartSelectionRef.current === pair;
           chartSelectionRef.current = pair;
           setChart(prev => (mergeWithHeldDepth
-            ? mergeSpotChartSeries(prev, sanitizedChartData, { intervalSeconds })
+            ? mergeSpotChartSeries(prev, sanitizedChartData, { interval: panel.interval })
             : sanitizedChartData));
           setUpdateChart(false);
           setIsFinal(false);
@@ -1066,7 +1077,11 @@ export const DataProvider = ({
           // Cache the chart data
           if (sanitizedChartData.length > 0) {
             const storedSeries = mergeWithHeldDepth
-              ? mergeSpotChartSeries(chartSeriesRef.current, sanitizedChartData, { intervalSeconds })
+              ? mergeSpotChartSeries(
+                chartSeriesRef.current,
+                sanitizedChartData,
+                { interval: panel.interval },
+              )
               : sanitizedChartData;
             setCachedCandles(panel.selected, panel.interval, storedSeries)
               .then(() => getCacheStats().then(setCacheStats))
@@ -1127,8 +1142,11 @@ export const DataProvider = ({
         if (rows.length < request.limit) setChartHistoryExhausted(true);
         if (rows.length === 0) break;
 
-        const intervalSeconds = spotChartIntervalSeconds(request.interval);
-        const merged = mergeSpotChartSeries(rows, chartSeriesRef.current, { intervalSeconds });
+        const merged = mergeSpotChartSeries(
+          rows,
+          chartSeriesRef.current,
+          { interval: request.interval },
+        );
         // The series is bounded, and a live tick never touches its front row, so
         // this comparison is exact. A page the chart cannot hold — because it is
         // already full to its ceiling, or because the page did not touch the run
@@ -1138,7 +1156,7 @@ export const DataProvider = ({
         if (Number.isFinite(oldestHeld) && !(merged[0]?.time < oldestHeld)) {
           setChartHistoryExhausted(true);
         }
-        setChart(prev => mergeSpotChartSeries(rows, prev, { intervalSeconds }));
+        setChart(prev => mergeSpotChartSeries(rows, prev, { interval: request.interval }));
         setCachedCandles(request.symbol, request.interval, merged)
           .catch(err => console.error('Cache write error:', err));
         break;

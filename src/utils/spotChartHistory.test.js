@@ -2,12 +2,11 @@ import { describe, expect, it } from 'vitest';
 import {
     SPOT_CHART_HISTORY_PAGE_ROWS,
     SPOT_CHART_MAX_ROWS,
-    countPrependedRows,
     mergeSpotChartSeries,
-    planSpotSeriesDraw,
     reachedSpotHistoryEdge,
     spotChartHistoryEndTime,
-    spotChartIntervalSeconds,
+    spotChartNextOpenTime,
+    spotChartOpenTimeAt,
 } from './spotChartHistory.js';
 
 const HOUR = 3600;
@@ -24,16 +23,48 @@ const run = (startTime, count, step = HOUR) => Array.from(
     (_unused, index) => candle(startTime + index * step),
 );
 
-describe('spotChartIntervalSeconds', () => {
-    it('answers in seconds for every interval the panel offers', () => {
-        expect(spotChartIntervalSeconds('1m')).toBe(60);
-        expect(spotChartIntervalSeconds('1h')).toBe(HOUR);
-        expect(spotChartIntervalSeconds('1d')).toBe(86_400);
+const utc = (year, month, day = 1) => Date.UTC(year, month - 1, day) / 1000;
+
+describe('spotChartNextOpenTime', () => {
+    it('answers a fixed interval with its own length', () => {
+        expect(spotChartNextOpenTime(1_700_000_000, '1m')).toBe(1_700_000_060);
+        expect(spotChartNextOpenTime(1_700_000_000, '1h')).toBe(1_700_000_000 + HOUR);
+        expect(spotChartNextOpenTime(1_700_000_000, '1d')).toBe(1_700_000_000 + 86_400);
+    });
+
+    // 28, 29, 30 and 31 days, in that order, all one step.
+    it('answers a month with the next month, whatever its length', () => {
+        expect(spotChartNextOpenTime(utc(2023, 2), '1M')).toBe(utc(2023, 3));
+        expect(spotChartNextOpenTime(utc(2024, 2), '1M')).toBe(utc(2024, 3));
+        expect(spotChartNextOpenTime(utc(2024, 4), '1M')).toBe(utc(2024, 5));
+        expect(spotChartNextOpenTime(utc(2024, 3), '1M')).toBe(utc(2024, 4));
+        expect(spotChartNextOpenTime(utc(2024, 12), '1M')).toBe(utc(2025, 1));
     });
 
     it('refuses an interval it does not know rather than guessing a length', () => {
-        expect(spotChartIntervalSeconds('7h')).toBeNull();
-        expect(spotChartIntervalSeconds(undefined)).toBeNull();
+        expect(spotChartNextOpenTime(1_700_000_000, '7h')).toBeNull();
+        expect(spotChartNextOpenTime(1_700_000_000, undefined)).toBeNull();
+        expect(spotChartNextOpenTime(null, '1h')).toBeNull();
+    });
+});
+
+describe('spotChartOpenTimeAt', () => {
+    it('counts fixed intervals from the candle it was given', () => {
+        const start = 1_700_000_000;
+        expect(spotChartOpenTimeAt(start, start + 3 * HOUR + 61, '1h')).toBe(start + 3 * HOUR);
+        expect(spotChartOpenTimeAt(start, start, '1h')).toBe(start);
+    });
+
+    // Counted in thirty-day blocks from the first of March, a print on the
+    // first of April opens a candle on the thirty-first of March.
+    it('reads a month off the calendar instead of counting thirty days', () => {
+        expect(spotChartOpenTimeAt(utc(2024, 3), utc(2024, 4) + 60, '1M')).toBe(utc(2024, 4));
+        expect(spotChartOpenTimeAt(utc(2024, 1), utc(2024, 3, 15), '1M')).toBe(utc(2024, 3));
+    });
+
+    it('refuses a moment before the candle it was given, and an unknown interval', () => {
+        expect(spotChartOpenTimeAt(1_700_000_000, 1_600_000_000, '1h')).toBeNull();
+        expect(spotChartOpenTimeAt(1_700_000_000, 1_700_000_060, '7h')).toBeNull();
     });
 });
 
@@ -55,7 +86,7 @@ describe('mergeSpotChartSeries', () => {
     it('prepends a history page in front of the live window', () => {
         const live = run(1_700_010_000, 3);
         const history = run(1_700_010_000 - 3 * HOUR, 3);
-        const merged = mergeSpotChartSeries(history, live, { intervalSeconds: HOUR });
+        const merged = mergeSpotChartSeries(history, live, { interval: '1h' });
         expect(merged).toHaveLength(6);
         expect(merged.map(row => row.time)).toEqual([
             ...history.map(row => row.time),
@@ -66,8 +97,8 @@ describe('mergeSpotChartSeries', () => {
     it('lets the arriving row win the seam, so a live candle is never overwritten by history', () => {
         const live = [candle(1_700_010_000, 555)];
         const history = [candle(1_700_010_000 - HOUR, 1), candle(1_700_010_000, 111)];
-        expect(mergeSpotChartSeries(history, live, { intervalSeconds: HOUR }).at(-1).close).toBe(555);
-        expect(mergeSpotChartSeries(live, history, { intervalSeconds: HOUR }).at(-1).close).toBe(111);
+        expect(mergeSpotChartSeries(history, live, { interval: '1h' }).at(-1).close).toBe(555);
+        expect(mergeSpotChartSeries(live, history, { interval: '1h' }).at(-1).close).toBe(111);
     });
 
     // The app being closed for a week is the ordinary case here. Concatenating
@@ -76,9 +107,9 @@ describe('mergeSpotChartSeries', () => {
     it('drops a run that no longer touches the one reaching into the present', () => {
         const stale = run(1_700_000_000, 5);
         const live = run(1_700_000_000 + 500 * HOUR, 5);
-        expect(mergeSpotChartSeries(stale, live, { intervalSeconds: HOUR })
+        expect(mergeSpotChartSeries(stale, live, { interval: '1h' })
             .map(row => row.time)).toEqual(live.map(row => row.time));
-        expect(mergeSpotChartSeries(live, stale, { intervalSeconds: HOUR })
+        expect(mergeSpotChartSeries(live, stale, { interval: '1h' })
             .map(row => row.time)).toEqual(live.map(row => row.time));
     });
 
@@ -89,13 +120,56 @@ describe('mergeSpotChartSeries', () => {
             candle(1_700_000_000 + 9 * HOUR),
         ];
         const live = [candle(1_700_000_000 + 10 * HOUR)];
-        expect(mergeSpotChartSeries(halted, live, { intervalSeconds: HOUR })).toHaveLength(4);
+        expect(mergeSpotChartSeries(halted, live, { interval: '1h' })).toHaveLength(4);
+    });
+
+    // Thirty days is longer than February and shorter than January, so a
+    // constant standing in for a month reads every 31-day seam as a hole and
+    // throws away everything behind it: a monthly chart lost its history to the
+    // calendar seven times a year.
+    describe('a month against the calendar', () => {
+        const month = (year, monthNumber, close = 100) => candle(
+            Date.UTC(year, monthNumber - 1, 1) / 1000,
+            close,
+        );
+        const times = series => series.map(row => row.time);
+
+        it('joins a 31-day month to the one after it', () => {
+            const older = [month(2023, 12), month(2024, 1)];
+            const newer = [month(2024, 2), month(2024, 3)];
+            expect(times(mergeSpotChartSeries(older, newer, { interval: '1M' })))
+                .toEqual(times([...older, ...newer]));
+        });
+
+        it('joins every seam of a year, whatever each month is worth', () => {
+            const year = Array.from({ length: 12 }, (_unused, index) => month(2023, index + 1));
+            for (let split = 1; split < year.length; split += 1) {
+                expect(mergeSpotChartSeries(
+                    year.slice(0, split),
+                    year.slice(split),
+                    { interval: '1M' },
+                )).toHaveLength(year.length);
+            }
+        });
+
+        it('joins December to January across the turn of the year', () => {
+            const older = [month(2023, 11), month(2023, 12)];
+            const newer = [month(2024, 1)];
+            expect(mergeSpotChartSeries(older, newer, { interval: '1M' })).toHaveLength(3);
+        });
+
+        it('still drops a run with a month missing between it and the present', () => {
+            const stale = [month(2024, 1), month(2024, 2)];
+            const live = [month(2024, 4), month(2024, 5)];
+            expect(times(mergeSpotChartSeries(stale, live, { interval: '1M' })))
+                .toEqual(times(live));
+        });
     });
 
     it('joins runs that abut exactly, with no candle invented or lost at the seam', () => {
         const older = run(1_700_000_000, 4);
         const newer = run(1_700_000_000 + 4 * HOUR, 4);
-        const merged = mergeSpotChartSeries(older, newer, { intervalSeconds: HOUR });
+        const merged = mergeSpotChartSeries(older, newer, { interval: '1h' });
         expect(merged).toHaveLength(8);
         for (let index = 1; index < merged.length; index += 1) {
             expect(merged[index].time - merged[index - 1].time).toBe(HOUR);
@@ -106,7 +180,7 @@ describe('mergeSpotChartSeries', () => {
         const merged = mergeSpotChartSeries(
             run(1_600_000_000, 4000),
             run(1_600_000_000 + 4000 * HOUR, 2000),
-            { intervalSeconds: HOUR },
+            { interval: '1h' },
         );
         expect(merged).toHaveLength(SPOT_CHART_MAX_ROWS);
         expect(merged.at(-1).time).toBe(1_600_000_000 + 5999 * HOUR);
@@ -124,21 +198,8 @@ describe('mergeSpotChartSeries', () => {
         expect(mergeSpotChartSeries(
             run(1_700_000_000, 2),
             run(1_700_000_000 + 500 * HOUR, 2),
-            { intervalSeconds: null },
+            { interval: undefined },
         )).toHaveLength(4);
-    });
-});
-
-describe('countPrependedRows', () => {
-    it('counts only the rows that arrived in front of what was drawn', () => {
-        const next = run(1_700_000_000, 6);
-        expect(countPrependedRows(next[2].time, next)).toBe(2);
-        expect(countPrependedRows(next[0].time, next)).toBe(0);
-    });
-
-    it('counts nothing when there was no previous series to hold in place', () => {
-        expect(countPrependedRows(null, run(1_700_000_000, 3))).toBe(0);
-        expect(countPrependedRows(1_700_000_000, undefined)).toBe(0);
     });
 });
 
@@ -152,59 +213,6 @@ describe('reachedSpotHistoryEdge', () => {
     it('treats a missing range as no request', () => {
         expect(reachedSpotHistoryEdge(null)).toBe(false);
         expect(reachedSpotHistoryEdge({})).toBe(false);
-    });
-});
-
-describe('planSpotSeriesDraw', () => {
-    const START = 1_700_000_000;
-    const drawn = run(START, 5);
-    const moved = (rows, index, close) => {
-        const next = [...rows];
-        next[index] = candle(next[index].time, close);
-        return next;
-    };
-
-    it('answers a moved last candle with the last candle alone', () => {
-        expect(planSpotSeriesDraw(drawn, moved(drawn, drawn.length - 1, 42))).toBe('tick');
-    });
-
-    it('answers a candle opening after the last one with that candle alone', () => {
-        expect(planSpotSeriesDraw(drawn, [...drawn, candle(START + 5 * HOUR, 42)])).toBe('append');
-    });
-
-    // The close of the candle just past — its true high, low and volume — is a
-    // row settling behind the last one, and it arrives through the same series a
-    // tick does. Answering it as a tick would leave it undrawn.
-    it('answers a candle settling behind the last one with the whole series', () => {
-        expect(planSpotSeriesDraw(drawn, moved(drawn, drawn.length - 2, 99))).toBe('full');
-    });
-
-    it('answers older candles arriving in front with the whole series', () => {
-        expect(planSpotSeriesDraw(drawn, [...run(START - 2 * HOUR, 2), ...drawn])).toBe('full');
-    });
-
-    it('answers a series it has never drawn with the whole series', () => {
-        expect(planSpotSeriesDraw(null, drawn)).toBe('full');
-        expect(planSpotSeriesDraw([], drawn)).toBe('full');
-    });
-
-    it('answers nothing at all when there are no rows to draw', () => {
-        expect(planSpotSeriesDraw(drawn, [])).toBe('none');
-        expect(planSpotSeriesDraw(drawn, undefined)).toBe('none');
-    });
-
-    // Two rows arriving at the end is a merge, not a bar opening: the row before
-    // the new last one was never drawn.
-    it('answers more than one new candle with the whole series', () => {
-        expect(planSpotSeriesDraw(drawn, [
-            ...drawn,
-            candle(START + 5 * HOUR, 42),
-            candle(START + 6 * HOUR, 43),
-        ])).toBe('full');
-    });
-
-    it('answers a shorter series with the whole series', () => {
-        expect(planSpotSeriesDraw(drawn, drawn.slice(0, -1))).toBe('full');
     });
 });
 

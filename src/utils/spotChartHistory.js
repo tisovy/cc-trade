@@ -18,7 +18,12 @@ export const SPOT_CHART_MAX_ROWS = 5000;
 // end of the data first and the older bars afterwards.
 export const SPOT_CHART_HISTORY_PREFETCH_BARS = 40;
 
-export const SPOT_CHART_INTERVAL_MS = Object.freeze({
+// Every interval the panel offers except one is a fixed number of
+// milliseconds. A month is not: it is 28, 29, 30 or 31 days, and it is absent
+// here on purpose — a constant standing in for it read a 31-day month as a gap
+// and threw away the run behind it. Ask `spotChartNextOpenTime` or
+// `spotChartOpenTimeAt` for a step instead of reading one from this table.
+const SPOT_CHART_INTERVAL_MS = Object.freeze({
     '1m': 60_000,
     '3m': 180_000,
     '5m': 300_000,
@@ -33,15 +38,43 @@ export const SPOT_CHART_INTERVAL_MS = Object.freeze({
     '1d': 86_400_000,
     '3d': 259_200_000,
     '1w': 604_800_000,
-    '1M': 2_592_000_000,
 });
+
+const SPOT_CHART_CALENDAR_MONTH = '1M';
 
 // Candles carry open time in seconds throughout the renderer; the exchange is
 // asked in milliseconds. Keeping the conversion in one place is what stops a
 // gap check from comparing one unit against the other.
-export const spotChartIntervalSeconds = (interval) => {
+const intervalSeconds = (interval) => {
     const intervalMs = SPOT_CHART_INTERVAL_MS[interval];
     return intervalMs === undefined ? null : intervalMs / 1000;
+};
+
+// Monthly candles open at midnight UTC on the first, which is the one thing
+// about a month that does not vary.
+const monthOpenTime = (time, monthsAhead) => {
+    const date = new Date(time * 1000);
+    return Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + monthsAhead, 1) / 1000;
+};
+
+// The candle that opens directly after the one that opened at `openTime`.
+export const spotChartNextOpenTime = (openTime, interval) => {
+    if (!Number.isFinite(openTime)) return null;
+    if (interval === SPOT_CHART_CALENDAR_MONTH) return monthOpenTime(openTime, 1);
+    const step = intervalSeconds(interval);
+    return step === null ? null : openTime + step;
+};
+
+// The candle that holds `at`, counted from a candle known to open at or before
+// it. A month is read off the calendar rather than counted, because the step
+// from one month to the next is not the step from that one to the one after —
+// and counted in thirty-day blocks a chart opens a March candle on the second.
+export const spotChartOpenTimeAt = (openTime, at, interval) => {
+    if (!Number.isFinite(openTime) || !Number.isFinite(at) || at < openTime) return null;
+    if (interval === SPOT_CHART_CALENDAR_MONTH) return monthOpenTime(at, 0);
+    const step = intervalSeconds(interval);
+    if (step === null) return null;
+    return openTime + Math.floor((at - openTime) / step) * step;
 };
 
 // Binance reads `endTime` inclusively, so one millisecond before the oldest
@@ -65,7 +98,7 @@ const ascendingRows = (rows) => (Array.isArray(rows) ? rows : [])
  * page arrives under the live window that is still ticking.
  */
 export const mergeSpotChartSeries = (existing, arriving, {
-    intervalSeconds,
+    interval,
     maxRows = SPOT_CHART_MAX_ROWS,
 } = {}) => {
     const held = ascendingRows(existing);
@@ -76,13 +109,12 @@ export const mergeSpotChartSeries = (existing, arriving, {
     // Two runs that do not touch cannot be joined without inventing the candles
     // between them. The run reaching furthest into the present wins outright: a
     // chart may be short, but it may never present a hole as continuous data.
-    if (Number.isFinite(intervalSeconds) && intervalSeconds > 0) {
-        const older = held[0].time <= incoming[0].time ? held : incoming;
-        const newer = older === held ? incoming : held;
-        if (older.at(-1).time + intervalSeconds < newer[0].time) {
-            const survivor = held.at(-1).time >= incoming.at(-1).time ? held : incoming;
-            return survivor.slice(-maxRows);
-        }
+    const older = held[0].time <= incoming[0].time ? held : incoming;
+    const newer = older === held ? incoming : held;
+    const nextOpen = spotChartNextOpenTime(older.at(-1).time, interval);
+    if (nextOpen !== null && nextOpen < newer[0].time) {
+        const survivor = held.at(-1).time >= incoming.at(-1).time ? held : incoming;
+        return survivor.slice(-maxRows);
     }
 
     const byTime = new Map(held.map(row => [row.time, row]));
@@ -90,56 +122,6 @@ export const mergeSpotChartSeries = (existing, arriving, {
     return [...byTime.values()]
         .sort((left, right) => left.time - right.time)
         .slice(-maxRows);
-};
-
-// Older candles arriving in front shift every bar's index, so the chart has to
-// know how many before it can hold the viewport still.
-export const countPrependedRows = (previousFirstTime, next) => {
-    if (!Number.isFinite(previousFirstTime)) return 0;
-    const rows = Array.isArray(next) ? next : [];
-    let count = 0;
-    while (count < rows.length && Number(rows[count]?.time) < previousFirstTime) count += 1;
-    return count;
-};
-
-const sharesEveryRowBefore = (drawn, next, count) => {
-    for (let index = 0; index < count; index += 1) {
-        if (drawn[index] !== next[index]) return false;
-    }
-    return true;
-};
-
-/**
- * What the chart has to redraw to show `next`, given the rows it is drawing now.
- *
- * A live trade moves the last candle and leaves every other one exactly as it
- * was — every writer copies the array and keeps the untouched rows themselves —
- * so the question is answered by identity rather than by comparing values, and
- * a row settled behind the last one is not mistaken for a tick. It is asked at
- * all because the alternative is redrawing three series, a moving average over
- * every bar and the whole volume histogram for one bar's news, on a chart that
- * accumulates up to `SPOT_CHART_MAX_ROWS` of them.
- */
-export const planSpotSeriesDraw = (drawn, next) => {
-    const rows = Array.isArray(next) ? next : [];
-    if (rows.length === 0) return 'none';
-    const previous = Array.isArray(drawn) ? drawn : [];
-    if (previous.length === 0) return 'full';
-
-    // The last bar moved and no other did.
-    if (rows.length === previous.length) {
-        if (rows.at(-1).time !== previous.at(-1).time) return 'full';
-        return sharesEveryRowBefore(previous, rows, rows.length - 1) ? 'tick' : 'full';
-    }
-
-    // A bar opened after the last one drawn. Anything else that changes the
-    // length is a merge — a history page in front, a window rejoined — and a
-    // merge is redrawn whole.
-    if (rows.length === previous.length + 1 && rows.at(-1).time > previous.at(-1).time) {
-        return sharesEveryRowBefore(previous, rows, previous.length) ? 'append' : 'full';
-    }
-
-    return 'full';
 };
 
 // Scrolling into the left edge is the request for more history: the operator is

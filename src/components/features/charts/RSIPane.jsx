@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useCallback, useState, memo } from 'react';
 import { createChart, ColorType, LineSeries, CrosshairMode } from 'lightweight-charts';
 import { advanceRSI, calculateRSISeries, RSI_CONFIG } from './chart-plugins/RSIIndicator';
-import { planSpotSeriesDraw } from '../../../utils/spotChartHistory';
+import { planSeriesDraw } from '../../../utils/chartSeriesDraw';
 import './RSIPane.css';
 
 /**
@@ -165,7 +165,7 @@ const RSIPane = memo(({
         if (!rsiSeriesRef.current) return;
         const drawn = drawnRef.current;
         const plan = drawn.period === period
-            ? planSpotSeriesDraw(drawn.rows, data)
+            ? planSeriesDraw(drawn.rows, data)
             : 'full';
         if (plan === 'none') return;
 

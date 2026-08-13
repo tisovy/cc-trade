@@ -7,6 +7,7 @@ import { GatewayProvider } from './GatewayContext.jsx'
 import { NotificationProvider } from './NotificationProvider'
 import { useNotifications } from '../hooks/useNotifications'
 import { readDeskFrame } from '../utils/deskFrameRouter'
+import { SPOT_CHART_MAX_ROWS } from '../utils/spotChartHistory'
 
 const webSocketMocks = vi.hoisted(() => ({
     connection: { readyState: 1 },
@@ -218,18 +219,18 @@ describe('DataContext spot chart depth', () => {
 
     // Awaited: a delivered chart writes the cache and re-reads its statistics,
     // and those state updates belong inside the same act as the delivery.
-    const deliver = message => act(async () => {
+    const deliver = (message, interval = '1h') => act(async () => {
         webSocketMocks.handleMessage({
             data: JSON.stringify({
-                channelId: 'detail-PAXUSDT-1h-test',
+                channelId: `detail-PAXUSDT-${interval}-test`,
                 symbol: 'PAXUSDT',
-                interval: '1h',
+                interval,
                 ...message,
             }),
         }, webSocketMocks.connection)
     })
 
-    const renderDepthChart = async () => {
+    const renderDepthChart = async (interval = '1h') => {
         captured.current = null
         render(
             <TestWrapper>
@@ -238,7 +239,7 @@ describe('DataContext spot chart depth', () => {
                 </DataProvider>
             </TestWrapper>
         )
-        await act(async () => { desk().handlePanelUpdate({ selected: 'PAXUSDT', interval: '1h' }, true) })
+        await act(async () => { desk().handlePanelUpdate({ selected: 'PAXUSDT', interval }, true) })
         // The cache read and the subscription that follows it are two hops of a
         // promise chain; both settle before anything is asserted.
         await act(async () => {})
@@ -456,6 +457,73 @@ describe('DataContext spot chart depth', () => {
         expect(desk().chart.slice(0, -1).every(
             (row, index) => row === showing[index],
         )).toBe(true)
+    })
+
+    // The ceiling was enforced only where history is merged, so the path that
+    // actually makes the series longer — a bar opening — grew it without bound.
+    // A desk left open on a 1m contract crosses five thousand rows in under
+    // three days and keeps going, and every redraw, every cache write and every
+    // moving average pays for it.
+    describe('the ceiling on a series that keeps growing', () => {
+        const atCeiling = () => run(LIVE_START, SPOT_CHART_MAX_ROWS)
+
+        it('drops the oldest bar when a print opens one past the ceiling', async () => {
+            await renderDepthChart()
+            const live = atCeiling()
+            await deliver({ type: 'chart', payload: live, extra: live.at(-1) })
+            expect(desk().chart).toHaveLength(SPOT_CHART_MAX_ROWS)
+
+            // A print past the end of the last candle opens the next one.
+            await deliver({
+                type: 'trades',
+                payload: { p: '12', q: '1', T: (live.at(-1).time + HOUR) * 1000 },
+            })
+
+            expect(desk().chart).toHaveLength(SPOT_CHART_MAX_ROWS)
+            expect(desk().chart[0].time).toBe(live[1].time)
+            expect(desk().chart.at(-1).time).toBe(live.at(-1).time + HOUR)
+            expect(desk().chart.at(-1).close).toBe(12)
+        })
+
+        it('drops the oldest bar when the stream opens one past the ceiling', async () => {
+            await renderDepthChart()
+            const live = atCeiling()
+            await deliver({ type: 'chart', payload: live, extra: live.at(-1) })
+
+            // The candle the stream is carrying has to close before the next one
+            // may open, exactly as it does on a live pair.
+            const closing = { ...live.at(-1), isFinal: true }
+            await deliver({ type: 'chart', payload: [closing], extra: closing })
+            const opened = candle(live.at(-1).time + HOUR, 13)
+            await deliver({ type: 'chart', payload: [opened], extra: opened })
+
+            expect(desk().chart).toHaveLength(SPOT_CHART_MAX_ROWS)
+            expect(desk().chart[0].time).toBe(live[1].time)
+            expect(desk().chart.at(-1).time).toBe(opened.time)
+        })
+    })
+
+    // Where the next candle opens is the interval's own question. Answered with
+    // a flat thirty days, a monthly chart opened April on the thirty-first of
+    // March — a bar at a date the exchange has no candle for, which the next
+    // read then contradicts.
+    it('opens a monthly candle on the first of the month, not thirty days on', async () => {
+        const monthOpen = index => Date.UTC(2023, 3 + index, 1) / 1000
+        // A year of monthly bars, April 2023 through March 2024, so the chart
+        // reads the delivery as the full window it is.
+        const live = Array.from({ length: 12 }, (_unused, index) => candle(monthOpen(index)))
+        const april = Date.UTC(2024, 3, 1) / 1000
+
+        await renderDepthChart('1M')
+        await deliver({ type: 'chart', payload: live, extra: live.at(-1) }, '1M')
+        expect(desk().chart).toHaveLength(12)
+
+        // A print on the first of April. Thirty days after the first of March
+        // is the thirty-first, which is not a month Binance has a candle for.
+        await deliver({ type: 'trades', payload: { p: '12', q: '1', T: april * 1000 } }, '1M')
+
+        expect(desk().chart).toHaveLength(13)
+        expect(desk().chart.at(-1).time).toBe(april)
     })
 
     // An order the exchange never confirmed is the one warning that must not be

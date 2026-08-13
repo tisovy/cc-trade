@@ -8,7 +8,8 @@ import { createChart, ColorType, CrosshairMode, LineStyle, CandlestickSeries, Hi
 import RSIPane from './RSIPane';
 import { precisionTruncate, formatVolumeShort } from '../../../utils/operations';
 import { buildVolumeHistogramBar, buildVolumeHistogramPresentation } from '../../../utils/chartVolume';
-import { countPrependedRows, planSpotSeriesDraw, reachedSpotHistoryEdge } from '../../../utils/spotChartHistory';
+import { countPrependedRows, planSeriesDraw } from '../../../utils/chartSeriesDraw';
+import { reachedSpotHistoryEdge } from '../../../utils/spotChartHistory';
 import { DEFAULT_PRECISION, getMinMove } from '../../../utils/precision';
 import { useDataContext } from '../../../context/DataContext';
 import { useDrawingContext } from '../../../hooks/useDrawingContext';
@@ -600,7 +601,7 @@ export const ChartWrapper = (props) => {
     useEffect(() => {
         if (!candleSeriesRef.current || !volumeSeriesRef.current) return;
         const drawn = drawnSeriesRef.current;
-        const plan = drawn.pair === chartPair ? planSpotSeriesDraw(drawn.rows, data) : 'full';
+        const plan = drawn.pair === chartPair ? planSeriesDraw(drawn.rows, data) : 'full';
         if (plan === 'none') return;
 
         if (plan !== 'full') {

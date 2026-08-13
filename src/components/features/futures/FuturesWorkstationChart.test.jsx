@@ -1325,6 +1325,76 @@ describe('FuturesWorkstationChart series writes', () => {
     expect(volumeSeries.applyOptions.mock.calls.at(-1)[0].priceFormat.type).toBe('custom')
   })
 
+  // A re-read of the series corrects candles the stream got wrong — a volume
+  // completed after the bar closed, a high the aggregate trade feed missed.
+  // Deciding what to redraw from length and endpoints alone called that "the
+  // last bar moved" and wrote the last bar only, so the correction stayed off
+  // the canvas for as long as the contract was open.
+  it('redraws a candle a re-read corrected inside the series', () => {
+    const drawn = series(0, 40)
+    const { rerender } = render(<FuturesWorkstationChart {...properties(drawn)} />)
+    const [contractSeries, volumeSeries] = chartMock.charts[0].series
+    contractSeries.setData.mockClear()
+    contractSeries.update.mockClear()
+    volumeSeries.setData.mockClear()
+
+    // Same length, same first and last open time — only a candle in the middle
+    // is not what the chart is drawing.
+    const corrected = [...drawn]
+    corrected[20] = candle(START + (20 * MINUTE), '59999.00', '4242')
+    rerender(<FuturesWorkstationChart {...properties(corrected)} />)
+
+    expect(contractSeries.update).not.toHaveBeenCalled()
+    expect(contractSeries.setData).toHaveBeenCalledTimes(1)
+    const redrawn = contractSeries.setData.mock.calls.at(-1)[0]
+    expect(redrawn[20].close).toBe(59_999)
+    expect(volumeSeries.setData.mock.calls.at(-1)[0][20].value).toBe(4242)
+  })
+
+  // The cheap path is the whole reason the question is asked: at the thousands
+  // of bars this chart holds, redrawing both series for one bar's news is the
+  // work of the entire series on every print.
+  it('still writes the last bar alone when only the last bar moved', () => {
+    const drawn = series(0, 40)
+    const { rerender } = render(<FuturesWorkstationChart {...properties(drawn)} />)
+    const [contractSeries, volumeSeries] = chartMock.charts[0].series
+    contractSeries.setData.mockClear()
+    volumeSeries.setData.mockClear()
+
+    // Re-sent off the wire, so every row is a new object and only the last
+    // one's value differs.
+    const ticked = drawn.map(row => ({ ...row }))
+    ticked[ticked.length - 1] = candle(START + (39 * MINUTE), '58500.00')
+    rerender(<FuturesWorkstationChart {...properties(ticked)} />)
+
+    expect(contractSeries.setData).not.toHaveBeenCalled()
+    expect(contractSeries.update).toHaveBeenCalledTimes(1)
+    expect(contractSeries.update.mock.calls.at(-1)[0].close).toBe(58_500)
+  })
+
+  // The live window the stream re-sends is bounded and slides: when a bar
+  // opens, the oldest live bar leaves it. With history loaded in front, the
+  // series still starts at the same open time and still ends one bar later —
+  // exactly what a bar opening looks like from the endpoints — while a row has
+  // gone out of the middle. Written as a tick, the chart keeps drawing it.
+  it('redraws when the live window slid under the history in front of it', () => {
+    const history = series(0, 20)
+    const { rerender } = render(
+      <FuturesWorkstationChart {...properties([...history, ...series(20, 60)])} />,
+    )
+    const contractSeries = chartMock.charts[0].series[0]
+    contractSeries.setData.mockClear()
+    contractSeries.update.mockClear()
+
+    // The window dropped bar 20 and opened bar 60. History does not cover the
+    // bar that left, so the series is one row shorter in the middle than what
+    // is on the canvas.
+    rerender(<FuturesWorkstationChart {...properties([...history, ...series(21, 61)])} />)
+
+    expect(contractSeries.update).not.toHaveBeenCalled()
+    expect(contractSeries.setData).toHaveBeenCalledTimes(1)
+  })
+
   // The candles own the time scale, and the library answers a time-scale change
   // by re-sending every series' data. Writing the volume first leaves both
   // series holding the same generation of rows when the frame ends.

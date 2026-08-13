@@ -55,9 +55,10 @@ a live candle. The newest rows SHALL be the ones kept.
 - **THEN** the series stays at the ceiling and the live end is never dropped
 
 ### Requirement: Calendar intervals are compared by calendar step
-Continuity between two runs of candles SHALL be decided using the interval's own
-step. An interval whose length varies by calendar — a month above all — SHALL
-NOT be compared against a fixed millisecond constant.
+Where a candle ends, and where the next one opens, SHALL be decided using the
+interval's own step. An interval whose length varies by calendar — a month above
+all — SHALL NOT be compared against, or counted in, a fixed millisecond
+constant.
 
 #### Scenario: Consecutive monthly candles of unequal length
 - **WHEN** a 31-day month follows a 28-day month
@@ -66,3 +67,7 @@ NOT be compared against a fixed millisecond constant.
 #### Scenario: A genuine gap between monthly candles
 - **WHEN** a month is missing between two monthly candles
 - **THEN** the gap is detected and no hole is presented as continuous data
+
+#### Scenario: A print opens the next monthly candle
+- **WHEN** a trade prints in the month after the one the chart's last candle opened
+- **THEN** the candle opened for it opens on the first of that month

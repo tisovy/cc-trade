@@ -5,6 +5,7 @@ import {
   FUTURES_PRODUCTION_WORKSTATION_ACTIONS,
   createFuturesProductionWorkstationEvent,
 } from '../utils/futuresProductionWorkstationProtocol.js'
+import { FUTURES_CANDLE_HISTORY_CACHE_MAX_ROWS } from '../utils/futuresCandleHistoryCache.js'
 
 class LocalSocket extends EventTarget {
   constructor(readyState = 1) {
@@ -807,5 +808,49 @@ describe('useFuturesProductionWorkstation candle history', () => {
     expect(result.current.candleHistory.rows).toHaveLength(1_000)
     expect(result.current.candleHistory.rows.at(-1).openTime).toBe(START - (41 * MINUTE))
     expect(result.current.candleHistory.exhausted).toBe(false)
+  })
+
+  // The disk cache has held five thousand rows per contract and interval from
+  // the start; the renderer held whatever the operator had scrolled through.
+  // Six pages is a minute of scrolling and puts the chart a fifth past the
+  // ceiling, where every redraw re-maps and re-scales the whole series.
+  it('holds the run to the ceiling the disk cache uses, keeping the live end', async () => {
+    const socket = new LocalSocket()
+    const sendMessage = vi.fn(() => true)
+    const { result } = renderHook(props => useFuturesProductionWorkstation(props), {
+      initialProps: defaultProps(socket, sendMessage, { candleHistoryCache: missingCache() }),
+    })
+    const requestId = sendMessage.mock.calls[0][0].requestId
+
+    const PAGE = 1_000
+    for (let page = 0; page < 6; page += 1) {
+      const endTime = START - (page * PAGE * MINUTE)
+      await act(async () => { await result.current.loadCandleHistory(endTime) })
+      const rows = historyRows(-(page + 1) * PAGE, -page * PAGE)
+      for (let offset = 0; offset < rows.length; offset += 80) {
+        const frame = rows.slice(offset, offset + 80)
+        await act(async () => emitHistoryPage(socket, requestId, 3 + (page * 20) + (offset / 80), {
+          endTime,
+          offset,
+          total: rows.length,
+          complete: offset + frame.length === rows.length,
+          rows: frame,
+        }))
+      }
+    }
+
+    expect(result.current.candleHistory.rows).toHaveLength(
+      FUTURES_CANDLE_HISTORY_CACHE_MAX_ROWS,
+    )
+    // The oldest thousand were dropped, not the newest: what the chart draws
+    // beside the live window is the run nearest to it.
+    expect(result.current.candleHistory.rows.at(-1).openTime).toBe(START - MINUTE)
+    expect(result.current.candleHistory.rows[0].openTime).toBe(
+      START - (FUTURES_CANDLE_HISTORY_CACHE_MAX_ROWS * MINUTE),
+    )
+    // The read is issued from the oldest row on the chart. Once the ceiling
+    // holds that row still, the same page would be asked for, delivered and
+    // dropped on every scroll into the edge — so the chart stops asking.
+    expect(result.current.candleHistory.exhausted).toBe(true)
   })
 })

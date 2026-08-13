@@ -17,6 +17,7 @@ import {
   isFuturesTradingGestureTarget,
   resolveFuturesTradingGesture,
 } from '../../../utils/futuresTradingGestures.js'
+import { countPrependedRows, planSeriesDraw } from '../../../utils/chartSeriesDraw.js'
 import { MeasurementOverlay } from '../../common/MeasurementOverlay.jsx'
 import '../charts/ChartWrapper.css'
 
@@ -85,32 +86,20 @@ const createPriceFormat = (tickSize) => {
 
 const rowTime = row => Number.isSafeInteger(row?.openTime) ? row.openTime : null
 
-const canUpdateLastRow = (previous, rows) => {
-  if (!previous || rows.length === 0) return false
-  const first = rowTime(rows[0])
-  const last = rowTime(rows.at(-1))
-  return first !== null
-    && last !== null
-    && first === previous.first
-    && (rows.length === previous.length || rows.length === previous.length + 1)
-    && last >= previous.last
-}
+// A candle frame is parsed off the wire, so every row in it is a new object
+// even where the market did not move — identity alone would call every tick a
+// full redraw. Identity is still asked first: only the live window's rows are
+// really new, and the history behind them is the same objects it was.
+const sameDrawnCandle = (drawn, next) => drawn === next || (
+  drawn?.openTime === next?.openTime
+  && drawn?.open === next?.open
+  && drawn?.high === next?.high
+  && drawn?.low === next?.low
+  && drawn?.close === next?.close
+  && drawn?.volume === next?.volume
+)
 
-// How many rows appeared in front of what was drawn last time. Counted from the
-// open time that used to be first, so a tail update reads as zero.
-const countPrependedRows = (previous, rows) => {
-  if (!previous || rows.length === 0) return 0
-  const first = rowTime(rows[0])
-  if (first === null || previous.first === null || first >= previous.first) return 0
-  const index = rows.findIndex(row => rowTime(row) === previous.first)
-  return index > 0 ? index : 0
-}
-
-const rememberRows = rows => rows.length === 0 ? null : Object.freeze({
-  first: rowTime(rows[0]),
-  last: rowTime(rows.at(-1)),
-  length: rows.length,
-})
+const DRAW_PLAN = Object.freeze({ timeOf: rowTime, sameRow: sameDrawnCandle })
 
 const futuresOrderIdentity = order => (
   `${order?.symbol}:${order?.orderKind}:${order?.orderId}:${order?.clientOrderId}`
@@ -611,13 +600,19 @@ export const FuturesWorkstationChart = ({
   useEffect(() => {
     if (!seriesRef.current) return
     const { contractSeries, volumeSeries } = seriesRef.current
+    const drawnRows = rowStateRef.current.contract
+    // Comparing only length and endpoints called a re-read that corrected a
+    // candle inside the series "the last bar moved", and the correction never
+    // reached the canvas. What is redrawn is decided from what actually
+    // changed.
+    const plan = planSeriesDraw(drawnRows, candles, DRAW_PLAN)
     const contractData = toCandleData(candles)
     const volumePresentation = toVolumeData(candles)
     // The volume series is written first and the candles second. The candles
     // own the time scale, and the library answers a time-scale change by
     // re-sending every series' data — so writing them last leaves both series
     // holding the same generation of rows when the frame ends.
-    if (canUpdateLastRow(rowStateRef.current.contract, candles)
+    if ((plan === 'tick' || plan === 'append')
       && contractData.length > 0
       && volumePresentation.data.length > 0) {
       volumeSeries.update(volumePresentation.data.at(-1))
@@ -627,7 +622,7 @@ export const FuturesWorkstationChart = ({
       // alone, the chart would jump backwards under the operator's cursor at
       // the exact moment they were reading it, so the visible range is moved by
       // as many bars as were prepended and the view stands still.
-      const prepended = countPrependedRows(rowStateRef.current.contract, candles)
+      const prepended = countPrependedRows(rowTime(drawnRows?.[0]), candles, DRAW_PLAN)
       const timeScale = chartRef.current?.timeScale()
       const heldRange = prepended > 0 ? timeScale?.getVisibleLogicalRange?.() ?? null : null
       volumeSeries.setData(volumePresentation.data)
@@ -648,7 +643,7 @@ export const FuturesWorkstationChart = ({
       volumeScaleRef.current = volumePresentation.scale
       volumeSeries.applyOptions({ priceFormat: volumePresentation.priceFormat })
     }
-    rowStateRef.current = { contract: rememberRows(candles) }
+    rowStateRef.current = { contract: candles }
     if (contractData.length > 0 && !hasFittedContentRef.current) {
       chartRef.current?.timeScale().fitContent()
       hasFittedContentRef.current = true

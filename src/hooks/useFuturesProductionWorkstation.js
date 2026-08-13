@@ -17,7 +17,10 @@ import {
   transitionFuturesWorkstationConnectionState,
 } from '../utils/futuresWorkstationProtocolShared.js'
 import { readStoredTapeSettings } from '../utils/futuresTapeSettings.js'
-import { futuresCandleHistoryCache } from '../utils/futuresCandleHistoryCache.js'
+import {
+  FUTURES_CANDLE_HISTORY_CACHE_MAX_ROWS,
+  futuresCandleHistoryCache,
+} from '../utils/futuresCandleHistoryCache.js'
 
 let requestSequence = 0
 
@@ -51,11 +54,19 @@ const EMPTY_CANDLE_HISTORY = Object.freeze({
 // Older rows arrive in front of what is already loaded; an open time that is
 // already known keeps the row already on the chart, so a re-read can never
 // duplicate a bar or rewrite one the stream has since updated.
+//
+// The run is bounded by the same ceiling the disk cache applies, and the rows
+// nearest the live end are the ones kept: a page is a thousand rows, so five
+// scrolls put the renderer past a limit it was not enforcing anywhere. Past it
+// the whole series is re-mapped, re-scaled and rewritten into two chart series
+// on every frame that redraws — 1.1 ms at twenty thousand rows against 0.23 ms
+// at the ceiling, for bars years behind the one being traded.
 const mergeCandleHistoryRows = (older, known) => {
-  if (known.length === 0) return Object.freeze([...older])
+  if (known.length === 0) return Object.freeze(older.slice(-FUTURES_CANDLE_HISTORY_CACHE_MAX_ROWS))
   const oldest = known[0].openTime
   const merged = older.filter(row => row.openTime < oldest)
-  return merged.length === 0 ? known : Object.freeze([...merged, ...known])
+  if (merged.length === 0) return known
+  return Object.freeze([...merged, ...known].slice(-FUTURES_CANDLE_HISTORY_CACHE_MAX_ROWS))
 }
 
 // A page belongs to the contract and interval it was read for, and to nothing
@@ -67,11 +78,18 @@ const applyCandleHistoryPage = (previous, { symbol, interval, rows, exhausted })
   const base = previous.symbol === symbol && previous.interval === interval
     ? previous
     : EMPTY_CANDLE_HISTORY
+  const merged = mergeCandleHistoryRows(rows, base.rows)
+  // A page the run cannot hold — because it is full to its ceiling, or because
+  // it did not reach behind what is already loaded — must not be asked for
+  // again. The read is issued from the oldest row on the chart, so a page that
+  // does not move that row would be requested, delivered and dropped for as
+  // long as the operator sat at the left edge.
+  const deepened = base.rows.length === 0 || merged[0].openTime < base.rows[0].openTime
   return Object.freeze({
     symbol,
     interval,
-    exhausted: base.exhausted || exhausted,
-    rows: mergeCandleHistoryRows(rows, base.rows),
+    exhausted: base.exhausted || exhausted || !deepened,
+    rows: merged,
   })
 }
 
