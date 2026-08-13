@@ -33,16 +33,19 @@ different things. The desk can hold several contracts live and show one.
   Selecting a contract selects which session the renderer is shown, and starts
   one only if it is not already held.
 - **The pool is bounded and warm.** The most recently used contracts are kept —
-  the bound is a setting, and the first shipped value is small on purpose.
-  Beyond it, the least recently used session is released.
-- **A background session is cheap, and the operator said how cheap.** The
-  spiky streams — the depth diff and the trade tape — are not held at all for a
-  contract that is not shown: they are opened on the way to showing it. A held
-  contract keeps only what is small and steady, its candles and its ticker, so
-  the price and the position's PnL are warm the moment it is selected. On the
-  shown contract the same two streams may be throttled or skipped under load,
-  because "в момент спайка я вообще не смотрю на него" — the book is the first
-  thing to shed and the last thing to wait for.
+  the bound is a setting, and the first shipped value is eight. Beyond it, the
+  least recently used session is released.
+- **A held session is a whole session.** It keeps every stream, keeps parsing
+  them and keeps its book, tape and candles current; being shown decides only
+  which session the renderer is given. Measured before deciding: a full session
+  on the heaviest contract is 28.4 KiB/s and 3.35 ms of parse per second, so
+  eight of them are 1.9 Mbit/s — 0.3% of the operator's link — and 2.7% of one
+  core. Holding less would have bought nothing the machine notices and cost the
+  operator one to two seconds of waiting on every switch back. §0 records the
+  three thinner shapes that were measured and rejected.
+- **Under load the shown contract still sheds.** "В момент спайка я вообще не
+  смотрю на него" — the book is coalesced to the latest and the tape's overflow
+  is dropped, so a burst costs the book's freshness and never the price.
 - **A failure is local to its session.** A resync, a refused frame or a lost
   socket affects the contract it belongs to and nothing else.
 - **The renderer selects rather than resubscribes.** The protocol already names
@@ -53,10 +56,16 @@ different things. The desk can hold several contracts live and show one.
 ## Trade-offs this accepts
 
 - **More upstream traffic and more parsing.** Held sessions cost frames the
-  operator is not looking at. This is why a background session drops the depth
-  diff — the one stream whose volume is unbounded in a burst — and why the pool
-  is small by default. The bound is stated in the settings rather than implied.
-- **More memory.** Each book is a thousand levels per side; several are still
+  operator is not looking at: at the shipped bound of eight, 1.9 Mbit/s and
+  27 ms of parse per second. Both were measured rather than estimated, and both
+  are accepted deliberately — see §0.8 for why bandwidth is not the constraint
+  it was first taken for. The bound is stated in the settings rather than
+  implied.
+- **More sockets.** Three per session, twenty-four at the shipped bound against
+  three today, each on Binance's 24-hour rotation. This is the real ceiling on
+  the bound, and it is only tolerable because a rotation is scoped to the
+  session it happens on.
+- **More memory.** Each book is a thousand levels per side; eight are still
   small beside the candle history the desk already holds.
 - **A larger service.** Every method that reads `this.current` becomes a method
   about a named session. This is the real cost of the change, and it is worth
