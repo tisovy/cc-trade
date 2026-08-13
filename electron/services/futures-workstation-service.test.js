@@ -18,6 +18,7 @@ import {
     createFuturesProductionWorkstationConfigureTapeRequest,
     createFuturesProductionWorkstationLoadCandleHistoryRequest,
     createFuturesProductionWorkstationSelectIntervalRequest,
+    createFuturesProductionWorkstationSelectSymbolRequest,
     createFuturesProductionWorkstationSubscribeRequest,
     createFuturesProductionWorkstationUnsubscribeRequest,
 } from '../../src/utils/futuresProductionWorkstationProtocol.js';
@@ -2650,21 +2651,37 @@ describe('the book is bought as deep as it is read', () => {
         expect(readDepthSnapshot.mock.calls.at(-1)[0]).toMatchObject({ limit: 1_000 });
     });
 
-    // The range is a distance in the contract's own quote currency. Carried into
-    // the next contract, a step of one on a contract priced in dollars reads as
-    // an impossible range on one priced in ten-thousandths.
-    it('opens a contract on its own reading, not the one stated for the last', async () => {
-        const { runtime, readDepthSnapshot } = await openContract('depth-page-switch');
+    // A contract the desk is already running is selected, not opened: the book
+    // it holds was correct a moment ago and sits on a page already paid for, so
+    // opening it again on the cheapest page would mean discarding that and
+    // buying something shallower. This test asserted exactly that — the reading
+    // reset and a fresh fifty levels — for as long as the desk could hold only
+    // the contract it was showing, and a second subscription for the same
+    // contract was the nearest thing to another contract there was. The rule it
+    // was written for, that a reading is a distance in the contract's own quote
+    // currency and belongs to no other contract, is now asserted where it
+    // applies: against another contract, in 'a session stops being the service'.
+    it('reads nothing when a contract it already holds is subscribed to again', async () => {
+        const { runtime, readDepthSnapshot } = await openContract('depth-page-again');
         await runtime.service.handleRequest(
-            productionDepthRequest('depth-page-switch', '5'),
+            productionDepthRequest('depth-page-again', '0.5'),
             { emit: () => {} },
         );
-        await vi.waitFor(() => expect(readDepthSnapshot.mock.calls.length).toBeGreaterThan(1));
-        await runtime.service.handleRequest(productionRequest('depth-page-next'), {
+        await Promise.resolve();
+        expect(readDepthSnapshot).toHaveBeenCalledOnce();
+
+        await runtime.service.handleRequest(productionRequest('depth-page-again-2'), {
             emit: () => {},
         });
-        expect(runtime.service.shown.depthRange).toBeNull();
-        expect(readDepthSnapshot.mock.calls.at(-1)[0]).toMatchObject({ limit: 50 });
+        await Promise.resolve();
+
+        // The new subscription owns the session that was already running, and
+        // the exchange was not asked for anything to make that happen.
+        expect(runtime.service.shown).toMatchObject({
+            requestId: 'depth-page-again-2',
+            depthRange: '0.5',
+        });
+        expect(readDepthSnapshot).toHaveBeenCalledOnce();
     });
 
     it('refuses a range stated by anyone but the subscription that owns the book', async () => {
@@ -3055,5 +3072,142 @@ describe('a session stops being the service', () => {
         // And the contract left behind keeps what it bought — it is still
         // running, and it will be shown again.
         expect(runtime.service.sessions.get('BTCUSDT')).toMatchObject({ depthPage: 3 });
+    });
+});
+
+// Selecting is not subscribing. The desk used to answer a contract switch with
+// `loading`, six REST reads and three fresh sockets, whatever it already had in
+// hand — which is what the operator saw as the chart flickering between
+// contracts. A contract the pool holds is answered from what it holds.
+describe('selecting is not subscribing', () => {
+    const openPool = async ({ heldContracts = 2 } = {}) => {
+        const clock = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport({ clock: clock.clock });
+        const subscribers = new Map();
+        const reads = {
+            loadExchangeInfo: vi.fn(options => base.loadExchangeInfo(options)),
+            bootstrapIndependent: vi.fn(options => base.bootstrapIndependent(options)),
+            readDepthSnapshot: vi.fn(options => base.readDepthSnapshot(options)),
+            connect: vi.fn((options) => {
+                subscribers.set(options.symbol, options);
+                return base.connect(options);
+            }),
+        };
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock: clock.clock,
+            heldContracts,
+            transport: { ...base, ...reads },
+        }));
+        const events = { BTCUSDT: [], ETHUSDT: [] };
+        const open = (requestId, symbol) => runtime.service.handleRequest(
+            productionRequest(requestId, symbol),
+            { emit: event => events[symbol].push(event) },
+        );
+        await open('pool-open-btc', 'BTCUSDT');
+        await open('pool-open-eth', 'ETHUSDT');
+        return { clock, runtime, subscribers, reads, events };
+    };
+
+    const selectSymbol = (runtime, requestId, symbol, sink, interval = '1m') => (
+        runtime.service.handleRequest(
+            JSON.stringify(createFuturesProductionWorkstationSelectSymbolRequest({
+                requestId,
+                symbol,
+                interval,
+            })),
+            { emit: event => sink.push(event) },
+        )
+    );
+
+    const counts = reads => Object.fromEntries(
+        Object.entries(reads).map(([name, spy]) => [name, spy.mock.calls.length]),
+    );
+
+    it('returns to a held contract with no read, no socket and no loading', async () => {
+        const { runtime, subscribers, reads } = await openPool();
+        const held = runtime.service.sessions.get('BTCUSDT');
+
+        // The book of the contract nobody is looking at moves on. In sequence:
+        // a diff the book cannot bridge would empty it instead of advancing it,
+        // and "the view changed" would then be satisfied by it becoming null.
+        const beforeDiff = held.orderBook.toRendererView(held.depthRange);
+        subscribers.get('BTCUSDT').onMessage(burstDepthFrame(1, 20));
+        const afterDiff = held.orderBook.toRendererView(held.depthRange);
+        expect(held.bookRecovering).toBe(false);
+        expect(afterDiff).not.toBeNull();
+        expect(afterDiff).not.toEqual(beforeDiff);
+
+        const before = counts(reads);
+        const back = [];
+        await selectSymbol(runtime, 'pool-back-btc', 'BTCUSDT', back);
+        await Promise.resolve();
+
+        // Nothing was asked of the exchange, and no connection was opened.
+        expect(counts(reads)).toEqual(before);
+        // The workspace never left `live`.
+        expect(back.filter(event => event.resource === 'status').map(event => event.state))
+            .toEqual(['live']);
+        // And the book delivered is the one the session had been keeping — the
+        // diff that landed while it was in the background is in it.
+        expect(back.find(event => event.resource === 'depth').payload).toEqual(afterDiff);
+        // Every frame names the subscription that asked for it, so the renderer
+        // keeps the ownership check it has always applied.
+        expect(back.every(event => (
+            event.requestId === 'pool-back-btc' && event.symbol === 'BTCUSDT'
+        ))).toBe(true);
+        // The chart, the header and the tape come with it.
+        expect(new Set(back.map(event => event.resource)))
+            .toEqual(new Set(['catalog', 'candles', 'header', 'depth', 'trades', 'status']));
+    });
+
+    // A session is only worth holding if it can admit it went stale unwatched.
+    // Delivered as `live` on the strength of being held, it would put the
+    // operator in front of a book that stopped moving some minutes ago under a
+    // badge saying it had not.
+    it('delivers a session that failed unwatched in the state it is actually in', async () => {
+        const { runtime, subscribers, events } = await openPool();
+        const quiet = events.BTCUSDT.length;
+
+        // The background contract loses its stream.
+        subscribers.get('BTCUSDT').onDisconnect('SOCKET_DISCONNECTED');
+
+        // The renderer heard nothing about it — it is not watching that contract.
+        expect(events.BTCUSDT).toHaveLength(quiet);
+        // And the contract on screen carried on.
+        expect(events.ETHUSDT.at(-1)).toMatchObject({ symbol: 'ETHUSDT' });
+
+        const back = [];
+        await selectSymbol(runtime, 'pool-back-broken', 'BTCUSDT', back);
+
+        expect(back.filter(event => event.resource === 'status').at(-1)).toMatchObject({
+            resource: 'status',
+            state: 'resynchronizing',
+            payload: { connected: false, reasonCode: 'SOCKET_DISCONNECTED' },
+        });
+    });
+
+    // The tape settings and the emitter belong to the panel, not to whichever
+    // contract happened to be open when they were last changed.
+    it('gives a re-selected contract the panel it is being shown in', async () => {
+        const { runtime } = await openPool();
+        const heldBefore = runtime.service.sessions.get('BTCUSDT');
+        await runtime.service.handleRequest(
+            productionTapeRequest('pool-open-eth', { minNotionalUsdt: '1000000' }),
+            { emit: () => {} },
+        );
+
+        const back = [];
+        await selectSymbol(runtime, 'pool-back-tape', 'BTCUSDT', back);
+
+        // The panel is handed to the session that was already running, not to a
+        // new one wearing its name.
+        const held = runtime.service.sessions.get('BTCUSDT');
+        expect(held).toBe(heldBefore);
+        expect(held.requestId).toBe('pool-back-tape');
+        expect(held.tapeSettings).toMatchObject({ minNotionalUsdt: '1000000' });
+        expect(held.emit).not.toBe(runtime.service.sessions.get('ETHUSDT').emit);
+        // A tape filtered at a million USDT shows nothing from this fixture, and
+        // that is the panel's setting being obeyed rather than the contract's.
+        expect(back.find(event => event.resource === 'trades').payload.rows).toEqual([]);
     });
 });

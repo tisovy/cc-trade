@@ -238,6 +238,17 @@ export class FuturesProductionWorkstationService {
             }
             return;
         }
+        // A contract the pool is already holding is selected, not subscribed to.
+        // Both actions arrive here: the renderer sends `subscribe` for the first
+        // contract of a connection and `select-symbol` afterwards, and a desk
+        // whose socket dropped and came back sends `subscribe` again for a
+        // contract that never stopped running.
+        if ((request.action === FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SUBSCRIBE
+            || request.action === FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SELECT_SYMBOL)
+            && this.sessions.has(request.symbol)) {
+            await this.selectHeldContract(this.sessions.get(request.symbol), request, emit);
+            return;
+        }
         if (request.action === FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SELECT_INTERVAL
             && this.shown?.symbol === request.symbol
             && this.shown.bootstrapped === true
@@ -640,12 +651,117 @@ export class FuturesProductionWorkstationService {
     }
 
     emitStatus(session, state, connected, reasonCode = null) {
+        // Recorded whether or not anyone is listening. A held session that lost
+        // its socket while nobody was watching has to be able to say so when it
+        // is selected, and the only record of what it would have said is this.
+        session.status = Object.freeze({ state, connected, reasonCode });
         return this.emitResource(
             session,
             FUTURES_WORKSTATION_RESOURCES.STATUS,
             state,
             Object.freeze({ connected, reasonCode }),
         );
+    }
+
+    /**
+     * A contract the pool is already holding.
+     *
+     * Nothing opens, nothing closes and nothing is read. What changes is which
+     * session is allowed to speak, and who it speaks to: the session takes the
+     * identity of the request that selected it, because the renderer discards
+     * any frame that does not name the subscription it has just opened. It
+     * keeps its generation — it did not bootstrap, and saying it did would tell
+     * the renderer to throw away a book that never stopped being correct.
+     */
+    selectHeldContract(session, request, emit) {
+        session.request = request;
+        session.requestId = request.requestId;
+        session.emit = emit;
+        // The tape settings belong to the panel, not to whichever contract
+        // happened to be open when they were last changed. The fingerprints and
+        // windows beside them are about what this subscription has been sent,
+        // and it has been sent nothing.
+        session.tapeSettings = this.tapeSettings;
+        this.clearPendingTapeTimer(session);
+        session.lastTapeFingerprint = null;
+        session.lastTapeEmittedAt = null;
+        session.lastHeaderEmittedAt = null;
+        // The reading travels with the request that selects a contract exactly
+        // as it does with the one that opens it. The page already bought stays:
+        // that is a property of the book in hand, not of the reading.
+        if (typeof request.range === 'string') session.depthRange = request.range;
+        this.showSession(session);
+        // An interval the session is not on is the one thing a selection cannot
+        // serve from what it holds. The candles are left out of the delivery
+        // rather than drawn and immediately replaced, and the existing interval
+        // path re-reads them over the sockets that stay open.
+        const intervalChanged = session.interval !== request.interval;
+        this.deliverHeldState(session, { candles: !intervalChanged });
+        if (!intervalChanged) return undefined;
+        return this.selectInterval(request, emit);
+    }
+
+    /**
+     * Everything the renderer needs about a contract the desk is already
+     * running, taken from what the session is holding.
+     *
+     * The catalog goes first, because a renderer that has just reconnected has
+     * no contract list of its own. The status goes last, and it is the status
+     * the session actually stands in rather than `live` on the strength of
+     * being held — a session that fell out of sync unwatched says so here, and
+     * that is the only place it can.
+     */
+    deliverHeldState(session, { candles = true } = {}) {
+        if (session.contracts.length > 0) {
+            for (const frame of createFuturesWorkstationCatalogFrames(session.contracts)) {
+                this.emitResource(
+                    session,
+                    FUTURES_WORKSTATION_RESOURCES.CATALOG,
+                    FUTURES_WORKSTATION_STATES.LIVE,
+                    frame,
+                );
+            }
+        }
+        let shortfall = null;
+        if (session.bootstrapped) {
+            if (candles) {
+                const candleState = session.staleResources.has(
+                    FUTURES_WORKSTATION_RESOURCES.CANDLES,
+                )
+                    ? FUTURES_WORKSTATION_STATES.STALE
+                    : FUTURES_WORKSTATION_STATES.LIVE;
+                this.emitCandleSeries(session, 'contract', session.candles, candleState);
+                this.emitCandleSeries(session, 'index', session.indexCandles, candleState);
+            }
+            if (session.header !== null) this.emitHeader(session, this.observedNow(session));
+            shortfall = session.orderBook.rangeShortfall(session.depthRange);
+            const view = session.orderBook.toRendererView(session.depthRange);
+            if (view !== null) {
+                session.lastDepthView = view;
+                this.emitResource(
+                    session,
+                    FUTURES_WORKSTATION_RESOURCES.DEPTH,
+                    this.depthDeliveryState(session, shortfall),
+                    view,
+                );
+            }
+            this.emitTrades(
+                session,
+                session.staleResources.has(FUTURES_WORKSTATION_RESOURCES.TRADES)
+                    ? FUTURES_WORKSTATION_STATES.STALE
+                    : FUTURES_WORKSTATION_STATES.LIVE,
+                { force: true },
+            );
+        }
+        if (session.status !== null) {
+            this.emitStatus(
+                session,
+                session.status.state,
+                session.status.connected,
+                session.status.reasonCode,
+            );
+        }
+        if (session.bootstrapped) this.ensureDepthCovers(session, shortfall);
     }
 
     delay(durationMs) {
@@ -746,6 +862,9 @@ export class FuturesProductionWorkstationService {
             depthPage: openingFresh ? 0 : (previous?.depthPage ?? 0),
             depthDeepenedAt: null,
             shownOrder: 0,
+            // The last status this session stated, kept so it can state it
+            // again to whoever selects the contract next.
+            status: null,
             pendingTapeTimer: null,
             pendingTapeEmission: false,
             lastTapeEmittedAt: null,
@@ -1083,6 +1202,12 @@ export class FuturesProductionWorkstationService {
     }
 
     queueTapeEmission(session) {
+        // Filtering the buffer by notional and fingerprinting the result is
+        // done per print, over up to five hundred rows. A session nobody is
+        // looking at keeps the prints — the buffer is what makes it whole — and
+        // does not build a tape out of them; the tape is built once, from the
+        // same buffer, when the contract is selected.
+        if (!this.isShown(session)) return;
         const rows = this.rendererTapeRows(session);
         const fingerprint = tapeFingerprint(FUTURES_WORKSTATION_STATES.LIVE, rows);
         if (fingerprint === session.lastTapeFingerprint) {
@@ -1159,15 +1284,27 @@ export class FuturesProductionWorkstationService {
                     // state a frame carries is decided by the book that frame
                     // contains. Asked afterwards, the operator had already read
                     // a short book badged live by the time the desk worked out
-                    // it was short.
+                    // it was short. Asked whether or not anyone is watching,
+                    // because it is what decides the page the book is kept on,
+                    // and a held book is kept deep enough for its own reading.
                     const shortfall = session.orderBook.rangeShortfall(session.depthRange);
-                    session.lastDepthView = session.orderBook.toRendererView(session.depthRange);
-                    this.emitResource(
-                        session,
-                        FUTURES_WORKSTATION_RESOURCES.DEPTH,
-                        this.depthDeliveryState(session, shortfall),
-                        session.lastDepthView,
-                    );
+                    // Crossing the book into rows is the one expensive thing a
+                    // diff causes, ten times a second on up to a thousand levels
+                    // a side. A session nobody is looking at does not do it —
+                    // the rows would be built and dropped at the emitter, and
+                    // the book they would be built from is delivered whole the
+                    // moment the contract is selected.
+                    if (this.isShown(session)) {
+                        session.lastDepthView = session.orderBook.toRendererView(
+                            session.depthRange,
+                        );
+                        this.emitResource(
+                            session,
+                            FUTURES_WORKSTATION_RESOURCES.DEPTH,
+                            this.depthDeliveryState(session, shortfall),
+                            session.lastDepthView,
+                        );
+                    }
                     // The market moves; the band the snapshot proved does not.
                     // When it stops reaching as far as the rows on screen, the
                     // answer is a fresh snapshot — not a book extended past what
@@ -1317,7 +1454,12 @@ export class FuturesProductionWorkstationService {
             session.candles = updateFuturesWorkstationCandles(session.candles, event.row);
             session.lastCandlesAt = now;
             session.staleResources.delete(FUTURES_WORKSTATION_RESOURCES.CANDLES);
-            this.emitCandleSeries(session, 'contract', session.candles);
+            // The series is kept whole either way; what is skipped for a
+            // contract nobody is watching is cutting the tail of it into rows
+            // for a renderer that would drop them.
+            if (this.isShown(session)) {
+                this.emitCandleSeries(session, 'contract', session.candles);
+            }
         } else if (event.kind === 'mark' || event.kind === 'ticker') {
             session.header = updateFuturesWorkstationHeader(session.header, event);
             session.lastHeaderAt = now;
