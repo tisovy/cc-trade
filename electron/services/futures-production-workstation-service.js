@@ -451,12 +451,18 @@ export class FuturesProductionWorkstationService {
         if (!this.isHeld(session)
             || !session.bootstrapped
             || session.reconnectTimer !== null
-            || session.bookRecovering
-            || session.depthRange === null) return;
-        const short = shortfall === null
-            ? session.orderBook.rangeShortfall(session.depthRange)
-            : shortfall;
-        if (short === 0) return;
+            || session.bookRecovering) return;
+        // Whether the band still holds the market is asked whether or not the
+        // panel has stated a reading: it is the market's question rather than the
+        // step's, and a book no range has been stated for still empties on the
+        // side the market walks toward.
+        const offCentre = !session.orderBook.holdsMarket();
+        const short = session.depthRange === null
+            ? 0
+            : (shortfall === null
+                ? session.orderBook.rangeShortfall(session.depthRange)
+                : shortfall);
+        if (short === 0 && !offCentre) return;
         // Two different things end up here, and only one of them is worth a
         // deeper page. A page that falls short of the reading on either side buys
         // a deeper one — and at the deepest page the exchange publishes there is
@@ -471,8 +477,21 @@ export class FuturesProductionWorkstationService {
         // An unmeasurable shortfall is the second case: a side emptied by the
         // walk states no distance to size a page against, so it is re-read as it
         // is and sized on the next reading, which will have both sides.
+        //
+        // And a third, which the shortfall cannot state at all. It measures the
+        // band against the rows on screen, so it says nothing about where inside
+        // the band the market is now — and what it does say is fixed at the
+        // moment the page was read, because it is measured against what that page
+        // proved. A band bought at the deepest page and short of the rows reports
+        // the same shortfall above 1 for the rest of the session, whatever the
+        // market does. Read from that number alone the desk asks for the deeper
+        // page that does not exist, finds none, and returns — and it was
+        // returning from bands the market had walked clean out of, on every diff,
+        // for as long as the contract stayed open. `holdsMarket` is the question
+        // the shortfall was never asking, and it moves when the market does at
+        // every page depth.
         const deepened = Number.isFinite(short) && short > 1 && this.deepenDepthPage(session, short);
-        if (Number.isFinite(short) && short > 1 && !deepened) return;
+        if (!offCentre && Number.isFinite(short) && short > 1 && !deepened) return;
         const now = this.observedNow(session);
         // Only the re-read is backed off, and for the reason a recovery is:
         // every diff landing on a book the market has walked out of would ask
@@ -485,7 +504,18 @@ export class FuturesProductionWorkstationService {
             && now - session.depthDeepenedAt
                 < FUTURES_PRODUCTION_WORKSTATION_BOOK_RECOVERY.COOLDOWN_MS) return;
         session.depthDeepenedAt = now;
-        void this.recoverBook(session, 'DEPTH_RANGE_SHORT', { immediate: deepened });
+        // The reason line names which of the two questions asked for the read.
+        // A deepening is always the reading's, and a read taken while the band
+        // still covers the rows is always the market's; between them the reading
+        // is named, because a page short of the rows is the condition worth
+        // seeing in the journal. Counting them apart is how the desk's own record
+        // shows whether a book that keeps re-reading is chasing the market or
+        // being read at a step the exchange does not publish deep enough for.
+        void this.recoverBook(
+            session,
+            !deepened && offCentre && short === 0 ? 'DEPTH_BAND_WALKED' : 'DEPTH_RANGE_SHORT',
+            { immediate: deepened },
+        );
     }
 
     configureTape(request) {

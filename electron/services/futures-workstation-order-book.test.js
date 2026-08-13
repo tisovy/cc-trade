@@ -547,6 +547,56 @@ describe('the band a snapshot proves', () => {
         expect(book.rangeShortfall('6')).toBe(0);
     });
 
+    // Whether the band reaches the rows and whether it still holds the market
+    // are two questions. The band this book was bought with proved one unit of
+    // price on each side and the market is resting in the middle of it: short of
+    // rows that reach six, and in no danger of walking out of it.
+    it('holds the market while the market rests inside it', () => {
+        const book = banded();
+        expect(book.holdsMarket()).toBe(true);
+        expect(book.rangeShortfall('6')).toBeCloseTo(6, 6);
+    });
+
+    // The ask side proved one unit of price and has two tenths of it left: every
+    // ask above the ceiling is being dropped, and the side is on its way to empty
+    // while the bid side stays full. That is the one-sided book.
+    it('does not hold a market that has taken most of one side away', () => {
+        const book = banded();
+        book.push(delta({
+            firstUpdateId: '102',
+            finalUpdateId: '103',
+            previousFinalUpdateId: '101',
+            bids: [],
+            asks: [['11.00', '0'], ['11.80', '1.0']],
+        }), 200);
+        expect(book.holdsMarket()).toBe(false);
+    });
+
+    // Not judged at the moment the room runs out: a side re-read then has already
+    // been empty on screen for as long as the read takes. Three tenths of the
+    // proven room left still holds; two tenths does not.
+    it('turns on the share of the room the page proved, not on the room running out', () => {
+        const walkedTo = (price) => {
+            const book = banded();
+            book.push(delta({
+                firstUpdateId: '102',
+                finalUpdateId: '103',
+                previousFinalUpdateId: '101',
+                bids: [],
+                asks: [['11.00', '0'], [price, '1.0']],
+            }), 200);
+            return book.holdsMarket();
+        };
+        expect(walkedTo('11.70')).toBe(true);
+        expect(walkedTo('11.80')).toBe(false);
+    });
+
+    // A snapshot that came back with a side empty proves no band, so there is no
+    // room to measure and nothing a re-read on this account would produce.
+    it('has no room to answer for when there is no band', () => {
+        expect(new FuturesWorkstationOrderBook().holdsMarket()).toBe(true);
+    });
+
     it('forgets the band when the book is rebuilt or stopped', () => {
         const book = banded();
         expect(book.coversRange('1')).toBe(true);

@@ -2613,11 +2613,27 @@ describe('the book is bought as deep as it is read', () => {
     const openContract = async (requestId) => {
         const base = createFuturesProductionWorkstationFakeTransport();
         const readDepthSnapshot = vi.fn(options => base.readDepthSnapshot(options));
+        const faults = [];
         const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
             transport: { ...base, readDepthSnapshot },
+            onInternalError: fault => faults.push(fault),
         }));
         await runtime.service.handleRequest(productionRequest(requestId), { emit: () => {} });
-        return { runtime, readDepthSnapshot };
+        return { runtime, readDepthSnapshot, faults };
+    };
+
+    // What the page proved is fixed at the moment it was read, so a market that
+    // walks is a market eating the room between its best price and the edge of
+    // the band it was bought with. Said here by lengthening what the page proved,
+    // which is the same arithmetic from the other end and does not touch the
+    // question being tested.
+    const walkTheMarketOut = (session) => {
+        const { band } = session.orderBook;
+        session.orderBook.band = {
+            ...band,
+            provenBelow: '1000',
+            provenAbove: '1000',
+        };
     };
 
     it('opens a contract on the cheapest page', async () => {
@@ -2675,6 +2691,58 @@ describe('the book is bought as deep as it is read', () => {
         runtime.service.ensureDepthCovers(session);
         await vi.waitFor(() => expect(readDepthSnapshot.mock.calls.length).toBe(2));
         expect(readDepthSnapshot.mock.calls.at(-1)[0]).toMatchObject({ limit: 1_000 });
+    });
+
+    // The state the operator was trading AKEUSDT in. The deepest page the
+    // exchange publishes reaches ±4% of price on that contract; the coarsest step
+    // the panel offers asks for 9% of it. So the shortfall sits above 1 and
+    // cannot come down — what the page proved does not change after it is read —
+    // and the desk asked for the deeper page that does not exist, found none, and
+    // returned. It returned from every band the market walked out of, on every
+    // diff, for as long as the contract stayed open: one side of the book emptied
+    // and stayed empty.
+    it('re-reads a band the market walked out of, though its page never reached the rows', async () => {
+        const { runtime, readDepthSnapshot } = await openContract('depth-page-walked-short');
+        const session = runtime.service.shown;
+        session.depthPage = 3;
+        session.depthRange = '0.5';
+        session.orderBook.rangeShortfall = () => 2.5;
+        walkTheMarketOut(session);
+        runtime.service.ensureDepthCovers(session);
+        await vi.waitFor(() => expect(readDepthSnapshot.mock.calls.length).toBe(2));
+        expect(readDepthSnapshot.mock.calls.at(-1)[0]).toMatchObject({ limit: 1_000 });
+    });
+
+    // And the reason that branch was written: a page short of the rows that no
+    // deeper page can answer must not be read again on that account, or a
+    // contract the exchange publishes no deeper than the reading re-reads the
+    // same page every cooldown for the session. The band still holds the market,
+    // so nothing is asked for.
+    it('reads nothing for a band short of the rows that still holds the market', async () => {
+        const { runtime, readDepthSnapshot } = await openContract('depth-page-short-resting');
+        const session = runtime.service.shown;
+        session.depthPage = 3;
+        session.depthRange = '0.5';
+        session.orderBook.rangeShortfall = () => 2.5;
+        runtime.service.ensureDepthCovers(session);
+        await Promise.resolve();
+        expect(readDepthSnapshot).toHaveBeenCalledOnce();
+    });
+
+    // Nothing is short here: the band covers the rows and the market has walked
+    // to the edge of it anyway. The desk had no path to this read at all, and the
+    // journal names it apart from a page short of the rows — one says the book is
+    // chasing the market, the other says it is being read at a step the exchange
+    // does not publish deep enough for.
+    it('re-centres a band that covers the rows and names the walk as the cause', async () => {
+        const { runtime, readDepthSnapshot, faults } = await openContract('depth-page-recentre');
+        const session = runtime.service.shown;
+        session.depthRange = '0.5';
+        session.orderBook.rangeShortfall = () => 0;
+        walkTheMarketOut(session);
+        runtime.service.ensureDepthCovers(session);
+        await vi.waitFor(() => expect(readDepthSnapshot.mock.calls.length).toBe(2));
+        expect(faults).toContainEqual({ phase: 'book-recovery', code: 'DEPTH_BAND_WALKED' });
     });
 
     // A contract the desk is already running is selected, not opened: the book

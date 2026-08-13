@@ -222,6 +222,15 @@ const bandOfSnapshot = (snapshot) => {
     });
 };
 
+// How little room a side may have left inside the band before the page is read
+// again, as a share of what that side's page proved when it was bought.
+//
+// Not zero. A side re-read once it has run out has already been empty on the
+// screen the operator is trading from, for as long as the read takes — and a
+// read takes a bridge plus a round trip to the exchange. Re-read with a quarter
+// of the room still there and the side has rows to draw throughout.
+export const FUTURES_WORKSTATION_BAND_ROOM_SHARE = 0.25;
+
 // The best price on a side is a minimum, not an ordering — taking it by sorting
 // the whole book was two full sorts per delta for two values.
 const bestPrice = (side, descending) => {
@@ -462,6 +471,50 @@ export class FuturesWorkstationOrderBook {
         // between them: the same page, read again, is a band centred where the
         // market is now.
         return Math.max(1, deepest);
+    }
+
+    /**
+     * Whether the band still has room for the market to move in on both sides.
+     *
+     * A different question from `rangeShortfall`, and deliberately not asked in
+     * the same terms. That one asks whether the band reaches the rows on screen,
+     * which is about the step the operator chose and is answered by a deeper
+     * page. This one asks whether the page is still centred on the market, which
+     * no page depth answers: every level past the edge of the band is dropped,
+     * so the side the market walks toward stops receiving levels and empties
+     * while its twin stays full. The only answer is the same page, read again,
+     * where the market is now.
+     *
+     * Judged against what each side's page proved when it was read, never
+     * against the stated range. What a page proved is fixed at the moment of
+     * reading, so a band that fell short of the rows would go on falling short
+     * of them for the session — and a band judged by that measure would never be
+     * found to have moved at all.
+     */
+    holdsMarket(share = FUTURES_WORKSTATION_BAND_ROOM_SHARE) {
+        if (this.band === null) return true;
+        const bid = bestPrice(this.bids, true);
+        const ask = bestPrice(this.asks, false);
+        // A side emptied outright states no best price to measure room from. It
+        // is the shortfall's case — unmeasurable, and re-read on its own account
+        // — not this one.
+        if (bid === null || ask === null) return true;
+        const sides = [
+            [subtractFuturesWorkstationDecimals(bid, this.band.floor), this.band.provenBelow],
+            [subtractFuturesWorkstationDecimals(this.band.ceiling, ask), this.band.provenAbove],
+        ];
+        for (const [room, proven] of sides) {
+            const reach = Number(proven);
+            // A side whose page proved no distance at all — one distinct price —
+            // is not a spacing to take a share of. Left to the shortfall.
+            if (!Number.isFinite(reach) || reach <= 0) continue;
+            const left = Number(room);
+            if (!Number.isFinite(left)) continue;
+            // Ordinary numbers on purpose, as the shortfall is: this decides
+            // whether to read a page, never what anything is worth.
+            if (left < reach * share) return false;
+        }
+        return true;
     }
 
     push(rawDelta, frameBytes = 0) {
