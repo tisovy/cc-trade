@@ -505,19 +505,13 @@ const FuturesTradingTicket = ({
               />
             </label>
             <label className="futures-production-size-slider">
-              <span>
-                <span>Size</span>
-                <output aria-live="polite">
-                  <strong>{`${displayedSizePercent}%`}</strong>
-                  <b>{notionalUsdt ? `${notionalUsdt} USDT` : '— USDT'}</b>
-                </output>
-              </span>
+              <span>Size</span>
               <input
                 aria-label="Order size percent"
                 type="range"
                 min="0"
                 max="100"
-                step="1"
+                step="0.5"
                 value={displayedSizePercent}
                 disabled={!sizingControlsReady}
                 style={{ '--futures-size-fill': `${displayedSizePercent}%` }}
@@ -528,8 +522,14 @@ const FuturesTradingTicket = ({
               />
             </label>
             <label className="futures-production-notional-field">
-              <span>Notional, USDT</span>
+              <span className="futures-production-notional-label">
+                <span>Notional, USDT</span>
+                <output aria-live="polite" aria-label={`Size ${displayedSizePercent}`}>
+                  <strong>{`${displayedSizePercent}%`}</strong>
+                </output>
+              </span>
               <input
+                className="futures-production-notional-input"
                 aria-label="Order notional USDT"
                 type="text"
                 inputMode="decimal"

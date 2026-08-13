@@ -33,6 +33,15 @@ describe('futuresOrderDraft', () => {
     expect(calculateFuturesNotionalPercent('25', '10')).toBe(100)
   })
 
+  it('converts exact half-percentage stops and rounds typed amounts to the nearest stop', () => {
+    expect(calculateFuturesNotionalForPercent('1000', 8.5)).toBe('85')
+    expect(calculateFuturesNotionalForPercent('999.99', 8.5)).toBe('84')
+    expect(calculateFuturesNotionalForPercent('1000', 8.25)).toBeNull()
+    expect(calculateFuturesNotionalPercent('82.499', '1000')).toBe(8)
+    expect(calculateFuturesNotionalPercent('82.5', '1000')).toBe(8.5)
+    expect(calculateFuturesNotionalPercent('1001', '1000')).toBe(100)
+  })
+
   it('uses the smaller exact order or remaining daily cap as the entry budget', () => {
     expect(calculateFuturesEntryBudget({
       maximumOrderNotionalUsdt: '10',

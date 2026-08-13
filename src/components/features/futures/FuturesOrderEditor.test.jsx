@@ -48,6 +48,68 @@ describe('FuturesOrderEditor', () => {
     expect(screen.getByLabelText('Edit BTCUSDT BUY order')).toHaveTextContent('BUY LONG')
   })
 
+  it('sizes an entry from available USDT in half-percentage steps', () => {
+    const { onSubmit } = renderEditor({ availableUsdt: '1000' })
+    const slider = screen.getByRole('slider', { name: 'Working order size percent' })
+    expect(slider).toBeEnabled()
+    expect(slider).toHaveAttribute('step', '0.5')
+
+    fireEvent.change(slider, { target: { value: '37.5' } })
+    expect(screen.getByLabelText('Order amount in USDT')).toHaveValue('375')
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }))
+
+    expect(onSubmit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      side: 'BUY',
+      price: '58445',
+      quantity: '0.006',
+    }))
+  })
+
+  it('sizes an exit from the matching position at the draft price', () => {
+    const { onSubmit } = renderEditor({
+      order: {
+        ...order,
+        side: 'SELL',
+        positionSide: 'LONG',
+        reduceOnly: true,
+        price: '100.0',
+        origQty: '10',
+      },
+      positionQuantity: '10',
+    })
+    const slider = screen.getByRole('slider', { name: 'Working order size percent' })
+    fireEvent.change(slider, { target: { value: '50' } })
+
+    expect(screen.getByLabelText('Order amount in USDT')).toHaveValue('500')
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }))
+    expect(onSubmit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      side: 'SELL',
+      price: '100',
+      quantity: '5',
+    }))
+  })
+
+  it('preserves a typed amount and positions the slider at its nearest half stop', () => {
+    renderEditor({ availableUsdt: '1000' })
+    const amount = screen.getByLabelText('Order amount in USDT')
+    fireEvent.change(amount, { target: { value: '333' } })
+
+    expect(amount).toHaveValue('333')
+    expect(screen.getByRole('slider', { name: 'Working order size percent' }))
+      .toHaveValue('33.5')
+  })
+
+  it('keeps manual amendment available when the sizing reference is unavailable', () => {
+    const { onSubmit } = renderEditor()
+    expect(screen.getByRole('slider', { name: 'Working order size percent' })).toBeDisabled()
+    const amount = screen.getByLabelText('Order amount in USDT')
+    expect(amount).toBeEnabled()
+
+    fireEvent.change(amount, { target: { value: '500' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }))
+    expect(onSubmit).toHaveBeenCalledOnce()
+  })
+
   it('amends price and amount through one atomic submission', () => {
     const { onSubmit, onClose } = renderEditor()
     fireEvent.change(screen.getByLabelText('Order price'), { target: { value: '58500.07' } })
@@ -86,6 +148,22 @@ describe('FuturesOrderEditor', () => {
     expect(screen.getByRole('button', { name: 'Apply' })).toBeDisabled()
     expect(screen.getByRole('status')).toHaveTextContent('above the local 200 USDT order limit')
     fireEvent.click(screen.getByRole('button', { name: 'Apply' }))
+    expect(onSubmit).not.toHaveBeenCalled()
+  })
+
+  it('keeps Apply disabled when a slider-derived amount exceeds the local ceiling', () => {
+    const { onSubmit } = renderEditor({
+      availableUsdt: '1000',
+      maxOrderNotionalUsdt: '200',
+    })
+    fireEvent.change(
+      screen.getByRole('slider', { name: 'Working order size percent' }),
+      { target: { value: '25' } },
+    )
+
+    expect(screen.getByLabelText('Order amount in USDT')).toHaveValue('250')
+    expect(screen.getByRole('button', { name: 'Apply' })).toBeDisabled()
+    expect(screen.getByRole('status')).toHaveTextContent('above the local 200 USDT order limit')
     expect(onSubmit).not.toHaveBeenCalled()
   })
 

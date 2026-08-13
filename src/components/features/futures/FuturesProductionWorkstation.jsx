@@ -5,7 +5,9 @@ import useFuturesContractDefaults from '../../../hooks/useFuturesContractDefault
 import {
   describeFuturesAlgoTrigger,
   describeFuturesOrderIntent,
+  describeFuturesPosition,
 } from '../../../utils/futuresOrderPresentation.js'
+import { isFuturesBalanceConfirmed } from '../../../utils/futuresReadiness.js'
 import {
   readFuturesSymbolHistory,
   rememberFuturesSymbol,
@@ -306,6 +308,15 @@ export const FuturesProductionWorkstation = ({
     setMarginType: executionState?.setMarginType,
   })
 
+  const editorBalanceResource = executionState?.accountResources?.balances ?? {
+    status: executionState?.balances == null ? 'loading' : 'ready',
+    lastSuccessfulAt: executionState?.balances == null ? null : 0,
+  }
+  const editorAvailableUsdt = isFuturesBalanceConfirmed(editorBalanceResource)
+    && typeof executionState?.balances?.USDT?.available === 'string'
+    ? executionState.balances.USDT.available
+    : null
+
   const handleTradingGesture = useCallback((gesture) => {
     gestureSequenceRef.current += 1
     setDraftPrice(gesture.price)
@@ -363,6 +374,20 @@ export const FuturesProductionWorkstation = ({
       ? executionPositions.filter(position => position.symbol === symbol)
       : []
   ), [executionPositions, symbol])
+
+  const orderEditorPositionQuantity = useMemo(() => {
+    if (!orderEditor || !Array.isArray(executionPositions)) return null
+    const intent = describeFuturesOrderIntent(orderEditor.order)
+    if (intent.positionEffect !== 'EXIT') return null
+    const position = executionPositions.find((candidate) => {
+      if (candidate.symbol !== orderEditor.order.symbol) return false
+      const description = describeFuturesPosition(candidate)
+      return description.positionSide === intent.positionSide
+        && description.absoluteQuantity !== null
+        && description.absoluteQuantity > 0
+    })
+    return position?.quantity ?? null
+  }, [executionPositions, orderEditor])
 
   // The panel is opened from a row, but it stays open while the account keeps
   // refreshing. It reads the live position rather than the snapshot it was
@@ -488,6 +513,8 @@ export const FuturesProductionWorkstation = ({
           order={orderEditor.order}
           contract={orderEditor.order.symbol === symbol ? selectedContract : null}
           maxOrderNotionalUsdt={executionState?.maxOrderNotionalUsdt ?? null}
+          availableUsdt={editorAvailableUsdt}
+          positionQuantity={orderEditorPositionQuantity}
           anchor={orderEditor.anchor}
           onSubmit={executionState?.modifyOrder}
           onCancelOrder={executionState?.cancelOrder}

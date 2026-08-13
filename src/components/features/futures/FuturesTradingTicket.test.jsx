@@ -75,6 +75,55 @@ describe('FuturesTradingTicket', () => {
     expect(screen.queryByText('Awaiting shortcut')).not.toBeInTheDocument()
   })
 
+  it('shows one emphasized notional readout and sizes confirmation at 8.5 percent', () => {
+    const state = createState({
+      balances: { USDT: { available: '2000', total: '2000' } },
+    })
+    const props = {
+      state,
+      selectedSymbol: 'BTCUSDT',
+      selectedContract: contract,
+      draftPrice: '58445.0',
+    }
+    const { rerender } = render(<FuturesTradingTicket {...props} />)
+    const slider = screen.getByRole('slider', { name: 'Order size percent' })
+    expect(slider).toHaveAttribute('step', '0.5')
+
+    sizeTo(8.5)
+    expect(slider).toHaveValue('8.5')
+    expect(within(slider.closest('label')).queryByText(/USDT/)).not.toBeInTheDocument()
+    const notionalLabel = screen.getByText('Notional, USDT').parentElement
+    expect(notionalLabel).toHaveClass('futures-production-notional-label')
+    expect(notionalLabel).toHaveTextContent('Notional, USDT8.5%')
+    expect(screen.getByRole('status', { name: 'Size 8.5' })).toHaveTextContent('8.5%')
+    expect(screen.getByRole('textbox', { name: 'Order notional USDT' }))
+      .toHaveClass('futures-production-notional-input')
+    expect(screen.getByRole('textbox', { name: 'Order notional USDT' })).toHaveValue('170')
+
+    rerender(
+      <FuturesTradingTicket
+        {...props}
+        gestureRequest={{
+          id: 85,
+          side: 'BUY',
+          positionSide: 'LONG',
+          positionEffect: 'ENTRY',
+          price: '58445.03',
+        }}
+      />,
+    )
+    expect(within(screen.getByRole('alertdialog')).getByTitle('0.002 contracts'))
+      .toBeInTheDocument()
+    confirmStagedOrder()
+    expect(state.placeOrder).toHaveBeenCalledExactlyOnceWith({
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'LIMIT',
+      price: '58445',
+      quantity: '0.002',
+    })
+  })
+
   // Nothing on the desk stated the multiple an entry is taken at, and the margin
   // it costs is the notional divided by it — at 20× a 250 USDT position holds
   // 12.50, which is the number an operator sizes against.

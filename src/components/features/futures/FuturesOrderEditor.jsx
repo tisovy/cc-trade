@@ -1,5 +1,8 @@
 import { useMemo, useState } from 'react'
 import {
+  calculateFuturesExitBudget,
+  calculateFuturesNotionalForPercent,
+  calculateFuturesNotionalPercent,
   evaluateFuturesLimitSubmission,
   normalizeFuturesDraftPrice,
   quantizeFuturesNotionalUsdt,
@@ -26,6 +29,8 @@ export const FuturesOrderEditor = ({
   order,
   contract = null,
   maxOrderNotionalUsdt = null,
+  availableUsdt = null,
+  positionQuantity = null,
   anchor,
   onSubmit,
   onCancelOrder,
@@ -43,6 +48,23 @@ export const FuturesOrderEditor = ({
     width: PANEL_WIDTH,
     onClose,
   })
+
+  const sizingMaximumUsdt = useMemo(() => {
+    if (intent.positionEffect === 'ENTRY') return availableUsdt
+    const rawQuantity = typeof positionQuantity === 'string'
+      ? positionQuantity
+      : Number.isFinite(positionQuantity) ? String(positionQuantity) : null
+    if (rawQuantity === null || !filters) return null
+    return calculateFuturesExitBudget({
+      positionQuantity: rawQuantity.replace(/^[+-]/, ''),
+      price,
+      tickSize: filters.price?.tickSize,
+    })
+  }, [availableUsdt, filters, intent.positionEffect, positionQuantity, price])
+  const sizingEnabled = calculateFuturesNotionalForPercent(sizingMaximumUsdt, 0) !== null
+  const sizingPercent = sizingEnabled
+    ? calculateFuturesNotionalPercent(notional, sizingMaximumUsdt)
+    : null
 
   // An amendment can raise exposure just as a new order can — the audit's case
   // was exactly this panel growing a 160 USDT order to 10 000. It is measured
@@ -127,6 +149,34 @@ export const FuturesOrderEditor = ({
           inputMode="decimal"
           value={notional}
           onChange={(event) => { setUnsent(null); setNotional(event.target.value) }}
+        />
+      </label>
+      <label className="futures-production-size-slider futures-editor-slider">
+        <span>
+          <span>Size</span>
+          <span className="futures-editor-slider-value" aria-live="polite">
+            <strong>{sizingPercent === null ? '—' : `${sizingPercent}%`}</strong>
+            <b>{intent.positionEffect === 'EXIT' ? 'of position' : 'of available'}</b>
+          </span>
+        </span>
+        <input
+          aria-label="Working order size percent"
+          type="range"
+          min="0"
+          max="100"
+          step="0.5"
+          value={sizingPercent ?? 0}
+          disabled={!sizingEnabled}
+          style={{ '--futures-size-fill': `${sizingPercent ?? 0}%` }}
+          onChange={(event) => {
+            const sizedNotional = calculateFuturesNotionalForPercent(
+              sizingMaximumUsdt,
+              Number(event.target.value),
+            )
+            if (sizedNotional === null) return
+            setUnsent(null)
+            setNotional(sizedNotional)
+          }}
         />
       </label>
 
