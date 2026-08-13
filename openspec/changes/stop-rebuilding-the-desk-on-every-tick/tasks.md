@@ -31,3 +31,25 @@
 
 - [x] 5.1 `npm run lint`, `npm test` (1693 passed, 106 files), `npm run check:futures-production`.
 - [ ] 5.2 Operator confirms on live data that the desk stays responsive on a liquid contract with deep history loaded. Written as a step in `verify-the-desk-in-one-sitting/runbook.md` rather than left here, so the operator runs one list.
+
+### Measured
+
+What one Spot print costs the chart in its own arithmetic, at the five thousand
+bars the operator can accumulate on one pair and interval. Each part driven
+through its own code on the same clock; the drawing the library does on top of
+this is not in these numbers, and is four whole series before against four single
+points after.
+
+| per print, 5000 bars | before | after |
+| --- | --- | --- |
+| Volume histogram | 0.0965 ms | **0 ms** — one bar |
+| Moving average | 0.6785 ms | **0.0087 ms** — one point |
+| RSI line | 0.1327 ms | **0.0002 ms** — one point, from the tail |
+| Deciding what changed | — | 0.0048 ms |
+| Copying the series in `applyTradeToChart` | 0.0069 ms | 0.0069 ms, or **0** when the print does not move the candle |
+| **Total** | **0.915 ms** | **0.021 ms** |
+
+Forty-four times less arithmetic per print, on a chart the operator has scrolled
+back through. And the cost that was not a cost but a failure: at the exchange's
+cadence on a liquid pair, the request for older candles was issued **never**
+before this and is issued on the scroll after it.
