@@ -33,4 +33,4 @@
 - [x] 4.7 Run the focused confirmation test, lint, OpenSpec validation, and staged GitNexus change detection for the bold-USDT refinement.
 - [x] 4.8 Audit the complete sizing path from slider percentage through staged draft, confirmation projection, and final payload; record and fix any defects under pre-edit GitNexus impact analysis.
 - [x] 4.9 Run the full automated verification set after audit fixes: complete test suite, lint, production build, Futures workstation boundary check, OpenSpec validation, and staged GitNexus change detection.
-- [ ] 4.10 Synchronize the verified delta specifications into the main specifications before archiving the operator-confirmed change.
+- [x] 4.10 Synchronize the verified delta specifications into the main specifications before archiving the operator-confirmed change.
