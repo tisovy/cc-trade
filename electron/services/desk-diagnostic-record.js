@@ -146,6 +146,14 @@ const RECORDED_FIELDS = Object.freeze({
         ['symbol', optional(text(SYMBOL))],
         ['superseded', count],
         ['dropped', count],
+        // How far behind it got, in frames and in bytes — the worst reached
+        // during the backlog, because the line is written once it has ended and
+        // by then what is waiting is nothing. Sixty-four frames is a different
+        // backlog when they are status lines than when they are books, and the
+        // frame count alone cannot tell the operator which they had. Counts, not
+        // amounts: a byte total is a length, and no length is a price.
+        ['frames', count],
+        ['bytes', count],
     ]),
     // What the desk was told to do — contract, side, type, identity — and never
     // what it was worth. A trade journal is a different decision.

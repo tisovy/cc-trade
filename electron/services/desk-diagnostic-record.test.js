@@ -204,18 +204,22 @@ describe('describeDeskDiagnosticEvent', () => {
 
     // What a renderer that fell behind was not sent. It is a count of frames,
     // never the frames themselves.
-    it('keeps what a backlog superseded and what it dropped', () => {
+    it('keeps what a backlog superseded, what it dropped, and how deep it got', () => {
         expect(describeDeskDiagnosticEvent('backlog', {
             resource: 'depth',
             symbol: 'BTCUSDT',
             superseded: 19,
             dropped: 0,
+            frames: 1,
+            bytes: 118_000,
         })).toEqual({
             kind: 'backlog',
             resource: 'depth',
             symbol: 'BTCUSDT',
             superseded: 19,
             dropped: 0,
+            frames: 1,
+            bytes: 118_000,
         });
         // A frame nothing names — a ticker batch — states no resource and no
         // contract, and is still worth counting.
@@ -224,9 +228,21 @@ describe('describeDeskDiagnosticEvent', () => {
             symbol: null,
             superseded: 0,
             dropped: 5,
+            frames: 5,
+            bytes: 640,
         })).not.toBeNull();
         expect(describeDeskDiagnosticEvent('backlog', {
-            resource: 'depth', symbol: 'BTCUSDT', superseded: '19', dropped: 0,
+            resource: 'depth', symbol: 'BTCUSDT', superseded: '19', dropped: 0, frames: 1, bytes: 1,
+        })).toBeNull();
+        // The depth reading is not optional. A backlog line without it is the
+        // line this change exists to stop writing.
+        expect(describeDeskDiagnosticEvent('backlog', {
+            resource: 'depth', symbol: 'BTCUSDT', superseded: 19, dropped: 0,
+        })).toBeNull();
+        // Counts, not amounts: the field that could carry a size is the one that
+        // must refuse a decimal.
+        expect(describeDeskDiagnosticEvent('backlog', {
+            resource: 'depth', symbol: 'BTCUSDT', superseded: 0, dropped: 0, frames: 1, bytes: '0.5',
         })).toBeNull();
     });
 

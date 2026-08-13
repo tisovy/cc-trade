@@ -87,11 +87,16 @@ describe('createRendererOutbox', () => {
         connection.drain();
 
         expect(connection.sent).toEqual(['first', 'book-20']);
+        // Twenty books arrived and the queue never held more than one of them:
+        // the depth reading is what says the desk was replacing rather than
+        // stacking, and the superseded count alone could not.
         expect(backlog).toHaveBeenCalledWith({
             resource: 'depth',
             symbol: 'BTCUSDT',
             superseded: 19,
             dropped: 0,
+            frames: 1,
+            bytes: 'book-20'.length,
         });
     });
 
@@ -164,6 +169,19 @@ describe('createRendererOutbox', () => {
             symbol: 'ETHUSDT',
             superseded: 0,
             dropped: 1,
+            frames: 1,
+            bytes: 'book-1'.length,
+        });
+        // The catalog lost nothing and still says how far behind it got — the
+        // reading a backlog of pages would otherwise never produce, because
+        // nothing about it can be superseded.
+        expect(backlog).toHaveBeenCalledWith({
+            resource: 'catalog',
+            symbol: 'BTCUSDT',
+            superseded: 0,
+            dropped: 0,
+            frames: RENDERER_OUTBOX.MARKET_QUEUE_FRAMES,
+            bytes: expect.any(Number),
         });
     });
 
@@ -268,6 +286,97 @@ describe('createRendererOutbox', () => {
             symbol: 'BTCUSDT',
             superseded: 2,
             dropped: 0,
+            frames: 1,
+            bytes: 'newer'.length,
+        });
+    });
+
+    // Every other change in this batch claims the desk got faster. Without a
+    // reading of how far behind the renderer actually fell, a regression in any
+    // of them looks exactly like a busy market.
+    it('states a rising queue while the socket is stalled, and nothing once it drains', () => {
+        const connection = createConnection();
+        const backlog = vi.fn();
+        const outbox = createRendererOutbox(connection, { onBacklog: backlog });
+        const page = offset => ({
+            lane: RENDERER_OUTBOX_LANES.MARKET,
+            resource: 'catalog',
+            symbol: 'BTCUSDT',
+            text: `page-${offset}`,
+        });
+
+        connection.stall();
+        outbox.send('filled-the-buffer', book('BTCUSDT'));
+        expect(outbox.pending()).toMatchObject({ market: 0, bytes: 0 });
+
+        outbox.send('page-0', page(0));
+        const oneDeep = outbox.pending();
+        expect(oneDeep).toMatchObject({ market: 1 });
+        expect(oneDeep.bytes).toBe('page-0'.length);
+
+        outbox.send('page-1', page(1));
+        outbox.send('book-1', book('BTCUSDT'));
+        const threeDeep = outbox.pending();
+        expect(threeDeep.market).toBe(3);
+        expect(threeDeep.bytes).toBe('page-0'.length + 'page-1'.length + 'book-1'.length);
+        expect(threeDeep.resources['catalog|BTCUSDT']).toMatchObject({ frames: 2, peakFrames: 2 });
+
+        // A newer book stands in for the queued one: the queue stops growing and
+        // the supersession is what says why.
+        outbox.send('book-2', book('BTCUSDT'));
+        expect(outbox.pending().market).toBe(3);
+        expect(outbox.pending().resources['depth|BTCUSDT']).toMatchObject({
+            frames: 1,
+            superseded: 1,
+        });
+
+        connection.drain();
+
+        // Drained: nothing is waiting, and the line written about it carries the
+        // worst it got rather than the nothing that is left.
+        expect(outbox.pending()).toMatchObject({ account: 0, market: 0, bytes: 0, blocked: false });
+        expect(outbox.pending().resources).toEqual({});
+        expect(backlog).toHaveBeenCalledWith({
+            resource: 'catalog',
+            symbol: 'BTCUSDT',
+            superseded: 0,
+            dropped: 0,
+            frames: 2,
+            bytes: 'page-0'.length + 'page-1'.length,
+        });
+        expect(backlog).toHaveBeenCalledWith({
+            resource: 'depth',
+            symbol: 'BTCUSDT',
+            superseded: 1,
+            dropped: 0,
+            frames: 1,
+            bytes: 'book-2'.length,
+        });
+    });
+
+    // An account frame is never superseded and never dropped, so under the old
+    // rule — a line per resource that lost something — a renderer sitting on a
+    // minute of fills produced no line at all. That is the backlog the operator
+    // actually feels.
+    it('states an account backlog, which loses nothing and so said nothing', () => {
+        const connection = createConnection();
+        const backlog = vi.fn();
+        const outbox = createRendererOutbox(connection, { onBacklog: backlog });
+
+        connection.stall();
+        outbox.send('filled-the-buffer', account);
+        outbox.send('filled-1', account);
+        outbox.send('filled-2', account);
+        expect(outbox.pending()).toMatchObject({ account: 2, bytes: 'filled-1'.length * 2 });
+        connection.drain();
+
+        expect(backlog).toHaveBeenCalledWith({
+            resource: null,
+            symbol: null,
+            superseded: 0,
+            dropped: 0,
+            frames: 2,
+            bytes: 'filled-1'.length + 'filled-2'.length,
         });
     });
 

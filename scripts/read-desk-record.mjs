@@ -100,6 +100,10 @@ export const summarizeDeskDiagnosticRecord = (text) => {
   // for. Keyed by the reason the read site stated, because "the desk reads a
   // lot" and "the desk reads when it must" are the same number without it.
   const reads = new Map()
+  // How far behind the renderer fell, per resource. The operator's complaint is
+  // always "the screen was late", and this is the only reading that separates a
+  // desk that was behind from a market that was fast.
+  const backlogs = new Map()
   let refused = 0
   let first = null
   let last = null
@@ -155,6 +159,21 @@ export const summarizeDeskDiagnosticRecord = (text) => {
       observed.resources += Number(line.resources) || 0
       reads.set(line.reason, observed)
     }
+    if (line.kind === 'backlog') {
+      const key = `${line.resource ?? '-'} ${line.symbol ?? '-'}`
+      const observed = backlogs.get(key)
+        ?? { count: 0, superseded: 0, dropped: 0, peakFrames: 0, peakBytes: 0, worstAt: null }
+      observed.count += 1
+      observed.superseded += Number(line.superseded) || 0
+      observed.dropped += Number(line.dropped) || 0
+      const frames = Number(line.frames) || 0
+      if (frames > observed.peakFrames) {
+        observed.peakFrames = frames
+        observed.worstAt = line.at ?? null
+      }
+      observed.peakBytes = Math.max(observed.peakBytes, Number(line.bytes) || 0)
+      backlogs.set(key, observed)
+    }
     if (line.kind === 'session') sessions.push({ at: line.at, event: line.event, version: line.version ?? null })
     if (line.kind === 'command') {
       commands.push({
@@ -206,6 +225,9 @@ export const summarizeDeskDiagnosticRecord = (text) => {
     reads: [...reads.entries()]
       .map(([reason, observed]) => ({ reason, ...observed }))
       .sort((left, right) => right.weight - left.weight),
+    backlogs: [...backlogs.entries()]
+      .map(([key, observed]) => ({ key, ...observed }))
+      .sort((left, right) => right.peakFrames - left.peakFrames),
   }
 }
 
@@ -276,6 +298,20 @@ export const formatDeskDiagnosticSummary = (summary, { day = null } = {}) => {
         `  ${entry.reason.padEnd(22)} n=${String(entry.count).padStart(5)}`
         + `  weight ${String(entry.weight).padStart(6)}`
         + `  resources ${String(entry.resources).padStart(5)}`,
+      )
+    }
+  }
+
+  if (summary.backlogs.length > 0) {
+    out.push('', 'How far behind the renderer fell')
+    for (const entry of summary.backlogs) {
+      out.push(
+        `  ${entry.key.padEnd(22)} n=${String(entry.count).padStart(5)}`
+        + `  deepest ${String(entry.peakFrames).padStart(4)} frames`
+        + ` / ${String(Math.round(entry.peakBytes / 1024)).padStart(6)} KB`
+        + `  superseded ${String(entry.superseded).padStart(5)}`
+        + `  dropped ${String(entry.dropped).padStart(4)}`
+        + (entry.worstAt === null ? '' : `  worst at ${entry.worstAt}`),
       )
     }
   }

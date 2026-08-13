@@ -57,6 +57,15 @@ export const RENDERER_OUTBOX = Object.freeze({
 const keyOf = (resource, symbol, variant) => `${resource}|${symbol}|${variant}`;
 const tallyKeyOf = (resource, symbol) => `${resource}|${symbol}`;
 
+// How big a frame is, asked once and only of a frame that is actually waiting.
+// Measured at 5.4µs for a 60 KB book — nothing at ten frames a second, but it is
+// asked on the path that is already behind, so it is not asked on the path that
+// is not: a frame written straight through never carries a size.
+const sizeOf = (frame) => {
+    if (frame.bytes === null) frame.bytes = Buffer.byteLength(frame.text);
+    return frame.bytes;
+};
+
 /**
  * Carries one renderer connection's outbound frames.
  *
@@ -70,22 +79,49 @@ export const createRendererOutbox = (connection, {
 } = {}) => {
     const account = [];
     const market = [];
-    // What this connection lost, per resource, since the last line written about
-    // it. Held here rather than reported per frame for the reason above.
+    // What this connection lost and how far behind it fell, per resource, since
+    // the last line written about it. Held here rather than reported per frame
+    // for the reason above.
     const tallies = new Map();
     let blocked = false;
     let reportedAt = null;
     let abandoned = false;
 
-    const tally = (frame, field) => {
-        const existing = tallies.get(frame.tallyKey) ?? {
+    const tallyOf = (frame) => {
+        const existing = tallies.get(frame.tallyKey);
+        if (existing) return existing;
+        const created = {
             resource: frame.resource,
             symbol: frame.symbol,
             superseded: 0,
             dropped: 0,
+            // What is waiting now, and the worst it got. The line is written when
+            // the backlog ends, and by then what is waiting is nothing — so the
+            // reading worth keeping is the peak, not the remainder.
+            frames: 0,
+            bytes: 0,
+            peakFrames: 0,
+            peakBytes: 0,
         };
-        existing[field] += 1;
-        tallies.set(frame.tallyKey, existing);
+        tallies.set(frame.tallyKey, created);
+        return created;
+    };
+
+    const tally = (frame, field) => { tallyOf(frame)[field] += 1; };
+
+    const entered = (frame) => {
+        const entry = tallyOf(frame);
+        entry.frames += 1;
+        entry.bytes += sizeOf(frame);
+        if (entry.frames > entry.peakFrames) entry.peakFrames = entry.frames;
+        if (entry.bytes > entry.peakBytes) entry.peakBytes = entry.bytes;
+    };
+
+    const left = (frame) => {
+        const entry = tallies.get(frame.tallyKey);
+        if (!entry) return;
+        entry.frames -= 1;
+        entry.bytes -= frame.bytes ?? 0;
     };
 
     const report = (force) => {
@@ -97,16 +133,32 @@ export const createRendererOutbox = (connection, {
             && Number.isFinite(reportedAt)
             && at - reportedAt < RENDERER_OUTBOX.REPORT_COOLDOWN_MS) return;
         reportedAt = at;
-        for (const entry of tallies.values()) onBacklog(Object.freeze({ ...entry }));
+        for (const entry of tallies.values()) {
+            onBacklog(Object.freeze({
+                resource: entry.resource,
+                symbol: entry.symbol,
+                superseded: entry.superseded,
+                dropped: entry.dropped,
+                frames: entry.peakFrames,
+                bytes: entry.peakBytes,
+            }));
+        }
         tallies.clear();
     };
 
     const write = (frame) => {
+        if (frame.queued) left(frame);
         connection.sendUTF(frame.text);
         // Set by the library from the socket write's own answer: true means Node
         // is now buffering for us, and anything sent next queues behind whatever
         // filled it.
         blocked = connection.outputBufferFull === true;
+    };
+
+    const queue = (lane, frame) => {
+        frame.queued = true;
+        entered(frame);
+        lane.push(frame);
     };
 
     const flush = () => {
@@ -141,6 +193,9 @@ export const createRendererOutbox = (connection, {
                 replaceable: supersede === true && resource !== null,
                 key: keyOf(resource, symbol, variant),
                 tallyKey: tallyKeyOf(resource, symbol),
+                // Asked for only if this frame ends up waiting; see `sizeOf`.
+                bytes: null,
+                queued: false,
             };
             const isAccount = lane === RENDERER_OUTBOX_LANES.ACCOUNT;
             if (!blocked && account.length === 0 && (isAccount || market.length === 0)) {
@@ -155,7 +210,7 @@ export const createRendererOutbox = (connection, {
                     connection.close();
                     return false;
                 }
-                account.push(frame);
+                queue(account, frame);
                 return true;
             }
             if (frame.replaceable) {
@@ -171,8 +226,11 @@ export const createRendererOutbox = (connection, {
                 ));
                 if (index !== -1) {
                     tally(market[index], 'superseded');
+                    left(market[index]);
                     // Replaced where it stands, so the order the desk stated
                     // between different resources is the order they arrive in.
+                    frame.queued = true;
+                    entered(frame);
                     market[index] = frame;
                     return true;
                 }
@@ -185,6 +243,7 @@ export const createRendererOutbox = (connection, {
                 const droppable = market.findIndex(queued => queued.replaceable);
                 if (droppable !== -1) {
                     tally(market[droppable], 'dropped');
+                    left(market[droppable]);
                     market.splice(droppable, 1);
                 } else if (market.length >= RENDERER_OUTBOX.MARKET_QUEUE_LIMIT) {
                     abandoned = true;
@@ -194,7 +253,7 @@ export const createRendererOutbox = (connection, {
                     return false;
                 }
             }
-            market.push(frame);
+            queue(market, frame);
             return true;
         },
         // What is being held right now, for the tests and for anything that wants
@@ -203,6 +262,20 @@ export const createRendererOutbox = (connection, {
             account: account.length,
             market: market.length,
             blocked,
+            // Depth in bytes as well as in frames: sixty-four frames is a
+            // different backlog when they are status lines than when they are
+            // books, and only one of the two readings says which.
+            bytes: [...tallies.values()].reduce((total, entry) => total + entry.bytes, 0),
+            resources: Object.freeze(Object.fromEntries(
+                [...tallies].map(([key, entry]) => [key, Object.freeze({
+                    frames: entry.frames,
+                    bytes: entry.bytes,
+                    peakFrames: entry.peakFrames,
+                    peakBytes: entry.peakBytes,
+                    superseded: entry.superseded,
+                    dropped: entry.dropped,
+                })]),
+            )),
         }),
         dispose: () => {
             abandoned = true;

@@ -148,6 +148,72 @@ describe('summarizeDeskDiagnosticRecord', () => {
     expect(printed).toContain('unstated')
   })
 
+  // "The screen was late" is the complaint every change in this batch answers,
+  // and until the backlog states its depth the record could say only that
+  // something was superseded — never how far behind the renderer actually got,
+  // or whether the frames it was holding were status lines or books.
+  it('states how far behind the renderer fell, not only what it lost', () => {
+    const behind = summarizeDeskDiagnosticRecord([
+      line({
+        at: '2026-08-10T09:00:00.000Z',
+        kind: 'backlog',
+        resource: 'depth',
+        symbol: 'BTCUSDT',
+        superseded: 19,
+        dropped: 0,
+        frames: 1,
+        bytes: 118_784,
+      }),
+      line({
+        at: '2026-08-10T09:04:00.000Z',
+        kind: 'backlog',
+        resource: 'depth',
+        symbol: 'BTCUSDT',
+        superseded: 4,
+        dropped: 1,
+        frames: 3,
+        bytes: 356_352,
+      }),
+      line({
+        at: '2026-08-10T09:05:00.000Z',
+        kind: 'backlog',
+        resource: null,
+        symbol: null,
+        superseded: 0,
+        dropped: 0,
+        frames: 2,
+        bytes: 900,
+      }),
+    ].join(''))
+
+    expect(behind.backlogs).toEqual([
+      {
+        key: 'depth BTCUSDT',
+        count: 2,
+        superseded: 23,
+        dropped: 1,
+        peakFrames: 3,
+        peakBytes: 356_352,
+        worstAt: '2026-08-10T09:04:00.000Z',
+      },
+      {
+        key: '- -',
+        count: 1,
+        superseded: 0,
+        dropped: 0,
+        peakFrames: 2,
+        peakBytes: 900,
+        worstAt: '2026-08-10T09:05:00.000Z',
+      },
+    ])
+
+    const printed = formatDeskDiagnosticSummary(behind)
+    expect(printed).toContain('How far behind the renderer fell')
+    expect(printed).toContain('deepest    3 frames')
+    expect(printed).toContain('348 KB')
+    expect(printed).toContain('worst at 2026-08-10T09:04:00.000Z')
+  })
+
   it('answers an empty record without failing', () => {
     const empty = summarizeDeskDiagnosticRecord('')
     expect(empty).toMatchObject({ lines: 0, refused: 0, from: null, to: null })
