@@ -24,7 +24,7 @@
 
 - [x] 3.1 Previously completed by commit `ef05d9e`: documented `test:all` already runs Vitest, lint, build, the circular-import check, and `check:runtime-mock`, `check:futures-production`, and `check:command-path`. Verified in `package.json`, README, and `docs/tests.md` on 2026-08-13; no command rewrite belongs to this change.
 - [x] 3.2 Extend the production runtime-mock source guard so `electron/preload.cjs` is an explicit checked entry point.
-  - Measured 2026-08-13: the clean production graph grew from 132 to 133 modules after adding the preload entry point; CommonJS `require(...)` edges are now traversed as well as ESM imports.
+  - Corrected audit measurement 2026-08-13: exact parent tree `7729c48` walked 131 production modules and exact implementation commit `e5c600b` walked 132 after adding the preload entry point. CommonJS `require(...)` edges are now traversed as well as ESM imports.
 - [x] 3.3 Add retained regression coverage after the production change, and prove it bites by running the changed test in a `git archive <ref>` copy of the pre-fix code with the shared `node_modules` symlink; record the ref and expected failure.
   - Fixed tree on 2026-08-13: `scripts/check-runtime-mock-layer.test.mjs` passed 10/10. Biting copy: `git archive f205709`, shared `node_modules` symlink, changed test only; expected result was 1 failed / 9 passed because the old graph contained only `electron/main.js` and `src/main.jsx`, omitting both preload modules.
 
@@ -36,8 +36,17 @@
 ## 5. Verification
 
 - [x] 5.1 Stage only this change, materialize that staged tree with `git write-tree` plus `git archive`, and run `npm run test:all` there with the exact Node binary named by `.nvmrc`; record the Node version, Vitest file/test counts, build result, and every guard result.
-  - Staged tree `0dc6a181725a5fdc398dceb7b62a0554acfee5a5`, archived to `/tmp/state-only-staged.nXGSJf` with a shared `node_modules` symlink; `.nvmrc` selected the matching `v24.11.0` binary.
+  - Initial pre-evidence staged tree `0dc6a181725a5fdc398dceb7b62a0554acfee5a5` was archived to `/tmp/state-only-staged.nXGSJf` with a shared `node_modules` symlink. The exact tree committed as `e5c600b`, `18b69389c89d9de1f69d7d735b1ec15407dd2972`, was independently re-archived during the 2026-08-13 audit to `/tmp/state-only-commit-audit.mrdAsW`; both selected the matching `v24.11.0` binary from `.nvmrc`.
   - `npm run test:all` passed on 2026-08-13: Vitest 107 files / 1737 tests; lint clean; build passed (546 renderer, 297 Electron main, 5 preload modules) and the Electron artifact boundary passed for 2 files.
   - Guards passed: circular imports (254 source files), runtime mock (132 production modules, floor 100), Futures production (23 isolated implementation files), and renderer command path (114 modules, one builder).
 - [x] 5.2 Re-run strict OpenSpec validation, audit the owned diff and staged archive, run `git diff --check`, and run GitNexus change detection on the staged scope before committing directly to `master`.
   - Verified 2026-08-13: strict OpenSpec validation passed; the owned and cached diffs contain exactly 18 intended files and pass `git diff --check`; the staged archive passed 5.1; GitNexus staged detection reported 43 changed symbols, 0 affected processes, and `low` risk.
+
+## 6. Archive Readiness Audit
+
+- [x] 6.1 Recount the false operator confirmations, ledger rows, dated backlinks, and archive locations before archiving.
+  - Re-audited 2026-08-13: exactly 10 corrected marks remain linked to exactly 10 `OUTSTANDING` ledger rows across the 8 archived changes listed in 1.1; all 8 source directories remain archived.
+- [x] 6.2 Reproduce the guard measurement and exact committed-tree verification, and correct any inaccurate evidence without claiming new implementation credit.
+  - Exact `7729c48`/`e5c600b` measurements corrected 3.2 to 131/132 modules. Exact commit tree `18b69389c89d9de1f69d7d735b1ec15407dd2972` passed `test:all` on Node `v24.11.0`: 107 files / 1737 tests, lint, build, artifact check, and every guard in 5.1.
+- [x] 6.3 Validate the reconciled change strictly, audit and materialize only the owned staged diff, run the full aggregate command there, and run GitNexus staged change detection before the audit-fix commit.
+  - Pre-completion staged tree `182a1036ac522c5fb22b6bf17a96ac1ad7fb44f2` was archived to `/tmp/openspec-audit-staged.vApXXp` and passed `test:all` on Node `v24.11.0`: 109 files / 1758 tests. After shared `master` advanced to `63bc3f8`, final staged tree `cf235cebd02bed9a2692561ee98d176f5ea09b48` was archived to `/tmp/openspec-audit-final-staged.zGV15z` and passed 109 files / 1763 tests, lint, build (547 renderer / 297 main / 5 preload modules), artifact check (2 files), and guards (257 circular-import files / 133 runtime modules / 23 Futures implementation files / 115 command-path modules with one builder). Both changes passed strict validation; `git diff --cached --check` was clean; after re-indexing current `HEAD`, GitNexus reported 3 staged files, 15 documentation symbols, 0 affected processes, and `low` risk.
