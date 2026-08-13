@@ -691,7 +691,23 @@ export class FuturesProductionWorkstationService {
             startedAt: this.clock.now(),
         };
         this.current = session;
-        this.emitStatus(session, FUTURES_WORKSTATION_STATES.LOADING, false, null);
+        // An attempt past the ceiling does not get to call itself loading. By
+        // then the operator is reading a notice that says the feed stopped and
+        // is still being retried, with the retry beside it, and `loading` takes
+        // both off the chart for as long as the attempt runs — a blink every
+        // thirty seconds where the route refuses immediately, and half a minute
+        // with nothing to read where it hangs instead. Nothing has improved
+        // between two attempts on the last rung, so nothing new is claimed.
+        const pastTheCeiling = reconnectAttempt
+            >= FUTURES_PRODUCTION_WORKSTATION_FRESHNESS.RECONNECT_ATTEMPTS;
+        this.emitStatus(
+            session,
+            pastTheCeiling
+                ? FUTURES_WORKSTATION_STATES.UNAVAILABLE
+                : FUTURES_WORKSTATION_STATES.LOADING,
+            false,
+            pastTheCeiling ? 'RECONNECT_EXHAUSTED' : null,
+        );
 
         let bootstrapAbort = null;
         let releaseBootstrapAbort = null;

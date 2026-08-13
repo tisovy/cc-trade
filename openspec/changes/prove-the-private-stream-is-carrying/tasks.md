@@ -178,8 +178,9 @@ Which is why 1.5 branches three ways rather than two.
 
       **Outcome 1 on the first attempt, 2026-08-13 16:06 UTC.** Left unchecked
       on purpose — operator verification lives in
-      `verify-the-desk-in-one-sitting`'s runbook, and the step goes there once
-      that file's consolidation lands.
+      `verify-the-desk-in-one-sitting`'s runbook, where this is **step 35**,
+      written against that file's consolidated numbering and already recorded
+      as passed.
 
       Session started 16:06:19.457, private socket opened 16:06:24.110. The
       operator placed, moved and cancelled one TUTUSDT limit order — four

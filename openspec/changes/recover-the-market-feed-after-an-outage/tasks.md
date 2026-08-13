@@ -88,6 +88,29 @@ Both experiments are the operator's own words, recorded during the run.
       since jsdom has no geometry; the guard was run against `top: 8px` and
       failed. Raised by the session auditing `name-the-algo-order-that-fired`.
 
+- [x] 2.6 **Found by auditing this change after it shipped, 2026-08-13.** The
+      notice was withdrawn on every attempt and restored when the attempt
+      failed. `startGeneration` opens each generation with `LOADING`
+      (`:694`), the notice is drawn from `unavailable`
+      (`FuturesWorkstationView.jsx:259`), and past the ceiling a generation is
+      started every 30 s — so the operator lost the message and the retry
+      button for the length of each attempt, forever. How bad depends on how
+      the route fails, and the worse case is the quieter one: a refused
+      connection answers in about 60 ms and reads as a blink, while a route
+      that hangs holds `LOADING` until the handshake times out, which is up to
+      ten seconds in every forty.
+      This was not a pre-existing fault. Before 1.2 the session halted at the
+      ceiling and there were no further attempts to withdraw it.
+      A generation started at the ceiling now restates `UNAVAILABLE` with
+      `RECONNECT_EXHAUSTED` instead of claiming to load. Restating rather than
+      staying silent, because a generation is a new session object with its own
+      revision counter, and the renderer must not be left inferring the status
+      of a generation it was never given one for. The repeat costs one journal
+      line per attempt — two a minute against the ~39 a minute the record
+      already budgets for a desk that cannot reach the exchange
+      (`desk-diagnostic-record.js:17-25`), and it is the only trace that the
+      desk spent the night trying.
+
 ## 3. Proving It
 
 - [x] 3.1 `keeps trying after the production session exhausts its reconnect
@@ -104,6 +127,13 @@ Both experiments are the operator's own words, recorded during the run.
       `expected 14 to be 8`, the ceiling test alone red. The chart-notice test
       needs no mutation run — the class it queries did not exist before this
       change.
+- [x] 3.6 `does not call a production attempt past the ceiling a loading one` —
+      after exhaustion, no status the session emits on a further attempt is
+      `loading`, and the first one it emits is `unavailable`. Asserted over
+      every status frame emitted after exhaustion rather than over the one the
+      test came for, since the defect was an extra frame rather than a missing
+      one. Mutation **M4**, restoring the unconditional `LOADING`: red, and
+      only this test.
 
 ## 4. Verification
 
@@ -129,6 +159,21 @@ Both experiments are the operator's own words, recorded during the run.
       The proof is the existence of attempt nine, not the recovery time. Past the
       ceiling the old code had destroyed the session and every timer with it, so
       there was nothing left to fire.
+
+- [x] 4.3 Re-verified after 2.6: `npm run lint`, the four `check:` scripts and
+      the suite, run three times from `git archive $(git write-tree)` rather
+      than from the shared tree.
+
+      **One failure, not this change's and not deterministic.**
+      `renders the newest book and stays interactive at 2 MiB per 100 ms cycle`
+      (`src/App.futures-stress.test.jsx`) failed on one run of three and passed
+      on the others, on identical bytes. It has no threshold assertion — it
+      leans on `waitFor` deadlines — so on a machine where three sessions run
+      the suite at once it fails for want of CPU rather than for want of
+      correctness. Left alone here: it belongs to the book work, and a guard
+      that fails under load is a change of its own to make. Recorded so the
+      next session that meets it does not go looking for a regression that is
+      not there.
 
 ## Notes
 

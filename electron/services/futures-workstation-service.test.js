@@ -2288,6 +2288,62 @@ describe('production Futures workstation service', () => {
             createFuturesProductionWorkstationRuntimeForTest,
             productionRequest,
         ],
+    ])('does not call a %s attempt past the ceiling a loading one', async (
+        _label,
+        createBase,
+        createRuntime,
+        createRequest,
+    ) => {
+        const clock = createManualClock();
+        const base = createBase({ clock: clock.clock });
+        let subscriber;
+        const transport = {
+            ...base,
+            connect: (options) => {
+                subscriber = options;
+                return base.connect(options);
+            },
+        };
+        const runtime = track(createRuntime({ transport, clock: clock.clock }));
+        const events = [];
+        await runtime.service.handleRequest(createRequest('ceiling-loading'), {
+            emit: event => events.push(event),
+        });
+        runtime.service.current.reconnectAttempt
+            = FUTURES_PRODUCTION_WORKSTATION_FRESHNESS.RECONNECT_ATTEMPTS;
+        subscriber.onDisconnect('SOCKET_DISCONNECTED');
+        const statedExhausted = events.length;
+
+        clock.runTimeouts();
+        await vi.waitFor(() => {
+            expect(events.at(-1)).toMatchObject({ resource: 'status', state: 'live' });
+        });
+
+        // The chart notice and its retry are drawn from `unavailable`, so a
+        // `loading` between two attempts on the last rung takes both away and
+        // gives them back — for as long as the attempt takes to fail, which is
+        // up to a socket handshake timeout when the route hangs rather than
+        // refuses.
+        const statesAfter = events
+            .slice(statedExhausted)
+            .filter(event => event.resource === 'status')
+            .map(event => event.state);
+        expect(statesAfter).not.toContain('loading');
+        expect(statesAfter[0]).toBe('unavailable');
+        expect(events[statedExhausted - 1]).toMatchObject({
+            resource: 'status',
+            state: 'unavailable',
+            payload: { reasonCode: 'RECONNECT_EXHAUSTED' },
+        });
+    });
+
+    it.each([
+        [
+            'production',
+            createFuturesProductionWorkstationFakeTransport,
+            createFuturesProductionWorkstationRuntimeForTest,
+            productionRequest,
+        ],
     ])('holds the %s reconnect attempt at its ceiling while the route stays gone', async (
         _label,
         createBase,

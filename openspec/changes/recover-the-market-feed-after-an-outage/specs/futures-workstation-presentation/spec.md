@@ -41,6 +41,12 @@ A manual retry SHALL be reachable from that statement. The retry offered in the
 contract list SHALL NOT be the only way to ask for recovery, and SHALL NOT
 describe the loss of the market feed as a loss of the contract list.
 
+The statement SHALL stand for as long as it is true. An attempt made after the
+fast ladder has run out SHALL NOT withdraw it: nothing has been recovered
+between two attempts on the slow interval, and withdrawing the statement takes
+the retry away with it at the moment the operator is most likely to reach for
+it.
+
 #### Scenario: Market data stops while a contract is selected
 - **WHEN** the session stops carrying market data for the selected contract
 - **THEN** the chart, order book and tape each state that they are not carrying, and the workspace states that recovery is being attempted
@@ -48,3 +54,7 @@ describe the loss of the market feed as a loss of the contract list.
 #### Scenario: The operator asks for recovery from the statement
 - **WHEN** the operator uses the retry offered beside the stopped surfaces
 - **THEN** an attempt is made at once without waiting for the slow interval, and without the operator reselecting the contract
+
+#### Scenario: Another attempt is made while the statement is on screen
+- **WHEN** the session makes a further attempt after the fast ladder has run out
+- **THEN** the statement and its retry stay on screen for the whole attempt, and are not withdrawn and restored around it
