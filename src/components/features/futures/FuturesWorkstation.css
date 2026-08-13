@@ -990,13 +990,21 @@
   pointer-events: none;
 }
 
-/* Top-centre of the chart, over everything else on it: the feed for this
-   contract has stopped, and no reading drawn underneath is current. It carries
-   the only control that can shorten the wait, so unlike the other notices it
-   takes pointer events. */
+/* Top of the chart, over everything else on it: the feed for this contract has
+   stopped, and no reading drawn underneath is current. It carries the only
+   control that can shorten the wait, so unlike the other notices it takes
+   pointer events.
+
+   Below the reading notice, not beside it. Both are top-anchored and the
+   reading notice starts at the left edge, so a centred row at the same height
+   collides with it as soon as the chart column is narrow — measured at 1280,
+   1366 and 1440, overlapping by up to 63px, and those are exactly the widths
+   where both lines appear at once: a stopped feed is what makes the reading
+   stale. 34px clears the reading notice's own box (top 6px + 2px padding +
+   ~11px line + 2px padding + border). */
 .futures-workstation-feed-notice {
   position: absolute;
-  top: 8px;
+  top: 34px;
   left: 50%;
   transform: translateX(-50%);
   z-index: 6;

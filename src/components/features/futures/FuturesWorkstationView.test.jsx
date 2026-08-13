@@ -998,6 +998,24 @@ describe('pure Futures workstation presentation', () => {
     expect(notice).toHaveTextContent('still retrying')
     fireEvent.click(within(notice).getByRole('button', { name: 'Retry now' }))
     expect(onRetry).toHaveBeenCalledOnce()
+
+    // Both lines are top-anchored and both appear during an outage — a stopped
+    // feed is what makes the reading stale. Measured in Chromium, a centred row
+    // at the reading notice's own height overlapped it by up to 63px at 1280,
+    // 1366 and 1440. jsdom cannot see that, so pin the relationship instead of
+    // the pixel: the feed notice starts below the reading notice's box.
+    const stylesheet = readFileSync(
+      'src/components/features/futures/FuturesWorkstation.css',
+      'utf8',
+    )
+    const topOf = selector => Number(stylesheet
+      .match(new RegExp(`\\${selector}\\s*\\{(?<declarations>[^}]*)\\}`))
+      ?.groups?.declarations
+      ?.match(/top:\s*(-?\d+(?:\.\d+)?)px/)?.[1])
+    const readingTop = topOf('.futures-workstation-reading-notice')
+    const feedTop = topOf('.futures-workstation-feed-notice')
+    expect(Number.isFinite(readingTop)).toBe(true)
+    expect(feedTop).toBeGreaterThanOrEqual(readingTop + 20)
   })
 
   it('keeps independently live widgets usable while aggregate recovery remains visible', () => {

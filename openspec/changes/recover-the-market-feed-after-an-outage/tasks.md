@@ -76,6 +76,17 @@ Both experiments are the operator's own words, recorded during the run.
       centred. The containment is not luck: `.futures-workstation-chart-frame`
       is `position: relative` (`FuturesWorkstation.css:746-750`), which is what
       an absolutely positioned child needs to stay in the panel it belongs to.
+- [x] 2.5a **The first measurement was not enough, and the second found a real
+      defect.** Containment and page overflow were measured; overlap with what
+      the chart already draws was not. The reading notice is top-anchored at the
+      left edge (`:955-958`), and at 1280, 1366 and 1440 the centred feed notice
+      overlapped it by up to 63px — at exactly the moment both appear, since a
+      stopped feed is what makes the reading stale. Moved to `top: 34px` so the
+      two stack; re-measured at all six widths with no overlap of either the
+      reading notice or the history notice. Guarded by asserting the
+      relationship between the two rules' `top` values rather than the pixel,
+      since jsdom has no geometry; the guard was run against `top: 8px` and
+      failed. Raised by the session auditing `name-the-algo-order-that-fired`.
 
 ## 3. Proving It
 
