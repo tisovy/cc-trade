@@ -17,6 +17,13 @@ import {
 // the change proposal). What is not accepted is losing an order quietly: every
 // path out of here either leaves an order working or raises an alert naming the
 // order that is gone.
+//
+// Obligations are held per order. They used to be held one at a time, on the
+// grounds that two of them could not be told apart on a single alert — true of
+// a single alert, and the wrong thing to bound. The window that limit closed is
+// one round trip through the operator's proxy, 340–800 ms measured, and for its
+// whole length no order on any contract could be moved. The alert is a list
+// now, so the reason the limit existed is gone with it.
 
 const PAUSED_ALERT = Object.freeze({
   tone: 'refused',
@@ -25,6 +32,14 @@ const PAUSED_ALERT = Object.freeze({
   order: null,
   retryPrice: null,
 })
+
+// Keyed by contract as well as by id: two contracts can answer with the same
+// order id, and an obligation matched across them would discharge the wrong one.
+const dragIdentity = (order) => {
+  const symbol = String(order?.symbol ?? '')
+  const id = order?.orderId ?? order?.clientOrderId ?? null
+  return id === null || symbol === '' ? null : `${symbol}:${id}`
+}
 
 const orderSummary = (order, replacement) => Object.freeze({
   symbol: order?.symbol ?? null,
@@ -41,23 +56,35 @@ export const useFuturesOrderDrag = ({
   cancelOrder,
   placeOrder,
 } = {}) => {
-  const [alert, setAlert] = useState(null)
-  const [replacementInFlight, setReplacementInFlight] = useState(false)
-  // What was lifted, and where from. Held in a ref because the pointer handlers
-  // that discharge it are not re-created between the lift and the drop.
+  const [alerts, setAlerts] = useState([])
+  const [inFlight, setInFlight] = useState(0)
+  // The drag the pointer is driving. One pointer, one drag — what changed is
+  // that the previous drag no longer has to have landed for the next to start.
   const liftedRef = useRef(null)
+  // Everything the desk currently owes an order for, by identity: the drag in
+  // hand and every replacement still in flight behind it.
+  const owedRef = useRef(new Set())
+  const alertSequence = useRef(0)
 
-  const dismiss = useCallback(() => {
-    liftedRef.current = null
-    setAlert(null)
+  const raise = useCallback((entry) => {
+    alertSequence.current += 1
+    const id = alertSequence.current
+    setAlerts(previous => [...previous, Object.freeze({ ...entry, id })])
+    return id
+  }, [])
+
+  const dismiss = useCallback((id = null) => {
+    setAlerts(previous => (id === null ? [] : previous.filter(entry => entry.id !== id)))
   }, [])
 
   // Everything that leaves the book empty ends here, in a form the operator
   // cannot scroll past: the order that is gone, why it is gone, and — unless a
-  // second attempt could duplicate it — a control that places it again.
+  // second attempt could duplicate it — a control that places it again. Each
+  // one carries what it was lifted from, so retrying one says nothing about
+  // another.
   const raiseObligation = useCallback((lifted, replacement, { code, message, unknown }) => {
     const summary = orderSummary(lifted.order, replacement)
-    setAlert(Object.freeze(unknown
+    raise(unknown
       ? {
           tone: 'unresolved',
           title: 'Replacement NOT confirmed',
@@ -66,6 +93,7 @@ export const useFuturesOrderDrag = ({
           // Deliberately none: an unknown outcome is exactly the case where
           // trying again is how two real orders end up resting.
           retryPrice: null,
+          lifted: null,
         }
       : {
           tone: 'lost',
@@ -73,7 +101,13 @@ export const useFuturesOrderDrag = ({
           detail: `${summary.symbol} ${summary.side} ${summary.quantity} @ ${summary.price} was cancelled and could not be placed again. ${message ?? code ?? 'The placement was refused.'}`,
           order: summary,
           retryPrice: lifted.originPrice,
-        }))
+          lifted,
+        })
+  }, [raise])
+
+  const release = useCallback((lifted) => {
+    const identity = dragIdentity(lifted.order)
+    if (identity !== null) owedRef.current.delete(identity)
   }, [])
 
   const sendReplacement = useCallback(async (lifted, price) => {
@@ -93,9 +127,10 @@ export const useFuturesOrderDrag = ({
         message: describeFuturesDragRefusal(replacement),
         unknown: false,
       })
+      release(lifted)
       return false
     }
-    setReplacementInFlight(true)
+    setInFlight(count => count + 1)
     try {
       const answer = await placeOrder({
         symbol: replacement.symbol,
@@ -107,8 +142,7 @@ export const useFuturesOrderDrag = ({
         reduceOnly: replacement.reduceOnly,
       })
       if (answer?.outcome === FUTURES_COMMAND_OUTCOME.CONFIRMED) {
-        liftedRef.current = null
-        setAlert(null)
+        release(lifted)
         return true
       }
       raiseObligation(lifted, replacement, {
@@ -116,11 +150,12 @@ export const useFuturesOrderDrag = ({
         message: answer?.message ?? null,
         unknown: answer?.outcome === FUTURES_COMMAND_OUTCOME.UNKNOWN,
       })
+      release(lifted)
       return false
     } finally {
-      setReplacementInFlight(false)
+      setInFlight(count => Math.max(0, count - 1))
     }
-  }, [maxOrderNotionalUsdt, placeOrder, raiseObligation])
+  }, [maxOrderNotionalUsdt, placeOrder, raiseObligation, release])
 
   /**
    * Take the order off the book. Resolves `{ ok: true }` only once Binance has
@@ -131,11 +166,25 @@ export const useFuturesOrderDrag = ({
     if (typeof cancelOrder !== 'function' || typeof placeOrder !== 'function') {
       return { ok: false }
     }
-    // While the desk still owes an order, nothing else may be lifted: two
-    // outstanding obligations cannot be told apart on one alert.
-    if (liftedRef.current !== null) return { ok: false }
+    const identity = dragIdentity(order)
+    // The same order twice. It is not on the book to be lifted again, and
+    // saying nothing here is indistinguishable from a drag the desk never
+    // registered — which is exactly how this read to the operator.
+    if (identity === null || owedRef.current.has(identity)) {
+      raise({
+        tone: 'refused',
+        title: 'Order NOT lifted',
+        detail: identity === null
+          ? 'That order has no identity the desk can move it by. It was left where it is.'
+          : `${order.symbol} is already lifted and has not landed yet. It was left where it is.`,
+        order: orderSummary(order, null),
+        retryPrice: null,
+        lifted: null,
+      })
+      return { ok: false }
+    }
     if (tradingPaused) {
-      setAlert(PAUSED_ALERT)
+      raise(PAUSED_ALERT)
       return { ok: false }
     }
     // Whether this order can be put back at the price it is resting at, asked
@@ -148,18 +197,19 @@ export const useFuturesOrderDrag = ({
       maxOrderNotionalUsdt,
     })
     if (!restorable.ok) {
-      setAlert(Object.freeze({
+      raise({
         tone: 'refused',
         title: 'Order NOT lifted',
         detail: `${describeFuturesDragRefusal(restorable)} The order was left where it is.`,
         order: orderSummary(order, null),
         retryPrice: null,
-      }))
+        lifted: null,
+      })
       return { ok: false }
     }
-    setAlert(null)
     const lifted = Object.freeze({ order, originPrice: order.price, tickSize })
     liftedRef.current = lifted
+    owedRef.current.add(identity)
     const answer = await cancelOrder({
       symbol: order.symbol,
       orderId: order.orderId,
@@ -168,14 +218,16 @@ export const useFuturesOrderDrag = ({
     if (answer?.outcome === FUTURES_COMMAND_OUTCOME.CONFIRMED) return { ok: true }
     // Nothing was lifted, so nothing is owed. The order is either still working
     // or its fate is the exchange's to state; either way the drag does not run.
-    liftedRef.current = null
-    setAlert(Object.freeze(answer?.outcome === FUTURES_COMMAND_OUTCOME.UNKNOWN
+    if (liftedRef.current === lifted) liftedRef.current = null
+    owedRef.current.delete(identity)
+    raise(answer?.outcome === FUTURES_COMMAND_OUTCOME.UNKNOWN
       ? {
           tone: 'unresolved',
           title: 'Cancellation NOT confirmed',
           detail: `${answer?.message ?? 'Binance did not confirm the cancellation either way.'} The order was not moved — check ${order.symbol} on Binance.`,
           order: orderSummary(order, null),
           retryPrice: null,
+          lifted: null,
         }
       : {
           tone: 'refused',
@@ -183,34 +235,44 @@ export const useFuturesOrderDrag = ({
           detail: `${answer?.message ?? answer?.code ?? 'The cancellation was refused.'} The order is still working where it was.`,
           order: orderSummary(order, null),
           retryPrice: null,
-        }))
+          lifted: null,
+        })
     return { ok: false }
-  }, [cancelOrder, maxOrderNotionalUsdt, placeOrder, tickSize, tradingPaused])
+  }, [cancelOrder, maxOrderNotionalUsdt, placeOrder, raise, tickSize, tradingPaused])
 
   /**
    * End the drag. `restored` puts the order back where it was lifted from —
    * the drag was abandoned, the contract changed under it, or it was dropped
    * where it started.
+   *
+   * The pointer is free the moment this is called: the replacement travels on
+   * its own, and the next order can be lifted while it does.
    */
   const drop = useCallback(async ({ price = null, restored = false } = {}) => {
     const lifted = liftedRef.current
     if (lifted === null) return false
+    liftedRef.current = null
     return sendReplacement(lifted, restored || price === null ? lifted.originPrice : price)
   }, [sendReplacement])
 
   // Offered only where a second attempt cannot duplicate anything: after a
-  // refusal, never after silence.
-  const retry = useCallback(async () => {
-    const lifted = liftedRef.current
-    if (lifted === null || alert?.retryPrice === null || alert?.retryPrice === undefined) {
+  // refusal, never after silence. Per statement, so answering one leaves the
+  // other standing.
+  const retry = useCallback(async (id = null) => {
+    const entry = id === null ? alerts[0] ?? null : alerts.find(one => one.id === id) ?? null
+    if (entry === null || entry.lifted === null || entry.retryPrice === null
+      || entry.retryPrice === undefined) {
       return false
     }
-    return sendReplacement(lifted, alert.retryPrice)
-  }, [alert, sendReplacement])
+    dismiss(entry.id)
+    const identity = dragIdentity(entry.lifted.order)
+    if (identity !== null) owedRef.current.add(identity)
+    return sendReplacement(entry.lifted, entry.retryPrice)
+  }, [alerts, dismiss, sendReplacement])
 
   return {
-    alert,
-    replacementInFlight,
+    alerts,
+    replacementInFlight: inFlight > 0,
     lift,
     drop,
     retry,

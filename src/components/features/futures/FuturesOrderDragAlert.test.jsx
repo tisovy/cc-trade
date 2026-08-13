@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import FuturesOrderDragAlert from './FuturesOrderDragAlert.jsx'
 
 const lostAlert = Object.freeze({
+  id: 1,
   tone: 'lost',
   title: 'Order cancelled and NOT replaced',
   detail: 'BTCUSDT BUY 0.004 @ 58500 was cancelled and could not be placed again. Margin is insufficient.',
@@ -12,7 +13,7 @@ const lostAlert = Object.freeze({
 
 describe('FuturesOrderDragAlert', () => {
   it('says nothing when the drag owes nothing', () => {
-    render(<FuturesOrderDragAlert alert={null} />)
+    render(<FuturesOrderDragAlert alerts={[]} />)
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 
@@ -20,9 +21,9 @@ describe('FuturesOrderDragAlert', () => {
   // order, gives the reason, and carries the control that puts it back.
   it('names the order that is gone and offers to place it again', () => {
     const onRetry = vi.fn()
-    render(<FuturesOrderDragAlert alert={lostAlert} onRetry={onRetry} onDismiss={vi.fn()} />)
+    render(<FuturesOrderDragAlert alerts={[lostAlert]} onRetry={onRetry} onDismiss={vi.fn()} />)
 
-    const alert = screen.getByRole('alert', { name: 'Futures order drag outcome' })
+    const alert = screen.getByRole('alert', { name: 'Futures order drag outcome for BTCUSDT' })
     expect(alert).toHaveTextContent('BTCUSDT BUY 0.004 @ 58500')
     expect(alert).toHaveTextContent('Margin is insufficient.')
 
@@ -31,7 +32,7 @@ describe('FuturesOrderDragAlert', () => {
   })
 
   it('shows the placement as in flight rather than as a second chance', () => {
-    render(<FuturesOrderDragAlert alert={lostAlert} busy onRetry={vi.fn()} />)
+    render(<FuturesOrderDragAlert alerts={[lostAlert]} busy onRetry={vi.fn()} />)
     expect(screen.getByRole('button', { name: 'Placing…' })).toBeDisabled()
   })
 
@@ -39,13 +40,14 @@ describe('FuturesOrderDragAlert', () => {
   // end up resting on the book.
   it('offers no retry when the outcome is unknown', () => {
     render(<FuturesOrderDragAlert
-      alert={{
+      alerts={[{
+        id: 2,
         tone: 'unresolved',
         title: 'Replacement NOT confirmed',
         detail: 'Check BTCUSDT on Binance before placing anything.',
         order: null,
         retryPrice: null,
-      }}
+      }]}
       onRetry={vi.fn()}
       onDismiss={vi.fn()}
     />)

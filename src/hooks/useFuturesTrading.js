@@ -516,6 +516,25 @@ const useFuturesTrading = ({
           }))
         }
       }
+      if (payload.futures_conditional_trigger_reject) {
+        const refusal = payload.futures_conditional_trigger_reject
+        // A stop that met its trigger and was then refused by the matching
+        // engine. No read explains this one — at the next reconciliation the
+        // order is simply gone — so the exchange's own words go where every
+        // other exchange refusal goes, rather than only into the log.
+        setState(previous => ({
+          ...previous,
+          lastError: {
+            code: 'FUTURES_TRIGGER_REJECTED',
+            message: refusal.reason ?? 'The exchange refused the triggered order.',
+            details: {
+              marketType: 'futures',
+              symbol: refusal.symbol ?? null,
+              orderId: refusal.orderId ?? null,
+            },
+          },
+        }))
+      }
       if (payload.futures_margin_call) {
         const marginCalls = readFuturesMarginCall(payload.futures_margin_call)
         // Merged rather than replaced: the exchange sends a call for the

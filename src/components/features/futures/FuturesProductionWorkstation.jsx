@@ -499,7 +499,7 @@ export const FuturesProductionWorkstation = ({
           may not wait in a panel: it is stated over the workspace, with the
           control that places it again. */}
       <FuturesOrderDragAlert
-        alert={orderDrag.alert}
+        alerts={orderDrag.alerts}
         busy={orderDrag.replacementInFlight}
         onRetry={orderDrag.retry}
         onDismiss={orderDrag.dismiss}

@@ -68,7 +68,7 @@ describe('useFuturesOrderDrag', () => {
       positionSide: undefined,
       reduceOnly: false,
     })
-    expect(result.current.alert).toBeNull()
+    expect(result.current.alerts).toEqual([])
   })
 
   it('places the order again where it was lifted from when the drag is abandoned', async () => {
@@ -91,7 +91,7 @@ describe('useFuturesOrderDrag', () => {
 
     expect(lift).toEqual({ ok: false })
     expect(cancelOrder).not.toHaveBeenCalled()
-    expect(result.current.alert).toMatchObject({
+    expect(result.current.alerts[0]).toMatchObject({
       tone: 'refused',
       detail: 'Trading is paused — resume to move orders.',
     })
@@ -110,7 +110,7 @@ describe('useFuturesOrderDrag', () => {
 
     expect(lift).toEqual({ ok: false })
     expect(cancelOrder).not.toHaveBeenCalled()
-    expect(result.current.alert.detail).toContain('above the local 200 USDT limit')
+    expect(result.current.alerts[0].detail).toContain('above the local 200 USDT limit')
   })
 
   it('lifts a reduce-only order whatever the ceiling says', async () => {
@@ -130,8 +130,8 @@ describe('useFuturesOrderDrag', () => {
 
     expect(lift).toEqual({ ok: false })
     expect(placeOrder).not.toHaveBeenCalled()
-    expect(result.current.alert).toMatchObject({ tone: 'refused' })
-    expect(result.current.alert.detail).toContain('still working where it was')
+    expect(result.current.alerts[0]).toMatchObject({ tone: 'refused' })
+    expect(result.current.alerts[0].detail).toContain('still working where it was')
   })
 
   it('presents an unconfirmed cancellation as unknown rather than as a loss', async () => {
@@ -139,8 +139,8 @@ describe('useFuturesOrderDrag', () => {
 
     await act(async () => { await result.current.lift(order()) })
 
-    expect(result.current.alert).toMatchObject({ tone: 'unresolved', retryPrice: null })
-    expect(result.current.alert.title).toBe('Cancellation NOT confirmed')
+    expect(result.current.alerts[0]).toMatchObject({ tone: 'unresolved', retryPrice: null })
+    expect(result.current.alerts[0].title).toBe('Cancellation NOT confirmed')
   })
 
   // The order is gone and nothing replaced it. That is the one thing the desk
@@ -151,19 +151,19 @@ describe('useFuturesOrderDrag', () => {
     await act(async () => { await result.current.lift(order()) })
     await act(async () => { await result.current.drop({ price: '58500.04' }) })
 
-    expect(result.current.alert).toMatchObject({
+    expect(result.current.alerts[0]).toMatchObject({
       tone: 'lost',
       title: 'Order cancelled and NOT replaced',
       retryPrice: '58445.00',
     })
-    expect(result.current.alert.detail).toContain('Margin is insufficient.')
+    expect(result.current.alerts[0].detail).toContain('Margin is insufficient.')
 
     placeOrder.mockResolvedValueOnce(CONFIRMED)
     await act(async () => { await result.current.retry() })
 
     expect(placeOrder).toHaveBeenCalledTimes(2)
     expect(placeOrder).toHaveBeenLastCalledWith(expect.objectContaining({ price: '58445' }))
-    expect(result.current.alert).toBeNull()
+    expect(result.current.alerts).toEqual([])
   })
 
   it('refuses an over-cap drop and never places a second order for it', async () => {
@@ -174,8 +174,8 @@ describe('useFuturesOrderDrag', () => {
     await act(async () => { await result.current.drop({ price: '65000' }) })
 
     expect(placeOrder).not.toHaveBeenCalled()
-    expect(result.current.alert).toMatchObject({ tone: 'lost', retryPrice: '58445.00' })
-    expect(result.current.alert.detail).toContain('above the local 250 USDT limit')
+    expect(result.current.alerts[0]).toMatchObject({ tone: 'lost', retryPrice: '58445.00' })
+    expect(result.current.alerts[0].detail).toContain('above the local 250 USDT limit')
   })
 
   // A second attempt on an unknown outcome is how two orders end up on the book.
@@ -185,7 +185,7 @@ describe('useFuturesOrderDrag', () => {
     await act(async () => { await result.current.lift(order()) })
     await act(async () => { await result.current.drop({ price: '58500' }) })
 
-    expect(result.current.alert).toMatchObject({
+    expect(result.current.alerts[0]).toMatchObject({
       tone: 'unresolved',
       title: 'Replacement NOT confirmed',
       retryPrice: null,
@@ -195,21 +195,71 @@ describe('useFuturesOrderDrag', () => {
     expect(placeOrder).toHaveBeenCalledTimes(1)
   })
 
-  it('lifts nothing while the desk still owes an order', async () => {
+  // The same order is not on the book to be lifted again — and saying nothing
+  // about it was indistinguishable from a drag the desk never registered.
+  it('refuses a second lift of the same order, in words', async () => {
     const { result, cancelOrder } = setup({ placeAnswer: REFUSED })
 
     await act(async () => { await result.current.lift(order()) })
-    await act(async () => { await result.current.drop({ price: '58500' }) })
-    expect(result.current.alert).toMatchObject({ tone: 'lost' })
+    let again
+    await act(async () => { again = await result.current.lift(order()) })
+
+    expect(again).toEqual({ ok: false })
+    expect(cancelOrder).toHaveBeenCalledOnce()
+    expect(result.current.alerts.at(-1)).toMatchObject({ tone: 'refused' })
+    expect(result.current.alerts.at(-1).detail).toContain('already lifted')
+  })
+
+  // The operator reached for a second order before the first had landed and
+  // nothing happened. The wait was one round trip through their proxy, and for
+  // its whole length no order on any contract could be moved.
+  it('lifts another order while the last replacement is still in flight', async () => {
+    let settlePlacement
+    const cancelOrder = vi.fn(async () => CONFIRMED)
+    const placeOrder = vi.fn(() => new Promise((resolve) => { settlePlacement = resolve }))
+    const { result } = renderHook(() => useFuturesOrderDrag({
+      tickSize: '0.10',
+      cancelOrder,
+      placeOrder,
+    }))
+
+    await act(async () => { await result.current.lift(order()) })
+    act(() => { result.current.drop({ price: '58500' }) })
+    expect(result.current.replacementInFlight).toBe(true)
 
     let second
     await act(async () => { second = await result.current.lift(order({ orderId: 12 })) })
-    expect(second).toEqual({ ok: false })
-    expect(cancelOrder).toHaveBeenCalledOnce()
-
-    act(() => result.current.dismiss())
-    await act(async () => { await result.current.lift(order({ orderId: 12 })) })
+    expect(second).toEqual({ ok: true })
     expect(cancelOrder).toHaveBeenCalledTimes(2)
+    expect(result.current.alerts).toEqual([])
+
+    await act(async () => {
+      settlePlacement(CONFIRMED)
+      await Promise.resolve()
+    })
+  })
+
+  // Two obligations outstanding was the case the single alert could not report,
+  // and refusing the second drag was how that was avoided. The alert is a list
+  // now, so each one is named on its own.
+  it('states two failed replacements apart, and answers them apart', async () => {
+    const { result, placeOrder } = setup({ placeAnswer: REFUSED })
+
+    await act(async () => { await result.current.lift(order()) })
+    await act(async () => { await result.current.drop({ price: '58500' }) })
+    await act(async () => { await result.current.lift(order({ orderId: 12, symbol: 'ETHUSDT' })) })
+    await act(async () => { await result.current.drop({ price: '3000' }) })
+
+    expect(result.current.alerts).toHaveLength(2)
+    expect(result.current.alerts.map(entry => entry.order.symbol)).toEqual(['BTCUSDT', 'ETHUSDT'])
+
+    // Placing one again leaves the other's statement standing.
+    placeOrder.mockResolvedValue(CONFIRMED)
+    const [first] = result.current.alerts
+    await act(async () => { await result.current.retry(first.id) })
+
+    expect(result.current.alerts).toHaveLength(1)
+    expect(result.current.alerts[0].order.symbol).toBe('ETHUSDT')
   })
 
   // A drag that ends because the operator changed contract must not price the
