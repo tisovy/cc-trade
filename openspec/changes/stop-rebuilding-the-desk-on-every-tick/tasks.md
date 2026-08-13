@@ -11,6 +11,8 @@
 - [x] 2.4 Redraw the whole series for a candle settling behind the last one. *(Discovered while deciding what a print may be answered with: the close of the candle just past — its true high, low and volume — reaches the chart through the same series a tick does, and comparing only the last bar would have left it undrawn. What changed is decided by identity across the rows, which the writers preserve for every row they did not touch, so a settled row is never mistaken for a tick. The scan costs 0.0026 ms at five thousand bars, less than the array copy it sits beside.)*
 - [x] 2.5 Draw the RSI pane's line incrementally, or state why it stays. *(Discovered by measuring what a print still costs: the section named three passes and there is a fourth. The RSI pane recomputed over every bar and redrew its line whole on every print — 0.133 ms at five thousand bars. First stated as left, because Wilder's smoothing is recursive from the first bar and a carry that is wrong does not fail, it drifts an indicator the operator reads. Then taken, because that risk is exactly what a test can remove: the line now carries the smoothed averages standing behind its last point, and both readings go through the same two operations in the same order, so an incremental point is the arithmetic a full pass would have done rather than something close to it. Proven against the whole calculation over three hundred bars of ticking and opening, each point compared exactly, and at the boundary where the divisor goes to zero.)*
 - [x] 2.6 Forget what was drawn when the chart is built again. *(Found auditing 2.1 rather than by a failing test, and it would have reached the operator: React mounts, tears down and mounts again on the first mount in development, which is how this desk is run. The component keeps its refs across that; the chart does not — the second mount builds new, empty series. A record of what was drawn that outlived the series it described had the whole chart taken for already drawn, and the next print written onto nothing. The first test written for it did not bite, because a fresh `render` gets fresh refs and is not what React does here; it is proven under `StrictMode`, where the pre-fix code draws the candles once for two mounts.)*
+- [x] 2.7 Draw the moving average from the same arithmetic both ways. *(Found auditing 2.1, by asking whether the one point written for a print is the number a full pass writes — the code said it was and it was not. `technicalindicators` carries a running sum from the first bar, so what it answers for a bar depends on how many bars came before it: a point computed on its own differed from the same point inside a full pass on 4838 of 4921 windows, by up to 6.5e-13 at five thousand bars. Far below anything the chart draws, and still two answers to one question in a line the operator reads against price — and the comment claiming they agreed was the actual defect. The average is now a window's mean, computed in one place for both paths, which is exact by construction and also 0.339 ms against 0.668 ms over the whole series. It leaves `technicalindicators` with no caller in the renderer; the dependency is left in `package.json` rather than removed in a change about redraw cost.)*
+- [x] 2.8 Subscribe the visible range to the chart that exists, not to the one the state still names. *(Found auditing 1.1. The subscription effect is keyed on the chart instance held in state, which is correct as a trigger and wrong as a value: the state lands a render after the chart is built, so on a rebuild the effect ran while the state still named the chart just disposed — subscribing to it, then unsubscribing from it after its removal. Unreachable today, since the only thing that rebuilds the chart is a colour prop nothing passes, and repaired rather than argued about: the effect takes the ref, which is always the chart that exists.)*
 
 ## 3. A Frame Redraws Only Its Own Panel
 
@@ -43,13 +45,17 @@ points after.
 | per print, 5000 bars | before | after |
 | --- | --- | --- |
 | Volume histogram | 0.0965 ms | **0 ms** — one bar |
-| Moving average | 0.6785 ms | **0.0087 ms** — one point |
+| Moving average | 0.6785 ms | **0.0002 ms** — one point |
 | RSI line | 0.1327 ms | **0.0002 ms** — one point, from the tail |
-| Deciding what changed | — | 0.0048 ms |
+| Deciding what changed | — | 0.0046 ms |
 | Copying the series in `applyTradeToChart` | 0.0069 ms | 0.0069 ms, or **0** when the print does not move the candle |
-| **Total** | **0.915 ms** | **0.021 ms** |
+| **Total** | **0.915 ms** | **0.012 ms** |
 
-Forty-four times less arithmetic per print, on a chart the operator has scrolled
-back through. And the cost that was not a cost but a failure: at the exchange's
-cadence on a liquid pair, the request for older candles was issued **never**
-before this and is issued on the scroll after it.
+Seventy-six times less arithmetic per print, on a chart the operator has scrolled
+back through. The full draw got cheaper too, and not by design: the moving
+average over the whole series is 0.339 ms against the library's 0.668 ms, because
+what 2.7 needed for correctness happens to be the faster arithmetic as well.
+
+And the cost that was not a cost but a failure: at the exchange's cadence on a
+liquid pair, the request for older candles was issued **never** before this and
+is issued on the scroll after it.

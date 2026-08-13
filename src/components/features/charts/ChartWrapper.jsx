@@ -1,11 +1,11 @@
 import { VolumeProfilePrimitive } from './chart-plugins/VolumeProfilePrimitive';
 import { DrawingPrimitive } from './chart-plugins/DrawingPrimitive';
 import { RSI_CONFIG } from './chart-plugins/RSIIndicator';
+import { movingAveragePoint, movingAveragePoints } from './chart-plugins/MovingAverage';
 import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import './ChartWrapper.css';
 import { createChart, ColorType, CrosshairMode, LineStyle, CandlestickSeries, HistogramSeries, LineSeries } from 'lightweight-charts';
 import RSIPane from './RSIPane';
-import { SMA } from 'technicalindicators';
 import { precisionTruncate, formatVolumeShort } from '../../../utils/operations';
 import { buildVolumeHistogramBar, buildVolumeHistogramPresentation } from '../../../utils/chartVolume';
 import { countPrependedRows, planSpotSeriesDraw, reachedSpotHistoryEdge } from '../../../utils/spotChartHistory';
@@ -621,17 +621,12 @@ export const ChartWrapper = (props) => {
             if (volumeBar) {
                 candleSeriesRef.current.update(bar);
                 volumeSeriesRef.current.update(volumeBar);
-                if (smaSeriesRef.current && data.length >= SMA_PERIOD) {
-                    // Through the same library the full draw uses, over the only
-                    // window that can produce the last point, so the value is
-                    // the one a full draw would have written there.
-                    const [value] = SMA.calculate({
-                        period: SMA_PERIOD,
-                        values: data.slice(-SMA_PERIOD).map(d => d.close),
-                    });
-                    if (Number.isFinite(value)) {
-                        smaSeriesRef.current.update({ time: bar.time, value });
-                    }
+                // The last point of the moving average, which is the same
+                // number it would be inside a whole line — see MovingAverage.js
+                // for why that has to be said rather than assumed.
+                const average = movingAveragePoint(data, SMA_PERIOD);
+                if (smaSeriesRef.current && average) {
+                    smaSeriesRef.current.update(average);
                 }
                 drawnSeriesRef.current = { ...drawn, rows: data };
                 // A bar opening changes which bars are in view; a bar ticking
@@ -661,14 +656,8 @@ export const ChartWrapper = (props) => {
         });
         volumeSeriesRef.current.setData(volumePresentation.data);
 
-        const closePrices = data.map(d => d.close);
-        const smaValues = SMA.calculate({ period: SMA_PERIOD, values: closePrices });
-        const smaData = smaValues.map((value, index) => ({
-            time: data[index + (SMA_PERIOD - 1)].time,
-            value,
-        }));
         if (smaSeriesRef.current) {
-            smaSeriesRef.current.setData(smaData);
+            smaSeriesRef.current.setData(movingAveragePoints(data, SMA_PERIOD));
         }
 
         drawnSeriesRef.current = {
@@ -696,9 +685,16 @@ export const ChartWrapper = (props) => {
     // timer waits, which is any contract worth scrolling back on, the request
     // for older candles was never issued at all and the chart stayed as short as
     // it opened.
+    // `chartInstance` says *when* to subscribe — it is the state that changes as
+    // a chart is built or torn down — but the chart to subscribe to is the ref.
+    // The state lands a render after the chart is made, so on a rebuild this
+    // effect runs while the state still names the chart that was just disposed,
+    // and would have subscribed to it and then unsubscribed from it after its
+    // removal.
     useEffect(() => {
-        if (isDisposedRef.current || !chartInstance) return;
-        const timeScale = chartInstance.timeScale();
+        const chart = chartRef.current;
+        if (isDisposedRef.current || !chartInstance || !chart) return;
+        const timeScale = chart.timeScale();
 
         let settleTimer = null;
         const handleVisibleRangeChange = (range) => {
