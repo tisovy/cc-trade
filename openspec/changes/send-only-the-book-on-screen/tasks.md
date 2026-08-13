@@ -56,4 +56,4 @@ machine.
 
 ## 6. Left For A Later Change
 
-- [ ] 6.1 `toRendererView` still sorts the whole retained side before trimming — `sortedByPrice` parses and orders a thousand prices to keep two hundred and twenty. At 0.457 ms it is now the largest single cost left in the main process's depth path. A bounded selection would cut most of it, but it changes the ordering code every delivery depends on and belongs in its own change with its own proof, not in this one.
+- [x] 6.1 Handed off to the separate `select-the-book-before-sorting` change: `toRendererView` still sorts the whole retained side before trimming — `sortedByPrice` parses and orders a thousand prices to keep two hundred and twenty. At 0.457 ms it is now the largest single cost left in the main process's depth path. The bounded-selection implementation and its proof belong only to that follow-up; this change gains no new implementation from the handoff.

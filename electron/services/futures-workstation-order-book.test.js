@@ -9,6 +9,14 @@ import {
     FUTURES_WORKSTATION_EVENT_MAX_BYTES,
 } from '../../src/utils/futuresWorkstationProtocolShared.js';
 import { groupFuturesBookLevels } from '../../src/utils/futuresOrderBook.js';
+import {
+    addFuturesWorkstationDecimals,
+    compareFuturesWorkstationDecimals,
+    isFuturesWorkstationDecimal,
+    isPositiveFuturesWorkstationDecimal,
+    normalizeFuturesWorkstationDecimal,
+    subtractFuturesWorkstationDecimals,
+} from './futures-workstation-decimal.js';
 
 const snapshot = (overrides = {}) => ({
     lastUpdateId: '100',
@@ -33,6 +41,67 @@ const liveBook = () => {
     expect(book.bootstrap(snapshot()).live).toBe(true);
     return book;
 };
+
+const bookFromLevels = (bids, asks) => {
+    const book = new FuturesWorkstationOrderBook();
+    expect(book.bootstrap(snapshot({ bids, asks })).live).toBe(true);
+    return book;
+};
+
+// The behavior being preserved, deliberately written as a full exact-decimal
+// sort rather than sharing the production selection implementation.
+const fullSortSideReference = (side, descending, range) => {
+    const entries = Array.from(side, ([price, quantity]) => ({ price, quantity }));
+    entries.sort((left, right) => {
+        const comparison = compareFuturesWorkstationDecimals(left.price, right.price);
+        return descending ? -comparison : comparison;
+    });
+    const best = entries.length > 0 ? entries[0].price : null;
+    const edge = best === null || range === null
+        ? null
+        : (descending
+            ? subtractFuturesWorkstationDecimals(best, range)
+            : addFuturesWorkstationDecimals(best, range));
+    const levels = [];
+    for (const { price, quantity } of entries) {
+        if (levels.length >= FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.RENDERER_LEVELS_PER_SIDE) break;
+        if (edge !== null
+            && levels.length >= FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.MIN_DELIVERED_LEVELS_PER_SIDE) {
+            const comparison = compareFuturesWorkstationDecimals(price, edge);
+            if (descending ? comparison < 0 : comparison > 0) break;
+        }
+        levels.push({ price, quantity });
+    }
+    return levels;
+};
+
+const fullSortRendererViewReference = (book, range = null) => {
+    const bound = isFuturesWorkstationDecimal(range)
+        && isPositiveFuturesWorkstationDecimal(range)
+        ? range
+        : null;
+    const bids = fullSortSideReference(book.bids, true, bound);
+    const asks = fullSortSideReference(book.asks, false, bound);
+    return {
+        lastUpdateId: book.lastUpdateId.toString(),
+        bids,
+        asks,
+        spread: bids[0] && asks[0]
+            ? subtractFuturesWorkstationDecimals(asks[0].price, bids[0].price)
+            : '0',
+    };
+};
+
+const decimalFromAtoms = (atoms, scale) => {
+    const digits = atoms.toString().padStart(scale + 1, '0');
+    if (scale === 0) return digits;
+    return `${digits.slice(0, -scale)}.${digits.slice(-scale)}`;
+};
+
+const permuteLevels = (levels, multiplier = 37) => Array.from(
+    { length: levels.length },
+    (_, index) => levels[(index * multiplier) % levels.length],
+);
 
 describe('authoritative Futures local order book', () => {
     it('buffers before snapshot and exposes a bounded live view', () => {
@@ -599,5 +668,151 @@ describe('the reading bounds the delivery', () => {
         const whole = bytes(book.toRendererView());
         expect(bytes(book.toRendererView('220')) * 4).toBeLessThan(whole);
         expect(whole).toBeLessThanOrEqual(FUTURES_WORKSTATION_EVENT_MAX_BYTES);
+    });
+});
+
+describe('bounded delivery selects before full ordering', () => {
+    const WIDE_BEST_ATOMS = 900_719_925_474_099_300_000n;
+    const exactLadder = (count) => ({
+        bids: Array.from({ length: count }, (_, index) => [
+            decimalFromAtoms(WIDE_BEST_ATOMS - BigInt(index), 4),
+            `${(index % 17) + 1}.${String(index % 10)}`,
+        ]),
+        asks: Array.from({ length: count }, (_, index) => [
+            decimalFromAtoms(WIDE_BEST_ATOMS + 1n + BigInt(index), 4),
+            `${(index % 19) + 1}.${String((index * 3) % 10)}`,
+        ]),
+    });
+    const realisticBook = () => {
+        const insertionOrder = Array.from({ length: 1_000 }, (_, index) => (index * 37) % 1_000);
+        return bookFromLevels(
+            insertionOrder.map(index => [decimalFromAtoms(15_500n - BigInt(index), 4), '1']),
+            insertionOrder.map(index => [decimalFromAtoms(15_501n + BigInt(index), 4), '1']),
+        );
+    };
+
+    it('matches the full-sort bytes for mixed scales, wide prices and insertion orders', () => {
+        const ladder = exactLadder(320);
+        const orders = [
+            levels => [...levels],
+            levels => [...levels].reverse(),
+            levels => permuteLevels(levels),
+        ];
+        let firstBytes = null;
+        for (const order of orders) {
+            const book = bookFromLevels(order(ladder.bids), order(ladder.asks));
+            const actual = book.toRendererView('0.0220');
+            const expected = fullSortRendererViewReference(book, '0.0220');
+            const bytes = JSON.stringify(actual);
+            expect(bytes).toBe(JSON.stringify(expected));
+            expect(actual.bids).toHaveLength(221);
+            expect(actual.asks).toHaveLength(221);
+            expect(BigInt(actual.bids[0].price.split('.')[0]))
+                .toBeGreaterThan(BigInt(Number.MAX_SAFE_INTEGER));
+            expect(new Set(actual.bids.map(level => level.price.split('.')[1]?.length ?? 0)).size)
+                .toBeGreaterThan(1);
+            if (firstBytes === null) firstBytes = bytes;
+            else expect(bytes).toBe(firstBytes);
+        }
+    });
+
+    it('matches the full-sort floor when the range contains only the best level', () => {
+        const ladder = exactLadder(320);
+        const book = bookFromLevels(permuteLevels(ladder.bids), permuteLevels(ladder.asks));
+        const actual = book.toRendererView('0.00001');
+        expect(JSON.stringify(actual))
+            .toBe(JSON.stringify(fullSortRendererViewReference(book, '0.00001')));
+        expect(actual.bids).toHaveLength(
+            FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.MIN_DELIVERED_LEVELS_PER_SIDE,
+        );
+        expect(actual.asks).toHaveLength(
+            FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.MIN_DELIVERED_LEVELS_PER_SIDE,
+        );
+    });
+
+    it('matches the full-sort reference at the realistic 221-of-1000 range', () => {
+        const book = realisticBook();
+        const actual = book.toRendererView('0.0220');
+        expect(JSON.stringify(actual))
+            .toBe(JSON.stringify(fullSortRendererViewReference(book, '0.0220')));
+        expect(actual.bids).toHaveLength(221);
+        expect(actual.asks).toHaveLength(221);
+    });
+
+    it('keeps exact ceiling output for wider, null, invalid and non-positive ranges', () => {
+        const book = realisticBook();
+        for (const range of ['1', undefined, null, 'wide', '0', '-1']) {
+            const actual = book.toRendererView(range);
+            expect(JSON.stringify(actual))
+                .toBe(JSON.stringify(fullSortRendererViewReference(book, range)));
+            expect(actual.bids).toHaveLength(1_000);
+            expect(actual.asks).toHaveLength(1_000);
+        }
+    });
+
+    it('keeps exact nearest retained levels when an in-band diff exceeds the ceiling', () => {
+        const limit = FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.RETAINED_LEVELS_PER_SIDE;
+        const originalBids = Array.from({ length: limit }, (_, index) => [
+            `${100_000 - index}.0`,
+            '1',
+        ]);
+        const originalAsks = Array.from({ length: limit }, (_, index) => [
+            `${100_001 + index}.0`,
+            '1',
+        ]);
+        const addedBids = Array.from({ length: 100 }, (_, index) => [
+            `${99_999 - index}.5`,
+            '2',
+        ]);
+        const addedAsks = Array.from({ length: 100 }, (_, index) => [
+            `${100_001 + index}.5`,
+            '2',
+        ]);
+        const book = bookFromLevels(originalBids, originalAsks);
+        expect(book.push(delta({
+            firstUpdateId: '101',
+            finalUpdateId: '101',
+            previousFinalUpdateId: '100',
+            bids: addedBids,
+            asks: addedAsks,
+        }), 1).applied).toBe(true);
+
+        const nearest = (levels, descending) => levels
+            .map(([price]) => normalizeFuturesWorkstationDecimal(price))
+            .sort((left, right) => {
+                const comparison = compareFuturesWorkstationDecimals(left, right);
+                return descending ? -comparison : comparison;
+            })
+            .slice(0, limit);
+        const actualBids = Array.from(book.bids.keys()).sort(
+            (left, right) => -compareFuturesWorkstationDecimals(left, right),
+        );
+        const actualAsks = Array.from(book.asks.keys()).sort(compareFuturesWorkstationDecimals);
+        expect(actualBids).toEqual(nearest([...originalBids, ...addedBids], true));
+        expect(actualAsks).toEqual(nearest([...originalAsks, ...addedAsks], false));
+    });
+
+    it('sorts only the selected subset for a bounded 1000-level side', () => {
+        const insertionOrder = Array.from({ length: 1_000 }, (_, index) => (index * 37) % 1_000);
+        const book = bookFromLevels(
+            insertionOrder.map(index => [`${1_000_000 - index}`, '1']),
+            insertionOrder.map(index => [`${1_000_001 + index}`, '1']),
+        );
+        const originalSort = Array.prototype.sort;
+        const sortedLengths = [];
+        let actual;
+        try {
+            Array.prototype.sort = function instrumentedSort(...args) {
+                sortedLengths.push(this.length);
+                return Reflect.apply(originalSort, this, args);
+            };
+            actual = book.toRendererView('220');
+        } finally {
+            Array.prototype.sort = originalSort;
+        }
+
+        expect(sortedLengths).toEqual([221, 221]);
+        expect(JSON.stringify(actual))
+            .toBe(JSON.stringify(fullSortRendererViewReference(book, '220')));
     });
 });

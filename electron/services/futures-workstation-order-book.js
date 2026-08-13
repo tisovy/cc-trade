@@ -237,6 +237,109 @@ const bestPrice = (side, descending) => {
     return best;
 };
 
+const isNearerPriceEntry = (left, right, descending) => (
+    descending ? left.key > right.key : left.key < right.key
+);
+
+// Keep only the nearest `count` entries without ordering the candidates. The
+// heap is worst-first, so each nearer candidate replaces the one level the
+// result can least afford to keep.
+const selectNearestPriceEntries = (entries, count, descending) => {
+    if (count <= 0) return [];
+    if (entries.length <= count) return entries;
+
+    const heap = [];
+    const isWorse = (left, right) => isNearerPriceEntry(right, left, descending);
+    const swap = (left, right) => {
+        [heap[left], heap[right]] = [heap[right], heap[left]];
+    };
+    const bubbleUp = (start) => {
+        let index = start;
+        while (index > 0) {
+            const parent = Math.floor((index - 1) / 2);
+            if (!isWorse(heap[index], heap[parent])) break;
+            swap(index, parent);
+            index = parent;
+        }
+    };
+    const bubbleDown = () => {
+        let index = 0;
+        while (true) {
+            const left = (index * 2) + 1;
+            const right = left + 1;
+            let worse = index;
+            if (left < heap.length && isWorse(heap[left], heap[worse])) worse = left;
+            if (right < heap.length && isWorse(heap[right], heap[worse])) worse = right;
+            if (worse === index) break;
+            swap(index, worse);
+            index = worse;
+        }
+    };
+
+    for (const entry of entries) {
+        if (heap.length < count) {
+            heap.push(entry);
+            bubbleUp(heap.length - 1);
+        } else if (isNearerPriceEntry(entry, heap[0], descending)) {
+            heap[0] = entry;
+            bubbleDown();
+        }
+    }
+    return heap;
+};
+
+// Select the exact prefix a fully ordered side would deliver, then order only
+// that prefix. Prices and the range are aligned as integers at one decimal
+// scale, preserving arbitrary precision and mixed-scale ordering without a
+// binary-number price conversion.
+const boundedByPrice = (side, descending, limit, range) => {
+    const rangeDecimal = parseFuturesWorkstationDecimal(range);
+    const entries = [];
+    let scale = rangeDecimal.scale;
+    for (const [price, quantity] of side) {
+        const decimal = parseFuturesWorkstationDecimal(price);
+        if (decimal.scale > scale) scale = decimal.scale;
+        entries.push({ price, quantity, decimal, key: 0n });
+    }
+    if (entries.length === 0) return entries;
+
+    for (const entry of entries) {
+        entry.key = entry.decimal.coefficient * (10n ** BigInt(scale - entry.decimal.scale));
+    }
+    const rangeKey = rangeDecimal.coefficient * (10n ** BigInt(scale - rangeDecimal.scale));
+    let bestKey = entries[0].key;
+    for (let index = 1; index < entries.length; index += 1) {
+        const key = entries[index].key;
+        if (descending ? key > bestKey : key < bestKey) bestKey = key;
+    }
+    const edgeKey = descending ? bestKey - rangeKey : bestKey + rangeKey;
+    const isWithinEdge = entry => (descending ? entry.key >= edgeKey : entry.key <= edgeKey);
+    const withinEdge = entries.filter(isWithinEdge);
+    const floor = Math.min(
+        FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.MIN_DELIVERED_LEVELS_PER_SIDE,
+        limit,
+        entries.length,
+    );
+
+    let selected;
+    if (withinEdge.length > limit) {
+        selected = selectNearestPriceEntries(withinEdge, limit, descending);
+    } else if (withinEdge.length >= floor) {
+        selected = withinEdge;
+    } else {
+        const outsideEdge = entries.filter(entry => !isWithinEdge(entry));
+        selected = [
+            ...withinEdge,
+            ...selectNearestPriceEntries(outsideEdge, floor - withinEdge.length, descending),
+        ];
+    }
+    selected.sort((left, right) => {
+        if (left.key === right.key) return 0;
+        return isNearerPriceEntry(left, right, descending) ? -1 : 1;
+    });
+    return selected;
+};
+
 // The levels the panel stated it reads, and no more.
 //
 // `range` is a distance in the contract's own quote currency: the rows on screen
@@ -248,21 +351,12 @@ const bestPrice = (side, descending) => {
 // Below the floor the range is ignored: ungrouped it describes the wrong thing
 // entirely, naming a distance in ticks for rows that are levels.
 const formatSide = (side, descending, limit, range) => {
-    const entries = sortedByPrice(side, descending);
-    const best = entries.length > 0 ? entries[0].price : null;
-    const edge = best === null || range === null
-        ? null
-        : (descending
-            ? subtractFuturesWorkstationDecimals(best, range)
-            : addFuturesWorkstationDecimals(best, range));
+    const entries = range === null
+        ? sortedByPrice(side, descending)
+        : boundedByPrice(side, descending, limit, range);
     const levels = [];
     for (const { price, quantity } of entries) {
         if (levels.length >= limit) break;
-        if (edge !== null
-            && levels.length >= FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.MIN_DELIVERED_LEVELS_PER_SIDE) {
-            const comparison = compareFuturesWorkstationDecimals(price, edge);
-            if (descending ? comparison < 0 : comparison > 0) break;
-        }
         levels.push(Object.freeze({ price, quantity }));
     }
     return Object.freeze(levels);
