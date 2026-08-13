@@ -40,7 +40,12 @@
 ## 7. Verification
 
 - [x] 7.1 Run unit and integration suites, the production-guard checks and the workstation boundary check.
-- [ ] 7.2 Use retained integration coverage with two independently issued runtimes and record that each rejects the other runtime's token, without browser automation.
+- [x] 7.2 Use retained integration coverage with two independently issued runtimes and record that each rejects the other runtime's token, without browser automation.
+  - 2026-08-13 retained Node integration result on Node `v24.11.0` (`1/1` passed; no Playwright/browser): the issued pairs satisfied `endpoint A != endpoint B` and `token A != token B`; token values were neither printed nor recorded.
+  - Runtime A result pair: own token accepted and stayed connected; runtime B's token closed with `4401 invalid-token`; post-startup market/account transport delta was `0` calls.
+  - Runtime B result pair: own token accepted and stayed connected; runtime A's token closed with `4401 invalid-token`; post-startup market/account transport delta was `0` calls.
+  - Biting proof: the same retained test overlaid on `git archive 23110079cfd1a65e4dc9e6361f161ab5a4d9a95a` with a symlink to `node_modules` failed `1/1` at endpoint independence (`expected false`, received `true`), before either runtime could bind.
+  - Staged-tree verification on Node `v24.11.0`: `npm run test:all` passed `109` files / `1758` tests, lint and all three build targets (`547` renderer, `297` main, `5` preload modules), plus the artifact (`2` files), circular-import (`257` files), runtime-mock (`133` modules), Futures-production (`23` files), and command-path (`115` modules, one builder) guards.
 
 ## 8. Activation Survives A Reconnect And A Fast Switch
 
