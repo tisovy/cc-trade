@@ -651,6 +651,58 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     await settle()
   })
 
+  // The operator's own speed. They flick an order across and let go inside the
+  // round trip, so the gesture is over before the cancellation is answered —
+  // and the test above never covered it, because it let the lift resolve before
+  // the pointer came up. Held in the slot, the drag refused the next grab: "не
+  // даёт схватить другой пока не закончит предыдущий".
+  it('begins the next drag when the last gesture ended before its cancellation answered', async () => {
+    // One resolver per lift: the second gesture must not be able to answer the
+    // first one's cancellation.
+    const confirmLift = []
+    const props = {
+      ...properties([candle(1_784_000_000_000)]),
+      ownedOrders: [workingOrder(), workingOrder({ orderId: '72', price: '59700' })],
+      onOrderLift: vi.fn(() => new Promise((resolve) => { confirmLift.push(resolve) })),
+    }
+    render(<FuturesWorkstationChart {...props} />)
+    const canvas = screen.getByTestId('futures-workstation-chart')
+    canvas.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 320, height: 320, right: 320, bottom: 320,
+    })
+
+    const first = await screen.findByRole('button', {
+      name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
+    })
+    fireEvent.pointerDown(first, { pointerId: 7, button: 0, ctrlKey: true })
+    const surface = dragSurface()
+    fireEvent.pointerMove(surface, { pointerId: 7, clientY: 80, ctrlKey: true })
+    // Let go while the cancellation is still travelling.
+    fireEvent.pointerUp(surface, { pointerId: 7, clientY: 80, ctrlKey: true })
+    await settle()
+    expect(props.onOrderDrop).not.toHaveBeenCalled()
+
+    const second = await screen.findByRole('button', {
+      name: 'Move SELL LONG order at 59700 with Ctrl or Alt drag',
+    })
+    fireEvent.pointerDown(second, { pointerId: 8, button: 0, ctrlKey: true })
+    await settle()
+
+    expect(props.onOrderLift).toHaveBeenCalledTimes(2)
+    expect(props.onOrderLift).toHaveBeenLastCalledWith(
+      expect.objectContaining({ orderId: '72' }),
+    )
+
+    // And the first is still owed: its cancellation answers, and the price the
+    // gesture ended on is the price it is placed at.
+    confirmLift[0]({ ok: true })
+    await settle()
+    expect(props.onOrderDrop).toHaveBeenCalledOnce()
+    expect(props.onOrderDrop).toHaveBeenCalledWith(
+      expect.objectContaining({ restored: false }),
+    )
+  })
+
   it('places the order again where it was lifted from when the drag is abandoned', async () => {
     const props = { ...properties([candle(1_784_000_000_000)]), ownedOrders: [workingOrder()] }
     render(<FuturesWorkstationChart {...props} />)

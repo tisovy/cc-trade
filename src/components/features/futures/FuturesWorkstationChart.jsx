@@ -82,6 +82,11 @@ const dragSnapshot = drag => Object.freeze({
   status: drag.status,
 })
 
+// What tells one drag from another once several can be in the air at once. The
+// pointer id stands in for an order the desk has no identity for, which cannot
+// be more than one at a time anyway.
+const dragKey = drag => drag.orderIdentity ?? drag.pointerId
+
 const EMPTY_CLICK_CANDIDATE = Object.freeze({ at: 0, x: 0, y: 0, modifier: null })
 
 const createPriceFormat = (tickSize) => {
@@ -197,8 +202,6 @@ export const FuturesWorkstationChart = ({
   const lastLeftClickRef = useRef(EMPTY_CLICK_CANDIDATE)
   const lastRightClickRef = useRef(EMPTY_CLICK_CANDIDATE)
   const orderDragRef = useRef(null)
-  const dragPriceLineRef = useRef(null)
-  const dragOriginLineRef = useRef(null)
   const dragRectRef = useRef(null)
   const requestOrderCoordinateRefreshRef = useRef(NOOP_ORDER_COORDINATE_REFRESH)
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 })
@@ -209,11 +212,15 @@ export const FuturesWorkstationChart = ({
   // flight. Nothing on the book corresponds to it after the lift, which is why
   // it is drawn from here rather than from the open-orders list.
   const [orderDrag, setOrderDrag] = useState(null)
-  // Drags whose gesture is over and whose replacement is still travelling. They
-  // are drawn exactly as they were, and they hold no pointer: the operator can
-  // pick the next order up while these land, which is one round trip through
-  // their proxy — long enough that waiting for it read as a chart that had
-  // stopped listening.
+  // Drags whose gesture is over and whose business with the exchange is not.
+  // They are drawn exactly as they were, and they hold no pointer: the operator
+  // can pick the next order up while these land.
+  //
+  // A gesture ends when the operator lets go, which is not when the exchange
+  // answers. Both round trips outlive it — the cancellation that lifts the
+  // order and the placement that puts it back, 340-800 ms each through the
+  // operator's proxy — and a drag that kept the pointer slot for either of them
+  // is a chart that has stopped listening. Both are held here instead.
   const [settlingDrags, setSettlingDrags] = useState(EMPTY_SETTLING)
   const settlingRef = useRef(new Map())
   const [heldGestureModifier, setHeldGestureModifier] = useState(null)
@@ -260,6 +267,17 @@ export const FuturesWorkstationChart = ({
       drag.abandoned = true
       orderDragRef.current = null
       setOrderDrag(null)
+      // Its own lines must not survive onto the next contract's chart.
+      for (const line of [drag.lines.price, drag.lines.origin]) {
+        if (!line) continue
+        try {
+          seriesRef.current?.contractSeries?.removePriceLine(line)
+        } catch {
+          // The series may already be gone; the line dies with it either way.
+        }
+      }
+      drag.lines.price = null
+      drag.lines.origin = null
       // A lift still waiting on the exchange settles itself when the answer
       // arrives; only a confirmed one owes a replacement now.
       if (drag.status !== 'lifting') {
@@ -270,10 +288,13 @@ export const FuturesWorkstationChart = ({
         })
       }
     }
-    // A settling drag's replacement is already on its way and is still owed;
-    // what cannot survive is its marks on a chart that is being replaced.
-    for (const entry of settlingRef.current.values()) {
-      for (const line of [entry.priceLine, entry.originLine]) {
+    // A handed-over drag is still owed — either its cancellation has not
+    // answered or its replacement is on its way — and that obligation is the
+    // hook's, not the chart's. What cannot survive is its marks on a chart that
+    // is being replaced.
+    for (const settling of settlingRef.current.values()) {
+      settling.abandoned = true
+      for (const line of [settling.lines.price, settling.lines.origin]) {
         if (!line) continue
         try {
           seriesRef.current?.contractSeries?.removePriceLine(line)
@@ -281,19 +302,11 @@ export const FuturesWorkstationChart = ({
           // The series may already be gone; the line dies with it either way.
         }
       }
+      settling.lines.price = null
+      settling.lines.origin = null
     }
     settlingRef.current.clear()
     setSettlingDrags(EMPTY_SETTLING)
-    // The drag's own lines must not survive onto the next contract's chart.
-    for (const lineRef of [dragPriceLineRef, dragOriginLineRef]) {
-      if (!lineRef.current) continue
-      try {
-        seriesRef.current?.contractSeries?.removePriceLine(lineRef.current)
-      } catch {
-        // The series may already be gone; the line dies with it either way.
-      }
-      lineRef.current = null
-    }
     measurementRef.current = null
   }, [measurementGeneration, symbol])
 
@@ -858,11 +871,15 @@ export const FuturesWorkstationChart = ({
 
   // A dragged order is shown as its own price line so the move is read on the
   // chart and on the price axis, not only on the handle badge.
-  const removeDragPriceLine = useCallback(() => {
+  //
+  // The lines belong to the drag that drew them rather than to the chart,
+  // because a drag outlives the gesture: several can be drawn at once, and one
+  // being handed off the pointer must take its own lines with it.
+  const removeDragLines = useCallback((drag) => {
     const series = seriesRef.current?.contractSeries
-    const lines = [dragPriceLineRef.current, dragOriginLineRef.current]
-    dragPriceLineRef.current = null
-    dragOriginLineRef.current = null
+    const lines = [drag.lines.price, drag.lines.origin]
+    drag.lines.price = null
+    drag.lines.origin = null
     if (!series) return
     for (const line of lines) {
       if (!line) continue
@@ -880,16 +897,16 @@ export const FuturesWorkstationChart = ({
   )
 
   const publishSettling = useCallback(() => {
-    const entries = [...settlingRef.current.values()].map(entry => dragSnapshot(entry.drag))
+    const entries = [...settlingRef.current.values()].map(drag => dragSnapshot(drag))
     setSettlingDrags(entries.length === 0 ? EMPTY_SETTLING : Object.freeze(entries))
   }, [])
 
-  const applyDragLinePrice = useCallback((price) => {
+  const applyDragLinePrice = useCallback((drag, price) => {
     const value = toNumber(price)
-    if (typeof dragPriceLineRef.current?.applyOptions !== 'function'
+    if (typeof drag.lines.price?.applyOptions !== 'function'
       || value === null
       || value <= 0) return
-    dragPriceLineRef.current.applyOptions({ price: value })
+    drag.lines.price.applyOptions({ price: value })
   }, [])
 
   // The chart's box, measured once for the whole gesture.
@@ -919,16 +936,16 @@ export const FuturesWorkstationChart = ({
   // becomes true on the confirmation. Passing no origin is what says so, and the
   // aim is then drawn thinner, dimmer and without an axis label, because at that
   // point it is a destination rather than an order.
-  const drawDragLines = useCallback((order, { price, originPrice = null }) => {
+  const drawDragLines = useCallback((drag, { price, originPrice = null }) => {
     const series = seriesRef.current?.contractSeries
     const value = toNumber(price)
-    removeDragPriceLine()
+    removeDragLines(drag)
     if (!series || value === null || value <= 0) return
-    const intent = describeFuturesOrderIntent(order)
+    const intent = describeFuturesOrderIntent(drag.order)
     const origin = toNumber(originPrice)
     const lifted = origin !== null && origin > 0
     if (lifted) {
-      dragOriginLineRef.current = series.createPriceLine({
+      drag.lines.origin = series.createPriceLine({
         price: origin,
         color: 'rgba(126, 143, 166, 0.45)',
         lineWidth: 1,
@@ -937,7 +954,7 @@ export const FuturesWorkstationChart = ({
         title: '',
       })
     }
-    dragPriceLineRef.current = series.createPriceLine({
+    drag.lines.price = series.createPriceLine({
       price: value,
       color: lifted
         ? (intent.tone === 'buy' ? '#2bc48a' : '#ef5b69')
@@ -947,63 +964,70 @@ export const FuturesWorkstationChart = ({
       axisLabelVisible: lifted,
       title: '',
     })
-  }, [removeDragPriceLine])
+  }, [removeDragLines])
 
+  // The drag is over and left nothing behind: nothing was lifted, or what was
+  // lifted has been answered for.
   const releaseDrag = useCallback((drag) => {
-    if (orderDragRef.current === drag) orderDragRef.current = null
-    dragRectRef.current = null
-    removeDragPriceLine()
+    if (orderDragRef.current === drag) {
+      orderDragRef.current = null
+      dragRectRef.current = null
+      publishOrderDrag(null)
+    }
+    if (settlingRef.current.get(dragKey(drag)) === drag) {
+      settlingRef.current.delete(dragKey(drag))
+      publishSettling()
+    }
+    removeDragLines(drag)
     shellRef.current?.releasePointerCapture?.(drag.pointerId)
+  }, [publishOrderDrag, publishSettling, removeDragLines])
+
+  // Take the drag off the pointer without ending it. The gesture is finished —
+  // the operator has let go — but the exchange has not answered yet, for the
+  // cancellation that lifts the order or for the placement that puts it back.
+  // What it drew stays drawn, and the next order can be picked up now.
+  const handOverDrag = useCallback((drag) => {
+    if (orderDragRef.current === drag) {
+      orderDragRef.current = null
+      dragRectRef.current = null
+    }
+    shellRef.current?.releasePointerCapture?.(drag.pointerId)
+    settlingRef.current.set(dragKey(drag), drag)
     publishOrderDrag(null)
-  }, [publishOrderDrag, removeDragPriceLine])
+    publishSettling()
+  }, [publishOrderDrag, publishSettling])
+
+  // Whether the drag is still one of the chart's own, on the pointer or handed
+  // over. A drag the contract change swept away is neither.
+  const dragIsHeld = useCallback(drag => (
+    orderDragRef.current === drag || settlingRef.current.get(dragKey(drag)) === drag
+  ), [])
 
   // The end of the drag, and the moment the obligation is discharged. The mark
   // stays on the chart, dashed, until the placement is answered: the level is
   // uncovered until then, and drawing a working order there would be a lie.
   const settleOrderDrag = useCallback((drag, { restored = false } = {}) => {
-    if (orderDragRef.current !== drag || drag.status === 'placing') return
+    if (drag.status === 'placing' || !dragIsHeld(drag)) return
     const abandoned = restored || toNumber(drag.price) === toNumber(drag.originPrice)
     drag.price = abandoned ? drag.originPrice : drag.price
     drag.status = 'placing'
-    applyDragLinePrice(drag.price)
-    shellRef.current?.releasePointerCapture?.(drag.pointerId)
+    applyDragLinePrice(drag, drag.price)
     // The gesture is over, so the pointer is free at once — the next order can
-    // be picked up while this one lands. What the drag drew is handed to the
-    // settling channel rather than removed: the level is uncovered until the
-    // placement is answered, and drawing nothing there would say less than
-    // drawing it dashed does.
-    const key = drag.orderIdentity ?? drag.pointerId
-    orderDragRef.current = null
-    dragRectRef.current = null
-    settlingRef.current.set(key, {
-      drag,
-      priceLine: dragPriceLineRef.current,
-      originLine: dragOriginLineRef.current,
-    })
-    dragPriceLineRef.current = null
-    dragOriginLineRef.current = null
-    publishOrderDrag(null)
-    publishSettling()
+    // be picked up while this one lands. What the drag drew is handed over with
+    // it rather than removed: the level is uncovered until the placement is
+    // answered, and drawing nothing there would say less than drawing it dashed
+    // does. A drag released before its cancellation answered is already handed
+    // over, and this only republishes it in its new state.
+    handOverDrag(drag)
     Promise.resolve(onOrderDropRef.current?.({
       order: drag.order,
       price: drag.price,
       restored: abandoned,
     })).catch(() => {}).finally(() => {
-      const entry = settlingRef.current.get(key)
-      if (entry === undefined || entry.drag !== drag) return
-      settlingRef.current.delete(key)
-      const series = seriesRef.current?.contractSeries
-      for (const line of [entry.priceLine, entry.originLine]) {
-        if (!line || !series) continue
-        try {
-          series.removePriceLine(line)
-        } catch {
-          // The series can be disposed before the placement is answered.
-        }
-      }
-      publishSettling()
+      if (settlingRef.current.get(dragKey(drag)) !== drag) return
+      releaseDrag(drag)
     })
-  }, [applyDragLinePrice, publishOrderDrag, publishSettling])
+  }, [applyDragLinePrice, dragIsHeld, handOverDrag, releaseDrag])
 
   // Picking an order up cancels it, and the gesture runs beside that
   // cancellation rather than behind it: waiting for the exchange before the mark
@@ -1041,20 +1065,23 @@ export const FuturesWorkstationChart = ({
       // drop is honoured at the price it landed on once the answer arrives —
       // restoring the origin instead would throw away the operator's move.
       releasedRestored: true,
+      // Drawn by this drag and removed with it. They travel with it off the
+      // pointer, which is what lets several be on the chart at once.
+      lines: { price: null, origin: null },
     }
     orderDragRef.current = drag
     measureDragRect()
     shellRef.current?.setPointerCapture?.(event.pointerId)
     publishOrderDrag(drag)
-    drawDragLines(order, { price: drag.price })
+    drawDragLines(drag, { price: drag.price })
     Promise.resolve(onOrderLiftRef.current(order)).then((outcome) => {
       if (outcome?.ok !== true) {
         // Nothing was lifted: the order is still drawn where it rests, and the
         // refusal is stated by the surface that asked for the cancellation.
-        if (orderDragRef.current === drag) releaseDrag(drag)
+        releaseDrag(drag)
         return
       }
-      if (drag.abandoned || orderDragRef.current !== drag) {
+      if (drag.abandoned || !dragIsHeld(drag)) {
         // The contract changed under the drag, or the chart was torn down. The
         // order was cancelled all the same, so it goes back where it was lifted
         // from — the gesture's own price belongs to a chart that is gone.
@@ -1066,13 +1093,24 @@ export const FuturesWorkstationChart = ({
         return
       }
       drag.status = 'moving'
-      drawDragLines(order, { price: drag.price, originPrice: drag.originPrice })
-      publishOrderDrag(drag)
+      drawDragLines(drag, { price: drag.price, originPrice: drag.originPrice })
+      if (orderDragRef.current === drag) publishOrderDrag(drag)
+      else publishSettling()
+      // The gesture was over before this answer arrived. Now that the order is
+      // known to be off the book, it is placed where the operator left it.
       if (drag.releasedEarly) settleOrderDrag(drag, { restored: drag.releasedRestored })
     }).catch(() => {
-      if (orderDragRef.current === drag) releaseDrag(drag)
+      releaseDrag(drag)
     })
-  }, [drawDragLines, measureDragRect, publishOrderDrag, releaseDrag, settleOrderDrag])
+  }, [
+    dragIsHeld,
+    drawDragLines,
+    measureDragRect,
+    publishOrderDrag,
+    publishSettling,
+    releaseDrag,
+    settleOrderDrag,
+  ])
 
   const moveOrderDrag = useCallback((event) => {
     const drag = orderDragRef.current
@@ -1099,7 +1137,7 @@ export const FuturesWorkstationChart = ({
     if (typeof price !== 'number' || !Number.isFinite(price) || price <= 0) return
     drag.price = toDraftString(price)
     drag.y = y
-    applyDragLinePrice(drag.price)
+    applyDragLinePrice(drag, drag.price)
     publishOrderDrag(drag)
   }, [applyDragLinePrice, measureDragRect, publishOrderDrag])
 
@@ -1117,12 +1155,18 @@ export const FuturesWorkstationChart = ({
       // Released before the exchange answered. The lift discharges it when the
       // answer arrives — at the price the gesture actually ended on, which is
       // why that verdict is recorded here rather than assumed to be the origin.
+      //
+      // The pointer is free now regardless. Holding the slot until the
+      // cancellation came back is what stopped the next order being picked up:
+      // the operator flicks an order across and lets go well inside the round
+      // trip, so this is the ordinary path, not the rare one.
       drag.releasedEarly = true
       drag.releasedRestored = restored
+      handOverDrag(drag)
       return
     }
     settleOrderDrag(drag, { restored })
-  }, [settleOrderDrag])
+  }, [handOverDrag, settleOrderDrag])
 
   // Letting the modifier go abandons the drag rather than leaving it hanging:
   // the order goes back to the price it was lifted from. It abandons one whose
@@ -1140,6 +1184,10 @@ export const FuturesWorkstationChart = ({
         if (drag.releasedEarly) return
         drag.releasedEarly = true
         drag.releasedRestored = true
+        // Abandoned, and still waiting on the cancellation. It goes back to
+        // where it was lifted from when that answers, and it does not hold the
+        // pointer for the wait.
+        handOverDrag(drag)
         return
       }
       if (drag.status !== 'moving') return
@@ -1147,7 +1195,7 @@ export const FuturesWorkstationChart = ({
     }
     globalThis.addEventListener?.('keyup', handleModifierRelease)
     return () => globalThis.removeEventListener?.('keyup', handleModifierRelease)
-  }, [dragIsLive, settleOrderDrag])
+  }, [dragIsLive, handOverDrag, settleOrderDrag])
 
   // The one mark standing for the order the drag holds. It is not on the book,
   // so it carries what the operator needs to recognise it — side and size — and

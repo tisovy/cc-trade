@@ -33,6 +33,22 @@ process, and it is the one that was actually costing the move.
 - [x] 1c.7 **Guard, named as one:** the explicit `CONTRACT_WIDE_TRADING_ACTIONS` set changes nothing today — none of those builders emits an order id, so they reach the contract by the fallback in 1c.3 anyway. Removing the set alone leaves all 36 tests green. It is kept because it states which actions speak for a contract, rather than leaving that to be inferred from which fields a builder happens not to set.
 - [x] 1c.8 Keep the ordering guarantee that exists: two commands about one order stay serialized. The pre-existing test now names one order explicitly instead of relying on neither command naming any.
 
+## 1d. The Pointer Is Free When The Gesture Ends
+
+Found after the queue fix shipped and the operator reported the same symptom a
+fourth time, in the words that named it: *не даёт схватить* — the second order
+could not be **grabbed**, not merely could not move. Every earlier measurement
+let the cancellation answer before the pointer came up, which is not how the
+operator works.
+
+- [x] 1d.1 Free the pointer slot when the gesture ends while the cancellation is still travelling, instead of holding it until the exchange answers.
+- [x] 1d.2 Give each drag ownership of the price lines it drew, so handing one off the pointer takes its lines with it and more than one can be drawn at once. This is what made the two-refs-per-chart design unable to hold a second drag at all.
+- [x] 1d.3 Discharge a handed-over drag when its cancellation answers: place at the price the gesture ended on, restore to the origin if it was abandoned, and draw nothing if the lift was refused.
+- [x] 1d.4 Hand over on modifier release too — an abandoned drag waiting on its cancellation must not hold the pointer either.
+- [x] 1d.5 End handed-over drags with the contract, whichever answer they are waiting for, and take their lines off the chart.
+- [x] 1d.6 Prove by test that the next drag begins when the last gesture ended before its cancellation answered. **Bites:** against the committed chart, `expected "vi.fn()" to be called 2 times, but got 1 times` — the second `pointerdown` reached nothing, which is exactly «не даёт схватить». The test also asserts the first order is still placed, at the price the gesture ended on, once its cancellation returns.
+- [x] 1d.7 **Own the measurement error that hid this three times.** The earlier tests awaited the lift before releasing the pointer, so they exercised a path the operator never takes. A drag test that does not hold the cancellation open is not testing the drag.
+
 ## 2. Nothing Refuses In Silence
 
 - [x] 2.1 Give every path out of a lift a statement — including the one that refuses because the same order is already lifted, which returned `{ ok: false }` and said nothing.
@@ -58,7 +74,7 @@ process, and it is the one that was actually costing the move.
     - `refuses a second lift of the same order, in words` — still refused, because that order is no longer on the book, but now with a statement instead of silence.
 
     One existing test had to go: `lifts nothing while the desk still owes an order` asserted the limit this change removes. Its replacement asserts the opposite, and the baseline above is the record of what it used to prove.
-- [x] 4.3 Full suite green — 1874 passed.
+- [x] 4.3 Full suite green — 1875 passed.
 - [x] 4.4 Added as step 40 of `verify-the-desk-in-one-sitting` (renumbered by the session that owns the runbook). Not marked done there.
 - [x] 4.5 Measured against the pre-change registry with the operator's own case, three orders on one contract. Baseline verbatim: `expected [ 'place:start' ] to deeply equal [ 'place:start', 'lift:another-order' ]` — the lift of the second order did not reach the exchange while the first replacement was in flight.
 - [x] 4.6 Checked that nothing else depended on the contract lane's width: the local order cap was already delegated to the exchange, and the notional ceiling is evaluated per order in the renderer before anything is sent.

@@ -4,11 +4,12 @@ The operator moved one order, then reached for a second before the first had
 landed, and nothing happened. No refusal, no message, no order lifted — the
 drag simply did not start.
 
-There were **three** gates, and each fix reached only the innermost one left.
+There were **four** gates, and each fix reached only the innermost one left.
 The operator retested after each and reported the same symptom, which is how the
-next one came to light. The third is the one that made their own case — three
-orders resting side by side on one contract — fail while the two fixes above it
-were already in.
+next one came to light. The fourth is the one that made their own case fail with
+the three above it already in, and it is the plainest of them: the chart held
+the pointer for the whole cancellation round trip, and the operator lets go long
+before that answers.
 
 ### The gate in the hook
 
@@ -91,6 +92,37 @@ What the coarse lane did buy, and what a naive narrowing would throw away, is
 that a cancel-all cannot run beside a placement it is meant to sweep away — so
 that is stated on its own rather than left as a side effect of the lane width.
 
+### The gate in the gesture
+
+A drag ends when the operator lets go. The chart treated it as ending when the
+*exchange* answered — and there are two answers, not one. The settling channel
+above covers the second, the placement. The first, the cancellation, was left
+holding the pointer outright:
+
+```js
+if (drag.status === 'lifting') {
+  drag.releasedEarly = true
+  drag.releasedRestored = restored
+  return              // ← orderDragRef.current is still this drag
+}
+```
+
+Every gate above this one was measured with a test that let the cancellation
+answer before the pointer came up. The operator does not work that way: they
+flick an order across and let go well inside 340–800 ms, so `status` is still
+`lifting` at `pointerup` and the slot stays taken until Binance replies. Their
+words, exactly: "не даёт схватить другой пока не закончит предыдущий" — not that
+the second order fails to move, that it cannot be *grabbed*.
+
+Measured before this change, at that timing: `onOrderLift` called once where it
+should be twice. The second `pointerdown` did nothing at all.
+
+The underlying reason it kept coming back is that the chart's drag lines lived
+in two refs owned by the chart, so only one drag could be drawn at a time and
+handing one over meant moving its lines out from under the next. The lines now
+belong to the drag that drew them, which is what makes any number of them able
+to be in the air at once.
+
 ## What Changes
 
 - The desk tracks what it owes per order rather than one obligation at a time.
@@ -116,6 +148,12 @@ that is stated on its own rather than left as a side effect of the lane width.
   type, position margin — runs alone on it. That was previously a side effect of
   the lane being the contract; it is now the rule, so narrowing the lane cannot
   quietly let a placement survive a sweep.
+- The pointer is freed when the *gesture* ends, not when either round trip does.
+  A drag released while its cancellation is still travelling is handed over the
+  same way a settling one is, and discharges itself at the price the gesture
+  ended on when the answer arrives.
+- A drag owns the price lines it drew. They travel with it off the pointer,
+  which is what allows more than one to be drawn at once.
 
 ## Non-goals
 
