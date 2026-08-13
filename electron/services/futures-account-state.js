@@ -292,8 +292,8 @@ export class FuturesStreamedOrderMemory {
         this.entries.delete(identity);
     }
 
-    // Did the stream speak about this order after the read left? Only then is the
-    // read's silence about it uninformed rather than authoritative.
+    // Did the stream speak about this order recently enough that the read's
+    // silence about it is uninformed rather than authoritative?
     notedSince(identity, since) {
         const notedAt = this.entries.get(identity);
         return notedAt !== undefined && Number.isFinite(since) && notedAt >= since;
@@ -305,23 +305,50 @@ export class FuturesStreamedOrderMemory {
 }
 
 /**
+ * How far a read may trail the stream and still be believed about an order it
+ * leaves out.
+ *
+ * When the read left is not the whole test, because Binance's REST view is
+ * eventually consistent with its own matching engine: a read issued *after* the
+ * stream reported an order working can still answer without it. That is the
+ * order of events after a placement — the exchange accepts, the stream says NEW,
+ * the desk asks for the account it has just changed, and the read that comes
+ * back has not caught up yet. Believing it made the order vanish for as long as
+ * the next read took to arrive, which is the blink on and off the chart the
+ * operator sees after placing an order.
+ *
+ * There is no such window in the other direction: an order the stream settled is
+ * refused by comparing the exchange's own stamps, and a stale row simply carries
+ * an older one. Absence carries no stamp to compare, so this is measured in
+ * time — long enough to cover the exchange's own lag, short enough that an order
+ * that really is gone clears on the next read past the window.
+ */
+export const FUTURES_WORKING_ORDER_READ_LAG_MS = 3_000;
+
+/**
  * What a read of the working orders is allowed to say.
  *
  * Two things the read cannot know about, in the two directions: an order the
  * stream reported settled after the read left, which the settled memory refuses,
- * and an order the stream reported working after the read left, which the read
- * simply does not contain. The second is put back here.
+ * and an order the stream reported working that the read simply does not
+ * contain. The second is put back here.
  *
  * `since` is when the read was issued, on the same clock the stream reports are
- * noted on.
+ * noted on, and `lag` is how far the exchange's own answer may trail it.
  */
 export const reconcileFuturesWorkingOrderRead = (
     resources,
     rows,
-    { settled = null, streamed = null, since = null } = {},
+    {
+        settled = null,
+        streamed = null,
+        since = null,
+        lag = FUTURES_WORKING_ORDER_READ_LAG_MS,
+    } = {},
 ) => {
     const filtered = settled === null ? rows : settled.filterRead(rows);
     if (streamed === null || !Number.isFinite(since)) return filtered;
+    const vouchedSince = since - (Number.isFinite(lag) ? Math.max(0, lag) : 0);
     const held = Array.isArray(resources?.regularOrders?.data)
         ? resources.regularOrders.data
         : [];
@@ -333,7 +360,7 @@ export const reconcileFuturesWorkingOrderRead = (
         if (identity === null || listed.has(identity)) return false;
         if (!FUTURES_WORKING_ORDER_STATUSES.has(String(row?.status ?? row?.X ?? ''))) return false;
         if (settled !== null && !settled.allows(row)) return false;
-        return streamed.notedSince(identity, since);
+        return streamed.notedSince(identity, vouchedSince);
     });
     return missing.length === 0 ? filtered : Object.freeze([...read, ...missing]);
 };

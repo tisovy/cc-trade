@@ -196,6 +196,7 @@ export const FuturesWorkstationChart = ({
   const orderDragRef = useRef(null)
   const dragPriceLineRef = useRef(null)
   const dragOriginLineRef = useRef(null)
+  const dragRectRef = useRef(null)
   const requestOrderCoordinateRefreshRef = useRef(NOOP_ORDER_COORDINATE_REFRESH)
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 })
   const [measurement, setMeasurement] = useState(null)
@@ -530,6 +531,10 @@ export const FuturesWorkstationChart = ({
     const resize = () => {
       const width = Math.max(320, container.clientWidth)
       const height = Math.max(320, container.clientHeight)
+      // The one thing that moves the chart's box under a captured pointer. The
+      // drag reads that box once and reuses it; dropping it here is what makes
+      // the next move measure again.
+      dragRectRef.current = null
       chart.applyOptions({ width, height })
       setContainerSize(previous => (
         previous.width === width && previous.height === height ? previous : { width, height }
@@ -848,6 +853,23 @@ export const FuturesWorkstationChart = ({
     dragPriceLineRef.current.applyOptions({ price: value })
   }, [])
 
+  // The chart's box, measured once for the whole gesture.
+  //
+  // `getBoundingClientRect` is a layout read, and a layout read is only cheap
+  // when the page's layout is already clean. The desk's is never clean for long:
+  // the book, the dock and the header all write to the DOM while the drag is
+  // running, so every read at pointer rate forced the browser to lay the entire
+  // desk out again before it could answer — once per frame, on the frame's
+  // critical path, and the busier the desk the more that read cost. Nothing but
+  // a resize moves the chart while the pointer is captured, and that clears this.
+  const measureDragRect = useCallback(() => {
+    const container = containerRef.current
+    if (!container) return null
+    const { top, height } = container.getBoundingClientRect()
+    dragRectRef.current = Object.freeze({ top, height })
+    return dragRectRef.current
+  }, [])
+
   // What the chart shows once the order has left the book: a dashed line at the
   // price being aimed at, and one faint unlabelled mark at the level it was
   // lifted from. Neither is a working order, and neither is drawn like one.
@@ -890,6 +912,7 @@ export const FuturesWorkstationChart = ({
 
   const releaseDrag = useCallback((drag) => {
     if (orderDragRef.current === drag) orderDragRef.current = null
+    dragRectRef.current = null
     removeDragPriceLine()
     shellRef.current?.releasePointerCapture?.(drag.pointerId)
     publishOrderDrag(null)
@@ -954,6 +977,7 @@ export const FuturesWorkstationChart = ({
       releasedRestored: true,
     }
     orderDragRef.current = drag
+    measureDragRect()
     shellRef.current?.setPointerCapture?.(event.pointerId)
     publishOrderDrag(drag)
     drawDragLines(order, { price: drag.price })
@@ -982,11 +1006,10 @@ export const FuturesWorkstationChart = ({
     }).catch(() => {
       if (orderDragRef.current === drag) releaseDrag(drag)
     })
-  }, [drawDragLines, publishOrderDrag, releaseDrag, settleOrderDrag])
+  }, [drawDragLines, measureDragRect, publishOrderDrag, releaseDrag, settleOrderDrag])
 
   const moveOrderDrag = useCallback((event) => {
     const drag = orderDragRef.current
-    const container = containerRef.current
     const series = seriesRef.current?.contractSeries
     // `lifting` follows the pointer too: the cancellation is in flight, and the
     // mark that follows is a destination, not a claim that the order has moved.
@@ -994,19 +1017,25 @@ export const FuturesWorkstationChart = ({
       || drag.pointerId !== event.pointerId
       || (drag.status !== 'moving' && drag.status !== 'lifting')
       || drag.releasedEarly
-      || !container
       || !series) return
-    const rect = container.getBoundingClientRect()
+    const rect = dragRectRef.current ?? measureDragRect()
+    if (rect === null) return
+    // The gesture owns the event whether or not it changed anything: leaving it
+    // to the page would let a drag select text across the desk.
+    event.preventDefault()
+    event.stopPropagation()
     const y = Math.max(0, Math.min(rect.height, event.clientY - rect.top))
+    // Sideways, or less than the row the mark already occupies. Redrawing the
+    // line and republishing the drag would repaint the chart to put both back
+    // exactly where they are.
+    if (drag.y !== null && Math.round(drag.y) === Math.round(y)) return
     const price = series.coordinateToPrice(y)
     if (typeof price !== 'number' || !Number.isFinite(price) || price <= 0) return
     drag.price = toDraftString(price)
     drag.y = y
     applyDragLinePrice(drag.price)
-    event.preventDefault()
-    event.stopPropagation()
     publishOrderDrag(drag)
-  }, [applyDragLinePrice, publishOrderDrag])
+  }, [applyDragLinePrice, measureDragRect, publishOrderDrag])
 
   const finishOrderDrag = useCallback((event, canceled = false) => {
     const drag = orderDragRef.current
@@ -1122,7 +1151,16 @@ export const FuturesWorkstationChart = ({
         {liftedMark === null ? null : (
           <div
             className={`futures-workstation-owned-order is-${liftedMark.tone} is-lifted${liftedMark.placing ? ' is-placing' : ''}${liftedMark.pending ? ' is-pending' : ''}`}
-            style={{ top: `${liftedMark.y}px` }}
+            style={{
+              // Moved by transform rather than by `top`, and it is the only
+              // handle that moves at pointer rate. `top` is a layout property:
+              // writing it marks the desk's layout dirty every frame, and the
+              // next thing that reads a box — this chart, the charting library,
+              // any panel — pays for laying the desk out again before it gets an
+              // answer. A transform is composited and dirties no layout at all.
+              top: 0,
+              transform: `translate3d(0, ${liftedMark.y}px, 0) translateY(-50%)`,
+            }}
             role="status"
             aria-label={liftedMark.placing
               ? `${liftedMark.side} ${liftedMark.label} order being placed at ${liftedMark.price}; nothing rests at that price yet`

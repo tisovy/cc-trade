@@ -37,6 +37,17 @@ claim about the exchange at all.
   the order goes back to where it started — with the drag now able to complete
   inside that window, discarding the operator's actual drop would be the new bug.
 
+- **The gesture stops charging itself for the rest of the desk.** With the wait
+  gone, what was left was the cost of each frame. Every pointer move measured the
+  chart's box, and a layout read is only answered cheaply against a layout that
+  is already clean — the desk's is not, because the book, the dock and the header
+  are writing to it the whole time — so the browser laid the entire desk out
+  again before answering, once per frame, before anything of the drag itself ran.
+  The mark then moved by `top`, which dirtied the layout again for whoever read a
+  box next. The box is now measured once per gesture, the mark is moved by a
+  transform, and a move that does not change the row the mark is on redraws
+  nothing.
+
 ## Trade-offs this accepts
 
 - Two marks stand for one order during the round trip: the working order at its

@@ -11,6 +11,7 @@ import {
     markFuturesResourceFailed,
     markFuturesResourceLoading,
     markFuturesResourceReady,
+    FUTURES_WORKING_ORDER_READ_LAG_MS,
     reconcileFuturesWorkingOrderRead,
     sanitizeFuturesAccountError,
 } from './futures-account-state.js';
@@ -359,15 +360,51 @@ describe('what a read of the working orders is allowed to say', () => {
         expect(reconciled.map(row => row.orderId)).toEqual([12]);
     });
 
+    // The exact shape of the blink the operator reported: the exchange accepts
+    // the order, the stream says NEW, the desk asks for the account it has just
+    // changed — and that read, issued *after* the stream spoke, comes back
+    // without the order because Binance's REST view has not caught up with its
+    // own matching engine. Believing it took the order off the screen until the
+    // next read put it back.
+    it('keeps an order a read issued just after the stream has not caught up with', () => {
+        const streamed = new FuturesStreamedOrderMemory();
+        const held = foldFuturesWorkingOrder(heldOrders([]), order({ orderId: 12 }), {
+            streamed,
+            now: 2_000,
+        });
+        const reconciled = reconcileFuturesWorkingOrderRead(held, [], {
+            streamed,
+            since: 2_400,
+        });
+        expect(reconciled.map(row => row.orderId)).toEqual([12]);
+    });
+
     // The read is the newer statement here, and an order it omits is gone —
     // cancelled from the Binance app, or filled while the desk was not looking.
+    // Past the window the exchange's own lag lives in, the read is believed.
     it('removes an order the stream has said nothing newer about', () => {
         const streamed = new FuturesStreamedOrderMemory();
         const held = foldFuturesWorkingOrder(heldOrders([]), order({ orderId: 12 }), {
             streamed,
             now: 2_000,
         });
-        expect(reconcileFuturesWorkingOrderRead(held, [], { streamed, since: 3_000 }))
+        const since = 2_000 + FUTURES_WORKING_ORDER_READ_LAG_MS + 1;
+        expect(reconcileFuturesWorkingOrderRead(held, [], { streamed, since }))
+            .toEqual([]);
+    });
+
+    // The window is what the exchange's lag needs, not what the desk feels like
+    // holding: a read past it removes the order on the very next pass.
+    it('measures the window from the stream, not from the read', () => {
+        const streamed = new FuturesStreamedOrderMemory();
+        const held = foldFuturesWorkingOrder(heldOrders([]), order({ orderId: 12 }), {
+            streamed,
+            now: 2_000,
+        });
+        const atTheEdge = 2_000 + FUTURES_WORKING_ORDER_READ_LAG_MS;
+        expect(reconcileFuturesWorkingOrderRead(held, [], { streamed, since: atTheEdge })
+            .map(row => row.orderId)).toEqual([12]);
+        expect(reconcileFuturesWorkingOrderRead(held, [], { streamed, since: atTheEdge, lag: 0 }))
             .toEqual([]);
     });
 

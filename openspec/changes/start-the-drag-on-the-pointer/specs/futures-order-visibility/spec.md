@@ -1,3 +1,33 @@
+## ADDED Requirements
+
+### Requirement: A drag does not pay for the rest of the desk
+Following the pointer SHALL cost a fixed, small amount of work per pointer move,
+independent of how much of the desk is being redrawn at the same time.
+
+The gesture SHALL NOT read the desk's layout while it runs: the chart's box SHALL
+be measured once for the gesture and measured again only when the chart is
+resized. A layout read is answered cheaply only against a layout that is already
+clean, and the desk's never is — the book, the dock and the header write to it
+throughout the drag — so a read at pointer rate lays the whole desk out again on
+every frame of the gesture.
+
+The mark that follows the pointer SHALL be moved by a property that does not
+invalidate layout, so that neither the desk nor the charting library is charged a
+fresh layout pass for the frame the operator is dragging in. A pointer move that
+leaves the mark on the row it already occupies SHALL redraw nothing.
+
+#### Scenario: The pointer moves while the desk is busy
+- **WHEN** the operator drags an order while the rest of the desk is being redrawn from the stream
+- **THEN** the mark follows the pointer, and the gesture measures no layout to do it
+
+#### Scenario: The chart is resized during a drag
+- **WHEN** the chart's box changes while a drag is in flight
+- **THEN** the next pointer move is placed against the new box
+
+#### Scenario: A move that changes nothing
+- **WHEN** a pointer move leaves the mark on the row it already occupies
+- **THEN** neither the chart nor the mark is redrawn
+
 ## MODIFIED Requirements
 
 ### Requirement: A drag lifts the order off the book

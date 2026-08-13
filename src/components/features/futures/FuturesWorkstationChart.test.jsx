@@ -948,6 +948,104 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     expect(screen.queryByRole('status', { name: /lifted off the book|being placed/ }))
       .not.toBeInTheDocument()
   })
+  // A layout read is only cheap against a clean layout, and the desk's is never
+  // clean: the book, the dock and the header write to the DOM the whole time the
+  // drag is running. Measuring the chart on every pointer move made the browser
+  // lay the entire desk out again before it would answer — once a frame, on the
+  // frame's critical path, and the busier the desk the slower the drag.
+  it('measures the chart once for a drag, not once for every pointer move', async () => {
+    const props = {
+      ...properties([candle(1_784_000_000_000)]),
+      ownedOrders: [workingOrder({ orderId: '96', side: 'BUY', positionEffect: 'ENTRY' })],
+    }
+    render(<FuturesWorkstationChart {...props} />)
+    const canvas = screen.getByTestId('futures-workstation-chart')
+    const measure = vi.fn(() => ({
+      left: 0, top: 0, width: 320, height: 320, right: 320, bottom: 320,
+    }))
+    canvas.getBoundingClientRect = measure
+    const handle = await screen.findByRole('button', {
+      name: 'Move BUY LONG order at 59900 with Ctrl or Alt drag',
+    })
+
+    fireEvent.pointerDown(handle, { pointerId: 11, button: 0, altKey: true })
+    await settle()
+    const measuredForTheLift = measure.mock.calls.length
+    expect(measuredForTheLift).toBeGreaterThan(0)
+
+    for (const clientY of [80, 84, 88, 92, 96]) {
+      fireEvent.pointerMove(dragSurface(), { pointerId: 11, clientY, altKey: true })
+    }
+
+    expect(screen.getByRole('status', { name: /lifted off the book, following the pointer at 59904/ }))
+      .toBeInTheDocument()
+    expect(measure).toHaveBeenCalledTimes(measuredForTheLift)
+
+    // A resize is the one thing that moves the chart's box under a captured
+    // pointer, so the measurement it invalidates is taken again.
+    fireEvent(globalThis, new Event('resize'))
+    fireEvent.pointerMove(dragSurface(), { pointerId: 11, clientY: 100, altKey: true })
+    expect(measure.mock.calls.length).toBeGreaterThan(measuredForTheLift)
+  })
+
+  // `top` is a layout property: written at pointer rate it marks the desk's
+  // layout dirty every frame, and the next box anyone reads — this chart, the
+  // charting library, any panel — is paid for with a fresh layout pass.
+  it('moves the lifted mark by transform, leaving the desk layout alone', async () => {
+    const props = {
+      ...properties([candle(1_784_000_000_000)]),
+      ownedOrders: [workingOrder({ orderId: '97', side: 'BUY', positionEffect: 'ENTRY' })],
+    }
+    render(<FuturesWorkstationChart {...props} />)
+    const canvas = screen.getByTestId('futures-workstation-chart')
+    canvas.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 320, height: 320, right: 320, bottom: 320,
+    })
+    const handle = await screen.findByRole('button', {
+      name: 'Move BUY LONG order at 59900 with Ctrl or Alt drag',
+    })
+
+    fireEvent.pointerDown(handle, { pointerId: 12, button: 0, altKey: true })
+    await settle()
+    fireEvent.pointerMove(dragSurface(), { pointerId: 12, clientY: 80, altKey: true })
+
+    const lifted = screen.getByRole('status', { name: /lifted off the book/ })
+    expect(lifted.style.top).toBe('0px')
+    expect(lifted.style.transform).toBe('translate3d(0, 80px, 0) translateY(-50%)')
+  })
+
+  // Pointer moves arrive whether or not they change the price: sideways, or a
+  // fraction of the row the mark already sits on. Redrawing on those repaints
+  // the chart to put the line back exactly where it is.
+  it('leaves the chart alone for a move that stays on the same row', async () => {
+    const props = {
+      ...properties([candle(1_784_000_000_000)]),
+      ownedOrders: [workingOrder({ orderId: '98', side: 'BUY', positionEffect: 'ENTRY' })],
+    }
+    render(<FuturesWorkstationChart {...props} />)
+    const canvas = screen.getByTestId('futures-workstation-chart')
+    canvas.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 320, height: 320, right: 320, bottom: 320,
+    })
+    const handle = await screen.findByRole('button', {
+      name: 'Move BUY LONG order at 59900 with Ctrl or Alt drag',
+    })
+    const series = chartMock.charts[0].series[0]
+
+    fireEvent.pointerDown(handle, { pointerId: 13, button: 0, altKey: true })
+    await settle()
+    const movingLine = priceLinesOf(series).find(line => line.lineStyle === 'Dashed')
+
+    fireEvent.pointerMove(dragSurface(), { pointerId: 13, clientY: 80, altKey: true })
+    expect(movingLine.applyOptions).toHaveBeenCalledTimes(1)
+
+    fireEvent.pointerMove(dragSurface(), { pointerId: 13, clientX: 200, clientY: 80, altKey: true })
+    expect(movingLine.applyOptions).toHaveBeenCalledTimes(1)
+
+    fireEvent.pointerMove(dragSurface(), { pointerId: 13, clientY: 81, altKey: true })
+    expect(movingLine.applyOptions).toHaveBeenCalledTimes(2)
+  })
+
   // Every label and value on a handle is sized by the rules that style its
   // plate. Left as bare children of the handle, the dragged order's value fell
   // outside all of them and rendered at the desk's body size inside a 16px

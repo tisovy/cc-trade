@@ -9,6 +9,16 @@
 - [x] 2.2 Keep removing an order the read omitted that the stream has said nothing newer about.
 - [x] 2.3 Prove both by test, including the placement-then-read sequence that produced the blink.
 
+## 2a. The Half The First Pass Missed
+
+The operator still saw the blink: a read issued *after* the stream's report, on
+an exchange whose REST view had not caught up, was believed and took the order
+off the screen. Comparing against when the read was issued only covers the reads
+that left first.
+
+- [x] 2a.1 Allow for the window the exchange's own answer may trail its stream by, measured from the stream's report.
+- [x] 2a.2 Prove by test that a read issued just after the report keeps the order, that a read past the window removes it, and that the window is measured from the report rather than from the read.
+
 ## 3. Verification
 
 - [x] 3.1 `npm run lint`, `npm test`, `npm run check:futures-production`.

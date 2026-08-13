@@ -4,11 +4,13 @@
 The system SHALL treat a confirmed execution report as authoritative until the
 account snapshot it is reconciled against is at least as recent. An account
 snapshot SHALL NOT replace an open order with an older version of that same
-order, and SHALL NOT remove an open order the stream reported working after that
-snapshot was requested — a read that left before the report could not have seen
-it, so its silence is not evidence that the order is gone. When the stream has
-said nothing newer than the read, the read decides, and an order it omits is no
-longer working.
+order, and SHALL NOT remove an open order the stream has recently reported
+working. A snapshot requested before that report could not have seen the order;
+a snapshot requested shortly after it may still be answered from a view of the
+exchange that has not caught up with its own matching engine. Neither silence is
+evidence that the order is gone. Only when the stream has said nothing about the
+order for longer than the window the exchange's answer may trail the stream by
+does the snapshot decide, and an order it omits is no longer working.
 
 An order the exchange has reported settled SHALL NOT be listed as working again,
 by any message. This covers both a report that left the exchange before the
@@ -21,10 +23,11 @@ settlement report that carries no order id SHALL settle nothing, its identity
 being the prefix every unidentified order on that contract would share.
 
 What the stream has reported working SHALL be remembered on the desk's own clock
-and compared against when the read was issued, so the comparison does not depend
-on the exchange's clock agreeing with the desk's. That memory SHALL be bounded on
-the same grounds as the settled one, and an order reported settled SHALL leave
-it.
+and compared against when the read was issued, less that window, so the
+comparison does not depend on the exchange's clock agreeing with the desk's. That
+memory SHALL be bounded on the same grounds as the settled one, and an order
+reported settled SHALL leave it — a settlement the stream reports ends the hold
+at once rather than waiting for the window to close.
 
 #### Scenario: Snapshot arrives with pre-amendment values
 - **WHEN** an amendment is confirmed and the account synchronization that follows returns the order with an earlier update time
@@ -38,8 +41,12 @@ it.
 - **WHEN** an order is placed, the stream reports it working, and an account read issued before that report returns a working-order list that does not contain it
 - **THEN** the order stays listed as working, and it is not removed and re-added as later reads catch up
 
+#### Scenario: A read issued after the placement has not caught up with it
+- **WHEN** an order is placed, the stream reports it working, the desk reads the account it has just changed, and that read — issued after the report — returns a working-order list that does not contain the order
+- **THEN** the order stays listed as working, because the exchange's own answer may trail its stream
+
 #### Scenario: A read reports an order the stream has not spoken about
-- **WHEN** an account read returns a working-order list without an order the desk holds, and the stream has reported nothing about that order since the read was issued
+- **WHEN** an account read returns a working-order list without an order the desk holds, and the stream has reported nothing about that order for longer than the window the exchange's answer may trail it by
 - **THEN** the order is removed, because the read is the newer statement about it
 
 #### Scenario: The placement's reply arrives after the fill

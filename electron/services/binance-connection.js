@@ -1321,10 +1321,12 @@ export function setupBinanceConnection({
             futuresAccountResources = markFuturesResourceReady(
                 futuresAccountResources,
                 operation.type,
-                // A read that left before the stream spoke describes a world
+                // A read that does not agree with the stream describes a world
                 // already moved past — in both directions. The settled memory
                 // refuses what it lists and should not, the streamed memory
-                // restores what it omits and should not.
+                // restores what it omits and should not. The second one allows
+                // for the exchange's own lag as well: a read issued after the
+                // stream reported an order can still answer without it.
                 operation.type === 'regularOrders'
                     ? reconcileFuturesWorkingOrderRead(
                         futuresAccountResources,

@@ -15,6 +15,18 @@
 - [x] 3.2 Keep abandonment — modifier released, gesture cancelled, dropped where it started — restoring the origin price.
 - [x] 3.3 Prove both by test.
 
+## 3a. What The Gesture Costs Per Frame
+
+The drag started on the pointer, and then moved slowly. Every pointer move
+measured the chart's box, and a layout read on a desk that is being written to
+continuously makes the browser lay the whole desk out before it answers — once
+per frame, on the frame's critical path.
+
+- [x] 3a.1 Measure the chart's box once for the gesture, and again only when the chart is resized.
+- [x] 3a.2 Move the pointer's mark by a property that does not invalidate layout.
+- [x] 3a.3 Skip a pointer move that leaves the mark on the row it already occupies.
+- [x] 3a.4 Prove all three by test, including that a resize is measured again.
+
 ## 4. Verification
 
 - [x] 4.1 `npm run lint`, `npm test`, `npm run check:futures-production`.
