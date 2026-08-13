@@ -1,3 +1,4 @@
+import { StrictMode } from 'react'
 import { act, render, waitFor } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { ChartWrapper } from './ChartWrapper'
@@ -385,5 +386,26 @@ describe('what one Spot print redraws', () => {
         expect(draw.redrawn('CandlestickSeries')).toBe(1)
         expect(draw.redrawn('HistogramSeries')).toBe(1)
         expect(draw.written('CandlestickSeries')).toBe(0)
+    })
+
+    // React mounts, tears down and mounts again on the first mount in
+    // development, which is how the operator runs this desk. The component keeps
+    // what it was holding across that, but the chart does not: the second mount
+    // builds new, empty series. A record of what was drawn that outlives the
+    // series it describes would have the whole chart taken for already drawn,
+    // and one bar written onto nothing.
+    it('redraws every series onto the chart built by a second mount', () => {
+        showing(OPENED)
+        render(
+            <StrictMode>
+                <ChartWrapper />
+            </StrictMode>,
+        )
+
+        // Two mounts, two draws, and not one bar written as though the series
+        // under it were already there.
+        expect(writesOf(mockSetData, 'CandlestickSeries')).toHaveLength(2)
+        expect(writesOf(mockSetData, 'HistogramSeries')).toHaveLength(2)
+        expect(writesOf(mockUpdate, 'CandlestickSeries')).toHaveLength(0)
     })
 })

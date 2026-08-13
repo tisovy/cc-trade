@@ -372,6 +372,12 @@ export const ChartWrapper = (props) => {
             lastValueVisible: false,
         });
         smaSeriesRef.current = smaSeries;
+        // These series have drawn nothing yet, whatever the last ones drew. The
+        // chart is rebuilt on every mount — and twice on the first, since React
+        // mounts, unmounts and mounts again in development — so a record of what
+        // was drawn that outlives the series it describes would have the next
+        // print written onto an empty chart as if the rest were already there.
+        drawnSeriesRef.current = { pair: null, rows: null, volumeScale: 1 };
 
         setContainerSize({
             width: chartContainerRef.current.clientWidth,

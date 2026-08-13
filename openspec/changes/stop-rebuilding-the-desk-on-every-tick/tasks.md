@@ -10,6 +10,7 @@
 - [x] 2.3 Prove by test that a trade that only moves the last candle produces no full-series work. Counted per series, through the writes each one takes: a print writes one bar to the candles, one to the histogram and one to the moving average, and redraws none of them. Proven against the pre-change component, where it redraws all three.
 - [x] 2.4 Redraw the whole series for a candle settling behind the last one. *(Discovered while deciding what a print may be answered with: the close of the candle just past — its true high, low and volume — reaches the chart through the same series a tick does, and comparing only the last bar would have left it undrawn. What changed is decided by identity across the rows, which the writers preserve for every row they did not touch, so a settled row is never mistaken for a tick. The scan costs 0.0026 ms at five thousand bars, less than the array copy it sits beside.)*
 - [ ] 2.5 Draw the RSI pane's line incrementally, or state why it stays. *(Discovered by measuring what a print still costs: the section named three passes and there is a fourth. The RSI pane recomputes over every bar and redraws its line whole on every print — 0.133 ms at five thousand bars, a fifth of what this section removed. Not taken here: Wilder's smoothing is recursive from the first bar, so an incremental point needs the running averages carried forward, and a carry that is wrong does not fail — it drifts an indicator the operator reads. It is stated rather than counted as nothing.)*
+- [x] 2.6 Forget what was drawn when the chart is built again. *(Found auditing 2.1 rather than by a failing test, and it would have reached the operator: React mounts, tears down and mounts again on the first mount in development, which is how this desk is run. The component keeps its refs across that; the chart does not — the second mount builds new, empty series. A record of what was drawn that outlived the series it described had the whole chart taken for already drawn, and the next print written onto nothing. The first test written for it did not bite, because a fresh `render` gets fresh refs and is not what React does here; it is proven under `StrictMode`, where the pre-fix code draws the candles once for two mounts.)*
 
 ## 3. A Frame Redraws Only Its Own Panel
 
@@ -28,5 +29,5 @@
 
 ## 5. Verification
 
-- [x] 5.1 `npm run lint`, `npm test` (1678 passed, 105 files), `npm run check:futures-production`.
+- [x] 5.1 `npm run lint`, `npm test` (1679 passed, 105 files), `npm run check:futures-production`.
 - [ ] 5.2 Operator confirms on live data that the desk stays responsive on a liquid contract with deep history loaded. Written as a step in `verify-the-desk-in-one-sitting/runbook.md` rather than left here, so the operator runs one list.
