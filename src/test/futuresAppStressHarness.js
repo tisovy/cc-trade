@@ -97,6 +97,7 @@ export const createFuturesAppStressCycle = ({
         bids: [frozenLevel(newestBid), ...BID_TAIL],
         asks: [frozenLevel(newestAsk), ...ASK_TAIL],
         spread: String(Number(newestAsk) - Number(newestBid)),
+        reach: null,
       },
     })
     const raw = JSON.stringify(event)

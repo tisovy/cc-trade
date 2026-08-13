@@ -2462,6 +2462,17 @@
   letter-spacing: 0.02em;
 }
 
+/* How far the exchange publishes this contract's book. A reading about the
+   market rather than about the choice beside it, so it is quieter than the step
+   it explains — the operator looks at it once, when the list ends sooner than
+   they expected. */
+.futures-workstation-book-published {
+  color: #6c7c92;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
 .futures-workstation-book-pressure-legend > .is-buy {
   color: #3dd69c;
 }

@@ -119,6 +119,7 @@ const payloads = Object.freeze({
     bids: Object.freeze([Object.freeze({ price: '58420', quantity: '2' })]),
     asks: Object.freeze([Object.freeze({ price: '58421', quantity: '3' })]),
     spread: '1',
+    reach: Object.freeze({ below: '120', above: '118' }),
   }),
   [FUTURES_WORKSTATION_RESOURCES.TRADES]: Object.freeze({
     rows: Object.freeze([Object.freeze({
@@ -152,7 +153,7 @@ describe('Futures workstation environment-specific protocols', () => {
   // older desk validates by exact keys would have every subscription refused, so
   // the two refuse each other on the version instead — once, legibly.
   it('uses protocol revision 8 for a contract opened at a stated reading', () => {
-    expect(FUTURES_WORKSTATION_PROTOCOL_VERSION).toBe('8')
+    expect(FUTURES_WORKSTATION_PROTOCOL_VERSION).toBe('9')
   })
 
   it('preserves an unavailable per-symbol algo limit instead of inventing one', () => {
@@ -547,6 +548,7 @@ describe('Futures workstation environment-specific protocols', () => {
         asks: Array.from({ length: FUTURES_WORKSTATION_DEPTH_LEVELS_PER_SIDE },
           (_, index) => level(index + 1)),
         spread: '0.00001',
+        reach: null,
       },
     })
     const raw = JSON.stringify(event)

@@ -642,7 +642,7 @@ export class FuturesWorkstationOrderBook {
      * ceiling — a first book must not arrive short of the rows the panel is
      * about to ask for.
      */
-    toRendererView(range = null) {
+    toRendererView(range = null, { atDeepestPage = false } = {}) {
         if (this.phase !== FUTURES_WORKSTATION_ORDER_BOOK_PHASES.LIVE
             || this.lastUpdateId === null) return null;
         const bound = isFuturesWorkstationDecimal(range)
@@ -669,6 +669,23 @@ export class FuturesWorkstationOrderBook {
             bids,
             asks,
             spread,
+            // How far the page this book was bought at proved past the best price
+            // on each side — where the exchange's book ends, not where the rows
+            // do. Stated only once no deeper page can be bought: before then it
+            // would describe what the desk has spent rather than what the market
+            // publishes, and a panel that ended its grouping ladder on it would
+            // stop the operator asking for the deeper page.
+            //
+            // What the page proved when it was read, not what is left of it: the
+            // second shrinks as the market walks inside the band, and a ladder
+            // cut against a shrinking number would move under the operator's
+            // hand while the market did nothing but trade.
+            reach: atDeepestPage && this.band !== null
+                ? Object.freeze({
+                    below: this.band.provenBelow,
+                    above: this.band.provenAbove,
+                })
+                : null,
         });
     }
 

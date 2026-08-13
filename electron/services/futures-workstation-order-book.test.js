@@ -101,6 +101,9 @@ const fullSortRendererViewReference = (book, range = null) => {
         spread: bids[0] && asks[0]
             ? subtractFuturesWorkstationDecimals(asks[0].price, bids[0].price)
             : '0',
+        // The reference is about ordering and bounding, and states the reach the
+        // book states for a page that is not the deepest: none.
+        reach: null,
     };
 };
 
@@ -595,6 +598,32 @@ describe('the band a snapshot proves', () => {
     // room to measure and nothing a re-read on this account would produce.
     it('has no room to answer for when there is no band', () => {
         expect(new FuturesWorkstationOrderBook().holdsMarket()).toBe(true);
+    });
+
+    // Where the exchange's book ends, which the panel cannot work out from the
+    // levels it was sent: the delivery is trimmed to the range the panel stated,
+    // so measuring it would measure the panel's own step back.
+    it('states how far its page proved, once no deeper page can be bought', () => {
+        const book = banded();
+        expect(book.toRendererView().reach).toBeNull();
+        expect(book.toRendererView(null, { atDeepestPage: true }).reach)
+            .toEqual({ below: '1', above: '1' });
+    });
+
+    // What the page proved when it was read, not what is left of it. Read the
+    // second way, a ladder cut against it would narrow under the operator's hand
+    // while the market did nothing but trade.
+    it('states the same reach after the market has walked inside the band', () => {
+        const book = banded();
+        book.push(delta({
+            firstUpdateId: '102',
+            finalUpdateId: '103',
+            previousFinalUpdateId: '101',
+            bids: [],
+            asks: [['11.00', '0'], ['11.80', '1.0']],
+        }), 200);
+        expect(book.toRendererView(null, { atDeepestPage: true }).reach)
+            .toEqual({ below: '1', above: '1' });
     });
 
     it('forgets the band when the book is rebuilt or stopped', () => {

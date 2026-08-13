@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  GROUPING_MULTIPLIERS,
   futuresBookDepthRange,
   futuresBookGroupKey,
   futuresBookGroupSteps,
@@ -31,7 +32,7 @@ describe('futuresBookDepthRange', () => {
 
 describe('futuresBookGroupSteps', () => {
   it('derives steps from the contract tick so a step is always tradable', () => {
-    expect(futuresBookGroupSteps('0.0001').slice(0, 4)).toEqual([
+    expect(futuresBookGroupSteps({ tickSize: '0.0001' }).slice(0, 4)).toEqual([
       { multiplier: 1, step: '0.0001' },
       { multiplier: 2, step: '0.0002' },
       { multiplier: 5, step: '0.0005' },
@@ -40,8 +41,64 @@ describe('futuresBookGroupSteps', () => {
   })
 
   it('offers no steps when the contract filters have not arrived', () => {
-    expect(futuresBookGroupSteps(null)).toEqual([])
-    expect(futuresBookGroupSteps('0')).toEqual([])
+    expect(futuresBookGroupSteps({ tickSize: null })).toEqual([])
+    expect(futuresBookGroupSteps({ tickSize: '0' })).toEqual([])
+    expect(futuresBookGroupSteps()).toEqual([])
+  })
+
+  // AKEUSDT as the exchange published it on 2026-08-13: a tick of 0.0000001 and
+  // a thousand levels a side reaching 0.000317 below the best bid and 0.000301
+  // above the best ask, on a mid of 0.00772395. The coarsest step the desk used
+  // to offer was 500 ticks, whose fourteen rows ask for 0.0007 — more than twice
+  // what the exchange publishes, drawn as six rows of book over eight blanks.
+  it('ends the ladder at the coarsest step the reach can fill', () => {
+    const steps = futuresBookGroupSteps({
+      tickSize: '0.0000001',
+      reach: { below: '0.000317', above: '0.000301' },
+      rows: 14,
+    })
+    expect(steps.at(-1)).toEqual({ multiplier: 200, step: '0.00002' })
+    // Fourteen rows of the last step fit inside the narrower side.
+    expect(Number(steps.at(-1).step) * 14).toBeLessThanOrEqual(0.000301)
+  })
+
+  // The step is one step on both halves of the panel, so a ladder cut against
+  // the side that reaches further asks the other half for rows nothing can fill.
+  it('cuts against the narrower of the two sides', () => {
+    const wide = { below: '0.000317', above: '0.000317' }
+    const lopsided = { below: '0.000317', above: '0.000120' }
+    expect(futuresBookGroupSteps({ tickSize: '0.0000001', reach: wide, rows: 14 }).at(-1))
+      .toEqual({ multiplier: 200, step: '0.00002' })
+    expect(futuresBookGroupSteps({ tickSize: '0.0000001', reach: lopsided, rows: 14 }).at(-1))
+      .toEqual({ multiplier: 50, step: '0.000005' })
+  })
+
+  // Until the ladder of pages is exhausted the desk has not shown everything the
+  // exchange publishes, so there is nothing to cut against — and cutting anyway
+  // would stop the operator selecting the step that buys the deeper page.
+  it('offers the whole ladder while the book states no reach', () => {
+    const steps = futuresBookGroupSteps({ tickSize: '0.0000001', reach: null, rows: 14 })
+    expect(steps.map(entry => entry.multiplier)).toEqual([...GROUPING_MULTIPLIERS])
+  })
+
+  // A reach that cannot fit even one tick of grouping is a reading with nothing
+  // left to cut. The finest step is the book as the exchange sent it, and the
+  // panel is never left without one.
+  it('always offers the finest step', () => {
+    const steps = futuresBookGroupSteps({
+      tickSize: '0.1',
+      reach: { below: '0.0001', above: '0.0001' },
+      rows: 14,
+    })
+    expect(steps).toEqual([{ multiplier: 1, step: '0.1' }])
+  })
+
+  it('offers the whole ladder when the rows are not a count', () => {
+    expect(futuresBookGroupSteps({
+      tickSize: '0.1',
+      reach: { below: '1', above: '1' },
+      rows: 0,
+    })).toHaveLength(GROUPING_MULTIPLIERS.length)
   })
 })
 

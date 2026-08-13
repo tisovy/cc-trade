@@ -206,6 +206,7 @@ const createState = (overrides = {}) => Object.freeze({
       bids: Object.freeze([Object.freeze({ price: '58420.00', quantity: '2' })]),
       asks: Object.freeze([Object.freeze({ price: '58420.50', quantity: '3' })]),
       spread: '0.5',
+      reach: null,
       state: 'live',
       observedAt: 1_784_000_000_000,
     }),
@@ -665,8 +666,67 @@ describe('pure Futures workstation presentation', () => {
     const step = screen.getByLabelText('Order book price step')
     const labels = [...step.options].map(option => option.textContent)
     expect(labels[0]).toBe('0.1 · <0.01%')
-    // 50 on a 58420.25 contract is 0.09% of price per row.
-    expect(labels.at(-1)).toBe('50 · 0.09%')
+    // 100 on a 58420.25 contract is 0.17% of price per row.
+    expect(labels.at(-1)).toBe('100 · 0.17%')
+  })
+
+  // Seventy-five per cent of price is what the operator asked to be able to zoom
+  // out to, and no exchange publishes a book that deep: measured 2026-08-13, the
+  // deepest page Binance serves reaches 0.19% on BTCUSDT and 4.1% on AKEUSDT. So
+  // the ladder ends where the book does, and the panel says where that is rather
+  // than leaving it to be read off where the rows stop.
+  it('ends the step list where the exchange stops publishing the book', () => {
+    const state = createState()
+    const withReach = reach => createState({
+      resources: Object.freeze({
+        ...state.resources,
+        depth: Object.freeze({ ...state.resources.depth, reach }),
+      }),
+    })
+    // 12 either side of a 58420 mid, over fourteen rows: a 5-tick step spans 7
+    // and fits, a 10-tick step spans 14 and does not.
+    const { container } = renderView({
+      state: withReach(Object.freeze({ below: '12', above: '12' })),
+    })
+    const step = screen.getByLabelText('Order book price step')
+    expect([...step.options].map(option => option.textContent).at(-1)).toBe('0.5 · <0.01%')
+    expect(container.querySelector('.futures-workstation-book-published').textContent)
+      .toBe('\u00b10.02%')
+  })
+
+  // The reach is a reading of a live market, so a moment when it narrows must
+  // cost the operator a redraw rather than the setting they chose: the book is
+  // drawn at the coarsest step still offered, and the step remembered for the
+  // contract is left where it is, to come back when the reach does.
+  it('draws a remembered step past the end of the ladder at the end of it', () => {
+    localStorage.setItem('futures.bookView', JSON.stringify({
+      BTCUSDT: { sideMode: 'both', stepMultiplier: 500 },
+    }))
+    const state = createState()
+    renderView({
+      state: createState({
+        resources: Object.freeze({
+          ...state.resources,
+          depth: Object.freeze({
+            ...state.resources.depth,
+            reach: Object.freeze({ below: '12', above: '12' }),
+          }),
+        }),
+      }),
+    })
+    expect(screen.getByLabelText('Order book price step')).toHaveValue('5')
+    expect(JSON.parse(localStorage.getItem('futures.bookView')).BTCUSDT.stepMultiplier).toBe(500)
+  })
+
+  // Until the desk is on the deepest page it has not shown everything the
+  // exchange publishes, so there is nothing to cut the ladder against — and
+  // cutting anyway would stop the operator choosing the step that buys the
+  // deeper page.
+  it('offers every step and states no reach while the book states none', () => {
+    const { container } = renderView()
+    const step = screen.getByLabelText('Order book price step')
+    expect([...step.options]).toHaveLength(10)
+    expect(container.querySelector('.futures-workstation-book-published')).toBeNull()
   })
 
   // The pressure split is measured over exactly the rows on screen. Two books

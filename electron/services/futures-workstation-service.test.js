@@ -210,6 +210,7 @@ describe('production Futures workstation service', () => {
                     bids: side,
                     asks: side,
                     spread: '0.01',
+                    reach: null,
                 }),
             );
         } catch (error) {
@@ -2743,6 +2744,19 @@ describe('the book is bought as deep as it is read', () => {
         runtime.service.ensureDepthCovers(session);
         await vi.waitFor(() => expect(readDepthSnapshot.mock.calls.length).toBe(2));
         expect(faults).toContainEqual({ phase: 'book-recovery', code: 'DEPTH_BAND_WALKED' });
+    });
+
+    // Six paths deliver a book. All of them build it here, so the panel's step
+    // list cannot change with whichever path last ran.
+    it('states the reach on a delivered book only from the deepest page', async () => {
+        const { runtime } = await openContract('depth-page-reach');
+        const session = runtime.service.shown;
+        expect(runtime.service.depthView(session).reach).toBeNull();
+        session.depthPage = 3;
+        const { reach } = runtime.service.depthView(session);
+        expect(reach).toMatchObject({ below: expect.any(String), above: expect.any(String) });
+        expect(Number(reach.below)).toBeGreaterThan(0);
+        expect(Number(reach.above)).toBeGreaterThan(0);
     });
 
     // A contract the desk is already running is selected, not opened: the book

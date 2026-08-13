@@ -1,5 +1,5 @@
 export const FUTURES_WORKSTATION_MARKET_TYPE = 'USD_M_FUTURES'
-export const FUTURES_WORKSTATION_PROTOCOL_VERSION = '8'
+export const FUTURES_WORKSTATION_PROTOCOL_VERSION = '9'
 export const FUTURES_WORKSTATION_REQUEST_MAX_BYTES = 1_024
 // Sized around the largest frame the desk actually sends — a full depth view.
 // The bound exists so a hostile frame can never force an unbounded parse, not to
@@ -502,8 +502,21 @@ const validateDepthLevel = (value) => (
   && [value.price, value.quantity].every(isCanonicalFuturesDecimal)
 )
 
+// reach: how far the page the book was bought at proved past the best price on
+// each side, or null while a deeper page can still be bought. It is where the
+// exchange's book ends, which is not where the rows end and cannot be worked out
+// from them: the delivery is already trimmed to the range the panel reads, so a
+// panel measuring the levels it was sent would only ever measure its own step.
+const validateDepthReach = (value) => (
+  value === null || (
+    hasExactFuturesWorkstationKeys(value, ['below', 'above'])
+    && [value.below, value.above].every(isCanonicalFuturesDecimal)
+  )
+)
+
 const validateDepth = (value) => (
-  hasExactFuturesWorkstationKeys(value, ['lastUpdateId', 'bids', 'asks', 'spread'])
+  hasExactFuturesWorkstationKeys(value, ['lastUpdateId', 'bids', 'asks', 'spread', 'reach'])
+  && validateDepthReach(value.reach)
   && isCanonicalFuturesIdentity(value.lastUpdateId)
   && Array.isArray(value.bids)
   && Array.isArray(value.asks)

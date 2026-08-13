@@ -94,6 +94,19 @@ const describeBookStep = (step, referencePrice) => {
   return `${step} · ${share < 0.01 ? '<0.01' : share.toFixed(2)}%`
 }
 
+// How far the exchange publishes the book, as a share of price. Stated on the
+// narrower of the two sides, which is the one the step list is cut against: a
+// reading that named the wider side would promise rows the other half of the
+// panel cannot fill.
+const describeBookReach = (below, above, referencePrice) => {
+  const price = Number(referencePrice)
+  const narrower = Math.min(Number(below), Number(above))
+  if (!Number.isFinite(price) || price <= 0) return null
+  if (!Number.isFinite(narrower) || narrower <= 0) return null
+  const share = (narrower / price) * 100
+  return share < 0.01 ? '±<0.01%' : `±${share.toFixed(2)}%`
+}
+
 const percentTone = (value) => {
   const parsed = Number(value)
   if (!Number.isFinite(parsed) || parsed === 0) return 'flat'
@@ -588,16 +601,41 @@ export const FuturesWorkstationView = ({
     if (!Number.isFinite(movedBy) || movedBy === 0) return
     setLastDirection(movedBy > 0 ? 'up' : 'down')
   }, [lastPrice, selectedSymbol])
+  const depthLevelsPerSide = measuredBookRows ?? VISIBLE_DEPTH_LEVELS_PER_SIDE
+  // How far the exchange publishes this contract's book, read off the delivery
+  // rather than measured from the rows: the delivery is already trimmed to the
+  // range the panel stated, so a panel measuring the levels it was sent would
+  // only ever measure its own step back. Held as the two strings rather than the
+  // object they arrive in, because the object is rebuilt on every frame and the
+  // ladder must not be.
+  const reachBelow = depth?.reach?.below ?? null
+  const reachAbove = depth?.reach?.above ?? null
   const groupSteps = useMemo(
-    () => futuresBookGroupSteps(selectedContract?.filters?.price?.tickSize ?? null),
-    [selectedContract],
+    () => futuresBookGroupSteps({
+      tickSize: selectedContract?.filters?.price?.tickSize ?? null,
+      reach: reachBelow === null || reachAbove === null
+        ? null
+        : { below: reachBelow, above: reachAbove },
+      rows: depthLevelsPerSide,
+    }),
+    [selectedContract, reachBelow, reachAbove, depthLevelsPerSide],
   )
+  // A step remembered for this contract that the ladder no longer offers is
+  // drawn at the coarsest it does. What is remembered is left alone: the reach
+  // is a reading of a live market, and a moment when it narrows should cost the
+  // operator a redraw rather than the setting they chose.
+  const drawnGrouping = groupSteps.some(entry => entry.multiplier === bookGrouping)
+    ? bookGrouping
+    : groupSteps.at(-1)?.multiplier ?? 1
   // 1× is "as the exchange sent it": no alignment pass at all, so a contract
   // whose filters disagree with its quoted prices still renders level by level.
-  const activeGroupStep = bookGrouping === 1
+  const activeGroupStep = drawnGrouping === 1
     ? null
-    : groupSteps.find(entry => entry.multiplier === bookGrouping)?.step ?? null
-  const depthLevelsPerSide = measuredBookRows ?? VISIBLE_DEPTH_LEVELS_PER_SIDE
+    : groupSteps.find(entry => entry.multiplier === drawnGrouping)?.step ?? null
+  const bookReachText = describeBookReach(reachBelow, reachAbove, lastPrice)
+  const bookReachTitle = bookReachText === null
+    ? null
+    : `Binance publishes this book ${reachBelow} below the best bid and ${reachAbove} above the best ask. The step list ends where the rows can still be filled from it.`
   // Grouping happens on the whole delivered book, then the visible window is
   // taken — otherwise a coarse step would only ever aggregate the first rows.
   // Both sides are grouped in every mode: a hidden side still carries half of
@@ -1161,7 +1199,7 @@ export const FuturesWorkstationView = ({
               <span>Step</span>
               <select
                 aria-label="Order book price step"
-                value={bookGrouping}
+                value={drawnGrouping}
                 onChange={event => chooseBookGrouping(Number(event.target.value))}
               >
                 {groupSteps.map(entry => (
@@ -1170,6 +1208,14 @@ export const FuturesWorkstationView = ({
                   </option>
                 ))}
               </select>
+              {bookReachText === null ? null : (
+                <span
+                  className="futures-workstation-book-published"
+                  title={bookReachTitle}
+                >
+                  {bookReachText}
+                </span>
+              )}
             </label>
           ) : null}
         </div>

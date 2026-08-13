@@ -22,6 +22,7 @@ const workstationEvent = (overrides = {}) => createFuturesProductionWorkstationE
     bids: Object.freeze([Object.freeze({ price: '58400.00', quantity: '1.5' })]),
     asks: Object.freeze([Object.freeze({ price: '58401.00', quantity: '2.5' })]),
     spread: '1.00',
+    reach: null,
   }),
   ...overrides,
 })

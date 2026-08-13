@@ -233,6 +233,24 @@ export class FuturesProductionWorkstationService {
         return pages[Math.min(session.depthPage, pages.length - 1)].limit;
     }
 
+    // Whether the ladder of pages has anything left above the one this session is
+    // on. What the panel does with the answer is end its grouping ladder where the
+    // exchange's book ends, so it is asked here — the book itself knows nothing
+    // about pages, and the panel knows nothing about either.
+    depthPageExhausted(session) {
+        return session.depthPage >= FUTURES_PRODUCTION_WORKSTATION_DEPTH_PAGES.length - 1;
+    }
+
+    // Every book that crosses to the renderer is built here. Six paths deliver one
+    // — configure, bootstrap, recovery, diff, selection, hand-over — and a reach
+    // stated by five of them is a panel whose ladder changes with which path last
+    // ran.
+    depthView(session) {
+        return session.orderBook.toRendererView(session.depthRange, {
+            atDeepestPage: this.depthPageExhausted(session),
+        });
+    }
+
     // Up by however much is short, never back down on its own: a market that
     // walks out of a band it has already outgrown would otherwise buy the same
     // page again and again. `factor` is how many times deeper the band has to
@@ -409,7 +427,7 @@ export class FuturesProductionWorkstationService {
         // within a diff or two on a busy contract and never on a quiet one,
         // which is the contract most likely to be read at a coarse step.
         const shortfall = session.orderBook.rangeShortfall(session.depthRange);
-        const view = session.orderBook.toRendererView(session.depthRange);
+        const view = this.depthView(session);
         if (view !== null) {
             session.lastDepthView = view;
             this.emitResource(
@@ -810,7 +828,7 @@ export class FuturesProductionWorkstationService {
             }
             if (session.header !== null) this.emitHeader(session, this.observedNow(session));
             shortfall = session.orderBook.rangeShortfall(session.depthRange);
-            const view = session.orderBook.toRendererView(session.depthRange);
+            const view = this.depthView(session);
             if (view !== null) {
                 session.lastDepthView = view;
                 this.emitResource(
@@ -1169,7 +1187,7 @@ export class FuturesProductionWorkstationService {
             if (!this.isHeld(session)) return;
             if (bookResult.live) {
                 const shortfall = session.orderBook.rangeShortfall(session.depthRange);
-                session.lastDepthView = session.orderBook.toRendererView(session.depthRange);
+                session.lastDepthView = this.depthView(session);
                 this.emitResource(
                     session,
                     FUTURES_WORKSTATION_RESOURCES.DEPTH,
@@ -1381,9 +1399,7 @@ export class FuturesProductionWorkstationService {
                     // the book they would be built from is delivered whole the
                     // moment the contract is selected.
                     if (this.isShown(session)) {
-                        session.lastDepthView = session.orderBook.toRendererView(
-                            session.depthRange,
-                        );
+                        session.lastDepthView = this.depthView(session);
                         this.emitResource(
                             session,
                             FUTURES_WORKSTATION_RESOURCES.DEPTH,
@@ -1486,7 +1502,7 @@ export class FuturesProductionWorkstationService {
                 }
                 session.lastDepthAt = this.observedNow(session);
                 session.staleResources.delete(FUTURES_WORKSTATION_RESOURCES.DEPTH);
-                session.lastDepthView = session.orderBook.toRendererView(session.depthRange);
+                session.lastDepthView = this.depthView(session);
                 this.emitResource(
                     session,
                     FUTURES_WORKSTATION_RESOURCES.DEPTH,
@@ -1585,7 +1601,7 @@ export class FuturesProductionWorkstationService {
                     this.markResourceStale(
                         session,
                         FUTURES_WORKSTATION_RESOURCES.DEPTH,
-                        session.orderBook.toRendererView(session.depthRange),
+                        this.depthView(session),
                     );
                 }
                 if (now - session.lastTradesAt > FUTURES_PRODUCTION_WORKSTATION_FRESHNESS.TRADES_MS) {

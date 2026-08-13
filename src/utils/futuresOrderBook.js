@@ -10,7 +10,13 @@ const MAX_DECIMAL_LENGTH = 64
 const SCALE_DIGITS = 18
 const SCALE = 10n ** BigInt(SCALE_DIGITS)
 
-export const GROUPING_MULTIPLIERS = Object.freeze([1, 2, 5, 10, 25, 50, 100, 500])
+// Spaced about twice apart the whole way up, because the ladder is cut against
+// what the exchange publishes and a gap in it is reach the operator loses: with
+// a fivefold jump from 100 to 500, a contract whose book ends anywhere between
+// them dropped to 100 — on AKEUSDT, from 3.9% of price published down to 1.8%
+// offered. No existing rung moves; a stored step is never invalidated by a rung
+// added beside it.
+export const GROUPING_MULTIPLIERS = Object.freeze([1, 2, 5, 10, 25, 50, 100, 200, 500, 1_000])
 
 const parseAtoms = (value) => {
   if (typeof value !== 'string'
@@ -32,15 +38,51 @@ const formatAtoms = (atoms) => {
 
 const atomsToNumber = atoms => Number(formatAtoms(atoms) ?? '0')
 
-// The step is expressed in the contract's own tick so it can never fall between
-// two tradable prices.
-export const futuresBookGroupSteps = (tickSize) => {
+// The coarsest step whose rows fit inside what the book states it reaches, in
+// atoms. Against the narrower of the two sides: a step is one step on both
+// halves of the panel, and cutting against the wider one asks the narrow half
+// for rows nothing can fill.
+const groupStepCeiling = (reach, rows) => {
+  if (reach === null || typeof reach !== 'object') return null
+  if (!Number.isSafeInteger(rows) || rows <= 0) return null
+  const below = parseAtoms(reach.below)
+  const above = parseAtoms(reach.above)
+  if (below === null || above === null) return null
+  const narrower = below < above ? below : above
+  if (narrower <= 0n) return null
+  return narrower / BigInt(rows)
+}
+
+/**
+ * The grouping steps a contract offers, coarsest last.
+ *
+ * The step is expressed in the contract's own tick so it can never fall between
+ * two tradable prices. How many of them are offered is a fact about the market
+ * rather than the contract: the ladder ends at the coarsest step whose rows fit
+ * inside the book the exchange publishes, because a step past that draws the
+ * same book over fewer filled rows — the same market at lower resolution, read
+ * as the book ending early.
+ *
+ * A reach of null is a book that may still be bought deeper, and the whole
+ * ladder is offered against it: cutting there would describe what the desk has
+ * spent rather than what the market publishes, and would stop the operator
+ * asking for the deeper page by choosing the step that needs it.
+ */
+export const futuresBookGroupSteps = ({ tickSize = null, reach = null, rows = null } = {}) => {
   const tickAtoms = parseAtoms(tickSize)
   if (tickAtoms === null || tickAtoms <= 0n) return Object.freeze([])
-  return Object.freeze(GROUPING_MULTIPLIERS.map(multiplier => Object.freeze({
-    multiplier,
-    step: formatAtoms(tickAtoms * BigInt(multiplier)),
-  })).filter(entry => entry.step !== null))
+  const ceiling = groupStepCeiling(reach, rows)
+  const steps = []
+  for (const multiplier of GROUPING_MULTIPLIERS) {
+    const stepAtoms = tickAtoms * BigInt(multiplier)
+    // The finest step is always offered. It is the book as the exchange sent it,
+    // with no alignment pass at all, and a reach too narrow for even one tick of
+    // grouping is a reading with nothing left to cut.
+    if (ceiling !== null && steps.length > 0 && stepAtoms > ceiling) break
+    const step = formatAtoms(stepAtoms)
+    if (step !== null) steps.push(Object.freeze({ multiplier, step }))
+  }
+  return Object.freeze(steps)
 }
 
 /**

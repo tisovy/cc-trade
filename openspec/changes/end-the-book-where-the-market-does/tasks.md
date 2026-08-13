@@ -1,0 +1,44 @@
+## 1. The Book States How Far It Reaches
+
+- [x] 1.1 Carry on every delivered book how far the page it was bought at proved past the best price on each side, as exact decimal strings in the contract's own quote currency.
+- [x] 1.2 State it only when no deeper page can be bought, and state nothing otherwise: until the ladder of pages is exhausted the desk has not shown everything the exchange publishes, and a reach stated from a cheap page would cut the grouping ladder before the operator could ask for the deeper one.
+- [x] 1.3 Take it from what the page proved when it was read, not from the distance currently left to the edge — the second shrinks as the market walks, and the ladder would move with it.
+- [x] 1.4 Add it to the payload the protocol validates, with the exact-keys rule kept, and raise the protocol version.
+- [x] 1.5 Build the view through one place in the service rather than at each of the six calls that deliver a book, so no path can deliver one without the reach.
+- [x] 1.6 Prove by test that a book bought at a page short of the deepest states no reach, that one bought at the deepest states what each side proved, and that the reading does not move as the market walks inside the band.
+
+## 2. The Ladder Ends Where The Book Does
+
+- [x] 2.1 Add the rungs that let the cut land near the reach: 200 and 1000 ticks. Move no existing rung, so no stored preference is invalidated by the change.
+- [x] 2.2 Offer only the rungs whose rows fit inside the reach, and always offer at least the finest.
+- [x] 2.3 Cut against the narrower of the two sides, so neither side of the panel is asked for rows the exchange does not publish.
+- [x] 2.4 Offer the whole ladder while no reach is stated, so a contract still climbing the page ladder can be asked for a deeper page.
+- [x] 2.5 Draw a stored step the ladder no longer offers at the coarsest step it does offer, and leave the stored preference alone, so a reach that narrows for a moment costs a redraw and not a setting.
+- [x] 2.6 Prove by test that the coarsest step offered on a contract fills the panel from the reach rather than overshooting it, and that a stored step past the end of the ladder is drawn at its end. *(Both bite against the tree before this change: `expected '50 · 0.09%' to be '0.5 · <0.01%'` for the step list, and a remembered 500 that was still selectable where it is now drawn at 5.)*
+- [x] 2.7 Read the reach off the delivery as two strings rather than the object it arrives in. *(Discovered: the object is rebuilt on every depth frame, ten times a second, so a ladder memoized against it is rebuilt with it — and the ladder feeds the range the panel states, which the backend buys pages against.)*
+
+## 3. The Panel Says How Far The Book Goes
+
+- [x] 3.1 State the reach where the grouping step is chosen, as a share of price, so the operator reads why the ladder ends where it does instead of inferring it from where the rows stop.
+- [x] 3.2 State nothing while no reach is stated, rather than a placeholder.
+- [x] 3.3 Prove by test that the reading appears with the reach and is absent without it.
+- [x] 3.4 State it on the narrower of the two sides, and carry both exactly in the title. *(Discovered: the two sides differ by more than a tenth of the reading on a real contract — AKEUSDT published 4.10% below and 3.90% above on 2026-08-13 — and the ladder is cut against the narrower, so naming the wider one would have promised rows the other half of the panel cannot fill.)*
+
+## 4. Verification
+
+- [x] 4.1 `npm run lint`, `npm test` (1902 passed), `npm run check:futures-production`.
+- [x] 4.2 Record what the coarsest step covers on each measured contract, before and after. Fourteen rows, prices and reaches read from the exchange on 2026-08-13:
+
+  | Contract | published, narrower side | coarsest step asked for, before | coarsest step covers, after |
+  |---|---|---|---|
+  | AKEUSDT | 3.90% | 9.06% | 3.63% |
+  | BTCUSDT | 0.19% | 1.10% | 0.11% |
+  | ETHUSDT | 0.55% | 3.71% | 0.37% |
+  | TUTUSDT | 28.35% | 181.1% | 18.1% |
+
+  The span the operator can see is unchanged — it always was whatever the
+  exchange publishes — and the rows drawing it are now full. What is lost is the
+  distance between the cut and the reach, which is the ladder's own spacing: at
+  most one rung, and never a level that existed.
+
+- [ ] 4.3 Operator confirms on live data that the coarsest step fills every row of the book, on AKEUSDT and on a contract quoted very differently, and that the stated reach matches where the rows stop — step 43, «Стакан кончается там же, где книга биржи», in `verify-the-desk-in-one-sitting/runbook.md`, so the operator runs one list.
