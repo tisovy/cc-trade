@@ -39,4 +39,4 @@ open waiting for it.
 - [x] 5.1 `npm test` — full suite green: 1076 passed, 86 files, nothing skipped (the two skips this change repaired included).
 - [x] 5.2 `eslint` clean on every touched file; circular-import, runtime-mock, futures-boundary and trading-command-path checks pass.
 - [x] 5.3 `openspec validate deepen-spot-chart-history --strict` passes.
-- [x] 5.4 Operator confirms on live data: opening a pair shows depth beyond the bootstrap window, scrolling left keeps loading without the view jumping, and a restart shows the same depth without a request.
+- [ ] 5.4 Operator confirms on live data: opening a pair shows depth beyond the bootstrap window, scrolling left keeps loading without the view jumping, and a restart shows the same depth without a request. — corrected 2026-08-13; see the [live-verification ledger](../../../live-verification-ledger.md#outstanding-verifications).

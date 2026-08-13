@@ -1,7 +1,12 @@
 # spot-chart-history Specification
 
 ## Purpose
-TBD - created by archiving change deepen-spot-chart-history. Update Purpose after archive.
+
+Defines how the Spot chart merges, pages, and persists closed-candle history for
+one pair and interval, so the operator can read beyond the live bootstrap window
+without gaps, duplicates, viewport jumps, stale-selection pages, or repeated
+exchange reads across a restart.
+
 ## Requirements
 ### Requirement: The chart opens on more than its live window
 Opening a pair SHALL present the depth already held for that pair and interval
@@ -104,4 +109,3 @@ no credential and no additional route.
 #### Scenario: A request asks for more than one read serves
 - **WHEN** a history request carries a page size above the bound, or a read point that is not a positive integer
 - **THEN** it is refused as an invalid channel action and no exchange read is issued
-

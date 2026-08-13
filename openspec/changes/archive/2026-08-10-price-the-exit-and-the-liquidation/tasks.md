@@ -33,4 +33,4 @@ open waiting for it.
 - [x] 5.2 Prove the close panel by test: the slider sets a lot-step size, a typed size moves the slider, dragging to nothing asks for a size, the summary states what the exit settles, and a limit prices it at the level.
 - [x] 5.3 Prove the margin panel by test: the projection moves the right way for a long, a short and a removal, falls back to the spare margin with no liquidation price reported, and each direction's control spans and names its own bound.
 - [x] 5.4 `eslint` clean on every touched file; futures and utils suites pass (438 tests).
-- [x] 5.5 Operator confirms on live data: the liquidation price moves as margin is dragged, a top-up larger than the position's own margin is accepted, and the close panel's slider and PnL read correctly against Binance's own figures.
+- [ ] 5.5 Operator confirms on live data: the liquidation price moves as margin is dragged, a top-up larger than the position's own margin is accepted, and the close panel's slider and PnL read correctly against Binance's own figures. — corrected 2026-08-13; see the [live-verification ledger](../../../live-verification-ledger.md#outstanding-verifications).

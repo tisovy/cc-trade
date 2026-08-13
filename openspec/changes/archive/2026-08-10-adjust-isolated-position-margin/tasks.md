@@ -70,6 +70,6 @@ Closed on the operator's instruction of 2026-08-10 to finish and commit: these
 checks are theirs to run on live data, and the change is archived rather than held
 open waiting for them.
 
-- [x] 11.1 Operator: on a real isolated position, add margin and confirm the row's figure and the liquidation price both move to Binance's own values.
-- [x] 11.2 Operator: remove margin from the same position, and confirm that an amount Binance considers too large is refused with its own message rather than silently swallowed.
-- [x] 11.3 Operator: confirm the buffer and the liquidation risk shown agree with Binance's own margin ratio for the position, that the slider moves the drawing, and that the panel opens fully visible and closes on its × with the app window at the bottom of the screen.
+- [ ] 11.1 Operator: on a real isolated position, add margin and confirm the row's figure and the liquidation price both move to Binance's own values. — corrected 2026-08-13; see the [live-verification ledger](../../../live-verification-ledger.md#outstanding-verifications).
+- [ ] 11.2 Operator: remove margin from the same position, and confirm that an amount Binance considers too large is refused with its own message rather than silently swallowed. — corrected 2026-08-13; see the [live-verification ledger](../../../live-verification-ledger.md#outstanding-verifications).
+- [ ] 11.3 Operator: confirm the buffer and the liquidation risk shown agree with Binance's own margin ratio for the position, that the slider moves the drawing, and that the panel opens fully visible and closes on its × with the app window at the bottom of the screen. — corrected 2026-08-13; see the [live-verification ledger](../../../live-verification-ledger.md#outstanding-verifications).

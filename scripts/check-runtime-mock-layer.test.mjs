@@ -43,6 +43,26 @@ describe('production source graph check', () => {
     expect(violations).toEqual([])
   })
 
+  it('walks the preload entry point and its CommonJS dependencies', async () => {
+    await write('electron/main.js', 'export const start = () => null\n')
+    await write('electron/preload.cjs', "require('./runtime-mock.cjs')\n")
+    await write('electron/runtime-mock.cjs', 'module.exports = { syntheticPrice: () => 1 }\n')
+    await write('src/main.jsx', 'export const render = () => null\n')
+
+    const { modules, violations } = await analyzeProductionSourceGraph({ root })
+    const relativeModules = [...modules]
+      .map(filePath => path.relative(root, filePath))
+      .sort()
+
+    expect(relativeModules).toEqual([
+      'electron/main.js',
+      'electron/preload.cjs',
+      'electron/runtime-mock.cjs',
+      'src/main.jsx',
+    ])
+    expect(violations).toEqual(['electron/runtime-mock.cjs: synthetic data identifier'])
+  })
+
   it('fails on a mock reintroduced under a name it has never seen', async () => {
     await write('electron/main.js', "import './feed.js'\n")
     await write('electron/feed.js', 'const syntheticDepthLadder = () => ({ bids: [] })\nexport default syntheticDepthLadder\n')

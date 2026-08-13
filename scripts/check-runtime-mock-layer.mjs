@@ -16,7 +16,11 @@ import path from 'node:path'
 import process from 'node:process'
 import { fileURLToPath } from 'node:url'
 
-export const PRODUCTION_ENTRY_POINTS = Object.freeze(['electron/main.js', 'src/main.jsx'])
+export const PRODUCTION_ENTRY_POINTS = Object.freeze([
+  'electron/main.js',
+  'electron/preload.cjs',
+  'src/main.jsx',
+])
 
 // A tripwire, not a target. The graph may grow freely; it may not silently
 // shrink, because a resolution gap removes modules from the walk without
@@ -40,7 +44,7 @@ export const FIRST_PARTY_ALIASES = Object.freeze([
   Object.freeze({ prefix: '@/', target: 'src/' }),
 ])
 
-const IMPORT_PATTERN = /(?:import\s+(?:[^'"()]+?\s+from\s+)?|export\s+[^'"()]+?\s+from\s+|import\s*\()(['"])([^'"]+)\1/g
+const IMPORT_PATTERN = /(?:import\s+(?:[^'"()]+?\s+from\s+)?|export\s+[^'"()]+?\s+from\s+|(?:import|require)\s*\()(['"])([^'"]+)\1/g
 
 // Named shapes kept from the original check. They no longer carry the guarantee
 // on their own — the generic rules below do — but a known regression should

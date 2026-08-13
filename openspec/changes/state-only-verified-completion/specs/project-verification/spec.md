@@ -4,12 +4,17 @@
 A task marked complete SHALL correspond to work that was actually performed. An
 operator confirmation SHALL be marked only after the operator confirmed the
 behaviour on live data. Work that shipped without its live confirmation SHALL be
-recorded as outstanding in a single ledger, naming the change and the behaviour
-that remains unverified.
+recorded as outstanding in a single ledger that names the change, the unverified
+behaviour, the reason verification did not happen, the date it was recorded,
+and its subsequent status.
 
 #### Scenario: A change ships before it can be confirmed live
 - **WHEN** code is archived but the operator has not confirmed it on live data
-- **THEN** the confirmation item stays unchecked and the outstanding verification is recorded in the ledger
+- **THEN** the confirmation item stays unchecked and the outstanding verification is recorded in the ledger with its date and status
+
+#### Scenario: A false historical completion mark is found
+- **WHEN** an archived task is checked while its own record says the live verification was left to the operator
+- **THEN** only that task is made unchecked with a dated ledger reference, and the archived change is neither reopened nor moved
 
 #### Scenario: The operator confirms later
 - **WHEN** the operator confirms the behaviour on live data
@@ -17,13 +22,19 @@ that remains unverified.
 
 ### Requirement: The verification commands declare the runtime they require
 The repository SHALL declare the Node version range its verification commands
-are supported on, so a failing run can be told apart from an unsupported
-runtime. The deterministic storage contract the suite relies on is owned by
+support and SHALL select one exact, measured version for the ordinary repository
+workflow. The exact version SHALL be chosen only after the supported versions
+installed on the verification host have completed the repository checks. The
+deterministic storage contract the suite relies on is owned by
 `stabilize-vitest-web-storage`.
 
 #### Scenario: An undeclared runtime
 - **WHEN** a contributor runs the suite on a version outside the declared range
 - **THEN** the tooling states the requirement rather than failing obscurely
+
+#### Scenario: A contributor selects the repository runtime
+- **WHEN** a contributor uses `.nvmrc`
+- **THEN** it selects an exact Node version inside `package.json.engines` that completed the recorded verification run
 
 ### Requirement: The production guards run with the ordinary verification
 The guard checks that protect the production boundary — the runtime-mock layer,
@@ -39,3 +50,11 @@ including the preload bridge.
 #### Scenario: The preload bridge imports the mock layer
 - **WHEN** `electron/preload.cjs` references the runtime mock layer
 - **THEN** the runtime-mock guard fails
+
+### Requirement: A capability specification states its purpose
+Every capability specification SHALL describe the behaviour boundary it owns
+instead of retaining an archive-generated `TBD` placeholder.
+
+#### Scenario: A contributor opens a capability specification
+- **WHEN** the contributor reads its Purpose section
+- **THEN** the section identifies the capability and the user-visible outcome its requirements govern

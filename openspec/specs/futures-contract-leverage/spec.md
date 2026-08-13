@@ -1,7 +1,12 @@
 # futures-contract-leverage Specification
 
 ## Purpose
-TBD - created by archiving change state-and-set-the-leverage. Update Purpose after archive.
+
+Defines how the Futures desk reads, retains, presents, and changes the
+exchange-owned leverage and margin mode of each contract, including safe
+defaults, bracket ceilings, explicit unknown state, and the risk shown wherever
+an order or open position carries that configuration.
+
 ## Requirements
 ### Requirement: The leverage a contract is set to is read from the exchange
 The desk SHALL read the leverage and margin mode of a contract from the exchange's
@@ -190,4 +195,3 @@ contract already being in that mode, not as a failure.
 #### Scenario: Trading is paused
 - **WHEN** a margin-mode change is applied while trading is paused
 - **THEN** it is refused with the paused reason and nothing is sent to the exchange
-

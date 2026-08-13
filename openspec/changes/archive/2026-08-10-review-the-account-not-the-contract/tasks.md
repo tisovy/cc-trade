@@ -30,4 +30,4 @@ open waiting for it.
 - [x] 5.1 Unit-test the new adapter reads and the per-contract fold: traded-symbol discovery, the implied entry, and a contract's exposure not being reduced by another's fills.
 - [x] 5.2 Prove the surfaces by test: the fan-out order and its partial failure, both history tables' Symbol column and per-contract ticks, closed-only rows, the empty state naming how many contracts were read, and the volume cell's value, label and title.
 - [x] 5.3 `npm test` (1167 passed, 90 files), project-wide `eslint` clean, five guard scripts pass.
-- [x] 5.4 Operator confirms on live data: the tabs list the positions they remember closing on every pair they traded, each row shows an entry and an exit, Realized PnL is never clipped, and the 24h volume matches the Binance app.
+- [ ] 5.4 Operator confirms on live data: the tabs list the positions they remember closing on every pair they traded, each row shows an entry and an exit, Realized PnL is never clipped, and the 24h volume matches the Binance app. — corrected 2026-08-13; see the [live-verification ledger](../../../live-verification-ledger.md#outstanding-verifications).
