@@ -1396,21 +1396,24 @@ export class FuturesProductionWorkstationService {
 
     scheduleResync(session, reasonCode) {
         if (!this.isCurrent(session) || session.reconnectTimer !== null) return;
-        if (session.reconnectAttempt >= FUTURES_PRODUCTION_WORKSTATION_FRESHNESS.RECONNECT_ATTEMPTS) {
-            this.emitStatus(
-                session,
-                FUTURES_WORKSTATION_STATES.UNAVAILABLE,
-                false,
-                'RECONNECT_EXHAUSTED',
-            );
-            this.haltSession(session);
-            return;
-        }
+        // Running out of fast attempts ends the hurry, not the recovery. The
+        // ladder spends 91.5 s — shorter than a proxy restart, a VPN
+        // renegotiation or a laptop waking up. Halting here left the desk
+        // holding a live position, a live wallet and a live uPnL against a
+        // chart, a book and a tape that had stopped, recoverable only by
+        // reloading the window; the account leg, which reconnects with no
+        // ceiling at all, came back on its own and made the desk look healthy
+        // while it was blind. Past the ladder the session keeps asking on the
+        // ladder's last rung, and says so under a state of its own.
+        const exhausted = session.reconnectAttempt
+            >= FUTURES_PRODUCTION_WORKSTATION_FRESHNESS.RECONNECT_ATTEMPTS;
         this.emitStatus(
             session,
-            FUTURES_WORKSTATION_STATES.RESYNCHRONIZING,
+            exhausted
+                ? FUTURES_WORKSTATION_STATES.UNAVAILABLE
+                : FUTURES_WORKSTATION_STATES.RESYNCHRONIZING,
             false,
-            reasonCode,
+            exhausted ? 'RECONNECT_EXHAUSTED' : reasonCode,
         );
         session.intervalEpoch += 1;
         session.intervalAbortController?.abort();
@@ -1436,37 +1439,18 @@ export class FuturesProductionWorkstationService {
         );
         const request = session.request;
         const emit = session.emit;
-        const attempt = session.reconnectAttempt + 1;
+        // Held at the ceiling rather than counted upwards: the number is only
+        // ever compared against it, and a session that spends an afternoon
+        // without a route must not grow one.
+        const attempt = Math.min(
+            session.reconnectAttempt + 1,
+            FUTURES_PRODUCTION_WORKSTATION_FRESHNESS.RECONNECT_ATTEMPTS,
+        );
         session.reconnectTimer = this.clock.setTimeout(() => {
             session.reconnectTimer = null;
             if (this.isCurrent(session)) void this.startGeneration(request, emit, attempt);
         }, delay);
         session.reconnectTimer?.unref?.();
-    }
-
-    haltSession(session) {
-        if (this.current !== session) return;
-        this.current = null;
-        this.release(() => session.stream?.close?.());
-        session.stream = null;
-        this.release(() => session.abortController.abort());
-        this.release(() => session.intervalAbortController?.abort());
-        this.release(() => session.orderBook.stop());
-        this.release(() => this.clearPendingTapeTimer(session));
-        if (session.freshnessTimer !== null) {
-            this.clock.clearInterval(session.freshnessTimer);
-            session.freshnessTimer = null;
-        }
-        if (session.reconnectTimer !== null) {
-            this.clock.clearTimeout(session.reconnectTimer);
-            session.reconnectTimer = null;
-        }
-        if (session.intervalReconnectTimer !== null) {
-            this.clock.clearTimeout(session.intervalReconnectTimer);
-            session.intervalReconnectTimer = null;
-        }
-        session.pendingEvents = [];
-        session.pendingCandleEvents = [];
     }
 
     // Every step, independently. A release that gave up half-way left the

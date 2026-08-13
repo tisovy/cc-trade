@@ -969,11 +969,32 @@ describe('pure Futures workstation presentation', () => {
     })
 
     expect(screen.getByRole('button', { name: /^BTCUSDT/ })).toBeInTheDocument()
-    expect(screen.getByRole('alert')).toHaveTextContent(
-      'Contracts stream stopped after repeated reconnect failures.',
-    )
+    // What stopped is the market feed, not the contract list the operator is
+    // still reading contracts from.
+    expect(screen.getAllByRole('alert').map(node => node.textContent).join(' '))
+      .toContain('Market data stopped after repeated reconnect failures')
     expect(screen.queryByText('No matching USDⓈ-M contract.')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+    expect(onRetry).toHaveBeenCalledOnce()
+  })
+
+  it('states the stopped feed on the chart and retries from there', () => {
+    const onRetry = vi.fn()
+    renderView({
+      state: createState({
+        status: 'unavailable',
+        reasonCode: 'RECONNECT_EXHAUSTED',
+      }),
+      onRetry,
+    })
+
+    // The operator watching a dead chart must not have to find a button in the
+    // contract list, or reload the window as they did on 2026-08-13.
+    const notice = document.querySelector('.futures-workstation-feed-notice')
+    expect(notice).not.toBeNull()
+    expect(notice.closest('.futures-workstation-chart-frame')).not.toBeNull()
+    expect(notice).toHaveTextContent('still retrying')
+    fireEvent.click(within(notice).getByRole('button', { name: 'Retry now' }))
     expect(onRetry).toHaveBeenCalledOnce()
   })
 

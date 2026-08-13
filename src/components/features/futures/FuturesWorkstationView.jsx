@@ -252,7 +252,11 @@ export const FuturesWorkstationView = ({
     ? 'sync'
     : aggregateState
   const resourceState = resource => resource?.state ?? aggregateState
-  const contractsUnavailable = selectionOwned && state.status === 'unavailable'
+  // What stops here is the market feed for the selected contract — the chart,
+  // the book and the tape. It was called `contractsUnavailable` and stated in
+  // the contract list, which is why an operator watching a dead chart reloaded
+  // the window instead of using the retry sitting two panels away.
+  const feedUnavailable = selectionOwned && state.status === 'unavailable'
   const candlesState = resourceState(candles)
   const liveCandles = candles?.contract ?? EMPTY_ROWS
   // History is drawn behind the live window, never over it: the streaming rows
@@ -294,11 +298,11 @@ export const FuturesWorkstationView = ({
   // thing that can take the pick away. Everything else is a reading with an age.
   const chartPickable = chartCandles.length > 0
   const tradesState = resourceState(trades)
-  const contractsUnavailableMessage = state.reasonCode === 'RECONNECT_EXHAUSTED'
-    ? 'Contracts stream stopped after repeated reconnect failures.'
+  const feedUnavailableMessage = state.reasonCode === 'RECONNECT_EXHAUSTED'
+    ? 'Market data stopped after repeated reconnect failures — still retrying.'
     : state.reasonCode === 'LOCAL_SUBSCRIBE_REJECTED'
-      ? 'Contracts subscription was rejected by the local connection.'
-      : 'Contracts are unavailable. Fix the reported connection issue, then retry.'
+      ? 'Market data subscription was rejected by the local connection.'
+      : 'Market data is unavailable. Fix the reported connection issue, then retry.'
 
   const favorites = useMemo(() => new Set(symbolHistory.favorites), [symbolHistory.favorites])
   const searchQuery = search.trim().toUpperCase()
@@ -327,7 +331,7 @@ export const FuturesWorkstationView = ({
     ))
     return orderFuturesContracts(candidates, symbolHistory).slice(0, 128)
   }, [contracts, recentContracts, searchQuery, symbolHistory])
-  const catalogPending = contracts.length === 0 && !contractsUnavailable
+  const catalogPending = contracts.length === 0 && !feedUnavailable
 
   // The reading travels with the price: what the ticket and the confirmation
   // state about a number depends on where it was taken from, and a price the
@@ -924,18 +928,18 @@ export const FuturesWorkstationView = ({
             ))}
             {catalogPending ? (
               <p className="futures-workstation-empty">Loading contracts…</p>
-            ) : visibleContracts.length === 0 && !contractsUnavailable ? (
+            ) : visibleContracts.length === 0 && !feedUnavailable ? (
               <p className="futures-workstation-empty">No matching USDⓈ-M contract.</p>
             ) : null}
           </div>
         ) : catalogPending ? (
           <p className="futures-workstation-empty">Loading contracts…</p>
-        ) : recentContracts.length === 0 && !contractsUnavailable ? (
+        ) : recentContracts.length === 0 && !feedUnavailable ? (
           <p className="futures-workstation-empty">No recent contracts. Search to select one.</p>
         ) : null}
-        {contractsUnavailable ? (
+        {feedUnavailable ? (
           <div className="futures-workstation-contract-retry" role="alert">
-            <span>{contractsUnavailableMessage}</span>
+            <span>{feedUnavailableMessage}</span>
             <button type="button" disabled={typeof onRetry !== 'function'} onClick={onRetry}>Retry</button>
           </div>
         ) : null}
@@ -1080,6 +1084,23 @@ export const FuturesWorkstationView = ({
             <p className="futures-workstation-history-notice" role="status">
               Older candles could not be loaded — scroll again to retry.
             </p>
+          ) : null}
+          {/* Said on the chart, because the chart is what the operator is
+              looking at when the feed stops. The desk keeps asking on its own
+              after the fast ladder is spent; this is where the operator can ask
+              sooner, without hunting for a button in the contract list or
+              reloading the window and throwing away every other panel. */}
+          {feedUnavailable ? (
+            <div className="futures-workstation-feed-notice" role="alert">
+              <span>{feedUnavailableMessage}</span>
+              <button
+                type="button"
+                disabled={typeof onRetry !== 'function'}
+                onClick={onRetry}
+              >
+                Retry now
+              </button>
+            </div>
           ) : null}
           {/* A chart that has candles on it is readable, and covering it with a
               state was the desk hiding the only thing the operator came for. The

@@ -9,6 +9,9 @@ import {
 import {
     FUTURES_PRODUCTION_WORKSTATION_FIXTURE,
 } from './futures-production-workstation-fixtures.js';
+import {
+    FUTURES_PRODUCTION_WORKSTATION_FRESHNESS,
+} from './futures-production-workstation-service.js';
 import { FUTURES_WORKSTATION_EVENT_MAX_BYTES } from '../../src/utils/futuresWorkstationProtocolShared.js';
 import {
     createFuturesProductionWorkstationConfigureDepthRequest,
@@ -2226,7 +2229,7 @@ describe('production Futures workstation service', () => {
             createFuturesProductionWorkstationRuntimeForTest,
             productionRequest,
         ],
-    ])('halts the %s session when reconnect attempts are exhausted', async (
+    ])('keeps trying after the %s session exhausts its reconnect attempts', async (
         _label,
         createBase,
         createRuntime,
@@ -2255,7 +2258,8 @@ describe('production Futures workstation service', () => {
         await runtime.service.handleRequest(createRequest('terminal-reconnect'), {
             emit: event => events.push(event),
         });
-        runtime.service.current.reconnectAttempt = Number.MAX_SAFE_INTEGER;
+        runtime.service.current.reconnectAttempt
+            = FUTURES_PRODUCTION_WORKSTATION_FRESHNESS.RECONNECT_ATTEMPTS;
         subscriber.onDisconnect('SOCKET_DISCONNECTED');
         expect(events.at(-1)).toMatchObject({
             resource: 'status',
@@ -2263,7 +2267,102 @@ describe('production Futures workstation service', () => {
             payload: { reasonCode: 'RECONNECT_EXHAUSTED' },
         });
         expect(close).toHaveBeenCalledOnce();
+        // The outage that exhausts the ladder is the ordinary length of a proxy
+        // restart. The session stays, and another attempt is already armed.
+        expect(runtime.service.current).not.toBeNull();
+        expect(clock.timeoutCount()).toBe(1);
+
+        // The route comes back while the session is asking on the last rung.
+        clock.runTimeouts();
+        await vi.waitFor(() => {
+            expect(events.at(-1)).toMatchObject({ resource: 'status', state: 'live' });
+        });
+        // And the fast ladder is available again for the next interruption.
+        expect(runtime.service.current.reconnectAttempt).toBe(0);
+    });
+
+    it.each([
+        [
+            'production',
+            createFuturesProductionWorkstationFakeTransport,
+            createFuturesProductionWorkstationRuntimeForTest,
+            productionRequest,
+        ],
+    ])('holds the %s reconnect attempt at its ceiling while the route stays gone', async (
+        _label,
+        createBase,
+        createRuntime,
+        createRequest,
+    ) => {
+        const clock = createManualClock();
+        const base = createBase({ clock: clock.clock });
+        let subscriber;
+        const transport = {
+            ...base,
+            connect: (options) => {
+                subscriber = options;
+                return base.connect(options);
+            },
+        };
+        const runtime = track(createRuntime({ transport, clock: clock.clock }));
+        await runtime.service.handleRequest(createRequest('ceiling-reconnect'), {
+            emit: () => {},
+        });
+        const { RECONNECT_ATTEMPTS } = FUTURES_PRODUCTION_WORKSTATION_FRESHNESS;
+        const started = [];
+        const startGeneration = runtime.service.startGeneration.bind(runtime.service);
+        runtime.service.startGeneration = (request, emit, attempt) => {
+            started.push(attempt);
+            return startGeneration(request, emit, attempt);
+        };
+        // A session that spends an afternoon without a route must not count its
+        // attempts upwards: the number is only ever compared against the ceiling.
+        runtime.service.current.reconnectAttempt = RECONNECT_ATTEMPTS + 5;
+        subscriber.onDisconnect('SOCKET_DISCONNECTED');
+        clock.runTimeouts();
+        await vi.waitFor(() => {
+            expect(started).toHaveLength(1);
+        });
+        expect(started[0]).toBe(RECONNECT_ATTEMPTS);
+    });
+
+    it.each([
+        [
+            'production',
+            createFuturesProductionWorkstationFakeTransport,
+            createFuturesProductionWorkstationRuntimeForTest,
+            productionRequest,
+        ],
+    ])('stops the %s attempts when the contract is released', async (
+        _label,
+        createBase,
+        createRuntime,
+        createRequest,
+    ) => {
+        const clock = createManualClock();
+        const base = createBase({ clock: clock.clock });
+        let subscriber;
+        const transport = {
+            ...base,
+            connect: (options) => {
+                subscriber = options;
+                return base.connect(options);
+            },
+        };
+        const runtime = track(createRuntime({ transport, clock: clock.clock }));
+        await runtime.service.handleRequest(createRequest('released-reconnect'), {
+            emit: () => {},
+        });
+        runtime.service.current.reconnectAttempt
+            = FUTURES_PRODUCTION_WORKSTATION_FRESHNESS.RECONNECT_ATTEMPTS;
+        subscriber.onDisconnect('SOCKET_DISCONNECTED');
+        expect(clock.timeoutCount()).toBe(1);
+
+        // The guarantee the old halt provided, which this change must keep: a
+        // session nobody wants any more arms nothing.
+        runtime.service.stop();
         expect(runtime.service.current).toBeNull();
+        expect(clock.timeoutCount()).toBe(0);
         expect(clock.intervalCount()).toBe(0);
         expect(base.getActiveTimerCount()).toBe(0);
     });
