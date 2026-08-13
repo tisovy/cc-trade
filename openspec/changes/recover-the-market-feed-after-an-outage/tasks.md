@@ -66,12 +66,16 @@ Both experiments are the operator's own words, recorded during the run.
       exposes — the same one the sidebar button uses.
 - [x] 2.4 The message no longer calls a lost market feed a lost contract list.
       `contractsUnavailable` renamed to `feedUnavailable` for the same reason.
-- [ ] 2.5 **Not measured in a browser.** The notice is `position: absolute` inside
-      the chart frame with `max-width: calc(100% - 16px)`, so it is out of flow
-      and cannot make a panel scroll or overflow. The repository has no Chromium
-      layout fixture any more — `remove-playwright-e2e` was archived on
-      2026-08-12 — so this is reasoned, not measured. Say so rather than checking
-      it off.
+- [x] 2.5 Measured in `/usr/bin/chromium --headless --dump-dom`, with the real
+      `base.css` + `app-layout.css` + `FuturesWorkstation.css` inside the real
+      `#root > .futures-mode-view > .futures-production-workstation` shell, at
+      1280×720, 1440×900, 1600×900, 1920×1080 and 2560×1440. At every size the
+      notice's rect is inside the chart frame's rect and
+      `documentElement.scrollWidth <= clientWidth` — no panel scrolls and the
+      page does not overflow. It wraps to two lines below 1600 and stays
+      centred. The containment is not luck: `.futures-workstation-chart-frame`
+      is `position: relative` (`FuturesWorkstation.css:746-750`), which is what
+      an absolutely positioned child needs to stay in the panel it belongs to.
 
 ## 3. Proving It
 
