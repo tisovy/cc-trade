@@ -102,6 +102,46 @@ export const countPrependedRows = (previousFirstTime, next) => {
     return count;
 };
 
+const sharesEveryRowBefore = (drawn, next, count) => {
+    for (let index = 0; index < count; index += 1) {
+        if (drawn[index] !== next[index]) return false;
+    }
+    return true;
+};
+
+/**
+ * What the chart has to redraw to show `next`, given the rows it is drawing now.
+ *
+ * A live trade moves the last candle and leaves every other one exactly as it
+ * was — every writer copies the array and keeps the untouched rows themselves —
+ * so the question is answered by identity rather than by comparing values, and
+ * a row settled behind the last one is not mistaken for a tick. It is asked at
+ * all because the alternative is redrawing three series, a moving average over
+ * every bar and the whole volume histogram for one bar's news, on a chart that
+ * accumulates up to `SPOT_CHART_MAX_ROWS` of them.
+ */
+export const planSpotSeriesDraw = (drawn, next) => {
+    const rows = Array.isArray(next) ? next : [];
+    if (rows.length === 0) return 'none';
+    const previous = Array.isArray(drawn) ? drawn : [];
+    if (previous.length === 0) return 'full';
+
+    // The last bar moved and no other did.
+    if (rows.length === previous.length) {
+        if (rows.at(-1).time !== previous.at(-1).time) return 'full';
+        return sharesEveryRowBefore(previous, rows, rows.length - 1) ? 'tick' : 'full';
+    }
+
+    // A bar opened after the last one drawn. Anything else that changes the
+    // length is a merge — a history page in front, a window rejoined — and a
+    // merge is redrawn whole.
+    if (rows.length === previous.length + 1 && rows.at(-1).time > previous.at(-1).time) {
+        return sharesEveryRowBefore(previous, rows, previous.length) ? 'append' : 'full';
+    }
+
+    return 'full';
+};
+
 // Scrolling into the left edge is the request for more history: the operator is
 // asking to see what came before, and the chart answers by loading it rather
 // than by ending.

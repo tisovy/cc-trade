@@ -1,13 +1,15 @@
 ## 1. The Trade Stream Does Not Cancel History
 
-- [ ] 1.1 Narrow the Spot chart history effect's dependencies to the selection and the series bounds it reads, so a trade does not recreate it.
-- [ ] 1.2 Keep the debounce, and prove by test that a continuous trade stream still lets a history request be issued.
+- [x] 1.1 Narrow the Spot chart history effect's dependencies to the selection and the series bounds it reads, so a trade does not recreate it. *(Split rather than narrowed: drawing the series and reading the visible range were one effect, and only the first of them has anything to do with the rows. The range subscription now depends on the chart and the selection, and reads the rows through a ref.)*
+- [x] 1.2 Keep the debounce, and prove by test that a continuous trade stream still lets a history request be issued. *(It was worse than a delay: the effect's cleanup cancelled the settle timer the operator's scroll had started, and the next print cancelled the next one, so on any contract printing faster than the 50 ms timer — which is any contract worth scrolling back on — the request was **never issued at all** and the chart stayed at the 500 bars it opened with. Proven against the pre-change component in a scratch checkout, where the test fails.)*
 
 ## 2. A Live Trade Costs One Candle
 
-- [ ] 2.1 Update the last candle in place on the chart's series instead of re-running `setData`, the volume series and the SMA pass on every trade.
-- [ ] 2.2 Avoid copying the whole candle array in `applyTradeToChart` when only the last candle changes.
-- [ ] 2.3 Prove by test that a trade that only moves the last candle produces no full-series work.
+- [x] 2.1 Update the last candle in place on the chart's series instead of re-running `setData`, the volume series and the SMA pass on every trade.
+- [x] 2.2 ~~Avoid copying the whole candle array in `applyTradeToChart` when only the last candle changes.~~ Measured before building: the copy is 0.0069 ms at the five thousand bars this chart accumulates, against 0.68 ms for the moving average and 0.097 ms for the volume histogram that the same print used to rebuild. Removing it means either mutating state React is holding or moving the live candle out of the series every reader reads, and both are a large change for seven microseconds. What was worth taking on that side is one line: **a print that moves nothing answers with the series already showing.** A liquid contract prints at one tick again and again, and every one of those prints used to hand every reader of the context a new array to redraw for.
+- [x] 2.3 Prove by test that a trade that only moves the last candle produces no full-series work. Counted per series, through the writes each one takes: a print writes one bar to the candles, one to the histogram and one to the moving average, and redraws none of them. Proven against the pre-change component, where it redraws all three.
+- [x] 2.4 Redraw the whole series for a candle settling behind the last one. *(Discovered while deciding what a print may be answered with: the close of the candle just past — its true high, low and volume — reaches the chart through the same series a tick does, and comparing only the last bar would have left it undrawn. What changed is decided by identity across the rows, which the writers preserve for every row they did not touch, so a settled row is never mistaken for a tick. The scan costs 0.0026 ms at five thousand bars, less than the array copy it sits beside.)*
+- [ ] 2.5 Draw the RSI pane's line incrementally, or state why it stays. *(Discovered by measuring what a print still costs: the section named three passes and there is a fourth. The RSI pane recomputes over every bar and redraws its line whole on every print — 0.133 ms at five thousand bars, a fifth of what this section removed. Not taken here: Wilder's smoothing is recursive from the first bar, so an incremental point needs the running averages carried forward, and a carry that is wrong does not fail — it drifts an indicator the operator reads. It is stated rather than counted as nothing.)*
 
 ## 3. A Frame Redraws Only Its Own Panel
 
@@ -26,5 +28,5 @@
 
 ## 5. Verification
 
-- [ ] 5.1 `npm run lint`, `npm test`, `npm run check:futures-production`.
-- [ ] 5.2 Operator confirms on live data that the desk stays responsive on a liquid contract with deep history loaded.
+- [x] 5.1 `npm run lint`, `npm test` (1678 passed, 105 files), `npm run check:futures-production`.
+- [ ] 5.2 Operator confirms on live data that the desk stays responsive on a liquid contract with deep history loaded. Written as a step in `verify-the-desk-in-one-sitting/runbook.md` rather than left here, so the operator runs one list.

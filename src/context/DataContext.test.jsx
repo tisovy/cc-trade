@@ -423,6 +423,41 @@ describe('DataContext spot chart depth', () => {
         expect(desk().chart.at(-1).close).toBe(999)
     })
 
+    // A liquid contract prints at one tick again and again, and every one of
+    // those prints used to answer with a new series — which every reader of this
+    // context, the chart included, redraws for.
+    it('answers a print that moves nothing with the series already showing', async () => {
+        await renderDepthChart()
+        const live = run(LIVE_START, 12)
+        await deliver({ type: 'chart', payload: live, extra: live.at(-1) })
+        const showing = desk().chart
+
+        await deliver({ type: 'trades', payload: { p: '10', q: '1', T: live.at(-1).time * 1000 } })
+
+        expect(desk().chart).toBe(showing)
+    })
+
+    it('answers a print that moves the candle with a new series', async () => {
+        await renderDepthChart()
+        const live = run(LIVE_START, 12)
+        await deliver({ type: 'chart', payload: live, extra: live.at(-1) })
+        const showing = desk().chart
+
+        await deliver({ type: 'trades', payload: { p: '11', q: '1', T: live.at(-1).time * 1000 } })
+
+        expect(desk().chart).not.toBe(showing)
+        expect(desk().chart.at(-1)).toEqual({
+            ...showing.at(-1),
+            close: 11,
+            high: 11,
+        })
+        // Every candle behind the last one is the very row that was there, which
+        // is what lets the chart draw one bar instead of the whole series.
+        expect(desk().chart.slice(0, -1).every(
+            (row, index) => row === showing[index],
+        )).toBe(true)
+    })
+
     // An order the exchange never confirmed is the one warning that must not be
     // replaced by the next thing to go wrong: an operator who stops seeing it
     // sends the order again, and the first one may be live.

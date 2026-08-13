@@ -4,6 +4,7 @@ import {
     SPOT_CHART_MAX_ROWS,
     countPrependedRows,
     mergeSpotChartSeries,
+    planSpotSeriesDraw,
     reachedSpotHistoryEdge,
     spotChartHistoryEndTime,
     spotChartIntervalSeconds,
@@ -151,6 +152,59 @@ describe('reachedSpotHistoryEdge', () => {
     it('treats a missing range as no request', () => {
         expect(reachedSpotHistoryEdge(null)).toBe(false);
         expect(reachedSpotHistoryEdge({})).toBe(false);
+    });
+});
+
+describe('planSpotSeriesDraw', () => {
+    const START = 1_700_000_000;
+    const drawn = run(START, 5);
+    const moved = (rows, index, close) => {
+        const next = [...rows];
+        next[index] = candle(next[index].time, close);
+        return next;
+    };
+
+    it('answers a moved last candle with the last candle alone', () => {
+        expect(planSpotSeriesDraw(drawn, moved(drawn, drawn.length - 1, 42))).toBe('tick');
+    });
+
+    it('answers a candle opening after the last one with that candle alone', () => {
+        expect(planSpotSeriesDraw(drawn, [...drawn, candle(START + 5 * HOUR, 42)])).toBe('append');
+    });
+
+    // The close of the candle just past — its true high, low and volume — is a
+    // row settling behind the last one, and it arrives through the same series a
+    // tick does. Answering it as a tick would leave it undrawn.
+    it('answers a candle settling behind the last one with the whole series', () => {
+        expect(planSpotSeriesDraw(drawn, moved(drawn, drawn.length - 2, 99))).toBe('full');
+    });
+
+    it('answers older candles arriving in front with the whole series', () => {
+        expect(planSpotSeriesDraw(drawn, [...run(START - 2 * HOUR, 2), ...drawn])).toBe('full');
+    });
+
+    it('answers a series it has never drawn with the whole series', () => {
+        expect(planSpotSeriesDraw(null, drawn)).toBe('full');
+        expect(planSpotSeriesDraw([], drawn)).toBe('full');
+    });
+
+    it('answers nothing at all when there are no rows to draw', () => {
+        expect(planSpotSeriesDraw(drawn, [])).toBe('none');
+        expect(planSpotSeriesDraw(drawn, undefined)).toBe('none');
+    });
+
+    // Two rows arriving at the end is a merge, not a bar opening: the row before
+    // the new last one was never drawn.
+    it('answers more than one new candle with the whole series', () => {
+        expect(planSpotSeriesDraw(drawn, [
+            ...drawn,
+            candle(START + 5 * HOUR, 42),
+            candle(START + 6 * HOUR, 43),
+        ])).toBe('full');
+    });
+
+    it('answers a shorter series with the whole series', () => {
+        expect(planSpotSeriesDraw(drawn, drawn.slice(0, -1))).toBe('full');
     });
 });
 

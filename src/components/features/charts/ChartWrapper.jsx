@@ -7,8 +7,8 @@ import { createChart, ColorType, CrosshairMode, LineStyle, CandlestickSeries, Hi
 import RSIPane from './RSIPane';
 import { SMA } from 'technicalindicators';
 import { precisionTruncate, formatVolumeShort } from '../../../utils/operations';
-import { buildVolumeHistogramPresentation } from '../../../utils/chartVolume';
-import { countPrependedRows, reachedSpotHistoryEdge } from '../../../utils/spotChartHistory';
+import { buildVolumeHistogramBar, buildVolumeHistogramPresentation } from '../../../utils/chartVolume';
+import { countPrependedRows, planSpotSeriesDraw, reachedSpotHistoryEdge } from '../../../utils/spotChartHistory';
 import { DEFAULT_PRECISION, getMinMove } from '../../../utils/precision';
 import { useDataContext } from '../../../context/DataContext';
 import { useDrawingContext } from '../../../hooks/useDrawingContext';
@@ -18,6 +18,18 @@ import { getGroupedOrdersForChart } from '../../../utils/orderGroups';
 import { MeasurementOverlay } from '../../common/MeasurementOverlay';
 
 const MEASUREMENT_BAR_WIDTH_RATIO = 0.08;
+
+// The moving average drawn under the candles, and the colours its histogram
+// draws a bar in. Both paths that write the volume series read the same two, so
+// a bar written on its own cannot be coloured differently from its neighbours.
+const SMA_PERIOD = 80;
+const VOLUME_BAR_COLORS = {
+    upColor: 'rgba(38, 166, 154, 0.5)',
+    downColor: 'rgba(239, 83, 80, 0.5)',
+};
+// How long the chart waits after the viewport stops moving before reading the
+// range. The operator scrolls in one gesture, not in one event.
+const VISIBLE_RANGE_SETTLE_MS = 50;
 import { buildTimeScaleFormatters } from '../../../utils/chart-utils';
 
 // Sub-component for rendering Order Overlays (redesigned)
@@ -166,10 +178,17 @@ export const ChartWrapper = (props) => {
 
     const chartContainerRef = useRef();
     const chartRef = useRef();
-    // What the drawn series was last time, keyed by the pair it belonged to.
-    // Keyed, because a prepend is only a prepend within one selection: after a
-    // switch, the new pair's first candle is not older data arriving.
-    const drawnSeriesRef = useRef({ pair: null, firstTime: null });
+    // The rows the series are actually drawing, keyed by the pair they belonged
+    // to. Keyed, because a prepend is only a prepend within one selection: after
+    // a switch, the new pair's first candle is not older data arriving. The rows
+    // themselves are held, not just their bounds, because what a new series
+    // costs to draw is decided by which of them changed.
+    const drawnSeriesRef = useRef({ pair: null, rows: null, volumeScale: 1 });
+    // What the range subscription reads, rather than what it depends on. The
+    // subscription has to outlive the tape: a print changes the series, and
+    // re-running the effect for it tore down the debounced read the operator's
+    // scroll had already scheduled — see the effect below.
+    const dataRef = useRef(data);
     const loadChartHistoryRef = useRef(loadChartHistory);
     const candleSeriesRef = useRef();
     const volumeSeriesRef = useRef();
@@ -513,156 +532,197 @@ export const ChartWrapper = (props) => {
     }, [loadChartHistory]);
 
     useEffect(() => {
-        if (candleSeriesRef.current && volumeSeriesRef.current && data && data.length > 0) {
-            // Older candles arriving in front shift every bar's logical index.
-            // Left alone, the chart jumps backwards under the operator's cursor
-            // at the exact moment they were reading those bars, so the visible
-            // range is moved by as many bars as were prepended and the view
-            // stands still.
-            const prepended = drawnSeriesRef.current.pair === chartPair
-                ? countPrependedRows(drawnSeriesRef.current.firstTime, data)
-                : 0;
-            const timeScale = chartRef.current?.timeScale?.();
-            const heldRange = prepended > 0
-                ? timeScale?.getVisibleLogicalRange?.() ?? null
-                : null;
-            drawnSeriesRef.current = { pair: chartPair, firstTime: data[0].time };
+        dataRef.current = data;
+    }, [data]);
 
-            candleSeriesRef.current.setData(data);
+    // The volume profile is of the bars in view, so it is rebuilt when the view
+    // moves and when the bars themselves change — not when the last bar ticks,
+    // which is a print a second for one bar's difference across thirty-five
+    // bins.
+    const redrawVolumeProfile = useCallback((requestedRange) => {
+        if (isDisposedRef.current || !volumeProfileRef.current) return;
+        // With no rows the series are still drawing the previous selection, and
+        // the profile is left drawing it too rather than emptied under bars that
+        // are still on screen.
+        const rows = dataRef.current;
+        if (!rows || rows.length === 0) return;
+        const range = requestedRange
+            ?? chartRef.current?.timeScale?.()?.getVisibleLogicalRange?.()
+            ?? null;
+        if (!range) return;
+        const from = Math.max(0, Math.floor(range.from));
+        const to = Math.min(rows.length - 1, Math.ceil(range.to));
+        if (from > to) return;
+        const visibleData = rows.slice(from, to + 1);
 
-            const volumePresentation = buildVolumeHistogramPresentation(data, {
-                upColor: 'rgba(38, 166, 154, 0.5)',
-                downColor: 'rgba(239, 83, 80, 0.5)',
-            });
-            volumeSeriesRef.current.applyOptions({
-                priceFormat: volumePresentation.priceFormat,
-            });
-            volumeSeriesRef.current.setData(volumePresentation.data);
+        const minPrice = Math.min(...visibleData.map(d => d.low));
+        const maxPrice = Math.max(...visibleData.map(d => d.high));
+        const binsCount = 35;
+        const step = (maxPrice - minPrice) / binsCount;
 
-            const closePrices = data.map(d => d.close);
-            const period = 80;
-            const smaValues = SMA.calculate({ period, values: closePrices });
-            const smaData = smaValues.map((value, index) => ({
-                time: data[index + (period - 1)].time,
-                value,
-            }));
-            if (smaSeriesRef.current) {
-                smaSeriesRef.current.setData(smaData);
-            }
+        if (step === 0) return;
 
-            // After every series holds the new rows, so nothing writing data
-            // afterwards resets the range that was just restored.
-            if (heldRange) {
-                timeScale?.setVisibleLogicalRange?.({
-                    from: heldRange.from + prepended,
-                    to: heldRange.to + prepended,
-                });
-            }
+        const profile = new Array(binsCount).fill(0).map((_, i) => ({
+            price: maxPrice - (i * step),
+            step: step,
+            vol: 0,
+            type: 'up'
+        }));
 
-            // VPVR Logic
-            const calculateVolumeProfile = (visibleData) => {
-                if (!visibleData || visibleData.length === 0) {
-                    if (volumeProfileRef.current) volumeProfileRef.current.setData([]);
-                    return;
+        const binVolumes = new Array(binsCount).fill(0).map(() => ({ up: 0, down: 0 }));
+
+        visibleData.forEach(d => {
+            const binIndex = Math.floor((maxPrice - d.close) / step);
+            if (binIndex >= 0 && binIndex < binsCount) {
+                if (d.close >= d.open) {
+                    binVolumes[binIndex].up += d.volume;
+                } else {
+                    binVolumes[binIndex].down += d.volume;
                 }
+            }
+        });
 
-                const minPrice = Math.min(...visibleData.map(d => d.low));
-                const maxPrice = Math.max(...visibleData.map(d => d.high));
-                const binsCount = 35;
-                const step = (maxPrice - minPrice) / binsCount;
+        const finalProfile = profile.map((bin, i) => ({
+            ...bin,
+            vol: binVolumes[i].up + binVolumes[i].down,
+            type: binVolumes[i].up >= binVolumes[i].down ? 'up' : 'down'
+        })).filter(b => b.vol > 0);
 
-                if (step === 0) return;
+        volumeProfileRef.current.setData(finalProfile);
+    }, []);
 
-                const profile = new Array(binsCount).fill(0).map((_, i) => ({
-                    price: maxPrice - (i * step),
-                    step: step,
-                    vol: 0,
-                    type: 'up'
-                }));
+    useEffect(() => {
+        if (!candleSeriesRef.current || !volumeSeriesRef.current) return;
+        const drawn = drawnSeriesRef.current;
+        const plan = drawn.pair === chartPair ? planSpotSeriesDraw(drawn.rows, data) : 'full';
+        if (plan === 'none') return;
 
-                const binVolumes = new Array(binsCount).fill(0).map(() => ({ up: 0, down: 0 }));
-
-                visibleData.forEach(d => {
-                    const binIndex = Math.floor((maxPrice - d.close) / step);
-                    if (binIndex >= 0 && binIndex < binsCount) {
-                        if (d.close >= d.open) {
-                            binVolumes[binIndex].up += d.volume;
-                        } else {
-                            binVolumes[binIndex].down += d.volume;
-                        }
+        if (plan !== 'full') {
+            // A trade moved the last candle, or a new one opened after it.
+            // Every series takes that one bar and nothing else: the rest of the
+            // screen is already showing what it should, and rebuilding all three
+            // for one bar's news costs the whole series' work — at the five
+            // thousand bars this chart accumulates, the moving average alone is
+            // 0.68 ms of it, on every print.
+            const bar = data.at(-1);
+            const volumeBar = buildVolumeHistogramBar(bar, {
+                ...VOLUME_BAR_COLORS,
+                scale: drawn.volumeScale,
+            });
+            // A bar the drawn histogram's scale cannot hold is not written on
+            // its own; it falls through to the draw below, which picks a scale
+            // that fits it and redraws every bar to it.
+            if (volumeBar) {
+                candleSeriesRef.current.update(bar);
+                volumeSeriesRef.current.update(volumeBar);
+                if (smaSeriesRef.current && data.length >= SMA_PERIOD) {
+                    // Through the same library the full draw uses, over the only
+                    // window that can produce the last point, so the value is
+                    // the one a full draw would have written there.
+                    const [value] = SMA.calculate({
+                        period: SMA_PERIOD,
+                        values: data.slice(-SMA_PERIOD).map(d => d.close),
+                    });
+                    if (Number.isFinite(value)) {
+                        smaSeriesRef.current.update({ time: bar.time, value });
                     }
-                });
-
-                const finalProfile = profile.map((bin, i) => ({
-                    ...bin,
-                    vol: binVolumes[i].up + binVolumes[i].down,
-                    type: binVolumes[i].up >= binVolumes[i].down ? 'up' : 'down'
-                })).filter(b => b.vol > 0);
-
-                if (volumeProfileRef.current) {
-                    volumeProfileRef.current.setData(finalProfile);
                 }
-            };
+                drawnSeriesRef.current = { ...drawn, rows: data };
+                // A bar opening changes which bars are in view; a bar ticking
+                // does not.
+                if (plan === 'append') redrawVolumeProfile();
+                return;
+            }
+        }
 
-            const debounce = (func, wait) => {
-                let timeout;
-                const debounced = (...args) => {
-                    const later = () => {
-                        clearTimeout(timeout);
-                        func(...args);
-                    };
-                    clearTimeout(timeout);
-                    timeout = setTimeout(later, wait);
-                };
-                debounced.cancel = () => {
-                    if (timeout) {
-                        clearTimeout(timeout);
-                        timeout = null;
-                    }
-                };
-                return debounced;
-            };
+        // Older candles arriving in front shift every bar's logical index. Left
+        // alone, the chart jumps backwards under the operator's cursor at the
+        // exact moment they were reading those bars, so the visible range is
+        // moved by as many bars as were prepended and the view stands still.
+        const prepended = drawn.pair === chartPair
+            ? countPrependedRows(drawn.rows?.[0]?.time, data)
+            : 0;
+        const timeScale = chartRef.current?.timeScale?.();
+        const heldRange = prepended > 0
+            ? timeScale?.getVisibleLogicalRange?.() ?? null
+            : null;
 
-            const handleVisibleRangeChange = debounce((newVisibleLogicalRange) => {
-                if (!newVisibleLogicalRange) return;
+        candleSeriesRef.current.setData(data);
+
+        const volumePresentation = buildVolumeHistogramPresentation(data, VOLUME_BAR_COLORS);
+        volumeSeriesRef.current.applyOptions({
+            priceFormat: volumePresentation.priceFormat,
+        });
+        volumeSeriesRef.current.setData(volumePresentation.data);
+
+        const closePrices = data.map(d => d.close);
+        const smaValues = SMA.calculate({ period: SMA_PERIOD, values: closePrices });
+        const smaData = smaValues.map((value, index) => ({
+            time: data[index + (SMA_PERIOD - 1)].time,
+            value,
+        }));
+        if (smaSeriesRef.current) {
+            smaSeriesRef.current.setData(smaData);
+        }
+
+        drawnSeriesRef.current = {
+            pair: chartPair,
+            rows: data,
+            volumeScale: volumePresentation.scale,
+        };
+
+        // After every series holds the new rows, so nothing writing data
+        // afterwards resets the range that was just restored.
+        if (heldRange) {
+            timeScale?.setVisibleLogicalRange?.({
+                from: heldRange.from + prepended,
+                to: heldRange.to + prepended,
+            });
+        }
+
+        redrawVolumeProfile();
+    }, [data, chartPair, redrawVolumeProfile]);
+
+    // The range subscription outlives the series it reads, and reads the rows
+    // through a ref rather than depending on them. It used to be rebuilt for
+    // every arriving print, which tore down the settle timer the operator's
+    // scroll had already started — so on a contract printing faster than the
+    // timer waits, which is any contract worth scrolling back on, the request
+    // for older candles was never issued at all and the chart stayed as short as
+    // it opened.
+    useEffect(() => {
+        if (isDisposedRef.current || !chartInstance) return;
+        const timeScale = chartInstance.timeScale();
+
+        let settleTimer = null;
+        const handleVisibleRangeChange = (range) => {
+            if (settleTimer) clearTimeout(settleTimer);
+            settleTimer = setTimeout(() => {
+                settleTimer = null;
+                if (!range) return;
                 // Reaching the oldest loaded bar is the request for more
                 // history. Whether there is any left to load, and whether a read
                 // is already outstanding, is the loader's own business — asking
                 // twice costs nothing here and guessing it locally would go
                 // stale the moment a page arrives.
-                if (reachedSpotHistoryEdge(newVisibleLogicalRange)) {
+                if (reachedSpotHistoryEdge(range)) {
                     loadChartHistoryRef.current?.();
                 }
-                const from = Math.max(0, Math.floor(newVisibleLogicalRange.from));
-                const to = Math.min(data.length - 1, Math.ceil(newVisibleLogicalRange.to));
+                redrawVolumeProfile(range);
+            }, VISIBLE_RANGE_SETTLE_MS);
+        };
 
-                if (from > to) return;
-
-                const visibleData = data.slice(from, to + 1);
-                calculateVolumeProfile(visibleData);
-            }, 50);
-
-            let unsubscribeVisibleRange;
-            if (!isDisposedRef.current && chartRef.current) {
-                const timeScale = chartRef.current.timeScale();
-                timeScale.subscribeVisibleLogicalRangeChange(handleVisibleRangeChange);
-                unsubscribeVisibleRange = () => {
-                    timeScale.unsubscribeVisibleLogicalRangeChange(handleVisibleRangeChange);
-                };
-
-                const currentRange = timeScale.getVisibleLogicalRange();
-                if (currentRange) {
-                    handleVisibleRangeChange(currentRange);
-                }
-            }
-            return () => {
-                if (unsubscribeVisibleRange) {
-                    unsubscribeVisibleRange();
-                }
-                handleVisibleRangeChange.cancel?.();
-            };
+        timeScale.subscribeVisibleLogicalRangeChange(handleVisibleRangeChange);
+        const currentRange = timeScale.getVisibleLogicalRange();
+        if (currentRange) {
+            handleVisibleRangeChange(currentRange);
         }
-    }, [data, chartPair]);
+
+        return () => {
+            timeScale.unsubscribeVisibleLogicalRangeChange(handleVisibleRangeChange);
+            if (settleTimer) clearTimeout(settleTimer);
+        };
+    }, [chartInstance, chartPair, redrawVolumeProfile]);
 
     useEffect(() => {
         if (!candleSeriesRef.current || !data || data.length === 0) return;

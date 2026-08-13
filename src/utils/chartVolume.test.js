@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { formatVolumeShort } from './operations';
 import {
+    buildVolumeHistogramBar,
     buildVolumeHistogramPresentation,
     LIGHTWEIGHT_CHARTS_MAX_SERIES_VALUE,
 } from './chartVolume';
@@ -57,5 +58,47 @@ describe('buildVolumeHistogramPresentation', () => {
 
         expect(result.scale).toBe(1);
         expect(result.data.map(row => row.value)).toEqual([0, 0, 0, 2_500]);
+    });
+});
+
+// A live trade moves one bar of the histogram. It is written on its own, to the
+// scale the bars already on screen are drawn to.
+describe('buildVolumeHistogramBar', () => {
+    it('draws one bar exactly as the whole series would have drawn it', () => {
+        const candles = [candle(1, 100), candle(2, 250, 1, 2)];
+        const whole = buildVolumeHistogramPresentation(candles, COLORS);
+        const one = buildVolumeHistogramBar(candles[1], { ...COLORS, scale: whole.scale });
+
+        expect(one).toEqual(whole.data[1]);
+    });
+
+    it('holds the drawn scale rather than choosing its own', () => {
+        const scale = 1_000;
+        const one = buildVolumeHistogramBar(candle(1, 5_000), { ...COLORS, scale });
+
+        expect(one.value).toBe(5);
+    });
+
+    // Rescaling for one bar would leave every other bar on screen drawn to the
+    // old scale, so a bar the held scale cannot express is refused instead — and
+    // the caller redraws the histogram whole.
+    it('refuses a bar the held scale cannot express', () => {
+        const tooLarge = LIGHTWEIGHT_CHARTS_MAX_SERIES_VALUE * 2;
+
+        expect(buildVolumeHistogramBar(candle(1, tooLarge), { ...COLORS, scale: 1 })).toBeNull();
+        expect(buildVolumeHistogramBar(candle(1, tooLarge), {
+            ...COLORS,
+            scale: 1_000,
+        })).not.toBeNull();
+    });
+
+    it('turns malformed or negative volume into a safe zero', () => {
+        expect(buildVolumeHistogramBar(candle(1, Number.NaN), COLORS).value).toBe(0);
+        expect(buildVolumeHistogramBar(candle(1, -5), COLORS).value).toBe(0);
+    });
+
+    it('answers nothing without a candle or a usable scale', () => {
+        expect(buildVolumeHistogramBar(null, COLORS)).toBeNull();
+        expect(buildVolumeHistogramBar(candle(1, 10), { ...COLORS, scale: 0 })).toBeNull();
     });
 });

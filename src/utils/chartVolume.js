@@ -45,3 +45,23 @@ export const buildVolumeHistogramPresentation = (
 
     return { data, priceFormat, scale };
 };
+
+/**
+ * One candle's bar in the presentation an already-drawn histogram is using.
+ *
+ * The scale is the drawn series' own, not this bar's: choosing a new one for a
+ * single bar would leave every other bar on screen drawn to the old one. A bar
+ * the held scale cannot express is not drawn at all — it is answered as `null`,
+ * which is the caller's signal to redraw the histogram whole and pick a scale
+ * that fits it.
+ */
+export const buildVolumeHistogramBar = (candle, { upColor, downColor, scale = 1 }) => {
+    if (!candle || !Number.isFinite(scale) || scale <= 0) return null;
+    const value = normalizeVolume(candle.volume) / scale;
+    if (value > LIGHTWEIGHT_CHARTS_MAX_SERIES_VALUE) return null;
+    return {
+        time: candle.time,
+        value,
+        color: candle.close >= candle.open ? upColor : downColor,
+    };
+};

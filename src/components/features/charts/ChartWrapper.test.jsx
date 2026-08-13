@@ -1,4 +1,4 @@
-import { render, waitFor } from '@testing-library/react'
+import { act, render, waitFor } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { ChartWrapper } from './ChartWrapper'
 import * as DataContextModule from '../../../context/DataContext'
@@ -57,6 +57,7 @@ vi.mock('../../../hooks/useDrawingContext', () => ({
 // Mock lightweight-charts
 const mockApplyOptions = vi.fn()
 const mockSetData = vi.fn()
+const mockUpdate = vi.fn()
 const mockTimeScale = {
     fitContent: vi.fn(),
     subscribeVisibleLogicalRangeChange: vi.fn(),
@@ -72,13 +73,24 @@ const mockTimeScale = {
 const mockSeries = {
     applyOptions: mockApplyOptions,
     setData: mockSetData,
+    update: mockUpdate,
     attachPrimitive: vi.fn(),
     createPriceLine: vi.fn(),
     removePriceLine: vi.fn(),
     priceScale: vi.fn(() => ({ applyOptions: vi.fn() })),
 }
+// Each series answers with its own object so a write can be attributed to the
+// series that made it, while still being recorded by the one spy the older
+// tests assert on. What a frame costs the chart is exactly which series it
+// wrote to and how much of each it wrote.
+const seriesWrites = (seriesType) => ({
+    ...mockSeries,
+    setData: (...args) => mockSetData(seriesType, ...args),
+    update: (...args) => mockUpdate(seriesType, ...args),
+})
+const writesOf = (spy, seriesType) => spy.mock.calls.filter(([type]) => type === seriesType)
 const mockChart = {
-    addSeries: vi.fn(() => mockSeries),
+    addSeries: vi.fn(seriesType => seriesWrites(seriesType)),
     timeScale: vi.fn(() => mockTimeScale),
     applyOptions: vi.fn(),
     remove: vi.fn(),
@@ -195,6 +207,38 @@ describe('ChartWrapper chart depth', () => {
         await waitFor(() => expect(loadChartHistory).toHaveBeenCalled())
     })
 
+    // The tape is running while the operator scrolls back — that is the whole
+    // point of scrolling back on a liquid contract. Every print used to rebuild
+    // the series effect, which tore down the range subscription and cancelled
+    // the debounced read it had scheduled; the next print cancelled the next
+    // one. A contract printing faster than the debounce waits never issued the
+    // request at all, so the chart stayed as short as it was.
+    it('asks for older candles while the tape keeps printing', async () => {
+        const live = run(START, 40)
+        const loadChartHistory = vi.fn(() => true)
+        const { rerender } = renderWithChart(live, loadChartHistory)
+
+        notifyRange({ from: 4, to: 30 })
+
+        for (let print = 0; print < 12; print += 1) {
+            vi.spyOn(DataContextModule, 'useDataContext').mockReturnValue(
+                createMockDataContextValue({
+                    chart: [...live.slice(0, -1), candle(live.at(-1).time, 10 + print)],
+                    loadChartHistory,
+                    panel: { selected: 'BTCUSDT', interval: '1h' },
+                }),
+            )
+            // Inside `act`, because a print is a commit and the twenty
+            // milliseconds after it are when the chart's own timers run.
+            await act(async () => {
+                rerender(<ChartWrapper />)
+                await new Promise(resolve => setTimeout(resolve, 20))
+            })
+        }
+
+        expect(loadChartHistory).toHaveBeenCalled()
+    })
+
     it('asks for nothing while the viewport is nowhere near the oldest bar', async () => {
         const { loadChartHistory } = renderWithChart(run(START, 400))
 
@@ -239,5 +283,107 @@ describe('ChartWrapper chart depth', () => {
         rerender(<ChartWrapper />)
 
         expect(mockTimeScale.setVisibleLogicalRange).not.toHaveBeenCalled()
+    })
+})
+
+// A trade moves the last candle and nothing else. The chart used to answer it by
+// redrawing every series it holds, recomputing the moving average over every bar
+// and rebuilding the whole volume histogram — the entire series' work for one
+// bar's news, on a chart that accumulates five thousand of them.
+describe('what one Spot print redraws', () => {
+    const candle = (time, close = 10) => ({
+        time,
+        open: close,
+        high: close,
+        low: close,
+        close,
+        volume: 1,
+    })
+    const run = (startTime, count) => Array.from(
+        { length: count },
+        (_unused, index) => candle(startTime + index * 3600),
+    )
+    const START = 1_700_000_000
+    const HOUR = 3600
+    // Long enough that the moving average has something to average: the SMA is
+    // over eighty bars, and under that the incremental path has no point to
+    // write and neither does the full one.
+    const OPENED = run(START, 400)
+
+    const showing = (chart) => {
+        vi.spyOn(DataContextModule, 'useDataContext').mockReturnValue(
+            createMockDataContextValue({
+                chart,
+                loadChartHistory: vi.fn(),
+                panel: { selected: 'BTCUSDT', interval: '1h' },
+            }),
+        )
+    }
+
+    // Renders the opened chart, then hands back a way to show it something else
+    // with only the writes that something else caused recorded.
+    const drawnAfter = (next) => {
+        showing(OPENED)
+        const { rerender } = render(<ChartWrapper />)
+        mockSetData.mockClear()
+        mockUpdate.mockClear()
+        showing(next)
+        rerender(<ChartWrapper />)
+        return {
+            redrawn: seriesType => writesOf(mockSetData, seriesType).length,
+            written: seriesType => writesOf(mockUpdate, seriesType).length,
+        }
+    }
+
+    beforeEach(() => {
+        vi.clearAllMocks()
+        mockTimeScale.getVisibleLogicalRange.mockReturnValue(null)
+    })
+
+    it('writes the one bar a print moved, and redraws nothing', () => {
+        const printed = [...OPENED.slice(0, -1), candle(OPENED.at(-1).time, 42)]
+        const draw = drawnAfter(printed)
+
+        expect(draw.redrawn('CandlestickSeries')).toBe(0)
+        expect(draw.redrawn('HistogramSeries')).toBe(0)
+        expect(draw.written('CandlestickSeries')).toBe(1)
+        expect(draw.written('HistogramSeries')).toBe(1)
+        // One line is the moving average, written as one point. The other is the
+        // RSI pane's own line, which computes over every bar and redraws whole —
+        // it is what §2 left, and it is stated rather than counted as nothing.
+        expect(draw.written('LineSeries')).toBe(1)
+        expect(draw.redrawn('LineSeries')).toBe(1)
+    })
+
+    it('writes the one bar that opened, and redraws nothing', () => {
+        const opened = [...OPENED, candle(OPENED.at(-1).time + HOUR, 42)]
+        const draw = drawnAfter(opened)
+
+        expect(draw.redrawn('CandlestickSeries')).toBe(0)
+        expect(draw.redrawn('HistogramSeries')).toBe(0)
+        expect(draw.written('CandlestickSeries')).toBe(1)
+        expect(draw.written('HistogramSeries')).toBe(1)
+        expect(draw.written('LineSeries')).toBe(1)
+    })
+
+    // A bar settling behind the last one is the close of the candle just past —
+    // its true high, low and volume. It reaches the chart through the same
+    // series as a tick and must not be mistaken for one.
+    it('redraws every series when a bar behind the last one settles', () => {
+        const settled = [...OPENED]
+        settled[settled.length - 2] = candle(settled.at(-2).time, 99)
+        const draw = drawnAfter(settled)
+
+        expect(draw.redrawn('CandlestickSeries')).toBe(1)
+        expect(draw.redrawn('HistogramSeries')).toBe(1)
+        expect(draw.written('CandlestickSeries')).toBe(0)
+    })
+
+    it('redraws every series when older candles arrive in front', () => {
+        const draw = drawnAfter([...run(START - 3 * HOUR, 3), ...OPENED])
+
+        expect(draw.redrawn('CandlestickSeries')).toBe(1)
+        expect(draw.redrawn('HistogramSeries')).toBe(1)
+        expect(draw.written('CandlestickSeries')).toBe(0)
     })
 })

@@ -735,16 +735,19 @@ export const DataProvider = ({
           return prev;
         }
 
+        const high = tradePrice > lastCandle.high ? tradePrice : lastCandle.high;
+        const low = tradePrice < lastCandle.low ? tradePrice : lastCandle.low;
+        // A print at the price already showing moves nothing on the chart, and
+        // on a liquid contract that is most of them — a heavily traded coin
+        // prints at one tick again and again. Answering it with a new series
+        // makes every reader of this context redraw for a candle identical to
+        // the one they are already drawing.
+        if (tradePrice === lastCandle.close && high === lastCandle.high && low === lastCandle.low) {
+          return prev;
+        }
+
         const next = [...prev];
-        const updated = { ...lastCandle };
-        updated.close = tradePrice;
-        if (tradePrice > updated.high) {
-          updated.high = tradePrice;
-        }
-        if (tradePrice < updated.low) {
-          updated.low = tradePrice;
-        }
-        next[lastIndex] = updated;
+        next[lastIndex] = { ...lastCandle, close: tradePrice, high, low };
         return next;
       });
     },
