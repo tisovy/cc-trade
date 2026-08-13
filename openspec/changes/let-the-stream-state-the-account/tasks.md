@@ -29,3 +29,8 @@
 - [ ] 4.2 Operator confirms on live data that a fill moves the position row and the wallet on screen at once, without the pause it had.
 - [ ] 4.3 Operator confirms a newly opened position shows no LIQ line for a moment and then shows the exchange's, and never a wrong one.
 - [ ] 4.4 Operator reads `node scripts/read-desk-record.mjs` after a run and confirms the account reads are few and each has a reason they recognise.
+
+## 5. Found In Audit
+
+- [x] 5.1 Collapse the reason of requests that queue behind a running read the way their resources already collapse. Whichever asked last used to decide, so a frame landing behind the operator's refresh, a reconnect or the periodic beat turned that full read into one allowed to state only a liquidation price — and those reads are precisely what corrects a frame the desk never saw. `unstated` now yields to any other reason sharing the pass.
+- [x] 5.2 Prove 5.1 both as a rule and end to end: a position the desk holds only because a frame stated it, gone at the exchange, is removed by an operator refresh that a frame queued behind.

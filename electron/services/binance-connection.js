@@ -76,6 +76,7 @@ import {
     reconcileFuturesUnstatedBalanceRead,
     reconcileFuturesUnstatedPositionRead,
     reconcileFuturesWorkingOrderRead,
+    widenFuturesAccountReadReason,
 } from './futures-account-state.js';
 import WebSocket from 'ws';
 import {
@@ -1406,7 +1407,13 @@ export function setupBinanceConnection({
     let _futuresAccountRefreshQueuedReason = null;
     const queueFuturesAccountRefresh = (resources, reason) => {
         _futuresAccountRefreshQueued = true;
-        _futuresAccountRefreshQueuedReason = reason;
+        // The union rule again, applied to why the pass is going out: a frame
+        // that queues behind the operator's refresh must not turn it into a read
+        // that may only state a liquidation price.
+        _futuresAccountRefreshQueuedReason = widenFuturesAccountReadReason(
+            _futuresAccountRefreshQueuedReason,
+            reason,
+        );
         if (resources === null || _futuresAccountRefreshQueuedResources === null) {
             _futuresAccountRefreshQueuedResources = null;
             return;

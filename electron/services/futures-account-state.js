@@ -38,6 +38,27 @@ export const FUTURES_ACCOUNT_READ_REASONS = Object.freeze([
     'setting',
 ]);
 
+/**
+ * Which reason a pass answering more than one request carries.
+ *
+ * Requests that arrive while a read is running collapse into one pass, and their
+ * resources into the union of what they asked for — never into less. Their
+ * reasons have to collapse the same way, and `unstated` is the one that cannot
+ * simply win: it is the only reason that *narrows* what a read may say. A read
+ * issued because a frame could not carry a liquidation price states that price
+ * and carries the frame's own figures over everything else, which is exactly
+ * right for the frame that asked for it and exactly wrong for a reconnect, the
+ * periodic beat or the operator's refresh. Those reads exist to correct a frame
+ * the desk never saw, and a read that may not replace a position row cannot do
+ * it. So `unstated` yields to any other reason queued for the same pass.
+ */
+export const widenFuturesAccountReadReason = (held, reason) => {
+    const asked = reason ?? null;
+    if (held === null || held === undefined) return asked;
+    if (held === asked) return held;
+    return held === 'unstated' ? asked : held;
+};
+
 export const FUTURES_ACCOUNT_RESOURCE_STATUS = Object.freeze({
     IDLE: 'idle',
     LOADING: 'loading',

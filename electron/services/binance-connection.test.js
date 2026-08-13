@@ -1067,6 +1067,54 @@ describe('setupBinanceConnection user-data orchestration', () => {
         }
     });
 
+    // A read asked for by a frame may only state what the frame could not, and
+    // carries the frame's own figures over the rest — which is right for that
+    // read and wrong for every other one. The operator's refresh, a reconnect
+    // and the periodic beat exist to correct a frame the desk never saw, and a
+    // read that may not replace a position row cannot do it. Requests that queue
+    // behind a running read collapse into one pass, so without a rule for the
+    // reason, whichever asked last decided what the whole pass was allowed to
+    // say.
+    it('does not narrow a full read that a frame queued behind', async () => {
+        const loads = futuresAccountLoads();
+        await openFuturesStream(loads);
+        const socket = moduleMocks.futuresUserDataSockets[0];
+
+        // A position the desk holds only because a frame said so.
+        socket.handlers.message(accountUpdate({
+            P: [{ s: 'TUTUSDT', pa: '25', ep: '2.1', up: '3', mt: 'cross', iw: '0', ps: 'BOTH' }],
+        }));
+        await flushMicrotasks();
+        expect(heldPositions()).toHaveLength(1);
+
+        // It is gone at the exchange, and the frame that would have said so
+        // never arrived — the case the operator's refresh is for.
+        loads.positions.mockResolvedValue({ futures_positions: [] });
+        // Hold the read the fold scheduled open, so what follows queues behind it.
+        let releaseBalances = null;
+        loads.balances.mockImplementationOnce(() => new Promise((resolve) => {
+            releaseBalances = () => resolve({
+                futures_balances: { USDT: { available: '100', total: '100' } },
+            });
+        }));
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(releaseBalances).not.toBeNull();
+
+        await runFuturesCommand({
+            action: 'account.refresh', clientOrderId: 'refresh-behind', symbol: 'TUTUSDT',
+        });
+        // And now a frame lands on top of the queued refresh.
+        socket.handlers.message(accountUpdate({ B: [{ a: 'USDT', wb: '1020.5', cw: '1020.5' }] }));
+        await vi.advanceTimersByTimeAsync(1_000);
+        await flushMicrotasks();
+
+        releaseBalances();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+
+        expect(heldPositions()).toEqual([]);
+    });
+
     // With no stream there is nothing else to learn it from, and the read is
     // the only way the desk finds out what its own command did.
     it('reads the account back after a command no stream can report', async () => {

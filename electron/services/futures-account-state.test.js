@@ -17,6 +17,7 @@ import {
     FUTURES_WORKING_ORDER_READ_LAG_MS,
     reconcileFuturesWorkingOrderRead,
     sanitizeFuturesAccountError,
+    widenFuturesAccountReadReason,
 } from './futures-account-state.js';
 
 describe('Futures account resource state', () => {
@@ -704,5 +705,42 @@ describe('what a read issued only for the unstated values may change', () => {
             USDT: { available: '640', total: '1000' },
             BNB: { available: '2', total: '2' },
         }).BNB).toEqual({ available: '2', total: '2' });
+    });
+});
+
+// Two requests can queue behind one running read, and the pass that follows
+// answers both of them. Its resources are already the union of what they asked
+// for; without the same rule on the reason, whichever asked last decided what
+// the pass was allowed to say — and a frame arriving a moment after the
+// operator pressed refresh turned that refresh into a read that may not correct
+// a single position row.
+describe('which reason a pass answering two requests carries', () => {
+    it('takes the reason when nothing is queued yet', () => {
+        expect(widenFuturesAccountReadReason(null, 'unstated')).toBe('unstated');
+    });
+
+    it('keeps one reason when both requests state it', () => {
+        expect(widenFuturesAccountReadReason('unstated', 'unstated')).toBe('unstated');
+    });
+
+    it('does not let a frame narrow the read the operator asked for', () => {
+        expect(widenFuturesAccountReadReason('refresh', 'unstated')).toBe('refresh');
+    });
+
+    it('widens a read asked for by a frame when a reconnect queues behind it', () => {
+        expect(widenFuturesAccountReadReason('unstated', 'stream')).toBe('stream');
+    });
+
+    // Two full-power reasons say the same thing about what the pass may state,
+    // so the first one stands rather than the record gaining a reason nobody
+    // asked for.
+    it('keeps the first of two reasons that narrow nothing', () => {
+        expect(widenFuturesAccountReadReason('command', 'setting')).toBe('command');
+    });
+
+    // A site that stated no reason loses its record line by design. It must not
+    // gain the narrowing of a frame's read on the way.
+    it('does not carry a narrowing reason onto a read that stated none', () => {
+        expect(widenFuturesAccountReadReason('unstated', null)).toBeNull();
     });
 });
