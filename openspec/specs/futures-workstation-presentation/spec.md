@@ -173,11 +173,23 @@ The workstation SHALL persist recently selected contracts, favourites, and the l
 - **THEN** recently traded contracts appear first in the single contract list, without a second strip repeating the same entries
 
 ### Requirement: Interface scale is adjustable and persisted
-The workstation SHALL express its type sizes against a persisted interface scale with a legible floor, expose a control to change it, and SHALL additionally provide persisted window-level zoom shortcuts for surfaces outside that scale.
+The workstation SHALL express its type sizes against a persisted interface scale
+from 70% through 160% in five-percentage-point steps, expose controls to decrease,
+reset, and increase that scale, and keep 100% as the reset value. It SHALL
+additionally provide persisted window-level zoom shortcuts for surfaces outside
+that scale.
+
+#### Scenario: Operator reduces the interface below the previous floor
+- **WHEN** the operator repeatedly decreases the interface scale from 85%
+- **THEN** the workstation offers 80%, 75%, and 70%, stops at 70%, and persists the selected value across a restart
 
 #### Scenario: Operator enlarges the interface
 - **WHEN** the operator increases the interface scale
 - **THEN** every futures surface grows proportionally and the choice survives a restart
+
+#### Scenario: Operator resets the interface scale
+- **WHEN** the operator activates the scale reset control from any supported value
+- **THEN** the interface returns to 100% and persists that value
 
 #### Scenario: Operator zooms the window
 - **WHEN** the operator presses the platform zoom-in, zoom-out, or reset shortcut
@@ -568,14 +580,23 @@ give up its column to the element's title before the result itself does.
 
 ### Requirement: The rail marks the contracts recently worked with
 The instrument rail SHALL present contracts the operator has recently selected
-as a wrapping group of compact pills rather than as full-width contract rows or
-rows carrying a `recent` suffix. The group SHALL preserve most-recent-first order
-across an app restart and SHALL allow several ordinary USDⓈ-M symbols to occupy
-one line at the instrument rail's supported width. Each pill SHALL expose the
-contract selection and favorite state as accessible controls and SHALL disclose
-which contract is selected. When no persisted recent contract exists, the
-workstation's active starting contract SHALL seed the group so the retained idle
-list is never absent on a fresh installation.
+as a stable three-column group of compact pills rather than as full-width
+contract rows or rows carrying a `recent` suffix. The group SHALL preserve
+most-recent-first order across an app restart, and each row SHALL hold three
+equal-width pill slots at the instrument rail's supported workstation width.
+Long symbols SHALL remain within their slot and expose their full value without
+changing the grid tracks or replacing any visible characters with truncation.
+
+Each pill SHALL expose contract selection and removal as separate accessible
+controls and SHALL disclose which contract is selected. Removing an inactive
+pill SHALL remove only that symbol from persisted recency: it SHALL NOT select a
+different contract or change the symbol's persisted favorite state. The selected
+contract's remove control SHALL remain unavailable until another contract is
+selected so the active market remains represented in the rail. Favorite state
+SHALL remain manageable from the searchable catalogue rather than from a recent
+pill. When no persisted recent contract exists, the workstation's active starting
+contract SHALL seed the group so the retained idle list is never absent on a
+fresh installation.
 
 When the search field is empty, the recent-pill group SHALL be the only contract
 list and the rail SHALL NOT render the ordinary catalogue beneath it. When a
@@ -592,8 +613,12 @@ while otherwise usable rail space remains empty.
 - **THEN** it remains a confirmed recent-contract pill rather than a full-width row carrying only its contract type, and no second catalogue list is rendered
 
 #### Scenario: Several recent contracts are available
-- **WHEN** the rail has several ordinary-length recent USDⓈ-M symbols and no search query
-- **THEN** they wrap as compact pills with more than one fitting on a line instead of consuming one full row each
+- **WHEN** the rail has at least six ordinary-length recent USDⓈ-M symbols and no search query
+- **THEN** the symbols occupy two rows of three equal-width pills instead of three or more two-pill rows
+
+#### Scenario: A long recent symbol is shown
+- **WHEN** a recent symbol is wider than its one-third rail slot
+- **THEN** its full value wraps within that slot, the row grows as needed, and no character is hidden or replaced by an ellipsis
 
 #### Scenario: Search is empty
 - **WHEN** the search field has no query
@@ -603,9 +628,17 @@ while otherwise usable rail space remains empty.
 - **WHEN** the operator activates a recent-contract pill
 - **THEN** that contract becomes selected and the pill discloses the selected state
 
+#### Scenario: An inactive recent contract is removed
+- **WHEN** the operator activates the remove control on an inactive recent-contract pill
+- **THEN** that pill disappears, the persisted recency list omits its symbol, the current contract remains selected, and the symbol's favorite state is unchanged
+
+#### Scenario: The active recent contract is protected
+- **WHEN** the operator reads the remove control on the selected contract's pill
+- **THEN** the control is unavailable and identifies that the active contract cannot be removed until another contract is selected
+
 #### Scenario: A recent favorite is toggled
-- **WHEN** the operator activates the favorite control associated with a recent-contract pill
-- **THEN** that contract's persisted favorite state changes without selecting a different contract
+- **WHEN** a recent contract appears in the unified search results and the operator activates its favorite control
+- **THEN** that contract's persisted favorite state changes without selecting a different contract or restoring a removed recent pill
 
 #### Scenario: The app is restarted
 - **WHEN** the operator selects a contract, closes the app and reopens it
@@ -620,11 +653,11 @@ while otherwise usable rail space remains empty.
 - **THEN** the recent-pill group yields to a unified matching catalogue list in which a recent contract appears no more than once and non-recent matches remain selectable
 
 #### Scenario: The rail has unused vertical space
-- **WHEN** recent pills wrap onto additional lines and the execution ticket still leaves unused space below it
-- **THEN** the recent-pill group expands to show those lines without an internal vertical scrollbar
+- **WHEN** recent pills occupy additional rows and the execution ticket still leaves unused space below it
+- **THEN** the recent-pill group expands to show those rows without an internal vertical scrollbar
 
 #### Scenario: Recent pills exhaust the rail height
-- **WHEN** showing every wrapped recent pill would leave insufficient height for the execution ticket within the rail
+- **WHEN** showing every recent-pill row would leave insufficient height for the execution ticket within the rail
 - **THEN** the recent-pill group is constrained to the remaining height and becomes internally scrollable without pushing the ticket outside the rail
 
 ### Requirement: The order book and tape reserve vertical space for market data
@@ -1233,14 +1266,20 @@ visible area of the header.
 - **THEN** the header's values remain visible, and the header does not scroll
 
 ### Requirement: Scrolling belongs to the unbounded lists
-Only the contract list, the aggregate-trade tape and the portfolio dock's tables
-SHALL scroll. The instrument rail as a whole, the trading ticket, the market
-header, the chart column and the order book SHALL NOT introduce a scrollbar of
-their own.
+Only the recent-contract group, searchable contract list, execution-ticket body,
+aggregate-trade tape and portfolio dock's tables SHALL scroll. The ticket body
+MAY scroll only when the ticket is taller than the rail allocation, while the
+ticket tabs and the instrument rail stay in place. The instrument rail as a
+whole, the execution ticket as a whole, the market header, the chart column and
+the order book SHALL NOT introduce a scrollbar of their own.
 
 #### Scenario: The rail holds more than fits
-- **WHEN** the contract list is longer than the rail is tall
+- **WHEN** a recent or searchable contract list is longer than the rail is tall
 - **THEN** the list scrolls inside itself and the trading ticket below it stays in place
+
+#### Scenario: The ticket body is taller than its allocation
+- **WHEN** the ticket fields and actions need more height than the instrument rail can allocate to them
+- **THEN** only the ticket body scrolls, its tabs remain visible, and every order action remains reachable
 
 ### Requirement: The shared market rail prioritizes the order book
 At supported desktop window sizes where the order book and aggregate-trade tape
@@ -1258,12 +1297,21 @@ panel SHALL paint or scroll into the other's allocation.
 - **THEN** the 65/35 panel split remains unchanged and each panel contains its own rows
 
 ### Requirement: Market-data and portfolio scrollbars stay compact
-The aggregate-trade list and every scrollable portfolio-dock table SHALL use a
+Every scrollable recent-contract group, searchable contract list,
+execution-ticket body, aggregate-trade list and portfolio-dock table SHALL use a
 workstation-themed scrollbar whose vertical width and horizontal height are no
 greater than 6 CSS pixels. The track SHALL not introduce light native chrome or
 arrow buttons, while the thumb SHALL remain visibly distinct from the track and
 gain emphasis on hover. Styling SHALL preserve wheel, touchpad, keyboard, thumb
 dragging, and any required horizontal scrolling behavior.
+
+#### Scenario: A contract list overflows vertically
+- **WHEN** a recent or searchable contract list contains more rows than its rail allocation can show
+- **THEN** it remains vertically scrollable through compact workstation-themed chrome no wider than 6 CSS pixels
+
+#### Scenario: The execution ticket body overflows vertically
+- **WHEN** the execution ticket body contains more controls than its rail allocation can show
+- **THEN** every control remains reachable through a compact scrollbar without light native track or arrow-button chrome
 
 #### Scenario: Aggregate trades overflow vertically
 - **WHEN** the aggregate-trade list contains more rows than its 35-percent panel allocation can show
@@ -1277,3 +1325,63 @@ dragging, and any required horizontal scrolling behavior.
 - **WHEN** the pointer hovers a compact scrollbar thumb
 - **THEN** the thumb becomes more prominent without changing the list's dimensions or scroll position
 
+### Requirement: Chart tools fit without a toolbar scrollbar
+The chart toolbar SHALL present its interval choices and all four display-only
+drawing and alert actions within the visible chart width at supported desktop
+workstation sizes without introducing a horizontal scrollbar. Each chart action
+SHALL use a compact recognizable icon while retaining its complete accessible
+name, explanatory pointer title, pressed state where applicable, and disabled
+state.
+
+#### Scenario: Desktop chart toolbar is width constrained
+- **WHEN** the chart column is rendered at its narrowest supported desktop width
+- **THEN** every interval and chart-tool action remains visible in one toolbar row and the toolbar has no horizontal scrollbar
+
+#### Scenario: Operator reads an icon-only chart action
+- **WHEN** the operator focuses or points at a drawing or alert action
+- **THEN** the complete action name remains available to assistive technology and as a pointer title even though the visible control is an icon
+
+#### Scenario: Chart action availability changes
+- **WHEN** a drawing, draft price, or display alert makes a chart action available or unavailable
+- **THEN** the matching icon control preserves the same pressed or disabled state and invokes the same display-only action
+
+### Requirement: Structural color is distinct from trading risk
+The futures workstation SHALL use neutral dark surfaces and borders for layout,
+and a calm non-red accent for ordinary selection, focus, and active workspace
+identity. Red SHALL be reserved for sell direction, negative performance,
+liquidation risk, destructive controls, unavailable or disconnected state, and
+errors. Positive outcomes SHALL remain green and cautionary state SHALL remain
+amber so ordinary navigation cannot be mistaken for trading risk.
+
+#### Scenario: Operator selects an ordinary control
+- **WHEN** the operator selects a recent contract, chart interval, or display-only chart tool
+- **THEN** the control uses the calm interaction accent rather than the red negative-state color
+
+#### Scenario: Negative and positive readings are shown together
+- **WHEN** the workstation renders a loss or sell state beside a profitable or buy state
+- **THEN** the former remains red, the latter remains green, and neither color is reused by surrounding panel borders
+
+#### Scenario: Workstation structure is rendered
+- **WHEN** the futures desk draws its shell, panel separators, and inactive surfaces
+- **THEN** those structural elements use neutral slate tones rather than a saturated red outline
+
+### Requirement: The portfolio dock can yield space to the chart
+The lower portfolio dock SHALL open in its current expanded state and expose an
+accessible control that collapses both dock panels into one compact summary row
+for the current session. The collapsed row SHALL retain the positions count,
+working-orders count, total unrealized PnL, and an expand control while removing
+the full tables from layout so the chart and market rails receive the released
+height. Collapsing and expanding SHALL NOT mutate account data or reset the
+selected order view.
+
+#### Scenario: Operator collapses the expanded dock
+- **WHEN** the operator activates the collapse control
+- **THEN** both full dock panels yield their layout height and one compact row states positions, working orders, and total unrealized PnL
+
+#### Scenario: Operator expands the compact dock
+- **WHEN** the operator activates the expand control after changing the dock's order view before collapse
+- **THEN** the full dock returns with the same order view, positions, orders, and account readings it held before collapse
+
+#### Scenario: A new workstation session starts
+- **WHEN** the futures workstation mounts in a new session
+- **THEN** the portfolio dock starts expanded and no collapsed preference is restored from storage
