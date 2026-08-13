@@ -24,4 +24,4 @@
 ## 5. Verification
 
 - [x] 5.1 `npm run lint`, `npm test`, `npm run check:futures-production`.
-- [ ] 5.2 Operator confirms on live data that the PnL moves during a sharp move rather than stepping once a second, and that the confirmed figure still matches Binance.
+- [ ] 5.2 Operator confirms on live data that the PnL moves during a sharp move rather than stepping once a second, and that the confirmed figure still matches Binance — step 30 п.4–6 in `verify-the-desk-in-one-sitting/runbook.md`, which needs an open position, plus step 12 п.3 for the half that does not (the last price keeps moving with a tape filter set high). Splitting them is what lets the tape half be read for free in part 1.

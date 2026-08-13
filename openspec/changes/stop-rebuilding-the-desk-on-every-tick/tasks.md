@@ -32,7 +32,8 @@
 ## 5. Verification
 
 - [x] 5.1 `npm run lint`, `npm test` (1693 passed, 106 files), `npm run check:futures-production`.
-- [ ] 5.2 Operator confirms on live data that the desk stays responsive on a liquid contract with deep history loaded. Written as a step in `verify-the-desk-in-one-sitting/runbook.md` rather than left here, so the operator runs one list.
+- [ ] 5.2 Operator confirms on live data that the desk stays responsive on a liquid contract with deep history loaded — step 12, «Быстрый контракт: стакан и лента идут ровно», in `verify-the-desk-in-one-sitting/runbook.md` for the Futures workstation, and step 13 for the Spot chart, which is where the deep history and the RSI live. Both are free to run, so both sit in part 1.
+- [x] 5.3 Correct the runbook's "not ready to verify" list, which still said this change's responsiveness work had not been started. *(It was written before §1–§4 landed and was never revisited; an operator reading it would have skipped steps 12 and 13 as premature.)*
 
 ### Measured
 

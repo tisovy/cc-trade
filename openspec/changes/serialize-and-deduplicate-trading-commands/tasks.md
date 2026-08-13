@@ -13,4 +13,4 @@
 ## 3. Verification
 
 - [x] 3.1 Run unit and integration suites and the production-guard checks.
-- [ ] 3.2 Operator confirms on live data that ordinary placement, amendment and cancellation are unchanged, that a cancellation sent straight after an amendment of the same order still cancels it, and that two contracts do not wait on each other.
+- [ ] 3.2 Operator confirms on live data that ordinary placement, amendment and cancellation are unchanged, that a cancellation sent straight after an amendment of the same order still cancels it, and that two contracts do not wait on each other — step 28, «Одна команда — одна отправка», in `verify-the-desk-in-one-sitting/runbook.md`. The step states plainly that there is nothing new to see, and that the observation is negative: nothing stalled. The 40-second worst case it names is the one the operator is asked to report if they ever meet it.

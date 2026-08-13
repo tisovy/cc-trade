@@ -30,4 +30,4 @@ per frame, on the frame's critical path.
 ## 4. Verification
 
 - [x] 4.1 `npm run lint`, `npm test`, `npm run check:futures-production`.
-- [ ] 4.2 Operator confirms on live data that a dragged order follows the pointer immediately, that the order stays visible until the cancellation is confirmed, and that a quick drag-and-drop lands where it was dropped.
+- [ ] 4.2 Operator confirms on live data that a dragged order follows the pointer immediately, that the order stays visible until the cancellation is confirmed, and that a quick drag-and-drop lands where it was dropped — step 27, «Драг: ордер идёт за рукой», in `verify-the-desk-in-one-sitting/runbook.md`, merged there with `cancel-the-order-the-drag-lifts` 6.2 because both drag the same order and splitting them would have the operator pay for the same order twice. The step states the exposure the merge creates: one order, but about seven placements of it, since every drag is a cancel and a place.

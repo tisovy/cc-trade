@@ -30,7 +30,7 @@
 
 - [x] 5.1 `npm run lint`, `npm test`, `npm run check:futures-production`.
 - [x] 5.2 Count the account history commands sent during a scripted sequence of tab clicks in the test, and assert the count rather than asserting the absence of a spy call.
-- [ ] 5.3 Operator confirms on live data: switching between the two history views is instant and does not blank the table, and an order filled after the review was opened appears in it without pressing refresh.
+- [ ] 5.3 Operator confirms on live data — step 5, «Обзор счёта читается один раз», in `verify-the-desk-in-one-sitting/runbook.md` for the first half (switching between the two history views is instant and does not blank the table), and step 30 п.9 for the second (an order filled after the review was opened appears in it without pressing refresh). Split across two steps because the second half needs a fill, and every step that costs money is in part 3.
 
 ## 6. Stated Limits, Not Fixed Here
 
@@ -55,4 +55,4 @@ all of them real, all of them fixed here.
 - [x] 8.4 Where the recent day alone fills the fan-out, the older end is not read and the review says the discovery was not complete — it stops claiming a look it did not take.
 - [x] 8.5 A closed position is what was closed. A window of fills that opens while a position is already held shows less exposure than the operator has, so closing all of it reduced past what the walk could see — and that was read as a reversal, which invented a position in the opposite direction, priced at both ends, and filed it in the review beside real ones. Realized PnL settles it: a reversal realizes exactly what closing the visible part realizes, and anything else means more was closed than the fills account for. The entry of such a position comes from the realized PnL, which states the whole position's average rather than the part of it inside the window.
 - [x] 8.6 Prove by test: a narrower read keeps the contracts it did not cover; a read that did cover a contract still drops a row it no longer returns; the walk reads the last day first and bounds the older walk to before it; a window opened inside a position closes the whole position and reports no reversal; a genuine reversal is still reported.
-- [ ] 8.7 Operator confirms on live data: a position closed and then reopened on the same contract stays in the closed-position list, and the list holds no position they did not take.
+- [ ] 8.7 Operator confirms on live data — step 32, «Закрытая позиция остаётся закрытой», in `verify-the-desk-in-one-sitting/runbook.md` for the reopen (a position closed and then reopened on the same contract stays in the closed-position list), and step 5 for the sweep of the whole list (it holds no position they did not take). The sweep costs nothing, so it is read in part 1 rather than paid for again in part 3.

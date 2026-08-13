@@ -21,5 +21,5 @@
 ## 4. Verification
 
 - [x] 4.1 `npm run lint`, `npm test`, `npm run check:futures-production`, `npm run check:command-path`.
-- [ ] 4.2 Operator confirms on live data that placing and dragging orders no longer refuses the next one with `Loading Futures account state`, that the sizing panel and the `SYNC` badge stop flashing, and that the desk stays tradable through a fast run of orders.
-- [ ] 4.3 Operator reads `node scripts/read-desk-record.mjs` after such a run and confirms the answer times it reports match what the desk felt like.
+- [ ] 4.2 Operator confirms on live data that placing and dragging orders no longer refuses the next one with `Loading Futures account state`, that the sizing panel and the `SYNC` badge stop flashing, and that the desk stays tradable through a fast run of orders — step 26, «Быстрая серия ордеров не выключает торговлю», in `verify-the-desk-in-one-sitting/runbook.md`.
+- [ ] 4.3 Operator reads `node scripts/read-desk-record.mjs` after such a run and confirms the answer times it reports match what the desk felt like — step 34 п.1, «Сколько на самом деле занимает ордер». Read at the end of the sitting rather than after step 26, so the record has the whole pass in it. Verified against the script: the section is titled `How long commands took to answer` (`scripts/read-desk-record.mjs:285`).

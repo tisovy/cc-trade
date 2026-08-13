@@ -38,4 +38,18 @@
 
 - [x] 7.1 Run unit and integration suites and the production-guard checks.
 - [x] 7.3 Remove the "Interim Operational Risk" section from the proposal once the guarantees hold, so the accepted risk is not carried into the archive as if it still applied.
-- [ ] 7.2 Record a live confirmation on a single minimum-size Futures order that an induced ambiguous outcome resolves through reconciliation without creating a second order, with `FUTURES_MAX_ORDER_USDT` set.
+- [x] 7.2 ~~Record a live confirmation on a single minimum-size Futures order that an induced ambiguous outcome resolves through reconciliation without creating a second order, with `FUTURES_MAX_ORDER_USDT` set.~~ **Not achievable by hand; recorded as `COVERED BY TEST ONLY` rather than handed to the operator.** Measured 2026-08-13 against this desk's own classifier (`trading-command-outcome.js`, `futures-trading-adapter.js:90`), three probes through a real `SocksProxyAgent`:
+
+  | Proxy | What the desk gets | Classified |
+  |---|---|---|
+  | stopped (nothing listening) | `connect ECONNREFUSED`, 59 ms, `code: null` | determinate |
+  | frozen before the tunnel is up | `Proxy connection timed out`, 30.1 s, `code: null` | determinate |
+  | frozen with the tunnel already up | `ETIMEDOUT`, 20.2 s | **indeterminate** |
+
+  Only the third row reaches `reconcileAmbiguousFuturesCommand`, and the agent opens a fresh tunnel per request (no keep-alive), so the window in which freezing the proxy produces it is one round trip to Binance — 340–800 ms on this operator's link. An operator cannot aim at it, and the branch worth the most — the exchange *has* the order — additionally requires the freeze to land after the request was relayed. The runbook says so under «Чего этот прогон закрыть не может» with the table above.
+
+  Two things the measurement also settled, both currently safe: `DETERMINATE_TRANSPORT_CODES` never actually fires on this desk, because errors surfacing through the SOCKS agent carry no `code` at all and fall through to the `code === null → determinate` default; and that default is the correct one here, since both code-less cases are connect-phase failures where no request bytes were written.
+
+  Held by test instead: `trading-command-outcome.test.js` (503 and timeout → `UNKNOWN`, business rejection stays determinate) and `binance-connection.test.js` (an ambiguous placement whose order exists never produces a second submission; a retried placement reaches the exchange with the first attempt's identity).
+
+  This change therefore has no step in the runbook, and that is the finding rather than an omission: it was listed for a live sitting for three days on a promise the sitting cannot keep.

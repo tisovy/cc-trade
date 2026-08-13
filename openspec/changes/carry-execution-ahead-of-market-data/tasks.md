@@ -51,7 +51,7 @@
 - [x] 5.1 Re-measure the renderer's per-frame parse-and-validate cost and the main process's per-frame outbound cost, and record before and after. Recorded below.
 - [x] 5.2 Measure the delay from an execution report arriving at the main process to the trading hook applying it, with a depth backlog present and without one. Recorded below.
 - [x] 5.3 `npm run lint`, `npm test` (1557 passed), `npm run check:futures-production`.
-- [ ] 5.4 Operator confirms on live data that a fill on a liquid contract leaves the working-orders list and the chart promptly during a fast move, not after it. Written as a step in `verify-the-desk-in-one-sitting/runbook.md` rather than left here, so the operator runs one list.
+- [ ] 5.4 Operator confirms on live data that a fill on a liquid contract leaves the working-orders list and the chart promptly during a fast move, not after it — step 31, «Исполнение впереди рыночных данных», in `verify-the-desk-in-one-sitting/runbook.md`, so the operator runs one list. It is the one step whose whole premise is a fast move, so it is the one step the operator may have to wait for rather than stage.
 
 ### Measured
 

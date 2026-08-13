@@ -23,4 +23,29 @@
 ## 4. Verification Of The Verification
 
 - [ ] 4.1 No confirmation item anywhere is checked without a line in the ledger behind it.
-- [ ] 4.2 The runbook's "not ready to verify" list matches the open changes at the time the pass is run; if work landed in between, the pass covers it or the list says why not.
+- [x] 4.2 The runbook's "not ready to verify" list matches the open changes at the time the pass is run; if work landed in between, the pass covers it or the list says why not. *(Rebuilt 2026-08-13 against `openspec list`. It had gone stale in both directions: it still said `stop-rebuilding-the-desk-on-every-tick` had not been started, when the change is 20/21 and now owns steps 12 and 13; and it named `keep-the-chart-loadable` as open when the change is archived. It now names the six changes that are genuinely not ready, and separately the two known gaps that no change owns yet — the flat candle-freshness threshold, and the misleading wording on `TRADIFI_PERPETUAL` contracts.)*
+
+## 5. One List, Not A Main List And Four Appendices
+
+The runbook reached 1306 lines: thirteen numbered steps, then eleven "Дописано"
+sections written by three sessions in three styles, several of which contradicted
+the ordering the numbered list promised.
+
+- [x] 5.1 Merge every appended section into the numbered list. Thirty-four steps in three parts, no appendices, no back-references to earlier steps.
+- [x] 5.2 Order the parts by what they cost, not by when they were written: everything readable on a live exchange for free, then the one outage, then the steps that place real orders.
+- [x] 5.3 Keep the outage single, as agreed between the two sessions that met it separately. Steps 16–20 all run inside one break, with the warning that touching the desk during it resets the reconnect ladder kept beside the step it protects. A second, short break is taken afterwards for the Spot chart, and the reason is stated rather than left as an inconsistency: switching to Spot rebuilds the market session, which is exactly what step 20 measures.
+- [x] 5.4 State the price of the pass before it starts, in the terms the operator decides on: about two hours, ~34 orders, seven of which fill, ≈0.3–0.5 USDT in taker fees at a 100 USDT notional, and one uncontrolled risk — a minimum-size position held open across steps 30, 31 and 32 while the market moves. The header said "около сорока минут" and "несколько центов комиссии"; both were written when the list had thirteen steps.
+- [x] 5.5 Name the one step that is riskier than the rest, rather than averaging it away: step 33 needs a stop that actually triggers, so it is the only step whose moment of execution the operator does not choose. It is last and nothing depends on it.
+
+## 6. Audit Of The Promises Before They Reach The Operator
+
+Every change with an open operator item was checked against the code before its
+step was handed over, on the finding that one change had been asking the operator
+to place a live order to verify a case it does not close.
+
+- [x] 6.1 Two changes had no step at all despite being listed for the sitting. `let-the-stream-state-the-account` had an unlabelled section that named no change; it is now steps 30 and 34. `harden-trading-command-integrity` had nothing.
+- [x] 6.2 `harden-trading-command-integrity` 7.2 cannot be run by hand, and the pass was going to be asked for it anyway. Measured three ways through a real `SocksProxyAgent`: a stopped proxy is a determinate rejection in 59 ms, a proxy frozen before its tunnel is up is a determinate rejection after 30.1 s, and only a proxy frozen with the tunnel already up gives the `ETIMEDOUT` that reaches reconciliation — a window of one round trip, 340–800 ms, opened fresh per request. Retired to `COVERED BY TEST ONLY` with the table, in that change and in the runbook.
+- [x] 6.3 `answer-the-command-that-asked` 4.2 was one task making two claims of different kinds. The cancel-all half is step 29; the unresolved-outcome half is the same unstageable case as 6.2 and was already recorded as such — for a reason that was close but not the real one. The real one is now written down.
+- [x] 6.4 `bootstrap-the-book-on-a-quiet-market` 4.3 was being blocked by a chart, not by a book. The 2026-08-12 pass met every book expectation and was recorded as not closing the item because the chart went stale. The threshold is still flat at `CANDLES_MS: 5_000` and the chart still leaves `live` on a contract with no trades; what changed is that it is now a label. The book is judged in step 10, the chart in step 11, and the threshold is named in the "not ready" list as having no change behind it.
+- [x] 6.5 `verify-live-futures-account-read` 1.5 asks that its verification place nothing, while its 1.4 was being served by a step that places an order. Step 23 now tells the operator to skip the placement if an order is already working elsewhere, and 1.5 records the difference instead of hiding it.
+- [x] 6.6 Confirm the promises that check out, rather than only reporting the ones that do not: the eight grouping steps the runbook names are exactly `GROUPING_MULTIPLIERS`; the seven account-read reasons it names are exactly the seven the desk emits; `Refusals by the code the exchange gave`, `How long commands took to answer` and `Why the account was read` are the three section titles `read-desk-record.mjs` actually prints; `liquidationPrice` is never derived in the renderer, only read from the exchange; and after a command the desk re-reads the whole account only when the stream is not carrying orders.

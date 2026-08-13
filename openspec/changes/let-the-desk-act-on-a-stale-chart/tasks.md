@@ -20,4 +20,5 @@
 ## 4. Verification
 
 - [x] 4.1 `npm run lint`, `npm test`, `npm run check:futures-production`.
-- [ ] 4.2 Operator confirms on live data that a quiet or resynchronizing contract no longer takes the chart and book controls away, and that a price taken during one is confirmed with its age shown.
+- [ ] 4.2 Operator confirms on live data that a quiet or resynchronizing contract no longer takes the chart and book controls away, and that a price taken during one is confirmed with its age shown — step 11, «Тихий график: надпись, а не запрет», in `verify-the-desk-in-one-sitting/runbook.md`, plus step 9 п.3 for the book's levels and step 19 for the half that needs a real break (`STALE`/`DISCONNECTED` in red, never `QUIET`), which lives in the one outage the pass takes.
+- [x] 4.3 Keep the two refused sub-steps in the list rather than dropping them. *(2026-08-12 the operator confirmed the `QUIET` plaque and declined the price-picking and age-on-confirmation sub-steps, saying they would not trade off a quiet chart. Both are kept because neither places an order: the confirmation panel is opened and dismissed with Esc, and nothing reaches the exchange. Without them the arming and the age are held by tests and mutations alone, which is what the 2026-08-12 note already said.)*

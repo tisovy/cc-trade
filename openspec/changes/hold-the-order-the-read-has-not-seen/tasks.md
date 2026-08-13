@@ -22,4 +22,4 @@ that left first.
 ## 3. Verification
 
 - [x] 3.1 `npm run lint`, `npm test`, `npm run check:futures-production`.
-- [ ] 3.2 Operator confirms on live data that a newly placed order appears once and stays, on the chart and in the working-orders list, and that an order cancelled from the Binance app still disappears.
+- [ ] 3.2 Operator confirms on live data that a newly placed order appears once and stays, on the chart and in the working-orders list, and that an order cancelled from the Binance app still disappears — step 25, «Ордер появляется один раз и остаётся», in `verify-the-desk-in-one-sitting/runbook.md`. Both halves are in the one step on purpose: the holding is only sound if the outside cancellation still lands, and a step that checked only the first half would pass on a desk that had simply stopped listening.

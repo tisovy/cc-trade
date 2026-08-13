@@ -26,9 +26,9 @@
 ## 4. Verification
 
 - [x] 4.1 `npm run lint`, `npm test`, `npm run check:futures-production`, `npm run check:circular`, `npm run check:runtime-mock`, `npm run check:command-path`.
-- [ ] 4.2 Operator confirms on live data that a fill moves the position row and the wallet on screen at once, without the pause it had.
-- [ ] 4.3 Operator confirms a newly opened position shows no LIQ line for a moment and then shows the exchange's, and never a wrong one.
-- [ ] 4.4 Operator reads `node scripts/read-desk-record.mjs` after a run and confirms the account reads are few and each has a reason they recognise.
+- [ ] 4.2 Operator confirms on live data that a fill moves the position row and the wallet on screen at once, without the pause it had — step 30 п.2, «Позиция появляется вместе с филом», in `verify-the-desk-in-one-sitting/runbook.md`.
+- [ ] 4.3 Operator confirms a newly opened position shows no LIQ line for a moment and then shows the exchange's, and never a wrong one — step 30 п.3, «Линия ликвидации». Checked against the code before it was handed over: `liquidationPrice` reaches the desk only from the adapter's reading of the exchange's position entry (`futures-trading-adapter.js:422`) and is never derived anywhere in `src/`, so "never a wrong one" is a property the operator can actually confirm rather than an aspiration.
+- [ ] 4.4 Operator reads `node scripts/read-desk-record.mjs` after a run and confirms the account reads are few and each has a reason they recognise — step 34 п.2, «Сколько раз деск ходил в REST и зачем». Verified against the code: the section is titled `Why the account was read` (`scripts/read-desk-record.mjs:300`), and the reasons the desk actually emits are exactly `bootstrap`, `stream`, `refresh`, `unstated`, `unresolved`, `command`, `setting` — the seven the runbook names, no more.
 
 ## 5. Found In Audit
 
