@@ -414,7 +414,12 @@ const createSocket = (
     // are the only sign of life a stream with no unconditional cadence has.
     let lastFrameAt = Date.now();
     let lastActivityAt = lastFrameAt;
-    let lastWitnessAt = witnessStream === null ? null : lastFrameAt;
+    // Null until a frame of the witnessed stream actually arrives. Seeding this
+    // with a clock reading would have it claim a trade printed when none had —
+    // and since the sockets of one connection open milliseconds apart, that
+    // claim could outlive the book's last frame and accuse a book that was only
+    // quiet.
+    let lastWitnessAt = null;
     const silenceWatch = setInterval(() => {
         if (closed) return;
         const now = Date.now();
@@ -440,9 +445,10 @@ const createSocket = (
     silenceWatch.unref?.();
     socket.once('open', () => {
         // Start the clock where the stream did, not where the handshake did.
+        // The witness is not started here: it is a record of what arrived, and
+        // nothing has.
         lastFrameAt = Date.now();
         lastActivityAt = lastFrameAt;
-        if (witnessStream !== null) lastWitnessAt = lastFrameAt;
         settleReady(true);
     });
     // A ping is the exchange saying the connection is alive without having
@@ -868,10 +874,18 @@ export const createFuturesProductionWorkstationReviewedTransport = ({
             // nothing.
             const bookWatch = setInterval(() => {
                 if (closed) return;
+                const now = Date.now();
                 const bookAt = publicSocket.lastFrameAt();
-                if (Date.now() - bookAt
+                if (now - bookAt
                     <= FUTURES_PRODUCTION_WORKSTATION_SILENCE.BOOK_THROUGH_TRADES_MS) return;
-                if (marketSocket.lastWitnessAt() <= bookAt) return;
+                // A tape that has itself stopped is no witness to anything. Its
+                // last print is then just the last thing that happened before
+                // two routes went down together, and accusing the book of it
+                // would resynchronize twice over one outage.
+                if (now - marketSocket.lastFrameAt()
+                    > FUTURES_PRODUCTION_WORKSTATION_SILENCE.CADENCE_MS) return;
+                const witnessAt = marketSocket.lastWitnessAt();
+                if (witnessAt === null || witnessAt <= bookAt) return;
                 clearInterval(bookWatch);
                 onDisconnect(`BOOK_SILENT_THROUGH_TRADES_${Math.round(
                     FUTURES_PRODUCTION_WORKSTATION_SILENCE.BOOK_THROUGH_TRADES_MS / 1000,

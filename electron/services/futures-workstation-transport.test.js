@@ -1131,6 +1131,54 @@ describe('reviewed environment-specific Futures workstation transports', () => {
         expect(publicSocket.close).toHaveBeenCalled();
     });
 
+    // The witness is a record of what arrived, not a clock reading. Seeded with
+    // one it claimed a trade had printed when none had — and the sockets of one
+    // connection finish their handshakes milliseconds apart, so that claim could
+    // outlive the book's own last frame and resynchronize the desk over a book
+    // that was merely quiet.
+    it('does not accuse a quiet book when no trade has printed at all', () => {
+        vi.useFakeTimers();
+        const disconnects = [];
+        createFuturesProductionWorkstationReviewedTransport().connect({
+            symbol: 'BTCUSDT',
+            interval: '1m',
+            onMessage: () => {},
+            onDisconnect: reason => disconnects.push(reason),
+            onCandleDisconnect: () => {},
+        });
+        const [publicSocket, marketSocket] = socketMock.instances;
+        publicSocket.emit('open');
+        // The tape's socket finishes its handshake after the book's did.
+        vi.advanceTimersByTime(200);
+        marketSocket.emit('open');
+        for (let elapsed = 0; elapsed < 60_000; elapsed += 5_000) {
+            vi.advanceTimersByTime(5_000);
+            marketSocket.emit('message', MARK_FRAME, false);
+        }
+
+        expect(disconnects).toEqual([]);
+    });
+
+    // Two routes going down together is one outage. Blaming the book for it as
+    // well would resynchronize twice and name the wrong cause once.
+    it('does not blame the book when the tape has stopped as well', () => {
+        vi.useFakeTimers();
+        const disconnects = [];
+        createFuturesProductionWorkstationReviewedTransport().connect({
+            symbol: 'BTCUSDT',
+            interval: '1m',
+            onMessage: () => {},
+            onDisconnect: reason => disconnects.push(reason),
+            onCandleDisconnect: () => {},
+        });
+        const [publicSocket, marketSocket] = socketMock.instances;
+        publicSocket.emit('message', DEPTH_FRAME, false);
+        marketSocket.emit('message', TRADE_FRAME, false);
+        vi.advanceTimersByTime(40_000);
+
+        expect(disconnects).toEqual(['STREAM_SILENT_15S']);
+    });
+
     // Guard. Both quiet is a quiet market, not a dead route, and the connection's
     // own traffic is what answers for it.
     it('says nothing about a book whose tape is not printing either', () => {

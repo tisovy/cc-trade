@@ -1,5 +1,6 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import {
+  calculateFuturesExitBudget,
   calculateFuturesNotionalForPercent,
   calculateFuturesNotionalPercent,
   deriveFuturesLimitOrderDraft,
@@ -284,6 +285,79 @@ const FuturesTradingTicket = ({
     if (!pendingOrder) return
     setPendingOrder(null)
     setFeedback(null)
+  }
+
+  const pendingExitPosition = pendingOrder?.action.positionEffect === 'EXIT'
+    ? positions.find((position) => {
+      if (position.symbol !== pendingOrder.symbol) return false
+      const description = describeFuturesPosition(position)
+      return description.positionSide === pendingOrder.action.positionSide
+        && description.absoluteQuantity !== null
+        && description.absoluteQuantity > 0
+    }) ?? null
+    : null
+  const pendingExitQuantity = typeof pendingExitPosition?.quantity === 'string'
+    ? pendingExitPosition.quantity.replace(/^[+-]/, '')
+    : Number.isFinite(pendingExitPosition?.quantity)
+      ? String(Math.abs(pendingExitPosition.quantity))
+      : null
+  const pendingSizingMaximumUsdt = pendingOrder
+    ? pendingOrder.action.positionEffect === 'ENTRY'
+      ? (sizingReady ? sizingBudget : null)
+      : calculateFuturesExitBudget({
+        positionQuantity: pendingExitQuantity,
+        price: pendingOrder.price,
+        tickSize,
+      })
+    : null
+  const pendingSizingPercent = pendingOrder && pendingSizingMaximumUsdt !== null
+    ? pendingOrder.sizingReferenceUsdt === pendingSizingMaximumUsdt
+      && Number.isSafeInteger(pendingOrder.requestedSizePercent * 2)
+      ? pendingOrder.requestedSizePercent
+      : calculateFuturesNotionalPercent(
+        pendingOrder.notionalUsdt,
+        pendingSizingMaximumUsdt,
+      )
+    : null
+  const pendingSizingReadiness = pendingOrder?.resizedInConfirmation === true
+    ? deriveSubmissionReadiness(
+      pendingOrder.action,
+      pendingOrder.draft,
+      pendingOrder.notionalUsdt,
+    )
+    : null
+  const pendingSizingReason = pendingOrder?.resizedInConfirmation === true
+    ? pendingOrder.draft.ok
+      ? pendingSizingReadiness?.ready ? null : pendingSizingReadiness?.reason
+      : DRAFT_REASON_MESSAGES[pendingOrder.draft.reason] ?? 'Order draft is invalid.'
+    : null
+
+  const resizePendingOrder = (nextPercent) => {
+    if (!pendingOrder || pendingSizingMaximumUsdt === null) return
+    const nextNotionalUsdt = calculateFuturesNotionalForPercent(
+      pendingSizingMaximumUsdt,
+      nextPercent,
+    )
+    if (nextNotionalUsdt === null) return
+    const nextDraft = deriveFuturesLimitOrderDraft({
+      notionalUsdt: nextNotionalUsdt,
+      price: pendingOrder.price,
+      tickSize,
+      stepSize,
+      minQuantity,
+      maxQuantity,
+      minNotionalUsdt,
+      leverage: entryLeverage ?? 1,
+    })
+    setPendingOrder(previous => previous ? {
+      ...previous,
+      draft: nextDraft,
+      quantity: nextDraft.ok ? nextDraft.quantity : null,
+      notionalUsdt: nextNotionalUsdt,
+      requestedSizePercent: nextPercent,
+      sizingReferenceUsdt: pendingSizingMaximumUsdt,
+      resizedInConfirmation: true,
+    } : previous)
   }
 
   // A gesture prepares the order; it does not send it.
@@ -860,6 +934,13 @@ const FuturesTradingTicket = ({
         <FuturesOrderConfirmation
           confirmation={pendingConfirmation}
           anchor={pendingOrder.anchor}
+          sizePercent={pendingSizingPercent}
+          sizeBasis={pendingOrder.action.positionEffect === 'EXIT' ? 'of position' : 'of available'}
+          sizeDisabled={pendingSizingMaximumUsdt === null}
+          sizeReason={pendingSizingReason}
+          confirmDisabled={pendingOrder.resizedInConfirmation === true
+            && (pendingSizingReason !== null || !pendingOrder.draft.ok)}
+          onSizePercentChange={resizePendingOrder}
           onConfirm={confirmPendingOrder}
           onCancel={cancelPendingOrder}
         />

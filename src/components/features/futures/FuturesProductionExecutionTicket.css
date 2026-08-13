@@ -1364,6 +1364,17 @@
   font-weight: 700;
 }
 
+.futures-order-confirm-size-reason {
+  margin: 0;
+  color: #ffb0b7;
+  font-size: calc(var(--fx-ui-scale, 1) * 11.5px);
+  font-weight: 700;
+}
+
+.futures-order-confirm-slider {
+  padding: 2px 1px 0;
+}
+
 /* How old the price is, stated where it is acted on. Read at the weight of a
    reading rather than a warning: the desk is not objecting to the order, it is
    telling the operator what the number behind it is. */

@@ -526,6 +526,166 @@ describe('FuturesTradingTicket', () => {
     expect(order.reduceOnly).toBeUndefined()
   })
 
+  it('resizes a staged entry from the confirmation slider before Send', () => {
+    const state = createState()
+    const props = {
+      state,
+      selectedSymbol: 'BTCUSDT',
+      selectedContract: contract,
+      draftPrice: '58445.0',
+    }
+    const { rerender } = render(<FuturesTradingTicket {...props} />)
+    sizeTo(25)
+    rerender(
+      <FuturesTradingTicket
+        {...props}
+        gestureRequest={{
+          id: 201,
+          side: 'BUY',
+          positionSide: 'LONG',
+          positionEffect: 'ENTRY',
+          price: '58445.0',
+        }}
+      />,
+    )
+
+    const panel = screen.getByRole('alertdialog')
+    const slider = within(panel).getByRole('slider', { name: 'Confirmation order size percent' })
+    expect(slider).toHaveAttribute('step', '0.5')
+    expect(slider).toHaveValue('25')
+
+    fireEvent.change(slider, { target: { value: '37.5' } })
+    expect(within(panel).getByText('375 USDT')).toBeInTheDocument()
+    expect(within(panel).getByTitle('0.006 contracts')).toBeInTheDocument()
+    expect(state.placeOrder).not.toHaveBeenCalled()
+
+    confirmStagedOrder()
+    expect(state.placeOrder).toHaveBeenCalledExactlyOnceWith({
+      symbol: 'BTCUSDT',
+      side: 'BUY',
+      orderType: 'LIMIT',
+      price: '58445',
+      quantity: '0.006',
+    })
+  })
+
+  it('resizes a staged exit from the matching position before Send', () => {
+    const state = createState({
+      positions: [{
+        symbol: 'BTCUSDT',
+        positionSide: 'LONG',
+        quantity: '10',
+        entryPrice: '90',
+        markPrice: '100',
+      }],
+    })
+    const props = {
+      state,
+      selectedSymbol: 'BTCUSDT',
+      selectedContract: contract,
+      draftPrice: '100.0',
+    }
+    const { rerender } = render(<FuturesTradingTicket {...props} />)
+    sizeTo(25)
+    rerender(
+      <FuturesTradingTicket
+        {...props}
+        gestureRequest={{
+          id: 202,
+          side: 'SELL',
+          positionSide: 'LONG',
+          positionEffect: 'EXIT',
+          price: '100.0',
+        }}
+      />,
+    )
+
+    const panel = screen.getByRole('alertdialog')
+    const slider = within(panel).getByRole('slider', { name: 'Confirmation order size percent' })
+    expect(slider).toHaveValue('25')
+    fireEvent.change(slider, { target: { value: '50' } })
+
+    expect(within(panel).getByText('500 USDT')).toBeInTheDocument()
+    expect(within(panel).getByTitle('5 contracts')).toBeInTheDocument()
+    expect(panel).toHaveTextContent('1000 → 500')
+    expect(state.placeOrder).not.toHaveBeenCalled()
+
+    confirmStagedOrder()
+    expect(state.placeOrder).toHaveBeenCalledExactlyOnceWith({
+      symbol: 'BTCUSDT',
+      side: 'SELL',
+      orderType: 'LIMIT',
+      price: '100',
+      quantity: '5',
+      reduceOnly: true,
+    })
+  })
+
+  it('disables only the confirmation slider when an exit position is unavailable', () => {
+    const state = createState()
+    const props = {
+      state,
+      selectedSymbol: 'BTCUSDT',
+      selectedContract: contract,
+      draftPrice: '58445.0',
+    }
+    const { rerender } = render(<FuturesTradingTicket {...props} />)
+    sizeTo(25)
+    rerender(
+      <FuturesTradingTicket
+        {...props}
+        gestureRequest={{
+          id: 203,
+          side: 'SELL',
+          positionSide: 'LONG',
+          positionEffect: 'EXIT',
+          price: '58445.0',
+        }}
+      />,
+    )
+
+    const panel = screen.getByRole('alertdialog')
+    expect(within(panel).getByRole('slider', { name: 'Confirmation order size percent' }))
+      .toBeDisabled()
+    expect(within(panel).getByRole('button', { name: 'Send · Enter' })).toBeEnabled()
+    expect(within(panel).getByText('250 USDT')).toBeInTheDocument()
+  })
+
+  it('blocks Send when the confirmation slider selects an invalid low stop', () => {
+    const state = createState()
+    const props = {
+      state,
+      selectedSymbol: 'BTCUSDT',
+      selectedContract: contract,
+      draftPrice: '58445.0',
+    }
+    const { rerender } = render(<FuturesTradingTicket {...props} />)
+    sizeTo(25)
+    rerender(
+      <FuturesTradingTicket
+        {...props}
+        gestureRequest={{
+          id: 204,
+          side: 'BUY',
+          positionSide: 'LONG',
+          positionEffect: 'ENTRY',
+          price: '58445.0',
+        }}
+      />,
+    )
+
+    const panel = screen.getByRole('alertdialog')
+    fireEvent.change(
+      within(panel).getByRole('slider', { name: 'Confirmation order size percent' }),
+      { target: { value: '0.5' } },
+    )
+
+    expect(within(panel).getByText('5 USDT')).toBeInTheDocument()
+    expect(within(panel).getByRole('button', { name: 'Send · Enter' })).toBeDisabled()
+    expect(within(panel).getByRole('status')).toHaveTextContent('below the Binance minimum')
+    expect(state.placeOrder).not.toHaveBeenCalled()
+  })
+
   // The confirmation is the one place where what is read and what is sent must
   // be the same numbers. Confirm used to re-derive the size from the balance,
   // so a refresh landing while the panel was open sent an order the operator

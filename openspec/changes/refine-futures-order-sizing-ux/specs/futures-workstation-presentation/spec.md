@@ -14,6 +14,21 @@ percentage-point increments. Integer stops SHALL be displayed without a trailing
 decimal and half stops SHALL be displayed with `.5`; every selected percentage
 SHALL continue to produce a whole-USDT notional.
 
+When a valid shortcut order reaches confirmation, the confirmation popup SHALL
+also present a compact zero-through-one-hundred-percent slider in `0.5`
+percentage-point increments. For an entry, one hundred percent SHALL represent
+the current available-USDT sizing capacity. For an exit, one hundred percent
+SHALL represent the matching open position valued at the staged price. The
+confirmation slider SHALL update only the staged whole-USDT notional, exact
+exchange-quantized quantity, and projected position; it SHALL NOT submit an
+order until the operator activates `Send`.
+
+If the required confirmation sizing reference is unavailable, only that slider
+SHALL be disabled and the already staged order SHALL remain confirmable under
+the existing live readiness checks. If a slider stop produces a draft below an
+exchange minimum, the popup SHALL show the existing contextual draft reason and
+disable `Send` until the operator chooses a valid stop or cancels.
+
 The ticket SHALL NOT present a `READY` label or routine readiness reason, an
 operator `Pause trading` or `Resume trading` control, a passive shortcut/action
 label, percentage anchor buttons, a derived `Quantity` summary row, the
@@ -42,7 +57,23 @@ removal SHALL NOT remove any of those safety-critical messages.
 
 #### Scenario: Order reaches confirmation
 - **WHEN** an order action stages a valid draft
-- **THEN** the confirmation states the exact exchange-quantized quantity even though the ticket summary omits its `Quantity` row
+- **THEN** the confirmation states the exact exchange-quantized quantity and presents a compact synchronized percentage slider even though the ticket summary omits its `Quantity` row
+
+#### Scenario: Operator resizes a staged entry
+- **WHEN** the operator moves an entry confirmation slider to `37.5%`
+- **THEN** the popup shows the whole-USDT amount and exact quantity for `37.5%` of current available capacity, and `Send` submits that updated staged quantity
+
+#### Scenario: Operator resizes a staged exit
+- **WHEN** the operator moves an exit confirmation slider to `50%` while the matching position is available
+- **THEN** the popup shows half of that position at the staged price, updates the projected position, and keeps the order unsent until `Send`
+
+#### Scenario: Confirmation sizing reference is unavailable
+- **WHEN** the staged action's current available balance or matching position cannot be established
+- **THEN** the confirmation slider is disabled while the already staged order and existing live readiness checks remain authoritative
+
+#### Scenario: Confirmation slider selects an invalid draft
+- **WHEN** a confirmation slider stop produces a draft below an exchange minimum
+- **THEN** `Send` is disabled with the existing contextual draft reason and no order command is emitted
 
 #### Scenario: Order is accepted
 - **WHEN** a confirmed order is accepted for submission

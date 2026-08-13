@@ -15,6 +15,12 @@ const PANEL_WIDTH = 236
 export const FuturesOrderConfirmation = ({
   confirmation,
   anchor,
+  sizePercent = null,
+  sizeBasis = 'of available',
+  sizeDisabled = false,
+  sizeReason = null,
+  confirmDisabled = false,
+  onSizePercentChange,
   onConfirm,
   onCancel,
 }) => {
@@ -60,8 +66,7 @@ export const FuturesOrderConfirmation = ({
           who sizes in USDT never has to think in multiples, which is how an
           entry gets carried at a leverage nobody chose — so the multiple is
           stated here, in the yellow this desk reserves for liquidation, in the
-          last second before the order goes. It is a reading and not a control:
-          nothing on the panel that sends an order also changes its terms. */}
+          last second before the order goes. */}
       <strong
         className="futures-order-confirm-leverage"
         title={confirmation.leverage === null
@@ -75,12 +80,33 @@ export const FuturesOrderConfirmation = ({
         <div><dt>Price</dt><dd>{confirmation.price}</dd></div>
         <div>
           <dt>Size</dt>
-          <dd title={`${confirmation.quantity} contracts`}>
+          <dd title={confirmation.quantity ? `${confirmation.quantity} contracts` : undefined}>
             {confirmation.notionalUsdt ? `${confirmation.notionalUsdt} USDT` : '—'}
           </dd>
         </div>
         <div><dt>Position</dt><dd>{positionLine}</dd></div>
       </dl>
+
+      <label className="futures-production-size-slider futures-editor-slider futures-order-confirm-slider">
+        <span>
+          <span>Size</span>
+          <span className="futures-editor-slider-value" aria-live="polite">
+            <strong>{sizePercent === null ? '—' : `${sizePercent}%`}</strong>
+            <b>{sizeBasis}</b>
+          </span>
+        </span>
+        <input
+          aria-label="Confirmation order size percent"
+          type="range"
+          min="0"
+          max="100"
+          step="0.5"
+          value={sizePercent ?? 0}
+          disabled={sizeDisabled}
+          style={{ '--futures-size-fill': `${sizePercent ?? 0}%` }}
+          onChange={event => onSizePercentChange?.(Number(event.target.value))}
+        />
+      </label>
 
       {/* The price on this panel came off a surface that could not vouch for it.
           Saying so here, rather than refusing the click that produced it, is the
@@ -95,8 +121,18 @@ export const FuturesOrderConfirmation = ({
         <p className="futures-order-confirm-warning" role="alert">{confirmation.warning.message}</p>
       ) : null}
 
+      {sizeReason ? (
+        <p className="futures-order-confirm-size-reason" role="status">{sizeReason}</p>
+      ) : null}
+
       <div className="futures-order-editor-actions">
-        <button type="button" className="is-apply" ref={confirmButtonRef} onClick={() => onConfirm?.()}>
+        <button
+          type="button"
+          className="is-apply"
+          ref={confirmButtonRef}
+          disabled={confirmDisabled}
+          onClick={() => onConfirm?.()}
+        >
           Send · Enter
         </button>
         <button type="button" onClick={() => onCancel?.()}>Cancel · Esc</button>
