@@ -14,6 +14,7 @@ import {
   describeFuturesPosition,
   describeFuturesPositionMargin,
   orderNotionalUsdt,
+  orderWorkingQuantity,
   totalOrderNotionalUsdt,
   formatSignedPercent,
   formatSignedUsdt,
@@ -75,9 +76,12 @@ const contractLabel = (symbol) => {
 
 // What the order is worth is what it is read against; the contract count is what
 // the exchange works in, and it stays a hover away rather than taking a column.
-const orderSizeTitle = (order) => (
-  Number(order?.origQty) > 0 ? `${order.origQty} contracts` : undefined
-)
+const orderSizeTitle = (order) => {
+  // What is still working, so the hover agrees with the value beside it: a
+  // partly filled order rests at its remainder.
+  const working = orderWorkingQuantity(order)
+  return working !== null && working > 0 ? `${working} contracts` : undefined
+}
 
 const openOrderEditorFromKeyboard = (event, order, onOrderEdit) => {
   if (event.target !== event.currentTarget) return

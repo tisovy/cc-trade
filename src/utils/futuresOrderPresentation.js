@@ -98,10 +98,30 @@ export const describeFuturesAlgoTrigger = (order) => {
 //
 // A close-position stop carries no quantity of its own, and a market-triggered
 // stop carries no limit price; both land here rather than at zero.
+// What of the order is still on the book. A partly filled order rests at its
+// remainder — the filled part is a position now, and it is reported and priced
+// as one. Valuing the order at the size it was placed at counts that part
+// twice and overstates what the operator still has working.
+//
+// The stream names the filled quantity `z` and a snapshot names it
+// `executedQty`; the drag already reads both to size its replacement, and this
+// is the same reading for the surfaces that only show the order.
+export const orderWorkingQuantity = (order) => {
+  const original = Number(order?.origQty)
+  if (!Number.isFinite(original)) return null
+  const executed = Number(order?.z ?? order?.executedQty)
+  if (!Number.isFinite(executed) || executed <= 0) return original
+  const remaining = Math.abs(original) - executed
+  // Fully filled: nothing rests. Such an order is off the book by the time this
+  // is asked, and a negative remainder would be read as a size.
+  if (!(remaining > 0)) return 0
+  return original < 0 ? -remaining : remaining
+}
+
 const orderNotionalValue = (order) => {
   const price = Number(order?.triggerPrice ?? order?.price)
-  const quantity = Number(order?.origQty)
-  if (!(price > 0) || !(Math.abs(quantity) > 0)) return null
+  const quantity = orderWorkingQuantity(order)
+  if (!(price > 0) || quantity === null || !(Math.abs(quantity) > 0)) return null
   return Math.abs(price * quantity)
 }
 

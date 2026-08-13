@@ -8,6 +8,7 @@ import {
   formatSignedUsdt,
   formatUsdt,
   orderNotionalUsdt,
+  orderWorkingQuantity,
 } from '../../../utils/futuresOrderPresentation.js'
 import { formatExchangePrice } from '../../../utils/futuresPriceFormat.js'
 import { futuresMarginCallKey } from '../../../utils/futuresMarginCall.js'
@@ -501,7 +502,7 @@ export const FuturesPortfolioDock = ({
                       size it, so one order reads as one number everywhere. The
                       contract count is what the exchange works in, so it stays
                       exact on hover rather than disappearing. */}
-                  <span role="cell" title={`${exactText(order.origQty)} contracts`}>
+                  <span role="cell" title={`${exactText(orderWorkingQuantity(order))} contracts`}>
                     {orderNotionalUsdt(order) ?? '—'}
                   </span>
                   <span role="cell">{exactText(order.z ?? '0')}</span>

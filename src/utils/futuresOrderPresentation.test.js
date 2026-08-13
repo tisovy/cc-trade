@@ -29,6 +29,20 @@ describe('totalOrderNotionalUsdt', () => {
     expect(totalOrderNotionalUsdt([stop])).toBe(30000)
   })
 
+  // Half of a working order can already be a position. What rests on the book
+  // is the remainder, and pricing the order at the size it was placed at
+  // overstates what the operator still has working — on the chart label, in the
+  // row, and in the total they read against their balance.
+  it('prices a partly filled order at what is still working', () => {
+    expect(orderNotionalUsdt(order('100', '10', { executedQty: '5' }))).toBe('500')
+    // The stream names the filled part `z`; a snapshot names it `executedQty`.
+    expect(orderNotionalUsdt(order('100', '10', { z: '5' }))).toBe('500')
+    expect(totalOrderNotionalUsdt([
+      order('100', '10', { executedQty: '5' }),
+      order('100', '4'),
+    ])).toBe(900)
+  })
+
   // Nothing resting is a reading; a list that could not be read is not.
   it('separates an empty list from one nothing could be priced from', () => {
     expect(totalOrderNotionalUsdt([])).toBe(0)
