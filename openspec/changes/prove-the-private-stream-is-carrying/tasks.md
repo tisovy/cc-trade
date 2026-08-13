@@ -176,6 +176,40 @@ Which is why 1.5 branches three ways rather than two.
   2. → none: build the path form and repeat. The `events` default was the wrong assumption;
   3. → still none: the prefix was not the whole story, and the next suspect is the listen key or the proxy rather than the form.
 
+      **Outcome 1 on the first attempt, 2026-08-13 16:06 UTC.** Left unchecked
+      on purpose — operator verification lives in
+      `verify-the-desk-in-one-sitting`'s runbook, and the step goes there once
+      that file's consolidation lands.
+
+      Session started 16:06:19.457, private socket opened 16:06:24.110. The
+      operator placed, moved and cancelled one TUTUSDT limit order — four
+      commands, since the desk carried out the move as a cancel and a fresh
+      placement — and each one was followed by exactly one read at
+      `resources: 1, weight: 5`: 16:06:34.677, :37.183, :38.433, :41.183.
+      **Four commands, four folds, none missed.** Before this the file held 489
+      reads without a single one; the day's totals are now 610 reads, 4 of them
+      `unstated`, and all four are inside these eight seconds.
+
+      The frame arrives with the answer, not after it.
+      `FUTURES_UNSTATED_READ_DELAY_MS` is 400 ms, and the gaps from each
+      command's answer to its read were 390, 407, 364 and 343 ms — so the timer
+      that only an execution report can start was already running 10, −7, 36 and
+      57 ms around each REST reply. The exchange is pushing the event as fast as
+      it answers the request, which is what the 30-second reconciliation beat
+      had been standing in for.
+
+      Both assumptions 1.2 weighed came out right: the query form is served, and
+      omitting the optional `events` filter yields every event rather than none.
+      The path form was not needed and is not built.
+
+      What this does **not** prove: no order was filled during the run, so
+      `ACCOUNT_UPDATE` on a fill — the event the operator's original complaint
+      was about, an order line the price crossed taking 8–12 s to leave the
+      chart — has still only been shown to arrive on a socket that is now
+      demonstrably delivering. It rides the same socket as the reports above,
+      so it is close to settled, but it was not observed. The runbook's own
+      real-order steps are where it gets observed.
+
 ## 2. The Stream States Whether It Is Carrying
 
 - [ ] 2.1 Judge liveness on traffic the exchange sends regardless of account activity, so a quiet account is not read as a dead route.
