@@ -11,6 +11,12 @@ routes already record: an unrouted path completes its handshake and holds the
 socket open while delivering nothing, so it fails as silence rather than as an
 error.
 
+The route each attempt is made on SHALL be recorded when the socket is opened,
+because a record that says a stream opened without saying where is what let one
+prefix stay wrong for four months. The listen key SHALL NOT appear in that
+record: it is a bearer credential for the account's own event stream, and the
+record exists to be read and passed on.
+
 #### Scenario: The desk opens the authenticated stream
 - **WHEN** the futures user-data stream is started
 - **THEN** it connects on the routed private path, not on the legacy unrouted one
@@ -22,6 +28,10 @@ error.
 #### Scenario: An event type the desk folds is not subscribed
 - **WHEN** the connection form in use takes an explicit list of event types
 - **THEN** every event the desk folds is named in it, so a missing type cannot become a new silence
+
+#### Scenario: The route an attempt was made on is asked for afterwards
+- **WHEN** a futures user-data connection is attempted, whether or not it completes
+- **THEN** the record names the route it was attempted on, with the listen key removed
 
 ### Requirement: A private stream that is not carrying is not presented as ready
 The authenticated futures user-data stream SHALL be presented as carrying only

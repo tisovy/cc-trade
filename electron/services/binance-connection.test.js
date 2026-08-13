@@ -654,6 +654,60 @@ describe('setupBinanceConnection user-data orchestration', () => {
         });
     });
 
+    it('opens the Futures user-data stream on the routed private path', async () => {
+        const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1' },
+        });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'activate_market',
+                marketMode: 'futures-live',
+            }),
+        });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+
+        const { default: MockWebSocket } = await import('ws');
+        const futuresUrls = MockWebSocket.mock.calls
+            .map(([url]) => String(url))
+            .filter(url => url.startsWith('wss://fstream.binance.com'));
+
+        // The account's own event stream, on the prefix the exchange has served
+        // since 2026-04-23, with no `events` filter narrowing it.
+        expect(futuresUrls).toContain(
+            'wss://fstream.binance.com/private/ws?listenKey=futures-listen-key',
+        );
+
+        // The half that stops this recurring. `/ws/<listenKey>` answers the
+        // handshake and then delivers nothing, so no error, no reconnect and no
+        // test that watches behaviour can catch it — only the path can. Stated
+        // over every futures socket the session opens rather than over the one
+        // this test came for, because the way the fault arrived was a socket
+        // nobody had written a rule about.
+        expect(futuresUrls.length).toBeGreaterThan(0);
+        for (const url of futuresUrls) {
+            expect(['/private/ws', '/market/stream', '/public/stream'])
+                .toContain(new URL(url).pathname);
+        }
+
+        // The record has to name the route, or the next wrong prefix hides the
+        // same way this one did — and it has to do that without carrying the
+        // listen key, which is a bearer credential for the account's own
+        // events.
+        const lines = info.mock.calls.map(args => args.join(' '));
+        expect(lines).toContain(
+            '[futures-stream] connecting wss://fstream.binance.com/private/ws?listenKey=<redacted>',
+        );
+        expect(lines.some(line => line.includes('futures-listen-key'))).toBe(false);
+        info.mockRestore();
+    });
+
     it('retains account-wide orders as stale across Futures stream reconnect until REST recovery', async () => {
         moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([
             {

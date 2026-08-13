@@ -5,6 +5,39 @@ import { isIndeterminateTradingFailure } from './trading-command-outcome.js';
 export const FUTURES_REST_ORIGIN = 'https://fapi.binance.com';
 export const FUTURES_STREAM_ORIGIN = 'wss://fstream.binance.com';
 
+// The unrouted paths `/ws` and `/stream` were decommissioned on 2026-04-23,
+// when Binance split the service into `/public`, `/market` and `/private`. The
+// notice states the consequence outright: connections that were not migrated
+// "will ONLY be able to receive data from wss://fstream.binance.com/public.
+// Channels under /market and /private will stop pushing data." This desk's
+// market feeds were migrated; the user-data stream was not, because the note
+// recording the decommissioning scoped it to market paths
+// (futures-mark-price-feed.js:33-39) and the ADR's WebSocket registry had no
+// row for this socket at all. The failure is silent by construction — the
+// handshake succeeds, the socket stays open, and no frame ever arrives — so the
+// desk goes on believing a stream speaks for its orders and positions while
+// nothing does.
+//
+// No `events` filter, deliberately. The parameter is optional, and omitting it
+// is what asks for everything: the desk folds ORDER_TRADE_UPDATE,
+// ACCOUNT_UPDATE and listenKeyExpired today, and a list written here would
+// silently exclude whatever it grows to fold next.
+export const FUTURES_USER_DATA_ROUTED_PREFIX = '/private/ws?listenKey=';
+
+export const futuresUserDataStreamUrl = (streamOrigin, listenKey) => (
+    `${streamOrigin}${FUTURES_USER_DATA_ROUTED_PREFIX}${encodeURIComponent(listenKey)}`
+);
+
+// The listen key is a bearer credential: whoever holds it can read the
+// account's own event stream for as long as it lives. The route is the part
+// worth recording, and it is the part that hid for four months; the key is the
+// part that must not reach a log the operator may hand to anyone. Both URL
+// shapes are covered so that falling back to the path form cannot start leaking
+// it.
+export const redactFuturesListenKey = url => String(url)
+    .replace(/(listenKey=)[^&#]+/, '$1<redacted>')
+    .replace(/(\/ws\/)[^/?#]+/, '$1<redacted>');
+
 const DEFAULT_RECV_WINDOW = 5000;
 const REQUEST_TIMEOUT_MS = 10000;
 

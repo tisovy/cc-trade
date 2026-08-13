@@ -52,7 +52,9 @@ import {
     FUTURES_STREAM_ORIGIN,
     FuturesTradingAdapter,
     describeFuturesApiError,
+    futuresUserDataStreamUrl,
     normalizeFuturesUserDataStreamEvent,
+    redactFuturesListenKey,
 } from './futures-trading-adapter.js';
 import {
     createBinanceStartupEnvelope,
@@ -1641,7 +1643,13 @@ export function setupBinanceConnection({
                 return;
             }
 
-            const socket = new WebSocket(`${FUTURES_STREAM_ORIGIN}/ws/${listenKey}`, {
+            const streamUrl = futuresUserDataStreamUrl(FUTURES_STREAM_ORIGIN, listenKey);
+            // Say which route was opened. Until now the only trace of an opening
+            // was a `read` line with reason `stream`, which records that a socket
+            // opened and not where — and that is exactly how the unrouted prefix
+            // stayed hidden across four months of sessions that looked healthy.
+            logger.info(`[futures-stream] connecting ${redactFuturesListenKey(streamUrl)}`);
+            const socket = new WebSocket(streamUrl, {
                 agent: sharedProxyAgent ?? undefined,
                 handshakeTimeout: 10_000,
             });

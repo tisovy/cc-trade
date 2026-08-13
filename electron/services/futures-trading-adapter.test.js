@@ -3,8 +3,10 @@
 import { createHmac } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+    FUTURES_STREAM_ORIGIN,
     FuturesTradingAdapter,
     describeFuturesApiError,
+    futuresUserDataStreamUrl,
     normalizeFuturesAlgoOrder,
     normalizeFuturesBalances,
     normalizeFuturesExecutionReport,
@@ -17,6 +19,7 @@ import {
     parseFuturesExchangeFilters,
     readFuturesMaxLeverage,
     readFuturesTradedSymbols,
+    redactFuturesListenKey,
 } from './futures-trading-adapter.js';
 
 const requests = [];
@@ -601,6 +604,42 @@ describe('futures API error descriptions', () => {
         expect(describeFuturesApiError({ code: -9999, message: 'Unknown failure' }))
             .toBe('Unknown failure');
         expect(describeFuturesApiError(undefined)).toBe('Binance futures request failed');
+    });
+});
+
+describe('futures user data stream route', () => {
+    it('builds the routed private path and asks for every event', () => {
+        const url = futuresUserDataStreamUrl(FUTURES_STREAM_ORIGIN, 'abc123');
+        expect(url).toBe('wss://fstream.binance.com/private/ws?listenKey=abc123');
+
+        // The two things the migration made load-bearing, stated as themselves
+        // rather than inferred from the string: the route is under `/private`,
+        // and no `events` filter narrows what arrives. `/ws/<key>` parses to a
+        // pathname of `/ws/abc123`, so this is the assertion that a return to
+        // the decommissioned form cannot pass.
+        const parsed = new URL(url);
+        expect(parsed.pathname).toBe('/private/ws');
+        expect(parsed.searchParams.get('listenKey')).toBe('abc123');
+        expect(parsed.searchParams.has('events')).toBe(false);
+        expect([...parsed.searchParams.keys()]).toEqual(['listenKey']);
+    });
+
+    it('carries the key as one parameter whatever the exchange puts in it', () => {
+        // Binance's keys are alphanumeric today. Nothing promises that, and a
+        // raw `&` or `#` in the key would silently truncate the parameter and
+        // produce a socket that opens on a key the account does not own.
+        const url = futuresUserDataStreamUrl(FUTURES_STREAM_ORIGIN, 'a&b#c d');
+        expect(new URL(url).searchParams.get('listenKey')).toBe('a&b#c d');
+    });
+
+    it('keeps the listen key out of the record while leaving the route in it', () => {
+        expect(redactFuturesListenKey(
+            futuresUserDataStreamUrl(FUTURES_STREAM_ORIGIN, 'secret-key'),
+        )).toBe('wss://fstream.binance.com/private/ws?listenKey=<redacted>');
+        // The fallback shape 1.5 may have to try is redacted too, so switching
+        // to it cannot start writing the key into logs the operator forwards.
+        expect(redactFuturesListenKey('wss://fstream.binance.com/private/ws/secret-key'))
+            .toBe('wss://fstream.binance.com/private/ws/<redacted>');
     });
 });
 

@@ -83,7 +83,15 @@ lifetime. Stated there for the market sockets, so 0.1 is confirming it holds on
 the private one rather than discovering it — but it is still a measurement,
 because a bound taken from a document about a different socket is an estimate.
 
-- [ ] 1.1 Open the futures user-data stream on the path the exchange serves, and state the migration and its date where the URL is built, as the mark-price feed already does for its own.
+- [x] 1.1 Open the futures user-data stream on the path the exchange serves, and state the migration and its date where the URL is built, as the mark-price feed already does for its own.
+      Done 2026-08-13 by the session that closed
+      `recover-the-market-feed-after-an-outage`, on the §1 hand-off. The URL is
+      no longer written at the socket: `futuresUserDataStreamUrl` and
+      `FUTURES_USER_DATA_ROUTED_PREFIX` sit in `futures-trading-adapter.js`
+      beside `FUTURES_STREAM_ORIGIN`, where the note about the 2026-04-23
+      decommissioning now is too — including why omitting `events` is what asks
+      for everything, so the next reader is not left to infer that from an
+      absence. `binance-connection.js` calls the builder.
 - [x] 1.2 **Decided: `wss://fstream.binance.com/private/ws?listenKey=<listenKey>`, with no `events` parameter.** Fallback if it does not carry: `wss://fstream.binance.com/private/ws/<listenKey>`. Reasoning and the assumption each one rests on are below.
 Worked out 2026-08-13 with the session running
 `recover-the-market-feed-after-an-outage`, over two passes. The first ranked the
@@ -129,8 +137,40 @@ built as though it did not:
 Which is why 1.5 branches three ways rather than two.
 
 - [ ] 1.3 Register the user-data endpoint in the ADR's WebSocket registry, which has no row for it — that absence is why a decommissioning notice about "market paths" read as not applying.
-- [ ] 1.4 Prove by test that the desk builds the routed URL, and that the bare legacy path cannot be built by accident.
-- [ ] 1.4a Log the URL the socket actually opened on, at connect. Today the only record of an opening is a `read` line with reason `stream`, which says where nothing — and that is exactly how one prefix hid for four months. A gate on 1.1, not a preference.
+- [x] 1.4 Prove by test that the desk builds the routed URL, and that the bare legacy path cannot be built by accident.
+      Four tests. In `futures-trading-adapter.test.js`: the built URL is
+      `.../private/ws?listenKey=abc123`, asserted through `new URL` as
+      `pathname === '/private/ws'` with `listenKey` its only parameter — the
+      legacy form parses to `/ws/abc123`, so it cannot pass; the key survives
+      an `&` or `#` in it, which the plain template did not guarantee; and the
+      redaction leaves the route and removes the key in both URL shapes. In
+      `binance-connection.test.js`, `opens the Futures user-data stream on the
+      routed private path` asserts the socket the live session actually
+      constructs, then asserts **every** futures socket that session opens is
+      on `/private/ws`, `/market/stream` or `/public/stream`. The last one is
+      the guard against a recurrence rather than against this bug: a
+      decommissioned path answers the handshake and then delivers nothing, so
+      no test that watches behaviour can catch it — only the path can.
+
+      Mutation-tested, all three red only where they should be. **M1**, the
+      legacy `/ws/<key>` restored: all four red. **M2**, `/private/ws` kept but
+      an `events` filter added: three red — the key-escaping test is rightly
+      indifferent. **M3**, the connect line logging the raw URL: one red, the
+      log test alone.
+- [x] 1.4a Log the URL the socket actually opened on, at connect. Today the only record of an opening is a `read` line with reason `stream`, which says where nothing — and that is exactly how one prefix hid for four months. A gate on 1.1, not a preference.
+      Done before 1.1, so the operator's run produces a before-and-after in the
+      record rather than an after alone.
+      `[futures-stream] connecting wss://fstream.binance.com/private/ws?listenKey=<redacted>`
+      at `logger.info` (the default level), written where the socket is
+      constructed rather than in `open`, so an attempt that never completes the
+      handshake is recorded too.
+
+      The key is redacted and that is not tidiness: a listen key is a bearer
+      credential for the account's own event stream, and this line is meant to
+      be read and forwarded. `redactFuturesListenKey` covers the path form as
+      well, so 1.5's fallback cannot start leaking it. The test asserts both
+      halves — the exact redacted line is present, and no log line anywhere
+      contains the key.
 - [ ] 1.5 Operator confirms on live data that the stream now delivers. **One** `unstated` read is the whole proof: `resources: 1, weight: 5` against 489 consecutive four-resource passes is unmissable and nothing else in the desk can produce it. One order placed and cancelled is enough per attempt, and the same oracle separates all three outcomes without anyone having to be right in advance:
   1. query form without `events` → an `unstated` read appears: done;
   2. → none: build the path form and repeat. The `events` default was the wrong assumption;
