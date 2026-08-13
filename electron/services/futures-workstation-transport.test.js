@@ -40,6 +40,7 @@ import {
     FUTURES_PRODUCTION_WORKSTATION_REST_ORIGIN,
     FUTURES_PRODUCTION_WORKSTATION_REQUEST_LIMITS,
     FUTURES_PRODUCTION_WORKSTATION_ROUTES,
+    FUTURES_PRODUCTION_WORKSTATION_SILENCE,
     FUTURES_PRODUCTION_WORKSTATION_WEIGHTS,
     FUTURES_PRODUCTION_WORKSTATION_WSS_ORIGIN,
     createFuturesProductionWorkstationReviewedTransport,
@@ -120,6 +121,21 @@ const installProxyRequest = ({
         return request;
     });
     return calls;
+};
+
+const MARK_FRAME = Buffer.from('{"stream":"btcusdt@markPrice@1s","data":{}}');
+const TRADE_FRAME = Buffer.from('{"stream":"btcusdt@aggTrade","data":{}}');
+const DEPTH_FRAME = Buffer.from('{"stream":"btcusdt@depth@100ms","data":{}}');
+
+// A connection only reaches its 24-hour rotation by having delivered for 24
+// hours. Silence now ends one long before that, so time advanced against these
+// transports has to carry traffic with it or the test is describing a dead feed
+// rather than a live one.
+const advanceWithTraffic = (totalMs, stepMs = 10_000) => {
+    for (let elapsed = 0; elapsed < totalMs; elapsed += stepMs) {
+        vi.advanceTimersByTime(stepMs);
+        for (const socket of socketMock.instances) socket.emit('message', MARK_FRAME, false);
+    }
 };
 
 beforeEach(() => {
@@ -985,7 +1001,7 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             onCandleDisconnect: () => {},
         });
         socketMock.instances[0].emit('close');
-        vi.advanceTimersByTime(86_400_000);
+        advanceWithTraffic(86_400_000);
         socketMock.instances[1].emit('close');
 
         expect(disconnects).toEqual(['SOCKET_CLOSED', 'CONNECTION_ROTATED']);
@@ -1001,9 +1017,167 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             onDisconnect: () => {},
             onCandleDisconnect: () => {},
         });
-        vi.advanceTimersByTime(86_400_000);
+        advanceWithTraffic(86_400_000);
         expect(socketMock.instances.every(socket => socket.close.mock.calls[0] === undefined
             || socket.close.mock.calls[0][1] === '24h connection rotation')).toBe(true);
+    });
+
+    // The failure this desk has already been bitten by: a route that answers the
+    // handshake and then says nothing raises no error and never closes, so every
+    // recovery that hangs off `close` is never entered. `@markPrice@1s` arrives
+    // every second whether or not the contract trades — 418 frames in 420
+    // seconds on a contract that printed one trade in the whole run — so
+    // fifteen seconds without one is a feed that stopped delivering.
+    it('treats a market stream that stops delivering as a disconnection', () => {
+        vi.useFakeTimers();
+        const disconnects = [];
+        createFuturesProductionWorkstationReviewedTransport().connect({
+            symbol: 'BTCUSDT',
+            interval: '1m',
+            onMessage: () => {},
+            onDisconnect: reason => disconnects.push(reason),
+            onCandleDisconnect: () => {},
+        });
+        socketMock.instances[1].emit('open');
+        vi.advanceTimersByTime(16_000);
+
+        expect(disconnects).toEqual(['STREAM_SILENT_15S']);
+        expect(socketMock.instances[1].close)
+            .toHaveBeenCalledWith(1000, 'stream went silent');
+    });
+
+    // Guard. Passes against the transport before the watchdog existed, because
+    // it asserts an absence; it is here so a bound set too tight cannot land
+    // unnoticed.
+    it('leaves a market stream that keeps delivering alone', () => {
+        vi.useFakeTimers();
+        const disconnects = [];
+        createFuturesProductionWorkstationReviewedTransport().connect({
+            symbol: 'BTCUSDT',
+            interval: '1m',
+            onMessage: () => {},
+            onDisconnect: reason => disconnects.push(reason),
+            onCandleDisconnect: () => {},
+        });
+        for (let elapsed = 0; elapsed < 120_000; elapsed += 10_000) {
+            vi.advanceTimersByTime(10_000);
+            socketMock.instances[1].emit('message', MARK_FRAME, false);
+        }
+
+        expect(disconnects).toEqual([]);
+    });
+
+    // Depth on a thin contract went 12.8 seconds between frames while perfectly
+    // alive, so a frame bound tight enough to be useful there would fire on a
+    // market that is merely quiet. What is left is the exchange's own ping —
+    // measured at 180.0s on both routes — and two missed ones end the socket.
+    it('keeps a quiet stream alive on the exchange ping and ends one that stops pinging', () => {
+        vi.useFakeTimers();
+        const disconnects = [];
+        const candleDisconnects = [];
+        createFuturesProductionWorkstationReviewedTransport().connect({
+            symbol: 'BTCUSDT',
+            interval: '1m',
+            onMessage: () => {},
+            onDisconnect: reason => disconnects.push(reason),
+            onCandleDisconnect: reason => candleDisconnects.push(reason),
+        });
+        const [publicSocket, marketSocket, candleSocket] = socketMock.instances;
+        for (let elapsed = 0; elapsed < 1_200_000; elapsed += 10_000) {
+            vi.advanceTimersByTime(10_000);
+            marketSocket.emit('message', MARK_FRAME, false);
+            if (elapsed % 180_000 === 0) {
+                publicSocket.emit('ping');
+                candleSocket.emit('ping');
+            }
+        }
+        expect(disconnects).toEqual([]);
+        expect(candleDisconnects).toEqual([]);
+
+        for (let elapsed = 0; elapsed < 410_000; elapsed += 10_000) {
+            vi.advanceTimersByTime(10_000);
+            marketSocket.emit('message', MARK_FRAME, false);
+        }
+
+        // Every socket is held to this bound, and each one reports it down its
+        // own path — the candle stream has a separate recovery from the rest.
+        expect(disconnects).toEqual(['STREAM_INACTIVE_400S']);
+        expect(candleDisconnects).toEqual(['STREAM_INACTIVE_400S']);
+    });
+
+    // Depth rides `/public` and the tape rides `/market` — two routes the
+    // exchange serves separately and can retire separately. A trade printing
+    // against the book is a change to the book, and the longest depth silence
+    // measured through a print was 1.2 seconds on BTCUSDT.
+    it('ends a book that says nothing while its own tape prints', () => {
+        vi.useFakeTimers();
+        const disconnects = [];
+        createFuturesProductionWorkstationReviewedTransport().connect({
+            symbol: 'BTCUSDT',
+            interval: '1m',
+            onMessage: () => {},
+            onDisconnect: reason => disconnects.push(reason),
+            onCandleDisconnect: () => {},
+        });
+        const [publicSocket, marketSocket] = socketMock.instances;
+        publicSocket.emit('message', DEPTH_FRAME, false);
+        for (let elapsed = 0; elapsed < 40_000; elapsed += 5_000) {
+            vi.advanceTimersByTime(5_000);
+            marketSocket.emit('message', MARK_FRAME, false);
+            marketSocket.emit('message', TRADE_FRAME, false);
+        }
+
+        expect(disconnects).toEqual(['BOOK_SILENT_THROUGH_TRADES_30S']);
+        expect(publicSocket.close).toHaveBeenCalled();
+    });
+
+    // Guard. Both quiet is a quiet market, not a dead route, and the connection's
+    // own traffic is what answers for it.
+    it('says nothing about a book whose tape is not printing either', () => {
+        vi.useFakeTimers();
+        const disconnects = [];
+        createFuturesProductionWorkstationReviewedTransport().connect({
+            symbol: 'BTCUSDT',
+            interval: '1m',
+            onMessage: () => {},
+            onDisconnect: reason => disconnects.push(reason),
+            onCandleDisconnect: () => {},
+        });
+        const marketSocket = socketMock.instances[1];
+        for (let elapsed = 0; elapsed < 40_000; elapsed += 5_000) {
+            vi.advanceTimersByTime(5_000);
+            marketSocket.emit('message', MARK_FRAME, false);
+        }
+
+        expect(disconnects).toEqual([]);
+    });
+
+    // Guard. A released generation's watchdog reporting a disconnection would
+    // resynchronize a session that no longer exists.
+    it('reports nothing from the watchdogs of a released connection', () => {
+        vi.useFakeTimers();
+        const disconnects = [];
+        const connection = createFuturesProductionWorkstationReviewedTransport().connect({
+            symbol: 'BTCUSDT',
+            interval: '1m',
+            onMessage: () => {},
+            onDisconnect: reason => disconnects.push(reason),
+            onCandleDisconnect: () => {},
+        });
+        connection.close();
+        vi.advanceTimersByTime(500_000);
+
+        expect(disconnects).toEqual([]);
+    });
+
+    it('freezes the measured silence bounds', () => {
+        expect(FUTURES_PRODUCTION_WORKSTATION_SILENCE).toEqual({
+            CADENCE_MS: 15_000,
+            INACTIVITY_MS: 400_000,
+            BOOK_THROUGH_TRADES_MS: 30_000,
+            CHECK_MS: 1_000,
+        });
+        expect(Object.isFrozen(FUTURES_PRODUCTION_WORKSTATION_SILENCE)).toBe(true);
     });
 
     it('freezes the documented route and request-weight registries', () => {

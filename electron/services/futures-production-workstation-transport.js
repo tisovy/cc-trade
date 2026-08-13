@@ -77,6 +77,46 @@ export const FUTURES_PRODUCTION_WORKSTATION_READ_BUDGET = Object.freeze({
     WINDOW_MS: 60_000,
 });
 
+// A socket that stays open while delivering nothing is the failure mode this
+// desk has already been bitten by: a route that answers the handshake and then
+// says nothing raises no error and never closes, so every recovery that hangs
+// off `close` is never entered. These are the bounds past which silence is
+// treated as a disconnection, each set from a measurement rather than from the
+// documentation — seven minutes on four sockets through the operator's proxy,
+// 2026-08-13, on BTCUSDT and on BITOUSDT (1 583 trades in 24 hours, thinner
+// than anything the rail carries).
+export const FUTURES_PRODUCTION_WORKSTATION_SILENCE = Object.freeze({
+    // `@markPrice@1s` is the one stream the exchange pushes whether or not
+    // anything trades: 418 frames in 420 seconds on the thin contract, which
+    // printed a single aggregate trade in the whole run. p50 1000ms, worst gap
+    // 1511ms. Ten times that worst gap, and the same bound the account-side
+    // mark feed already applies to the same stream
+    // (`futures-mark-price-feed.js`). Only the socket carrying that stream is
+    // judged this way.
+    CADENCE_MS: 15_000,
+    // The exchange pings every three minutes — measured 180002ms and 179965ms
+    // on `/market`, 180264ms and 180003ms on `/public`. Two missed pings plus
+    // forty seconds, against a quarter-second of observed jitter. This is the
+    // bound every socket is held to, because it is the only one a stream with
+    // no unconditional cadence can be held to at all: depth on the thin
+    // contract went 12822ms between frames while perfectly alive.
+    INACTIVITY_MS: 400_000,
+    // A trade printing against the book is a change to the book, so depth
+    // cannot be silent through one. Longest depth silence containing a print:
+    // 1224ms on BTCUSDT with 42 prints in it, 177ms on BITOUSDT with one.
+    // Twenty-five times the worst of them. This is what covers `/public`, which
+    // is served separately from `/market` and can be retired without it.
+    BOOK_THROUGH_TRADES_MS: 30_000,
+    CHECK_MS: 1_000,
+});
+
+// The combined-stream envelope names its stream first: `{"stream":"…","data":…}`.
+// Read off the head rather than parsed, because the service parses every frame
+// already and this only has to answer one question. A frame that does not match
+// witnesses nothing, so an envelope this desk stops recognizing costs a missed
+// detection rather than a false one.
+const STREAM_ENVELOPE_NAME = /^\{"stream":"([^"]{1,64})"/;
+
 const ROUTE_SET = new Set(Object.values(FUTURES_PRODUCTION_WORKSTATION_ROUTES));
 const PUBLIC_READ_BUDGET = new FuturesWorkstationReadBudget({
     maximumWeight: FUTURES_PRODUCTION_WORKSTATION_READ_BUDGET.MAXIMUM_WEIGHT,
@@ -330,7 +370,14 @@ const weightedGet = (
     )
 );
 
-const createSocket = (url, onMessage, onDisconnect, backendProxy, onOversizedFrame = () => {}) => {
+const createSocket = (
+    url,
+    onMessage,
+    onDisconnect,
+    backendProxy,
+    onOversizedFrame = () => {},
+    { cadenceMs = null, witnessStream = null } = {},
+) => {
     const parsed = new URL(url);
     if (parsed.origin !== FUTURES_PRODUCTION_WORKSTATION_WSS_ORIGIN
         || !['/public/stream', '/market/stream'].includes(parsed.pathname)) {
@@ -362,17 +409,64 @@ const createSocket = (url, onMessage, onDisconnect, backendProxy, onOversizedFra
         socket.close(1000, '24h connection rotation');
     }, 86_400_000);
     lifetime.unref?.();
-    socket.once('open', () => settleReady(true));
+    // The clock the silence bounds are read against. `lastFrameAt` is what the
+    // exchange delivered; `lastActivityAt` also counts its protocol pings, which
+    // are the only sign of life a stream with no unconditional cadence has.
+    let lastFrameAt = Date.now();
+    let lastActivityAt = lastFrameAt;
+    let lastWitnessAt = witnessStream === null ? null : lastFrameAt;
+    const silenceWatch = setInterval(() => {
+        if (closed) return;
+        const now = Date.now();
+        const reason = cadenceMs !== null && now - lastFrameAt > cadenceMs
+            ? `STREAM_SILENT_${Math.round(cadenceMs / 1000)}S`
+            : (now - lastActivityAt > FUTURES_PRODUCTION_WORKSTATION_SILENCE.INACTIVITY_MS
+                ? `STREAM_INACTIVE_${Math.round(
+                    FUTURES_PRODUCTION_WORKSTATION_SILENCE.INACTIVITY_MS / 1000,
+                )}S`
+                : null);
+        if (reason === null) return;
+        closed = true;
+        settleReady(false);
+        clearTimeout(lifetime);
+        clearInterval(silenceWatch);
+        onDisconnect(reason);
+        try {
+            socket.close(1000, 'stream went silent');
+        } catch {
+            // The connection is being abandoned either way.
+        }
+    }, FUTURES_PRODUCTION_WORKSTATION_SILENCE.CHECK_MS);
+    silenceWatch.unref?.();
+    socket.once('open', () => {
+        // Start the clock where the stream did, not where the handshake did.
+        lastFrameAt = Date.now();
+        lastActivityAt = lastFrameAt;
+        if (witnessStream !== null) lastWitnessAt = lastFrameAt;
+        settleReady(true);
+    });
+    // A ping is the exchange saying the connection is alive without having
+    // anything to send on it. It is not a frame, and a stream judged by its
+    // frames must not be kept alive by one.
+    socket.on('ping', () => {
+        lastActivityAt = Date.now();
+    });
     socket.on('message', (data, isBinary) => {
         if (closed) return;
+        lastFrameAt = Date.now();
+        lastActivityAt = lastFrameAt;
         if (isBinary) {
             closed = true;
             clearTimeout(lifetime);
+            clearInterval(silenceWatch);
             onDisconnect('BINARY_FRAME_REJECTED');
             socket.close(1003, 'binary frame rejected');
             return;
         }
         const raw = typeof data === 'string' ? data : data.toString('utf8');
+        if (witnessStream !== null && STREAM_ENVELOPE_NAME.exec(raw)?.[1] === witnessStream) {
+            lastWitnessAt = lastFrameAt;
+        }
         // A frame past the ceiling is dropped, not answered by hanging up. The
         // market is what makes a frame big, and closing the stream over one of
         // them took depth, tape, header and candles away at the moment the
@@ -386,6 +480,7 @@ const createSocket = (url, onMessage, onDisconnect, backendProxy, onOversizedFra
     });
     socket.once('close', () => {
         settleReady(false);
+        clearInterval(silenceWatch);
         if (closed) return;
         closed = true;
         clearTimeout(lifetime);
@@ -393,15 +488,22 @@ const createSocket = (url, onMessage, onDisconnect, backendProxy, onOversizedFra
     });
     socket.once('error', () => {
         settleReady(false);
+        clearInterval(silenceWatch);
         if (!closed) onDisconnect('SOCKET_ERROR');
     });
     return Object.freeze({
         ready,
+        // What this socket last heard, for the rules that judge one stream
+        // against another. `lastWitnessAt` answers `null` unless this socket was
+        // asked to witness a stream.
+        lastFrameAt: () => lastFrameAt,
+        lastWitnessAt: () => lastWitnessAt,
         close: () => {
             if (closed) return;
             closed = true;
             settleReady(false);
             clearTimeout(lifetime);
+            clearInterval(silenceWatch);
             socket.removeAllListeners();
             // A connection still in its handshake does not answer `close()` by
             // closing: `ws` aborts the handshake and *raises* "WebSocket was
@@ -717,12 +819,20 @@ export const createFuturesProductionWorkstationReviewedTransport = ({
                 backendProxy,
                 reportOversizedFrame,
             );
+            // The market socket is the only one with a heartbeat to be judged
+            // against: `@markPrice@1s` arrives every second whether or not the
+            // contract trades. It also witnesses the tape, which is what lets
+            // the book's silence be told apart from a quiet market.
             const marketSocket = createSocket(
                 marketUrl,
                 onMessage,
                 onDisconnect,
                 backendProxy,
                 reportOversizedFrame,
+                {
+                    cadenceMs: FUTURES_PRODUCTION_WORKSTATION_SILENCE.CADENCE_MS,
+                    witnessStream: `${lower}@aggTrade`,
+                },
             );
             let closed = false;
             let candleEpoch = 0;
@@ -749,10 +859,31 @@ export const createFuturesProductionWorkstationReviewedTransport = ({
             let candleSocket = createCandleSocket(interval, candleEpoch);
             const initialCandleSocket = candleSocket;
             const startedAt = Date.now();
+            // Depth rides `/public` and the tape rides `/market` — two routes
+            // the exchange serves separately and can retire separately. Depth
+            // has no cadence of its own to be judged by (12.8s between frames on
+            // a live thin contract), so the tape is what judges it: a trade
+            // printed against the book is a change to the book, and depth cannot
+            // be silent through one. Both quiet is a quiet market, and says
+            // nothing.
+            const bookWatch = setInterval(() => {
+                if (closed) return;
+                const bookAt = publicSocket.lastFrameAt();
+                if (Date.now() - bookAt
+                    <= FUTURES_PRODUCTION_WORKSTATION_SILENCE.BOOK_THROUGH_TRADES_MS) return;
+                if (marketSocket.lastWitnessAt() <= bookAt) return;
+                clearInterval(bookWatch);
+                onDisconnect(`BOOK_SILENT_THROUGH_TRADES_${Math.round(
+                    FUTURES_PRODUCTION_WORKSTATION_SILENCE.BOOK_THROUGH_TRADES_MS / 1000,
+                )}S`);
+                publicSocket.close();
+            }, FUTURES_PRODUCTION_WORKSTATION_SILENCE.CHECK_MS);
+            bookWatch.unref?.();
             const close = () => {
                 if (closed) return;
                 closed = true;
                 candleEpoch += 1;
+                clearInterval(bookWatch);
                 publicSocket.close();
                 marketSocket.close();
                 candleSocket.close();

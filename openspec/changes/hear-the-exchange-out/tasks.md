@@ -21,20 +21,26 @@ false-positive margins below are the worst case rather than a typical one.
 
 ## 1. A Stream That Says Nothing Is Not A Live Stream
 
-- [ ] 1.1 Give the transport's socket a silence bound and a timer that enforces it, so a connection that stops delivering reports the same disconnection a closed one does and enters the reconnect ladder already built for it.
-- [ ] 1.2 Judge a stream that carries an unconditional cadence by its frames, and set that bound from 0.1 — `@markPrice@1s` on the market socket is the desk's one guaranteed heartbeat, and the account-side mark feed already treats fifteen seconds of it as a dead feed.
-- [ ] 1.3 Judge a stream whose silence can be legitimate by the connection's own traffic instead — frames or the exchange's protocol ping, whichever came last — at a bound of no fewer than two missed pings, so a thin contract that genuinely has nothing to say is never mistaken for a dead route.
-- [ ] 1.4 Name each bound in the disconnection reason, so the workspace's reason line distinguishes a route that went quiet from one that closed, as `futures-workstation-presentation` already requires of a resynchronization. `handleDisconnect` carries the reason to the status line unchanged, and the operator has already sat in front of a flat code once: `STREAM_SILENT_15S` and `STREAM_INACTIVE_400S` say which bound was crossed, `SOCKET_CLOSED` does not.
-- [ ] 1.5 Keep the judgement in the transport, per socket, so it does not depend on which contract is displayed and does not touch the session bookkeeping `keep-the-contracts-warm` is rewriting.
-- [ ] 1.6 Clear the timers on close, on the 24-hour rotation and on teardown, so a released generation's watchdog cannot report a disconnection against a session that no longer exists.
-- [ ] 1.7 Prove by test that a socket which opens and then delivers nothing past its bound reports a disconnection, that one which keeps receiving pings on a quiet contract does not, that the reason names the bound, and that a torn-down socket's watchdog stays silent. Run each against the pre-change transport first and record which of them fail there.
+- [x] 1.1 Give the transport's socket a silence bound and a timer that enforces it, so a connection that stops delivering reports the same disconnection a closed one does and enters the reconnect ladder already built for it.
+- [x] 1.2 Judge a stream that carries an unconditional cadence by its frames, and set that bound from 0.1 — `@markPrice@1s` on the market socket is the desk's one guaranteed heartbeat, and the account-side mark feed already treats fifteen seconds of it as a dead feed.
+- [x] 1.3 Judge a stream whose silence can be legitimate by the connection's own traffic instead — frames or the exchange's protocol ping, whichever came last — at a bound of no fewer than two missed pings, so a thin contract that genuinely has nothing to say is never mistaken for a dead route.
+- [x] 1.4 Name each bound in the disconnection reason, so the workspace's reason line distinguishes a route that went quiet from one that closed, as `futures-workstation-presentation` already requires of a resynchronization. `handleDisconnect` carries the reason to the status line unchanged, and the operator has already sat in front of a flat code once: `STREAM_SILENT_15S` and `STREAM_INACTIVE_400S` say which bound was crossed, `SOCKET_CLOSED` does not.
+- [x] 1.5 Keep the judgement in the transport, per socket, so it does not depend on which contract is displayed and does not touch the session bookkeeping `keep-the-contracts-warm` is rewriting.
+- [x] 1.6 Clear the timers on close, on the 24-hour rotation and on teardown, so a released generation's watchdog cannot report a disconnection against a session that no longer exists.
+- [x] 1.7 Proved by test, and run against the pre-change transport (`52ae266`) first:
+    - **Bites.** `treats a market stream that stops delivering as a disconnection` — pre-change `[]` against `['STREAM_SILENT_15S']`.
+    - **Bites.** `keeps a quiet stream alive on the exchange ping and ends one that stops pinging` — pre-change `[]` against `['STREAM_INACTIVE_400S']` on the depth socket and the same on the candle socket's own path.
+    - **Guard.** `leaves a market stream that keeps delivering alone` passes pre-change; it asserts an absence, and is kept so a bound set too tight cannot land unnoticed.
+    - **Guard.** `reports nothing from the watchdogs of a released connection` passes pre-change.
+    - `freezes the measured silence bounds` fails pre-change only because the export does not exist there. It is a registry test, not a finding.
+    - Two existing tests had to change: both advanced twenty-four hours in one step with nothing delivered, which is now a dead feed and ends at fifteen seconds. They advance with traffic instead, which is what a connection that lives twenty-four hours actually does.
 
 ## 2. A Book That Says Nothing While The Tape Prints Is A Dead Book
 
-- [ ] 2.1 0.3 left room for it — 30s against a worst observed 1.2s. Judge the depth socket's silence against the market socket's, since a trade printing against the book is a change to the book, and depth cannot be silent through one.
-- [ ] 2.2 Hold the rule to the same contract and the same session, and make it judge nothing when both streams are quiet — that is a quiet market, and the bound in 1.3 already covers it.
-- [ ] 2.3 Report it under its own reason — `BOOK_SILENT_THROUGH_TRADES_30S` — distinct from the cadence bound, because it says something different: not that a connection died, but that one of two independently served routes did.
-- [ ] 2.4 Prove by test that a book silent through printing trades is disconnected, that a book and tape silent together are not, and that the margin from 0.3 is left intact. If 0.3 shows the margin is not there, write that here and leave §2 unbuilt rather than shipping a rule that resynchronizes a live desk on a thin contract.
+- [x] 2.1 0.3 left room for it — 30s against a worst observed 1.2s. Judge the depth socket's silence against the market socket's, since a trade printing against the book is a change to the book, and depth cannot be silent through one.
+- [x] 2.2 Hold the rule to the same contract and the same session, and make it judge nothing when both streams are quiet — that is a quiet market, and the bound in 1.3 already covers it.
+- [x] 2.3 Report it under its own reason — `BOOK_SILENT_THROUGH_TRADES_30S` — distinct from the cadence bound, because it says something different: not that a connection died, but that one of two independently served routes did.
+- [x] 2.4 Proved by test against `52ae266` first. **Bites:** `ends a book that says nothing while its own tape prints` — pre-change `[]` against `['BOOK_SILENT_THROUGH_TRADES_30S']`. **Guard:** `says nothing about a book whose tape is not printing either` passes pre-change. The margin from 0.3 is intact: the rule fires at 30s against a worst measured 1.2s.
 
 ## 3. The Events The Desk Drops
 
