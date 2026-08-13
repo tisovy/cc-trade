@@ -389,10 +389,52 @@ export const normalizeFuturesPositions = (positionEntries = []) => (
         }))
 );
 
-// What a fill actually changes that no stream states in full: the wallet and the
-// position it moved. The working orders are not among them — the report carries
-// the order itself, and re-reading the account for it cost weight 40 twice.
-const FUTURES_FILL_REFRESH_RESOURCES = Object.freeze(['balances', 'positions']);
+/**
+ * What an `ACCOUNT_UPDATE` actually says.
+ *
+ * The frame carries the account change itself — the wallet balance after it,
+ * and each position it touched with its size, entry price, margin mode and
+ * isolated wallet. The desk used to treat it as a doorbell and ask Binance over
+ * REST for the numbers it had just been handed, which put the position on screen
+ * a signed round trip (340–800 ms through the operator's proxy) after the
+ * exchange had already stated it.
+ *
+ * Positions at zero size are kept here rather than filtered out the way a read's
+ * are: zero is how the frame says a position closed, and that is exactly the
+ * change the fold has to apply.
+ */
+export const normalizeFuturesAccountUpdate = (payload = {}) => {
+    if (payload?.e !== 'ACCOUNT_UPDATE') return null;
+    const account = payload.a ?? {};
+    const balances = (Array.isArray(account.B) ? account.B : [])
+        .filter(entry => typeof entry?.a === 'string' && entry.a.length > 0)
+        .map(entry => ({
+            asset: entry.a,
+            // The wallet after the change. Not the free margin, which the frame
+            // does not carry at all — see the read the fold asks for.
+            walletBalance: entry.wb,
+            crossWallet: entry.cw,
+        }));
+    const positions = (Array.isArray(account.P) ? account.P : [])
+        .filter(entry => typeof entry?.s === 'string' && entry.s.length > 0)
+        .map(entry => ({
+            symbol: entry.s,
+            positionSide: entry.ps ?? 'BOTH',
+            quantity: entry.pa,
+            entryPrice: entry.ep,
+            unrealizedPnl: entry.up,
+            marginType: (entry.mt ?? '').toUpperCase() || undefined,
+            isolatedWallet: entry.iw,
+        }));
+    return {
+        // Binance's own word for what moved the account — `ORDER`, `FUNDING_FEE`,
+        // `DEPOSIT`, and the rest. Carried for the record, not branched on: what
+        // the desk does is decided by what actually changed.
+        cause: typeof account.m === 'string' ? account.m : null,
+        balances,
+        positions,
+    };
+};
 
 export const normalizeFuturesUserDataStreamEvent = (payload = {}) => {
     if (payload?.e === 'ORDER_TRADE_UPDATE') {
@@ -401,24 +443,19 @@ export const normalizeFuturesUserDataStreamEvent = (payload = {}) => {
             type: 'executionReport',
             executionReport,
             rendererPayload: { futures_execution_update: executionReport },
-            shouldRefreshAccount: executionReport.status === 'FILLED'
-                || executionReport.status === 'PARTIALLY_FILLED',
-            refreshResources: FUTURES_FILL_REFRESH_RESOURCES,
         };
     }
     if (payload?.e === 'ACCOUNT_UPDATE') {
         return {
             type: 'accountUpdate',
+            accountUpdate: normalizeFuturesAccountUpdate(payload),
             rendererPayload: null,
-            shouldRefreshAccount: true,
-            refreshResources: FUTURES_FILL_REFRESH_RESOURCES,
         };
     }
     if (payload?.e === 'listenKeyExpired') {
         return {
             type: 'listenKeyExpired',
             rendererPayload: null,
-            shouldRefreshAccount: false,
         };
     }
     return null;

@@ -96,6 +96,10 @@ export const summarizeDeskDiagnosticRecord = (text) => {
   // a placement and a cancellation are not the same wait and averaging them
   // hides whichever is the slow one.
   const answers = new Map()
+  // How often the desk went to the exchange for the signed account, and what
+  // for. Keyed by the reason the read site stated, because "the desk reads a
+  // lot" and "the desk reads when it must" are the same number without it.
+  const reads = new Map()
   let refused = 0
   let first = null
   let last = null
@@ -143,6 +147,13 @@ export const summarizeDeskDiagnosticRecord = (text) => {
       const observed = answers.get(line.action) ?? []
       observed.push({ durationMs: Number(line.durationMs) || 0, at: line.at, outcome: line.outcome })
       answers.set(line.action, observed)
+    }
+    if (line.kind === 'read' && typeof line.reason === 'string') {
+      const observed = reads.get(line.reason) ?? { count: 0, weight: 0, resources: 0 }
+      observed.count += 1
+      observed.weight += Number(line.weight) || 0
+      observed.resources += Number(line.resources) || 0
+      reads.set(line.reason, observed)
     }
     if (line.kind === 'session') sessions.push({ at: line.at, event: line.event, version: line.version ?? null })
     if (line.kind === 'command') {
@@ -192,6 +203,9 @@ export const summarizeDeskDiagnosticRecord = (text) => {
     commands,
     phases,
     answers: observedAs(answers.entries()),
+    reads: [...reads.entries()]
+      .map(([reason, observed]) => ({ reason, ...observed }))
+      .sort((left, right) => right.weight - left.weight),
   }
 }
 
@@ -249,6 +263,19 @@ export const formatDeskDiagnosticSummary = (summary, { day = null } = {}) => {
         + `  slowest ${String(answer.slowestMs).padStart(6)}ms`
         + (answer.slowestAt === null ? '' : ` at ${answer.slowestAt}`)
         + (answer.errors === 0 ? '' : `  (${answer.errors} failed)`),
+      )
+    }
+  }
+
+  if (summary.reads.length > 0) {
+    const weight = summary.reads.reduce((total, entry) => total + entry.weight, 0)
+    const passes = summary.reads.reduce((total, entry) => total + entry.count, 0)
+    out.push('', `Why the account was read (${passes} passes, weight ${weight})`)
+    for (const entry of summary.reads) {
+      out.push(
+        `  ${entry.reason.padEnd(22)} n=${String(entry.count).padStart(5)}`
+        + `  weight ${String(entry.weight).padStart(6)}`
+        + `  resources ${String(entry.resources).padStart(5)}`,
       )
     }
   }

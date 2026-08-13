@@ -6,6 +6,9 @@ import {
     FuturesStreamedOrderMemory,
     createFuturesAccountStateEnvelope,
     createInitialFuturesAccountResources,
+    foldFuturesAccountUpdate,
+    reconcileFuturesUnstatedBalanceRead,
+    reconcileFuturesUnstatedPositionRead,
     foldFuturesWorkingOrder,
     markFuturesOrderResourcesStale,
     markFuturesResourceFailed,
@@ -481,5 +484,225 @@ describe('what a read of the working orders is allowed to say', () => {
         expect(streamed.notedSince('B:2', 0)).toBe(true);
         streamed.forget();
         expect(streamed.entries.size).toBe(0);
+    });
+});
+
+describe('folding an account update into the wallet and the positions', () => {
+    const held = ({ balances = null, positions = null } = {}) => {
+        let resources = createInitialFuturesAccountResources();
+        if (balances !== null) {
+            resources = markFuturesResourceReady(resources, 'balances', balances, 1_000);
+        }
+        if (positions !== null) {
+            resources = markFuturesResourceReady(resources, 'positions', positions, 1_000);
+        }
+        return resources;
+    };
+
+    const wallet = (overrides = {}) => ({
+        USDT: { available: '900', total: '1000', crossUnPnl: '0', ...overrides },
+    });
+
+    const position = (overrides = {}) => ({
+        symbol: 'TUTUSDT',
+        positionSide: 'BOTH',
+        quantity: '10',
+        entryPrice: '2',
+        unrealizedPnl: '0',
+        marginType: 'CROSS',
+        isolatedWallet: '0',
+        liquidationPrice: '1.5',
+        leverage: '5',
+        ...overrides,
+    });
+
+    const framed = (overrides = {}) => ({
+        symbol: 'TUTUSDT',
+        positionSide: 'BOTH',
+        quantity: '10',
+        entryPrice: '2',
+        unrealizedPnl: '0',
+        marginType: 'CROSS',
+        isolatedWallet: '0',
+        ...overrides,
+    });
+
+    it('carries the size and entry the frame states without waiting for a read', () => {
+        const resources = held({ balances: wallet(), positions: [position()] });
+        const { resources: next, unstated } = foldFuturesAccountUpdate(resources, {
+            balances: [{ asset: 'USDT', walletBalance: '1010.5' }],
+            positions: [framed({ quantity: '25', entryPrice: '2.1' })],
+        }, { now: 2_000 });
+        expect(next.positions.data).toEqual([position({ quantity: '25', entryPrice: '2.1' })]);
+        expect(next.balances.data.USDT.total).toBe('1010.5');
+        // The read that answered before is still what the free margin and the
+        // liquidation price came from — the frame carries neither.
+        expect(next.balances.data.USDT.available).toBe('900');
+        expect(next.positions.data[0].liquidationPrice).toBe('1.5');
+        expect(unstated).toEqual(['positions', 'balances']);
+    });
+
+    // The stream updated the reading; it did not prove it. A resource marked
+    // stale by a reconnect must stay stale until a read says otherwise.
+    it('leaves the resource status and its last successful read alone', () => {
+        const resources = held({ positions: [position()] });
+        const { resources: next } = foldFuturesAccountUpdate(resources, {
+            positions: [framed({ quantity: '25' })],
+        }, { now: 2_000 });
+        expect(next.positions.status).toBe(resources.positions.status);
+        expect(next.positions.lastSuccessfulAt).toBe(1_000);
+        expect(next.positions.updatedAt).toBe(2_000);
+    });
+
+    it('drops a position the frame reports at zero and keeps the others', () => {
+        const resources = held({
+            positions: [position(), position({ symbol: 'BMTUSDT' })],
+        });
+        const { resources: next, unstated } = foldFuturesAccountUpdate(resources, {
+            positions: [framed({ quantity: '0', entryPrice: '0.0' })],
+        }, { now: 2_000 });
+        expect(next.positions.data.map(row => row.symbol)).toEqual(['BMTUSDT']);
+        expect(unstated).toEqual(['positions', 'balances']);
+    });
+
+    it('folds a hedged contract onto the side the frame names', () => {
+        const resources = held({
+            positions: [
+                position({ positionSide: 'LONG' }),
+                position({ positionSide: 'SHORT', quantity: '4' }),
+            ],
+        });
+        const { resources: next } = foldFuturesAccountUpdate(resources, {
+            positions: [framed({ positionSide: 'SHORT', quantity: '7' })],
+        }, { now: 2_000 });
+        expect(next.positions.data.map(row => [row.positionSide, row.quantity]))
+            .toEqual([['LONG', '10'], ['SHORT', '7']]);
+    });
+
+    it('leaves the positions alone for a frame that only moves the wallet', () => {
+        const resources = held({ balances: wallet(), positions: [position()] });
+        const { resources: next, unstated } = foldFuturesAccountUpdate(resources, {
+            balances: [{ asset: 'USDT', walletBalance: '1010.5' }],
+            positions: [],
+        }, { now: 2_000 });
+        expect(next.positions).toBe(resources.positions);
+        expect(unstated).toEqual(['balances']);
+    });
+
+    it('asks for no read when the frame states nothing the account did not say', () => {
+        const resources = held({ balances: wallet(), positions: [position()] });
+        const { resources: next, unstated } = foldFuturesAccountUpdate(resources, {
+            balances: [{ asset: 'USDT', walletBalance: '1000' }],
+            positions: [framed()],
+        }, { now: 2_000 });
+        expect(next).toBe(resources);
+        expect(unstated).toEqual([]);
+    });
+
+    // A wallet built from the one asset a frame happened to move, or a position
+    // list built from the one contract it touched, would be presented as the
+    // whole account.
+    it('folds nothing into a resource that has never been read', () => {
+        const resources = createInitialFuturesAccountResources();
+        const { resources: next, unstated } = foldFuturesAccountUpdate(resources, {
+            balances: [{ asset: 'USDT', walletBalance: '1010.5' }],
+            positions: [framed()],
+        }, { now: 2_000 });
+        expect(next).toBe(resources);
+        expect(unstated).toEqual([]);
+    });
+
+    it('opens a position on a contract the desk holds nothing for', () => {
+        const resources = held({ positions: [] });
+        const { resources: next } = foldFuturesAccountUpdate(resources, {
+            positions: [framed({ symbol: 'BMTUSDT', quantity: '3' })],
+        }, { now: 2_000 });
+        // Shown with what the frame states and without a liquidation price, which
+        // the read that follows fills in. A computed one would be there at once
+        // and wrong exactly where it matters.
+        expect(next.positions.data).toEqual([{
+            symbol: 'BMTUSDT',
+            positionSide: 'BOTH',
+            quantity: '3',
+            entryPrice: '2',
+            unrealizedPnl: '0',
+            marginType: 'CROSS',
+            isolatedWallet: '0',
+        }]);
+        expect(next.positions.data[0].liquidationPrice).toBeUndefined();
+    });
+});
+
+describe('what a read issued only for the unstated values may change', () => {
+    const held = positions => markFuturesResourceReady(
+        createInitialFuturesAccountResources(),
+        'positions',
+        positions,
+        1_000,
+    );
+
+    it('takes the liquidation price from the read and the size from the stream', () => {
+        const resources = held([{
+            symbol: 'TUTUSDT', positionSide: 'BOTH', quantity: '25', entryPrice: '2.1',
+        }]);
+        expect(reconcileFuturesUnstatedPositionRead(resources, [{
+            // The replica answered a fill behind, which is what it is allowed to
+            // do and what this refuses to believe.
+            symbol: 'TUTUSDT', positionSide: 'BOTH', quantity: '10', entryPrice: '2',
+            liquidationPrice: '1.5', leverage: '5',
+        }])).toEqual([{
+            symbol: 'TUTUSDT', positionSide: 'BOTH', quantity: '25', entryPrice: '2.1',
+            liquidationPrice: '1.5', leverage: '5',
+        }]);
+    });
+
+    // The frame says a position closed by reporting it at zero, and the fold has
+    // already dropped it. A read that has not caught up must not put it back.
+    it('does not restore a position the stream has already closed', () => {
+        const resources = held([]);
+        expect(reconcileFuturesUnstatedPositionRead(resources, [
+            { symbol: 'TUTUSDT', positionSide: 'BOTH', quantity: '10' },
+        ])).toEqual([{ symbol: 'TUTUSDT', positionSide: 'BOTH', quantity: '10' }]);
+
+        const withOther = held([{ symbol: 'BMTUSDT', positionSide: 'BOTH', quantity: '4' }]);
+        expect(reconcileFuturesUnstatedPositionRead(withOther, [
+            { symbol: 'BMTUSDT', positionSide: 'BOTH', quantity: '4' },
+            { symbol: 'TUTUSDT', positionSide: 'BOTH', quantity: '10' },
+        ]).map(row => row.symbol)).toEqual(['BMTUSDT', 'TUTUSDT']);
+    });
+
+    it('keeps a position the read leaves out', () => {
+        const resources = held([
+            { symbol: 'TUTUSDT', positionSide: 'BOTH', quantity: '25' },
+            { symbol: 'BMTUSDT', positionSide: 'BOTH', quantity: '4' },
+        ]);
+        expect(reconcileFuturesUnstatedPositionRead(resources, [
+            { symbol: 'BMTUSDT', positionSide: 'BOTH', quantity: '4', liquidationPrice: '9' },
+        ]).map(row => [row.symbol, row.quantity])).toEqual([['TUTUSDT', '25'], ['BMTUSDT', '4']]);
+    });
+
+    it('takes the free margin from the read and the balance from the stream', () => {
+        const resources = markFuturesResourceReady(
+            createInitialFuturesAccountResources(),
+            'balances',
+            { USDT: { available: '900', total: '1200' } },
+            1_000,
+        );
+        expect(reconcileFuturesUnstatedBalanceRead(resources, {
+            USDT: { available: '640', total: '1000', crossUnPnl: '5' },
+        })).toEqual({ USDT: { available: '640', total: '1200', crossUnPnl: '5' } });
+    });
+
+    it('takes an asset the desk holds nothing for exactly as the read states it', () => {
+        const resources = markFuturesResourceReady(
+            createInitialFuturesAccountResources(),
+            'balances',
+            { USDT: { available: '900', total: '1200' } },
+            1_000,
+        );
+        expect(reconcileFuturesUnstatedBalanceRead(resources, {
+            USDT: { available: '640', total: '1000' },
+            BNB: { available: '2', total: '2' },
+        }).BNB).toEqual({ available: '2', total: '2' });
     });
 });

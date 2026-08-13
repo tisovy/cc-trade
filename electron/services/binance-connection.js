@@ -66,12 +66,15 @@ import {
     FuturesStreamedOrderMemory,
     createFuturesAccountStateEnvelope,
     createInitialFuturesAccountResources,
+    foldFuturesAccountUpdate,
     foldFuturesWorkingOrder,
     markFuturesOrderResourcesStale,
     markFuturesResourceFailed,
     markFuturesResourceIdle,
     markFuturesResourceLoading,
     markFuturesResourceReady,
+    reconcileFuturesUnstatedBalanceRead,
+    reconcileFuturesUnstatedPositionRead,
     reconcileFuturesWorkingOrderRead,
 } from './futures-account-state.js';
 import WebSocket from 'ws';
@@ -1278,17 +1281,47 @@ export function setupBinanceConnection({
         broadcastFuturesSymbolConfigs([...held, ...configs]);
     };
 
+    // What a read of one resource is allowed to say, once the stream has already
+    // said something about the same thing. A read that does not agree with the
+    // stream describes a world already moved past — in both directions — and the
+    // two memories below are what refuse it.
+    const readFuturesAccountResource = (type, rows, { issuedAt, unstated }) => {
+        if (type === 'regularOrders') {
+            return reconcileFuturesWorkingOrderRead(futuresAccountResources, rows, {
+                settled: futuresSettledOrders,
+                streamed: futuresStreamedOrders,
+                since: issuedAt,
+            });
+        }
+        if (!unstated) return rows;
+        if (type === 'positions') {
+            return reconcileFuturesUnstatedPositionRead(futuresAccountResources, rows);
+        }
+        if (type === 'balances') {
+            return reconcileFuturesUnstatedBalanceRead(futuresAccountResources, rows);
+        }
+        return rows;
+    };
+
     // `resources` names which of them this pass is for; `null` is all four. A
     // fill asks for the wallet and the position it moved — the working orders
     // arrive on the stream that reported the fill, and reading them back cost 80
     // of the pass's 90.
-    const runFuturesAccountRefreshPass = async (resources = null) => {
+    const runFuturesAccountRefreshPass = async (resources = null, reason = null) => {
         const requested = resources === null ? null : new Set(resources);
         const operations = futuresTradingAdapter.getAccountRefreshOperations()
             .filter(operation => requested === null || requested.has(operation.type));
         if (operations.length === 0) return;
         const epoch = futuresMutationEpoch;
         const activation = futuresActivationGeneration;
+        // One line per pass, not per request: what it was for and what it spent.
+        // Without it "the desk reads too much" cannot be told from "the desk
+        // reads when it must", which is the whole question this answers.
+        diagnosticRecord.record('read', {
+            reason,
+            resources: operations.length,
+            weight: operations.reduce((total, operation) => total + operation.weight, 0),
+        });
 
         for (const operation of operations) {
             futuresAccountResources = markFuturesResourceLoading(
@@ -1327,24 +1360,24 @@ export function setupBinanceConnection({
                 // restores what it omits and should not. The second one allows
                 // for the exchange's own lag as well: a read issued after the
                 // stream reported an order can still answer without it.
-                operation.type === 'regularOrders'
-                    ? reconcileFuturesWorkingOrderRead(
-                        futuresAccountResources,
-                        payload[payloadKey],
-                        {
-                            settled: futuresSettledOrders,
-                            streamed: futuresStreamedOrders,
-                            since: issuedAt,
-                        },
-                    )
-                    : payload[payloadKey],
+                readFuturesAccountResource(operation.type, payload[payloadKey], {
+                    issuedAt,
+                    // A read asked for only because a frame could not carry the
+                    // liquidation price is allowed to state the liquidation
+                    // price. What the frame did state stands: the replica it
+                    // answers from can still be describing the account before
+                    // the frame, and showing the exchange's own figure and then
+                    // taking it back is the blink by another route.
+                    unstated: reason === 'unstated',
+                }),
             );
             if (operation.type === 'positions') {
-                futuresMarkPriceFeed?.track(payload[payloadKey]);
+                const positions = futuresAccountResources.positions.data ?? [];
+                futuresMarkPriceFeed?.track(positions);
                 // Every open position's leverage, so the dock can state what each
                 // one is carried at. Not awaited: the account state is already
                 // correct without it, and this only adds a reading to it.
-                void refreshFuturesPositionConfigs(payload[payloadKey]);
+                void refreshFuturesPositionConfigs(positions);
             }
             broadcastFuturesAccountState();
         }, operation.weight).catch((error) => {
@@ -1370,8 +1403,10 @@ export function setupBinanceConnection({
     // read must not turn that read into a partial one, and vice versa.
     let _futuresAccountRefreshQueued = false;
     let _futuresAccountRefreshQueuedResources = null;
-    const queueFuturesAccountRefresh = (resources) => {
+    let _futuresAccountRefreshQueuedReason = null;
+    const queueFuturesAccountRefresh = (resources, reason) => {
         _futuresAccountRefreshQueued = true;
+        _futuresAccountRefreshQueuedReason = reason;
         if (resources === null || _futuresAccountRefreshQueuedResources === null) {
             _futuresAccountRefreshQueuedResources = null;
             return;
@@ -1380,28 +1415,74 @@ export function setupBinanceConnection({
             ...new Set([..._futuresAccountRefreshQueuedResources, ...resources]),
         ];
     };
-    const refreshFuturesAccountState = async ({ resources = null } = {}) => {
+    const refreshFuturesAccountState = async ({ resources = null, reason = null } = {}) => {
         broadcastFuturesTradingPaused();
         if (!futuresTradingAdapter) return;
         if (_futuresAccountRefreshInFlight) {
-            queueFuturesAccountRefresh(resources);
+            queueFuturesAccountRefresh(resources, reason);
             return;
         }
         _futuresAccountRefreshInFlight = true;
         try {
             let requested = resources;
+            let requestedFor = reason;
             for (;;) {
                 _futuresAccountRefreshQueued = false;
                 _futuresAccountRefreshQueuedResources = [];
-                await runFuturesAccountRefreshPass(requested);
+                _futuresAccountRefreshQueuedReason = null;
+                await runFuturesAccountRefreshPass(requested, requestedFor);
                 if (!_futuresAccountRefreshQueued) break;
                 requested = _futuresAccountRefreshQueuedResources;
+                requestedFor = _futuresAccountRefreshQueuedReason;
             }
         } finally {
             _futuresAccountRefreshInFlight = false;
             _futuresAccountRefreshQueued = false;
             _futuresAccountRefreshQueuedResources = null;
+            _futuresAccountRefreshQueuedReason = null;
         }
+    };
+
+    // Long enough that the frames belonging to one event — the fills of a single
+    // order, an amendment's cancel and its replacement — arrive inside it and
+    // cost one read between them; short enough that a position opened on a
+    // contract the desk holds nothing for waits about as long for its
+    // liquidation price as one signed round trip takes anyway.
+    const FUTURES_UNSTATED_READ_DELAY_MS = 400;
+    let _futuresUnstatedReadTimer = null;
+    let _futuresUnstatedReadResources = new Set();
+
+    /**
+     * Reads back the values the stream stated a change to but cannot carry.
+     *
+     * `ACCOUNT_UPDATE` gives the wallet and each position's size, entry, margin
+     * mode and isolated wallet. It gives no liquidation price, no margin a
+     * position commits, and no free margin — Binance publishes none of the three
+     * on a socket. They are read rather than computed: a liquidation line drawn
+     * from the desk's own arithmetic is wrong exactly where it matters, and it
+     * is wrong without saying so.
+     *
+     * Coalesced, because the frames arrive in bursts and the numbers are the
+     * same either way.
+     */
+    const scheduleFuturesUnstatedRead = (resources) => {
+        if (!Array.isArray(resources) || resources.length === 0) return;
+        for (const resource of resources) _futuresUnstatedReadResources.add(resource);
+        if (_futuresUnstatedReadTimer !== null) return;
+        _futuresUnstatedReadTimer = setTimeout(() => {
+            _futuresUnstatedReadTimer = null;
+            const requested = [..._futuresUnstatedReadResources];
+            _futuresUnstatedReadResources = new Set();
+            if (requested.length === 0) return;
+            void refreshFuturesAccountState({ resources: requested, reason: 'unstated' });
+        }, FUTURES_UNSTATED_READ_DELAY_MS);
+        _futuresUnstatedReadTimer.unref?.();
+    };
+
+    const cancelFuturesUnstatedRead = () => {
+        if (_futuresUnstatedReadTimer !== null) clearTimeout(_futuresUnstatedReadTimer);
+        _futuresUnstatedReadTimer = null;
+        _futuresUnstatedReadResources = new Set();
     };
 
     const futuresStreamCarriesOrders = () => (
@@ -1432,11 +1513,11 @@ export function setupBinanceConnection({
      */
     const reconcileAfterFuturesCommand = async ({ streamCannotReport = null } = {}) => {
         if (!futuresStreamCarriesOrders()) {
-            await refreshFuturesAccountState();
+            await refreshFuturesAccountState({ reason: 'command' });
             return;
         }
         if (streamCannotReport === null) return;
-        await refreshFuturesAccountState({ resources: streamCannotReport });
+        await refreshFuturesAccountState({ resources: streamCannotReport, reason: 'command' });
     };
 
     // Lazily started the first time the renderer touches futures trading, so
@@ -1495,6 +1576,8 @@ export function setupBinanceConnection({
         forgetFuturesHistoryState();
         futuresSettledOrders.forget();
         futuresStreamedOrders.forget();
+        // A read owed to a frame from an account nobody is on any more.
+        cancelFuturesUnstatedRead();
         // No Futures renderer is watching: nothing to mark to market.
         futuresMarkPriceFeed?.track([]);
         if (futuresKeepAliveInterval) {
@@ -1563,7 +1646,7 @@ export function setupBinanceConnection({
                     || futuresUserDataWs !== socket) return;
                 markFuturesUserDataReady();
                 logger.info('Futures user data stream connected.');
-                void refreshFuturesAccountState();
+                void refreshFuturesAccountState({ reason: 'stream' });
             });
 
             socket.on('message', (data) => {
@@ -1587,6 +1670,36 @@ export function setupBinanceConnection({
                         broadcastFuturesAccountState();
                     }
                     broadcastToRenderers(streamEvent.rendererPayload);
+                    // Placing, amending or cancelling an order locks or releases
+                    // margin, and no stream says so — the frame describes the
+                    // order, never the free margin behind it. A fill needs
+                    // nothing here: the ACCOUNT_UPDATE for the same fill carries
+                    // the wallet and the position, and asks for its own read.
+                    scheduleFuturesUnstatedRead(['balances']);
+                }
+                if (streamEvent.type === 'accountUpdate' && streamEvent.accountUpdate) {
+                    // The exchange has just stated the change. Reading it back
+                    // put the position on screen a signed round trip after the
+                    // frame that carried it, and spent weight 10 to learn what
+                    // had already arrived.
+                    const { resources, unstated } = foldFuturesAccountUpdate(
+                        futuresAccountResources,
+                        streamEvent.accountUpdate,
+                    );
+                    if (resources !== futuresAccountResources) {
+                        const positionsMoved = resources.positions !== futuresAccountResources.positions;
+                        futuresAccountResources = resources;
+                        broadcastFuturesAccountState();
+                        if (positionsMoved) {
+                            const positions = resources.positions.data ?? [];
+                            // A folded position set is a position set: the marks
+                            // it is valued at and the leverage it is carried at
+                            // follow it exactly as they follow a read.
+                            futuresMarkPriceFeed?.track(positions);
+                            void refreshFuturesPositionConfigs(positions);
+                        }
+                    }
+                    scheduleFuturesUnstatedRead(unstated);
                 }
                 if (streamEvent.type === 'listenKeyExpired') {
                     const error = new Error('Futures listen key expired');
@@ -1594,11 +1707,6 @@ export function setupBinanceConnection({
                     markFuturesUserDataFailed(error);
                     socket.close();
                     return;
-                }
-                if (streamEvent.shouldRefreshAccount) {
-                    void refreshFuturesAccountState({
-                        resources: streamEvent.refreshResources ?? null,
-                    });
                 }
             });
             socket.on('error', (err) => {
@@ -2271,7 +2379,7 @@ export function setupBinanceConnection({
                         logger.info(`[futures-orders] ${action} resolved by reconciliation: order exists`);
                         noteFuturesMutation();
                         emit({ futures_execution_update: outcome.report });
-                        await refreshFuturesAccountState();
+                        await refreshFuturesAccountState({ reason: 'unresolved' });
                         return;
                     }
                     // "No such order" is provisional. Binance's order state is
@@ -2789,7 +2897,7 @@ export function setupBinanceConnection({
                 const config = await readFuturesSymbolConfig(symbol, { withCeiling: true });
                 broadcastFuturesSymbolConfigs([config]);
                 // Margin requirements and the liquidation price both moved.
-                await refreshFuturesAccountState();
+                await refreshFuturesAccountState({ reason: 'setting' });
             } catch (error) {
                 emitFuturesApiRejection(TRADING_COMMAND_ACTIONS.SET_LEVERAGE, error);
             }
@@ -2839,7 +2947,7 @@ export function setupBinanceConnection({
             // stands behind a position, and therefore where it liquidates. A
             // contract that was already in the mode moved nothing, and an
             // account read is not free.
-            if (changed) await refreshFuturesAccountState();
+            if (changed) await refreshFuturesAccountState({ reason: 'setting' });
         };
 
         const handleFuturesModifyOrder = async (command) => {
@@ -2888,7 +2996,7 @@ export function setupBinanceConnection({
                         emitFuturesApiRejection(TRADING_COMMAND_ACTIONS.REPLACE_ORDER, error);
                         // The order survives a rejected amendment; resync so the
                         // chart snaps the line back to the price Binance holds.
-                        await refreshFuturesAccountState();
+                        await refreshFuturesAccountState({ reason: 'unresolved' });
                     },
                 });
             }
@@ -2922,7 +3030,7 @@ export function setupBinanceConnection({
                         // needs no rejection: the book already matches intent.
                         // Only a determinate failure is a refusal to report.
                         if (isIndeterminateTradingFailure(error)) {
-                            await refreshFuturesAccountState();
+                            await refreshFuturesAccountState({ reason: 'unresolved' });
                             return;
                         }
                         emitFuturesApiRejection(TRADING_COMMAND_ACTIONS.CANCEL_ORDER, error, {
@@ -3000,7 +3108,7 @@ export function setupBinanceConnection({
                     `${UNCONFIRMED_COMMAND_MESSAGE} The ${stillLive} on ${command.symbol} may still be live.`,
                     { marketType: FUTURES_MARKET_TYPE, symbol: command.symbol, reconciled: false },
                 ));
-                await refreshFuturesAccountState();
+                await refreshFuturesAccountState({ reason: 'unresolved' });
                 // The re-read is what settles a cancel-all: it names no single
                 // order, so the book itself is the answer.
                 emit(createCommandResolved(
@@ -3023,7 +3131,7 @@ export function setupBinanceConnection({
                 },
             ));
             // The books that did cancel changed; show what is actually left.
-            await refreshFuturesAccountState();
+            await refreshFuturesAccountState({ reason: 'unresolved' });
         };
 
         // Margin moves between the wallet and one open position. It places no
@@ -3059,7 +3167,7 @@ export function setupBinanceConnection({
                 await futuresTradingAdapter.adjustPositionMargin(adjustment);
                 noteFuturesMutation();
                 // The row shows the exchange's figure, not the requested one.
-                await refreshFuturesAccountState();
+                await refreshFuturesAccountState({ reason: 'command' });
             } catch (error) {
                 // A margin transfer carries no client id Binance would echo, so
                 // there is nothing to reconcile by: re-reading the account is
@@ -3076,7 +3184,7 @@ export function setupBinanceConnection({
                             reconciled: false,
                         },
                     ));
-                    await refreshFuturesAccountState();
+                    await refreshFuturesAccountState({ reason: 'unresolved' });
                     // The position's own margin, re-read, is the answer here.
                     emit(createCommandResolved(
                         TRADING_COMMAND_ACTIONS.ADJUST_POSITION_MARGIN,
@@ -3185,7 +3293,7 @@ export function setupBinanceConnection({
                         // offset its signed request syncs) so the first order
                         // pays no extra round-trips.
                         void futuresTradingAdapter?.getPositionMode().catch(() => {});
-                        await refreshFuturesAccountState();
+                        await refreshFuturesAccountState({ reason: 'refresh' });
                         break;
                     case TRADING_COMMAND_ACTIONS.ACCOUNT_HISTORY:
                         await handleFuturesHistory(command);
@@ -3719,7 +3827,7 @@ export function setupBinanceConnection({
             futuresDataInitialized = true;
             futuresRendererConnections.add(connection);
             ensureFuturesUserDataStream();
-            void refreshFuturesAccountState();
+            void refreshFuturesAccountState({ reason: 'bootstrap' });
         };
 
         const deactivateFuturesData = async () => {

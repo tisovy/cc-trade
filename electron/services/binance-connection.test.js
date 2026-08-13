@@ -7,6 +7,7 @@ import {
     readDeskDiagnosticCommandEvent,
     readDeskDiagnosticOutboundEvent,
 } from './desk-diagnostic-record.js';
+import { FUTURES_ACCOUNT_READ_REASONS } from './futures-account-state.js';
 
 const moduleMocks = vi.hoisted(() => {
     const state = {};
@@ -806,11 +807,13 @@ describe('setupBinanceConnection user-data orchestration', () => {
         await flushMicrotasks();
         expect(workingOrders().map(order => order.orderId)).toEqual([11]);
 
-        // Neither order list was read for any of it; the wallet and the
-        // position were.
+        // Neither order list was read for any of it. The wallet was, once: the
+        // margin an order locks and releases is the one thing about it no stream
+        // states. The position was not — no `ACCOUNT_UPDATE` said it moved, and
+        // a fill is not a reason to go and ask.
         expect(loads.regularOrders).toHaveBeenCalledTimes(afterSetup.regularOrders);
         expect(loads.algoOrders).toHaveBeenCalledTimes(afterSetup.algoOrders);
-        expect(loads.positions.mock.calls.length).toBeGreaterThan(afterSetup.positions);
+        expect(loads.positions).toHaveBeenCalledTimes(afterSetup.positions);
         expect(loads.balances.mock.calls.length).toBeGreaterThan(afterSetup.balances);
     });
 
@@ -891,6 +894,174 @@ describe('setupBinanceConnection user-data orchestration', () => {
         await sendFuturesPlacement();
 
         expect(moduleMocks.futuresAdapter.placeOrder).toHaveBeenCalledOnce();
+        for (const [type, load] of Object.entries(loads)) {
+            expect(load, type).toHaveBeenCalledTimes(afterSetup[type]);
+        }
+    });
+
+    const heldPositions = () => moduleMocks.rendererConnection.sendUTF.mock.calls
+        .map(([message]) => JSON.parse(message))
+        .filter(payload => payload.type === 'futures_account_state')
+        .at(-1).resources.positions.data;
+
+    const accountUpdate = (account) => JSON.stringify({
+        e: 'ACCOUNT_UPDATE', E: 5_000, T: 5_000, a: { m: 'ORDER', ...account },
+    });
+
+    const openFuturesStream = async (loads) => {
+        await startFuturesDesk();
+        moduleMocks.futuresUserDataSockets[0].handlers.open();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+        return Object.fromEntries(
+            Object.entries(loads).map(([type, load]) => [type, load.mock.calls.length]),
+        );
+    };
+
+    // The frame *is* the account change. Asking Binance for it back put the
+    // position on screen a signed round trip after the exchange had already
+    // stated it — 340–800 ms through the operator's proxy, on their own record.
+    it('shows the position the frame states before any read answers for it', async () => {
+        const loads = futuresAccountLoads();
+        const afterSetup = await openFuturesStream(loads);
+
+        moduleMocks.futuresUserDataSockets[0].handlers.message(accountUpdate({
+            B: [{ a: 'USDT', wb: '1010.5', cw: '1010.5' }],
+            P: [{ s: 'TUTUSDT', pa: '25', ep: '2.1', up: '3', mt: 'cross', iw: '0', ps: 'BOTH' }],
+        }));
+        await flushMicrotasks();
+
+        // On screen already, and with no liquidation price — the frame carries
+        // none, and a computed one would be there at once and sometimes wrong.
+        expect(heldPositions()).toEqual([{
+            symbol: 'TUTUSDT',
+            positionSide: 'BOTH',
+            quantity: '25',
+            entryPrice: '2.1',
+            unrealizedPnl: '3',
+            marginType: 'CROSS',
+            isolatedWallet: '0',
+        }]);
+        expect(loads.positions).toHaveBeenCalledTimes(afterSetup.positions);
+
+        // And then the read for what the frame could not carry — those two
+        // resources and no others.
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+        expect(loads.positions).toHaveBeenCalledTimes(afterSetup.positions + 1);
+        expect(loads.balances).toHaveBeenCalledTimes(afterSetup.balances + 1);
+        expect(loads.regularOrders).toHaveBeenCalledTimes(afterSetup.regularOrders);
+        expect(loads.algoOrders).toHaveBeenCalledTimes(afterSetup.algoOrders);
+    });
+
+    // A folded position set is a position set: the mark the contract is valued
+    // at follows it exactly as it follows a read. Asserted before any read
+    // answers, because a read would subscribe it anyway and prove nothing.
+    it('marks a position the frame opened to the market at once', async () => {
+        const loads = futuresAccountLoads();
+        await openFuturesStream(loads);
+        const { default: MockWebSocket } = await import('ws');
+        const marksBefore = MockWebSocket.mock.calls.filter(
+            ([url]) => String(url).includes('tutusdt@markPrice@1s'),
+        ).length;
+
+        moduleMocks.futuresUserDataSockets[0].handlers.message(accountUpdate({
+            P: [{ s: 'TUTUSDT', pa: '25', ep: '2.1', up: '3', mt: 'cross', iw: '0', ps: 'BOTH' }],
+        }));
+        await flushMicrotasks();
+
+        expect(MockWebSocket.mock.calls.filter(
+            ([url]) => String(url).includes('tutusdt@markPrice@1s'),
+        ).length).toBe(marksBefore + 1);
+    });
+
+    // Binance's REST view is eventually consistent with its own matching engine,
+    // so the read issued *for* the liquidation price can answer from a replica
+    // still describing the account before the frame that prompted it. Taking it
+    // whole would show the exchange's figure and then revert it — the blink,
+    // arriving by a new route.
+    it('takes the liquidation price from the read and the size from the frame', async () => {
+        const loads = futuresAccountLoads();
+        loads.positions.mockResolvedValue({
+            futures_positions: [{
+                symbol: 'TUTUSDT', positionSide: 'BOTH',
+                // What the replica still says, a fill behind.
+                quantity: '10', entryPrice: '2',
+                liquidationPrice: '1.5', leverage: '5',
+            }],
+        });
+        await openFuturesStream(loads);
+
+        moduleMocks.futuresUserDataSockets[0].handlers.message(accountUpdate({
+            P: [{ s: 'TUTUSDT', pa: '25', ep: '2.1', up: '3', mt: 'cross', iw: '0', ps: 'BOTH' }],
+        }));
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+
+        expect(heldPositions()).toEqual([expect.objectContaining({
+            symbol: 'TUTUSDT',
+            quantity: '25',
+            entryPrice: '2.1',
+            liquidationPrice: '1.5',
+            leverage: '5',
+        })]);
+    });
+
+    it('reads no positions for a frame that only moves the wallet', async () => {
+        const loads = futuresAccountLoads();
+        const afterSetup = await openFuturesStream(loads);
+
+        moduleMocks.futuresUserDataSockets[0].handlers.message(accountUpdate({
+            B: [{ a: 'USDT', wb: '1010.5', cw: '1010.5' }],
+            P: [],
+        }));
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+
+        expect(loads.balances).toHaveBeenCalledTimes(afterSetup.balances + 1);
+        expect(loads.positions).toHaveBeenCalledTimes(afterSetup.positions);
+    });
+
+    // The frames arrive in bursts — the fills of one order, an amendment's
+    // cancel and its replacement. One read between them says the same thing.
+    it('collapses a burst of frames into one read', async () => {
+        const loads = futuresAccountLoads();
+        const afterSetup = await openFuturesStream(loads);
+        const socket = moduleMocks.futuresUserDataSockets[0];
+
+        for (const quantity of ['5', '12', '25']) {
+            socket.handlers.message(accountUpdate({
+                B: [{ a: 'USDT', wb: `10${quantity}`, cw: `10${quantity}` }],
+                P: [{ s: 'TUTUSDT', pa: quantity, ep: '2', up: '0', mt: 'cross', iw: '0', ps: 'BOTH' }],
+            }));
+            // Spaced inside the window rather than delivered in one tick: a
+            // desk that read per frame would have read three times by here, and
+            // frames arriving in the same millisecond would not tell them apart.
+            await vi.advanceTimersByTimeAsync(100);
+            await flushMicrotasks();
+        }
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+
+        expect(heldPositions()[0].quantity).toBe('25');
+        expect(loads.positions).toHaveBeenCalledTimes(afterSetup.positions + 1);
+        expect(loads.balances).toHaveBeenCalledTimes(afterSetup.balances + 1);
+    });
+
+    it('reads nothing for a frame that states what the account already says', async () => {
+        const loads = futuresAccountLoads();
+        loads.balances.mockResolvedValue({
+            futures_balances: { USDT: { available: '90', total: '100' } },
+        });
+        const afterSetup = await openFuturesStream(loads);
+
+        moduleMocks.futuresUserDataSockets[0].handlers.message(accountUpdate({
+            B: [{ a: 'USDT', wb: '100', cw: '100' }],
+            P: [],
+        }));
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+
         for (const [type, load] of Object.entries(loads)) {
             expect(load, type).toHaveBeenCalledTimes(afterSetup[type]);
         }
@@ -4633,12 +4804,22 @@ describe('setupBinanceConnection user-data orchestration', () => {
         const record = {
             directory: '/desk/diagnostics',
             record: (kind, value) => kept.push({ kind, ...value }) > 0,
-            observeOutbound: payload => kept.push(
-                readDeskDiagnosticOutboundEvent(payload) ?? { kind: 'ignored' },
-            ) > 0,
-            observeCommand: command => kept.push(
-                readDeskDiagnosticCommandEvent(command) ?? { kind: 'ignored' },
-            ) > 0,
+            // Both answer whether they wrote anything, exactly as the real
+            // record does. A fake that answered `true` for a frame it kept
+            // nothing for let the desk record an answer to a command that has no
+            // line of its own to pair it with.
+            observeOutbound: (payload) => {
+                const event = readDeskDiagnosticOutboundEvent(payload);
+                if (event === null) return false;
+                kept.push(event);
+                return true;
+            },
+            observeCommand: (command) => {
+                const event = readDeskDiagnosticCommandEvent(command);
+                if (event === null) return false;
+                kept.push(event);
+                return true;
+            },
             close: () => {},
         };
         const held = kind => kept.filter(entry => entry.kind === kind);
@@ -4712,19 +4893,61 @@ describe('setupBinanceConnection user-data orchestration', () => {
         // recorded; their answers are not either, or the record would fill with
         // the desk's own housekeeping.
         it('keeps no answer for a read the record does not keep', async () => {
+            futuresAccountLoads();
             await connectRecordedRenderer();
+            await vi.advanceTimersByTimeAsync(2_000);
 
-            await moduleMocks.rendererHandlers.message({
+            const handled = moduleMocks.rendererHandlers.message({
                 type: 'utf8',
                 utf8Data: JSON.stringify({
                     version: 1,
                     marketType: 'futures',
-                    action: 'trade.accountRefresh',
+                    action: 'account.refresh',
                     accountId: 'default',
                 }),
             });
+            await vi.advanceTimersByTimeAsync(2_000);
+            await handled;
 
+            // The read itself happened — this is about the answer line, not
+            // about whether the desk did the work.
+            expect(held('read')).not.toEqual([]);
             expect(held('answer')).toEqual([]);
+            expect(held('outcome').filter(entry => entry.code === 'UNSUPPORTED_ACTION')).toEqual([]);
+        });
+
+        // The desk has always been required to have a stated reason before it
+        // reads the signed account. This is where the reason is kept, and it is
+        // the only way to tell a desk that reads when it must from one that
+        // reads on every frame that arrives.
+        it('states why every account read went out and what it cost', async () => {
+            futuresAccountLoads();
+            await connectRecordedRenderer();
+            await vi.advanceTimersByTimeAsync(2_000);
+
+            // Not awaited before the clock moves: the read this command issues
+            // waits on the limiter's own spacing timer, and awaiting the command
+            // first would hold the clock that has to fire it.
+            const handled = moduleMocks.rendererHandlers.message({
+                type: 'utf8',
+                utf8Data: JSON.stringify({
+                    version: 1,
+                    marketType: 'futures',
+                    action: 'account.refresh',
+                    accountId: 'default',
+                }),
+            });
+            await vi.advanceTimersByTimeAsync(2_000);
+            await handled;
+
+            const reads = held('read');
+            expect(reads.length).toBeGreaterThan(0);
+            expect(reads).toContainEqual(expect.objectContaining({ kind: 'read', reason: 'refresh' }));
+            for (const read of reads) {
+                expect(FUTURES_ACCOUNT_READ_REASONS).toContain(read.reason);
+                expect(Number.isSafeInteger(read.resources)).toBe(true);
+                expect(Number.isSafeInteger(read.weight)).toBe(true);
+            }
         });
 
         // Spot travels the same road with its own code, which the Spot client

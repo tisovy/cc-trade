@@ -9,6 +9,35 @@ export const FUTURES_ACCOUNT_RESOURCE_NAMES = Object.freeze([
     'userDataStream',
 ]);
 
+/**
+ * Why the desk read the signed account.
+ *
+ * `futures-order-visibility` has always required an account read to be issued
+ * only for a stated reason. This is that vocabulary, written down: the read
+ * sites name one of these, the record keeps it, and the day's summary is what
+ * lets the operator see whether the desk is reading for reasons they recognise
+ * or on every frame that arrives.
+ */
+export const FUTURES_ACCOUNT_READ_REASONS = Object.freeze([
+    // The first snapshot, when a renderer takes up futures trading.
+    'bootstrap',
+    // The authenticated stream connected or reconnected, so whatever it missed
+    // while it was down has to be read back.
+    'stream',
+    // The operator asked, or the periodic beat asked on the same command.
+    'refresh',
+    // A stream frame stated a change and could not state everything it moved.
+    'unstated',
+    // A command whose effect no stream reports — the algorithmic orders, or
+    // anything at all while no stream is up.
+    'command',
+    // An outcome the exchange left ambiguous, or a refusal whose effect on the
+    // book has to be established by reading it.
+    'unresolved',
+    // Leverage or margin mode moved, which moves what stands behind a position.
+    'setting',
+]);
+
 export const FUTURES_ACCOUNT_RESOURCE_STATUS = Object.freeze({
     IDLE: 'idle',
     LOADING: 'loading',
@@ -419,6 +448,199 @@ export const foldFuturesWorkingOrder = (
     return withRows(held === null
         ? [...rows, report]
         : rows.map(row => (futuresOrderIdentity(row) === identity ? report : row)));
+};
+
+// Where a position is held: one contract may carry two of them on a hedged
+// account, and folding a LONG onto a SHORT would state the wrong exposure.
+const futuresPositionKey = position => (
+    `${String(position?.symbol ?? '')}:${String(position?.positionSide ?? 'BOTH')}`
+);
+
+const foldFuturesWalletBalances = (resources, balances, now) => {
+    const resource = resources.balances;
+    // Nothing read yet. A wallet built from the one asset a frame happened to
+    // move would present it as the whole account.
+    if (resource.lastSuccessfulAt === null || balances.length === 0) return resources;
+    const held = resource.data && typeof resource.data === 'object' ? resource.data : {};
+    let changed = false;
+    const next = { ...held };
+    for (const balance of balances) {
+        if (typeof balance.walletBalance !== 'string') continue;
+        const previous = next[balance.asset] ?? null;
+        if (previous !== null && previous.total === balance.walletBalance) continue;
+        // The frame states the wallet, never the free margin — that is what the
+        // read this fold asks for is for. What was last read stands until it
+        // answers, rather than being invented from the wallet.
+        next[balance.asset] = Object.freeze({
+            ...(previous ?? { available: null, crossUnPnl: null }),
+            total: balance.walletBalance,
+        });
+        changed = true;
+    }
+    if (!changed) return resources;
+    return replaceResource(resources, 'balances', {
+        ...resource,
+        data: Object.freeze(next),
+        updatedAt: now,
+    });
+};
+
+// What the frame states about a position, and nothing else. The liquidation
+// price, the margins and the notional are absent from `ACCOUNT_UPDATE`
+// altogether; on a position the desk already holds they are carried over, and on
+// one it does not they are simply not there yet.
+const foldedFuturesPosition = (held, position) => Object.freeze({
+    ...(held ?? {}),
+    symbol: position.symbol,
+    positionSide: position.positionSide,
+    quantity: position.quantity,
+    entryPrice: position.entryPrice,
+    unrealizedPnl: position.unrealizedPnl,
+    ...(position.marginType === undefined ? {} : { marginType: position.marginType }),
+    isolatedWallet: position.isolatedWallet,
+});
+
+const sameFuturesPosition = (held, folded) => held !== null && [
+    'quantity',
+    'entryPrice',
+    'unrealizedPnl',
+    'marginType',
+    'isolatedWallet',
+].every(field => held[field] === folded[field]);
+
+const foldFuturesPositions = (resources, positions, now) => {
+    const resource = resources.positions;
+    if (resource.lastSuccessfulAt === null || positions.length === 0) return resources;
+    const rows = Array.isArray(resource.data) ? resource.data : [];
+    const byKey = new Map(rows.map(row => [futuresPositionKey(row), row]));
+    let changed = false;
+    for (const position of positions) {
+        const key = futuresPositionKey(position);
+        const held = byKey.get(key) ?? null;
+        const quantity = Number(position.quantity);
+        if (!Number.isFinite(quantity)) continue;
+        // Zero is how the frame says a position closed. A read simply stops
+        // listing it; the stream has to say so, and this is how.
+        if (quantity === 0) {
+            if (held === null) continue;
+            byKey.delete(key);
+            changed = true;
+            continue;
+        }
+        const folded = foldedFuturesPosition(held, position);
+        if (sameFuturesPosition(held, folded)) continue;
+        byKey.set(key, folded);
+        changed = true;
+    }
+    if (!changed) return resources;
+    return replaceResource(resources, 'positions', {
+        ...resource,
+        data: Object.freeze([...byKey.values()]),
+        updatedAt: now,
+    });
+};
+
+// What the stream states, and the read therefore may not take back. A read
+// issued to fetch a liquidation price answers from a replica that can still be
+// describing the account before the frame that prompted it — the same eventual
+// consistency the working orders are already guarded against. Letting it replace
+// the row wholesale would show the exchange's own figure and then revert it,
+// which is the blink, arriving by a new route.
+const FUTURES_STREAM_STATED_POSITION_FIELDS = Object.freeze([
+    'quantity',
+    'entryPrice',
+    'unrealizedPnl',
+    'marginType',
+    'isolatedWallet',
+]);
+
+const carriedOver = (row, fields) => Object.fromEntries(
+    fields.filter(field => row[field] !== undefined).map(field => [field, row[field]]),
+);
+
+/**
+ * What a read issued only for the values a stream cannot carry may change.
+ *
+ * Exactly those values. The size, the entry, the margin mode and the isolated
+ * wallet are the stream's to state, and a held row keeps them. Membership is the
+ * held set's too: the frame says a position closed by reporting it at zero, and
+ * a read that has not caught up with that must not put it back. A contract the
+ * read knows about and the desk does not is added — the desk missed something,
+ * and showing it is better than hiding it.
+ *
+ * A full read — the first snapshot, a reconnect, the periodic beat, the
+ * operator's refresh — is not this and replaces everything, which is what
+ * corrects a frame the desk never saw.
+ */
+export const reconcileFuturesUnstatedPositionRead = (resources, rows) => {
+    const held = Array.isArray(resources?.positions?.data) ? resources.positions.data : [];
+    if (held.length === 0) return rows;
+    const answered = new Map(
+        (Array.isArray(rows) ? rows : []).map(row => [futuresPositionKey(row), row]),
+    );
+    const merged = held.map((row) => {
+        const key = futuresPositionKey(row);
+        const read = answered.get(key);
+        if (read === undefined) return row;
+        answered.delete(key);
+        return Object.freeze({
+            ...read,
+            ...carriedOver(row, FUTURES_STREAM_STATED_POSITION_FIELDS),
+        });
+    });
+    return Object.freeze([...merged, ...answered.values()]);
+};
+
+/**
+ * The same rule for the wallet: the free margin is the read's to state, the
+ * balance itself is the stream's.
+ */
+export const reconcileFuturesUnstatedBalanceRead = (resources, balances) => {
+    const held = resources?.balances?.data;
+    if (!held || typeof held !== 'object') return balances;
+    if (!balances || typeof balances !== 'object') return balances;
+    const merged = { ...balances };
+    for (const [asset, reading] of Object.entries(balances)) {
+        const stated = held[asset];
+        if (stated?.total === undefined) continue;
+        merged[asset] = Object.freeze({ ...reading, total: stated.total });
+    }
+    return Object.freeze(merged);
+};
+
+/**
+ * Folds one `ACCOUNT_UPDATE` into the held wallet and positions.
+ *
+ * The exchange has just stated the change, on a stream the desk is already
+ * listening to. Asking for it back over REST put the position on screen a signed
+ * round trip after the frame that carried it — 340–800 ms through the operator's
+ * proxy, measured — and cost weight 10 for every fill, twice, because the
+ * execution report for the same fill asked as well.
+ *
+ * Answers the resources and `unstated`: the resources holding values the frame
+ * cannot carry — the liquidation price, the margin a position commits, the free
+ * margin an order is sized against — that the fold has just moved. The caller
+ * reads exactly those back and nothing else. When the fold changed nothing,
+ * `unstated` is empty and there is nothing to read.
+ */
+export const foldFuturesAccountUpdate = (
+    resources,
+    update,
+    { now = Date.now() } = {},
+) => {
+    const balances = Array.isArray(update?.balances) ? update.balances : [];
+    const positions = Array.isArray(update?.positions) ? update.positions : [];
+    const withWallet = foldFuturesWalletBalances(resources, balances, now);
+    const folded = foldFuturesPositions(withWallet, positions, now);
+    const unstated = [];
+    // A position that moved changed where it liquidates and what it commits.
+    if (folded.positions !== resources.positions) unstated.push('positions');
+    // A wallet that moved changed the free margin — and so did a position,
+    // whose margin comes out of the same wallet.
+    if (folded.balances !== resources.balances || folded.positions !== resources.positions) {
+        unstated.push('balances');
+    }
+    return { resources: folded, unstated: Object.freeze(unstated) };
 };
 
 export const createFuturesAccountStateEnvelope = (

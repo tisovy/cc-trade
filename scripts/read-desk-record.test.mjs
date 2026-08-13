@@ -129,6 +129,25 @@ describe('summarizeDeskDiagnosticRecord', () => {
     expect(formatDeskDiagnosticSummary(damaged)).toContain('Commands (2)')
   })
 
+  // The one question this whole design turns on: is the desk reading the signed
+  // account when it must, or on every frame that arrives? Grouped by the reason
+  // the read site stated, because the count alone answers neither.
+  it('states why the account was read and what it cost', () => {
+    const reads = summarizeDeskDiagnosticRecord([
+      line({ at: '2026-08-10T09:00:00.000Z', kind: 'read', reason: 'bootstrap', resources: 4, weight: 90 }),
+      line({ at: '2026-08-10T09:05:00.000Z', kind: 'read', reason: 'unstated', resources: 2, weight: 10 }),
+      line({ at: '2026-08-10T09:05:30.000Z', kind: 'read', reason: 'unstated', resources: 1, weight: 5 }),
+      line({ at: '2026-08-10T09:06:00.000Z', kind: 'read' }),
+    ].join(''))
+    expect(reads.reads).toEqual([
+      { reason: 'bootstrap', count: 1, weight: 90, resources: 4 },
+      { reason: 'unstated', count: 2, weight: 15, resources: 3 },
+    ])
+    const printed = formatDeskDiagnosticSummary(reads)
+    expect(printed).toContain('Why the account was read (3 passes, weight 105)')
+    expect(printed).toContain('unstated')
+  })
+
   it('answers an empty record without failing', () => {
     const empty = summarizeDeskDiagnosticRecord('')
     expect(empty).toMatchObject({ lines: 0, refused: 0, from: null, to: null })

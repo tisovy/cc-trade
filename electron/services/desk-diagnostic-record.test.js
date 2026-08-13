@@ -132,6 +132,34 @@ describe('describeDeskDiagnosticEvent', () => {
         })).toBeNull();
     });
 
+    // Why the desk went to the exchange for the signed account. Without it,
+    // "the desk reads a lot" and "the desk reads when it must" are the same
+    // number, and the operator has no way to tell which one they are looking at.
+    it('keeps an account read under the reason the site stated', () => {
+        expect(describeDeskDiagnosticEvent('read', {
+            reason: 'unstated',
+            resources: 2,
+            weight: 10,
+            balance: '1200.5',
+        })).toEqual({
+            kind: 'read',
+            reason: 'unstated',
+            resources: 2,
+            weight: 10,
+        });
+        // A reason outside the vocabulary is a read site that never stated one.
+        expect(describeDeskDiagnosticEvent('read', {
+            reason: 'because it felt like it',
+            resources: 4,
+            weight: 90,
+        })).toBeNull();
+        expect(describeDeskDiagnosticEvent('read', {
+            reason: null,
+            resources: 4,
+            weight: 90,
+        })).toBeNull();
+    });
+
     it('names the byte count a refused frame reported', () => {
         expect(describeDeskDiagnosticEvent('timing', {
             phase: 'oversized-frame:40657',

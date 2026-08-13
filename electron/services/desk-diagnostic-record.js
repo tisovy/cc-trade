@@ -12,6 +12,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { TRADING_COMMAND_ACTIONS } from '../../src/utils/tradingCommands.js';
+import { FUTURES_ACCOUNT_READ_REASONS } from './futures-account-state.js';
 
 export const DESK_DIAGNOSTIC_RECORD = Object.freeze({
     // Measured on 2026-08-11 against the live exchange, one contract, 63s: the
@@ -73,6 +74,10 @@ const RESULT = /^(?:rejected|unresolved|resolved)$/;
 const EXCHANGE_CODE_NUMBER = /^-?\d{1,6}$/;
 const EXCHANGE_CODE_NAME = /^[A-Z][A-Z0-9_]{0,39}$/;
 const EVENT = /^(?:started|stopped)$/;
+// Why the desk read the signed account. A closed vocabulary rather than free
+// text: a reason the record does not know is a read site that never stated one,
+// and losing that line is how it says so.
+const READ_REASON = new RegExp(`^(?:${FUTURES_ACCOUNT_READ_REASONS.join('|')})$`);
 // The desk's own name for a stream of market data — `depth`, `candles`,
 // `trades`, `ticker`. Same shape as the workstation protocol's resource names.
 const RESOURCE = /^[a-z][a-zA-Z0-9]{0,31}$/;
@@ -164,6 +169,17 @@ const RECORDED_FIELDS = Object.freeze({
         ['outcome', text(OUTCOME)],
         ['symbol', optional(text(SYMBOL))],
         ['identity', optional(identity)],
+    ]),
+    // One line per pass over the signed account resources, stating why it went
+    // out and what it cost. The desk's rule has always been that an account read
+    // needs a stated reason; this is where the reason is kept, and it is the only
+    // way to tell a desk that reads when it must from one that reads on every
+    // frame that arrives. One line per pass, never per request — a full pass is
+    // four requests and would say the same thing four times.
+    read: Object.freeze([
+        ['reason', text(READ_REASON)],
+        ['resources', count],
+        ['weight', count],
     ]),
     outcome: Object.freeze([
         ['action', text(ACTION)],

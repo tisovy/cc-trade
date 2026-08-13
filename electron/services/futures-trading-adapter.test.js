@@ -12,6 +12,7 @@ import {
     normalizeFuturesHistoryTrade,
     normalizeFuturesPositions,
     normalizeFuturesSymbolConfig,
+    normalizeFuturesAccountUpdate,
     normalizeFuturesUserDataStreamEvent,
     parseFuturesExchangeFilters,
     readFuturesMaxLeverage,
@@ -711,16 +712,59 @@ describe('futures normalization', () => {
         });
     });
 
-    it('classifies user data stream events and refresh triggers', () => {
+    it('classifies user data stream events', () => {
         expect(normalizeFuturesUserDataStreamEvent({
             e: 'ORDER_TRADE_UPDATE',
             o: { s: 'BTCUSDT', S: 'BUY', X: 'FILLED', i: 1, q: '1', z: '1', p: '1' },
-        })).toMatchObject({ type: 'executionReport', shouldRefreshAccount: true });
-        expect(normalizeFuturesUserDataStreamEvent({ e: 'ACCOUNT_UPDATE' }))
-            .toMatchObject({ type: 'accountUpdate', shouldRefreshAccount: true });
+        })).toMatchObject({ type: 'executionReport' });
+        expect(normalizeFuturesUserDataStreamEvent({ e: 'ACCOUNT_UPDATE', a: {} }))
+            .toMatchObject({ type: 'accountUpdate' });
         expect(normalizeFuturesUserDataStreamEvent({ e: 'listenKeyExpired' }))
             .toMatchObject({ type: 'listenKeyExpired' });
         expect(normalizeFuturesUserDataStreamEvent({ e: 'MARGIN_CALL' })).toBeNull();
+    });
+
+    // The frame is the account change, not a signal that one happened. Reading
+    // it back over REST put the position on screen a signed round trip after the
+    // exchange had already stated it.
+    it('reads what an account update states about the wallet and the positions', () => {
+        expect(normalizeFuturesAccountUpdate({
+            e: 'ACCOUNT_UPDATE',
+            a: {
+                m: 'ORDER',
+                B: [
+                    { a: 'USDT', wb: '1200.5', cw: '1200.5', bc: '-0.4' },
+                    { b: 'no asset named' },
+                ],
+                P: [
+                    {
+                        s: 'BTCUSDT', pa: '0.5', ep: '60000', up: '12.5',
+                        mt: 'isolated', iw: '300', ps: 'BOTH',
+                    },
+                    // Zero is how the frame says a position closed. A read simply
+                    // stops listing it, so this one has to survive normalization.
+                    { s: 'ETHUSDT', pa: '0', ep: '0.0', up: '0', mt: 'cross', iw: '0', ps: 'BOTH' },
+                ],
+            },
+        })).toEqual({
+            cause: 'ORDER',
+            balances: [{ asset: 'USDT', walletBalance: '1200.5', crossWallet: '1200.5' }],
+            positions: [
+                {
+                    symbol: 'BTCUSDT', positionSide: 'BOTH', quantity: '0.5',
+                    entryPrice: '60000', unrealizedPnl: '12.5',
+                    marginType: 'ISOLATED', isolatedWallet: '300',
+                },
+                {
+                    symbol: 'ETHUSDT', positionSide: 'BOTH', quantity: '0',
+                    entryPrice: '0.0', unrealizedPnl: '0',
+                    marginType: 'CROSS', isolatedWallet: '0',
+                },
+            ],
+        });
+        expect(normalizeFuturesAccountUpdate({ e: 'ORDER_TRADE_UPDATE' })).toBeNull();
+        expect(normalizeFuturesAccountUpdate({ e: 'ACCOUNT_UPDATE' }))
+            .toEqual({ cause: null, balances: [], positions: [] });
     });
 
     it('extracts filters, balances, and open positions', () => {
