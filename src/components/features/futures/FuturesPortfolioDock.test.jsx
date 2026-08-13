@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs'
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { createEvent, fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import FuturesPortfolioDock from './FuturesPortfolioDock.jsx'
 import { describeFuturesPosition } from '../../../utils/futuresOrderPresentation.js'
@@ -326,7 +326,11 @@ describe('FuturesPortfolioDock', () => {
 
     // Nothing on a fired parent may open the editor: the exchange has acted.
     fireEvent.click(row)
+    fireEvent.keyDown(row, { key: 'Enter' })
+    fireEvent.keyDown(row, { key: ' ' })
     expect(onOrderEdit).not.toHaveBeenCalled()
+    expect(row).not.toHaveAttribute('tabindex')
+    expect(row).not.toHaveAttribute('aria-label')
     expect(within(row).queryByRole('button', { name: /^Cancel/ })).toBeNull()
   })
 
@@ -381,29 +385,95 @@ describe('FuturesPortfolioDock', () => {
 
     fireEvent.click(screen.getAllByRole('button', { name: 'Show BTCUSDT' })[0])
     expect(onSymbolChange).toHaveBeenCalledWith('BTCUSDT')
+
+    const orderRow = screen.getAllByRole('row').find(row => (
+      row.classList.contains('is-orders') && !row.classList.contains('is-head')
+    ))
+    expect(orderRow).not.toHaveAttribute('tabindex')
+    expect(orderRow).not.toHaveAttribute('aria-label')
+    expect(orderRow).not.toHaveClass('is-editable')
   })
 
-  it('opens the shared order editor from a working-order row', () => {
+  it('opens the shared order editor once from Enter and Space at the row centre', () => {
+    const onOrderEdit = vi.fn()
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        openOrders={[order]}
+        onOrderEdit={onOrderEdit}
+        onCancelOrder={vi.fn()}
+        onSymbolChange={vi.fn()}
+      />,
+    )
+    const row = screen.getByRole('row', {
+      name: 'Edit BTCUSDT BUY order at 58445.00',
+    })
+    expect(row).toHaveAttribute('tabindex', '0')
+    expect(row).toHaveClass('is-editable')
+    vi.spyOn(row, 'getBoundingClientRect').mockReturnValue({
+      left: 40,
+      top: 60,
+      width: 200,
+      height: 30,
+      right: 240,
+      bottom: 90,
+      x: 40,
+      y: 60,
+      toJSON: () => ({}),
+    })
+
+    fireEvent.keyDown(row, { key: 'Enter' })
+    expect(onOrderEdit).toHaveBeenCalledExactlyOnceWith(order, { x: 140, y: 75 })
+
+    onOrderEdit.mockClear()
+    const space = createEvent.keyDown(row, { key: ' ' })
+    fireEvent(row, space)
+    expect(space.defaultPrevented).toBe(true)
+    expect(onOrderEdit).toHaveBeenCalledExactlyOnceWith(order, { x: 140, y: 75 })
+
+    onOrderEdit.mockClear()
+    fireEvent.keyDown(row, { key: 'ArrowDown' })
+    expect(onOrderEdit).not.toHaveBeenCalled()
+
+    // Keys from nested controls stay their controls' events, not row actions.
+    fireEvent.keyDown(within(row).getByRole('button', { name: 'Show BTCUSDT' }), {
+      key: 'Enter',
+    })
+    fireEvent.keyDown(within(row).getByRole('button', {
+      name: 'Cancel BTCUSDT BUY order at 58445.00',
+    }), { key: ' ' })
+    expect(onOrderEdit).not.toHaveBeenCalled()
+  })
+
+  it('preserves click coordinates and isolates nested controls and ALGO rows', () => {
     const onOrderEdit = vi.fn()
     const onCancelOrder = vi.fn()
+    const onSymbolChange = vi.fn()
     render(
       <FuturesPortfolioDock
         selectedSymbol="BTCUSDT"
         openOrders={[order, { ...order, orderId: 12, orderKind: 'ALGO' }]}
         onOrderEdit={onOrderEdit}
         onCancelOrder={onCancelOrder}
+        onSymbolChange={onSymbolChange}
       />,
     )
     const rows = screen.getAllByRole('row').filter(row => row.classList.contains('is-orders'))
-    fireEvent.click(rows[1])
-    expect(onOrderEdit).toHaveBeenCalledWith(order, expect.any(Object))
+    fireEvent.click(rows[1], { clientX: 120, clientY: 240 })
+    expect(onOrderEdit).toHaveBeenCalledExactlyOnceWith(order, { x: 120, y: 240 })
 
-    // An exchange-managed row stays display-only, and Cancel never opens it.
+    // An exchange-managed row stays display-only, and nested controls never
+    // open the row editor through their pointer events.
     fireEvent.click(rows[2])
     expect(onOrderEdit).toHaveBeenCalledTimes(1)
     fireEvent.click(screen.getByRole('button', { name: 'Cancel BTCUSDT BUY order at 58445.00' }))
     expect(onCancelOrder).toHaveBeenCalledTimes(1)
     expect(onOrderEdit).toHaveBeenCalledTimes(1)
+    fireEvent.click(within(rows[1]).getByRole('button', { name: 'Show BTCUSDT' }))
+    expect(onSymbolChange).toHaveBeenCalledExactlyOnceWith('BTCUSDT')
+    expect(onOrderEdit).toHaveBeenCalledTimes(1)
+    expect(rows[2]).not.toHaveAttribute('tabindex')
+    expect(rows[2]).not.toHaveAttribute('aria-label')
   })
 
   // The multiple a position is carried at is the difference between a position

@@ -1264,24 +1264,52 @@ describe('instrument recency and interface scale', () => {
     expect(symbolRule).not.toMatch(/text-overflow\s*:/)
   })
 
-  it('reserves the desktop market rail at 65/35 without changing the mobile stack', () => {
+  it('keeps the dock in an explicit seventh narrow grid row', () => {
+    const stylesheet = readFileSync(
+      'src/components/features/futures/FuturesWorkstation.css',
+      'utf8',
+    )
+    const narrowRule = stylesheet.match(
+      /@media \(max-width: \d+px\) \{[\s\S]*?\.futures-workstation\s*\{(?<declarations>[^}]*grid-template-areas:[^}]*)\}/,
+    )?.groups?.declarations
+
+    expect(narrowRule).toContain(
+      'grid-template-rows: auto auto auto minmax(390px, 56vh) auto auto auto;',
+    )
+    expect(narrowRule).toContain('"trades"\n      "dock";')
+  })
+
+  it('uses complementary measured breakpoints where the desktop tracks fit', () => {
     const stylesheet = readFileSync(
       'src/components/features/futures/FuturesWorkstation.css',
       'utf8',
     )
     const desktopRule = stylesheet.match(
-      /@media \(min-width: 761px\) \{[\s\S]*?\.futures-workstation\s*\{(?<declarations>[^}]*)\}/,
-    )?.groups?.declarations
-    const mobileRule = stylesheet.match(
-      /@media \(max-width: 760px\) \{[\s\S]*?\.futures-workstation\s*\{(?<declarations>[^}]*)\}/,
+      /@media \(min-width: 830px\) \{[\s\S]*?\.futures-workstation\s*\{(?<declarations>[^}]*)\}/,
     )?.groups?.declarations
 
     expect(desktopRule).toContain(
       'grid-template-rows: auto auto minmax(0, 65fr) minmax(0, 35fr) auto;',
     )
-    expect(mobileRule).toContain(
-      'grid-template-rows: auto auto auto minmax(390px, 56vh) auto auto;',
+
+    // The two integer-width media queries are complementary: no viewport falls
+    // between them and no narrow width receives the desktop minimum tracks.
+    expect(stylesheet).toContain('@media (max-width: 829px)')
+    expect(stylesheet).toContain('@media (min-width: 830px)')
+    expect(stylesheet).not.toMatch(/@media \((?:min-width: 761|max-width: 760)px\)/)
+  })
+
+  it('draws a visible focus indicator on both editable order-row surfaces', () => {
+    const stylesheet = readFileSync(
+      'src/components/features/futures/FuturesWorkstation.css',
+      'utf8',
     )
+    const focusRule = stylesheet.match(
+      /\.futures-workstation-dock-row\.is-editable:focus-visible,\s*\.futures-production-order-row\.is-editable:focus-visible\s*\{(?<declarations>[^}]*)\}/,
+    )?.groups?.declarations
+
+    expect(focusRule).toContain('outline: 2px solid var(--futures-accent);')
+    expect(focusRule).toContain('outline-offset: -2px;')
   })
 
   it('lists persisted recent contracts before the catalogue arrives', () => {

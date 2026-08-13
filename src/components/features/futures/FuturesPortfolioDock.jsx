@@ -26,6 +26,17 @@ const marginModeLabel = mode => (
   mode === 'ISOLATED' ? 'ISO' : mode === 'CROSS' ? 'CROSS' : ''
 )
 
+const openOrderEditorFromKeyboard = (event, order, onOrderEdit) => {
+  if (event.target !== event.currentTarget) return
+  if (event.key !== 'Enter' && event.key !== ' ') return
+  if (event.key === ' ') event.preventDefault()
+  const rowRect = event.currentTarget.getBoundingClientRect()
+  onOrderEdit(order, {
+    x: rowRect.left + (rowRect.width / 2),
+    y: rowRect.top + (rowRect.height / 2),
+  })
+}
+
 // Positions and working orders live under the chart because they are what a
 // trader watches continuously — a tab you have to open is a tab you forget.
 // What a list of no rows means: nothing open, or nothing read yet. The dock used
@@ -418,6 +429,13 @@ export const FuturesPortfolioDock = ({
                   className={`futures-workstation-dock-row is-orders is-${intent.tone}${order.symbol === selectedSymbol ? ' is-current-symbol' : ''}${editable ? ' is-editable' : ''}${trigger.triggered ? ' is-triggered' : ''}`}
                   role="row"
                   key={`${order.orderKind ?? 'REGULAR'}:${order.symbol}:${order.orderId}`}
+                  tabIndex={editable ? 0 : undefined}
+                  aria-label={editable
+                    ? `Edit ${order.symbol} ${intent.side} order at ${order.price}`
+                    : undefined}
+                  onKeyDown={editable
+                    ? event => openOrderEditorFromKeyboard(event, order, onOrderEdit)
+                    : undefined}
                   // Every order surface opens the same editor; the row's own
                   // controls stop the event so Cancel never opens a panel.
                   onClick={editable

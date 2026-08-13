@@ -78,6 +78,17 @@ const orderSizeTitle = (order) => (
   Number(order?.origQty) > 0 ? `${order.origQty} contracts` : undefined
 )
 
+const openOrderEditorFromKeyboard = (event, order, onOrderEdit) => {
+  if (event.target !== event.currentTarget) return
+  if (event.key !== 'Enter' && event.key !== ' ') return
+  if (event.key === ' ') event.preventDefault()
+  const rowRect = event.currentTarget.getBoundingClientRect()
+  onOrderEdit(order, {
+    x: rowRect.left + (rowRect.width / 2),
+    y: rowRect.top + (rowRect.height / 2),
+  })
+}
+
 const FuturesTradingTicket = ({
   state,
   selectedSymbol = 'BTCUSDT',
@@ -624,11 +635,19 @@ const FuturesTradingTicket = ({
                     const intent = describeFuturesOrderIntent(order)
                     const isAlgo = order.orderKind === 'ALGO'
                     const trigger = describeFuturesAlgoTrigger(order)
+                    const editable = !isAlgo && typeof onOrderEdit === 'function'
                     return (
                       <div
-                        className={`futures-production-order-row is-${intent.tone}${order.symbol === selectedSymbol ? ' is-current-symbol' : ''}${trigger.triggered ? ' is-triggered' : ''}`}
+                        className={`futures-production-order-row is-${intent.tone}${order.symbol === selectedSymbol ? ' is-current-symbol' : ''}${editable ? ' is-editable' : ''}${trigger.triggered ? ' is-triggered' : ''}`}
                         role="row"
                         key={`${order.orderKind ?? 'REGULAR'}:${order.symbol}:${order.orderId}`}
+                        tabIndex={editable ? 0 : undefined}
+                        aria-label={editable
+                          ? `Edit ${order.symbol} ${intent.side} order at ${order.price}`
+                          : undefined}
+                        onKeyDown={editable
+                          ? event => openOrderEditorFromKeyboard(event, order, onOrderEdit)
+                          : undefined}
                         onDoubleClick={event => (isAlgo ? undefined : onOrderEdit?.(order, {
                           x: event.clientX,
                           y: event.clientY,

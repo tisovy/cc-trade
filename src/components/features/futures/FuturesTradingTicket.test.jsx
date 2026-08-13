@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, createEvent, fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import FuturesTradingTicket from './FuturesTradingTicket.jsx'
 
@@ -358,7 +358,11 @@ describe('FuturesTradingTicket', () => {
 
     // The editor never opened on an algo row and must not start now.
     fireEvent.doubleClick(row)
+    fireEvent.keyDown(row, { key: 'Enter' })
+    fireEvent.keyDown(row, { key: ' ' })
     expect(onOrderEdit).not.toHaveBeenCalled()
+    expect(row).not.toHaveAttribute('tabindex')
+    expect(row).not.toHaveAttribute('aria-label')
   })
 
   it('keeps sizing and reduce-only exits usable while the local entry cap is exceeded', () => {
@@ -979,9 +983,13 @@ describe('FuturesTradingTicket', () => {
     )
     fireEvent.click(screen.getByRole('tab', { name: /Orders/ }))
     const panel = screen.getByLabelText('Current Futures orders')
+    const orderRow = panel.querySelector('.futures-production-order-row')
     expect(panel).toHaveTextContent('LONG')
     expect(panel).toHaveTextContent('234')
     expect(panel).toHaveTextContent('58445.0')
+    expect(orderRow).not.toHaveAttribute('tabindex')
+    expect(orderRow).not.toHaveAttribute('aria-label')
+    expect(orderRow).not.toHaveClass('is-editable')
 
     fireEvent.click(within(panel).getByRole('button', {
       name: 'Cancel BTCUSDT BUY order at 58445.00',
@@ -1018,13 +1026,65 @@ describe('FuturesTradingTicket', () => {
     expect(within(panel).getByText('0.014841')).toBeInTheDocument()
   })
 
-  it('opens the order editor on a double-clicked row', () => {
+  it('opens the order editor once from Enter and Space at the row centre', () => {
     const onOrderEdit = vi.fn()
+    const workingOrder = {
+      symbol: 'BTCUSDT', orderId: 11, side: 'BUY', positionSide: 'BOTH',
+      type: 'LIMIT', status: 'NEW', price: '58445.00', origQty: '0.004', z: '0',
+    }
+    const state = createState({ openOrders: [workingOrder] })
+    render(
+      <FuturesTradingTicket
+        state={state}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+        onOrderEdit={onOrderEdit}
+      />,
+    )
+    fireEvent.click(screen.getByRole('tab', { name: /Orders/ }))
+    const row = screen.getByRole('row', {
+      name: 'Edit BTCUSDT BUY order at 58445.00',
+    })
+    expect(row).toHaveAttribute('tabindex', '0')
+    expect(row).toHaveClass('is-editable')
+    vi.spyOn(row, 'getBoundingClientRect').mockReturnValue({
+      left: 20,
+      top: 100,
+      width: 180,
+      height: 40,
+      right: 200,
+      bottom: 140,
+      x: 20,
+      y: 100,
+      toJSON: () => ({}),
+    })
+
+    fireEvent.keyDown(row, { key: 'Enter' })
+    expect(onOrderEdit).toHaveBeenCalledExactlyOnceWith(workingOrder, { x: 110, y: 120 })
+
+    onOrderEdit.mockClear()
+    const space = createEvent.keyDown(row, { key: ' ' })
+    fireEvent(row, space)
+    expect(space.defaultPrevented).toBe(true)
+    expect(onOrderEdit).toHaveBeenCalledExactlyOnceWith(workingOrder, { x: 110, y: 120 })
+
+    onOrderEdit.mockClear()
+    fireEvent.keyDown(row, { key: 'Escape' })
+    fireEvent.keyDown(within(row).getByRole('button', {
+      name: 'Cancel BTCUSDT BUY order at 58445.00',
+    }), { key: 'Enter' })
+    expect(onOrderEdit).not.toHaveBeenCalled()
+    expect(state.cancelOrder).not.toHaveBeenCalled()
+  })
+
+  it('preserves the order object and pointer coordinates on ticket double-click', () => {
+    const onOrderEdit = vi.fn()
+    const workingOrder = {
+      symbol: 'BTCUSDT', orderId: 11, side: 'BUY', positionSide: 'BOTH',
+      type: 'LIMIT', status: 'NEW', price: '58445.00', origQty: '0.004', z: '0',
+    }
     const state = createState({
-      openOrders: [{
-        symbol: 'BTCUSDT', orderId: 11, side: 'BUY', positionSide: 'BOTH',
-        type: 'LIMIT', status: 'NEW', price: '58445.00', origQty: '0.004', z: '0',
-      }],
+      openOrders: [workingOrder],
     })
     render(
       <FuturesTradingTicket
@@ -1037,7 +1097,7 @@ describe('FuturesTradingTicket', () => {
     fireEvent.click(screen.getByRole('tab', { name: /Orders/ }))
     fireEvent.doubleClick(screen.getByText('58445.0'), { clientX: 120, clientY: 240 })
     expect(onOrderEdit).toHaveBeenCalledExactlyOnceWith(
-      expect.objectContaining({ orderId: 11 }),
+      workingOrder,
       { x: 120, y: 240 },
     )
   })
