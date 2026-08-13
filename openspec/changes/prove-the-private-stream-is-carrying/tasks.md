@@ -84,40 +84,57 @@ the private one rather than discovering it — but it is still a measurement,
 because a bound taken from a document about a different socket is an estimate.
 
 - [ ] 1.1 Open the futures user-data stream on the path the exchange serves, and state the migration and its date where the URL is built, as the mark-price feed already does for its own.
-- [x] 1.2 **Decided: the path form, `wss://fstream.binance.com/private/ws/<listenKey>`, unfiltered.** Reasoning below; it is the minimum diff and the only candidate that cannot fail by omission.
-Why that form, decided 2026-08-13 with the session running
-`recover-the-market-feed-after-an-outage`, whose reading of it this follows.
+- [x] 1.2 **Decided: `wss://fstream.binance.com/private/ws?listenKey=<listenKey>`, with no `events` parameter.** Fallback if it does not carry: `wss://fstream.binance.com/private/ws/<listenKey>`. Reasoning and the assumption each one rests on are below.
+Worked out 2026-08-13 with the session running
+`recover-the-market-feed-after-an-outage`, over two passes. The first ranked the
+path form first on the grounds that the query form implies a filter. That was a
+false choice, and the fact that dissolves it is that **`events` is optional**: a
+query form with the parameter simply omitted is unfiltered too, so the filter
+argument does not separate the candidates at all. What separates them is
+attestation.
 
-The desk folds exactly three event types — `ORDER_TRADE_UPDATE`, `ACCOUNT_UPDATE`
-and `listenKeyExpired` (`futures-trading-adapter.js:453/:461/:468`); everything
-else `normalizeFuturesUserDataStreamEvent` answers `null` for. The path form
-takes no filter, so the delivered set is unchanged by construction and nothing
-the desk folds can go missing. The query form
-`/private/ws?listenKey=<key>&events=…` adds a filter, and a filter is a claim
-about the future as much as the present: `ACCOUNT_CONFIG_UPDATE` is not folded
-today but `compute-the-unstated-values-beside-the-read` wants leverage changes,
-and an events list written now would quietly exclude them later. The two
-candidates do not carry the same risk of being wrong, and only one of them can
-fail in the way that cost four months here.
+Not filtering is still the requirement, and it is not a preference. The desk
+folds exactly three event types — `ORDER_TRADE_UPDATE`, `ACCOUNT_UPDATE` and
+`listenKeyExpired` (`futures-trading-adapter.js:453/:461/:468`); everything else
+`normalizeFuturesUserDataStreamEvent` answers `null` for. An `events` list is a
+claim about the future as much as the present: `ACCOUNT_CONFIG_UPDATE` is not
+folded today but `compute-the-unstated-values-beside-the-read` wants leverage
+changes, and a list written now would exclude them silently. `listenKeyExpired`
+is a further reason to write no list — it is a control message rather than an
+account event, and whether it is even nameable in that parameter is unknown here.
+The notice writes its example values slash-separated
+(`events=ORDER_TRADE_UPDATE/ACCOUNT_UPDATE`), which is unusual enough on its own
+that hand-writing the list invites a quiet mistake.
 
-`events` is documented as optional and `listenKey` as required, so the query form
-with no filter would be equivalent — but it is a larger diff for nothing.
+**Attestation is what decides it, and it favours the query form.** The migration
+notice (`.../websocket-market-streams/Important-WebSocket-Change-Notice`) — the
+one document whose whole job is to say what to migrate *to* — shows
+`/private/ws?listenKey=…` and `/private/stream?listenKey=…`, and does not show
+the path form at all. Its absence there is evidence rather than an oversight. The
+path form is attested on the User Data Streams *Connect* page, which every direct
+fetch from here answered with the documentation homepage, so what supports it is
+search summaries quoting that page — two of them, including a concrete example
+URL — and that page documents connecting in general rather than this migration,
+so it could as easily be describing the pre-migration shape.
 
-**Where the evidence is uneven, and it matters.** The migration notice
-(`.../websocket-market-streams/Important-WebSocket-Change-Notice`) shows *only*
-the query forms under `/private` and does not show the path form at all; the path
-form is attested on the User Data Streams *Connect* page, which every direct
-fetch from here answered with the documentation homepage instead, so it is
-attested through search summaries rather than a quotation taken by hand. The
-notice is documenting the new capability — several listen keys on one socket,
-with per-key filtering — rather than enumerating every valid form, which is the
-reading that makes the two pages agree. It is not proof. 1.5 is therefore not a
-formality: if the prefix alone does not make the leg carry, the connect form is
-the next thing to change, not the last.
+Each candidate rests on exactly one unproven assumption, and neither should be
+built as though it did not:
+
+- **Query form without `events`:** that omitting an optional filter yields *all*
+  events rather than none. Near-certain — it is the only sensible default, and it
+  is what the legacy socket did — but if it defaults to none, the failure is the
+  same silence again, and indistinguishable from it.
+- **Path form:** that it is still valid after the migration.
+
+Which is why 1.5 branches three ways rather than two.
 
 - [ ] 1.3 Register the user-data endpoint in the ADR's WebSocket registry, which has no row for it — that absence is why a decommissioning notice about "market paths" read as not applying.
 - [ ] 1.4 Prove by test that the desk builds the routed URL, and that the bare legacy path cannot be built by accident.
-- [ ] 1.5 Operator confirms on live data that the stream now delivers. **One** `unstated` read is the whole proof: `resources: 1, weight: 5` against 489 consecutive four-resource passes is unmissable and nothing else in the desk can produce it. One order placed and cancelled is enough. If none appears, the prefix was not the whole story and 1.2's connect form is the next suspect.
+- [ ] 1.4a Log the URL the socket actually opened on, at connect. Today the only record of an opening is a `read` line with reason `stream`, which says where nothing — and that is exactly how one prefix hid for four months. A gate on 1.1, not a preference.
+- [ ] 1.5 Operator confirms on live data that the stream now delivers. **One** `unstated` read is the whole proof: `resources: 1, weight: 5` against 489 consecutive four-resource passes is unmissable and nothing else in the desk can produce it. One order placed and cancelled is enough per attempt, and the same oracle separates all three outcomes without anyone having to be right in advance:
+  1. query form without `events` → an `unstated` read appears: done;
+  2. → none: build the path form and repeat. The `events` default was the wrong assumption;
+  3. → still none: the prefix was not the whole story, and the next suspect is the listen key or the proxy rather than the form.
 
 ## 2. The Stream States Whether It Is Carrying
 
