@@ -966,6 +966,17 @@ export const FuturesWorkstationChart = ({
     })
   }, [removeDragLines])
 
+  // Give the pointer back, unless the gesture the operator is making now is the
+  // one holding it. A mouse reports the same pointer id for every gesture, so a
+  // drag that ended a round trip ago would otherwise take the capture off the
+  // drag in hand — and a pointer that then left the chart would take its
+  // `pointerup` with it, leaving an order lifted off the book and never dropped.
+  const releasePointer = useCallback((drag) => {
+    const live = orderDragRef.current
+    if (live !== null && live !== drag && live.pointerId === drag.pointerId) return
+    shellRef.current?.releasePointerCapture?.(drag.pointerId)
+  }, [])
+
   // The drag is over and left nothing behind: nothing was lifted, or what was
   // lifted has been answered for.
   const releaseDrag = useCallback((drag) => {
@@ -979,8 +990,8 @@ export const FuturesWorkstationChart = ({
       publishSettling()
     }
     removeDragLines(drag)
-    shellRef.current?.releasePointerCapture?.(drag.pointerId)
-  }, [publishOrderDrag, publishSettling, removeDragLines])
+    releasePointer(drag)
+  }, [publishOrderDrag, publishSettling, releasePointer, removeDragLines])
 
   // Take the drag off the pointer without ending it. The gesture is finished —
   // the operator has let go — but the exchange has not answered yet, for the
@@ -991,11 +1002,11 @@ export const FuturesWorkstationChart = ({
       orderDragRef.current = null
       dragRectRef.current = null
     }
-    shellRef.current?.releasePointerCapture?.(drag.pointerId)
+    releasePointer(drag)
     settlingRef.current.set(dragKey(drag), drag)
     publishOrderDrag(null)
     publishSettling()
-  }, [publishOrderDrag, publishSettling])
+  }, [publishOrderDrag, publishSettling, releasePointer])
 
   // Whether the drag is still one of the chart's own, on the pointer or handed
   // over. A drag the contract change swept away is neither.

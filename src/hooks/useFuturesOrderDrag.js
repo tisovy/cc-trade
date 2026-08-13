@@ -24,6 +24,13 @@ import {
 // one round trip through the operator's proxy, 340–800 ms measured, and for its
 // whole length no order on any contract could be moved. The alert is a list
 // now, so the reason the limit existed is gone with it.
+//
+// Per order means the drop must say which order it is discharging. It used to
+// take whatever the last lift had put in a single slot, which held while a
+// gesture could not begin until the one before it had landed. Once it could,
+// the second lift overwrote the first: the first drop placed the second order's
+// size at the first order's price, and the second drop found the slot empty and
+// placed nothing at all. The operator moved three orders and two came back.
 
 const PAUSED_ALERT = Object.freeze({
   tone: 'refused',
@@ -58,12 +65,13 @@ export const useFuturesOrderDrag = ({
 } = {}) => {
   const [alerts, setAlerts] = useState([])
   const [inFlight, setInFlight] = useState(0)
-  // The drag the pointer is driving. One pointer, one drag — what changed is
-  // that the previous drag no longer has to have landed for the next to start.
-  const liftedRef = useRef(null)
-  // Everything the desk currently owes an order for, by identity: the drag in
-  // hand and every replacement still in flight behind it.
-  const owedRef = useRef(new Set())
+  // Everything the desk currently owes an order for, by identity: the drags in
+  // hand and every replacement still in flight behind them. An entry stands
+  // from the moment a cancellation is confirmed until the replacement it owes
+  // is answered, and it carries `dropped` so that one obligation cannot be
+  // discharged twice — two real orders resting where the operator asked for one
+  // is the same accounting error as none.
+  const owedRef = useRef(new Map())
   const alertSequence = useRef(0)
 
   const raise = useCallback((entry) => {
@@ -208,8 +216,7 @@ export const useFuturesOrderDrag = ({
       return { ok: false }
     }
     const lifted = Object.freeze({ order, originPrice: order.price, tickSize })
-    liftedRef.current = lifted
-    owedRef.current.add(identity)
+    owedRef.current.set(identity, { lifted, dropped: false })
     const answer = await cancelOrder({
       symbol: order.symbol,
       orderId: order.orderId,
@@ -218,7 +225,6 @@ export const useFuturesOrderDrag = ({
     if (answer?.outcome === FUTURES_COMMAND_OUTCOME.CONFIRMED) return { ok: true }
     // Nothing was lifted, so nothing is owed. The order is either still working
     // or its fate is the exchange's to state; either way the drag does not run.
-    if (liftedRef.current === lifted) liftedRef.current = null
     owedRef.current.delete(identity)
     raise(answer?.outcome === FUTURES_COMMAND_OUTCOME.UNKNOWN
       ? {
@@ -241,17 +247,25 @@ export const useFuturesOrderDrag = ({
   }, [cancelOrder, maxOrderNotionalUsdt, placeOrder, raise, tickSize, tradingPaused])
 
   /**
-   * End the drag. `restored` puts the order back where it was lifted from —
+   * End the drag on `order`. `restored` puts it back where it was lifted from —
    * the drag was abandoned, the contract changed under it, or it was dropped
    * where it started.
+   *
+   * The order must be named. Several drags can be outstanding at once — the
+   * operator lets go of one well inside its round trip and reaches for the next
+   * — so which obligation this discharges cannot be inferred from which was
+   * lifted last. A drop the desk owes nothing for places nothing: that is a new
+   * order, not a replacement.
    *
    * The pointer is free the moment this is called: the replacement travels on
    * its own, and the next order can be lifted while it does.
    */
-  const drop = useCallback(async ({ price = null, restored = false } = {}) => {
-    const lifted = liftedRef.current
-    if (lifted === null) return false
-    liftedRef.current = null
+  const drop = useCallback(async ({ order = null, price = null, restored = false } = {}) => {
+    const identity = dragIdentity(order)
+    const owed = identity === null ? null : owedRef.current.get(identity) ?? null
+    if (owed === null || owed.dropped) return false
+    owed.dropped = true
+    const { lifted } = owed
     return sendReplacement(lifted, restored || price === null ? lifted.originPrice : price)
   }, [sendReplacement])
 
@@ -266,7 +280,8 @@ export const useFuturesOrderDrag = ({
     }
     dismiss(entry.id)
     const identity = dragIdentity(entry.lifted.order)
-    if (identity !== null) owedRef.current.add(identity)
+    // Owed again, and already dropped: the gesture that lifted it is long over.
+    if (identity !== null) owedRef.current.set(identity, { lifted: entry.lifted, dropped: true })
     return sendReplacement(entry.lifted, entry.retryPrice)
   }, [alerts, dismiss, sendReplacement])
 

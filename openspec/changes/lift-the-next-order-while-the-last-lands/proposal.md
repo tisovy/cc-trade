@@ -11,6 +11,11 @@ the three above it already in, and it is the plainest of them: the chart held
 the pointer for the whole cancellation round trip, and the operator lets go long
 before that answers.
 
+With all four in, the drags ran at once — and the desk started **losing
+orders**. The gates were about what could begin; the accounting behind them had
+never had to hold two live drags, and it could not. That is the fifth section
+below, and it is the one that cost the operator real orders on a real book.
+
 ### The gate in the hook
 
 The first, and it is deliberate:
@@ -123,6 +128,55 @@ handing one over meant moving its lines out from under the next. The lines now
 belong to the drag that drew them, which is what makes any number of them able
 to be in the air at once.
 
+### The obligation that could not name its order
+
+Opening the gates was not enough, because the accounting behind them was still
+written for one drag at a time. The hook held what it owed in a single slot, and
+the drop took whatever was in it:
+
+```js
+liftedRef.current = lifted            // every lift overwrites the last
+
+const drop = useCallback(async ({ price = null, restored = false } = {}) => {
+  const lifted = liftedRef.current    // ← whichever order was lifted most recently
+  if (lifted === null) return false
+```
+(`src/hooks/useFuturesOrderDrag.js:211,251`)
+
+That held while a gesture could not begin until the one before it had landed,
+because the slot was always emptied by the drop before the next lift filled it.
+Once two drags could be outstanding, the second lift overwrote the first, and
+the arithmetic came out one short every time:
+
+- the first drop placed the **second order's size at the first order's price**,
+- the second drop found the slot empty and placed **nothing**, silently,
+- and the operator's book was one order lighter with no alert raised.
+
+Measured against the code before this change, with two orders lifted and both
+then dropped: `expected "vi.fn()" to be called 2 times, but got 1 times`, and
+the one call that was made was `{"price":"58500","quantity":"0.007"}` — the
+second order's quantity at the first order's destination. The operator's own
+count: three orders moved, two came back; two moved, one came back.
+
+The chart named the order in every drop payload it sent. The container between
+them took the price and the direction off that payload and left the name on the
+floor:
+
+```js
+const handleOrderDrop = useCallback(({ price, restored }) => {   // no `order`
+```
+(`src/components/features/futures/FuturesProductionWorkstation.jsx:337`)
+
+Both sides were green throughout, and neither was wrong on its own. The chart's
+tests assert what it hands over; the hook's tests call `drop` directly. Nothing
+exercised the seam, and the seam is where the order was lost.
+
+The same opening exposed a second way to lose one. A mouse reports the **same
+pointer id** for every gesture it makes, and a finished drag gave that id back
+when its round trip answered — taking the capture off the drag the operator was
+making at that moment. The chart's own tests used a different pointer id per
+drag, which is not a desk anyone is sitting at.
+
 ## What Changes
 
 - The desk tracks what it owes per order rather than one obligation at a time.
@@ -154,6 +208,13 @@ to be in the air at once.
   ended on when the answer arrives.
 - A drag owns the price lines it drew. They travel with it off the pointer,
   which is what allows more than one to be drawn at once.
+- A drop names the order it is discharging, end to end — the chart already did,
+  and the container now carries it through to the hook, which looks the
+  obligation up by it instead of taking whatever was lifted last. A drop for an
+  order nothing is owed for places nothing, and one obligation cannot be
+  discharged twice.
+- The pointer stays with the gesture in hand. An earlier drag being discharged
+  no longer hands back the pointer id the operator is currently dragging with.
 
 ## Non-goals
 
@@ -163,9 +224,12 @@ to be in the air at once.
   change's.
 - No change to how a single drag is drawn on the chart. The chart already holds
   one pointer drag at a time and continues to.
-- The cancel-then-place pair itself stays serialized against the order it is
-  about. A second command on one order still waits, and the 40-second worst case
-  the registry documents is unchanged for that case.
+- Two commands about the same order stay serialized, and the 40-second worst
+  case the registry documents is unchanged for that case. The cancel-then-place
+  pair of one move is not that case — the cancellation names the order being
+  lifted and the placement names the replacement it mints, so they sit in
+  different lanes. What keeps them in order is the drag itself, which does not
+  place until the cancellation is confirmed.
 - Deduplication is untouched: identity still decides whether a command runs at
   all, and ordering only decides when.
 

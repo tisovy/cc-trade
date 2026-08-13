@@ -15,6 +15,17 @@ lifted: the wait it imposes is a round trip through the operator's proxy, during
 which every order on every contract was unmovable. Lifting an order that is
 already lifted SHALL be refused, because it is no longer on the book.
 
+Discharging an obligation SHALL name the order it is for. More than one gesture
+can be in the air at once, so which obligation a drop discharges SHALL NOT be
+inferred from which order was lifted most recently. A drop that names an order
+the system owes nothing for SHALL place nothing, and an obligation already
+discharged SHALL NOT be discharged a second time: an order placed twice and an
+order never placed are the same accounting error.
+
+A gesture in progress SHALL NOT be interrupted by an earlier one being
+discharged. The operator makes every drag with the same pointer, and a drag that
+loses it mid-gesture is an order lifted off the book that never gets dropped.
+
 Where more than one obligation is outstanding, each SHALL be stated on its own,
 naming its own order, its own reason and its own price to place it again, and
 answering one SHALL NOT clear the record of another.
@@ -50,3 +61,19 @@ thing as an order that is gone.
 #### Scenario: The same order is lifted twice
 - **WHEN** a lift is attempted for an order that is already lifted
 - **THEN** it is refused with a statement, rather than nothing happening
+
+#### Scenario: Two orders are lifted before either is dropped
+- **WHEN** the operator lets go of one drag inside its cancellation round trip, lifts another, and both are then dropped
+- **THEN** each order is placed at the price its own drag ended on and in its own size, and neither obligation is discharged by the other's drop
+
+#### Scenario: A drop names an order nothing is owed for
+- **WHEN** a drop names an order the system holds no outstanding obligation for
+- **THEN** nothing is placed, because that would be a new order rather than a replacement
+
+#### Scenario: One drag ends twice
+- **WHEN** the same drag is dropped more than once
+- **THEN** one replacement is placed, not one per drop
+
+#### Scenario: An earlier drag is discharged during a later gesture
+- **WHEN** an earlier drag's cancellation or replacement is answered while the operator is in the middle of another drag
+- **THEN** the drag in hand keeps the pointer and still ends where the operator releases it

@@ -334,14 +334,17 @@ export const FuturesProductionWorkstation = ({
   // book; dropping is what puts one back, at the new price or at the old one.
   const handleOrderLift = useCallback(order => orderDrag.lift(order), [orderDrag])
 
-  const handleOrderDrop = useCallback(({ price, restored }) => {
+  // The order is carried through rather than inferred: several drags can be
+  // outstanding at once, so the obligation this discharges is the one made for
+  // the order the chart names, not the one lifted most recently.
+  const handleOrderDrop = useCallback(({ order, price, restored }) => {
     // A dragged price is the operator's own placement, not a reading taken off
     // a surface, so it clears whatever reading the draft was carrying.
     if (!restored && typeof price === 'string') {
       setDraftPrice(price)
       setDraftPriceReading(null)
     }
-    return orderDrag.drop({ price, restored })
+    return orderDrag.drop({ order, price, restored })
   }, [orderDrag])
 
   const executionOpenOrders = executionState?.openOrders

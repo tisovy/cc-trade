@@ -674,18 +674,20 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     const first = await screen.findByRole('button', {
       name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
     })
-    fireEvent.pointerDown(first, { pointerId: 7, button: 0, ctrlKey: true })
+    // One pointer id throughout: a mouse reports the same one for every gesture,
+    // and giving each drag its own would test a desk nobody is sitting at.
+    fireEvent.pointerDown(first, { pointerId: 1, button: 0, ctrlKey: true })
     const surface = dragSurface()
-    fireEvent.pointerMove(surface, { pointerId: 7, clientY: 80, ctrlKey: true })
+    fireEvent.pointerMove(surface, { pointerId: 1, clientY: 80, ctrlKey: true })
     // Let go while the cancellation is still travelling.
-    fireEvent.pointerUp(surface, { pointerId: 7, clientY: 80, ctrlKey: true })
+    fireEvent.pointerUp(surface, { pointerId: 1, clientY: 80, ctrlKey: true })
     await settle()
     expect(props.onOrderDrop).not.toHaveBeenCalled()
 
     const second = await screen.findByRole('button', {
       name: 'Move SELL LONG order at 59700 with Ctrl or Alt drag',
     })
-    fireEvent.pointerDown(second, { pointerId: 8, button: 0, ctrlKey: true })
+    fireEvent.pointerDown(second, { pointerId: 1, button: 0, ctrlKey: true })
     await settle()
 
     expect(props.onOrderLift).toHaveBeenCalledTimes(2)
@@ -701,6 +703,54 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     expect(props.onOrderDrop).toHaveBeenCalledWith(
       expect.objectContaining({ restored: false }),
     )
+  })
+
+  // A mouse reports the same pointer id for every gesture it makes, so a drag
+  // that has been let go must not hand that id back while the next gesture is
+  // holding it: the capture would be taken from the drag the operator is making
+  // now, and a pointer that leaves the chart would take its `pointerup` with it
+  // — an order lifted off the book and never dropped. jsdom implements no
+  // pointer capture, so what is measured here is what the chart asks for.
+  it('leaves the live gesture its pointer when an earlier drag is discharged', async () => {
+    const confirmLift = []
+    const props = {
+      ...properties([candle(1_784_000_000_000)]),
+      ownedOrders: [workingOrder(), workingOrder({ orderId: '72', price: '59700' })],
+      onOrderLift: vi.fn(() => new Promise((resolve) => { confirmLift.push(resolve) })),
+    }
+    render(<FuturesWorkstationChart {...props} />)
+    const canvas = screen.getByTestId('futures-workstation-chart')
+    canvas.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 320, height: 320, right: 320, bottom: 320,
+    })
+    const surface = dragSurface()
+    surface.setPointerCapture = vi.fn()
+    surface.releasePointerCapture = vi.fn()
+
+    const first = await screen.findByRole('button', {
+      name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
+    })
+    fireEvent.pointerDown(first, { pointerId: 1, button: 0, ctrlKey: true })
+    fireEvent.pointerMove(surface, { pointerId: 1, clientY: 80, ctrlKey: true })
+    fireEvent.pointerUp(surface, { pointerId: 1, clientY: 80, ctrlKey: true })
+    await settle()
+
+    // The next gesture takes the same pointer.
+    const second = await screen.findByRole('button', {
+      name: 'Move SELL LONG order at 59700 with Ctrl or Alt drag',
+    })
+    fireEvent.pointerDown(second, { pointerId: 1, button: 0, ctrlKey: true })
+    await settle()
+    expect(surface.setPointerCapture).toHaveBeenLastCalledWith(1)
+    surface.releasePointerCapture.mockClear()
+
+    // The first drag is discharged from under it: cancellation, then placement.
+    confirmLift[0]({ ok: true })
+    await settle()
+    expect(props.onOrderDrop).toHaveBeenCalledOnce()
+    await settle()
+
+    expect(surface.releasePointerCapture).not.toHaveBeenCalled()
   })
 
   it('places the order again where it was lifted from when the drag is abandoned', async () => {

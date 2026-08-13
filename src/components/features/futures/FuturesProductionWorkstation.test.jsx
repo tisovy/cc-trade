@@ -1,6 +1,7 @@
 import { act, render } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { readFuturesSymbolHistory } from '../../../utils/futuresSymbolHistory.js'
+import { FUTURES_COMMAND_OUTCOME } from '../../../utils/futuresCommandOutcome.js'
 import FuturesProductionWorkstation from './FuturesProductionWorkstation.jsx'
 
 const productionWorkstationMocks = vi.hoisted(() => ({
@@ -229,5 +230,63 @@ describe('FuturesProductionWorkstation account review', () => {
     )
     expect(productionWorkstationMocks.orderEditorRender.mock.lastCall[0].positionQuantity)
       .toBe('2')
+  })
+})
+
+// The chart names the order every drop is for, and the hook discharges the
+// obligation made for that order. Between them sits this container, which took
+// the price and the direction off the payload and left the name on the floor.
+// Both sides were green the whole time: the chart's tests assert what it hands
+// over, the hook's tests call it directly, and nothing joined them up. With two
+// drags in the air the first drop placed the second order's size at the first
+// order's price, and the second drop found nothing left to place — the operator
+// moved three orders and two came back.
+describe('FuturesProductionWorkstation order drags', () => {
+  const dragged = (overrides = {}) => ({
+    symbol: 'BTCUSDT',
+    orderKind: 'REGULAR',
+    status: 'NEW',
+    side: 'BUY',
+    orderId: 11,
+    clientOrderId: 'first',
+    price: '58445.00',
+    origQty: '0.004',
+    ...overrides,
+  })
+
+  it('places every order that was dropped, with two drags in the air at once', async () => {
+    const cancelOrderAndConfirm = vi.fn(async () => ({ outcome: FUTURES_COMMAND_OUTCOME.CONFIRMED }))
+    const placeOrderAndConfirm = vi.fn(async () => ({ outcome: FUTURES_COMMAND_OUTCOME.CONFIRMED }))
+    const first = dragged()
+    const second = dragged({ orderId: 12, clientOrderId: 'second', price: '58200.00', origQty: '0.007' })
+    render(
+      <FuturesProductionWorkstation
+        enabled
+        executionState={executionState({
+          openOrders: [first, second],
+          cancelOrderAndConfirm,
+          placeOrderAndConfirm,
+        })}
+      />,
+    )
+    const view = () => productionWorkstationMocks.viewRender.mock.lastCall[0]
+
+    // Both gestures end inside their cancellation round trips, which is how the
+    // operator works: they flick an order across and let go.
+    await act(async () => { await view().onOrderLift(first) })
+    await act(async () => { await view().onOrderLift(second) })
+    await act(async () => {
+      await view().onOrderDrop({ order: first, price: '58500', restored: false })
+    })
+    await act(async () => {
+      await view().onOrderDrop({ order: second, price: '58300', restored: false })
+    })
+
+    expect(cancelOrderAndConfirm).toHaveBeenCalledTimes(2)
+    // Two orders came off the book, so two go back on it — each at its own
+    // price, in its own size.
+    expect(placeOrderAndConfirm).toHaveBeenCalledTimes(2)
+    expect(placeOrderAndConfirm.mock.calls.map(([command]) => [command.price, command.quantity]))
+      .toEqual([['58500', '0.004'], ['58300', '0.007']])
   })
 })

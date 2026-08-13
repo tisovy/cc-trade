@@ -47,8 +47,9 @@ describe('useFuturesOrderDrag', () => {
   it('cancels the order the drag lifts and places the remainder where it is dropped', async () => {
     const { result, cancelOrder, placeOrder } = setup()
 
+    const lifted = order({ z: '0.001' })
     let lift
-    await act(async () => { lift = await result.current.lift(order({ z: '0.001' })) })
+    await act(async () => { lift = await result.current.lift(lifted) })
     expect(lift).toEqual({ ok: true })
     expect(cancelOrder).toHaveBeenCalledExactlyOnceWith({
       symbol: 'BTCUSDT',
@@ -56,7 +57,7 @@ describe('useFuturesOrderDrag', () => {
       origClientOrderId: undefined,
     })
 
-    await act(async () => { await result.current.drop({ price: '58500.04' }) })
+    await act(async () => { await result.current.drop({ order: lifted, price: '58500.04' }) })
     // The price is the contract's tick, and the size is what was still working:
     // the filled 0.001 is already a position and is not placed again.
     expect(placeOrder).toHaveBeenCalledExactlyOnceWith({
@@ -74,8 +75,11 @@ describe('useFuturesOrderDrag', () => {
   it('places the order again where it was lifted from when the drag is abandoned', async () => {
     const { result, placeOrder } = setup()
 
-    await act(async () => { await result.current.lift(order()) })
-    await act(async () => { await result.current.drop({ price: '59000', restored: true }) })
+    const lifted = order()
+    await act(async () => { await result.current.lift(lifted) })
+    await act(async () => {
+      await result.current.drop({ order: lifted, price: '59000', restored: true })
+    })
 
     expect(placeOrder).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ price: '58445', quantity: '0.004' }),
@@ -124,9 +128,10 @@ describe('useFuturesOrderDrag', () => {
   it('starts no drag on a refused cancellation and leaves the order alone', async () => {
     const { result, placeOrder } = setup({ cancelAnswer: REFUSED })
 
+    const lifted = order()
     let lift
-    await act(async () => { lift = await result.current.lift(order()) })
-    await act(async () => { await result.current.drop({ price: '58500' }) })
+    await act(async () => { lift = await result.current.lift(lifted) })
+    await act(async () => { await result.current.drop({ order: lifted, price: '58500' }) })
 
     expect(lift).toEqual({ ok: false })
     expect(placeOrder).not.toHaveBeenCalled()
@@ -148,8 +153,9 @@ describe('useFuturesOrderDrag', () => {
   it('states the obligation when the replacement is refused, and can place it again', async () => {
     const { result, placeOrder } = setup({ placeAnswer: REFUSED })
 
-    await act(async () => { await result.current.lift(order()) })
-    await act(async () => { await result.current.drop({ price: '58500.04' }) })
+    const lifted = order()
+    await act(async () => { await result.current.lift(lifted) })
+    await act(async () => { await result.current.drop({ order: lifted, price: '58500.04' }) })
 
     expect(result.current.alerts[0]).toMatchObject({
       tone: 'lost',
@@ -169,9 +175,10 @@ describe('useFuturesOrderDrag', () => {
   it('refuses an over-cap drop and never places a second order for it', async () => {
     const { result, placeOrder } = setup({ maxOrderNotionalUsdt: '250' })
 
-    await act(async () => { await result.current.lift(order()) })
+    const lifted = order()
+    await act(async () => { await result.current.lift(lifted) })
     // 0.004 at 58445 is 233 USDT and fits; at 65000 it does not.
-    await act(async () => { await result.current.drop({ price: '65000' }) })
+    await act(async () => { await result.current.drop({ order: lifted, price: '65000' }) })
 
     expect(placeOrder).not.toHaveBeenCalled()
     expect(result.current.alerts[0]).toMatchObject({ tone: 'lost', retryPrice: '58445.00' })
@@ -182,8 +189,9 @@ describe('useFuturesOrderDrag', () => {
   it('offers no retry when the replacement is unresolved', async () => {
     const { result, placeOrder } = setup({ placeAnswer: UNKNOWN })
 
-    await act(async () => { await result.current.lift(order()) })
-    await act(async () => { await result.current.drop({ price: '58500' }) })
+    const lifted = order()
+    await act(async () => { await result.current.lift(lifted) })
+    await act(async () => { await result.current.drop({ order: lifted, price: '58500' }) })
 
     expect(result.current.alerts[0]).toMatchObject({
       tone: 'unresolved',
@@ -223,8 +231,9 @@ describe('useFuturesOrderDrag', () => {
       placeOrder,
     }))
 
-    await act(async () => { await result.current.lift(order()) })
-    act(() => { result.current.drop({ price: '58500' }) })
+    const lifted = order()
+    await act(async () => { await result.current.lift(lifted) })
+    act(() => { result.current.drop({ order: lifted, price: '58500' }) })
     expect(result.current.replacementInFlight).toBe(true)
 
     let second
@@ -239,16 +248,80 @@ describe('useFuturesOrderDrag', () => {
     })
   })
 
+  // The gesture ends when the operator lets go, which is well inside the
+  // cancellation round trip — so the second order is lifted before the first is
+  // dropped. Both obligations are outstanding at once and neither has been
+  // discharged yet, which is the case a single slot cannot hold: the second
+  // lift overwrote the first, the first drop placed the second order's size at
+  // the first order's price, and the second drop found nothing left to place.
+  it('discharges each obligation against the order it was made for', async () => {
+    const { result, placeOrder } = setup()
+
+    const first = order({ orderId: 11, clientOrderId: 'first', price: '58445.00' })
+    const second = order({
+      orderId: 12,
+      clientOrderId: 'second',
+      price: '58200.00',
+      origQty: '0.007',
+    })
+
+    await act(async () => { await result.current.lift(first) })
+    await act(async () => { await result.current.lift(second) })
+
+    await act(async () => { await result.current.drop({ order: first, price: '58500' }) })
+    await act(async () => { await result.current.drop({ order: second, price: '58300' }) })
+
+    // Two orders were taken off the book, so two must go back on it.
+    expect(placeOrder).toHaveBeenCalledTimes(2)
+    expect(placeOrder).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      price: '58500',
+      quantity: '0.004',
+    }))
+    expect(placeOrder).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      price: '58300',
+      quantity: '0.007',
+    }))
+    expect(result.current.alerts).toEqual([])
+  })
+
+  // The other way to lose count: one obligation discharged twice leaves two
+  // real orders resting where the operator asked for one.
+  it('places one replacement however many times the same drag ends', async () => {
+    const { result, placeOrder } = setup()
+    const lifted = order()
+
+    await act(async () => { await result.current.lift(lifted) })
+    await act(async () => { await result.current.drop({ order: lifted, price: '58500' }) })
+    await act(async () => { await result.current.drop({ order: lifted, price: '58600' }) })
+
+    expect(placeOrder).toHaveBeenCalledOnce()
+  })
+
+  // Nothing was lifted, so nothing may be placed. A drop that names an order
+  // the desk owes nothing for is not a replacement, it is a new order.
+  it('places nothing for a drop that names an order the desk never lifted', async () => {
+    const { result, placeOrder } = setup()
+
+    await act(async () => { await result.current.lift(order()) })
+    await act(async () => {
+      await result.current.drop({ order: order({ orderId: 99 }), price: '58500' })
+    })
+
+    expect(placeOrder).not.toHaveBeenCalled()
+  })
+
   // Two obligations outstanding was the case the single alert could not report,
   // and refusing the second drag was how that was avoided. The alert is a list
   // now, so each one is named on its own.
   it('states two failed replacements apart, and answers them apart', async () => {
     const { result, placeOrder } = setup({ placeAnswer: REFUSED })
 
-    await act(async () => { await result.current.lift(order()) })
-    await act(async () => { await result.current.drop({ price: '58500' }) })
-    await act(async () => { await result.current.lift(order({ orderId: 12, symbol: 'ETHUSDT' })) })
-    await act(async () => { await result.current.drop({ price: '3000' }) })
+    const bitcoin = order()
+    const ether = order({ orderId: 12, symbol: 'ETHUSDT' })
+    await act(async () => { await result.current.lift(bitcoin) })
+    await act(async () => { await result.current.drop({ order: bitcoin, price: '58500' }) })
+    await act(async () => { await result.current.lift(ether) })
+    await act(async () => { await result.current.drop({ order: ether, price: '3000' }) })
 
     expect(result.current.alerts).toHaveLength(2)
     expect(result.current.alerts.map(entry => entry.order.symbol)).toEqual(['BTCUSDT', 'ETHUSDT'])
@@ -273,12 +346,11 @@ describe('useFuturesOrderDrag', () => {
       { initialProps: { tickSize: '0.0000010' } },
     )
 
-    await act(async () => {
-      await result.current.lift(order({ price: '0.0308370', origQty: '3000' }))
-    })
+    const lifted = order({ price: '0.0308370', origQty: '3000' })
+    await act(async () => { await result.current.lift(lifted) })
     // The operator moves to a contract that trades in whole cents.
     rerender({ tickSize: '0.01' })
-    await act(async () => { await result.current.drop({ restored: true }) })
+    await act(async () => { await result.current.drop({ order: lifted, restored: true }) })
 
     expect(placeOrder).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ price: '0.030837' }),
@@ -288,10 +360,9 @@ describe('useFuturesOrderDrag', () => {
   it('carries the exchange leg of a hedged order onto its replacement', async () => {
     const { result, placeOrder } = setup()
 
-    await act(async () => {
-      await result.current.lift(order({ exchangePositionSide: 'LONG', positionSide: 'SHORT' }))
-    })
-    await act(async () => { await result.current.drop({ price: '58500' }) })
+    const lifted = order({ exchangePositionSide: 'LONG', positionSide: 'SHORT' })
+    await act(async () => { await result.current.lift(lifted) })
+    await act(async () => { await result.current.drop({ order: lifted, price: '58500' }) })
 
     expect(placeOrder).toHaveBeenCalledWith(expect.objectContaining({ positionSide: 'LONG' }))
   })
