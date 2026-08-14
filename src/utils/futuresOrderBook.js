@@ -185,10 +185,50 @@ export const groupFuturesBookLevels = ({
       price: entry.displayPrice,
       groupKey: String(entry.groupAtoms),
       quantity: formatAtoms(entry.quantityAtoms),
+      // The same value twice, exactly and conveniently. The main process groups
+      // with this function and then sends the rows across a protocol that
+      // carries decimal strings, so it needs the exact one; the panel scales
+      // bars and picks walls, which is arithmetic on doubles either way. A row's
+      // notional on a liquid contract passes 2^53 atoms long before it passes
+      // anything a trader would notice, so the string is the one that crosses.
+      value: formatAtoms(entry.notionalAtoms),
       notionalUsdt: atomsToNumber(entry.notionalAtoms),
       cumulativeUsdt: atomsToNumber(cumulativeAtoms),
     })
   }))
+}
+
+const EMPTY_BOOK_ROWS = Object.freeze([])
+
+/**
+ * The rows as delivered, with the two figures the panel draws them by.
+ *
+ * The book is grouped where the book is, so a row arrives already bucketed and
+ * already priced. What it does not arrive with is a running total, because a
+ * cumulative column is a fact about the rows *on screen* and which rows those
+ * are is the panel's business — a total accumulated over anything else is a
+ * number the operator cannot check against what they can see.
+ *
+ * Accumulated in atoms and converted once, so a hundred rows of a liquid
+ * contract do not drift the way a hundred float additions would.
+ */
+export const readFuturesBookRows = (rows) => {
+  if (!Array.isArray(rows) || rows.length === 0) return EMPTY_BOOK_ROWS
+  let cumulativeAtoms = 0n
+  const read = []
+  for (const row of rows) {
+    const valueAtoms = parseAtoms(row?.value)
+    if (valueAtoms === null) continue
+    cumulativeAtoms += valueAtoms
+    read.push(Object.freeze({
+      price: row.price,
+      groupKey: row.groupKey,
+      quantity: row.quantity,
+      notionalUsdt: atomsToNumber(valueAtoms),
+      cumulativeUsdt: atomsToNumber(cumulativeAtoms),
+    }))
+  }
+  return Object.freeze(read)
 }
 
 // A book is scanned for its walls: the few levels holding far more than the rest

@@ -113,6 +113,7 @@ describe('groupFuturesBookLevels', () => {
         price: '0.02',
         groupKey: futuresBookGroupKey({ price: '0.02', side: 'bid' }),
         quantity: '1000',
+        value: '20',
         notionalUsdt: 20,
         cumulativeUsdt: 20,
       },
@@ -120,6 +121,7 @@ describe('groupFuturesBookLevels', () => {
         price: '0.019',
         groupKey: futuresBookGroupKey({ price: '0.019', side: 'bid' }),
         quantity: '2000',
+        value: '38',
         notionalUsdt: 38,
         cumulativeUsdt: 58,
       },
@@ -205,6 +207,7 @@ describe('groupFuturesBookLevels', () => {
       price: '2',
       groupKey: futuresBookGroupKey({ price: '2', side: 'ask' }),
       quantity: '1',
+      value: '2',
       notionalUsdt: 2,
       cumulativeUsdt: 2,
     }])

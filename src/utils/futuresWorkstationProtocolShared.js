@@ -1,5 +1,5 @@
 export const FUTURES_WORKSTATION_MARKET_TYPE = 'USD_M_FUTURES'
-export const FUTURES_WORKSTATION_PROTOCOL_VERSION = '9'
+export const FUTURES_WORKSTATION_PROTOCOL_VERSION = '10'
 export const FUTURES_WORKSTATION_REQUEST_MAX_BYTES = 1_024
 // Sized around the largest frame the desk actually sends — a full depth view.
 // The bound exists so a hostile frame can never force an unbounded parse, not to
@@ -8,28 +8,29 @@ export const FUTURES_WORKSTATION_REQUEST_MAX_BYTES = 1_024
 export const FUTURES_WORKSTATION_EVENT_MAX_BYTES = 256 * 1_024
 export const FUTURES_WORKSTATION_UINT64_MAX = '18446744073709551615'
 
-// The most of the book that may ever cross to the renderer. This is a count of
-// *raw* exchange levels, but the book is displayed *grouped*: 14 rows at a 50×
-// step consume 700 levels. Sizing this below rows × step makes the book look
-// empty far from the mid — the feed ran out, not the market. It is pinned to the
-// thousand levels per side Binance serves, which is the deepest book that can
-// be delivered complete rather than guessed at.
-//
-// It is a ceiling, not the delivery: what actually crosses is bounded by the
-// range the panel stated it reads. See `FUTURES_WORKSTATION_DEPTH_RANGE_MAX_LENGTH`
-// below and `toRendererView`.
+// The deepest page a single REST read returns, which is the deepest stretch of
+// price a snapshot can prove complete. It sizes the read and the diff bound
+// below; it is no longer a delivery bound, because a level count was never a
+// bound the panel could use.
 export const FUTURES_WORKSTATION_DEPTH_LEVELS_PER_SIDE = 1_000
 
-// The fewest levels a delivery carries, whatever range was stated.
+// The most of the book that may ever cross to the renderer: rows, the things the
+// panel actually draws, rather than the levels they are grouped from.
 //
-// Ungrouped, a row is one raw level, so the panel needs one level per row and
-// the price distance they span is whatever the market happens to rest at — a
-// contract quoting a tick of 0.000001 with levels every tenth of a percent puts
-// fourteen rows far outside fourteen ticks. The stated range is rows × step,
-// which assumes a level on every step, so on a sparse book it names a distance
-// the rows overflow. This is the panel's own row cap, so a delivery is never
-// shorter than the rows it can draw, and it costs a fifth of the ceiling.
-export const FUTURES_WORKSTATION_DEPTH_MIN_LEVELS_PER_SIDE = 200
+// A level count is the wrong bound for a grouped book, and it failed in the one
+// direction that matters. Fourteen rows at a step of a thousand ticks consume
+// however many levels happen to rest inside fourteen thousand ticks — on
+// AKEUSDT on 2026-08-14 that was well past the nearest thousand, so the nearest
+// thousand crossed, three rows drew, and eleven were blank over a book that had
+// levels for every one of them. The feed had run out, not the market.
+//
+// Rows cannot fail that way: the panel states how many it draws and gets them,
+// grouped where the whole book is. Sixty-four is far above any panel a desk can
+// show — the operator's runs about fourteen a side — and it exists to bound a
+// hostile request rather than to shape an honest one. At four fields a row it
+// is a frame of a few KiB against the protocol's 256 KiB, where the level-based
+// delivery it replaces ran to 68 KiB to fill those same fourteen rows.
+export const FUTURES_WORKSTATION_DEPTH_ROWS_PER_SIDE = 64
 
 // The node budget an event was read under is gone with the parser that counted
 // it. What it protected against was an unbounded parse, and the byte ceiling
@@ -83,11 +84,12 @@ export const FUTURES_WORKSTATION_DEFAULT_TAPE_SETTINGS = Object.freeze({
   minNotionalUsdt: '0',
 })
 
-// How far past the best price the rows on screen reach: how many of them, times
-// the step they are grouped by. The desk buys the book one page deeper when the
-// snapshot it holds does not prove that far — a book bought deeper than it is
-// read costs ten times the weight of one read at the finest step.
-export const FUTURES_WORKSTATION_DEPTH_RANGE_MAX_LENGTH = 64
+// The step the rows on screen are grouped by, in the contract's own quote
+// currency. With the row count beside it, it says both of the things the backend
+// needs: how far past the best price the rows reach, which is what a deeper page
+// is bought against, and how the book is bucketed, which is what the rows are
+// built with.
+export const FUTURES_WORKSTATION_DEPTH_STEP_MAX_LENGTH = 64
 
 // One request reads at most this many candles behind the live window. Binance
 // serves 1500 per call; 1000 keeps the read at weight 5 and the response inside
@@ -210,14 +212,50 @@ export const isFuturesWorkstationSymbol = value => (
 
 export const isFuturesWorkstationInterval = value => INTERVAL_VALUES.has(value)
 
-// A reading, wherever it is stated. The panel restates it on the request that
-// opens a contract as well as on its own, and one rule reads both — a range the
-// desk would accept from one message and refuse from the other is a range whose
-// meaning depends on how it arrived.
-const isFuturesWorkstationDepthRange = value => (
+// The key a row is matched by: its bucket boundary in the grouper's own fixed
+// point. Not an exchange identity — those are bounded by uint64, and a bucket
+// key is a price scaled by 1e18, so a five-figure contract's keys run to
+// twenty-three digits. Bounded by length alone, which is all it is: an opaque
+// string the panel and the book must agree on, compared and never arithmetic.
+const isFuturesWorkstationBucketKey = value => (
   typeof value === 'string'
-  && value.length <= FUTURES_WORKSTATION_DEPTH_RANGE_MAX_LENGTH
-  && NONNEGATIVE_DECIMAL_PATTERN.test(value)
+  && value.length <= 64
+  && UNSIGNED_INTEGER_PATTERN.test(value)
+)
+
+// A reading, wherever it is stated. The panel restates it on the request that
+// opens a contract as well as on its own, and one rule reads both — a reading
+// the desk would accept from one message and refuse from the other is a reading
+// whose meaning depends on how it arrived.
+//
+// Two numbers, not their product. The product — rows × step, one distance — was
+// enough while the backend only bought pages against it, and the step could stay
+// the renderer's private business. It cannot now: the book is grouped where the
+// book is, and a step cannot be recovered from a distance. The distance is
+// derived from these instead, so the page bought and the rows drawn can never
+// describe different readings.
+//
+// A null step is the ungrouped reading: one row is one level, as the exchange
+// sent it. It is not the tick — a contract whose quoted prices disagree with its
+// own tick filter must still draw level by level, and aligning to the filter
+// there would merge two real levels into a price neither rests at.
+const isFuturesWorkstationDepthStep = value => (
+  value === null || (
+    typeof value === 'string'
+    && value.length <= FUTURES_WORKSTATION_DEPTH_STEP_MAX_LENGTH
+    && NONNEGATIVE_DECIMAL_PATTERN.test(value)
+    && Number(value) > 0
+  )
+)
+
+const isFuturesWorkstationDepthRows = value => (
+  Number.isSafeInteger(value)
+  && value > 0
+  && value <= FUTURES_WORKSTATION_DEPTH_ROWS_PER_SIDE
+)
+
+const statesFuturesWorkstationReading = value => (
+  isFuturesWorkstationDepthStep(value.step) && isFuturesWorkstationDepthRows(value.rows)
 )
 
 const isSafeTimestamp = value => Number.isSafeInteger(value) && value >= 0
@@ -491,22 +529,30 @@ const validateCandleHistory = (value) => (
   && value.rows.every(validateCandle)
 )
 
-// A level is what it rests at and how much rests there. It carries no running
-// total: a total accumulated over raw levels is not a total over the grouped
-// rows the panel draws, so the panel builds the only cumulative column it can
-// display from the notional of the rows it grouped. A second one cost a decimal
-// addition per level, a third of every frame's bytes, and a validation pass —
-// to be discarded on arrival.
-const validateDepthLevel = (value) => (
-  hasExactFuturesWorkstationKeys(value, ['price', 'quantity'])
-  && [value.price, value.quantity].every(isCanonicalFuturesDecimal)
+// A row is a bucket of the book: the price it prints, how much rests inside it,
+// what that is worth, and the key an order is matched against it by.
+//
+// `value` is carried rather than recomputed because it is the one number that
+// cannot be rebuilt from the row: it is the sum of price × quantity over the
+// levels the bucket holds, and multiplying the printed boundary by the summed
+// quantity is a different, wrong number — every level inside the bucket rests
+// somewhere other than its edge. `groupKey` is carried for the same reason in
+// the other direction: a grouped row prints a boundary, so an order resting
+// inside the bucket would never match the printed price.
+//
+// No running total: a cumulative column is a fact about the rows on screen, and
+// which of them are on screen is the panel's business. It is built there.
+const validateDepthRow = (value) => (
+  hasExactFuturesWorkstationKeys(value, ['price', 'quantity', 'value', 'groupKey'])
+  && [value.price, value.quantity, value.value].every(isCanonicalFuturesDecimal)
+  && isFuturesWorkstationBucketKey(value.groupKey)
 )
 
-// reach: how far the page the book was bought at proved past the best price on
-// each side, or null while a deeper page can still be bought. It is where the
-// exchange's book ends, which is not where the rows end and cannot be worked out
-// from them: the delivery is already trimmed to the range the panel reads, so a
-// panel measuring the levels it was sent would only ever measure its own step.
+// reach: how far the book on hand reaches past the best price on each side, or
+// null while a deeper page can still be bought. It is where the book ends, which
+// is not where the rows end and cannot be worked out from them: the delivery is
+// the rows the panel asked for, so a panel measuring what it was sent would only
+// ever measure its own step back.
 const validateDepthReach = (value) => (
   value === null || (
     hasExactFuturesWorkstationKeys(value, ['below', 'above'])
@@ -515,15 +561,32 @@ const validateDepthReach = (value) => (
 )
 
 const validateDepth = (value) => (
-  hasExactFuturesWorkstationKeys(value, ['lastUpdateId', 'bids', 'asks', 'spread', 'reach'])
+  hasExactFuturesWorkstationKeys(value, [
+    'lastUpdateId',
+    // The step the rows were grouped by, or null for the ungrouped reading. The
+    // panel needs it to key its own working orders against the rows it was sent
+    // rather than against the reading it last asked for.
+    'step',
+    'bids',
+    'asks',
+    'spread',
+    'reach',
+    // How far the book is accounted for, inside the reach above. Rows beyond it
+    // hold what the stream has restated and may understate what rests there;
+    // rows inside it are complete. Null when no page has proved anything yet, or
+    // when the market has traded clean out of the one that did.
+    'proven',
+  ])
   && validateDepthReach(value.reach)
+  && validateDepthReach(value.proven)
+  && (value.step === null || isCanonicalFuturesDecimal(value.step))
   && isCanonicalFuturesIdentity(value.lastUpdateId)
   && Array.isArray(value.bids)
   && Array.isArray(value.asks)
-  && value.bids.length <= FUTURES_WORKSTATION_DEPTH_LEVELS_PER_SIDE
-  && value.asks.length <= FUTURES_WORKSTATION_DEPTH_LEVELS_PER_SIDE
-  && value.bids.every(validateDepthLevel)
-  && value.asks.every(validateDepthLevel)
+  && value.bids.length <= FUTURES_WORKSTATION_DEPTH_ROWS_PER_SIDE
+  && value.asks.length <= FUTURES_WORKSTATION_DEPTH_ROWS_PER_SIDE
+  && value.bids.every(validateDepthRow)
+  && value.asks.every(validateDepthRow)
   && isCanonicalFuturesDecimal(value.spread)
 )
 
@@ -619,9 +682,10 @@ export const validateFuturesWorkstationRequest = ({
     return freezeFuturesWorkstationValue(value)
   }
 
-  // How far past the best price the rows on screen reach. One decimal, in the
-  // contract's own quote currency, because the step and the row count are the
-  // renderer's to know and their product is all the backend needs.
+  // How the panel reads the book: the step its rows are grouped by and how many
+  // of them it draws. Both, always — the backend groups the book with the first
+  // and bounds the delivery by the second, and derives the distance to buy pages
+  // against from the two together.
   if (value.action === actions.CONFIGURE_DEPTH) {
     if (!hasExactFuturesWorkstationKeys(value, [
       'channelId',
@@ -630,9 +694,10 @@ export const validateFuturesWorkstationRequest = ({
       'environment',
       'action',
       'requestId',
-      'range',
+      'step',
+      'rows',
     ])
-      || !isFuturesWorkstationDepthRange(value.range)) {
+      || !statesFuturesWorkstationReading(value)) {
       fail('INVALID_DEPTH_CONFIGURATION')
     }
     return freezeFuturesWorkstationValue(value)
@@ -680,11 +745,11 @@ export const validateFuturesWorkstationRequest = ({
     'symbol',
     'interval',
   ]
-  const statesRange = hasExactFuturesWorkstationKeys(value, [...selectionKeys, 'range'])
-  if ((!statesRange && !hasExactFuturesWorkstationKeys(value, selectionKeys))
+  const statesReading = hasExactFuturesWorkstationKeys(value, [...selectionKeys, 'step', 'rows'])
+  if ((!statesReading && !hasExactFuturesWorkstationKeys(value, selectionKeys))
     || !isFuturesWorkstationSymbol(value.symbol)
     || !isFuturesWorkstationInterval(value.interval)
-    || (statesRange && !isFuturesWorkstationDepthRange(value.range))) {
+    || (statesReading && !statesFuturesWorkstationReading(value))) {
     fail('INVALID_REQUEST_SHAPE')
   }
   return freezeFuturesWorkstationValue(value)
@@ -741,7 +806,8 @@ export const createFuturesWorkstationRequest = ({
   throttleEnabled,
   timeoutMs,
   minNotionalUsdt,
-  range,
+  step,
+  rows,
   actions,
 }) => validateFuturesWorkstationRequest({
   value: {
@@ -756,13 +822,19 @@ export const createFuturesWorkstationRequest = ({
       : action === actions.CONFIGURE_TAPE
         ? { throttleEnabled, timeoutMs, minNotionalUsdt }
         : action === actions.CONFIGURE_DEPTH
-          ? { range }
+          ? { step, rows }
           : action === actions.LOAD_CANDLE_HISTORY
             ? { symbol, interval, endTime, limit }
             // The reading is carried only when there is one to carry: a request
-            // that states no range is the request that opened every contract
-            // before this, and it still opens one at the cheapest page.
-            : { symbol, interval, ...(range === undefined ? {} : { range }) }),
+            // that states no reading is the request that opened every contract
+            // before this, and it still opens one at the cheapest page. The step
+            // is carried even when it is null — null is a reading, not the
+            // absence of one — so the row count is what decides.
+            : {
+              symbol,
+              interval,
+              ...(rows === undefined ? {} : { step: step ?? null, rows }),
+            }),
   },
   channelId,
   environment,

@@ -1,17 +1,16 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   FUTURES_WORKSTATION_DEFAULT_TAPE_SETTINGS,
-  FUTURES_WORKSTATION_DEPTH_MIN_LEVELS_PER_SIDE,
+  FUTURES_WORKSTATION_DEPTH_ROWS_PER_SIDE,
   FUTURES_WORKSTATION_INTERVALS,
   FUTURES_WORKSTATION_TAPE_LIMITS,
 } from '../../../utils/futuresWorkstationProtocolShared.js'
 import { orderFuturesContracts } from '../../../utils/futuresSymbolHistory.js'
 import {
-  futuresBookDepthRange,
   futuresBookGroupKey,
   futuresBookGroupSteps,
   futuresBookWallKeys,
-  groupFuturesBookLevels,
+  readFuturesBookRows,
 } from '../../../utils/futuresOrderBook.js'
 import { formatCompactUsdt, formatExchangePrice } from '../../../utils/futuresPriceFormat.js'
 import { describeFuturesAlgoTrigger } from '../../../utils/futuresOrderPresentation.js'
@@ -45,11 +44,11 @@ const IGNORE_PRICE_PICK = () => {}
 // otherwise whatever fits, so a row is never half-drawn or clipped away.
 const VISIBLE_DEPTH_LEVELS_PER_SIDE = 14
 const BOOK_ROW_HEIGHT_PX = 14
-// A ceiling, not a setting: a very tall panel must not ask the grouper for an
-// unbounded number of rows. Shared with the floor the delivery keeps under the
-// stated range, so a panel can never ask for more rows than a delivery carries
-// levels — ungrouped, that is one level per row.
-const MAX_DEPTH_LEVELS_PER_SIDE = FUTURES_WORKSTATION_DEPTH_MIN_LEVELS_PER_SIDE
+// A ceiling, not a setting: a very tall panel must not ask for an unbounded
+// number of rows. It is the protocol's own row bound, so the count the panel
+// states is always a count a delivery is allowed to answer with — asking for
+// more would have every frame refused by the payload rules rather than trimmed.
+const MAX_DEPTH_LEVELS_PER_SIDE = FUTURES_WORKSTATION_DEPTH_ROWS_PER_SIDE
 const BOOK_SIDE_MODE_LABELS = Object.freeze({
   both: 'Show both book sides',
   bids: 'Show buy side only',
@@ -162,7 +161,7 @@ export const FuturesWorkstationView = ({
   onOrderEdit,
   onRetry,
   onTapeConfigurationChange,
-  onDepthRangeChange,
+  onDepthReadingChange,
   onSymbolChange,
   onIntervalChange,
 }) => {
@@ -636,40 +635,47 @@ export const FuturesWorkstationView = ({
   const bookReachTitle = bookReachText === null
     ? null
     : `Binance publishes this book ${reachBelow} below the best bid and ${reachAbove} above the best ask. The step list ends where the rows can still be filled from it.`
-  // Grouping happens on the whole delivered book, then the visible window is
-  // taken — otherwise a coarse step would only ever aggregate the first rows.
-  // Both sides are grouped in every mode: a hidden side still carries half of
-  // the pressure split.
-  const visibleAsks = useMemo(() => [...groupFuturesBookLevels({
-    levels: depth?.asks ?? EMPTY_ROWS,
-    side: 'ask',
-    step: activeGroupStep,
-    limit: depthLevelsPerSide,
-  })].reverse(), [activeGroupStep, depth, depthLevelsPerSide])
-  const visibleBids = useMemo(() => groupFuturesBookLevels({
-    levels: depth?.bids ?? EMPTY_ROWS,
-    side: 'bid',
-    step: activeGroupStep,
-    limit: depthLevelsPerSide,
-  }), [activeGroupStep, depth, depthLevelsPerSide])
+  // The rows arrive grouped. They used to arrive as a thousand raw levels a side
+  // and be grouped here, which meant the thousand had to be chosen before the
+  // step was known — nearest-first, which at a coarse step is a dense clump
+  // inside the first two or three rows and nothing at all for the rest. Grouping
+  // where the whole book is fills every row from the levels that belong in it.
+  // Both sides are read in every mode: a hidden side still carries half of the
+  // pressure split.
+  // Cut to the rows that fit, on top of the count the desk was told. The two
+  // agree a frame later: the panel measures itself, states the new count, and
+  // the next delivery carries it — so between a resize and that frame the desk
+  // is still answering the old reading, and the extra rows would draw outside
+  // the panel. Nearest the market first on both sides, which is where the ask
+  // side is reversed for drawing.
+  const visibleAsks = useMemo(
+    () => [...readFuturesBookRows(depth?.asks).slice(0, depthLevelsPerSide)].reverse(),
+    [depth, depthLevelsPerSide],
+  )
+  const visibleBids = useMemo(
+    () => readFuturesBookRows(depth?.bids).slice(0, depthLevelsPerSide),
+    [depth, depthLevelsPerSide],
+  )
   // A level on screen is a level the exchange published, whatever the badge above
   // it says. Gated on the resource's state, every level went dead the moment the
   // state did — during a resync, on a quiet contract, on a book the exchange does
   // not publish deep enough for the step it is read at. What actually makes a
   // level unpickable is there being no level: a book delivered empty.
   const bookLevelsPickable = visibleAsks.length > 0 || visibleBids.length > 0
-  // The book is bought as deep as it is read, and this is the reading: the rows
-  // on screen times the step they are grouped by. Stated whenever it changes —
-  // a coarser step, a taller panel, another contract — so the backend can buy
-  // the page that covers it instead of the deepest page every time.
-  const depthRange = futuresBookDepthRange({
-    step: activeGroupStep ?? selectedContract?.filters?.price?.tickSize ?? null,
-    rows: depthLevelsPerSide,
-  })
+  // The book is grouped as it is read, and bought as deep as it is read, and
+  // this is the reading: the step the rows are grouped by and how many of them
+  // there are. Stated whenever it changes — a coarser step, a taller panel,
+  // another contract — so the backend groups the book the way the panel draws
+  // it and buys the page that covers it instead of the deepest page every time.
+  //
+  // The step is stated as null when the book is read ungrouped, rather than as
+  // the contract's tick: 1× means the book as the exchange sent it, and a
+  // contract whose quoted prices disagree with its own tick filter must still
+  // draw level by level rather than have two real levels aligned into one.
   useEffect(() => {
-    if (depthRange === null) return
-    onDepthRangeChange?.(depthRange)
-  }, [depthRange, onDepthRangeChange, selectedSymbol])
+    if (!Number.isSafeInteger(depthLevelsPerSide) || depthLevelsPerSide <= 0) return
+    onDepthReadingChange?.({ step: activeGroupStep, rows: depthLevelsPerSide })
+  }, [activeGroupStep, depthLevelsPerSide, onDepthReadingChange, selectedSymbol])
 
   // The heaviest levels on each visible side. Only the size is thickened: the
   // wall is the size, and a whole bold row would drag its price and its running
@@ -692,12 +698,15 @@ export const FuturesWorkstationView = ({
       // a level the order has left — the same claim the chart marker was making.
       if (describeFuturesAlgoTrigger(order).triggered) continue
       const side = order.side === 'BUY' ? 'bid' : 'ask'
-      const key = futuresBookGroupKey({ price: order.price, side, step: activeGroupStep })
+      // Keyed against the step the rows on screen were grouped by, which the
+      // delivery states. Keying against the step just chosen would move every
+      // mark off its row for the frame between asking and being answered.
+      const key = futuresBookGroupKey({ price: order.price, side, step: depth?.step ?? null })
       if (key === null) continue
       marks[side].set(key, (marks[side].get(key) ?? 0) + 1)
     }
     return marks
-  }, [activeGroupStep, ownedOrders, selectedSymbol])
+  }, [depth?.step, ownedOrders, selectedSymbol])
 
   // Depth bars are scaled against the deepest visible level on either side, so
   // the two halves of the book stay comparable to each other.

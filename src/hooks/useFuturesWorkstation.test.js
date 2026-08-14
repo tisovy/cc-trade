@@ -200,19 +200,21 @@ describe('production workstation hook isolation', () => {
     )
 
     act(() => {
-      expect(result.current.configureDepth('1.4')).toBe(true)
+      expect(result.current.configureDepth({ step: '0.1', rows: 14 })).toBe(true)
     })
     expect(sendMessage.mock.calls.at(-1)[0]).toMatchObject({
       action: FUTURES_PRODUCTION_WORKSTATION_ACTIONS.CONFIGURE_DEPTH,
       requestId: result.current.requestId,
-      range: '1.4',
+      step: '0.1',
+      rows: 14,
     })
 
     act(() => result.current.retry())
     expect(sendMessage.mock.calls.at(-1)[0]).toMatchObject({
       action: FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SUBSCRIBE,
       requestId: result.current.requestId,
-      range: '1.4',
+      step: '0.1',
+      rows: 14,
     })
   })
 
@@ -229,11 +231,12 @@ describe('production workstation hook isolation', () => {
 
     const opening = sendMessage.mock.calls.at(-1)[0]
     expect(opening.action).toBe(FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SUBSCRIBE)
-    expect('range' in opening).toBe(false)
+    expect('step' in opening).toBe(false)
+    expect('rows' in opening).toBe(false)
   })
 
-  // A range is a distance in the contract's own quote currency, so the one
-  // stated for the contract being left says nothing about the one being opened.
+  // A step is a multiple of the contract's own tick, so the reading stated for
+  // the contract being left says nothing about the one being opened.
   it('does not carry a reading across to another contract', () => {
     const socket = new LocalSocket()
     const sendMessage = vi.fn(() => true)
@@ -243,7 +246,7 @@ describe('production workstation hook isolation', () => {
     )
 
     act(() => {
-      expect(result.current.configureDepth('1.4')).toBe(true)
+      expect(result.current.configureDepth({ step: '0.1', rows: 14 })).toBe(true)
     })
     rerender(defaultProps(socket, sendMessage, { symbol: 'ETHUSDT' }))
     expect(sendMessage.mock.calls.at(-1)[0].action)

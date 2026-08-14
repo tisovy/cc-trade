@@ -15,18 +15,18 @@
 hand as §3 and travel with it. §2.1 and §2.4 are done.*
 
 - [x] 2.1 Keep the band and keep its meaning: the stretch of price every level of which the desk can account for. Beyond it the book holds what the stream has restated since — exact for each level it names, silent about levels nobody has touched.
-- [ ] 2.2 State the boundary on the delivery, so the panel can mark where the accounted-for book ends instead of the operator having to know.
+- [x] 2.2 State the boundary on the delivery, so the panel can mark where the accounted-for book ends instead of the operator having to know. *(`proven: {below, above} | null` on every delivery, measured from where the market is now rather than from where it was when the page was read — the band is a pair of fixed prices and the market moves inside it, so the room left below its floor is what can still be read as whole. Null when no page has proved anything, and null when the market has traded clean out of the one that did, which is a book that accounts for nothing and says so. Distinct from `reach` in exactly the way the two facts are distinct: that is how far the book goes, this is how far it can be trusted to be whole.)*
 - [ ] 2.3 Mark it on the panel, quietly: a row beyond the proven band is a row that may understate, and the operator reads far rows to size a breakout against.
 - [x] 2.4 Keep the reach the ladder is cut against as the reach of the book on hand — which now grows past the band — so `end-the-book-where-the-market-does` lengthens the ladder without a rung being added or moved. *(The reach was measured over the band, which does not grow. It is now measured over the levels held, so it follows the book: a market walking toward an edge genuinely leaves less book beyond it, and the ladder is kept from jumping by clamping the step drawn rather than by freezing a number that has stopped being true.)*
 - [ ] 2.5 Prove by test that the boundary travels with the book and that the panel marks exactly the rows beyond it.
 
 ## 3. The Book Crosses As The Rows The Panel Draws
 
-*§3 is the other session's; the file and the protocol are theirs. Note for it:
-the retention ceiling in §1.3 is held down by level-based delivery and rises when
-rows cross instead. And under the pool, only the shown contract has a step and a
-row count at all, so the grouping belongs at delivery for the shown session
-rather than cached on each held one.*
+*§3 was the other session's, and is done. The note it was left with holds: the
+grouping happens at delivery for the shown session rather than cached on each
+held one, and the retention ceiling in §1.3 is no longer held down by the
+delivery — the side is walked once and the walk stops one row past the last row
+asked for.*
 
 *Seen on the operator's own desk, 2026-08-14, with §1 running — AKEUSDT at the
 coarsest step the ladder offers. The panel states the book on hand reaches
@@ -53,29 +53,54 @@ filled.*
 
   **What is newly reachable is the operator's original complaint, unfixed.** Delivery still selects the *nearest* thousand levels. Now that the book reaches to −60% and +139% (my own 60 s run on AKEUSDT: 5 045 distinct prices resting outside the REST page, against a page spanning −2.78%…+2.61%), the nearest thousand at a coarse step is a dense clump at the mid and empty far rows — the empty book this change exists to remove. §1's wider book buys the operator nothing at all until rows cross instead of levels.
 
-- [ ] 3.1 Carry the grouping step and the row count on the request that configures depth, and derive the range the page ladder is bought against from them, so one statement serves both instead of two that can disagree.
-- [ ] 3.2 Group in the main process, with the exact-decimal pass the panel uses today, and deliver rows: the bucket price, the resting quantity, the value in USDT, and the bucket key an order is matched by.
-- [ ] 3.3 Keep the arithmetic exact on the way through — the value of a row is the sum of price times quantity over its levels, not the bucket boundary times the summed quantity.
-- [ ] 3.4 Keep the ungrouped reading working: a step of one tick is the book as the exchange sent it, level by level.
-- [ ] 3.5 Bound the delivery by the rows the panel draws rather than by a level ceiling, and keep the payload validator's bound the same value the book is built to.
-- [ ] 3.6 Raise the protocol version, and keep the exact-keys rule on the payload.
-- [ ] 3.7 Prove by test that a book delivered at a coarse step fills its far rows from levels the nearest-first selection would have dropped — the case that made the panel look empty — and that the rows match, exactly, what the renderer's own grouping produced from the same levels.
+- [x] 3.1 Carry the grouping step and the row count on the request that configures depth, and derive the range the page ladder is bought against from them, so one statement serves both instead of two that can disagree. *(`step` and `rows`, on the request that configures depth and on the one that opens a contract, read by one rule wherever they arrive. The distance is derived in the service and never stated: a statement and a derivation cannot disagree, where two statements can. A null step is the ungrouped reading and states no distance at all — a row is one level there, and the price the rows span is wherever the market happens to rest, so a distance in ticks would name something the rows have no relation to and buy a page for nothing.)*
+- [x] 3.2 Group in the main process, with the exact-decimal pass the panel uses today, and deliver rows: the bucket price, the resting quantity, the value in USDT, and the bucket key an order is matched by. *(Literally the same function — `groupFuturesBookLevels`, imported from `src/utils/futuresOrderBook.js`, which the main process already reaches into for the protocol. Not a second implementation held to agree with the first: a row the book computes and a row the panel would have computed are the same row by construction, including the bucket key.)*
+- [x] 3.3 Keep the arithmetic exact on the way through — the value of a row is the sum of price times quantity over its levels, not the bucket boundary times the summed quantity. *(Already true of the shared pass, and pinned by a test that states both numbers: five levels of one unit from 999999 down to 999995 are worth 4 999 985, and the boundary times the summed quantity says 4 999 975 — ten USDT short over five levels of a five-tick bucket.)*
+- [x] 3.4 Keep the ungrouped reading working: a step of one tick is the book as the exchange sent it, level by level. *(Stated as a null step rather than as the tick, and deliberately: 1× means no alignment pass at all, so a contract whose quoted prices disagree with its own tick filter still draws the levels it has. Aligning there would merge two real levels into a price neither of them rests at.)*
+- [x] 3.5 Bound the delivery by the rows the panel draws rather than by a level ceiling, and keep the payload validator's bound the same value the book is built to. *(`FUTURES_WORKSTATION_DEPTH_ROWS_PER_SIDE` = 64, shared by the book, the validator and the panel's own measurement ceiling — the count the panel states is always a count a delivery is allowed to answer with. Sixty-four bounds a hostile request rather than shaping an honest one; the operator's panel draws about fourteen.)*
+- [x] 3.6 Raise the protocol version, and keep the exact-keys rule on the payload. *(Revision 10. The delivery also names the `step` it grouped by — see 3.8, which is why.)*
+- [x] 3.7 Prove by test that a book delivered at a coarse step fills its far rows from levels the nearest-first selection would have dropped — the case that made the panel look empty — and that the rows match, exactly, what the renderer's own grouping produced from the same levels. *(Fixture built the way the real book is: the page buys the near thousand, the far levels arrive on the diff stream. **Fourteen rows of fourteen**, against fewer than four from the nearest thousand the old delivery selected — asserted side by side in one test, so the number that used to be three is in the file next to the number that is now fourteen. The second half is the weaker one and is named as such: sharing the grouping pass makes "the rows match what the panel grouped" close to a tautology. It is kept because it pins the bucket **key** across the seam, which §4.2 matches working orders by.)*
+- [x] 3.8 Name the step the rows were grouped by on the delivery. *(Not planned — found by a test that stopped passing for the right reason. The panel matches a working order to its row by computing the order's bucket key, and it was computing it at the step the operator had just chosen. A reading is stated and answered a frame later, so for that frame the rows on screen belong to the previous step and every mark sat on a bucket nothing had been grouped into — or on none. The delivery names its own step and the panel keys off that. Two tests: a mark on a grouped row that holds an order resting inside it, and a mark that stays put while a coarser step is still being answered.)*
 
 ## 4. The Panel Reads Rows
 
-*§4 is this session's, and it starts once §3 has settled the row shape and the
-boundary field. `groupFuturesBookLevels` stays exported after the panel stops
-calling it on arrival: §3.7 proves the delivered rows equal what it produces from
-the same levels, and it is the only thing that can prove it.*
+*§4 is the other session's. §4.1 and §4.2 were done with §3 rather than after it,
+and not by preference: the operator runs master live, a commit reaches the screen
+in minutes, and a payload change landed without the panel that reads it is a desk
+with no book on it for however long the two commits are apart. What is left is
+§4.3 and §4.4, and §2.3 and §2.5 beside them.*
 
-- [ ] 4.1 Draw the delivered rows rather than grouping levels on arrival, and compute the cumulative column, the walls and the pressure split from them as now.
-- [ ] 4.2 Match a working order to its row by the bucket key the delivery carries, and keep the key the panel computes for an order identical to the one the book computes for a row.
+*`groupFuturesBookLevels` stays exported after the panel stops calling it on
+arrival: §3.7 proves the delivered rows equal what it produces from the same
+levels, and it is the only thing that can prove it.*
+
+- [x] 4.1 Draw the delivered rows rather than grouping levels on arrival, and compute the cumulative column, the walls and the pressure split from them as now. *(`readFuturesBookRows` builds the cumulative column from the exact value each row carries, accumulated in atoms and converted once — a hundred float additions down a liquid side drift, and a drifting running total is worse than none. The panel still cuts the rows it draws to the height it measured: between a resize and the next frame the desk is still answering the previous row count, and the extra rows would draw outside the panel.)*
+- [x] 4.2 Match a working order to its row by the bucket key the delivery carries, and keep the key the panel computes for an order identical to the one the book computes for a row. *(Keyed at the step the **delivery** names, not the step the operator last chose — see §3.8. The two are the same function over the same step, so the keys are identical by construction rather than by agreement.)*
 - [ ] 4.3 Keep a row selectable for seeding a price, on a short book as on a whole one.
 - [ ] 4.4 Prove by test that the panel draws the same rows, sizes and cumulative column it drew before, on the same book.
 
 ## 5. Verification
 
-- [ ] 5.1 `npm run lint`, `npm test`, `npm run check:futures-production`.
-- [ ] 5.2 Record the delivered frame size and the per-frame work in both processes, before and after.
+- [x] 5.1 `npm run lint`, `npm test`, `npm run check:futures-production`. *(Run against the staged tree in isolation rather than against the working tree, which holds another session's unfinished work: 1921 of 1921 tests, eslint clean, boundary check passed over 23 isolated implementation files.)*
+- [x] 5.2 Record the delivered frame size and the per-frame work in both processes, before and after. Measured 2026-08-14, median of 40 crossings, one book — a thousand-level page with the far levels the stream restates behind it — read at a step of 0.0001 over fourteen rows.
+
+  | | before | after |
+  |---|---|---|
+  | frame on the wire | 72.1 KiB | **2.4 KiB** |
+  | renderer, per frame | 1 768 µs | **5 µs** |
+  | both processes, per frame | 2 642 µs | 2 643 µs |
+  | rows drawn, on the operator's book | 3 of 14 | **14 of 14** |
+
+  **The third row is the honest one and is not a win: total CPU did not move.** The grouping did not get cheaper, it changed sides. What it bought is the other three rows — the wire fell thirtyfold, the work left the thread that draws the panel, and the same money now buys the right answer instead of an empty book. At ten frames a second the renderer goes from 17.7 ms/s to 0.05 ms/s, and 680 KiB/s of serialise-parse-discard becomes 24 KiB/s.
+
+  **A guard, named as one rather than counted as a finding.** `OUTBOUND_FRAME_TOO_LARGE` is now unreachable — and the question of whether it is unreachable only through depth or unreachable *entirely* was asked and measured rather than assumed. Every resource, at its own payload bound and with the longest decimals and identities the rules accept:
+
+  | | largest legal frame | of the 256 KiB ceiling |
+  |---|---|---|
+  | depth, 64 rows a side | 38.4 KiB | 15.0% |
+  | trades, 80 rows | 31.2 KiB | 12.2% |
+  | catalog, 8 contracts | smaller still | — |
+
+  So the byte check can no longer refuse anything: the payload rules refuse a wider frame before its bytes are ever measured, on every resource. The test that claimed to prove the guard bites was rewritten to assert what is true — the measured size, and the refusal by the payload rules. The guard itself is kept as one comparison against a future payload that grows, but it is a guard and not a finding, and this is it written down.
 - [ ] 5.3 Record how far the book reaches on a real contract after a minute and after ten, so the operator's reading has something to be compared against.
 - [ ] 5.4 Operator confirms on live data that the book zooms out to what the Binance app shows on the same contract at the same moment, that far rows carry sizes rather than blanks, and that the boundary of the accounted-for book is marked — step 44, «Стакан достаёт туда же, куда приложение Binance», in `verify-the-desk-in-one-sitting/runbook.md`, so the operator runs one list.

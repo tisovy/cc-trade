@@ -500,7 +500,7 @@ export const FuturesProductionWorkstation = ({
         onOrderEdit={handleOrderEdit}
         onRetry={workstationState.retry}
         onTapeConfigurationChange={workstationState.configureTape}
-        onDepthRangeChange={workstationState.configureDepth}
+        onDepthReadingChange={workstationState.configureDepth}
         onSymbolChange={handleSymbolChange}
         onIntervalChange={setInterval}
       />

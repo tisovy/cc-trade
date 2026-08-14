@@ -8,14 +8,13 @@ import {
 import {
     FUTURES_WORKSTATION_EVENT_MAX_BYTES,
 } from '../../src/utils/futuresWorkstationProtocolShared.js';
-import { groupFuturesBookLevels } from '../../src/utils/futuresOrderBook.js';
+import {
+    futuresBookGroupKey,
+    groupFuturesBookLevels,
+} from '../../src/utils/futuresOrderBook.js';
 import {
     compareFuturesWorkstationDecimals,
-    isFuturesWorkstationDecimal,
-    isPositiveFuturesWorkstationDecimal,
     normalizeFuturesWorkstationDecimal,
-    parseFuturesWorkstationDecimal,
-    subtractFuturesWorkstationDecimals,
 } from './futures-workstation-decimal.js';
 
 const snapshot = (overrides = {}) => ({
@@ -48,85 +47,18 @@ const bookFromLevels = (bids, asks) => {
     return book;
 };
 
-// The behavior being preserved, deliberately written as a full exact-decimal
-// sort rather than sharing the production selection implementation.
-const fullSortSideReference = (side, descending, range) => {
-    const rangeDecimal = range === null ? null : parseFuturesWorkstationDecimal(range);
-    const entries = Array.from(side, ([price, quantity]) => ({
-        price,
-        quantity,
-        decimal: parseFuturesWorkstationDecimal(price),
-        key: 0n,
-    }));
-    const scale = Math.max(
-        rangeDecimal?.scale ?? 0,
-        ...entries.map(entry => entry.decimal.scale),
-    );
-    const alignedKey = decimal => (
-        decimal.coefficient * (10n ** BigInt(scale - decimal.scale))
-    );
-    for (const entry of entries) entry.key = alignedKey(entry.decimal);
-    entries.sort((left, right) => {
-        const comparison = left.key < right.key ? -1 : left.key > right.key ? 1 : 0;
-        return descending ? -comparison : comparison;
-    });
-    const bestKey = entries.length > 0 ? entries[0].key : null;
-    const rangeKey = rangeDecimal === null ? null : alignedKey(rangeDecimal);
-    const edgeKey = bestKey === null || rangeKey === null
-        ? null
-        : (descending ? bestKey - rangeKey : bestKey + rangeKey);
-    const levels = [];
-    for (const { price, quantity, key } of entries) {
-        if (levels.length >= FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.RENDERER_LEVELS_PER_SIDE) break;
-        if (edgeKey !== null
-            && levels.length >= FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.MIN_DELIVERED_LEVELS_PER_SIDE) {
-            if (descending ? key < edgeKey : key > edgeKey) break;
-        }
-        levels.push({ price, quantity });
-    }
-    return levels;
-};
-
-const fullSortRendererViewReference = (book, range = null) => {
-    const bound = isFuturesWorkstationDecimal(range)
-        && isPositiveFuturesWorkstationDecimal(range)
-        ? range
-        : null;
-    const bids = fullSortSideReference(book.bids, true, bound);
-    const asks = fullSortSideReference(book.asks, false, bound);
-    return {
-        lastUpdateId: book.lastUpdateId.toString(),
-        bids,
-        asks,
-        spread: bids[0] && asks[0]
-            ? subtractFuturesWorkstationDecimals(asks[0].price, bids[0].price)
-            : '0',
-        // The reference is about ordering and bounding, and states the reach the
-        // book states for a page that is not the deepest: none.
-        reach: null,
-    };
-};
-
-const decimalFromAtoms = (atoms, scale) => {
-    const digits = atoms.toString().padStart(scale + 1, '0');
-    if (scale === 0) return digits;
-    return `${digits.slice(0, -scale)}.${digits.slice(-scale)}`;
-};
-
-const permuteLevels = (levels, multiplier = 37) => Array.from(
-    { length: levels.length },
-    (_, index) => levels[(index * multiplier) % levels.length],
-);
-
 describe('authoritative Futures local order book', () => {
     it('buffers before snapshot and exposes a bounded live view', () => {
         const book = liveBook();
-        const view = book.toRendererView();
+        const view = book.toRendererRows();
         expect(book.phase).toBe(FUTURES_WORKSTATION_ORDER_BOOK_PHASES.LIVE);
         expect(view.lastUpdateId).toBe('101');
-        expect(view.bids[0]).toEqual({ price: '10', quantity: '2.5' });
-        expect(view.bids[1]).toEqual({ price: '9', quantity: '3' });
-        expect(view.asks[0]).toEqual({ price: '11', quantity: '3.5' });
+        expect(view.bids[0].price).toBe('10');
+        expect(view.bids[0].quantity).toBe('2.5');
+        expect(view.bids[1].price).toBe('9');
+        expect(view.bids[1].quantity).toBe('3');
+        expect(view.asks[0].price).toBe('11');
+        expect(view.asks[0].quantity).toBe('3.5');
         expect(view.spread).toBe('1');
     });
 
@@ -135,7 +67,7 @@ describe('authoritative Futures local order book', () => {
         book.push(delta({ firstUpdateId: '90', finalUpdateId: '99' }), 100);
         book.push(delta(), 100);
         expect(book.bootstrap(snapshot()).live).toBe(true);
-        expect(book.toRendererView().lastUpdateId).toBe('101');
+        expect(book.toRendererRows().lastUpdateId).toBe('101');
     });
 
     // A contract nobody is trading publishes no diff at all — the stream carries
@@ -144,8 +76,9 @@ describe('authoritative Futures local order book', () => {
     it('goes live on a snapshot no diff has contradicted', () => {
         const book = new FuturesWorkstationOrderBook();
         expect(book.bootstrap(snapshot())).toEqual({ live: true, reason: 'bootstrapped' });
-        expect(book.toRendererView().lastUpdateId).toBe('100');
-        expect(book.toRendererView().bids[0]).toEqual({ price: '10', quantity: '2' });
+        expect(book.toRendererRows().lastUpdateId).toBe('100');
+        expect(book.toRendererRows().bids[0].price).toBe('10');
+        expect(book.toRendererRows().bids[0].quantity).toBe('2');
     });
 
     it('pays the owed bridge with a first diff that spans the snapshot', () => {
@@ -155,7 +88,7 @@ describe('authoritative Futures local order book', () => {
         // one the exchange published before the snapshot was taken.
         expect(book.push(delta({ firstUpdateId: '99', previousFinalUpdateId: '98' }), 100))
             .toEqual({ applied: true, reason: 'live' });
-        expect(book.toRendererView().lastUpdateId).toBe('101');
+        expect(book.toRendererRows().lastUpdateId).toBe('101');
     });
 
     it('pays the owed bridge with a first diff that continues from the snapshot', () => {
@@ -166,7 +99,7 @@ describe('authoritative Futures local order book', () => {
             finalUpdateId: '101',
             previousFinalUpdateId: '100',
         }), 100)).toEqual({ applied: true, reason: 'live' });
-        expect(book.toRendererView().lastUpdateId).toBe('101');
+        expect(book.toRendererRows().lastUpdateId).toBe('101');
     });
 
     it('owes the bridge only once', () => {
@@ -189,7 +122,7 @@ describe('authoritative Futures local order book', () => {
             finalUpdateId: '103',
             previousFinalUpdateId: '101',
         }), 100)).toEqual({ applied: false, reason: 'gap', resync: true });
-        expect(book.toRendererView()).toBeNull();
+        expect(book.toRendererRows()).toBeNull();
     });
 
     // A re-bootstrap empties the buffer while the socket keeps running, so
@@ -231,7 +164,7 @@ describe('authoritative Futures local order book', () => {
             reason: 'snapshot-not-bridged',
             resync: true,
         });
-        expect(book.toRendererView()).toBeNull();
+        expect(book.toRendererRows()).toBeNull();
     });
 
     it('ignores a duplicate inside the bootstrap buffer before checking pu continuity', () => {
@@ -244,7 +177,7 @@ describe('authoritative Futures local order book', () => {
             previousFinalUpdateId: '101',
         }), 100);
         expect(book.bootstrap(snapshot()).live).toBe(true);
-        expect(book.toRendererView().lastUpdateId).toBe('102');
+        expect(book.toRendererRows().lastUpdateId).toBe('102');
     });
 
     it('requires pu continuity while replaying the bootstrap buffer', () => {
@@ -275,7 +208,7 @@ describe('authoritative Futures local order book', () => {
             finalUpdateId: '103',
             previousFinalUpdateId: '102',
         }), 100)).toEqual({ applied: false, reason: 'gap', resync: true });
-        expect(book.toRendererView()).toBeNull();
+        expect(book.toRendererRows()).toBeNull();
     });
 
     it('applies absolute quantities and accepts deletion of an absent level', () => {
@@ -287,7 +220,7 @@ describe('authoritative Futures local order book', () => {
             bids: [['10.00', '0'], ['8.00', '0']],
             asks: [],
         }), 100).applied).toBe(true);
-        expect(book.toRendererView().bids.map(level => level.price)).toEqual(['9']);
+        expect(book.toRendererRows().bids.map(level => level.price)).toEqual(['9']);
     });
 
     it('rejects reordered update ranges', () => {
@@ -312,7 +245,7 @@ describe('authoritative Futures local order book', () => {
             previousFinalUpdateId: '9007199254740992',
         }), 100);
         expect(book.bootstrap(snapshot({ lastUpdateId: '9007199254740993' })).live).toBe(true);
-        expect(book.toRendererView().lastUpdateId).toBe('9007199254740994');
+        expect(book.toRendererRows().lastUpdateId).toBe('9007199254740994');
     });
 
     it('rejects update IDs outside unsigned int64', () => {
@@ -379,15 +312,20 @@ describe('authoritative Futures local order book', () => {
         // the far book, and they are kept.
         expect(book.bids.size).toBe(SNAPSHOT_LEVELS_PER_SIDE + 100);
         expect(book.asks.size).toBe(SNAPSHOT_LEVELS_PER_SIDE + 100);
-        const view = book.toRendererView();
-        expect(view.bids).toHaveLength(
-            FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.RENDERER_LEVELS_PER_SIDE,
-        );
-        expect(view.asks).toHaveLength(
-            FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.RENDERER_LEVELS_PER_SIDE,
-        );
-        expect(view.bids[0].price).toBe('100000.01');
-        expect(view.asks[0].price).toBe('100001.01');
+        // And the delivery reaches them, which is the whole of the change: read
+        // at a step wide enough to hold a hundred of the old page's levels in a
+        // row, the far levels the stream added fill rows of their own instead of
+        // being dropped for being the thousand-and-first nearest.
+        const view = book.toRendererRows({ step: '100', rows: 14 });
+        expect(view.bids[0].price).toBe('100000');
+        expect(view.asks[0].price).toBe('100100');
+        // The page alone spans eleven buckets a side at this step. The far levels
+        // the stream added open a twelfth, and it is drawn — the row that used to
+        // be blank because those levels were the thousand-and-first nearest.
+        expect(view.bids).toHaveLength(12);
+        expect(view.asks).toHaveLength(12);
+        expect(view.bids.at(-1).price).toBe('98900');
+        expect(view.asks.at(-1).price).toBe('101200');
     });
 
     // The delivered book is the largest frame the desk sends. If it outgrows the
@@ -405,7 +343,7 @@ describe('authoritative Futures local order book', () => {
             asks: Array.from({ length: FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.SNAPSHOT_LEVELS_PER_SIDE },
                 (_, index) => [`${(900001 + index) / 10000}`, '184467440737.09551615']),
         }));
-        const bytes = Buffer.byteLength(JSON.stringify(book.toRendererView()), 'utf8');
+        const bytes = Buffer.byteLength(JSON.stringify(book.toRendererRows()), 'utf8');
         expect(bytes).toBeLessThanOrEqual(FUTURES_WORKSTATION_EVENT_MAX_BYTES);
     });
 
@@ -416,7 +354,7 @@ describe('authoritative Futures local order book', () => {
             bids: [['9007199254740993.0001', '1'], ['9007199254740993.0002', '1']],
             asks: [['9007199254740993.0003', '1']],
         })).live).toBe(true);
-        expect(book.toRendererView().bids[0].price).toBe('9007199254740993.0002');
+        expect(book.toRendererRows().bids[0].price).toBe('9007199254740993.0002');
     });
 
     it('tears down idempotently and rejects later mutation', () => {
@@ -424,7 +362,7 @@ describe('authoritative Futures local order book', () => {
         book.stop();
         book.stop();
         expect(book.push(delta(), 100)).toEqual({ applied: false, reason: 'stopped' });
-        expect(book.toRendererView()).toBeNull();
+        expect(book.toRendererRows()).toBeNull();
     });
 });
 
@@ -454,7 +392,7 @@ describe('the band a snapshot proves', () => {
             bids: [['8.00', '7.0'], ['9.50', '1.5']],
             asks: [['13.00', '9.0'], ['11.50', '2.5']],
         }), 200);
-        const view = book.toRendererView();
+        const view = book.toRendererRows();
         expect(view.bids.map(row => row.price)).toEqual(['10', '9.5', '9', '8']);
         expect(view.asks.map(row => row.price)).toEqual(['11', '11.5', '12', '13']);
     });
@@ -485,7 +423,7 @@ describe('the band a snapshot proves', () => {
             bids: [['9.00', '0']],
             asks: [],
         }), 200);
-        expect(book.toRendererView().bids.map(row => row.price)).toEqual(['10']);
+        expect(book.toRendererRows().bids.map(row => row.price)).toEqual(['10']);
     });
 
     it('says whether it still reaches as far as the rows on screen', () => {
@@ -627,8 +565,8 @@ describe('the band a snapshot proves', () => {
     // so measuring it would measure the panel's own step back.
     it('states how far its page proved, once no deeper page can be bought', () => {
         const book = banded();
-        expect(book.toRendererView().reach).toBeNull();
-        expect(book.toRendererView(null, { atDeepestPage: true }).reach)
+        expect(book.toRendererRows().reach).toBeNull();
+        expect(book.toRendererRows({ atDeepestPage: true }).reach)
             .toEqual({ below: '1', above: '1' });
     });
 
@@ -645,7 +583,7 @@ describe('the band a snapshot proves', () => {
             bids: [],
             asks: [['11.00', '0'], ['11.80', '1.0']],
         }), 200);
-        expect(book.toRendererView(null, { atDeepestPage: true }).reach)
+        expect(book.toRendererRows({ atDeepestPage: true }).reach)
             .toEqual({ below: '1', above: '0.2' });
     });
 
@@ -653,7 +591,7 @@ describe('the band a snapshot proves', () => {
     // as the stream names levels further out, with no rung added or moved.
     it('reaches as far as the levels the stream has restated', () => {
         const book = banded();
-        expect(book.toRendererView(null, { atDeepestPage: true }).reach)
+        expect(book.toRendererRows({ atDeepestPage: true }).reach)
             .toEqual({ below: '1', above: '1' });
         book.push(delta({
             firstUpdateId: '102',
@@ -662,7 +600,7 @@ describe('the band a snapshot proves', () => {
             bids: [['4.00', '7.0']],
             asks: [['30.00', '9.0']],
         }), 200);
-        expect(book.toRendererView(null, { atDeepestPage: true }).reach)
+        expect(book.toRendererRows({ atDeepestPage: true }).reach)
             .toEqual({ below: '6', above: '19' });
     });
 
@@ -686,7 +624,7 @@ describe('the band a snapshot proves', () => {
             bids: [['10.50', '2.0'], ['9.50', '3.0']],
             asks: [['11.50', '4.0'], ['12.50', '5.0']],
         }).live).toBe(true);
-        const view = book.toRendererView();
+        const view = book.toRendererRows();
         // 4 and 30 are outside the new band and are still drawn. So is 9, which
         // the new page does not reach either. 10 was inside the new band and the
         // snapshot did not name it, so it has been taken.
@@ -745,7 +683,7 @@ describe('the band a snapshot proves', () => {
 // page to buy and then ignored it when deciding what to send. A thousand levels
 // a side crossed to draw forty rows, ten times a second, and everything
 // downstream of the socket is priced per level.
-describe('the reading bounds the delivery', () => {
+describe('the reading is the rows the panel draws', () => {
     const DEEP_LEVELS_PER_SIDE = 400;
     // Whole numbers a tick apart: the grouping arithmetic below is then readable
     // as prices rather than as decimal-string bookkeeping.
@@ -761,95 +699,113 @@ describe('the reading bounds the delivery', () => {
         return book;
     };
 
-    it('carries the levels within the stated range on each side', () => {
-        const view = deepBook().toRendererView('250');
-        expect(view.bids).toHaveLength(251);
-        expect(view.asks).toHaveLength(251);
-        expect(view.bids.at(-1).price).toBe('999750');
-        expect(view.asks.at(-1).price).toBe('1000251');
+    it('delivers the rows asked for, grouped by the step asked for', () => {
+        const view = deepBook().toRendererRows({ step: '5', rows: 14 });
+        expect(view.bids).toHaveLength(14);
+        expect(view.asks).toHaveLength(14);
+        // Bids round their bucket down and asks round theirs up, so a row prints
+        // a price its side would actually fill through.
+        expect(view.bids[0].price).toBe('1000000');
+        expect(view.bids.at(-1).price).toBe('999935');
+        expect(view.asks[0].price).toBe('1000005');
+        expect(view.asks.at(-1).price).toBe('1000070');
     });
 
-    // The panel has not spoken yet, or has stated something that is not a
-    // distance. A first book must not arrive short of the rows it is about to be
-    // asked for, so the ceiling stands until a reading replaces it.
-    it('delivers at the ceiling when no range has been stated', () => {
+    // Ungrouped is the book as the exchange sent it, level by level, with no
+    // alignment pass at all — a contract whose quoted prices disagree with its
+    // own tick filter must still draw the levels it actually has.
+    it('delivers level by level when no step is stated', () => {
         const book = deepBook();
-        for (const range of [undefined, null, '0', 'wide', 5]) {
-            expect(book.toRendererView(range).bids).toHaveLength(DEEP_LEVELS_PER_SIDE);
+        for (const step of [undefined, null, '0', 'wide', 5]) {
+            const view = book.toRendererRows({ step, rows: 14 });
+            expect(view.bids).toHaveLength(14);
+            expect(view.bids.map(row => row.price).slice(0, 3))
+                .toEqual(['1000000', '999999', '999998']);
         }
     });
 
-    it('delivers what the book holds when the reading reaches past it', () => {
-        const view = deepBook().toRendererView('10000');
-        expect(view.bids).toHaveLength(DEEP_LEVELS_PER_SIDE);
-        expect(view.asks).toHaveLength(DEEP_LEVELS_PER_SIDE);
+    it('delivers what the book holds when the rows reach past it', () => {
+        const view = deepBook().toRendererRows({ step: '1000', rows: 14 });
+        expect(view.bids.length).toBeLessThan(14);
+        expect(view.bids.length).toBeGreaterThan(0);
     });
 
-    // Ungrouped a row is one raw level, and the distance those rows span is
-    // wherever the market happens to rest — a contract quoting a tick of a
-    // millionth with levels a tenth of a percent apart puts fourteen rows far
-    // outside fourteen ticks. The stated range assumes a level on every step, so
-    // under the floor it describes the wrong thing and is ignored.
-    it('keeps a floor under the range for the rows a range cannot describe', () => {
-        const view = deepBook().toRendererView('1');
-        expect(view.bids).toHaveLength(
-            FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.MIN_DELIVERED_LEVELS_PER_SIDE,
-        );
-        expect(view.asks).toHaveLength(
-            FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.MIN_DELIVERED_LEVELS_PER_SIDE,
-        );
+    // The bound is on a hostile request, not on an honest one. A panel states a
+    // couple of dozen rows; nothing states a couple of thousand.
+    it('bounds the rows at the ceiling, whatever is asked for', () => {
+        const book = deepBook();
+        const { RENDERER_ROWS_PER_SIDE } = FUTURES_WORKSTATION_ORDER_BOOK_LIMITS;
+        for (const rows of [undefined, null, 0, -1, 1e9, RENDERER_ROWS_PER_SIDE + 1]) {
+            expect(book.toRendererRows({ step: null, rows }).bids.length)
+                .toBeLessThanOrEqual(RENDERER_ROWS_PER_SIDE);
+        }
     });
 
-    // The trim is on delivery and never on what is retained, proven or bridged.
-    // A coarser step is answered out of the book already in hand — buying the
-    // page again would put the operator behind the market for a read.
+    // The grouping is on delivery and never on what is retained, proven or
+    // bridged. A coarser step is answered out of the book already in hand —
+    // buying the page again would put the operator behind the market for a read.
     it('answers a wider reading from the book already held', () => {
         const book = deepBook();
-        expect(book.toRendererView('250').bids).toHaveLength(251);
+        expect(book.toRendererRows({ step: '5', rows: 14 }).bids).toHaveLength(14);
         expect(book.bids.size).toBe(DEEP_LEVELS_PER_SIDE);
-        expect(book.toRendererView('300').bids).toHaveLength(301);
+        expect(book.toRendererRows({ step: '20', rows: 14 }).bids).toHaveLength(14);
         expect(book.phase).toBe(FUTURES_WORKSTATION_ORDER_BOOK_PHASES.LIVE);
     });
 
-    // What the operator actually reads. Forty-four rows at a five-tick step is
-    // the reading the audit measured, and every row of it — its price, its size
-    // and its cumulative column — has to come out the same as it did when the
-    // whole book crossed.
-    it('draws the same rows from the trimmed delivery as from the whole book', () => {
-        const book = deepBook();
-        const rows = 44;
+    // Every row is priced by summing price × quantity over the levels inside it.
+    // Multiplying the printed boundary by the summed quantity is a different and
+    // wrong number: every level in the bucket rests somewhere other than its edge.
+    it('prices a row over its levels rather than over its boundary', () => {
+        const view = deepBook().toRendererRows({ step: '5', rows: 3 });
+        // The best bid sits on a bucket boundary and is a bucket of one. The row
+        // under it holds 999999 down to 999995, five levels of one unit each,
+        // and prints its boundary — 999995.
+        const [, second] = view.bids;
+        expect(second.price).toBe('999995');
+        expect(second.quantity).toBe('5');
+        expect(second.value).toBe('4999985');
+        // What multiplying the printed boundary by the summed quantity would
+        // have said, which is ten USDT short over five levels.
+        expect(second.value).not.toBe('4999975');
+    });
+
+    // A row prints its bucket, so an order resting anywhere inside the bucket
+    // would never match the printed price. The key is what it matches on, and
+    // the panel must compute the same one for the order that the book computed
+    // for the row.
+    it('carries the key the panel matches a working order by', () => {
         const step = '5';
-        const range = String(rows * Number(step));
-        const trimmed = book.toRendererView(range);
-        const whole = book.toRendererView();
-        for (const side of ['bids', 'asks']) {
-            const grouped = levels => groupFuturesBookLevels({
-                levels,
-                side: side === 'bids' ? 'bid' : 'ask',
-                step,
-                limit: rows,
-            });
-            const fromTrimmed = grouped(trimmed[side]);
-            expect(fromTrimmed).toHaveLength(rows);
-            expect(fromTrimmed).toEqual(grouped(whole[side]));
+        const view = deepBook().toRendererRows({ step, rows: 3 });
+        for (const row of view.bids) {
+            expect(row.groupKey).toBe(futuresBookGroupKey({ price: row.price, side: 'bid', step }));
         }
+        // An order resting inside the first bucket, not on its boundary.
+        // 999998 rests inside the second bucket — the best bid sits on a
+        // boundary and is a bucket of one — and the printed price of that bucket
+        // is 999995, which the operator's order does not equal.
+        expect(futuresBookGroupKey({ price: '999998', side: 'bid', step }))
+            .toBe(view.bids[1].groupKey);
     });
 
-    // A total accumulated over raw levels is not a total over grouped rows, so
-    // the panel computes the only cumulative column it can display and the
-    // delivered one was computed, serialized, parsed, validated, frozen and
-    // discarded — a third of every frame.
-    it('delivers a level as price and quantity, with no running total', () => {
-        const view = deepBook().toRendererView('250');
+    it('delivers a row as price, quantity, value and key, with no running total', () => {
+        const view = deepBook().toRendererRows({ step: '5', rows: 14 });
         for (const side of [view.bids, view.asks]) {
-            expect(Object.keys(side[0])).toEqual(['price', 'quantity']);
+            expect(Object.keys(side[0])).toEqual(['price', 'quantity', 'value', 'groupKey']);
         }
     });
 
-    // The saving, stated as the thing that was actually wrong: the frame. A
-    // retained book at the ceiling, read at forty-four rows and a five-tick
-    // step — the reading the audit measured — is the comparison that matters.
-    it('is a fraction of the frame the whole book was', () => {
+    // The spread is the one number on the panel that must not move when the step
+    // does. Taken between the first two rows it would widen by up to two steps,
+    // and widen further the more the operator zooms out.
+    it('states the market spread rather than the distance between two buckets', () => {
+        const book = deepBook();
+        for (const step of [null, '5', '100']) {
+            expect(book.toRendererRows({ step, rows: 14 }).spread).toBe('1');
+        }
+    });
+
+    // The saving, stated as the thing that was actually wrong: the frame.
+    it('is a fraction of the frame the levels were', () => {
         const { SNAPSHOT_LEVELS_PER_SIDE } = FUTURES_WORKSTATION_ORDER_BOOK_LIMITS;
         const book = new FuturesWorkstationOrderBook();
         book.push(delta({ bids: [], asks: [] }), 1);
@@ -860,107 +816,121 @@ describe('the reading bounds the delivery', () => {
                 (_, index) => [`${1_000_001 + index}`, '1.123456789012345678']),
         })).live).toBe(true);
         const bytes = view => Buffer.byteLength(JSON.stringify(view), 'utf8');
-        const whole = bytes(book.toRendererView());
-        expect(bytes(book.toRendererView('220')) * 4).toBeLessThan(whole);
-        expect(whole).toBeLessThanOrEqual(FUTURES_WORKSTATION_EVENT_MAX_BYTES);
+        const rows = bytes(book.toRendererRows({ step: '5', rows: 14 }));
+        expect(rows * 20).toBeLessThan(bytes({
+            bids: [...book.bids].map(([price, quantity]) => ({ price, quantity })),
+            asks: [...book.asks].map(([price, quantity]) => ({ price, quantity })),
+        }));
+        expect(rows).toBeLessThan(FUTURES_WORKSTATION_EVENT_MAX_BYTES);
     });
 });
 
-describe('bounded delivery selects before full ordering', () => {
-    const WIDE_BEST_ATOMS = 900_719_925_474_099_300_000n;
-    const exactLadder = (count) => ({
-        bids: Array.from({ length: count }, (_, index) => [
-            decimalFromAtoms(WIDE_BEST_ATOMS - BigInt(index), 4),
-            `${(index % 17) + 1}.${String(index % 10)}`,
-        ]),
-        asks: Array.from({ length: count }, (_, index) => [
-            decimalFromAtoms(WIDE_BEST_ATOMS + 1n + BigInt(index), 4),
-            `${(index % 19) + 1}.${String((index * 3) % 10)}`,
-        ]),
-    });
-    const realisticBook = () => {
-        const insertionOrder = Array.from({ length: 1_000 }, (_, index) => (index * 37) % 1_000);
-        return bookFromLevels(
-            insertionOrder.map(index => [decimalFromAtoms(15_500n - BigInt(index), 4), '1']),
-            insertionOrder.map(index => [decimalFromAtoms(15_501n + BigInt(index), 4), '1']),
-        );
+describe('the far rows are filled from the levels a level count would have dropped', () => {
+    // The operator's own desk, 2026-08-14, AKEUSDT on the coarsest step. Tick
+    // 0.0000001, step 0.0001 — a thousand ticks, 1.34% of price — and fourteen
+    // rows a side. The book on hand reached 54.96%; the delivery reached 2.6%,
+    // because it was the nearest thousand levels. Three rows drew and eleven
+    // were blank over a book that held levels for every one of them.
+    const TICK_ATOMS = 1n;
+    const STEP = '0.0001';
+    const ROWS = 14;
+    const price = atoms => {
+        const text = String(atoms).padStart(8, '0');
+        return `${text.slice(0, -7) || '0'}.${text.slice(-7)}`;
+    };
+    // A dense clump at the mid — a thousand levels inside the first two rows —
+    // and then a sparse book reaching far past them, which is what a real
+    // contract looks like and what made the panel go blank.
+    // Built the way the real one is: the page buys the near thousand, and the
+    // far levels arrive on the diff stream afterwards. That is exactly the split
+    // the old delivery could not carry — the page fitted inside the level count
+    // and everything the stream added past it was dropped on the way out.
+    const BEST_ATOMS = 74_600n;
+    const clumpedBook = () => {
+        const bids = [];
+        const asks = [];
+        for (let index = 0; index < 1_000; index += 1) {
+            bids.push([price(BEST_ATOMS - (BigInt(index) * TICK_ATOMS)), '1']);
+            asks.push([price(BEST_ATOMS + 1n + (BigInt(index) * TICK_ATOMS)), '1']);
+        }
+        const book = new FuturesWorkstationOrderBook();
+        book.push(delta({ bids: [], asks: [] }), 1);
+        expect(book.bootstrap(snapshot({ bids, asks })).live).toBe(true);
+        const farBids = [];
+        const farAsks = [];
+        for (let row = 1; row <= 40; row += 1) {
+            const offset = BigInt(row) * 1_000n;
+            farBids.push([price(BEST_ATOMS - offset), '3']);
+            farAsks.push([price(BEST_ATOMS + 1n + offset), '3']);
+        }
+        expect(book.push(delta({
+            firstUpdateId: '102',
+            finalUpdateId: '102',
+            previousFinalUpdateId: '101',
+            bids: farBids,
+            asks: farAsks,
+        }), 1).applied).toBe(true);
+        return book;
     };
 
-    it('matches the full-sort bytes for mixed scales, wide prices and insertion orders', () => {
-        const ladder = exactLadder(320);
-        const orders = [
-            levels => [...levels],
-            levels => [...levels].reverse(),
-            levels => permuteLevels(levels),
-        ];
-        let firstBytes = null;
-        for (const order of orders) {
-            const book = bookFromLevels(order(ladder.bids), order(ladder.asks));
-            const actual = book.toRendererView('0.0220');
-            const expected = fullSortRendererViewReference(book, '0.0220');
-            const bytes = JSON.stringify(actual);
-            expect(bytes).toBe(JSON.stringify(expected));
-            expect(actual.bids).toHaveLength(221);
-            expect(actual.asks).toHaveLength(221);
-            expect(BigInt(actual.bids[0].price.split('.')[0]))
-                .toBeGreaterThan(BigInt(Number.MAX_SAFE_INTEGER));
-            expect(new Set(actual.bids.map(level => level.price.split('.')[1]?.length ?? 0)).size)
-                .toBeGreaterThan(1);
-            if (firstBytes === null) firstBytes = bytes;
-            else expect(bytes).toBe(firstBytes);
+    it('fills every row the panel draws', () => {
+        const view = clumpedBook().toRendererRows({ step: STEP, rows: ROWS });
+        expect(view.bids).toHaveLength(ROWS);
+        expect(view.asks).toHaveLength(ROWS);
+        for (const row of [...view.bids, ...view.asks]) {
+            expect(Number(row.quantity)).toBeGreaterThan(0);
         }
     });
 
-    it('matches the full-sort floor when the range contains only the best level', () => {
-        const ladder = exactLadder(320);
-        const book = bookFromLevels(permuteLevels(ladder.bids), permuteLevels(ladder.asks));
-        const actual = book.toRendererView('0.00001');
-        expect(JSON.stringify(actual))
-            .toBe(JSON.stringify(fullSortRendererViewReference(book, '0.00001')));
-        expect(actual.bids).toHaveLength(
-            FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.MIN_DELIVERED_LEVELS_PER_SIDE,
-        );
-        expect(actual.asks).toHaveLength(
-            FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.MIN_DELIVERED_LEVELS_PER_SIDE,
-        );
+    // The defect, stated as the arithmetic that caused it. The nearest thousand
+    // levels a side span ten buckets at this step — every level of the clump
+    // falls inside the first row and a half — so a delivery bounded by a level
+    // count carried nothing for the rows past them.
+    it('reaches past the levels a nearest-first thousand would have selected', () => {
+        const book = clumpedBook();
+        const nearestThousand = [...book.bids]
+            .map(([bidPrice, quantity]) => ({ price: bidPrice, quantity }))
+            .sort((left, right) => Number(right.price) - Number(left.price))
+            .slice(0, 1_000);
+        const fromNearest = groupFuturesBookLevels({
+            levels: nearestThousand,
+            side: 'bid',
+            step: STEP,
+            limit: ROWS,
+        });
+        expect(fromNearest.length).toBeLessThan(4);
+        expect(book.toRendererRows({ step: STEP, rows: ROWS }).bids).toHaveLength(ROWS);
     });
 
-    it('matches the full-sort reference at the realistic 221-of-1000 range', () => {
-        const book = realisticBook();
-        const actual = book.toRendererView('0.0220');
-        expect(JSON.stringify(actual))
-            .toBe(JSON.stringify(fullSortRendererViewReference(book, '0.0220')));
-        expect(actual.bids).toHaveLength(221);
-        expect(actual.asks).toHaveLength(221);
-    });
-
-    it('keeps exact ceiling output for wider, null, invalid and non-positive ranges', () => {
-        const book = realisticBook();
-        for (const range of ['1', undefined, null, 'wide', '0', '-1']) {
-            const actual = book.toRendererView(range);
-            expect(JSON.stringify(actual))
-                .toBe(JSON.stringify(fullSortRendererViewReference(book, range)));
-            expect(actual.bids).toHaveLength(1_000);
-            expect(actual.asks).toHaveLength(1_000);
+    // The rows the book builds and the rows the panel would have built from the
+    // same levels are the same rows, because they are the same pass. Asserted on
+    // the key as well as the price: the key is what a working order is matched
+    // by, and the two sides computing it differently is a mark on the wrong row.
+    it('matches what the panel grouped for itself, key for key', () => {
+        const book = clumpedBook();
+        const view = book.toRendererRows({ step: STEP, rows: ROWS });
+        for (const [side, sideName, descending] of [
+            [view.bids, 'bid', true],
+            [view.asks, 'ask', false],
+        ]) {
+            const levels = [...(sideName === 'bid' ? book.bids : book.asks)]
+                .map(([levelPrice, quantity]) => ({ price: levelPrice, quantity }))
+                .sort((left, right) => (descending
+                    ? Number(right.price) - Number(left.price)
+                    : Number(left.price) - Number(right.price)));
+            const panel = groupFuturesBookLevels({
+                levels,
+                side: sideName,
+                step: STEP,
+                limit: ROWS,
+            });
+            expect(side.map(row => [row.price, row.quantity, row.value, row.groupKey]))
+                .toEqual(panel.map(row => [row.price, row.quantity, row.value, row.groupKey]));
         }
     });
+});
 
-    it('keeps exact floor and ceiling output at the accepted range-length boundary', () => {
-        const book = realisticBook();
-        const ranges = [
-            { range: `0.${'0'.repeat(61)}1`, expectedLevels: 200 },
-            { range: '9'.repeat(64), expectedLevels: 1_000 },
-        ];
-        for (const { range, expectedLevels } of ranges) {
-            expect(range).toHaveLength(64);
-            const actual = book.toRendererView(range);
-            expect(JSON.stringify(actual))
-                .toBe(JSON.stringify(fullSortRendererViewReference(book, range)));
-            expect(actual.bids).toHaveLength(expectedLevels);
-            expect(actual.asks).toHaveLength(expectedLevels);
-        }
-    });
-
+describe('what the book retains', () => {
     // Past the ceiling the furthest levels go first. Evicting from the near edge
     // would drop exactly what a coarse step is read for, and the ceiling is a
     // guard against a pathological stream rather than a reading of any market —
@@ -1034,29 +1004,5 @@ describe('bounded delivery selects before full ordering', () => {
         expect(actualBids).toEqual(ordered([...originalBids, ...addedBids], true));
         expect(actualAsks).toEqual(ordered([...originalAsks, ...addedAsks], false));
         expect(actualBids.length).toBe(limit + addedBids.length);
-    });
-
-    it('sorts only the selected subset for a bounded 1000-level side', () => {
-        const insertionOrder = Array.from({ length: 1_000 }, (_, index) => (index * 37) % 1_000);
-        const book = bookFromLevels(
-            insertionOrder.map(index => [`${1_000_000 - index}`, '1']),
-            insertionOrder.map(index => [`${1_000_001 + index}`, '1']),
-        );
-        const originalSort = Array.prototype.sort;
-        const sortedLengths = [];
-        let actual;
-        try {
-            Array.prototype.sort = function instrumentedSort(...args) {
-                sortedLengths.push(this.length);
-                return Reflect.apply(originalSort, this, args);
-            };
-            actual = book.toRendererView('220');
-        } finally {
-            Array.prototype.sort = originalSort;
-        }
-
-        expect(sortedLengths).toEqual([221, 221]);
-        expect(JSON.stringify(actual))
-            .toBe(JSON.stringify(fullSortRendererViewReference(book, '220')));
     });
 });

@@ -36,6 +36,22 @@ const createRequestId = () => {
 
 const isOpenSocket = connection => connection?.readyState === 1
 
+// A reading is the step the rows are grouped by and how many of them there are.
+// A null step is the ungrouped reading — one row, one level — and is a reading
+// like any other, so it is the row count that decides whether there is one.
+const isDepthReading = value => (
+  value !== null
+  && typeof value === 'object'
+  && (value.step === null || typeof value.step === 'string')
+  && Number.isSafeInteger(value.rows)
+  && value.rows > 0
+)
+
+// Compared rather than the object, which is rebuilt on every render: a reading
+// restated unchanged must not cost a message, and on a panel that re-renders per
+// frame that is the difference between one message and ten a second.
+const depthReadingFingerprint = reading => `${reading.step ?? ''}:${reading.rows}`
+
 const emptyResources = () => Object.freeze({
   status: null,
   catalog: null,
@@ -165,10 +181,10 @@ const useFuturesProductionWorkstation = ({
   // contract opens — which is before the subscription that will carry it exists,
   // a child's effect running before its parent's. What was stated for the
   // contract being left is dropped by the symbol, not by the reset.
-  const depthRangeRef = useRef(null)
-  // What the current subscription was actually told, so a range restated
+  const depthReadingRef = useRef(null)
+  // What the current subscription was actually told, so a reading restated
   // unchanged is not sent twice.
-  const sentDepthRangeRef = useRef(null)
+  const sentDepthReadingRef = useRef(null)
   const ownerRef = useRef(0)
   const historyRequestRef = useRef(null)
   const historySelectionRef = useRef(null)
@@ -199,40 +215,44 @@ const useFuturesProductionWorkstation = ({
     setRetryNonce(previous => previous + 1)
   }, [])
 
-  // How far past the best price the rows on screen reach: how many of them,
-  // times the step they are grouped by. The backend buys the book one page
-  // deeper when the snapshot it holds does not prove that far, and opens a
-  // contract on the cheapest page — a book bought as deep as the coarsest step
-  // could ever want costs ten times a read at the finest.
-  const sendDepthRange = useCallback((range, forSymbol) => {
+  // How the panel reads the book: the step its rows are grouped by and how many
+  // it draws. The backend groups the book by the first, delivers the second, and
+  // works out from the two how far past the best price the rows reach — which is
+  // what it buys a deeper page against. A contract opens on the cheapest page; a
+  // book bought as deep as the coarsest step could ever want costs ten times a
+  // read at the finest.
+  const sendDepthReading = useCallback((reading, forSymbol) => {
     const activeSubscription = activeSubscriptionRef.current
-    // Never to a subscription for another contract: the panel states the range
+    // Never to a subscription for another contract: the panel states the reading
     // of the contract it is opening while the one it is leaving is still the
-    // subscription on hand, and that range would buy a page for the wrong book.
+    // subscription on hand, and that reading would group and buy for the wrong
+    // book.
     if (activeSubscription === null || activeSubscription.symbol !== forSymbol) return false
-    if (sentDepthRangeRef.current === range) return false
+    const fingerprint = depthReadingFingerprint(reading)
+    if (sentDepthReadingRef.current === fingerprint) return false
     try {
       const sent = activeSubscription.sendMessage(
         createFuturesProductionWorkstationConfigureDepthRequest({
           requestId: activeSubscription.requestId,
-          range,
+          step: reading.step,
+          rows: reading.rows,
         }),
       ) !== false
-      if (sent) sentDepthRangeRef.current = range
+      if (sent) sentDepthReadingRef.current = fingerprint
       return sent
     } catch {
       return false
     }
   }, [])
 
-  const configureDepth = useCallback((range) => {
-    if (typeof range !== 'string') return false
+  const configureDepth = useCallback((reading) => {
+    if (!isDepthReading(reading)) return false
     // Remembered whether or not it can be sent right now. A subscription that
     // arrives afterwards re-states it, so a contract opened before the panel
-    // could speak still gets the page its rows need.
-    depthRangeRef.current = Object.freeze({ symbol, range })
-    return sendDepthRange(range, symbol)
-  }, [sendDepthRange, symbol])
+    // could speak still gets the rows it draws and the page they need.
+    depthReadingRef.current = Object.freeze({ symbol, reading: Object.freeze({ ...reading }) })
+    return sendDepthReading(reading, symbol)
+  }, [sendDepthReading, symbol])
 
   const configureTape = useCallback((settings) => {
     const activeSubscription = activeSubscriptionRef.current
@@ -443,21 +463,22 @@ const useFuturesProductionWorkstation = ({
     wsConnection.addEventListener('error', handleError)
     // The reading already stated for the contract being opened travels with the
     // request that opens it, so the first snapshot is bought against the rows
-    // that will be drawn from it rather than against a range that arrives a
+    // that will be drawn from it rather than against a reading that arrives a
     // message later. A contract nothing has been stated for — the first of a
     // session, chosen before any book has been drawn — carries none and opens at
     // the cheapest page, as every contract did.
-    const statedRange = depthRangeRef.current
-    const openingRange = statedRange !== null && statedRange.symbol === symbol
-      ? statedRange.range
-      : undefined
+    const statedReading = depthReadingRef.current
+    const openingReading = statedReading !== null && statedReading.symbol === symbol
+      ? statedReading.reading
+      : null
     let sent = false
     try {
       sent = sendMessage(createRequest({
         requestId,
         symbol,
         interval,
-        range: openingRange,
+        step: openingReading?.step ?? null,
+        rows: openingReading?.rows,
       })) !== false
     } catch {
       sent = false
@@ -481,14 +502,16 @@ const useFuturesProductionWorkstation = ({
       // What the subscription was opened with counts as stated, so a reading
       // that travelled with the request is not immediately restated as a second
       // message saying the same thing.
-      sentDepthRangeRef.current = openingRange ?? null
+      sentDepthReadingRef.current = openingReading === null
+        ? null
+        : depthReadingFingerprint(openingReading)
       // Re-stated for the subscription that will carry it, the way the tape
       // settings below are: the panel states its reading when the reading
       // changes, and a new subscription for the same contract is not a change
       // it would notice.
-      const depthRange = depthRangeRef.current
-      if (depthRange !== null && depthRange.symbol === symbol) {
-        sendDepthRange(depthRange.range, symbol)
+      const depthReading = depthReadingRef.current
+      if (depthReading !== null && depthReading.symbol === symbol) {
+        sendDepthReading(depthReading.reading, symbol)
       }
       const tapeSettings = tapeSettingsRef.current
       if (tapeSettings.throttleEnabled !== FUTURES_WORKSTATION_DEFAULT_TAPE_SETTINGS.throttleEnabled
@@ -513,7 +536,7 @@ const useFuturesProductionWorkstation = ({
       wsConnection.removeEventListener('close', handleClose)
       wsConnection.removeEventListener('error', handleError)
     }
-  }, [enabled, interval, retryNonce, sendDepthRange, sendMessage, symbol, wsConnection])
+  }, [enabled, interval, retryNonce, sendDepthReading, sendMessage, symbol, wsConnection])
 
   // History is accumulated outside the resource snapshot: a resource is what the
   // exchange says now, while history is what the operator has already pulled

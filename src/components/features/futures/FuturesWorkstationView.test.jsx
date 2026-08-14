@@ -4,6 +4,26 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import FuturesWorkstationView from './FuturesWorkstationView.jsx'
 import FuturesProductionWorkstation from './FuturesProductionWorkstation.jsx'
 import FuturesTradingTicket from './FuturesTradingTicket.jsx'
+import { groupFuturesBookLevels } from '../../../utils/futuresOrderBook.js'
+
+// The book arrives grouped now: the main process runs the panel's own grouping
+// pass over the whole book and delivers the rows. A fixture that states levels
+// is stating what the desk stopped sending, so it is built through the same pass
+// — one level to a row, which is the ungrouped reading the panel opens at.
+const bookRow = (price, quantity, side = 'bid') => {
+  const [row] = groupFuturesBookLevels({
+    levels: [{ price, quantity }],
+    side,
+    step: null,
+    limit: 1,
+  })
+  return Object.freeze({
+    price: row.price,
+    quantity: row.quantity,
+    value: row.value,
+    groupKey: row.groupKey,
+  })
+}
 
 const workstationViewMocks = vi.hoisted(() => ({
   chartRender: vi.fn(),
@@ -108,10 +128,11 @@ const candle = (close, openTime = 1_784_000_000_000) => Object.freeze({
 
 // A book side deep enough that the panel, not the feed, decides how much shows.
 const bookLevels = (best, direction, count) => Object.freeze(
-  Array.from({ length: count }, (unused, index) => Object.freeze({
-    price: (best + (direction * index * 0.1)).toFixed(2),
-    quantity: '1',
-  })),
+  Array.from({ length: count }, (unused, index) => bookRow(
+    (best + (direction * index * 0.1)).toFixed(2),
+    '1',
+    direction < 0 ? 'bid' : 'ask',
+  )),
 )
 
 // jsdom lays nothing out, so the panel measurement has to be told what the
@@ -203,8 +224,8 @@ const createState = (overrides = {}) => Object.freeze({
     }),
     depth: Object.freeze({
       lastUpdateId: '90071992547409931234',
-      bids: Object.freeze([Object.freeze({ price: '58420.00', quantity: '2' })]),
-      asks: Object.freeze([Object.freeze({ price: '58420.50', quantity: '3' })]),
+      bids: Object.freeze([bookRow('58420.00', '2')]),
+      asks: Object.freeze([bookRow('58420.50', '3')]),
       spread: '0.5',
       reach: null,
       state: 'live',
@@ -311,14 +332,15 @@ describe('pure Futures workstation presentation', () => {
 
   it('shows the nearest exact depth levels as complete USDT rows', () => {
     const state = createState()
-    const asks = Object.freeze(Array.from({ length: 16 }, (_, index) => Object.freeze({
-      price: `0.0095${String(11 + index).padStart(2, '0')}`,
-      quantity: String(100_000 + index),
-    })))
-    const bids = Object.freeze(Array.from({ length: 16 }, (_, index) => Object.freeze({
-      price: `0.0094${String(99 - index).padStart(2, '0')}`,
-      quantity: String(200_000 + index),
-    })))
+    const asks = Object.freeze(Array.from({ length: 16 }, (_, index) => bookRow(
+      `0.0095${String(11 + index).padStart(2, '0')}`,
+      String(100_000 + index),
+      'ask',
+    )))
+    const bids = Object.freeze(Array.from({ length: 16 }, (_, index) => bookRow(
+      `0.0094${String(99 - index).padStart(2, '0')}`,
+      String(200_000 + index),
+    )))
     const { container } = renderView({
       state: createState({
         resources: Object.freeze({
@@ -741,12 +763,12 @@ describe('pure Futures workstation presentation', () => {
           depth: Object.freeze({
             ...state.resources.depth,
             bids: Object.freeze([
-              Object.freeze({ price: '58420.00', quantity: '2' }),
-              Object.freeze({ price: '57000.00', quantity: '2' }),
+              bookRow('58420.00', '2'),
+              bookRow('57000.00', '2'),
             ]),
             asks: Object.freeze([
-              Object.freeze({ price: '58420.50', quantity: '3' }),
-              Object.freeze({ price: '59000.00', quantity: '3' }),
+              bookRow('58420.50', '3'),
+              bookRow('59000.00', '3'),
             ]),
           }),
         }),
@@ -757,17 +779,34 @@ describe('pure Futures workstation presentation', () => {
       .toHaveTextContent('±2.43%')
   })
 
+  // A grouped row prints its bucket's boundary, so an order resting anywhere
+  // inside the bucket has to be matched by the bucket key rather than by the
+  // printed price. The key the panel computes for the order and the key the desk
+  // computed for the row have to come out identical — and at the step the *rows*
+  // were grouped by, which the delivery states. Keyed at the step the operator
+  // has just chosen instead, every mark would leave its row for the frame
+  // between the panel asking and the desk answering.
   it('marks a grouped row that holds an order resting inside it', () => {
     const state = createState()
+    const [row] = groupFuturesBookLevels({
+      levels: [{ price: '58420.07', quantity: '2' }],
+      side: 'bid',
+      step: '0.5',
+      limit: 1,
+    })
     renderView({
       state: createState({
         resources: Object.freeze({
           ...state.resources,
           depth: Object.freeze({
             ...state.resources.depth,
-            bids: Object.freeze([
-              Object.freeze({ price: '58420.07', quantity: '2' }),
-            ]),
+            step: '0.5',
+            bids: Object.freeze([Object.freeze({
+              price: row.price,
+              quantity: row.quantity,
+              value: row.value,
+              groupKey: row.groupKey,
+            })]),
           }),
         }),
       }),
@@ -775,6 +814,31 @@ describe('pure Futures workstation presentation', () => {
         { symbol: 'BTCUSDT', orderId: 3, side: 'BUY', price: '58420.03', status: 'NEW' },
       ],
     })
+    expect(screen.getByTitle('1 working buy order here')).toBeInTheDocument()
+  })
+
+  // The seam the step on the delivery exists to close: the operator coarsens the
+  // step, the panel states the new reading, and until the desk answers it the
+  // rows on screen are still the old ones. The mark stays on the row it belongs
+  // to rather than jumping to a bucket nothing was grouped into.
+  it('keeps an order on its row while a coarser step is still being answered', () => {
+    const state = createState()
+    renderView({
+      state: createState({
+        resources: Object.freeze({
+          ...state.resources,
+          depth: Object.freeze({
+            ...state.resources.depth,
+            step: null,
+            bids: Object.freeze([bookRow('58420.00', '2')]),
+          }),
+        }),
+      }),
+      ownedOrders: [
+        { symbol: 'BTCUSDT', orderId: 3, side: 'BUY', price: '58420.00', status: 'NEW' },
+      ],
+    })
+    expect(screen.getByTitle('1 working buy order here')).toBeInTheDocument()
     fireEvent.change(screen.getByLabelText('Order book price step'), { target: { value: '5' } })
     expect(screen.getByTitle('1 working buy order here')).toBeInTheDocument()
   })
@@ -1152,21 +1216,22 @@ describe('pure Futures workstation presentation', () => {
     localStorage.setItem('futures.bookView', JSON.stringify({
       ETHUSDT: { sideMode: 'both', stepMultiplier: 50 },
     }))
-    const onDepthRangeChange = vi.fn()
+    const onDepthReadingChange = vi.fn()
     const properties = {
       identity: 'USDⓈ-M PRODUCTION · REAL MONEY',
       state: createState(),
       selectedInterval: '1m',
-      onDepthRangeChange,
+      onDepthReadingChange,
       onSymbolChange: () => {},
       onIntervalChange: () => {},
     }
     const { rerender } = render(
       <FuturesWorkstationView {...properties} selectedSymbol="BTCUSDT" />,
     )
-    // Fourteen rows at this contract's tick, which is what BTCUSDT is read at.
-    expect(onDepthRangeChange).toHaveBeenLastCalledWith('1.4')
-    onDepthRangeChange.mockClear()
+    // Fourteen rows read ungrouped, which is what BTCUSDT opens at: a null step
+    // is the book as the exchange sent it, level by level.
+    expect(onDepthReadingChange).toHaveBeenLastCalledWith({ step: null, rows: 14 })
+    onDepthReadingChange.mockClear()
 
     rerender(
       <FuturesWorkstationView
@@ -1177,7 +1242,7 @@ describe('pure Futures workstation presentation', () => {
     )
     // Fourteen rows at fifty ticks — stated once, and never at the step the
     // contract being left was read at.
-    expect(onDepthRangeChange.mock.calls).toEqual([['70']])
+    expect(onDepthReadingChange.mock.calls).toEqual([[{ step: '5', rows: 14 }]])
   })
 
   // A book delivered short is a book of exact, current levels — fewer of them.
@@ -1683,21 +1748,28 @@ describe('instrument recency and interface scale', () => {
     expect(container.querySelector('.futures-workstation-contract-list')).toBeNull()
   })
 
-  it('groups the order book by a chosen price step', () => {
+  // Choosing a step no longer regroups anything here. The panel draws the rows
+  // it was sent, and a step is a statement to the desk — which groups the whole
+  // book by it and answers with rows drawn from levels the panel never had. That
+  // is the change: at a coarse step the rows the operator wants are built from
+  // levels far outside anything a delivery bounded by a level count carried.
+  it('states a chosen price step to the desk rather than regrouping what it holds', () => {
     const state = createState()
+    const onDepthReadingChange = vi.fn()
     const { container } = renderView({
+      onDepthReadingChange,
       state: createState({
         resources: Object.freeze({
           ...state.resources,
           depth: Object.freeze({
             ...state.resources.depth,
             bids: Object.freeze([
-              Object.freeze({ price: '58419.90', quantity: '2' }),
-              Object.freeze({ price: '58419.60', quantity: '2' }),
+              bookRow('58419.90', '2'),
+              bookRow('58419.60', '2'),
             ]),
             asks: Object.freeze([
-              Object.freeze({ price: '58420.10', quantity: '3' }),
-              Object.freeze({ price: '58420.60', quantity: '1' }),
+              bookRow('58420.10', '3', 'ask'),
+              bookRow('58420.60', '1', 'ask'),
             ]),
           }),
         }),
@@ -1707,14 +1779,15 @@ describe('instrument recency and interface scale', () => {
     const bidPrices = () => [...container.querySelectorAll('.futures-workstation-book-side.is-bid button')]
       .map(row => row.children[0].textContent)
     expect(bidPrices()).toEqual(['58419.90', '58419.60'])
+    expect(onDepthReadingChange).toHaveBeenLastCalledWith({ step: null, rows: 14 })
 
     fireEvent.change(screen.getByLabelText('Order book price step'), { target: { value: '10' } })
-    expect(bidPrices()).toEqual(['58419'])
-    const asks = [...container.querySelectorAll('.futures-workstation-book-side.is-ask button')]
-    // Asks round their group up to the boundary they would fill through.
-    expect(asks.map(row => row.children[0].textContent)).toEqual(['58421'])
-    // 58420.10 × 3 plus 58420.60 × 1, summed exactly before display.
-    expect(asks[0].children[1].textContent).toBe('233.7k')
+    // Stated, in the contract's own quote currency: ten ticks of 0.10.
+    expect(onDepthReadingChange).toHaveBeenLastCalledWith({ step: '1', rows: 14 })
+    // And the rows on screen are still the rows that were delivered. The desk
+    // answers the new reading with new rows; the panel does not invent them from
+    // a book it was never sent.
+    expect(bidPrices()).toEqual(['58419.90', '58419.60'])
   })
 
   it('thickens the size of the heaviest levels and leaves the rest of the row alone', () => {
@@ -1726,13 +1799,13 @@ describe('instrument recency and interface scale', () => {
           depth: Object.freeze({
             ...state.resources.depth,
             bids: Object.freeze([
-              Object.freeze({ price: '100.7', quantity: '10' }),
-              Object.freeze({ price: '100.6', quantity: '1' }),
-              Object.freeze({ price: '100.5', quantity: '9' }),
-              Object.freeze({ price: '100.4', quantity: '1' }),
-              Object.freeze({ price: '100.3', quantity: '8' }),
-              Object.freeze({ price: '100.2', quantity: '7' }),
-              Object.freeze({ price: '100.1', quantity: '6' }),
+              bookRow('100.7', '10'),
+              bookRow('100.6', '1'),
+              bookRow('100.5', '9'),
+              bookRow('100.4', '1'),
+              bookRow('100.3', '8'),
+              bookRow('100.2', '7'),
+              bookRow('100.1', '6'),
             ]),
           }),
         }),
@@ -1760,8 +1833,8 @@ describe('instrument recency and interface scale', () => {
           depth: Object.freeze({
             ...state.resources.depth,
             // 300 USDT resting on the bid against 100 on the ask.
-            bids: Object.freeze([Object.freeze({ price: '100', quantity: '3' })]),
-            asks: Object.freeze([Object.freeze({ price: '100', quantity: '1' })]),
+            bids: Object.freeze([bookRow('100', '3')]),
+            asks: Object.freeze([bookRow('100', '1')]),
           }),
         }),
       }),
@@ -2159,7 +2232,7 @@ describe('production workstation container', () => {
         depth: Object.freeze({
           ...initialState.resources.depth,
           bids: Object.freeze([
-            Object.freeze({ price: '58419.50', quantity: '4' }),
+            bookRow('58419.50', '4'),
           ]),
         }),
       }),

@@ -9,11 +9,12 @@ import {
     subtractFuturesWorkstationDecimals,
 } from './futures-workstation-decimal.js';
 import {
-    FUTURES_WORKSTATION_DEPTH_LEVELS_PER_SIDE,
-    FUTURES_WORKSTATION_DEPTH_MIN_LEVELS_PER_SIDE,
+    FUTURES_WORKSTATION_DEPTH_ROWS_PER_SIDE,
     FUTURES_WORKSTATION_DIFF_LEVELS_PER_SIDE,
     FUTURES_WORKSTATION_UINT64_MAX,
 } from '../../src/utils/futuresWorkstationProtocolShared.js';
+// The panel's own grouping, called where the book is. See `groupSide`.
+import { groupFuturesBookLevels } from '../../src/utils/futuresOrderBook.js';
 
 export const FUTURES_WORKSTATION_ORDER_BOOK_LIMITS = Object.freeze({
     // The deepest page a single REST read returns, and so the deepest stretch of
@@ -29,24 +30,18 @@ export const FUTURES_WORKSTATION_ORDER_BOOK_LIMITS = Object.freeze({
     // nearest thousand of it hold between 7% and 18% of the resting value. So a
     // thousand was not a bound on cost — it was most of the book, thrown away.
     //
-    // Four thousand holds the whole of both books measured, with margin, and is
-    // as far as it can go while levels rather than rows cross the transport:
-    // every delivery walks the retained side once, so the ceiling is what a
-    // hostile stream can make the desk pay per frame. At a burst of full-width
-    // diffs, 4000 costs about a fifth more per frame than the thousand it
-    // replaces, and 20000 stalls the session outright — the guard for that is
-    // 'holds a live session through a burst of full-width diffs and a heavy
-    // tape'. It rises when the book crosses as rows.
+    // Four thousand holds the whole of both books measured, with margin. Every
+    // delivery walks the retained side once, so the ceiling is what a hostile
+    // stream can make the desk pay per frame: at a burst of full-width diffs,
+    // 4000 costs about a fifth more per frame than the thousand it replaced, and
+    // 20000 stalls the session outright — the guard for that is 'holds a live
+    // session through a burst of full-width diffs and a heavy tape'.
     RETAINED_LEVELS_PER_SIDE: 4_000,
-    // Shared with the renderer's own bound so the two can never drift apart:
-    // a delivered book larger than the protocol accepts is dropped whole. This
-    // is the ceiling on a delivery, not the delivery: what crosses is bounded by
-    // the range the panel stated it reads. See `toRendererView`.
-    RENDERER_LEVELS_PER_SIDE: FUTURES_WORKSTATION_DEPTH_LEVELS_PER_SIDE,
-    // And the floor under it, for the reading a range cannot describe: ungrouped,
-    // a row is one raw level and the distance the rows span is wherever the
-    // market happens to rest.
-    MIN_DELIVERED_LEVELS_PER_SIDE: FUTURES_WORKSTATION_DEPTH_MIN_LEVELS_PER_SIDE,
+    // Shared with the renderer's own bound so the two can never drift apart: a
+    // delivered book larger than the protocol accepts is dropped whole. This is
+    // the ceiling on a delivery, not the delivery — what crosses is the rows the
+    // panel said it draws, which is a couple of dozen. See `toRendererRows`.
+    RENDERER_ROWS_PER_SIDE: FUTURES_WORKSTATION_DEPTH_ROWS_PER_SIDE,
     // What one *diff* may carry, which is not what a snapshot holds: a diff
     // restates every level that changed, and a sweep with the makers re-posting
     // behind it changes more levels than the book is deep. Bounding a diff by
@@ -272,129 +267,44 @@ const bestPrice = (side, descending) => {
     return best;
 };
 
-const isNearerPriceEntry = (left, right, descending) => (
-    descending ? left.key > right.key : left.key < right.key
-);
-
-// Keep only the nearest `count` entries without ordering the candidates. The
-// heap is worst-first, so each nearer candidate replaces the one level the
-// result can least afford to keep.
-const selectNearestPriceEntries = (entries, count, descending) => {
-    if (count <= 0) return [];
-    if (entries.length <= count) return entries;
-
-    const heap = [];
-    const isWorse = (left, right) => isNearerPriceEntry(right, left, descending);
-    const swap = (left, right) => {
-        [heap[left], heap[right]] = [heap[right], heap[left]];
+/**
+ * The rows the panel draws, grouped where the book is.
+ *
+ * Grouping used to happen on arrival, which meant the levels had to arrive —
+ * and a level count is the one bound that means nothing to a grouped book. What
+ * crossed was the nearest thousand levels a side, selected by a heap: at a
+ * coarse step those thousand are a dense clump inside the first two or three
+ * rows, and every row past them was drawn empty over a book that held levels
+ * for all of them. Measured on the operator's own desk, 2026-08-14: AKEUSDT at
+ * a step of 1.34% of price drew three rows of fourteen, while the delivery
+ * reached 2.6% past the best price and the book on hand reached 54.96%.
+ *
+ * So the whole side is grouped instead, best price outward, and the walk stops
+ * one row past the panel's count. Prices are monotonic, so opening that row
+ * proves every earlier one closed: a coarse step walks far to fill its rows, a
+ * fine step stops almost at once, and neither pays for the other's reading.
+ *
+ * The grouping is the panel's own — the same function, imported, rather than a
+ * second implementation held to agree with it. A row the book computes and a
+ * row the panel would have computed are then the same row by construction,
+ * including the bucket key a working order is matched by.
+ */
+const groupSide = (side, descending, step, rows) => {
+    const entries = sortedByPrice(side, descending);
+    return {
+        best: entries.length > 0 ? entries[0].price : null,
+        rows: Object.freeze(groupFuturesBookLevels({
+            levels: entries,
+            side: descending ? 'bid' : 'ask',
+            step,
+            limit: rows,
+        }).map(row => Object.freeze({
+            price: row.price,
+            quantity: row.quantity,
+            value: row.value,
+            groupKey: row.groupKey,
+        }))),
     };
-    const bubbleUp = (start) => {
-        let index = start;
-        while (index > 0) {
-            const parent = Math.floor((index - 1) / 2);
-            if (!isWorse(heap[index], heap[parent])) break;
-            swap(index, parent);
-            index = parent;
-        }
-    };
-    const bubbleDown = () => {
-        let index = 0;
-        while (true) {
-            const left = (index * 2) + 1;
-            const right = left + 1;
-            let worse = index;
-            if (left < heap.length && isWorse(heap[left], heap[worse])) worse = left;
-            if (right < heap.length && isWorse(heap[right], heap[worse])) worse = right;
-            if (worse === index) break;
-            swap(index, worse);
-            index = worse;
-        }
-    };
-
-    for (const entry of entries) {
-        if (heap.length < count) {
-            heap.push(entry);
-            bubbleUp(heap.length - 1);
-        } else if (isNearerPriceEntry(entry, heap[0], descending)) {
-            heap[0] = entry;
-            bubbleDown();
-        }
-    }
-    return heap;
-};
-
-// Select the exact prefix a fully ordered side would deliver, then order only
-// that prefix. Prices and the range are aligned as integers at one decimal
-// scale, preserving arbitrary precision and mixed-scale ordering without a
-// binary-number price conversion.
-const boundedByPrice = (side, descending, limit, range) => {
-    const rangeDecimal = parseFuturesWorkstationDecimal(range);
-    const entries = [];
-    let scale = rangeDecimal.scale;
-    for (const [price, quantity] of side) {
-        const decimal = parseFuturesWorkstationDecimal(price);
-        if (decimal.scale > scale) scale = decimal.scale;
-        entries.push({ price, quantity, decimal, key: 0n });
-    }
-    if (entries.length === 0) return entries;
-
-    for (const entry of entries) {
-        entry.key = entry.decimal.coefficient * (10n ** BigInt(scale - entry.decimal.scale));
-    }
-    const rangeKey = rangeDecimal.coefficient * (10n ** BigInt(scale - rangeDecimal.scale));
-    let bestKey = entries[0].key;
-    for (let index = 1; index < entries.length; index += 1) {
-        const key = entries[index].key;
-        if (descending ? key > bestKey : key < bestKey) bestKey = key;
-    }
-    const edgeKey = descending ? bestKey - rangeKey : bestKey + rangeKey;
-    const isWithinEdge = entry => (descending ? entry.key >= edgeKey : entry.key <= edgeKey);
-    const withinEdge = entries.filter(isWithinEdge);
-    const floor = Math.min(
-        FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.MIN_DELIVERED_LEVELS_PER_SIDE,
-        limit,
-        entries.length,
-    );
-
-    let selected;
-    if (withinEdge.length > limit) {
-        selected = selectNearestPriceEntries(withinEdge, limit, descending);
-    } else if (withinEdge.length >= floor) {
-        selected = withinEdge;
-    } else {
-        const outsideEdge = entries.filter(entry => !isWithinEdge(entry));
-        selected = [
-            ...withinEdge,
-            ...selectNearestPriceEntries(outsideEdge, floor - withinEdge.length, descending),
-        ];
-    }
-    selected.sort((left, right) => {
-        if (left.key === right.key) return 0;
-        return isNearerPriceEntry(left, right, descending) ? -1 : 1;
-    });
-    return selected;
-};
-
-// The levels the panel stated it reads, and no more.
-//
-// `range` is a distance in the contract's own quote currency: the rows on screen
-// times the step they are grouped by. A grouped row's boundary sits at most one
-// step the wrong side of the best price, so the deepest row a panel of `rows`
-// rows can draw ends strictly inside `rows × step` of it — the stated range
-// fills every row it was computed from, with nothing to spare and nothing owed.
-//
-// Below the floor the range is ignored: ungrouped it describes the wrong thing
-// entirely, naming a distance in ticks for rows that are levels.
-const formatSide = (side, descending, limit, range) => {
-    const entries = range === null
-        ? sortedByPrice(side, descending)
-        : boundedByPrice(side, descending, limit, range);
-    const levels = [];
-    for (const { price, quantity } of entries) {
-        if (levels.length >= limit) break;
-        levels.push(Object.freeze({ price, quantity }));
-    }
-    return Object.freeze(levels);
 };
 
 export class FuturesWorkstationOrderBook {
@@ -723,46 +633,88 @@ export class FuturesWorkstationOrderBook {
     }
 
     /**
-     * The book as the renderer reads it, bounded by the range the panel stated.
+     * How far past the best price the book is *accounted for* on each side —
+     * the stretch inside which every resting level is named, rather than only
+     * the ones the stream has restated since the page was read.
      *
-     * The trim is on delivery alone: everything the snapshot bought is still
-     * held, still bridged and still proven, so widening the reading is answered
-     * from the book in hand rather than by another read. A range that has not
-     * been stated yet, or one that cannot be read as a distance, delivers at the
-     * ceiling — a first book must not arrive short of the rows the panel is
-     * about to ask for.
+     * Measured from where the market is now, not from where it was when the
+     * page was bought: the band is a pair of fixed prices and the market moves
+     * inside it, so the room left below the floor is what the operator can still
+     * read as complete. A market that has traded clean out of its band accounts
+     * for nothing, and says so.
+     *
+     * Distinct from `reachOfBook` in exactly the way the two facts are distinct:
+     * that one is how far the book reaches, this one is how far it can be
+     * trusted to be whole, and the rows between them may understate.
      */
-    toRendererView(range = null, { atDeepestPage = false } = {}) {
+    provenReach() {
+        if (this.band === null) return null;
+        const bid = bestPrice(this.bids, true);
+        const ask = bestPrice(this.asks, false);
+        if (bid === null || ask === null) return null;
+        if (!this.band.contains(bid) || !this.band.contains(ask)) return null;
+        return Object.freeze({
+            below: subtractFuturesWorkstationDecimals(bid, this.band.floor),
+            above: subtractFuturesWorkstationDecimals(this.band.ceiling, ask),
+        });
+    }
+
+    /**
+     * The book as the renderer draws it: the rows the panel said it draws,
+     * grouped by the step the panel said it groups by.
+     *
+     * The grouping is the whole of the delivery. Everything the snapshot bought
+     * and everything the stream has restated since is still held, so a coarser
+     * step or a taller panel is answered from the book in hand rather than by
+     * another read — and answered over the *whole* book, which is the point:
+     * the far rows are filled from levels a nearest-first level count used to
+     * drop before they ever reached the wire.
+     *
+     * A step that has not been stated yet, or one that cannot be read as a
+     * distance, is the ungrouped reading — the book as the exchange sent it,
+     * level by level, with no alignment pass at all. That matters on a contract
+     * whose quoted prices disagree with its own tick filter: aligning there
+     * would merge two real levels into a price neither of them rests at.
+     */
+    toRendererRows({ step = null, rows = null, atDeepestPage = false } = {}) {
         if (this.phase !== FUTURES_WORKSTATION_ORDER_BOOK_PHASES.LIVE
             || this.lastUpdateId === null) return null;
-        const bound = isFuturesWorkstationDecimal(range)
-            && isPositiveFuturesWorkstationDecimal(range)
-            ? range
+        const ceiling = FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.RENDERER_ROWS_PER_SIDE;
+        const drawn = Number.isSafeInteger(rows) && rows > 0
+            ? Math.min(rows, ceiling)
+            : ceiling;
+        const grouped = isFuturesWorkstationDecimal(step)
+            && isPositiveFuturesWorkstationDecimal(step)
+            ? step
             : null;
-        const bids = formatSide(
-            this.bids,
-            true,
-            FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.RENDERER_LEVELS_PER_SIDE,
-            bound,
-        );
-        const asks = formatSide(
-            this.asks,
-            false,
-            FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.RENDERER_LEVELS_PER_SIDE,
-            bound,
-        );
-        const spread = bids[0] && asks[0]
-            ? subtractFuturesWorkstationDecimals(asks[0].price, bids[0].price)
-            : '0';
+        const bids = groupSide(this.bids, true, grouped, drawn);
+        const asks = groupSide(this.asks, false, grouped, drawn);
         return Object.freeze({
             lastUpdateId: this.lastUpdateId.toString(),
-            bids,
-            asks,
-            spread,
+            // The step these rows were actually grouped by, which is not always
+            // the step the panel last chose: a reading is stated and answered a
+            // frame later, and in between the rows on screen belong to the
+            // previous one. The panel matches a working order to its row by
+            // computing the order's bucket key, and computing it at a step the
+            // rows were not built with puts every mark on the wrong row — or on
+            // none. So the delivery names the step it used, and the panel keys
+            // off that rather than off what it has asked for.
+            step: grouped,
+            bids: bids.rows,
+            asks: asks.rows,
+            // The real distance between the two best prices, taken from the
+            // levels rather than from the rows above them. A row prints the
+            // boundary of its bucket — bids rounded down, asks rounded up — so a
+            // spread measured between the first two rows is wider than the
+            // market's by up to two steps, and widens further the more the
+            // operator zooms out. The one number on the panel that must not move
+            // when the step does.
+            spread: bids.best && asks.best
+                ? subtractFuturesWorkstationDecimals(asks.best, bids.best)
+                : '0',
             // How far the book on hand reaches past the best price on each side —
             // where the book ends, not where the rows do. The panel cannot work
-            // it out from what it was sent, because delivery is already trimmed
-            // to the range the panel stated: it would only measure its own step
+            // it out from what it was sent: it would only measure its own step
             // back.
             //
             // Measured over the levels actually held rather than over the band:
@@ -774,6 +726,10 @@ export class FuturesWorkstationOrderBook {
             // near book is one read away, and a ladder cut here would stop the
             // operator selecting the step that buys it.
             reach: atDeepestPage ? this.reachOfBook() : null,
+            // And where inside that reach the book stops being whole, so the
+            // panel can mark the rows that may understate instead of the
+            // operator having to know which they are.
+            proven: this.provenReach(),
         });
     }
 

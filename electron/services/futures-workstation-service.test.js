@@ -32,8 +32,17 @@ afterEach(() => {
     vi.restoreAllMocks();
 });
 
-const productionRequest = (requestId, symbol = 'BTCUSDT', interval = '1m', range) => JSON.stringify(
-    createFuturesProductionWorkstationSubscribeRequest({ requestId, symbol, interval, range }),
+// A step with no row count beside it is no reading at all, which is what a
+// contract opened before any book has been drawn states. One row of a given step
+// names the distance a single `range` used to.
+const productionRequest = (requestId, symbol = 'BTCUSDT', interval = '1m', step, rows) => (
+    JSON.stringify(createFuturesProductionWorkstationSubscribeRequest({
+        requestId,
+        symbol,
+        interval,
+        step,
+        rows: step === undefined ? rows : (rows ?? 1),
+    }))
 );
 
 const productionIntervalRequest = (requestId, symbol, interval) => JSON.stringify(
@@ -61,8 +70,11 @@ const productionTapeRequest = (requestId, overrides = {}) => JSON.stringify(
     }),
 );
 
-const productionDepthRequest = (requestId, range) => JSON.stringify(
-    createFuturesProductionWorkstationConfigureDepthRequest({ requestId, range }),
+// The reading, stated as the panel states it: a step and a row count. The
+// distance the desk buys pages against is their product, so a single row of a
+// given step names the same distance the old single `range` did.
+const productionDepthRequest = (requestId, step, rows = 1) => JSON.stringify(
+    createFuturesProductionWorkstationConfigureDepthRequest({ requestId, step, rows }),
 );
 
 const productionTradeFrame = ({
@@ -183,7 +195,17 @@ describe('production Futures workstation service', () => {
 
     // Measuring the string that is sent must not change what happens to a frame
     // too large to send: it is refused, and nothing is delivered.
-    it('still refuses an event past the byte ceiling', async () => {
+    // A СТОРОЖ, not a finding, and worth saying so plainly: since the book
+    // crosses as rows there is no payload the protocol accepts that can reach the
+    // byte ceiling at all. Every resource is bounded well under it — 64 rows a
+    // side here, 8 contracts in a catalog, 80 rows in a tape or a history page —
+    // and `createFuturesProductionWorkstationEvent` validates before the frame is
+    // measured, so an oversized payload is refused as INVALID_EVENT and never
+    // reaches the byte check. The guard is kept because it is generic over
+    // resources and costs one length comparison; what is asserted is the fact it
+    // now rests on, which is that the largest legal frame is a fraction of the
+    // ceiling rather than a hundred and eighteen kilobytes of it.
+    it('sends the largest legal book far inside the byte ceiling', async () => {
         const runtime = track(createFuturesProductionWorkstationRuntime());
         const delivered = [];
         await runtime.service.handleRequest(productionRequest('service-oversized'), {
@@ -192,32 +214,69 @@ describe('production Futures workstation service', () => {
         const session = runtime.service.shown;
         const before = delivered.length;
 
-        // Structurally valid to the last level — a full ladder of the longest
-        // decimals the protocol accepts — and still past what may be sent.
+        // The longest decimals the protocol accepts, in every field of every row
+        // of a full-width book.
         const decimal = `1${'0'.repeat(30)}.${'1'.repeat(30)}`;
-        const side = Array.from({ length: 1_000 }, () => Object.freeze({
+        const side = Array.from({ length: 64 }, () => Object.freeze({
             price: decimal,
             quantity: decimal,
+            value: decimal,
+            groupKey: '9'.repeat(64),
         }));
+        expect(runtime.service.emitResource(
+            session,
+            'depth',
+            'live',
+            Object.freeze({
+                lastUpdateId: '1',
+                step: null,
+                bids: side,
+                asks: side,
+                spread: '0.01',
+                reach: null,
+                proven: null,
+            }),
+        )).toBe(true);
+        expect(delivered).toHaveLength(before + 1);
+        // Measured, not reasoned about: 39 KiB against a ceiling of 256, where
+        // the level-based delivery this replaces ran to 118 KiB on a book of
+        // ordinary decimals — and this one is the pathological case.
+        const bytes = Buffer.byteLength(JSON.stringify(delivered.at(-1)), 'utf8');
+        expect(bytes).toBeLessThan(48 * 1024);
+        expect(bytes * 5).toBeLessThan(FUTURES_WORKSTATION_EVENT_MAX_BYTES);
+    });
+
+    // And the payload rules are what refuse a wider book, ahead of the byte
+    // check: a level count past the row bound is not a large frame, it is a frame
+    // that does not describe a book this protocol carries.
+    it('refuses a book wider than the rows the panel can draw', async () => {
+        const runtime = track(createFuturesProductionWorkstationRuntime());
+        await runtime.service.handleRequest(productionRequest('service-too-many-rows'), {
+            emit: () => {},
+        });
+        const session = runtime.service.shown;
+        const row = Object.freeze({
+            price: '1',
+            quantity: '1',
+            value: '1',
+            groupKey: '1',
+        });
+        const side = Array.from({ length: 65 }, () => row);
         let refusal = null;
         try {
-            runtime.service.emitResource(
-                session,
-                'depth',
-                'live',
-                Object.freeze({
-                    lastUpdateId: '1',
-                    bids: side,
-                    asks: side,
-                    spread: '0.01',
-                    reach: null,
-                }),
-            );
+            runtime.service.emitResource(session, 'depth', 'live', Object.freeze({
+                lastUpdateId: '1',
+                step: null,
+                bids: side,
+                asks: side,
+                spread: '0.01',
+                reach: null,
+                proven: null,
+            }));
         } catch (error) {
             refusal = error;
         }
-        expect(refusal?.code).toBe('OUTBOUND_FRAME_TOO_LARGE');
-        expect(delivered).toHaveLength(before);
+        expect(refusal?.code).toBe('INVALID_EVENT');
     });
 
     it('reports a bounded aggregate-ready duration without exposing market payloads', async () => {
@@ -2979,10 +3038,10 @@ describe('the reading bounds what the desk delivers', () => {
         });
         const session = runtime.service.shown;
         const readings = [];
-        const view = session.orderBook.toRendererView.bind(session.orderBook);
-        session.orderBook.toRendererView = (range) => {
-            readings.push(range);
-            return view(range);
+        const view = session.orderBook.toRendererRows.bind(session.orderBook);
+        session.orderBook.toRendererRows = (options) => {
+            readings.push(options.step);
+            return view(options);
         };
         return { runtime, events, readings, session };
     };
@@ -3036,10 +3095,10 @@ describe('the reading bounds what the desk delivers', () => {
     // A level is what it rests at and how much rests there. The running total
     // was computed, serialized, parsed, validated, frozen and then discarded,
     // because a total over raw levels is not a total over grouped rows.
-    it('delivers a level as price and quantity', async () => {
+    it('delivers a row as price, quantity, value and key', async () => {
         const { events } = await openContract('depth-reading-shape');
-        const level = depthEvents(events).at(-1).payload.bids[0];
-        expect(Object.keys(level)).toEqual(['price', 'quantity']);
+        const row = depthEvents(events).at(-1).payload.bids[0];
+        expect(Object.keys(row)).toEqual(['price', 'quantity', 'value', 'groupKey']);
     });
 });
 
@@ -3255,9 +3314,15 @@ describe('selecting is not subscribing', () => {
         // The book of the contract nobody is looking at moves on. In sequence:
         // a diff the book cannot bridge would empty it instead of advancing it,
         // and "the view changed" would then be satisfied by it becoming null.
-        const beforeDiff = held.orderBook.toRendererView(held.depthRange);
+        const beforeDiff = held.orderBook.toRendererRows({
+            step: held.depthStep,
+            rows: held.depthRows,
+        });
         subscribers.get('BTCUSDT').onMessage(burstDepthFrame(1, 20));
-        const afterDiff = held.orderBook.toRendererView(held.depthRange);
+        const afterDiff = held.orderBook.toRendererRows({
+            step: held.depthStep,
+            rows: held.depthRows,
+        });
         expect(held.bookRecovering).toBe(false);
         expect(afterDiff).not.toBeNull();
         expect(afterDiff).not.toEqual(beforeDiff);

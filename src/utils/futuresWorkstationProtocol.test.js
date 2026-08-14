@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  FUTURES_WORKSTATION_DEPTH_LEVELS_PER_SIDE,
+  FUTURES_WORKSTATION_DEPTH_ROWS_PER_SIDE,
   FUTURES_WORKSTATION_EVENT_MAX_BYTES,
   FUTURES_WORKSTATION_PROTOCOL_VERSION,
   FUTURES_WORKSTATION_RESOURCES,
@@ -116,10 +116,22 @@ const payloads = Object.freeze({
   }),
   [FUTURES_WORKSTATION_RESOURCES.DEPTH]: Object.freeze({
     lastUpdateId: '9007199254740993',
-    bids: Object.freeze([Object.freeze({ price: '58420', quantity: '2' })]),
-    asks: Object.freeze([Object.freeze({ price: '58421', quantity: '3' })]),
+    step: null,
+    bids: Object.freeze([Object.freeze({
+      price: '58420',
+      quantity: '2',
+      value: '116840',
+      groupKey: '58420000000000000000000',
+    })]),
+    asks: Object.freeze([Object.freeze({
+      price: '58421',
+      quantity: '3',
+      value: '175263',
+      groupKey: '58421000000000000000000',
+    })]),
     spread: '1',
     reach: Object.freeze({ below: '120', above: '118' }),
+    proven: Object.freeze({ below: '40', above: '38' }),
   }),
   [FUTURES_WORKSTATION_RESOURCES.TRADES]: Object.freeze({
     rows: Object.freeze([Object.freeze({
@@ -147,13 +159,15 @@ const createEventValues = resource => ({
 })
 
 describe('Futures workstation environment-specific protocols', () => {
-  // Bumped with the shape of what crosses: revision 7 dropped the running total
-  // from a delivered level, and 8 lets the request that opens a contract carry
-  // the reading its rows need. A renderer that states a range on a request an
-  // older desk validates by exact keys would have every subscription refused, so
-  // the two refuse each other on the version instead — once, legibly.
-  it('uses protocol revision 8 for a contract opened at a stated reading', () => {
-    expect(FUTURES_WORKSTATION_PROTOCOL_VERSION).toBe('9')
+  // Bumped with the shape of what crosses: 8 let the request that opens a
+  // contract carry the reading its rows need, 9 stated the book's reach on the
+  // delivery, and 10 crosses the rows the panel draws instead of the levels they
+  // are grouped from — the request states a step and a row count, the delivery
+  // answers in rows. A renderer and a desk that disagree about that shape would
+  // refuse every frame by exact keys, so they refuse each other on the version
+  // instead — once, legibly.
+  it('uses protocol revision 10 for a book that crosses as rows', () => {
+    expect(FUTURES_WORKSTATION_PROTOCOL_VERSION).toBe('10')
   })
 
   it('preserves an unavailable per-symbol algo limit instead of inventing one', () => {
@@ -246,19 +260,22 @@ describe('Futures workstation environment-specific protocols', () => {
     })).toThrowError(expect.objectContaining({ code: 'INVALID_TAPE_CONFIGURATION' }))
   })
 
-  // How far past the best price the rows on screen reach — the rows times the
-  // step they are grouped by. One decimal, because the count and the step are
-  // the renderer's to know and their product is all the backend needs to pick
-  // which page of the book to buy.
+  // How the panel reads the book: the step its rows are grouped by and how many
+  // of them it draws. Both, because the backend needs both — it groups the book
+  // by the step and bounds the delivery by the count — and derives from the two
+  // together how far past the best price the rows reach, which is what picks the
+  // page of the book to buy.
   it('round-trips a bounded depth reading without market authority', () => {
     const request = createFuturesProductionWorkstationConfigureDepthRequest({
       requestId: requestValues.requestId,
-      range: '0.000014',
+      step: '0.000001',
+      rows: 14,
     })
 
     expect(request).toEqual(expect.objectContaining({
       action: FUTURES_PRODUCTION_WORKSTATION_ACTIONS.CONFIGURE_DEPTH,
-      range: '0.000014',
+      step: '0.000001',
+      rows: 14,
     }))
     expect(request).not.toHaveProperty('symbol')
     expect(request).not.toHaveProperty('interval')
@@ -267,32 +284,54 @@ describe('Futures workstation environment-specific protocols', () => {
   })
 
   it.each([
-    ['a negative range', '-1'],
-    ['a non-finite range', 'Infinity'],
-    ['a non-canonical range', '01'],
-    ['a range that is not a string', 14],
-    ['a range longer than the bound', `0.${'0'.repeat(64)}1`],
-  ])('rejects %s in a bounded depth reading', (_label, range) => {
+    ['a negative step', { step: '-1', rows: 14 }],
+    ['a non-finite step', { step: 'Infinity', rows: 14 }],
+    ['a non-canonical step', { step: '01', rows: 14 }],
+    ['a zero step', { step: '0', rows: 14 }],
+    ['a step that is not a string or null', { step: 14, rows: 14 }],
+    ['a step longer than the bound', { step: `0.${'0'.repeat(64)}1`, rows: 14 }],
+    ['no row count', { step: '0.000001' }],
+    ['a fractional row count', { step: '0.000001', rows: 1.5 }],
+    ['a row count of zero', { step: '0.000001', rows: 0 }],
+    ['a negative row count', { step: '0.000001', rows: -14 }],
+    ['a row count past the ceiling', { step: '0.000001', rows: 65 }],
+  ])('rejects %s in a bounded depth reading', (_label, reading) => {
     expect(() => createFuturesProductionWorkstationConfigureDepthRequest({
       requestId: requestValues.requestId,
-      range,
+      ...reading,
     })).toThrowError(expect.objectContaining({ code: 'INVALID_DEPTH_CONFIGURATION' }))
+  })
+
+  // The ungrouped reading. A null step is a reading like any other — one row is
+  // one level, as the exchange sent it — and must not be mistaken for a request
+  // that states nothing.
+  it('round-trips the ungrouped reading', () => {
+    const request = createFuturesProductionWorkstationConfigureDepthRequest({
+      requestId: requestValues.requestId,
+      step: null,
+      rows: 14,
+    })
+    expect(request.step).toBeNull()
+    expect(request.rows).toBe(14)
+    expect(readFuturesProductionWorkstationRequest(JSON.stringify(request))).toEqual(request)
   })
 
   // The snapshot that opens a contract is bought before a second message could
   // arrive, so a reading stated in a message of its own is stated too late to
   // buy the page it asks for. It travels with the request instead — and is read
-  // by the same rule, because a range the desk would accept from one message and
-  // refuse from another is a range whose meaning depends on how it arrived.
+  // by the same rule, because a reading the desk would accept from one message
+  // and refuse from another is a reading whose meaning depends on how it arrived.
   it('opens a contract at the reading its rows need', () => {
     const request = createFuturesProductionWorkstationSubscribeRequest({
       ...requestValues,
-      range: '0.0220',
+      step: '0.0005',
+      rows: 44,
     })
     expect(request).toEqual(expect.objectContaining({
       action: FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SUBSCRIBE,
       symbol: requestValues.symbol,
-      range: '0.0220',
+      step: '0.0005',
+      rows: 44,
     }))
     expect(readFuturesProductionWorkstationRequest(JSON.stringify(request))).toEqual(request)
   })
@@ -301,19 +340,22 @@ describe('Futures workstation environment-specific protocols', () => {
   // states no reading rather than inventing one, and opens at the cheapest page.
   it('opens a contract that states no reading', () => {
     const request = createFuturesProductionWorkstationSubscribeRequest(requestValues)
-    expect(request).not.toHaveProperty('range')
+    expect(request).not.toHaveProperty('step')
+    expect(request).not.toHaveProperty('rows')
     expect(readFuturesProductionWorkstationRequest(JSON.stringify(request))).toEqual(request)
   })
 
   it.each([
-    ['a negative range', '-1'],
-    ['a non-canonical range', '01'],
-    ['a range that is not a string', 14],
-    ['a range longer than the bound', `0.${'0'.repeat(64)}1`],
-  ])('rejects %s on the request that opens a contract', (_label, range) => {
+    ['a negative step', { step: '-1', rows: 14 }],
+    ['a non-canonical step', { step: '01', rows: 14 }],
+    ['a step that is not a string or null', { step: 14, rows: 14 }],
+    ['a step longer than the bound', { step: `0.${'0'.repeat(64)}1`, rows: 14 }],
+    ['a row count past the ceiling', { step: '0.0005', rows: 65 }],
+    ['a fractional row count', { step: '0.0005', rows: 1.5 }],
+  ])('rejects %s on the request that opens a contract', (_label, reading) => {
     expect(() => createFuturesProductionWorkstationSubscribeRequest({
       ...requestValues,
-      range,
+      ...reading,
     })).toThrowError(expect.objectContaining({ code: 'INVALID_REQUEST_SHAPE' }))
   })
 
@@ -525,7 +567,7 @@ describe('Futures workstation environment-specific protocols', () => {
   })
 
   // The book the desk delivers is the largest and node-densest frame on the
-  // wire. Its byte bound, its node bound and the level count it is allowed to
+  // wire. Its byte bound, its node bound and the row count it is allowed to
   // carry are three separate numbers, and a frame that clears the payload rules
   // but trips either parser bound does not degrade — depth simply stops
   // arriving. So the deepest legal book is parsed here, not reasoned about.
@@ -533,9 +575,11 @@ describe('Futures workstation environment-specific protocols', () => {
     // Long decimals throughout, and the longest identities the rules accept:
     // the bound has to hold for the widest book the protocol calls legal, not
     // for the tidy one this contract happens to quote today.
-    const level = index => ({
+    const row = index => ({
       price: `${900_000 + index}.123456789012345678`,
       quantity: '184467440737.09551615',
+      value: '170028355150614447.123456789012345678',
+      groupKey: '9'.repeat(64),
     })
     const event = createFuturesProductionWorkstationEvent({
       ...createEventValues('depth'),
@@ -543,19 +587,21 @@ describe('Futures workstation environment-specific protocols', () => {
       symbol: 'ABCDEFGHIJKLMNOPQRST',
       payload: {
         lastUpdateId: '18446744073709551615',
-        bids: Array.from({ length: FUTURES_WORKSTATION_DEPTH_LEVELS_PER_SIDE },
-          (_, index) => level(-index)),
-        asks: Array.from({ length: FUTURES_WORKSTATION_DEPTH_LEVELS_PER_SIDE },
-          (_, index) => level(index + 1)),
+        step: '0.00001',
+        bids: Array.from({ length: FUTURES_WORKSTATION_DEPTH_ROWS_PER_SIDE },
+          (_, index) => row(-index)),
+        asks: Array.from({ length: FUTURES_WORKSTATION_DEPTH_ROWS_PER_SIDE },
+          (_, index) => row(index + 1)),
         spread: '0.00001',
         reach: null,
+        proven: null,
       },
     })
     const raw = JSON.stringify(event)
     expect(new TextEncoder().encode(raw).byteLength)
       .toBeLessThanOrEqual(FUTURES_WORKSTATION_EVENT_MAX_BYTES)
     expect(parseFuturesProductionWorkstationEvent(raw).payload.bids)
-      .toHaveLength(FUTURES_WORKSTATION_DEPTH_LEVELS_PER_SIDE)
+      .toHaveLength(FUTURES_WORKSTATION_DEPTH_ROWS_PER_SIDE)
   })
 
   it('preserves lossless int64 identities as strings', () => {

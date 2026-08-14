@@ -19,10 +19,22 @@ const workstationEvent = (overrides = {}) => createFuturesProductionWorkstationE
   observedAt: 1_784_000_000_000,
   payload: Object.freeze({
     lastUpdateId: '9001',
-    bids: Object.freeze([Object.freeze({ price: '58400.00', quantity: '1.5' })]),
-    asks: Object.freeze([Object.freeze({ price: '58401.00', quantity: '2.5' })]),
+    step: null,
+    bids: Object.freeze([Object.freeze({
+      price: '58400.00',
+      quantity: '1.5',
+      value: '87600.00',
+      groupKey: '58400000000000000000000',
+    })]),
+    asks: Object.freeze([Object.freeze({
+      price: '58401.00',
+      quantity: '2.5',
+      value: '146002.50',
+      groupKey: '58401000000000000000000',
+    })]),
     spread: '1.00',
     reach: null,
+    proven: null,
   }),
   ...overrides,
 })

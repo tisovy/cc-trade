@@ -196,6 +196,13 @@ A delivered row SHALL NOT carry a running total: the cumulative column depends o
 which rows are on screen and on which sides are shown, both of which the panel
 knows and the book does not.
 
+A delivery SHALL name the step its rows were grouped by, and the panel SHALL
+match a working order to a row using that step rather than the step it last
+asked for. A reading is stated and answered a delivery later, so between the two
+the rows on screen belong to the previous step; a key computed at the new one
+matches a bucket nothing was grouped into, and every mark leaves the row it
+belongs to for as long as the desk takes to answer.
+
 #### Scenario: Operator reads a level
 - **WHEN** a level rests at a price with a base quantity
 - **THEN** the row shows the price, the level's value in USDT, and the cumulative value in USDT from the top of the book
@@ -203,6 +210,10 @@ knows and the book does not.
 #### Scenario: Operator groups the book
 - **WHEN** the operator selects a price step that is a multiple of the contract tick size
 - **THEN** levels within one step are aggregated into a single row whose price is the step boundary on that side, and their USDT values are summed
+
+#### Scenario: A coarser step has been asked for and not yet answered
+- **WHEN** the operator coarsens the step while the rows on screen are still those of the previous one
+- **THEN** a working order stays marked on the row it rests in, and moves only when the rows it is matched against do
 
 #### Scenario: Contract has no usable tick size
 - **WHEN** the contract's filters have not arrived

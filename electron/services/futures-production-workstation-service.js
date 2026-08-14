@@ -34,6 +34,7 @@ import {
 import {
     parseFuturesWorkstationDecimal,
 } from './futures-workstation-decimal.js';
+import { futuresBookDepthRange } from '../../src/utils/futuresOrderBook.js';
 
 export const FUTURES_PRODUCTION_WORKSTATION_FRESHNESS = Object.freeze({
     HEADER_MS: 5_000,
@@ -141,6 +142,36 @@ const tradeMeetsTapeNotional = (row, minimumNotionalUsdt) => {
 const tapeFingerprint = (state, rows) => (
     `${state}:${rows.map(row => row.aggregateTradeId).join(',')}`
 );
+
+/**
+ * Take the panel's reading of the book onto the session.
+ *
+ * Three facts, one of them derived. The step and the row count are stated: the
+ * book is grouped by the first and the delivery is bounded by the second. How
+ * far past the best price those rows reach is *computed* from them, here, rather
+ * than stated alongside — the panel used to send the distance and keep the step
+ * to itself, which was enough while the backend only bought pages against it and
+ * is not enough now that it groups the book too. Two statements of one reading
+ * can disagree; a statement and a derivation cannot.
+ *
+ * The ungrouped reading states no distance at all. A row is one raw level there,
+ * and the price the rows span is wherever the market happens to rest, so a
+ * distance in ticks would name something the rows have no relation to — and a
+ * page bought against it would be bought for nothing. The cheapest page holds
+ * fifty levels a side against a panel's dozen or so rows.
+ *
+ * A request that states no reading leaves the one the session has. That is what
+ * opening a contract does before any book has been drawn.
+ */
+const applyReading = (session, request) => {
+    if (!Number.isSafeInteger(request.rows) || request.rows <= 0) return;
+    const step = typeof request.step === 'string' ? request.step : null;
+    session.depthStep = step;
+    session.depthRows = request.rows;
+    session.depthRange = step === null
+        ? null
+        : futuresBookDepthRange({ step, rows: request.rows });
+};
 
 /**
  * How many contracts the desk keeps running at once, of which it shows one.
@@ -254,7 +285,9 @@ export class FuturesProductionWorkstationService {
     // stated by five of them is a panel whose ladder changes with which path last
     // ran.
     depthView(session) {
-        return session.orderBook.toRendererView(session.depthRange, {
+        return session.orderBook.toRendererRows({
+            step: session.depthStep,
+            rows: session.depthRows,
             atDeepestPage: this.depthPageExhausted(session),
         });
     }
@@ -427,7 +460,7 @@ export class FuturesProductionWorkstationService {
         if (!session || !this.isHeld(session) || session.requestId !== request.requestId) {
             throw new FuturesProductionWorkstationServiceError('DEPTH_OWNER_UNAVAILABLE');
         }
-        session.depthRange = request.range;
+        applyReading(session, request);
         if (!session.bootstrapped) return;
         // The reading bounds the delivery, so a new reading is a new delivery —
         // from the book already in hand, since the trim was never on what is
@@ -816,7 +849,7 @@ export class FuturesProductionWorkstationService {
         // The reading travels with the request that selects a contract exactly
         // as it does with the one that opens it. The page already bought stays:
         // that is a property of the book in hand, not of the reading.
-        if (typeof request.range === 'string') session.depthRange = request.range;
+        applyReading(session, request);
         this.showSession(session);
         // An interval the session is not on is the one thing a selection cannot
         // serve from what it holds. The candles are left out of the delivery
@@ -994,9 +1027,9 @@ export class FuturesProductionWorkstationService {
             indexCandles: Object.freeze([]),
             trades: Object.freeze([]),
             tapeSettings: this.tapeSettings,
-            depthRange: openingFresh
-                ? (typeof request.range === 'string' ? request.range : null)
-                : (previous?.depthRange ?? null),
+            depthStep: openingFresh ? null : (previous?.depthStep ?? null),
+            depthRows: openingFresh ? null : (previous?.depthRows ?? null),
+            depthRange: openingFresh ? null : (previous?.depthRange ?? null),
             depthPage: openingFresh ? 0 : (previous?.depthPage ?? 0),
             depthDeepenedAt: null,
             // A rebuild inherits its place in the pool's order. Left at zero, a
@@ -1020,6 +1053,12 @@ export class FuturesProductionWorkstationService {
             clockRegressed: false,
             startedAt: this.clock.now(),
         };
+        // A contract opened with a reading already stated takes it here: the
+        // panel knows how it draws this book before the first frame of it
+        // arrives, and the page that covers those rows is then bought against
+        // the first band the snapshot proves rather than after a second message.
+        // A rebuild states none and keeps the one it carried over.
+        applyReading(session, request);
         this.sessions.set(session.symbol, session);
         if (takesTheScreen) this.showSession(session);
         // An attempt past the ceiling does not get to call itself loading. By
