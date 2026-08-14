@@ -1267,7 +1267,14 @@ snapshot or from a diff applied since, and outside it only the levels a diff has
 touched are known. The book SHALL record that band and SHALL deliver only levels
 within it, so that no row aggregates a range the book cannot account for. When
 the market leaves the band, the band SHALL be re-established by a fresh snapshot
-rather than by extending the book past what it can prove.
+rather than by extending the book past what it can prove — for the contract
+being shown. For a contract that is held and not shown, the band SHALL be
+re-established when the contract is selected.
+
+A book that no longer holds the market SHALL be delivered as stale whether or
+not a reading has been stated for it. With no reading stated there is no
+shortfall to measure, so a book the market had walked out of was being stated as
+live on the ground that nothing had been asked of it.
 
 #### Scenario: A diff touches a level outside the band
 - **WHEN** a depth diff carries a level beyond the range the snapshot covered
@@ -1288,6 +1295,14 @@ rather than by extending the book past what it can prove.
 #### Scenario: A grouped row would span unproven ground
 - **WHEN** the rows on screen would need more range than the band proves
 - **THEN** the panel shows the rows it can prove until the deeper snapshot lands, rather than rows built on partial levels
+
+#### Scenario: The market walks out of the band of a contract nobody is showing
+- **WHEN** the best price leaves the proven band of a held session that is not being shown
+- **THEN** no snapshot is taken for it, and the band is re-established when the contract is selected
+
+#### Scenario: The market has walked out of the band, and no reading is stated
+- **WHEN** a book whose reading is unstated no longer holds the market
+- **THEN** it is delivered as stale rather than live
 
 ### Requirement: Bounded order-book delivery orders only the levels it can send
 When a valid stated range bounds delivery to fewer levels than the retained
@@ -1678,6 +1693,13 @@ the depth diff, and SHALL keep its order book, tape and candles current whether
 or not it is the one being shown. Being shown SHALL decide only whether the
 session delivers to the renderer.
 
+Keeping the book current means applying every diff the exchange sends it. It
+SHALL NOT mean buying pages of the book from the exchange: the depth of page a
+book is held at answers how far the rows drawn from it reach past the best
+price, and a session that is not shown draws no rows. A session that is not
+shown SHALL NOT issue a depth read to cover a reading, and the reading SHALL be
+answered when the contract is selected.
+
 #### Scenario: A held contract is selected
 - **WHEN** the operator selects a contract whose session is held but not shown
 - **THEN** its book, tape and candles are delivered as the session already holds them, with no snapshot read and no stream opened
@@ -1685,6 +1707,14 @@ session delivers to the renderer.
 #### Scenario: A held contract is not shown
 - **WHEN** a held session is not the one being shown
 - **THEN** it keeps parsing its streams and updating its state, and delivers nothing to the renderer
+
+#### Scenario: The band of a held contract stops covering its reading
+- **WHEN** a session that is not being shown holds a book whose band no longer covers the reading last stated for that contract, or no longer holds the market
+- **THEN** no depth read is issued for it, and the page is bought when the contract is selected
+
+#### Scenario: The shown contract's band stops covering its reading
+- **WHEN** the band of the contract being shown stops covering the rows on screen
+- **THEN** a page is bought for it exactly as before
 
 ### Requirement: The pool is bounded
 The number of held sessions SHALL be bounded by a stated setting, and the least
@@ -1710,3 +1740,4 @@ session when it is not the failing one, SHALL continue.
 #### Scenario: A background session reconnects
 - **WHEN** a held session that is not being shown rebuilds itself after losing its stream
 - **THEN** the contract being shown does not change, and the rebuilt session keeps the place in the pool it already had
+

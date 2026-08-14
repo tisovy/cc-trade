@@ -101,3 +101,11 @@ publish deep enough for the step it is read at.
 #### Scenario: A side is refilled before it empties
 - **WHEN** the market has taken most, but not all, of one side's room out of the band
 - **THEN** the re-read is asked for while that side still has rows to draw, rather than once it has none
+
+#### Scenario: The market walks out of the band of a contract nobody is showing
+- **WHEN** the best price leaves the proven band of a held session that is not being shown
+- **THEN** no snapshot is taken for it, and the band is re-established when the contract is selected
+
+#### Scenario: The market has walked out of the band, and no reading is stated
+- **WHEN** a book whose reading is unstated no longer holds the market
+- **THEN** it is delivered as stale rather than live

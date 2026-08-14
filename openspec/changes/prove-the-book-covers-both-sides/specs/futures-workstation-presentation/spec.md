@@ -125,3 +125,11 @@ publish deep enough for the step it is read at.
 #### Scenario: A price is picked off a short book
 - **WHEN** the operator clicks a level of a book delivered short
 - **THEN** the level seeds the price it rests at, exactly as it does on a book that covers the rows
+
+#### Scenario: The market walks out of the band of a contract nobody is showing
+- **WHEN** the best price leaves the proven band of a held session that is not being shown
+- **THEN** no snapshot is taken for it, and the band is re-established when the contract is selected
+
+#### Scenario: The market has walked out of the band, and no reading is stated
+- **WHEN** a book whose reading is unstated no longer holds the market
+- **THEN** it is delivered as stale rather than live
