@@ -275,7 +275,6 @@ const sortedByPrice = (side, descending) => {
     return entries;
 };
 
-
 // Past the ceiling, the levels furthest from the market go first. Nearest-first
 // retention is what the operator zooms out *against*, so evicting from the near
 // edge would drop exactly what a coarse step is read for; and a level far from

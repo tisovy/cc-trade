@@ -128,7 +128,7 @@ const bookRowTitle = (workingOrders, side, whole) => {
   const marks = []
   if (workingOrders) marks.push(`${workingOrders} working ${side} order here`)
   if (!whole) {
-    marks.push('Beyond the book the desk read whole — every level shown rests here, but levels nobody has restated since are missing, so this row can only understate.')
+    marks.push('Beyond the book the desk read whole — every level shown rests here, but levels nobody has restated since may be missing from it, so if this row is wrong it is low.')
   }
   return marks.length > 0 ? marks.join('\n') : undefined
 }
