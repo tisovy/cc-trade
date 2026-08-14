@@ -5,6 +5,11 @@ import FuturesWorkstationView from './FuturesWorkstationView.jsx'
 import FuturesProductionWorkstation from './FuturesProductionWorkstation.jsx'
 import FuturesTradingTicket from './FuturesTradingTicket.jsx'
 import { GROUPING_MULTIPLIERS, groupFuturesBookLevels } from '../../../utils/futuresOrderBook.js'
+import { formatCompactUsdt } from '../../../utils/futuresPriceFormat.js'
+// The desk's own book, so the rows under test are the rows the desk actually
+// delivers rather than a fixture's idea of them.
+import { FuturesWorkstationOrderBook } from '../../../../electron/services/futures-workstation-order-book.js'
+import { normalizeFuturesWorkstationDecimal } from '../../../../electron/services/futures-workstation-decimal.js'
 
 // The book arrives grouped now: the main process runs the panel's own grouping
 // pass over the whole book and delivers the rows. A fixture that states levels
@@ -687,6 +692,76 @@ describe('pure Futures workstation presentation', () => {
   // it rests there, but levels nobody has restated since the page was read are
   // missing from it. The mark is on the row and never on its numbers — those are
   // exact for what the row does hold.
+  // The book moved from the panel to the desk, and the whole claim of that move
+  // is that nothing the operator reads changed except which rows arrive full. So
+  // this takes one book of levels, has the desk group and deliver it, renders
+  // that, and compares the drawn rows against what the panel's own grouping pass
+  // makes of the same levels — prices, sizes and the running total, in the order
+  // they are drawn in. Not two calls of one function: the left-hand side is read
+  // out of the DOM, so the ask side being reversed for drawing, the cumulative
+  // column being accumulated from the market outwards, and the formatting of
+  // every number are all inside what is being compared.
+  it('draws the rows the panel would have grouped itself, from the same book', () => {
+    const bids = Array.from({ length: 60 }, (_, index) => [
+      `${58_420 - index}.00`,
+      `${((index % 7) + 1) * 0.5}`,
+    ])
+    const asks = Array.from({ length: 60 }, (_, index) => [
+      `${58_421 + index}.00`,
+      `${((index % 5) + 1) * 0.75}`,
+    ])
+    const book = new FuturesWorkstationOrderBook()
+    expect(book.bootstrap({ lastUpdateId: '100', bids, asks }).live).toBe(true)
+    const delivered = book.toRendererRows({ step: '10', rows: 4 })
+    // A coarse step over a book this deep is the case the move exists for: each
+    // row is grouped from several levels, and the far ones used to be blank.
+    expect(delivered.bids).toHaveLength(4)
+    expect(delivered.bids.every(row => row.value !== '0')).toBe(true)
+
+    const state = createState()
+    const { container } = renderView({
+      state: createState({
+        resources: Object.freeze({
+          ...state.resources,
+          depth: Object.freeze({
+            ...state.resources.depth,
+            step: '10',
+            bids: delivered.bids,
+            asks: delivered.asks,
+          }),
+        }),
+      }),
+    })
+
+    const drawn = side => [...container.querySelectorAll(
+      `.futures-workstation-book-side.is-${side} button`,
+    )].map(row => [...row.querySelectorAll('span')].map(cell => cell.textContent))
+    // Against the levels as the book holds them, not as the exchange spelled
+    // them: prices are brought to canonical form on the way in, and a level that
+    // lands on a bucket boundary keeps its own string, so '58420.00' and '58420'
+    // are the same level and would print differently. That is ingress, not
+    // grouping, and it was the same before the book moved.
+    const expected = (levels, side) => {
+      const rows = groupFuturesBookLevels({
+        levels: levels.map(([price, quantity]) => ({
+          price: normalizeFuturesWorkstationDecimal(price),
+          quantity: normalizeFuturesWorkstationDecimal(quantity),
+        })),
+        side,
+        step: '10',
+        limit: 4,
+      })
+      const drawnRows = rows.map(row => [
+        row.price,
+        formatCompactUsdt(row.notionalUsdt),
+        formatCompactUsdt(row.cumulativeUsdt),
+      ])
+      return side === 'ask' ? [...drawnRows].reverse() : drawnRows
+    }
+    expect(drawn('bid')).toEqual(expected(bids, 'bid'))
+    expect(drawn('ask')).toEqual(expected(asks, 'ask'))
+  })
+
   it('marks the book rows that lie beyond the book the desk read whole', () => {
     const state = createState()
     const { container } = renderView({
