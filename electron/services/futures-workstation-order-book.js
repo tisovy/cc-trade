@@ -40,25 +40,34 @@ export const FUTURES_WORKSTATION_ORDER_BOOK_LIMITS = Object.freeze({
     // means "the whole book" — a desk left open passes any bound eventually and
     // then sits on it. Which makes the bound a cost decision and nothing else.
     //
-    // It cost more than expected, and not where expected. Rows crossing instead
-    // of levels took the wire down thirtyfold and left the main process where it
-    // was: delivery still sorts the side it groups, and eviction sorts it again.
-    // Measured on a book sitting at the bound, at ten frames and ten diffs a
+    // It cost more than expected, and not where expected. The sort was assumed
+    // to be the price of the ceiling; measured, it was a quarter of it. Two
+    // thirds was the same decimal strings being parsed again every frame — the
+    // levels nobody had touched. Remembered, in the grouping pass this shares
+    // with the panel, a frame at four thousand fell from 5.7 ms to 1.6 ms, and
+    // ten thousand became cheaper than four thousand had been. Measured
+    // 2026-08-14 on a book sitting at the bound, at ten frames and ten diffs a
     // second on the shown contract:
     //
-    //   bound   frame    diff    per second
-    //    4000   7.9 ms   0.8 ms     87 ms
-    //   10000  20.4 ms   1.8 ms    222 ms
-    //   20000  30.8 ms   4.0 ms    348 ms
+    //   bound   frame     diff     per second   was
+    //    4000    1.6 ms   0.6 ms      22 ms      87 ms
+    //   10000    4.4 ms   1.3 ms      58 ms     222 ms
+    //   20000   10.1 ms   2.7 ms     128 ms     348 ms
     //
-    // A third of a core for one contract's book is not a trade worth making, so
-    // the bound stays. What it costs the operator is real and worth naming: past
-    // about eight minutes the far edge is being evicted, so how far the panel
-    // can zoom out is set by this number rather than by the market. Lifting it
-    // wants grouping that fills buckets in one pass instead of sorting the whole
-    // side — buckets are a few hundred where levels are thousands — and that is
-    // a change to how rows are built, not to a number.
-    RETAINED_LEVELS_PER_SIDE: 4_000,
+    // Ten thousand covers both books measured at ten minutes with room over, for
+    // a third of what four thousand cost before. Twenty thousand buys nothing
+    // that has been observed and costs an eighth of a core for one contract's
+    // book, so the ceiling stops where the evidence stops rather than where the
+    // arithmetic still allows.
+    //
+    // Raising it further wants grouping that fills buckets in one pass instead
+    // of sorting the whole side — buckets are a few hundred where levels are
+    // thousands — and that is a change to how rows are built, not to a number.
+    // It also wants `FUTURES_BOOK_PARSED_DECIMAL_BOUND` raised alongside: a
+    // cache smaller than the book it serves empties mid-pass and costs more than
+    // no cache at all. A test asks for the two together rather than leaving that
+    // to be rediscovered as a cliff.
+    RETAINED_LEVELS_PER_SIDE: 10_000,
     // How far past the ceiling a side may run before it is cut back to it, and
     // the whole cost of having a ceiling at all.
     //

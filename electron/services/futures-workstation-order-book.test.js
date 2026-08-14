@@ -9,6 +9,7 @@ import {
     FUTURES_WORKSTATION_EVENT_MAX_BYTES,
 } from '../../src/utils/futuresWorkstationProtocolShared.js';
 import {
+    FUTURES_BOOK_PARSED_DECIMAL_BOUND,
     futuresBookGroupKey,
     groupFuturesBookLevels,
 } from '../../src/utils/futuresOrderBook.js';
@@ -933,6 +934,27 @@ describe('the far rows are filled from the levels a level count would have dropp
 });
 
 describe('what the book retains', () => {
+    // The grouping pass remembers what a decimal string parses to, and its bound
+    // has to hold the book it serves. A cache smaller than that is emptied
+    // mid-pass and refilled from nothing on the next one, so every frame pays the
+    // full parse it was meant to avoid, with the clearing on top — measured at a
+    // retention of 20 000 a side against a bound of 32 768, a frame cost 26.5 ms
+    // where a bound with room cost 10.1 ms. The cache was the cliff, not the book.
+    //
+    // The two numbers cannot reference each other: the retention ceiling lives
+    // here, in the process that owns the book, and the cache lives in the pass
+    // this shares with the panel, which this file already imports. So the tie is
+    // asserted rather than imported, and a retention raised without the cache
+    // fails here instead of quietly costing four times what it used to.
+    //
+    // Both sides, and a quantity beside every price: four strings per level of
+    // one side, and the contract the operator switched from is still in there.
+    it('remembers enough parsed decimals to hold the book it retains', () => {
+        const { RETAINED_LEVELS_PER_SIDE } = FUTURES_WORKSTATION_ORDER_BOOK_LIMITS;
+        expect(FUTURES_BOOK_PARSED_DECIMAL_BOUND)
+            .toBeGreaterThanOrEqual(RETAINED_LEVELS_PER_SIDE * 4);
+    });
+
     // Past the ceiling the furthest levels go first. Evicting from the near edge
     // would drop exactly what a coarse step is read for, and the ceiling is a
     // guard against a pathological stream rather than a reading of any market —

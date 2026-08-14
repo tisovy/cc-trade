@@ -36,7 +36,7 @@ export const GROUPING_MULTIPLIERS = Object.freeze([
   1, 2, 5, 10, 25, 50, 100, 200, 500, 1_000, 2_000, 5_000, 10_000, 20_000,
 ])
 
-const parseAtoms = (value) => {
+const readAtoms = (value) => {
   if (typeof value !== 'string'
     || value.length === 0
     || value.length > MAX_DECIMAL_LENGTH
@@ -45,6 +45,58 @@ const parseAtoms = (value) => {
   if (fraction.length > SCALE_DIGITS) return null
   return (BigInt(integer) * SCALE)
     + BigInt((fraction + '0'.repeat(SCALE_DIGITS)).slice(0, SCALE_DIGITS))
+}
+
+// What a decimal string parses to never changes, so it is worth remembering.
+//
+// This pass is the expensive half of building a book, and almost all of what it
+// parses it parsed a moment ago: a diff restates a few dozen prices out of
+// thousands, and at a coarse step the rows on screen are summed over every level
+// on the side. Measured on a side of twelve thousand levels, one frame at a
+// coarse step: 8.0 ms of grouping, of which 5.3 ms was this function and 0.7 ms
+// was the arithmetic it exists to feed. Remembered, the 5.3 ms becomes 0.3.
+//
+// Safe in the way only a pure function of its key is safe — the same string
+// cannot parse to anything else — so there is nothing to invalidate and no
+// staleness to reason about. What it needs is a bound.
+//
+// Past the bound it is emptied rather than trimmed: choosing which entries to
+// keep costs more than the one frame of full parsing that refilling it costs,
+// and the entries worth keeping are exactly the ones the next frame asks for.
+//
+// Which makes the bound load-bearing in a way worth stating, because it was
+// measured falling over. A cache smaller than the book it serves is emptied
+// mid-pass and refilled from nothing on the next one, and then every frame pays
+// the full parse it was meant to avoid — with the clearing on top. At a
+// retention of 20 000 a side and this bound at 32 768, a frame cost 26.5 ms
+// against 10.1 ms with the bound raised: the cache was the cliff, not the book.
+//
+// So it has to hold both sides of a full book, their quantities beside their
+// prices, with room for the contract the operator switched from. Two sides of
+// the retention ceiling is 20 000 strings today; 65 536 leaves that headroom.
+// It is tied to `RETAINED_LEVELS_PER_SIDE` by a test rather than by an import,
+// because the retention ceiling lives in the process that owns the book and
+// importing it here would close a cycle. Raise one and the test asks for the
+// other.
+export const FUTURES_BOOK_PARSED_DECIMAL_BOUND = 65_536
+const parsedDecimals = new Map()
+
+const parseAtoms = (value) => {
+  const remembered = parsedDecimals.get(value)
+  // Never stored, so `undefined` is a miss and `null` is a remembered refusal.
+  // Remembering the refusals matters as much as remembering the parses: a book
+  // carrying a malformed level would otherwise re-run the pattern on it every
+  // frame for as long as it rests there.
+  if (remembered !== undefined) return remembered
+  const atoms = readAtoms(value)
+  // Only strings are worth a slot. Anything else is refused by its type on the
+  // first branch of `readAtoms`, and an unbounded set of object keys is exactly
+  // what the bound exists to stop.
+  if (typeof value === 'string') {
+    if (parsedDecimals.size >= FUTURES_BOOK_PARSED_DECIMAL_BOUND) parsedDecimals.clear()
+    parsedDecimals.set(value, atoms)
+  }
+  return atoms
 }
 
 const formatAtoms = (atoms) => {
