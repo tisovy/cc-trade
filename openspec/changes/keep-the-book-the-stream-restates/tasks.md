@@ -106,5 +106,31 @@ levels, and it is the only thing that can prove it.*
   | catalog, 8 contracts | smaller still | — |
 
   So the byte check can no longer refuse anything: the payload rules refuse a wider frame before its bytes are ever measured, on every resource. The test that claimed to prove the guard bites was rewritten to assert what is true — the measured size, and the refusal by the payload rules. The guard itself is kept as one comparison against a future payload that grows, but it is a guard and not a finding, and this is it written down.
-- [ ] 5.3 Record how far the book reaches on a real contract after a minute and after ten, so the operator's reading has something to be compared against.
+- [x] 5.3 Record how far the book reaches on a real contract after a minute and after ten, so the operator's reading has something to be compared against. Measured 2026-08-14 by applying `@depth@100ms` through the desk's own proxy.
+
+  | levels a side | 1 min | 3 min | 5 min | 10 min |
+  |---|---|---|---|---|
+  | AKEUSDT | 1 658 / 1 801 | 2 403 / 2 420 | 4 017 / 3 427 | **6 197 / 4 665** |
+  | BTCUSDT | 1 580 / 1 555 | 2 689 / 2 615 | 4 157 / 4 122 | **6 270 / 5 185** |
+
+  Still climbing at ten minutes on both, which retires the earlier three-minute
+  reading of 2431–3425 as "the whole book": there is no such number, only how
+  long the desk has been watching. Past about eight minutes a session sits on the
+  retention bound rather than under it.
+
+  Where the book actually has substance, after five minutes, as a share of price:
+
+  | | furthest level | 99th of levels | 95th | median |
+  |---|---|---|---|---|
+  | AKEUSDT bids | 100.0% | 56.86% | 39.06% | 11.13% |
+  | AKEUSDT asks | **1 357 378%** | 145.21% | 77.65% | 7.20% |
+  | BTCUSDT bids | 99.0% | 10.05% | 3.36% | 0.78% |
+  | BTCUSDT asks | 97.8% | 9.05% | 2.89% | 0.83% |
+  | ETHUSDT bids | 94.7% | 27.23% | 6.09% | 1.29% |
+
+  The furthest level is an outlier on every contract, which is what
+  `end-the-book-where-the-market-does` §2.10 stops cutting the ladder against.
+  The far book made that reachable: the outlier used to be evicted along with
+  everything past the nearest thousand levels.
+
 - [ ] 5.4 Operator confirms on live data that the book zooms out to what the Binance app shows on the same contract at the same moment, that far rows carry sizes rather than blanks, and that the boundary of the accounted-for book is marked — step 44, «Стакан достаёт туда же, куда приложение Binance», in `verify-the-desk-in-one-sitting/runbook.md`, so the operator runs one list.

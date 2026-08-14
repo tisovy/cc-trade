@@ -24,31 +24,40 @@ export const FUTURES_WORKSTATION_ORDER_BOOK_LIMITS = Object.freeze({
     // beyond the band.
     SNAPSHOT_LEVELS_PER_SIDE: 1_000,
     // How much of the book is kept, which is not the same question as how much a
-    // page proves. Measured on 2026-08-13 by applying `@depth@100ms` for three
-    // minutes without the band filter: the whole book is 2431 to 3425 levels a
-    // side on AKEUSDT and BTCUSDT, reaching past 80% of price on both, and the
-    // nearest thousand of it hold between 7% and 18% of the resting value. So a
-    // thousand was not a bound on cost — it was most of the book, thrown away.
+    // page proves. Measured by applying `@depth@100ms` without the band filter:
+    // a page is a thousand levels a side and holds 7% to 18% of a contract's
+    // resting value. So a thousand was never a bound on cost — it was most of
+    // the book, thrown away.
     //
-    // Four thousand holds the whole of both books measured, with margin.
+    // What the whole book is depends entirely on how long you watch. Measured
+    // 2026-08-14, levels a side:
     //
-    // It stayed at four thousand once rows crossed instead of levels, and for a
-    // different reason than it was set for. Delivery no longer walks the book to
-    // fill the wire, but it still sorts the side it groups, and eviction sorts it
-    // again — so the ceiling is still what a stream can make the desk pay per
-    // frame. Measured 2026-08-14 on a book sitting at the bound, at ten frames
-    // and ten diffs a second on the shown contract:
+    //           1 min   3 min   5 min   10 min
+    //   AKEUSDT  1658    2403    4017     6197
+    //   BTCUSDT  1580    2689    4157     6270
+    //
+    // It was still climbing at ten minutes, so there is no number here that
+    // means "the whole book" — a desk left open passes any bound eventually and
+    // then sits on it. Which makes the bound a cost decision and nothing else.
+    //
+    // It cost more than expected, and not where expected. Rows crossing instead
+    // of levels took the wire down thirtyfold and left the main process where it
+    // was: delivery still sorts the side it groups, and eviction sorts it again.
+    // Measured on a book sitting at the bound, at ten frames and ten diffs a
+    // second on the shown contract:
     //
     //   bound   frame    diff    per second
     //    4000   7.9 ms   0.8 ms     87 ms
     //   10000  20.4 ms   1.8 ms    222 ms
     //   20000  30.8 ms   4.0 ms    348 ms
     //
-    // A third of a core for one contract's book is not a trade worth making for
-    // headroom nobody has needed: the deepest book measured on a real contract is
-    // 3425 levels a side. Raising it wants grouping that does not sort the whole
-    // side — buckets can be filled in one pass and only the rows drawn need
-    // ordering — and that is a change to how the rows are built, not to a number.
+    // A third of a core for one contract's book is not a trade worth making, so
+    // the bound stays. What it costs the operator is real and worth naming: past
+    // about eight minutes the far edge is being evicted, so how far the panel
+    // can zoom out is set by this number rather than by the market. Lifting it
+    // wants grouping that fills buckets in one pass instead of sorting the whole
+    // side — buckets are a few hundred where levels are thousands — and that is
+    // a change to how rows are built, not to a number.
     RETAINED_LEVELS_PER_SIDE: 4_000,
     // How far past the ceiling a side may run before it is cut back to it, and
     // the whole cost of having a ceiling at all.
