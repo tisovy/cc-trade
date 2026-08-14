@@ -275,9 +275,17 @@ belongs to for as long as the desk takes to answer.
 - **WHEN** the first book of a session is delivered and no reading has been stated for the contract
 - **THEN** it is delivered ungrouped to the protocol ceiling, so no row the panel is about to ask for is missing
 
-#### Scenario: A delivered row is read
-- **WHEN** the renderer reads a row out of a delivered book
+#### Scenario: A delivered level is read
+- **WHEN** the renderer reads a row out of a delivered book, which is what a level has become on the wire
 - **THEN** it finds the bucket's price, its resting quantity, its value and its key, and computes the cumulative column itself from the rows on screen
+
+#### Scenario: One order rests far past the rest of a side
+- **WHEN** a side holds a resting order much further from the market than the levels behind it
+- **THEN** the stated reach is not stretched to it, and the ladder is cut where the side still has levels to fill rows from
+
+#### Scenario: A side has too few levels to leave any out
+- **WHEN** the share to be left outside the reading rounds down to no levels at all
+- **THEN** the side is measured to its own furthest level
 
 #### Scenario: A coarse step reaches past the levels nearest the mid
 - **WHEN** the operator selects a step whose rows span further than a thousand levels of the book reach
