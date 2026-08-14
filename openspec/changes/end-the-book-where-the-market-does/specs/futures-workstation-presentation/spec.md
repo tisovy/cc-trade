@@ -1,29 +1,34 @@
 ## ADDED Requirements
 
-### Requirement: The book states how far the exchange publishes it
-A delivered book SHALL state how far past the best price the page it was bought
-at proved on each side, in the contract's own quote currency. That reading is a
-fact about the page rather than about the rows on screen, and it SHALL be taken
-from what the page proved when it was read rather than from the distance
-currently left to the edge of the band, which shrinks as the market walks.
+### Requirement: The book states how far it reaches
+A delivered book SHALL state how far past the best price the book the desk holds
+reaches on each side, in the contract's own quote currency. That reading is a
+fact about the book on hand rather than about the rows on screen, and the panel
+SHALL NOT be left to infer it from the levels it was sent: delivery is already
+trimmed to the range the panel stated, so a panel measuring what it received
+would only ever measure its own step back.
+
+The reading SHALL be a property of the book, not a claim about the exchange. What
+the exchange publishes is wider than any one snapshot page — the diff stream
+restates levels far outside it — so a reading taken from the page states what the
+desk can draw, which is what the ladder must be cut against, and states nothing
+about what the market holds beyond it.
+
+The reading SHALL be taken from what the page proved when it was read rather than
+from the distance currently left to the edge of the band, which shrinks as the
+market walks and would move the ladder under the operator's hand.
 
 The reading SHALL be stated only when no deeper page can be bought. Until the
-ladder of pages is exhausted the desk has not shown everything the exchange
-publishes, and a reading stated from a cheap page would describe the desk's
-spending rather than the market's book.
-
-The reading SHALL NOT be taken as permission to draw beyond the band. Levels
-outside the band are still unknown and still dropped; what the reading adds is
-that the desk can now say where the book ends instead of leaving it to be
-inferred from where the rows stop.
+ladder of pages is exhausted a wider reading is one read away, and the ladder
+should not be cut against a page the operator can still ask to deepen.
 
 #### Scenario: The book is bought at a page short of the deepest
 - **WHEN** the book is delivered from a page the exchange offers a deeper one than
 - **THEN** it states no reach, because a deeper page may still be bought
 
 #### Scenario: The book is bought at the deepest page
-- **WHEN** the book is delivered from the deepest page the exchange publishes
-- **THEN** it states how far that page proved past the best price on each side
+- **WHEN** the book is delivered from the deepest page the exchange serves in one read
+- **THEN** it states how far the book it holds reaches past the best price on each side
 
 #### Scenario: The market walks inside the band
 - **WHEN** the market moves toward one edge of a band bought at the deepest page
@@ -40,9 +45,9 @@ the last traded price.
 
 The steps offered SHALL end at the coarsest one whose rows fit inside the reach
 the book states, and the finest SHALL always be offered. A step whose rows would
-ask for more than the exchange publishes SHALL NOT be offered: it draws the same
-book over fewer filled rows, which is a reading of the same market at lower
-resolution and reads as the book ending early. The cut SHALL be made against the
+ask for more book than the desk holds SHALL NOT be offered: it draws the same
+levels over fewer filled rows, which is the same reading at lower resolution and
+reads as the book ending early. The cut SHALL be made against the
 narrower of the two sides, so neither side is asked for rows that cannot be
 filled. While the book states no reach the whole ladder SHALL be offered, so a
 contract whose page can still be deepened can be asked to deepen it.
@@ -132,7 +137,7 @@ bytes, and a validation pass — to be discarded on arrival.
 - **WHEN** the renderer reads a level out of a delivered book
 - **THEN** it finds the level's price and resting quantity, and computes the cumulative column itself from the rows it has grouped
 
-#### Scenario: The coarsest step is offered on a contract whose book ends early
+#### Scenario: The coarsest step is offered on a contract whose held book ends early
 - **WHEN** the book states a reach that the second-coarsest rung fits inside and the coarsest does not
 - **THEN** the coarsest rung is not offered, and the step above it is the last one the operator can select
 
