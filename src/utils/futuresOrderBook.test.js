@@ -93,6 +93,39 @@ describe('futuresBookGroupSteps', () => {
     expect(steps).toEqual([{ multiplier: 1, step: '0.1' }])
   })
 
+  // The book the desk holds is no longer one snapshot page, so the reading that
+  // used to run past the end of the ladder now runs off it. This is the
+  // operator's own contract on 2026-08-14: AKEUSDT at 0.0074561 with the book
+  // reaching 54.96% of price, read over fourteen rows. A fourteenth of that
+  // reach is 2 900 ticks, so the cut belongs between 2 000 and 5 000 — where the
+  // ladder used to stop at 1 000 and leave the panel drawing 19% of a book more
+  // than twice that deep.
+  it('offers a step past a thousand ticks when the book reaches that far', () => {
+    const reach = { below: '0.0040978', above: '0.0040978' }
+    const steps = futuresBookGroupSteps({ tickSize: '0.0000001', reach, rows: 14 })
+    expect(steps.at(-1)).toEqual({ multiplier: 2_000, step: '0.0002' })
+    // Fourteen rows of it fit inside the reach, and the rung above would not.
+    expect(Number(steps.at(-1).step) * 14).toBeLessThanOrEqual(Number(reach.below))
+    expect(0.0005 * 14).toBeGreaterThan(Number(reach.below))
+  })
+
+  // The ladder is still cut by the book rather than by its own length: a
+  // contract quoted coarsely against its price runs out of reach long before it
+  // runs out of rungs, and adding rungs at the top must not offer it any.
+  //
+  // A guard, not a finding: it passes against the tree before this change, where
+  // the rungs it must not be offered did not exist. It holds the cut in place
+  // while the ladder above it grows — 522 of the 570 perpetuals trading on
+  // 2026-08-14 are this contract rather than the one above.
+  it('leaves a coarsely quoted contract where its own reach ends', () => {
+    const steps = futuresBookGroupSteps({
+      tickSize: '0.001',
+      reach: { below: '0.35', above: '0.35' },
+      rows: 14,
+    })
+    expect(steps.at(-1)).toEqual({ multiplier: 25, step: '0.025' })
+  })
+
   it('offers the whole ladder when the rows are not a count', () => {
     expect(futuresBookGroupSteps({
       tickSize: '0.1',

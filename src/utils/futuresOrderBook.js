@@ -16,7 +16,25 @@ const SCALE = 10n ** BigInt(SCALE_DIGITS)
 // them dropped to 100 — on AKEUSDT, from 3.9% of price published down to 1.8%
 // offered. No existing rung moves; a stored step is never invalidated by a rung
 // added beside it.
-export const GROUPING_MULTIPLIERS = Object.freeze([1, 2, 5, 10, 25, 50, 100, 200, 500, 1_000])
+//
+// It ended at 1000 while the desk held the nearest thousand levels, and that was
+// the right end for that book: past it a coarse step drew the same clump of
+// levels over fewer rows. Now that the book is everything the stream restates,
+// the ladder is what runs out first. Measured on the operator's own desk, a book
+// reaching 54.96% of price was read at 1.34% a row — fourteen rows covering 19%
+// of a book more than twice that deep, with no coarser step to select.
+//
+// The top rung is set by the contract, not by the ladder: a row can never be
+// worth more than about a fourteenth of price, because the bid side ends at
+// zero. Across the 570 perpetuals trading on 2026-08-14 that ceiling is under
+// 1000 ticks on 522 of them — for those the ladder already ended past what they
+// can reach — and above it on 48, the ones quoted finely against their price:
+// 5 500 ticks on AKEUSDT, 13 400 on ETHUSDT, 44 800 on BTCUSDT. Rungs past
+// 20 000 are reachable on one contract in the whole catalogue, so the ladder
+// stops there rather than carrying a rung nobody can select.
+export const GROUPING_MULTIPLIERS = Object.freeze([
+  1, 2, 5, 10, 25, 50, 100, 200, 500, 1_000, 2_000, 5_000, 10_000, 20_000,
+])
 
 const parseAtoms = (value) => {
   if (typeof value !== 'string'

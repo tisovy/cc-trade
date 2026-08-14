@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import FuturesWorkstationView from './FuturesWorkstationView.jsx'
 import FuturesProductionWorkstation from './FuturesProductionWorkstation.jsx'
 import FuturesTradingTicket from './FuturesTradingTicket.jsx'
-import { groupFuturesBookLevels } from '../../../utils/futuresOrderBook.js'
+import { GROUPING_MULTIPLIERS, groupFuturesBookLevels } from '../../../utils/futuresOrderBook.js'
 
 // The book arrives grouped now: the main process runs the panel's own grouping
 // pass over the whole book and delivers the rows. A fixture that states levels
@@ -688,16 +688,19 @@ describe('pure Futures workstation presentation', () => {
     const step = screen.getByLabelText('Order book price step')
     const labels = [...step.options].map(option => option.textContent)
     expect(labels[0]).toBe('0.1 · <0.01%')
-    // 100 on a 58420.25 contract is 0.17% of price per row.
-    expect(labels.at(-1)).toBe('100 · 0.17%')
+    // 20000 ticks on a 58420.25 contract is 3.42% of price per row — and the
+    // coarsest rung is only worth stating on a contract quoted this finely
+    // against its own price, which is exactly why the reading is here.
+    expect(labels.at(-1)).toBe('2000 · 3.42%')
   })
 
-  // Seventy-five per cent of price is what the operator asked to be able to zoom
-  // out to, and no exchange publishes a book that deep: measured 2026-08-13, the
-  // deepest page Binance serves reaches 0.19% on BTCUSDT and 4.1% on AKEUSDT. So
-  // the ladder ends where the book does, and the panel says where that is rather
-  // than leaving it to be read off where the rows stop.
-  it('ends the step list where the exchange stops publishing the book', () => {
+  // The ladder ends where the book on hand ends, and the panel says where that
+  // is rather than leaving it to be read off where the rows stop. Not where the
+  // exchange stops: a snapshot page reaches 0.19% on BTCUSDT and 4.1% on
+  // AKEUSDT, but the stream restates levels far outside it and the desk keeps
+  // them, so the reach this is cut against is a reading of the book the desk
+  // holds and grows while a contract stays open.
+  it('ends the step list where the book on hand stops reaching', () => {
     const state = createState()
     const withReach = reach => createState({
       resources: Object.freeze({
@@ -747,7 +750,7 @@ describe('pure Futures workstation presentation', () => {
   it('offers every step and states no reach while the book states none', () => {
     const { container } = renderView()
     const step = screen.getByLabelText('Order book price step')
-    expect([...step.options]).toHaveLength(10)
+    expect([...step.options]).toHaveLength(GROUPING_MULTIPLIERS.length)
     expect(container.querySelector('.futures-workstation-book-published')).toBeNull()
   })
 
