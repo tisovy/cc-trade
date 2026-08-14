@@ -25,6 +25,20 @@ rows cross instead. And under the pool, only the shown contract has a step and a
 row count at all, so the grouping belongs at delivery for the shown session
 rather than cached on each held one.*
 
+- [x] 3.0 Measure what a level-based delivery costs before replacing it, and check the two ceilings it runs between. Measured 2026-08-14 in-process on a tick-aligned book, median of 40 crossings, and independently against the live stream.
+
+  | retained per side | `toRendererView` | frame | rows delivered |
+  |---|---|---|---|
+  | 50 | 31 µs | 3.5 KiB | 100 |
+  | 500 | 268 µs | 34.0 KiB | 1 000 |
+  | 1 000 | **459 µs** | **68.0 KiB** | 2 000 |
+
+  At ten frames a second on the shown contract that is 4.6 ms/s of crossing and **680 KiB/s into the renderer**, for a panel that draws about forty rows. Forty rows is one to two KiB. That is the whole of §3 in one line.
+
+  **A ceiling I suspected and checked before claiming: not a problem.** Raising retention to 4 000 does not raise what is delivered — `toRendererView` bounds delivery at `RENDERER_LEVELS_PER_SIDE` = 1 000 a side, so a frame stays near 68 KiB against the protocol's 256 KiB. `OUTBOUND_FRAME_TOO_LARGE` is not newly reachable.
+
+  **What is newly reachable is the operator's original complaint, unfixed.** Delivery still selects the *nearest* thousand levels. Now that the book reaches to −60% and +139% (my own 60 s run on AKEUSDT: 5 045 distinct prices resting outside the REST page, against a page spanning −2.78%…+2.61%), the nearest thousand at a coarse step is a dense clump at the mid and empty far rows — the empty book this change exists to remove. §1's wider book buys the operator nothing at all until rows cross instead of levels.
+
 - [ ] 3.1 Carry the grouping step and the row count on the request that configures depth, and derive the range the page ladder is bought against from them, so one statement serves both instead of two that can disagree.
 - [ ] 3.2 Group in the main process, with the exact-decimal pass the panel uses today, and deliver rows: the bucket price, the resting quantity, the value in USDT, and the bucket key an order is matched by.
 - [ ] 3.3 Keep the arithmetic exact on the way through — the value of a row is the sum of price times quantity over its levels, not the bucket boundary times the summed quantity.
