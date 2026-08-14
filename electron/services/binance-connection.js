@@ -1361,16 +1361,41 @@ export function setupBinanceConnection({
     // the new socket from what the old one was told.
     const tradingCommandRegistry = createTradingCommandRegistry();
 
-    // The leverage of every contract the account is actually holding. Bounded:
-    // an account in eight positions is eight reads at weight 5, and a ninth row
-    // states no leverage rather than spending the minute's budget on it. The
-    // bound applies to what is actually read, so reusing what is held cannot
-    // silently widen it.
-    const refreshFuturesPositionConfigs = async (positions) => {
-        const symbols = [...new Set((Array.isArray(positions) ? positions : [])
-            .filter(position => Number(position?.quantity) !== 0)
-            .map(position => String(position?.symbol ?? '').toUpperCase())
-            .filter(Boolean))];
+    // Both order lists as one, for the single question asked of them here: which
+    // contracts have something resting on them.
+    const futuresWorkingOrderSymbolSource = () => [
+        ...(futuresAccountResources.regularOrders.data ?? []),
+        ...(futuresAccountResources.algoOrders.data ?? []),
+    ];
+
+    // The leverage of every contract the account has anything riding on — a
+    // position it holds, or an order resting on the book. Bounded: eight
+    // contracts is eight reads at weight 5, and a ninth states no leverage
+    // rather than spending the minute's budget on it. The bound applies to what
+    // is actually read, so reusing what is held cannot silently widen it.
+    //
+    // Positions alone was not enough, and the gap stayed invisible until the
+    // desk began checking its own arithmetic against the exchange's. A resting
+    // order commits margin the same way a position does, so the free-margin
+    // estimate has to price every one of them — and it is all-or-nothing across
+    // the whole account by design, because a partial sum would tell the operator
+    // they have more to spend than they do. One order on a contract whose
+    // leverage was never read therefore took the entire answer away. On the
+    // operator's own desk on 2026-08-14, working orders across four contracts
+    // while holding no position, that was twenty-three passes out of
+    // twenty-three: not an unlucky evening, but every account that trades more
+    // than the one contract it happens to be looking at.
+    //
+    // Positions are listed first so that the bound, when it bites, drops a
+    // contract the account merely has an order on before one it has money in.
+    const refreshFuturesPositionConfigs = async (positions, workingOrders = []) => {
+        const symbols = [...new Set([
+            ...(Array.isArray(positions) ? positions : [])
+                .filter(position => Number(position?.quantity) !== 0)
+                .map(position => String(position?.symbol ?? '').toUpperCase()),
+            ...(Array.isArray(workingOrders) ? workingOrders : [])
+                .map(order => String(order?.symbol ?? '').toUpperCase()),
+        ].filter(Boolean))];
         if (symbols.length === 0) return;
         // Asked once per symbol: the hold is measured against the clock, so
         // asking twice could put the same contract in both lists on the
@@ -1488,12 +1513,21 @@ export function setupBinanceConnection({
                 recordFuturesMarginEstimates(operation.type);
             }
             if (operation.type === 'positions') {
-                const positions = futuresAccountResources.positions.data ?? [];
-                futuresMarkPriceFeed?.track(positions);
-                // Every open position's leverage, so the dock can state what each
-                // one is carried at. Not awaited: the account state is already
-                // correct without it, and this only adds a reading to it.
-                void refreshFuturesPositionConfigs(positions);
+                futuresMarkPriceFeed?.track(futuresAccountResources.positions.data ?? []);
+            }
+            // Every contract the account has something riding on, so the dock can
+            // state what each is carried at and the free-margin estimate can
+            // price what the resting orders commit. Read after an order list as
+            // well as after a position list: an account can work orders for a
+            // whole session without ever holding a position, and that is exactly
+            // the account whose leverage nothing else would ask for. Not awaited
+            // — the account state is already correct without it, and this only
+            // adds a reading to it.
+            if (['positions', 'regularOrders', 'algoOrders'].includes(operation.type)) {
+                void refreshFuturesPositionConfigs(
+                    futuresAccountResources.positions.data ?? [],
+                    futuresWorkingOrderSymbolSource(),
+                );
             }
             broadcastFuturesAccountState();
         }, operation.weight).catch((error) => {
@@ -1824,7 +1858,10 @@ export function setupBinanceConnection({
                             // it is valued at and the leverage it is carried at
                             // follow it exactly as they follow a read.
                             futuresMarkPriceFeed?.track(positions);
-                            void refreshFuturesPositionConfigs(positions);
+                            void refreshFuturesPositionConfigs(
+                                positions,
+                                futuresWorkingOrderSymbolSource(),
+                            );
                         }
                     }
                     scheduleFuturesUnstatedRead(unstated);

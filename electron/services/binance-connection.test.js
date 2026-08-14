@@ -4247,6 +4247,55 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(configuredSymbols().filter(symbol => symbol === 'BMTUSDT')).toHaveLength(2);
     });
 
+    // A resting order commits margin exactly as a position does, and the desk
+    // cannot say what is spendable without knowing what every one of them
+    // commits. The contract configuration was read for positions alone, so an
+    // account working orders without holding a position knew the leverage of
+    // nothing — and the free-margin estimate, which is all-or-nothing across the
+    // whole account by design, could not be computed at all. Twenty-three passes
+    // out of twenty-three on the operator's desk on 2026-08-14.
+    it('reads the contract configuration of a contract it only has an order on', async () => {
+        moduleMocks.futuresAdapter.getSymbolConfig
+            .mockImplementation(async symbol => ({
+                symbol, leverage: 20, marginType: 'CROSSED', maxNotionalValue: '5000000',
+            }));
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([
+            positionsRefreshOperation([]),
+            {
+                type: 'regularOrders',
+                weight: 40,
+                errorLabel: 'regular orders',
+                loadPayload: vi.fn().mockResolvedValue({
+                    futures_regular_orders: [{
+                        symbol: 'ORDERONLYUSDT',
+                        orderId: 77,
+                        orderKind: 'REGULAR',
+                        status: 'NEW',
+                        side: 'BUY',
+                        origQty: '10',
+                        executedQty: '0',
+                        price: '3',
+                    }],
+                }),
+            },
+        ]);
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+
+        await runFuturesCommand({
+            action: 'account.refresh', clientOrderId: 'refresh-order-only', symbol: 'BTCUSDT',
+        });
+        await flushMicrotasks();
+
+        expect(configuredSymbols()).toContain('ORDERONLYUSDT');
+        expect(moduleMocks.futuresAdapter.getLeverageBracketTable)
+            .toHaveBeenCalledWith('ORDERONLYUSDT');
+    });
+
     it('reads only the contracts nothing is held for', async () => {
         moduleMocks.futuresAdapter.getSymbolConfig
             .mockImplementation(async symbol => ({
@@ -5304,9 +5353,14 @@ describe('setupBinanceConnection user-data orchestration', () => {
                     liquidationPrice: '80.8080808080808',
                 }],
             });
-            moduleMocks.futuresAdapter.getSymbolConfig.mockResolvedValue({
-                symbol: 'BTCUSDT', leverage: 10, marginType: 'CROSSED', maxNotionalValue: '5000000',
-            });
+            // Echoes the contract it was asked about. Answering every request
+            // with BTCUSDT's configuration hid which contract the desk was
+            // actually reading, and the bracket table — stored only when its
+            // symbol matches the config's — was then dropped for every contract
+            // but one.
+            moduleMocks.futuresAdapter.getSymbolConfig.mockImplementation(async symbol => ({
+                symbol, leverage: 10, marginType: 'CROSSED', maxNotionalValue: '5000000',
+            }));
 
             await connectRecordedRenderer();
             await vi.advanceTimersByTimeAsync(5_000);
