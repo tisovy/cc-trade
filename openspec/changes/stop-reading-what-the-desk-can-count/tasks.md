@@ -1,5 +1,36 @@
 ## 1. Gathering The Evidence
 
+*Read on 2026-08-14, the day the comparison landed (`3452f2d`, 12:24), from the
+operator's own journal after the desk ran that evening. The window has **not
+started**, and one of the two reasons is a defect rather than a wait:*
+
+```
+notional            passes 0/11   unavailable  0
+initial-margin      passes 0/11   unavailable  0
+maintenance-margin  passes 0/11   unavailable  0
+liquidation-price   passes 0/11   unavailable  0
+free-margin         passes 0/23   unavailable 23 passes / 23 rows (23 wholly)
+```
+
+*The four position values compared nothing because the account held no position
+all session — the operator placed and cancelled orders without opening one. That
+is a wait, not a fault.*
+
+*Free margin is a fault. It needs no position, only the wallet, and it failed to
+compute on **every one of twenty-three passes**. The gate is
+`futures-account-margin.js:340` — `!incomplete && crossWallet !== null &&
+orderMargin !== null` — and the operator had working orders throughout, so
+`orderMargin` should have been computable unless the leverage brackets or symbol
+configs were not there. Left to the session that owns that change; reported to it
+the same day.*
+
+*Why it is worth writing here rather than only there: the bar below asks for
+**zero passes the desk could not compute**. While free margin is never
+computable the bar cannot be cleared however long the window runs — and the
+window is ten trading days against a record that keeps fourteen. Without this
+note the operator sits out two weeks and then finds an empty record, which is the
+exact failure the bar was written early to prevent.*
+
 - [ ] 1.1 Do not start this change until `compute-the-unstated-values-beside-the-read` has been running for the window in the proposal. There is nothing to decide before then.
 - [ ] 1.2 Operator copies the day's record files aside if the window is to run longer than the fourteen days the record keeps.
 - [ ] 1.3 Operator reads `node scripts/read-desk-record.mjs` over the window and states, per value, the passes compared, the worst disagreement and where, and the passes that could not be computed.
