@@ -417,10 +417,44 @@ const bestPrice = (side, descending) => {
  * from the market in both cases. A bucket straddling the edge of the band is
  * counted as not whole, because part of it is not.
  */
+// How far out the book still has substance, as a share of the levels a side
+// holds. The reading it produces is what the grouping ladder is cut against, so
+// it decides how far the operator can zoom out and still see rows with something
+// in them.
+//
+// Not the furthest level. Measured on 2026-08-14 over five minutes of stream,
+// the furthest level is an outlier on every contract looked at, and not by a
+// little: AKEUSDT's furthest ask stood at 1 357 378% of price while the
+// hundredth of the side behind it stood at 145%, and BTCUSDT's furthest bid at
+// 99% against 10%. Cutting the ladder against one absurd resting order offers a
+// step whose rows span most of a market that has nothing in it — which is the
+// blank far rows this whole change exists to remove, arriving through the other
+// door.
+//
+// A hundredth of a side is a few dozen levels on a real book. What is given up
+// is the ability to zoom out far enough to see them; what is bought is that
+// every row of every step the ladder offers has book behind it.
+//
+// Expressed as levels dropped rather than as an index into the side, so a short
+// book keeps its whole span: a hundredth of two levels is none of them, and a
+// side with nothing to trim is measured to its edge exactly as before.
+const FUTURES_WORKSTATION_BOOK_OUTLIER_SHARE = 0.01;
+
+const reachOfEntries = (entries, descending) => {
+    if (entries.length === 0) return null;
+    const best = entries[0].price;
+    const dropped = Math.floor(entries.length * FUTURES_WORKSTATION_BOOK_OUTLIER_SHARE);
+    const far = entries[entries.length - 1 - dropped].price;
+    return descending
+        ? subtractFuturesWorkstationDecimals(best, far)
+        : subtractFuturesWorkstationDecimals(far, best);
+};
+
 const groupSide = (side, descending, step, rows, band) => {
     const entries = sortedByPrice(side, descending);
     return {
         best: entries.length > 0 ? entries[0].price : null,
+        reach: reachOfEntries(entries, descending),
         rows: Object.freeze(groupFuturesBookLevels({
             levels: entries,
             side: descending ? 'bid' : 'ask',
@@ -616,16 +650,14 @@ export class FuturesWorkstationOrderBook {
      * for, and the book reaches past it by whatever the stream has restated.
      * That difference is the whole book, near enough — measured 2026-08-13, the
      * levels inside one page hold 7% to 18% of the resting value of a contract.
+     *
+     * Built from the sides already sorted for the rows, so it costs nothing.
      */
     reachOfBook() {
-        const edge = (side, descending) => {
-            const best = bestPrice(side, descending);
-            const furthest = bestPrice(side, !descending);
-            if (best === null || furthest === null) return null;
-            return descending
-                ? subtractFuturesWorkstationDecimals(best, furthest)
-                : subtractFuturesWorkstationDecimals(furthest, best);
-        };
+        const edge = (side, descending) => reachOfEntries(
+            sortedByPrice(side, descending),
+            descending,
+        );
         const below = edge(this.bids, true);
         const above = edge(this.asks, false);
         if (below === null || above === null) return null;
@@ -827,7 +859,9 @@ export class FuturesWorkstationOrderBook {
             // Stated only once no deeper page can be bought. Before then a wider
             // near book is one read away, and a ladder cut here would stop the
             // operator selecting the step that buys it.
-            reach: atDeepestPage ? this.reachOfBook() : null,
+            reach: atDeepestPage && bids.reach !== null && asks.reach !== null
+                ? Object.freeze({ below: bids.reach, above: asks.reach })
+                : null,
         });
     }
 

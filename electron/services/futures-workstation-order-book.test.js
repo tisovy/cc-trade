@@ -1081,6 +1081,60 @@ describe('the rows say which of them are whole', () => {
     });
 });
 
+describe('how far the book states it reaches', () => {
+    const sideOf = (count, descending, mid = 1_000) => Array.from(
+        { length: count },
+        (_, index) => [`${descending ? mid - index : mid + 1 + index}`, '1'],
+    );
+
+    // The reading the grouping ladder is cut against, so it decides how far the
+    // operator can zoom out and still see rows with anything in them. One
+    // absurd resting order — measured on a live contract, an ask at 1 357 378%
+    // of price with the hundredth of the side behind it at 145% — would
+    // otherwise offer a step whose rows span a market that is not there.
+    it('is not stretched by a level resting far past the rest of the side', () => {
+        const bids = sideOf(300, true);
+        const asks = sideOf(300, false);
+        const plain = bookFromLevels(bids, asks)
+            .toRendererRows({ rows: 14, atDeepestPage: true }).reach;
+        // The same book, plus one order a thousand times away from the market on
+        // each side — legal, real, and nothing anybody is trading against.
+        const book = bookFromLevels(bids, asks);
+        expect(book.push(delta({
+            firstUpdateId: '101',
+            finalUpdateId: '101',
+            previousFinalUpdateId: '100',
+            bids: [['1', '1']],
+            asks: [['1000000', '1']],
+        }), 1).applied).toBe(true);
+        const reach = book.toRendererRows({ rows: 14, atDeepestPage: true }).reach;
+        // The far order sits 999 away on the bid side and 999 000 away on the
+        // ask. The reading does not follow it: one more level in a side moves
+        // the boundary out by one level, and by nothing else.
+        expect(Number(reach.below)).toBeLessThanOrEqual(Number(plain.below) + 1);
+        expect(Number(reach.above)).toBeLessThanOrEqual(Number(plain.above) + 1);
+    });
+
+    // What is dropped is a share of the side, so a side with nothing to spare
+    // keeps its whole span: a hundredth of two levels is none of them.
+    it('measures a short side to its own edge', () => {
+        const book = bookFromLevels(
+            [['100', '1'], ['98', '1']],
+            [['101', '1'], ['104', '1']],
+        );
+        expect(book.toRendererRows({ rows: 14, atDeepestPage: true }).reach)
+            .toEqual({ below: '2', above: '3' });
+    });
+
+    // Only once no deeper page can be bought: before then a wider near book is
+    // one read away, and a ladder cut here would stop the operator selecting the
+    // step that buys it.
+    it('states nothing while a deeper page can still be bought', () => {
+        const book = bookFromLevels([['100', '1'], ['98', '1']], [['101', '1']]);
+        expect(book.toRendererRows({ rows: 14 }).reach).toBeNull();
+    });
+});
+
 describe('what a side remembers about its own prices', () => {
     // Two comparisons of the same two prices now live in this file: the one that
     // reads decimal strings, which the band and the spread go through, and the

@@ -93,10 +93,15 @@ const describeBookStep = (step, referencePrice) => {
   return `${step} · ${share < 0.01 ? '<0.01' : share.toFixed(2)}%`
 }
 
-// How far the exchange publishes the book, as a share of price. Stated on the
+// How far the book the desk holds has levels, as a share of price. Stated on the
 // narrower of the two sides, which is the one the step list is cut against: a
 // reading that named the wider side would promise rows the other half of the
 // panel cannot fill.
+//
+// Not how far the exchange publishes: the desk keeps every level the stream
+// restates, and the furthest of them is one resting order nobody is trading
+// against — measured on a live contract, an ask at 1 357 378% of price. The
+// reading is taken past the furthest hundredth of each side for that reason.
 const describeBookReach = (below, above, referencePrice) => {
   const price = Number(referencePrice)
   const narrower = Math.min(Number(below), Number(above))
@@ -656,7 +661,7 @@ export const FuturesWorkstationView = ({
   const bookReachText = describeBookReach(reachBelow, reachAbove, lastPrice)
   const bookReachTitle = bookReachText === null
     ? null
-    : `Binance publishes this book ${reachBelow} below the best bid and ${reachAbove} above the best ask. The step list ends where the rows can still be filled from it.`
+    : `The book the desk holds has levels ${reachBelow} below the best bid and ${reachAbove} above the best ask. Measured past the furthest hundredth of each side, which on a live market is a handful of orders resting nowhere near it. The step list ends where the rows can still be filled from this.`
   // The rows arrive grouped. They used to arrive as a thousand raw levels a side
   // and be grouped here, which meant the thousand had to be chosen before the
   // step was known — nearest-first, which at a coarse step is a dense clump

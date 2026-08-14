@@ -14,9 +14,18 @@ restates levels far outside it — so a reading taken from the page states what 
 desk can draw, which is what the ladder must be cut against, and states nothing
 about what the market holds beyond it.
 
-The reading SHALL be taken from what the page proved when it was read rather than
-from the distance currently left to the edge of the band, which shrinks as the
-market walks and would move the ladder under the operator's hand.
+The reading SHALL be taken from where the book still has substance rather than
+from the single level furthest from the market. A resting order far outside the
+market is legal, real, and nothing anybody trades against; cut against it, the
+ladder offers a step whose rows span a stretch of price the book has almost
+nothing in, which is the blank far rows the ladder exists to prevent. A share of
+each side's levels SHALL be left outside the reading, expressed as levels dropped
+rather than as a position in the side, so a side with nothing to spare is still
+measured to its own edge.
+
+The reading SHALL NOT be taken from the distance currently left to the edge of the
+band, which shrinks as the market walks and would move the ladder under the
+operator's hand.
 
 The reading SHALL be stated only when no deeper page can be bought. Until the
 ladder of pages is exhausted a wider reading is one read away, and the ladder
@@ -144,6 +153,14 @@ bytes, and a validation pass — to be discarded on arrival.
 #### Scenario: No reach has been stated yet
 - **WHEN** the book has been delivered from a page the exchange offers a deeper one than
 - **THEN** every rung of the ladder is offered, so the operator can select the step that buys the deeper page
+
+#### Scenario: One order rests far past the rest of a side
+- **WHEN** a side holds a resting order much further from the market than the levels behind it
+- **THEN** the stated reach is not stretched to it, and the ladder is cut where the side still has levels to fill rows from
+
+#### Scenario: A side has too few levels to leave any out
+- **WHEN** the share to be left outside the reading rounds down to no levels at all
+- **THEN** the side is measured to its own furthest level
 
 #### Scenario: The two sides reach differently
 - **WHEN** one side of the page proved further than the other
