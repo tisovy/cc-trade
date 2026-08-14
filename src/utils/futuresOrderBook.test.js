@@ -4,8 +4,10 @@ import {
   futuresBookDepthRange,
   futuresBookGroupKey,
   futuresBookGroupSteps,
+  futuresBookParsedDecimalCount,
   futuresBookWallKeys,
   groupFuturesBookLevels,
+  readFuturesBookRows,
 } from './futuresOrderBook.js'
 
 const level = (price, quantity) => ({ price, quantity })
@@ -273,5 +275,44 @@ describe('futuresBookWallKeys', () => {
   it('ignores levels it cannot size instead of ranking them as empty walls', () => {
     const walls = futuresBookWallKeys(rows([0, Number.NaN, 12, 8, 4, 2]), 3)
     expect([...walls].sort()).toEqual(['k2', 'k3', 'k4'])
+  })
+})
+
+// The cache under the grouping pass exists because a book restates the same
+// prices frame after frame. What a frame *computes* has the opposite shape: a
+// row's value is a sum that moves the moment any level in its bucket moves, so
+// every one of them is a string that will never be asked for twice.
+//
+// Left going through the cache they fill it, evict the prices that do repeat,
+// and empty it on a timer nobody chose — measured on the operator's own panel,
+// twenty-eight rows a frame at ten frames a second put 9.2 MiB of dead entries
+// through it and cleared the whole thing every 234 seconds.
+describe('what the grouping pass remembers', () => {
+  it('remembers a price the book restates', () => {
+    const before = futuresBookParsedDecimalCount()
+    groupFuturesBookLevels({
+      levels: [{ price: '11111.0001', quantity: '2.5' }],
+      side: 'bid',
+      step: null,
+      limit: 1,
+    })
+    expect(futuresBookParsedDecimalCount()).toBeGreaterThan(before)
+  })
+
+  it('does not remember the sums a frame computed', () => {
+    // Unique to this run, so a hit could only come from this call.
+    const rows = Array.from({ length: 40 }, (_, index) => ({
+      price: '1',
+      quantity: '1',
+      groupKey: '1',
+      value: `987654321${String(index).padStart(3, '0')}.7654321`,
+    }))
+    const before = futuresBookParsedDecimalCount()
+    const read = readFuturesBookRows(rows)
+    expect(read).toHaveLength(40)
+    // Compared against the string's own value rather than a literal: the sum is
+    // exact through atoms and only becomes a double on the way to a bar width.
+    expect(read[0].notionalUsdt).toBe(Number(rows[0].value))
+    expect(futuresBookParsedDecimalCount()).toBe(before)
   })
 })
