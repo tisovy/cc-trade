@@ -1198,6 +1198,21 @@ describe('what a side remembers about its own prices', () => {
         expect(book.toRendererRows().bids.map(row => row.price)).toEqual(bids);
     });
 
+    // A cache smaller than the side it is walked over is worse than no cache:
+    // it empties partway through every pass and the next pass re-parses the book
+    // it just forgot. The two numbers are set independently here, so this states
+    // the relation between them rather than trusting it to stay true.
+    it('remembers more prices than a side can ever hold', () => {
+        const { RETAINED_LEVELS_PER_SIDE, EVICTION_SLACK, DIFF_LEVELS_PER_SIDE } =
+            FUTURES_WORKSTATION_ORDER_BOOK_LIMITS;
+        const book = new FuturesWorkstationOrderBook();
+        // The most a side can hold at once: the ceiling, the slack eviction is
+        // allowed to run past it by, and one diff's worth applied before the
+        // eviction pass runs.
+        const largestSide = RETAINED_LEVELS_PER_SIDE + EVICTION_SLACK + DIFF_LEVELS_PER_SIDE;
+        expect(book.bids.parsedBound).toBeGreaterThan(largestSide);
+    });
+
     // The cache is a pure function of a price string, so it can never hold a
     // wrong answer — only too many right ones. What it must not do is lose a
     // level: forgetting is by price, and a price the side still holds is not

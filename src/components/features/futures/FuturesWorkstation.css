@@ -1144,21 +1144,32 @@
   background: rgba(126, 143, 166, 0.1);
 }
 
-/* A row past the stretch of price the desk read whole. It is drawn on the outer
-   edge of the ladder — away from the price, the size and the running total, all
-   of which are exact for the levels the row does hold. What the mark says is
-   that levels may be missing from it, and a treatment that touched the numbers
-   would say the numbers are wrong, which they are not. */
-   The right edge on both sides, because the left one already carries the
-   working-order tick and two marks in one place is neither. */
+/* A row past the stretch of price the desk read whole. What the mark says is
+   that levels may be missing from the row, and a treatment that touched the
+   price, the size or the running total would say those are wrong, which they
+   are not — every level the row does hold was named by the exchange.
+
+   On the leading edge, not the trailing one. The depth bar is drawn from
+   `right: 0` and grows leftwards, so its right edge is where every bar starts
+   and where the eye reads its length from; a strip there sits on top of that
+   anchor on every marked row. The leading edge is clear except for the
+   working-order tick, which steps aside below when a row carries both. */
 .futures-workstation-book-side button.is-beyond-read::after {
   content: '';
   position: absolute;
   top: 0;
-  right: 0;
+  left: 0;
   width: 2px;
   height: 100%;
-  background: rgba(126, 143, 166, 0.45);
+  background: rgba(126, 143, 166, 0.55);
+}
+
+/* Two marks on one row, side by side rather than one over the other. The tick
+   is a square turned forty-five degrees, so it reaches about three pixels
+   either side of where it is placed — six clears the strip, four leaves a
+   corner of it touching. */
+.futures-workstation-book-side button.is-beyond-read .futures-workstation-book-own {
+  left: 6px;
 }
 
 .futures-workstation-book-own {

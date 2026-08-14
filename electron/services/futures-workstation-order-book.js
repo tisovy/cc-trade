@@ -864,15 +864,17 @@ export class FuturesWorkstationOrderBook {
             spread: bids.best && asks.best
                 ? subtractFuturesWorkstationDecimals(asks.best, bids.best)
                 : '0',
-            // How far the book on hand reaches past the best price on each side —
-            // where the book ends, not where the rows do. The panel cannot work
-            // it out from what it was sent: it would only measure its own step
-            // back.
+            // How far the book on hand still has levels past the best price on
+            // each side — where the book runs out, not where the rows do. The
+            // panel cannot work it out from what it was sent: it would only
+            // measure its own step back.
             //
-            // Measured over the levels actually held rather than over the band:
-            // the band is the stretch that is *complete*, and past it the book
-            // holds everything the stream has restated since — most of it, by
-            // value, on every contract measured.
+            // Measured over the levels held rather than over the band: the band
+            // is the stretch that is *complete*, and past it the book holds
+            // everything the stream has restated since — most of it, by value,
+            // on every contract measured. And measured past the furthest
+            // hundredth of each side, because the very furthest level is one
+            // resting order nobody trades against. See `reachOfEntries`.
             //
             // Stated only once no deeper page can be bought. Before then a wider
             // near book is one read away, and a ladder cut here would stop the
