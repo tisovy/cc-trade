@@ -122,16 +122,17 @@ const payloads = Object.freeze({
       quantity: '2',
       value: '116840',
       groupKey: '58420000000000000000000',
+      whole: true,
     })]),
     asks: Object.freeze([Object.freeze({
       price: '58421',
       quantity: '3',
       value: '175263',
       groupKey: '58421000000000000000000',
+      whole: true,
     })]),
     spread: '1',
     reach: Object.freeze({ below: '120', above: '118' }),
-    proven: Object.freeze({ below: '40', above: '38' }),
   }),
   [FUTURES_WORKSTATION_RESOURCES.TRADES]: Object.freeze({
     rows: Object.freeze([Object.freeze({
@@ -163,11 +164,13 @@ describe('Futures workstation environment-specific protocols', () => {
   // contract carry the reading its rows need, 9 stated the book's reach on the
   // delivery, and 10 crosses the rows the panel draws instead of the levels they
   // are grouped from — the request states a step and a row count, the delivery
-  // answers in rows. A renderer and a desk that disagree about that shape would
+  // answers in rows. 11 states on each row whether the page the band was read
+  // from named every price it could hold, and drops the reading of that boundary
+  // nothing was left asking. A renderer and a desk that disagree about that shape would
   // refuse every frame by exact keys, so they refuse each other on the version
   // instead — once, legibly.
-  it('uses protocol revision 10 for a book that crosses as rows', () => {
-    expect(FUTURES_WORKSTATION_PROTOCOL_VERSION).toBe('10')
+  it('uses protocol revision 11 for rows that say which of them are whole', () => {
+    expect(FUTURES_WORKSTATION_PROTOCOL_VERSION).toBe('11')
   })
 
   it('preserves an unavailable per-symbol algo limit instead of inventing one', () => {
@@ -580,6 +583,7 @@ describe('Futures workstation environment-specific protocols', () => {
       quantity: '184467440737.09551615',
       value: '170028355150614447.123456789012345678',
       groupKey: '9'.repeat(64),
+      whole: true,
     })
     const event = createFuturesProductionWorkstationEvent({
       ...createEventValues('depth'),
@@ -594,7 +598,6 @@ describe('Futures workstation environment-specific protocols', () => {
           (_, index) => row(index + 1)),
         spread: '0.00001',
         reach: null,
-        proven: null,
       },
     })
     const raw = JSON.stringify(event)

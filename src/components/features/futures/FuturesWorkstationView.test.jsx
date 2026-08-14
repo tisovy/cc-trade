@@ -10,7 +10,7 @@ import { GROUPING_MULTIPLIERS, groupFuturesBookLevels } from '../../../utils/fut
 // pass over the whole book and delivers the rows. A fixture that states levels
 // is stating what the desk stopped sending, so it is built through the same pass
 // — one level to a row, which is the ungrouped reading the panel opens at.
-const bookRow = (price, quantity, side = 'bid') => {
+const bookRow = (price, quantity, side = 'bid', whole = true) => {
   const [row] = groupFuturesBookLevels({
     levels: [{ price, quantity }],
     side,
@@ -22,6 +22,9 @@ const bookRow = (price, quantity, side = 'bid') => {
     quantity: row.quantity,
     value: row.value,
     groupKey: row.groupKey,
+    // Whether the page the band was read from named every price this row could
+    // hold. The desk states it per row; the panel only draws it.
+    whole,
   })
 }
 
@@ -679,6 +682,65 @@ describe('pure Futures workstation presentation', () => {
     expect(screen.getByTitle('1 working sell order here')).toBeInTheDocument()
   })
 
+  // The operator sizes a breakout against the far rows, and past the stretch of
+  // price the desk read whole a row can only understate: every level printed on
+  // it rests there, but levels nobody has restated since the page was read are
+  // missing from it. The mark is on the row and never on its numbers — those are
+  // exact for what the row does hold.
+  it('marks the book rows that lie beyond the book the desk read whole', () => {
+    const state = createState()
+    const { container } = renderView({
+      state: createState({
+        resources: Object.freeze({
+          ...state.resources,
+          depth: Object.freeze({
+            ...state.resources.depth,
+            bids: Object.freeze([
+              bookRow('58420.00', '2', 'bid'),
+              bookRow('58400.00', '5', 'bid', false),
+            ]),
+            asks: Object.freeze([
+              bookRow('58420.50', '3', 'ask'),
+              bookRow('58440.00', '7', 'ask', false),
+            ]),
+          }),
+        }),
+      }),
+    })
+    const marked = [...container.querySelectorAll('.is-beyond-read')]
+      .map(row => row.querySelector('span').textContent)
+    expect(marked).toEqual(['58440.00', '58400.00'])
+    // And the reading is on the row itself, so it is there for a screen reader
+    // as well as for the eye.
+    expect(screen.getByLabelText(/price 58400.*beyond the read book/))
+      .toBeInTheDocument()
+    // And nothing is said about the rows the desk did read whole.
+    const unmarked = [...container.querySelectorAll('.futures-workstation-book-side button')]
+      .filter(row => !row.classList.contains('is-beyond-read'))
+    expect(unmarked).toHaveLength(2)
+    expect(unmarked.every(row => !row.getAttribute('aria-label').includes('beyond'))).toBe(true)
+  })
+
+  // A book with no band proves nothing, so no row of it is whole. Nothing about
+  // the rows changes: they are the market as the exchange stated it, and what
+  // the mark says is that the desk cannot promise there is nothing between them.
+  it('marks every row while the desk has read no page whole', () => {
+    const state = createState()
+    const { container } = renderView({
+      state: createState({
+        resources: Object.freeze({
+          ...state.resources,
+          depth: Object.freeze({
+            ...state.resources.depth,
+            bids: Object.freeze([bookRow('58420.00', '2', 'bid', false)]),
+            asks: Object.freeze([bookRow('58420.50', '3', 'ask', false)]),
+          }),
+        }),
+      }),
+    })
+    expect(container.querySelectorAll('.is-beyond-read')).toHaveLength(2)
+  })
+
   // A step means nothing until it is read against the price it groups. On a
   // low-priced contract a coarse step swallows the whole book into two rows,
   // which reads as a broken book rather than a coarse setting — so the share of
@@ -809,6 +871,7 @@ describe('pure Futures workstation presentation', () => {
               quantity: row.quantity,
               value: row.value,
               groupKey: row.groupKey,
+              whole: true,
             })]),
           }),
         }),

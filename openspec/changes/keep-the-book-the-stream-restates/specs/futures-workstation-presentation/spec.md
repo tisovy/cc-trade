@@ -17,9 +17,29 @@ whole book streamed for a contract is a few thousand levels a side; one snapshot
 page is a thousand of them and, measured, holds under a fifth of the resting
 value.
 
-Where the accounted-for book ends SHALL travel with the delivery, and the panel
-SHALL mark the rows beyond it, so a far row is read as what it is by an operator
-sizing a breakout against it.
+Each delivered row SHALL state whether it is whole: whether the page the band was
+read from named every price that row could be holding. The panel SHALL mark the
+rows that are not, so a far row is read as what it is by an operator sizing a
+breakout against it.
+
+It SHALL be stated per row rather than as a boundary the panel measures its own
+rows against. A boundary would be the same arithmetic done on both sides of the
+wire, over buckets only one side built, and the two would part exactly where the
+bucket key did — a row belongs to the desk that grouped it.
+
+A row grouping several prices SHALL be judged by the end of its bucket furthest
+from the market, so a bucket with one foot outside the band is not whole. Part of
+it stands over prices nobody read, and a row that may understate is worth naming
+even when most of it does not.
+
+A book with no band SHALL call no row whole. That is the honest reading rather
+than a special case: a page that proved nothing proves nothing about any row, and
+so does a page the market has since traded clean out of.
+
+The mark SHALL NOT change what the row states. Every level the row holds was
+named by the exchange and is exact; what may be missing is levels nobody has
+restated. Dimming a size to say the size might be low would make the panel state
+something false about a number that is true.
 
 Whether the band still reaches the rows on screen SHALL be judged for each side
 against its own edge, and the depth bought SHALL answer the side that falls
@@ -94,6 +114,18 @@ reach deep enough for the step it is read at.
 #### Scenario: One side of the band falls short of the rows
 - **WHEN** the band reaches past the rows on one side and falls short of them on the other
 - **THEN** the shortfall is measured on the side that falls short, and a page deep enough for that side is bought, rather than the wide side being taken as proof that the reading is covered
+
+#### Scenario: A row stands beyond the page the band was read from
+- **WHEN** the stream has restated levels outside the band and the panel draws rows over them
+- **THEN** each of those rows is delivered marked as not whole, and the panel marks it, while the rows inside the band are left unmarked
+
+#### Scenario: A bucket straddles the edge of the band
+- **WHEN** a grouped row covers prices on both sides of the edge of the band
+- **THEN** it is not whole, because part of it stands over prices no page named
+
+#### Scenario: The desk has read no page whole
+- **WHEN** the book holds levels but no snapshot has proved a band, or the market has traded clean out of the one that did
+- **THEN** no row is whole, and every row on the panel is marked
 
 #### Scenario: A short side is delivered
 - **WHEN** the book cannot prove the rows on one side and a diff is applied

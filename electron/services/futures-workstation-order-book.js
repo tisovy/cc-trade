@@ -385,8 +385,21 @@ const bestPrice = (side, descending) => {
  * second implementation held to agree with it. A row the book computes and a
  * row the panel would have computed are then the same row by construction,
  * including the bucket key a working order is matched by.
+ *
+ * Each row also states whether it is whole: whether every price it could be
+ * holding was named by the page the band was read from. Inside the band the
+ * exchange named every resting level, so a row there is the market. Outside it
+ * the row holds what the stream has restated since — exact for each level it
+ * names, and silent about levels nobody has touched — so it can only understate.
+ * The operator sizes a breakout against the far rows, and a row that may
+ * understate is a different thing to size against than one that cannot.
+ *
+ * A bucket is judged by its far edge, which is the price it prints: bids round
+ * down and asks round up, so the printed price is the end of the bucket furthest
+ * from the market in both cases. A bucket straddling the edge of the band is
+ * counted as not whole, because part of it is not.
  */
-const groupSide = (side, descending, step, rows) => {
+const groupSide = (side, descending, step, rows, band) => {
     const entries = sortedByPrice(side, descending);
     return {
         best: entries.length > 0 ? entries[0].price : null,
@@ -400,6 +413,7 @@ const groupSide = (side, descending, step, rows) => {
             quantity: row.quantity,
             value: row.value,
             groupKey: row.groupKey,
+            whole: band !== null && band.contains(row.price),
         }))),
     };
 };
@@ -730,33 +744,6 @@ export class FuturesWorkstationOrderBook {
     }
 
     /**
-     * How far past the best price the book is *accounted for* on each side —
-     * the stretch inside which every resting level is named, rather than only
-     * the ones the stream has restated since the page was read.
-     *
-     * Measured from where the market is now, not from where it was when the
-     * page was bought: the band is a pair of fixed prices and the market moves
-     * inside it, so the room left below the floor is what the operator can still
-     * read as complete. A market that has traded clean out of its band accounts
-     * for nothing, and says so.
-     *
-     * Distinct from `reachOfBook` in exactly the way the two facts are distinct:
-     * that one is how far the book reaches, this one is how far it can be
-     * trusted to be whole, and the rows between them may understate.
-     */
-    provenReach() {
-        if (this.band === null) return null;
-        const bid = bestPrice(this.bids, true);
-        const ask = bestPrice(this.asks, false);
-        if (bid === null || ask === null) return null;
-        if (!this.band.contains(bid) || !this.band.contains(ask)) return null;
-        return Object.freeze({
-            below: subtractFuturesWorkstationDecimals(bid, this.band.floor),
-            above: subtractFuturesWorkstationDecimals(this.band.ceiling, ask),
-        });
-    }
-
-    /**
      * The book as the renderer draws it: the rows the panel said it draws,
      * grouped by the step the panel said it groups by.
      *
@@ -784,8 +771,8 @@ export class FuturesWorkstationOrderBook {
             && isPositiveFuturesWorkstationDecimal(step)
             ? step
             : null;
-        const bids = groupSide(this.bids, true, grouped, drawn);
-        const asks = groupSide(this.asks, false, grouped, drawn);
+        const bids = groupSide(this.bids, true, grouped, drawn, this.band);
+        const asks = groupSide(this.asks, false, grouped, drawn, this.band);
         return Object.freeze({
             lastUpdateId: this.lastUpdateId.toString(),
             // The step these rows were actually grouped by, which is not always
@@ -823,10 +810,6 @@ export class FuturesWorkstationOrderBook {
             // near book is one read away, and a ladder cut here would stop the
             // operator selecting the step that buys it.
             reach: atDeepestPage ? this.reachOfBook() : null,
-            // And where inside that reach the book stops being whole, so the
-            // panel can mark the rows that may understate instead of the
-            // operator having to know which they are.
-            proven: this.provenReach(),
         });
     }
 

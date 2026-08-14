@@ -1,5 +1,5 @@
 export const FUTURES_WORKSTATION_MARKET_TYPE = 'USD_M_FUTURES'
-export const FUTURES_WORKSTATION_PROTOCOL_VERSION = '10'
+export const FUTURES_WORKSTATION_PROTOCOL_VERSION = '11'
 export const FUTURES_WORKSTATION_REQUEST_MAX_BYTES = 1_024
 // Sized around the largest frame the desk actually sends — a full depth view.
 // The bound exists so a hostile frame can never force an unbounded parse, not to
@@ -542,10 +542,20 @@ const validateCandleHistory = (value) => (
 //
 // No running total: a cumulative column is a fact about the rows on screen, and
 // which of them are on screen is the panel's business. It is built there.
+//
+// whole: whether every price this row could be holding was named by the page the
+// band was read from. Inside the band the exchange named every resting level, so
+// the row is the market; outside it the row holds what the stream has restated
+// since, exact for each level it names and silent about levels nobody has
+// touched — so it can only understate. Stated per row rather than as a boundary
+// the panel measures rows against, because a boundary would be arithmetic done
+// on both sides of the wire against a bucket the panel did not build, and the
+// two would disagree exactly the way the bucket key did.
 const validateDepthRow = (value) => (
-  hasExactFuturesWorkstationKeys(value, ['price', 'quantity', 'value', 'groupKey'])
+  hasExactFuturesWorkstationKeys(value, ['price', 'quantity', 'value', 'groupKey', 'whole'])
   && [value.price, value.quantity, value.value].every(isCanonicalFuturesDecimal)
   && isFuturesWorkstationBucketKey(value.groupKey)
+  && typeof value.whole === 'boolean'
 )
 
 // reach: how far the book on hand reaches past the best price on each side, or
@@ -571,14 +581,8 @@ const validateDepth = (value) => (
     'asks',
     'spread',
     'reach',
-    // How far the book is accounted for, inside the reach above. Rows beyond it
-    // hold what the stream has restated and may understate what rests there;
-    // rows inside it are complete. Null when no page has proved anything yet, or
-    // when the market has traded clean out of the one that did.
-    'proven',
   ])
   && validateDepthReach(value.reach)
-  && validateDepthReach(value.proven)
   && (value.step === null || isCanonicalFuturesDecimal(value.step))
   && isCanonicalFuturesIdentity(value.lastUpdateId)
   && Array.isArray(value.bids)

@@ -244,6 +244,9 @@ export const readFuturesBookRows = (rows) => {
       quantity: row.quantity,
       notionalUsdt: atomsToNumber(valueAtoms),
       cumulativeUsdt: atomsToNumber(cumulativeAtoms),
+      // Carried rather than computed: whether a row is whole is a fact about the
+      // page the book was read from, which the panel has never seen.
+      whole: row.whole === true,
     }))
   }
   return Object.freeze(read)

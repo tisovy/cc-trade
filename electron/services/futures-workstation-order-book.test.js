@@ -788,10 +788,11 @@ describe('the reading is the rows the panel draws', () => {
             .toBe(view.bids[1].groupKey);
     });
 
-    it('delivers a row as price, quantity, value and key, with no running total', () => {
+    it('delivers a row as price, quantity, value, key and whether it is whole, with no running total', () => {
         const view = deepBook().toRendererRows({ step: '5', rows: 14 });
         for (const side of [view.bids, view.asks]) {
-            expect(Object.keys(side[0])).toEqual(['price', 'quantity', 'value', 'groupKey']);
+            expect(Object.keys(side[0]))
+                .toEqual(['price', 'quantity', 'value', 'groupKey', 'whole']);
         }
     });
 
@@ -1005,6 +1006,73 @@ describe('what the book retains', () => {
         expect(actualBids).toEqual(ordered([...originalBids, ...addedBids], true));
         expect(actualAsks).toEqual(ordered([...originalAsks, ...addedAsks], false));
         expect(actualBids.length).toBe(limit + addedBids.length);
+    });
+});
+
+describe('the rows say which of them are whole', () => {
+    // A snapshot names every resting level inside the stretch of price it
+    // covers, so a row there is the market. Past it the book holds only what the
+    // stream has since restated — exact for each level it names, silent about
+    // levels nobody has touched — so such a row can only understate, and the
+    // operator sizes a breakout against exactly those far rows.
+    it('marks the rows beyond the page the band was read from', () => {
+        const book = new FuturesWorkstationOrderBook();
+        expect(book.bootstrap(snapshot({
+            bids: [['100', '1'], ['99', '1'], ['98', '1']],
+            asks: [['101', '1'], ['102', '1'], ['103', '1']],
+        })).live).toBe(true);
+        // The stream restates levels the page never reached, on both sides.
+        expect(book.push(delta({
+            firstUpdateId: '101',
+            finalUpdateId: '101',
+            previousFinalUpdateId: '100',
+            bids: [['90', '5'], ['80', '5']],
+            asks: [['110', '5'], ['120', '5']],
+        }), 1).applied).toBe(true);
+        const view = book.toRendererRows({ rows: 14 });
+        expect(view.bids.map(row => [row.price, row.whole])).toEqual([
+            ['100', true], ['99', true], ['98', true], ['90', false], ['80', false],
+        ]);
+        expect(view.asks.map(row => [row.price, row.whole])).toEqual([
+            ['101', true], ['102', true], ['103', true], ['110', false], ['120', false],
+        ]);
+    });
+
+    // A bucket is judged by the price it prints, which is its far edge on both
+    // sides: bids round down, asks round up. So a bucket with one foot outside
+    // the band is not whole — part of it is over levels nobody read.
+    it('counts a bucket straddling the edge of the band as not whole', () => {
+        const book = new FuturesWorkstationOrderBook();
+        expect(book.bootstrap(snapshot({
+            bids: [['100', '1'], ['96', '1']],
+            asks: [['104', '1'], ['108', '1']],
+        })).live).toBe(true);
+        // Grouped by ten, the second bid bucket runs 90–99 and the band floor is
+        // 96, so four of its ten prices were never read. Same above: the second
+        // ask bucket runs 111–120 against a ceiling of 108.
+        const view = book.toRendererRows({ step: '10', rows: 14 });
+        expect(view.bids.map(row => [row.price, row.whole]))
+            .toEqual([['100', true], ['90', false]]);
+        expect(view.asks.map(row => [row.price, row.whole]))
+            .toEqual([['110', false]]);
+    });
+
+    // A book with no band proves nothing, so nothing it delivers is whole. It is
+    // the honest reading rather than a special case: a snapshot that came back
+    // with a side empty named no stretch of price at all.
+    it('calls no row whole while the book has no band', () => {
+        const book = new FuturesWorkstationOrderBook();
+        expect(book.bootstrap(snapshot({ bids: [], asks: [] })).live).toBe(true);
+        expect(book.push(delta({
+            firstUpdateId: '101',
+            finalUpdateId: '101',
+            previousFinalUpdateId: '100',
+            bids: [['99', '1']],
+            asks: [['101', '1']],
+        }), 1).applied).toBe(true);
+        const view = book.toRendererRows({ rows: 14 });
+        expect(view.bids.map(row => row.whole)).toEqual([false]);
+        expect(view.asks.map(row => row.whole)).toEqual([false]);
     });
 });
 

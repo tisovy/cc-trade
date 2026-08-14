@@ -222,6 +222,7 @@ describe('production Futures workstation service', () => {
             quantity: decimal,
             value: decimal,
             groupKey: '9'.repeat(64),
+            whole: false,
         }));
         expect(runtime.service.emitResource(
             session,
@@ -234,7 +235,6 @@ describe('production Futures workstation service', () => {
                 asks: side,
                 spread: '0.01',
                 reach: null,
-                proven: null,
             }),
         )).toBe(true);
         expect(delivered).toHaveLength(before + 1);
@@ -271,7 +271,6 @@ describe('production Futures workstation service', () => {
                 asks: side,
                 spread: '0.01',
                 reach: null,
-                proven: null,
             }));
         } catch (error) {
             refusal = error;
@@ -3095,10 +3094,11 @@ describe('the reading bounds what the desk delivers', () => {
     // A level is what it rests at and how much rests there. The running total
     // was computed, serialized, parsed, validated, frozen and then discarded,
     // because a total over raw levels is not a total over grouped rows.
-    it('delivers a row as price, quantity, value and key', async () => {
+    it('delivers a row as price, quantity, value, key and whether it is whole', async () => {
         const { events } = await openContract('depth-reading-shape');
         const row = depthEvents(events).at(-1).payload.bids[0];
-        expect(Object.keys(row)).toEqual(['price', 'quantity', 'value', 'groupKey']);
+        expect(Object.keys(row))
+            .toEqual(['price', 'quantity', 'value', 'groupKey', 'whole']);
     });
 });
 

@@ -106,6 +106,28 @@ const describeBookReach = (below, above, referencePrice) => {
   return share < 0.01 ? '±<0.01%' : `±${share.toFixed(2)}%`
 }
 
+// A row beyond the stretch of price the desk read whole. Everything printed on
+// it is exact — the exchange named each level it holds — but levels nobody has
+// touched since the page was read are missing from it, so it can only understate
+// what rests there. The mark is deliberately quiet and never touches the
+// numbers: a far row is read for its size, and dimming the size to say the size
+// might be low would be the worst of both.
+const bookRowClass = (hasOwnOrder, whole) => {
+  const names = []
+  if (hasOwnOrder) names.push('has-own-order')
+  if (!whole) names.push('is-beyond-read')
+  return names.length > 0 ? names.join(' ') : undefined
+}
+
+const bookRowTitle = (workingOrders, side, whole) => {
+  const marks = []
+  if (workingOrders) marks.push(`${workingOrders} working ${side} order here`)
+  if (!whole) {
+    marks.push('Beyond the book the desk read whole — every level shown rests here, but levels nobody has restated since are missing, so this row can only understate.')
+  }
+  return marks.length > 0 ? marks.join('\n') : undefined
+}
+
 const percentTone = (value) => {
   const parsed = Number(value)
   if (!Number.isFinite(parsed) || parsed === 0) return 'flat'
@@ -758,11 +780,9 @@ export const FuturesWorkstationView = ({
         <button
           type="button"
           key={`ask-${level.price}`}
-          className={ownBookLevels.ask.has(level.groupKey) ? 'has-own-order' : undefined}
-          title={ownBookLevels.ask.get(level.groupKey)
-            ? `${ownBookLevels.ask.get(level.groupKey)} working sell order here`
-            : undefined}
-          aria-label={`Ask book level: price ${level.price}; level ${formatCompactUsdt(level.notionalUsdt)} USDT; cumulative ${formatCompactUsdt(level.cumulativeUsdt)} USDT`}
+          className={bookRowClass(ownBookLevels.ask.has(level.groupKey), level.whole)}
+          title={bookRowTitle(ownBookLevels.ask.get(level.groupKey), 'sell', level.whole)}
+          aria-label={`Ask book level: price ${level.price}; level ${formatCompactUsdt(level.notionalUsdt)} USDT; cumulative ${formatCompactUsdt(level.cumulativeUsdt)} USDT${level.whole ? '' : '; beyond the read book'}`}
           disabled={!bookLevelsPickable}
           style={{ '--futures-depth-share': depthShare(level) }}
           onClick={event => handleBookClick(event, level.price)}
@@ -796,11 +816,9 @@ export const FuturesWorkstationView = ({
         <button
           type="button"
           key={`bid-${level.price}`}
-          className={ownBookLevels.bid.has(level.groupKey) ? 'has-own-order' : undefined}
-          title={ownBookLevels.bid.get(level.groupKey)
-            ? `${ownBookLevels.bid.get(level.groupKey)} working buy order here`
-            : undefined}
-          aria-label={`Bid book level: price ${level.price}; level ${formatCompactUsdt(level.notionalUsdt)} USDT; cumulative ${formatCompactUsdt(level.cumulativeUsdt)} USDT`}
+          className={bookRowClass(ownBookLevels.bid.has(level.groupKey), level.whole)}
+          title={bookRowTitle(ownBookLevels.bid.get(level.groupKey), 'buy', level.whole)}
+          aria-label={`Bid book level: price ${level.price}; level ${formatCompactUsdt(level.notionalUsdt)} USDT; cumulative ${formatCompactUsdt(level.cumulativeUsdt)} USDT${level.whole ? '' : '; beyond the read book'}`}
           disabled={!bookLevelsPickable}
           style={{ '--futures-depth-share': depthShare(level) }}
           onClick={event => handleBookClick(event, level.price)}

@@ -34,6 +34,7 @@ const frozenLevel = (price, side = 'bid') => {
     quantity: row.quantity,
     value: row.value,
     groupKey: row.groupKey,
+    whole: true,
   })
 }
 
@@ -121,7 +122,6 @@ export const createFuturesAppStressCycle = ({
         asks: [frozenLevel(newestAsk, 'ask'), ...ASK_TAIL],
         spread: String(Number(newestAsk) - Number(newestBid)),
         reach: null,
-        proven: null,
       },
     })
     const raw = JSON.stringify(event)

@@ -1144,6 +1144,23 @@
   background: rgba(126, 143, 166, 0.1);
 }
 
+/* A row past the stretch of price the desk read whole. It is drawn on the outer
+   edge of the ladder — away from the price, the size and the running total, all
+   of which are exact for the levels the row does hold. What the mark says is
+   that levels may be missing from it, and a treatment that touched the numbers
+   would say the numbers are wrong, which they are not. */
+   The right edge on both sides, because the left one already carries the
+   working-order tick and two marks in one place is neither. */
+.futures-workstation-book-side button.is-beyond-read::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 2px;
+  height: 100%;
+  background: rgba(126, 143, 166, 0.45);
+}
+
 .futures-workstation-book-own {
   position: absolute;
   top: 50%;

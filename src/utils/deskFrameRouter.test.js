@@ -25,16 +25,17 @@ const workstationEvent = (overrides = {}) => createFuturesProductionWorkstationE
       quantity: '1.5',
       value: '87600.00',
       groupKey: '58400000000000000000000',
+      whole: true,
     })]),
     asks: Object.freeze([Object.freeze({
       price: '58401.00',
       quantity: '2.5',
       value: '146002.50',
       groupKey: '58401000000000000000000',
+      whole: true,
     })]),
     spread: '1.00',
     reach: null,
-    proven: null,
   }),
   ...overrides,
 })
