@@ -16,13 +16,27 @@ free-margin         passes 0/23   unavailable 23 passes / 23 rows (23 wholly)
 all session — the operator placed and cancelled orders without opening one. That
 is a wait, not a fault.*
 
-*Free margin is a fault. It needs no position, only the wallet, and it failed to
-compute on **every one of twenty-three passes**. The gate is
-`futures-account-margin.js:340` — `!incomplete && crossWallet !== null &&
-orderMargin !== null` — and the operator had working orders throughout, so
-`orderMargin` should have been computable unless the leverage brackets or symbol
-configs were not there. Left to the session that owns that change; reported to it
-the same day.*
+*Free margin is a fault, and reading the code says it is structural rather than
+occasional. It needs no position, only the wallet, and it failed on **every one
+of twenty-three passes**. The gate is `futures-account-margin.js:340` —
+`!incomplete && crossWallet !== null && orderMargin !== null` — and the operator
+held working orders throughout, so the suspect is `orderMargin`.*
+
+*`restingOrderInitialMargin` is all-or-nothing across the **whole account**: one
+resting order whose contract has no leverage bracket returns null for the sum,
+and the sum is free margin. Brackets are loaded per symbol and only when that
+symbol's config is read on demand — `binance-connection.js:1183`, inside the
+read a contract gets when the operator opens the ticket on it. But the order list
+is account-wide. That evening the operator had working orders on TUTUSDT,
+BTWUSDT, ACEUSDT and AKEUSDT while looking at one contract at a time, so the set
+of contracts with orders and the set with brackets loaded could not coincide —
+and free margin is unavailable whenever they do not.*
+
+*Which is why it is 23 of 23 rather than sometimes: an account that trades more
+than one contract structurally cannot compute it. Not verified against a running
+desk — the record states that a pass failed and not why, which is the second
+finding below. Left to the session that owns that change; reported to it the same
+day, and the report is held for that session's operator to approve.*
 
 *Why it is worth writing here rather than only there: the bar below asks for
 **zero passes the desk could not compute**. While free margin is never
