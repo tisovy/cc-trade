@@ -25,6 +25,17 @@ rows cross instead. And under the pool, only the shown contract has a step and a
 row count at all, so the grouping belongs at delivery for the shown session
 rather than cached on each held one.*
 
+*Seen on the operator's own desk, 2026-08-14, with §1 running — AKEUSDT at the
+coarsest step the ladder offers. The panel states the book on hand reaches
+**±54.96%**, so §1 is holding the far book. The step is 0.0001 — a thousand
+ticks, **1.34% of price** — and fourteen rows ask for 18.8% a side. **Three rows
+a side are drawn.** Measured through the desk's proxy at the same moment, the
+nearest thousand levels a side reach **−2.60% / +2.66%**, and the nearest
+thousand is exactly what delivery selects. So the panel is drawing the whole of
+what it was sent, and what it was sent is a fiftieth of the book behind it. This
+is the case for §3.7 to hold a test against: same book, same step, far rows
+filled.*
+
 - [x] 3.0 Measure what a level-based delivery costs before replacing it, and check the two ceilings it runs between. Measured 2026-08-14 in-process on a tick-aligned book, median of 40 crossings, and independently against the live stream.
 
   | retained per side | `toRendererView` | frame | rows delivered |
