@@ -591,6 +591,21 @@ describe('folding an account update into the wallet and the positions', () => {
         expect(unstated).toEqual(['balances']);
     });
 
+    it('folds the stated cross wallet even when the total wallet did not move', () => {
+        const resources = held({
+            balances: wallet({ crossWallet: '950' }),
+            positions: [position()],
+        });
+        const { resources: next, unstated } = foldFuturesAccountUpdate(resources, {
+            balances: [{ asset: 'USDT', walletBalance: '1000', crossWallet: '925' }],
+            positions: [],
+        }, { now: 2_000 });
+        expect(next.balances.data.USDT).toEqual({
+            available: '900', total: '1000', crossWallet: '925', crossUnPnl: '0',
+        });
+        expect(unstated).toEqual(['balances']);
+    });
+
     it('asks for no read when the frame states nothing the account did not say', () => {
         const resources = held({ balances: wallet(), positions: [position()] });
         const { resources: next, unstated } = foldFuturesAccountUpdate(resources, {
@@ -687,12 +702,14 @@ describe('what a read issued only for the unstated values may change', () => {
         const resources = markFuturesResourceReady(
             createInitialFuturesAccountResources(),
             'balances',
-            { USDT: { available: '900', total: '1200' } },
+            { USDT: { available: '900', total: '1200', crossWallet: '1150' } },
             1_000,
         );
         expect(reconcileFuturesUnstatedBalanceRead(resources, {
-            USDT: { available: '640', total: '1000', crossUnPnl: '5' },
-        })).toEqual({ USDT: { available: '640', total: '1200', crossUnPnl: '5' } });
+            USDT: { available: '640', total: '1000', crossWallet: '950', crossUnPnl: '5' },
+        })).toEqual({
+            USDT: { available: '640', total: '1200', crossWallet: '1150', crossUnPnl: '5' },
+        });
     });
 
     it('takes an asset the desk holds nothing for exactly as the read states it', () => {

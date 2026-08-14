@@ -307,6 +307,72 @@ export const readFuturesMaxLeverage = (payload) => {
     return ceiling;
 };
 
+const leverageBracketAmount = (value, { allowZero = true } = {}) => {
+    if (value === null || value === undefined || value === '') return null;
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed) || (allowZero ? parsed < 0 : parsed <= 0)) return null;
+    return String(value);
+};
+
+const normalizeFuturesLeverageBracket = (bracket) => {
+    const initialLeverage = historyNumber(bracket?.initialLeverage);
+    const notionalFloor = leverageBracketAmount(bracket?.notionalFloor);
+    const notionalCap = leverageBracketAmount(bracket?.notionalCap, { allowZero: false });
+    const maintMarginRatio = leverageBracketAmount(bracket?.maintMarginRatio);
+    const cum = leverageBracketAmount(bracket?.cum);
+    if (initialLeverage === null
+        || initialLeverage < 1
+        || notionalFloor === null
+        || notionalCap === null
+        || Number(notionalCap) < Number(notionalFloor)
+        || maintMarginRatio === null
+        || cum === null) return null;
+    return Object.freeze({
+        initialLeverage: Math.floor(initialLeverage),
+        notionalFloor,
+        notionalCap,
+        maintMarginRatio,
+        cum,
+    });
+};
+
+// The full maintenance table from the same answer the desk already reads for
+// its leverage ceiling. Selecting the requested symbol matters when a fixture
+// or a future endpoint shape carries more than one contract: a table from a
+// different contract is worse than no table at all.
+export const readFuturesLeverageBracketTable = (payload, symbol = null) => {
+    const entries = Array.isArray(payload) ? payload : [payload];
+    const wanted = typeof symbol === 'string' && symbol !== '' ? symbol.toUpperCase() : null;
+    const matching = wanted === null
+        ? null
+        : entries.find(candidate => String(candidate?.symbol ?? '').toUpperCase() === wanted);
+    const soleUnlabelled = entries.length === 1
+        && (entries[0]?.symbol === null
+            || entries[0]?.symbol === undefined
+            || entries[0]?.symbol === '')
+        ? entries[0]
+        : null;
+    const entry = matching ?? (wanted === null ? entries[0] : soleUnlabelled) ?? null;
+    const resolvedSymbol = typeof entry?.symbol === 'string' && entry.symbol !== ''
+        ? entry.symbol.toUpperCase()
+        : wanted;
+    if (entry === null || resolvedSymbol === null) return null;
+    const brackets = (Array.isArray(entry.brackets) ? entry.brackets : [])
+        .map(normalizeFuturesLeverageBracket)
+        .filter(bracket => bracket !== null)
+        .sort((left, right) => Number(left.notionalFloor) - Number(right.notionalFloor));
+    if (brackets.length === 0) return null;
+    const maxLeverage = brackets.reduce(
+        (ceiling, bracket) => Math.max(ceiling, bracket.initialLeverage),
+        0,
+    );
+    return Object.freeze({
+        symbol: resolvedSymbol,
+        maxLeverage,
+        brackets: Object.freeze(brackets),
+    });
+};
+
 // Which contracts this account traded, newest first. Income history is the only
 // USDⓈ-M read that answers that without being told a symbol first — every trade
 // and order history endpoint requires one — so it is what a review of the whole
@@ -402,6 +468,9 @@ export const normalizeFuturesBalances = (balanceEntries = []) => {
             balances[entry.asset] = {
                 available: entry.availableBalance,
                 total: entry.balance,
+                ...(entry.crossWalletBalance === undefined
+                    ? {}
+                    : { crossWallet: entry.crossWalletBalance }),
                 crossUnPnl: entry.crossUnPnl,
             };
         }
@@ -1039,6 +1108,11 @@ export class FuturesTradingAdapter {
     async getMaxLeverage(symbol) {
         const data = await this.#signedRequest('GET', '/fapi/v1/leverageBracket', { symbol });
         return readFuturesMaxLeverage(data);
+    }
+
+    async getLeverageBracketTable(symbol) {
+        const data = await this.#signedRequest('GET', '/fapi/v1/leverageBracket', { symbol });
+        return readFuturesLeverageBracketTable(data, symbol);
     }
 
     // Binance answers with the leverage it actually applied, which can be lower

@@ -166,6 +166,20 @@ describe('createFuturesMarkPriceFeed', () => {
         }]);
     });
 
+    it('exposes only the marks the existing feed still considers live', () => {
+        expect(harness.feed.snapshot()).toEqual({});
+        harness.feed.track([{ symbol: 'BMTUSDT', quantity: '-1' }]);
+        harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03523'));
+
+        // Snapshotting neither waits for nor causes a renderer batch.
+        expect(harness.feed.snapshot()).toEqual({ BMTUSDT: '0.03523' });
+        expect(harness.broadcasts).toEqual([]);
+        expect(Object.isFrozen(harness.feed.snapshot())).toBe(true);
+
+        harness.sockets[0].emit('close');
+        expect(harness.feed.snapshot()).toEqual({});
+    });
+
     it('ignores frames it does not read and prices for untracked symbols', () => {
         harness.feed.track([{ symbol: 'BMTUSDT', quantity: '-1' }]);
         harness.sockets[0].emit('message', 'not json');

@@ -307,6 +307,16 @@ export const createFuturesMarkPriceFeed = ({
             symbols = next;
             connect();
         },
+        // A diagnostic reader sees only marks the feed still considers live.
+        // Disconnect and stall handling already clear this map, so the snapshot
+        // cannot accidentally extend a stale mark's lifetime.
+        snapshot() {
+            return Object.freeze(Object.fromEntries(
+                [...marks.entries()]
+                    .filter(([, reading]) => typeof reading?.markPrice === 'string')
+                    .map(([symbol, reading]) => [symbol, reading.markPrice]),
+            ));
+        },
         stop() {
             stopped = true;
             symbols = [];

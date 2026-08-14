@@ -69,6 +69,17 @@ const moduleMocks = vi.hoisted(() => {
                 symbol: 'BTCUSDT', leverage: 20, marginType: 'CROSSED', maxNotionalValue: '5000000',
             }),
             getMaxLeverage: vi.fn().mockResolvedValue(125),
+            getLeverageBracketTable: vi.fn().mockImplementation(async symbol => ({
+                symbol,
+                maxLeverage: 125,
+                brackets: [{
+                    initialLeverage: 125,
+                    notionalFloor: '0',
+                    notionalCap: '1000000000',
+                    maintMarginRatio: '0.01',
+                    cum: '0',
+                }],
+            })),
             setLeverage: vi.fn().mockResolvedValue({ symbol: 'BTCUSDT', leverage: 20 }),
             setMarginType: vi.fn().mockResolvedValue({ code: 200, msg: 'success' }),
             getAccountRefreshOperations: vi.fn(() => []),
@@ -794,7 +805,9 @@ describe('setupBinanceConnection user-data orchestration', () => {
     it('keeps the working orders from the stream without reading them back', async () => {
         const loads = {
             balances: vi.fn().mockResolvedValue({
-                futures_balances: { USDT: { available: '100', total: '100' } },
+                futures_balances: {
+                    USDT: { available: '100', total: '100', crossWallet: '100' },
+                },
             }),
             regularOrders: vi.fn().mockResolvedValue({
                 futures_regular_orders: [{
@@ -1219,7 +1232,9 @@ describe('setupBinanceConnection user-data orchestration', () => {
     it('reads nothing for a frame that states what the account already says', async () => {
         const loads = futuresAccountLoads();
         loads.balances.mockResolvedValue({
-            futures_balances: { USDT: { available: '90', total: '100' } },
+            futures_balances: {
+                USDT: { available: '90', total: '100', crossWallet: '100' },
+            },
         });
         const afterSetup = await openFuturesStream(loads);
 
@@ -4065,7 +4080,8 @@ describe('setupBinanceConnection user-data orchestration', () => {
         });
 
         expect(moduleMocks.futuresAdapter.getSymbolConfig).toHaveBeenCalledWith('BTCUSDT');
-        expect(moduleMocks.futuresAdapter.getMaxLeverage).toHaveBeenCalledWith('BTCUSDT');
+        expect(moduleMocks.futuresAdapter.getLeverageBracketTable)
+            .toHaveBeenCalledWith('BTCUSDT');
         const [configs] = moduleMocks.rendererConnection.sendUTF.mock.calls
             .map(([message]) => JSON.parse(message))
             .filter(payload => payload.futures_symbol_configs);
@@ -4264,6 +4280,32 @@ describe('setupBinanceConnection user-data orchestration', () => {
         // The contract that was not read is still stated, from what is held.
         expect(Object.keys(latest.futures_symbol_configs).sort())
             .toEqual(['BMTUSDT', 'EPICUSDT']);
+    });
+
+    it('bounds missing held-position bracket reads to eight contracts', async () => {
+        moduleMocks.futuresAdapter.getSymbolConfig
+            .mockImplementation(async symbol => ({
+                symbol, leverage: 20, marginType: 'CROSSED', maxNotionalValue: '5000000',
+            }));
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+
+        const symbols = Array.from({ length: 9 }, (_, index) => `HELD${index}USDT`);
+        moduleMocks.futuresAdapter.getAccountRefreshOperations
+            .mockReturnValue([positionsRefreshOperation(symbols)]);
+        await runFuturesCommand({
+            action: 'account.refresh', clientOrderId: 'refresh-brackets', symbol: 'BTCUSDT',
+        });
+        await flushMicrotasks();
+
+        expect(moduleMocks.futuresAdapter.getLeverageBracketTable).toHaveBeenCalledTimes(8);
+        expect(moduleMocks.futuresAdapter.getLeverageBracketTable.mock.calls.map(([symbol]) => symbol))
+            .toEqual(symbols.slice(0, 8));
+        expect(configuredSymbols()).toEqual(symbols.slice(0, 8));
     });
 
     // Leverage places no order, but it changes what every entry costs and where an
@@ -5111,11 +5153,14 @@ describe('setupBinanceConnection user-data orchestration', () => {
         };
         const held = kind => kept.filter(entry => entry.kind === kind);
 
-        const connectRecordedRenderer = async (marketMode = 'futures-live') => {
+        const connectRecordedRenderer = async (
+            marketMode = 'futures-live',
+            diagnosticRecord = record,
+        ) => {
             kept.length = 0;
             setupBinanceConnection({
                 localWebSocketAccess: { host: '127.0.0.1' },
-                diagnosticRecord: record,
+                diagnosticRecord,
             });
             moduleMocks.websocketServerHandlers.request({
                 origin: 'http://localhost:5174',
@@ -5235,6 +5280,119 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 expect(Number.isSafeInteger(read.resources)).toBe(true);
                 expect(Number.isSafeInteger(read.weight)).toBe(true);
             }
+        });
+
+        it('keeps a successful bracket table after a failed refresh and records only distances', async () => {
+            const loads = futuresAccountLoads();
+            loads.balances.mockResolvedValue({
+                futures_balances: {
+                    USDT: {
+                        available: '280', total: '200', crossWallet: '200', crossUnPnl: '0',
+                    },
+                },
+            });
+            loads.positions.mockResolvedValue({
+                futures_positions: [{
+                    symbol: 'BTCUSDT',
+                    positionSide: 'LONG',
+                    quantity: '10',
+                    entryPrice: '100',
+                    isolatedWallet: '0',
+                    notional: '1200',
+                    initialMargin: '120',
+                    maintenanceMargin: '12',
+                    liquidationPrice: '80.8080808080808',
+                }],
+            });
+            moduleMocks.futuresAdapter.getSymbolConfig.mockResolvedValue({
+                symbol: 'BTCUSDT', leverage: 10, marginType: 'CROSSED', maxNotionalValue: '5000000',
+            });
+
+            await connectRecordedRenderer();
+            await vi.advanceTimersByTimeAsync(5_000);
+            await flushMicrotasks();
+            expect(moduleMocks.futuresAdapter.getLeverageBracketTable).toHaveBeenCalledTimes(1);
+
+            // The public feed already exists for this held position. Its own
+            // map is the calculator's mark source; no REST request is added.
+            const markSocket = moduleMocks.futuresUserDataSockets.at(-1);
+            markSocket.handlers.message(JSON.stringify({
+                data: {
+                    e: 'markPriceUpdate', E: Date.now(), s: 'BTCUSDT', p: '120',
+                },
+            }));
+            await flushMicrotasks();
+
+            // Expire the shared config/table clock without running unrelated
+            // interval timers, then let the table refresh fail once.
+            vi.setSystemTime(new Date(Date.now() + 10 * 60 * 1000));
+            moduleMocks.futuresAdapter.getLeverageBracketTable
+                .mockRejectedValueOnce(Object.assign(new Error('unavailable'), { code: 'EUNAVAILABLE' }));
+            await runFuturesCommand({
+                action: 'account.refresh', clientOrderId: 'estimate-refresh-1', symbol: 'BTCUSDT',
+            });
+            await flushMicrotasks();
+            expect(moduleMocks.futuresAdapter.getLeverageBracketTable).toHaveBeenCalledTimes(2);
+
+            kept.length = 0;
+            await runFuturesCommand({
+                action: 'account.refresh', clientOrderId: 'estimate-refresh-2', symbol: 'BTCUSDT',
+            });
+            await flushMicrotasks();
+
+            // The failed refresh did not erase the table, and the fresh config
+            // clock means this pass makes no third bracket request.
+            expect(moduleMocks.futuresAdapter.getLeverageBracketTable).toHaveBeenCalledTimes(2);
+            const estimates = held('estimate');
+            expect(estimates.map(entry => entry.value).sort()).toEqual([
+                'free-margin',
+                'initial-margin',
+                'liquidation-price',
+                'maintenance-margin',
+                'notional',
+            ]);
+            for (const estimate of estimates) {
+                expect(estimate).toEqual(expect.objectContaining({
+                    kind: 'estimate', compared: 1, unavailable: 0, deviationBps: 0,
+                }));
+                expect(Object.keys(estimate).sort()).toEqual([
+                    'compared', 'deviationBps', 'kind', 'symbol', 'unavailable', 'value',
+                ]);
+            }
+            expect(JSON.stringify(estimates)).not.toMatch(/1200|80\.808|280|entryPrice|wallet/);
+
+            // The renderer still receives only the exchange row.
+            expect(heldPositions()[0].liquidationPrice).toBe('80.8080808080808');
+        });
+
+        it('delivers an accepted account read when estimate recording fails', async () => {
+            const loads = futuresAccountLoads();
+            const failingRecord = {
+                ...record,
+                record: (kind, value) => {
+                    if (kind === 'estimate') {
+                        throw Object.assign(new Error('diagnostic unavailable'), {
+                            code: 'EDIAGNOSTIC',
+                        });
+                    }
+                    return record.record(kind, value);
+                },
+            };
+
+            await connectRecordedRenderer('futures-live', failingRecord);
+            await vi.advanceTimersByTimeAsync(5_000);
+            await flushMicrotasks();
+
+            expect(loads.balances).toHaveBeenCalled();
+            expect(loads.positions).toHaveBeenCalled();
+            const latest = moduleMocks.rendererConnection.sendUTF.mock.calls
+                .map(([message]) => JSON.parse(message))
+                .filter(payload => payload.type === 'futures_account_state')
+                .at(-1);
+            expect(latest.resources).toMatchObject({
+                balances: { status: 'ready', lastSuccessfulAt: expect.any(Number) },
+                positions: { status: 'ready', lastSuccessfulAt: expect.any(Number) },
+            });
         });
 
         // Spot travels the same road with its own code, which the Spot client

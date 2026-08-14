@@ -148,6 +148,61 @@ describe('summarizeDeskDiagnosticRecord', () => {
     expect(printed).toContain('unstated')
   })
 
+  it('summarizes estimate disagreement and unavailable passes without amounts', () => {
+    const compared = summarizeDeskDiagnosticRecord([
+      line({
+        at: '2026-08-10T09:00:00.000Z', kind: 'estimate', value: 'notional',
+        compared: 2, unavailable: 0, deviationBps: 0, symbol: 'BTCUSDT',
+      }),
+      line({
+        at: '2026-08-10T09:01:00.000Z', kind: 'estimate', value: 'notional',
+        compared: 1, unavailable: 1, deviationBps: 25, symbol: 'ETHUSDT',
+      }),
+      line({
+        at: '2026-08-10T09:02:00.000Z', kind: 'estimate', value: 'notional',
+        compared: 0, unavailable: 2, deviationBps: null, symbol: null,
+      }),
+      line({
+        at: '2026-08-10T09:02:01.000Z', kind: 'estimate', value: 'free-margin',
+        compared: 0, unavailable: 1, deviationBps: null, symbol: null,
+      }),
+    ].join(''))
+
+    expect(compared.estimates).toEqual([
+      {
+        value: 'notional',
+        passes: 3,
+        comparedPasses: 2,
+        agreedPasses: 1,
+        unavailablePasses: 2,
+        uncomputedPasses: 1,
+        comparedRows: 3,
+        unavailableRows: 3,
+        worstBps: 25,
+        worstSymbol: 'ETHUSDT',
+        worstAt: '2026-08-10T09:01:00.000Z',
+      },
+      {
+        value: 'free-margin',
+        passes: 1,
+        comparedPasses: 0,
+        agreedPasses: 0,
+        unavailablePasses: 1,
+        uncomputedPasses: 1,
+        comparedRows: 0,
+        unavailableRows: 1,
+        worstBps: null,
+        worstSymbol: null,
+        worstAt: null,
+      },
+    ])
+    const printed = formatDeskDiagnosticSummary(compared)
+    expect(printed).toContain('Computed values beside exchange reads')
+    expect(printed).toContain('worst 25 bps on ETHUSDT')
+    expect(printed).toMatch(/free-margin\s+passes\s+0\/1/)
+    expect(printed).not.toMatch(/58400|wallet|price/i)
+  })
+
   // "The screen was late" is the complaint every change in this batch answers,
   // and until the backlog states its depth the record could say only that
   // something was superseded — never how far behind the renderer actually got,

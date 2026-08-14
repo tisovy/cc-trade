@@ -18,6 +18,7 @@ import {
     normalizeFuturesUserDataStreamEvent,
     FUTURES_USER_DATA_EVENTS_IGNORED,
     parseFuturesExchangeFilters,
+    readFuturesLeverageBracketTable,
     readFuturesMaxLeverage,
     readFuturesTradedSymbols,
     redactFuturesListenKey,
@@ -518,6 +519,60 @@ describe('futures contract configuration', () => {
         expect(requests[0].url).toContain('/fapi/v1/leverageBracket');
         expect(readFuturesMaxLeverage([])).toBeNull();
         expect(readFuturesMaxLeverage({ brackets: [{ initialLeverage: '0' }] })).toBeNull();
+    });
+
+    it('keeps every maintenance band from the same leverage-bracket answer', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestResponse = [{
+            symbol: 'BTCUSDT',
+            brackets: [
+                {
+                    bracket: 2,
+                    initialLeverage: 50,
+                    notionalFloor: '50000',
+                    notionalCap: '500000',
+                    maintMarginRatio: '0.01',
+                    cum: '250',
+                },
+                {
+                    bracket: 1,
+                    initialLeverage: 125,
+                    notionalFloor: '0',
+                    notionalCap: '50000',
+                    maintMarginRatio: '0.005',
+                    cum: '0',
+                },
+            ],
+        }];
+
+        const table = await adapter.getLeverageBracketTable('BTCUSDT');
+        expect(requests).toHaveLength(1);
+        expect(requests[0].url).toContain('/fapi/v1/leverageBracket');
+        expect(table).toEqual({
+            symbol: 'BTCUSDT',
+            maxLeverage: 125,
+            brackets: [
+                {
+                    initialLeverage: 125,
+                    notionalFloor: '0',
+                    notionalCap: '50000',
+                    maintMarginRatio: '0.005',
+                    cum: '0',
+                },
+                {
+                    initialLeverage: 50,
+                    notionalFloor: '50000',
+                    notionalCap: '500000',
+                    maintMarginRatio: '0.01',
+                    cum: '250',
+                },
+            ],
+        });
+        expect(Object.isFrozen(table)).toBe(true);
+        expect(Object.isFrozen(table.brackets)).toBe(true);
+        expect(readFuturesLeverageBracketTable(globalThis.__futuresTestResponse, 'ETHUSDT'))
+            .toBeNull();
     });
 
     it('reports the leverage the exchange applied, not the one that was asked for', async () => {
@@ -1031,10 +1086,13 @@ describe('futures normalization', () => {
         });
 
         expect(normalizeFuturesBalances([
-            { asset: 'USDT', balance: '100', availableBalance: '90', crossUnPnl: '0' },
+            {
+                asset: 'USDT', balance: '100', crossWalletBalance: '95',
+                availableBalance: '90', crossUnPnl: '0',
+            },
             { asset: 'BNB', balance: '0', availableBalance: '0', crossUnPnl: '0' },
         ])).toEqual({
-            USDT: { available: '90', total: '100', crossUnPnl: '0' },
+            USDT: { available: '90', total: '100', crossWallet: '95', crossUnPnl: '0' },
         });
 
         expect(normalizeFuturesBalances([

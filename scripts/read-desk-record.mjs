@@ -23,6 +23,14 @@ export const SEGMENT_NAME = /^desk-(\d{4}-\d{2}-\d{2})-(\d{3})\.jsonl$/
 const APPLICATION_DIRECTORY = 'cc-trade'
 const RECORD_DIRECTORY = 'diagnostics'
 const SLOWEST_PHASES = 12
+const ESTIMATE_VALUES = Object.freeze([
+  'notional',
+  'initial-margin',
+  'maintenance-margin',
+  'liquidation-price',
+  'free-margin',
+])
+const ESTIMATE_VALUE_SET = new Set(ESTIMATE_VALUES)
 
 // Electron's own `app.getPath('userData')`, resolved without Electron so the
 // summary can be run against a desk that is not started.
@@ -100,6 +108,10 @@ export const summarizeDeskDiagnosticRecord = (text) => {
   // for. Keyed by the reason the read site stated, because "the desk reads a
   // lot" and "the desk reads when it must" are the same number without it.
   const reads = new Map()
+  // One aggregate event per value per applicable account read. Both pass and
+  // row counts matter: a pass with one missing hedge leg is different evidence
+  // from a pass where nothing could be computed at all.
+  const estimates = new Map()
   // How far behind the renderer fell, per resource. The operator's complaint is
   // always "the screen was late", and this is the only reading that separates a
   // desk that was behind from a market that was fast.
@@ -158,6 +170,50 @@ export const summarizeDeskDiagnosticRecord = (text) => {
       observed.weight += Number(line.weight) || 0
       observed.resources += Number(line.resources) || 0
       reads.set(line.reason, observed)
+    }
+    if (line.kind === 'estimate' && ESTIMATE_VALUE_SET.has(line.value)) {
+      const compared = Number.isSafeInteger(line.compared) && line.compared >= 0
+        ? line.compared
+        : null
+      const unavailable = Number.isSafeInteger(line.unavailable) && line.unavailable >= 0
+        ? line.unavailable
+        : null
+      const deviationBps = line.deviationBps === null
+        ? null
+        : Number.isSafeInteger(line.deviationBps) && line.deviationBps >= 0
+          ? line.deviationBps
+          : undefined
+      if (compared !== null && unavailable !== null && deviationBps !== undefined) {
+        const observed = estimates.get(line.value) ?? {
+          value: line.value,
+          passes: 0,
+          comparedPasses: 0,
+          agreedPasses: 0,
+          unavailablePasses: 0,
+          uncomputedPasses: 0,
+          comparedRows: 0,
+          unavailableRows: 0,
+          worstBps: null,
+          worstSymbol: null,
+          worstAt: null,
+        }
+        observed.passes += 1
+        observed.comparedRows += compared
+        observed.unavailableRows += unavailable
+        if (compared > 0) observed.comparedPasses += 1
+        if (unavailable > 0) observed.unavailablePasses += 1
+        if (compared === 0 && unavailable > 0) observed.uncomputedPasses += 1
+        if (compared > 0 && unavailable === 0 && deviationBps === 0) {
+          observed.agreedPasses += 1
+        }
+        if (deviationBps !== null
+          && (observed.worstBps === null || deviationBps > observed.worstBps)) {
+          observed.worstBps = deviationBps
+          observed.worstSymbol = typeof line.symbol === 'string' ? line.symbol : null
+          observed.worstAt = line.at ?? null
+        }
+        estimates.set(line.value, observed)
+      }
     }
     if (line.kind === 'backlog') {
       const key = `${line.resource ?? '-'} ${line.symbol ?? '-'}`
@@ -230,6 +286,9 @@ export const summarizeDeskDiagnosticRecord = (text) => {
     reads: [...reads.entries()]
       .map(([reason, observed]) => ({ reason, ...observed }))
       .sort((left, right) => right.weight - left.weight),
+    estimates: ESTIMATE_VALUES
+      .map(value => estimates.get(value))
+      .filter(observed => observed !== undefined),
     backlogs: [...backlogs.entries()]
       .map(([key, observed]) => ({ key, ...observed }))
       .sort((left, right) => right.peakFrames - left.peakFrames),
@@ -303,6 +362,25 @@ export const formatDeskDiagnosticSummary = (summary, { day = null } = {}) => {
         `  ${entry.reason.padEnd(22)} n=${String(entry.count).padStart(5)}`
         + `  weight ${String(entry.weight).padStart(6)}`
         + `  resources ${String(entry.resources).padStart(5)}`,
+      )
+    }
+  }
+
+  if (Array.isArray(summary.estimates) && summary.estimates.length > 0) {
+    out.push('', 'Computed values beside exchange reads')
+    for (const estimate of summary.estimates) {
+      out.push(
+        `  ${estimate.value.padEnd(22)}`
+        + ` passes ${String(estimate.comparedPasses).padStart(5)}/${String(estimate.passes).padEnd(5)}`
+        + ` agreed ${String(estimate.agreedPasses).padStart(5)}`
+        + `  rows ${String(estimate.comparedRows).padStart(5)}`
+        + `  unavailable ${String(estimate.unavailablePasses).padStart(5)} passes`
+        + `/${String(estimate.unavailableRows).padStart(5)} rows`
+        + ` (${String(estimate.uncomputedPasses).padStart(5)} wholly)`
+        + (estimate.worstBps === null
+          ? '  worst -'
+          : `  worst ${estimate.worstBps} bps on ${estimate.worstSymbol ?? '-'}`
+            + (estimate.worstAt === null ? '' : ` at ${estimate.worstAt}`)),
       )
     }
   }

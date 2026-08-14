@@ -536,13 +536,19 @@ const foldFuturesWalletBalances = (resources, balances, now) => {
     for (const balance of balances) {
         if (typeof balance.walletBalance !== 'string') continue;
         const previous = next[balance.asset] ?? null;
-        if (previous !== null && previous.total === balance.walletBalance) continue;
+        const crossWallet = typeof balance.crossWallet === 'string'
+            ? balance.crossWallet
+            : previous?.crossWallet;
+        if (previous !== null
+            && previous.total === balance.walletBalance
+            && previous.crossWallet === crossWallet) continue;
         // The frame states the wallet, never the free margin — that is what the
         // read this fold asks for is for. What was last read stands until it
         // answers, rather than being invented from the wallet.
         next[balance.asset] = Object.freeze({
             ...(previous ?? { available: null, crossUnPnl: null }),
             total: balance.walletBalance,
+            ...(crossWallet === undefined ? {} : { crossWallet }),
         });
         changed = true;
     }
@@ -671,8 +677,12 @@ export const reconcileFuturesUnstatedBalanceRead = (resources, balances) => {
     const merged = { ...balances };
     for (const [asset, reading] of Object.entries(balances)) {
         const stated = held[asset];
-        if (stated?.total === undefined) continue;
-        merged[asset] = Object.freeze({ ...reading, total: stated.total });
+        if (stated?.total === undefined && stated?.crossWallet === undefined) continue;
+        merged[asset] = Object.freeze({
+            ...reading,
+            ...(stated.total === undefined ? {} : { total: stated.total }),
+            ...(stated.crossWallet === undefined ? {} : { crossWallet: stated.crossWallet }),
+        });
     }
     return Object.freeze(merged);
 };

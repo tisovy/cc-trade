@@ -64,6 +64,10 @@ import {
     createFuturesMarkPriceFeed,
 } from './futures-mark-price-feed.js';
 import {
+    computeFuturesAccountMarginEstimates,
+    createFuturesMarginEstimateEvents,
+} from './futures-account-margin.js';
+import {
     FuturesSettledOrderMemory,
     FuturesStreamedOrderMemory,
     createFuturesAccountStateEnvelope,
@@ -1064,6 +1068,10 @@ export function setupBinanceConnection({
     // any more, so without this read nothing on the desk can state the leverage a
     // position is carried at — or set it.
     const futuresSymbolConfigs = new Map();
+    // The maintenance bands arrive in the leverage-ceiling answer. They live
+    // beside the config rather than inside its renderer shape: computed margins
+    // are diagnostic-only, and no bracket amount belongs in that envelope.
+    const futuresLeverageBrackets = new Map();
     // When each of them was read. Leverage and margin mode change when somebody
     // sets them — this desk, which reads them straight back, or the operator in
     // Binance's own app. A leverage set elsewhere is announced on the
@@ -1077,6 +1085,10 @@ export function setupBinanceConnection({
     // operator's refresh are the same command, so time held is what separates
     // "read again" from "read every time".
     const futuresSymbolConfigReadAt = new Map();
+    // A config read now includes the bracket admission behind it. Two account
+    // passes can therefore meet while the same symbol is still in flight; they
+    // share that promise instead of spending the pair of reads twice.
+    const futuresSymbolConfigReads = new Map();
     const futuresAccountPayloadKeys = Object.freeze({
         balances: 'futures_balances',
         positions: 'futures_positions',
@@ -1136,40 +1148,61 @@ export function setupBinanceConnection({
 
     const forgetFuturesSymbolConfigs = () => {
         futuresSymbolConfigs.clear();
+        futuresLeverageBrackets.clear();
         futuresSymbolConfigReadAt.clear();
+        futuresSymbolConfigReads.clear();
     };
 
     const readFuturesSymbolConfig = async (symbol, { withCeiling = false } = {}) => {
         if (!futuresTradingAdapter || !symbol) return null;
-        const epoch = futuresMutationEpoch;
-        const activation = futuresActivationGeneration;
-        const superseded = () => epoch !== futuresMutationEpoch
-            || activation !== futuresActivationGeneration;
+        const key = String(symbol).toUpperCase();
+        const inFlight = futuresSymbolConfigReads.get(key);
+        if (inFlight) return inFlight;
+        const reading = (async () => {
+            const epoch = futuresMutationEpoch;
+            const activation = futuresActivationGeneration;
+            const superseded = () => epoch !== futuresMutationEpoch
+                || activation !== futuresActivationGeneration;
+            try {
+                const config = await futuresRestLimiter.execute(
+                    () => futuresTradingAdapter.getSymbolConfig(symbol),
+                    FUTURES_SYMBOL_CONFIG_WEIGHT,
+                );
+                if (config === null || superseded()) return null;
+                const bracketTable = withCeiling
+                    ? await futuresRestLimiter.execute(
+                        () => futuresTradingAdapter.getLeverageBracketTable(symbol),
+                        FUTURES_LEVERAGE_BRACKET_WEIGHT,
+                    ).catch(() => null)
+                    : null;
+                if (superseded()) return null;
+                // A bracket read that failed does not un-know a ceiling that was read
+                // before it, or the table behind it: the panel would silently offer
+                // the whole 1–125 range and diagnostics would lose a known input.
+                if (bracketTable !== null && bracketTable.symbol === config.symbol) {
+                    futuresLeverageBrackets.set(config.symbol, bracketTable);
+                }
+                const entry = {
+                    ...config,
+                    maxLeverage: bracketTable?.maxLeverage
+                        ?? futuresSymbolConfigs.get(config.symbol)?.maxLeverage
+                        ?? null,
+                };
+                futuresSymbolConfigs.set(entry.symbol, entry);
+                futuresSymbolConfigReadAt.set(entry.symbol, Date.now());
+                return entry;
+            } catch (error) {
+                logger.warn(`[futures-config] ${symbol} configuration read failed:`, error?.code || error?.message);
+                return null;
+            }
+        })();
+        futuresSymbolConfigReads.set(key, reading);
         try {
-            const config = await futuresRestLimiter.execute(
-                () => futuresTradingAdapter.getSymbolConfig(symbol),
-                FUTURES_SYMBOL_CONFIG_WEIGHT,
-            );
-            if (config === null || superseded()) return null;
-            const ceiling = withCeiling
-                ? await futuresRestLimiter.execute(
-                    () => futuresTradingAdapter.getMaxLeverage(symbol),
-                    FUTURES_LEVERAGE_BRACKET_WEIGHT,
-                ).catch(() => null)
-                : futuresSymbolConfigs.get(config.symbol)?.maxLeverage ?? null;
-            if (superseded()) return null;
-            // A bracket read that failed does not un-know a ceiling that was read
-            // before it: the panel would silently offer the whole 1–125 range.
-            const entry = {
-                ...config,
-                maxLeverage: ceiling ?? futuresSymbolConfigs.get(config.symbol)?.maxLeverage ?? null,
-            };
-            futuresSymbolConfigs.set(entry.symbol, entry);
-            futuresSymbolConfigReadAt.set(entry.symbol, Date.now());
-            return entry;
-        } catch (error) {
-            logger.warn(`[futures-config] ${symbol} configuration read failed:`, error?.code || error?.message);
-            return null;
+            return await reading;
+        } finally {
+            if (futuresSymbolConfigReads.get(key) === reading) {
+                futuresSymbolConfigReads.delete(key);
+            }
         }
     };
 
@@ -1187,6 +1220,53 @@ export function setupBinanceConnection({
             logger,
         })
         : null;
+
+    // The amounts are deliberately scoped to this stack frame. Only their
+    // aggregate relative distance is handed to the record; account resources,
+    // renderer envelopes and command admission never receive an estimate.
+    const recordFuturesMarginEstimates = (resource) => {
+        if (resource !== 'positions' && resource !== 'balances') return;
+        try {
+            const positionResource = futuresAccountResources.positions;
+            const balanceResource = futuresAccountResources.balances;
+            const regularOrderResource = futuresAccountResources.regularOrders;
+            const algoOrderResource = futuresAccountResources.algoOrders;
+            const positions = positionResource.lastSuccessfulAt === null
+                ? null
+                : positionResource.data ?? null;
+            const balances = balanceResource.lastSuccessfulAt === null
+                ? null
+                : balanceResource.data ?? null;
+            const estimates = computeFuturesAccountMarginEstimates({
+                positions,
+                balances,
+                regularOrders: regularOrderResource.lastSuccessfulAt === null
+                    ? null
+                    : regularOrderResource.data ?? null,
+                algoOrders: algoOrderResource.lastSuccessfulAt === null
+                    ? null
+                    : algoOrderResource.data ?? null,
+                marks: futuresMarkPriceFeed?.snapshot() ?? null,
+                symbolConfigs: futuresSymbolConfigs,
+                leverageBrackets: futuresLeverageBrackets,
+            });
+            for (const event of createFuturesMarginEstimateEvents({
+                resource,
+                positions: positions ?? [],
+                balances,
+                estimates,
+            })) {
+                diagnosticRecord.record('estimate', event);
+            }
+        } catch (error) {
+            // Diagnostics may lose a sample, never an exchange reading. Keep
+            // even the warning amount-free: only the error's bounded name/code.
+            logger.warn(
+                '[futures-estimate] comparison failed:',
+                error?.code ?? error?.name ?? 'UNKNOWN_ERROR',
+            );
+        }
+    };
 
     // Bumped once per confirmed mutating command. A snapshot carries the epoch
     // it began under, so a read that started before a place, amend or cancel can
@@ -1295,15 +1375,22 @@ export function setupBinanceConnection({
         // Asked once per symbol: the hold is measured against the clock, so
         // asking twice could put the same contract in both lists on the
         // millisecond it expires.
-        const holdings = symbols.map(symbol => [symbol, heldFuturesSymbolConfig(symbol)]);
+        const holdings = symbols.map(symbol => [
+            symbol,
+            heldFuturesSymbolConfig(symbol),
+            futuresLeverageBrackets.get(symbol) ?? null,
+        ]);
         const held = holdings
             .filter(([, config]) => config !== null)
             .map(([, config]) => config);
         const unread = holdings
-            .filter(([, config]) => config === null)
+            .filter(([, config, brackets]) => config === null || brackets === null)
             .map(([symbol]) => symbol)
             .slice(0, FUTURES_POSITION_CONFIG_MAX_SYMBOLS);
-        const configs = await Promise.all(unread.map(symbol => readFuturesSymbolConfig(symbol)));
+        const configs = await Promise.all(unread.map(symbol => readFuturesSymbolConfig(
+            symbol,
+            { withCeiling: true },
+        )));
         broadcastFuturesSymbolConfigs([...held, ...configs]);
     };
 
@@ -1397,6 +1484,9 @@ export function setupBinanceConnection({
                     unstated: reason === 'unstated',
                 }),
             );
+            if (operation.type === 'positions' || operation.type === 'balances') {
+                recordFuturesMarginEstimates(operation.type);
+            }
             if (operation.type === 'positions') {
                 const positions = futuresAccountResources.positions.data ?? [];
                 futuresMarkPriceFeed?.track(positions);

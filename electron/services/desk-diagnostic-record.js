@@ -13,6 +13,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { TRADING_COMMAND_ACTIONS } from '../../src/utils/tradingCommands.js';
 import { FUTURES_ACCOUNT_READ_REASONS } from './futures-account-state.js';
+import {
+    FUTURES_MARGIN_ESTIMATE_MAX_BPS,
+    FUTURES_MARGIN_ESTIMATE_VALUES,
+} from './futures-account-margin.js';
 
 export const DESK_DIAGNOSTIC_RECORD = Object.freeze({
     // Measured on 2026-08-11 against the live exchange, one contract, 63s: the
@@ -82,11 +86,19 @@ const READ_REASON = new RegExp(`^(?:${FUTURES_ACCOUNT_READ_REASONS.join('|')})$`
 // `trades`, `ticker`. Same shape as the workstation protocol's resource names.
 const RESOURCE = /^[a-z][a-zA-Z0-9]{0,31}$/;
 const VERSION = /^[0-9][0-9A-Za-z.+-]{0,31}$/;
+const ESTIMATE_VALUE = new RegExp(`^(?:${FUTURES_MARGIN_ESTIMATE_VALUES.join('|')})$`);
 
 const text = pattern => value => (
     typeof value === 'string' && pattern.test(value) ? value : undefined
 );
 const count = value => (Number.isSafeInteger(value) && value >= 0 ? value : undefined);
+const basisPoints = value => (
+    Number.isSafeInteger(value)
+        && value >= 0
+        && value <= FUTURES_MARGIN_ESTIMATE_MAX_BPS
+        ? value
+        : undefined
+);
 // An order identity arrives as a number from the exchange and as a string from
 // the desk's own client ids. Both name the same thing.
 const identity = (value) => {
@@ -189,6 +201,16 @@ const RECORDED_FIELDS = Object.freeze({
         ['resources', count],
         ['weight', count],
     ]),
+    // The calculator's amounts never arrive here. One event is the aggregate
+    // distance for one value in one pass, plus the count that could not be
+    // computed; nullable fields mean there was no comparable row, not zero.
+    estimate: Object.freeze([
+        ['value', text(ESTIMATE_VALUE)],
+        ['compared', count],
+        ['unavailable', count],
+        ['deviationBps', optional(basisPoints)],
+        ['symbol', optional(text(SYMBOL))],
+    ]),
     outcome: Object.freeze([
         ['action', text(ACTION)],
         ['result', text(RESULT)],
@@ -219,6 +241,14 @@ export const describeDeskDiagnosticEvent = (kind, value) => {
         || value === null
         || typeof value !== 'object'
         || Array.isArray(value)) return null;
+    // Every other record kind is a projection of an existing broader envelope.
+    // An estimate is built for this file alone, so an extra field is a caller
+    // trying to hand the privacy boundary something it did not declare. Lose
+    // the line rather than silently stripping a price or a size from it.
+    if (kind === 'estimate') {
+        const accepted = new Set(fields.map(([name]) => name));
+        if (Object.keys(value).some(name => !accepted.has(name))) return null;
+    }
     const event = { kind };
     for (const [name, read] of fields) {
         const carried = read(value[name]);

@@ -160,6 +160,43 @@ describe('describeDeskDiagnosticEvent', () => {
         })).toBeNull();
     });
 
+    it('keeps only bounded basis-point estimate aggregates and counters', () => {
+        expect(describeDeskDiagnosticEvent('estimate', {
+            value: 'liquidation-price',
+            compared: 2,
+            unavailable: 1,
+            deviationBps: 37,
+            symbol: 'BTCUSDT',
+        })).toEqual({
+            kind: 'estimate',
+            value: 'liquidation-price',
+            compared: 2,
+            unavailable: 1,
+            deviationBps: 37,
+            symbol: 'BTCUSDT',
+        });
+        expect(describeDeskDiagnosticEvent('estimate', {
+            value: 'free-margin',
+            compared: 0,
+            unavailable: 1,
+            deviationBps: null,
+            symbol: null,
+        })).not.toBeNull();
+
+        for (const value of [37.5, -1, 1_000_001, '37']) {
+            expect(describeDeskDiagnosticEvent('estimate', {
+                value: 'notional', compared: 1, unavailable: 0,
+                deviationBps: value, symbol: 'BTCUSDT',
+            })).toBeNull();
+        }
+        // Estimate events are built for this record alone. Offering an amount
+        // beside the ratio loses the whole line instead of merely stripping it.
+        expect(describeDeskDiagnosticEvent('estimate', {
+            value: 'notional', compared: 1, unavailable: 0,
+            deviationBps: 0, symbol: 'BTCUSDT', price: '58400.25',
+        })).toBeNull();
+    });
+
     it('names the byte count a refused frame reported', () => {
         expect(describeDeskDiagnosticEvent('timing', {
             phase: 'oversized-frame:40657',
