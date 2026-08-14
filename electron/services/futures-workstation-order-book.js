@@ -50,6 +50,22 @@ export const FUTURES_WORKSTATION_ORDER_BOOK_LIMITS = Object.freeze({
     // side — buckets can be filled in one pass and only the rows drawn need
     // ordering — and that is a change to how the rows are built, not to a number.
     RETAINED_LEVELS_PER_SIDE: 4_000,
+    // How far past the ceiling a side may run before it is cut back to it, and
+    // the whole cost of having a ceiling at all.
+    //
+    // Not zero. Evicting the moment the bound is passed means sorting the entire
+    // side on every applied diff for as long as the book stays full — which,
+    // measured on a real contract, is from about eight minutes in and then for
+    // the rest of the session. A stream naming twenty new far prices a diff
+    // crosses this slack every twenty-five diffs instead, so one sort every
+    // couple of seconds does the work of a hundred: measured, an applied diff at
+    // the bound went from 811 to 332 microseconds.
+    //
+    // What it costs is that a side may hold this many levels more than the
+    // ceiling names. Nothing reads the ceiling as an exact count — what crosses
+    // to the panel is rows, and what the bound protects is memory and per-frame
+    // work, each of which moves by an eighth here.
+    EVICTION_SLACK: 500,
     // Shared with the renderer's own bound so the two can never drift apart: a
     // delivered book larger than the protocol accepts is dropped whole. This is
     // the ceiling on a delivery, not the delivery — what crosses is the rows the
@@ -241,15 +257,17 @@ const sortedByPrice = (side, descending) => {
     return entries;
 };
 
+
 // Past the ceiling, the levels furthest from the market go first. Nearest-first
 // retention is what the operator zooms out *against*, so evicting from the near
 // edge would drop exactly what a coarse step is read for; and a level far from
 // the market is the one whose absence a row can best survive, because rows out
 // there are wide.
 const trimSide = (side, descending) => {
-    if (side.size <= FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.RETAINED_LEVELS_PER_SIDE) return;
+    const { RETAINED_LEVELS_PER_SIDE, EVICTION_SLACK } = FUTURES_WORKSTATION_ORDER_BOOK_LIMITS;
+    if (side.size <= RETAINED_LEVELS_PER_SIDE + EVICTION_SLACK) return;
     const sorted = sortedByPrice(side, descending);
-    for (const entry of sorted.slice(FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.RETAINED_LEVELS_PER_SIDE)) {
+    for (const entry of sorted.slice(RETAINED_LEVELS_PER_SIDE)) {
         side.delete(entry.price);
     }
 };

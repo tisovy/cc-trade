@@ -959,7 +959,12 @@ describe('what the book retains', () => {
             }), 1).applied).toBe(true);
             updateId = final;
         }
-        expect(book.bids.size).toBe(RETAINED_LEVELS_PER_SIDE);
+        // Cut back to the ceiling once the slack above it is crossed, so the
+        // side sits between the two rather than paying an eviction pass per diff.
+        expect(book.bids.size).toBeGreaterThanOrEqual(RETAINED_LEVELS_PER_SIDE);
+        expect(book.bids.size).toBeLessThanOrEqual(
+            RETAINED_LEVELS_PER_SIDE + FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.EVICTION_SLACK,
+        );
         // The best bid — the level the market is at — survived; the deepest one
         // pushed did not.
         expect(book.bids.has('100000')).toBe(true);
@@ -1148,7 +1153,7 @@ describe('what a side remembers about its own prices', () => {
         }
         const held = Array.from(book.bids.keys());
         expect(held.length).toBe(Math.min(
-            RETAINED_LEVELS_PER_SIDE,
+            RETAINED_LEVELS_PER_SIDE + FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.EVICTION_SLACK,
             1 + (rounds * perRound),
         ));
         // Delivered ungrouped, the rows are the levels held, nearest first, and
