@@ -452,6 +452,14 @@ export class FuturesProductionWorkstationService {
      *
      * The shortfall is passed in wherever the caller has already measured it:
      * one reading per frame, not one per question asked about the frame.
+     *
+     * A book that no longer holds the market is not live either, and that is a
+     * separate question from the reading: with no reading stated the shortfall
+     * is zero by definition, so a book the market had walked out of was being
+     * badged live on exactly the ground that nothing had been asked of it. It
+     * mattered for at most a repair cooldown while the desk held one contract.
+     * It matters for as long as a contract goes unselected now that it holds
+     * eight, because the repair is the shown contract's alone.
      */
     depthDeliveryState(session, shortfall = null) {
         if (session.staleResources.has(FUTURES_WORKSTATION_RESOURCES.DEPTH)) {
@@ -460,13 +468,34 @@ export class FuturesProductionWorkstationService {
         const short = shortfall === null
             ? session.orderBook.rangeShortfall(session.depthRange)
             : shortfall;
-        return short === 0
+        return short === 0 && session.orderBook.holdsMarket()
             ? FUTURES_WORKSTATION_STATES.LIVE
             : FUTURES_WORKSTATION_STATES.STALE;
     }
 
+    /**
+     * Buy a deeper page, or the same page again, when the book on hand stops
+     * proving the rows on screen.
+     *
+     * Only for the contract that has rows on screen. A reading is a property of
+     * the panel drawing the book, not of the book — a held contract's reading is
+     * whatever the panel last said about it, and the market walking out of that
+     * band costs a REST snapshot every five seconds for a book nobody is
+     * looking at. The desk's own journal is unambiguous about the size of that:
+     * `book-recovery:DEPTH_RANGE_SHORT` is the only fault it recorded on
+     * 2026-08-12 and 2026-08-13 — 33 and 155 of them, peaking at 34 in an hour,
+     * on the one contract the desk held at the time. Multiplied by a pool of
+     * eight, that is the shown contract queueing behind seven books nobody
+     * asked about, on a read budget of 600 a minute whose own sizing note says
+     * it was measured against one contract.
+     *
+     * Nothing is lost by waiting: a selection measures the shortfall and buys
+     * the page then, and until it lands the book is delivered as `stale`, which
+     * is what it is.
+     */
     ensureDepthCovers(session, shortfall = null) {
         if (!this.isHeld(session)
+            || !this.isShown(session)
             || !session.bootstrapped
             || session.reconnectTimer !== null
             || session.bookRecovering) return;
@@ -1388,10 +1417,10 @@ export class FuturesProductionWorkstationService {
                     // state a frame carries is decided by the book that frame
                     // contains. Asked afterwards, the operator had already read
                     // a short book badged live by the time the desk worked out
-                    // it was short. Asked whether or not anyone is watching,
-                    // because it is what decides the page the book is kept on,
-                    // and a held book is kept deep enough for its own reading.
-                    const shortfall = session.orderBook.rangeShortfall(session.depthRange);
+                    // it was short.
+                    const shortfall = this.isShown(session)
+                        ? session.orderBook.rangeShortfall(session.depthRange)
+                        : null;
                     // Crossing the book into rows is the one expensive thing a
                     // diff causes, ten times a second on up to a thousand levels
                     // a side. A session nobody is looking at does not do it —

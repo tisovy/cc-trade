@@ -3424,3 +3424,77 @@ describe('the pool is bounded', () => {
         }
     });
 });
+
+// The desk's own journal for 2026-08-12 and 2026-08-13 recorded exactly one
+// kind of fault: `book-recovery:DEPTH_RANGE_SHORT`, 33 and 155 of them, peaking
+// at 34 in an hour — each one a REST snapshot, on the one contract the desk
+// held at the time. A pool of eight must not multiply that by eight, because
+// the eight share one read budget of 600 a minute and five concurrent slots,
+// and the contract the operator is trading on would queue behind seven books
+// nobody asked about.
+describe('a held book asks the exchange for nothing', () => {
+    // The real clock: a recovery waits before it re-reads, and a manual clock
+    // would hold that wait open forever rather than let the read happen.
+    const openTwo = async () => {
+        const base = createFuturesProductionWorkstationFakeTransport();
+        const readDepthSnapshot = vi.fn(options => base.readDepthSnapshot(options));
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            heldContracts: 2,
+            transport: { ...base, readDepthSnapshot },
+        }));
+        for (const [requestId, symbol] of [['cost-btc', 'BTCUSDT'], ['cost-eth', 'ETHUSDT']]) {
+            await runtime.service.handleRequest(
+                productionRequest(requestId, symbol),
+                { emit: () => {} },
+            );
+        }
+        return { runtime, readDepthSnapshot };
+    };
+
+    it('buys no page for a contract nobody is looking at, and still buys one for the shown', async () => {
+        const { runtime, readDepthSnapshot } = await openTwo();
+        const held = runtime.service.sessions.get('BTCUSDT');
+        const shown = runtime.service.sessions.get('ETHUSDT');
+        expect(runtime.service.shown).toBe(shown);
+
+        // The held contract's band has stopped covering the reading the panel
+        // last stated for it, and its book has walked off the market.
+        held.depthRange = '5';
+        held.orderBook.rangeShortfall = () => 1;
+        held.orderBook.holdsMarket = () => false;
+        const before = readDepthSnapshot.mock.calls.length;
+        runtime.service.ensureDepthCovers(held);
+        await Promise.resolve();
+        expect(readDepthSnapshot).toHaveBeenCalledTimes(before);
+
+        // The same state on the contract being shown does buy a page.
+        shown.depthRange = '5';
+        shown.orderBook.rangeShortfall = () => 1;
+        shown.bookRecoveredAt = null;
+        runtime.service.ensureDepthCovers(shown);
+        await vi.waitFor(() => expect(readDepthSnapshot.mock.calls.length).toBe(before + 1));
+    });
+
+    // Nothing is lost by waiting — but only because the book says what it is
+    // when it arrives. Delivered live on the ground that nothing had been asked
+    // of it, a book the market had walked out of is the green badge over a
+    // wrong ladder this desk keeps being caught by.
+    it('delivers a book that walked off the market as stale, not as live', async () => {
+        const { runtime } = await openTwo();
+        const held = runtime.service.sessions.get('BTCUSDT');
+        held.depthRange = null;
+        held.orderBook.holdsMarket = () => false;
+
+        const back = [];
+        await runtime.service.handleRequest(
+            JSON.stringify(createFuturesProductionWorkstationSelectSymbolRequest({
+                requestId: 'cost-back-btc',
+                symbol: 'BTCUSDT',
+                interval: '1m',
+            })),
+            { emit: event => back.push(event) },
+        );
+
+        expect(back.find(event => event.resource === 'depth')).toMatchObject({ state: 'stale' });
+    });
+});
