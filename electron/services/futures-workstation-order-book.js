@@ -30,12 +30,25 @@ export const FUTURES_WORKSTATION_ORDER_BOOK_LIMITS = Object.freeze({
     // nearest thousand of it hold between 7% and 18% of the resting value. So a
     // thousand was not a bound on cost — it was most of the book, thrown away.
     //
-    // Four thousand holds the whole of both books measured, with margin. Every
-    // delivery walks the retained side once, so the ceiling is what a hostile
-    // stream can make the desk pay per frame: at a burst of full-width diffs,
-    // 4000 costs about a fifth more per frame than the thousand it replaced, and
-    // 20000 stalls the session outright — the guard for that is 'holds a live
-    // session through a burst of full-width diffs and a heavy tape'.
+    // Four thousand holds the whole of both books measured, with margin.
+    //
+    // It stayed at four thousand once rows crossed instead of levels, and for a
+    // different reason than it was set for. Delivery no longer walks the book to
+    // fill the wire, but it still sorts the side it groups, and eviction sorts it
+    // again — so the ceiling is still what a stream can make the desk pay per
+    // frame. Measured 2026-08-14 on a book sitting at the bound, at ten frames
+    // and ten diffs a second on the shown contract:
+    //
+    //   bound   frame    diff    per second
+    //    4000   7.9 ms   0.8 ms     87 ms
+    //   10000  20.4 ms   1.8 ms    222 ms
+    //   20000  30.8 ms   4.0 ms    348 ms
+    //
+    // A third of a core for one contract's book is not a trade worth making for
+    // headroom nobody has needed: the deepest book measured on a real contract is
+    // 3425 levels a side. Raising it wants grouping that does not sort the whole
+    // side — buckets can be filled in one pass and only the rows drawn need
+    // ordering — and that is a change to how the rows are built, not to a number.
     RETAINED_LEVELS_PER_SIDE: 4_000,
     // Shared with the renderer's own bound so the two can never drift apart: a
     // delivered book larger than the protocol accepts is dropped whole. This is
@@ -151,6 +164,56 @@ const validateDelta = (delta) => {
     });
 };
 
+// What a price string parses to never changes, so it is worth remembering.
+//
+// A side is walked several times a second and almost all of it is the same
+// levels as last time: a diff restates a few dozen prices out of thousands. The
+// parse is a regex, a split and two BigInt constructions, and it was being paid
+// again for every level on every frame. Remembering it is safe in the way only a
+// pure function of its key is safe — a stale entry is impossible, because the
+// same string cannot parse to anything else — so the cache needs no invalidation
+// at all, only a bound.
+//
+// The bound is per book and generous: prices leave the book as the market walks,
+// and their entries would otherwise accumulate for the life of the session.
+// Rebuilding from the keys actually held costs one pass and happens rarely.
+const PARSED_PRICE_CACHE_SLACK = 2;
+
+// A side of the book, which remembers what its own prices parse to. One cache
+// per side rather than one for the desk, so a contract nobody is looking at
+// cannot push the shown one's prices out of it.
+class FuturesWorkstationBookSide extends Map {
+    constructor() {
+        super();
+        this.parsed = new Map();
+        this.parsedBound = FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.RETAINED_LEVELS_PER_SIDE
+            * PARSED_PRICE_CACHE_SLACK;
+    }
+
+    decimalOf(price) {
+        const remembered = this.parsed.get(price);
+        if (remembered !== undefined) return remembered;
+        const decimal = parseFuturesWorkstationDecimal(price);
+        if (this.parsed.size >= this.parsedBound) this.forgetPricesNotHeld();
+        this.parsed.set(price, decimal);
+        return decimal;
+    }
+
+    // Prices leave the book as the market walks and as the far edge is evicted,
+    // and what they parsed to would otherwise be remembered for the life of the
+    // session. Dropping only what the side no longer holds keeps the levels that
+    // are about to be walked again, where emptying the whole cache would make
+    // the next frame re-parse the entire book.
+    forgetPricesNotHeld() {
+        for (const price of this.parsed.keys()) {
+            if (!this.has(price)) this.parsed.delete(price);
+        }
+        // Still full of prices the book is actually holding: the bound is below
+        // what this side legitimately needs, so it is the bound that gives.
+        if (this.parsed.size >= this.parsedBound) this.parsed.clear();
+    }
+}
+
 // A thousand-level side is sorted several times a second, and comparing two
 // decimals re-parses both strings. Sorting through the comparator would parse
 // every price twenty-odd times per pass; parsing each price once and ordering
@@ -159,12 +222,16 @@ const sortedByPrice = (side, descending) => {
     const entries = [];
     let scale = 0;
     for (const [price, quantity] of side) {
-        const decimal = parseFuturesWorkstationDecimal(price);
+        const decimal = side.decimalOf(price);
         if (decimal.scale > scale) scale = decimal.scale;
         entries.push({ price, quantity, decimal, key: 0n });
     }
+    // A contract quotes every price at one precision, so the common side needs
+    // no rescaling at all and the coefficients are already comparable.
     for (const entry of entries) {
-        entry.key = entry.decimal.coefficient * (10n ** BigInt(scale - entry.decimal.scale));
+        entry.key = entry.decimal.scale === scale
+            ? entry.decimal.coefficient
+            : entry.decimal.coefficient * (10n ** BigInt(scale - entry.decimal.scale));
     }
     const direction = descending ? -1n : 1n;
     entries.sort((left, right) => {
@@ -252,17 +319,47 @@ const bandOfSnapshot = (snapshot) => {
 // of the room still there and the side has rows to draw throughout.
 export const FUTURES_WORKSTATION_BAND_ROOM_SHARE = 0.25;
 
+// Two parsed decimals in the order their prices are in, without going back to
+// the strings. Equal scales are the whole of the live case — a contract quotes
+// every price at its own precision — so the exponentiation is only paid on a
+// book that mixes them.
+const compareParsedDecimals = (left, right) => {
+    if (left.scale === right.scale) {
+        if (left.coefficient === right.coefficient) return 0;
+        return left.coefficient < right.coefficient ? -1 : 1;
+    }
+    const scale = left.scale > right.scale ? left.scale : right.scale;
+    const leftKey = left.coefficient * (10n ** BigInt(scale - left.scale));
+    const rightKey = right.coefficient * (10n ** BigInt(scale - right.scale));
+    if (leftKey === rightKey) return 0;
+    return leftKey < rightKey ? -1 : 1;
+};
+
 // The best price on a side is a minimum, not an ordering — taking it by sorting
 // the whole book was two full sorts per delta for two values.
+//
+// Each price is parsed once. Comparing two decimal *strings* parses both, so
+// walking a side through the string comparator parsed every price twice and the
+// running best once more for every level behind it. That is the hottest loop the
+// desk has: the crossed-book check runs it twice per applied diff, ten diffs a
+// second, over a side that is now thousands of levels deep rather than the
+// nearest thousand. Measured on a 4000-level side, parsing once took a diff from
+// 2.9 ms to 0.6 ms.
 const bestPrice = (side, descending) => {
     let best = null;
+    let bestDecimal = null;
     for (const price of side.keys()) {
+        const decimal = side.decimalOf(price);
         if (best === null) {
             best = price;
+            bestDecimal = decimal;
             continue;
         }
-        const comparison = compareFuturesWorkstationDecimals(price, best);
-        if (descending ? comparison > 0 : comparison < 0) best = price;
+        const comparison = compareParsedDecimals(decimal, bestDecimal);
+        if (descending ? comparison > 0 : comparison < 0) {
+            best = price;
+            bestDecimal = decimal;
+        }
     }
     return best;
 };
@@ -311,8 +408,8 @@ export class FuturesWorkstationOrderBook {
     constructor() {
         this.phase = FUTURES_WORKSTATION_ORDER_BOOK_PHASES.BUFFERING;
         this.lastUpdateId = null;
-        this.bids = new Map();
-        this.asks = new Map();
+        this.bids = new FuturesWorkstationBookSide();
+        this.asks = new FuturesWorkstationBookSide();
         this.buffer = [];
         this.bufferedBytes = 0;
         this.band = null;

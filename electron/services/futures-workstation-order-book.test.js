@@ -15,6 +15,7 @@ import {
 import {
     compareFuturesWorkstationDecimals,
     normalizeFuturesWorkstationDecimal,
+    subtractFuturesWorkstationDecimals as subtractDecimals,
 } from './futures-workstation-decimal.js';
 
 const snapshot = (overrides = {}) => ({
@@ -1004,5 +1005,91 @@ describe('what the book retains', () => {
         expect(actualBids).toEqual(ordered([...originalBids, ...addedBids], true));
         expect(actualAsks).toEqual(ordered([...originalAsks, ...addedAsks], false));
         expect(actualBids.length).toBe(limit + addedBids.length);
+    });
+});
+
+describe('what a side remembers about its own prices', () => {
+    // Two comparisons of the same two prices now live in this file: the one that
+    // reads decimal strings, which the band and the spread go through, and the
+    // one that reads what a price parsed to, which the best price and the sort go
+    // through. They must agree on every book, and the case that separates them is
+    // a book whose prices are quoted at different precisions — where a coefficient
+    // is not comparable to a coefficient until one of them is rescaled.
+    //
+    // A guard, not a finding: it passes against the tree before this change,
+    // which had one comparison and could not disagree with itself. It is here so
+    // that the second one can never quietly stop matching the first — and it
+    // does bite that: comparing coefficients without bringing them to a common
+    // scale makes the book reach backwards, `below: '-0.0999999'`.
+    it('finds the best price on a side quoted at mixed precision', () => {
+        // Distinct prices whose canonical forms carry different numbers of
+        // decimals, which is what a coefficient comparison alone gets wrong: by
+        // coefficient, 9.9000001 is the largest number here and 10 the smallest.
+        const bidPrices = ['9.9', '9.899999', '10', '9.9000001', '9.95', '9.8'];
+        const askPrices = ['10.5', '11.000001', '10.55', '11', '10.5000001'];
+        const book = bookFromLevels(
+            bidPrices.map((price, index) => [price, `${index + 1}`]),
+            askPrices.map((price, index) => [price, `${index + 1}`]),
+        );
+        const edge = (prices, descending) => prices
+            .map(price => normalizeFuturesWorkstationDecimal(price))
+            .sort((left, right) => (descending ? -1 : 1)
+                * compareFuturesWorkstationDecimals(left, right));
+        const bids = edge(bidPrices, true);
+        const asks = edge(askPrices, false);
+        // `reachOfBook` is measured from the best price to the furthest one on
+        // each side, so it is wrong in both terms if either is found by comparing
+        // coefficients that have not been brought to a common scale.
+        expect(book.reachOfBook()).toEqual({
+            below: subtractDecimals(bids[0], bids.at(-1)),
+            above: subtractDecimals(asks.at(-1), asks[0]),
+        });
+        // And the delivered side is in the order the string comparison puts it
+        // in, which is the other reader of the same prices.
+        expect(book.toRendererRows().bids.map(row => row.price)).toEqual(bids);
+    });
+
+    // The cache is a pure function of a price string, so it can never hold a
+    // wrong answer — only too many right ones. What it must not do is lose a
+    // level: forgetting is by price, and a price the side still holds is not
+    // forgotten however far the market has walked from it.
+    //
+    // A guard: it passes against the tree before this change, where nothing was
+    // remembered and so nothing could be forgotten wrongly.
+    it('delivers every held level after the market has walked past its remembered prices', () => {
+        const { RETAINED_LEVELS_PER_SIDE } = FUTURES_WORKSTATION_ORDER_BOOK_LIMITS;
+        const book = bookFromLevels([['50000.0', '1']], [['50001.0', '1']]);
+        let updateId = 100n;
+        // Every round names prices the book has never seen and abandons the last
+        // round's, which is what walks the cache past its bound.
+        const rounds = 12;
+        const perRound = 500;
+        for (let round = 0; round < rounds; round += 1) {
+            const first = updateId + 1n;
+            expect(book.push(delta({
+                firstUpdateId: String(first),
+                finalUpdateId: String(first),
+                previousFinalUpdateId: String(updateId),
+                bids: Array.from({ length: perRound }, (_, index) => [
+                    `${49_999 - (round * perRound) - index}.25`,
+                    '1',
+                ]),
+                asks: [],
+            }), 1).applied).toBe(true);
+            updateId = first;
+        }
+        const held = Array.from(book.bids.keys());
+        expect(held.length).toBe(Math.min(
+            RETAINED_LEVELS_PER_SIDE,
+            1 + (rounds * perRound),
+        ));
+        // Delivered ungrouped, the rows are the levels held, nearest first, and
+        // none of them has gone missing behind a forgotten parse.
+        const rows = book.toRendererRows({ rows: 64 }).bids.map(row => row.price);
+        const nearest = held
+            .sort((left, right) => -compareFuturesWorkstationDecimals(left, right))
+            .slice(0, 64)
+            .map(price => normalizeFuturesWorkstationDecimal(price));
+        expect(rows).toEqual(nearest);
     });
 });
