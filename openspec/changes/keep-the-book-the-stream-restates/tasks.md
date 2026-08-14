@@ -87,7 +87,7 @@ levels, and it is the only thing that can prove it.*
 
 ## 5. Verification
 
-- [x] 5.1 `npm run lint`, `npm test`, `npm run check:futures-production`. *(Run against the staged tree in isolation rather than against the working tree, which holds another session's unfinished work: 1921 of 1921 tests, eslint clean, boundary check passed over 23 isolated implementation files.)*
+- [x] 5.1 `npm run lint`, `npm test`, `npm run check:futures-production`. *(Run against the staged tree in isolation rather than against the working tree, which holds another session's unfinished work: 1921 of 1921 tests, eslint clean, boundary check passed over 23 isolated implementation files. Re-run on the whole change once every part of it had landed, this time against the shared tree with nothing else outstanding: **1954 of 1954**, eslint clean, and the boundary, circular-import and trading-command-path checks all passed.)*
 - [x] 5.2 Record the delivered frame size and the per-frame work in both processes, before and after. Measured 2026-08-14, median of 40 crossings, one book — a thousand-level page with the far levels the stream restates behind it — read at a step of 0.0001 over fourteen rows.
 
   | | before | after |
