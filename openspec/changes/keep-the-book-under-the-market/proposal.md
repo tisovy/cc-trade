@@ -19,8 +19,8 @@ full. Nothing about it looks like a failure from inside the desk.
 
 **The answer is the same page read again, centred where the market is now**, and
 the spec already requires it: *"the best price leaves a band read at the deepest
-page the exchange publishes → that page is read again, centred where the market
-is now, rather than the book going on dropping the levels it can no longer
+page a single REST read returns → that page is read again, centred where the
+market is now, rather than the book going on dropping the levels it can no longer
 prove."*
 
 **The desk reaches that read down one path only.** `ensureDepthCovers` decides
@@ -38,14 +38,17 @@ which is true, and it acts as *"there is nothing to do"*, which is not. Depth an
 centring are two different questions, and only one of them is about the operator's
 step. Worse, the branch is not a passing condition: what a page proved is fixed at
 the moment it was read, so at the deepest page a shortfall above 1 can never come
-back down. On a contract read at a step the exchange does not publish deep enough
+back down. On a contract read at a step no single page reaches deep enough
 for, the desk enters that branch on the first frame and stays in it for the
 session — the band never moves again, and every break takes a side of the book
 with it.
 
 **AKEUSDT at the step the operator reads it at is exactly that contract.**
-Measured through the desk's own proxy on 2026-08-13, the deepest page Binance
-publishes — a thousand levels a side — reaches this far past the mid:
+Measured through the desk's own proxy on 2026-08-13, the deepest page a single
+REST read returns — a thousand levels a side — reaches this far past the mid.
+(This is the reach of a *page*, not of the exchange's book: the diff stream
+restates levels far outside it, which the desk drops and
+`keep-the-book-the-stream-restates` stops dropping.)
 
 | Contract | reach below | reach above | ticks to price |
 |---|---|---|---|
@@ -55,8 +58,8 @@ publishes — a thousand levels a side — reaches this far past the mid:
 | TUTUSDT | 33.22% | 28.35% | 3 865 |
 
 The coarsest grouping step the panel offers is 500 ticks, which over fourteen
-rows asks for 9.1% of price on AKEUSDT. Against 4.1% published, the shortfall is
-2.2 — permanently. The operator was trading the one state the desk never
+rows asks for 9.1% of price on AKEUSDT. Against the 4.1% the page reached, the
+shortfall is 2.2 — permanently. The operator was trading the one state the desk never
 re-centres out of.
 
 ## What Changes
@@ -75,13 +78,13 @@ re-centres out of.
   bought before the rows run out, not after the operator has watched them go.
 - A band that still holds the market is left alone, however far short of the rows
   it falls. A page that cannot cover the reading is not re-read for that reason,
-  which is what keeps a contract the exchange publishes no deeper than this from
-  reading the same page every five seconds for the session.
+  which is what keeps a contract no page reaches that far on from reading the
+  same page every five seconds for the session.
 
 ## Non-Goals
 
 - The ladder of grouping steps is not touched here. That the coarsest step asks
-  for more than the exchange publishes on every contract measured above is a real
+  for more than one page reaches on every contract measured above is a real
   defect, and it is what leaves half the panel blank at that step; it is the
   subject of the change that follows this one. This change makes the book correct
   at whatever step it is read at.

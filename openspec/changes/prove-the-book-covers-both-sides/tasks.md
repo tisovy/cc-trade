@@ -15,7 +15,7 @@
 - [x] 2.4 Apply the same rule to the bootstrap and recovery deliveries, so no path can state `live` over a short book.
 - [x] 2.5 Prove by test that a book short on one side is delivered `stale`, that it still carries its rows, and that it returns to `live` when the deeper page lands.
 - [x] 2.6 Measure the shortfall once per frame and pass it to both the delivery and the page decision. *(Discovered: judging coverage at delivery asks the same question `ensureDepthCovers` already asks, and asking it twice is four more scans of a thousand-level side per frame — a tenth of the per-frame budget the previous change just bought back.)*
-- [x] 2.7 Keep the levels of a short book selectable. *(Discovered: the panel disabled every book level unless the depth resource read `live`. Delivering a short book as stale would have made its levels unclickable — on a contract the exchange does not publish deep enough for the step it is read at, permanently. A short book is exact and current in every level it carries, a click seeds a draft price, and the operator confirms at the cursor; what is gated on `live` is not the price but the badge.)*
+- [x] 2.7 Keep the levels of a short book selectable. *(Discovered: the panel disabled every book level unless the depth resource read `live`. Delivering a short book as stale would have made its levels unclickable — on a contract whose page does not reach deep enough for the step it is read at, permanently. A short book is exact and current in every level it carries, a click seeds a draft price, and the operator confirms at the cursor; what is gated on `live` is not the price but the badge.)*
 
 ## 3. The First Page Covers The Rows
 

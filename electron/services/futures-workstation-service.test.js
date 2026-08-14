@@ -2759,6 +2759,27 @@ describe('the book is bought as deep as it is read', () => {
         expect(Number(reach.above)).toBeGreaterThan(0);
     });
 
+    // The seam the two halves meet at. The book knows how to carry the far book
+    // through a rebuild and how to clear it; which of the two a rebuild is, is a
+    // fact about why the desk asked for it, and only the service knows that.
+    it('carries the far book through a re-centre and clears it when the stream broke', async () => {
+        const { runtime } = await openContract('depth-page-carry');
+        const session = runtime.service.shown;
+        const asked = [];
+        session.orderBook.beginBootstrap = vi.fn((options) => { asked.push(options); });
+        session.orderBook.bootstrap = vi.fn(() => ({ live: true }));
+        for (const reason of ['DEPTH_BAND_WALKED', 'DEPTH_RANGE_SHORT', 'DEPTH_SEQUENCE_GAP']) {
+            session.bookRecovering = false;
+            session.bookRecoveredAt = null;
+            await runtime.service.recoverBook(session, reason, { immediate: true });
+        }
+        expect(asked).toEqual([
+            { keepFarBook: true },
+            { keepFarBook: true },
+            { keepFarBook: false },
+        ]);
+    });
+
     // A contract the desk is already running is selected, not opened: the book
     // it holds was correct a moment ago and sits on a page already paid for, so
     // opening it again on the cheapest page would mean discarding that and
@@ -2816,7 +2837,13 @@ describe('the book states the side it cannot prove', () => {
             FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.depthSnapshot,
         );
         const cents = value => `${value / 100n}.${String(value % 100n).padStart(2, '0')}`;
-        const mid = 5_842_000n;
+        // Centred on the fixture's own book, which is where the diffs this
+        // snapshot is bridged against restate their levels. Twenty-five dollars
+        // away from it, as this was, describes a different contract: the book now
+        // keeps every level the stream restates, so those diffs land as bids far
+        // above the paged asks and the book fails closed on a crossed book —
+        // correctly, and for a reason the fixture invented.
+        const mid = 5_844_500n;
         let reads = 0;
         const readDepthSnapshot = vi.fn(async ({ limit } = {}) => {
             reads += 1;

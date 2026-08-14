@@ -1,20 +1,29 @@
 ## 1. The Far Book Is Kept
 
-- [ ] 1.1 Apply a diff level wherever it rests, rather than refusing every level outside the band the snapshot proved.
-- [ ] 1.2 Keep applying a removal wherever it lands, as now — forgetting a level is never a lie.
-- [ ] 1.3 Size retention for the book the exchange streams rather than for one page of it. Measured 2026-08-13: the whole book is 2431–3425 levels a side on AKEUSDT and BTCUSDT after three minutes. State the bound in the code as what it is — a ceiling against a hostile or pathological stream, not a reading of any market.
-- [ ] 1.4 Evict from the far edge only, and only past the bound, so the levels the operator zooms out to see are not the first ones dropped.
-- [ ] 1.5 Prove by test that a diff level beyond the band is drawn, that a level the stream has never named is not invented, and that retention drops the furthest level rather than the newest.
+- [x] 1.1 Apply a diff level wherever it rests, rather than refusing every level outside the band the snapshot proved.
+- [x] 1.2 Keep applying a removal wherever it lands, as now — forgetting a level is never a lie.
+- [x] 1.3 Size retention for the book the exchange streams rather than for one page of it. Measured 2026-08-13: the whole book is 2431–3425 levels a side on AKEUSDT and BTCUSDT after three minutes. *(Set to 4000, which holds both measured books whole. It is not yet the ceiling a hostile stream needs bounding at: while levels rather than rows cross the transport, every delivery walks the retained side once, so the ceiling is what a burst can make the desk pay per frame. Measured against the burst guard — full-width diffs, a hundred ticks, five-second budget — 1000 takes 2.9 s, 4000 takes 3.6 s, 6000 takes 4.2 s and 20000 stalls the session outright. It rises in §3.)*
+- [x] 1.4 Evict from the far edge only, and only past the bound, so the levels the operator zooms out to see are not the first ones dropped.
+- [x] 1.5 Prove by test that a diff level beyond the band is drawn, that the band it can account for is not widened by drawing past it, and that retention drops the furthest level rather than the nearest.
+- [x] 1.6 Carry the far book through a rebuild the desk asked for, and clear it for one the stream forced. *(Discovered: a re-centre calls `beginBootstrap`, which cleared both sides — so on the contracts that re-centre most, which are the ones being traded, the far book would never accumulate at all. A snapshot is the whole truth inside its own band and says nothing outside it, so what is outside is carried and what is inside but unnamed has been taken. Not for a rebuild the stream forced: a gap means diffs were missed, and showing liquidity that is no longer there is the one error worth clearing a book to avoid.)*
+- [x] 1.7 Answer neither coverage question from a band the market has traded out of. *(Discovered: `coversRange` and `holdsMarket` both measure from the best price to the band's edges, and the best price could not leave the band while every out-of-band level was refused. Now it can, and both would have read a market that has left the page as comfortably covered by it.)*
+- [x] 1.8 Centre the paged depth fixture on the book its own stream restates. *(Discovered: `pagedTransport` priced its band twenty-five dollars away from the fixture the diffs come from. With the band filter gone those diffs land as bids far above the paged asks, and the book fails closed on a crossed book — correctly, for a contradiction the fixture invented and the filter had been hiding.)*
 
 ## 2. The Proven Band Is Stated Rather Than Enforced
 
 - [ ] 2.1 Keep the band and keep its meaning: the stretch of price every level of which the desk can account for. Beyond it the book holds what the stream has restated since — exact for each level it names, silent about levels nobody has touched.
 - [ ] 2.2 State the boundary on the delivery, so the panel can mark where the accounted-for book ends instead of the operator having to know.
 - [ ] 2.3 Mark it on the panel, quietly: a row beyond the proven band is a row that may understate, and the operator reads far rows to size a breakout against.
-- [ ] 2.4 Keep the reach the ladder is cut against as the reach of the book on hand — which now grows past the band — so `end-the-book-where-the-market-does` lengthens the ladder without a rung being added or moved.
+- [x] 2.4 Keep the reach the ladder is cut against as the reach of the book on hand — which now grows past the band — so `end-the-book-where-the-market-does` lengthens the ladder without a rung being added or moved. *(The reach was measured over the band, which does not grow. It is now measured over the levels held, so it follows the book: a market walking toward an edge genuinely leaves less book beyond it, and the ladder is kept from jumping by clamping the step drawn rather than by freezing a number that has stopped being true.)*
 - [ ] 2.5 Prove by test that the boundary travels with the book and that the panel marks exactly the rows beyond it.
 
 ## 3. The Book Crosses As The Rows The Panel Draws
+
+*§3 is the other session's; the file and the protocol are theirs. Note for it:
+the retention ceiling in §1.3 is held down by level-based delivery and rises when
+rows cross instead. And under the pool, only the shown contract has a step and a
+row count at all, so the grouping belongs at delivery for the shown session
+rather than cached on each held one.*
 
 - [ ] 3.1 Carry the grouping step and the row count on the request that configures depth, and derive the range the page ladder is bought against from them, so one statement serves both instead of two that can disagree.
 - [ ] 3.2 Group in the main process, with the exact-decimal pass the panel uses today, and deliver rows: the bucket price, the resting quantity, the value in USDT, and the bucket key an order is matched by.

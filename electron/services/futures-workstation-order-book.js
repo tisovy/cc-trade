@@ -16,14 +16,28 @@ import {
 } from '../../src/utils/futuresWorkstationProtocolShared.js';
 
 export const FUTURES_WORKSTATION_ORDER_BOOK_LIMITS = Object.freeze({
-    // Binance serves at most a thousand levels per side, so this is the deepest
-    // *complete* book that exists: past it the exchange publishes no snapshot to
-    // bridge against, and a book stitched from diff traffic alone would show
-    // less liquidity than the market holds — the same lie, further out.
+    // The deepest page a single REST read returns, and so the deepest stretch of
+    // price the desk can prove *complete* in one go: past it there is no snapshot
+    // to bridge against. It is not how far the exchange's book goes — the diff
+    // stream restates levels far outside it, and those are what the desk draws
+    // beyond the band.
     SNAPSHOT_LEVELS_PER_SIDE: 1_000,
-    // Everything the snapshot gives is kept. Retaining less discarded half of a
-    // read the desk already paid weight 20 for.
-    RETAINED_LEVELS_PER_SIDE: 1_000,
+    // How much of the book is kept, which is not the same question as how much a
+    // page proves. Measured on 2026-08-13 by applying `@depth@100ms` for three
+    // minutes without the band filter: the whole book is 2431 to 3425 levels a
+    // side on AKEUSDT and BTCUSDT, reaching past 80% of price on both, and the
+    // nearest thousand of it hold between 7% and 18% of the resting value. So a
+    // thousand was not a bound on cost — it was most of the book, thrown away.
+    //
+    // Four thousand holds the whole of both books measured, with margin, and is
+    // as far as it can go while levels rather than rows cross the transport:
+    // every delivery walks the retained side once, so the ceiling is what a
+    // hostile stream can make the desk pay per frame. At a burst of full-width
+    // diffs, 4000 costs about a fifth more per frame than the thousand it
+    // replaces, and 20000 stalls the session outright — the guard for that is
+    // 'holds a live session through a burst of full-width diffs and a heavy
+    // tape'. It rises when the book crosses as rows.
+    RETAINED_LEVELS_PER_SIDE: 4_000,
     // Shared with the renderer's own bound so the two can never drift apart:
     // a delivered book larger than the protocol accepts is dropped whole. This
     // is the ceiling on a delivery, not the delivery: what crosses is bounded by
@@ -165,6 +179,11 @@ const sortedByPrice = (side, descending) => {
     return entries;
 };
 
+// Past the ceiling, the levels furthest from the market go first. Nearest-first
+// retention is what the operator zooms out *against*, so evicting from the near
+// edge would drop exactly what a coarse step is read for; and a level far from
+// the market is the one whose absence a row can best survive, because rows out
+// there are wide.
 const trimSide = (side, descending) => {
     if (side.size <= FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.RETAINED_LEVELS_PER_SIDE) return;
     const sorted = sortedByPrice(side, descending);
@@ -173,13 +192,20 @@ const trimSide = (side, descending) => {
     }
 };
 
-const applyLevels = (side, levels, band = null) => {
+// A level the exchange restates is applied wherever it rests. The exchange named
+// its price and its quantity, and that is exact whether or not the snapshot page
+// happened to reach it.
+//
+// This refused every level outside the band, on the reasoning that its
+// neighbours were never read and a row built across the gap would understate the
+// market. The first half is true and is why the band is still recorded and still
+// marked on the delivery. The second half does not follow: a row that is absent
+// understates by all of it, which is the same error taken to the limit. Measured
+// on 2026-08-13, refusing them cost between 82% and 93% of the resting value of
+// the book — and it is the reason the desk could not be zoomed out past a couple
+// of per cent while the exchange's own app showed the book past 100%.
+const applyLevels = (side, levels) => {
     for (const [price, quantity] of levels) {
-        // Outside the band the snapshot proved, a level is one the desk cannot
-        // account for: its neighbours were never read, so keeping it would build
-        // a row out of one known level and an unknown gap. A removal is always
-        // applied — forgetting a level is never a lie.
-        if (band !== null && quantity !== '0' && !band.contains(price)) continue;
         if (quantity === '0') side.delete(price);
         else side.set(price, quantity);
     }
@@ -390,11 +416,29 @@ export class FuturesWorkstationOrderBook {
         this.observedUpdateId = null;
     }
 
-    beginBootstrap() {
+    /**
+     * Start a rebuild.
+     *
+     * `keepFarBook` is for the rebuild the desk asks for while the stream is
+     * still carrying: a snapshot centred where the market is now. The snapshot
+     * is authoritative for the stretch of price it covers and says nothing about
+     * anything else, so the levels beyond it are neither refreshed nor
+     * contradicted by it — and clearing them on every re-centre means the book
+     * beyond the page never accumulates at all on the contracts that re-centre
+     * most, which are exactly the ones the operator is trading.
+     *
+     * It is not for a rebuild the stream forced. A sequence gap or a reconnect
+     * means diffs were missed, and a level nobody has heard about since could
+     * have been taken. Showing liquidity that is no longer there is the one
+     * error worth clearing a book to avoid.
+     */
+    beginBootstrap({ keepFarBook = false } = {}) {
         this.phase = FUTURES_WORKSTATION_ORDER_BOOK_PHASES.BUFFERING;
         this.lastUpdateId = null;
-        this.bids.clear();
-        this.asks.clear();
+        if (!keepFarBook) {
+            this.bids.clear();
+            this.asks.clear();
+        }
         this.buffer = [];
         this.bufferedBytes = 0;
         this.band = null;
@@ -414,6 +458,12 @@ export class FuturesWorkstationOrderBook {
         const bid = bestPrice(this.bids, true);
         const ask = bestPrice(this.asks, false);
         if (bid === null || ask === null) return false;
+        // The best price can now rest outside the band: the book keeps every
+        // level the stream restates, and the market can trade its way out of the
+        // page that was read. When it has, the band describes somewhere the
+        // market no longer is, and the rows around the market are proven by
+        // nothing — whatever arithmetic its edges would satisfy.
+        if (!this.band.contains(bid) || !this.band.contains(ask)) return false;
         return compareFuturesWorkstationDecimals(
             subtractFuturesWorkstationDecimals(bid, range),
             this.band.floor,
@@ -499,6 +549,9 @@ export class FuturesWorkstationOrderBook {
         // is the shortfall's case — unmeasurable, and re-read on its own account
         // — not this one.
         if (bid === null || ask === null) return true;
+        // Traded clean out of the page: no room left to measure, only a band the
+        // market has left behind.
+        if (!this.band.contains(bid) || !this.band.contains(ask)) return false;
         const sides = [
             [subtractFuturesWorkstationDecimals(bid, this.band.floor), this.band.provenBelow],
             [subtractFuturesWorkstationDecimals(this.band.ceiling, ask), this.band.provenAbove],
@@ -515,6 +568,29 @@ export class FuturesWorkstationOrderBook {
             if (left < reach * share) return false;
         }
         return true;
+    }
+
+    /**
+     * How far the book on hand reaches past the best price on each side.
+     *
+     * Not the band: the band is the stretch every level of which is accounted
+     * for, and the book reaches past it by whatever the stream has restated.
+     * That difference is the whole book, near enough — measured 2026-08-13, the
+     * levels inside one page hold 7% to 18% of the resting value of a contract.
+     */
+    reachOfBook() {
+        const edge = (side, descending) => {
+            const best = bestPrice(side, descending);
+            const furthest = bestPrice(side, !descending);
+            if (best === null || furthest === null) return null;
+            return descending
+                ? subtractFuturesWorkstationDecimals(best, furthest)
+                : subtractFuturesWorkstationDecimals(furthest, best);
+        };
+        const below = edge(this.bids, true);
+        const above = edge(this.asks, false);
+        if (below === null || above === null) return null;
+        return Object.freeze({ below, above });
     }
 
     push(rawDelta, frameBytes = 0) {
@@ -596,6 +672,20 @@ export class FuturesWorkstationOrderBook {
         }
 
         this.band = bandOfSnapshot(snapshot);
+        // The snapshot is the whole truth inside its own band, so a level carried
+        // over from before that the snapshot does not name has been taken, and
+        // goes. Outside the band it says nothing, and what is there stays.
+        if (this.band !== null) {
+            const named = new Set([
+                ...snapshot.bids.map(([price]) => price),
+                ...snapshot.asks.map(([price]) => price),
+            ]);
+            for (const side of [this.bids, this.asks]) {
+                for (const price of side.keys()) {
+                    if (this.band.contains(price) && !named.has(price)) side.delete(price);
+                }
+            }
+        }
         applyLevels(this.bids, snapshot.bids);
         applyLevels(this.asks, snapshot.asks);
         this.lastUpdateId = snapshot.lastUpdateId;
@@ -619,8 +709,8 @@ export class FuturesWorkstationOrderBook {
     }
 
     applyDelta(delta) {
-        applyLevels(this.bids, delta.bids, this.band);
-        applyLevels(this.asks, delta.asks, this.band);
+        applyLevels(this.bids, delta.bids);
+        applyLevels(this.asks, delta.asks);
         trimSide(this.bids, true);
         trimSide(this.asks, false);
         this.lastUpdateId = delta.finalUpdateIdBigInt;
@@ -669,23 +759,21 @@ export class FuturesWorkstationOrderBook {
             bids,
             asks,
             spread,
-            // How far the page this book was bought at proved past the best price
-            // on each side — where the exchange's book ends, not where the rows
-            // do. Stated only once no deeper page can be bought: before then it
-            // would describe what the desk has spent rather than what the market
-            // publishes, and a panel that ended its grouping ladder on it would
-            // stop the operator asking for the deeper page.
+            // How far the book on hand reaches past the best price on each side —
+            // where the book ends, not where the rows do. The panel cannot work
+            // it out from what it was sent, because delivery is already trimmed
+            // to the range the panel stated: it would only measure its own step
+            // back.
             //
-            // What the page proved when it was read, not what is left of it: the
-            // second shrinks as the market walks inside the band, and a ladder
-            // cut against a shrinking number would move under the operator's
-            // hand while the market did nothing but trade.
-            reach: atDeepestPage && this.band !== null
-                ? Object.freeze({
-                    below: this.band.provenBelow,
-                    above: this.band.provenAbove,
-                })
-                : null,
+            // Measured over the levels actually held rather than over the band:
+            // the band is the stretch that is *complete*, and past it the book
+            // holds everything the stream has restated since — most of it, by
+            // value, on every contract measured.
+            //
+            // Stated only once no deeper page can be bought. Before then a wider
+            // near book is one read away, and a ladder cut here would stop the
+            // operator selecting the step that buys it.
+            reach: atDeepestPage ? this.reachOfBook() : null,
         });
     }
 

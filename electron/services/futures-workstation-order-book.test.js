@@ -358,14 +358,14 @@ describe('authoritative Futures local order book', () => {
     // The snapshot is already the retained size, so the book only outgrows its
     // bound the way it does live: diffs quoting levels beyond the snapshot's
     // window. What is dropped must be the far end, never the tradable top.
-    it('retains only bounded levels and emits the renderer window per side', () => {
-        const { RETAINED_LEVELS_PER_SIDE } = FUTURES_WORKSTATION_ORDER_BOOK_LIMITS;
+    it('emits the renderer window per side and keeps what a diff adds beyond the page', () => {
+        const { SNAPSHOT_LEVELS_PER_SIDE } = FUTURES_WORKSTATION_ORDER_BOOK_LIMITS;
         const book = new FuturesWorkstationOrderBook();
         book.push(delta({ bids: [], asks: [] }), 1);
         expect(book.bootstrap(snapshot({
-            bids: Array.from({ length: RETAINED_LEVELS_PER_SIDE },
+            bids: Array.from({ length: SNAPSHOT_LEVELS_PER_SIDE },
                 (_, index) => [`${100000 - index}.01`, '1']),
-            asks: Array.from({ length: RETAINED_LEVELS_PER_SIDE },
+            asks: Array.from({ length: SNAPSHOT_LEVELS_PER_SIDE },
                 (_, index) => [`${100001 + index}.01`, '1']),
         })).live).toBe(true);
         expect(book.push(delta({
@@ -375,8 +375,10 @@ describe('authoritative Futures local order book', () => {
             bids: Array.from({ length: 100 }, (_, index) => [`${99000 - index}.01`, '1']),
             asks: Array.from({ length: 100 }, (_, index) => [`${101001 + index}.01`, '1']),
         }), 1).applied).toBe(true);
-        expect(book.bids.size).toBe(RETAINED_LEVELS_PER_SIDE);
-        expect(book.asks.size).toBe(RETAINED_LEVELS_PER_SIDE);
+        // A hundred levels a side beyond the page the snapshot proved. They are
+        // the far book, and they are kept.
+        expect(book.bids.size).toBe(SNAPSHOT_LEVELS_PER_SIDE + 100);
+        expect(book.asks.size).toBe(SNAPSHOT_LEVELS_PER_SIDE + 100);
         const view = book.toRendererView();
         expect(view.bids).toHaveLength(
             FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.RENDERER_LEVELS_PER_SIDE,
@@ -399,8 +401,8 @@ describe('authoritative Futures local order book', () => {
         const book = new FuturesWorkstationOrderBook();
         book.push(delta({ bids: [], asks: [] }), 1);
         book.bootstrap(snapshot({
-            bids: side(FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.RETAINED_LEVELS_PER_SIDE),
-            asks: Array.from({ length: FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.RETAINED_LEVELS_PER_SIDE },
+            bids: side(FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.SNAPSHOT_LEVELS_PER_SIDE),
+            asks: Array.from({ length: FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.SNAPSHOT_LEVELS_PER_SIDE },
                 (_, index) => [`${(900001 + index) / 10000}`, '184467440737.09551615']),
         }));
         const bytes = Buffer.byteLength(JSON.stringify(book.toRendererView()), 'utf8');
@@ -439,7 +441,11 @@ describe('the band a snapshot proves', () => {
         return book;
     };
 
-    it('does not keep a level beyond what the snapshot covered', () => {
+    // The exchange named the price and the quantity; that is exact wherever it
+    // rests. Refusing it does not avoid understating the market — an absent row
+    // understates by all of it — and refusing it cost between 82% and 93% of the
+    // resting value of a real book, measured 2026-08-13.
+    it('keeps a level beyond what the snapshot covered', () => {
         const book = banded();
         book.push(delta({
             firstUpdateId: '102',
@@ -449,8 +455,24 @@ describe('the band a snapshot proves', () => {
             asks: [['13.00', '9.0'], ['11.50', '2.5']],
         }), 200);
         const view = book.toRendererView();
-        expect(view.bids.map(row => row.price)).toEqual(['10', '9.5', '9']);
-        expect(view.asks.map(row => row.price)).toEqual(['11', '11.5', '12']);
+        expect(view.bids.map(row => row.price)).toEqual(['10', '9.5', '9', '8']);
+        expect(view.asks.map(row => row.price)).toEqual(['11', '11.5', '12', '13']);
+    });
+
+    // What the band still marks: inside it every level is accounted for, outside
+    // it the book holds what the stream has said and is silent about the rest.
+    // The band itself is unchanged by a level landing beyond it.
+    it('does not widen the band it can account for by drawing past it', () => {
+        const book = banded();
+        book.push(delta({
+            firstUpdateId: '102',
+            finalUpdateId: '103',
+            previousFinalUpdateId: '101',
+            bids: [['8.00', '7.0']],
+            asks: [['13.00', '9.0']],
+        }), 200);
+        expect(book.band.floor).toBe('9');
+        expect(book.band.ceiling).toBe('12');
     });
 
     // Forgetting a level is never a lie: a removal is applied wherever it lands.
@@ -610,10 +632,11 @@ describe('the band a snapshot proves', () => {
             .toEqual({ below: '1', above: '1' });
     });
 
-    // What the page proved when it was read, not what is left of it. Read the
-    // second way, a ladder cut against it would narrow under the operator's hand
-    // while the market did nothing but trade.
-    it('states the same reach after the market has walked inside the band', () => {
+    // A fact about the book on hand, so it follows the book. The market walking
+    // up to 11.80 leaves two tenths of ask book above it, and two tenths is what
+    // the panel can draw — the ladder is kept from jumping by clamping the step
+    // it draws at, not by freezing a number that has stopped being true.
+    it('states the reach the book has left after the market walks toward an edge', () => {
         const book = banded();
         book.push(delta({
             firstUpdateId: '102',
@@ -623,7 +646,88 @@ describe('the band a snapshot proves', () => {
             asks: [['11.00', '0'], ['11.80', '1.0']],
         }), 200);
         expect(book.toRendererView(null, { atDeepestPage: true }).reach)
+            .toEqual({ below: '1', above: '0.2' });
+    });
+
+    // And it grows with the far book, which is the point: the ladder lengthens
+    // as the stream names levels further out, with no rung added or moved.
+    it('reaches as far as the levels the stream has restated', () => {
+        const book = banded();
+        expect(book.toRendererView(null, { atDeepestPage: true }).reach)
             .toEqual({ below: '1', above: '1' });
+        book.push(delta({
+            firstUpdateId: '102',
+            finalUpdateId: '103',
+            previousFinalUpdateId: '101',
+            bids: [['4.00', '7.0']],
+            asks: [['30.00', '9.0']],
+        }), 200);
+        expect(book.toRendererView(null, { atDeepestPage: true }).reach)
+            .toEqual({ below: '6', above: '19' });
+    });
+
+    // A rebuild the desk asks for while the stream is still carrying is a
+    // snapshot centred where the market is now. It is the whole truth inside its
+    // own band and says nothing outside it, so the far book survives it — and
+    // has to, or on the contracts that re-centre most, which are the ones being
+    // traded, it never accumulates at all.
+    it('keeps the far book across a re-centre and drops what the new band no longer names', () => {
+        const book = banded();
+        book.push(delta({
+            firstUpdateId: '102',
+            finalUpdateId: '103',
+            previousFinalUpdateId: '101',
+            bids: [['4.00', '7.0']],
+            asks: [['30.00', '9.0']],
+        }), 200);
+        book.beginBootstrap({ keepFarBook: true });
+        expect(book.bootstrap({
+            lastUpdateId: '200',
+            bids: [['10.50', '2.0'], ['9.50', '3.0']],
+            asks: [['11.50', '4.0'], ['12.50', '5.0']],
+        }).live).toBe(true);
+        const view = book.toRendererView();
+        // 4 and 30 are outside the new band and are still drawn. So is 9, which
+        // the new page does not reach either. 10 was inside the new band and the
+        // snapshot did not name it, so it has been taken.
+        expect(view.bids.map(row => row.price)).toEqual(['10.5', '9.5', '9', '4']);
+        expect(view.asks.map(row => row.price)).toEqual(['11.5', '12.5', '30']);
+    });
+
+    // Not for a rebuild the stream forced. A gap means diffs were missed, and a
+    // level nobody has heard about since could have been taken — showing
+    // liquidity that is not there is the error worth clearing a book to avoid.
+    it('clears the far book for a rebuild the stream forced', () => {
+        const book = banded();
+        book.push(delta({
+            firstUpdateId: '102',
+            finalUpdateId: '103',
+            previousFinalUpdateId: '101',
+            bids: [['4.00', '7.0']],
+            asks: [['30.00', '9.0']],
+        }), 200);
+        book.beginBootstrap();
+        expect(book.bids.size).toBe(0);
+        expect(book.asks.size).toBe(0);
+    });
+
+    // The best price can rest outside the band now that the book keeps what the
+    // stream restates. When it does, the band describes somewhere the market has
+    // left, and nothing around the market is proven by it — so neither question
+    // may be answered from its edges.
+    it('answers neither question from a band the market has traded out of', () => {
+        const book = banded();
+        book.push(delta({
+            firstUpdateId: '102',
+            finalUpdateId: '103',
+            previousFinalUpdateId: '101',
+            // Every level the page proved is taken, and the market re-forms above
+            // the ceiling the page reached.
+            bids: [['10.00', '0'], ['9.00', '0'], ['13.00', '1.0']],
+            asks: [['11.00', '0'], ['12.00', '0'], ['14.00', '1.0']],
+        }), 200);
+        expect(book.coversRange('0.1')).toBe(false);
+        expect(book.holdsMarket()).toBe(false);
     });
 
     it('forgets the band when the book is rebuilt or stopped', () => {
@@ -746,13 +850,13 @@ describe('the reading bounds the delivery', () => {
     // retained book at the ceiling, read at forty-four rows and a five-tick
     // step — the reading the audit measured — is the comparison that matters.
     it('is a fraction of the frame the whole book was', () => {
-        const { RETAINED_LEVELS_PER_SIDE } = FUTURES_WORKSTATION_ORDER_BOOK_LIMITS;
+        const { SNAPSHOT_LEVELS_PER_SIDE } = FUTURES_WORKSTATION_ORDER_BOOK_LIMITS;
         const book = new FuturesWorkstationOrderBook();
         book.push(delta({ bids: [], asks: [] }), 1);
         expect(book.bootstrap(snapshot({
-            bids: Array.from({ length: RETAINED_LEVELS_PER_SIDE },
+            bids: Array.from({ length: SNAPSHOT_LEVELS_PER_SIDE },
                 (_, index) => [`${1_000_000 - index}`, '1.123456789012345678']),
-            asks: Array.from({ length: RETAINED_LEVELS_PER_SIDE },
+            asks: Array.from({ length: SNAPSHOT_LEVELS_PER_SIDE },
                 (_, index) => [`${1_000_001 + index}`, '1.123456789012345678']),
         })).live).toBe(true);
         const bytes = view => Buffer.byteLength(JSON.stringify(view), 'utf8');
@@ -857,8 +961,41 @@ describe('bounded delivery selects before full ordering', () => {
         }
     });
 
-    it('keeps exact nearest retained levels when an in-band diff exceeds the ceiling', () => {
-        const limit = FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.RETAINED_LEVELS_PER_SIDE;
+    // Past the ceiling the furthest levels go first. Evicting from the near edge
+    // would drop exactly what a coarse step is read for, and the ceiling is a
+    // guard against a pathological stream rather than a reading of any market —
+    // measured, a whole contract's book is a few thousand levels a side.
+    it('evicts from the far edge when the retained side passes its ceiling', () => {
+        const { RETAINED_LEVELS_PER_SIDE, DIFF_LEVELS_PER_SIDE } = FUTURES_WORKSTATION_ORDER_BOOK_LIMITS;
+        const book = bookFromLevels([['100000.0', '1']], [['100001.0', '1']]);
+        let updateId = 100n;
+        // Enough diffs to carry the side past the ceiling, and no more: trimming
+        // holds it there, so a loop waiting for it to grow would never end.
+        const rounds = Math.ceil(RETAINED_LEVELS_PER_SIDE / DIFF_LEVELS_PER_SIDE) + 1;
+        for (let pushed = 0; pushed < rounds; pushed += 1) {
+            const first = updateId + 1n;
+            const final = updateId + 1n;
+            expect(book.push(delta({
+                firstUpdateId: String(first),
+                finalUpdateId: String(final),
+                previousFinalUpdateId: String(updateId),
+                bids: Array.from({ length: DIFF_LEVELS_PER_SIDE }, (_, index) => [
+                    `${99999 - (pushed * DIFF_LEVELS_PER_SIDE) - index}.0`,
+                    '1',
+                ]),
+                asks: [],
+            }), 1).applied).toBe(true);
+            updateId = final;
+        }
+        expect(book.bids.size).toBe(RETAINED_LEVELS_PER_SIDE);
+        // The best bid — the level the market is at — survived; the deepest one
+        // pushed did not.
+        expect(book.bids.has('100000')).toBe(true);
+        expect(book.bids.has(`${99999 - (rounds * DIFF_LEVELS_PER_SIDE) + 1}`)).toBe(false);
+    });
+
+    it('keeps every level a diff adds while the retained side is under its ceiling', () => {
+        const limit = FUTURES_WORKSTATION_ORDER_BOOK_LIMITS.SNAPSHOT_LEVELS_PER_SIDE;
         const originalBids = Array.from({ length: limit }, (_, index) => [
             `${100_000 - index}.0`,
             '1',
@@ -884,19 +1021,19 @@ describe('bounded delivery selects before full ordering', () => {
             asks: addedAsks,
         }), 1).applied).toBe(true);
 
-        const nearest = (levels, descending) => levels
+        const ordered = (levels, descending) => levels
             .map(([price]) => normalizeFuturesWorkstationDecimal(price))
             .sort((left, right) => {
                 const comparison = compareFuturesWorkstationDecimals(left, right);
                 return descending ? -comparison : comparison;
-            })
-            .slice(0, limit);
+            });
         const actualBids = Array.from(book.bids.keys()).sort(
             (left, right) => -compareFuturesWorkstationDecimals(left, right),
         );
         const actualAsks = Array.from(book.asks.keys()).sort(compareFuturesWorkstationDecimals);
-        expect(actualBids).toEqual(nearest([...originalBids, ...addedBids], true));
-        expect(actualAsks).toEqual(nearest([...originalAsks, ...addedAsks], false));
+        expect(actualBids).toEqual(ordered([...originalBids, ...addedBids], true));
+        expect(actualAsks).toEqual(ordered([...originalAsks, ...addedAsks], false));
+        expect(actualBids.length).toBe(limit + addedBids.length);
     });
 
     it('sorts only the selected subset for a bounded 1000-level side', () => {

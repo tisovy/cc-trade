@@ -10,7 +10,7 @@
 ## 2. An Off-Centre Band Is Re-Read At Any Page Depth
 
 - [x] 2.1 Separate the two decisions in `ensureDepthCovers`: what the reading needs, which buys depth, and whether the band still holds the market, which buys a re-read.
-- [x] 2.2 Re-read an off-centre band whatever its shortfall and whatever its page, including the deepest page the exchange publishes.
+- [x] 2.2 Re-read an off-centre band whatever its shortfall and whatever its page, including the deepest page a single REST read returns.
 - [x] 2.3 Keep the existing rule for a band that still holds the market: a page short of the rows that cannot be deepened is left alone, so a contract published no deeper than this does not re-read every cooldown for the session.
 - [x] 2.4 Keep the recovery cooldown on the re-read, and keep a deepening exempt from it.
 - [x] 2.5 Ask the question on the path that already measures the shortfall per applied diff, so the cost is one more pair of scans and not one more pass over the book.

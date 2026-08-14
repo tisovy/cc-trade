@@ -80,6 +80,14 @@ export const FUTURES_PRODUCTION_WORKSTATION_BOOK_RECOVERY = Object.freeze({
 // A ceiling the market trips, it trips repeatedly: the frames that reach it come
 // from one burst. The refusal is stated once per window, so the reason line
 // carries the fact rather than a count of it.
+// The recoveries the desk asks for while the stream is still carrying: the page
+// is re-read because it no longer covers the rows or no longer sits under the
+// market, not because anything was missed. Everything else that rebuilds a book
+// rebuilds it because the stream broke.
+export const FUTURES_PRODUCTION_WORKSTATION_RECENTRE_CODES = Object.freeze(
+    new Set(['DEPTH_RANGE_SHORT', 'DEPTH_BAND_WALKED']),
+);
+
 export const FUTURES_PRODUCTION_WORKSTATION_FRAME_REFUSAL = Object.freeze({
     REPORT_COOLDOWN_MS: 5_000,
 });
@@ -1503,11 +1511,17 @@ export class FuturesProductionWorkstationService {
                 FUTURES_WORKSTATION_RESOURCES.DEPTH,
                 session.lastDepthView,
             );
+            // A re-centre is a fresh page for a stream that never stopped, so the
+            // book beyond that page is neither refreshed nor contradicted by it
+            // and is carried over. Any other cause means diffs were missed, and
+            // a level nobody has heard about since could have been taken — that
+            // book is cleared.
+            const keepFarBook = FUTURES_PRODUCTION_WORKSTATION_RECENTRE_CODES.has(reasonCode);
             for (let attempt = 1;
                 attempt <= FUTURES_PRODUCTION_WORKSTATION_BOOK_RECOVERY.ATTEMPTS;
                 attempt += 1) {
                 if (!this.isHeld(session) || session.reconnectTimer !== null) return;
-                session.orderBook.beginBootstrap();
+                session.orderBook.beginBootstrap({ keepFarBook });
                 await this.delay(
                     FUTURES_PRODUCTION_WORKSTATION_BOOK_RECOVERY.BRIDGE_MS * (2 ** (attempt - 1)),
                 );

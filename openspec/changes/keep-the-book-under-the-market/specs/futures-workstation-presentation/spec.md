@@ -51,8 +51,8 @@ and SHALL return to live on the first delivery that covers both sides again.
 A level of a book delivered short SHALL remain selectable. Such a book is exact
 and current in every level it carries; there are fewer of them. Gating the levels
 on a live state alone made a book that had merely fallen short of the rows
-unusable for seeding a price — permanently, on a contract the exchange does not
-publish deep enough for the step it is read at.
+unusable for seeding a price — permanently, on a contract whose page does not
+reach deep enough for the step it is read at.
 
 #### Scenario: A diff touches a level outside the band
 - **WHEN** a depth diff carries a level beyond the range the snapshot covered
@@ -67,7 +67,7 @@ publish deep enough for the step it is read at.
 - **THEN** the page already held is read again rather than a deeper one bought, so a drifting market cannot climb the desk to the deepest page
 
 #### Scenario: The market moves past a band bought at the deepest page
-- **WHEN** the best price leaves a band read at the deepest page the exchange publishes
+- **WHEN** the best price leaves a band read at the deepest page a single REST read returns
 - **THEN** that page is read again, centred where the market is now, rather than the book going on dropping the levels it can no longer prove
 
 #### Scenario: A grouped row would span unproven ground
