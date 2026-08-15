@@ -51,9 +51,66 @@ assumed; §2's bound is not, and must be before it is chosen.
   timeout — the code has no silence watchdog, so `ready` ends only when the
   socket errors/closes or the desk itself stops.
 
-- [ ] 0.1 Measure how often the exchange sends an unprompted frame on an idle private socket — the interval that will set §2's bound. Take it from the desk's own endpoint, socket options and proxy, over at least an hour on an account doing nothing, and record the distribution rather than a single reading.
+- [x] 0.1 Measure how often the exchange sends an unprompted frame on an idle private socket — the interval that will set §2's bound. Take it from the desk's own endpoint, socket options and proxy, over at least an hour on an account doing nothing, and record the distribution rather than a single reading.
+      **Measured 2026-08-15, 21:28:01Z → 22:38:00Z — 70 minutes, 23 unprompted
+      pings, 22 intervals:**
+
+      | | ms |
+      |---|---|
+      | shortest | 179 915 |
+      | median | 180 021 |
+      | p90 | 180 027 |
+      | longest | 180 120 |
+      | mean | 180 004 |
+
+      205 ms between the shortest and the longest, across seventy minutes. The
+      exchange pings a private socket every 180 s and does it to the millisecond.
+
+      Taken from the desk's own leg, not from something built beside it: the
+      desk's URL builder (`futuresUserDataStreamUrl` → `/private/ws?listenKey=`),
+      the desk's proxy resolution (`HttpsProxyAgent` over `http://127.0.0.1:1080`,
+      which is what `resolveProxyAgent` builds for this operator's environment),
+      the desk's socket options (`handshakeTimeout: 10_000`), the desk's `ws`
+      8.18.3, and the desk's own listen key and account — the credentials were
+      read out of the running desk's process rather than configured separately.
+      Every frame was written to a JSONL as it arrived; the script is in the
+      session scratchpad, not the repository.
+
+      **Three findings the interval alone does not carry.**
+
+      *The ping is on the exchange's clock, not the connection's.* The first
+      ping of the run came 105.5 s after the handshake, not 180 s. A socket that
+      has just opened may therefore wait a full interval for its first proof of
+      life, which is why the bound is armed at the handshake and why it is two
+      intervals wide rather than one.
+
+      *Account traffic does not reset it.* Two `ORDER_TRADE_UPDATE` frames
+      arrived at 22:28:26.305 and 22:28:38.805 — the operator acting on the
+      account from elsewhere, the desk itself having been down since 21:30 — and
+      the next ping still landed 180.023 s after the previous ping. So a busy
+      account is proved no more often than a quiet one, and the bound needs no
+      allowance for either.
+
+      *Two connections on one listen key are both served.* Established by a
+      three-minute pilot at 21:24 before the long run, because opening a second
+      socket on the operator's live account is not free: while the desk was
+      still up, it and this measurement received the same execution reports —
+      the desk's own journal shows its two `unstated` reads at 21:25:25.475 and
+      21:25:28.740 for the frames this client logged at 21:25:25.075 and
+      21:25:28.337 — and the desk's socket was not dropped, then or across the
+      whole 70-minute run (`deskStreamOpeningsDuringRun: 0`). Worth knowing
+      before anyone measures this leg again.
 - [x] 0.2 Measure what the desk does today when the private socket opens and then delivers nothing: how long the stream stays `ready`, how many command-time reads are skipped in that window. This is the cost the change removes and the number 5.2 is compared against.
-- [ ] 0.3 Write both numbers into this file before building. A bound taken from the exchange's documentation rather than from a measured run is an estimate, and §2 SHALL NOT state it as anything else.
+- [x] 0.3 Write both numbers into this file before building. A bound taken from the exchange's documentation rather than from a measured run is an estimate, and §2 SHALL NOT state it as anything else.
+      Both are above: 0.1's 180.021 s median over 22 intervals, and 0.2's
+      26 min 15 s of misplaced belief with nine reads suppressed in it. The
+      documentation's "every 3 minutes" turns out to be right, and it is still
+      not what the bound rests on — it is written about the market sockets, this
+      is the private one, and the two were served by different prefixes for four
+      months without anyone noticing. What the run adds beyond confirming the
+      figure is the spread (205 ms, which is what makes two missed pings
+      unmistakable) and the two behaviours in 0.1 that decide where the bound is
+      armed and how wide it has to be.
 
 ## 1. The Path The Exchange Actually Serves
 
@@ -238,7 +295,17 @@ Which is why 1.5 branches three ways rather than two.
       and the handshake completing counts as the first. The exchange's ping is
       what carries the proof: it arrives on an account doing nothing, which is
       the case a rule watching account events would call dead.
-- [ ] 2.2 State the silence bound where it is enforced, with the measurement from 0.1 beside it.
+- [x] 2.2 State the silence bound where it is enforced, with the measurement from 0.1 beside it.
+      `FUTURES_USER_DATA_SILENCE_MS = 420_000`, declared where the watchdog arms
+      it, with the run beside it: the dates, the sample, the shortest and
+      longest interval, and the two behaviours that decide the shape of the
+      bound — that the ping is on the exchange's clock, so the bound is armed at
+      the handshake, and that account traffic does not reset it, so no allowance
+      is needed for a busy account. The arithmetic for 420 s is written out
+      rather than asserted: two missed pings, decided before a third is due, one
+      missed ping already 877 times the measured spread past the longest
+      interval seen, and the whole thing inside the ten minutes the exchange
+      allows us for a pong.
 - [x] 2.3 On silence past the bound, present the stream as not carrying and restore it, with the spacing the mark-price feed already uses so a dead route does not become a reconnect loop.
       The watchdog does the whole of it where it fires rather than leaving it to
       the close handler: `close()` on a route that has stopped answering waits
@@ -365,7 +432,18 @@ Which is why 1.5 branches three ways rather than two.
 
 ## 5. Verification
 
-- [ ] 5.1 `npm run lint`, `npm test`, `npm run check:futures-production`.
+- [x] 5.1 `npm run lint`, `npm test`, `npm run check:futures-production`.
+      2026-08-15 22:40Z, on the tree with everything above in it: lint clean,
+      **2018 tests in 111 files, all passing**, boundary check passed (23
+      isolated files, exact public-read routes only). `check:circular`,
+      `check:command-path` and `check:runtime-mock` were run too, since this
+      change adds an import to `binance-connection.js`: 261 source files with no
+      cycle, one command builder, no mock in the production graph.
+
+      Run against a tree two other sessions are also writing to, so it says the
+      change is not broken *there* — what says it is not broken on its own is
+      the same suite run against `git write-tree` before each commit, which is
+      how each of them was checked.
 - [x] 5.2 Re-measure 0.2 against the change: the window in which the desk believes a dead stream should be bounded by §2's bound, not open-ended.
       **Nine command-time reads suppressed became two.** 0.2's session is
       reproduced as a test rather than waited for: a socket that opens and is

@@ -1770,22 +1770,28 @@ export function setupBinanceConnection({
     // presenting it as carrying.
     //
     // Measured on 2026-08-15 against the live exchange, on this desk's own
-    // route, proxy, socket options and account, with the account doing nothing:
-    // the exchange sends an unprompted ping every 180 s, and the spread of the
-    // intervals is milliseconds rather than seconds. The run and its
-    // distribution are in `prove-the-private-stream-is-carrying`, task 0.1;
-    // what is stated here is what the bound is built on. A number from the
-    // exchange's documentation would have been an estimate, and this bound is
-    // load-bearing: below it the desk trusts a socket, above it it stops.
+    // route, proxy, socket options, listen key and account: 70 minutes, 23
+    // unprompted pings, 22 intervals between **179.915 s and 180.120 s** —
+    // median 180.021 s, and 205 ms between the shortest and the longest. Not
+    // taken from the documentation, which says three minutes about a different
+    // socket; this bound is load-bearing, and below it the desk trusts a socket
+    // it should not. The run is written up in
+    // `prove-the-private-stream-is-carrying`, task 0.1.
     //
-    // So silence is not a property of the account here — an idle account is
-    // told nothing by the account, and is still pinged. That is what makes a
-    // bound possible at all.
+    // Two things that run showed, which the interval alone does not say. The
+    // exchange pings on its own clock rather than the connection's — the first
+    // ping of that run arrived 105.5 s after the handshake — so a fresh socket
+    // may wait a whole interval for its first proof. And account traffic does
+    // not reset it: two order updates landed between pings and the next ping
+    // still came 180.023 s after the previous one. So an idle account is proved
+    // exactly as often as a busy one, which is what makes a bound possible on a
+    // socket whose silence is otherwise normal.
     //
     // 420 s is two consecutive pings missed, decided before a third is due. One
-    // missed ping is already far outside the measured spread; two cannot be
-    // jitter. It is also inside the ten minutes the exchange gives us to answer
-    // its ping, so the desk notices a route that stopped before the exchange
+    // missed ping already puts the silence ~180 s past the longest interval ever
+    // measured, which is 877 times the whole spread; two cannot be jitter.
+    // It is also inside the ten minutes the exchange gives us to answer its
+    // ping, so the desk notices a route that stopped before the exchange
     // notices a client that stopped.
     const FUTURES_USER_DATA_SILENCE_MS = 420_000;
     // What a restoration waits, which is what a close has always waited here and
