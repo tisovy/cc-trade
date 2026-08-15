@@ -74,7 +74,10 @@
       it must stop being the answer to a case the desk could have caught.
 - [ ] 3.4 Operator drags a minimum-size order downward until the notional would
       fall under 5 USDT. The order stays live, and the desk says why it will not
-      move.
+      move. Written out as runbook step 27, items 7 and 8 — the over-cap drop
+      that now returns the order by itself, and the drop under the exchange's
+      floor, with the check against Binance's own book and with what counts as
+      this defect not having closed.
 
 ## 4. Stated Limits, Not Fixed Here
 

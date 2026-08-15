@@ -79,8 +79,12 @@
       passing, on the tree this change was committed as.
 - [ ] 3.3 Operator repeats runbook step 19: outage, scroll to where candles are
       missing, restore the link, scroll again. Older candles load, or the chart
-      says why they will not.
+      says why they will not. Written out there, in the operator's words, with
+      what counts as the defect not having closed — this line is the pointer,
+      the check itself is step 19.
 - [ ] 3.4 Operator confirms Spot (step 21) still recovers as it does today.
+      Stated there as the control case for step 19: the two markets reach
+      history by different paths, and the pair is where the difference shows.
 
 ## 4. Stated Limits, Not Fixed Here
 
