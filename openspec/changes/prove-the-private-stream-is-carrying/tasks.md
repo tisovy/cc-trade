@@ -149,7 +149,14 @@ built as though it did not:
 
 Which is why 1.5 branches three ways rather than two.
 
-- [ ] 1.3 Register the user-data endpoint in the ADR's WebSocket registry, which has no row for it — that absence is why a decommissioning notice about "market paths" read as not applying.
+- [x] 1.3 Register the user-data endpoint in the ADR's WebSocket registry, which has no row for it — that absence is why a decommissioning notice about "market paths" read as not applying.
+      A sixth row in `docs/futures_phase8_workstation_adr.md`:
+      `/private/ws?listenKey=`, the account's own stream, event-driven, private
+      read. Written with the paragraph that keeps it from reading as a
+      permission — Phase 8 still opens nothing but the public reads above it,
+      and this socket belongs to the shared connection layer. The registry is
+      there to answer "which of our sockets does this notice apply to", and it
+      could not while the private one was missing from it.
 - [x] 1.4 Prove by test that the desk builds the routed URL, and that the bare legacy path cannot be built by accident.
       Four tests. In `futures-trading-adapter.test.js`: the built URL is
       `.../private/ws?listenKey=abc123`, asserted through `new URL` as
@@ -359,8 +366,33 @@ Which is why 1.5 branches three ways rather than two.
 ## 5. Verification
 
 - [ ] 5.1 `npm run lint`, `npm test`, `npm run check:futures-production`.
-- [ ] 5.2 Re-measure 0.2 against the change: the window in which the desk believes a dead stream should be bounded by §2's bound, not open-ended.
+- [x] 5.2 Re-measure 0.2 against the change: the window in which the desk believes a dead stream should be bounded by §2's bound, not open-ended.
+      **Nine command-time reads suppressed became two.** 0.2's session is
+      reproduced as a test rather than waited for: a socket that opens and is
+      never sent anything, twenty-seven minutes, one command every three. Before
+      the change the desk skips the account read for all nine — the same
+      all-nine 0.2 measured on 2026-08-13, and for the same reason, that nothing
+      but a close ends the belief. After it, the two commands inside the bound
+      (180 s and 360 s) are skipped and the other seven read the account.
+
+      The remaining two are not a defect: inside the bound the desk has no
+      evidence the stream is dead, and buying that evidence sooner means
+      distrusting a live stream on a quiet minute. What changed is that the
+      window has an end.
+
+      Run against the live desk, this is what 5.3 asks the operator to see with
+      the proxy stopped.
 - [ ] 5.3 Operator confirms from the record of one ordinary session that the private stream opened and stayed carrying, and — with the proxy stopped — that it says so when it does not. Hand this to `verify-the-desk-in-one-sitting`'s runbook as a step rather than leaving it here.
+      Handed over: **step 50**, in that runbook's own numbering, with a row in
+      its results table. Left unchecked here, as operator verification always
+      is. Four parts: an ordinary quiet session writes no `futures-user-data`
+      line at all — a quiet account is not a dead route and the desk must not
+      confuse them; the proxy stopped for eight minutes produces
+      `STREAM_SILENT`; the dock stops presenting the stream as ready; and with
+      the proxy back, the `unstated` reads of step 35 return.
+
+      The eight minutes are the cost of the bound being 420 s, and the step says
+      so rather than leaving the operator to wonder whether it failed.
 
 ## Notes
 

@@ -5922,6 +5922,42 @@ describe('setupBinanceConnection user-data orchestration', () => {
 
                     expect(held('read').map(entry => entry.reason)).toContain('command');
                 });
+
+                // 5.2, and the number this change is measured by. Task 0.2 timed
+                // the same window on the desk as it was: a socket that opened at
+                // 14:38:23 on 2026-08-13 stayed `ready` for 26 minutes and
+                // suppressed all nine command-time reads issued in it, because
+                // nothing there ever ends that belief but a close.
+                //
+                // The same twenty-seven minutes, one command every three, on a
+                // socket the exchange never says anything on.
+                it('believes a dead stream for the bound and not for the session', async () => {
+                    moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([
+                        {
+                            type: 'balances',
+                            weight: 5,
+                            errorLabel: 'balances',
+                            loadPayload: vi.fn().mockResolvedValue({ futures_balances: [] }),
+                        },
+                    ]);
+                    await openStream();
+                    kept.length = 0;
+
+                    const skipped = [];
+                    for (let command = 1; command <= 9; command += 1) {
+                        await vi.advanceTimersByTimeAsync(180_000);
+                        const before = held('read').filter(entry => entry.reason === 'command').length;
+                        await placeFuturesOrder(`bounded-belief-${command}`);
+                        await flushMicrotasks();
+                        const after = held('read').filter(entry => entry.reason === 'command').length;
+                        if (after === before) skipped.push(command * 180);
+                    }
+
+                    // Two: the commands at 180s and 360s, both inside the bound.
+                    // Before this change the answer was all nine, and the window
+                    // had no end at all.
+                    expect(skipped).toEqual([180, 360]);
+                });
             });
         });
     });
