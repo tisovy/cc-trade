@@ -22,10 +22,10 @@ untouched. Each is marked below with where it is, so nothing is rebuilt.
 
 ## 3. Order Surfaces Disclose Synchronization
 
-- [ ] 3.1 The chart is given `ownedOrders` and nothing about their state (`FuturesWorkstationView.jsx:1130`). The dock is given `accountResources` and uses them. **The chart half is in another session's file.**
-- [ ] 3.2 Partly. The ticket distinguishes unavailable from partial (`FuturesTradingTicket.jsx:701–706`); the dock only distinguishes "read" from "not read yet" and "the account read failed" (`FuturesPortfolioDock.jsx:57–65`), with no synchronizing or stale state. The chart says nothing.
-- [ ] 3.3 The dock offers neither the sanitized reason nor a retry; the ticket offers both.
-- [ ] 3.4 No test holds the dock or the chart to it.
+- [ ] 3.1 The dock half is done. The chart is still given `ownedOrders` and nothing about their state (`FuturesWorkstationView.jsx:1130`). **That file belongs to another session — it needs the operator to hand it over or to route the change through them.**
+- [x] 3.2 **Landed by this change for the dock.** It now separates not read yet, reading, ready, stale and failed, and "No working orders" is shown only when a read actually reported none. The chart still says nothing — see 3.1.
+- [x] 3.3 **Landed by this change for the dock.** The exchange's sanitized reason and a Retry are stated in the panel whose rows they are about, wired to the same `refresh` the ticket uses. The chart still offers neither — see 3.1.
+- [x] 3.4 **Landed by this change for the dock.** `FuturesPortfolioDock.test.jsx` proves that a failed order resource never renders as an empty book, that a stale one keeps its rows and says what they are, and that Retry reaches the account refresh. The chart is untested because it is untouched — see 3.1.
 
 ## 4. Intent Is Presented
 

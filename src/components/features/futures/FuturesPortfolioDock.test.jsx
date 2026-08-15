@@ -849,11 +849,86 @@ describe('FuturesPortfolioDock', () => {
       />,
     )
 
-    // Both panels say it: positions and working orders are read separately.
-    expect(screen.getAllByText('Not read yet.')).toHaveLength(2)
+    // Both panels say it: positions and working orders are read separately. And
+    // a read in flight is not a read that has not started — the first says wait,
+    // the second says nothing has been asked for yet.
+    expect(screen.getAllByText('Reading the account…')).toHaveLength(2)
+    expect(screen.queryByText('Not read yet.')).toBeNull()
     expect(screen.queryByText('No open positions.')).toBeNull()
     expect(screen.queryByText('No working orders.')).toBeNull()
     expect(screen.getByText('— open')).toBeInTheDocument()
+  })
+
+  // A snapshot the desk holds and nothing has confirmed is a third case again:
+  // the rows are still the rows to read, and taking them away is worse — but
+  // "these are your working orders" and "these were your working orders when the
+  // connection dropped" are different claims, and the dock made the first for
+  // both.
+  it('keeps a stale reading on screen and says what it is, with the way back', () => {
+    const onRefreshAccount = vi.fn()
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[]}
+        openOrders={[{ symbol: 'BTCUSDT', orderId: 7, side: 'BUY', price: '58000', origQty: '1', z: '0' }]}
+        onRefreshAccount={onRefreshAccount}
+        accountResources={{
+          positions: { status: 'ready', data: [], lastSuccessfulAt: 100, error: null },
+          regularOrders: {
+            status: 'stale',
+            data: [],
+            lastSuccessfulAt: 100,
+            error: {
+              code: 'TRANSPORT_LOST',
+              message: 'Not confirmed since the connection dropped — retry account synchronization.',
+            },
+          },
+          algoOrders: { status: 'ready', data: [], lastSuccessfulAt: 100, error: null },
+        }}
+      />,
+    )
+
+    const notice = screen.getByLabelText('Working orders synchronization')
+    expect(notice).toHaveTextContent('showing the last reading')
+    expect(notice).toHaveTextContent('Not confirmed since the connection dropped')
+    // The row it is about is still there to be read.
+    expect(screen.getByRole('table', { name: 'Working orders' })).toHaveTextContent('BTCUSDT')
+    // The positions panel read fine and says nothing.
+    expect(screen.queryByLabelText('Positions synchronization')).toBeNull()
+    expect(screen.getByText('No open positions.')).toBeInTheDocument()
+
+    fireEvent.click(within(notice).getByRole('button', { name: 'Retry' }))
+    expect(onRefreshAccount).toHaveBeenCalledExactlyOnceWith('BTCUSDT')
+  })
+
+  it('never renders a failed order resource as an empty book of working orders', () => {
+    const onRefreshAccount = vi.fn()
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[]}
+        openOrders={[]}
+        onRefreshAccount={onRefreshAccount}
+        accountResources={{
+          positions: { status: 'ready', data: [], lastSuccessfulAt: 100, error: null },
+          regularOrders: {
+            status: 'error',
+            data: [],
+            lastSuccessfulAt: null,
+            error: { code: 'READ_FAILED', message: 'Open orders read failed.' },
+          },
+          algoOrders: { status: 'error', data: [], lastSuccessfulAt: null, error: null },
+        }}
+      />,
+    )
+
+    expect(screen.queryByText('No working orders.')).toBeNull()
+    const notice = screen.getByLabelText('Working orders synchronization')
+    expect(notice).toHaveTextContent('Not read — the account read failed.')
+    expect(notice).toHaveTextContent('Open orders read failed.')
+    expect(notice).toHaveAttribute('role', 'alert')
+    fireEvent.click(within(notice).getByRole('button', { name: 'Retry' }))
+    expect(onRefreshAccount).toHaveBeenCalledExactlyOnceWith('BTCUSDT')
   })
 
   it('says the read failed rather than reporting nothing open', () => {

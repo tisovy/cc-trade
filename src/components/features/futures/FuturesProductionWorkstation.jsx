@@ -470,6 +470,7 @@ export const FuturesProductionWorkstation = ({
       onSymbolChange={handleSymbolChange}
       onSizePick={handleSizePick}
       onLoadHistory={executionState?.loadHistory}
+      onRefreshAccount={executionState?.refresh}
     />
   )
 

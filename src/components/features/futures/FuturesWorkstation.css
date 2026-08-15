@@ -2803,6 +2803,38 @@
   color: #ff8490;
 }
 
+/* What is behind the rows, said beside them. A held reading that nothing has
+   confirmed still shows its rows — taking them away is worse — so the claim they
+   carry is what has to change, not their presence. The reason is the exchange's
+   own sanitized one, and the control is the way back. */
+.futures-workstation-dock-sync {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin: 0 0 5px;
+  color: #8192a4;
+  font-size: calc(var(--fx-ui-scale, 1) * 11px);
+  letter-spacing: 0.02em;
+}
+
+.futures-workstation-dock-sync em {
+  color: #718399;
+  font-style: normal;
+}
+
+.futures-workstation-dock-sync.is-stale {
+  color: #e8c65a;
+}
+
+.futures-workstation-dock-sync.is-failed {
+  color: #ff8490;
+}
+
+.futures-workstation-dock-sync .futures-workstation-dock-close {
+  flex: 0 0 auto;
+}
+
 /* ── The desk fits the window ──────────────────────────────────────────────── */
 
 /* Last in the file on purpose. Every rule below overrides a floor declared by

@@ -51,16 +51,53 @@ const openOrderEditorFromKeyboard = (event, order, onOrderEdit) => {
 // No resource at all is the same unknown: a dock wired to a workstation with no
 // execution state behind it knows nothing about the account, and the honest
 // reading of nothing is "not read", not "nothing there".
+// And a reading that was taken and has since gone unconfirmed is a third case
+// again. The rows stay — taking them away is worse — but "these are the orders
+// you have" and "these are the orders you had when the connection dropped" are
+// different claims, and the dock used to make the first for both. So the state
+// behind the rows is disclosed whether or not there are any, with the exchange's
+// sanitized reason and the way back.
 const EMPTY_RESOURCES = Object.freeze({})
 const describeRowsAvailability = (resources) => {
   const everRead = resources.length > 0
     && resources.every(resource => resource?.lastSuccessfulAt != null)
-  if (everRead) return { known: true, label: null }
-  const failed = resources.some(resource => resource?.status === 'error')
-  return {
-    known: false,
-    label: failed ? 'Not read — the account read failed.' : 'Not read yet.',
+  const failed = resources.find(resource => resource?.status === 'error') ?? null
+  const stale = resources.find(resource => resource?.status === 'stale') ?? null
+  const reasonOf = resource => resource?.error?.message ?? null
+  if (!everRead) {
+    const reading = resources.some(resource => resource?.status === 'loading')
+    return {
+      known: false,
+      state: failed ? 'failed' : reading ? 'reading' : 'unread',
+      label: failed
+        ? 'Not read — the account read failed.'
+        : reading ? 'Reading the account…' : 'Not read yet.',
+      reason: reasonOf(failed),
+      notice: null,
+    }
   }
+  if (failed !== null) {
+    return {
+      known: true,
+      state: 'failed',
+      label: null,
+      reason: reasonOf(failed),
+      notice: 'The last account read failed — showing what was read before it.',
+    }
+  }
+  if (stale !== null) {
+    return {
+      known: true,
+      state: 'stale',
+      label: null,
+      reason: reasonOf(stale),
+      notice: 'Not confirmed since the connection dropped — showing the last reading.',
+    }
+  }
+  // A refresh in flight over a reading that has answered is the ordinary case
+  // and says nothing: the rows are the ones the last order was worked against,
+  // and the read is what is about to make them fresher.
+  return { known: true, state: 'ready', label: null, reason: null, notice: null }
 }
 
 export const FuturesPortfolioDock = ({
@@ -79,6 +116,7 @@ export const FuturesPortfolioDock = ({
   onSymbolChange,
   onSizePick,
   onLoadHistory,
+  onRefreshAccount,
 }) => {
   const [ordersTab, setOrdersTab] = useState('working')
   const [isCollapsed, setIsCollapsed] = useState(false)
@@ -106,6 +144,36 @@ export const FuturesPortfolioDock = ({
   const ordersAvailability = describeRowsAvailability(
     [resources.regularOrders, resources.algoOrders].filter(Boolean),
   )
+  // The reason and the way back, stated where the rows are read rather than only
+  // on the trading rail. An operator looking at a list of orders is not looking
+  // at the ticket, and "these are stale" is not a fact the ticket can carry for
+  // a panel two columns away.
+  const retry = typeof onRefreshAccount === 'function'
+    ? (
+      <button
+        type="button"
+        className="futures-workstation-dock-close"
+        onClick={() => onRefreshAccount(selectedSymbol)}
+      >
+        Retry
+      </button>
+    )
+    : null
+  const syncState = (availability, label) => {
+    if (availability.notice === null && availability.label === null) return null
+    const failed = availability.state === 'failed'
+    return (
+      <p
+        className={`futures-workstation-dock-sync is-${availability.state}`}
+        role={failed ? 'alert' : 'status'}
+        aria-label={label}
+      >
+        <span>{availability.notice ?? availability.label}</span>
+        {availability.reason === null ? null : <em>{availability.reason}</em>}
+        {failed || availability.state === 'stale' ? retry : null}
+      </p>
+    )
+  }
 
   // Selecting a view reads nothing. The review is a reading the desk holds —
   // read once when the workspace opens, maintained by the stream, and re-read
@@ -184,10 +252,11 @@ export const FuturesPortfolioDock = ({
             </svg>
           </button>
         </header>
+        {syncState(positionsAvailability, 'Positions synchronization')}
         {describedPositions.length === 0 ? (
-          <p className="futures-workstation-empty">
-            {positionsAvailability.known ? 'No open positions.' : positionsAvailability.label}
-          </p>
+          positionsAvailability.known
+            ? <p className="futures-workstation-empty">No open positions.</p>
+            : null
         ) : (
           <div className="futures-workstation-dock-table" role="table" aria-label="Open positions">
             <div className="futures-workstation-dock-row is-head" role="row">
@@ -430,10 +499,19 @@ export const FuturesPortfolioDock = ({
             onSymbolChange={onSymbolChange}
           />
         ) : openOrders.length === 0 ? (
-          <p className="futures-workstation-empty">
-            {ordersAvailability.known ? 'No working orders.' : ordersAvailability.label}
-          </p>
+          <>
+            {syncState(ordersAvailability, 'Working orders synchronization')}
+            {/* "No working orders" is a claim about the account, and it may only
+                be made when a read actually reported none. */}
+            {ordersAvailability.known
+              ? <p className="futures-workstation-empty">No working orders.</p>
+              : null}
+          </>
         ) : (
+          <>
+          {/* Rows the desk holds and nothing has confirmed are still the rows to
+              read; what they are is what has to be said beside them. */}
+          {syncState(ordersAvailability, 'Working orders synchronization')}
           <div className="futures-workstation-dock-table" role="table" aria-label="Working orders">
             <div className="futures-workstation-dock-row is-head is-orders" role="row">
               <span role="columnheader">Symbol</span>
@@ -540,6 +618,7 @@ export const FuturesPortfolioDock = ({
               )
             })}
           </div>
+          </>
         )}
       </div>
     </section>
