@@ -14,7 +14,7 @@
 ## 3. Verification
 
 - [x] 3.1 `npm run lint`, `npm run test:all`, focused Vitest, and strict OpenSpec validation.
-- [ ] 3.2 Operator confirms the dock is present at narrow widths and that keyboard editing works.
+- [ ] 3.2 Operator confirms the dock is present at narrow widths and that keyboard editing works — step 46, «Док на узком окне и клавиатура вместо мыши», in `verify-the-desk-in-one-sitting`, so the operator runs one list.
 
 ## 4. Full Audit Follow-up
 
