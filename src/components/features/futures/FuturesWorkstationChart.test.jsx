@@ -753,7 +753,10 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     expect(surface.releasePointerCapture).not.toHaveBeenCalled()
   })
 
-  it('places the order again where it was lifted from when the drag is abandoned', async () => {
+  // The modifier begins the drag and is asked for nothing after that. The
+  // operator's fingers come off Ctrl before the button — which used to throw
+  // the move away and put the order back where it started.
+  it('places the order where the pointer left it, with the modifier long gone', async () => {
     const props = { ...properties([candle(1_784_000_000_000)]), ownedOrders: [workingOrder()] }
     render(<FuturesWorkstationChart {...props} />)
     const canvas = screen.getByTestId('futures-workstation-chart')
@@ -768,8 +771,44 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     await settle()
     const surface = dragSurface()
     fireEvent.pointerMove(surface, { pointerId: 8, clientY: 80, altKey: true })
-    // Letting the modifier go abandons the drag: the order goes back.
-    fireEvent.pointerUp(surface, { pointerId: 8, clientY: 80 })
+    // Alt goes, mid-gesture, with the button still down. The drag is the
+    // operator's until they let go of it.
+    fireEvent.keyUp(globalThis, { key: 'Alt' })
+    fireEvent.pointerMove(surface, { pointerId: 8, clientY: 60, altKey: false })
+    await settle()
+    expect(screen.getByRole('status', { name: /following the pointer at 59940/ }))
+      .toBeInTheDocument()
+
+    fireEvent.pointerUp(surface, { pointerId: 8, clientY: 60 })
+    await settle()
+
+    expect(props.onOrderDrop).toHaveBeenCalledExactlyOnceWith({
+      order: expect.objectContaining({ orderId: '71' }),
+      price: '59940',
+      restored: false,
+    })
+  })
+
+  // What abandons a drag by hand now that the modifier does not: bringing the
+  // order back to the level it was lifted from, which the chart marks.
+  it('places the order again where it was lifted from when it is dropped there', async () => {
+    const props = { ...properties([candle(1_784_000_000_000)]), ownedOrders: [workingOrder()] }
+    render(<FuturesWorkstationChart {...props} />)
+    const canvas = screen.getByTestId('futures-workstation-chart')
+    canvas.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 320, height: 320, right: 320, bottom: 320,
+    })
+    const order = await screen.findByRole('button', {
+      name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
+    })
+
+    fireEvent.pointerDown(order, { pointerId: 8, button: 0, altKey: true })
+    await settle()
+    const surface = dragSurface()
+    fireEvent.pointerMove(surface, { pointerId: 8, clientY: 80, altKey: true })
+    // Back to the price it came from — 60 000 less the coordinate is 59 900.
+    fireEvent.pointerMove(surface, { pointerId: 8, clientY: 100, altKey: true })
+    fireEvent.pointerUp(surface, { pointerId: 8, clientY: 100, altKey: true })
     await settle()
 
     expect(props.onOrderDrop).toHaveBeenCalledExactlyOnceWith({
@@ -910,11 +949,9 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     })
   })
 
-  // Letting the modifier go abandons the drag. That was only ever reachable
-  // once the exchange had answered; now that the gesture runs during the round
-  // trip, a drag that kept following the pointer after the operator let go
-  // would be the desk ignoring them.
-  it('abandons a drag whose modifier is released before the answer arrives', async () => {
+  // The modifier let go while the cancellation is still out is still not the
+  // operator letting go of the order: the button is down, so the drag is theirs.
+  it('keeps a drag whose modifier is released before the answer arrives', async () => {
     let confirmLift = null
     const props = {
       ...properties([candle(1_784_000_000_000)]),
@@ -942,19 +979,23 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     fireEvent.keyUp(globalThis, { key: 'Control' })
     fireEvent.pointerMove(surface, { pointerId: 24, clientY: 40, ctrlKey: false })
     await settle()
-    // The mark stopped where the operator let go rather than following on.
-    expect(screen.getByRole('status', { name: /heading for 59920/ })).toBeInTheDocument()
+    // The mark went on with the pointer.
+    expect(screen.getByRole('status', { name: /heading for 59960/ })).toBeInTheDocument()
 
     confirmLift({ ok: true })
     await settle()
+    expect(props.onOrderDrop).not.toHaveBeenCalled()
+
+    fireEvent.pointerUp(surface, { pointerId: 24, clientY: 40 })
+    await settle()
     expect(props.onOrderDrop).toHaveBeenCalledExactlyOnceWith({
       order: expect.objectContaining({ orderId: '71' }),
-      price: '59900',
-      restored: true,
+      price: '59960',
+      restored: false,
     })
   })
 
-  it('restores the origin when a drag is abandoned before the answer arrives', async () => {
+  it('restores the origin when the gesture is cancelled before the answer arrives', async () => {
     let confirmLift = null
     const props = {
       ...properties([candle(1_784_000_000_000)]),
@@ -974,9 +1015,10 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     await settle()
     const surface = dragSurface()
     fireEvent.pointerMove(surface, { pointerId: 23, clientY: 80, ctrlKey: true })
-    // The modifier was let go before the drop: the drag is abandoned, and the
-    // answer that arrives afterwards puts the order back where it came from.
-    fireEvent.pointerUp(surface, { pointerId: 23, clientY: 80 })
+    // The pointer was taken away rather than released — the one ending the
+    // operator did not choose — and the answer that arrives afterwards puts the
+    // order back where it came from.
+    fireEvent.pointerCancel(surface, { pointerId: 23, clientY: 80, ctrlKey: true })
     await settle()
 
     confirmLift({ ok: true })

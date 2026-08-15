@@ -1049,6 +1049,10 @@ export const FuturesWorkstationChart = ({
   // is confirmed the order is still drawn where it rests, still labelled as being
   // lifted, and the mark under the pointer is drawn as pending — a refusal
   // removes that mark and leaves the order exactly where it was.
+  //
+  // Exactly one trading modifier begins it, and that is the whole of the
+  // modifier's part: from here the gesture is held by the button, and what the
+  // keyboard does while it is held is not the desk's business.
   const beginOrderDrag = useCallback((event, order) => {
     if (order?.orderKind !== 'REGULAR'
       || event.button !== 0
@@ -1064,7 +1068,6 @@ export const FuturesWorkstationChart = ({
       : null
     const drag = {
       pointerId: event.pointerId,
-      modifier: event.altKey ? 'alt' : 'ctrl',
       order,
       orderIdentity: futuresOrderIdentity(order),
       originPrice: order.price,
@@ -1159,10 +1162,11 @@ export const FuturesWorkstationChart = ({
     event.preventDefault()
     event.stopPropagation()
     if (drag.status !== 'moving' && drag.status !== 'lifting') return
-    const modifierHeld = drag.modifier === 'alt'
-      ? event.altKey && !event.ctrlKey
-      : event.ctrlKey && !event.altKey
-    const restored = canceled || !modifierHeld
+    // The button holds the drag, so the button ends it, and the price it ends
+    // on is the one under the pointer. The modifier is not asked about: it began
+    // the gesture, and the operator's fingers come off it before the button,
+    // which used to throw the move away and put the order back where it started.
+    const restored = canceled
     if (drag.status === 'lifting') {
       // Released before the exchange answered. The lift discharges it when the
       // answer arrives — at the price the gesture actually ended on, which is
@@ -1180,34 +1184,13 @@ export const FuturesWorkstationChart = ({
     settleOrderDrag(drag, { restored })
   }, [handOverDrag, settleOrderDrag])
 
-  // Letting the modifier go abandons the drag rather than leaving it hanging:
-  // the order goes back to the price it was lifted from. It abandons one whose
-  // cancellation is still in flight too — the gesture follows the pointer from
-  // the moment it begins now, so a drag that ignored the modifier until the
-  // exchange answered would keep moving after the operator had let go.
-  const dragIsLive = orderDrag?.status === 'moving' || orderDrag?.status === 'lifting'
-  useEffect(() => {
-    if (!dragIsLive) return undefined
-    const handleModifierRelease = (event) => {
-      const drag = orderDragRef.current
-      if (!drag) return
-      if (drag.modifier === 'alt' ? event.altKey : event.ctrlKey) return
-      if (drag.status === 'lifting') {
-        if (drag.releasedEarly) return
-        drag.releasedEarly = true
-        drag.releasedRestored = true
-        // Abandoned, and still waiting on the cancellation. It goes back to
-        // where it was lifted from when that answers, and it does not hold the
-        // pointer for the wait.
-        handOverDrag(drag)
-        return
-      }
-      if (drag.status !== 'moving') return
-      settleOrderDrag(drag, { restored: true })
-    }
-    globalThis.addEventListener?.('keyup', handleModifierRelease)
-    return () => globalThis.removeEventListener?.('keyup', handleModifierRelease)
-  }, [dragIsLive, handOverDrag, settleOrderDrag])
+  // Nothing listens for the modifier once a drag has begun. It used to abandon
+  // the gesture on `keyup` — written when the modifier was the only thing that
+  // could end a drag early — and on a desk traded by mouse that made the key,
+  // not the button, the thing holding the order. The operator let go of Ctrl on
+  // the way and the order went back where it came from. The way out of a drag
+  // by hand is to bring the order back to the level it was lifted from, which
+  // the chart marks for exactly that.
 
   // The one mark standing for the order the drag holds. It is not on the book,
   // so it carries what the operator needs to recognise it — side and size — and
