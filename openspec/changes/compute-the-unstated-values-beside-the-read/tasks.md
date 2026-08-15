@@ -1,3 +1,16 @@
+> **The ticks below are on master; the code they describe is not.** No commit
+> on any branch contains the implementation of sections 1–3 — it exists only in
+> the working tree, and on `refs/orphaned/2026-08-15-untraced-futures-margin-work`
+> where it was rescued. The operator's desk runs `npm run e` over the tree, so
+> the behaviour is live for them while absent from every commit. The ticks
+> reached master by accident: `fc635c1` swept this folder's working-tree edits
+> into an archive commit meant for three other changes.
+>
+> Do not archive this change on the strength of the ticks. The check is
+> `git show HEAD:electron/services/futures-account-margin.js | grep -c
+> positionInitialMargin`, and it must be non-zero first. Until it is, this
+> delta must stay unfolded — master's built spec is the honest one.
+
 ## 1. Holding What The Arithmetic Needs
 
 - [x] 1.1 Read the whole leverage bracket table out of the `/fapi/v1/leverageBracket` answer the desk already makes, instead of discarding everything but the highest multiple.
