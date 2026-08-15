@@ -22,6 +22,13 @@ Where the replacement is refused for a reason the desk could not have known in
 advance, the existing behaviour stands — the operator is told the order was
 cancelled and not replaced.
 
+A refusal SHALL state only what the desk knows: an order it could not value
+SHALL be refused as one it could not value, never as one of a size it never
+measured. And the desk SHALL NOT offer to place an order again at a price it has
+itself just refused — a control that cannot do what it says is worse than no
+control, and where the price the order was resting at is refused too, the
+operator is told the order is gone rather than told it merely did not move.
+
 #### Scenario: The order could not be placed back where it rests
 - **WHEN** a drag would pick up an order that a bound the desk holds would refuse at its own resting price
 - **THEN** no cancellation is issued, the order stays live, and the refusal names the bound
@@ -37,6 +44,14 @@ cancelled and not replaced.
 #### Scenario: A bound the desk does not hold refuses nothing
 - **WHEN** the drop would fall under a bound whose value the desk has not loaded for that contract
 - **THEN** the move is sent and the exchange decides, rather than being refused against a bound invented here
+
+#### Scenario: The price it was resting at is refused as well
+- **WHEN** an amendment is refused and the price the order was resting at is refused by a bound the desk holds too
+- **THEN** the operator is told the order was cancelled and not replaced, and is offered no control to place it again at that price
+
+#### Scenario: The order cannot be valued at all
+- **WHEN** an amendment cannot be valued against a bound the desk holds
+- **THEN** it is refused, and the refusal says the order could not be valued rather than naming a size
 
 #### Scenario: The exchange refuses something the desk could not judge
 - **WHEN** a replacement the desk had no bound for is refused by the exchange
