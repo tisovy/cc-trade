@@ -16,16 +16,32 @@ const normalizePositionSide = (value) => {
 
 export const describeFuturesOrderIntent = (order) => {
   const side = normalizeSide(order?.side)
-  const reduceOnly = order?.reduceOnly === true
-  // Hedge accounts state the leg outright; one-way accounts imply it: a
-  // reduce-only BUY closes a SHORT, a plain BUY opens a LONG.
+  // Binance carries "this order closes the whole position" in a field of its
+  // own, and a close-position stop arrives with `reduceOnly` false — the flag
+  // is `cp` on the stream and `closePosition` on the read. Weighed only by
+  // `reduceOnly`, such an order was read as an entry on the opposite leg: a
+  // stop closing a long was labelled SHORT and classified ENTRY, so the chart
+  // and the dock both named it as opening a position it exists to close, and
+  // the editor sized an amendment to it against the free balance instead of
+  // against the position. An order that closes is an exit whichever side it is
+  // submitted on.
+  const reducesPosition = order?.reduceOnly === true || order?.closePosition === true
+  // Hedge accounts state the leg outright; one-way accounts imply it: an order
+  // that reduces and buys closes a SHORT, a plain BUY opens a LONG.
   const positionSide = normalizePositionSide(order?.positionSide)
-    ?? ((side === 'BUY') === !reduceOnly ? 'LONG' : 'SHORT')
-  const positionEffect = (positionSide === 'LONG') === (side === 'BUY') ? 'ENTRY' : 'EXIT'
+    ?? ((side === 'BUY') === !reducesPosition ? 'LONG' : 'SHORT')
+  const positionEffect = reducesPosition
+    || (positionSide === 'LONG') !== (side === 'BUY')
+    ? 'EXIT'
+    : 'ENTRY'
   return Object.freeze({
     side,
     positionSide,
     positionEffect,
+    // Whether the order can only take exposure off. Callers that budget an
+    // amendment ask this rather than reading `reduceOnly` themselves, so a
+    // close-position order is not budgeted as if it opened something.
+    reducesPosition,
     tone: side === 'BUY' ? 'buy' : 'sell',
     // The leg plus the side colour already says everything: a red LONG closes a
     // long, a red SHORT opens one. Spelling out "entry"/"exit" adds only noise.

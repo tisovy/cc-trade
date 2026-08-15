@@ -21,6 +21,7 @@ import {
   formatUsdt,
 } from '../../../utils/futuresOrderPresentation.js'
 import { describeFuturesOrderConfirmation } from '../../../utils/futuresOrderConfirmation.js'
+import { formatFuturesReadingAge } from '../../../utils/futuresPriceReading.js'
 import {
   formatExchangePrice,
   formatPriceOrAbsent,
@@ -36,6 +37,31 @@ import FuturesReadingNotice from './FuturesReadingNotice.jsx'
 import './FuturesProductionExecutionTicket.css'
 
 const EXACT_POSITIVE_DECIMAL = /^(?:[1-9][0-9]*|0\.[0-9]*[1-9][0-9]*|[1-9][0-9]*\.[0-9]+)$/
+
+// How old the balance on screen is, while nothing has confirmed it on the
+// connection that is up now.
+//
+// A reconnect turns a ready balance stale and the number stays on screen —
+// re-entering the workspace with a blank ticket is worse. But a figure of
+// unknown age is what an order gets sized against, so the age is stated beside
+// it rather than left to be inferred from a readiness badge.
+//
+// A leaf on purpose, exactly as the price age is: the count has to grow, and a
+// tick a second has no business re-rendering a ticket that already re-renders on
+// market data. It says nothing at all for a confirmed balance.
+export const FuturesBalanceAge = ({ at }) => {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1_000)
+    return () => clearInterval(timer)
+  }, [])
+  const age = formatFuturesReadingAge(at, now)
+  return (
+    <em className="futures-production-balance-age" role="status">
+      {age === null ? 'unconfirmed' : `${age} old`}
+    </em>
+  )
+}
 
 const ORDER_ACTIONS = Object.freeze([
   Object.freeze({
@@ -172,6 +198,11 @@ const FuturesTradingTicket = ({
   const sizingReady = isFuturesBalanceConfirmed(balanceResource)
     && sizingBudget !== null
     && hasFilters
+  // A balance the desk still shows but nothing has confirmed on this connection:
+  // stale after a reconnect, or failed after having answered once. The figure
+  // stays — the alternative is a blank ticket — so its age has to be stated.
+  const balanceUnconfirmed = !isFuturesBalanceConfirmed(balanceResource)
+    && Number.isFinite(balanceResource?.lastSuccessfulAt)
   // Whole USDT only: a slider that reports 66030.478842815 makes the operator
   // read noise instead of a size.
   const rawNotionalUsdt = sizingReady
@@ -633,6 +664,12 @@ const FuturesTradingTicket = ({
                 <dt>Available</dt>
                 <dd title={availableUsdt ?? undefined}>
                   {availableUsdt ? `${formatUsdtAmount(availableUsdt, 0)} USDT` : '—'}
+                  {/* Only while it is unconfirmed. A line that is always on
+                      screen is a line nobody reads on the one occasion it
+                      matters. */}
+                  {balanceUnconfirmed
+                    ? <FuturesBalanceAge at={balanceResource.lastSuccessfulAt} />
+                    : null}
                 </dd>
               </div>
               {/* What the entry actually costs out of the wallet: the notional is

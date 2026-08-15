@@ -185,6 +185,37 @@ describe('describeFuturesOrderIntent', () => {
     })).toMatchObject({ positionSide: 'SHORT', positionEffect: 'EXIT', tone: 'buy' })
   })
 
+  // Binance carries "closes the whole position" separately from reduce-only,
+  // and sends a close-position stop with `reduceOnly` false. Read by
+  // `reduceOnly` alone, a stop closing a long was labelled SHORT and classified
+  // ENTRY — the desk named it as opening the position it exists to close.
+  it('reads a close-position order as an exit whichever side it is submitted on', () => {
+    expect(describeFuturesOrderIntent({
+      side: 'SELL', positionSide: 'BOTH', reduceOnly: false, closePosition: true,
+    })).toMatchObject({
+      positionSide: 'LONG',
+      positionEffect: 'EXIT',
+      reducesPosition: true,
+      tone: 'sell',
+    })
+    expect(describeFuturesOrderIntent({
+      side: 'BUY', positionSide: 'BOTH', reduceOnly: false, closePosition: true,
+    })).toMatchObject({
+      positionSide: 'SHORT',
+      positionEffect: 'EXIT',
+      reducesPosition: true,
+      tone: 'buy',
+    })
+    // And the ordinary order beside it is unmoved.
+    expect(describeFuturesOrderIntent({
+      side: 'SELL', positionSide: 'BOTH', closePosition: false,
+    })).toMatchObject({
+      positionSide: 'SHORT',
+      positionEffect: 'ENTRY',
+      reducesPosition: false,
+    })
+  })
+
   it('trusts the declared leg on hedge accounts', () => {
     expect(describeFuturesOrderIntent({ side: 'BUY', positionSide: 'SHORT' }))
       .toMatchObject({ positionSide: 'SHORT', positionEffect: 'EXIT', tone: 'buy' })

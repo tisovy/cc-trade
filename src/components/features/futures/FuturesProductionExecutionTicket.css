@@ -393,6 +393,20 @@
   white-space: nowrap;
 }
 
+/* The age of a balance nothing has confirmed on this connection, beside the
+   figure it qualifies. Quiet enough not to be read as part of the amount, and
+   present only while the amount is unconfirmed. */
+.futures-production-balance-age {
+  display: inline;
+  margin-left: 5px;
+  color: #e8c65a;
+  font-size: calc(var(--fx-ui-scale, 1) * 10.5px);
+  font-style: normal;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
 .futures-production-draft-reason,
 .futures-production-positions > p,
 .futures-production-orders > p {

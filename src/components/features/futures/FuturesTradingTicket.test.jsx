@@ -1767,4 +1767,72 @@ describe('FuturesTradingTicket', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Retry account sync' }))
     expect(state.refresh).toHaveBeenCalledExactlyOnceWith('BTCUSDT')
   })
+
+  // The seam, not either side of it. That a reconnect marks the balance stale is
+  // proved in the hook, and that a stale balance blocks trading is proved in the
+  // readiness derivation — and between them nothing said what the operator sees
+  // on the ticket, which is where the sizing is done and where a figure of
+  // unknown age would be acted on.
+  it('states the age of a balance nothing has confirmed since the reconnect, and will not size against it', () => {
+    vi.useFakeTimers()
+    const confirmedAt = Date.now() - 92_000
+    try {
+      render(
+        <FuturesTradingTicket
+          state={createState({
+            accountResources: {
+              balances: {
+                status: 'stale',
+                data: { USDT: { available: '1000', total: '1000' } },
+                lastSuccessfulAt: confirmedAt,
+                error: {
+                  code: 'TRANSPORT_LOST',
+                  message: 'Not confirmed since the connection dropped — retry account synchronization.',
+                },
+              },
+            },
+          })}
+          selectedSymbol="BTCUSDT"
+          selectedContract={contract}
+          draftPrice="58445.0"
+        />,
+      )
+
+      // The number is still there — a blank ticket after a reconnect is worse —
+      // and it says how old it is rather than leaving it to be inferred.
+      const available = screen.getByText('1000 USDT')
+      expect(available).toHaveTextContent('1m 32s old')
+
+      // And it is not a balance an order may be sized as a share of.
+      expect(screen.getByRole('slider', { name: 'Order size percent' })).toBeDisabled()
+      expect(screen.getByRole('textbox', { name: 'Order notional USDT' })).toBeDisabled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // A guard, not a bite: it passed before this change too. It is here so the
+  // age cannot creep onto a ticket that has nothing to disclose — a line that
+  // is always on screen is a line nobody reads when it matters.
+  it('says nothing about age once the balance is confirmed again', () => {
+    render(
+      <FuturesTradingTicket
+        state={createState({
+          accountResources: {
+            balances: {
+              status: 'ready',
+              data: { USDT: { available: '1000', total: '1000' } },
+              lastSuccessfulAt: Date.now() - 92_000,
+              error: null,
+            },
+          },
+        })}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+        draftPrice="58445.0"
+      />,
+    )
+    expect(screen.getByText('1000 USDT')).not.toHaveTextContent('old')
+    expect(screen.getByRole('slider', { name: 'Order size percent' })).not.toBeDisabled()
+  })
 })

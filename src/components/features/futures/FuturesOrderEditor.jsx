@@ -81,9 +81,11 @@ export const FuturesOrderEditor = ({
       minNotionalUsdt: filters.minimumNotional,
       leverage: 1,
       maxOrderNotionalUsdt,
-      exposureIncreasing: order.reduceOnly !== true,
+      // Asked of the intent rather than of `reduceOnly`: a close-position order
+      // carries `reduceOnly` false and can still only take exposure off.
+      exposureIncreasing: !intent.reducesPosition,
     })
-  }, [filters, maxOrderNotionalUsdt, notional, order.reduceOnly, price])
+  }, [filters, intent.reducesPosition, maxOrderNotionalUsdt, notional, price])
 
   const refusal = draft.ok
     ? null
