@@ -38,8 +38,21 @@ assumed; §2's bound is not, and must be before it is chosen.
   evidence that startup works; it is evidence that something outside the desk had
   to happen for it to.
 
+- **0.2 measured: `ready` lasted at least 26 min 15.189 s and suppressed all
+  nine command-time fallback reads in that window.** In the pre-route-fix
+  session started at 2026-08-13 14:38:19 UTC, the private socket opened at
+  14:38:23.797 and produced the session's only `stream` read. It never produced
+  an `unstated` read and nothing recorded a close or an error before the process
+  stopped at 15:04:38.986, 1,575,189 ms later. Nine `trade.placeOrder` commands
+  were issued after the opening. The same interval contains 52 ordinary
+  `refresh` reads, but zero reads with reason `command` and zero with reason
+  `unstated`: all nine account reads `reconcileAfterFuturesCommand` would have
+  taken without a carrying stream were skipped. This is a lower bound, not a
+  timeout — the code has no silence watchdog, so `ready` ends only when the
+  socket errors/closes or the desk itself stops.
+
 - [ ] 0.1 Measure how often the exchange sends an unprompted frame on an idle private socket — the interval that will set §2's bound. Take it from the desk's own endpoint, socket options and proxy, over at least an hour on an account doing nothing, and record the distribution rather than a single reading.
-- [ ] 0.2 Measure what the desk does today when the private socket opens and then delivers nothing: how long the stream stays `ready`, how many command-time reads are skipped in that window. This is the cost the change removes and the number 5.2 is compared against.
+- [x] 0.2 Measure what the desk does today when the private socket opens and then delivers nothing: how long the stream stays `ready`, how many command-time reads are skipped in that window. This is the cost the change removes and the number 5.2 is compared against.
 - [ ] 0.3 Write both numbers into this file before building. A bound taken from the exchange's documentation rather than from a measured run is an estimate, and §2 SHALL NOT state it as anything else.
 
 ## 1. The Path The Exchange Actually Serves
