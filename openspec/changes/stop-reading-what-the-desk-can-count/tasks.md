@@ -126,6 +126,46 @@ leaves a real case open:*
 long it runs. Do not count days against this change before free margin is
 observed computing on live data at least once.*
 
+### Day one, later: the fix was committed and never ran
+
+*The operator opened a position on APRUSDT and worked it through the afternoon —
+twenty-one commands, the last at 16:40Z. Read from the same journal at the end of
+that day, the desk having been restarted eleven times after the gate fix landed
+at 12:43Z:*
+
+```
+free-margin         passes   0/174  agreed   0  unavailable 174/174 (174 wholly)
+notional            passes 108/162  agreed 104  worst 20 bps on APRUSDT
+initial-margin      passes 108/162  agreed 104  worst 20 bps on APRUSDT
+maintenance-margin  passes 108/162  agreed 104  worst 20 bps on APRUSDT
+liquidation-price   passes 108/162  agreed  63  worst 37 bps on APRUSDT
+```
+
+*Not a fourth input. `npm run e` is a vite dev server over the working tree, so
+the desk runs the files on disk and not the committed ones. The gate fix was
+taken into the repository through the index while another session held its own
+uncommitted copy of `futures-account-margin.js` in the tree — a copy based on the
+commit before it. `git diff` therefore showed the fix as a deletion, and the
+running desk kept the old gate on line 269. The fix existed for four hours
+without once executing.*
+
+*Reproduced before acting: a slice of the committed tree with that session's four
+working files laid over it fails the external guard with `unavailable: 1`;
+restoring the single gate line turns it green and moves nothing else. The line
+was then restored in the working tree itself, as a hunk and without a commit, so
+the desk reads it on the next start.*
+
+*What this says about the tree, and it is worth keeping: **a commit is not a
+deployment here.** Any fix meant to be observed on live data has to be checked on
+disk, not in the log, for as long as a second session holds the same file. The
+check is `grep -c "required exactly where it is used"` against the working copy,
+not against `HEAD:`.*
+
+*The liquidation price is the one number this record shows genuinely disagreeing
+— agreed on 63 of 108 passes, against 104 of 108 for the other three. That is not
+this change's blocker and is not diagnosed here; it is written down so the window
+does not later mistake it for something it introduced.*
+
 - [ ] 1.1 Do not start this change until `compute-the-unstated-values-beside-the-read` has been running for the window in the proposal. There is nothing to decide before then.
 - [ ] 1.2 Operator copies the day's record files aside if the window is to run longer than the fourteen days the record keeps.
 - [ ] 1.3 Operator reads `node scripts/read-desk-record.mjs` over the window and states, per value, the passes compared, the worst disagreement and where, and the passes that could not be computed.
