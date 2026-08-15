@@ -47,8 +47,9 @@ wrong against:
 
 - `notional = |size| × mark`
 - `maintenance = notional × mmr(bracket) − cum(bracket)`
-- `initial margin = notional / leverage`, and for an isolated position the
-  isolated wallet is what is actually committed
+- `initial margin = notional / leverage` in both margin modes; an isolated
+  wallet is separate collateral used by the liquidation formula, not the
+  position's initial-margin requirement
 - `free margin = crossWallet + crossUnPnl − Σ cross position initial margin
   − Σ resting order initial margin`, where a reduce-only order commits nothing
   and, per contract, only the heavier of the two sides is counted
@@ -69,8 +70,15 @@ wrong against:
   unattended for a fortnight.
 - **Every read that answers positions or balances is stood beside the desk's own
   answer for the same instant**, and the distance between them is recorded.
+- **The comparison uses like-for-like exchange facts.** A short position's
+  signed `notional` is compared by magnitude, and the position calculation is
+  compared with `positionInitialMargin`, not the row's aggregate
+  `initialMargin` that can also include open orders.
 - **The full bracket table is kept** from the read already being made, so the
   arithmetic costs no extra weight for a contract the desk has already priced.
+  An incomplete table or a non-default `notionalCoef` still supplies the
+  exchange's leverage ceiling, but is not guessed into a diagnostic margin
+  formula.
 
 ## What the record may carry, and what it may not
 

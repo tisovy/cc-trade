@@ -84,3 +84,23 @@ same terms as the contract's other settings.
 #### Scenario: A resting order commits margin
 - **WHEN** the account has resting orders that are not reduce-only
 - **THEN** the computed free margin counts the margin they commit, and counts nothing for a reduce-only order
+
+#### Scenario: A bracket answer is not safe to calculate from
+- **WHEN** a bracket answer is partial, malformed, or carries a non-default user bracket multiplier whose application is not stated
+- **THEN** the exchange-derived leverage ceiling remains usable, but the desk states that it could not compute margin from that table
+
+#### Scenario: A spawned order identity exists on another contract
+- **WHEN** an algo names an actual order identity that is also used by a regular order on a different contract
+- **THEN** both contracts' orders remain in the free-margin calculation because order identities are contract-scoped
+
+#### Scenario: A resting order has impossible filled quantity
+- **WHEN** a resting order states an executed quantity greater than its original quantity
+- **THEN** the desk states that it could not compute free margin rather than treating the order as fully filled
+
+#### Scenario: A short position is compared
+- **WHEN** the exchange states a signed negative notional for a short position
+- **THEN** its magnitude is compared with the desk's positive notional magnitude, and equal values record zero basis points
+
+#### Scenario: Position initial margin is compared
+- **WHEN** a position row states both position and open-order initial margin
+- **THEN** the position estimate is compared with `positionInitialMargin`, not with the aggregate `initialMargin`

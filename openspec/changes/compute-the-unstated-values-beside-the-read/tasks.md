@@ -29,8 +29,16 @@
 
 ## 4. Verification
 
-- [x] 4.1 `npm run lint`, `npm test`, `npm run check:futures-production`, `npm run check:circular`, `npm run check:runtime-mock`, `npm run check:command-path`.
+- [ ] 4.1 `npm run lint`, `npm test`, `npm run check:futures-production`, `npm run check:circular`, `npm run check:runtime-mock`, `npm run check:command-path`.
 - [ ] 4.2 Operator confirms nothing on screen changed: the same liquidation price, margins and free margin as before, from the same source.
 - [ ] 4.3 Operator runs a session and reads `node scripts/read-desk-record.mjs`, confirming a comparison line appears for each of the five values.
 - [ ] 4.4 Operator confirms the desk's weight and the number of reads are unchanged from the previous change — this one buys evidence, not weight.
 - [ ] 4.5 Operator keeps the day's record files aside if the evidence window is to run longer than the fourteen days the record itself keeps.
+
+## 5. Audit Corrections
+
+- [x] 5.1 Keep adjusted or partially malformed bracket answers usable for their exchange leverage ceiling while making diagnostic margin estimates unavailable.
+- [x] 5.2 Compare short notional by magnitude and position initial margin against the exchange's position-only field; use notional over leverage for isolated initial margin.
+- [x] 5.3 Scope algo-to-regular identity de-duplication by contract and refuse an order whose executed quantity exceeds its original quantity.
+- [x] 5.4 Prove 5.1–5.3 with focused regression tests written after the production fixes.
+- [ ] 5.5 Repeat OpenSpec validation, the relevant suites and repository checks, and GitNexus change detection before committing.

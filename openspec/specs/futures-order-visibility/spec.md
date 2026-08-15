@@ -498,6 +498,16 @@ the desk lists and cancels but cannot place — SHALL be read on the periodic
 reconciliation and on an operator-requested refresh, and SHALL NOT be read in
 response to an execution report or a position change.
 
+Where the authenticated stream does report an algorithmic order, the desk SHALL
+apply what it reports to the listed algorithmic orders, on the frame that
+carried it and without reading the account back to learn what it was just told.
+
+The periodic beat SHALL remain regardless, as the backstop it already is, and
+the read issued after an algorithmic command SHALL remain until delivery of such
+an event has been observed on the operator's own account. A documented event
+whose delivery has not been seen SHALL NOT be grounds for removing a read the
+desk depends on.
+
 #### Scenario: A fill arrives while an algorithmic order rests
 - **WHEN** an execution report arrives for a regular order and an algorithmic order is listed
 - **THEN** no algorithmic-order read is issued, and the listed algorithmic order stays as last read
@@ -505,6 +515,14 @@ response to an execution report or a position change.
 #### Scenario: The operator asks for a refresh
 - **WHEN** the operator requests an account refresh
 - **THEN** the algorithmic orders are read again alongside the regular ones
+
+#### Scenario: The stream reports an algorithmic order
+- **WHEN** the authenticated stream delivers an algorithmic-order update for a listed algorithmic order
+- **THEN** the listed order is updated from that frame, and no account read is issued because of it
+
+#### Scenario: The stream has never been seen to report one
+- **WHEN** the desk can fold such an event but has not observed one arriving on this account
+- **THEN** the periodic beat and the post-command read both stay exactly as they are
 
 ### Requirement: The account review survives a restart
 Orders and trades that have reached a terminal state SHALL be stored locally per
@@ -630,6 +648,31 @@ that neither could be placed. The third case SHALL name the order that is gone,
 state why the replacement failed, and offer to place it again. It SHALL NOT be
 reported only in a log.
 
+Obligations SHALL be held per order, and SHALL be discharged independently. An
+outstanding obligation for one order SHALL NOT prevent another order from being
+lifted: the wait it imposes is a round trip through the operator's proxy, during
+which every order on every contract was unmovable. Lifting an order that is
+already lifted SHALL be refused, because it is no longer on the book.
+
+Discharging an obligation SHALL name the order it is for. More than one gesture
+can be in the air at once, so which obligation a drop discharges SHALL NOT be
+inferred from which order was lifted most recently. A drop that names an order
+the system owes nothing for SHALL place nothing, and an obligation already
+discharged SHALL NOT be discharged a second time: an order placed twice and an
+order never placed are the same accounting error.
+
+A gesture in progress SHALL NOT be interrupted by an earlier one being
+discharged. The operator makes every drag with the same pointer, and a drag that
+loses it mid-gesture is an order lifted off the book that never gets dropped.
+
+Where more than one obligation is outstanding, each SHALL be stated on its own,
+naming its own order, its own reason and its own price to place it again, and
+answering one SHALL NOT clear the record of another.
+
+No path out of a lift SHALL be silent. A lift that is refused SHALL say so and
+SHALL make clear that the order was left where it was, which is not the same
+thing as an order that is gone.
+
 #### Scenario: The drag ends at a new price
 - **WHEN** the operator drops a dragged order at a price the desk accepts
 - **THEN** a replacement order is placed at that price
@@ -645,3 +688,51 @@ reported only in a log.
 #### Scenario: The replacement's outcome is unknown
 - **WHEN** the replacement is sent and its outcome is not confirmed
 - **THEN** it is presented as unknown and no further replacement is placed automatically, because a second attempt could leave two orders on the book
+
+#### Scenario: A second order is reached for before the first has landed
+- **WHEN** the operator lifts another order while a replacement for an earlier one is still in flight
+- **THEN** the second order is lifted, and the two obligations are discharged independently
+
+#### Scenario: Two replacements both fail
+- **WHEN** two outstanding replacements are both refused
+- **THEN** each is stated on its own, naming its own order and reason, and placing one again leaves the other's statement standing
+
+#### Scenario: The same order is lifted twice
+- **WHEN** a lift is attempted for an order that is already lifted
+- **THEN** it is refused with a statement, rather than nothing happening
+
+#### Scenario: Two orders are lifted before either is dropped
+- **WHEN** the operator lets go of one drag inside its cancellation round trip, lifts another, and both are then dropped
+- **THEN** each order is placed at the price its own drag ended on and in its own size, and neither obligation is discharged by the other's drop
+
+#### Scenario: A drop names an order nothing is owed for
+- **WHEN** a drop names an order the system holds no outstanding obligation for
+- **THEN** nothing is placed, because that would be a new order rather than a replacement
+
+#### Scenario: One drag ends twice
+- **WHEN** the same drag is dropped more than once
+- **THEN** one replacement is placed, not one per drop
+
+#### Scenario: An earlier drag is discharged during a later gesture
+- **WHEN** an earlier drag's cancellation or replacement is answered while the operator is in the middle of another drag
+- **THEN** the drag in hand keeps the pointer and still ends where the operator releases it
+
+### Requirement: A trigger the exchange refused is stated, not silently dropped
+When the exchange reports that a conditional order met its trigger and was then
+refused by the matching engine, the desk SHALL state that refusal in the
+exchange's own words, naming the contract and the order it applies to.
+
+A trigger that was refused SHALL NOT be presented the same as a trigger that
+filled, and SHALL NOT be left to disappear at the next reconciliation with
+nothing said. This is the one case where the operator's stop does not become a
+position, and the reason it did not is the only thing that tells them whether to
+place it again.
+
+#### Scenario: A stop triggers and the engine refuses it
+- **WHEN** a conditional order triggers and the exchange reports the trigger rejected
+- **THEN** the refusal is stated with the exchange's own reason, against the contract and order it names
+
+#### Scenario: The reconciliation catches up afterwards
+- **WHEN** the next reconciliation removes the refused order from the listed algorithmic orders
+- **THEN** the statement of why it went is not withdrawn by that removal
+

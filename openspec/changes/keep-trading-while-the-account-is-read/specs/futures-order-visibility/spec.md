@@ -70,3 +70,11 @@ position change.
 #### Scenario: A cancel-all clears both books
 - **WHEN** the operator cancels everything on a contract and the exchange accepts it
 - **THEN** the algorithmic orders are read back, because no stream reports what became of them, and the regular ones are not
+
+#### Scenario: The stream reports an algorithmic order
+- **WHEN** the authenticated stream delivers an algorithmic-order update for a listed algorithmic order
+- **THEN** the listed order is updated from that frame, and no account read is issued because of it
+
+#### Scenario: The stream has never been seen to report one
+- **WHEN** the desk can fold such an event but has not observed one arriving on this account
+- **THEN** the periodic beat and the post-command read both stay exactly as they are

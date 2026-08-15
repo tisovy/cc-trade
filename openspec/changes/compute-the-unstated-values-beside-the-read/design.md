@@ -48,6 +48,16 @@ that same table. The existing ceiling helper remains a projection of this
 normalizer so callers and tests that need only the ceiling keep their narrow
 contract.
 
+The entry's optional `notionalCoef` is retained as well. Binance documents it
+as a user-specific multiplier relative to the default brackets but does not
+state, in the endpoint contract, which returned monetary fields have already
+been adjusted. Applying it again or ignoring it would each be a guess. A
+non-default or malformed coefficient therefore leaves the exchange-derived
+leverage ceiling usable but marks the table unavailable to the diagnostic
+calculator. The same applies when any returned bracket row is malformed: valid
+rows may still state the ceiling, but a partial table cannot state maintenance
+margin.
+
 `binance-connection` will retain the table in a map beside
 `futuresSymbolConfigs`. A successful table read replaces that symbol's table; a
 failed or superseded read leaves a previously held table intact. The table map
@@ -80,7 +90,8 @@ The formulas are:
 
 - `notional = abs(quantity) * mark`
 - `maintenance = notional * maintMarginRatio - cum`
-- cross `initial = notional / leverage`; isolated `initial = isolatedWallet`
+- `initial = notional / leverage` in both margin modes; `isolatedWallet` is
+  required separately as collateral for isolated liquidation
 - cross unrealized PnL is recomputed as `quantity * (mark - entryPrice)`
 - free margin is cross wallet plus cross unrealized PnL, less cross-position
   initial margin and resting-order initial margin
@@ -94,6 +105,11 @@ nothing. BUY and SELL commitments are summed separately per contract and only
 the larger side is charged. An order whose quantity, price, leverage, mode, or
 mark dependency cannot be established makes free margin unavailable rather
 than partially understating commitment.
+
+An algo's `actualOrderId` is matched to a regular order only within the same
+contract because exchange order identities are symbol-scoped. An executed
+quantity greater than the original quantity is malformed and also makes free
+margin unavailable; it is not clamped to a fully filled order.
 
 Input money remains decimal text at the integration boundary. The pure module
 converts validated finite values to JavaScript numbers for arithmetic and never
@@ -132,6 +148,13 @@ free-margin event. A full pass therefore produces all five; a balances-only
 pass does not pretend that an old positions response was read again. Exchange
 fields remain the comparison side and remain the only values stored in account
 resources and broadcast to renderers.
+
+The comparison normalizes only representation, not value: the signed exchange
+notional of a short is compared by magnitude with `abs(size) * mark`, and
+computed position initial margin is compared with the exchange's
+`positionInitialMargin`. The broader `initialMargin` field is not substituted
+when that position-only field is absent because it can include open-order
+margin.
 
 The comparison groups rows by value. Each event states the number compared, the
 number unavailable, the greatest absolute deviation in whole basis points of
@@ -189,9 +212,13 @@ parsing and cannot be interpreted as agreement.
   final relative deviation to whole basis points and keep all computed amounts
   out of user/trading paths.
 - [Algo and regular order views may briefly overlap during a trigger] → Use the
-  reconciled held working sets and deterministic identity de-duplication where
-  an algo names its spawned regular order; if identity is insufficient, make
-  free margin unavailable rather than knowingly double-counting.
+  reconciled held working sets and deterministic, symbol-scoped identity
+  de-duplication where an algo names its spawned regular order; if identity is
+  insufficient, make free margin unavailable rather than knowingly
+  double-counting.
+- [A user-specific bracket multiplier has ambiguous application semantics] →
+  Preserve it, keep the exchange ceiling available, and record estimates as
+  unavailable instead of either ignoring or applying it speculatively.
 - [The diagnostic line rate rises by up to five events per full read] → Keep one
   aggregate line per value and retain the record's existing byte/day bounds.
 

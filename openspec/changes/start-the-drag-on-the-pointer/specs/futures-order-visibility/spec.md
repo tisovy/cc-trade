@@ -108,3 +108,31 @@ a log.
 #### Scenario: The replacement's outcome is unknown
 - **WHEN** the replacement is sent and its outcome is not confirmed
 - **THEN** it is presented as unknown and no further replacement is placed automatically, because a second attempt could leave two orders on the book
+
+#### Scenario: A second order is reached for before the first has landed
+- **WHEN** the operator lifts another order while a replacement for an earlier one is still in flight
+- **THEN** the second order is lifted, and the two obligations are discharged independently
+
+#### Scenario: Two replacements both fail
+- **WHEN** two outstanding replacements are both refused
+- **THEN** each is stated on its own, naming its own order and reason, and placing one again leaves the other's statement standing
+
+#### Scenario: The same order is lifted twice
+- **WHEN** a lift is attempted for an order that is already lifted
+- **THEN** it is refused with a statement, rather than nothing happening
+
+#### Scenario: Two orders are lifted before either is dropped
+- **WHEN** the operator lets go of one drag inside its cancellation round trip, lifts another, and both are then dropped
+- **THEN** each order is placed at the price its own drag ended on and in its own size, and neither obligation is discharged by the other's drop
+
+#### Scenario: A drop names an order nothing is owed for
+- **WHEN** a drop names an order the system holds no outstanding obligation for
+- **THEN** nothing is placed, because that would be a new order rather than a replacement
+
+#### Scenario: One drag ends twice
+- **WHEN** the same drag is dropped more than once
+- **THEN** one replacement is placed, not one per drop
+
+#### Scenario: An earlier drag is discharged during a later gesture
+- **WHEN** an earlier drag's cancellation or replacement is answered while the operator is in the middle of another drag
+- **THEN** the drag in hand keeps the pointer and still ends where the operator releases it
