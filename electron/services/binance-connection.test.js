@@ -5419,6 +5419,11 @@ describe('setupBinanceConnection user-data orchestration', () => {
                     isolatedWallet: '0',
                     notional: '1200',
                     initialMargin: '120',
+                    // What the exchange holds against this position alone. The
+                    // broader `initialMargin` beside it also carries margin held
+                    // by open orders, so comparing a position estimate against it
+                    // is not like for like.
+                    positionInitialMargin: '120',
                     maintenanceMargin: '12',
                     liquidationPrice: '80.8080808080808',
                 }],
@@ -5521,6 +5526,11 @@ describe('setupBinanceConnection user-data orchestration', () => {
                     isolatedWallet: '0',
                     notional: '1200',
                     initialMargin: '120',
+                    // What the exchange holds against this position alone. The
+                    // broader `initialMargin` beside it also carries margin held
+                    // by open orders, so comparing a position estimate against it
+                    // is not like for like.
+                    positionInitialMargin: '120',
                     maintenanceMargin: '12',
                     liquidationPrice: '80.8080808080808',
                 }],

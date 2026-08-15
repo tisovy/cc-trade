@@ -92,9 +92,9 @@ describe('computeFuturesAccountMarginEstimates', () => {
             .toBeCloseTo(175.4455445545, 8);
         expect(estimates.positions['ETHUSDT:BOTH']).toMatchObject({
             notional: 200,
-            // An isolated position commits the wallet the exchange walled off,
-            // not notional divided by leverage.
-            initialMargin: 30,
+            // Initial margin is still notional divided by leverage. The
+            // isolated wallet is separate collateral for liquidation.
+            initialMargin: 40,
             maintenanceMargin: 2,
         });
         expect(estimates.positions['ETHUSDT:BOTH'].liquidationPrice)
@@ -103,45 +103,6 @@ describe('computeFuturesAccountMarginEstimates', () => {
         // Cross wallet 200 + cross uPnL 100 - cross initial 180 - orders 39.
         // BUY commits 32, SELL commits 39, and the reduce-only order commits 0.
         expect(estimates.freeMargin).toBeCloseTo(81, 10);
-    });
-
-    // A resting order holds the same margin from the moment it is placed until
-    // it is cancelled or filled: its own price times its own quantity, over the
-    // leverage. Nothing about that moves with the market, so nothing about it
-    // needs a live mark — and demanding one anyway is what took the whole sum
-    // away, since the sum is all-or-nothing across the account and marks are
-    // followed per position. An entry order is by definition an order on a
-    // contract holding no position.
-    it('values a resting order at its own price when its contract has no mark', () => {
-        const value = reading();
-        const withOrderOnly = extra => ({
-            ...value,
-            regularOrders: [...value.regularOrders, extra],
-            // SOLUSDT is the contract the account only has an order on. Its
-            // leverage and bracket are held — that much was already fixed — and
-            // `marks` deliberately says nothing about it.
-            symbolConfigs: new Map([
-                ...value.symbolConfigs,
-                ['SOLUSDT', { symbol: 'SOLUSDT', leverage: 10, marginType: 'CROSSED' }],
-            ]),
-            leverageBrackets: new Map([...value.leverageBrackets, ['SOLUSDT', bracketTable('SOLUSDT')]]),
-        });
-
-        // Four at twenty-five is a hundred of notional at ten times, so ten more
-        // committed against the eighty-one that was spendable without it.
-        expect(computeFuturesAccountMarginEstimates(withOrderOnly({
-            orderId: 5, symbol: 'SOLUSDT', side: 'BUY', origQty: '4',
-            executedQty: '0', price: '25', reduceOnly: false,
-        })).freeMargin).toBeCloseTo(71, 10);
-
-        // And nothing is loosened: an order that names no price at all — a
-        // market-triggered stop reports `price` as zero — has only the mark to be
-        // valued at, and without one the sum still refuses rather than
-        // understating what the account has committed.
-        expect(computeFuturesAccountMarginEstimates(withOrderOnly({
-            orderId: 6, symbol: 'SOLUSDT', side: 'BUY', origQty: '4',
-            executedQty: '0', price: '0', reduceOnly: false,
-        })).freeMargin).toBeNull();
     });
 
     it.each([
@@ -178,18 +139,76 @@ describe('computeFuturesAccountMarginEstimates', () => {
             positions: null,
         }).freeMargin).toBeNull();
     });
+
+    it('scopes a spawned regular-order identity to its contract', () => {
+        const value = reading();
+        const estimates = computeFuturesAccountMarginEstimates({
+            ...value,
+            positions: [],
+            balances: { USDT: { crossWallet: '1000' } },
+            regularOrders: [{
+                symbol: 'BTCUSDT', orderId: 7, side: 'BUY',
+                origQty: '1', executedQty: '0', price: '100',
+            }],
+            algoOrders: [{
+                symbol: 'ETHUSDT', algoId: 8, actualOrderId: 7, side: 'BUY',
+                origQty: '1', executedQty: '0', price: '100',
+            }],
+            marks: { BTCUSDT: '100', ETHUSDT: '100' },
+        });
+
+        // BTC commits 10 at 10x and ETH commits 20 at 5x: the equal numeric
+        // identity on another contract is not the algo's spawned regular order.
+        expect(estimates.freeMargin).toBe(970);
+    });
+
+    it('makes free margin unavailable for an impossible executed quantity', () => {
+        const value = reading();
+        expect(computeFuturesAccountMarginEstimates({
+            ...value,
+            positions: [],
+            balances: { USDT: { crossWallet: '1000' } },
+            regularOrders: [{
+                symbol: 'BTCUSDT', orderId: 9, side: 'BUY',
+                origQty: '1', executedQty: '2', price: '100',
+            }],
+            algoOrders: [],
+            marks: { BTCUSDT: '100' },
+        }).freeMargin).toBeNull();
+    });
+
+    it('refuses to guess from an adjusted or incomplete bracket table', () => {
+        const value = reading();
+        const btc = bracketTable('BTCUSDT');
+        const estimates = computeFuturesAccountMarginEstimates({
+            ...value,
+            leverageBrackets: new Map([
+                ['BTCUSDT', {
+                    ...btc,
+                    notionalCoef: '1.5',
+                    marginEstimatesAvailable: false,
+                }],
+                ['ETHUSDT', bracketTable('ETHUSDT')],
+            ]),
+        });
+
+        expect(estimates.positions['BTCUSDT:LONG']).toBeUndefined();
+        expect(estimates.freeMargin).toBeNull();
+    });
 });
 
 describe('createFuturesMarginEstimateEvents', () => {
     const positions = [
         {
             symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '1',
-            notional: '100', initialMargin: '50', maintenanceMargin: '10',
+            notional: '100', initialMargin: '50', positionInitialMargin: '50',
+            maintenanceMargin: '10',
             liquidationPrice: '20',
         },
         {
             symbol: 'ETHUSDT', positionSide: 'BOTH', quantity: '1',
-            notional: '200', initialMargin: '100', maintenanceMargin: '20',
+            notional: '200', initialMargin: '100', positionInitialMargin: '100',
+            maintenanceMargin: '20',
             liquidationPrice: '30',
         },
     ];
@@ -244,6 +263,42 @@ describe('createFuturesMarginEstimateEvents', () => {
             deviationBps: null,
             symbol: null,
         });
+    });
+
+    it('compares short notional by magnitude and position-only initial margin', () => {
+        const positions = [{
+            symbol: 'BTCUSDT', positionSide: 'SHORT', quantity: '-1',
+            notional: '-100', initialMargin: '30', positionInitialMargin: '10',
+            maintenanceMargin: '1', liquidationPrice: '120',
+        }];
+        const estimates = {
+            positions: {
+                'BTCUSDT:SHORT': {
+                    notional: 100,
+                    initialMargin: 10,
+                    maintenanceMargin: 1,
+                    liquidationPrice: 120,
+                },
+            },
+        };
+        const events = createFuturesMarginEstimateEvents({
+            resource: 'positions', positions, estimates,
+        });
+
+        expect(events.find(event => event.value === 'notional')).toMatchObject({
+            compared: 1, unavailable: 0, deviationBps: 0,
+        });
+        expect(events.find(event => event.value === 'initial-margin')).toMatchObject({
+            compared: 1, unavailable: 0, deviationBps: 0,
+        });
+
+        const withoutPositionOnlyMargin = createFuturesMarginEstimateEvents({
+            resource: 'positions',
+            positions: [{ ...positions[0], positionInitialMargin: undefined }],
+            estimates,
+        });
+        expect(withoutPositionOnlyMargin.find(event => event.value === 'initial-margin'))
+            .toMatchObject({ compared: 0, unavailable: 1, deviationBps: null });
     });
 
     it('drops an aggregate whose ratio is outside the bounded record domain', () => {

@@ -575,6 +575,38 @@ describe('futures contract configuration', () => {
             .toBeNull();
     });
 
+    it('keeps the ceiling but marks adjusted or partial bracket tables unavailable to estimates', () => {
+        const complete = {
+            symbol: 'BTCUSDT',
+            notionalCoef: '1.5',
+            brackets: [{
+                initialLeverage: 125,
+                notionalFloor: '0',
+                notionalCap: '50000',
+                maintMarginRatio: '0.005',
+                cum: '0',
+            }],
+        };
+        expect(readFuturesLeverageBracketTable(complete, 'BTCUSDT')).toMatchObject({
+            symbol: 'BTCUSDT',
+            maxLeverage: 125,
+            notionalCoef: '1.5',
+            marginEstimatesAvailable: false,
+        });
+
+        const partial = readFuturesLeverageBracketTable({
+            ...complete,
+            notionalCoef: undefined,
+            brackets: [complete.brackets[0], { initialLeverage: 50 }],
+        }, 'BTCUSDT');
+        expect(partial).toMatchObject({
+            symbol: 'BTCUSDT',
+            maxLeverage: 125,
+            marginEstimatesAvailable: false,
+        });
+        expect(partial.brackets).toHaveLength(1);
+    });
+
     it('reports the leverage the exchange applied, not the one that was asked for', async () => {
         const adapter = createAdapter();
         adapter.serverTimeOffsetMs = 0;
@@ -1114,12 +1146,13 @@ describe('futures normalization', () => {
         // /fapi/v3/positionRisk answers without leverage or margin mode; the
         // committed margin it does report is what ROE is computed from.
         expect(normalizeFuturesPositions([
-            { symbol: 'BEATUSDT', positionAmt: '-2873', positionSide: 'BOTH', entryPrice: '3.3449999999999998', markPrice: '3.37867363', unRealizedProfit: '-96.74', liquidationPrice: '4.71896804', isolatedMargin: '0', notional: '-9707', initialMargin: '960.5', maintMargin: '38.8' },
+            { symbol: 'BEATUSDT', positionAmt: '-2873', positionSide: 'BOTH', entryPrice: '3.3449999999999998', markPrice: '3.37867363', unRealizedProfit: '-96.74', liquidationPrice: '4.71896804', isolatedMargin: '0', notional: '-9707', initialMargin: '960.5', positionInitialMargin: '950.5', openOrderInitialMargin: '10', maintMargin: '38.8' },
         ])).toEqual([expect.objectContaining({
             symbol: 'BEATUSDT',
             leverage: undefined,
             marginType: undefined,
             initialMargin: '960.5',
+            positionInitialMargin: '950.5',
             maintenanceMargin: '38.8',
         })]);
 

@@ -17,10 +17,10 @@ export const FUTURES_MARGIN_ESTIMATE_VALUES = Object.freeze([
 export const FUTURES_MARGIN_ESTIMATE_MAX_BPS = 1_000_000;
 
 const POSITION_VALUE_FIELDS = Object.freeze([
-    Object.freeze(['notional', 'notional']),
-    Object.freeze(['initial-margin', 'initialMargin']),
-    Object.freeze(['maintenance-margin', 'maintenanceMargin']),
-    Object.freeze(['liquidation-price', 'liquidationPrice']),
+    Object.freeze(['notional', 'notional', 'notional']),
+    Object.freeze(['initial-margin', 'initialMargin', 'positionInitialMargin']),
+    Object.freeze(['maintenance-margin', 'maintenanceMargin', 'maintenanceMargin']),
+    Object.freeze(['liquidation-price', 'liquidationPrice', 'liquidationPrice']),
 ]);
 
 const finite = (value) => {
@@ -77,6 +77,12 @@ const positionKey = position => {
 
 const bracketRows = (tables, symbol) => {
     const held = symbolEntry(tables, symbol);
+    if (held !== null && typeof held === 'object' && !Array.isArray(held)) {
+        if (held.marginEstimatesAvailable === false) return null;
+        if (Object.hasOwn(held, 'notionalCoef') && positive(held.notionalCoef) !== 1) {
+            return null;
+        }
+    }
     const rows = Array.isArray(held) ? held : held?.brackets;
     return Array.isArray(rows) && rows.length > 0 ? rows : null;
 };
@@ -122,11 +128,9 @@ const positionBase = (position, { marks, symbolConfigs, leverageBrackets }) => {
     const isolatedWallet = marginMode === 'ISOLATED'
         ? nonNegative(position?.isolatedWallet)
         : null;
-    const initialMargin = marginMode === 'ISOLATED'
-        ? isolatedWallet
-        : notional / leverage;
+    const initialMargin = notional / leverage;
     const unrealizedPnl = quantity * (mark - entryPrice);
-    if (initialMargin === null
+    if ((marginMode === 'ISOLATED' && isolatedWallet === null)
         || !Number.isFinite(initialMargin)
         || initialMargin < 0
         || !Number.isFinite(maintenanceMargin)
@@ -204,12 +208,19 @@ const workingOrders = (regularOrders, algoOrders) => {
     if (!Array.isArray(regularOrders) || !Array.isArray(algoOrders)) return null;
     const regular = regularOrders;
     const algo = algoOrders;
-    const regularIds = new Set(regular.map(identityOf).filter(value => value !== null));
+    const regularIds = new Set(regular.map((order) => {
+        const symbol = symbolOf(order?.symbol ?? order?.s);
+        const identity = identityOf(order);
+        return symbol === null || identity === null ? null : `${symbol}:${identity}`;
+    }).filter(value => value !== null));
     const rows = [
         ...regular,
         ...algo.filter(order => {
             const actual = actualOrderIdentityOf(order);
-            return actual === null || !regularIds.has(actual);
+            const symbol = symbolOf(order?.symbol ?? order?.s);
+            return actual === null
+                || symbol === null
+                || !regularIds.has(`${symbol}:${actual}`);
         }),
     ];
     const seen = new Set();
@@ -244,8 +255,8 @@ const restingOrderInitialMargin = ({
         const quantity = nonNegative(order?.origQty ?? order?.q);
         const executed = nonNegative(order?.executedQty ?? order?.z);
         if (symbol === null || !['BUY', 'SELL'].includes(side)
-            || quantity === null || executed === null) return null;
-        const remaining = Math.max(quantity - executed, 0);
+            || quantity === null || executed === null || executed > quantity) return null;
+        const remaining = quantity - executed;
         if (remaining === 0) continue;
 
         const mark = markOf(marks, symbol);
@@ -264,7 +275,8 @@ const restingOrderInitialMargin = ({
         // definition an order on a contract holding no position. Measured on the
         // operator's desk on 2026-08-15, on a build that had already been taught
         // to read leverage and brackets for those contracts: free margin
-        // unavailable on sixty-eight account passes out of sixty-eight.
+        // unavailable on sixty-eight account passes out of sixty-eight, and then
+        // a hundred and seventy-four out of a hundred and seventy-four.
         //
         // So the mark is required exactly where it is used, which `price` states
         // on its own. Nothing is loosened: an order naming no price still has
@@ -380,7 +392,7 @@ const basisPoints = (computed, exchange) => {
         : undefined;
 };
 
-const positionComparison = (value, exchangeField, positions, estimates) => {
+const positionComparison = (value, computedField, exchangeField, positions, estimates) => {
     let compared = 0;
     let unavailable = 0;
     let worst = null;
@@ -389,7 +401,15 @@ const positionComparison = (value, exchangeField, positions, estimates) => {
     for (const row of rows) {
         const key = positionKey(row);
         const estimate = key === null ? null : estimates?.[key] ?? null;
-        const deviation = basisPoints(estimate?.[exchangeField], row?.[exchangeField]);
+        const exchangeAmount = value === 'notional'
+            ? finite(row?.[exchangeField])
+            : row?.[exchangeField];
+        const deviation = basisPoints(
+            estimate?.[computedField],
+            value === 'notional' && exchangeAmount !== null
+                ? Math.abs(exchangeAmount)
+                : exchangeAmount,
+        );
         // `undefined` means the ratio itself was outside the record's bounded
         // domain. The whole aggregate loses its line instead of smuggling a raw
         // amount in as a substitute.
@@ -441,9 +461,10 @@ export const createFuturesMarginEstimateEvents = ({
 } = {}) => {
     if (resource === 'positions') {
         return Object.freeze(POSITION_VALUE_FIELDS
-            .map(([value, field]) => positionComparison(
+            .map(([value, computedField, exchangeField]) => positionComparison(
                 value,
-                field,
+                computedField,
+                exchangeField,
                 positions,
                 estimates?.positions,
             ))

@@ -1,15 +1,17 @@
-> **The ticks below are on master; the code they describe is not.** No commit
-> on any branch contains the implementation of sections 1–3 — it exists only in
-> the working tree, and on `refs/orphaned/2026-08-15-untraced-futures-margin-work`
-> where it was rescued. The operator's desk runs `npm run e` over the tree, so
-> the behaviour is live for them while absent from every commit. The ticks
-> reached master by accident: `fc635c1` swept this folder's working-tree edits
-> into an archive commit meant for three other changes.
+> **These ticks outran their code for five hours, and no longer do.** They
+> reached master by accident on 2026-08-15: `fc635c1` swept this folder's
+> working-tree edits into an archive commit meant for three other changes, so
+> master read as twenty-four of thirty done. Sections 1–3 were on master already;
+> section 5 was not, and its author had stopped at 5.5 — the task that says to
+> run the checks before committing — leaving the code in the working tree with no
+> commit, no branch, no stash and no session that remembered writing it. Since the
+> desk runs `npm run e` over the tree, the operator had been trading on it all
+> day regardless.
 >
-> Do not archive this change on the strength of the ticks. The check is
+> It was rescued to `refs/orphaned/2026-08-15-untraced-futures-margin-work` and
+> then landed properly. The check that says so is
 > `git show HEAD:electron/services/futures-account-margin.js | grep -c
-> positionInitialMargin`, and it must be non-zero first. Until it is, this
-> delta must stay unfolded — master's built spec is the honest one.
+> positionInitialMargin`, and it is now non-zero.
 
 ## 1. Holding What The Arithmetic Needs
 
@@ -42,7 +44,7 @@
 
 ## 4. Verification
 
-- [ ] 4.1 `npm run lint`, `npm test`, `npm run check:futures-production`, `npm run check:circular`, `npm run check:runtime-mock`, `npm run check:command-path`.
+- [x] 4.1 `npm run lint`, `npm test`, `npm run check:futures-production`, `npm run check:circular`, `npm run check:runtime-mock`, `npm run check:command-path`. *Run on 2026-08-15 against an archived slice of the staged tree, not the working tree: 1970 of 1970 tests, eslint clean, all four checks passing.*
 - [ ] 4.2 Operator confirms nothing on screen changed: the same liquidation price, margins and free margin as before, from the same source.
 - [ ] 4.3 Operator runs a session and reads `node scripts/read-desk-record.mjs`, confirming a comparison line appears for each of the five values.
 - [ ] 4.4 Operator confirms the desk's weight and the number of reads are unchanged from the previous change — this one buys evidence, not weight.
@@ -54,4 +56,4 @@
 - [x] 5.2 Compare short notional by magnitude and position initial margin against the exchange's position-only field; use notional over leverage for isolated initial margin.
 - [x] 5.3 Scope algo-to-regular identity de-duplication by contract and refuse an order whose executed quantity exceeds its original quantity.
 - [x] 5.4 Prove 5.1–5.3 with focused regression tests written after the production fixes.
-- [ ] 5.5 Repeat OpenSpec validation, the relevant suites and repository checks, and GitNexus change detection before committing.
+- [x] 5.5 Repeat OpenSpec validation, the relevant suites and repository checks, and GitNexus change detection before committing. *Done on 2026-08-15 by a different hand than wrote 5.1–5.4: openspec 20 of 20 strict, the full suite and the four checks on an archived slice. GitNexus change detection was not run — its MCP server is absent in this environment and the CLI does not offer that command; the scope check was `git diff --stat` against the staged tree instead, five files, all of them named in 5.1–5.4 and one test fixture.*

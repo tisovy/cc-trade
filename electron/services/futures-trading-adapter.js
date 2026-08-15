@@ -357,11 +357,24 @@ export const readFuturesLeverageBracketTable = (payload, symbol = null) => {
         ? entry.symbol.toUpperCase()
         : wanted;
     if (entry === null || resolvedSymbol === null) return null;
-    const brackets = (Array.isArray(entry.brackets) ? entry.brackets : [])
-        .map(normalizeFuturesLeverageBracket)
+    const rawBrackets = Array.isArray(entry.brackets) ? entry.brackets : [];
+    const normalizedBrackets = rawBrackets.map(normalizeFuturesLeverageBracket);
+    const brackets = normalizedBrackets
         .filter(bracket => bracket !== null)
         .sort((left, right) => Number(left.notionalFloor) - Number(right.notionalFloor));
     if (brackets.length === 0) return null;
+    const hasNotionalCoef = entry.notionalCoef !== null
+        && entry.notionalCoef !== undefined
+        && entry.notionalCoef !== '';
+    const notionalCoef = hasNotionalCoef
+        ? leverageBracketAmount(entry.notionalCoef, { allowZero: false })
+        : null;
+    // Binance calls this a multiplier relative to the default brackets, but the
+    // endpoint does not say whether its returned floors/caps/cumulative amount
+    // have already been adjusted. The ceiling is still exchange-stated; margin
+    // arithmetic is unavailable rather than applying or ignoring the multiplier.
+    const marginEstimatesAvailable = normalizedBrackets.every(bracket => bracket !== null)
+        && (!hasNotionalCoef || (notionalCoef !== null && Number(notionalCoef) === 1));
     const maxLeverage = brackets.reduce(
         (ceiling, bracket) => Math.max(ceiling, bracket.initialLeverage),
         0,
@@ -370,6 +383,8 @@ export const readFuturesLeverageBracketTable = (payload, symbol = null) => {
         symbol: resolvedSymbol,
         maxLeverage,
         brackets: Object.freeze(brackets),
+        ...(notionalCoef === null ? {} : { notionalCoef }),
+        ...(marginEstimatesAvailable ? {} : { marginEstimatesAvailable: false }),
     });
 };
 
@@ -500,6 +515,12 @@ export const normalizeFuturesPositions = (positionEntries = []) => (
             // /fapi/v3/positionRisk reports neither leverage nor margin mode, so
             // the margin actually committed is the only basis left for ROE.
             initialMargin: entry.initialMargin ?? entry.positionInitialMargin,
+            // Position-only initial margin for like-for-like diagnostics. The
+            // broader `initialMargin` above may also include open orders and
+            // remains the exchange field the renderer already consumes.
+            ...(entry.positionInitialMargin === undefined
+                ? {}
+                : { positionInitialMargin: entry.positionInitialMargin }),
             maintenanceMargin: entry.maintMargin,
         }))
 );
