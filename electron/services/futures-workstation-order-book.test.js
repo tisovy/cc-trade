@@ -949,10 +949,20 @@ describe('what the book retains', () => {
     //
     // Both sides, and a quantity beside every price: four strings per level of
     // one side, and the contract the operator switched from is still in there.
+    //
+    // Against the ceiling *plus its slack*, which is what a side actually holds.
+    // The ceiling is not an exact count — eviction is deferred until a side runs
+    // that far past it, which is the whole reason a diff at the bound costs 332
+    // microseconds instead of 811 — so a tie asserted against the ceiling alone
+    // is short by the slack, and it is the number a side reaches that the cache
+    // has to hold.
     it('remembers enough parsed decimals to hold the book it retains', () => {
-        const { RETAINED_LEVELS_PER_SIDE } = FUTURES_WORKSTATION_ORDER_BOOK_LIMITS;
+        const {
+            RETAINED_LEVELS_PER_SIDE,
+            EVICTION_SLACK,
+        } = FUTURES_WORKSTATION_ORDER_BOOK_LIMITS;
         expect(FUTURES_BOOK_PARSED_DECIMAL_BOUND)
-            .toBeGreaterThanOrEqual(RETAINED_LEVELS_PER_SIDE * 4);
+            .toBeGreaterThanOrEqual((RETAINED_LEVELS_PER_SIDE + EVICTION_SLACK) * 4);
     });
 
     // Past the ceiling the furthest levels go first. Evicting from the near edge
