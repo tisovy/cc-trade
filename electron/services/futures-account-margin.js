@@ -252,10 +252,27 @@ const restingOrderInitialMargin = ({
         const config = symbolEntry(symbolConfigs, symbol);
         const leverage = positive(config?.leverage);
         const marginMode = marginModeOf(config?.marginType);
+        // What the order is valued at is the price it names — its own, or the
+        // trigger a market-stop rests at. The mark is the fallback for an order
+        // that names neither, and it was also demanded outright, which is a
+        // different and much stronger thing: it made the sum refuse for want of
+        // an input the order did not need.
+        //
+        // That cost the whole answer, because this sum is all-or-nothing across
+        // the account. Marks are followed per *position*, so a contract the
+        // account only has an order on has none — and an entry order is by
+        // definition an order on a contract holding no position. Measured on the
+        // operator's desk on 2026-08-15, on a build that had already been taught
+        // to read leverage and brackets for those contracts: free margin
+        // unavailable on sixty-eight account passes out of sixty-eight.
+        //
+        // So the mark is required exactly where it is used, which `price` states
+        // on its own. Nothing is loosened: an order naming no price still has
+        // nothing to be valued at without one, and still refuses.
         const price = positive(order?.price ?? order?.p)
             ?? positive(order?.triggerPrice)
             ?? mark;
-        if (mark === null || leverage === null || marginMode === null || price === null) {
+        if (leverage === null || marginMode === null || price === null) {
             return null;
         }
         const notional = remaining * price;

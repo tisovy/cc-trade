@@ -105,6 +105,45 @@ describe('computeFuturesAccountMarginEstimates', () => {
         expect(estimates.freeMargin).toBeCloseTo(81, 10);
     });
 
+    // A resting order holds the same margin from the moment it is placed until
+    // it is cancelled or filled: its own price times its own quantity, over the
+    // leverage. Nothing about that moves with the market, so nothing about it
+    // needs a live mark — and demanding one anyway is what took the whole sum
+    // away, since the sum is all-or-nothing across the account and marks are
+    // followed per position. An entry order is by definition an order on a
+    // contract holding no position.
+    it('values a resting order at its own price when its contract has no mark', () => {
+        const value = reading();
+        const withOrderOnly = extra => ({
+            ...value,
+            regularOrders: [...value.regularOrders, extra],
+            // SOLUSDT is the contract the account only has an order on. Its
+            // leverage and bracket are held — that much was already fixed — and
+            // `marks` deliberately says nothing about it.
+            symbolConfigs: new Map([
+                ...value.symbolConfigs,
+                ['SOLUSDT', { symbol: 'SOLUSDT', leverage: 10, marginType: 'CROSSED' }],
+            ]),
+            leverageBrackets: new Map([...value.leverageBrackets, ['SOLUSDT', bracketTable('SOLUSDT')]]),
+        });
+
+        // Four at twenty-five is a hundred of notional at ten times, so ten more
+        // committed against the eighty-one that was spendable without it.
+        expect(computeFuturesAccountMarginEstimates(withOrderOnly({
+            orderId: 5, symbol: 'SOLUSDT', side: 'BUY', origQty: '4',
+            executedQty: '0', price: '25', reduceOnly: false,
+        })).freeMargin).toBeCloseTo(71, 10);
+
+        // And nothing is loosened: an order that names no price at all — a
+        // market-triggered stop reports `price` as zero — has only the mark to be
+        // valued at, and without one the sum still refuses rather than
+        // understating what the account has committed.
+        expect(computeFuturesAccountMarginEstimates(withOrderOnly({
+            orderId: 6, symbol: 'SOLUSDT', side: 'BUY', origQty: '4',
+            executedQty: '0', price: '0', reduceOnly: false,
+        })).freeMargin).toBeNull();
+    });
+
     it.each([
         ['mark', value => ({ ...value, marks: {} })],
         ['bracket', value => ({ ...value, leverageBrackets: new Map() })],
