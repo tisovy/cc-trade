@@ -122,66 +122,24 @@ describe('FuturesProductionWorkstation account review', () => {
       .toMatchObject({ orderKind: 'ALGO', price: '57000.00' })
   })
 
-  // Read once, when the workspace opens on a contract it can name. The hook
-  // above it is mounted by the workspace and never told the symbol, so a read
-  // issued there arrives without one and the backend completes it from the
-  // panel's own selection — a different contract entirely.
-  it('reads the account history once, naming the contract on screen', () => {
-    const state = executionState()
+  // Nothing is read for the review from here any more. A read issued before a
+  // history view is open pays for both of its endpoints — a fan-out of twelve
+  // contracts each — for a panel the operator may never open, so the dock, which
+  // is what knows which view is on screen, reads the one that was opened.
+  // `FuturesPortfolioDock.test.jsx` holds what replaced these.
+  it('reads no account history of its own, whatever the review holds', () => {
+    const unread = executionState({ historyStoreReady: true, history: { readAt: null } })
     const { rerender } = render(
-      <FuturesProductionWorkstation enabled executionState={state} />,
+      <FuturesProductionWorkstation enabled executionState={unread} />,
     )
-
-    expect(state.loadHistory).toHaveBeenCalledExactlyOnceWith('BTCUSDT')
-
-    rerender(<FuturesProductionWorkstation enabled executionState={state} />)
-    expect(state.loadHistory).toHaveBeenCalledOnce()
-  })
-
-  it('waits for store hydration and does not auto-read a review restored from it', () => {
-    const loading = executionState({
-      historyStoreReady: false,
-      history: { readAt: null },
-    })
-    const { rerender } = render(
-      <FuturesProductionWorkstation enabled executionState={loading} />,
-    )
-    expect(loading.loadHistory).not.toHaveBeenCalled()
+    expect(unread.loadHistory).not.toHaveBeenCalled()
 
     const restored = {
-      ...loading,
-      historyStoreReady: true,
+      ...unread,
       history: { readAt: 1_784_000_000_000 },
     }
     rerender(<FuturesProductionWorkstation enabled executionState={restored} />)
     expect(restored.loadHistory).not.toHaveBeenCalled()
-  })
-
-  it('waits for a connection to read on, and does not read without one', () => {
-    const disconnected = executionState({ connected: false })
-    const { rerender } = render(
-      <FuturesProductionWorkstation enabled executionState={disconnected} />,
-    )
-    expect(disconnected.loadHistory).not.toHaveBeenCalled()
-
-    const connected = { ...disconnected, connected: true }
-    rerender(<FuturesProductionWorkstation enabled executionState={connected} />)
-    expect(connected.loadHistory).toHaveBeenCalledExactlyOnceWith('BTCUSDT')
-  })
-
-  // A frame that never left is not a read. The attempt stays armed so the next
-  // usable connection performs it, rather than the desk holding an empty review
-  // for the rest of the session.
-  it('tries again when the read could not be sent', () => {
-    const state = executionState({ loadHistory: vi.fn(() => false) })
-    const { rerender } = render(
-      <FuturesProductionWorkstation enabled executionState={state} />,
-    )
-    expect(state.loadHistory).toHaveBeenCalledOnce()
-
-    const recovered = { ...state, loadHistory: vi.fn(() => true) }
-    rerender(<FuturesProductionWorkstation enabled executionState={recovered} />)
-    expect(recovered.loadHistory).toHaveBeenCalledExactlyOnceWith('BTCUSDT')
   })
 
   it('passes account synchronization only for connected idle or loading resources', () => {

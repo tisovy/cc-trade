@@ -48,6 +48,11 @@ export const createHeldFuturesHistory = () => Object.freeze({
   // so, and so a later read can tell what it is allowed to drop.
   foldedOrders: Object.freeze([]),
   foldedTrades: Object.freeze([]),
+  // When each view was last answered by a read, or `null` for a view no read has
+  // ever covered. A review reads the endpoint the open view needs, so the view
+  // the operator has not opened is genuinely unread — and this is what says so,
+  // rather than an empty list that looks like "nothing happened".
+  readViews: Object.freeze({ orders: null, trades: null }),
 })
 
 const asArray = value => (Array.isArray(value) ? value : [])
@@ -181,7 +186,16 @@ export const applyFuturesHistoryReading = (history, payload, now) => {
   const read = [...new Set(named.length > 0
     ? named
     : [...readOrders, ...readTrades].map(contractOf).filter(Boolean))]
-  const covered = new Set(read)
+  // Which endpoints this answer is about. A read of the fills covers a contract's
+  // fills and nothing else, so its order log is not "covered and empty" — it is
+  // untouched, and the rows already held for it stay exactly where they are.
+  // A payload that does not say covers both, which is what it used to mean.
+  const answered = asArray(payload?.views).filter(view => (
+    view === 'orders' || view === 'trades'
+  ))
+  const views = answered.length > 0 ? answered : ['orders', 'trades']
+  const coveredOrders = new Set(views.includes('orders') ? read : [])
+  const coveredTrades = new Set(views.includes('trades') ? read : [])
   const readFrom = payload?.readFrom !== null
     && typeof payload?.readFrom === 'object'
     && !Array.isArray(payload.readFrom)
@@ -198,7 +212,7 @@ export const applyFuturesHistoryReading = (history, payload, now) => {
     history.orders,
     new Set(history.foldedOrders),
     futuresHistoryOrderKey,
-    covered,
+    coveredOrders,
     incrementalOrders,
     FUTURES_HELD_HISTORY_MAX_ORDERS_PER_CONTRACT,
   )
@@ -207,7 +221,7 @@ export const applyFuturesHistoryReading = (history, payload, now) => {
     history.trades,
     new Set(history.foldedTrades),
     futuresHistoryTradeKey,
-    covered,
+    coveredTrades,
     incrementalTrades,
     FUTURES_HELD_HISTORY_MAX_TRADES_PER_CONTRACT,
   )
@@ -224,12 +238,19 @@ export const applyFuturesHistoryReading = (history, payload, now) => {
     )
     coverage[symbol] = Object.freeze({
       readAt: now,
-      orderCursor: incrementalOrders.has(symbol)
-        ? higherIdentity(identityOf(previous.orderCursor), orderCursor)
-        : orderCursor,
-      tradeCursor: incrementalTrades.has(symbol)
-        ? higherIdentity(identityOf(previous.tradeCursor), tradeCursor)
-        : tradeCursor,
+      // Only the endpoint this read looked at moves. The other keeps what the
+      // read that did look at it left, so the desk still knows where to resume
+      // it — and, until one has, that it has never been read at all.
+      orderCursor: !coveredOrders.has(symbol)
+        ? previous.orderCursor ?? null
+        : incrementalOrders.has(symbol)
+          ? higherIdentity(identityOf(previous.orderCursor), orderCursor)
+          : orderCursor,
+      tradeCursor: !coveredTrades.has(symbol)
+        ? previous.tradeCursor ?? null
+        : incrementalTrades.has(symbol)
+          ? higherIdentity(identityOf(previous.tradeCursor), tradeCursor)
+          : tradeCursor,
     })
   }
   const frozenCoverage = Object.freeze(coverage)
@@ -261,6 +282,10 @@ export const applyFuturesHistoryReading = (history, payload, now) => {
     error: null,
     readAt: stamps.length > 0 ? Math.min(...stamps) : now,
     coverage: frozenCoverage,
+    readViews: Object.freeze({
+      orders: views.includes('orders') ? now : history.readViews?.orders ?? null,
+      trades: views.includes('trades') ? now : history.readViews?.trades ?? null,
+    }),
   })
 }
 

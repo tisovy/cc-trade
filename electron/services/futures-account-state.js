@@ -39,6 +39,23 @@ export const FUTURES_ACCOUNT_READ_REASONS = Object.freeze([
 ]);
 
 /**
+ * The reads the operator is waiting on, which are admitted ahead of ordinary
+ * work when both are queued for the same rate-limited turn.
+ *
+ * Each of these follows something that just happened to the account — a command
+ * the operator sent, a settlement the stream reported, an outcome the exchange
+ * left open. What is on screen is wrong until they land, and the operator is
+ * acting on it. The rest are maintenance: the first snapshot, a reconnect
+ * catching up, the periodic beat. They are worth reading and worth waiting for.
+ */
+export const FUTURES_URGENT_ACCOUNT_READ_REASONS = Object.freeze(new Set([
+    'unstated',
+    'command',
+    'unresolved',
+    'setting',
+]));
+
+/**
  * Which reason a pass answering more than one request carries.
  *
  * Requests that arrive while a read is running collapse into one pass, and their

@@ -635,6 +635,9 @@ const useFuturesTrading = ({
                 orders: history.orders,
                 trades: history.trades,
                 readFrom: history.readFrom,
+                // Which endpoints this answer covered, so the store replaces
+                // only those and the view it did not read keeps what it holds.
+                views: history.views,
                 readAt,
               })
             } catch {
@@ -943,13 +946,18 @@ const useFuturesTrading = ({
     }))
   }, [sendCommand])
 
-  const loadHistory = useCallback((targetSymbol, { full = false } = {}) => {
+  // `views` names the endpoints this read is for — the view the operator has
+  // open. Reading both costs a second fan-out answering a panel nobody is
+  // looking at: twelve contracts, one request each, through a queue that spaces
+  // every request 150ms from the last.
+  const loadHistory = useCallback((targetSymbol, { full = false, views = null } = {}) => {
     if (!state.historyStoreReady) return false
     const symbolToLoad = targetSymbol ?? symbolRef.current
     const sent = sendCommand(createFuturesAccountHistoryCommand({
       coverage: state.history.coverage,
       full,
       symbol: symbolToLoad,
+      views,
     }))
     // The rows already read stay on screen while the read is in flight: emptying
     // them makes the operator wait a second time for what they were reading.

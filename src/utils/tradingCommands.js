@@ -39,6 +39,19 @@ export const POSITION_MARGIN_DIRECTIONS = Object.freeze({
     REMOVE: 'REMOVE',
 });
 
+// The two endpoints an account review reads, named for what the panel shows out
+// of them: the order log behind the order history, the fills behind the closed
+// positions. Every USDⓈ-M history endpoint is read per contract, so reading both
+// for a panel showing one costs a whole fan-out answering a view nobody has open.
+export const FUTURES_HISTORY_VIEWS = Object.freeze({
+    ORDERS: 'orders',
+    TRADES: 'trades',
+});
+export const FUTURES_HISTORY_VIEW_VALUES = Object.freeze([
+    FUTURES_HISTORY_VIEWS.ORDERS,
+    FUTURES_HISTORY_VIEWS.TRADES,
+]);
+
 export const DEFAULT_SPOT_ORDER_TYPE = 'LIMIT';
 export const DEFAULT_SPOT_TIME_IN_FORCE = 'GTC';
 
@@ -299,12 +312,15 @@ export const createFuturesAccountRefreshCommand = ({
 // History is a read: it never touches the book. The renderer carries the
 // per-contract identities it already holds so Electron can ask only for the
 // gap; the command boundary validates and bounds them before they are used.
+// `views` names which endpoints this read is for. Absent means both, which is
+// what a caller that does not know what is on screen is asking for.
 export const createFuturesAccountHistoryCommand = ({
     accountId,
     clientOrderId,
     coverage = {},
     full = false,
     symbol,
+    views = null,
 } = {}) => ({
     ...buildBaseCommand({
         action: TRADING_COMMAND_ACTIONS.ACCOUNT_HISTORY,
@@ -316,6 +332,7 @@ export const createFuturesAccountHistoryCommand = ({
     coverage,
     full: full === true,
     symbol,
+    ...(Array.isArray(views) && views.length > 0 ? { views: [...views] } : {}),
 });
 
 export const createFuturesSetTradingPausedCommand = ({

@@ -1,4 +1,4 @@
-import { memo, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import {
   describeFuturesAlgoTrigger,
   describeFuturesOrderIntent,
@@ -23,6 +23,14 @@ import FuturesHistoryPanel from './FuturesHistoryPanel.jsx'
 const EMPTY_ROWS = Object.freeze([])
 const EMPTY_TICKS = Object.freeze({})
 const EMPTY_MARGIN_CALLS = Object.freeze({})
+
+// Which endpoint each tab is read out of. `working` is not a review at all — it
+// is the live order list, and it reads nothing.
+const HISTORY_VIEW_OF_TAB = Object.freeze({
+  working: null,
+  orderHistory: 'orders',
+  tradeHistory: 'trades',
+})
 
 const exactText = value => (
   typeof value === 'string' && value.length > 0 ? value : (value ?? '—')
@@ -129,13 +137,32 @@ export const FuturesPortfolioDock = ({
     )
   }
 
-  // Selecting a view reads nothing. The review is a reading the desk holds —
-  // read once when the workspace opens, maintained by the stream, and re-read
-  // only by the control beside it. Every click here used to cost an
-  // account-wide fan-out of about twenty-five requests.
+  // Selecting a view reads what that view is made of, once. The review is a
+  // reading the desk holds — maintained by the stream and re-read only by the
+  // control beside it — and every click here used to cost an account-wide
+  // fan-out of about twenty-five requests. Reading both endpoints for a panel
+  // that shows one is half that fan-out spent on a view nobody has open, so the
+  // view that was opened is what gets read, and only if no read covers it yet.
   const historyStatus = history?.status ?? 'idle'
   const historyReading = historyStatus === 'loading' || historyStatus === 'refreshing'
   const historyReadAt = history?.readAt ?? null
+  const historyView = HISTORY_VIEW_OF_TAB[ordersTab] ?? null
+  const historyViewRead = historyView === null
+    ? null
+    : history?.readViews?.[historyView] ?? null
+  // Armed until a frame actually leaves. A read that could not be sent — the
+  // store still opening, the socket down — is retried when that changes, which
+  // is exactly when the callback below is rebuilt.
+  const requestedViewsRef = useRef(null)
+  if (requestedViewsRef.current === null) requestedViewsRef.current = new Set()
+  useEffect(() => {
+    if (historyView === null || typeof onLoadHistory !== 'function') return
+    if (historyViewRead !== null || historyReading) return
+    if (requestedViewsRef.current.has(historyView)) return
+    if (onLoadHistory(selectedSymbol, { views: [historyView] })) {
+      requestedViewsRef.current.add(historyView)
+    }
+  }, [historyReading, historyView, historyViewRead, onLoadHistory, selectedSymbol])
 
   if (isCollapsed) {
     return (
@@ -426,7 +453,9 @@ export const FuturesPortfolioDock = ({
                 aria-label="Re-read account history"
                 title="Read only the account history that may have changed"
                 disabled={historyReading || typeof onLoadHistory !== 'function'}
-                onClick={() => onLoadHistory?.(selectedSymbol)}
+                onClick={() => onLoadHistory?.(selectedSymbol, {
+                  views: historyView === null ? null : [historyView],
+                })}
               >
                 ↻
               </button>
@@ -436,7 +465,10 @@ export const FuturesPortfolioDock = ({
                 aria-label="Read full account history"
                 title="Run discovery and read the full account history window"
                 disabled={historyReading || typeof onLoadHistory !== 'function'}
-                onClick={() => onLoadHistory?.(selectedSymbol, { full: true })}
+                onClick={() => onLoadHistory?.(selectedSymbol, {
+                  full: true,
+                  views: historyView === null ? null : [historyView],
+                })}
               >
                 Full
               </button>

@@ -271,4 +271,47 @@ describe('futuresHeldHistory', () => {
 
     expect(again.trades.map(trade => trade.id)).toEqual([7])
   })
+
+  // A read now covers the endpoint the open view needs, not both. An answer
+  // about the fills says nothing about the order log of the same contract, and
+  // reading it as "covered and empty" is how switching tabs would delete the
+  // rows the operator had just been reading.
+  it('keeps the other view of a contract a one-endpoint read covered', () => {
+    const both = applyFuturesHistoryReading(createHeldFuturesHistory(), {
+      ...READING,
+      symbols: ['BTCUSDT'],
+    }, 5_000)
+
+    const fillsOnly = applyFuturesHistoryReading(both, {
+      ...READING,
+      orders: [],
+      trades: [{ symbol: 'BTCUSDT', id: 8, realizedPnl: '3.5', time: 2_000 }],
+      symbols: ['BTCUSDT'],
+      readFrom: {},
+      views: ['trades'],
+    }, 12_000)
+
+    // The order log is untouched: not replaced, not emptied, not re-stamped.
+    expect(fillsOnly.orders.map(order => order.orderId)).toEqual([1])
+    expect(fillsOnly.trades.map(trade => trade.id)).toEqual([8])
+    expect(fillsOnly.coverage.BTCUSDT.orderCursor).toBe(both.coverage.BTCUSDT.orderCursor)
+    expect(fillsOnly.coverage.BTCUSDT.tradeCursor).toBe('8')
+    expect(both.readViews).toEqual({ orders: 5_000, trades: 5_000 })
+    expect(fillsOnly.readViews).toEqual({ orders: 5_000, trades: 12_000 })
+  })
+
+  // The first read of a view the desk has never opened. Nothing about the other
+  // one may be claimed by it — including that it was ever read.
+  it('leaves the view it did not read unread', () => {
+    const fillsOnly = applyFuturesHistoryReading(createHeldFuturesHistory(), {
+      ...READING,
+      orders: [],
+      symbols: ['BTCUSDT'],
+      views: ['trades'],
+    }, 5_000)
+
+    expect(fillsOnly.coverage.BTCUSDT.orderCursor).toBe(null)
+    expect(fillsOnly.orders).toEqual([])
+    expect(fillsOnly.readViews).toEqual({ orders: null, trades: 5_000 })
+  })
 })

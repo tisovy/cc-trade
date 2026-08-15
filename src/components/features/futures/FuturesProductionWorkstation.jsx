@@ -129,29 +129,12 @@ export const FuturesProductionWorkstation = ({
     setSymbolHistory(previous => rememberFuturesSymbol(previous, nextSymbol))
   }, [])
 
-  // The account review is read once, when the workspace opens on a contract it
-  // can name, and after that only when the operator asks for it. Selecting a
-  // history view renders what is held; the stream keeps it current.
-  const loadHistory = executionState?.loadHistory
-  const executionConnected = executionState?.connected === true
-  const historyStoreReady = executionState?.historyStoreReady !== false
-  const historyHeld = executionState?.history?.readAt !== null
-    && executionState?.history?.readAt !== undefined
-  const historyReadRef = useRef(false)
-  useEffect(() => {
-    if (!enabled || !executionConnected || typeof loadHistory !== 'function') return
-    if (historyReadRef.current) return
-    // The persisted-history cache owns discovery. Sending while it is still opening
-    // turns a cheap launch into the full income walk the store exists to avoid.
-    if (!historyStoreReady) return
-    if (historyHeld) {
-      historyReadRef.current = true
-      return
-    }
-    // Armed until a frame actually leaves: a read that could not be sent must be
-    // performed by the next usable connection, not silently skipped.
-    if (loadHistory(symbol)) historyReadRef.current = true
-  }, [enabled, executionConnected, historyHeld, historyStoreReady, loadHistory, symbol])
+  // The account review is read when a history view is opened, for the endpoint
+  // that view is made of, and after that only when the operator asks for it. The
+  // dock issues it, because the dock is what knows which view is on screen —
+  // reading here, before any view is open, paid for both endpoints and for a
+  // review the operator may never look at. Selecting a view a read already
+  // covers renders what is held; the stream keeps it current.
 
   const handleToggleFavorite = useCallback((favoriteSymbol) => {
     setSymbolHistory(previous => toggleFuturesFavorite(previous, favoriteSymbol))

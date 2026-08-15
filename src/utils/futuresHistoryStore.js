@@ -91,6 +91,12 @@ export const mergeFuturesHistoryContract = (stored, {
   maxTrades = FUTURES_HISTORY_STORE_MAX_TRADES,
   replaceOrders = false,
   replaceTrades = false,
+  // Which endpoints the reading behind this actually covered. A review reads the
+  // endpoint the open view needs, so a contract can be read for its fills and
+  // never for its order log — and the next run has to be able to tell the
+  // difference between an endpoint read and empty and one never asked about.
+  readsOrders = true,
+  readsTrades = true,
 } = {}) => {
   const key = futuresHistoryContractKey(symbol ?? stored?.symbol)
   const mergedOrders = boundedRows(
@@ -106,6 +112,11 @@ export const mergeFuturesHistoryContract = (stored, {
     tradeIdentity,
     maxTrades,
   )
+  const storedStamp = Number.isSafeInteger(stored?.readAt) ? stored.readAt : null
+  // A record written before reads were per endpoint has no per-view stamp, and
+  // every read behind it covered both — so its own stamp stands for both.
+  const heldStamp = key => (Object.hasOwn(stored ?? {}, key) ? stored[key] : storedStamp)
+  const stamp = Number.isSafeInteger(readAt) ? readAt : null
   return Object.freeze({
     key,
     symbol: key,
@@ -115,7 +126,9 @@ export const mergeFuturesHistoryContract = (stored, {
     // forward from, and when the reading was taken.
     orderCursor: cursorOf(mergedOrders, orderIdentity),
     tradeCursor: cursorOf(mergedTrades, tradeIdentity),
-    readAt: Number.isSafeInteger(readAt) ? readAt : (stored?.readAt ?? null),
+    orderReadAt: readsOrders ? (stamp ?? heldStamp('orderReadAt')) : heldStamp('orderReadAt'),
+    tradeReadAt: readsTrades ? (stamp ?? heldStamp('tradeReadAt')) : heldStamp('tradeReadAt'),
+    readAt: stamp ?? storedStamp,
   })
 }
 
@@ -163,6 +176,17 @@ export const boundFuturesHistoryContracts = (
  * saying it has never been read, which is the one case where an empty panel is
  * honest.
  */
+// When a view was last read across every contract the store holds, or `null` if
+// any of them was never read for it. A record from before reads were per
+// endpoint carries no per-view stamp, and its own stamp answers for both.
+const viewStampOf = (records, key) => {
+  const stamps = records.map((record) => {
+    const stamp = Object.hasOwn(record, key) ? record[key] : record.readAt
+    return Number.isSafeInteger(stamp) ? stamp : null
+  })
+  return stamps.some(stamp => stamp === null) ? null : Math.min(...stamps)
+}
+
 export const restoreFuturesHistoryFromStore = (records) => {
   const usable = asArray(records).filter(record => (
     futuresHistoryContractKey(record?.symbol) !== ''
@@ -187,6 +211,14 @@ export const restoreFuturesHistoryFromStore = (records) => {
     // the desk prints beside ↻. An empty-but-covered contract participates too:
     // "there were no rows" is a reading, not an absence of one.
     readAt: Math.min(...usable.map(record => record.readAt)),
+    // A view counts as read only where every restored contract was read for it.
+    // One contract read for its fills alone is enough to make the order log
+    // worth asking for again, and the desk only re-reads the contracts that
+    // need it — the rest are vouched for and cost nothing.
+    readViews: Object.freeze({
+      orders: viewStampOf(usable, 'orderReadAt'),
+      trades: viewStampOf(usable, 'tradeReadAt'),
+    }),
     coverage: Object.freeze(Object.fromEntries(usable.map(record => [
       futuresHistoryContractKey(record.symbol),
       Object.freeze({
@@ -276,6 +308,13 @@ export const createFuturesHistoryStore = ({
   },
   async writeReading(reading) {
     const readAt = Number.isSafeInteger(reading?.readAt) ? reading.readAt : null
+    // Which endpoints this reading covered. A reading that does not say covered
+    // both, which is what every reading meant before they were split by view.
+    const answered = Array.isArray(reading?.views)
+      ? reading.views.filter(view => view === 'orders' || view === 'trades')
+      : []
+    const readsOrders = answered.length === 0 || answered.includes('orders')
+    const readsTrades = answered.length === 0 || answered.includes('trades')
     const contracts = splitFuturesHistoryReading(reading)
     const readFrom = reading?.readFrom !== null
       && typeof reading?.readFrom === 'object'
@@ -305,8 +344,14 @@ export const createFuturesHistoryStore = ({
               // A cursor-origin page is a gap and joins the stored rows. A null
               // origin (and an old payload with no origins) is a full endpoint
               // reading and must replace that endpoint in persistent state too.
-              replaceOrders: !hasOrigins || identityOf(origins.orderCursor) === null,
-              replaceTrades: !hasOrigins || identityOf(origins.tradeCursor) === null,
+              // An endpoint this reading never looked at replaces nothing: it
+              // would replace the stored rows with the nothing it did not read.
+              readsOrders,
+              readsTrades,
+              replaceOrders: readsOrders
+                && (!hasOrigins || identityOf(origins.orderCursor) === null),
+              replaceTrades: readsTrades
+                && (!hasOrigins || identityOf(origins.tradeCursor) === null),
             },
           ),
         )

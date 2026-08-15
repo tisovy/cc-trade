@@ -239,6 +239,68 @@ describe('the store across runs', () => {
     })
   })
 
+  // A review reads the endpoint the open view needs. What it did not read, it
+  // did not read — replacing the stored rows of the other endpoint with the
+  // nothing it came back with would lose a run's worth of history to a tab.
+  it('leaves the endpoint a one-view reading did not read exactly as it was', async () => {
+    const { store } = createMemoryStore()
+    await store.writeReading({
+      symbols: ['BTCUSDT'],
+      orders: [order(5)],
+      trades: [trade(1)],
+      readAt: READ_AT,
+    })
+    await store.writeReading({
+      symbols: ['BTCUSDT'],
+      orders: [],
+      trades: [trade(2, { time: READ_AT + 1 })],
+      readFrom: { BTCUSDT: { tradeCursor: null } },
+      views: ['trades'],
+      readAt: READ_AT + 1,
+    })
+
+    const [record] = await store.readContracts()
+    expect(record.orders.map(row => row.orderId)).toEqual([5])
+    expect(record.trades.map(row => row.id)).toEqual([2])
+    expect(record).toMatchObject({
+      orderCursor: '5', tradeCursor: '2', orderReadAt: READ_AT, tradeReadAt: READ_AT + 1,
+    })
+  })
+
+  // Which views the next run may present without asking again. A contract read
+  // for one of them leaves the other worth reading, and the store is where that
+  // survives the desk being closed.
+  it('carries which views were read into the next run', async () => {
+    const { store } = createMemoryStore()
+    await store.writeReading({
+      symbols: ['BTCUSDT'],
+      orders: [],
+      trades: [trade(1)],
+      views: ['trades'],
+      readAt: READ_AT,
+    })
+    expect(restoreFuturesHistoryFromStore(await store.readContracts()).readViews)
+      .toEqual({ orders: null, trades: READ_AT })
+
+    await store.writeReading({
+      symbols: ['BTCUSDT'],
+      orders: [order(5)],
+      trades: [],
+      views: ['orders'],
+      readAt: READ_AT + 1,
+    })
+    expect(restoreFuturesHistoryFromStore(await store.readContracts()).readViews)
+      .toEqual({ orders: READ_AT + 1, trades: READ_AT })
+
+    // One contract read for its fills alone is enough to leave the order log
+    // worth asking for: the desk re-reads that contract and vouches the rest.
+    await store.writeReading({
+      symbols: ['ETHUSDT'], orders: [], trades: [trade(9)], views: ['trades'], readAt: READ_AT + 2,
+    })
+    expect(restoreFuturesHistoryFromStore(await store.readContracts()).readViews)
+      .toEqual({ orders: null, trades: READ_AT })
+  })
+
   it('lets an empty-but-covered contract age the review it proves', async () => {
     const { store } = createMemoryStore()
     // "No rows" is still the result of a read and still names persisted

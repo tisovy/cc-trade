@@ -4,6 +4,7 @@ import {
     DEFAULT_ACCOUNT_ID,
     DEFAULT_SPOT_ORDER_TYPE,
     DEFAULT_SPOT_TIME_IN_FORCE,
+    FUTURES_HISTORY_VIEW_VALUES,
     FUTURES_LEVERAGE_LIMITS,
     FUTURES_MARGIN_TYPES,
     FUTURES_MARKET_TYPE,
@@ -93,6 +94,15 @@ const normalizeFuturesHistoryCoverage = (value) => {
         })]);
     }
     return Object.freeze(Object.fromEntries(entries));
+};
+
+// Which endpoints the read is for. `null` is "the caller did not say", which is
+// read as both — an unrecognised name is dropped rather than refused, so a
+// renderer asking for something this desk does not have still gets its review.
+const normalizeFuturesHistoryViews = (value) => {
+    if (!Array.isArray(value)) return null;
+    const views = FUTURES_HISTORY_VIEW_VALUES.filter(view => value.includes(view));
+    return views.length > 0 ? Object.freeze(views) : null;
 };
 
 export const createCommandRejection = (request, code, message, details = {}) => ({
@@ -764,6 +774,7 @@ export const validateTypedTradingCommand = (payload, { selectedSymbol } = {}) =>
                 };
             }
             const coverage = normalizeFuturesHistoryCoverage(payload.coverage);
+            const views = normalizeFuturesHistoryViews(payload.views);
             return {
                 ok: true,
                 command: {
@@ -771,6 +782,7 @@ export const validateTypedTradingCommand = (payload, { selectedSymbol } = {}) =>
                     symbol,
                     ...(Object.keys(coverage).length > 0 ? { coverage } : {}),
                     ...(payload.full === true ? { full: true } : {}),
+                    ...(views === null ? {} : { views }),
                 },
             };
         }

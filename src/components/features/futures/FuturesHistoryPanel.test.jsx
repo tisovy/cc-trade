@@ -520,6 +520,49 @@ describe('FuturesHistoryPanel', () => {
     expect(screen.getByRole('status')).toHaveTextContent('Open history to load it.')
   })
 
+  // A read covers the endpoint the view that asked needs, so the other view can
+  // be genuinely unread while the account carries a reading. "No closed
+  // positions across the 2 contracts read" would then be a claim about a read
+  // that never looked at a single fill.
+  it('does not call a view empty when no read has covered it', () => {
+    render(
+      <FuturesHistoryPanel
+        view="tradeHistory"
+        symbol="BTCUSDT"
+        tickSizes={ticks}
+        history={{
+          ...history,
+          trades: [],
+          symbols: ['BTCUSDT', 'BICOUSDT'],
+          readViews: { orders: 1_784_000_100_000, trades: null },
+        }}
+      />,
+    )
+    expect(screen.queryByText(/No closed positions/)).not.toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent('Open history to load it.')
+  })
+
+  // The account holds a reading, so its status is `refreshing` rather than
+  // `loading` while this view is read for the first time. It is still the first
+  // read of what is on screen, and saying "open history to load it" of a read
+  // already in flight reads as a control the operator has to press again.
+  it('says the first read of this view is in flight, whatever the other view holds', () => {
+    render(
+      <FuturesHistoryPanel
+        view="tradeHistory"
+        symbol="BTCUSDT"
+        tickSizes={ticks}
+        history={{
+          ...history,
+          status: 'refreshing',
+          trades: [],
+          readViews: { orders: 1_784_000_100_000, trades: null },
+        }}
+      />,
+    )
+    expect(screen.getByRole('status')).toHaveTextContent('Loading account history…')
+  })
+
   // A session is reviewed whole: half of it was on contracts the operator has
   // since switched away from, and scoping the tab to the chart hid exactly those.
   it('reports every contract the account traded, each at its own tick', () => {

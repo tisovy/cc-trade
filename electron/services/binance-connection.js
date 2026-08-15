@@ -22,6 +22,8 @@ import {
     runSpotAccountRefreshOperations,
 } from './spot-trading-adapter.js';
 import {
+    FUTURES_HISTORY_VIEWS,
+    FUTURES_HISTORY_VIEW_VALUES,
     FUTURES_MARKET_TYPE,
     SPOT_MARKET_TYPE,
     TRADING_COMMAND_ACTIONS,
@@ -68,6 +70,7 @@ import {
     createFuturesMarginEstimateEvents,
 } from './futures-account-margin.js';
 import {
+    FUTURES_URGENT_ACCOUNT_READ_REASONS,
     FuturesSettledOrderMemory,
     FuturesStreamedOrderMemory,
     createFuturesAccountStateEnvelope,
@@ -328,6 +331,18 @@ const waitForPromise = (promise, signal) => {
     });
 };
 
+// How many times a request already waiting may be passed by an urgent one.
+//
+// Overtaking with no bound is starvation with another name: the operator's reads
+// keep arriving for as long as they are trading, and the review of the session
+// they opened has to finish while they do. Eight is more than one command's worth
+// of urgent reads — a fill asks for two resources, a leverage change for four and
+// the command itself — so a burst belonging to one action passes in full. Past
+// that the request that has waited longest goes next, whoever is behind it, and
+// the fan-out is held up by at most eight admissions however many orders are
+// worked over it.
+const MAX_ADMISSION_PASSES = 8;
+
 export class RateLimiter {
     constructor(maxWeight = 800, windowMs = 60000, requestDelayMs = 500) {
         this.maxWeight = maxWeight;        // Max weight per window (conservative)
@@ -337,7 +352,9 @@ export class RateLimiter {
         this.lastRequestTime = 0;          // Last request timestamp for spacing
         // Serialize only admission/reservation. Once admitted, operations remain
         // independent, so one slow read cannot suppress unrelated resources.
-        this.admissionTail = Promise.resolve();
+        // Queued in arrival order; urgency decides who leaves the queue first.
+        this.waiting = [];
+        this.admitting = false;
     }
 
     /**
@@ -396,27 +413,75 @@ export class RateLimiter {
     }
 
     /**
+     * Which queued request goes next.
+     *
+     * Arrival order, except that an urgent one may pass the ordinary requests
+     * ahead of it — what follows the operator's command must not wait out a
+     * review of the session. Every request it passes counts the pass, and once
+     * the one at the head has been passed `MAX_ADMISSION_PASSES` times nothing
+     * may pass it again.
+     *
+     * Reading the head is enough to know that: a pass is counted against every
+     * request it skipped, so nothing in the queue can have been passed more
+     * often than the one that has been waiting longest.
+     */
+    nextAdmission() {
+        const head = this.waiting[0];
+        if (head.urgent || head.passes >= MAX_ADMISSION_PASSES) return 0;
+        const urgent = this.waiting.findIndex(entry => entry.urgent);
+        if (urgent <= 0) return 0;
+        for (let index = 0; index < urgent; index += 1) {
+            this.waiting[index].passes += 1;
+        }
+        return urgent;
+    }
+
+    /**
+     * Hand the admission slot to whichever queued request has earned it.
+     */
+    pumpAdmissions() {
+        if (this.admitting || this.waiting.length === 0) return;
+        this.admitting = true;
+        const [next] = this.waiting.splice(this.nextAdmission(), 1);
+        next.admit();
+    }
+
+    releaseAdmission() {
+        this.admitting = false;
+        this.pumpAdmissions();
+    }
+
+    /**
      * Atomically wait for capacity, apply spacing, and reserve request weight.
      */
-    async reserve(weight, signal) {
-        const previousAdmission = this.admissionTail;
-        let releaseAdmission;
-        const admissionGate = new Promise(resolve => {
-            releaseAdmission = resolve;
+    async reserve(weight, signal, { urgent = false } = {}) {
+        const entry = { urgent: urgent === true, passes: 0, admit: null };
+        const turn = new Promise(resolve => {
+            entry.admit = resolve;
         });
-        this.admissionTail = previousAdmission.then(
-            () => admissionGate,
-            () => admissionGate,
-        );
+        this.waiting.push(entry);
+        this.pumpAdmissions();
 
         try {
-            await waitForPromise(previousAdmission, signal);
+            await waitForPromise(turn, signal);
+        } catch (error) {
+            // Abandoned before its turn came, so it leaves the queue having
+            // held nothing. If the turn had already been handed to it, the slot
+            // is held by this request and has to be passed on rather than
+            // dropped — otherwise one cancelled read stops the queue for good.
+            const index = this.waiting.indexOf(entry);
+            if (index >= 0) this.waiting.splice(index, 1);
+            else this.releaseAdmission();
+            throw error;
+        }
+
+        try {
             await this.waitForCapacity(weight, signal);
             await this.enforceDelay(signal);
             throwIfAborted(signal);
             this.requests.push({ timestamp: Date.now(), weight });
         } finally {
-            releaseAdmission();
+            this.releaseAdmission();
         }
     }
 
@@ -425,9 +490,13 @@ export class RateLimiter {
      * @param {Function} fn - Async function to execute
      * @param {number} weight - Weight of this request (default 1)
      * @param {number} maxRetries - Max retries on network errors (default 2)
+     * @param {object} [options]
+     * @param {AbortSignal} [options.signal]
+     * @param {boolean} [options.urgent] - Admitted ahead of ordinary work, within
+     *   the bound above. For what the operator's command needs, nothing else.
      */
-    async execute(fn, weight = 1, maxRetries = 2, { signal } = {}) {
-        await this.reserve(weight, signal);
+    async execute(fn, weight = 1, maxRetries = 2, { signal, urgent = false } = {}) {
+        await this.reserve(weight, signal, { urgent });
 
         // Execute with retry on network errors
         let lastError;
@@ -1160,7 +1229,12 @@ export function setupBinanceConnection({
         futuresSymbolConfigReads.clear();
     };
 
-    const readFuturesSymbolConfig = async (symbol, { withCeiling = false } = {}) => {
+    // `urgent` is for the read that stands between the operator's own change and
+    // the account read behind it: what the exchange settled the leverage or the
+    // margin mode at. A read that joins one already in flight takes that one's
+    // place in the queue — it is past being reordered — which is the housekeeping
+    // read for the same contract and at most one admission's worth of waiting.
+    const readFuturesSymbolConfig = async (symbol, { withCeiling = false, urgent = false } = {}) => {
         if (!futuresTradingAdapter || !symbol) return null;
         const key = String(symbol).toUpperCase();
         const inFlight = futuresSymbolConfigReads.get(key);
@@ -1174,12 +1248,16 @@ export function setupBinanceConnection({
                 const config = await futuresRestLimiter.execute(
                     () => futuresTradingAdapter.getSymbolConfig(symbol),
                     FUTURES_SYMBOL_CONFIG_WEIGHT,
+                    2,
+                    { urgent },
                 );
                 if (config === null || superseded()) return null;
                 const bracketTable = withCeiling
                     ? await futuresRestLimiter.execute(
                         () => futuresTradingAdapter.getLeverageBracketTable(symbol),
                         FUTURES_LEVERAGE_BRACKET_WEIGHT,
+                        2,
+                        { urgent },
                     ).catch(() => null)
                     : null;
                 if (superseded()) return null;
@@ -1328,26 +1406,48 @@ export function setupBinanceConnection({
         activity: futuresHistoryActivityOf(symbol),
     });
 
+    // Proved per endpoint, because a read is now per endpoint: a review that read
+    // the fills of a contract has proved nothing about its order log, and saying
+    // otherwise would leave the other view unread when it is opened. What this
+    // read did not look at keeps whatever the read that did look at it proved.
     const retainFuturesHistoryProof = (symbol, captured, cursors) => {
         if (!captured.connected
             || !futuresHistoryStreamConnected
             || captured.epoch !== futuresHistoryStreamEpoch
             || captured.activity !== futuresHistoryActivityOf(symbol)) return;
+        const held = futuresHistoryProofBySymbol.get(symbol);
+        const carried = held?.epoch === captured.epoch
+            && held.activity === captured.activity
+            ? held
+            : null;
         futuresHistoryProofBySymbol.set(symbol, Object.freeze({
             epoch: captured.epoch,
             activity: captured.activity,
-            orderCursor: cursors.orderCursor,
-            tradeCursor: cursors.tradeCursor,
+            orderCursor: Object.hasOwn(cursors, 'orderCursor')
+                ? cursors.orderCursor
+                : carried?.orderCursor,
+            tradeCursor: Object.hasOwn(cursors, 'tradeCursor')
+                ? cursors.tradeCursor
+                : carried?.tradeCursor,
         }));
     };
 
-    const futuresHistoryIsVouched = (symbol, held) => {
+    const FUTURES_HISTORY_VIEW_CURSORS = Object.freeze({
+        [FUTURES_HISTORY_VIEWS.ORDERS]: 'orderCursor',
+        [FUTURES_HISTORY_VIEWS.TRADES]: 'tradeCursor',
+    });
+
+    const futuresHistoryIsVouched = (symbol, held, views) => {
         if (!futuresHistoryStreamConnected) return false;
         const proof = futuresHistoryProofBySymbol.get(symbol);
-        return proof?.epoch === futuresHistoryStreamEpoch
-            && proof.activity === futuresHistoryActivityOf(symbol)
-            && proof.orderCursor === normalizeFuturesHistoryCursor(held?.orderCursor)
-            && proof.tradeCursor === normalizeFuturesHistoryCursor(held?.tradeCursor);
+        if (proof?.epoch !== futuresHistoryStreamEpoch
+            || proof.activity !== futuresHistoryActivityOf(symbol)) return false;
+        // Only the endpoints this read is for. A contract vouched for its fills
+        // and never read for its orders is unread as far as the order log goes.
+        return views.every((view) => {
+            const cursor = FUTURES_HISTORY_VIEW_CURSORS[view];
+            return proof[cursor] === normalizeFuturesHistoryCursor(held?.[cursor]);
+        });
     };
 
     const forgetFuturesHistoryState = () => {
@@ -1476,6 +1576,13 @@ export function setupBinanceConnection({
         }
         broadcastFuturesAccountState();
 
+        // A pass that answers something the operator just did is admitted ahead
+        // of ordinary reads queued before it. Measured on 2026-08-16: behind the
+        // fan-out of a session review, the wallet read a fill asks for waited
+        // 3 150ms — the desk showing the account before the trade for that long,
+        // with the operator acting on it.
+        const urgent = FUTURES_URGENT_ACCOUNT_READ_REASONS.has(reason);
+
         // The signed reads run concurrently: the limiter still spaces their
         // admissions, but the round-trips overlap, so the ticket reaches
         // READY in roughly one round-trip instead of serial endpoint latency.
@@ -1523,7 +1630,7 @@ export function setupBinanceConnection({
                 futuresMarkPriceFeed?.track(futuresAccountResources.positions.data ?? []);
             }
             broadcastFuturesAccountState();
-        }, operation.weight).catch((error) => {
+        }, operation.weight, 2, { urgent }).catch((error) => {
                 if (epoch !== futuresMutationEpoch || activation !== futuresActivationGeneration) return;
                 futuresAccountResources = markFuturesResourceFailed(
                     futuresAccountResources,
@@ -2279,11 +2386,11 @@ export function setupBinanceConnection({
         return cursor;
     };
 
-    const chooseFuturesHistoryReadSymbols = (symbols, coverage, { full = false } = {}) => {
+    const chooseFuturesHistoryReadSymbols = (symbols, coverage, { full = false, views } = {}) => {
         if (full) return [...symbols];
         const required = new Set(symbols.filter(symbol => (
             !Object.hasOwn(coverage, symbol)
-            || !futuresHistoryIsVouched(symbol, coverage[symbol])
+            || !futuresHistoryIsVouched(symbol, coverage[symbol], views)
         )));
         if (symbols.length === 0 || required.size === symbols.length) {
             return symbols.filter(symbol => required.has(symbol));
@@ -3191,7 +3298,12 @@ export function setupBinanceConnection({
                 symbol,
                 coverage = {},
                 full = false,
+                // Which endpoints the view that asked needs. A command that does
+                // not say is answered with both, as it always was.
+                views = FUTURES_HISTORY_VIEW_VALUES,
             } = command;
+            const readsOrders = views.includes(FUTURES_HISTORY_VIEWS.ORDERS);
+            const readsTrades = views.includes(FUTURES_HISTORY_VIEWS.TRADES);
             const activation = futuresActivationGeneration;
             const rendererActivation = marketActivationGeneration;
             const isObsolete = () => (
@@ -3203,7 +3315,7 @@ export function setupBinanceConnection({
                 symbols, discovered, discoveryComplete,
             } = await collectFuturesHistorySymbols(symbol, { coverage, full, isObsolete });
             if (isObsolete()) return;
-            const readSymbols = chooseFuturesHistoryReadSymbols(symbols, coverage, { full });
+            const readSymbols = chooseFuturesHistoryReadSymbols(symbols, coverage, { full, views });
             const orders = [];
             const trades = [];
             const unavailable = [];
@@ -3219,8 +3331,11 @@ export function setupBinanceConnection({
                     : normalizeFuturesHistoryCursor(held.tradeCursor);
                 const proof = captureFuturesHistoryProof(historySymbol);
                 try {
+                    // One endpoint per contract where the panel shows one view.
+                    // Both are still read together where both were asked for, so
+                    // the two round-trips overlap rather than queue in sequence.
                     const [symbolOrders, symbolTrades] = await Promise.all([
-                        readFuturesHistoryGap({
+                        readsOrders ? readFuturesHistoryGap({
                             cursor: orderCursor,
                             limit: FUTURES_HISTORY_LIMIT,
                             identityOf: order => order?.orderId,
@@ -3233,8 +3348,8 @@ export function setupBinanceConnection({
                                     })),
                                 FUTURES_HISTORY_READ_WEIGHT,
                             ),
-                        }),
-                        readFuturesHistoryGap({
+                        }) : null,
+                        readsTrades ? readFuturesHistoryGap({
                             cursor: tradeCursor,
                             limit: FUTURES_TRADE_HISTORY_LIMIT,
                             identityOf: trade => trade?.id,
@@ -3247,22 +3362,32 @@ export function setupBinanceConnection({
                                     })),
                                 FUTURES_HISTORY_READ_WEIGHT,
                             ),
-                        }),
+                        }) : null,
                     ]);
-                    orders.push(...symbolOrders);
-                    trades.push(...symbolTrades);
-                    readFrom[historySymbol] = { orderCursor, tradeCursor };
+                    if (readsOrders) orders.push(...symbolOrders);
+                    if (readsTrades) trades.push(...symbolTrades);
+                    // Where a read started from, stated only for the endpoint it
+                    // started: the renderer decides what it may replace from this,
+                    // and a cursor for an endpoint nobody read describes nothing.
+                    readFrom[historySymbol] = {
+                        ...(readsOrders ? { orderCursor } : {}),
+                        ...(readsTrades ? { tradeCursor } : {}),
+                    };
                     retainFuturesHistoryProof(historySymbol, proof, {
-                        orderCursor: futuresHistoryCursorAfter(
-                            orderCursor,
-                            symbolOrders,
-                            order => order?.orderId,
-                        ),
-                        tradeCursor: futuresHistoryCursorAfter(
-                            tradeCursor,
-                            symbolTrades,
-                            trade => trade?.id,
-                        ),
+                        ...(readsOrders ? {
+                            orderCursor: futuresHistoryCursorAfter(
+                                orderCursor,
+                                symbolOrders,
+                                order => order?.orderId,
+                            ),
+                        } : {}),
+                        ...(readsTrades ? {
+                            tradeCursor: futuresHistoryCursorAfter(
+                                tradeCursor,
+                                symbolTrades,
+                                trade => trade?.id,
+                            ),
+                        } : {}),
                     });
                 } catch (error) {
                     unavailable.push(historySymbol);
@@ -3281,6 +3406,7 @@ export function setupBinanceConnection({
                         discoveryComplete,
                         readFrom: {},
                         full: full === true,
+                        views: [...views],
                         orders: [],
                         trades: [],
                         error: {
@@ -3304,6 +3430,11 @@ export function setupBinanceConnection({
                     discoveryComplete,
                     readFrom,
                     full: full === true,
+                    // Which endpoints this answer covers. The renderer replaces
+                    // only what was read and keeps the rest of the review it is
+                    // already showing — an answer about the fills says nothing
+                    // about the order log, and must not be read as emptying it.
+                    views: [...views],
                     orders: orders.sort((left, right) => right.time - left.time),
                     trades: trades.sort((left, right) => right.time - left.time),
                     error: null,
@@ -3336,14 +3467,27 @@ export function setupBinanceConnection({
             }
             try {
                 logger.info(`[futures-leverage] ${symbol} → ${leverage}x`);
+                // The one command that waits in this queue rather than going
+                // straight out. Behind a session review it reached the exchange
+                // 3 150ms after the operator asked for it — measured — which is
+                // not a stale reading but a stalled command, so it goes ahead of
+                // the review the same way the reads behind it do.
                 await futuresRestLimiter.execute(
                     () => futuresTradingAdapter.setLeverage({ symbol, leverage }),
                     1,
+                    2,
+                    { urgent: true },
                 );
                 noteFuturesMutation();
                 // The exchange's figure, not the requested one: Binance lowers a
                 // setting a position is too large for rather than refusing it.
-                const config = await readFuturesSymbolConfig(symbol, { withCeiling: true });
+                // Urgent for the same reason the command was, and because the
+                // account read is behind it: an ordinary read here puts the whole
+                // rest of the fan-out between the change and its consequences.
+                const config = await readFuturesSymbolConfig(symbol, {
+                    withCeiling: true,
+                    urgent: true,
+                });
                 broadcastFuturesSymbolConfigs([config]);
                 // Margin requirements and the liquidation price both moved.
                 await refreshFuturesAccountState({ reason: 'setting' });
@@ -3377,6 +3521,8 @@ export function setupBinanceConnection({
                 await futuresRestLimiter.execute(
                     () => futuresTradingAdapter.setMarginType({ symbol, marginType }),
                     1,
+                    2,
+                    { urgent: true },
                 );
                 noteFuturesMutation();
             } catch (error) {
@@ -3390,7 +3536,10 @@ export function setupBinanceConnection({
             // What the exchange holds now, not what was asked for. Read even
             // where nothing changed: -4046 means the desk's own reading of the
             // mode was the stale one, and that is worth correcting.
-            const config = await readFuturesSymbolConfig(symbol, { withCeiling: true });
+            const config = await readFuturesSymbolConfig(symbol, {
+                withCeiling: true,
+                urgent: true,
+            });
             broadcastFuturesSymbolConfigs([config]);
             // The account only where the mode actually moved — it changes what
             // stands behind a position, and therefore where it liquidates. A

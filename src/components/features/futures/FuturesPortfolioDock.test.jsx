@@ -574,9 +574,10 @@ describe('FuturesPortfolioDock', () => {
     expect(table).not.toHaveTextContent('×')
   })
 
-  // Selecting a view renders the reading the desk holds. Every click here used
-  // to cost an account-wide fan-out — about twenty-five requests through one
-  // 150ms-spaced queue — for a past that had not changed.
+  // Selecting a view renders the reading the desk holds, and reads nothing to do
+  // it where a read already covers that view. Every click here used to cost an
+  // account-wide fan-out — about twenty-five requests through one 150ms-spaced
+  // queue — for a past that had not changed.
   it('renders the held reading from the dock tabs and reads nothing to do it', () => {
     const onLoadHistory = vi.fn()
     render(
@@ -591,6 +592,7 @@ describe('FuturesPortfolioDock', () => {
           orders: [],
           trades: [{ id: 4, side: 'SELL', price: '58500', quantity: '0.004', commission: '0.02', realizedPnl: '12.5', time: 1 }],
           error: null,
+          readViews: { orders: 1_784_000_100_000, trades: 1_784_000_100_000 },
         }}
       />,
     )
@@ -611,11 +613,78 @@ describe('FuturesPortfolioDock', () => {
     expect(onLoadHistory).toHaveBeenCalledTimes(0)
 
     // The ordinary refresh is incremental; the wider read is a separate,
-    // explicit operator choice.
+    // explicit operator choice. Both read the view that is open and not the one
+    // beside it.
     fireEvent.click(screen.getByRole('button', { name: 'Re-read account history' }))
-    expect(onLoadHistory).toHaveBeenCalledExactlyOnceWith('BTCUSDT')
+    expect(onLoadHistory).toHaveBeenCalledExactlyOnceWith('BTCUSDT', { views: ['trades'] })
     fireEvent.click(screen.getByRole('button', { name: 'Read full account history' }))
-    expect(onLoadHistory).toHaveBeenNthCalledWith(2, 'BTCUSDT', { full: true })
+    expect(onLoadHistory).toHaveBeenNthCalledWith(2, 'BTCUSDT', { full: true, views: ['trades'] })
+  })
+
+  // Every USDⓈ-M history endpoint is read per contract, so a review that reads
+  // both endpoints pays a whole fan-out — twelve contracts, 150ms apart — for a
+  // panel that shows one of them at a time.
+  it('reads the endpoint the opened view is made of, and only that one', () => {
+    const onLoadHistory = vi.fn(() => true)
+    const unread = {
+      symbol: 'BTCUSDT',
+      status: 'idle',
+      readAt: null,
+      orders: [],
+      trades: [],
+      error: null,
+      readViews: { orders: null, trades: null },
+    }
+    const { rerender } = render(
+      <FuturesPortfolioDock selectedSymbol="BTCUSDT" onLoadHistory={onLoadHistory} history={unread} />,
+    )
+    // Nothing is open on the review, so nothing is read for it.
+    expect(onLoadHistory).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Closed positions' }))
+    expect(onLoadHistory).toHaveBeenCalledExactlyOnceWith('BTCUSDT', { views: ['trades'] })
+
+    // The read answered for the view that asked. Opening the other view reads
+    // the other endpoint — once — and going back reads nothing.
+    const readTrades = { ...unread, status: 'ready', readAt: 1_784_000_100_000, readViews: { orders: null, trades: 1_784_000_100_000 } }
+    rerender(
+      <FuturesPortfolioDock selectedSymbol="BTCUSDT" onLoadHistory={onLoadHistory} history={readTrades} />,
+    )
+    fireEvent.click(screen.getByRole('tab', { name: 'Order history' }))
+    expect(onLoadHistory).toHaveBeenNthCalledWith(2, 'BTCUSDT', { views: ['orders'] })
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Closed positions' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Order history' }))
+    expect(onLoadHistory).toHaveBeenCalledTimes(2)
+  })
+
+  // A frame that never left is not a read. The attempt stays armed so the next
+  // usable connection performs it, rather than the desk holding an empty review
+  // for the rest of the session. `onLoadHistory` is rebuilt whenever what it
+  // depends on moves — the store opening, the socket returning — which is
+  // exactly when it is worth trying again.
+  it('tries the opened view again when the read could not be sent', () => {
+    const unsendable = vi.fn(() => false)
+    const unread = {
+      symbol: 'BTCUSDT',
+      status: 'idle',
+      readAt: null,
+      orders: [],
+      trades: [],
+      error: null,
+      readViews: { orders: null, trades: null },
+    }
+    const { rerender } = render(
+      <FuturesPortfolioDock selectedSymbol="BTCUSDT" onLoadHistory={unsendable} history={unread} />,
+    )
+    fireEvent.click(screen.getByRole('tab', { name: 'Order history' }))
+    expect(unsendable).toHaveBeenCalledExactlyOnceWith('BTCUSDT', { views: ['orders'] })
+
+    const sendable = vi.fn(() => true)
+    rerender(
+      <FuturesPortfolioDock selectedSymbol="BTCUSDT" onLoadHistory={sendable} history={unread} />,
+    )
+    expect(sendable).toHaveBeenCalledExactlyOnceWith('BTCUSDT', { views: ['orders'] })
   })
 
   it('states how old the reading is and refuses a second read while one is in flight', () => {
@@ -722,6 +791,7 @@ describe('FuturesPortfolioDock', () => {
       orders: [],
       trades: [{ id: 4, side: 'SELL', price: '58500', quantity: '0.004', commission: '0.02', realizedPnl: '12.5', time: 1 }],
       error: null,
+      readViews: { orders: 1_784_000_100_000, trades: 1_784_000_100_000 },
     }
     const { rerender } = render(
       <FuturesPortfolioDock selectedSymbol="BTCUSDT" onLoadHistory={onLoadHistory} history={history} />,

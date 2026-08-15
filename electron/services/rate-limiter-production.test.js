@@ -129,4 +129,60 @@ describe('production RateLimiter cancellation', () => {
         firstResult.resolve('first');
         await expect(first).resolves.toBe('first');
     });
+
+    // Everything the desk reads from Futures shares this queue, and the spacing
+    // makes a long read expensive to be behind: a session review is twenty-six
+    // admissions. What follows the operator's command may not wait them out.
+    it('admits an urgent request ahead of the ordinary work already queued', async () => {
+        vi.setSystemTime(1_000);
+        const limiter = new RateLimiter(1_000, 60_000, 150);
+        const admitted = [];
+        const run = (label, options) => limiter.execute(
+            async () => { admitted.push(label); },
+            1,
+            0,
+            options,
+        );
+
+        const review = ['page', 'first', 'second', 'third'].map(label => run(label));
+        // The first is already holding the queue; the rest are waiting behind it
+        // when the operator's read arrives.
+        const afterCommand = run('after-command', { urgent: true });
+
+        await vi.advanceTimersByTimeAsync(5_000);
+        await Promise.all([...review, afterCommand]);
+        expect(admitted).toEqual(['page', 'after-command', 'first', 'second', 'third']);
+    });
+
+    // The other half of the same rule. An operator working orders produces urgent
+    // reads for as long as they keep working them, and the review they opened has
+    // to finish while they do.
+    it('stops urgent work passing the request that has waited longest', async () => {
+        vi.setSystemTime(1_000);
+        const limiter = new RateLimiter(1_000, 60_000, 150);
+        const admitted = [];
+        const run = (label, options) => limiter.execute(
+            async () => { admitted.push(label); },
+            1,
+            0,
+            options,
+        );
+
+        const review = [run('page'), run('contract')];
+        const commands = Array.from({ length: 12 }, (_, index) => (
+            run(`after-command-${index}`, { urgent: true })
+        ));
+
+        await vi.advanceTimersByTimeAsync(10_000);
+        await Promise.all([...review, ...commands]);
+        // Passed eight times and not a ninth: `contract` goes before the urgent
+        // reads still queued behind it, so the review finishes rather than
+        // waiting out a desk that keeps trading.
+        expect(admitted.slice(0, 10)).toEqual([
+            'page',
+            ...Array.from({ length: 8 }, (_, index) => `after-command-${index}`),
+            'contract',
+        ]);
+        expect(admitted).toHaveLength(14);
+    });
 });

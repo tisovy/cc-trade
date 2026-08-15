@@ -247,10 +247,19 @@ export const FuturesHistoryPanel = ({
     () => groupRowsByDay(rounds, round => round?.closeTime),
     [rounds],
   )
-  // A reading exists, whatever the read is doing now. Everything below renders
-  // from it: a refresh in flight and a refresh that failed both leave the rows
-  // the operator was reading exactly where they were.
-  const held = history?.readAt !== null && history?.readAt !== undefined
+  // A reading exists *for this view*, whatever the read is doing now. Everything
+  // below renders from it: a refresh in flight and a refresh that failed both
+  // leave the rows the operator was reading exactly where they were.
+  //
+  // Per view, because a read now covers the endpoint the open view needs. The
+  // other view can be genuinely unread while the account carries a reading, and
+  // "No closed positions across the 12 contracts read" is a claim about a read
+  // that never looked at a single fill.
+  const readViews = history?.readViews ?? null
+  const viewReadAt = readViews === null
+    ? history?.readAt ?? null
+    : readViews[view === 'tradeHistory' ? 'trades' : 'orders'] ?? null
+  const held = viewReadAt !== null && viewReadAt !== undefined
   const folded = view === 'tradeHistory'
     ? (history?.foldedTrades?.length ?? 0)
     : (history?.foldedOrders?.length ?? 0)
@@ -340,8 +349,11 @@ export const FuturesHistoryPanel = ({
     </div>
   )
 
-  // Nothing has ever been read: this is the one case where an empty panel is
-  // honest, and the one case where a failure is all there is to show.
+  // Nothing has ever been read for this view: this is the one case where an
+  // empty panel is honest, and the one case where a failure is all there is to
+  // show. A read in flight is a read in flight whether or not the other view
+  // already holds one — `refreshing` is what the account-wide status says while
+  // this view is being read for the first time.
   if (!held) {
     if (status === 'error') {
       return (
@@ -352,7 +364,9 @@ export const FuturesHistoryPanel = ({
     }
     return (
       <p className="futures-workstation-empty" role="status">
-        {status === 'loading' ? 'Loading account history…' : 'Open history to load it.'}
+        {status === 'loading' || status === 'refreshing'
+          ? 'Loading account history…'
+          : 'Open history to load it.'}
       </p>
     )
   }

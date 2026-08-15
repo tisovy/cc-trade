@@ -4000,6 +4000,176 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(fullWeight / idleWeight).toBe(36);
     });
 
+    // Every USDⓈ-M history endpoint is read per contract, and the panel shows one
+    // view at a time. Reading both is a second fan-out — one request per contract,
+    // 150ms apart — answering a view nobody has open.
+    it('reads the endpoint the view that asked needs, and the other when it is opened', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        await openFuturesHistoryStream();
+        const symbols = ['V01USDT', 'V02USDT', 'V03USDT'];
+        moduleMocks.futuresAdapter.getTradedSymbolPage.mockResolvedValue({
+            symbols: symbols.slice(1), full: false, lastTime: 5_000,
+        });
+        moduleMocks.futuresAdapter.getOrderHistory.mockImplementation(({ symbol }) => (
+            Promise.resolve([{ symbol, orderId: 7, status: 'FILLED', time: 1 }])
+        ));
+        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({ symbol }) => (
+            Promise.resolve([{ symbol, id: 9, realizedPnl: '0', time: 1 }])
+        ));
+
+        await runFuturesCommand({
+            action: 'account.history',
+            clientOrderId: 'history-view-trades',
+            symbol: symbols[0],
+            views: ['trades'],
+        });
+        expect(moduleMocks.futuresAdapter.getOrderHistory).not.toHaveBeenCalled();
+        expect(moduleMocks.futuresAdapter.getTradeHistory.mock.calls
+            .map(([request]) => request.symbol)).toEqual(symbols);
+        const closed = futuresHistoryAnswers().at(-1);
+        expect(closed.views).toEqual(['trades']);
+        expect(closed.trades).toHaveLength(3);
+        expect(closed.orders).toEqual([]);
+        // Only the endpoint that was read states where it was read from, so the
+        // renderer keeps the order rows it is holding rather than emptying them.
+        expect(closed.readFrom[symbols[0]]).toEqual({ tradeCursor: null });
+
+        // The other view, opened. The contracts are proved for their fills and
+        // not for their order logs, so the order log of each is read once.
+        const coverage = Object.fromEntries(symbols.map(symbol => [symbol, {
+            readAt: Date.now(), orderCursor: null, tradeCursor: '9',
+        }]));
+        moduleMocks.futuresAdapter.getTradeHistory.mockClear();
+        await runFuturesCommand({
+            action: 'account.history',
+            clientOrderId: 'history-view-orders',
+            symbol: symbols[0],
+            coverage,
+            views: ['orders'],
+        });
+        expect(moduleMocks.futuresAdapter.getTradeHistory).not.toHaveBeenCalled();
+        expect(moduleMocks.futuresAdapter.getOrderHistory.mock.calls
+            .map(([request]) => request.symbol)).toEqual(symbols);
+        expect(futuresHistoryAnswers().at(-1).views).toEqual(['orders']);
+
+        // And opening it again reads nothing but the rotation's one contract:
+        // this view is now proved for the same contracts the other one was.
+        const proved = Object.fromEntries(symbols.map(symbol => [symbol, {
+            readAt: Date.now(), orderCursor: '7', tradeCursor: '9',
+        }]));
+        moduleMocks.futuresAdapter.getOrderHistory.mockClear();
+        await runFuturesCommand({
+            action: 'account.history',
+            clientOrderId: 'history-view-orders-again',
+            symbol: symbols[0],
+            coverage: proved,
+            views: ['orders'],
+        });
+        expect(moduleMocks.futuresAdapter.getOrderHistory).toHaveBeenCalledOnce();
+    });
+
+    // A review is twenty-six admissions of the futures queue, spaced 150ms apart,
+    // and the operator does not stop trading for it. Measured against this tree
+    // on 2026-08-16: with the fan-out running, the wallet read that a fill asks
+    // for waited 3 150ms — the desk showing the account as it was before the
+    // trade for that long, while the operator acted on it.
+    it('reads what a fill moved without waiting out a review in flight', async () => {
+        const admitted = [];
+        const loadFor = (type, key, value) => vi.fn(async () => {
+            admitted.push({ label: `read:${type}`, at: Date.now() });
+            return { [key]: value };
+        });
+        const loads = {
+            balances: loadFor('balances', 'futures_balances', {
+                USDT: { available: '100', total: '100' },
+            }),
+            positions: loadFor('positions', 'futures_positions', []),
+            regularOrders: loadFor('regularOrders', 'futures_regular_orders', []),
+            algoOrders: loadFor('algoOrders', 'futures_algo_orders', []),
+        };
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue(
+            ['balances', 'positions', 'regularOrders', 'algoOrders'].map(type => ({
+                type, weight: 5, errorLabel: type, loadPayload: loads[type],
+            })),
+        );
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        const socket = await openFuturesHistoryStream();
+
+        const traded = Array.from({ length: 11 }, (_, index) => (
+            `C${String(index + 1).padStart(2, '0')}USDT`
+        ));
+        moduleMocks.futuresAdapter.getTradedSymbolPage.mockImplementation(({ startTime }) => (
+            Promise.resolve({ symbols: traded, full: false, lastTime: startTime + 1 })
+        ));
+        moduleMocks.futuresAdapter.getOrderHistory.mockImplementation(({ symbol }) => {
+            admitted.push({ label: 'history', at: Date.now() });
+            return Promise.resolve([{ symbol, orderId: 1, status: 'FILLED', time: 1 }]);
+        });
+        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({ symbol }) => {
+            admitted.push({ label: 'history', at: Date.now() });
+            return Promise.resolve([{ symbol, id: 2, realizedPnl: '0', time: 1 }]);
+        });
+        // Anything the desk read while it was starting up is not this test's.
+        await vi.advanceTimersByTimeAsync(5_000);
+        await flushMicrotasks();
+        admitted.length = 0;
+
+        const review = moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                version: 1, marketType: 'futures', accountId: 'default',
+                action: 'account.history', clientOrderId: 'review-in-flight',
+                symbol: 'SELUSDT', coverage: {},
+            }),
+        });
+        // Far enough in that the fan-out owns the queue, and the operator trades.
+        await vi.advanceTimersByTimeAsync(600);
+        const order = moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                version: 1, marketType: 'futures', accountId: 'default',
+                action: 'order.place', clientOrderId: 'worked-over-a-review',
+                order: {
+                    symbol: 'BTCUSDT', side: 'BUY', type: 'MARKET', quantity: '0.01',
+                    newClientOrderId: 'worked-over-a-review',
+                },
+            }),
+        });
+        await flushMicrotasks();
+        const filledAt = Date.now();
+        socket.handlers.message(JSON.stringify({
+            e: 'ORDER_TRADE_UPDATE',
+            E: 3_000,
+            o: {
+                s: 'BTCUSDT', i: 99, X: 'FILLED', S: 'BUY', o: 'MARKET',
+                p: '0', q: '0.01', z: '0.01', T: 3_000,
+            },
+        }));
+        await vi.advanceTimersByTimeAsync(60_000);
+        await Promise.all([review, order]);
+        await flushMicrotasks();
+
+        const wallet = admitted.findIndex(entry => entry.label === 'read:balances');
+        expect(wallet).toBeGreaterThan(-1);
+        // Ahead of the review's remaining requests, not behind them.
+        expect(admitted.slice(wallet + 1).filter(entry => entry.label === 'history').length)
+            .toBeGreaterThan(10);
+        // The 400ms the desk itself holds a frame-driven read for, plus its turn.
+        expect(admitted[wallet].at - filledAt).toBeLessThanOrEqual(1_000);
+        // And the review still finished: overtaking is not starving.
+        expect(admitted.filter(entry => entry.label === 'history')).toHaveLength(24);
+    });
+
     // The fan-out reads twelve contracts. Once the last day alone has named that
     // many, reading further back cannot add one — and the review must say that the
     // rest of the week went unlooked-at rather than report a complete discovery.
