@@ -1113,6 +1113,83 @@ describe('the rows say which of them are whole', () => {
     });
 });
 
+// The far book is carried through a re-centre, and on the day that landed the
+// operator's desk began recording `CROSSED_ORDER_BOOK` — twenty times, against
+// none in the three days before. A market that moves further than the old band
+// was wide leaves the whole of one side stranded on the wrong side of the new
+// one, and a bid resting above the asks is not a book, it is a contradiction the
+// book has to fail closed on.
+describe('a re-centre after the market has run', () => {
+    it('retires a carried level that the new market has moved past', () => {
+        const book = new FuturesWorkstationOrderBook();
+        expect(book.bootstrap(snapshot({
+            bids: [['100', '1'], ['99', '1']],
+            asks: [['101', '1'], ['102', '1']],
+        })).live).toBe(true);
+        // The stream reaches further out on both sides than the page did.
+        expect(book.push(delta({
+            firstUpdateId: '101',
+            finalUpdateId: '101',
+            previousFinalUpdateId: '100',
+            bids: [['95', '5']],
+            asks: [['110', '5']],
+        }), 1).applied).toBe(true);
+
+        // The market crashes past everything the old page covered, and the desk
+        // re-reads the page where the market is now, carrying the far book.
+        book.beginBootstrap({ keepFarBook: true });
+        expect(book.bootstrap({
+            lastUpdateId: '200',
+            bids: [['50', '1'], ['49', '1']],
+            asks: [['51', '1'], ['52', '1']],
+        }).live).toBe(true);
+
+        // Every carried bid rested above the asks that exist now, so none of them
+        // could still be resting — including the one at 95, which the old page
+        // never reached and which the crash went straight through. The carried
+        // asks are untouched, and that is the point of the rule being about the
+        // market rather than about the band: 101 and 102 are far above where the
+        // market is now, which is exactly where a resting ask is allowed to be.
+        const view = book.toRendererRows({ rows: 64 });
+        expect(view.bids.map(row => row.price)).toEqual(['50', '49']);
+        expect(view.asks.map(row => row.price)).toEqual(['51', '52', '101', '102', '110']);
+        expect(book.phase).toBe(FUTURES_WORKSTATION_ORDER_BOOK_PHASES.LIVE);
+    });
+
+    // The other direction, and the reason the rule is stated against the
+    // snapshot's own best prices rather than against its band: an ask left below
+    // the market after a run up would cross it just as surely.
+    it('retires a carried ask the market has run above', () => {
+        const book = new FuturesWorkstationOrderBook();
+        expect(book.bootstrap(snapshot({
+            bids: [['100', '1']],
+            asks: [['101', '1']],
+        })).live).toBe(true);
+        expect(book.push(delta({
+            firstUpdateId: '101',
+            finalUpdateId: '101',
+            previousFinalUpdateId: '100',
+            bids: [['90', '5']],
+            asks: [['105', '5']],
+        }), 1).applied).toBe(true);
+
+        book.beginBootstrap({ keepFarBook: true });
+        expect(book.bootstrap({
+            lastUpdateId: '200',
+            bids: [['200', '1']],
+            asks: [['201', '1']],
+        }).live).toBe(true);
+
+        // Both carried asks were below the market that exists now, so neither
+        // could still be resting. The carried bids stay: far below the market is
+        // where a bid belongs.
+        const view = book.toRendererRows({ rows: 64 });
+        expect(view.asks.map(row => row.price)).toEqual(['201']);
+        expect(view.bids.map(row => row.price)).toEqual(['200', '100', '90']);
+        expect(book.phase).toBe(FUTURES_WORKSTATION_ORDER_BOOK_PHASES.LIVE);
+    });
+});
+
 describe('how far the book states it reaches', () => {
     const sideOf = (count, descending, mid = 1_000) => Array.from(
         { length: count },

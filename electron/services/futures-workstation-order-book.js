@@ -330,6 +330,11 @@ const bandOfSnapshot = (snapshot) => {
     return Object.freeze({
         floor,
         ceiling,
+        // Where the snapshot says the market is. A level carried over from before
+        // that rests on the wrong side of this has been taken: a bid at or above
+        // the best ask would have matched rather than rested.
+        bestBid,
+        bestAsk,
         // How far past the best price this page reached on each side at the
         // moment it was read — which is what reading the same page again would
         // reach. The distance from the *current* best price to the edge is what
@@ -762,15 +767,38 @@ export class FuturesWorkstationOrderBook {
         this.band = bandOfSnapshot(snapshot);
         // The snapshot is the whole truth inside its own band, so a level carried
         // over from before that the snapshot does not name has been taken, and
-        // goes. Outside the band it says nothing, and what is there stays.
+        // goes. Outside the band it says nothing, and what is there stays —
+        // except on the wrong side of the market it states.
+        //
+        // That exception is not a refinement, it is the difference between a book
+        // and a contradiction. Carrying the far book through a re-centre means
+        // carrying levels the new page never mentions, and when the market has
+        // moved further than the old band was wide, the levels left behind are on
+        // the other side of it: a bid from before a crash rests above the asks
+        // that exist now. The book fails closed on that, correctly, and rebuilds
+        // — which is how it showed up, as `CROSSED_ORDER_BOOK` in the operator's
+        // own journal, 20 times on the day the far book landed and 13 the next,
+        // against none in the three days before it.
+        //
+        // A resting bid cannot be at or above the best ask: it would have matched
+        // instead of resting. So the snapshot's own best prices retire it,
+        // wherever it sits.
         if (this.band !== null) {
             const named = new Set([
                 ...snapshot.bids.map(([price]) => price),
                 ...snapshot.asks.map(([price]) => price),
             ]);
+            const stale = (price, side) => {
+                if (this.band.contains(price)) return !named.has(price);
+                const against = side === this.bids ? this.band.bestAsk : this.band.bestBid;
+                if (against === null) return false;
+                return side === this.bids
+                    ? compareFuturesWorkstationDecimals(price, against) >= 0
+                    : compareFuturesWorkstationDecimals(price, against) <= 0;
+            };
             for (const side of [this.bids, this.asks]) {
                 for (const price of side.keys()) {
-                    if (this.band.contains(price) && !named.has(price)) side.delete(price);
+                    if (stale(price, side)) side.delete(price);
                 }
             }
         }
