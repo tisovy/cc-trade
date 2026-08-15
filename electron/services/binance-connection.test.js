@@ -5489,6 +5489,91 @@ describe('setupBinanceConnection user-data orchestration', () => {
             expect(heldPositions()[0].liquidationPrice).toBe('80.8080808080808');
         });
 
+        // Deliberately kept in *this* file, which is not the one the fix lives
+        // in. The fix — a resting order is valued at the price it names, and
+        // wants a mark only when it names none — sits in `futures-account-margin.js`,
+        // and on 2026-08-15 that file and its own test were held uncommitted by
+        // another session from before the fix. A plain `git add` there would
+        // revert a live defect with every test still green, because the test that
+        // guards it would be reverted in the same breath. A guard that travels
+        // with the code it guards is no guard at all.
+        //
+        // What it guards: free margin is all-or-nothing across the account, marks
+        // are followed per position, and an entry order is by definition an order
+        // on a contract holding no position. Demand a mark for such an order and
+        // the whole answer disappears — measured on the operator's own desk that
+        // day, unavailable on sixty-eight account passes out of sixty-eight.
+        it('computes free margin with an order on a contract it holds no mark for', async () => {
+            const loads = futuresAccountLoads();
+            loads.balances.mockResolvedValue({
+                futures_balances: {
+                    USDT: {
+                        available: '270', total: '200', crossWallet: '200', crossUnPnl: '200',
+                    },
+                },
+            });
+            loads.positions.mockResolvedValue({
+                futures_positions: [{
+                    symbol: 'BTCUSDT',
+                    positionSide: 'LONG',
+                    quantity: '10',
+                    entryPrice: '100',
+                    isolatedWallet: '0',
+                    notional: '1200',
+                    initialMargin: '120',
+                    maintenanceMargin: '12',
+                    liquidationPrice: '80.8080808080808',
+                }],
+            });
+            // The entry order: a contract the account has an order on and no
+            // position in, so the mark feed — which follows positions — never
+            // subscribes to it. It names its own price, which is all the sum needs.
+            loads.regularOrders.mockResolvedValue({
+                futures_regular_orders: [{
+                    symbol: 'SOLUSDT',
+                    orderId: 4242,
+                    orderKind: 'REGULAR',
+                    status: 'NEW',
+                    side: 'BUY',
+                    origQty: '4',
+                    executedQty: '0',
+                    price: '25',
+                    reduceOnly: false,
+                }],
+            });
+            moduleMocks.futuresAdapter.getSymbolConfig.mockImplementation(async symbol => ({
+                symbol, leverage: 10, marginType: 'CROSSED', maxNotionalValue: '5000000',
+            }));
+
+            await connectRecordedRenderer();
+            await vi.advanceTimersByTimeAsync(5_000);
+            await flushMicrotasks();
+
+            // A mark for the contract holding the position, and for nothing else.
+            const markSocket = moduleMocks.futuresUserDataSockets.at(-1);
+            markSocket.handlers.message(JSON.stringify({
+                data: {
+                    e: 'markPriceUpdate', E: Date.now(), s: 'BTCUSDT', p: '120',
+                },
+            }));
+            await flushMicrotasks();
+
+            kept.length = 0;
+            await runFuturesCommand({
+                action: 'account.refresh', clientOrderId: 'free-margin-no-mark', symbol: 'BTCUSDT',
+            });
+            await flushMicrotasks();
+
+            const [freeMargin] = held('estimate').filter(entry => entry.value === 'free-margin');
+            // Wallet 200, unrealized 200 on the position, 120 committed by it and
+            // 10 by the order — 270, which is what the exchange itself reports as
+            // available. The point is `unavailable: 0`: before the fix this row
+            // was the whole account's answer going missing.
+            expect(freeMargin).toEqual(expect.objectContaining({
+                kind: 'estimate', compared: 1, unavailable: 0, deviationBps: 0,
+            }));
+        });
+
         it('delivers an accepted account read when estimate recording fails', async () => {
             const loads = futuresAccountLoads();
             const failingRecord = {
