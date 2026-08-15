@@ -45,6 +45,25 @@ window is ten trading days against a record that keeps fourteen. Without this
 note the operator sits out two weeks and then finds an empty record, which is the
 exact failure the bar was written early to prevent.*
 
+*Fixed on 2026-08-15. `1c07bba` reads the contract configuration — and with it
+the leverage bracket — for every contract the account has an order resting on,
+not only for the ones it holds a position in; `bec36ca` then makes that read
+happen once per account pass instead of once per list the pass reads. The
+structural reason free margin could not be computed is gone.*
+
+*So the window's clock starts here, and no earlier. Every record written before
+2026-08-15 carries free margin unavailable by construction and cannot count
+toward the ten days — including the evening of 2026-08-14 measured above. An
+operator counting from the day the comparison landed would reach day ten with
+nine days of nothing in them.*
+
+*What is fixed is proven by test, not on live data: the desk now reads the
+leverage of a contract it only has an order on. Whether free margin actually
+computes is the first thing the record will say, and it is worth reading on the
+window's **first** day rather than its last — the same argument as the note
+above, one blocker later. If it is still unavailable on day one, the cause is a
+different one and the window should stop until it is found.*
+
 - [ ] 1.1 Do not start this change until `compute-the-unstated-values-beside-the-read` has been running for the window in the proposal. There is nothing to decide before then.
 - [ ] 1.2 Operator copies the day's record files aside if the window is to run longer than the fourteen days the record keeps.
 - [ ] 1.3 Operator reads `node scripts/read-desk-record.mjs` over the window and states, per value, the passes compared, the worst disagreement and where, and the passes that could not be computed.
