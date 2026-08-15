@@ -51,5 +51,5 @@ the two verification items.
 
 ## 7. Verification
 
-- [ ] 7.1 Run unit and integration suites and the production-guard checks.
-- [ ] 7.2 Walk the desk once with the account intentionally failing and record that no surface claims a state the account is not in.
+- [x] 7.1 `npm run lint`, `npm test` (111 files, 1993 tests) and `npm run check:futures-production`, all clean.
+- [ ] 7.2 Walk the desk once with the account intentionally failing and record that no surface claims a state the account is not in. Written up for the operator as step 48 of `verify-the-desk-in-one-sitting/runbook.md`.

@@ -38,4 +38,4 @@
 
 - [x] 5.1 `npm run lint`, `npm test`, `npm run check:futures-production`.
 - [x] 5.2 Measured the finished table in Chromium at the same eight widths. No table scrolls sideways at any of them and no declared column falls outside the visible area. One cell is cut: a 14-character contract name against a 107.6–120.8 px track, which is what the track was always for — the full symbol is on the element. Every other reading fits, including `STOP MKT` beside the `exit` badge, the widest pair the desk can state.
-- [ ] 5.3 Operator confirms on live data that the review answers "did my orders do anything" at a glance.
+- [ ] 5.3 Operator confirms on live data that the review answers "did my orders do anything" at a glance. Written up for the operator as step 47 of `verify-the-desk-in-one-sitting/runbook.md`.
