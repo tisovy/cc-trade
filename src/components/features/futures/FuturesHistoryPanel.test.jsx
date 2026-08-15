@@ -223,7 +223,7 @@ describe('FuturesHistoryPanel', () => {
     expect(screen.getByText('No closed positions across the 2 contracts read.')).toBeInTheDocument()
   })
 
-  it('lists orders at the contract tick with their status', () => {
+  it('lists orders at the contract tick with what became of them', () => {
     render(
       <FuturesHistoryPanel
         view="orderHistory"
@@ -233,9 +233,86 @@ describe('FuturesHistoryPanel', () => {
       />,
     )
     const table = screen.getByRole('table', { name: 'Order history' })
-    expect(table).toHaveTextContent('58000.1')
+    // It filled away from the price it named, so the price cell states what it
+    // got; both readings stay on the element.
+    expect(table).toHaveTextContent('≈57999.9')
     expect(table).not.toHaveTextContent('58000.123456')
-    expect(table).toHaveTextContent('FILLED')
+    const cells = within(screen.getAllByRole('row')[1]).getAllByRole('cell')
+    expect(cells[5]).toHaveAttribute('title', 'Placed at 58000.1, filled at 57999.9')
+    expect(cells[0]).toHaveTextContent('Filled')
+  })
+
+  // The status column was 62.7px wide at the width the dock leaves this panel,
+  // and PARTIALLY_FILLED needs 125px. It ellipsized with no title behind it, so
+  // the exchange's own word was not merely cut — it could not be recovered.
+  it('states the outcome in its own words and keeps the exchange word on the element', () => {
+    render(
+      <FuturesHistoryPanel
+        view="orderHistory"
+        symbol="BICOUSDT"
+        tickSizes={ticks}
+        history={{
+          ...history,
+          orders: [
+            { orderId: 21, symbol: 'BICOUSDT', side: 'BUY', type: 'LIMIT', status: 'PARTIALLY_FILLED', price: '2.5', averagePrice: '2.5', origQty: '1000', executedQty: '380', reduceOnly: false, time: 1_784_000_000_003 },
+            { orderId: 22, symbol: 'BICOUSDT', side: 'SELL', type: 'LIMIT', status: 'EXPIRED_IN_MATCH', price: '2.5', averagePrice: '0', origQty: '1000', executedQty: '0', reduceOnly: false, time: 1_784_000_000_002 },
+            { orderId: 23, symbol: 'BICOUSDT', side: 'BUY', type: 'LIMIT', status: 'NEW', price: '2.5', averagePrice: '0', origQty: '1000', executedQty: '0', reduceOnly: false, time: 1_784_000_000_001 },
+            { orderId: 24, symbol: 'BICOUSDT', side: 'BUY', type: 'LIMIT', status: 'FILLED', price: '2.5', averagePrice: '2.5', origQty: '1000', executedQty: '1000', reduceOnly: false, time: 1_784_000_000_000 },
+          ],
+        }}
+      />,
+    )
+    const rows = screen.getAllByRole('row')
+    const outcome = index => within(rows[index]).getAllByRole('cell')[0]
+
+    // A partial fill states its proportion, which is the reading `0 / 9080`
+    // could never give at a glance.
+    expect(outcome(1)).toHaveTextContent('Part 38%')
+    expect(within(outcome(1)).getByTitle('PARTIALLY_FILLED')).toBeInTheDocument()
+    expect(outcome(2)).toHaveTextContent('Expired')
+    expect(within(outcome(2)).getByTitle('EXPIRED_IN_MATCH')).toBeInTheDocument()
+    expect(outcome(3)).toHaveTextContent('Open')
+    expect(outcome(4)).toHaveTextContent('Filled')
+
+    // An order that executed nothing is quieter than one that did, and is still
+    // present and readable.
+    expect(rows[2].className).toContain('is-idle')
+    expect(rows[3].className).toContain('is-idle')
+    expect(rows[1].className).not.toContain('is-idle')
+    expect(rows[4].className).not.toContain('is-idle')
+  })
+
+  // `· RO` was two letters the row never expanded, and the exchange's order
+  // types run to eighteen characters in a track of eighty pixels.
+  it('shortens the order type and says reduce-only in words', () => {
+    render(
+      <FuturesHistoryPanel
+        view="orderHistory"
+        symbol="BICOUSDT"
+        tickSizes={ticks}
+        history={{
+          ...history,
+          orders: [
+            { orderId: 31, symbol: 'BICOUSDT', side: 'SELL', type: 'TAKE_PROFIT_MARKET', status: 'NEW', price: '0', averagePrice: '0', origQty: '100', executedQty: '0', reduceOnly: true, time: 1_784_000_000_001 },
+            { orderId: 32, symbol: 'BICOUSDT', side: 'BUY', type: 'LIMIT', status: 'NEW', price: '2.5', averagePrice: '0', origQty: '100', executedQty: '0', reduceOnly: false, time: 1_784_000_000_000 },
+          ],
+        }}
+      />,
+    )
+    const rows = screen.getAllByRole('row')
+    const reduceOnly = within(rows[1]).getAllByRole('cell')[3]
+    expect(reduceOnly).toHaveTextContent('TP MKT')
+    expect(reduceOnly).toHaveTextContent('exit')
+    expect(reduceOnly).not.toHaveTextContent('RO')
+    expect(reduceOnly.getAttribute('title'))
+      .toBe('TAKE_PROFIT_MARKET · reduce-only — this order can only close a position')
+
+    const plain = within(rows[2]).getAllByRole('cell')[3]
+    expect(plain).toHaveTextContent('LIMIT')
+    expect(plain).not.toHaveTextContent('exit')
+    expect(plain.getAttribute('title')).toBeNull()
+    expect(screen.getByRole('columnheader', { name: 'Type' }).getAttribute('title'))
+      .toContain('reduce-only')
   })
 
   it('states reported or derived filled notional in USDT and keeps quantities secondary', () => {
@@ -258,23 +335,26 @@ describe('FuturesHistoryPanel', () => {
     expect(screen.getByRole('columnheader', { name: 'Filled USDT' }))
       .toHaveAttribute('title', 'Filled notional in USDT')
     const rows = screen.getAllByRole('row')
-    const reported = within(rows[1]).getAllByRole('cell')[5]
-    const derived = within(rows[2]).getAllByRole('cell')[5]
-    const absent = within(rows[3]).getAllByRole('cell')[5]
+    const reported = within(rows[1]).getAllByRole('cell')[4]
+    const derived = within(rows[2]).getAllByRole('cell')[4]
+    const absent = within(rows[3]).getAllByRole('cell')[4]
 
     expect(reported).toHaveTextContent('3.26M')
     expect(reported).toHaveAttribute(
       'title',
-      '3259000.25 USDT · reported by the exchange · 16441 / 16441 contracts',
+      '3259000.25 USDT · reported by the exchange · 16441 / 16441 contracts · placed for 3288.20 USDT',
     )
     expect(derived).toHaveTextContent('98.10')
     expect(derived.getAttribute('title')).toContain(
       '98.1 USDT · derived from executed quantity × average fill price · 5000 / 5000 contracts',
     )
+    // An order that executed nothing still had a size, and the column states
+    // what happened rather than what was asked for — so what it was placed for
+    // rides on the element.
     expect(absent).toHaveTextContent('—')
     expect(absent).toHaveAttribute(
       'title',
-      '0 / 10000 contracts · executed USDT unavailable',
+      '0 / 10000 contracts · executed USDT unavailable · placed for 200.00 USDT',
     )
   })
 
@@ -294,8 +374,11 @@ describe('FuturesHistoryPanel', () => {
     )
 
     const table = screen.getByRole('table', { name: 'Order history' })
-    expect(screen.getAllByRole('row')).toHaveLength(2)
-    expect(table).toHaveTextContent('FILLED')
+    const rows = screen.getAllByRole('row')
+    expect(rows).toHaveLength(2)
+    // The outcome cell, not the `Filled USDT` header beside it.
+    expect(within(rows[1]).getAllByRole('cell')[0]).toHaveTextContent('Filled')
+    expect(table).not.toHaveTextContent('Cancelled')
     expect(table).not.toHaveTextContent('CANCELED')
     expect(table).not.toHaveTextContent('CANCELLED')
     expect(heldOrders.map(order => order.status)).toEqual(['CANCELED', 'CANCELLED', 'FILLED'])
@@ -319,20 +402,25 @@ describe('FuturesHistoryPanel', () => {
         }}
       />,
     )
+    // One price cell rather than two columns: an order that named no price is
+    // read for what it got, and one that has not filled for what it names.
     const rows = screen.getAllByRole('row')
-    const market = within(rows[1]).getAllByRole('cell')
-    expect(market[4]).toHaveTextContent('—')
-    expect(market[6]).toHaveTextContent('2.630')
-    const working = within(rows[2]).getAllByRole('cell')
-    expect(working[4]).toHaveTextContent('8.120')
-    expect(working[6]).toHaveTextContent('—')
+    const market = within(rows[1]).getAllByRole('cell')[5]
+    expect(market).toHaveTextContent('≈2.630')
+    expect(market.getAttribute('title'))
+      .toBe('No price was named — this is the average of 3135 contracts filled')
+    const working = within(rows[2]).getAllByRole('cell')[5]
+    expect(working).toHaveTextContent('8.120')
+    expect(working).not.toHaveTextContent('≈')
+    expect(working.getAttribute('title')).toBeNull()
     expect(screen.getByRole('table', { name: 'Order history' })).not.toHaveTextContent('0.000')
   })
 
-  // The column carried both halves of the stamp and ellipsized the one that
-  // mattered: `10.08 11:21:…`. Today is read for its time of day, any other day
-  // for the day, and the whole stamp stays in the title.
-  it('shows the time for today’s rows and the date for older ones', () => {
+  // The row's own format used to carry the day — a time for today, a date for
+  // anything older — so `20:42:12` and `09.08` sat one above the other in one
+  // undivided list with nothing saying they were different kinds of stamp. The
+  // day is a heading now, and every row shows the time within it.
+  it('groups rows under the day they belong to and times every row', () => {
     render(
       <FuturesHistoryPanel
         view="orderHistory"
@@ -342,20 +430,70 @@ describe('FuturesHistoryPanel', () => {
           ...history,
           orders: [
             // Now, not a minute ago: in the first minute after midnight a
-            // minute ago is yesterday, and the row correctly showed a date.
+            // minute ago is yesterday.
             { ...history.orders[0], orderId: 7, time: Date.now() },
             { ...history.orders[0], orderId: 8, time: 1_784_000_000_000 },
           ],
         }}
       />,
     )
+    const days = screen.getAllByRole('rowgroup')
+    expect(days).toHaveLength(2)
+    expect(days[0]).toHaveAccessibleName('Today')
+    expect(days[1]).toHaveAccessibleName(/^\d{2}\.\d{2}$/)
+
     const rows = screen.getAllByRole('row')
-    const today = within(rows[1]).getAllByRole('cell')[1]
-    const older = within(rows[2]).getAllByRole('cell')[1]
-    expect(today).toHaveTextContent(/\d{1,2}:\d{2}/)
-    expect(older).not.toHaveTextContent(/\d{1,2}:\d{2}/)
+    const today = within(rows[1]).getAllByRole('cell')[2]
+    const older = within(rows[2]).getAllByRole('cell')[2]
+    expect(today).toHaveTextContent(/\d{1,2}:\d{2}:\d{2}/)
+    expect(older).toHaveTextContent(/\d{1,2}:\d{2}:\d{2}/)
     expect(today.getAttribute('title')).toBeTruthy()
     expect(older.getAttribute('title')).toBeTruthy()
+  })
+
+  // Narrowing reads the reading already held. The panel issues no read of its
+  // own, and the line beneath the table describes the read rather than what a
+  // filter left of it.
+  it('narrows the held reading without changing what the read covered', () => {
+    const onSymbolChange = vi.fn()
+    render(
+      <FuturesHistoryPanel
+        view="orderHistory"
+        symbol="BTCUSDT"
+        onSymbolChange={onSymbolChange}
+        tickSizes={ticks}
+        history={{
+          ...history,
+          symbols: ['BTCUSDT', 'BICOUSDT'],
+          discovered: 2,
+          orders: [
+            { orderId: 41, symbol: 'BTCUSDT', side: 'BUY', type: 'LIMIT', status: 'FILLED', price: '58000.1', averagePrice: '58000.1', origQty: '1', executedQty: '1', reduceOnly: false, time: 1_784_000_000_002 },
+            { orderId: 42, symbol: 'BICOUSDT', side: 'SELL', type: 'LIMIT', status: 'EXPIRED', price: '2.5', averagePrice: '0', origQty: '100', executedQty: '0', reduceOnly: false, time: 1_784_000_000_001 },
+          ],
+        }}
+      />,
+    )
+    const scope = '2 contracts read'
+    expect(screen.getByText(new RegExp(scope))).toBeInTheDocument()
+    expect(screen.getAllByRole('row')).toHaveLength(3)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Filled' }))
+    expect(screen.getAllByRole('row')).toHaveLength(2)
+    expect(screen.getByRole('table', { name: 'Order history' })).toHaveTextContent('BTCUSDT')
+    expect(screen.getByText(new RegExp(scope))).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Unfilled' }))
+    expect(screen.getAllByRole('row')).toHaveLength(2)
+    expect(screen.getByRole('table', { name: 'Order history' })).toHaveTextContent('BICOUSDT')
+
+    fireEvent.click(screen.getByRole('button', { name: 'All' }))
+    fireEvent.click(screen.getByRole('button', { name: 'This contract' }))
+    expect(screen.getAllByRole('row')).toHaveLength(2)
+    expect(screen.getByRole('table', { name: 'Order history' })).toHaveTextContent('BTCUSDT')
+    // The read was never asked to happen again, and the statement of what it
+    // covered is untouched by the narrowing.
+    expect(screen.getByText(new RegExp(scope))).toBeInTheDocument()
+    expect(onSymbolChange).not.toHaveBeenCalled()
   })
 
   it('reports a failed history read without pretending the account is empty', () => {
@@ -419,7 +557,7 @@ describe('FuturesHistoryPanel', () => {
         history={{ ...history, status: 'refreshing' }}
       />,
     )
-    expect(screen.getByRole('table', { name: 'Order history' })).toHaveTextContent('58000.1')
+    expect(screen.getByRole('table', { name: 'Order history' })).toHaveTextContent('≈57999.9')
     expect(screen.getByRole('status')).toHaveTextContent('Re-reading the account…')
   })
 

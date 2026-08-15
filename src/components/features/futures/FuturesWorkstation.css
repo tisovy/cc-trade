@@ -1734,10 +1734,10 @@
 .futures-workstation-dock-table {
   /* The rows scroll, not the panel: a panel that scrolls takes its own heading
      and its totals away with it. Sideways is left on `auto` deliberately — the
-     order-history view is eight columns wide and the operator asked to keep the
-     scroll on these tables; hiding it there would clip the review instead of
-     letting it be read. The positions row is tightened above so that it fits and
-     no sideways scrollbar appears under it at all. */
+     operator asked to keep the scroll on these tables, and hiding it would clip
+     a reading instead of letting it be reached. Measured, no dock table reaches
+     for it: at eight widths from 1280 to 2560px every one of them has a
+     scrollWidth equal to its clientWidth. */
   min-height: 0;
   overflow: auto;
   display: grid;
@@ -2395,20 +2395,168 @@
 
 /* History spans the account, so both tables lead with the contract: a row that
    does not name its own pair is unreadable once more than one is in the list. */
-/* Eight tracks in the narrower of the two dock panels: the minimums are what
-   that panel can actually hold at the width where the dock splits, so the review
-   is read rather than scrolled sideways to. Anything longer than its track keeps
-   its exact form in the cell's title. */
+/* Six tracks, not eight, and the outcome leads.
+   Measured, not declared: above 1460px the dock splits and this panel holds
+   605.1px at the split and 671.1px from 1616px up, where the workstation stops
+   growing. That leaves 585px of table at the narrowest, and 14px of row padding,
+   3px of tone border and five 6px gaps take 47 of it. 538px is the budget; these
+   minimums spend 508. Type is the widest of them because it carries the longest
+   pair the desk can state — `STOP MKT` beside the `exit` badge, 103px measured.
+   The eight tracks this replaces resolved to 62.7px each for Status and Type,
+   against 125px for PARTIALLY_FILLED and 86px for STOP_MARKET — cut, with
+   nothing on the element to recover them from. */
 .futures-workstation-dock-row.is-order-history {
   grid-template-columns:
-    minmax(68px, 1fr) minmax(64px, 0.9fr) 44px minmax(56px, 0.9fr)
-    minmax(66px, 1fr) minmax(84px, 1.15fr) minmax(66px, 1fr) minmax(60px, 0.9fr);
+    minmax(72px, 0.85fr) minmax(100px, 1.2fr) minmax(64px, 0.75fr)
+    minmax(108px, 1.25fr) minmax(80px, 0.95fr) minmax(84px, 1fr);
 }
 
+/* Money and prices read down their right edge; the words to their left do not. */
 .futures-workstation-dock-row.is-order-history > span:nth-child(5),
-.futures-workstation-dock-row.is-order-history > span:nth-child(6),
-.futures-workstation-dock-row.is-order-history > span:nth-child(7) {
+.futures-workstation-dock-row.is-order-history > span:nth-child(6) {
   text-align: right;
+}
+
+/* The type and its exit badge, and the contract and its side, are each one
+   reading in one cell rather than two tracks. */
+.futures-workstation-dock-row.is-order-history > span:nth-child(2),
+.futures-workstation-dock-row.is-order-history > span:nth-child(4) {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+}
+
+/* What became of the order, as the thing the eye lands on rather than as a word
+   in the last column. The exchange's own status word is on the element. */
+.futures-workstation-dock-outcome {
+  overflow: hidden;
+  max-width: 100%;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: calc(var(--fx-ui-scale, 1) * 11.5px);
+  font-style: normal;
+  font-weight: 800;
+  letter-spacing: 0.02em;
+  text-overflow: ellipsis;
+}
+
+.futures-workstation-dock-outcome.is-filled {
+  background: rgba(43, 196, 138, 0.18);
+  color: #48d8a4;
+}
+
+.futures-workstation-dock-outcome.is-part {
+  background: rgba(244, 202, 67, 0.16);
+  color: #f0c94b;
+}
+
+.futures-workstation-dock-outcome.is-open {
+  background: rgba(79, 143, 199, 0.18);
+  color: #8dc0ea;
+}
+
+.futures-workstation-dock-outcome.is-dead {
+  background: rgba(126, 143, 166, 0.16);
+  color: #93a6b7;
+}
+
+/* An order that executed nothing is quieter than one that did — quieter, not
+   absent: it is still there to be read. */
+.futures-workstation-dock-row.is-idle {
+  opacity: 0.62;
+}
+
+/* The side, beside the contract it was taken on rather than in a track of its
+   own. Narrower than the standalone cell, which centres itself in a column. */
+.futures-workstation-dock-side.is-inline {
+  flex: 0 0 auto;
+  padding: 1px 4px;
+  font-size: calc(var(--fx-ui-scale, 1) * 11px);
+  font-style: normal;
+}
+
+/* `· RO` was two letters the row never expanded. What a reduce-only order is,
+   is an exit: it can only close a position. */
+.futures-workstation-dock-exit {
+  flex: 0 0 auto;
+  padding: 1px 3px;
+  border: 1px solid rgba(126, 143, 166, 0.4);
+  border-radius: 3px;
+  color: #93a6b7;
+  font-size: calc(var(--fx-ui-scale, 1) * 9.5px);
+  font-style: normal;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+/* A day is a group of rows, not a row: it takes part in the table's own grid so
+   its rows keep their tracks, and it is not counted among the orders. */
+.futures-workstation-dock-daygroup {
+  display: contents;
+}
+
+.futures-workstation-dock-day {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 0;
+  padding: 0 7px;
+  color: #718399;
+  font-size: calc(var(--fx-ui-scale, 1) * 10.5px);
+  font-weight: 800;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.futures-workstation-dock-day::after {
+  flex: 1 1 auto;
+  height: 1px;
+  background: rgba(126, 143, 166, 0.22);
+  content: '';
+}
+
+/* Narrowing acts on the reading already held: these issue no read, which is why
+   they sit with the table rather than with the read controls in the header. */
+.futures-workstation-history-filters {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  padding: 0 2px 6px;
+}
+
+.futures-workstation-history-filter {
+  padding: 2px 8px;
+  border: 1px solid rgba(126, 143, 166, 0.3);
+  border-radius: 999px;
+  background: rgba(126, 143, 166, 0.08);
+  color: #8fa2b6;
+  font-size: calc(var(--fx-ui-scale, 1) * 11px);
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+}
+
+.futures-workstation-history-filter:hover:not(:disabled),
+.futures-workstation-history-filter:focus-visible {
+  border-color: var(--futures-accent);
+  color: #e7f0f8;
+}
+
+.futures-workstation-history-filter[aria-pressed='true'] {
+  border-color: var(--futures-accent);
+  background: var(--futures-accent-soft);
+  color: #e7f0f8;
+}
+
+.futures-workstation-history-filter:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.futures-workstation-history-filter.is-contract {
+  margin-left: auto;
 }
 
 .futures-workstation-dock-filled {
