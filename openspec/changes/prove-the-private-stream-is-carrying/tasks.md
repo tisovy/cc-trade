@@ -385,14 +385,22 @@ Which is why 1.5 branches three ways rather than two.
 - [ ] 5.3 Operator confirms from the record of one ordinary session that the private stream opened and stayed carrying, and — with the proxy stopped — that it says so when it does not. Hand this to `verify-the-desk-in-one-sitting`'s runbook as a step rather than leaving it here.
       Handed over: **step 50**, in that runbook's own numbering, with a row in
       its results table. Left unchecked here, as operator verification always
-      is. Four parts: an ordinary quiet session writes no `futures-user-data`
-      line at all — a quiet account is not a dead route and the desk must not
-      confuse them; the proxy stopped for eight minutes produces
-      `STREAM_SILENT`; the dock stops presenting the stream as ready; and with
-      the proxy back, the `unstated` reads of step 35 return.
+      is.
 
-      The eight minutes are the cost of the bound being 420 s, and the step says
-      so rather than leaving the operator to wonder whether it failed.
+      Written around a lesson that runbook already holds. Its step 38 asked for
+      the same state on the market feed and came back **ШАГ НЕГОДЕН**: stopping
+      the proxy produces a disconnect, not a silent socket, and "открытый сокет,
+      переставший приносить кадры — вызвать нельзя" by stopping anything. This
+      change's own bound is about exactly that state, so the step is built not
+      to repeat it. Its first part is the one that matters most on a live desk
+      and costs nothing: an ordinary quiet session must write no
+      `futures-user-data` line at all, because a quiet account is not a dead
+      route. Its second part uses the proxy stop for what it does produce — a
+      disconnect that now names itself, `SOCKET_CLOSED` and then
+      `RECONNECT_EXHAUSTED`, where before this change it left the record empty.
+      Silence itself is asked for only conditionally, by freezing the proxy
+      (`kill -STOP`) rather than stopping it, with the step saying plainly that
+      a skip is better than a step that cannot be run.
 
 ## Notes
 
