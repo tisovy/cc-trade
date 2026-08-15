@@ -56,17 +56,6 @@ global.ResizeObserver = class ResizeObserver {
     disconnect() { }
 };
 
-// Mock localStorage
-const localStorageMock = {
-    store: {},
-    getItem: vi.fn((key) => localStorageMock.store[key] || null),
-    setItem: vi.fn((key, value) => { localStorageMock.store[key] = value; }),
-    removeItem: vi.fn((key) => { delete localStorageMock.store[key]; }),
-    clear: vi.fn(() => { localStorageMock.store = {}; }),
-};
-// eslint-disable-next-line no-undef
-Object.defineProperty(global, 'localStorage', { value: localStorageMock });
-
 describe('MiniChart', () => {
     const mockData = [
         { time: 1700000000, open: 50000, high: 51000, low: 49000, close: 50500 },
@@ -84,7 +73,6 @@ describe('MiniChart', () => {
 
     beforeEach(() => {
         vi.clearAllMocks();
-        localStorageMock.clear();
     });
 
     it('should render symbol name', () => {
@@ -177,4 +165,3 @@ describe('MiniChart', () => {
         expect(screen.getByTestId('rsi-pane')).toBeInTheDocument();
     });
 });
-

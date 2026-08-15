@@ -60,6 +60,12 @@ class MarketStreamManager {
         // Callbacks
         this.onMessage = null;  // Single message handler that routes by event type
         this.connectFn = null;  // Will be set to client.websocketStreams.connect
+
+        // Which lifecycle the in-flight connect belongs to. A connect that
+        // resolves after cleanup used to be adopted as the current socket,
+        // reviving a connection the operator had already left — and its close
+        // handler could then schedule reconnects for a market nobody is on.
+        this.connectGeneration = 0;
     }
 
     /**
@@ -286,7 +292,10 @@ class MarketStreamManager {
     async reconnectMarketSocket(retryCount = 0) {
         const MAX_RETRIES = 3;
         const RETRY_DELAY_BASE = 2000;
-        
+        // Everything below belongs to this lifecycle. If cleanup happens while
+        // any of it is in flight, the work is discarded rather than applied.
+        const generation = this.connectGeneration;
+
         const streams = this.getAllStreams();
         
         // Close existing connection
@@ -318,9 +327,17 @@ class MarketStreamManager {
         
         try {
             this.logger.info(`[MarketStreamManager] Connecting market socket with ${streams.length} streams`);
-            this.marketWsConnection = await this.connectFn({ stream: streams });
+            const connection = await this.connectFn({ stream: streams });
+            if (generation !== this.connectGeneration) {
+                // Cleanup ran while this connect was open. Adopting the socket
+                // here is what revived a torn-down connection.
+                this.logger.info('[MarketStreamManager] Discarding a connect that outlived its cleanup');
+                await this.closeConnection(connection);
+                return;
+            }
+            this.marketWsConnection = connection;
             this.connectedStreams = [...streams];
-            
+
             this.marketWsConnection.on('message', (data) => {
                 if (this.onMessage) {
                     this.onMessage(data);
@@ -344,10 +361,16 @@ class MarketStreamManager {
                 this.logger.warn(`[MarketStreamManager] Market socket closed (${code}): ${readableReason}`);
                 this.connectedStreams = [];
                 
-                // Auto-reconnect on abnormal close
-                if (code !== 1000 && this.getAllStreams().length > 0) {
+                // Auto-reconnect on abnormal close, but never for a lifecycle
+                // that has since been cleaned up.
+                if (code !== 1000
+                    && generation === this.connectGeneration
+                    && this.getAllStreams().length > 0) {
                     this.logger.info('[MarketStreamManager] Scheduling market socket reconnection...');
-                    setTimeout(() => this.reconnectMarketSocket(), 3000);
+                    setTimeout(() => {
+                        if (generation !== this.connectGeneration) return;
+                        this.reconnectMarketSocket();
+                    }, 3000);
                 }
             });
         } catch (err) {
@@ -363,6 +386,7 @@ class MarketStreamManager {
                 const delay = RETRY_DELAY_BASE * (retryCount + 1);
                 this.logger.warn(`[MarketStreamManager] Market socket connection failed (${err?.code || err?.message}), retrying in ${delay}ms (${retryCount + 1}/${MAX_RETRIES})`);
                 await new Promise(resolve => setTimeout(resolve, delay));
+                if (generation !== this.connectGeneration) return;
                 return this.reconnectMarketSocket(retryCount + 1);
             }
             
@@ -386,7 +410,25 @@ class MarketStreamManager {
     /**
      * Cleanup all connections
      */
+    // Closes a socket that must not be kept, whichever shape it came back as.
+    async closeConnection(connection) {
+        if (!connection) return;
+        const closer = typeof connection.disconnect === 'function'
+            ? connection.disconnect.bind(connection)
+            : typeof connection.close === 'function'
+                ? connection.close.bind(connection)
+                : null;
+        if (!closer) return;
+        try {
+            await closer();
+        } catch (err) {
+            this.logger.debug('[MarketStreamManager] Error closing market socket (ignored):', err?.code || err?.message);
+        }
+    }
+
     async cleanup(disconnectFn) {
+        // Anything already in flight now belongs to a lifecycle that is over.
+        this.connectGeneration += 1;
         // Clear state to prevent auto-reconnect
         this.klineStreams.clear();
         this.detailSymbol = null;

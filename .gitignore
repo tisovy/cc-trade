@@ -9,14 +9,10 @@ lerna-debug.log*
 
 node_modules
 tele_announcer
-test-results
 dist
 dist-electron
 dist-ssr
 *.local
-
-# Test artifacts
-playwright-report
 
 # Environment files
 .env

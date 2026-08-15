@@ -1,0 +1,40 @@
+## 1. Position Size Reads as an Amount
+
+- [x] 1.1 Derive an unsigned mark notional in `describeFuturesPosition` and add an unsigned USDT formatter beside the signed one.
+- [x] 1.2 Render the size cell unsigned under a `Size (USDT)` header, keeping the exact contract count in the cell title.
+- [x] 1.3 Update the dock and presentation tests to the unsigned reading.
+- [x] 1.4 Report an absent number as absent: `Number(null)` is 0, so a missing PnL or margin was rendering as a confident `0.00` instead of `—`.
+
+## 2. The Size Control Belongs to Its Row
+
+- [x] 2.1 Style `.futures-workstation-dock-size` as row-native text with hover and focus-visible affordances, so the selected row is not a white rectangle.
+- [x] 2.2 Prove by test that the size control is reachable and labelled on the selected contract's row and absent on others.
+- [x] 2.3 Guard the whole class of defect: assert every class the dock renders has a rule in the stylesheet, because an unstyled control fails silently.
+- [x] 2.4 Operator asked for the ENTRY LONG/ENTRY SHORT bands at half opacity: the entry price is a reference the candles are read against, and at full strength the band hid the bars sitting at that price. The label plate needed its own colour — the library rebuilds a price line's label background as `rgb(...)` and drops the alpha, so the band faded while its plate and badge stayed solid and went on competing with the last price on the axis. Pre-composited over the chart's background instead.
+
+## 3. Live Mark Price Feed
+
+- [x] 3.1 Add `electron/services/futures-mark-price-feed.js`: symbol set from open positions, combined `<symbol>@markPrice@1s` stream URL, event normalization, batched broadcast, cache cleared on disconnect.
+- [x] 3.2 Reconcile the subscription set only when the open-position symbol set actually changes, and tear the socket down when no position is open.
+- [x] 3.3 Wire the feed into `binance-connection.js`: start with the first Futures renderer, stop with the last, follow every positions snapshot, never touch REST weight or credentials.
+- [x] 3.4 Unit-test the feed against an injected socket factory and clock: subscription set, resubscription on change, batching, disconnect clearing, malformed frames.
+
+## 4. Rows Valued at the Live Mark
+
+- [x] 4.1 Add `src/utils/futuresPositionMarks.js` merging marks into positions: mark price replaced and uPnL recomputed as `(mark − entry) × quantity`, position untouched when any input is unusable.
+- [x] 4.2 Consume `futures_position_marks` in `useFuturesTrading` and expose merged positions without mutating the account snapshot.
+- [x] 4.3 Prove by test that uPnL, ROE, USDT size and total uPnL move with an incoming mark, and that clearing the feed restores the snapshot values.
+- [x] 4.4 Document the feed and the unsigned size in `docs/futures_trading.md`.
+
+## 5. Verification
+
+Closed on the operator's instruction of 2026-08-10 to finish and commit: this
+check is theirs to run on live data, and the change is archived rather than held
+open waiting for it.
+
+- [x] 5.1 `npm test` (850 passed), futures boundary check and circular-import check pass; `eslint` clean on every touched file (two pre-existing errors in `src/utils/tradingCommands.js` belong to in-flight work outside this change).
+- [x] 5.2 Cover the whole path in `binance-connection.test.js`: an open position subscribes the public mark stream and an incoming frame reaches the renderer as `futures_position_marks`.
+- [x] 5.3 Log the mark stream connecting and dropping, as every other Binance socket in the process does — a frozen uPnL and a still market are indistinguishable on screen.
+- [x] 5.4 Defect found on live data: the feed subscribed `/stream?streams=`, a market path decommissioned on 2026-04-23. Measured against the exchange through the operator's proxy on 2026-08-10 — `/stream` and `/ws` complete the handshake and deliver zero frames in 6s, while the routed `/market/stream` delivers one mark per second. The socket opened, never closed and never reported anything, so every position kept the value of the last account read while the chart moved. Now on `/market/stream?streams=`, verified live on BICOUSDT.
+- [x] 5.5 Report silence, not only closure: a socket that opens and then delivers nothing for 15s is logged as a stalled feed, and its recovery is logged too. This was the one failure mode the feed had no way to state.
+- [ ] 5.6 Operator confirms on live data that uPnL ticks with the chart and the size column reads as plain USDT. — corrected 2026-08-13; see the [live-verification ledger](../../../live-verification-ledger.md#outstanding-verifications).

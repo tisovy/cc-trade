@@ -2,14 +2,17 @@
 
 ## Electron Main Process (`electron/main.js`)
 
-- Initializes Electron window (1200×800), enables devtools, and registers `Cmd/Ctrl+Shift+I`.
+- Initializes Electron window (1200×800) and opens DevTools only during Vite dev-server runs or with `ELECTRON_OPEN_DEVTOOLS=true`.
+- Creates one exact loopback WebSocket host/port plus a per-session token, passes them to `setupBinanceConnection()`, and exposes only that route through the narrow preload runtime bridge.
 - Imports and executes `setupBinanceConnection()` before creating the BrowserWindow so the WebSocket server is always ready.
-- Loads the Vite dev server URL during development, otherwise serves the built `dist/index.html`.
+- Loads the validated loopback Vite dev-server URL during development, otherwise serves the built renderer through the internal `cc-trade://renderer` protocol.
 
 ## Binance Connection Service (`electron/services/binance-connection.js`)
 
 ### Responsibilities
-1. **WebSocket Server**: Creates an HTTP server + WebSocketServer on `process.env.WS_PORT` (defaults to `14477`).
+1. **WebSocket Server**: Creates an HTTP server + WebSocketServer on `127.0.0.1` and `process.env.WS_PORT` (defaults to `14477`).
+   - Incoming WebSocket upgrades are accepted only after local-origin validation where the browser supplies `Origin`.
+   - Electron main and renderer share a per-session token; it is attached only to the exact main-issued host and port before the legacy or channel message protocol starts.
 2. **Mock Mode**: When `BK/BS` are missing we emit synthetic ticker/depth/trade/chart data every second so the renderer can boot without hitting Binance.
 3. **Live Mode**: Uses `@binance/spot` REST + WebSocket Streams to hydrate:
    - 24h ticker snapshots + incremental updates for the Activity panel.
@@ -85,10 +88,13 @@ The backend implements rate limiting to comply with Binance API restrictions:
 | Renderer → Service | `{ action: 'unsubscribe', channelId }` | Unsubscribe from a channel. |
 | Renderer → Service | `{ action: 'enable_depth_view', symbol }` | Enable trade + depth streams (call when entering DepthView). |
 | Renderer → Service | `{ action: 'disable_depth_view' }` | Disable trade + depth streams (call when leaving DepthView). |
-| Renderer → Service | `{ action: 'order', type: 'buy'|'sell', symbol, price, quantity }` | Place an order. |
-| Renderer → Service | `{ action: 'cancelOrder', orderId, symbol }` | Cancel an order. |
+| Renderer → Service | `{ action: 'trade.placeOrder', version: 1, marketType: 'spot', accountId, clientOrderId, symbol, side, orderType: 'LIMIT', timeInForce: 'GTC', price, quantity }` | Versioned spot order command. Supported for the current LIMIT/GTC spot path. |
+| Renderer → Service | `{ action: 'trade.cancelOrder', version: 1, marketType: 'spot', accountId, clientOrderId, symbol, orderId \| origClientOrderId }` | Versioned spot cancel command. `clientOrderId` is command identity; `origClientOrderId` targets the exchange order. |
+| Renderer → Service | `{ action: 'account.refresh', version: 1, marketType: 'spot', accountId, symbol? }` | Refresh spot account state. |
 | Service → Renderer | `{ channelId, type: 'chart', symbol, interval, payload, extra }` | Chart data with channel metadata. |
 | Service → Renderer | `{ channelId: 'global', type: 'ticker', payload }` | Global ticker updates. |
+
+`trade.replaceOrder` and `trade.cancelAll` are part of the versioned command family but currently return explicit backend rejections until their execution semantics are implemented.
 
 **Legacy Protocol** (still supported for backward compatibility):
 
@@ -168,4 +174,3 @@ The backend implements rate limiting to comply with Binance API restrictions:
 - **Server-side validation**
   - `tele_announcer/server.js` lives alongside its own `package.json` and redis/Telegram dependencies. It reads the same env vars (prefixed with `ANALYTICS_`) and exposes `/analytics/*` routes protected by HMAC signatures.
   - Because this service is a separate deployment unit, nothing inside the React/Electron workspace depends on it; keep its dependencies isolated under `tele_announcer/`.
-

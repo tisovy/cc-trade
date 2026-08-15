@@ -4,6 +4,7 @@ import { createChart, ColorType, CandlestickSeries, LineSeries, HistogramSeries,
 import { MeasurementOverlay } from '../../common/MeasurementOverlay';
 import { buildTimeScaleFormatters } from '../../../utils/chart-utils';
 import { formatVolumeShort } from '../../../utils/operations';
+import { buildVolumeHistogramPresentation } from '../../../utils/chartVolume';
 import RSIPane from './RSIPane';
 import { RSI_CONFIG } from './chart-plugins/RSIIndicator';
 
@@ -256,14 +257,15 @@ const MiniChart = memo(({
 
         candleSeriesRef.current.setData(data);
 
-        // Map volume data with transparency
-        const volumeData = data.map(d => ({
-            time: d.time,
-            value: d.volume,
+        const volumePresentation = buildVolumeHistogramPresentation(data, {
             // Use semi-transparent colors to avoid blocking candles
-            color: d.close >= d.open ? 'rgba(38, 166, 154, 0.3)' : 'rgba(239, 83, 80, 0.3)'
-        }));
-        volumeSeriesRef.current.setData(volumeData);
+            upColor: 'rgba(38, 166, 154, 0.3)',
+            downColor: 'rgba(239, 83, 80, 0.3)',
+        });
+        volumeSeriesRef.current.applyOptions({
+            priceFormat: volumePresentation.priceFormat,
+        });
+        volumeSeriesRef.current.setData(volumePresentation.data);
 
         // Calculate and set SMA
         const smaData = calculateSMA(data, 20);
@@ -660,4 +662,3 @@ const MiniChart = memo(({
 MiniChart.displayName = 'MiniChart';
 
 export default MiniChart;
-

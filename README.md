@@ -17,7 +17,7 @@ A modern cryptocurrency trading terminal built with React, Vite, and Electron. F
 
 ## Prerequisites
 
-- Node.js 18+
+- Node.js `^20.19.0 || >=22.12.0`
 - npm or yarn
 - Binance API keys (optional — app runs in mock mode without them)
 
@@ -34,15 +34,31 @@ npm install
 
 ## Development
 
+All development and integration work is committed directly to `master`. Do not
+create feature branches or additional Git worktrees for this repository. See
+[Repository workflow](docs/repository_workflow.md) for the mandatory checks.
+
 ```bash
 # Start the Vite dev server (web mode)
 npm run dev
 
-# Start with Electron
+# Start Electron with the normal operator configuration. This enables the
+# reviewed public-read Futures Production transport; if BK is
+# configured, Spot may also connect to real market-data/account endpoints.
 npm run e
+
+# Start Electron persistently with credentials cleared and deterministic fakes
+npm run e:safe
+
+# Run the bounded fake-only Electron readiness smoke (exits automatically)
+npm run e:smoke
 ```
 
 The app will be available at `http://localhost:5174` in web mode.
+
+Futures Testnet was retired on 2026-07-16 and is not part of the runtime or
+verification build. Its recovery manifest is in
+[`archive/futures-testnet/`](archive/futures-testnet/README.md).
 
 ## Environment Variables
 
@@ -66,7 +82,7 @@ If you create a `.env` file locally, keep it untracked (already covered by `.git
 # Build for production
 npm run build
 
-# Build Electron distributables
+# Build Electron distributables (runs a fresh production build first)
 npm run dist
 ```
 
@@ -79,10 +95,8 @@ npm test
 # Run tests in watch mode
 npm run test:watch
 
-# Run E2E tests (Playwright)
-npm run test:e2e
-
-# Run all tests
+# Run the supported aggregate verification
+# (Vitest, lint, normal build, and retained static safety gates)
 npm run test:all
 ```
 
@@ -99,7 +113,6 @@ npm run test:all
 │   ├── hooks/          # Custom hooks (useWebSocket, etc.)
 │   ├── styles/         # Global styles
 │   └── utils/          # Utility functions
-└── tests/              # E2E tests
 ```
 
 ## Documentation

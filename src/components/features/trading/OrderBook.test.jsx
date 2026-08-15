@@ -21,11 +21,12 @@ vi.mock('../../../context/DataContext', () => ({
 }));
 
 // Mock localStorage
-const localStorageMock = attachMockLocalStorage();
+let localStorageMock;
 
 describe('OrderBook', () => {
     beforeEach(() => {
         vi.clearAllMocks();
+        localStorageMock = attachMockLocalStorage();
         localStorageMock.clear();
     });
 

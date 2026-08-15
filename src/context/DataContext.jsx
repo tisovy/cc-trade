@@ -1,5 +1,4 @@
 import { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
-import useWebSocket from '../hooks/useWebSocket';
 import { parseData, balanceUpdate } from '../utils/utils';
 import { DEFAULT_PANEL } from '../constants';
 import { calculatePrecision, DEFAULT_PRECISION } from '../utils/precision';
@@ -8,126 +7,28 @@ import {
   initCache,
   getCachedCandles,
   setCachedCandles,
-  mergeCandles as _mergeCandles,
   getCacheStats,
 } from '../utils/cache';
+import {
+  SPOT_CHART_HISTORY_PAGE_ROWS,
+  SPOT_CHART_MAX_ROWS,
+  mergeSpotChartSeries,
+  spotChartHistoryEndTime,
+  spotChartNextOpenTime,
+  spotChartOpenTimeAt,
+} from '../utils/spotChartHistory';
 import { incrementTradeCount } from '../utils/pnl';
+import { answersUnresolvedCommand } from '../utils/unresolvedCommandIdentity.js';
 import {
   CHANNEL_TYPES,
   isChannelMessage,
   isGlobalMessage,
 } from '../utils/channels';
-import { useNotifications } from '../hooks/useNotifications';
 import {
   requestAnalyticsCombined,
   requestActivityMetrics,
 } from '../utils/analytics';
-
-
-
-const initialChartData = [
-  { time: '2018-12-22', open: 32.51, high: 33.00, low: 32.00, close: 32.51 },
-  { time: '2018-12-23', open: 31.11, high: 32.00, low: 31.00, close: 31.11 },
-  { time: '2018-12-24', open: 27.02, high: 28.00, low: 26.00, close: 27.02 },
-  { time: '2018-12-25', open: 27.32, high: 28.00, low: 27.00, close: 27.32 },
-  { time: '2018-12-26', open: 25.17, high: 26.00, low: 25.00, close: 25.17 },
-  { time: '2018-12-27', open: 28.89, high: 29.00, low: 28.00, close: 28.89 },
-  { time: '2018-12-28', open: 25.46, high: 26.00, low: 25.00, close: 25.46 },
-  { time: '2018-12-29', open: 23.92, high: 24.00, low: 23.00, close: 23.92 },
-  { time: '2018-12-30', open: 22.68, high: 23.00, low: 22.00, close: 22.68 },
-  { time: '2018-12-31', open: 22.67, high: 23.00, low: 22.00, close: 22.67 },
-];
-
-const mockFilters = {
-  BTCUSDT: {
-    tickSize: '0.01',
-    stepSize: '0.000001',
-    minQty: '0.000001',
-    minNotional: '10',
-    maxQty: '9000',
-    maxPrice: '1000000',
-    minPrice: '0.01',
-    status: 'TRADING',
-    baseAsset: 'BTC',
-    quoteAsset: 'USDT',
-    baseAssetPrecision: 8,
-    quoteAssetPrecision: 2,
-  },
-  ETHUSDT: {
-    tickSize: '0.01',
-    stepSize: '0.0001',
-    minQty: '0.0001',
-    minNotional: '10',
-    maxQty: '9000',
-    maxPrice: '1000000',
-    minPrice: '0.01',
-    status: 'TRADING',
-    baseAsset: 'ETH',
-    quoteAsset: 'USDT',
-    baseAssetPrecision: 8,
-    quoteAssetPrecision: 2,
-  },
-  BNBUSDT: {
-    tickSize: '0.01',
-    stepSize: '0.001',
-    minQty: '0.001',
-    minNotional: '10',
-    maxQty: '9000',
-    maxPrice: '1000000',
-    minPrice: '0.01',
-    status: 'TRADING',
-    baseAsset: 'BNB',
-    quoteAsset: 'USDT',
-    baseAssetPrecision: 8,
-    quoteAssetPrecision: 2,
-  },
-  ADAUSDT: {
-    tickSize: '0.0001',
-    stepSize: '0.1',
-    minQty: '0.1',
-    minNotional: '10',
-    maxQty: '900000',
-    maxPrice: '1000',
-    minPrice: '0.0001',
-    status: 'TRADING',
-    baseAsset: 'ADA',
-    quoteAsset: 'USDT',
-    baseAssetPrecision: 6,
-    quoteAssetPrecision: 2,
-  },
-  PAXUSDT: {
-    tickSize: '0.0001',
-    stepSize: '0.01',
-    minQty: '0.01',
-    minNotional: '10',
-    maxQty: '900000',
-    maxPrice: '1000',
-    minPrice: '0.0001',
-    status: 'TRADING',
-    baseAsset: 'PAX',
-    quoteAsset: 'USDT',
-    baseAssetPrecision: 2,
-    quoteAssetPrecision: 4,
-  },
-};
-
-const INTERVAL_TO_MS = {
-  '1m': 60_000,
-  '3m': 180_000,
-  '5m': 300_000,
-  '15m': 900_000,
-  '30m': 1_800_000,
-  '1h': 3_600_000,
-  '2h': 7_200_000,
-  '4h': 14_400_000,
-  '6h': 21_600_000,
-  '8h': 28_800_000,
-  '12h': 43_200_000,
-  '1d': 86_400_000,
-  '3d': 259_200_000,
-  '1w': 604_800_000,
-  '1M': 2_592_000_000,
-};
+import { useGatewayContext } from './GatewayContext.jsx';
 
 const DEFAULT_TRADE_PAIRS = ['PAXUSDT', 'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'ADAUSDT'];
 const MIN_TRADE_NOTIONAL_BTC = 0.01;
@@ -230,6 +131,17 @@ const sanitizeCandles = (candles = []) => {
   }, []);
 };
 
+// A bar opening is the one thing that makes the series longer, so it is where
+// the ceiling has to hold. Enforced only at the merge, it bounded the history a
+// scroll pages in and nothing else: a desk left open overnight grew the series,
+// its cache write and the cost of every redraw past the stated limit — at 1m,
+// past five thousand rows in under three days.
+const appendWithinCeiling = (series, candle) => (
+  series.length < SPOT_CHART_MAX_ROWS
+    ? [...series, candle]
+    : [...series.slice(series.length - SPOT_CHART_MAX_ROWS + 1), candle]
+);
+
 const upsertCandle = (series, candle, { allowAppend = true } = {}) => {
   if (!candle) {
     return { series, appended: false, changed: false };
@@ -252,7 +164,7 @@ const upsertCandle = (series, candle, { allowAppend = true } = {}) => {
   const lastTime = Number(currentSeries[lastIndex]?.time);
 
   if (allowAppend && candleTime > lastTime) {
-    return { series: [...currentSeries, candle], appended: true, changed: true };
+    return { series: appendWithinCeiling(currentSeries, candle), appended: true, changed: true };
   }
 
   for (let idx = lastIndex; idx >= 0; idx--) {
@@ -272,18 +184,23 @@ const upsertCandle = (series, candle, { allowAppend = true } = {}) => {
 
 const DataContext = createContext(null);
 
-export const DataProvider = ({ children }) => {
+export const DataProvider = ({
+  children,
+  spotEnabled = true,
+}) => {
   const [throttle, setThrottle] = useState({ state: false, timeout: 500 });
 
-  // Get notification functions (safely with fallback)
-  const notifications = useNotifications();
-
-  // Resolve WS_URL at runtime to allow for mocking
-  const WS_PORT = import.meta.env.VITE_WS_PORT || 14477;
-  // Check localStorage, window, and import.meta.env
-  const MOCK_URL = localStorage.getItem('MOCK_WS_URL') || window.MOCK_WS_URL || import.meta.env.MOCK_WS_URL;
-  const WS_URL = MOCK_URL || import.meta.env.VITE_WS_URL || `ws://localhost:${WS_PORT}`;
-  console.log('Using WebSocket URL:', WS_URL, 'Mock:', MOCK_URL);
+  const {
+    addMessageListener,
+    marketGeneration,
+    notifications,
+    sendMessage: sendWsMessage,
+    setSpotDetailSubscription,
+    startupStatus,
+    subscribe: subscribeChannel,
+    unsubscribe: unsubscribeChannel,
+    wsConnection,
+  } = useGatewayContext();
 
   const initialPanelState = (() => {
     const storedPanel = readStorage(STORAGE_KEYS.PANEL, null);
@@ -297,12 +214,24 @@ export const DataProvider = ({ children }) => {
   const [enabledMarketBalance, setEnabledMarketBalance] = useState(() => {
     return readStorage(STORAGE_KEYS.ENABLED_MARKET_BALANCE, false);
   });
-  const [chart, setChart] = useState(initialChartData);
+  const [chart, setChart] = useState([]);
   // Mini charts data: Map of "symbol-interval" -> { data: [], lastTick: null }
   const [miniCharts, setMiniCharts] = useState({});
   const [balances, setBalances] = useState({});
   const [orders, setOrders] = useState([]);
-  const [filters, setFilters] = useState(mockFilters);
+  // The last Spot command outcome the exchange or the transport reported.
+  // Stays until the operator dismisses it: a refusal that scrolls away
+  // unnoticed is the same as no refusal at all.
+  const [commandOutcome, setCommandOutcome] = useState(null);
+  const dismissCommandOutcome = useCallback(() => setCommandOutcome(null), []);
+  // A command whose outcome the exchange never confirmed is held apart from the
+  // ordinary ones. It shared the slot, so the next refusal — of any other order
+  // — took its place, and an operator who no longer sees the warning sends the
+  // order that may already be live a second time. It leaves on its own answer,
+  // or when the operator dismisses it.
+  const [unresolvedOutcome, setUnresolvedOutcome] = useState(null);
+  const dismissUnresolvedOutcome = useCallback(() => setUnresolvedOutcome(null), []);
+  const [filters, setFilters] = useState({});
   const [depth, setDepth] = useState({ bids: {}, asks: {} });
   const [trades, setTrades] = useState([]);
   const [tradeNotionalFilter, setTradeNotionalFilter] = useState(() => {
@@ -508,13 +437,21 @@ export const DataProvider = ({ children }) => {
   const [isFinal, setIsFinal] = useState(false);
 
   // Loading states for user feedback
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(spotEnabled);
   const [isChartLoading, setIsChartLoading] = useState(false);
   const [loadingMessage, setLoadingMessage] = useState('Connecting...');
   const loadingTimeoutRef = useRef(null);
 
   // Loading timeout - auto-dismiss after 15 seconds to prevent stuck loading
   useEffect(() => {
+    if (!spotEnabled || !startupStatus.ready) {
+      if (loadingTimeoutRef.current) {
+        clearTimeout(loadingTimeoutRef.current);
+        loadingTimeoutRef.current = null;
+      }
+      return undefined;
+    }
+
     if (isLoading) {
       loadingTimeoutRef.current = setTimeout(() => {
         console.warn('Loading timeout - dismissing loading overlay');
@@ -533,7 +470,7 @@ export const DataProvider = ({ children }) => {
         clearTimeout(loadingTimeoutRef.current);
       }
     };
-  }, [isLoading, notifications]);
+  }, [isLoading, notifications, spotEnabled, startupStatus.ready]);
 
   // Offline/cache mode
   const [isOffline, setIsOffline] = useState(!navigator.onLine);
@@ -542,6 +479,8 @@ export const DataProvider = ({ children }) => {
 
   // Initialize cache on mount
   useEffect(() => {
+    if (!spotEnabled || !startupStatus.ready) return undefined;
+
     if (!cacheInitialized.current) {
       cacheInitialized.current = true;
       initCache().then(() => {
@@ -571,9 +510,11 @@ export const DataProvider = ({ children }) => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
-  }, [notifications]);
+  }, [notifications, spotEnabled, startupStatus.ready]);
 
   useEffect(() => {
+    if (!spotEnabled || !startupStatus.ready) return undefined;
+
     refreshAnalytics();
     refreshActivityMetrics();
     const intervalId = setInterval(() => {
@@ -592,7 +533,7 @@ export const DataProvider = ({ children }) => {
         activityAbortControllerRef.current = null;
       }
     };
-  }, [refreshAnalytics, refreshActivityMetrics]);
+  }, [refreshAnalytics, refreshActivityMetrics, spotEnabled, startupStatus.ready]);
 
   const [detailSubscription, setDetailSubscription] = useState(() => ({
     symbol: panel.selected,
@@ -600,6 +541,20 @@ export const DataProvider = ({ children }) => {
     requestId: `init-${Date.now()}`,
     panelState: panel,
   }));
+
+  useEffect(() => {
+    if (!spotEnabled || !startupStatus.ready) {
+      setSpotDetailSubscription(null);
+      return undefined;
+    }
+    setSpotDetailSubscription(detailSubscription);
+    return () => setSpotDetailSubscription(null);
+  }, [
+    detailSubscription,
+    setSpotDetailSubscription,
+    spotEnabled,
+    startupStatus.ready,
+  ]);
 
   // Channel registry for multi-chart support
   // Maps channelId -> { type, symbol, interval, data }
@@ -619,6 +574,20 @@ export const DataProvider = ({ children }) => {
   const isFinalRef = useRef(isFinal);
   const throttleRef = useRef(throttle);
   const pendingPairRef = useRef(null);
+  // Which pair and interval the rows in `chart` belong to. Depth is only ever
+  // joined to rows read for the same selection: a page merged in front of the
+  // previous pair's tail is how one market's candles end up drawn under
+  // another's, and that defect has already been found once on live data.
+  const chartSelectionRef = useRef(null);
+  // The one history read allowed to be outstanding. The left edge fires
+  // continuously while the operator scrolls.
+  const chartHistoryRequestRef = useRef(null);
+  const chartSeriesRef = useRef([]);
+  const [chartHistoryExhausted, setChartHistoryExhausted] = useState(false);
+
+  useEffect(() => {
+    chartSeriesRef.current = chart;
+  }, [chart]);
 
   useEffect(() => {
     isFinalRef.current = isFinal;
@@ -741,8 +710,7 @@ export const DataProvider = ({ children }) => {
       if (!trade) return;
       setChart((prev) => {
         if (!prev.length) return prev;
-        const intervalMs = INTERVAL_TO_MS[detailSubscription.interval];
-        if (!intervalMs) return prev;
+        const interval = detailSubscription.interval;
         const tradePrice = parseFloat(trade.p ?? trade.price ?? trade.lastPrice);
         if (!Number.isFinite(tradePrice)) return prev;
         const tradeTime = trade.T ?? trade.time ?? trade.E ?? Date.now();
@@ -753,13 +721,18 @@ export const DataProvider = ({ children }) => {
           typeof lastCandle.time === 'number' && lastCandle.time > 1e12
             ? lastCandle.time
             : lastCandle.time * 1000;
-        const candleEnd = candleStart + intervalMs;
+        // Where the next candle opens is the interval's own question, not a
+        // constant's: thirty days after the first of March is the thirty-first,
+        // and a monthly chart asked in thirty-day blocks opens April in the
+        // middle of a bar.
+        const candleEnd = spotChartNextOpenTime(candleStart / 1000, interval);
+        if (candleEnd === null) return prev;
 
-        if (tradeTime >= candleEnd) {
-          const intervalsAhead = Math.floor((tradeTime - candleStart) / intervalMs);
-          const newStart = candleStart + intervalsAhead * intervalMs;
+        if (tradeTime >= candleEnd * 1000) {
+          const newStart = spotChartOpenTimeAt(candleStart / 1000, tradeTime / 1000, interval);
+          if (newStart === null) return prev;
           const newCandle = {
-            time: Math.floor(newStart / 1000),
+            time: Math.floor(newStart),
             open: tradePrice,
             high: tradePrice,
             low: tradePrice,
@@ -767,23 +740,26 @@ export const DataProvider = ({ children }) => {
             volume: 0,
             isFinal: false,
           };
-          return [...prev, newCandle];
+          return appendWithinCeiling(prev, newCandle);
         }
 
         if (tradeTime < candleStart) {
           return prev;
         }
 
+        const high = tradePrice > lastCandle.high ? tradePrice : lastCandle.high;
+        const low = tradePrice < lastCandle.low ? tradePrice : lastCandle.low;
+        // A print at the price already showing moves nothing on the chart, and
+        // on a liquid contract that is most of them — a heavily traded coin
+        // prints at one tick again and again. Answering it with a new series
+        // makes every reader of this context redraw for a candle identical to
+        // the one they are already drawing.
+        if (tradePrice === lastCandle.close && high === lastCandle.high && low === lastCandle.low) {
+          return prev;
+        }
+
         const next = [...prev];
-        const updated = { ...lastCandle };
-        updated.close = tradePrice;
-        if (tradePrice > updated.high) {
-          updated.high = tradePrice;
-        }
-        if (tradePrice < updated.low) {
-          updated.low = tradePrice;
-        }
-        next[lastIndex] = updated;
+        next[lastIndex] = { ...lastCandle, close: tradePrice, high, low };
         return next;
       });
     },
@@ -876,10 +852,21 @@ export const DataProvider = ({ children }) => {
         });
       }
 
+      // Depth belongs to one pair and one interval. Nothing loaded under the
+      // previous selection may survive into this one, and whether the previous
+      // selection had reached the start of its history says nothing about this
+      // one's.
+      chartHistoryRequestRef.current = null;
+      chartSelectionRef.current = `${nextSelected}:${nextInterval}`;
+      setChartHistoryExhausted(false);
+
       // Try to load cached data first for instant display
       const loadCachedFirst = async () => {
         const cached = await getCachedCandles(nextSelected, nextInterval);
         if (cached && cached.candles.length > 0) {
+          // The stored run is the depth an earlier session already pulled in,
+          // not just the last live window: it is presented whole, and the
+          // bootstrap that follows merges into it rather than replacing it.
           setChart(cached.candles);
           // If we have cached data, clear loading immediately - data is visible
           // The chart will update seamlessly when fresh data arrives
@@ -936,6 +923,29 @@ export const DataProvider = ({ children }) => {
   }, [panel]);
 
   /**
+   * Ask for the page of closed candles behind the oldest one loaded.
+   *
+   * Nothing is asked for twice: the page is bounded, one read is outstanding at
+   * a time, and once the exchange answers short the pair's history is treated as
+   * having a start.
+   */
+  const loadChartHistory = useCallback(() => {
+    if (chartHistoryExhausted) return false;
+    if (chartHistoryRequestRef.current !== null) return false;
+    const symbol = panel.selected;
+    const interval = panel.interval;
+    if (chartSelectionRef.current !== `${symbol}:${interval}`) return false;
+    const endTime = spotChartHistoryEndTime(chartSeriesRef.current);
+    if (endTime === null) return false;
+
+    const request = { symbol, interval, endTime, limit: SPOT_CHART_HISTORY_PAGE_ROWS };
+    chartHistoryRequestRef.current = request;
+    const sent = sendWsMessage({ action: 'load_chart_history', ...request });
+    if (sent === false) chartHistoryRequestRef.current = null;
+    return sent !== false;
+  }, [chartHistoryExhausted, panel.selected, panel.interval, sendWsMessage]);
+
+  /**
    * Handle global messages (ticker, filters, balances, orders)
    * These are not tied to a specific channel
    */
@@ -952,6 +962,19 @@ export const DataProvider = ({ children }) => {
           const index = payload;
           if (typeof index === 'number' && extra) {
             newTicker[index] = { ...newTicker[index], ...extra };
+          }
+          return newTicker;
+        });
+        break;
+      case 'ticker_batch':
+        // payload is an array of { index, entry } — apply all in one render.
+        setTicker(prev => {
+          const newTicker = [...prev];
+          const updates = Array.isArray(payload) ? payload : [];
+          for (const u of updates) {
+            if (u && typeof u.index === 'number') {
+              newTicker[u.index] = { ...newTicker[u.index], ...u.entry };
+            }
           }
           return newTicker;
         });
@@ -1030,7 +1053,18 @@ export const DataProvider = ({ children }) => {
             clearTimeout(chartFlushTimerRef.current);
             chartFlushTimerRef.current = null;
           }
-          setChart(sanitizedChartData);
+          // The bootstrap window is the fresher read, so it wins the overlap —
+          // but it is only the last 500 candles, and replacing with it threw
+          // away every older candle the operator had scrolled to and everything
+          // the local store had preserved across the restart. It is merged in
+          // front of that depth instead, and only when the depth was read for
+          // this same pair and interval.
+          const pair = `${panel.selected}:${panel.interval}`;
+          const mergeWithHeldDepth = chartSelectionRef.current === pair;
+          chartSelectionRef.current = pair;
+          setChart(prev => (mergeWithHeldDepth
+            ? mergeSpotChartSeries(prev, sanitizedChartData, { interval: panel.interval })
+            : sanitizedChartData));
           setUpdateChart(false);
           setIsFinal(false);
           isFinalRef.current = false;
@@ -1042,7 +1076,14 @@ export const DataProvider = ({ children }) => {
 
           // Cache the chart data
           if (sanitizedChartData.length > 0) {
-            setCachedCandles(panel.selected, panel.interval, sanitizedChartData)
+            const storedSeries = mergeWithHeldDepth
+              ? mergeSpotChartSeries(
+                chartSeriesRef.current,
+                sanitizedChartData,
+                { interval: panel.interval },
+              )
+              : sanitizedChartData;
+            setCachedCandles(panel.selected, panel.interval, storedSeries)
               .then(() => getCacheStats().then(setCacheStats))
               .catch(err => console.error('Cache write error:', err));
 
@@ -1058,6 +1099,66 @@ export const DataProvider = ({ children }) => {
             }));
           }
         }
+        break;
+      }
+
+      // A read that could not be served. It answers the request being held so the
+      // lock is released; the pair keeps whatever depth it has, and the next
+      // scroll asks again.
+      case 'chart_history_failed': {
+        const request = chartHistoryRequestRef.current;
+        const answer = extra && typeof extra === 'object' ? extra : {};
+        if (!request
+          || answer.symbol !== request.symbol
+          || answer.interval !== request.interval
+          || answer.endTime !== request.endTime) break;
+        chartHistoryRequestRef.current = null;
+        notifications?.notifyWarning?.(
+          `Older ${request.symbol} candles could not be loaded — scroll again to retry.`,
+        );
+        break;
+      }
+
+      // The depth behind the live window. It arrives once per request, is joined
+      // under the rows already drawn, and is stored so the next run of the app
+      // starts where this one left off rather than reading it again.
+      case 'chart_history': {
+        const request = chartHistoryRequestRef.current;
+        const answer = extra && typeof extra === 'object' ? extra : {};
+        // Only the answer to the request being held is applied. A page for a
+        // pair, interval or read-point the chart has moved on from is history of
+        // something the operator is no longer looking at.
+        if (!request
+          || answer.symbol !== request.symbol
+          || answer.interval !== request.interval
+          || answer.endTime !== request.endTime) break;
+        chartHistoryRequestRef.current = null;
+        if (chartSelectionRef.current !== `${request.symbol}:${request.interval}`) break;
+
+        const rows = sanitizeCandles(Array.isArray(payload) ? payload : []);
+        // Fewer candles than were asked for is the exchange saying there is
+        // nothing older. Without this the chart would ask for the same short
+        // answer on every scroll for the rest of the session.
+        if (rows.length < request.limit) setChartHistoryExhausted(true);
+        if (rows.length === 0) break;
+
+        const merged = mergeSpotChartSeries(
+          rows,
+          chartSeriesRef.current,
+          { interval: request.interval },
+        );
+        // The series is bounded, and a live tick never touches its front row, so
+        // this comparison is exact. A page the chart cannot hold — because it is
+        // already full to its ceiling, or because the page did not touch the run
+        // it has — must not be asked for again: the same read would otherwise
+        // repeat for as long as the operator sits at the left edge.
+        const oldestHeld = chartSeriesRef.current[0]?.time;
+        if (Number.isFinite(oldestHeld) && !(merged[0]?.time < oldestHeld)) {
+          setChartHistoryExhausted(true);
+        }
+        setChart(prev => mergeSpotChartSeries(rows, prev, { interval: request.interval }));
+        setCachedCandles(request.symbol, request.interval, merged)
+          .catch(err => console.error('Cache write error:', err));
         break;
       }
 
@@ -1126,17 +1227,54 @@ export const DataProvider = ({ children }) => {
     tradePassesNotionalFilter,
     applyTradeToChart,
     touchChannel,
-    updateHistoryCache
+    updateHistoryCache,
+    notifications
   ]);
 
-  const handleSocketUpdate = useCallback((event, _connection) => {
+  const handleSocketUpdate = useCallback((event, _connection, frame) => {
     if (!event || !event.data) return;
 
-    // Try to parse the raw message
-    let rawMessage;
-    try {
-      rawMessage = JSON.parse(event.data);
-    } catch {
+    // Read once, at the socket boundary. The legacy reading below still works
+    // from the frame's own text: it answers with a shape this context builds
+    // from, not with the frame, and untangling that is its own change.
+    const rawMessage = frame?.payload;
+    if (rawMessage === null || typeof rawMessage !== 'object') return;
+
+    // A refused or unconfirmed Spot command used to reach only the main-process
+    // log, so a failed order was invisible at the desk. Futures owns its own
+    // presentation, so its outcomes are left alone here.
+    const outcome = rawMessage.command_rejected
+      ?? rawMessage.command_unresolved
+      ?? rawMessage.command_resolved;
+    if (outcome) {
+      if (outcome.details?.marketType === 'futures') return;
+      const reading = {
+        request: outcome.request ?? null,
+        code: outcome.code ?? null,
+        message: outcome.message ?? 'The trading command failed.',
+        binanceCode: outcome.details?.binanceCode ?? null,
+        details: outcome.details ?? null,
+        timestamp: outcome.timestamp ?? null,
+      };
+      if (rawMessage.command_unresolved) {
+        setUnresolvedOutcome({ kind: 'unresolved', ...reading });
+        return;
+      }
+      // Whether this envelope withdraws the standing warning is a question about
+      // identity, not about arrival order: only the answer to that command ends
+      // it.
+      const answered = {
+        symbol: outcome.details?.symbol,
+        orderId: outcome.details?.orderId,
+        clientOrderId: outcome.details?.clientOrderId,
+        request: outcome.request,
+      };
+      setUnresolvedOutcome(previous => (
+        answersUnresolvedCommand(previous, answered) ? null : previous
+      ));
+      // A resolution is the end of a warning, not a notice of its own.
+      if (rawMessage.command_resolved) return;
+      setCommandOutcome({ kind: 'rejected', ...reading });
       return;
     }
 
@@ -1228,18 +1366,30 @@ export const DataProvider = ({ children }) => {
     }
 
     // Global message types (ticker) - handle specially
-    if (type === 'ticker' || type === 'ticker_update') {
+    if (type === 'ticker' || type === 'ticker_update' || type === 'ticker_batch') {
       if (type === 'ticker') {
         setTicker(payload);
-        touchChannel('ticker');
+      } else if (type === 'ticker_batch') {
+        // Apply the whole coalesced push in ONE state update (one array copy,
+        // one render) instead of one setTicker per symbol — this is the fix for
+        // the periodic UI freeze under the miniTicker fan-out.
+        setTicker(prev => {
+          const newTicker = [...prev];
+          for (const u of payload) {
+            if (u && typeof u.index === 'number') {
+              newTicker[u.index] = { ...newTicker[u.index], ...u.entry };
+            }
+          }
+          return newTicker;
+        });
       } else {
         setTicker(prev => {
           const newTicker = [...prev];
           newTicker[payload] = { ...newTicker[payload], ...extra };
           return newTicker;
         });
-        touchChannel('ticker');
       }
+      touchChannel('ticker');
       return;
     }
 
@@ -1254,7 +1404,10 @@ export const DataProvider = ({ children }) => {
     handleGlobalMessage,
   ]);
 
-
+  useEffect(() => addMessageListener(handleSocketUpdate), [
+    addMessageListener,
+    handleSocketUpdate,
+  ]);
 
   const resubscribeDetail = useCallback(() => {
     setDetailSubscription((prev) => ({
@@ -1264,15 +1417,26 @@ export const DataProvider = ({ children }) => {
     }));
   }, [panel]);
 
-  // WebSocket connection with channel subscription API
-  const {
-    connection: wsConnection,
-    subscribe: subscribeChannel,
-    unsubscribe: unsubscribeChannel,
-    sendMessage: sendWsMessage
-  } = useWebSocket(WS_URL, detailSubscription, handleSocketUpdate);
+  useEffect(() => {
+    if (spotEnabled && startupStatus.ready) {
+      setIsLoading(true);
+      setLoadingMessage('Connecting...');
+      return;
+    }
+
+    setIsLoading(false);
+    setIsChartLoading(false);
+    setLoadingMessage('');
+    chartQueueRef.current = [];
+    if (chartFlushTimerRef.current) {
+      clearTimeout(chartFlushTimerRef.current);
+      chartFlushTimerRef.current = null;
+    }
+  }, [spotEnabled, startupStatus.ready]);
 
   useEffect(() => {
+    if (!spotEnabled || !startupStatus.ready) return undefined;
+
     const WATCHDOG_INTERVAL = 5000;
     const STALL_THRESHOLD = 10000;
     const intervalId = setInterval(() => {
@@ -1291,7 +1455,7 @@ export const DataProvider = ({ children }) => {
       });
     }, WATCHDOG_INTERVAL);
     return () => clearInterval(intervalId);
-  }, [resubscribeDetail]);
+  }, [resubscribeDetail, spotEnabled, startupStatus.ready]);
 
   const selectedPrecision = calculatePrecision(filters?.[panel.selected]) ?? DEFAULT_PRECISION;
 
@@ -1301,6 +1465,10 @@ export const DataProvider = ({ children }) => {
     chart,
     balances,
     orders,
+    commandOutcome,
+    dismissCommandOutcome,
+    unresolvedOutcome,
+    dismissUnresolvedOutcome,
     filters,
     depth,
     trades,
@@ -1311,7 +1479,13 @@ export const DataProvider = ({ children }) => {
     tradePairs,
     selectedPrecision,
     wsConnection,
+    startupStatus,
+    spotEnabled,
     handlePanelUpdate,
+    // Chart depth: the loader the chart calls when the operator scrolls into the
+    // oldest bar, and whether the pair's history has a start behind it.
+    loadChartHistory,
+    chartHistoryExhausted,
     handleThrottleSwitch,
     handleThrottleTimeout,
     enabledMarketBalance,
@@ -1334,6 +1508,10 @@ export const DataProvider = ({ children }) => {
     unsubscribeChannel,
     sendWsMessage,
     sendMessage: sendWsMessage,  // Alias for convenience
+    // The activation a market-scoped frame must carry. Frames sent through
+    // `sendMessage` are stamped by the gateway; a caller that writes to the
+    // socket itself stamps with this.
+    marketGeneration,
     activeDetailChannelId,
     // Mini charts data for MainView
     miniCharts,
@@ -1375,5 +1553,3 @@ export const useDataContext = () => {
   }
   return context;
 };
-
-

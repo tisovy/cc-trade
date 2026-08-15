@@ -152,6 +152,10 @@ function parseTickerUpdate(update, index, requestId) {
     return { type: "ticker_update", payload: index, extra: update, requestId };
 }
 
+function parseTickerBatch(updates, requestId) {
+    return { type: "ticker_batch", payload: Array.isArray(updates) ? updates : [], requestId };
+}
+
 function parseBalanceUpdate(data, requestId) {
     data = data["B"];
     let coin, free, locked;
@@ -309,6 +313,8 @@ export function parseData(data, orders, history, panel) {
             return parseTicker(data["ticker"], requestId);
         case "ticker_update":
             return parseTickerUpdate(data["ticker_update"], data["index"], requestId);
+        case "ticker_batch":
+            return parseTickerBatch(data["ticker_batch"], requestId);
         default:
     }
 }

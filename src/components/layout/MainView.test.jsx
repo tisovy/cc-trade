@@ -72,7 +72,7 @@ global.ResizeObserver = class ResizeObserver {
 };
 
 // Mock localStorage
-const localStorageMock = attachMockLocalStorage();
+let localStorageMock;
 
 describe('MainView', () => {
     const mockOnSwitchToDepth = vi.fn();
@@ -80,6 +80,7 @@ describe('MainView', () => {
 
     beforeEach(() => {
         vi.clearAllMocks();
+        localStorageMock = attachMockLocalStorage();
         localStorageMock.clear();
         mockSubscribeChannel.mockClear();
         mockUnsubscribeChannel.mockClear();
@@ -250,4 +251,3 @@ describe('MainView', () => {
         }
     });
 });
-

@@ -169,3 +169,358 @@
 .offline-indicator::before {
   content: '⚡';
 }
+
+.market-mode-switch {
+  position: fixed;
+  top: -1px;
+  left: 50%;
+  z-index: 140;
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 5px;
+  transform: translateX(-50%);
+  filter: drop-shadow(0 5px 8px rgba(0, 0, 0, 0.48));
+}
+
+.market-local-clock {
+  position: fixed;
+  top: 40px;
+  left: 50%;
+  z-index: 139;
+  box-sizing: border-box;
+  min-width: 196px;
+  padding: 5px 10px 6px;
+  transform: translateX(-50%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 3px;
+  background: rgba(21, 22, 24, 0.94);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.035),
+    0 5px 14px rgba(0, 0, 0, 0.38);
+  color: #d5d8dc;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  line-height: 1.15;
+  letter-spacing: 0.025em;
+  text-align: center;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.startup-gate,
+.market-workspace-selector {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 32px;
+  background:
+    radial-gradient(circle at 50% 18%, rgba(53, 113, 255, 0.12), transparent 42%),
+    #080b12;
+  color: #eef3ff;
+}
+
+.startup-gate.is-error {
+  background:
+    radial-gradient(circle at 50% 18%, rgba(244, 83, 83, 0.13), transparent 42%),
+    #080b12;
+}
+
+.startup-gate-card,
+.market-workspace-selector-card {
+  width: min(560px, 100%);
+  padding: 32px;
+  border: 1px solid rgba(139, 160, 204, 0.22);
+  border-radius: 16px;
+  background: rgba(15, 20, 32, 0.96);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.38);
+}
+
+.startup-gate.is-error .startup-gate-card {
+  border-color: rgba(244, 83, 83, 0.48);
+}
+
+.startup-gate-kicker {
+  display: block;
+  margin-bottom: 10px;
+  color: #83a7ff;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.14em;
+}
+
+.startup-gate.is-error .startup-gate-kicker {
+  color: #ff8e8e;
+}
+
+.startup-gate-card h1,
+.market-workspace-selector-card h1 {
+  margin: 0 0 14px;
+  font-size: clamp(24px, 4vw, 36px);
+}
+
+.startup-gate-card p,
+.market-workspace-selector-card p {
+  margin: 10px 0 0;
+  color: #aebbd3;
+  line-height: 1.55;
+}
+
+.startup-gate-card code {
+  color: #fff;
+  font-weight: 700;
+}
+
+.startup-gate-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.market-workspace-selector-card .market-mode-switch {
+  position: static;
+  width: 100%;
+  margin-top: 24px;
+  transform: none;
+}
+
+.market-mode-switch button {
+  position: relative;
+  min-height: 29px;
+  border: 1px solid #3d4145;
+  border-top: 0;
+  border-radius: 0 0 7px 7px;
+  padding: 6px 12px 8px;
+  background: #17191b;
+  color: #a5a8ab;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.035),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.07);
+  font: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  cursor: pointer;
+  opacity: 0.76;
+  transition:
+    min-height 120ms ease,
+    padding 120ms ease,
+    color 120ms ease,
+    background 120ms ease,
+    opacity 120ms ease;
+}
+
+.market-mode-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.market-mode-indicator {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #555;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08);
+}
+
+.market-mode-switch button:hover {
+  color: #f0f0f0;
+  opacity: 1;
+}
+
+.market-mode-switch button.is-unavailable,
+.market-mode-switch button:disabled {
+  border-color: #3a3d40;
+  background: #141516;
+  color: #6b7075;
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.market-mode-switch button.is-unavailable:hover {
+  color: #6b7075;
+  opacity: 0.45;
+}
+
+.market-mode-switch button.is-unavailable .market-mode-indicator {
+  background: #4a2c2c;
+}
+
+.market-workspace-unavailable {
+  margin-top: 14px;
+  color: #d38b8b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.market-mode-switch button.active {
+  min-height: 35px;
+  padding-bottom: 12px;
+  opacity: 1;
+}
+
+.market-mode-switch button.is-spot {
+  border-color: #305a50;
+  background: #10211d;
+  color: #8fb8ad;
+}
+
+.market-mode-switch button.is-spot.active {
+  background: #174039;
+  color: #c6fce1;
+}
+
+.market-mode-switch button.is-spot.active .market-mode-indicator {
+  background: #48c69b;
+  box-shadow: 0 0 7px rgba(72, 198, 155, 0.75);
+}
+
+.market-mode-switch button.is-production {
+  border-color: #84323a;
+  background: #321014;
+  color: #c78f94;
+}
+
+.market-mode-switch button.is-production.active {
+  background: #711d25;
+  color: #fff0f0;
+}
+
+.market-mode-switch button.is-production.active .market-mode-indicator {
+  background: #ff5964;
+  box-shadow: 0 0 9px rgba(255, 89, 100, 0.95);
+}
+
+.futures-mode-view {
+  min-height: 100vh;
+  box-sizing: border-box;
+  display: block;
+  padding: 72px 18px 18px;
+  overflow: auto;
+}
+
+.futures-mode-view > .futures-production-workstation {
+  width: min(100%, 1580px);
+  margin: 0 auto;
+}
+
+.futures-mode-view.is-production {
+  background:
+    radial-gradient(circle at 50% 0%, rgba(148, 31, 39, 0.34), transparent 45%),
+    #110607;
+}
+
+.futures-mode-banner {
+  position: fixed;
+  top: 45px;
+  left: 50%;
+  z-index: 110;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transform: translateX(-50%);
+  border: 1px solid;
+  border-radius: 999px;
+  padding: 4px 11px;
+  font-size: 9px;
+  letter-spacing: 0.06em;
+  box-shadow: 0 3px 15px rgba(0, 0, 0, 0.45);
+}
+
+.futures-mode-banner strong {
+  font-size: 10px;
+  letter-spacing: 0.08em;
+}
+
+.futures-mode-banner.is-production {
+  border-color: #d3414c;
+  background: #731c25;
+  color: #fff;
+  box-shadow: 0 3px 18px rgba(188, 35, 47, 0.42);
+}
+
+.workspace-loading {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  background: #07111b;
+  color: #91a4b8;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+}
+
+@media (max-width: 620px) {
+  .market-mode-switch button {
+    padding-right: 7px;
+    padding-left: 7px;
+    font-size: 8px;
+    letter-spacing: 0.025em;
+  }
+
+  .futures-mode-banner span {
+    display: none;
+  }
+
+  .futures-mode-view {
+    padding: 72px 8px 12px;
+  }
+}
+
+/* A Spot command outcome the operator has to read. Pinned above the workspace
+   rather than shown as a passing toast: an order the exchange refused, or one
+   whose fate is unknown, is not something to catch out of the corner of an eye. */
+.spot-command-outcome {
+  position: fixed;
+  top: 52px;
+  left: 50%;
+  z-index: 60;
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  max-width: min(760px, calc(100vw - 24px));
+  padding: 8px 12px;
+  transform: translateX(-50%);
+  border: 1px solid rgba(240, 185, 11, 0.55);
+  border-radius: 5px;
+  background: #1b1710;
+  color: #e6edf3;
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
+}
+
+.spot-command-outcome.is-rejected {
+  border-color: rgba(233, 84, 84, 0.55);
+  background: #1d1112;
+}
+
+.spot-command-outcome > strong {
+  flex: 0 0 auto;
+  color: #f0b90b;
+  white-space: nowrap;
+}
+
+.spot-command-outcome.is-rejected > strong {
+  color: #ff6b6b;
+}
+
+.spot-command-outcome > span {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.spot-command-outcome > button {
+  flex: 0 0 auto;
+  padding: 3px 9px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
+.spot-command-outcome > button:hover {
+  border-color: rgba(255, 255, 255, 0.4);
+}

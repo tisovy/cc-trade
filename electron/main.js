@@ -1,7 +1,58 @@
-import { app, BrowserWindow, Menu, ipcMain, session } from 'electron'
+import { app, BrowserWindow, Menu, ipcMain, protocol, session } from 'electron'
 import path from 'path'
 import { fileURLToPath } from 'url'
+import { shouldOpenDevTools } from './devtools.js'
+import { installRendererZoomControls } from './renderer-zoom.js'
 import { setupBinanceConnection } from './services/binance-connection.js'
+import { createDeskDiagnosticRecord } from './services/desk-diagnostic-record.js'
+import {
+  createLocalWebSocketAccess,
+} from './services/local-websocket-access.js'
+import { configureLinuxSafeStorageBackend } from './linux-safe-storage-backend.js'
+import {
+  createRendererRuntime,
+  createRendererRuntimeRegistry,
+} from './renderer-runtime.js'
+import {
+  createRendererNavigationGuard,
+  createSecureRendererWebPreferences,
+  installRendererContentSecurityPolicyHeader,
+  installRendererSecurityGuards,
+} from './renderer-security.js'
+import {
+  createRendererContentSecurityPolicy,
+  installRendererAppProtocol,
+  RENDERER_ENTRY_URL,
+  RENDERER_ORIGIN,
+  registerRendererAppProtocolScheme,
+  resolveTrustedRendererDevServerUrl,
+} from './renderer-protocol.js'
+
+if (configureLinuxSafeStorageBackend({ app })) {
+  console.log('[Electron] Hyprland safeStorage backend pinned to gnome-libsecret')
+}
+
+registerRendererAppProtocolScheme(protocol)
+
+// Legacy Futures Testnet and guarded-production variables are retired; the
+// futures path uses its own BFK/BFS credentials, separate from Spot's BK/BS.
+for (const key of Object.keys(process.env)) {
+  if (key.startsWith('FUTURES_TESTNET_')
+    || key.startsWith('FUTURES_READ_')
+    || key.startsWith('FUTURES_PRODUCTION_')) {
+    delete process.env[key]
+  }
+}
+
+// A second app instance exits before opening a renderer.
+const hasExclusiveExecutionOwnership = app.requestSingleInstanceLock()
+if (!hasExclusiveExecutionOwnership) app.quit()
+
+const analyticsSecret = process.env.ANALYTICS_SECRET || '';
+if (process.env.ANALYTICS_SECRET) {
+  process.env.ANALYTICS_REQUIRES_MAIN_SIGNING = 'true';
+  delete process.env.ANALYTICS_SECRET;
+}
 
 // ============================================================
 // Global error handlers to prevent crashes from network errors
@@ -25,7 +76,7 @@ process.on('uncaughtException', (error) => {
   // Don't exit - let the app continue running
 });
 
-process.on('unhandledRejection', (reason, promise) => {
+process.on('unhandledRejection', (reason, _promise) => {
   const error = reason instanceof Error ? reason : new Error(String(reason));
   const isNetworkError = error?.code === 'ECONNRESET' ||
                          error?.code === 'ETIMEDOUT' ||
@@ -45,7 +96,21 @@ process.on('unhandledRejection', (reason, promise) => {
   // Don't exit - let the app continue running
 });
 
-setupBinanceConnection();
+const rendererDevServerUrl = resolveTrustedRendererDevServerUrl({
+  value: process.env.VITE_DEV_SERVER_URL,
+  isPackaged: app.isPackaged,
+})
+const localWebSocketAccess = {
+  ...createLocalWebSocketAccess(),
+  allowedOrigins: [
+    RENDERER_ORIGIN,
+    ...(rendererDevServerUrl ? [new URL(rendererDevServerUrl).origin] : []),
+  ],
+};
+const rendererRuntimeRegistry = createRendererRuntimeRegistry(ipcMain)
+let binanceController = null
+let deskDiagnosticRecord = null
+let isExecutionShutdownStarted = false
 
 // Get proxy URL from environment (supports http_proxy, HTTP_PROXY, https_proxy, HTTPS_PROXY)
 const getSystemProxy = () => {
@@ -61,23 +126,22 @@ const getSystemProxy = () => {
   }
 };
 
-// Analytics config from environment - will be injected into browser
+// Analytics config from environment - only non-secret values are injected into browser
 const getAnalyticsConfig = () => {
+  const requiresMainProcessSigning = Boolean(analyticsSecret);
   const config = {
     baseUrl: process.env.ANALYTICS_URL || process.env.ANALYTICS_BASE_URL || 'http://localhost:3000',
+    pollInterval: Math.max(5000, Number(process.env.ANALYTICS_POLL_INTERVAL) || 45000),
+    limit: Math.min(200, Math.max(5, Number(process.env.ANALYTICS_LIMIT) || 40)),
+    enabled: !requiresMainProcessSigning,
+    authMode: requiresMainProcessSigning ? 'main-process-required' : 'none',
   };
-  // Only add credentials if they're configured
+  // Public key is safe to expose; signing secret must stay in main.
   if (process.env.ANALYTICS_KEY) {
     config.key = process.env.ANALYTICS_KEY;
   }
-  if (process.env.ANALYTICS_SECRET) {
-    config.secret = process.env.ANALYTICS_SECRET;
-  }
   return config;
 };
-
-// IPC handler for analytics config
-ipcMain.handle('get-analytics-config', () => getAnalyticsConfig());
 
 const isWaylandSession = () => process.env.XDG_SESSION_TYPE === 'wayland' || !!process.env.WAYLAND_DISPLAY;
 
@@ -92,16 +156,49 @@ if (isWaylandSession()) {
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
+const rendererRootDirectory = path.join(__dirname, '../dist')
+let hasInstalledDevServerCsp = false
 
 function createWindow() {
-  const win = new BrowserWindow({
+  const devServerUrl = rendererDevServerUrl
+  const rendererUrl = devServerUrl || RENDERER_ENTRY_URL
+  const analyticsConfig = getAnalyticsConfig()
+  const contentSecurityPolicy = createRendererContentSecurityPolicy({
+    analyticsBaseUrl: analyticsConfig.baseUrl,
+    localWebSocketAccess,
+  })
+  if (devServerUrl && !hasInstalledDevServerCsp) {
+    installRendererContentSecurityPolicyHeader(session.defaultSession, {
+      rendererUrl: devServerUrl,
+      contentSecurityPolicy,
+    })
+    hasInstalledDevServerCsp = true
+  }
+  // The runtime exists before the window that will ask for it, and the two are
+  // bound in one step that nothing can be inserted between. The preload asks
+  // synchronously over IPC the moment its document is created; a sender the
+  // registry does not know receives no runtime at all, and a renderer with no
+  // runtime fails closed with a stated reason instead of dialling a default
+  // endpoint it can never authenticate against.
+  const rendererRuntime = createRendererRuntime({
+    localWebSocketAccess,
+    analyticsConfig,
+  })
+  const win = rendererRuntimeRegistry.createRegisteredWindow(rendererRuntime, () => new BrowserWindow({
     width: 1200,
     height: 800,
-    webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
-      sandbox: false,
-    },
+    webPreferences: createSecureRendererWebPreferences({
+      preload: path.join(__dirname, 'preload.cjs'),
+    }),
+  }))
+
+  installRendererSecurityGuards(
+    win.webContents,
+    createRendererNavigationGuard({ devServerUrl, rendererUrl }),
+  )
+
+  installRendererZoomControls(win.webContents, {
+    settingsDirectory: app.getPath('userData'),
   })
 
   win.webContents.on('did-fail-load', (event, errorCode, errorDescription) => {
@@ -110,29 +207,10 @@ function createWindow() {
 
   const devToolsOptions = { mode: 'bottom' }
 
-  // Inject analytics config into browser window after page loads
-  win.webContents.on('did-finish-load', () => {
-    const config = getAnalyticsConfig();
-    const configJson = JSON.stringify(config);
-    // Always overwrite localStorage with current env config
-    win.webContents.executeJavaScript(`
-      const existing = localStorage.getItem('analyticsConfig');
-      const newConfig = ${configJson};
-      localStorage.setItem('analyticsConfig', JSON.stringify(newConfig));
-      console.log('[Electron] Analytics config updated:', newConfig);
-      if (existing) {
-        console.log('[Electron] Previous config was:', existing);
-      }
-    `);
-  });
+  console.log('Loading renderer URL:', rendererUrl)
+  win.loadURL(rendererUrl)
 
-  if (process.env.VITE_DEV_SERVER_URL) {
-    console.log('Loading URL:', process.env.VITE_DEV_SERVER_URL)
-    win.loadURL(process.env.VITE_DEV_SERVER_URL)
-    win.webContents.openDevTools(devToolsOptions)
-  } else {
-    console.log('Loading file:', path.join(__dirname, '../dist/index.html'))
-    win.loadFile(path.join(__dirname, '../dist/index.html'))
+  if (shouldOpenDevTools({ allowDevServerDefault: !app.isPackaged })) {
     win.webContents.openDevTools(devToolsOptions)
   }
 
@@ -160,6 +238,31 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
+  if (!hasExclusiveExecutionOwnership) return
+
+  // The desk keeps its own record of what it did, under its own data directory.
+  // The path is stated once, here, because a record the operator cannot find is
+  // a record that does not exist.
+  deskDiagnosticRecord = createDeskDiagnosticRecord({
+    directory: path.join(app.getPath('userData'), 'diagnostics'),
+  })
+  console.log('[Electron] Desk record:', deskDiagnosticRecord.directory)
+  deskDiagnosticRecord.record('session', { event: 'started', version: app.getVersion() })
+
+  binanceController = setupBinanceConnection({
+    localWebSocketAccess,
+    diagnosticRecord: deskDiagnosticRecord,
+  })
+
+  installRendererAppProtocol({
+    protocol,
+    rootDirectory: rendererRootDirectory,
+    contentSecurityPolicy: createRendererContentSecurityPolicy({
+      analyticsBaseUrl: getAnalyticsConfig().baseUrl,
+      localWebSocketAccess,
+    }),
+  })
+
   // Configure proxy from system environment
   const proxyUrl = getSystemProxy();
   if (proxyUrl) {
@@ -179,6 +282,26 @@ app.whenReady().then(async () => {
       createWindow()
     }
   })
+}).catch((error) => {
+  console.error('[Electron] Main-process startup failed:', error)
+  app.quit()
+})
+
+app.on('before-quit', (event) => {
+  if (!binanceController || isExecutionShutdownStarted) return
+  event.preventDefault()
+  isExecutionShutdownStarted = true
+  // A run that ended is a fact the next reading needs: without it, a desk that
+  // was closed and one that died look the same in the record.
+  deskDiagnosticRecord?.record('session', { event: 'stopped', version: app.getVersion() })
+  void binanceController.close()
+    .catch((error) => {
+      console.error('[Electron] Execution shutdown failed:', error)
+    })
+    .finally(() => {
+      deskDiagnosticRecord?.close()
+      app.quit()
+    })
 })
 
 app.on('window-all-closed', () => {

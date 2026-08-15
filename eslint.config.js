@@ -37,7 +37,6 @@ export default defineConfig([
     files: [
       'electron/**/*.js',
       'tele_announcer/**/*.js',
-      'tests/**/*.js',
       '*.config.js',
       'src/**/*.test.js',
     ],
