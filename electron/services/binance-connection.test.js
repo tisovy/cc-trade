@@ -6724,6 +6724,66 @@ describe('setupBinanceConnection user-data orchestration', () => {
             expect(historyEvents()).toEqual([]);
         });
 
+        it('keeps a failed history answer behind account traffic after its channel disappeared', async () => {
+            vi.useFakeTimers();
+            try {
+                await openDetailChannel();
+                moduleMocks.spotClient.restAPI.klines = vi.fn()
+                    .mockRejectedValue(Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' }));
+
+                const pending = loadHistory();
+                let historySettled = false;
+                void pending.then(() => { historySettled = true; });
+                await moduleMocks.rendererHandlers.message({
+                    type: 'utf8',
+                    utf8Data: JSON.stringify({
+                        action: 'unsubscribe',
+                        channelId: 'detail-BTCUSDT-1h',
+                    }),
+                });
+
+                // One accepted account frame fills the socket. Everything that
+                // follows is now ordered by the outbox lanes rather than by the
+                // order sendUTF happened to be called in.
+                moduleMocks.rendererConnection.outputBufferFull = true;
+                await moduleMocks.rendererHandlers.message({
+                    type: 'utf8',
+                    utf8Data: JSON.stringify({ action: 'get_startup_status' }),
+                });
+                moduleMocks.rendererConnection.sendUTF.mockClear();
+
+                for (let step = 0; step < 20 && !historySettled; step += 1) {
+                    vi.advanceTimersByTime(1000);
+                    await flushMicrotasks();
+                }
+                expect(historySettled).toBe(true);
+                await pending;
+                expect(moduleMocks.spotClient.restAPI.klines).toHaveBeenCalledWith({
+                    symbol: 'BTCUSDT',
+                    interval: '1h',
+                    endTime: 1_699_999_999_999,
+                    limit: 1000,
+                });
+
+                await moduleMocks.rendererHandlers.message({
+                    type: 'utf8',
+                    utf8Data: JSON.stringify({ action: 'get_startup_status' }),
+                });
+                moduleMocks.rendererConnection.outputBufferFull = false;
+                moduleMocks.rendererHandlers.drain();
+
+                const drained = emitted();
+                const accountIndex = drained.findIndex(payload => payload.type === 'startup_status');
+                const failureIndex = drained.findIndex(payload => payload.chart_history_failed);
+                expect(accountIndex).toBeGreaterThanOrEqual(0);
+                expect(failureIndex).toBeGreaterThanOrEqual(0);
+                expect(accountIndex).toBeLessThan(failureIndex);
+            } finally {
+                moduleMocks.rendererConnection.outputBufferFull = false;
+                vi.useRealTimers();
+            }
+        });
+
         it('refuses a page larger than one klines read serves, and a nonsense read point', async () => {
             await openDetailChannel();
 

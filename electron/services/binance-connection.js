@@ -3570,8 +3570,20 @@ export function setupBinanceConnection({
         const emitToChannel = (channelId, type, payload, extra = null) => {
             const channel = channelManager.getChannel(channelId);
             if (!channel) {
-                // Fallback to legacy emit for global messages
-                emit({ [type]: payload, ...(extra && { extra }) });
+                // Preserve the legacy envelope when the channel disappeared,
+                // but keep it in the market lane. In particular, a failed
+                // history read can answer after its channel was removed; that
+                // stale answer must not sit in front of a fill merely because
+                // it no longer has channel metadata.
+                const legacyPayload = { [type]: payload, ...(extra && { extra }) };
+                diagnosticRecord.observeOutbound(legacyPayload);
+                tradingCommandRegistry.recordOutcome(legacyPayload);
+                const reqId = activeRequestId;
+                sendJSON(
+                    connection,
+                    reqId ? { requestId: reqId, ...legacyPayload } : legacyPayload,
+                    marketFrame(type),
+                );
                 return;
             }
 
