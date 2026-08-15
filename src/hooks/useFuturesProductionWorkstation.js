@@ -62,11 +62,23 @@ const emptyResources = () => Object.freeze({
   trades: null,
 })
 
+// Why the chart will ask for nothing more. `history-start` is the exchange
+// saying there is nothing older; `chart-limit` is this desk's own ceiling on how
+// long a run it will draw. The two look identical from the chart's side — it
+// stops asking either way — and read differently to the operator, who is owed
+// the difference between a contract that begins here and a chart that stops
+// here.
+const CANDLE_HISTORY_EXHAUSTED_BY = Object.freeze({
+  HISTORY_START: 'history-start',
+  CHART_LIMIT: 'chart-limit',
+})
+
 const EMPTY_CANDLE_HISTORY = Object.freeze({
   symbol: null,
   interval: null,
   rows: Object.freeze([]),
   exhausted: false,
+  exhaustedBy: null,
   // Whether the last read of older candles could not be served. Held beside the
   // run rather than raised as an alert: what the operator needs to know is that
   // the left edge of this chart is where a read failed, not that something
@@ -136,10 +148,18 @@ const applyCandleHistoryPage = (previous, { symbol, interval, rows, exhausted })
   // does not move that row would be requested, delivered and dropped for as
   // long as the operator sat at the left edge.
   const deepened = base.rows.length === 0 || merged[0].openTime < base.rows[0].openTime
+  const exhaustedBy = base.exhausted
+    ? base.exhaustedBy
+    : exhausted
+      ? CANDLE_HISTORY_EXHAUSTED_BY.HISTORY_START
+      : !deepened
+        ? CANDLE_HISTORY_EXHAUSTED_BY.CHART_LIMIT
+        : null
   return Object.freeze({
     symbol,
     interval,
     exhausted: base.exhausted || exhausted || !deepened,
+    exhaustedBy,
     rows: merged,
     // A page that arrived is the answer the failed one never gave.
     readFailed: false,
@@ -188,6 +208,7 @@ const useFuturesProductionWorkstation = ({
   const ownerRef = useRef(0)
   const historyRequestRef = useRef(null)
   const historySelectionRef = useRef(null)
+  const generationRef = useRef(0)
   const [candleHistory, setCandleHistory] = useState(EMPTY_CANDLE_HISTORY)
   const [retryNonce, setRetryNonce] = useState(0)
   const [state, setState] = useState(() => createState({
@@ -561,7 +582,17 @@ const useFuturesProductionWorkstation = ({
     // page. The lock is released above so the next scroll asks again, the run
     // on screen is left exactly as it was, and nothing about it is taken for
     // the exchange saying there is nothing older.
-    if (historyResponse.state === FUTURES_WORKSTATION_STATES.UNAVAILABLE) {
+    //
+    // Anything that is not a served page is such a read. A page the exchange
+    // sent arrives `live` and nothing else does — but a status the desk states
+    // while the link is down rewrites every resource it holds, so the answer to
+    // the previous read comes back around under a state of its own, at the same
+    // endTime the next read is waiting on. Read as a page, that rewrite was the
+    // chart's answer to a read the exchange never saw: rows it already had,
+    // deepening nothing, which is how a dropped link came to mean the contract's
+    // history starts here and the chart stopped asking for the rest of the
+    // session. That is runbook step 19.
+    if (historyResponse.state !== FUTURES_WORKSTATION_STATES.LIVE) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setCandleHistory((previous) => {
         // Named for the contract it failed on, or it is a failure the desk
@@ -596,6 +627,21 @@ const useFuturesProductionWorkstation = ({
     }))
   }, [candleHistoryCache, historyResponse, state.symbol])
 
+  // Which session the read in flight belongs to. A generation replaces the
+  // session behind it, and an answer produced under the one it replaced is
+  // dropped for being older than what is on screen — so a read that was
+  // outstanding across a resynchronization is not in flight, it is lost.
+  //
+  // Held that way it was the second half of runbook step 19: the link came back,
+  // the session resynchronized, and the one read still outstanding kept the lock
+  // for the rest of the session while the notice went on telling the operator to
+  // scroll again. The lock now expires with the session that owns it, while the
+  // selection is left armed — a page that does arrive late is still the page the
+  // operator scrolled for.
+  useEffect(() => {
+    generationRef.current = state.generation
+  }, [state.generation])
+
   // The window the stream re-sends, watched for what falls off its front. Held
   // rather than derived, because a frame carries only where the window is now —
   // the bar that left is gone from it, and this is the last place it exists.
@@ -629,10 +675,15 @@ const useFuturesProductionWorkstation = ({
     const activeSubscription = activeSubscriptionRef.current
     if (activeSubscription === null) return false
     if (!Number.isSafeInteger(endTime) || endTime <= 0) return false
-    // One read at a time: the left edge fires continuously while scrolling.
-    if (historyRequestRef.current !== null) return false
+    // One read at a time: the left edge fires continuously while scrolling. One
+    // read of the session that issued it, though — a read outstanding when the
+    // session was rebuilt is not still travelling, and holding the lock for it
+    // is how a chart stops asking for the rest of a session.
+    const generation = generationRef.current
+    if (historyRequestRef.current !== null
+      && historyRequestRef.current.generation === generation) return false
     const limit = FUTURES_WORKSTATION_CANDLE_HISTORY_LIMITS.DEFAULT_ROWS
-    const selection = { symbol, interval, endTime }
+    const selection = { symbol, interval, endTime, generation }
     historyRequestRef.current = selection
     historySelectionRef.current = selection
 

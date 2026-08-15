@@ -159,8 +159,30 @@ const EMPTY_CANDLE_HISTORY = Object.freeze({
   interval: null,
   rows: Object.freeze([]),
   exhausted: false,
+  exhaustedBy: null,
   readFailed: false,
 })
+
+// What the chart has to say about its own left edge. A notice that instructs an
+// action the chart will not carry out is worse than no notice: it tells the
+// operator the missing market data is theirs to recover, at the moment they are
+// trying to read the market. So the instruction is only given where it is true —
+// where the chart will ask again — and where it will not, the operator is told
+// why instead.
+const readHistoryNotice = (candleHistory) => {
+  if (candleHistory.exhausted) {
+    // Two ways to stop asking, and the operator is owed the difference: the
+    // exchange having nothing older is a fact about the contract, while the run
+    // this chart will draw ending is a fact about the desk.
+    return candleHistory.exhaustedBy === 'chart-limit'
+      ? 'No older candles — the chart holds as far back as it draws.'
+      : 'No older candles — this contract’s history starts here.'
+  }
+  if (candleHistory.readFailed) {
+    return 'Older candles could not be loaded — scroll again to retry.'
+  }
+  return null
+}
 
 export const FuturesWorkstationView = ({
   identity,
@@ -311,6 +333,7 @@ export const FuturesWorkstationView = ({
     const behind = history.filter(row => row.openTime < oldestLive)
     return behind.length === 0 ? liveCandles : [...behind, ...liveCandles]
   }, [candleHistory, liveCandles, selectedInterval, selectedSymbol])
+  const historyNotice = readHistoryNotice(candleHistory)
   const depthState = resourceState(depth)
   const transportConnected = resources.status?.connected === true
   // `liveObservedAt`, not `observedAt`: the reducer keeps the last time each
@@ -1149,10 +1172,12 @@ export const FuturesWorkstationView = ({
               that could not be served is not a moment's news to be dismissed:
               it is where this chart stops until another scroll asks again, and
               a line that disappears leaves the chart looking like the contract
-              simply has no more history. */}
-          {candleHistory.readFailed ? (
+              simply has no more history. Where the chart will not ask again,
+              the same line says that instead — the retry it used to name was
+              one the chart had already stopped issuing. */}
+          {historyNotice !== null ? (
             <p className="futures-workstation-history-notice" role="status">
-              Older candles could not be loaded — scroll again to retry.
+              {historyNotice}
             </p>
           ) : null}
           {/* Said on the chart, because the chart is what the operator is

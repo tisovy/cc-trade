@@ -648,6 +648,16 @@ describe('useFuturesProductionWorkstation candle history', () => {
     writePage: vi.fn(async () => true),
   })
 
+  const emitStatus = (socket, requestId, revision, state, reasonCode = null, generation = 1) => {
+    socket.emitMessage(createFuturesProductionWorkstationEvent(eventValues(requestId, {
+      generation,
+      revision,
+      resource: 'status',
+      state,
+      payload: Object.freeze({ connected: state === 'live', reasonCode }),
+    })))
+  }
+
   const emitHistoryPage = (socket, requestId, revision, payload) => {
     socket.emitMessage(createFuturesProductionWorkstationEvent(eventValues(requestId, {
       revision,
@@ -911,6 +921,10 @@ describe('useFuturesProductionWorkstation candle history', () => {
         initialProps: defaultProps(socket, sendMessage, { candleHistoryCache: missingCache() }),
       })
       const requestId = sendMessage.mock.calls[0][0].requestId
+      // The session the read belongs to, settled before it is issued: a read
+      // outstanding across a generation is a read nothing will answer, and this
+      // scenario is about an answer that names another read, not about one.
+      act(() => emitStatus(socket, requestId, 2, 'live'))
 
       await act(async () => { await result.current.loadCandleHistory(START) })
       // The answer to a read the chart has moved on from.
@@ -943,6 +957,149 @@ describe('useFuturesProductionWorkstation candle history', () => {
 
       expect(result.current.candleHistory.readFailed).toBe(false)
       expect(result.current.candleHistory.rows).toHaveLength(20)
+    })
+  })
+
+  // Runbook step 19. The operator cut the link, scrolled to where candles are
+  // missing, restored the link and scrolled again: the candles never loaded for
+  // the rest of the session, while the notice went on saying `scroll again to
+  // retry`. Two latches produce that one screen — the chart concluding the
+  // contract's history starts here, and the renderer holding a read nothing
+  // will ever answer — and both are reached by the same sequence.
+  describe('the link comes back and the chart asks again', () => {
+    const failHistory = (socket, requestId, revision, endTime) => {
+      socket.emitMessage(createFuturesProductionWorkstationEvent(eventValues(requestId, {
+        revision,
+        resource: 'candleHistory',
+        state: 'unavailable',
+        payload: Object.freeze({
+          series: 'contract',
+          interval: '1m',
+          endTime,
+          offset: 0,
+          total: 0,
+          complete: true,
+          rows: Object.freeze([]),
+        }),
+      })))
+    }
+
+    const openScrolledToTheEdge = async () => {
+      const socket = new LocalSocket()
+      const sendMessage = vi.fn(() => true)
+      const { result } = renderHook(props => useFuturesProductionWorkstation(props), {
+        initialProps: defaultProps(socket, sendMessage, { candleHistoryCache: missingCache() }),
+      })
+      const requestId = sendMessage.mock.calls[0][0].requestId
+      const reads = () => sendMessage.mock.calls.filter(([message]) => (
+        message.action === FUTURES_PRODUCTION_WORKSTATION_ACTIONS.LOAD_CANDLE_HISTORY
+      ))
+      act(() => emitStatus(socket, requestId, 2, 'live'))
+      // The link goes down under the operator: the read they scrolled for is
+      // answered by a failure, and the notice goes up.
+      await act(async () => { await result.current.loadCandleHistory(START) })
+      await act(async () => failHistory(socket, requestId, 3, START))
+      expect(result.current.candleHistory.readFailed).toBe(true)
+      // They scroll again, at the same left edge, so the same read.
+      await act(async () => { await result.current.loadCandleHistory(START) })
+      expect(reads()).toHaveLength(2)
+      return { socket, result, requestId, reads }
+    }
+
+    // The desk states the link is down, and every resource it holds is restated
+    // under that state — the same page, the same endTime, a new object. Read as
+    // a page it deepened nothing, and a page that deepens nothing is the chart
+    // concluding it has reached the start of the contract's history.
+    it('does not read a stated outage as the exchange saying there is nothing older', async () => {
+      const { socket, result, requestId, reads } = await openScrolledToTheEdge()
+
+      await act(async () => emitStatus(socket, requestId, 4, 'disconnected', 'SOCKET_DISCONNECTED'))
+
+      expect(result.current.candleHistory.exhausted).toBe(false)
+      expect(result.current.candleHistory.exhaustedBy).toBeNull()
+      // The notice stands, and what it instructs is still true.
+      expect(result.current.candleHistory.readFailed).toBe(true)
+      await act(async () => { await result.current.loadCandleHistory(START) })
+      expect(reads()).toHaveLength(3)
+    })
+
+    // The link comes back and the session is rebuilt under a new generation.
+    // The read outstanding across it is not travelling — its answer is dropped
+    // for being older than what is on screen, or was never read at all.
+    it('lets go of a read the resynchronization abandoned', async () => {
+      const { socket, result, requestId, reads } = await openScrolledToTheEdge()
+
+      await act(async () => emitStatus(socket, requestId, 1, 'live', null, 2))
+
+      await act(async () => { await result.current.loadCandleHistory(START) })
+      expect(reads()).toHaveLength(3)
+      // And the page that scroll asks for is drawn — served under the
+      // generation the session was rebuilt as.
+      await act(async () => socket.emitMessage(createFuturesProductionWorkstationEvent(
+        eventValues(requestId, {
+          generation: 2,
+          revision: 2,
+          resource: 'candleHistory',
+          payload: Object.freeze({
+            series: 'contract',
+            interval: '1m',
+            endTime: START,
+            offset: 0,
+            total: 20,
+            complete: true,
+            rows: historyRows(-20, 0),
+          }),
+        }),
+      )))
+      expect(result.current.candleHistory.rows).toHaveLength(20)
+      expect(result.current.candleHistory.readFailed).toBe(false)
+    })
+
+    // The other half of the same rule: a page the exchange did serve, and that
+    // came back short, still stops the asking — and says which of the two
+    // reasons it is, because they are not the same fact.
+    it('still stops asking on a page the exchange served short', async () => {
+      const socket = new LocalSocket()
+      const sendMessage = vi.fn(() => true)
+      const { result } = renderHook(props => useFuturesProductionWorkstation(props), {
+        initialProps: defaultProps(socket, sendMessage, { candleHistoryCache: missingCache() }),
+      })
+      const requestId = sendMessage.mock.calls[0][0].requestId
+
+      await act(async () => { await result.current.loadCandleHistory(START) })
+      await act(async () => emitHistoryPage(socket, requestId, 2, {
+        offset: 0, total: 20, complete: true, rows: historyRows(-20, 0),
+      }))
+
+      expect(result.current.candleHistory.exhausted).toBe(true)
+      expect(result.current.candleHistory.exhaustedBy).toBe('history-start')
+    })
+
+    it('names its own ceiling as its own, not as the start of the contract', async () => {
+      const socket = new LocalSocket()
+      const sendMessage = vi.fn(() => true)
+      const { result } = renderHook(props => useFuturesProductionWorkstation(props), {
+        initialProps: defaultProps(socket, sendMessage, { candleHistoryCache: missingCache() }),
+      })
+      const requestId = sendMessage.mock.calls[0][0].requestId
+
+      await act(async () => { await result.current.loadCandleHistory(START) })
+      await act(async () => emitHistoryPage(socket, requestId, 2, {
+        offset: 0, total: 1_000, complete: true, rows: historyRows(-20, 0),
+      }))
+      expect(result.current.candleHistory.exhausted).toBe(false)
+      // A page the exchange served in full, reaching no further back than the
+      // rows already held: the desk stops asking, and the reason is the desk's.
+      await act(async () => { await result.current.loadCandleHistory(START) })
+      await act(async () => emitHistoryPage(socket, requestId, 3, {
+        offset: 0,
+        total: 1_000,
+        complete: true,
+        rows: historyRows(-10, 0),
+      }))
+
+      expect(result.current.candleHistory.exhausted).toBe(true)
+      expect(result.current.candleHistory.exhaustedBy).toBe('chart-limit')
     })
   })
 

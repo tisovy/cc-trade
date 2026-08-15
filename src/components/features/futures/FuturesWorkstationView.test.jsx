@@ -2335,6 +2335,31 @@ describe('a history read that could not be served', () => {
 
     expect(screen.queryByText(/Older candles could not be loaded/)).toBeNull()
   })
+
+  // A notice that instructs an action the chart has already stopped taking is
+  // worse than no notice: it tells the operator the missing market data is
+  // theirs to recover at the moment they are trying to read the market. Runbook
+  // step 19 is exactly that screen — `scroll again to retry`, on a chart that
+  // would issue no read however hard it was scrolled.
+  it('does not offer a retry the chart has stopped issuing', () => {
+    renderView({
+      candleHistory: history({ exhausted: true, exhaustedBy: 'history-start', readFailed: true }),
+    })
+
+    expect(screen.queryByText(/scroll again to retry/)).toBeNull()
+    expect(screen.getByText(/history starts here/)).toHaveAttribute('role', 'status')
+  })
+
+  it('separates the contract having no more history from the chart drawing no more', () => {
+    const { unmount } = renderView({
+      candleHistory: history({ exhausted: true, exhaustedBy: 'history-start' }),
+    })
+    expect(screen.getByText(/this contract’s history starts here/)).toBeTruthy()
+    unmount()
+
+    renderView({ candleHistory: history({ exhausted: true, exhaustedBy: 'chart-limit' }) })
+    expect(screen.getByText(/the chart holds as far back as it draws/)).toBeTruthy()
+  })
 })
 
 describe('production workstation container', () => {
