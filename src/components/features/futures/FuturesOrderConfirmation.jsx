@@ -19,6 +19,7 @@ export const FuturesOrderConfirmation = ({
   sizeBasis = 'of available',
   sizeDisabled = false,
   sizeReason = null,
+  unsent = null,
   confirmDisabled = false,
   onSizePercentChange,
   onConfirm,
@@ -126,6 +127,13 @@ export const FuturesOrderConfirmation = ({
 
       {sizeReason ? (
         <p className="futures-order-confirm-size-reason" role="status">{sizeReason}</p>
+      ) : null}
+
+      {/* The send did not leave the renderer. Said here rather than only on the
+          rail behind this panel: the operator is looking at the numbers they
+          approved, and those numbers are still exactly what would be sent. */}
+      {unsent ? (
+        <p className="futures-order-confirm-warning" role="alert">{unsent}</p>
       ) : null}
 
       <div className="futures-order-editor-actions">

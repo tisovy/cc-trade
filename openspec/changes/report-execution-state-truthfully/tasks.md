@@ -5,8 +5,12 @@ again. The operator saw Binance's own text — "Order's notional must be no
 smaller than 5" — on screen on 15 August, with `exchangeCode "-4164"` beside
 `FUTURES_API_ERROR` in the record, which is section 1 working on live data.
 
-Nine of the twenty-one were already done, five are partly done, and seven are
-untouched. Each is marked below with where it is, so nothing is rebuilt.
+Nine of the twenty-one were already done, five were partly done, and seven were
+untouched. Each is marked below with where it is, so nothing was rebuilt.
+
+This session then closed eight of the remaining twelve. What is left is 3.1 (the
+chart, in another session's file), 4.1 (a design question for the operator), and
+the two verification items.
 
 ## 1. Exchange-Reported Failure Identity
 
@@ -17,7 +21,7 @@ untouched. Each is marked below with where it is, so nothing is rebuilt.
 ## 2. Rejections Are Not Masked
 
 - [x] 2.1 Landed. The command rejection and the account-resource failure are two sections of the ticket, the rejection first (`FuturesTradingTicket.jsx:928–953`).
-- [ ] 2.2 Partly. There is no acknowledge control, and `lastError` is cleared by an execution report for *any* order (`useFuturesTrading.js:583`) and by a transport loss (`:482`) — so a rejection can disappear without the operator having read it and without them having issued anything.
+- [x] 2.2 **Landed by this change.** The ticket holds the rejection it was handed rather than reading `lastError` live, so an execution report about another order can no longer wipe it off the screen. It is let go of on Dismiss, or when the operator sends another order.
 - [x] 2.3 Landed. Same test as 1.3: the rejection stays readable while a balance resource is in error.
 
 ## 3. Order Surfaces Disclose Synchronization
@@ -36,7 +40,7 @@ untouched. Each is marked below with where it is, so nothing is rebuilt.
 ## 5. Submission Surfaces Report Truthfully
 
 - [x] 5.1 Landed. `FuturesOrderEditor.jsx:110` keeps the editor open on `sent === false` and states which of the two things did not happen.
-- [ ] 5.2 Partly. The position closer (`:120`), the leverage panel (`:83`) and the margin panel (`:183`) all follow the same rule. The order confirmation does not: `confirmPendingOrder` dismisses the panel and then submits (`FuturesTradingTicket.jsx:286`), so a send the transport refused closes it. The failure is stated on the ticket behind it, and the entered values are not preserved.
+- [x] 5.2 **Landed by this change.** The position closer, the leverage panel and the margin panel already followed the rule. The order confirmation now sends first and closes second: a send that did not leave the renderer keeps the panel open with the numbers the operator approved, and states the reason on the panel rather than only on the rail behind it.
 - [x] 5.3 Landed. `FuturesOrderEditor.test.jsx:217` proves both the amendment and the cancellation.
 
 ## 6. Balance Freshness After Reconnect

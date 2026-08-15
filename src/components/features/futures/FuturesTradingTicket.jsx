@@ -160,6 +160,17 @@ const FuturesTradingTicket = ({
   const [localPrice, setLocalPrice] = useState('')
   const [feedback, setFeedback] = useState(null)
   const [pendingOrder, setPendingOrder] = useState(null)
+  // What did not leave the renderer, held on the panel that tried to send it.
+  const [unsentConfirmation, setUnsentConfirmation] = useState(null)
+  // The rejection the ticket is showing, and the one it was last given.
+  //
+  // The hook clears `lastError` whenever an execution report arrives — including
+  // a report about a completely different order — so a refusal of the order the
+  // operator just sent could be wiped off the screen by an unrelated fill a
+  // moment later. The ticket keeps the rejection it was handed and lets go of it
+  // only when the operator dismisses it or sends something else.
+  const [heldRejection, setHeldRejection] = useState(null)
+  const [givenRejection, setGivenRejection] = useState(null)
   const handledGestureRef = useRef(null)
   const handledSizeRef = useRef(null)
   const feedbackSymbolRef = useRef(selectedSymbol)
@@ -294,6 +305,9 @@ const FuturesTradingTicket = ({
       })
       return false
     }
+    // The operator is issuing another command: the previous refusal has been
+    // acted on, whether or not it was dismissed.
+    setHeldRejection(null)
     const accepted = safeState.placeOrder({
       symbol: selectedSymbol,
       side: action.side,
@@ -314,18 +328,34 @@ const FuturesTradingTicket = ({
   // a quantity, and that quantity is what leaves. Deriving it again here read
   // the balance a second time, so a refresh landing between staging and Confirm
   // silently doubled an order the operator had already read and approved.
+  // A panel that closes is this desk's way of saying "done", and it may only say
+  // it when the command actually left the renderer. It used to close first and
+  // send second, so a closed socket dismissed the confirmation exactly as a
+  // delivered order did — with the numbers the operator had just approved gone
+  // from the screen. The editor already worked this way; this is the same rule
+  // on the surface that sends the most orders.
   const confirmPendingOrder = () => {
     if (!pendingOrder) return
-    setPendingOrder(null)
-    submitLimitOrder(pendingOrder.action, pendingOrder.draft, {
+    const sent = submitLimitOrder(pendingOrder.action, pendingOrder.draft, {
       sizeUsdt: pendingOrder.notionalUsdt,
       staged: true,
     })
+    if (sent === false) {
+      setUnsentConfirmation(resolveSubmitBlockReason(
+        pendingOrder.action,
+        pendingOrder.draft,
+        pendingOrder.notionalUsdt,
+      ))
+      return
+    }
+    setUnsentConfirmation(null)
+    setPendingOrder(null)
   }
 
   const cancelPendingOrder = () => {
     if (!pendingOrder) return
     setPendingOrder(null)
+    setUnsentConfirmation(null)
     setFeedback(null)
   }
 
@@ -392,6 +422,7 @@ const FuturesTradingTicket = ({
       minNotionalUsdt,
       leverage: entryLeverage ?? 1,
     })
+    setUnsentConfirmation(null)
     setPendingOrder(previous => previous ? {
       ...previous,
       draft: nextDraft,
@@ -433,6 +464,7 @@ const FuturesTradingTicket = ({
       return
     }
     setFeedback(null)
+    setUnsentConfirmation(null)
     setPendingOrder({
       action,
       symbol: selectedSymbol,
@@ -498,6 +530,7 @@ const FuturesTradingTicket = ({
     // An order staged for the previous contract must never be confirmable
     // against the new one.
     setPendingOrder(null)
+    setUnsentConfirmation(null)
   }, [selectedSymbol])
 
   // Recomputed on every render rather than frozen at staging time, so the
@@ -527,7 +560,13 @@ const FuturesTradingTicket = ({
     ? (!amountWithinBudget && sizingReady ? 'Order size exceeds the available balance' : null)
     : (price ? DRAFT_REASON_MESSAGES[orderDraft.reason] ?? null : 'Pick a chart or order-book price'))
   const selectedOpenOrders = openOrders.filter(order => order.symbol === selectedSymbol)
-  const lastError = safeState.lastError ?? null
+  // Adjusting state during render rather than in an effect: the rejection must
+  // be on screen in the same commit it arrived in, not one paint later.
+  if (safeState.lastError && safeState.lastError !== givenRejection) {
+    setGivenRejection(safeState.lastError)
+    setHeldRejection(safeState.lastError)
+  }
+  const lastError = heldRejection
   const unresolvedCommand = safeState.unresolvedCommand ?? null
   const accountFailures = Object.entries(safeState.accountResources ?? {})
     .filter(([, resource]) => resource?.status === 'error' || resource?.status === 'stale')
@@ -976,6 +1015,15 @@ const FuturesTradingTicket = ({
                 : ` · Binance ${lastError.details.binanceCode}`}
             </strong>
             <code>{lastError.message}</code>
+            {/* The refusal stays until it is read. Dismissing it is the operator
+                saying so — nothing else on the desk may decide that for them. */}
+            <button
+              type="button"
+              aria-label="Dismiss rejection"
+              onClick={() => setHeldRejection(null)}
+            >
+              Dismiss
+            </button>
           </section>
         ) : null}
         {accountFailures.length > 0 ? (
@@ -1002,6 +1050,7 @@ const FuturesTradingTicket = ({
           sizeReason={pendingSizingReason}
           confirmDisabled={pendingOrder.resizedInConfirmation === true
             && (pendingSizingReason !== null || !pendingOrder.draft.ok)}
+          unsent={unsentConfirmation}
           onSizePercentChange={resizePendingOrder}
           onConfirm={confirmPendingOrder}
           onCancel={cancelPendingOrder}

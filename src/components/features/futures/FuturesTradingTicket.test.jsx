@@ -1768,6 +1768,100 @@ describe('FuturesTradingTicket', () => {
     expect(state.refresh).toHaveBeenCalledExactlyOnceWith('BTCUSDT')
   })
 
+  // A panel that closes is this desk's way of saying "done". It closed first and
+  // sent second, so a closed socket dismissed the confirmation exactly as a
+  // delivered order did — and took the numbers the operator had just approved
+  // off the screen with it.
+  it('keeps the confirmation open with its numbers when the send does not leave', () => {
+    const state = createState({ placeOrder: vi.fn(() => false) })
+    const props = {
+      state,
+      selectedSymbol: 'BTCUSDT',
+      selectedContract: contract,
+      draftPrice: '58445.0',
+    }
+    const { rerender } = render(<FuturesTradingTicket {...props} />)
+    sizeTo(25)
+    rerender(
+      <FuturesTradingTicket
+        {...props}
+        gestureRequest={{
+          id: 77, side: 'BUY', positionSide: 'LONG', positionEffect: 'ENTRY', price: '58445.03',
+        }}
+      />,
+    )
+    const panel = screen.getByRole('alertdialog')
+    const approvedPrice = within(panel).getByText('58445')
+
+    confirmStagedOrder()
+
+    expect(state.placeOrder).toHaveBeenCalledOnce()
+    // Still open, still showing what would be sent, and saying why it was not.
+    expect(screen.getByRole('alertdialog')).toBe(panel)
+    expect(approvedPrice).toBeInTheDocument()
+    expect(panel).toHaveTextContent('Local backend connection unavailable')
+  })
+
+  // The hook clears `lastError` on any execution report, including one about a
+  // different order. A refusal of the order the operator just sent could be
+  // wiped off the screen by an unrelated fill a moment later.
+  it('holds a rejection on screen after the state stops carrying it', () => {
+    const rejected = {
+      code: 'FUTURES_API_ERROR',
+      message: "Order's notional must be no smaller than 5.",
+      details: { marketType: 'futures', binanceCode: -4164 },
+    }
+    const props = {
+      selectedSymbol: 'BTCUSDT',
+      selectedContract: contract,
+      draftPrice: '58445.0',
+    }
+    const { rerender } = render(
+      <FuturesTradingTicket {...props} state={createState({ lastError: rejected })} />,
+    )
+    const rejection = screen.getByLabelText('Futures command rejection')
+    expect(rejection).toHaveTextContent('Binance -4164')
+
+    // An unrelated fill lands and the hook drops the rejection.
+    rerender(<FuturesTradingTicket {...props} state={createState({ lastError: null })} />)
+    expect(screen.getByLabelText('Futures command rejection'))
+      .toHaveTextContent("Order's notional must be no smaller than 5.")
+
+    // It goes when the operator says it goes.
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss rejection' }))
+    expect(screen.queryByLabelText('Futures command rejection')).toBeNull()
+  })
+
+  it('lets go of a held rejection when the operator sends another order', () => {
+    const state = createState({
+      lastError: {
+        code: 'FUTURES_API_ERROR',
+        message: 'Margin is insufficient.',
+        details: { marketType: 'futures', binanceCode: -2019 },
+      },
+    })
+    const props = {
+      state,
+      selectedSymbol: 'BTCUSDT',
+      selectedContract: contract,
+      draftPrice: '58445.0',
+    }
+    const { rerender } = render(<FuturesTradingTicket {...props} />)
+    expect(screen.getByLabelText('Futures command rejection')).toBeInTheDocument()
+    sizeTo(25)
+    rerender(
+      <FuturesTradingTicket
+        {...props}
+        gestureRequest={{
+          id: 78, side: 'BUY', positionSide: 'LONG', positionEffect: 'ENTRY', price: '58445.03',
+        }}
+      />,
+    )
+    confirmStagedOrder()
+    expect(state.placeOrder).toHaveBeenCalledOnce()
+    expect(screen.queryByLabelText('Futures command rejection')).toBeNull()
+  })
+
   // The seam, not either side of it. That a reconnect marks the balance stale is
   // proved in the hook, and that a stale balance blocks trading is proved in the
   // readiness derivation — and between them nothing said what the operator sees
