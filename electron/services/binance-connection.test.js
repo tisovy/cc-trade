@@ -4296,6 +4296,76 @@ describe('setupBinanceConnection user-data orchestration', () => {
             .toHaveBeenCalledWith('ORDERONLYUSDT');
     });
 
+    // The contracts the account has something riding on are named by three of a
+    // pass's reads, and asking each of them separately asked the same question of
+    // a half-answered account. Measured on 2026-08-15: a pass reading three lists
+    // sent three identical `futures_symbol_configs` broadcasts where a pass
+    // reading one sent one, and every one of them is a renderer state update.
+    // What the pass can act on is the last answer either way.
+    //
+    // Stated per pass rather than per command, because a command can run more
+    // than one: the pass is the unit that reads the account, so the pass is the
+    // unit the configuration is read for.
+    it('reads the contract configuration once a pass, not once a list', async () => {
+        moduleMocks.futuresAdapter.getSymbolConfig
+            .mockImplementation(async symbol => ({
+                symbol, leverage: 20, marginType: 'CROSSED', maxNotionalValue: '5000000',
+            }));
+        const positionsOperation = positionsRefreshOperation(['BMTUSDT']);
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([
+            positionsOperation,
+            {
+                type: 'regularOrders',
+                weight: 40,
+                errorLabel: 'regular orders',
+                loadPayload: vi.fn().mockResolvedValue({
+                    futures_regular_orders: [{
+                        symbol: 'ORDERONLYUSDT', orderId: 77, orderKind: 'REGULAR',
+                        status: 'NEW', side: 'BUY', origQty: '10', executedQty: '0', price: '3',
+                    }],
+                }),
+            },
+            {
+                type: 'algoOrders',
+                weight: 5,
+                errorLabel: 'algo orders',
+                loadPayload: vi.fn().mockResolvedValue({
+                    futures_algo_orders: [{
+                        symbol: 'ALGOONLYUSDT', orderId: 78, orderKind: 'ALGO',
+                        status: 'NEW', side: 'SELL', origQty: '10', executedQty: '0',
+                        stopPrice: '9',
+                    }],
+                }),
+            },
+        ]);
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+
+        moduleMocks.rendererConnection.sendUTF.mockClear();
+        positionsOperation.loadPayload.mockClear();
+        await runFuturesCommand({
+            action: 'account.refresh', clientOrderId: 'refresh-three-lists', symbol: 'BTCUSDT',
+        });
+        await flushMicrotasks();
+
+        // Every pass reads the position list exactly once, so counting that read
+        // counts the passes — including the follow-up a pass can queue behind it.
+        const passes = positionsOperation.loadPayload.mock.calls.length;
+        const broadcasts = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.futures_symbol_configs)
+            .length;
+        expect(passes).toBeGreaterThan(0);
+        expect(broadcasts).toBe(passes);
+        // And it still reads every contract, which is what the pass is for.
+        expect(configuredSymbols().sort())
+            .toEqual(['ALGOONLYUSDT', 'BMTUSDT', 'ORDERONLYUSDT']);
+    });
+
     it('reads only the contracts nothing is held for', async () => {
         moduleMocks.futuresAdapter.getSymbolConfig
             .mockImplementation(async symbol => ({

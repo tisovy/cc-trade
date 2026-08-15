@@ -1032,6 +1032,10 @@ export function setupBinanceConnection({
     // Leverage per open position is a different read with a different budget; it
     // is bounded on its own so that widening the history fan-out does not widen it.
     const FUTURES_POSITION_CONFIG_MAX_SYMBOLS = 8;
+    // Which of a pass's reads can change the set of contracts the account has
+    // something riding on. A pass touching none of them leaves that set exactly
+    // where it was and has nothing to re-read it for.
+    const FUTURES_HOLDING_RESOURCES = new Set(['positions', 'regularOrders', 'algoOrders']);
     // How long a contract's leverage and margin mode are held before an
     // automatic refresh reads them again. Long enough that a busy minute pays
     // nothing for them, short enough that a leverage changed in Binance's own
@@ -1515,20 +1519,6 @@ export function setupBinanceConnection({
             if (operation.type === 'positions') {
                 futuresMarkPriceFeed?.track(futuresAccountResources.positions.data ?? []);
             }
-            // Every contract the account has something riding on, so the dock can
-            // state what each is carried at and the free-margin estimate can
-            // price what the resting orders commit. Read after an order list as
-            // well as after a position list: an account can work orders for a
-            // whole session without ever holding a position, and that is exactly
-            // the account whose leverage nothing else would ask for. Not awaited
-            // — the account state is already correct without it, and this only
-            // adds a reading to it.
-            if (['positions', 'regularOrders', 'algoOrders'].includes(operation.type)) {
-                void refreshFuturesPositionConfigs(
-                    futuresAccountResources.positions.data ?? [],
-                    futuresWorkingOrderSymbolSource(),
-                );
-            }
             broadcastFuturesAccountState();
         }, operation.weight).catch((error) => {
                 if (epoch !== futuresMutationEpoch || activation !== futuresActivationGeneration) return;
@@ -1540,6 +1530,31 @@ export function setupBinanceConnection({
                 broadcastFuturesAccountState();
                 logger.error(`${operation.errorLabel}:`, error?.code || error?.message);
             })));
+
+        // Every contract the account has something riding on, so the dock can
+        // state what each is carried at and the free-margin estimate can price
+        // what the resting orders commit. The contracts come from the position
+        // list and from both order lists — an account can work orders for a
+        // whole session without ever holding a position, and that is exactly the
+        // account whose leverage nothing else would ask for.
+        //
+        // Once the pass has finished, not as each list lands. Asked per list it
+        // asked the same question of a half-answered account: three lists, three
+        // reads of the same held set, three identical configuration broadcasts to
+        // the renderer for one pass — six against two, measured. The reads
+        // themselves coalesced while they were in flight, so what it cost was
+        // renderer work, and what it bought was nothing: the last of the three
+        // answers is the only one the pass could act on anyway.
+        //
+        // Not awaited — the account state is already correct without it, and this
+        // only adds a reading to it.
+        if (epoch !== futuresMutationEpoch || activation !== futuresActivationGeneration) return;
+        if (operations.some(operation => FUTURES_HOLDING_RESOURCES.has(operation.type))) {
+            void refreshFuturesPositionConfigs(
+                futuresAccountResources.positions.data ?? [],
+                futuresWorkingOrderSymbolSource(),
+            );
+        }
     };
 
     // A refresh asked for while one is running used to be discarded outright, so
