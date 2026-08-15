@@ -64,6 +64,68 @@ window's **first** day rather than its last — the same argument as the note
 above, one blocker later. If it is still unavailable on day one, the cause is a
 different one and the window should stop until it is found.*
 
+### Day one: still 0, and the cause is a third input
+
+*Read 2026-08-15 from the operator's own journal, the desk having run from 11:54
+on the fixed build:*
+
+```
+free-margin         passes 0/68   agreed 0   unavailable 68/68 (68 wholly)
+notional            passes 41/58  agreed 40  worst 5 bps
+initial-margin      passes 41/58  agreed 40  worst 5 bps
+maintenance-margin  passes 41/58  agreed 40  worst 5 bps
+liquidation-price   passes 41/58  agreed 41  worst 0 bps
+```
+
+*So the window has still not started, and the note above was wrong where it said
+the structural reason was gone. It named one reason and fixed it. There were
+three, and the fix covered two.*
+
+*A resting order is priced from three held things: the contract's leverage, its
+bracket table, and its **mark**. `1c07bba` widened the first two to contracts the
+account only has an order on. The mark comes from somewhere else entirely — the
+mark-price feed, tracked by `readFuturesPositionSymbols`, which skips any row
+whose quantity is zero. A contract with an order and no position has no mark, and
+`restingOrderInitialMargin` refuses without one; the sum is all-or-nothing, so one
+such order is the whole account's free margin.*
+
+*And an entry order **is** an order on a contract with no position. That is not
+an edge of the account shape, it is the ordinary one.*
+
+*Measured against the module at `102afe3`, one position and one resting order on
+another contract, changing one held input at a time:*
+
+| what is held for the order's contract | free margin |
+|---------------------------------------|-------------|
+| mark, leverage and bracket             | 270         |
+| leverage and bracket, **no mark**      | null        |
+| mark and bracket, no leverage          | null        |
+| mark and leverage, no bracket          | null        |
+
+*The middle row is today. The two below it are what `1c07bba` closed.*
+
+*Note also that the mark is refused for a **limit** order, which carries its own
+price and needs no mark to be valued — `restingOrderInitialMargin` requires one
+unconditionally and only falls back to it when the order states no price. So
+there are two independent repairs here, in two different files, and either alone
+leaves a real case open:*
+
+- *the gate: require a mark only when the order has no price of its own —
+  `futures-account-margin.js`, owned by the session working
+  `compute-the-unstated-values-beside-the-read`;*
+- *the feed: track marks for contracts with working orders, not only for
+  contracts with positions — `binance-connection.js` and
+  `futures-mark-price-feed.js`. Without it a stop-market or trailing order on an
+  order-only contract still takes the whole sum away, because it has no price of
+  its own to fall back from. It is not a one-liner: the feed reconnects every
+  stream when its symbol set changes, so tracking orders makes placing one
+  re-open the marks — and an empty mark map is this same failure while it
+  reconnects.*
+
+*Until both land, the window cannot start and 1.3 will read 0 compared however
+long it runs. Do not count days against this change before free margin is
+observed computing on live data at least once.*
+
 - [ ] 1.1 Do not start this change until `compute-the-unstated-values-beside-the-read` has been running for the window in the proposal. There is nothing to decide before then.
 - [ ] 1.2 Operator copies the day's record files aside if the window is to run longer than the fourteen days the record keeps.
 - [ ] 1.3 Operator reads `node scripts/read-desk-record.mjs` over the window and states, per value, the passes compared, the worst disagreement and where, and the passes that could not be computed.
