@@ -1903,14 +1903,17 @@
    dock splits it resolved to 99px, so the badge, being last, was the part cut.
    The new reading eaten by the old one is the defect this change exists to
    remove, so the room comes from the tracks with slack rather than from the
-   word. Measured in Chromium at 1280, 1461, 1600 and 1920: every reading fits,
-   the head and every row resolve to one set of tracks, and the two clips that
-   remain are older than this change — a fourteen-character contract, whose whole
-   name is now on the element, and the Cancel control's own 68px track. */
+   word. 128px because the widest pair is `ALGO · SHORT` and not the `ALGO · LONG`
+   the first measurement happened to use — 126px, six more than the eight that
+   would have looked sufficient.
+   Measured in Chromium at 1280, 1461, 1600, 1920 and 2560: every reading fits,
+   including a ten-digit price, and the head and every row resolve to one set of
+   tracks. One clip remains and it is older than this change — a fourteen-
+   character contract, whose whole name is now on the element. */
 .futures-workstation-dock-row.is-orders {
   grid-template-columns:
-    minmax(72px, 1fr) 48px minmax(120px, 1.2fr) minmax(70px, 1fr)
-    minmax(74px, 0.9fr) minmax(48px, 0.9fr) 68px;
+    minmax(72px, 1fr) 48px minmax(128px, 1.2fr) minmax(78px, 1fr)
+    minmax(74px, 0.9fr) minmax(44px, 0.9fr) 68px;
 }
 
 .futures-workstation-dock-row > span {
@@ -2167,6 +2170,16 @@
   font-size: calc(var(--fx-ui-scale, 1) * 12px);
   font-weight: 800;
   cursor: pointer;
+}
+
+/* Cancel is the one control of this family that lives inside a row rather than
+   in a header, and at the width the dock splits its own padding was what pushed
+   its label out of the cell: 77px of button in a 68px track, so it read `Cance…`.
+   The fix is the padding rather than the track — a wider track would have been
+   paid for by the price beside it, and a price is a reading while this is a
+   label the operator already knows the shape of. */
+.futures-workstation-dock-row .futures-workstation-dock-cancel {
+  padding: 4px 5px;
 }
 
 .futures-workstation-dock-close:disabled,
