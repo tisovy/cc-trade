@@ -192,6 +192,8 @@ export const FuturesWorkstationView = ({
   draftPrice,
   ownedOrders = EMPTY_ROWS,
   ownedPositions = EMPTY_ROWS,
+  orderAvailability = null,
+  onRefreshAccount,
   candleHistory = EMPTY_CANDLE_HISTORY,
   onLoadHistory,
   tradingRail,
@@ -1197,6 +1199,31 @@ export const FuturesWorkstationView = ({
               </button>
             </div>
           ) : null}
+          {/* An order the desk has not read is an order the chart does not draw,
+              and a chart with no order lines on it is the picture of an account
+              with no orders in it. Those are not the same account, and the chart
+              is what the operator is looking at when they decide nothing is
+              resting — so what is behind the lines is said here, with the way
+              back, exactly as the dock says it under its rows. */}
+          {orderAvailability !== null
+            && (orderAvailability.notice !== null || orderAvailability.label !== null) ? (
+              <div
+                className={`futures-workstation-order-sync is-${orderAvailability.state}`}
+                role={orderAvailability.state === 'failed' ? 'alert' : 'status'}
+                aria-label="Chart order synchronization"
+              >
+                <span>{orderAvailability.notice ?? orderAvailability.label}</span>
+                {orderAvailability.reason === null ? null : <em>{orderAvailability.reason}</em>}
+                {(orderAvailability.state === 'failed' || orderAvailability.state === 'stale')
+                  && typeof onRefreshAccount === 'function'
+                  ? (
+                    <button type="button" onClick={() => onRefreshAccount(selectedSymbol)}>
+                      Retry
+                    </button>
+                  )
+                  : null}
+              </div>
+            ) : null}
           {/* A chart that has candles on it is readable, and covering it with a
               state was the desk hiding the only thing the operator came for. The
               state is stated in the corner with the age of the reading, and the

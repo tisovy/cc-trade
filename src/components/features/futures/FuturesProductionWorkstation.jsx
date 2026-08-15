@@ -7,7 +7,10 @@ import {
   describeFuturesOrderIntent,
   describeFuturesPosition,
 } from '../../../utils/futuresOrderPresentation.js'
-import { isFuturesBalanceConfirmed } from '../../../utils/futuresReadiness.js'
+import {
+  describeFuturesOrderAvailability,
+  isFuturesBalanceConfirmed,
+} from '../../../utils/futuresReadiness.js'
 import {
   readFuturesSymbolHistory,
   rememberFuturesSymbol,
@@ -435,6 +438,11 @@ export const FuturesProductionWorkstation = ({
       .filter(([, tickSize]) => typeof tickSize === 'string'),
   ), [catalogContracts])
 
+  // What is behind the orders the chart is about to draw. The same reading the
+  // dock is given, from the same helper, so the two surfaces cannot disagree
+  // about whether the account has been read.
+  const orderAvailability = describeFuturesOrderAvailability(executionState?.accountResources)
+
   const tradingRail = (
     <FuturesTradingTicket
       state={executionState}
@@ -488,6 +496,8 @@ export const FuturesProductionWorkstation = ({
         draftPrice={draftPrice}
         ownedOrders={ownedOrders}
         ownedPositions={ownedPositions}
+        orderAvailability={orderAvailability}
+        onRefreshAccount={executionState?.refresh}
         candleHistory={workstationState.candleHistory}
         onLoadHistory={workstationState.loadCandleHistory}
         tradingRail={tradingRail}

@@ -393,6 +393,20 @@
   white-space: nowrap;
 }
 
+/* What the order does to the position, beside the leg it belongs to. The rail is
+   the narrowest surface that lists orders, so it is a badge and not a column. */
+.futures-production-order-exit {
+  margin-left: 4px;
+  padding: 0 3px;
+  border: 1px solid rgba(126, 143, 166, 0.4);
+  border-radius: 3px;
+  color: #93a6b7;
+  font-size: calc(var(--fx-ui-scale, 1) * 9px);
+  font-style: normal;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
 /* The age of a balance nothing has confirmed on this connection, beside the
    figure it qualifies. Quiet enough not to be read as part of the amount, and
    present only while the amount is unconfirmed. */

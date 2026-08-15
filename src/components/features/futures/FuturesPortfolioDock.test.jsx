@@ -901,6 +901,35 @@ describe('FuturesPortfolioDock', () => {
     expect(onRefreshAccount).toHaveBeenCalledExactlyOnceWith('BTCUSDT')
   })
 
+  // The leg says which position an order belongs to. It never said whether the
+  // order opens that position or closes it — that was left to be worked out from
+  // the side colour, which is true and only if you already know the rule.
+  it('says on a working order whether it opens or closes the position', () => {
+    const read = { status: 'ready', data: [], lastSuccessfulAt: 100, error: null }
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[]}
+        accountResources={{ positions: read, regularOrders: read, algoOrders: read }}
+        openOrders={[
+          // One-way account: a reduce-only sell closes a long.
+          { symbol: 'BTCUSDT', orderId: 1, side: 'SELL', positionSide: 'BOTH', reduceOnly: true, price: '59900', origQty: '1', z: '0' },
+          // And a plain buy opens one.
+          { symbol: 'BTCUSDT', orderId: 2, side: 'BUY', positionSide: 'BOTH', price: '58000', origQty: '1', z: '0' },
+        ]}
+      />,
+    )
+
+    const rows = within(screen.getByRole('table', { name: 'Working orders' })).getAllByRole('row')
+    const closing = within(rows[1]).getAllByRole('cell')[2]
+    expect(closing).toHaveTextContent('LONG')
+    expect(within(closing).getByTitle(/^Exit — reduce-only/)).toHaveTextContent('exit')
+
+    const opening = within(rows[2]).getAllByRole('cell')[2]
+    expect(opening).toHaveTextContent('LONG')
+    expect(opening).not.toHaveTextContent('exit')
+  })
+
   it('never renders a failed order resource as an empty book of working orders', () => {
     const onRefreshAccount = vi.fn()
     render(

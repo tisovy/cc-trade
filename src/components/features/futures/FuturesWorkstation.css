@@ -1038,6 +1038,87 @@
   cursor: default;
 }
 
+/* What is behind the order lines, said on the chart because the chart is where
+   an unread account looks like a flat one: no lines drawn is exactly what an
+   account with no orders looks like.
+   Bottom-left, stacked above the older-candles line, for the same reason the
+   feed notice sits 28px below the reading notice — two boxes anchored to one
+   corner are kept apart vertically, because that is the only separation a
+   variable-width box cannot lose. The right of the chart is the price scale and
+   stays clear of text, so the box is bounded short of it. */
+.futures-workstation-order-sync {
+  position: absolute;
+  bottom: 36px;
+  left: 8px;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 88px);
+  margin: 0;
+  padding: 3px 8px;
+  border: 1px solid rgba(142, 159, 177, 0.35);
+  border-radius: 6px;
+  background: rgba(5, 12, 19, 0.92);
+  color: #8192a4;
+  font-size: calc(var(--fx-ui-scale, 1) * 11px);
+  letter-spacing: 0.02em;
+  line-height: 1.3;
+}
+
+.futures-workstation-order-sync > span {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.futures-workstation-order-sync em {
+  overflow: hidden;
+  min-width: 0;
+  color: #718399;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.futures-workstation-order-sync.is-stale {
+  border-color: rgba(232, 198, 90, 0.45);
+  color: #e8c65a;
+}
+
+.futures-workstation-order-sync.is-failed {
+  border-color: rgba(239, 91, 105, 0.5);
+  color: #ffabb3;
+}
+
+.futures-workstation-order-sync button {
+  flex: 0 0 auto;
+  padding: 2px 7px;
+  border: 1px solid rgba(240, 185, 11, 0.5);
+  border-radius: 4px;
+  background: rgba(240, 185, 11, 0.12);
+  color: #f0c94e;
+  font: inherit;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+/* The leg says which position an order belongs to; this says what it does to it.
+   One badge wide, because on the chart the line is already carrying its price
+   and its value. */
+.futures-workstation-owned-order-exit {
+  margin-left: 4px;
+  padding: 0 3px;
+  border: 1px solid currentcolor;
+  border-radius: 3px;
+  font-size: calc(var(--fx-ui-scale, 1) * 9px);
+  font-style: normal;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  opacity: 0.75;
+}
+
 /* Quiet is not a fault: nothing failed, the market simply has nothing to say,
    so it is the colour of a reading rather than the colour of a problem. */
 .futures-workstation-reading-notice.is-quiet {

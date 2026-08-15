@@ -13,6 +13,7 @@ import {
   describeFuturesOrderIntent,
   describeFuturesPosition,
   describeFuturesPositionMargin,
+  exitTitle,
   orderNotionalUsdt,
   orderWorkingQuantity,
   totalOrderNotionalUsdt,
@@ -835,10 +836,18 @@ const FuturesTradingTicket = ({
                             {contractLabel(order.symbol)}
                           </button>
                         </span>
+                        {/* The leg, and what the order does to it. The rail is
+                            the narrowest surface that lists orders, so the word
+                            is a badge rather than a column. */}
                         <span role="cell">
                           <span className={`futures-production-side is-${intent.tone}`}>
                             {intent.label}
                           </span>
+                          {intent.positionEffect === 'EXIT' ? (
+                            <em className="futures-production-order-exit" title={exitTitle(intent)}>
+                              exit
+                            </em>
+                          ) : null}
                         </span>
                         {/* An order rests at its trigger where it has one, at the
                             contract's tick rather than at the stream's padded

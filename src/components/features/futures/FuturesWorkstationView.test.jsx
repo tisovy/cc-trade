@@ -2317,6 +2317,60 @@ describe('instrument recency and interface scale', () => {
 // One failed read used to disable scrolling left for the rest of the session,
 // with nothing on screen to say why. The chart looked exactly like a contract
 // whose history simply ends there.
+// An order the desk has not read is an order the chart does not draw, and a
+// chart with no order lines on it is exactly what an account with no orders
+// looks like. The chart is what the operator is looking at when they decide
+// nothing is resting.
+describe('what is behind the order lines the chart draws', () => {
+  const availability = extra => ({
+    known: true, state: 'ready', label: null, reason: null, notice: null, ...extra,
+  })
+
+  // A guard, not a bite: it passed before this change too. It is here so the
+  // notice cannot creep onto a chart that has nothing to disclose.
+  it('says nothing at all once the orders have been read', () => {
+    renderView({ orderAvailability: availability() })
+
+    expect(screen.queryByLabelText('Chart order synchronization')).toBeNull()
+  })
+
+  it('states a failed order read on the chart, with its reason and the way back', () => {
+    const onRefreshAccount = vi.fn()
+    renderView({
+      onRefreshAccount,
+      orderAvailability: availability({
+        known: false,
+        state: 'failed',
+        label: 'Not read — the account read failed.',
+        reason: 'Binance rejected the signed request.',
+      }),
+    })
+
+    const notice = screen.getByLabelText('Chart order synchronization')
+    expect(notice).toHaveAttribute('role', 'alert')
+    expect(notice).toHaveTextContent('Not read — the account read failed.')
+    expect(notice).toHaveTextContent('Binance rejected the signed request.')
+    fireEvent.click(within(notice).getByRole('button', { name: 'Retry' }))
+    expect(onRefreshAccount).toHaveBeenCalledExactlyOnceWith('BTCUSDT')
+  })
+
+  it('keeps drawing a stale reading and says that is what it is', () => {
+    renderView({
+      onRefreshAccount: vi.fn(),
+      orderAvailability: availability({
+        state: 'stale',
+        reason: 'Not confirmed since the connection dropped.',
+        notice: 'Not confirmed since the connection dropped — showing the last reading.',
+      }),
+    })
+
+    const notice = screen.getByLabelText('Chart order synchronization')
+    expect(notice).toHaveAttribute('role', 'status')
+    expect(notice).toHaveTextContent('showing the last reading')
+    expect(within(notice).getByRole('button', { name: 'Retry' })).toBeInTheDocument()
+  })
+})
+
 describe('a history read that could not be served', () => {
   const history = extra => ({
     symbol: 'BTCUSDT', interval: '1m', rows: [], exhausted: false, readFailed: false, ...extra,

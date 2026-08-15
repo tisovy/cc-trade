@@ -11,6 +11,7 @@ import { buildVolumeHistogramPresentation } from '../../../utils/chartVolume.js'
 import {
   describeFuturesAlgoTrigger,
   describeFuturesOrderIntent,
+  exitTitle,
   describeFuturesPosition,
   orderNotionalUsdt,
 } from '../../../utils/futuresOrderPresentation.js'
@@ -1328,9 +1329,29 @@ export const FuturesWorkstationChart = ({
           const intent = describeFuturesOrderIntent(order)
           const notional = orderNotionalUsdt(order)
           const trigger = describeFuturesAlgoTrigger(order)
+          // What the order does to the position, not only which leg it is on.
+          // The line's colour says buy or sell and the leg says which position —
+          // between them nothing said whether this line opens something or
+          // closes it, which for a stop resting under a long is the whole
+          // question being asked of it.
+          // The badge is added to what is drawn, not to the accessible names:
+          // those are the handles this chart's drag tests address orders by, and
+          // this file belongs to another session. A visible word is what the
+          // change asked for; renaming fifteen of someone else's fixtures is not.
+          const exits = intent.positionEffect === 'EXIT'
           const content = (
             <>
-              <b>{order.orderKind === 'ALGO' ? 'ALGO ' : ''}{intent.label}</b>
+              <b>
+                {order.orderKind === 'ALGO' ? 'ALGO ' : ''}{intent.label}
+                {exits ? (
+                  <em
+                    className="futures-workstation-owned-order-exit"
+                    title={exitTitle(intent)}
+                  >
+                    exit
+                  </em>
+                ) : null}
+              </b>
               <span>
                 {lifting ? 'lifting…' : null}
                 {/* A fired stop is not resting here for the operator to reach

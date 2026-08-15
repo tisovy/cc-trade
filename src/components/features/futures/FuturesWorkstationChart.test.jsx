@@ -1,4 +1,4 @@
-import { act, createEvent, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { createChart } from 'lightweight-charts'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { LIGHTWEIGHT_CHARTS_MAX_SERIES_VALUE } from '../../../utils/chartVolume.js'
@@ -1406,7 +1406,10 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     fireEvent.pointerMove(algoOrder, { pointerId: 10, clientY: 80, altKey: true })
     fireEvent.pointerUp(algoOrder, { pointerId: 10, clientY: 80, altKey: true })
 
-    expect(algoOrder).toHaveTextContent('ALGO LONG— USDT')
+    // The leg says which position it belongs to; the badge beside it says what
+    // it does to that position, which the side colour alone left to be inferred.
+    expect(algoOrder).toHaveTextContent('ALGO LONGexit— USDT')
+    expect(within(algoOrder).getByTitle(/^Exit —/)).toHaveTextContent('exit')
     expect(props.onOrderLift).not.toHaveBeenCalled()
     expect(screen.queryByRole('button')).not.toBeInTheDocument()
   })

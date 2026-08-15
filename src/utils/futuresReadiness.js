@@ -40,6 +40,73 @@ export const isFuturesBalanceConfirmed = balanceResource => (
     && Number.isFinite(balanceResource?.lastSuccessfulAt))
 )
 
+/**
+ * What is behind the rows a surface is drawing.
+ *
+ * A list of no rows means three different things — nothing has been asked for,
+ * an answer is on the way, or a read answered and found nothing — and a list of
+ * rows means two: these are what the account holds, or these are what it held
+ * when the connection dropped. Every surface that draws orders has to make the
+ * same distinction, so they make it from here rather than each inventing its
+ * own wording and drifting apart.
+ *
+ * `known` is the narrow question the counts ask: may this surface state a number
+ * as fact? `state` is the whole answer, and `notice` is what to say when rows are
+ * on screen but nothing has confirmed them.
+ */
+export const describeFuturesResourceAvailability = (resources) => {
+  const present = (Array.isArray(resources) ? resources : []).filter(Boolean)
+  const everRead = present.length > 0
+    && present.every(resource => resource?.lastSuccessfulAt != null)
+  const failed = present.find(resource => resource?.status === 'error') ?? null
+  const stale = present.find(resource => resource?.status === 'stale') ?? null
+  const reasonOf = resource => resource?.error?.message ?? null
+  if (!everRead) {
+    const reading = present.some(resource => resource?.status === 'loading')
+    return Object.freeze({
+      known: false,
+      state: failed ? 'failed' : reading ? 'reading' : 'unread',
+      label: failed
+        ? 'Not read — the account read failed.'
+        : reading ? 'Reading the account…' : 'Not read yet.',
+      reason: reasonOf(failed),
+      notice: null,
+    })
+  }
+  if (failed !== null) {
+    return Object.freeze({
+      known: true,
+      state: 'failed',
+      label: null,
+      reason: reasonOf(failed),
+      notice: 'The last account read failed — showing what was read before it.',
+    })
+  }
+  if (stale !== null) {
+    return Object.freeze({
+      known: true,
+      state: 'stale',
+      label: null,
+      reason: reasonOf(stale),
+      notice: 'Not confirmed since the connection dropped — showing the last reading.',
+    })
+  }
+  // A refresh in flight over a reading that has answered is the ordinary case
+  // and says nothing: the rows are the ones the last order was worked against,
+  // and the read is what is about to make them fresher.
+  return Object.freeze({ known: true, state: 'ready', label: null, reason: null, notice: null })
+}
+
+// The two resources every order surface draws from. Orders arrive on two reads —
+// the regular book and the algo book — and a surface that draws both is only as
+// synchronized as the worse of them.
+export const describeFuturesOrderAvailability = accountResources => (
+  describeFuturesResourceAvailability([
+    accountResources?.regularOrders,
+    accountResources?.algoOrders,
+  ])
+)
+
 const result = (code, tone, label, reason, ready = false) => Object.freeze({
   code,
   tone,

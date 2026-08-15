@@ -8,9 +8,8 @@ smaller than 5" — on screen on 15 August, with `exchangeCode "-4164"` beside
 Nine of the twenty-one were already done, five were partly done, and seven were
 untouched. Each is marked below with where it is, so nothing was rebuilt.
 
-This session then closed eight of the remaining twelve. What is left is 3.1 (the
-chart, in another session's file), 4.1 (a design question for the operator), and
-the two verification items.
+This session then closed eleven of the remaining twelve. Only 7.2 is left, and it
+is the operator's own walk — written up as step 48 of the runbook.
 
 ## 1. Exchange-Reported Failure Identity
 
@@ -26,14 +25,14 @@ the two verification items.
 
 ## 3. Order Surfaces Disclose Synchronization
 
-- [ ] 3.1 The dock half is done. The chart is still given `ownedOrders` and nothing about their state (`FuturesWorkstationView.jsx:1130`). **That file belongs to another session — it needs the operator to hand it over or to route the change through them.**
-- [x] 3.2 **Landed by this change for the dock.** It now separates not read yet, reading, ready, stale and failed, and "No working orders" is shown only when a read actually reported none. The chart still says nothing — see 3.1.
-- [x] 3.3 **Landed by this change for the dock.** The exchange's sanitized reason and a Retry are stated in the panel whose rows they are about, wired to the same `refresh` the ticket uses. The chart still offers neither — see 3.1.
-- [x] 3.4 **Landed by this change for the dock.** `FuturesPortfolioDock.test.jsx` proves that a failed order resource never renders as an empty book, that a stale one keeps its rows and says what they are, and that Retry reaches the account refresh. The chart is untested because it is untouched — see 3.1.
+- [x] 3.1 **Landed.** The operator handed the file over on 2026-08-15. Order resource status is derived once in `FuturesProductionWorkstation` and given to both the dock and the chart, so the two cannot disagree about whether the account has been read.
+- [x] 3.2 **Landed.** Not read yet, reading, ready, stale and failed are separated by one helper, `describeFuturesResourceAvailability`, which the dock and the chart both read. "No working orders" is shown only when a read actually reported none.
+- [x] 3.3 **Landed.** The exchange's sanitized reason and a Retry are stated on both surfaces, wired to the same `refresh` the ticket uses. The chart notice sits bottom-left above the older-candles line; measured in Chromium at five widths, no pair of chart notices overlaps and it stays clear of the price scale.
+- [x] 3.4 **Landed.** `FuturesPortfolioDock.test.jsx` proves a failed resource never renders as an empty book and that a stale one keeps its rows; `FuturesWorkstationView.test.jsx` proves the same for the chart, including that a read which succeeded says nothing at all.
 
 ## 4. Intent Is Presented
 
-- [ ] 4.1 Not done, and deliberately so: `futuresOrderPresentation.js:29` reasons that "the leg plus the side colour already says everything" and returns the position side as the label. That reasoning is sound for a reduce-only order, whose leg *is* its intent — and it is what the change disputes. Left for the operator to settle rather than reversed silently.
+- [x] 4.1 **Landed**, settled by the operator on 2026-08-15: keep the leg and add the word rather than replace one with the other. Every working-order surface — the dock, the rail and the chart — now carries an `exit` badge beside `LONG`/`SHORT` when the intent is EXIT, with the reason on the element: reduce-only orders say they can only close, hedge-leg closes say they close rather than open. Direction and its colour are untouched, so the badge adds information instead of standing in for it. The chart's accessible names are deliberately left alone — they are the handles that file's drag tests address orders by.
 - [x] 4.2 **Landed by this change.** A close-position order is now classified as an exit regardless of its side.
 - [x] 4.3 Landed. The tone always follows the side (`futuresOrderPresentation.js:6`), so intent never replaces direction.
 
@@ -51,5 +50,5 @@ the two verification items.
 
 ## 7. Verification
 
-- [x] 7.1 `npm run lint`, `npm test` (111 files, 1993 tests) and `npm run check:futures-production`, all clean.
+- [x] 7.1 `npm run lint`, `npm test` and `npm run check:futures-production`, all clean.
 - [ ] 7.2 Walk the desk once with the account intentionally failing and record that no surface claims a state the account is not in. Written up for the operator as step 48 of `verify-the-desk-in-one-sitting/runbook.md`.

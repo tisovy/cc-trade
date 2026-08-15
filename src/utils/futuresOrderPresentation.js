@@ -49,6 +49,16 @@ export const describeFuturesOrderIntent = (order) => {
   })
 }
 
+// Why the order is marked as an exit, in the words the fact deserves. A
+// reduce-only order is barred from opening anything; a plain sell on a hedge
+// account's long leg is not barred, it simply closes rather than opens. Both are
+// exits, and the reader is owed the difference.
+export const exitTitle = intent => (
+  intent?.reducesPosition
+    ? 'Exit — reduce-only, so it can only close a position'
+    : 'Exit — this order closes a position rather than opening one'
+)
+
 const NOT_TRIGGERED = Object.freeze({
   triggered: false,
   spawnedOrderId: null,

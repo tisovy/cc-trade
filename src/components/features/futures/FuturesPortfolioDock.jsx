@@ -4,6 +4,7 @@ import {
   describeFuturesOrderIntent,
   describeFuturesPosition,
   describeFuturesPositionMargin,
+  exitTitle,
   formatSignedPercent,
   formatSignedUsdt,
   formatUsdt,
@@ -12,6 +13,10 @@ import {
 } from '../../../utils/futuresOrderPresentation.js'
 import { formatExchangePrice } from '../../../utils/futuresPriceFormat.js'
 import { futuresMarginCallKey } from '../../../utils/futuresMarginCall.js'
+import {
+  describeFuturesOrderAvailability,
+  describeFuturesResourceAvailability,
+} from '../../../utils/futuresReadiness.js'
 import { exactFuturesDeskTime, formatFuturesDeskTime } from '../../../utils/futuresDeskTime.js'
 import FuturesHistoryPanel from './FuturesHistoryPanel.jsx'
 
@@ -51,54 +56,7 @@ const openOrderEditorFromKeyboard = (event, order, onOrderEdit) => {
 // No resource at all is the same unknown: a dock wired to a workstation with no
 // execution state behind it knows nothing about the account, and the honest
 // reading of nothing is "not read", not "nothing there".
-// And a reading that was taken and has since gone unconfirmed is a third case
-// again. The rows stay — taking them away is worse — but "these are the orders
-// you have" and "these are the orders you had when the connection dropped" are
-// different claims, and the dock used to make the first for both. So the state
-// behind the rows is disclosed whether or not there are any, with the exchange's
-// sanitized reason and the way back.
 const EMPTY_RESOURCES = Object.freeze({})
-const describeRowsAvailability = (resources) => {
-  const everRead = resources.length > 0
-    && resources.every(resource => resource?.lastSuccessfulAt != null)
-  const failed = resources.find(resource => resource?.status === 'error') ?? null
-  const stale = resources.find(resource => resource?.status === 'stale') ?? null
-  const reasonOf = resource => resource?.error?.message ?? null
-  if (!everRead) {
-    const reading = resources.some(resource => resource?.status === 'loading')
-    return {
-      known: false,
-      state: failed ? 'failed' : reading ? 'reading' : 'unread',
-      label: failed
-        ? 'Not read — the account read failed.'
-        : reading ? 'Reading the account…' : 'Not read yet.',
-      reason: reasonOf(failed),
-      notice: null,
-    }
-  }
-  if (failed !== null) {
-    return {
-      known: true,
-      state: 'failed',
-      label: null,
-      reason: reasonOf(failed),
-      notice: 'The last account read failed — showing what was read before it.',
-    }
-  }
-  if (stale !== null) {
-    return {
-      known: true,
-      state: 'stale',
-      label: null,
-      reason: reasonOf(stale),
-      notice: 'Not confirmed since the connection dropped — showing the last reading.',
-    }
-  }
-  // A refresh in flight over a reading that has answered is the ordinary case
-  // and says nothing: the rows are the ones the last order was worked against,
-  // and the read is what is about to make them fresher.
-  return { known: true, state: 'ready', label: null, reason: null, notice: null }
-}
 
 export const FuturesPortfolioDock = ({
   selectedSymbol,
@@ -138,12 +96,8 @@ export const FuturesPortfolioDock = ({
   const priceOf = (symbol, value) => formatExchangePrice(value, tickSizes[symbol] ?? null)
   // A caller that passes the account state through may pass null for it.
   const resources = accountResources ?? EMPTY_RESOURCES
-  const positionsAvailability = describeRowsAvailability(
-    [resources.positions].filter(Boolean),
-  )
-  const ordersAvailability = describeRowsAvailability(
-    [resources.regularOrders, resources.algoOrders].filter(Boolean),
-  )
+  const positionsAvailability = describeFuturesResourceAvailability([resources.positions])
+  const ordersAvailability = describeFuturesOrderAvailability(resources)
   // The reason and the way back, stated where the rows are read rather than only
   // on the trading rail. An operator looking at a list of orders is not looking
   // at the ticket, and "these are stale" is not a fact the ticket can carry for
@@ -560,8 +514,17 @@ export const FuturesPortfolioDock = ({
                   <span role="cell" className={`futures-workstation-dock-side is-${intent.tone}`}>
                     {intent.side}
                   </span>
+                  {/* The leg says which position the order belongs to; it does
+                      not say whether the order opens or closes it. That was left
+                      to be worked out from the side colour — true, and only if
+                      you already know the rule. The word is one badge wide. */}
                   <span role="cell">
                     {order.orderKind === 'ALGO' ? 'ALGO · ' : ''}{intent.label}
+                    {intent.positionEffect === 'EXIT' ? (
+                      <em className="futures-workstation-dock-exit" title={exitTitle(intent)}>
+                        exit
+                      </em>
+                    ) : null}
                     {trigger.triggered ? ' · triggered' : ''}
                   </span>
                   {/* A triggered parent is priced at the price it fired at when
