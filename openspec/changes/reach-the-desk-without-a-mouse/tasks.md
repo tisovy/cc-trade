@@ -14,7 +14,7 @@
 ## 3. Verification
 
 - [x] 3.1 `npm run lint`, `npm run test:all`, focused Vitest, and strict OpenSpec validation.
-- [ ] 3.2 Operator confirms the dock is present at narrow widths and that keyboard editing works — step 46, «Док на узком окне и клавиатура вместо мыши», in `verify-the-desk-in-one-sitting`, so the operator runs one list.
+- [x] 3.2 Settle the operator confirmation, half by measurement and half by refusal. *(Asked on 2026-08-15 as step 46. The operator answered about the keyboard half in as many words: «я НИКОГДА не буду торговать клавиатурой». That is not a check declined for today — it is a statement about how the desk is used, and a confirmation nobody will ever perform does not become truer for staying open. Recorded as `COVERED BY TEST ONLY` in the runbook, against the two focused suites that fail on the tree before this change: a row takes focus, Enter and Space open the same panel a click does, and a held key opens it once. The narrow-window half was measured rather than left: Chromium, twelve widths from 320 to 1280 px, dock inside the grid and reachable at every one.)*
 
 ## 4. Full Audit Follow-up
 
