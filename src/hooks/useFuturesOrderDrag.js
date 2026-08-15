@@ -101,7 +101,14 @@ export const useFuturesOrderDrag = ({
   // second attempt could duplicate it — a control that places it again. Each
   // one carries what it was lifted from, so retrying one says nothing about
   // another.
-  const raiseObligation = useCallback((lifted, replacement, { code, message, unknown }) => {
+  // `retryable` is false where the price the retry would use is one this desk
+  // has just refused itself: offering to place it again would be a control that
+  // does nothing but raise this statement a second time.
+  const raiseObligation = useCallback((
+    lifted,
+    replacement,
+    { code, message, unknown, retryable = true },
+  ) => {
     const summary = orderSummary(lifted.order, replacement)
     raise(unknown
       ? {
@@ -119,8 +126,8 @@ export const useFuturesOrderDrag = ({
           title: 'Order cancelled and NOT replaced',
           detail: `${summary.symbol} ${summary.side} ${summary.quantity} @ ${summary.price} was cancelled and could not be placed again. ${message ?? code ?? 'The placement was refused.'}`,
           order: summary,
-          retryPrice: lifted.originPrice,
-          lifted,
+          retryPrice: retryable ? lifted.originPrice : null,
+          lifted: retryable ? lifted : null,
         })
   }, [raise])
 
@@ -151,21 +158,31 @@ export const useFuturesOrderDrag = ({
     // one it was resting at. The move is refused; the order is not, and nothing
     // is invented to make the new price fit.
     if (!replacement.ok && !samePrice(price, lifted.originPrice)) {
-      raise({
-        tone: 'refused',
-        title: 'Order NOT moved',
-        detail: `${describeFuturesDragRefusal(replacement)} It is being placed again at ${lifted.originPrice}.`,
-        order: orderSummary(lifted.order, null),
-        retryPrice: null,
-        lifted: null,
-      })
-      replacement = describe(lifted.originPrice)
+      const resting = describe(lifted.originPrice)
+      // Said only where it is true. If the price the order was resting at is
+      // refused as well — a ceiling lowered while the drag was in hand — then
+      // the order is not being placed again, and the statement the operator
+      // needs is that it is gone, not that it merely did not move.
+      if (resting.ok) {
+        raise({
+          tone: 'refused',
+          title: 'Order NOT moved',
+          detail: `${describeFuturesDragRefusal(replacement)} It is being placed again at ${lifted.originPrice}.`,
+          order: orderSummary(lifted.order, null),
+          retryPrice: null,
+          lifted: null,
+        })
+      }
+      replacement = resting
     }
     if (!replacement.ok) {
       raiseObligation(lifted, replacement, {
         code: replacement.reason,
         message: describeFuturesDragRefusal(replacement),
         unknown: false,
+        // Every local refusal that reaches here was measured at the price the
+        // order was resting at, which is the price a retry would use.
+        retryable: false,
       })
       release(lifted)
       return false

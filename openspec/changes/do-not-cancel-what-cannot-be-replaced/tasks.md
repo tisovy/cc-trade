@@ -92,7 +92,23 @@
       `useFuturesOrderDrag` was deliberately built around, and closing it leaves
       the order fillable at its old price for the length of the gesture. Named
       so the next person does not read this change as having closed it.
-- [x] 4.3 Only the two bounds the desk already holds are asked — the exchange's
+- [x] 4.3 Audit of the delivered change, 2026-08-16, two defects found and fixed
+      here rather than left for the operator:
+      - The refusal named a size the desk did not have. An order it cannot value
+        — more decimals than its fixed point holds — was refused as `null USDT,
+        below the Binance minimum notional`. It still refuses, and now says it
+        could not value the order.
+      - Where the price the order was resting at was refused as well — a ceiling
+        lowered while the drag was in hand — the desk said `It is being placed
+        again at 58445` and then did not place it, and offered `Place it again
+        at 58445`, a button that placed nothing and raised the same statement
+        again. The promise is now made only when the placement will be made, and
+        no retry is offered for a price this desk has just refused itself.
+- [x] 4.4 Reduce-only exits are held to the floor like every other order, which
+      is what the amend panel already does. If Binance turns out to exempt them,
+      the cost is a stop that cannot be dragged rather than one that is lost, and
+      the order stays live either way — which is the direction to be wrong in.
+- [x] 4.5 Only the two bounds the desk already holds are asked — the exchange's
       minimum notional and the desk's own order ceiling. The price band, the
       maximum open order count and the rest stay the exchange's, per the
       operator's decision not to check exchange filters locally.

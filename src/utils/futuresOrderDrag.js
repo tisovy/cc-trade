@@ -140,9 +140,12 @@ export const describeFuturesDragRefusal = (replacement) => {
     case FUTURES_DRAG_REASONS.UNUSABLE_PRICE:
       return 'The price the order was dropped at cannot be used.'
     // The words the ticket already refuses a placement in, so one order refusal
-    // does not read differently from another.
+    // does not read differently from another — and where the order could not be
+    // valued at all, a size the desk does not have is not stated as if it did.
     case FUTURES_DRAG_REASONS.BELOW_MINIMUM_NOTIONAL:
-      return `The order would be ${replacement.notionalUsdt} USDT, below the Binance minimum notional of ${replacement.minNotionalUsdt} USDT.`
+      return replacement.notionalUsdt === null
+        ? `The order could not be valued, so the Binance minimum notional of ${replacement.minNotionalUsdt} USDT could not be checked.`
+        : `The order would be ${replacement.notionalUsdt} USDT, below the Binance minimum notional of ${replacement.minNotionalUsdt} USDT.`
     case FUTURES_DRAG_REASONS.ABOVE_ORDER_CAP:
       return `The order would be ${replacement.notionalUsdt} USDT, above the local ${replacement.capUsdt} USDT limit.`
     case FUTURES_DRAG_REASONS.UNPRICEABLE_ORDER:

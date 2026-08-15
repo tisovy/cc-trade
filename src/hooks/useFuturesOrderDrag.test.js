@@ -466,6 +466,59 @@ describe('useFuturesOrderDrag', () => {
       })
     })
 
+    // The desk refuses an order it cannot value against a floor it holds — and
+    // says that, rather than naming a size it does not have.
+    it('states an order it could not value instead of a size it never had', async () => {
+      const { result, placeOrder } = smallSetup()
+
+      // More decimals than the desk's fixed point can hold: the notional cannot
+      // be computed, so the floor cannot be measured against it.
+      const lifted = smallOrder({ origQty: '23.000000000000000000001' })
+      await act(async () => { await result.current.lift(lifted) })
+
+      expect(placeOrder).not.toHaveBeenCalled()
+      expect(result.current.alerts[0].detail)
+        .toContain('could not be valued, so the Binance minimum notional of 5 USDT')
+      expect(result.current.alerts[0].detail).not.toContain('null')
+    })
+
+    // A ceiling lowered while the drag is in hand refuses the drop and the
+    // price the order was resting at alike. Then there is no order to put back,
+    // and the desk must not say it is putting one back — nor offer a control
+    // that would ask for the price it has just refused.
+    it('offers no way back to a price it has just refused itself', async () => {
+      const cancelOrder = vi.fn(async () => CONFIRMED)
+      const placeOrder = vi.fn(async () => CONFIRMED)
+      const { result, rerender } = renderHook(
+        ({ cap }) => useFuturesOrderDrag({
+          tickSize: '0.10',
+          maxOrderNotionalUsdt: cap,
+          cancelOrder,
+          placeOrder,
+        }),
+        { initialProps: { cap: '300' } },
+      )
+
+      const lifted = order()
+      await act(async () => { await result.current.lift(lifted) })
+      // 0.004 at 58445 is 233 USDT and fitted under 300. Now nothing fits.
+      rerender({ cap: '10' })
+      await act(async () => { await result.current.drop({ order: lifted, price: '59000' }) })
+
+      expect(placeOrder).not.toHaveBeenCalled()
+      expect(result.current.alerts).toHaveLength(1)
+      expect(result.current.alerts[0]).toMatchObject({
+        tone: 'lost',
+        title: 'Order cancelled and NOT replaced',
+        retryPrice: null,
+      })
+
+      // And the control that is not offered cannot be reached another way.
+      await act(async () => { await result.current.retry(result.current.alerts[0].id) })
+      expect(placeOrder).not.toHaveBeenCalled()
+      expect(result.current.alerts).toHaveLength(1)
+    })
+
     // The order goes back on the book, and if that placement is the one the
     // exchange refuses, the desk says the order is gone rather than saying it
     // was merely not moved.
