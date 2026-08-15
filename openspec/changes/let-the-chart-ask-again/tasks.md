@@ -93,7 +93,15 @@
       `DataContext`'s, is shared with everything else Spot draws, and carries its
       own requirement set under `spot-chart-history`. Stated so the next person
       does not read the divergence as an oversight.
-- [x] 4.2 One read can still be lost without the desk noticing: a load the
+- [x] 4.2 Found by auditing the delivered change and left as it is: a page that
+      arrives in the same tick as a stated outage is dropped, and the operator is
+      told the read could not be served. Measured — twenty served rows, gone, and
+      the notice up. It costs one re-read on the next scroll and nothing else: no
+      exhaustion is concluded and no read is left held. Fixing it properly means
+      applying an answer from the event that carried it rather than from the
+      resource snapshot it landed in, which is a larger change than this one, and
+      every cheaper discriminator is the one that produced step 19.
+- [x] 4.3 One read can still be lost without the desk noticing: a load the
       backend refuses outright — `CANDLE_HISTORY_OWNER_UNAVAILABLE` — is not a
       workstation event, so the renderer never sees it. It reaches the operator
       only as a chart that does not deepen until the session is rebuilt, which
