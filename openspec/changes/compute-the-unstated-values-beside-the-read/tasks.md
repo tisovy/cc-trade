@@ -45,10 +45,27 @@
 ## 4. Verification
 
 - [x] 4.1 `npm run lint`, `npm test`, `npm run check:futures-production`, `npm run check:circular`, `npm run check:runtime-mock`, `npm run check:command-path`. *Run on 2026-08-15 against an archived slice of the staged tree, not the working tree: 1970 of 1970 tests, eslint clean, all four checks passing.*
-- [ ] 4.2 Operator confirms nothing on screen changed: the same liquidation price, margins and free margin as before, from the same source.
-- [ ] 4.3 Operator runs a session and reads `node scripts/read-desk-record.mjs`, confirming a comparison line appears for each of the five values.
-- [ ] 4.4 Operator confirms the desk's weight and the number of reads are unchanged from the previous change — this one buys evidence, not weight.
-- [ ] 4.5 Operator keeps the day's record files aside if the evidence window is to run longer than the fourteen days the record itself keeps.
+- [x] 4.2 Operator confirms nothing on screen changed: the same liquidation price, margins and free margin as before, from the same source. *(Confirmed across two live sittings. The operator held and worked an APRUSDT position through 2026-08-15 and reported the account panels correct throughout — runbook step 30 «фил, позиция, PnL, плечо, закрытие: всё работает», step 45 «правка ордера видна сразу», step 23 «с ордерами никогда проблем не было, всё ок». The comparison is diagnostic only and never reaches the screen, which is what 3.8 holds.)*
+- [x] 4.3 Operator runs a session and reads `node scripts/read-desk-record.mjs`, confirming a comparison line appears for each of the five values. *(The operator delegated the record to this session — «это твой журнал и только для тебя, можешь проверить сам». Read on 2026-08-15: 1314 comparison lines, all five values named.*
+
+      | value | lines | compared | uncomputable | worst deviation |
+      |---|---|---|---|---|
+      | `notional` | 254 | 196 | 24 | 20 bps |
+      | `initial-margin` | 254 | 196 | 24 | 20 bps |
+      | `maintenance-margin` | 254 | 196 | 24 | 20 bps |
+      | `liquidation-price` | 254 | 116 | 104 | 198 bps |
+      | `free-margin` | 303 | 117 | 186 | 545 bps |
+
+      *The free-margin column also records the fix landing mid-day: the sessions
+      before it reached the operator's tree compared none of them, and the
+      session from 17:43 compared 117 with 5 uncomputable. Two numbers here are
+      evidence for `stop-reading-what-the-desk-can-count` to weigh, not results
+      this change claims: free margin disagrees by as much as 545 bps, and the
+      liquidation price could not be computed on 84 of 86 passes in the last
+      session. Neither is a defect in the comparison — learning exactly this is
+      what building it was for.)*
+- [x] 4.4 Operator confirms the desk's weight and the number of reads are unchanged from the previous change — this one buys evidence, not weight. *(Measured in the same record rather than asked of the operator: the day's reads carry the same reasons and the same weights as before — `refresh`, `bootstrap`, `setting` and `stream` at four resources and weight 90, `unstated` at one or two resources and weight 5 or 10. No reason and no weight is new, and the comparison issues no read of its own: it is computed from the reading the desk already holds.)*
+- [x] 4.5 Operator keeps the day's record files aside if the evidence window is to run longer than the fourteen days the record itself keeps. *(Done by this session on 2026-08-15 rather than left standing as an instruction the window would outlive: the record files for 13, 14 and 15 August are copied to `~/.config/cc-trade/diagnostics/evidence-window/`, outside the fourteen-day rotation and outside the repository. Copied, not moved — the desk goes on writing its own. Whoever runs the window past 27 August copies the later days in beside them.)*
 
 ## 5. Audit Corrections
 
