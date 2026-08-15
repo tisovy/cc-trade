@@ -30,7 +30,9 @@ vi.mock('./FuturesWorkstationView.jsx', () => ({
   },
 }))
 vi.mock('./FuturesPortfolioDock.jsx', () => ({ default: () => <div /> }))
-vi.mock('./FuturesTradingTicket.jsx', () => ({ default: () => <div /> }))
+vi.mock('./FuturesTradingTicket.jsx', () => ({
+  default: () => <div />,
+}))
 vi.mock('./FuturesOrderEditor.jsx', () => ({
   default: properties => {
     productionWorkstationMocks.orderEditorRender(properties)
@@ -64,6 +66,21 @@ describe('FuturesProductionWorkstation account review', () => {
       .toMatchObject({ recent: ['BTCUSDT'], lastSymbol: 'BTCUSDT' })
     expect(readFuturesSymbolHistory())
       .toMatchObject({ recent: ['BTCUSDT'], lastSymbol: 'BTCUSDT' })
+  })
+
+  it('gives the trading rail the normal workstation symbol-selection path', () => {
+    render(
+      <FuturesProductionWorkstation enabled executionState={executionState()} />,
+    )
+    const tradingRail = productionWorkstationMocks.viewRender.mock.lastCall[0].tradingRail
+    expect(tradingRail.props.onSymbolChange).toEqual(expect.any(Function))
+
+    act(() => tradingRail.props.onSymbolChange('TUTUSDT'))
+
+    expect(productionWorkstationMocks.viewRender.mock.lastCall[0])
+      .toMatchObject({ selectedSymbol: 'TUTUSDT' })
+    expect(productionWorkstationMocks.viewRender.mock.lastCall[0].symbolHistory.recent[0])
+      .toBe('TUTUSDT')
   })
 
   // The chart marker, the dock row and the rail row have to price one order the

@@ -238,6 +238,46 @@ describe('FuturesHistoryPanel', () => {
     expect(table).toHaveTextContent('FILLED')
   })
 
+  it('states reported or derived filled notional in USDT and keeps quantities secondary', () => {
+    render(
+      <FuturesHistoryPanel
+        view="orderHistory"
+        symbol="BICOUSDT"
+        tickSizes={ticks}
+        history={{
+          ...history,
+          orders: [
+            { orderId: 11, symbol: 'BICOUSDT', side: 'BUY', type: 'LIMIT', status: 'FILLED', price: '0.20', averagePrice: '0.19822', origQty: '16441', executedQty: '16441', quoteQty: '3259000.25', reduceOnly: false, time: 1_784_000_000_000 },
+            { orderId: 12, symbol: 'BICOUSDT', side: 'BUY', type: 'MARKET', status: 'FILLED', price: '0', averagePrice: '0.01962', origQty: '5000', executedQty: '5000', quoteQty: '0', reduceOnly: false, time: 1_784_000_000_001 },
+            { orderId: 13, symbol: 'BICOUSDT', side: 'SELL', type: 'LIMIT', status: 'NEW', price: '0.020', averagePrice: '0', origQty: '10000', executedQty: '0', quoteQty: '0', reduceOnly: false, time: 1_784_000_000_002 },
+          ],
+        }}
+      />,
+    )
+
+    expect(screen.getByRole('columnheader', { name: 'Filled USDT' }))
+      .toHaveAttribute('title', 'Filled notional in USDT')
+    const rows = screen.getAllByRole('row')
+    const reported = within(rows[1]).getAllByRole('cell')[5]
+    const derived = within(rows[2]).getAllByRole('cell')[5]
+    const absent = within(rows[3]).getAllByRole('cell')[5]
+
+    expect(reported).toHaveTextContent('3.26M')
+    expect(reported).toHaveAttribute(
+      'title',
+      '3259000.25 USDT · reported by the exchange · 16441 / 16441 contracts',
+    )
+    expect(derived).toHaveTextContent('98.10')
+    expect(derived.getAttribute('title')).toContain(
+      '98.1 USDT · derived from executed quantity × average fill price · 5000 / 5000 contracts',
+    )
+    expect(absent).toHaveTextContent('—')
+    expect(absent).toHaveAttribute(
+      'title',
+      '0 / 10000 contracts · executed USDT unavailable',
+    )
+  })
+
   it('hides both cancelled spellings without changing the held order reading', () => {
     const heldOrders = [
       { ...history.orders[0], orderId: 4, status: 'CANCELED' },

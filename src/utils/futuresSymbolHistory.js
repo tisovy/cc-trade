@@ -3,7 +3,7 @@
 // recently instead of whatever sorts first.
 
 export const FUTURES_SYMBOL_HISTORY_STORAGE_KEY = 'cc-trade:futures-symbols:v1'
-export const FUTURES_RECENT_SYMBOL_LIMIT = 8
+export const FUTURES_RECENT_SYMBOL_LIMIT = 9
 
 const SYMBOL_PATTERN = /^[A-Z0-9]{4,20}$/
 

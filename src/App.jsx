@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useState } from 'react'
 import './styles/app-layout.css'
 import NotificationToast from './components/common/NotificationToast.jsx'
 import { GatewayProvider, useGatewayContext } from './context/GatewayContext.jsx'
@@ -37,6 +37,45 @@ const MARKET_MODE_OPTIONS = Object.freeze([
     tone: 'production',
   }),
 ])
+
+const MARKET_CLOCK_FORMAT = new Intl.DateTimeFormat('en-GB', {
+  weekday: 'short',
+  day: '2-digit',
+  month: 'short',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hour12: false,
+})
+
+const formatMarketClock = (date) => {
+  const parts = Object.fromEntries(
+    MARKET_CLOCK_FORMAT.formatToParts(date)
+      .filter(part => part.type !== 'literal')
+      .map(part => [part.type, part.value]),
+  )
+  return `${parts.weekday} ${parts.day} ${parts.month} ${parts.hour}:${parts.minute}:${parts.second}`
+}
+
+const MarketClock = () => {
+  const [now, setNow] = useState(() => new Date())
+
+  useEffect(() => {
+    const interval = globalThis.setInterval(() => setNow(new Date()), 1_000)
+    return () => globalThis.clearInterval(interval)
+  }, [])
+
+  const label = formatMarketClock(now)
+  return (
+    <time
+      className="market-local-clock"
+      dateTime={now.toISOString()}
+      aria-label={`Local time ${label}`}
+    >
+      {label}
+    </time>
+  )
+}
 
 const MarketModeSwitch = ({ mode, onChange, startupStatus }) => (
   <div className="market-mode-switch" role="group" aria-label="Market mode">
@@ -152,6 +191,7 @@ const WorkspaceGateway = ({ marketMode, onMarketModeChange }) => {
         onChange={onMarketModeChange}
         startupStatus={startupStatus}
       />
+      <MarketClock />
       {/* The workspace mounts only once the backend has acknowledged this
           market. Its children issue refreshes and subscriptions from their own
           effects, and on a warm lazy switch those used to run before the

@@ -14,6 +14,37 @@ const HIDDEN_ORDER_HISTORY_STATUSES = new Set(['CANCELED', 'CANCELLED'])
 
 const sideTone = side => (String(side).toUpperCase() === 'SELL' ? 'sell' : 'buy')
 
+const positiveNumber = (value) => {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null
+}
+
+const exactDerivedUsdt = value => value.toFixed(8).replace(/\.?0+$/, '')
+
+const describeFilledUsdt = (order) => {
+  const reported = positiveNumber(order?.quoteQty)
+  if (reported !== null) {
+    return {
+      value: reported,
+      exact: String(order.quoteQty).trim(),
+      derived: false,
+    }
+  }
+  const executed = positiveNumber(order?.executedQty)
+  const average = positiveNumber(order?.averagePrice)
+  if (executed === null || average === null) return null
+  const value = executed * average
+  return {
+    value,
+    exact: exactDerivedUsdt(value),
+    derived: true,
+  }
+}
+
+const formatFilledUsdt = value => (
+  Math.abs(value) >= 10_000 ? formatCompactUsdt(value) : formatUsdtAmount(value, 2)
+)
+
 // A round is a span, not a moment: the column shows where it started and the
 // title shows how long it ran, including the case where it is still running.
 const roundSpan = (round) => {
@@ -265,31 +296,40 @@ export const FuturesHistoryPanel = ({
           <span role="columnheader">Side</span>
           <span role="columnheader">Type</span>
           <span role="columnheader">Price</span>
-          <span role="columnheader">Filled</span>
+          <span role="columnheader" title="Filled notional in USDT">Filled USDT</span>
           <span role="columnheader">Avg</span>
           <span role="columnheader">Status</span>
         </div>
-        {orders.map(order => (
-          <div
-            className={rowClass('is-order-history', sideTone(order.side), order.symbol)}
-            role="row"
-            key={`${order.symbol}:${order.orderId}:${order.time}`}
-          >
-            {symbolCell(order.symbol)}
-            <span role="cell" title={exactFuturesDeskTime(order.time)}>{formatFuturesDeskTime(order.time)}</span>
-            <span role="cell" className={`futures-workstation-dock-side is-${sideTone(order.side)}`}>
-              {order.side}
-            </span>
-            <span role="cell">{order.type}{order.reduceOnly ? ' · RO' : ''}</span>
-            {/* A market order carries no limit price and an unfilled order no
-                average: the exchange reports 0 for both, and 0.000 in a price column
-                reads as a level rather than as an absence. */}
-            <span role="cell">{formatPriceOrAbsent(order.price, tickOf(order.symbol))}</span>
-            <span role="cell">{order.executedQty} / {order.origQty}</span>
-            <span role="cell">{formatPriceOrAbsent(order.averagePrice, tickOf(order.symbol))}</span>
-            <span role="cell" className="futures-workstation-dock-status">{order.status}</span>
-          </div>
-        ))}
+        {orders.map((order) => {
+          const filled = describeFilledUsdt(order)
+          const quantities = `${order.executedQty} / ${order.origQty} contracts`
+          const filledTitle = filled === null
+            ? `${quantities} · executed USDT unavailable`
+            : `${filled.exact} USDT${filled.derived ? ' · derived from executed quantity × average fill price' : ' · reported by the exchange'} · ${quantities}`
+          return (
+            <div
+              className={rowClass('is-order-history', sideTone(order.side), order.symbol)}
+              role="row"
+              key={`${order.symbol}:${order.orderId}:${order.time}`}
+            >
+              {symbolCell(order.symbol)}
+              <span role="cell" title={exactFuturesDeskTime(order.time)}>{formatFuturesDeskTime(order.time)}</span>
+              <span role="cell" className={`futures-workstation-dock-side is-${sideTone(order.side)}`}>
+                {order.side}
+              </span>
+              <span role="cell">{order.type}{order.reduceOnly ? ' · RO' : ''}</span>
+              {/* A market order carries no limit price and an unfilled order no
+                  average: the exchange reports 0 for both, and 0.000 in a price column
+                  reads as a level rather than as an absence. */}
+              <span role="cell">{formatPriceOrAbsent(order.price, tickOf(order.symbol))}</span>
+              <span role="cell" className="futures-workstation-dock-filled" title={filledTitle}>
+                {filled === null ? '—' : formatFilledUsdt(filled.value)}
+              </span>
+              <span role="cell">{formatPriceOrAbsent(order.averagePrice, tickOf(order.symbol))}</span>
+              <span role="cell" className="futures-workstation-dock-status">{order.status}</span>
+            </div>
+          )
+        })}
       </div>
       {reach(orders)}
     </>

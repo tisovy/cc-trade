@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { attachMockLocalStorage } from '@/test/mocks'
 import {
@@ -81,12 +81,14 @@ describe('App lazy market workspace ownership', () => {
   afterEach(() => {
     cleanup()
     localStorageMock.clear()
+    vi.useRealTimers()
   })
 
   it('starts neutral with no fallback and imports only the explicitly selected workspace', async () => {
     render(<App />)
 
     expect(screen.getByTestId('market-workspace-selector')).toBeInTheDocument()
+    expect(screen.queryByLabelText(/^Local time /)).not.toBeInTheDocument()
     expect(mocks.spotModuleLoads).toBe(0)
     expect(mocks.futuresModuleLoads).toBe(0)
     expect(mocks.spotRenders).toBe(0)
@@ -94,11 +96,33 @@ describe('App lazy market workspace ownership', () => {
 
     fireEvent.click(screen.getByTestId('market-mode-futures-live'))
     expect(await screen.findByTestId('lazy-futures-workspace')).toBeInTheDocument()
+    expect(screen.getByLabelText(/^Local time /)).toBeInTheDocument()
     expect(mocks.futuresModuleLoads).toBe(1)
     expect(mocks.spotModuleLoads).toBe(0)
     expect(mocks.spotRenders).toBe(0)
     expect(localStorageMock.getItem(MARKET_WORKSPACE_STORAGE_KEY))
       .toBe(MARKET_WORKSPACES.FUTURES_LIVE)
+  })
+
+  it('shows exact local time through seconds and cleans up its active-workspace timer', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(2026, 7, 15, 23, 59, 59))
+    localStorageMock.setItem(MARKET_WORKSPACE_STORAGE_KEY, MARKET_WORKSPACES.FUTURES_LIVE)
+
+    const { unmount } = render(<App />)
+
+    const beforeMidnight = screen.getByLabelText('Local time Sat 15 Aug 23:59:59')
+    expect(beforeMidnight).toHaveTextContent('Sat 15 Aug 23:59:59')
+    expect(beforeMidnight).toHaveClass('market-local-clock')
+    expect(vi.getTimerCount()).toBe(1)
+
+    act(() => vi.advanceTimersByTime(1_000))
+
+    expect(screen.getByLabelText('Local time Sun 16 Aug 00:00:00'))
+      .toHaveTextContent('Sun 16 Aug 00:00:00')
+
+    unmount()
+    expect(vi.getTimerCount()).toBe(0)
   })
 
   it('restores persisted Spot directly without mounting Futures first', async () => {

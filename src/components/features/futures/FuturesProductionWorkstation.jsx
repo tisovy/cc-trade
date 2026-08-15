@@ -443,6 +443,7 @@ export const FuturesProductionWorkstation = ({
       gestureRequest={gestureRequest}
       sizeRequest={sizeRequest}
       onDraftPriceChange={handleDraftPriceChange}
+      onSymbolChange={handleSymbolChange}
       onOrderEdit={handleOrderEdit}
       onPositionClose={handlePositionClose}
     />

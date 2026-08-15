@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { act, createEvent, fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import FuturesTradingTicket from './FuturesTradingTicket.jsx'
@@ -1295,6 +1296,58 @@ describe('FuturesTradingTicket', () => {
     // trades, and the exchange's padding is not precision the contract quotes.
     expect(within(panel).getByText('GRVT')).toHaveAttribute('title', 'GRVTUSDT')
     expect(within(panel).getByText('0.014841')).toBeInTheDocument()
+  })
+
+  it('switches from an explicit order-symbol control and keeps a small price whole', () => {
+    const onSymbolChange = vi.fn()
+    const onOrderEdit = vi.fn()
+    const state = createState({
+      openOrders: [{
+        symbol: 'TUTUSDT', orderId: 31, side: 'BUY', positionSide: 'LONG',
+        type: 'LIMIT', status: 'NEW', price: '0.000123', origQty: '5000', z: '0',
+      }],
+    })
+    render(
+      <FuturesTradingTicket
+        state={state}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+        onSymbolChange={onSymbolChange}
+        onOrderEdit={onOrderEdit}
+      />,
+    )
+    fireEvent.click(screen.getByRole('tab', { name: /Orders/ }))
+    const panel = screen.getByLabelText('Current Futures orders')
+    const symbol = within(panel).getByRole('button', { name: 'Show TUTUSDT' })
+
+    expect(symbol).toHaveTextContent('TUT')
+    expect(symbol).toHaveAttribute('title', 'TUTUSDT')
+    expect(within(panel).getByText('0.000123').closest('[role="cell"]')).toHaveAttribute(
+      'title',
+      '0.000123',
+    )
+
+    fireEvent.click(symbol, { detail: 1 })
+    expect(onSymbolChange).toHaveBeenCalledExactlyOnceWith('TUTUSDT')
+    expect(onOrderEdit).not.toHaveBeenCalled()
+
+    onSymbolChange.mockClear()
+    // A native button's keyboard activation arrives at React as a click with
+    // detail 0; the same handler must select without falling through to edit.
+    fireEvent.click(symbol, { detail: 0 })
+    expect(onSymbolChange).toHaveBeenCalledExactlyOnceWith('TUTUSDT')
+    fireEvent.doubleClick(symbol)
+    expect(onOrderEdit).not.toHaveBeenCalled()
+
+    const stylesheet = readFileSync(
+      'src/components/features/futures/FuturesProductionExecutionTicket.css',
+      'utf8',
+    )
+    const rowTracks = stylesheet.match(
+      /\.futures-production-order-head,\s*\.futures-production-order-row\s*\{(?<declarations>[^}]*)\}/,
+    )?.groups?.declarations
+    expect(rowTracks).toContain('minmax(68px, 1.35fr)')
+    expect(rowTracks).toContain('gap: 4px;')
   })
 
   it('opens the order editor once from Enter and Space at the row centre', () => {

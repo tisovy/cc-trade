@@ -42,6 +42,26 @@ describe('futures symbol history', () => {
     expect(rememberFuturesSymbol(history, 'not a symbol')).toBe(history)
   })
 
+  it('persists nine recent symbols and evicts only the oldest on the tenth', () => {
+    expect(FUTURES_RECENT_SYMBOL_LIMIT).toBe(9)
+    const storage = createStorage()
+    let history = readFuturesSymbolHistory(storage)
+    for (let index = 0; index < 10; index += 1) {
+      history = rememberFuturesSymbol(history, `SYM${index}USDT`)
+    }
+
+    expect(history.recent).toEqual([
+      'SYM9USDT', 'SYM8USDT', 'SYM7USDT',
+      'SYM6USDT', 'SYM5USDT', 'SYM4USDT',
+      'SYM3USDT', 'SYM2USDT', 'SYM1USDT',
+    ])
+    writeFuturesSymbolHistory(history, storage)
+    expect(readFuturesSymbolHistory(storage)).toMatchObject({
+      recent: history.recent,
+      lastSymbol: 'SYM9USDT',
+    })
+  })
+
   it('survives unreadable or corrupt storage', () => {
     expect(readFuturesSymbolHistory({ getItem: () => '{{{' }))
       .toMatchObject({ recent: [], favorites: [], lastSymbol: null })

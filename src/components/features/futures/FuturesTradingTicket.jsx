@@ -106,6 +106,7 @@ const FuturesTradingTicket = ({
   gestureRequest = null,
   sizeRequest = null,
   onDraftPriceChange,
+  onSymbolChange,
   onOrderEdit,
   onPositionClose,
 }) => {
@@ -722,6 +723,10 @@ const FuturesTradingTicket = ({
                     const isAlgo = order.orderKind === 'ALGO'
                     const trigger = describeFuturesAlgoTrigger(order)
                     const editable = !isAlgo && typeof onOrderEdit === 'function'
+                    const displayedPrice = formatPriceOrAbsent(
+                      trigger.spawnedPrice ?? order.triggerPrice ?? order.price,
+                      tickOf(order.symbol),
+                    )
                     return (
                       <div
                         className={`futures-production-order-row is-${intent.tone}${order.symbol === selectedSymbol ? ' is-current-symbol' : ''}${editable ? ' is-editable' : ''}${trigger.triggered ? ' is-triggered' : ''}`}
@@ -739,7 +744,21 @@ const FuturesTradingTicket = ({
                           y: event.clientY,
                         }))}
                       >
-                        <span role="cell"><strong title={order.symbol}>{contractLabel(order.symbol)}</strong></span>
+                        <span role="cell">
+                          <button
+                            type="button"
+                            className="futures-production-order-symbol"
+                            aria-label={`Show ${order.symbol}`}
+                            title={order.symbol}
+                            onClick={(event) => {
+                              event.stopPropagation()
+                              onSymbolChange?.(order.symbol)
+                            }}
+                            onDoubleClick={event => event.stopPropagation()}
+                          >
+                            {contractLabel(order.symbol)}
+                          </button>
+                        </span>
                         <span role="cell">
                           <span className={`futures-production-side is-${intent.tone}`}>
                             {intent.label}
@@ -754,17 +773,12 @@ const FuturesTradingTicket = ({
                         <span
                           role="cell"
                           title={trigger.spawnedPrice === null
-                            ? undefined
-                            : `fired from a trigger at ${order.triggerPrice ?? order.price}`}
+                            ? displayedPrice === '—' ? undefined : displayedPrice
+                            : `${displayedPrice} · fired from a trigger at ${order.triggerPrice ?? order.price}`}
                         >
-                          <code>
-                            {formatPriceOrAbsent(
-                              // A parent that fired is priced where it fired,
-                              // not where it was waiting to.
-                              trigger.spawnedPrice ?? order.triggerPrice ?? order.price,
-                              tickOf(order.symbol),
-                            )}
-                          </code>
+                          {/* A parent that fired is priced where it fired, not
+                              where it was waiting to. */}
+                          <code>{displayedPrice}</code>
                         </span>
                         <span role="cell" title={orderSizeTitle(order)}>
                           <b>{orderNotionalUsdt(order) ?? '—'}</b>
