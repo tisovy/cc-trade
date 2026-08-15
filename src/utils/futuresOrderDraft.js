@@ -275,6 +275,24 @@ export const isFuturesOrderCapConfigured = capUsdt => (
   capUsdt !== null && capUsdt !== undefined && capUsdt !== ''
 )
 
+// The exchange's floor under an order, asked the same way the ceiling above it
+// is. `deriveFuturesLimitOrderDraft` tests the same bound on the atoms it has
+// already parsed; this is for the paths that arrive holding a quantity and a
+// price rather than a notional to size from — the drag being the one that
+// carries a live order into it.
+//
+// A floor the desk does not hold is not a floor an order fails: an unloaded
+// catalogue must not read as an order too small to place, and Binance applies
+// the filter itself. An order that cannot be valued is the other way round —
+// the desk cannot say it clears a bound it could not measure it against.
+export const fallsBelowFuturesMinimumNotional = (notionalUsdt, minNotionalUsdt) => {
+  const minimumAtoms = parseDecimalAtoms(toDecimalText(minNotionalUsdt) ?? '', { positive: true })
+  if (minimumAtoms === null) return false
+  const notionalAtoms = parseDecimalAtoms(toDecimalText(notionalUsdt) ?? '', { positive: true })
+  if (notionalAtoms === null) return true
+  return notionalAtoms < minimumAtoms
+}
+
 export const exceedsFuturesOrderCap = (notionalUsdt, capUsdt) => {
   if (!isFuturesOrderCapConfigured(capUsdt)) return false
   const capAtoms = parseDecimalAtoms(toDecimalText(capUsdt) ?? '', { positive: true })

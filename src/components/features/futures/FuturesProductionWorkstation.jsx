@@ -96,6 +96,10 @@ export const FuturesProductionWorkstation = ({
     tradingPaused: executionState?.tradingPaused === true,
     maxOrderNotionalUsdt: executionState?.maxOrderNotionalUsdt ?? null,
     tickSize: selectedContract?.filters?.price?.tickSize ?? null,
+    // The floor the ticket already refuses a placement against. A drag lowers
+    // the price and keeps the quantity, so it is the one gesture on this desk
+    // that walks an order under it without typing anything.
+    minNotionalUsdt: selectedContract?.filters?.minimumNotional ?? null,
     cancelOrder: executionState?.cancelOrderAndConfirm,
     placeOrder: executionState?.placeOrderAndConfirm,
   })

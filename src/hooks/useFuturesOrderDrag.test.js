@@ -172,7 +172,10 @@ describe('useFuturesOrderDrag', () => {
     expect(result.current.alerts).toEqual([])
   })
 
-  it('refuses an over-cap drop and never places a second order for it', async () => {
+  // A bound the desk holds refuses the move, not the order. The order was
+  // taken off the book by the lift, so refusing the move means putting it back
+  // where it was resting — the operator keeps the order and learns the bound.
+  it('refuses an over-cap drop and puts the order back where it was', async () => {
     const { result, placeOrder } = setup({ maxOrderNotionalUsdt: '250' })
 
     const lifted = order()
@@ -180,8 +183,14 @@ describe('useFuturesOrderDrag', () => {
     // 0.004 at 58445 is 233 USDT and fits; at 65000 it does not.
     await act(async () => { await result.current.drop({ order: lifted, price: '65000' }) })
 
-    expect(placeOrder).not.toHaveBeenCalled()
-    expect(result.current.alerts[0]).toMatchObject({ tone: 'lost', retryPrice: '58445.00' })
+    expect(placeOrder).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ price: '58445', quantity: '0.004' }),
+    )
+    expect(result.current.alerts[0]).toMatchObject({
+      tone: 'refused',
+      title: 'Order NOT moved',
+      retryPrice: null,
+    })
     expect(result.current.alerts[0].detail).toContain('above the local 250 USDT limit')
   })
 
@@ -355,6 +364,127 @@ describe('useFuturesOrderDrag', () => {
     expect(placeOrder).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({ price: '0.030837' }),
     )
+  })
+
+  // Dragging an order destroyed it. The operator moved a 5 USDT limit order
+  // down; the cancellation was confirmed at 18:12:27 and the placement refused
+  // at 18:12:29 with -4164, the exchange's minimum notional. A drag lowers the
+  // price and leaves the quantity where it was, so it lowers the notional — and
+  // the desk held that floor all along, on the path that places an order and
+  // not on the path that moves one.
+  describe('a move under a bound the desk already holds', () => {
+    const smallOrder = (overrides = {}) => order({
+      symbol: 'BTWUSDT',
+      price: '0.2174',
+      origQty: '23',
+      ...overrides,
+    })
+    const smallSetup = (options = {}) => setup({
+      tickSize: '0.0001',
+      minNotionalUsdt: '5',
+      ...options,
+    })
+
+    it('leaves the order live at the price it was resting at', async () => {
+      const { result, cancelOrder, placeOrder } = smallSetup()
+
+      const lifted = smallOrder()
+      await act(async () => { await result.current.lift(lifted) })
+      // 23 × 0.2029 is 4.6667 USDT, under the contract's 5 USDT floor.
+      await act(async () => { await result.current.drop({ order: lifted, price: '0.2029' }) })
+
+      expect(cancelOrder).toHaveBeenCalledOnce()
+      // One placement, at the price the order was resting at: the move is
+      // refused, the order is not.
+      expect(placeOrder).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        symbol: 'BTWUSDT',
+        price: '0.2174',
+        quantity: '23',
+      }))
+      expect(result.current.alerts).toHaveLength(1)
+      expect(result.current.alerts[0]).toMatchObject({
+        tone: 'refused',
+        title: 'Order NOT moved',
+        retryPrice: null,
+      })
+      expect(result.current.alerts[0].detail)
+        .toContain('below the Binance minimum notional of 5 USDT')
+    })
+
+    // The literal reading of the rule: an order the desk could not place at its
+    // own resting price is one the drag must not take off the book at all.
+    it('cancels nothing it could not place back at the price it holds', async () => {
+      const { result, cancelOrder, placeOrder } = smallSetup()
+
+      let lift
+      await act(async () => {
+        lift = await result.current.lift(smallOrder({ price: '0.2029' }))
+      })
+
+      expect(lift).toEqual({ ok: false })
+      expect(cancelOrder).not.toHaveBeenCalled()
+      expect(placeOrder).not.toHaveBeenCalled()
+      expect(result.current.alerts[0]).toMatchObject({
+        tone: 'refused',
+        title: 'Order NOT lifted',
+      })
+      expect(result.current.alerts[0].detail).toContain('The order was left where it is.')
+    })
+
+    // Only bounds the desk actually holds are consulted. A contract whose
+    // catalogue has not loaded has no floor here, and inventing one would
+    // refuse a move the exchange would have taken.
+    it('refuses nothing on a floor the desk does not hold', async () => {
+      const { result, placeOrder } = smallSetup({ minNotionalUsdt: null })
+
+      const lifted = smallOrder()
+      await act(async () => { await result.current.lift(lifted) })
+      await act(async () => { await result.current.drop({ order: lifted, price: '0.2029' }) })
+
+      expect(placeOrder).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ price: '0.2029' }),
+      )
+      expect(result.current.alerts).toEqual([])
+    })
+
+    // What this change must not silence: a refusal the desk had no bound for
+    // still reaches the exchange, and still reads as an order that is gone.
+    it('still states an order the exchange refused for a reason of its own', async () => {
+      const { result, placeOrder } = smallSetup({ placeAnswer: REFUSED })
+
+      const lifted = smallOrder()
+      await act(async () => { await result.current.lift(lifted) })
+      await act(async () => { await result.current.drop({ order: lifted, price: '0.2200' }) })
+
+      expect(placeOrder).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ price: '0.22' }),
+      )
+      expect(result.current.alerts[0]).toMatchObject({
+        tone: 'lost',
+        title: 'Order cancelled and NOT replaced',
+        retryPrice: '0.2174',
+      })
+    })
+
+    // The order goes back on the book, and if that placement is the one the
+    // exchange refuses, the desk says the order is gone rather than saying it
+    // was merely not moved.
+    it('says the order is gone when the price it rested at is refused too', async () => {
+      const { result, placeOrder } = smallSetup({ placeAnswer: REFUSED })
+
+      const lifted = smallOrder()
+      await act(async () => { await result.current.lift(lifted) })
+      await act(async () => { await result.current.drop({ order: lifted, price: '0.2029' }) })
+
+      expect(placeOrder).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({ price: '0.2174' }),
+      )
+      expect(result.current.alerts.map(entry => entry.title)).toEqual([
+        'Order NOT moved',
+        'Order cancelled and NOT replaced',
+      ])
+      expect(result.current.alerts.at(-1)).toMatchObject({ retryPrice: '0.2174' })
+    })
   })
 
   it('carries the exchange leg of a hedged order onto its replacement', async () => {

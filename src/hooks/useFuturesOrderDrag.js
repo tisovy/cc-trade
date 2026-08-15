@@ -48,6 +48,16 @@ const dragIdentity = (order) => {
   return id === null || symbol === '' ? null : `${symbol}:${id}`
 }
 
+// Whether a drag ended where it began. Compared as numbers because the same
+// price arrives written two ways — `58445.00` from the account read, `58445`
+// from the chart — and a drop that moved nothing must not be answered as if it
+// had somewhere else to go.
+const samePrice = (one, other) => {
+  const left = Number(one)
+  const right = Number(other)
+  return Number.isFinite(left) && Number.isFinite(right) && left === right
+}
+
 const orderSummary = (order, replacement) => Object.freeze({
   symbol: order?.symbol ?? null,
   side: order?.side ?? null,
@@ -60,6 +70,7 @@ export const useFuturesOrderDrag = ({
   tradingPaused = false,
   maxOrderNotionalUsdt = null,
   tickSize = null,
+  minNotionalUsdt = null,
   cancelOrder,
   placeOrder,
 } = {}) => {
@@ -119,16 +130,37 @@ export const useFuturesOrderDrag = ({
   }, [])
 
   const sendReplacement = useCallback(async (lifted, price) => {
-    const replacement = describeFuturesDragReplacement({
+    const describe = target => describeFuturesDragReplacement({
       order: lifted.order,
-      price,
+      price: target,
       // The tick the order's own contract trades at, captured when it was
       // lifted. A drag that ends because the operator changed contract would
       // otherwise round the old order's price to the new contract's tick —
       // 0.0308370 against a 0.01 tick is an order at 0.03.
       tickSize: lifted.tickSize,
+      // Captured with the tick and for the same reason: the floor belongs to
+      // the contract the order rests on, not to whichever one is on screen when
+      // the drag ends.
+      minNotionalUsdt: lifted.minNotionalUsdt,
       maxOrderNotionalUsdt,
     })
+    let replacement = describe(price)
+    // A bound the desk holds refused the move — not the exchange, and not the
+    // order. The order is off the book because this drag lifted it, so what is
+    // owed is still an order, and the one price it is known to pass at is the
+    // one it was resting at. The move is refused; the order is not, and nothing
+    // is invented to make the new price fit.
+    if (!replacement.ok && !samePrice(price, lifted.originPrice)) {
+      raise({
+        tone: 'refused',
+        title: 'Order NOT moved',
+        detail: `${describeFuturesDragRefusal(replacement)} It is being placed again at ${lifted.originPrice}.`,
+        order: orderSummary(lifted.order, null),
+        retryPrice: null,
+        lifted: null,
+      })
+      replacement = describe(lifted.originPrice)
+    }
     if (!replacement.ok) {
       raiseObligation(lifted, replacement, {
         code: replacement.reason,
@@ -163,7 +195,7 @@ export const useFuturesOrderDrag = ({
     } finally {
       setInFlight(count => Math.max(0, count - 1))
     }
-  }, [maxOrderNotionalUsdt, placeOrder, raiseObligation, release])
+  }, [maxOrderNotionalUsdt, placeOrder, raise, raiseObligation, release])
 
   /**
    * Take the order off the book. Resolves `{ ok: true }` only once Binance has
@@ -202,6 +234,7 @@ export const useFuturesOrderDrag = ({
       order,
       price: order?.price,
       tickSize,
+      minNotionalUsdt,
       maxOrderNotionalUsdt,
     })
     if (!restorable.ok) {
@@ -215,7 +248,7 @@ export const useFuturesOrderDrag = ({
       })
       return { ok: false }
     }
-    const lifted = Object.freeze({ order, originPrice: order.price, tickSize })
+    const lifted = Object.freeze({ order, originPrice: order.price, tickSize, minNotionalUsdt })
     owedRef.current.set(identity, { lifted, dropped: false })
     const answer = await cancelOrder({
       symbol: order.symbol,
@@ -244,7 +277,15 @@ export const useFuturesOrderDrag = ({
           lifted: null,
         })
     return { ok: false }
-  }, [cancelOrder, maxOrderNotionalUsdt, placeOrder, raise, tickSize, tradingPaused])
+  }, [
+    cancelOrder,
+    maxOrderNotionalUsdt,
+    minNotionalUsdt,
+    placeOrder,
+    raise,
+    tickSize,
+    tradingPaused,
+  ])
 
   /**
    * End the drag on `order`. `restored` puts it back where it was lifted from —

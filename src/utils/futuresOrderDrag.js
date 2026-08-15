@@ -13,7 +13,9 @@
 
 import {
   FUTURES_RISK_REASONS,
+  calculateFuturesOrderNotional,
   evaluateFuturesOrderRisk,
+  fallsBelowFuturesMinimumNotional,
   normalizeFuturesDraftPrice,
   remainingFuturesQuantity,
 } from './futuresOrderDraft.js'
@@ -24,6 +26,7 @@ export const FUTURES_DRAG_REASONS = Object.freeze({
   NOT_DRAGGABLE: 'NOT_DRAGGABLE',
   NO_REMAINING_QUANTITY: 'NO_REMAINING_QUANTITY',
   UNUSABLE_PRICE: 'UNUSABLE_PRICE',
+  BELOW_MINIMUM_NOTIONAL: 'BELOW_MINIMUM_NOTIONAL',
   ABOVE_ORDER_CAP: FUTURES_RISK_REASONS.ABOVE_ORDER_CAP,
   UNPRICEABLE_ORDER: FUTURES_RISK_REASONS.UNPRICEABLE_ORDER,
 })
@@ -58,6 +61,7 @@ export const describeFuturesDragReplacement = ({
   order,
   price,
   tickSize = null,
+  minNotionalUsdt = null,
   maxOrderNotionalUsdt = null,
 } = {}) => {
   if (!order || (order.orderKind ?? 'REGULAR') !== 'REGULAR') {
@@ -81,6 +85,19 @@ export const describeFuturesDragReplacement = ({
   const normalizedPrice = normalizeFuturesDraftPrice(target, tickSize)
     ?? (isPositiveDecimal(target) ? target : null)
   if (normalizedPrice === null) return refuse(FUTURES_DRAG_REASONS.UNUSABLE_PRICE)
+
+  // A drag lowers the price and leaves the quantity where it was, so it lowers
+  // the notional — and the floor under an order is a bound this desk already
+  // holds and already enforces on the path that places one. Asked here, it
+  // refuses the move; unasked, it was the exchange that refused, after the
+  // cancellation that lifted the order had already been confirmed.
+  const dragNotionalUsdt = calculateFuturesOrderNotional(quantity, normalizedPrice)
+  if (fallsBelowFuturesMinimumNotional(dragNotionalUsdt, minNotionalUsdt)) {
+    return refuse(FUTURES_DRAG_REASONS.BELOW_MINIMUM_NOTIONAL, {
+      notionalUsdt: dragNotionalUsdt,
+      minNotionalUsdt,
+    })
+  }
 
   const reduceOnly = order.reduceOnly === true
   const risk = evaluateFuturesOrderRisk({
@@ -122,6 +139,10 @@ export const describeFuturesDragRefusal = (replacement) => {
       return 'The order has no remaining quantity to place.'
     case FUTURES_DRAG_REASONS.UNUSABLE_PRICE:
       return 'The price the order was dropped at cannot be used.'
+    // The words the ticket already refuses a placement in, so one order refusal
+    // does not read differently from another.
+    case FUTURES_DRAG_REASONS.BELOW_MINIMUM_NOTIONAL:
+      return `The order would be ${replacement.notionalUsdt} USDT, below the Binance minimum notional of ${replacement.minNotionalUsdt} USDT.`
     case FUTURES_DRAG_REASONS.ABOVE_ORDER_CAP:
       return `The order would be ${replacement.notionalUsdt} USDT, above the local ${replacement.capUsdt} USDT limit.`
     case FUTURES_DRAG_REASONS.UNPRICEABLE_ORDER:
