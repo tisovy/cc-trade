@@ -427,11 +427,16 @@ wallet and the position it moved.
 ### Requirement: Values no stream carries are read, not computed
 The liquidation price, the margin a position commits and the free margin an
 order may be sized against are not carried by any authenticated stream. The
-system SHALL NOT derive them from the values a stream does carry. It SHALL read
-them from the exchange, and SHALL do so only when a fold moved something they
-depend on: a position whose size, entry, margin mode or isolated wallet changed,
-or a wallet balance that moved. Such a read SHALL name only the resources whose
-unstated values moved, and SHALL issue nothing when none did.
+system SHALL show, and SHALL size an order against, only what the exchange
+answered — never a value it derived itself. It SHALL read them from the
+exchange, and SHALL do so only when a fold moved something they depend on: a
+position whose size, entry, margin mode or isolated wallet changed, or a wallet
+balance that moved. Such a read SHALL name only the resources whose unstated
+values moved, and SHALL issue nothing when none did.
+
+The system MAY compute the same values for comparison, and SHALL keep any value
+so computed out of everything the operator sees or trades against. A computed
+value SHALL reach the desk's record and nothing else.
 
 Placing, amending or cancelling an order changes the free margin and is reported
 by no stream, so it SHALL cause the balances alone to be read.
@@ -463,4 +468,62 @@ read is in flight.
 #### Scenario: A position opens before its liquidation price is known
 - **WHEN** a position is folded onto a contract the desk holds no read for
 - **THEN** the row is shown without a liquidation price rather than with one the desk computed, and the price appears when the read answers
+
+#### Scenario: The desk's own answer disagrees with the exchange's
+- **WHEN** the value the desk computed differs from the one the read answered
+- **THEN** the exchange's value is what is shown and what an order is sized against, and the difference is recorded
+
+### Requirement: The desk computes the values no stream carries
+The system SHALL compute, from what it already holds, the values no stream
+carries: each held position's notional, initial margin, maintenance margin and
+liquidation price, and the account's free margin. While a read of the same
+values is available, what it computes SHALL be used for comparison only and
+SHALL reach the record and nothing else. It SHALL compute them from the
+contract's maintenance-margin brackets, the contract's leverage and margin mode,
+the mark price, the folded position and wallet, and the resting orders — without
+issuing a read of its own for the purpose.
+
+Where a bracket, a mark price, a leverage or a margin mode is missing, the system
+SHALL state that it could not compute the value rather than substitute a default,
+a zero or a value from a different contract.
+
+The maintenance-margin brackets SHALL be kept from the answer the desk already
+reads for a contract's leverage ceiling, held per contract and forgotten on the
+same terms as the contract's other settings.
+
+#### Scenario: A position is held with everything the arithmetic needs
+- **WHEN** the desk holds a position, the contract's brackets, its leverage and a mark price
+- **THEN** it computes that position's notional, initial margin, maintenance margin and liquidation price
+
+#### Scenario: A contract with no brackets held
+- **WHEN** a position is held on a contract whose brackets have not been read
+- **THEN** the desk states that it could not compute that position's maintenance margin and liquidation price, and computes nothing in their place
+
+#### Scenario: The brackets come from a read already made
+- **WHEN** the desk reads a contract's leverage ceiling
+- **THEN** the whole bracket table from that answer is kept, and no further read is issued to obtain it
+
+#### Scenario: A resting order commits margin
+- **WHEN** the account has resting orders that are not reduce-only
+- **THEN** the computed free margin counts the margin they commit, and counts nothing for a reduce-only order
+
+#### Scenario: A bracket answer is not safe to calculate from
+- **WHEN** a bracket answer is partial, malformed, or carries a non-default user bracket multiplier whose application is not stated
+- **THEN** the exchange-derived leverage ceiling remains usable, but the desk states that it could not compute margin from that table
+
+#### Scenario: A spawned order identity exists on another contract
+- **WHEN** an algo names an actual order identity that is also used by a regular order on a different contract
+- **THEN** both contracts' orders remain in the free-margin calculation because order identities are contract-scoped
+
+#### Scenario: A resting order has impossible filled quantity
+- **WHEN** a resting order states an executed quantity greater than its original quantity
+- **THEN** the desk states that it could not compute free margin rather than treating the order as fully filled
+
+#### Scenario: A short position is compared
+- **WHEN** the exchange states a signed negative notional for a short position
+- **THEN** its magnitude is compared with the desk's positive notional magnitude, and equal values record zero basis points
+
+#### Scenario: Position initial margin is compared
+- **WHEN** a position row states both position and open-order initial margin
+- **THEN** the position estimate is compared with `positionInitialMargin`, not with the aggregate `initialMargin`
 
