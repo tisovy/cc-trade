@@ -498,11 +498,17 @@ export const FuturesPortfolioDock = ({
                     ? event => onOrderEdit(order, { x: event.clientX, y: event.clientY })
                     : undefined}
                 >
+                  {/* A fourteen-character contract needs 117px and this track
+                      gives it 82 at the width the dock splits, so the name is
+                      cut — and giving the intent beside it the room its badge
+                      needs takes another ten. The whole name is on the element,
+                      as it is in the review. */}
                   <span role="cell">
                     <button
                       type="button"
                       className="futures-workstation-dock-symbol"
                       aria-label={`Show ${order.symbol}`}
+                      title={order.symbol}
                       onClick={(event) => {
                         event.stopPropagation()
                         onSymbolChange?.(order.symbol)

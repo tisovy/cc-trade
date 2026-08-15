@@ -1768,6 +1768,38 @@ describe('FuturesTradingTicket', () => {
     expect(state.refresh).toHaveBeenCalledExactlyOnceWith('BTCUSDT')
   })
 
+  // The dock and the chart carry the word `exit` beside the leg. The rail cannot:
+  // measured in Chromium, at a 281px rail the side cell has 69px and `SHORT` with
+  // the badge needs 83, and since the badge trails the leg it is the badge that
+  // gets cut — the new reading eaten by the old one. It rides on the element
+  // instead. This is a guard: it holds the rail to stating the intent without
+  // spending width it does not have.
+  it('states an exit on the rail without a badge the row cannot hold', () => {
+    render(
+      <FuturesTradingTicket
+        state={createState({
+          openOrders: [
+            { symbol: 'BTCUSDT', orderId: 1, side: 'SELL', positionSide: 'BOTH', reduceOnly: true, price: '59900', origQty: '1', z: '0' },
+            { symbol: 'BTCUSDT', orderId: 2, side: 'BUY', positionSide: 'BOTH', price: '58000', origQty: '1', z: '0' },
+          ],
+        })}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+      />,
+    )
+    fireEvent.click(screen.getByRole('tab', { name: /^Orders/ }))
+
+    const rows = within(screen.getByRole('table', { name: 'Working orders' })).getAllByRole('row')
+    const closing = within(rows[1]).getAllByRole('cell')[1]
+    expect(closing).toHaveTextContent('LONG')
+    expect(closing).not.toHaveTextContent('exit')
+    expect(closing.getAttribute('title')).toMatch(/^Exit — reduce-only/)
+
+    const opening = within(rows[2]).getAllByRole('cell')[1]
+    expect(opening).toHaveTextContent('LONG')
+    expect(opening.getAttribute('title')).toBeNull()
+  })
+
   // A panel that closes is this desk's way of saying "done". It closed first and
   // sent second, so a closed socket dismissed the confirmation exactly as a
   // delivered order did — and took the numbers the operator had just approved

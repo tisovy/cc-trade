@@ -1898,10 +1898,19 @@
   white-space: nowrap;
 }
 
+/* Intent carries the widest pair in the row — `ALGO · LONG` beside the `exit`
+   badge, 118px measured — and it was the track that had least: at the width the
+   dock splits it resolved to 99px, so the badge, being last, was the part cut.
+   The new reading eaten by the old one is the defect this change exists to
+   remove, so the room comes from the tracks with slack rather than from the
+   word. Measured in Chromium at 1280, 1461, 1600 and 1920: every reading fits,
+   the head and every row resolve to one set of tracks, and the two clips that
+   remain are older than this change — a fourteen-character contract, whose whole
+   name is now on the element, and the Cancel control's own 68px track. */
 .futures-workstation-dock-row.is-orders {
   grid-template-columns:
-    minmax(68px, 1fr) 48px minmax(84px, 1.2fr) minmax(70px, 1fr)
-    minmax(78px, 0.9fr) minmax(60px, 0.9fr) 68px;
+    minmax(72px, 1fr) 48px minmax(120px, 1.2fr) minmax(70px, 1fr)
+    minmax(74px, 0.9fr) minmax(48px, 0.9fr) 68px;
 }
 
 .futures-workstation-dock-row > span {

@@ -486,8 +486,15 @@ describe('FuturesHistoryPanel', () => {
     expect(screen.getAllByRole('row')).toHaveLength(2)
     expect(screen.getByRole('table', { name: 'Order history' })).toHaveTextContent('BICOUSDT')
 
-    fireEvent.click(screen.getByRole('button', { name: 'All' }))
+    // Narrowing that leaves nothing is not an empty review, and rendering a bare
+    // header with the scope line beneath it reads as the first.
     fireEvent.click(screen.getByRole('button', { name: 'This contract' }))
+    expect(screen.queryByRole('table', { name: 'Order history' })).toBeNull()
+    expect(screen.getByText(/Nothing here matches/))
+      .toHaveTextContent('The review holds 2 orders')
+    expect(screen.getByText(new RegExp(scope))).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'All' }))
     expect(screen.getAllByRole('row')).toHaveLength(2)
     expect(screen.getByRole('table', { name: 'Order history' })).toHaveTextContent('BTCUSDT')
     // The read was never asked to happen again, and the statement of what it

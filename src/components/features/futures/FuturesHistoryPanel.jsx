@@ -96,7 +96,7 @@ const describeOrderOutcome = (order) => {
       status,
     }
   }
-  const label = ENDED_OUTCOME_LABELS[status] ?? (status === '' ? 'Ended' : 'Ended')
+  const label = ENDED_OUTCOME_LABELS[status] ?? 'Ended'
   return {
     label,
     tone: label === 'Open' ? 'open' : 'dead',
@@ -476,6 +476,16 @@ export const FuturesHistoryPanel = ({
     <>
       {notice}
       {filters}
+      {/* Narrowing that leaves nothing is not an empty review, and the two must
+          not look alike: the table would otherwise render as a bare header with
+          the scope line beneath it still describing the whole read, which reads
+          as "the account has nothing" rather than "your filter has nothing". */}
+      {narrowedOrders.length === 0 ? (
+        <p className="futures-workstation-empty" role="status">
+          {`Nothing here matches. The review holds ${orders.length} order${
+            orders.length === 1 ? '' : 's'} — widen the narrowing to reach them.`}
+        </p>
+      ) : (
       <div className="futures-workstation-dock-table" role="table" aria-label="Order history">
         {/* Six columns, not eight. The outcome leads because it is what the review
             exists to answer, and it is a chip rather than a word in the last
@@ -600,6 +610,7 @@ export const FuturesHistoryPanel = ({
           )
         }))}
       </div>
+      )}
       {reach(orders)}
     </>
   )

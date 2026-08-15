@@ -836,18 +836,23 @@ const FuturesTradingTicket = ({
                             {contractLabel(order.symbol)}
                           </button>
                         </span>
-                        {/* The leg, and what the order does to it. The rail is
-                            the narrowest surface that lists orders, so the word
-                            is a badge rather than a column. */}
-                        <span role="cell">
+                        {/* The leg, and what the order does to it — on the
+                            element rather than beside it. The dock and the chart
+                            both carry the word `exit`; this rail cannot. Measured
+                            in Chromium: at a 281px rail the side cell has 69px
+                            and `SHORT` with the badge needs 83, and because the
+                            badge trails the leg it is the badge that gets cut —
+                            the new reading eaten by the old one. Worse, the track
+                            is sized from its own content, so a row carrying a
+                            badge pushed its price and value out of line with the
+                            rows above it. */}
+                        <span
+                          role="cell"
+                          title={intent.positionEffect === 'EXIT' ? exitTitle(intent) : undefined}
+                        >
                           <span className={`futures-production-side is-${intent.tone}`}>
                             {intent.label}
                           </span>
-                          {intent.positionEffect === 'EXIT' ? (
-                            <em className="futures-production-order-exit" title={exitTitle(intent)}>
-                              exit
-                            </em>
-                          ) : null}
                         </span>
                         {/* An order rests at its trigger where it has one, at the
                             contract's tick rather than at the stream's padded
