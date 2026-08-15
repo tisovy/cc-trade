@@ -74,7 +74,9 @@ cost and the contention are not, and 0.2 and 0.3 below are the new readings.
 - [x] 3.2 A test that opening one history view reads one endpoint per contract,
   that the other view reads its own when opened, and that neither the held review
   nor the persistent store loses the rows of the view that was not read.
-- [ ] 3.3 `npx vitest run` on the committed tree, extracted with `git archive`.
+- [x] 3.3 `npx vitest run` on the committed tree, extracted with `git archive`:
+  2 018 tests, 111 files, all passing, with `eslint`, `check:futures-production`
+  and `check:command-path` beside it on the same tree.
 - [ ] 3.4 Operator confirms that opening the review no longer delays what the
   desk shows after an order. In
   `verify-the-desk-in-one-sitting/runbook.md`.
