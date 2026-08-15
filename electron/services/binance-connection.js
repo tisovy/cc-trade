@@ -2040,7 +2040,6 @@ export function setupBinanceConnection({
                 });
             }, 30 * 60 * 1000);
         } catch (err) {
-            futuresUserDataReconnecting = false;
             // The attempt outlived what it was for: the market was left, or the
             // last renderer went, while it was in flight. Nothing failed, and
             // the resource must not be left carrying a failure for a market
@@ -2050,6 +2049,7 @@ export function setupBinanceConnection({
                 abandonFuturesUserDataStream(generation);
                 return;
             }
+            futuresUserDataReconnecting = false;
             markFuturesUserDataFailed(err);
             if (err?.code === -2015 || err?.status === 401) {
                 // Terminal, and stated: no further attempt can grant a
