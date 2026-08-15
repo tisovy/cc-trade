@@ -25,4 +25,4 @@
 
 ## 5. Operator Verification
 
-- [ ] 5.1 Operator confirms on live data that the clock placement, order-symbol switching, small-price readability, ninth recent symbol, and Filled USDT history match the requested desktop workflow; archive only after this confirmation.
+- [x] 5.1 Operator confirms on live data that the clock placement, order-symbol switching, small-price readability, ninth recent symbol, and Filled USDT history match the requested desktop workflow; archive only after this confirmation.
