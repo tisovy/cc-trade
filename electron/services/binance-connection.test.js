@@ -4,6 +4,7 @@ import {
     createFuturesProductionWorkstationSubscribeRequest,
 } from '../../src/utils/futuresProductionWorkstationProtocol.js';
 import {
+    describeDeskDiagnosticEvent,
     readDeskDiagnosticCommandEvent,
     readDeskDiagnosticOutboundEvent,
 } from './desk-diagnostic-record.js';
@@ -5670,6 +5671,166 @@ describe('setupBinanceConnection user-data orchestration', () => {
             expect(held('status')[0]).toMatchObject({ kind: 'status', symbol: 'BTCUSDT' });
             // The book and the tape that arrived on the same emitter are not in it.
             expect(kept.every(entry => entry.kind !== 'book' && entry.kind !== 'tape')).toBe(true);
+        });
+
+        // Four ways an attempt on the private stream ends, and one thing they
+        // used to have in common: the resource is marked loading at the top of
+        // the attempt, three of the four paths out leave it there with nothing
+        // scheduled, and none of them writes a line. A desk that spent a session
+        // without its private stream could not be asked why — the record held
+        // the beat it fell back to and no reason for it.
+        describe('what ends an attempt on the private stream', () => {
+            // `activateMarket` clears the frames the activation itself produced,
+            // and the ending of the first attempt is one of them.
+            const activateFuturesKeepingEnvelopes = async () => {
+                await moduleMocks.rendererHandlers.message({
+                    type: 'utf8',
+                    utf8Data: JSON.stringify({
+                        action: 'activate_market',
+                        marketMode: 'futures-live',
+                    }),
+                });
+                await vi.advanceTimersByTimeAsync(2_000);
+                await flushMicrotasks();
+            };
+
+            const userDataStreamState = () => moduleMocks.rendererConnection.sendUTF.mock.calls
+                .map(([message]) => JSON.parse(message))
+                .filter(payload => payload.type === 'futures_account_state')
+                .at(-1)?.resources?.userDataStream;
+
+            const streamFaults = () => held('fault')
+                .filter(entry => entry.phase === 'futures-user-data');
+
+            const listenKeyAttempts = () => moduleMocks.futuresAdapter
+                .createUserDataStreamListenKey.mock.calls.length;
+
+            it('states a listen key the exchange did not give, and asks again', async () => {
+                // The answer arrived; it had no key in it. Indistinguishable
+                // today from the desk deciding not to ask.
+                moduleMocks.futuresAdapter.createUserDataStreamListenKey
+                    .mockResolvedValue(undefined);
+                await connectRecordedRenderer(null);
+                await activateFuturesKeepingEnvelopes();
+
+                expect(streamFaults()[0]).toEqual({
+                    kind: 'fault',
+                    phase: 'futures-user-data',
+                    code: 'LISTEN_KEY_MISSING',
+                });
+                // Failed with the cause named, rather than left loading — and
+                // named as itself, not as the desk's word for every failed read
+                // there is.
+                expect(userDataStreamState()).toMatchObject({
+                    status: 'error',
+                    error: { code: 'FUTURES_LISTEN_KEY_MISSING', retryable: true },
+                });
+
+                const asked = listenKeyAttempts();
+                await vi.advanceTimersByTimeAsync(3_000);
+                await flushMicrotasks();
+                expect(listenKeyAttempts()).toBeGreaterThan(asked);
+            });
+
+            // The other `undefined`: the desk decided not to ask, because the
+            // window closed while the request was in flight. Nobody is waiting
+            // for this stream, so nothing is retried and nothing is reported —
+            // but the record still says the attempt ended, because "the desk
+            // stopped trying" and "the desk never tried" read identically in a
+            // record that says neither.
+            it('states an attempt abandoned because nobody is watching, and retries nothing', async () => {
+                let answerListenKey = null;
+                moduleMocks.futuresAdapter.createUserDataStreamListenKey.mockImplementation(
+                    () => new Promise((resolve) => { answerListenKey = resolve; }),
+                );
+                await connectRecordedRenderer(null);
+                await activateFuturesKeepingEnvelopes();
+                expect(answerListenKey).toBeTypeOf('function');
+
+                moduleMocks.rendererHandlers.close();
+                await flushMicrotasks();
+                answerListenKey('futures-listen-key');
+                await vi.advanceTimersByTimeAsync(30_000);
+                await flushMicrotasks();
+
+                expect(streamFaults()).toEqual([
+                    { kind: 'fault', phase: 'futures-user-data', code: 'STREAM_ABANDONED' },
+                ]);
+                expect(moduleMocks.futuresUserDataSockets).toHaveLength(0);
+                expect(listenKeyAttempts()).toBe(1);
+                // An abandonment is not the exchange refusing anything, and the
+                // operator who closed the window is owed no red state for it.
+                expect(userDataStreamState()?.status).not.toBe('error');
+            });
+
+            it('states a refused key and stops, because another attempt cannot grant a permission', async () => {
+                moduleMocks.futuresAdapter.createUserDataStreamListenKey.mockRejectedValue(
+                    Object.assign(new Error('Invalid API-key, IP, or permissions'), { code: -2015 }),
+                );
+                await connectRecordedRenderer(null);
+                await activateFuturesKeepingEnvelopes();
+
+                expect(streamFaults()).toEqual([
+                    { kind: 'fault', phase: 'futures-user-data', code: 'LISTEN_KEY_REFUSED' },
+                ]);
+                expect(userDataStreamState()).toMatchObject({
+                    status: 'error',
+                    error: { code: 'FUTURES_PERMISSION_DENIED', retryable: false },
+                });
+
+                await vi.advanceTimersByTimeAsync(60_000);
+                await flushMicrotasks();
+                expect(listenKeyAttempts()).toBe(1);
+            });
+
+            // 4.3: the session that never opened the stream. Every attempt it
+            // made is in the record with what ended it, and the last line says
+            // the desk gave up rather than trailing off.
+            it('names every ending of a session in which the stream never opened', async () => {
+                // Not a network code: the limiter retries those itself, three
+                // times per attempt, and this test is about the desk's own
+                // bound rather than the limiter's.
+                moduleMocks.futuresAdapter.createUserDataStreamListenKey.mockRejectedValue(
+                    Object.assign(new Error('listen key request failed'), {
+                        code: 'FUTURES_API_ERROR',
+                        status: 503,
+                    }),
+                );
+                await connectRecordedRenderer(null);
+                await activateFuturesKeepingEnvelopes();
+                // The bound that already existed: five retries at 3s, 6s, 9s,
+                // 12s and 15s after the first attempt.
+                await vi.advanceTimersByTimeAsync(60_000);
+                await flushMicrotasks();
+
+                expect(listenKeyAttempts()).toBe(6);
+                // The code the failure arrived with, where the record accepts
+                // it, so five identical endings are not five blanks.
+                expect(streamFaults().map(entry => entry.code)).toEqual([
+                    'FUTURES_API_ERROR',
+                    'FUTURES_API_ERROR',
+                    'FUTURES_API_ERROR',
+                    'FUTURES_API_ERROR',
+                    'FUTURES_API_ERROR',
+                    'RECONNECT_EXHAUSTED',
+                ]);
+                expect(userDataStreamState().status).toBe('error');
+                // Nothing else in the record claims the leg ever carried: the
+                // opening is a `read` with reason `stream`, and there is none.
+                expect(held('read').some(entry => entry.reason === 'stream')).toBe(false);
+
+                // 4.2: the record keeps a fault only in its own shape and drops
+                // the whole line otherwise, so a code that says what happened
+                // and a code the record will refuse are the same silence. Asked
+                // of the record's own reader rather than a copy of its rule.
+                for (const fault of streamFaults()) {
+                    expect(describeDeskDiagnosticEvent('fault', fault)).not.toBeNull();
+                }
+
+                await vi.advanceTimersByTimeAsync(60_000);
+                await flushMicrotasks();
+                expect(listenKeyAttempts()).toBe(6);
+            });
         });
     });
 

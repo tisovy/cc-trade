@@ -89,7 +89,10 @@ import WebSocket from 'ws';
 import {
     createFuturesProductionWorkstationRuntime,
 } from './futures-production-workstation-composition.js';
-import { DESK_DIAGNOSTICS_UNRECORDED } from './desk-diagnostic-record.js';
+import {
+    DESK_DIAGNOSTICS_UNRECORDED,
+    describeDeskDiagnosticEvent,
+} from './desk-diagnostic-record.js';
 import { RENDERER_OUTBOX_LANES, createRendererOutbox } from './renderer-outbox.js';
 import {
     isPotentialFuturesProductionWorkstationFrame,
@@ -1765,6 +1768,68 @@ export function setupBinanceConnection({
         broadcastFuturesAccountState();
     };
 
+    // Where the private leg states itself in the record. The market sockets
+    // already write faults under `stream`; this one is the account's own, and
+    // the two are worth telling apart when a session is read back.
+    const FUTURES_USER_DATA_PHASE = 'futures-user-data';
+
+    /**
+     * What ended an attempt on the private stream.
+     *
+     * No new event kind: `fault` is a phase and a code, `read` with reason
+     * `stream` already says an attempt succeeded, and between them the record
+     * can be asked why a desk spent a session on its thirty-second beat.
+     */
+    const recordFuturesUserDataFault = (code) => {
+        diagnosticRecord.record('fault', { phase: FUTURES_USER_DATA_PHASE, code });
+    };
+
+    /**
+     * The failure's own code where the record will take it, the desk's word for
+     * the ending where it will not.
+     *
+     * A record keeps a fault only in its own shape and drops the whole line
+     * otherwise, so a code that says what happened and a code the record
+     * refuses are the same silence. What arrives here is whatever threw — a
+     * transport's name, Binance's signed integer, or nothing at all — and it is
+     * offered to the record's own reader rather than to a copy of its rule.
+     */
+    const futuresUserDataFaultCode = (error, unnamed) => (
+        describeDeskDiagnosticEvent('fault', {
+            phase: FUTURES_USER_DATA_PHASE,
+            code: error?.code,
+        }) === null
+            ? unnamed
+            : error.code
+    );
+
+    // The listen key the desk decided not to ask for, as against the one the
+    // exchange did not give. Both arrived as `undefined` and they owe the
+    // operator opposite things: one is a failure to state and retry, the other
+    // is the desk correctly stopping because nobody is on futures any more.
+    const FUTURES_LISTEN_KEY_NOT_REQUESTED = Symbol('futures listen key not requested');
+
+    /**
+     * An attempt dropped on purpose: the market was left, or the last renderer
+     * went. Not a failure, so nothing is marked failed and nothing is
+     * scheduled — but the resource goes back to idle rather than staying on the
+     * `loading` it was set to at the top of the attempt, and the record says it
+     * happened. "The desk stopped trying" and "the desk never tried" read
+     * identically in a record that says neither.
+     */
+    const abandonFuturesUserDataStream = (generation) => {
+        recordFuturesUserDataFault('STREAM_ABANDONED');
+        // A newer activation owns the resource now; its state is not this
+        // attempt's to reset.
+        if (generation !== futuresUserDataGeneration) return;
+        futuresUserDataReconnecting = false;
+        futuresAccountResources = markFuturesResourceIdle(
+            futuresAccountResources,
+            'userDataStream',
+        );
+        broadcastFuturesAccountState();
+    };
+
     const startFuturesUserDataStream = async (
         retryCount = 0,
         generation = futuresUserDataGeneration,
@@ -1780,13 +1845,22 @@ export function setupBinanceConnection({
             const listenKey = await futuresRestLimiter.execute(
                 () => (generation !== futuresUserDataGeneration
                     || futuresRendererConnections.size === 0
-                    ? undefined
+                    ? FUTURES_LISTEN_KEY_NOT_REQUESTED
                     : futuresTradingAdapter.createUserDataStreamListenKey()),
                 1,
             );
-            if (!listenKey) {
-                futuresUserDataReconnecting = false;
+            if (listenKey === FUTURES_LISTEN_KEY_NOT_REQUESTED) {
+                abandonFuturesUserDataStream(generation);
                 return;
+            }
+            if (!listenKey) {
+                // The exchange answered and the answer had no key in it. Thrown
+                // rather than returned, so that stating the cause, marking the
+                // resource and scheduling the next attempt all happen where
+                // every other failure of this attempt already does.
+                const error = new Error('Futures listen key was not returned');
+                error.code = 'LISTEN_KEY_MISSING';
+                throw error;
             }
 
             await throttleWsConnection();
@@ -1801,7 +1875,7 @@ export function setupBinanceConnection({
             }
             if (generation !== futuresUserDataGeneration
                 || futuresRendererConnections.size === 0) {
-                futuresUserDataReconnecting = false;
+                abandonFuturesUserDataStream(generation);
                 return;
             }
 
@@ -1918,12 +1992,14 @@ export function setupBinanceConnection({
                     const error = new Error('Futures listen key expired');
                     error.code = 'LISTEN_KEY_EXPIRED';
                     markFuturesUserDataFailed(error);
+                    recordFuturesUserDataFault('LISTEN_KEY_EXPIRED');
                     socket.close();
                     return;
                 }
             });
             socket.on('error', (err) => {
                 markFuturesUserDataFailed(err);
+                recordFuturesUserDataFault(futuresUserDataFaultCode(err, 'SOCKET_ERROR'));
                 logger.warn('Futures user data stream error:', err?.code || err?.message);
             });
             socket.on('close', () => {
@@ -1932,6 +2008,10 @@ export function setupBinanceConnection({
                 const error = new Error('Futures user data stream disconnected');
                 error.code = 'ECONNRESET';
                 markFuturesUserDataFailed(error);
+                // The close itself, not the reset the resource is marked with:
+                // a socket the exchange closed and a socket that errored first
+                // are different sessions to read back.
+                recordFuturesUserDataFault('SOCKET_CLOSED');
                 if (futuresKeepAliveInterval) {
                     clearInterval(futuresKeepAliveInterval);
                     futuresKeepAliveInterval = null;
@@ -1953,23 +2033,42 @@ export function setupBinanceConnection({
                     1,
                 ).catch((err) => {
                     markFuturesUserDataFailed(err);
+                    recordFuturesUserDataFault(
+                        futuresUserDataFaultCode(err, 'LISTEN_KEY_RENEWAL_FAILED'),
+                    );
                     logger.warn('Failed to renew futures listenKey:', err?.code || err?.message);
                 });
             }, 30 * 60 * 1000);
         } catch (err) {
             futuresUserDataReconnecting = false;
+            // The attempt outlived what it was for: the market was left, or the
+            // last renderer went, while it was in flight. Nothing failed, and
+            // the resource must not be left carrying a failure for a market
+            // nobody is on.
+            if (generation !== futuresUserDataGeneration
+                || futuresRendererConnections.size === 0) {
+                abandonFuturesUserDataStream(generation);
+                return;
+            }
             markFuturesUserDataFailed(err);
             if (err?.code === -2015 || err?.status === 401) {
+                // Terminal, and stated: no further attempt can grant a
+                // permission, and the log line saying so is one the operator
+                // will not have.
+                recordFuturesUserDataFault('LISTEN_KEY_REFUSED');
                 logger.error('Futures listenKey rejected — enable Futures permission on this API key.');
                 return;
             }
-            if (generation === futuresUserDataGeneration
-                && retryCount < MAX_RETRIES
-                && futuresRendererConnections.size > 0) {
+            if (retryCount < MAX_RETRIES) {
                 const delay = 3000 * (retryCount + 1);
+                recordFuturesUserDataFault(futuresUserDataFaultCode(err, 'STREAM_START_FAILED'));
                 logger.warn(`Futures user data stream failed (${err?.code || err?.message}), retrying in ${delay}ms`);
                 setTimeout(() => startFuturesUserDataStream(retryCount + 1, generation), delay);
             } else {
+                // The bound is reached. Said once, in the record, so a session
+                // that ends up on its thirty-second beat can be asked how it
+                // got there rather than only that it did.
+                recordFuturesUserDataFault('RECONNECT_EXHAUSTED');
                 logger.error('Failed to start futures user data stream:', err?.code || err?.message);
             }
         }

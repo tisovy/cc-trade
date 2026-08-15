@@ -234,17 +234,89 @@ Which is why 1.5 branches three ways rather than two.
 
 ## 3. No Attempt Ends In Silence
 
-- [ ] 3.1 Distinguish a listen key that was not obtained from a request that was deliberately never made, at the one place both arrive as `undefined` today (`binance-connection.js:1616-1626`).
-- [ ] 3.2 Mark the resource failed with a stated cause on the first, and idle on the second; neither may leave it loading.
-- [ ] 3.3 Schedule another attempt after a failure, under the retry bound that already exists, and record giving up when that bound is reached.
-- [ ] 3.4 Leave the permission refusal (`-2015`) terminal as it is today, but stated in the record rather than only in a log the operator will not have.
-- [ ] 3.5 Prove by test that each of the four endings — no key, abandoned, refused, exhausted — leaves a state that names itself, and that none leaves the resource loading.
+- [x] 3.1 Distinguish a listen key that was not obtained from a request that was deliberately never made, at the one place both arrive as `undefined` today (`binance-connection.js:1616-1626`).
+      `FUTURES_LISTEN_KEY_NOT_REQUESTED`, a symbol, is what the limiter's own
+      guard now answers with instead of `undefined`. So the two cases are
+      separated by what came back rather than by what did not: a symbol is the
+      desk deciding not to ask, and a falsy answer is the exchange having
+      answered without a key in it.
+- [x] 3.2 Mark the resource failed with a stated cause on the first, and idle on the second; neither may leave it loading.
+      The missing key is thrown — `LISTEN_KEY_MISSING` — rather than returned,
+      so marking, stating and scheduling all happen where every other failure of
+      the attempt already does. `sanitizeFuturesAccountError` names it
+      `FUTURES_LISTEN_KEY_MISSING` instead of letting it fall through to
+      `FUTURES_ACCOUNT_REQUEST_FAILED`, which is the desk's word for a failed
+      *read* of the account and says nothing about its event stream.
+      `abandonFuturesUserDataStream` handles the other: idle, no failure, and
+      no state written at all if a newer activation already owns the resource.
+- [x] 3.3 Schedule another attempt after a failure, under the retry bound that already exists, and record giving up when that bound is reached.
+      The bound is the one that was already there (`MAX_RETRIES = 5`, 3s → 15s);
+      what is new is that the missing-key path now reaches it, and that reaching
+      it writes `RECONNECT_EXHAUSTED` rather than only a log line. Note for §2
+      and for whoever reads the record: this bound holds within one failing
+      chain. `ensureFuturesUserDataStream` starts a fresh chain from any command
+      that arrives afterwards, so a session can hold more than six attempts —
+      the record shows each chain ending in its own `RECONNECT_EXHAUSTED`.
+- [x] 3.4 Leave the permission refusal (`-2015`) terminal as it is today, but stated in the record rather than only in a log the operator will not have.
+      `LISTEN_KEY_REFUSED`, and nothing scheduled after it. The resource carries
+      `FUTURES_PERMISSION_DENIED`, `retryable: false`, which is what the ticket
+      already showed for a refused read.
+- [x] 3.5 Prove by test that each of the four endings — no key, abandoned, refused, exhausted — leaves a state that names itself, and that none leaves the resource loading.
+      Four tests in `binance-connection.test.js`, under `what ends an attempt on
+      the private stream`, all four red against the tree before the change: no
+      fault line existed for any ending, and the no-key path neither failed the
+      resource nor asked again.
+
+      What the abandoned case can and cannot assert is worth stating, because it
+      is the one ending with no operator on the other side. Its record line, the
+      absence of a socket, and the absence of a second listen-key request are
+      asserted; that the resource went to idle rather than staying loading is
+      not, because the renderer that would have received the broadcast is the
+      one that just left. The state is asserted at the two endings that keep a
+      renderer.
+
+      The exhausted case counts six listen-key requests, not eighteen: the rate
+      limiter retries a *network* code three times inside one `execute`, so the
+      test fails with a code it does not treat as one. That is the desk's bound
+      being measured rather than the limiter's.
+
+      Mutation-tested in a copy of the tree, so the operator's desk — which runs
+      from the working tree — was never left holding a mutation. Each of the
+      four killed exactly one test, and its own. **M1**, the abandonment writes
+      no line: the abandoned test alone. **M2**, a missing key returns silently
+      again: the no-key test alone. **M3**, giving up records the failure's code
+      instead of saying it gave up: the never-opened test alone. **M4**, the
+      refusal is not recorded: the refused test alone.
 
 ## 4. The Record Answers Why
 
-- [ ] 4.1 Record each user-data stream transition with its cause, using the record's existing kinds. Do not add an event kind; `fault` carries a phase and a code, and `read` already carries the opening.
-- [ ] 4.2 Keep the codes inside the record's existing shape rule, so nothing here can widen what the record accepts.
-- [ ] 4.3 Prove by test that a session which never opened the stream leaves a record that names what ended each attempt.
+- [x] 4.1 Record each user-data stream transition with its cause, using the record's existing kinds. Do not add an event kind; `fault` carries a phase and a code, and `read` already carries the opening.
+      Phase `futures-user-data`, chosen because `stream` is already the market
+      sockets' phase in this record and the account's own leg is worth telling
+      apart from them when a day is read back. Eight endings write a line:
+      `STREAM_ABANDONED`, `LISTEN_KEY_MISSING`, `LISTEN_KEY_REFUSED`,
+      `RECONNECT_EXHAUSTED`, `LISTEN_KEY_EXPIRED`, `LISTEN_KEY_RENEWAL_FAILED`,
+      `SOCKET_ERROR`, `SOCKET_CLOSED` — the last two under the failure's own
+      transport code where it has one. The opening stays where it was, a `read`
+      with reason `stream`. No new kind, and `desk-diagnostic-record.js` is
+      untouched, which was the point: the frame-timing change is working there.
+- [x] 4.2 Keep the codes inside the record's existing shape rule, so nothing here can widen what the record accepts.
+      A code that arrives from an error is whatever threw it — a transport name,
+      Binance's signed integer, or nothing — and the record drops the whole line
+      if the code is not in its shape, so an unrecognized failure would be
+      recorded as silence. `futuresUserDataFaultCode` offers the code to
+      `describeDeskDiagnosticEvent`, the record's own reader, and falls back to
+      the desk's word for the ending when it is refused. The rule is read from
+      the record rather than copied beside it, so the two cannot drift.
+- [x] 4.3 Prove by test that a session which never opened the stream leaves a record that names what ended each attempt.
+      `names every ending of a session in which the stream never opened`: six
+      attempts, five stating the failure's own code and the sixth
+      `RECONNECT_EXHAUSTED`; no `read` with reason `stream` anywhere in it, which
+      is the record's own way of saying the socket never opened; and every line
+      passed back through `describeDeskDiagnosticEvent` to prove the record
+      would keep it rather than drop it. That last assertion is what makes 4.2
+      testable at all — a fake record that keeps whatever it is handed cannot
+      tell a good code from one the real file refuses.
 
 ## 5. Verification
 

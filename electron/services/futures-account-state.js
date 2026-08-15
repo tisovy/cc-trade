@@ -122,6 +122,19 @@ export const sanitizeFuturesAccountError = (error) => {
             retryable: true,
         });
     }
+    // The private stream's own beginning, and the only failure here that is not
+    // a read: the exchange answered the listen-key request without a key in it.
+    // Named, because "a Futures account resource could not be synchronized" is
+    // what the desk says about a read of the account, and this is the account's
+    // event stream failing to start — a different thing to be told.
+    if (transportCode === 'LISTEN_KEY_MISSING') {
+        return Object.freeze({
+            code: 'FUTURES_LISTEN_KEY_MISSING',
+            category: 'stream',
+            message: 'Binance answered the Futures listen-key request without a key, so the private stream cannot start. The desk keeps reading the account on its own beat and will try again.',
+            retryable: true,
+        });
+    }
     if (NETWORK_ERROR_CODES.has(transportCode)) {
         return Object.freeze({
             code: 'FUTURES_NETWORK_ERROR',
