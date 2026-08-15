@@ -5831,6 +5831,98 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 await flushMicrotasks();
                 expect(listenKeyAttempts()).toBe(6);
             });
+
+            // §2. An open socket is not a carrying one: the route that was
+            // withdrawn on 2026-04-23 answered every handshake and delivered
+            // nothing for four months, and `ready` said the socket opened.
+            describe('an opened socket that stops carrying', () => {
+                // The measured bound: the exchange pings an idle private socket
+                // every 180s, so 420s is two missed pings.
+                const SILENCE_MS = 420_000;
+
+                const openStream = async () => {
+                    await connectRecordedRenderer(null);
+                    await activateFuturesKeepingEnvelopes();
+                    const socket = moduleMocks.futuresUserDataSockets[0];
+                    expect(socket).toBeDefined();
+                    socket.handlers.open();
+                    await flushMicrotasks();
+                    return socket;
+                };
+
+                it('stops being counted as carrying, and is rebuilt', async () => {
+                    const socket = await openStream();
+                    expect(userDataStreamState().status).toBe('ready');
+
+                    await vi.advanceTimersByTimeAsync(SILENCE_MS + 1_000);
+                    await flushMicrotasks();
+
+                    // Stated as what it is. A route that stopped carrying and a
+                    // socket the exchange dropped look identical to an operator
+                    // who is only told "disconnected".
+                    expect(streamFaults().map(entry => entry.code)).toContain('STREAM_SILENT');
+                    expect(userDataStreamState()).toMatchObject({
+                        status: 'stale',
+                        error: { code: 'FUTURES_STREAM_NOT_CARRYING' },
+                    });
+                    expect(socket.close).toHaveBeenCalled();
+
+                    // Restored on the spacing a close already used, rather than
+                    // rebuilt the instant it was found dead.
+                    expect(moduleMocks.futuresUserDataSockets).toHaveLength(1);
+                    await vi.advanceTimersByTimeAsync(5_000);
+                    await flushMicrotasks();
+                    expect(moduleMocks.futuresUserDataSockets).toHaveLength(2);
+                });
+
+                // The half that makes the bound usable at all: an account with
+                // nothing happening on it is correctly told nothing by the
+                // account, and a rule that watched account traffic would call
+                // every quiet desk dead.
+                it('stays carrying through a quiet account while the exchange keeps pinging', async () => {
+                    const socket = await openStream();
+
+                    // Twenty-one minutes, three times the bound, on the
+                    // exchange's own keep-alive and no account event at all.
+                    for (let beat = 0; beat < 7; beat += 1) {
+                        await vi.advanceTimersByTimeAsync(180_000);
+                        socket.handlers.ping();
+                        await flushMicrotasks();
+                    }
+
+                    expect(streamFaults()).toEqual([]);
+                    expect(userDataStreamState().status).toBe('ready');
+                    expect(socket.close).not.toHaveBeenCalled();
+                    expect(moduleMocks.futuresUserDataSockets).toHaveLength(1);
+                });
+
+                // 2.4 is about the answer, not the timer. A command that arrives
+                // after the bound has run out but before the watchdog has fired
+                // is exactly the case where `ready` and `carrying` differ, and it
+                // is the case that costs an account read.
+                it('reads the account for a command issued while the stream is not carrying', async () => {
+                    moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([
+                        {
+                            type: 'balances',
+                            weight: 5,
+                            errorLabel: 'balances',
+                            loadPayload: vi.fn().mockResolvedValue({ futures_balances: [] }),
+                        },
+                    ]);
+                    await openStream();
+                    kept.length = 0;
+
+                    // The clock moves; the timers do not. The resource still
+                    // says `ready`.
+                    vi.setSystemTime(new Date(Date.now() + SILENCE_MS + 1_000));
+                    expect(userDataStreamState().status).toBe('ready');
+
+                    await placeFuturesOrder('not-carrying-1');
+                    await flushMicrotasks();
+
+                    expect(held('read').map(entry => entry.reason)).toContain('command');
+                });
+            });
         });
     });
 

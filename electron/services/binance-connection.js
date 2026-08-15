@@ -1659,9 +1659,62 @@ export function setupBinanceConnection({
         _futuresUnstatedReadResources = new Set();
     };
 
+    // How long the private socket may say nothing at all before the desk stops
+    // presenting it as carrying.
+    //
+    // Measured on 2026-08-15 against the live exchange, on this desk's own
+    // route, proxy, socket options and account, with the account doing nothing:
+    // the exchange sends an unprompted ping every 180 s, and the spread of the
+    // intervals is milliseconds rather than seconds. The run and its
+    // distribution are in `prove-the-private-stream-is-carrying`, task 0.1;
+    // what is stated here is what the bound is built on. A number from the
+    // exchange's documentation would have been an estimate, and this bound is
+    // load-bearing: below it the desk trusts a socket, above it it stops.
+    //
+    // So silence is not a property of the account here — an idle account is
+    // told nothing by the account, and is still pinged. That is what makes a
+    // bound possible at all.
+    //
+    // 420 s is two consecutive pings missed, decided before a third is due. One
+    // missed ping is already far outside the measured spread; two cannot be
+    // jitter. It is also inside the ten minutes the exchange gives us to answer
+    // its ping, so the desk notices a route that stopped before the exchange
+    // notices a client that stopped.
+    const FUTURES_USER_DATA_SILENCE_MS = 420_000;
+    // What a restoration waits, which is what a close has always waited here and
+    // what the mark price feed waits for the same reason: rebuilding a socket
+    // the moment it is found dead, every window, for as long as the route stays
+    // dead, is a reconnect loop with no spacing.
+    const FUTURES_USER_DATA_RESTORE_MS = 5000;
+    // When the exchange last said anything on this socket — a ping, a pong, or
+    // an account event. The handshake counts: completing it is the exchange
+    // talking.
+    let futuresUserDataLastHeardAt = null;
+    let futuresUserDataSilenceTimer = null;
+
+    /**
+     * Whether the private stream is carrying, which is not whether it is open.
+     *
+     * An unrouted or withdrawn route completes the handshake and holds the
+     * socket open while delivering nothing — that is how this desk traded for
+     * four months on a stream that had stopped being served. `ready` is the
+     * resource's word for a socket that opened; the clock is what says the
+     * exchange is still there.
+     *
+     * Asked of the clock rather than of the watchdog's timer, so the answer is
+     * right in the window between the bound elapsing and the timer firing: a
+     * command arriving in that window is exactly the case this protects.
+     */
     const futuresStreamCarriesOrders = () => (
         futuresAccountResources?.userDataStream?.status === 'ready'
+        && futuresUserDataLastHeardAt !== null
+        && Date.now() - futuresUserDataLastHeardAt < FUTURES_USER_DATA_SILENCE_MS
     );
+
+    const clearFuturesUserDataSilenceWatch = () => {
+        if (futuresUserDataSilenceTimer !== null) clearTimeout(futuresUserDataSilenceTimer);
+        futuresUserDataSilenceTimer = null;
+    };
 
     /**
      * What a command owes the account once the exchange has answered it.
@@ -1752,6 +1805,10 @@ export function setupBinanceConnection({
         futuresStreamedOrders.forget();
         // A read owed to a frame from an account nobody is on any more.
         cancelFuturesUnstatedRead();
+        // The bound belongs to a socket that is going. Left armed, it would
+        // judge the next account's stream by when this one last spoke.
+        clearFuturesUserDataSilenceWatch();
+        futuresUserDataLastHeardAt = null;
         // No Futures renderer is watching: nothing to mark to market.
         futuresMarkPriceFeed?.track([]);
         if (futuresKeepAliveInterval) {
@@ -1830,6 +1887,65 @@ export function setupBinanceConnection({
         broadcastFuturesAccountState();
     };
 
+    /**
+     * The exchange said something on the private socket, so the route is live.
+     *
+     * Any frame counts and account events are the least of them: a quiet account
+     * is correctly told nothing, and judging liveness on account traffic would
+     * read a desk with nothing happening on it as a dead route. What carries the
+     * proof is the exchange's own ping, which arrives whether or not the account
+     * does anything.
+     *
+     * Rearms the bound each time, so the watchdog fires only on silence that
+     * ran the whole length of it.
+     */
+    const noteFuturesUserDataTraffic = (socket, generation) => {
+        if (futuresUserDataWs !== socket || generation !== futuresUserDataGeneration) return;
+        futuresUserDataLastHeardAt = Date.now();
+        clearFuturesUserDataSilenceWatch();
+        futuresUserDataSilenceTimer = setTimeout(() => {
+            futuresUserDataSilenceTimer = null;
+            if (futuresUserDataWs !== socket || generation !== futuresUserDataGeneration) return;
+            // Not one frame for the whole bound, on a socket the exchange pings
+            // every three minutes. Everything is said here rather than left to
+            // the close handler, because `close()` on a route that has stopped
+            // answering waits for a close frame that may never come, and the
+            // desk must not go on presenting a dead stream while it waits.
+            //
+            // Dropped before it is rebuilt, in the mark price feed's order and
+            // on its spacing: the socket stops being the desk's at the moment it
+            // stops carrying, so a close arriving minutes later cannot report
+            // the same failure a second time as an ordinary disconnect.
+            const error = new Error('Futures user data stream stopped carrying');
+            error.code = 'STREAM_SILENT';
+            futuresUserDataWs = null;
+            futuresUserDataLastHeardAt = null;
+            if (futuresKeepAliveInterval) {
+                clearInterval(futuresKeepAliveInterval);
+                futuresKeepAliveInterval = null;
+            }
+            markFuturesUserDataFailed(error);
+            recordFuturesUserDataFault('STREAM_SILENT');
+            logger.warn(
+                `[futures-stream] nothing received for ${
+                    Math.round(FUTURES_USER_DATA_SILENCE_MS / 1000)
+                }s — the private stream is not carrying; rebuilding it.`,
+            );
+            try {
+                socket.close();
+            } catch {
+                // A socket that cannot even be closed is already gone.
+            }
+            if (futuresRendererConnections.size === 0) return;
+            logger.info('Scheduling futures user data stream reconnection...');
+            setTimeout(
+                () => startFuturesUserDataStream(0, generation),
+                FUTURES_USER_DATA_RESTORE_MS,
+            );
+        }, FUTURES_USER_DATA_SILENCE_MS);
+        futuresUserDataSilenceTimer.unref?.();
+    };
+
     const startFuturesUserDataStream = async (
         retryCount = 0,
         generation = futuresUserDataGeneration,
@@ -1891,16 +2007,29 @@ export function setupBinanceConnection({
             });
             futuresUserDataWs = socket;
             futuresUserDataReconnecting = false;
+            futuresUserDataLastHeardAt = null;
 
             socket.on('open', () => {
                 if (generation !== futuresUserDataGeneration
                     || futuresUserDataWs !== socket) return;
                 markFuturesUserDataReady();
+                // The handshake completing is the exchange talking, so the bound
+                // starts here rather than at the first ping — a socket that
+                // opens and says nothing for the whole window is exactly what
+                // this is for.
+                noteFuturesUserDataTraffic(socket, generation);
                 logger.info('Futures user data stream connected.');
                 void refreshFuturesAccountState({ reason: 'stream' });
             });
 
+            // The exchange's own keep-alive: the one traffic that proves the
+            // route without the account doing anything. `ws` answers the ping
+            // itself; what is needed here is only that it happened.
+            socket.on('ping', () => noteFuturesUserDataTraffic(socket, generation));
+            socket.on('pong', () => noteFuturesUserDataTraffic(socket, generation));
+
             socket.on('message', (data) => {
+                noteFuturesUserDataTraffic(socket, generation);
                 const payload = extractStreamPayload(data);
                 if (!payload) return;
                 const streamEvent = normalizeFuturesUserDataStreamEvent(payload);
@@ -2005,12 +2134,17 @@ export function setupBinanceConnection({
             socket.on('close', () => {
                 if (futuresUserDataWs !== socket) return;
                 futuresUserDataWs = null;
+                clearFuturesUserDataSilenceWatch();
+                futuresUserDataLastHeardAt = null;
                 const error = new Error('Futures user data stream disconnected');
                 error.code = 'ECONNRESET';
                 markFuturesUserDataFailed(error);
-                // The close itself, not the reset the resource is marked with:
-                // a socket the exchange closed and a socket that errored first
-                // are different sessions to read back.
+                // The close itself, not the reset the resource is marked
+                // with: a socket the exchange closed and a socket that
+                // errored first are different sessions to read back. A socket
+                // the desk closed for silence never reaches here — it stops
+                // being the desk's at the moment it stops carrying, which is
+                // also where that failure is stated.
                 recordFuturesUserDataFault('SOCKET_CLOSED');
                 if (futuresKeepAliveInterval) {
                     clearInterval(futuresKeepAliveInterval);
@@ -2020,7 +2154,10 @@ export function setupBinanceConnection({
                     && futuresRendererConnections.size > 0
                     && !futuresUserDataReconnecting) {
                     logger.info('Scheduling futures user data stream reconnection...');
-                    setTimeout(() => startFuturesUserDataStream(0, generation), 5000);
+                    setTimeout(
+                        () => startFuturesUserDataStream(0, generation),
+                        FUTURES_USER_DATA_RESTORE_MS,
+                    );
                 }
             });
 

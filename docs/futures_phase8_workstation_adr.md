@@ -98,6 +98,22 @@ Legacy unrouted production market paths were permanently decommissioned on 2026-
 | `/market/stream?streams=` | `<lower-symbol>@kline_<interval>` | 250 ms | public read |
 | `/market/stream?streams=` | `<lower-symbol>@markPrice@1s` | 1 s | public read |
 | `/market/stream?streams=` | `<lower-symbol>@ticker` | 2 s | public read |
+| `/private/ws?listenKey=` | the account's own user-data stream, unfiltered | event-driven | private read |
+
+The last row is not opened by this milestone, and registering it does not widen
+what Phase 8 may open: the workstation still compiles nothing but the public
+reads above. The user-data socket belongs to the shared connection layer
+(`electron/services/binance-connection.js`), and its URL is built in one place,
+`futuresUserDataStreamUrl` in `futures-trading-adapter.js`, with no `events`
+filter — the parameter is optional, and omitting it is what asks for every
+event rather than a list that silently excludes whatever the desk folds next.
+
+It is written here because its absence from this table is what let the
+2026-04-23 decommissioning read as a market-path matter. Every socket in the
+rows above was migrated; the private one was not, and the desk went on opening
+`wss://fstream.binance.com/ws/<listenKey>` for four months. A registry that
+lists only the routes one milestone opens cannot be asked "which of our sockets
+does this notice apply to", which is the question that was never put.
 
 The connection lifetime is bounded to 24 hours. The server sends a ping every 3 minutes and requires a pong within 10 minutes. The client budget is below the documented 10 incoming messages per second and far below 1024 streams per connection. Each generation opens at most one public depth socket and one market socket containing four streams. Both handshakes must report open before any snapshot/candle bootstrap REST request is dispatched; an error or close before open fails the readiness barrier and enters bounded resynchronization. Symbols are lowercase in stream names and uppercase in normalized models.
 

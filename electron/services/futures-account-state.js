@@ -127,6 +127,18 @@ export const sanitizeFuturesAccountError = (error) => {
     // Named, because "a Futures account resource could not be synchronized" is
     // what the desk says about a read of the account, and this is the account's
     // event stream failing to start — a different thing to be told.
+    // An open socket that stopped delivering. Named apart from a disconnect
+    // because they look identical to the operator and are not: a route that was
+    // withdrawn holds the handshake open and says nothing, which is how one
+    // wrong prefix cost four months.
+    if (transportCode === 'STREAM_SILENT') {
+        return Object.freeze({
+            code: 'FUTURES_STREAM_NOT_CARRYING',
+            category: 'stream',
+            message: 'The Futures private stream stopped carrying — the exchange sent nothing on it, not even its own keep-alive. The desk is reading the account on its own beat and rebuilding the stream.',
+            retryable: true,
+        });
+    }
     if (transportCode === 'LISTEN_KEY_MISSING') {
         return Object.freeze({
             code: 'FUTURES_LISTEN_KEY_MISSING',

@@ -226,11 +226,49 @@ Which is why 1.5 branches three ways rather than two.
 
 ## 2. The Stream States Whether It Is Carrying
 
-- [ ] 2.1 Judge liveness on traffic the exchange sends regardless of account activity, so a quiet account is not read as a dead route.
+- [x] 2.1 Judge liveness on traffic the exchange sends regardless of account activity, so a quiet account is not read as a dead route.
+      `noteFuturesUserDataTraffic` takes any frame — `ping`, `pong`, `message` —
+      and the handshake completing counts as the first. The exchange's ping is
+      what carries the proof: it arrives on an account doing nothing, which is
+      the case a rule watching account events would call dead.
 - [ ] 2.2 State the silence bound where it is enforced, with the measurement from 0.1 beside it.
-- [ ] 2.3 On silence past the bound, present the stream as not carrying and restore it, with the spacing the mark-price feed already uses so a dead route does not become a reconnect loop.
-- [ ] 2.4 Make "carrying" rather than "open" the thing `futuresStreamCarriesOrders()` answers, so the reads skipped on the stream's behalf are taken again while it is not carrying.
-- [ ] 2.5 Prove by test that an opened socket which then delivers nothing stops being counted as carrying, that a quiet account on a live route does not, and that a command issued while it is not carrying reads the account.
+- [x] 2.3 On silence past the bound, present the stream as not carrying and restore it, with the spacing the mark-price feed already uses so a dead route does not become a reconnect loop.
+      The watchdog does the whole of it where it fires rather than leaving it to
+      the close handler: `close()` on a route that has stopped answering waits
+      for a close frame that may never come, and the desk must not go on
+      presenting a dead stream while it waits. So the socket stops being the
+      desk's, the keep-alive is cleared, the resource is marked and the record
+      is written at the moment silence is established; then the socket is
+      closed, and the rebuild is scheduled at `FUTURES_USER_DATA_RESTORE_MS`
+      (5 s) — the delay a close here already used and the same one
+      `futures-mark-price-feed.js` waits after a stall, for the reason it
+      states: rebuilding at every stall window, for as long as the route stays
+      dead, is a reconnect loop with no spacing.
+
+      A consequence worth stating: because the socket is dropped first, its
+      later `close` sees `futuresUserDataWs !== socket` and returns, so one
+      silence writes one `STREAM_SILENT` and not also a `SOCKET_CLOSED`.
+- [x] 2.4 Make "carrying" rather than "open" the thing `futuresStreamCarriesOrders()` answers, so the reads skipped on the stream's behalf are taken again while it is not carrying.
+      It now answers `ready` **and** the exchange having said something inside
+      the bound. Asked of the clock rather than of the watchdog's timer, which
+      matters for the one case that costs an account read: a command arriving
+      after the bound has run out but before the timer has fired would otherwise
+      be answered by a resource still marked `ready`.
+
+      Radius: one caller, `reconcileAfterFuturesCommand`, and through it the
+      four command paths — placement, cancellation, amendment and algo cancel.
+      Nothing else in the tree reads it.
+- [x] 2.5 Prove by test that an opened socket which then delivers nothing stops being counted as carrying, that a quiet account on a live route does not, and that a command issued while it is not carrying reads the account.
+      Three tests under `an opened socket that stops carrying`. All three are
+      red against the tree before §2, but only the first for its own reason —
+      the other two fail there mechanically, because a tree with no notion of
+      silence registers no `ping` handler for the test to fire. What they are
+      worth is shown by mutation instead, each killing exactly one test and its
+      own: **M5**, liveness judged on account events only and not the exchange's
+      ping — the quiet-account test alone, which is the whole point of it;
+      **M6**, `carrying` reduced to what the resource says, without the clock —
+      the command test alone; **M7**, silence noticed but the socket not rebuilt
+      — the first test alone.
 
 ## 3. No Attempt Ends In Silence
 
