@@ -401,35 +401,25 @@ still read and still shown.
 
 ### Requirement: A price the order does not have is reported as absent
 Where the exchange reports no price for an order — a market order has no limit
-price, an order that has not filled has no average price — the desk SHALL show that
-as absent rather than as a zero rendered through the contract's tick.
+price, an order that has not filled has no average price — the desk SHALL show
+that as absent rather than as a zero rendered through the contract's tick.
+
+The order review SHALL state the order's price and the average it achieved as one
+reading rather than as two columns. Where the two differ, the achieved average
+SHALL be what is shown, marked as an average rather than as the price the order
+names, and both readings SHALL be stated on the element.
 
 #### Scenario: A filled market order is listed
 - **WHEN** order history lists a market order
-- **THEN** its price column reads as absent and its average column carries the price it actually got
+- **THEN** its price cell reads as the average it actually got, marked as an average, and the element states that the order named no price
 
 #### Scenario: A working order has not filled
 - **WHEN** order history lists an order with nothing executed
-- **THEN** its average column reads as absent and its limit price is shown
+- **THEN** its price cell shows the limit price the order names, and no average is claimed
 
-### Requirement: A history row is stamped for when it happened
-A history row SHALL carry the half of its timestamp that the row is read for: the
-time of day for a row from today, the date for a row from any other day. The whole
-stamp SHALL remain available on the element. A closed position SHALL be stamped by
-when it closed, and the whole span from opening to closing SHALL remain available
-on the element.
-
-#### Scenario: The row is from today
-- **WHEN** a history row's timestamp falls on the current day
-- **THEN** the column shows its time of day, seconds included, and the full stamp is in the title
-
-#### Scenario: The row is older
-- **WHEN** a history row is from any earlier day
-- **THEN** the column shows its date and the full stamp is in the title
-
-#### Scenario: A closed position is listed
-- **WHEN** the closed-position history lists a round trip
-- **THEN** the stamp is when it closed and the title carries the whole span it ran for
+#### Scenario: An order filled away from its own price
+- **WHEN** an order's average fill price differs from the price it was placed at
+- **THEN** the cell shows the average, marked as one, and both prices are stated on the element
 
 ### Requirement: Executions are reported as the positions they formed
 The trade history SHALL report closed round trips rather than fills: a position
@@ -1069,4 +1059,142 @@ The order-history `Filled` column SHALL state the USDT notional that actually ex
 #### Scenario: An order has no established execution value
 - **WHEN** an order-history row has no positive cumulative quote amount and lacks either a positive executed quantity or a positive average fill price
 - **THEN** the Filled column reads as absent rather than as a confident zero-USDT execution
+
+### Requirement: A history row's day is a heading, not a format
+A history row SHALL show its time of day, and the day it belongs to SHALL be
+stated by the heading it is grouped under rather than by switching the row's own
+format. Rows SHALL be grouped under a heading naming their day, so two rows from
+different days are never read as two moments of the same day. The whole stamp
+SHALL remain available on the element. A closed position SHALL be stamped by when
+it closed and grouped under the day it closed on, and the whole span from opening
+to closing SHALL remain available on the element.
+
+#### Scenario: The review spans more than one day
+- **WHEN** a history table contains rows from today and from an earlier day
+- **THEN** each row is under a heading naming its day, and every row shows its time of day
+
+#### Scenario: A row is read for its exact moment
+- **WHEN** a history row is displayed
+- **THEN** the full stamp is on the element
+
+#### Scenario: A closed position is listed
+- **WHEN** the closed-position history lists a round trip
+- **THEN** the stamp is when it closed, the row is grouped under that day, and the element carries the whole span it ran for
+
+### Requirement: An order review states what became of each order
+Every row of the order review SHALL state the order's outcome as its leading
+reading, and that outcome SHALL be readable at every width the workspace
+supports. An order that is still working, one that filled, one that filled in
+part and one the exchange ended without a fill SHALL each be distinguishable by
+the outcome alone rather than by inference from a quantity pair. Where the
+outcome generalizes a status the exchange reported, the exchange's own word SHALL
+be on the element.
+
+#### Scenario: An order filled in part
+- **WHEN** an order executed part of its quantity
+- **THEN** the row states that it filled in part and by what proportion
+
+#### Scenario: An order ended without filling
+- **WHEN** the review contains an order the exchange expired or rejected with nothing executed
+- **THEN** the row states that outcome, without the reader having to compare an executed quantity against an original one
+
+#### Scenario: The panel is at its narrowest supported width
+- **WHEN** the order review is rendered at the narrowest width the workspace supports
+- **THEN** the outcome of every row is readable without an ellipsis
+
+#### Scenario: The exchange reported a status the chip generalizes
+- **WHEN** the exchange reported a status the review states in its own words
+- **THEN** the exchange's own word is on the element
+
+### Requirement: An abbreviation on a review row is labelled
+A marker on a review row that abbreviates an order property SHALL carry its
+meaning in words for a reader who does not know the abbreviation. A reduce-only
+order SHALL be marked for what it does — that it can only close a position —
+rather than by an unexplained pair of letters.
+
+#### Scenario: A reduce-only order is listed
+- **WHEN** the review contains a reduce-only order
+- **THEN** the row marks it as an exit and states `reduce-only` in words on the element
+
+### Requirement: An order that did nothing is quieter than one that did
+Among the rows the review presents, those whose orders executed nothing SHALL be
+presented less prominently than those whose orders executed, so a review of many
+dead orders does not obscure the fills within it. This SHALL be a matter of
+prominence only: presentation SHALL NOT remove a row the review is presenting.
+
+#### Scenario: The review is mostly orders that did nothing
+- **WHEN** the review contains many orders that executed nothing and a few that filled
+- **THEN** the filled ones are the more prominent, and the others are still present and readable
+
+### Requirement: A review can be narrowed without reading the exchange again
+The order review SHALL offer narrowing by outcome — all, filled, unfilled — and
+to the contract on screen. Narrowing SHALL act on the reading already held and
+SHALL issue no exchange read, and the statement of what the underlying read
+covered SHALL continue to describe the read rather than the narrowed view.
+
+#### Scenario: The operator narrows to filled orders
+- **WHEN** the operator narrows the review to filled orders
+- **THEN** only orders that executed are listed, no exchange read is issued, and the scope statement still describes what was read
+
+#### Scenario: The operator narrows to the contract on screen
+- **WHEN** the operator narrows the review to the contract on screen
+- **THEN** only that contract's rows are listed and no exchange read is issued
+
+### Requirement: Every order surface discloses its synchronization state
+The chart, the trading rail and the dock SHALL each present the synchronization
+state of the order data they draw, distinguishing at least not yet
+synchronized, synchronizing, ready, stale and failed. An empty order display
+SHALL state that no working orders exist only when a successful synchronization
+reported none. A failed or unsynchronized order resource SHALL offer its
+sanitized reason and the retry path.
+
+#### Scenario: Synchronization has not run yet
+- **WHEN** the order resource has produced no snapshot
+- **THEN** the chart and the dock state that orders are not yet synchronized rather than that there are none
+
+#### Scenario: Synchronization failed
+- **WHEN** the order resource is in error
+- **THEN** the chart and the dock present the failure and its retry path rather than an empty list
+
+#### Scenario: Synchronization succeeded with no orders
+- **WHEN** a successful snapshot reports no working orders
+- **THEN** the surfaces state that there are no working orders
+
+#### Scenario: Snapshot is stale
+- **WHEN** the last successful snapshot has become stale
+- **THEN** the surfaces keep showing its orders and disclose that the data is stale
+
+### Requirement: Order intent is presented, not only direction
+The system SHALL present the entry or exit intent it derives for an order or a
+position alongside its direction. An order that closes a position SHALL be
+classified as an exit regardless of the side it is submitted on.
+
+#### Scenario: Reduce-only order on a long position
+- **WHEN** a reduce-only sell reduces an open long
+- **THEN** the surface presents it as an exit as well as a sell
+
+#### Scenario: Close-position order
+- **WHEN** an order carries close-position intent
+- **THEN** it is classified as an exit regardless of its side
+
+#### Scenario: Direction remains readable
+- **WHEN** intent is presented
+- **THEN** the direction remains visible and distinctly coloured as before
+
+### Requirement: A submission surface does not close on a send it did not achieve
+When a submission does not reach the backend — including a transport that is
+disconnected — the surface that issued it SHALL remain open, SHALL state the
+failure, and SHALL preserve the operator's entered values.
+
+#### Scenario: Editor submits while disconnected
+- **WHEN** the order editor submits an amendment and the send is refused because the transport is unavailable
+- **THEN** the editor stays open, states the reason, and keeps the entered price and amount
+
+#### Scenario: Send succeeds
+- **WHEN** the send reaches the backend
+- **THEN** the surface behaves as it does today and the outcome is reported through the command result
+
+#### Scenario: Other submission surfaces
+- **WHEN** any other submission surface issues a send that does not reach the backend
+- **THEN** it follows the same rule rather than dismissing itself
 
