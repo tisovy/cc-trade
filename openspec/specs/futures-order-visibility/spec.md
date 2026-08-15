@@ -7,6 +7,13 @@ Defines account-wide synchronization of regular and algorithmic Futures orders a
 ### Requirement: The account order model includes regular and algorithmic orders
 The system SHALL synchronize both regular open orders and currently open algorithmic orders from the authenticated USDⓈ-M account. Each normalized order SHALL retain its source kind, exchange identity, symbol, side, type, status, quantity, prices relevant to that type, reduce-only or close-position intent when supplied, and exchange update time.
 
+An algorithmic order SHALL additionally retain the identity and price of the
+regular order it spawned, when the exchange reports them. The exchange reports an
+order that has not fired with an empty value, and that value SHALL be retained as
+the exchange states it rather than coerced into a null or a zero — the difference
+between "has not fired" and "fired at nothing" is the difference between an order
+the operator can still move and one they cannot.
+
 #### Scenario: Account has regular and algorithmic orders for TUTUSDT
 - **WHEN** Binance returns one regular order and one algorithmic order for `TUTUSDT`
 - **THEN** both orders are present in the normalized account order state with distinct source kinds and identities
@@ -18,6 +25,14 @@ The system SHALL synchronize both regular open orders and currently open algorit
 #### Scenario: One order endpoint fails
 - **WHEN** either the regular-order or algorithmic-order request fails while the other succeeds
 - **THEN** the successful source is updated, the failed source retains its last confirmed snapshot if any, and the UI reports partial synchronization rather than claiming the combined order list is complete
+
+#### Scenario: An algorithmic order has fired
+- **WHEN** Binance reports an algorithmic order carrying the identity and price of the regular order it spawned
+- **THEN** both are retained on the normalized order, so the spawned order can be recognized when the stream reports it
+
+#### Scenario: An algorithmic order has not fired
+- **WHEN** Binance reports an algorithmic order whose spawned-order identity is the documented empty value
+- **THEN** that value is retained as reported, and the order is not read as having fired
 
 ### Requirement: Account-wide snapshots are not replaced by symbol-scoped data
 The system SHALL keep the authoritative open-order snapshot account-wide. Selecting a chart symbol, refreshing one symbol, placing an order, receiving an order update, or canceling an order SHALL reconcile the affected records without deleting confirmed open orders for unrelated symbols.
@@ -73,9 +88,16 @@ stream: an execution report that opens or changes an order SHALL update it in
 place, and one that reports it settled SHALL remove it, without issuing an
 account-wide order read. An account-wide order read SHALL be issued only for a
 stated reason — the first snapshot, a stream connect or reconnect, an
-operator-requested refresh, or the periodic beat. The periodic read SHALL run
-while orders are working and SHALL stop while none are, so that a desk holding
-nothing spends no weight on it.
+operator-requested refresh, the periodic beat, or a command whose effect no
+stream can report. The periodic read SHALL run while orders are working and
+SHALL stop while none are, so that a desk holding nothing spends no weight on it.
+
+A command the desk sends SHALL NOT be a reason on its own. The exchange reports
+what the command did on the stream the desk is already listening to, and reading
+the account back to learn the same thing spends ninety weight, holds the desk's
+resources in a loading state for the length of the read, and — repeated once per
+command — exhausts the minute's budget in eight commands. When no authenticated
+stream is up there is nothing else to learn it from, and then the read stands.
 
 #### Scenario: User-data stream reconnects
 - **WHEN** the authenticated stream disconnects and reconnects
@@ -92,6 +114,14 @@ nothing spends no weight on it.
 #### Scenario: An order is opened or changed on the stream
 - **WHEN** an execution report reports an order new, partially filled or amended
 - **THEN** the working-order set carries it with the values the report gave, and no account-wide order read is issued for it
+
+#### Scenario: A command completes while the stream is up
+- **WHEN** the exchange answers a placement, cancellation or amendment and the authenticated stream is connected
+- **THEN** no account read is issued for it, and the order reaches the desk on the stream
+
+#### Scenario: A command completes with no stream to report it
+- **WHEN** the exchange answers a command and no authenticated stream is connected
+- **THEN** the account is read, because nothing else can say what the command did
 
 #### Scenario: No message reports a settlement
 - **WHEN** orders are working and no execution report or snapshot arrives
@@ -194,7 +224,13 @@ When Binance rejects a futures command with a code whose resolution is known, th
 The system SHALL treat a confirmed execution report as authoritative until the
 account snapshot it is reconciled against is at least as recent. An account
 snapshot SHALL NOT replace an open order with an older version of that same
-order.
+order, and SHALL NOT remove an open order the stream has recently reported
+working. A snapshot requested before that report could not have seen the order;
+a snapshot requested shortly after it may still be answered from a view of the
+exchange that has not caught up with its own matching engine. Neither silence is
+evidence that the order is gone. Only when the stream has said nothing about the
+order for longer than the window the exchange's answer may trail the stream by
+does the snapshot decide, and an order it omits is no longer working.
 
 An order the exchange has reported settled SHALL NOT be listed as working again,
 by any message. This covers both a report that left the exchange before the
@@ -206,6 +242,13 @@ bounded, since it guards messages in flight rather than recording history. A
 settlement report that carries no order id SHALL settle nothing, its identity
 being the prefix every unidentified order on that contract would share.
 
+What the stream has reported working SHALL be remembered on the desk's own clock
+and compared against when the read was issued, less that window, so the
+comparison does not depend on the exchange's clock agreeing with the desk's. That
+memory SHALL be bounded on the same grounds as the settled one, and an order
+reported settled SHALL leave it — a settlement the stream reports ends the hold
+at once rather than waiting for the window to close.
+
 #### Scenario: Snapshot arrives with pre-amendment values
 - **WHEN** an amendment is confirmed and the account synchronization that follows returns the order with an earlier update time
 - **THEN** the order keeps the confirmed price and size, and no operator refresh is required to see them
@@ -213,6 +256,18 @@ being the prefix every unidentified order on that contract would share.
 #### Scenario: Snapshot is newer than the local report
 - **WHEN** the account snapshot reports the order with a later update time than the last locally applied report
 - **THEN** the snapshot values replace the local ones
+
+#### Scenario: A read issued before the order existed answers without it
+- **WHEN** an order is placed, the stream reports it working, and an account read issued before that report returns a working-order list that does not contain it
+- **THEN** the order stays listed as working, and it is not removed and re-added as later reads catch up
+
+#### Scenario: A read issued after the placement has not caught up with it
+- **WHEN** an order is placed, the stream reports it working, the desk reads the account it has just changed, and that read — issued after the report — returns a working-order list that does not contain the order
+- **THEN** the order stays listed as working, because the exchange's own answer may trail its stream
+
+#### Scenario: A read reports an order the stream has not spoken about
+- **WHEN** an account read returns a working-order list without an order the desk holds, and the stream has reported nothing about that order for longer than the window the exchange's answer may trail it by
+- **THEN** the order is removed, because the read is the newer statement about it
 
 #### Scenario: The placement's reply arrives after the fill
 - **WHEN** an order fills the instant it is placed, so the stream reports it filled before the reply to the placement arrives describing it as new
@@ -454,6 +509,18 @@ quantity SHALL remain available on the cell without occupying the column. An
 order whose size is carried against a trigger price SHALL be valued at that
 trigger price, because a stop-market carries a `price` of `0`.
 
+The size an order is valued at SHALL be what is still working: the quantity it
+was placed at, less the quantity that has traded. A partly filled order commits
+its remainder, and the filled part is already reported as the position it
+formed — valuing the order at the size it was placed at states that part twice.
+The traded quantity SHALL be read whether the source names it as a stream report
+does or as an account snapshot does, and the exact contract count offered beside
+the value SHALL state the same working quantity rather than the original one.
+
+What has traded SHALL remain separately readable. Stating what is still working
+answers a different question from stating what has filled, and neither SHALL be
+derived from the other's absence.
+
 #### Scenario: A limit order is listed
 - **WHEN** a working order rests at `58445.00` for `0.004` contracts
 - **THEN** the size cell reads `234` under a `Size (USDT)` header, and its title states `0.004 contracts`
@@ -465,6 +532,14 @@ trigger price, because a stop-market carries a `price` of `0`.
 #### Scenario: The same order is read on two surfaces
 - **WHEN** the operator compares a working order's size in the list against the same order on the chart or in the editor
 - **THEN** both state the same USDT amount
+
+#### Scenario: An order is partly filled
+- **WHEN** an order placed for `10` contracts at `100` has `5` contracts filled and is still working
+- **THEN** every surface values it at `500` rather than at `1000`, and the exact count offered beside that value states the working `5` contracts
+
+#### Scenario: The filled part is asked for on its own
+- **WHEN** the operator reads how much of a working order has traded
+- **THEN** that quantity is stated in its own right, unchanged by the order being valued at its remainder
 
 ### Requirement: The working-orders list is read as a table, not as sentences
 The list of working orders SHALL state the unit of each column once, at the head
@@ -493,20 +568,22 @@ remains available on the cell and on every control that acts on the contract.
 - **THEN** every row names its own contract, shortened to its base asset with the whole name on the cell, rather than losing the column to its neighbours
 
 ### Requirement: Orders the stream does not report are read on their own beat
-Order kinds the authenticated stream does not report — the algorithmic orders
-the desk lists and cancels but cannot place — SHALL be read on the periodic
-reconciliation and on an operator-requested refresh, and SHALL NOT be read in
-response to an execution report or a position change.
+Order kinds the desk does not learn from the authenticated stream — the
+algorithmic orders it lists and cancels but cannot place — SHALL be read on the
+periodic reconciliation and on an operator-requested refresh, and SHALL NOT be
+read in response to an execution report or a position change.
 
-Where the authenticated stream does report an algorithmic order, the desk SHALL
-apply what it reports to the listed algorithmic orders, on the frame that
-carried it and without reading the account back to learn what it was just told.
+This SHALL be stated as what the desk does, not as what the exchange sends. The
+exchange documents an `ALGO_UPDATE` event on this stream; whether it is
+delivered to this desk is unverified, and nothing here SHALL depend on it until
+a received frame says so.
 
-The periodic beat SHALL remain regardless, as the backstop it already is, and
-the read issued after an algorithmic command SHALL remain until delivery of such
-an event has been observed on the operator's own account. A documented event
-whose delivery has not been seen SHALL NOT be grounds for removing a read the
-desk depends on.
+The one exception SHALL be an execution report whose order identity is one a
+listed algorithmic order reports having spawned. That parent SHALL be resolved
+from the report rather than left on screen until the beat comes round, and it
+MAY be read once for that match alone. The read SHALL be deduplicated and SHALL
+remain inside the read budget, so a burst of fills against one parent is one
+read. An execution report matching no listed parent SHALL still read nothing.
 
 #### Scenario: A fill arrives while an algorithmic order rests
 - **WHEN** an execution report arrives for a regular order and an algorithmic order is listed
@@ -515,6 +592,18 @@ desk depends on.
 #### Scenario: The operator asks for a refresh
 - **WHEN** the operator requests an account refresh
 - **THEN** the algorithmic orders are read again alongside the regular ones
+
+#### Scenario: A fill arrives on an order a listed parent spawned
+- **WHEN** an execution report carries the identity a listed algorithmic order reports having spawned
+- **THEN** that parent is resolved from the report, and at most one algorithmic-order read is issued for the match
+
+#### Scenario: A burst of fills lands on one spawned order
+- **WHEN** several execution reports arrive for the same spawned order
+- **THEN** they resolve the same parent and produce one read, not one per report
+
+#### Scenario: A cancel-all clears both books
+- **WHEN** the operator cancels everything on a contract and the exchange accepts it
+- **THEN** the algorithmic orders are read back, because no stream reports what became of them, and the regular ones are not
 
 #### Scenario: The stream reports an algorithmic order
 - **WHEN** the authenticated stream delivers an algorithmic-order update for a listed algorithmic order
@@ -608,31 +697,46 @@ per-event byte and shape limits SHALL remain unchanged.
 
 ### Requirement: A drag lifts the order off the book
 Beginning a drag on a working order SHALL cancel that order. The drag SHALL
-begin only once the cancellation is confirmed; if it is refused or its outcome is
-unknown, the order SHALL be left alone and no drag SHALL start. Once the
-cancellation is confirmed the order SHALL leave the chart, the order list and
-every other surface that lists working orders, because it no longer exists.
+follow the pointer from the moment the gesture begins, without waiting for the
+cancellation to be answered; the desk SHALL NOT present the order as gone until
+the cancellation is confirmed. If the cancellation is refused or its outcome is
+unknown, the drag SHALL end with nothing lifted and the order SHALL be left
+alone. Once the cancellation is confirmed the order SHALL leave the chart, the
+order list and every other surface that lists working orders, because it no
+longer exists.
 
 #### Scenario: The operator picks an order up
 - **WHEN** the operator begins a drag on a working order and the exchange confirms the cancellation
 - **THEN** the order is no longer listed as working and no longer drawn at the price it rested at
 
+#### Scenario: The pointer moves before the exchange answers
+- **WHEN** the operator begins a drag and moves the pointer while the cancellation is still in flight
+- **THEN** the mark for where the order is going follows the pointer, without waiting for the answer
+
 #### Scenario: The cancellation is refused
 - **WHEN** the exchange refuses the cancellation
-- **THEN** no drag begins, the order remains working and drawn where it was, and the refusal is stated
+- **THEN** the drag ends, the order remains working and drawn where it was, and the refusal is stated
 
 #### Scenario: The cancellation's outcome is unknown
 - **WHEN** the cancellation is sent and the exchange does not confirm it either way
-- **THEN** no drag begins and the unknown outcome is presented as unknown, so the operator is not told the order is gone
+- **THEN** the drag ends and the unknown outcome is presented as unknown, so the operator is not told the order is gone
 
 ### Requirement: The order being dragged is drawn
 While a drag is in flight the order that will be placed SHALL be drawn at the
-price under the pointer, carrying its side and its size, and SHALL be the only
-mark on the chart standing for it. The price the order was lifted from MAY carry
-one faint marker, distinct from a working order and without an axis label.
+price under the pointer, carrying its side and its size. Until the cancellation
+is confirmed that mark SHALL be drawn as pending — distinguishably from a lifted
+order — and the working order SHALL remain drawn at the price it rests at,
+because it is still on the book. From the confirmation onward the pointer's mark
+SHALL be the only mark on the chart standing for that order, and the price it
+was lifted from MAY carry one faint marker, distinct from a working order and
+without an axis label.
+
+#### Scenario: The cancellation is still in flight
+- **WHEN** the operator is dragging an order whose cancellation has not been answered
+- **THEN** the mark at the pointer is drawn as pending, and the working order is still drawn where it rests
 
 #### Scenario: An order is being dragged
-- **WHEN** an order is being dragged across the chart
+- **WHEN** an order is being dragged across the chart after its cancellation was confirmed
 - **THEN** it is drawn once, at the pointer, and no working-order mark for it remains at the price it was lifted from
 
 #### Scenario: Other orders during a drag
@@ -644,38 +748,19 @@ From the moment a lifted order's cancellation is confirmed, the system SHALL owe
 a replacement order and SHALL discharge that obligation in exactly one of three
 ways: by placing the replacement at the price the drag ended on, by placing it
 again at the price it was lifted from when the drag is abandoned, or by stating
-that neither could be placed. The third case SHALL name the order that is gone,
-state why the replacement failed, and offer to place it again. It SHALL NOT be
-reported only in a log.
-
-Obligations SHALL be held per order, and SHALL be discharged independently. An
-outstanding obligation for one order SHALL NOT prevent another order from being
-lifted: the wait it imposes is a round trip through the operator's proxy, during
-which every order on every contract was unmovable. Lifting an order that is
-already lifted SHALL be refused, because it is no longer on the book.
-
-Discharging an obligation SHALL name the order it is for. More than one gesture
-can be in the air at once, so which obligation a drop discharges SHALL NOT be
-inferred from which order was lifted most recently. A drop that names an order
-the system owes nothing for SHALL place nothing, and an obligation already
-discharged SHALL NOT be discharged a second time: an order placed twice and an
-order never placed are the same accounting error.
-
-A gesture in progress SHALL NOT be interrupted by an earlier one being
-discharged. The operator makes every drag with the same pointer, and a drag that
-loses it mid-gesture is an order lifted off the book that never gets dropped.
-
-Where more than one obligation is outstanding, each SHALL be stated on its own,
-naming its own order, its own reason and its own price to place it again, and
-answering one SHALL NOT clear the record of another.
-
-No path out of a lift SHALL be silent. A lift that is refused SHALL say so and
-SHALL make clear that the order was left where it was, which is not the same
-thing as an order that is gone.
+that neither could be placed. A gesture that ends before the cancellation is
+answered SHALL be discharged at the price it ended on, on the same terms as one
+that ends after. The third case SHALL name the order that is gone, state why the
+replacement failed, and offer to place it again. It SHALL NOT be reported only in
+a log.
 
 #### Scenario: The drag ends at a new price
 - **WHEN** the operator drops a dragged order at a price the desk accepts
 - **THEN** a replacement order is placed at that price
+
+#### Scenario: The drop lands before the cancellation is answered
+- **WHEN** the operator drops the order at a new price while the cancellation is still in flight, and the cancellation is then confirmed
+- **THEN** the replacement is placed at the price it was dropped at rather than at the price it was lifted from
 
 #### Scenario: The drag is abandoned
 - **WHEN** the operator abandons the drag by releasing the modifier, by cancelling, or by dropping at the price the order was lifted from
@@ -735,4 +820,207 @@ place it again.
 #### Scenario: The reconciliation catches up afterwards
 - **WHEN** the next reconciliation removes the refused order from the listed algorithmic orders
 - **THEN** the statement of why it went is not withdrawn by that removal
+
+### Requirement: The account review is read once and then held
+The account order and trade history SHALL be read from the exchange when the
+Futures workspace opens, and afterwards only on an explicit operator request.
+Selecting a history view, returning to a view already selected, changing the
+selected contract, or re-entering the workspace SHALL render from the held
+reading and SHALL issue no exchange read.
+
+#### Scenario: The operator switches between history views
+- **WHEN** the operator selects the order history and then the closed positions, having already loaded the history
+- **THEN** both views render from the held reading and no account history request is sent
+
+#### Scenario: The operator asks for a refresh
+- **WHEN** the operator uses the refresh control on the history panel
+- **THEN** one account history read is issued
+
+#### Scenario: The contract on screen changes
+- **WHEN** the operator selects a different contract while a history view is open
+- **THEN** the held reading continues to be shown, because it spans the account rather than the contract
+
+### Requirement: A refresh replaces the reading rather than removing it
+While a history read is in flight the previously held rows SHALL remain on
+screen, marked as being refreshed. They SHALL be replaced only when an answer
+arrives. When the read fails the held rows SHALL remain, with the failure stated
+beside them rather than in place of them.
+
+#### Scenario: A refresh is in flight
+- **WHEN** a history read has been issued and has not yet answered
+- **THEN** the rows already read stay on screen and are marked as being refreshed
+
+#### Scenario: A refresh fails
+- **WHEN** a history read fails
+- **THEN** the held rows remain readable and the failure is stated alongside them
+
+#### Scenario: Nothing has ever been read
+- **WHEN** no history reading is held and one is in flight
+- **THEN** the panel states that it is loading, because there is nothing to hold
+
+### Requirement: The held review is maintained by the stream
+An order reaching a terminal state and a fill reported on the Futures user-data
+stream SHALL be folded into the held history, so that the review reflects them
+without an exchange read. A folded entry SHALL be identified by the same order
+and trade identities the read uses, so the same event cannot appear twice.
+
+#### Scenario: An order is filled while the review is held
+- **WHEN** an order reaches a terminal state on the user-data stream and the history has been read
+- **THEN** it appears in the order review without a further exchange read
+
+#### Scenario: The same order is then read again
+- **WHEN** a subsequent read returns an order already folded in from the stream
+- **THEN** it appears once, not twice
+
+#### Scenario: A position is closed while the review is held
+- **WHEN** fills that close a position arrive on the user-data stream
+- **THEN** the closed-position review reflects the closed position without a further exchange read
+
+### Requirement: The review states how old it is
+A held history reading SHALL state when it was taken, so that a reading held
+from earlier in the session is not read as one taken just now.
+
+#### Scenario: The review has been open for some time
+- **WHEN** the operator opens a history view whose reading was taken earlier
+- **THEN** the panel states when the reading was taken
+
+### Requirement: A read replaces only the contracts it covered
+The account history read is a fan-out over a bounded set of contracts, and a
+contract may drop out of it — its request failed, the discovery that names it ran
+short, or it no longer holds a position or working order to seed it. Rows held
+for a contract the read did not cover SHALL be kept, and rows for a contract it
+did cover SHALL be replaced by what it returned. The panel's statement of how
+many contracts the review covers SHALL count only contracts that were read.
+
+#### Scenario: A later read does not reach a contract the review holds rows for
+- **WHEN** an account history read returns without covering a contract whose rows are already held
+- **THEN** those rows remain in the review, and the closed position they describe is still listed
+
+#### Scenario: A read covers a contract and returns fewer rows for it
+- **WHEN** an account history read covers a contract and does not return a row previously held for it
+- **THEN** that row is dropped, because the read is the authority on the contract it covered
+
+### Requirement: Contract discovery reaches the session being reviewed
+The read that names which contracts the account traded SHALL cover the most
+recent part of its window before the rest of it, so that a bounded walk reaches
+the contracts traded today rather than those traded at the far end of the window.
+Where the walk stops short, the review SHALL state that more may have been
+traded.
+
+#### Scenario: The account realized more rows than the walk is bounded to
+- **WHEN** the account has more realized-PnL rows in the window than the discovery walk can page through
+- **THEN** the contracts traded most recently are the ones discovered, and the review states that the discovery was not complete
+
+### Requirement: A closed position is what was actually closed
+Fills SHALL be folded into positions without inventing one. Where a fill reduces
+more than the fills in hand show is held, and what the exchange reports it
+realized does not account for a reversal, the fill SHALL be read as closing a
+position opened before this window of fills rather than as opening one in the
+opposite direction. The entry price of such a position SHALL be the one the
+exchange's realized PnL states.
+
+#### Scenario: The window of fills opens while a position is already held
+- **WHEN** the operator adds to a position opened before the read's window and then closes all of it
+- **THEN** the review shows one closed position of the whole size, and no position in the opposite direction
+
+#### Scenario: The position really did reverse
+- **WHEN** a fill reduces past flat and its realized PnL accounts for closing exactly what was held
+- **THEN** the review shows the position closed and the opposite one opened
+
+### Requirement: An open position's value moves with the market between marks
+Between two mark-price updates, an open position's unrealized PnL and its
+percentage SHALL be re-priced against the most recent traded price for that
+contract, at a bounded repaint rate. When a mark arrives, the confirmed
+mark-based figure SHALL replace the estimate.
+
+#### Scenario: The market moves between two marks
+- **WHEN** trades print for a contract holding an open position and no new mark has arrived
+- **THEN** the position's value and PnL follow those prints rather than standing still
+
+#### Scenario: A mark arrives
+- **WHEN** a mark price arrives for that contract
+- **THEN** the position's PnL is the exchange's own arithmetic on that mark
+
+### Requirement: An estimated reading says that it is estimated
+A PnL re-priced from the last traded price SHALL be presented as an estimate,
+distinguishably from one computed on a confirmed mark, and SHALL state the
+confirmed figure it is an estimate of. Liquidation price and liquidation
+distance SHALL NOT be estimated this way, and neither SHALL any margin reading
+measured from them — the margin balance and the amount the desk offers for
+withdrawal are statements about liquidation, and liquidation is the mark's.
+
+#### Scenario: The operator reads an interpolated PnL
+- **WHEN** the value shown was computed from the last trade rather than from a mark
+- **THEN** the surface shows it as an estimate, names the mark-based figure beside it, and the liquidation reading remains the mark's
+
+#### Scenario: Margin is measured while the estimate is on screen
+- **WHEN** the desk states a margin balance, a distance to liquidation, or an amount of margin that may be withdrawn, while the PnL on screen is an estimate
+- **THEN** those readings are computed from the mark's own unrealized PnL rather than from the estimate
+
+### Requirement: A drag does not pay for the rest of the desk
+Following the pointer SHALL cost a fixed, small amount of work per pointer move,
+independent of how much of the desk is being redrawn at the same time.
+
+The gesture SHALL NOT read the desk's layout while it runs: the chart's box SHALL
+be measured once for the gesture and measured again only when the chart is
+resized. A layout read is answered cheaply only against a layout that is already
+clean, and the desk's never is — the book, the dock and the header write to it
+throughout the drag — so a read at pointer rate lays the whole desk out again on
+every frame of the gesture.
+
+The mark that follows the pointer SHALL be moved by a property that does not
+invalidate layout, so that neither the desk nor the charting library is charged a
+fresh layout pass for the frame the operator is dragging in. A pointer move that
+leaves the mark on the row it already occupies SHALL redraw nothing.
+
+#### Scenario: The pointer moves while the desk is busy
+- **WHEN** the operator drags an order while the rest of the desk is being redrawn from the stream
+- **THEN** the mark follows the pointer, and the gesture measures no layout to do it
+
+#### Scenario: The chart is resized during a drag
+- **WHEN** the chart's box changes while a drag is in flight
+- **THEN** the next pointer move is placed against the new box
+
+#### Scenario: A move that changes nothing
+- **WHEN** a pointer move leaves the mark on the row it already occupies
+- **THEN** neither the chart nor the mark is redrawn
+
+### Requirement: An algorithmic order that has fired does not read as resting
+An algorithmic order that is finished by the regular order it spawned SHALL,
+once it reports one, be presented as triggered and awaiting confirmation, not as
+an order resting at its trigger price. Every surface that draws working orders —
+the chart marker, the working-orders list and the portfolio dock — SHALL state it
+the same way, and SHALL withhold the controls that apply only to a working order,
+because a marker drawn at a price the market has left invites the operator to
+move or cancel something the exchange has already acted on.
+
+An algorithmic order that outlives the order it spawned — a scheduled algorithm
+that fills one child and places the next, naming the current one in the same
+field — SHALL NOT be read this way. It is still working, and reading a child's
+settlement as the parent's own would take a running algorithm off the desk. The
+kinds that are finished by their spawned order SHALL be named explicitly, and a
+kind the desk has not been shown SHALL read as still working.
+
+A control the exchange still accepts on a triggered parent SHALL remain
+available, and one it does not SHALL be stated rather than silently absent.
+
+#### Scenario: A stop fires
+- **WHEN** a conditional algorithmic order reports a spawned regular order
+- **THEN** it reads as triggered and awaiting confirmation on every surface that draws it, rather than as a working order at its trigger price
+
+#### Scenario: The operator reaches for a triggered parent
+- **WHEN** the operator opens the controls on an algorithmic order that has fired
+- **THEN** repricing and resizing are not offered, and whether the exchange will still cancel it is stated
+
+#### Scenario: The order has not fired
+- **WHEN** an algorithmic order reports no spawned order
+- **THEN** it reads as working at its trigger price, exactly as it does today
+
+#### Scenario: A scheduled algorithm names its current child
+- **WHEN** an algorithmic order that outlives the orders it spawns names one of them
+- **THEN** it reads as working, and the settlement of that child neither removes it from the desk nor keeps it from being listed again
+
+#### Scenario: The exchange reports a kind the desk has not been shown
+- **WHEN** an algorithmic order names a spawned order under a kind the desk does not recognize
+- **THEN** it reads as working, as it did before spawned orders were carried at all
 

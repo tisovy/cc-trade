@@ -93,3 +93,53 @@ cause or as several without opening the record itself.
 - **WHEN** the summary is run against a day in which several commands were refused
 - **THEN** it reports the refusals grouped by the code the exchange gave, and how many commands each code accounts for
 
+### Requirement: A command's answer is recorded beside it
+The record SHALL state, for every command it keeps, when the desk finished with
+it and how long that took, so that a command's line can be read as a measurement
+rather than as a note that something was asked for. The answer SHALL name the
+same command and the same order identity its own line carries, SHALL state
+whether the desk finished or failed, and SHALL carry no price, size or amount.
+
+A command the record does not keep SHALL have no answer kept either, so the
+reads the desk asks for on its own beat do not fill the record with their own
+housekeeping.
+
+The summary over a day SHALL report how long each kind of command took to
+answer — how many, the middle of them, and the slowest with its time — so a desk
+that felt slow can be asked which command was slow and when.
+
+#### Scenario: An order is placed
+- **WHEN** a placement is sent and the exchange answers it
+- **THEN** the record carries the command and, beside it, how long the desk took to answer it, naming the same order identity
+
+#### Scenario: A read on the desk's own beat
+- **WHEN** the desk refreshes the account on its own beat
+- **THEN** neither the read nor an answer for it is written
+
+#### Scenario: The evening's reading
+- **WHEN** the summary is run against a day in which orders were placed and cancelled
+- **THEN** it reports each command's count, median and slowest answer, and when the slowest happened
+
+### Requirement: An account read is recorded with the reason it was issued
+Every read of the signed account resources SHALL carry a reason from the site
+that asked for it, and the record SHALL keep one event per read pass stating
+that reason, how many resources the pass asked for and what it cost in exchange
+weight. The reason SHALL come from a fixed vocabulary the record can verify, so
+that a reason it does not recognise loses its line rather than widening the
+record's shape.
+
+The day's summary SHALL report the reads grouped by reason, with how many were
+issued and the weight they spent.
+
+#### Scenario: The account is read after a fold
+- **WHEN** the desk reads the balances back because a folded frame moved the free margin
+- **THEN** the record carries one read event naming that reason, one resource and its weight
+
+#### Scenario: A reason the record does not know
+- **WHEN** a read is recorded with a reason outside the vocabulary
+- **THEN** the event is refused and no line is written for it
+
+#### Scenario: The summary is read
+- **WHEN** the operator reads the day's summary
+- **THEN** it states how many account reads went out for each reason and the weight they cost
+

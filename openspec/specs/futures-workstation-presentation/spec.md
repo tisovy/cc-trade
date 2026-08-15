@@ -566,18 +566,32 @@ this consolidation SHALL NOT suppress an actionable account or command failure.
 The last-print row between the two book sides, the market header's `Last`, the
 grouping step's share-of-price readout and the reference the pressure reach is
 measured against SHALL all read one resolved last traded price. That price SHALL
-be taken from the newest live candle's close, falling back to the ticker's last
-price and only then to the newest displayed trade. The tape's own display
-settings — minimum displayed notional and throttle timeout — SHALL NOT be able
-to hold that price still.
+be taken from the newest print the contract made, delivered on a path the tape's
+own display settings do not stand in — the minimum displayed notional and the
+throttle timeout decide what the tape shows and SHALL NOT be able to hold the
+price still. It SHALL fall back to the newest live candle's close, which is the
+same figure at the kline stream's cadence, and only then to the newest displayed
+trade.
+
+A print SHALL NOT restate the price more often than the operator can read it,
+and SHALL NOT be taken as proof that the mark, the funding and the rest of the
+header beside it are current — a contract can print while its mark feed is dead.
 
 #### Scenario: Tape filter excludes every recent print
 - **WHEN** the operator's minimum displayed trade excludes the prints that are actually trading, so the tape delivers no new row
-- **THEN** the last-print row keeps tracking the candle close, at the cadence the chart is drawn from
+- **THEN** the last traded price keeps moving with those prints, which the filter never applied to
+
+#### Scenario: Prints arrive faster than they can be read
+- **WHEN** a burst of prints arrives inside one repaint window
+- **THEN** the price is restated once for the window rather than once per print
+
+#### Scenario: No print has arrived for the contract
+- **WHEN** no print has been delivered for the selected contract
+- **THEN** the newest live candle's close is shown, which is the same last traded price at the kline stream's cadence
 
 #### Scenario: Candles are not live
-- **WHEN** no live candle is available for the selected interval
-- **THEN** the ticker's last price is shown, and the newest displayed trade only if the ticker has none either
+- **WHEN** no print has arrived and no live candle is available for the selected interval
+- **THEN** the newest displayed trade is shown, the tape being the last resort rather than the first
 
 #### Scenario: One price on screen
 - **WHEN** the last traded price is resolved
@@ -2193,4 +2207,155 @@ two independently served routes stopped carrying while the other kept talking.
 #### Scenario: The margin is not there to be had
 - **WHEN** measurement of the thinnest carried contract shows book silences through printing trades that reach the proposed margin
 - **THEN** the rule is not enforced, and the measurement that ruled it out is written down
+
+### Requirement: Market data state does not disarm order entry
+Chart price picking, chart trading gestures and order-book level selection SHALL
+remain available while the market data is stale, quiet, disconnected or
+resynchronizing. They SHALL be unavailable only where the surface has never
+received data and therefore has no price to act on. Lifting an order off the
+chart SHALL NOT depend on the market data state at all, because the order being
+lifted is the desk's own.
+
+#### Scenario: The workspace is resynchronizing
+- **WHEN** the market data resynchronizes while the operator holds a position
+- **THEN** the chart gestures, the price pick and the book's levels remain usable
+
+#### Scenario: The contract is quiet
+- **WHEN** the selected contract records no trade for longer than the freshness window
+- **THEN** the chart gestures, the price pick and the book's levels remain usable
+
+#### Scenario: Nothing has ever been received
+- **WHEN** a contract's chart has received no candle at all
+- **THEN** picking a price from it is unavailable, because there is no price on it
+
+#### Scenario: The book was delivered empty
+- **WHEN** the order book carries no level on either side
+- **THEN** there is no level to pick, and picking one is unavailable
+
+### Requirement: A price taken from a non-live reading states its age
+A price picked from a surface that is not live SHALL be presented with the age
+of the reading it came from, on the ticket and on the confirmation panel, so the
+operator confirms a price whose age they can see. The age SHALL be counted from
+the time the reading was observed to the moment it is read, so a panel left open
+states a growing age rather than the age it was staged at. A price the operator
+typed carries no reading and SHALL state no age.
+
+#### Scenario: A gesture is made on a stale chart
+- **WHEN** the operator opens an order from a chart whose data is stale
+- **THEN** the confirmation states how old the price it carries is
+
+#### Scenario: The confirmation is left open
+- **WHEN** a confirmation carrying a non-live price stays open
+- **THEN** the age it states grows with the time the reading has been held
+
+#### Scenario: The operator typed the price
+- **WHEN** the price on the ticket was typed rather than picked off a surface
+- **THEN** no reading age is stated for it
+
+### Requirement: A silent stream on a live transport is named quiet
+A market-data resource that has stopped updating while its transport is still
+proven live SHALL be presented as quiet rather than stale. A resource whose
+transport is not proven live SHALL keep the state the transport gave it.
+
+#### Scenario: A contract with no trades
+- **WHEN** the connection is live and the selected contract's candles stop arriving
+- **THEN** the chart is marked quiet and states how long ago its last candle arrived
+
+#### Scenario: The connection is gone
+- **WHEN** the workspace is disconnected
+- **THEN** the chart is not called quiet
+
+### Requirement: A non-live reading is stated beside the chart, not over it
+A chart that carries candles SHALL remain readable whatever its state: the state
+and the age of its last reading SHALL be stated beside the chart rather than
+drawn across it. The chart SHALL be covered only where it carries no candle at
+all and therefore has nothing to read.
+
+#### Scenario: The chart is quiet or stale but drawn
+- **WHEN** the chart's data is not live and candles are on screen
+- **THEN** the candles stay legible and the state and age are stated in a corner notice
+
+#### Scenario: The chart has nothing on it
+- **WHEN** the chart carries no candle
+- **THEN** the chart is covered by a notice that states there is nothing to read
+
+### Requirement: Every window width presents the positions and orders dock
+The workstation layout SHALL present the positions and orders dock at every
+supported window width. A layout template SHALL be applied only at widths its
+columns fit in, so no width falls between a template that is too wide and a
+breakpoint that has not yet applied.
+
+#### Scenario: Narrow window
+- **WHEN** the window is narrower than the desktop breakpoint
+- **THEN** the positions and orders dock is present and readable
+
+#### Scenario: Just above the breakpoint
+- **WHEN** the window is at a width where the desktop columns no longer fit
+- **THEN** the narrower template is already in force
+
+### Requirement: An action available by pointer is available by keyboard
+A row or control that opens an editor SHALL be focusable, SHALL activate with
+Enter and Space, and SHALL state its action for assistive technology. A pointer
+gesture SHALL NOT be the only way to reach an action that changes an order or a
+position.
+
+#### Scenario: Repricing an order without a mouse
+- **WHEN** the operator focuses an order row and presses Enter
+- **THEN** the order editor opens for that order and can be submitted from the keyboard
+
+#### Scenario: The row states what it does
+- **WHEN** assistive technology reads a row that opens an editor
+- **THEN** it announces the action the row performs
+
+### Requirement: A frame redraws the panel it belongs to and no other
+The workstation SHALL redraw the order book only for a frame that changes the
+book, and the tape only for a frame that changes the tape. What a frame costs to
+draw SHALL NOT depend on how much of the panel it did not change: a print SHALL
+cost the same whether two levels a side are on screen or twenty-four.
+
+This replaces coalescing depth deliveries to an animation interval, which was
+measured and does not pay. The exchange sends depth ten times a second and the
+tape is throttled to four; against the sixty an animation interval allows there
+is nothing to coalesce, and the one case there was — a burst on a socket that
+stopped accepting bytes — is already collapsed in the transport, where the newer
+book replaces the undelivered older one. What the burst actually cost was paid in
+the panel: every frame of either kind rebuilt both ladders and every tape row.
+
+#### Scenario: A print arrives
+- **WHEN** a tape frame arrives and the book has not changed
+- **THEN** the tape rows are redrawn and the book rows are not
+
+#### Scenario: A book update arrives
+- **WHEN** a depth frame arrives and the tape has not printed
+- **THEN** the book rows are redrawn and the tape rows are not
+
+#### Scenario: A frame changes both
+- **WHEN** a frame carries both a new book and a new print
+- **THEN** both are redrawn, because both are what changed
+
+### Requirement: A price tick does not restart the render
+The workstation SHALL derive the last-print direction without updating state
+during render. A price tick SHALL cause one render pass of the workstation.
+
+A turn of the market — a price that moves the other way from the one before it —
+MAY cost a second pass, because a direction is a comparison with what was on
+screen before and nothing the render is given carries that. It SHALL be decided
+after the render and before the browser paints, so a turn is drawn on the frame
+it happened rather than a frame late.
+
+#### Scenario: A price tick arrives
+- **WHEN** a new last price arrives moving the same way as the one before it
+- **THEN** the workstation renders once and the direction reads the same as it does today
+
+#### Scenario: The price does not move
+- **WHEN** the same last price arrives again
+- **THEN** the workstation renders once and keeps the direction it last had
+
+#### Scenario: The market turns
+- **WHEN** a last price arrives moving the other way from the one before it
+- **THEN** the turn is drawn on that frame rather than the next one
+
+#### Scenario: The first price of a contract
+- **WHEN** a contract's first last price is drawn
+- **THEN** it reads as neutral, because a first reading is not a move
 

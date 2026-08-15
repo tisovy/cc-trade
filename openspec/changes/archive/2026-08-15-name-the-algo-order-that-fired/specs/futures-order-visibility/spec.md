@@ -71,7 +71,7 @@ the operator can still move and one they cannot.
 - **WHEN** Binance reports an algorithmic order whose spawned-order identity is the documented empty value
 - **THEN** that value is retained as reported, and the order is not read as having fired
 
-### Requirement: Orders the desk does not learn from the stream are read on their own beat
+### Requirement: Orders the stream does not report are read on their own beat
 Order kinds the desk does not learn from the authenticated stream — the
 algorithmic orders it lists and cancels but cannot place — SHALL be read on the
 periodic reconciliation and on an operator-requested refresh, and SHALL NOT be
@@ -104,3 +104,15 @@ read. An execution report matching no listed parent SHALL still read nothing.
 #### Scenario: A burst of fills lands on one spawned order
 - **WHEN** several execution reports arrive for the same spawned order
 - **THEN** they resolve the same parent and produce one read, not one per report
+
+#### Scenario: A cancel-all clears both books
+- **WHEN** the operator cancels everything on a contract and the exchange accepts it
+- **THEN** the algorithmic orders are read back, because no stream reports what became of them, and the regular ones are not
+
+#### Scenario: The stream reports an algorithmic order
+- **WHEN** the authenticated stream delivers an algorithmic-order update for a listed algorithmic order
+- **THEN** the listed order is updated from that frame, and no account read is issued because of it
+
+#### Scenario: The stream has never been seen to report one
+- **WHEN** the desk can fold such an event but has not observed one arriving on this account
+- **THEN** the periodic beat and the post-command read both stay exactly as they are
