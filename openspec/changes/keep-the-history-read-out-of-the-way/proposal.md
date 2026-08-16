@@ -32,15 +32,28 @@ always is; they are admitted in the order they arrive.
   admitted through it, and the read that follows it — is admitted ahead of a
   history fan-out already queued, so a review in flight cannot delay the desk
   learning what its own order did, nor delay the order.
+- The leverage a position is carried at travels with the read that found the
+  position rather than behind the review. The free-margin estimate is
+  all-or-nothing across the account, so one contract whose leverage is still
+  queued takes the whole number off the desk.
 - A stream of urgent admissions may not stall a fan-out already under way: what
   overtakes is bounded, so the review still finishes.
 
 ## Impact
 
 - Affected specs: `futures-order-visibility`
-- Affected code: `electron/services/binance-connection.js` (the fan-out and the
-  limiter's admission), `src/hooks/useFuturesTrading.js` and
+- Affected code: `electron/services/binance-connection.js` (the fan-out, the
+  limiter's admission and which reads are urgent),
+  `electron/services/futures-account-state.js` (which read reasons are urgent),
+  `src/utils/tradingCommands.js` and
+  `electron/services/trading-command-validation.js` (the command carries the
+  views), `src/hooks/useFuturesTrading.js` and
   `src/components/features/futures/FuturesPortfolioDock.jsx` (the request carries
-  which view asked)
+  which view asked, and the dock is what asks),
+  `src/components/features/futures/FuturesProductionWorkstation.jsx` (which no
+  longer reads the review before a view is open), `src/utils/futuresHeldHistory.js`,
+  `src/utils/futuresHistoryStore.js` and
+  `src/components/features/futures/FuturesHistoryPanel.jsx` (coverage, cursors,
+  the stored record and what counts as read, all per endpoint)
 - Not a correctness fault: every reading is right, and this changes when they
   arrive rather than what they say.

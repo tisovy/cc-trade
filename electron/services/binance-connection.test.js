@@ -4170,6 +4170,92 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(admitted.filter(entry => entry.label === 'history')).toHaveLength(24);
     });
 
+    // The wallet is not the only thing the operator waits for. The free-margin
+    // estimate is all-or-nothing across every contract the account has money or
+    // an order on, so a position opened on a contract whose leverage has never
+    // been read takes the whole estimate away until that read lands. The frame
+    // that opens the position asks for that read, and it was ordinary.
+    it('reads the leverage a new position needs without waiting out a review in flight', async () => {
+        const admitted = [];
+        const loadFor = (type, key, value) => vi.fn(async () => {
+            admitted.push({ label: `read:${type}`, at: Date.now() });
+            return { [key]: value };
+        });
+        const loads = {
+            balances: loadFor('balances', 'futures_balances', {
+                USDT: { available: '100', total: '100' },
+            }),
+            positions: loadFor('positions', 'futures_positions', []),
+            regularOrders: loadFor('regularOrders', 'futures_regular_orders', []),
+            algoOrders: loadFor('algoOrders', 'futures_algo_orders', []),
+        };
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue(
+            ['balances', 'positions', 'regularOrders', 'algoOrders'].map(type => ({
+                type, weight: 5, errorLabel: type, loadPayload: loads[type],
+            })),
+        );
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        const socket = await openFuturesHistoryStream();
+
+        const traded = Array.from({ length: 11 }, (_, index) => (
+            `D${String(index + 1).padStart(2, '0')}USDT`
+        ));
+        moduleMocks.futuresAdapter.getTradedSymbolPage.mockImplementation(({ startTime }) => (
+            Promise.resolve({ symbols: traded, full: false, lastTime: startTime + 1 })
+        ));
+        moduleMocks.futuresAdapter.getOrderHistory.mockImplementation(({ symbol }) => {
+            admitted.push({ label: 'history', at: Date.now() });
+            return Promise.resolve([{ symbol, orderId: 1, status: 'FILLED', time: 1 }]);
+        });
+        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({ symbol }) => {
+            admitted.push({ label: 'history', at: Date.now() });
+            return Promise.resolve([{ symbol, id: 2, realizedPnl: '0', time: 1 }]);
+        });
+        moduleMocks.futuresAdapter.getSymbolConfig.mockImplementation(async (symbol) => {
+            admitted.push({ label: `config:${symbol}`, at: Date.now() });
+            return { symbol, leverage: 20, marginType: 'CROSSED', maxNotionalValue: '5000000' };
+        });
+        await vi.advanceTimersByTimeAsync(5_000);
+        await flushMicrotasks();
+        admitted.length = 0;
+
+        const review = moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                version: 1, marketType: 'futures', accountId: 'default',
+                action: 'account.history', clientOrderId: 'review-under-a-position',
+                symbol: 'SELUSDT', coverage: {},
+            }),
+        });
+        await vi.advanceTimersByTimeAsync(600);
+        const openedAt = Date.now();
+        socket.handlers.message(JSON.stringify({
+            e: 'ACCOUNT_UPDATE', E: 3_000, T: 3_000,
+            a: {
+                m: 'ORDER',
+                B: [{ a: 'USDT', wb: '1010.5', cw: '1010.5' }],
+                P: [{ s: 'NEWUSDT', pa: '25', ep: '2.1', up: '3', mt: 'cross', iw: '0', ps: 'BOTH' }],
+            },
+        }));
+        await vi.advanceTimersByTimeAsync(60_000);
+        await review;
+        await flushMicrotasks();
+
+        const config = admitted.findIndex(entry => entry.label === 'config:NEWUSDT');
+        expect(config).toBeGreaterThan(-1);
+        // Ahead of the review's remaining requests, not behind them.
+        expect(admitted.slice(config + 1).filter(entry => entry.label === 'history').length)
+            .toBeGreaterThan(10);
+        expect(admitted[config].at - openedAt).toBeLessThanOrEqual(1_000);
+        // And the review still finished.
+        expect(admitted.filter(entry => entry.label === 'history')).toHaveLength(24);
+    });
+
     // The fan-out reads twelve contracts. Once the last day alone has named that
     // many, reading further back cannot add one — and the review must say that the
     // rest of the week went unlooked-at rather than report a complete discovery.

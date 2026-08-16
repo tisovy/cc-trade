@@ -50,8 +50,11 @@ cost and the contention are not, and 0.2 and 0.3 below are the new readings.
   already in progress: state the bound on how far a queued request may be passed,
   and hold to it. The bound is eight — every pass is counted against every
   request it skipped, and nothing may pass one that has been passed eight times.
-  A fan-out is therefore held up by at most eight admissions however many orders
-  are worked over it.
+  A fan-out queued in one burst — which is what a review is, one request per
+  contract — is therefore held up by at most eight admissions however many orders
+  are worked over it: measured against the queue's own counters under a flood of
+  urgent work, exactly eight and never more. A gap read that pages pays the bound
+  once per page.
 - [x] 2.2 Mark the post-mutation account read urgent, and the history fan-out
   ordinary. Urgent is the read that follows a command, a settlement the stream
   reported, or an outcome the exchange left open; the first snapshot, a reconnect
@@ -64,19 +67,33 @@ cost and the contention are not, and 0.2 and 0.3 below are the new readings.
   reached the exchange 300ms after the operator asked instead of 3 150ms, and the
   account behind it landed at 1 200ms instead of 3 600ms.
 
+- [x] 2.4 Mark the contract read that a position asks for with the urgency of
+  whatever asked for the position. Found by auditing this change on 2026-08-16,
+  not by building it: the free-margin estimate is all-or-nothing across every
+  contract the account has money or an order on, so a fill that opens a position
+  on a contract whose leverage was never read takes the whole estimate away until
+  that read lands — and the read was ordinary. Measured with a review in flight:
+  last of twenty-seven admissions and 3 450ms after the frame, against sixth and
+  300ms now, with nineteen history reads still behind it.
+
 ## 3. Verification
 
 - [x] 3.1 A test that queues a history fan-out and then a post-mutation refresh,
   and asserts the refresh is admitted before the fan-out's remaining requests —
   and two on the queue itself, one for the overtaking and one for the bound that
   keeps it from starving the review. All three fail on the tree before this
-  change.
+  change. A fourth, from the audit, does the same for the leverage a position the
+  stream just opened is priced from.
 - [x] 3.2 A test that opening one history view reads one endpoint per contract,
   that the other view reads its own when opened, and that neither the held review
   nor the persistent store loses the rows of the view that was not read.
 - [x] 3.3 `npx vitest run` on the committed tree, extracted with `git archive`:
-  2 018 tests, 111 files, all passing, with `eslint`, `check:futures-production`
-  and `check:command-path` beside it on the same tree.
+  2 019 tests, 111 files, all passing, with `eslint`, `check:futures-production`
+  and `check:command-path` beside it on the same tree. The admission queue was
+  also driven directly, outside the suite: three hundred randomly aborted
+  requests leave it neither wedged nor holding its slot, spacing and the weight
+  window still bite under reordering, and no queued request was ever observed
+  past the bound.
 - [ ] 3.4 Operator confirms that opening the review no longer delays what the
   desk shows after an order. In
   `verify-the-desk-in-one-sitting/runbook.md`.
@@ -88,6 +105,12 @@ cost and the contention are not, and 0.2 and 0.3 below are the new readings.
   This is about the 150ms spacing and the order of admission.
 - [ ] 4.2 Halving the requests does not remove the contention, it halves it. The
   overtaking in section 2 is what actually bounds the delay.
+- [ ] 4.4 The listen key is still ordinary. A private stream that reconnects
+  while a review is running asks this same queue for its key, so the desk can be
+  blind to its own fills for the length of a fan-out. It is one request of weight
+  1 and the flag is already there, but the reconnect path is what
+  `prove-the-private-stream-is-carrying` is holding open in this tree; it belongs
+  to that change, not this one.
 - [ ] 4.3 The repeats are already gone: `hold-the-history-the-desk-has-read`
   archived on 2026-08-15, so selecting a tab reads nothing and a refresh of a held
   review costs two requests. What is left for this change is the load that is

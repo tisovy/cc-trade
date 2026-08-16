@@ -1495,7 +1495,20 @@ export function setupBinanceConnection({
     //
     // Positions are listed first so that the bound, when it bites, drops a
     // contract the account merely has an order on before one it has money in.
-    const refreshFuturesPositionConfigs = async (positions, workingOrders = []) => {
+    //
+    // `urgent` follows whatever asked for these configs. The leverage a contract
+    // is carried at is the third input to the free-margin estimate, and that
+    // estimate is all-or-nothing across the account — so a contract the account
+    // has just opened a position on, whose leverage nothing has ever read, takes
+    // the whole number away until this read lands. Measured on 2026-08-16 with a
+    // review in flight: last of the review's own twenty-seven admissions, 3 450ms
+    // after the frame that opened the position. The wallet beside it was already
+    // urgent, which is exactly what made this the one input still waiting.
+    const refreshFuturesPositionConfigs = async (
+        positions,
+        workingOrders = [],
+        { urgent = false } = {},
+    ) => {
         const symbols = [...new Set([
             ...(Array.isArray(positions) ? positions : [])
                 .filter(position => Number(position?.quantity) !== 0)
@@ -1521,7 +1534,7 @@ export function setupBinanceConnection({
             .slice(0, FUTURES_POSITION_CONFIG_MAX_SYMBOLS);
         const configs = await Promise.all(unread.map(symbol => readFuturesSymbolConfig(
             symbol,
-            { withCeiling: true },
+            { withCeiling: true, urgent },
         )));
         broadcastFuturesSymbolConfigs([...held, ...configs]);
     };
@@ -1663,6 +1676,10 @@ export function setupBinanceConnection({
             void refreshFuturesPositionConfigs(
                 futuresAccountResources.positions.data ?? [],
                 futuresWorkingOrderSymbolSource(),
+                // As urgent as the pass it belongs to: a read that answers what
+                // the operator just did is not finished until what it moved can
+                // be priced.
+                { urgent },
             );
         }
     };
@@ -2192,6 +2209,10 @@ export function setupBinanceConnection({
                             void refreshFuturesPositionConfigs(
                                 positions,
                                 futuresWorkingOrderSymbolSource(),
+                                // The frame is a settlement the exchange has
+                                // just reported, and it is the whole reason this
+                                // contract needs a leverage at all.
+                                { urgent: true },
                             );
                         }
                     }
