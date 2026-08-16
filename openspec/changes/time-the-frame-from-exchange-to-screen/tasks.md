@@ -154,7 +154,7 @@ the format cannot silently go back to implying one event.
 
 `src/App.futures-burst.test.jsx` drives the real renderer outbox, production
 protocol parser/reducer, execution hook and order-book view under Vitest/JSDOM.
-Six 41,795-byte books — all 64 rows per side and every bounded row value at its
+Six 41,796-byte books — all 64 rows per side and every bounded row value at its
 64-character legal maximum — are offered on absolute 100 ms deadlines, with a
 contract-candle frame beside each one. A terminal report is offered on cycle
 three while the socket is stalled. On drain the test requires the working order
@@ -162,20 +162,20 @@ to leave the rendered ticket, the last book's exact first bid to reach the
 rendered book, and exact counts of four superseded books and five superseded
 candle frames.
 
-The 600 ms execution-application bound is measured, not estimated. Isolated
-final-harness calibration (n=20) was min 329.271 ms, p50 334.338 ms, p90 338.717
-ms, p99 345.136 ms, max 345.878 ms, range 16.607 ms and sample standard
-deviation 3.680 ms. Aggregate calibration (n=6) was min 373.844 ms, p50 423.635
-ms, p90 486.699 ms, p99 487.390 ms, max 487.467 ms, range 113.623 ms and sample
-standard deviation 49.193 ms. The bound is the aggregate maximum plus one full
-100 ms scheduler interval, rounded up to a cadence boundary: (487.467 + 100) ms
-→ 600 ms. `npm run test:futures-burst` calls it alone; one bound-enforcing run
-takes about 1.1 seconds, and twenty consecutive isolated plus six aggregate
-measurement runs passed, so the ordinary `npm test` Vitest glob includes it.
+The 600 ms execution-application bound is measured, not estimated. Final-harness
+calibration at `e0c8a92a2734bbe966570a94bec7bd40e30688ba` was min 332.551 ms,
+p50 337.953 ms, p90 341.942 ms, p99 342.358 ms, max 342.391 ms, range 9.840 ms
+and sample standard deviation 3.056 ms in twenty isolated runs. Six aggregate
+runs were min 380.236 ms, p50 406.697 ms, p90 463.910 ms, p99 470.952 ms, max
+471.735 ms, range 91.499 ms and sample standard deviation 38.261 ms. The bound
+is the aggregate maximum plus one full 100 ms scheduler interval, rounded up to
+a cadence boundary: (471.735 + 100) ms → 600 ms. `npm run test:futures-burst`
+calls it alone; one bound-enforcing run takes about 1.1 seconds, and the ordinary
+`npm test` Vitest glob includes it.
 
 ## 5. Verification
 
-- [ ] 5.1 `npm run lint`, `npm test`, `npm run check:futures-production`, and the new burst case.
+- [x] 5.1 `npm run lint`, `npm test`, `npm run check:futures-production`, and the new burst case.
 - [x] 5.2 Record one measured run of the burst case ~~on master before any other change in this batch lands~~ at the revision it is actually run against, naming that revision, as the baseline later runs are measured against. See §0: the pre-batch run is no longer obtainable, and the batch it was meant to precede has landed.
 - [ ] 5.2a Optionally, and labelled as the different thing it is: drive the same harness against `git archive 799931d` — the commit before the batch — and record it as "this change's harness against the old modules", never as a baseline run of the old desk.
 - [ ] 5.3 Operator confirms that the record names the stage a late frame waited in, on a contract that actually produced the complaint.
@@ -190,21 +190,56 @@ order on screen — was min 330.104 ms, p50 335.060 ms, p90 347.276 ms, p99
 deviation 15.806 ms (n=20). Whole-burst time was min 530.943 ms, p50 535.790 ms,
 p90 547.877 ms, p99 589.293 ms, max 590.837 ms, range 59.894 ms, mean 540.938
 ms and sample standard deviation 15.954 ms. Across all runs the offered cadence
-was 98.359–101.580 ms, every depth frame was 41,795 bytes, and the observed
-counts were exactly four superseded depth frames and five superseded candle
-frames.
+was 98.359–101.580 ms, the reported final depth frame was 41,795 bytes, and the
+observed counts were exactly four superseded depth frames and five superseded
+candle frames. The later audit established that this harness actually mixed
+41,794- and 41,795-byte frames as its revision crossed from one to two digits;
+that is why this baseline is retained but superseded below.
 
-The asserted 600 ms execution bound remains deliberately based on the noisier
-aggregate calibration, not this faster focused baseline: its 487.467 ms maximum
-plus one complete 100 ms burst interval is 587.467 ms, rounded upward to the
-next cadence boundary. That leaves one scheduler beat of measured headroom
-without turning a renderer that waits through an additional beat green.
+That run is retained as the first baseline of the original harness. The
+post-audit baseline below supersedes it for later comparisons.
 
 5.2a was not run. Revision `799931d` has neither
 `electron/services/renderer-outbox.js` nor the burst test, so the same harness
 cannot load against its modules. Making it run would require a compatibility
 implementation and would no longer be the production-code-free comparison the
 optional task permits.
+
+### Post-audit baseline at `e0c8a92a2734bbe966570a94bec7bd40e30688ba`
+
+Twenty consecutive focused runs from an exact `git archive` were min 332.551
+ms, p50 337.953 ms, p90 341.942 ms, p99 342.358 ms, max 342.391 ms, range 9.840
+ms, mean 337.579 ms and sample standard deviation 3.056 ms for execution
+application. Whole-burst time was min 532.747 ms, p50 538.228 ms, p90 542.223
+ms, p99 542.500 ms, max 542.505 ms, range 9.758 ms, mean 537.801 ms and sample
+standard deviation 3.056 ms. Offered cadence was 98.342–101.076 ms.
+
+Six full-suite runs from the same archive were min 380.236 ms, p50 406.697 ms,
+p90 463.910 ms, p99 470.952 ms, max 471.735 ms, range 91.499 ms, mean 417.288
+ms and sample standard deviation 38.261 ms for execution application. Whole
+burst time was min 581.553 ms, p50 614.434 ms, p90 665.708 ms, p99 671.886 ms,
+max 672.572 ms, range 91.019 ms, mean 621.146 ms and sample standard deviation
+37.805 ms. Offered cadence was 88.053–110.150 ms. Every run carried six equal
+41,796-byte depth frames and observed exactly four superseded depth frames and
+five superseded candle frames.
+
+The 600 ms bound is the final aggregate maximum plus one complete 100 ms burst
+interval, rounded upward to the next cadence boundary: (471.735 + 100) ms → 600
+ms. This keeps one measured scheduler beat of headroom without admitting an
+additional beat of renderer delay.
+
+Verification was repeated after the audit: the focused burst, focused ESLint,
+`npm run lint`, `npm run check:futures-production`, OpenSpec validation and all
+2,055 Vitest cases under the repository machine's `ru_RU.utf8` locale passed.
+The unqualified shell locale formats one pre-existing history-panel date as
+`07/14` where that test demands `DD.MM`; its otherwise identical full run was
+2,054/2,055 and the burst passed there too.
+
+Live record evidence exists but does not close 5.3 by itself. The 2026-08-16
+record contains 171 delivered-frame readings and its summary names
+`exchange→desk`, `→queue`, `→renderer` and `→screen` for ACEUSDT and HEMIUSDT.
+Only the operator can confirm that one of those is the contract that produced
+the complaint, so 5.3 remains unchecked.
 
 ## 6. Do The Tests Bite?
 
@@ -267,3 +302,13 @@ The timing assertion bites independently too: an aggregate run at the first
 400 ms candidate bound failed at 425.135 ms. That failure is what triggered the
 aggregate calibration and the measured 600 ms bound above; the threshold was
 not loosened speculatively.
+
+The post-audit guards bite independently as well:
+
+- Setting the execution bound to 1 ms while exporting the old
+  `FUTURES_BURST_MEASURE_ONLY=1` escape hatch now fails at 335.052 ms; no
+  environment variable can suppress the execution bound.
+- Offering cycles every 140 ms fails on a measured 39.126 ms cadence deviation
+  against the 25 ms tolerance, before execution timing can hide the bad feed.
+- Restoring the old variable-width revisions produces frame sizes 41,794 and
+  41,795 bytes and fails the assertion that all six maximal frames are equal.

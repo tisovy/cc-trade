@@ -26,8 +26,8 @@ const BURST_CYCLES = 6
 const BURST_CADENCE_MS = 100
 const BURST_CADENCE_TOLERANCE_MS = 25
 const EXECUTION_CYCLE = 2
-// Final harness calibration, isolated n=20: p99 345.136 ms, max 345.878 ms;
-// aggregate n=6: p99 487.390 ms, max 487.467 ms. Six hundred is the aggregate
+// Final harness calibration, isolated n=20: p99 342.358 ms, max 342.391 ms;
+// aggregate n=6: p99 470.952 ms, max 471.735 ms. Six hundred is the aggregate
 // maximum plus one 100 ms scheduler interval, rounded to a cadence boundary.
 const EXECUTION_APPLY_BOUND_MS = 600
 const utf8Bytes = value => new TextEncoder().encode(value).byteLength
