@@ -24,14 +24,12 @@ vi.mock('./components/features/futures/FuturesWorkstationChart.jsx', () => ({
 const OBSERVED_AT = 1_784_000_000_000
 const BURST_CYCLES = 6
 const BURST_CADENCE_MS = 100
+const BURST_CADENCE_TOLERANCE_MS = 25
 const EXECUTION_CYCLE = 2
-// A measurement-only run still exercises every assertion except this bound and
-// prints the sample in a machine-readable line.
 // Final harness calibration, isolated n=20: p99 345.136 ms, max 345.878 ms;
 // aggregate n=6: p99 487.390 ms, max 487.467 ms. Six hundred is the aggregate
 // maximum plus one 100 ms scheduler interval, rounded to a cadence boundary.
 const EXECUTION_APPLY_BOUND_MS = 600
-const MEASURE_ONLY = globalThis.process?.env?.FUTURES_BURST_MEASURE_ONLY === '1'
 const utf8Bytes = value => new TextEncoder().encode(value).byteLength
 const delay = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds))
 
@@ -283,21 +281,24 @@ describe('Futures exchange-to-screen burst', () => {
       supersede: true,
     })
     const accountDelivery = Object.freeze({ lane: RENDERER_OUTBOX_LANES.ACCOUNT })
-    const cycleStarts = []
+    const cycleOffers = []
+    const depthFrameBytes = []
     let issuedAt = null
     let latestDepth = null
-    let nextRevision = 4
+    // Keep every envelope revision at the same width so all six maximal depth
+    // payloads are also exactly the same frame size.
+    let nextRevision = 100
 
     connection.stall()
     const burstStartedAt = performance.now()
     for (let cycle = 0; cycle < BURST_CYCLES; cycle += 1) {
       const observedAt = OBSERVED_AT + (cycle * BURST_CADENCE_MS)
-      cycleStarts.push(performance.now())
       latestDepth = widestDepthFrame({
         requestId: subscription.requestId,
         revision: nextRevision + 1,
         observedAt,
       })
+      depthFrameBytes.push(latestDepth.bytes)
       const candles = candleFrame({
         requestId: subscription.requestId,
         revision: nextRevision,
@@ -305,6 +306,9 @@ describe('Futures exchange-to-screen burst', () => {
       })
 
       await act(async () => {
+        // Measure cadence where the frame is actually offered to the outbox,
+        // after constructing and serializing it.
+        cycleOffers.push(performance.now())
         outbox.send(latestDepth.raw, depthDelivery)
         outbox.send(candles, candleDelivery)
         if (cycle === EXECUTION_CYCLE) {
@@ -381,24 +385,30 @@ describe('Futures exchange-to-screen burst', () => {
       dropped: 0,
       frames: 1,
     })
-    expect(cycleStarts).toHaveLength(BURST_CYCLES)
+    expect(cycleOffers).toHaveLength(BURST_CYCLES)
+    expect(depthFrameBytes).toHaveLength(BURST_CYCLES)
+    expect(new Set(depthFrameBytes)).toEqual(new Set([latestDepth.bytes]))
+    const cadenceIntervals = cycleOffers.slice(1).map(
+      (offeredAt, index) => offeredAt - cycleOffers[index],
+    )
+    expect(cadenceIntervals).toHaveLength(BURST_CYCLES - 1)
+    cadenceIntervals.forEach((interval) => {
+      expect(Math.abs(interval - BURST_CADENCE_MS))
+        .toBeLessThanOrEqual(BURST_CADENCE_TOLERANCE_MS)
+    })
 
     const metrics = Object.freeze({
       executionApplyMs: Number(executionApplyMs.toFixed(3)),
       burstMs: Number((executionAppliedAt - burstStartedAt).toFixed(3)),
       cadenceMs: BURST_CADENCE_MS,
-      cadenceMinMs: Number(Math.min(...cycleStarts.slice(1).map(
-        (startedAt, index) => startedAt - cycleStarts[index],
-      )).toFixed(3)),
-      cadenceMaxMs: Number(Math.max(...cycleStarts.slice(1).map(
-        (startedAt, index) => startedAt - cycleStarts[index],
-      )).toFixed(3)),
+      cadenceMinMs: Number(Math.min(...cadenceIntervals).toFixed(3)),
+      cadenceMaxMs: Number(Math.max(...cadenceIntervals).toFixed(3)),
       cycles: BURST_CYCLES,
       depthFrameBytes: latestDepth.bytes,
       depthSuperseded: depthBacklog.superseded,
       candleSuperseded: candleBacklog.superseded,
     })
     console.info(`FUTURES_BURST_METRIC ${JSON.stringify(metrics)}`)
-    if (!MEASURE_ONLY) expect(executionApplyMs).toBeLessThanOrEqual(EXECUTION_APPLY_BOUND_MS)
+    expect(executionApplyMs).toBeLessThanOrEqual(EXECUTION_APPLY_BOUND_MS)
   }, 20_000)
 })
