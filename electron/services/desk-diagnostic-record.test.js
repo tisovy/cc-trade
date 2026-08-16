@@ -197,6 +197,109 @@ describe('describeDeskDiagnosticEvent', () => {
         })).toBeNull();
     });
 
+    // The five marks a frame passes, written as the four gaps between them and
+    // the whole. This is the line the operator's "the price crawled" complaint
+    // gets answered from, so it has to say which step was slow and nothing about
+    // what the frame was worth.
+    it('keeps a frame timing as delays, and refuses an amount beside them', () => {
+        expect(describeDeskDiagnosticEvent('frame', {
+            phase: 'frame',
+            code: 'DELIVERED',
+            resource: 'depth',
+            symbol: 'ACEUSDT',
+            upstreamMs: 345,
+            queuedMs: 1,
+            deliveredMs: 12,
+            committedMs: 30,
+            totalMs: 388,
+        })).toEqual({
+            kind: 'frame',
+            phase: 'frame',
+            code: 'DELIVERED',
+            resource: 'depth',
+            symbol: 'ACEUSDT',
+            upstreamMs: 345,
+            queuedMs: 1,
+            deliveredMs: 12,
+            committedMs: 30,
+            totalMs: 388,
+        });
+        // Built for this record alone, like an estimate: a price offered beside
+        // the delays loses the whole line rather than being quietly dropped.
+        expect(describeDeskDiagnosticEvent('frame', {
+            phase: 'frame',
+            code: 'DELIVERED',
+            resource: 'depth',
+            symbol: 'ACEUSDT',
+            upstreamMs: 345,
+            queuedMs: 1,
+            deliveredMs: 12,
+            committedMs: 30,
+            totalMs: 388,
+            markPrice: '0.5321',
+        })).toBeNull();
+    });
+
+    // A frame whose payload states no event time, and a frame whose stated event
+    // time is ahead of when this process received it, are the same case: there is
+    // no upstream leg to report. Both say so with null. Reporting 0 would claim
+    // the exchange reached the desk instantly, which is the one answer that would
+    // send someone looking in the wrong place.
+    it('states an unmeasurable upstream leg as null and still marks the rest', () => {
+        expect(describeDeskDiagnosticEvent('frame', {
+            phase: 'frame',
+            code: 'DELIVERED',
+            resource: 'candles',
+            symbol: 'ACEUSDT',
+            upstreamMs: null,
+            queuedMs: 0,
+            deliveredMs: 4,
+            committedMs: 9,
+            totalMs: 13,
+        })).toMatchObject({ upstreamMs: null, queuedMs: 0, deliveredMs: 4, committedMs: 9 });
+        // Every other leg is measured on one clock, so absence there is a caller
+        // that did not take the mark rather than a leg that cannot be timed.
+        for (const missing of ['queuedMs', 'deliveredMs', 'committedMs', 'totalMs']) {
+            expect(describeDeskDiagnosticEvent('frame', {
+                phase: 'frame',
+                code: 'DELIVERED',
+                resource: 'depth',
+                symbol: 'ACEUSDT',
+                upstreamMs: 345,
+                queuedMs: 1,
+                deliveredMs: 12,
+                committedMs: 30,
+                totalMs: 388,
+                [missing]: null,
+            })).toBeNull();
+        }
+    });
+
+    // The rule that lets a delay sit in this file at all: it is a count, and a
+    // count cannot spell a decimal. The moment one of these accepted `0.5` it
+    // would be a field an amount could arrive under.
+    //
+    // A guard, not a proof, and it is named one because it cannot be anything
+    // else: run against the tree before the `frame` kind existed it passes, since
+    // an unknown kind is refused whatever it carries. It bites only on a future
+    // change that widens one of these fields off `count`, which is exactly the
+    // change worth stopping.
+    it('guards: refuses a delay that is not a whole count of milliseconds', () => {
+        for (const bad of [0.5, -1, '12', Number.NaN, Number.MAX_SAFE_INTEGER + 2]) {
+            expect(describeDeskDiagnosticEvent('frame', {
+                phase: 'frame',
+                code: 'DELIVERED',
+                resource: 'depth',
+                symbol: 'ACEUSDT',
+                upstreamMs: 345,
+                queuedMs: 1,
+                deliveredMs: bad,
+                committedMs: 30,
+                totalMs: 388,
+            })).toBeNull();
+        }
+    });
+
     it('names the byte count a refused frame reported', () => {
         expect(describeDeskDiagnosticEvent('timing', {
             phase: 'oversized-frame:40657',

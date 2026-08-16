@@ -167,6 +167,39 @@ const RECORDED_FIELDS = Object.freeze({
         ['frames', count],
         ['bytes', count],
     ]),
+    // Where one frame spent its time on the way from the exchange to the screen.
+    //
+    // Delays, not clock readings. Five marks are taken — the exchange's own event
+    // time, the main process receiving the frame, queueing it for the renderer,
+    // the renderer receiving it, and the desk committing it to screen — and what
+    // is written is the gap between each pair. Two reasons, and the second is the
+    // load-bearing one: a reader wanting to know which step was slow would have to
+    // subtract the readings anyway, and a delay is a *count* of milliseconds,
+    // which is the same rule that keeps every other amount out of this file. A
+    // clock reading is a number that could be anything; `count` cannot spell a
+    // decimal, so no price or size can arrive under one of these names.
+    //
+    // `upstreamMs` alone is nullable, and null means "not knowable" rather than
+    // zero. A frame whose payload states no event time has no upstream leg to
+    // measure; so does a frame whose stated event time is *ahead* of when this
+    // process received it, which is a disagreement between two clocks and not a
+    // leg that took no time. Reporting either as 0 would claim the exchange
+    // reached the desk instantly.
+    //
+    // `totalMs` is carried rather than left to be summed, for the same reason:
+    // with `upstreamMs` absent a reader summing the parts would get the desk's own
+    // share and call it the whole journey.
+    frame: Object.freeze([
+        ['phase', text(PHASE)],
+        ['code', text(CODE)],
+        ['resource', optional(text(RESOURCE))],
+        ['symbol', optional(text(SYMBOL))],
+        ['upstreamMs', optional(count)],
+        ['queuedMs', count],
+        ['deliveredMs', count],
+        ['committedMs', count],
+        ['totalMs', count],
+    ]),
     // What the desk was told to do — contract, side, type, identity — and never
     // what it was worth. A trade journal is a different decision.
     command: Object.freeze([
@@ -227,6 +260,18 @@ const RECORDED_FIELDS = Object.freeze({
 
 export const DESK_DIAGNOSTIC_RECORD_KINDS = Object.freeze(Object.keys(RECORDED_FIELDS));
 
+// Most record kinds are a projection of an envelope that exists for other
+// reasons: the caller hands over the whole thing and the field list above takes
+// the handful of properties that may be kept. An extra property there is normal
+// and is simply not copied.
+//
+// These two are built for this file and nothing else. Nobody constructs an
+// `estimate` or a `frame` except to record it, so an unexpected field is not a
+// bigger envelope being narrowed — it is a caller handing the privacy boundary
+// something it never declared. Lose the whole line rather than silently stripping
+// a price or a size out of it, which is the failure that would never be noticed.
+const SEALED_KINDS = Object.freeze(new Set(['estimate', 'frame']));
+
 /**
  * The whole of what may be written, and the only way in.
  *
@@ -241,11 +286,7 @@ export const describeDeskDiagnosticEvent = (kind, value) => {
         || value === null
         || typeof value !== 'object'
         || Array.isArray(value)) return null;
-    // Every other record kind is a projection of an existing broader envelope.
-    // An estimate is built for this file alone, so an extra field is a caller
-    // trying to hand the privacy boundary something it did not declare. Lose
-    // the line rather than silently stripping a price or a size from it.
-    if (kind === 'estimate') {
+    if (SEALED_KINDS.has(kind)) {
         const accepted = new Set(fields.map(([name]) => name));
         if (Object.keys(value).some(name => !accepted.has(name))) return null;
     }

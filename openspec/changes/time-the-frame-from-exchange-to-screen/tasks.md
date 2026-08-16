@@ -42,10 +42,28 @@ so the next session does not pay for it twice.
   ask the operator for that evidence first, and the check is a record reading
   rather than a terminal watch.
 
-Stale premise to resolve before doing 5.2: it asks for a baseline run "on master
-before any other change in this batch lands", and most of the batch has already
-landed. Either restate it as a baseline at the revision it is actually run
-against, or say plainly that the pre-batch baseline is no longer obtainable.
+**Resolved 2026-08-16, and it is the second of the two answers.** 5.2 asked for a
+baseline run "on master before any other change in this batch lands". That run is
+no longer obtainable, and saying so is worth more than approximating it.
+
+The batch has landed. `carry-execution-ahead-of-market-data` §1–§4 are in `main`
+— the two outbound lanes, the single serialization, the parse-once boundary and
+the platform parser — and so is this change's own §2. There is no revision of
+`main` left that is both "before the batch" and "now".
+
+What *is* obtainable is not the same thing, and the difference matters. The
+pre-batch tree can be copied out with `git archive` and driven, which is the
+established technique here — `carry-execution`'s §5.1 measured 799931d
+(2026-08-12, the commit before the batch) against the working tree exactly that
+way. But the burst case does not exist at 799931d, so the harness driving it
+would be this change's own, run against the old modules. That measures the old
+*code*; it does not reproduce the old *run*, and calling the result a "baseline
+on master" would be claiming a measurement nobody took.
+
+So 5.2 is restated below as a baseline at the revision it is actually run
+against, with the pre-batch comparison offered as the separate, honestly-labelled
+thing it is. The number the burst case's bound is set from (4.2) comes from the
+first, not the second.
 
 §2 is done and §1, §3 and §4 are not. §1 opens `binance-connection.js`,
 `futures-production-workstation-service.js` and the two renderer hooks — all
@@ -94,7 +112,7 @@ the format cannot silently go back to implying one event.
 
 ## 3. The Record Takes The Marks
 
-- [ ] 3.1 Add a diagnostic event kind for a frame's timing, with a recognized phase and code, so the record accepts it under the rule it already enforces.
+- [x] 3.1 Add a diagnostic event kind for a frame's timing, with a recognized phase and code, so the record accepts it under the rule it already enforces. *(The `frame` kind carries the four gaps between the five marks plus the whole, as counts — a delay is a count of milliseconds, and `count` cannot spell a decimal, which is the same rule that keeps every other amount out of this file. `upstreamMs` alone is nullable: a frame stating no event time and a frame whose stated event time is ahead of local receive are the same case, and both say null rather than 0 — reporting 0 would claim the exchange reached the desk instantly. `frame` joins `estimate` as a **sealed** kind, so an unexpected field loses the whole line instead of being quietly not-copied: both are built for this record alone, so an extra property is a caller handing the privacy boundary something it never declared.)*
 - [ ] 3.2 Record the per-stage delays and the queue readings; record no price, size, notional or profit-and-loss value with them. — **queue readings done**, per-stage delays wait on §1. `frames` and `bytes` are counts under the record's existing `count` rule, so neither can spell a decimal; a test asserts a `bytes` of `'0.5'` refuses the whole line. `scripts/read-desk-record.mjs` grew a "How far behind the renderer fell" section so the reading reaches the operator rather than only the file.
 - [ ] 3.3 Sample rather than record every frame, and state the sampling rule in the code that enforces it, so the record stays inside its existing bounds at ten frames a second.
 - [ ] 3.4 Keep writing the record incapable of raising into a caller or delaying a delivery, as it is today.
@@ -111,7 +129,8 @@ the format cannot silently go back to implying one event.
 ## 5. Verification
 
 - [ ] 5.1 `npm run lint`, `npm test`, `npm run check:futures-production`, and the new burst case.
-- [ ] 5.2 Record one measured run of the burst case on master before any other change in this batch lands, as the baseline the others are measured against.
+- [ ] 5.2 Record one measured run of the burst case ~~on master before any other change in this batch lands~~ at the revision it is actually run against, naming that revision, as the baseline later runs are measured against. See §0: the pre-batch run is no longer obtainable, and the batch it was meant to precede has landed.
+- [ ] 5.2a Optionally, and labelled as the different thing it is: drive the same harness against `git archive 799931d` — the commit before the batch — and record it as "this change's harness against the old modules", never as a baseline run of the old desk.
 - [ ] 5.3 Operator confirms that the record names the stage a late frame waited in, on a contract that actually produced the complaint.
 
 ## 6. Do The Tests Bite?
