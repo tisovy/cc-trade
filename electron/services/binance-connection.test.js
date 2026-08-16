@@ -501,6 +501,24 @@ describe('setupBinanceConnection user-data orchestration', () => {
         });
     });
 
+    it('gives the futures leg a pooling connection and a fallback that cannot pool', () => {
+        vi.stubEnv('https_proxy', 'socks5://127.0.0.1:1080');
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1' },
+        });
+
+        const [options] = moduleMocks.FuturesTradingAdapter.mock.calls[0];
+        // The option object, not the behaviour behind it: this is the whole of
+        // what turns 630 ms per request into 325.
+        expect(options.proxyAgent.keepAlive).toBe(true);
+        expect(options.proxyAgent.maxSockets).toBe(8);
+        expect(options.proxyAgent.maxFreeSockets).toBe(2);
+        // The fallback exists to be the connection the pool is not.
+        expect(options.proxyAgentWithoutReuse.keepAlive).toBe(false);
+        expect(options.proxyAgentWithoutReuse).not.toBe(options.proxyAgent);
+        expect(typeof options.recordEvent).toBe('function');
+    });
+
     it('broadcasts independent Futures account resource transitions and retains partial success', async () => {
         const permissionError = Object.assign(new Error('permission denied'), { code: -2015 });
         moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([

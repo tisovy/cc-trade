@@ -50,6 +50,7 @@ import {
 import { LOCAL_WEBSOCKET_AUTH_CLOSE_CODE } from '../../src/utils/localWebSocketAccess.js';
 import {
     FUTURES_HISTORY_LIMIT,
+    FUTURES_REST_CONNECTION_POOL,
     FUTURES_TRADE_HISTORY_LIMIT,
     FUTURES_STREAM_ORIGIN,
     FuturesTradingAdapter,
@@ -568,7 +569,11 @@ const throttleWsConnection = async () => {
     lastWsConnectionTime = Date.now();
 };
 
-const resolveProxyAgent = () => {
+// `agentOptions` is how a caller asks for connections that outlive one request.
+// Called without it the agent behaves as it always has — one connection per
+// request — which is what the WebSocket callers want, since an upgraded socket
+// leaves any pool anyway, and what the fallback path needs by definition.
+const resolveProxyAgent = (agentOptions = null) => {
     const proxyUrl =
         process.env.https_proxy ||
         process.env.HTTPS_PROXY ||
@@ -581,9 +586,9 @@ const resolveProxyAgent = () => {
         const protocol = new URL(proxyUrl).protocol.replace(':', '').toLowerCase();
         let agent;
         if (protocol.startsWith('socks')) {
-            agent = new SocksProxyAgent(proxyUrl);
+            agent = new SocksProxyAgent(proxyUrl, agentOptions ?? undefined);
         } else if (protocol === 'http' || protocol === 'https') {
-            agent = new HttpsProxyAgent(proxyUrl);
+            agent = new HttpsProxyAgent(proxyUrl, agentOptions ?? undefined);
         }
 
         if (agent) {
@@ -848,6 +853,12 @@ export function setupBinanceConnection({
     }
 
     const sharedProxyAgent = credentialPreflight.ready ? resolveProxyAgent() : null;
+    // The futures REST leg alone pools. The spot client's own keep-alive flag
+    // and the warning attached to it are left exactly as they are, and the
+    // WebSocket callers keep the agent above.
+    const futuresRestProxyAgent = credentialPreflight.ready
+        ? resolveProxyAgent(FUTURES_REST_CONNECTION_POOL)
+        : null;
     applyLogMasking([
         APIKEY,
         APISECRET,
@@ -898,7 +909,9 @@ export function setupBinanceConnection({
             apiKey: FUTURES_APIKEY,
             apiSecret: FUTURES_APISECRET,
             recvWindow: SIGNED_RECV_WINDOW,
-            proxyAgent: sharedProxyAgent,
+            proxyAgent: futuresRestProxyAgent,
+            proxyAgentWithoutReuse: sharedProxyAgent,
+            recordEvent: (kind, value) => diagnosticRecord.record(kind, value),
         });
     }
 

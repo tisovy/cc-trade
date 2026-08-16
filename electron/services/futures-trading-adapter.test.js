@@ -3,6 +3,7 @@
 import { createHmac } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+    FUTURES_REST_CONNECTION_POOL,
     FUTURES_STREAM_ORIGIN,
     FuturesTradingAdapter,
     describeFuturesApiError,
@@ -26,25 +27,54 @@ import {
 
 const requests = [];
 
-// The mock can answer with a status, refuse at the transport, or time out, so
-// the three outcomes a mutating command must tell apart are all reachable here.
+// Read per attempt, so a first attempt can fail on a connection the pool handed
+// out and a second can be answered on one opened for it.
+const perAttempt = (setting, attempt) => (
+    typeof setting === 'function' ? setting(attempt) : setting
+);
+
+// The mock can answer with a status, refuse at the transport, time out, or fail
+// after the answer has begun, so every outcome the retry rule turns on — and the
+// three a mutating command must tell apart — are all reachable here.
 vi.mock('node:https', () => ({
     default: {
+        Agent: class MockHttpsAgent {
+            constructor(options = {}) {
+                this.options = options;
+            }
+        },
         request: (url, options, onResponse) => {
             const chunks = [];
             const listeners = {};
             const request = {
+                reusedSocket: false,
                 on: (event, handler) => {
                     listeners[event] = handler;
                     return request;
                 },
                 write: chunk => chunks.push(chunk),
                 end: () => {
+                    const attempt = requests.length;
                     const record = { url: String(url), options, body: chunks.join('') };
                     requests.push(record);
-                    const transport = globalThis.__futuresTestTransport ?? null;
+                    request.reusedSocket = perAttempt(
+                        globalThis.__futuresTestReusedSocket,
+                        attempt,
+                    ) === true;
+                    const transport = perAttempt(globalThis.__futuresTestTransport, attempt) ?? null;
                     if (transport === 'timeout') {
                         queueMicrotask(() => listeners.timeout?.());
+                        return;
+                    }
+                    // The exchange has already said something and the connection
+                    // then fails: it acted on the request, so nothing may send it
+                    // again.
+                    if (transport?.afterAnswerHasBegun) {
+                        onResponse({
+                            statusCode: globalThis.__futuresTestStatus ?? 200,
+                            on: () => {},
+                        });
+                        queueMicrotask(() => listeners.error?.(transport.afterAnswerHasBegun));
                         return;
                     }
                     if (transport) {
@@ -85,6 +115,7 @@ const createAdapter = () => new FuturesTradingAdapter({
 afterEach(() => {
     requests.length = 0;
     delete globalThis.__futuresTestResponse;
+    delete globalThis.__futuresTestReusedSocket;
     delete globalThis.__futuresTestStatus;
     delete globalThis.__futuresTestTransport;
     vi.restoreAllMocks();
@@ -1167,4 +1198,208 @@ describe('futures normalization', () => {
         })]);
     });
 
+});
+
+describe('a connection the desk already has', () => {
+    const pooledConnection = { name: 'taken from the pool' };
+    const ownConnection = { name: 'opened for this request' };
+
+    const createPooledAdapter = (recordEvent = null) => {
+        const adapter = new FuturesTradingAdapter({
+            apiKey: 'test-key',
+            apiSecret: 'test-secret',
+            recvWindow: 60000,
+            proxyAgent: pooledConnection,
+            proxyAgentWithoutReuse: ownConnection,
+            recordEvent,
+        });
+        adapter.serverTimeOffsetMs = 0;
+        // So the requests counted below are the order's own and nothing else.
+        adapter.getPositionMode = vi.fn().mockResolvedValue({ hedgeMode: false });
+        return adapter;
+    };
+
+    const connectionLost = (code = 'ECONNRESET') => Object.assign(
+        new Error('socket hang up'),
+        { code },
+    );
+
+    const placeOne = adapter => adapter.placeOrder({
+        symbol: 'BTCUSDT',
+        side: 'BUY',
+        orderType: 'LIMIT',
+        numericQuantity: 1,
+        numericPrice: 10,
+        positionSide: 'BOTH',
+    });
+
+    it('holds the pool to the bounds it was measured against', () => {
+        expect(FUTURES_REST_CONNECTION_POOL).toEqual({
+            keepAlive: true,
+            maxSockets: 8,
+            maxFreeSockets: 2,
+        });
+        expect(Object.isFrozen(FUTURES_REST_CONNECTION_POOL)).toBe(true);
+    });
+
+    it('sends the request again on a connection of its own when a pooled one is lost', async () => {
+        const recorded = [];
+        const adapter = createPooledAdapter((kind, value) => recorded.push({ kind, value }));
+        globalThis.__futuresTestReusedSocket = attempt => attempt === 0;
+        globalThis.__futuresTestTransport = attempt => (attempt === 0 ? connectionLost() : null);
+        globalThis.__futuresTestResponse = { orderId: 88, status: 'NEW', symbol: 'BTCUSDT' };
+
+        const report = await placeOne(adapter);
+
+        expect(requests).toHaveLength(2);
+        expect(requests[0].options.agent).toBe(pooledConnection);
+        expect(requests[1].options.agent).toBe(ownConnection);
+        // The same bytes, so the identity the command was given goes out
+        // unchanged and the exchange can refuse a duplicate rather than fill it.
+        expect(requests[1].body).toBe(requests[0].body);
+        expect(report).toBeTruthy();
+        // The fallback, and then the cost of the connection it had to open —
+        // which is the whole of what the record owes the operator here.
+        expect(recorded).toEqual([
+            { kind: 'fault', value: { phase: 'futures-rest', code: 'CONNECTION_REUSE_FALLBACK' } },
+            {
+                kind: 'timing',
+                value: expect.objectContaining({
+                    phase: 'futures-rest-unpooled',
+                    outcome: 'ok',
+                    cache: 'miss',
+                }),
+            },
+        ]);
+    });
+
+    it('does not send again when the request opened the connection itself', async () => {
+        const recorded = [];
+        const adapter = createPooledAdapter((kind, value) => recorded.push({ kind, value }));
+        globalThis.__futuresTestReusedSocket = false;
+        globalThis.__futuresTestTransport = connectionLost();
+
+        const error = await placeOne(adapter).catch(caught => caught);
+
+        expect(requests).toHaveLength(1);
+        expect(error.name).toBe('FuturesApiError');
+        expect(error.code).toBe('ECONNRESET');
+        expect(recorded.filter(event => event.kind === 'fault')).toEqual([]);
+    });
+
+    it('does not send again once the exchange has begun answering', async () => {
+        const adapter = createPooledAdapter();
+        globalThis.__futuresTestReusedSocket = true;
+        globalThis.__futuresTestTransport = { afterAnswerHasBegun: connectionLost() };
+
+        const error = await placeOne(adapter).catch(caught => caught);
+
+        expect(requests).toHaveLength(1);
+        expect(error.name).toBe('FuturesApiError');
+    });
+
+    it('does not send a timed-out request again', async () => {
+        const adapter = createPooledAdapter();
+        globalThis.__futuresTestReusedSocket = true;
+        globalThis.__futuresTestTransport = 'timeout';
+
+        const error = await placeOne(adapter).catch(caught => caught);
+
+        expect(requests).toHaveLength(1);
+        expect(error.code).toBe('ETIMEDOUT');
+        expect(error.indeterminate).toBe(true);
+    });
+
+    it('does not send a request the exchange answered with a server error again', async () => {
+        const adapter = createPooledAdapter();
+        globalThis.__futuresTestReusedSocket = true;
+        globalThis.__futuresTestStatus = 503;
+        globalThis.__futuresTestResponse = { code: -1000, msg: 'Unknown error' };
+
+        const error = await placeOne(adapter).catch(caught => caught);
+
+        expect(requests).toHaveLength(1);
+        expect(error.status).toBe(503);
+        expect(error.indeterminate).toBe(true);
+    });
+
+    it('fails with what ended the request, not with what caused the retry', async () => {
+        const recorded = [];
+        const adapter = createPooledAdapter((kind, value) => recorded.push({ kind, value }));
+        globalThis.__futuresTestReusedSocket = attempt => attempt === 0;
+        globalThis.__futuresTestTransport = attempt => (
+            attempt === 0 ? connectionLost() : connectionLost('ENOTFOUND')
+        );
+
+        const error = await placeOne(adapter).catch(caught => caught);
+
+        expect(requests).toHaveLength(2);
+        expect(error.code).toBe('ENOTFOUND');
+        expect(recorded.filter(event => event.kind === 'fault').map(event => event.value.code)).toEqual([
+            'CONNECTION_REUSE_FALLBACK',
+            'CONNECTION_REUSE_FALLBACK_FAILED',
+        ]);
+    });
+});
+
+describe('what the record says about connections', () => {
+    const createRecordingAdapter = (recorded) => {
+        const adapter = new FuturesTradingAdapter({
+            apiKey: 'test-key',
+            apiSecret: 'test-secret',
+            recvWindow: 60000,
+            proxyAgent: { name: 'taken from the pool' },
+            proxyAgentWithoutReuse: { name: 'opened for this request' },
+            recordEvent: (kind, value) => recorded.push({ kind, value }),
+        });
+        adapter.serverTimeOffsetMs = 0;
+        return adapter;
+    };
+
+    it('says what a request that had to open a connection cost', async () => {
+        const recorded = [];
+        const adapter = createRecordingAdapter(recorded);
+        globalThis.__futuresTestReusedSocket = false;
+        globalThis.__futuresTestResponse = { serverTime: 1 };
+
+        await adapter.syncServerTime();
+
+        expect(recorded).toHaveLength(1);
+        expect(recorded[0].kind).toBe('timing');
+        expect(recorded[0].value).toMatchObject({
+            phase: 'futures-rest-unpooled',
+            outcome: 'ok',
+            cache: 'miss',
+        });
+        expect(typeof recorded[0].value.durationMs).toBe('number');
+    });
+
+    it('says nothing at all for a request served from the pool', async () => {
+        const recorded = [];
+        const adapter = createRecordingAdapter(recorded);
+        globalThis.__futuresTestReusedSocket = true;
+        globalThis.__futuresTestResponse = { serverTime: 1 };
+
+        await adapter.syncServerTime();
+
+        expect(requests).toHaveLength(1);
+        expect(recorded).toEqual([]);
+    });
+
+    it('says an opening that failed was an opening', async () => {
+        const recorded = [];
+        const adapter = createRecordingAdapter(recorded);
+        globalThis.__futuresTestReusedSocket = false;
+        globalThis.__futuresTestStatus = 400;
+        globalThis.__futuresTestResponse = { code: -1121, msg: 'Invalid symbol' };
+
+        await adapter.syncServerTime().catch(() => {});
+
+        expect(recorded).toHaveLength(1);
+        expect(recorded[0].value).toMatchObject({
+            phase: 'futures-rest-unpooled',
+            outcome: 'error',
+            cache: 'miss',
+        });
+    });
 });
