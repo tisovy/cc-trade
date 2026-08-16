@@ -623,12 +623,48 @@ describe('the record on disk', () => {
                 durationMs: 184,
                 outcome: 'ok',
                 cache: null,
+                // A phase that did not fail has no reason to state.
+                code: null,
             },
             {
                 at: '2026-08-11T14:20:32.482Z',
                 kind: 'fault',
                 phase: 'stream-frame',
                 code: 'STREAM_FRAME_REFUSED',
+            },
+        ]);
+    });
+
+    it('keeps why a phase failed, and keeps the line when the reason is malformed', () => {
+        const { record, clock } = createRecord(disk);
+        record.record('timing', {
+            phase: 'exchange-info', durationMs: 4, outcome: 'error', cache: 'miss', code: 'REQUEST_ABORTED',
+        });
+        clock.now += 1_000;
+        record.record('timing', {
+            phase: 'exchange-info', durationMs: 4, outcome: 'error', cache: 'miss', code: 'not a code',
+        });
+
+        expect(disk.lines(TODAY)).toEqual([
+            {
+                at: '2026-08-11T14:20:31.482Z',
+                kind: 'timing',
+                phase: 'exchange-info',
+                durationMs: 4,
+                outcome: 'error',
+                cache: 'miss',
+                code: 'REQUEST_ABORTED',
+            },
+            {
+                at: '2026-08-11T14:20:32.482Z',
+                kind: 'timing',
+                phase: 'exchange-info',
+                durationMs: 4,
+                outcome: 'error',
+                cache: 'miss',
+                // A reason this file will not repeat costs the reason. Losing
+                // the line instead would lose the fact that it failed at all.
+                code: null,
             },
         ]);
     });

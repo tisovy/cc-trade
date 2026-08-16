@@ -147,10 +147,32 @@ const fail = (code) => {
     throw new FuturesProductionWorkstationTransportError(code);
 };
 
-const emitTiming = (onTiming, phase, startedAt, outcome, cache = null) => {
+const CODE_SHAPE = /^[A-Z0-9_-]{1,96}$/;
+
+/**
+ * Why a phase ended badly, in the shape the record's `code` field accepts.
+ *
+ * Every rejection on these paths carries one already: this module's own errors,
+ * the read budget's, and Node's socket and abort codes. The name is the fallback
+ * because a `DOMException` numbers its code instead of naming it, and an
+ * anonymous bucket is what this exists to stop — a failure line that will not
+ * say what refused is the reason one `exchange-info` error per desk start went
+ * six days without an explanation.
+ */
+const timingCode = (error) => {
+    if (typeof error?.code === 'string' && CODE_SHAPE.test(error.code)) {
+        return error.code.replace(/-/g, '_');
+    }
+    const named = typeof error?.name === 'string'
+        ? error.name.replace(/([a-z0-9])([A-Z])/g, '$1_$2').toUpperCase()
+        : '';
+    return CODE_SHAPE.test(named) ? named : 'TRANSPORT_REJECTED';
+};
+
+const emitTiming = (onTiming, phase, startedAt, outcome, cache = null, code = null) => {
     const durationMs = Math.max(0, Date.now() - startedAt);
     try {
-        onTiming(Object.freeze({ phase, durationMs, outcome, cache }));
+        onTiming(Object.freeze({ phase, durationMs, outcome, cache, code }));
     } catch {
         // Diagnostics are observational and cannot affect market-data delivery.
     }
@@ -537,20 +559,29 @@ export const createFuturesProductionWorkstationReviewedTransport = ({
     const timedWeightedGet = async (phase, ...args) => {
         const startedAt = Date.now();
         let outcome = 'ok';
+        let code = null;
         try {
             return await weightedGet(...args);
         } catch (error) {
             outcome = 'error';
+            code = timingCode(error);
             throw error;
         } finally {
-            emitTiming(onTiming, phase, startedAt, outcome);
+            emitTiming(onTiming, phase, startedAt, outcome, null, code);
         }
     };
+    // Three ways to end in milliseconds rather than in a round trip, and until
+    // this said which, the record could not be asked. A configured proxy this
+    // process refuses is the first, and it used to leave no line at all — the
+    // read that never happened was also the read nothing recorded.
     const loadExchangeInfo = async ({ signal } = {}) => {
-        if (backendProxy.errorCode) fail(backendProxy.errorCode);
         const startedAt = Date.now();
+        if (backendProxy.errorCode) {
+            emitTiming(onTiming, 'exchange-info', startedAt, 'error', null, backendProxy.errorCode);
+            fail(backendProxy.errorCode);
+        }
         if (signal?.aborted) {
-            emitTiming(onTiming, 'exchange-info', startedAt, 'error');
+            emitTiming(onTiming, 'exchange-info', startedAt, 'error', null, 'REQUEST_ABORTED');
             throw new FuturesProductionWorkstationTransportError('REQUEST_ABORTED');
         }
         const fetchIdentity = globalThis.fetch;
@@ -569,7 +600,12 @@ export const createFuturesProductionWorkstationReviewedTransport = ({
                 return value;
             },
             (error) => {
-                emitTiming(onTiming, 'exchange-info', startedAt, 'error', cache);
+                // The other two: the caller's signal aborting while this waits
+                // on the shared read, and the admission ladder refusing before
+                // the request is issued. Both arrive here as an error carrying
+                // its own reason, so the reason is taken from the error rather
+                // than guessed from the site.
+                emitTiming(onTiming, 'exchange-info', startedAt, 'error', cache, timingCode(error));
                 throw error;
             },
         );
@@ -815,7 +851,7 @@ export const createFuturesProductionWorkstationReviewedTransport = ({
             // the refusal itself goes to the session, which is what puts it in
             // front of the operator under its own name.
             const reportOversizedFrame = (bytes) => {
-                emitTiming(onTiming, `oversized-frame:${bytes}`, Date.now(), 'error');
+                emitTiming(onTiming, `oversized-frame:${bytes}`, Date.now(), 'error', null, 'STREAM_FRAME_REFUSED');
                 onFrameRefused('STREAM_FRAME_REFUSED');
             };
             const publicSocket = createSocket(
@@ -907,7 +943,14 @@ export const createFuturesProductionWorkstationReviewedTransport = ({
                 ready: Promise.all([publicSocket.ready, marketSocket.ready, initialCandleSocket.ready])
                     .then((results) => {
                         const ready = results.every(Boolean);
-                        emitTiming(onTiming, 'upstream-streams', startedAt, ready ? 'ok' : 'error');
+                        emitTiming(
+                            onTiming,
+                            'upstream-streams',
+                            startedAt,
+                            ready ? 'ok' : 'error',
+                            null,
+                            ready ? null : 'UPSTREAM_NOT_READY',
+                        );
                         return ready;
                     }),
                 selectInterval: async ({ interval: selectedInterval, signal: selectionSignal } = {}) => {

@@ -2711,12 +2711,13 @@ export function setupBinanceConnection({
         const marketStreamManager = channelManager.getMarketStreamManager();
         const futuresProductionWorkstationRuntime = futuresCredentialsReady
             ? createFuturesProductionWorkstationRuntime({
-                onTiming: ({ phase, durationMs, outcome, cache }) => {
+                onTiming: ({ phase, durationMs, outcome, cache, code = null }) => {
                     logger.info(
                         `[futures-production-workstation:timing] ${phase} ${durationMs}ms ${outcome}`
-                        + (cache === null ? '' : ` cache=${cache}`),
+                        + (cache === null ? '' : ` cache=${cache}`)
+                        + (code === null ? '' : ` code=${code}`),
                     );
-                    diagnosticRecord.record('timing', { phase, durationMs, outcome, cache });
+                    diagnosticRecord.record('timing', { phase, durationMs, outcome, cache, code });
                 },
                 // The faults the desk absorbs without telling the operator: a
                 // book that could not bridge, a recovery, a rejected frame, a

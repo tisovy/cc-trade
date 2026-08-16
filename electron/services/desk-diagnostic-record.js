@@ -133,11 +133,19 @@ const RECORDED_FIELDS = Object.freeze({
         ['event', text(EVENT)],
         ['version', optional(text(VERSION))],
     ]),
+    // `code` is why the phase ended badly, and null on a phase that did not.
+    // Without it a failure line states that something took four milliseconds and
+    // refuses to say what refused: the desk failed one `exchange-info` read on
+    // nearly every start for six days and the record could not be asked which of
+    // three fast rejections it was. `tolerated` rather than `optional` for the
+    // same reason the exchange's own refusal code is — a reason in a shape this
+    // file will not repeat costs the reason, never the fact that it happened.
     timing: Object.freeze([
         ['phase', text(PHASE)],
         ['durationMs', count],
         ['outcome', text(OUTCOME)],
         ['cache', optional(text(CACHE))],
+        ['code', tolerated(text(CODE))],
     ]),
     fault: Object.freeze([
         ['phase', text(PHASE)],

@@ -793,7 +793,9 @@ describe('reviewed environment-specific Futures workstation transports', () => {
         expect(globalThis.fetch).toHaveBeenCalledOnce();
         expect(timings.map(timing => timing.cache).sort()).toEqual(['hit', 'miss', 'shared']);
         expect(timings.every(timing => Object.keys(timing).sort().join(',')
-            === 'cache,durationMs,outcome,phase')).toBe(true);
+            === 'cache,code,durationMs,outcome,phase')).toBe(true);
+        // Three reads that answered: none of them states a reason for failing.
+        expect(timings.every(timing => timing.code === null)).toBe(true);
     });
 
     it('does not dispatch exchange-info for an already-aborted caller', async () => {
@@ -816,8 +818,91 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             phase: 'exchange-info',
             outcome: 'error',
             cache: null,
+            code: 'REQUEST_ABORTED',
         });
         expect(timings[0].durationMs).toBeGreaterThanOrEqual(0);
+    });
+
+    // The desk failed one exchange-info read on nearly every start for the six
+    // days the record keeps, always in three to six milliseconds — far too fast
+    // to be a round trip that failed, and the line would not say what refused.
+    // There are three ways to end that fast and each now names itself.
+    describe('why an exchange-info read ended in milliseconds', () => {
+        it('states the reason a caller abandoned a read that had not answered', async () => {
+            const timings = [];
+            let releaseFetch = null;
+            globalThis.fetch = vi.fn(async url => new Promise((resolve) => {
+                releaseFetch = () => resolve(responseFor(
+                    url.href,
+                    FUTURES_PRODUCTION_WORKSTATION_FIXTURE,
+                ));
+            }));
+            const transport = createFuturesProductionWorkstationReviewedTransport({
+                onTiming: timing => timings.push(timing),
+            });
+            const controller = new AbortController();
+
+            const pending = transport.loadExchangeInfo({ signal: controller.signal });
+            await vi.waitFor(() => expect(globalThis.fetch).toHaveBeenCalled());
+            controller.abort();
+
+            await expect(pending).rejects.toMatchObject({ code: 'REQUEST_ABORTED' });
+            expect(timings.at(-1)).toMatchObject({
+                phase: 'exchange-info',
+                outcome: 'error',
+                cache: 'miss',
+                code: 'REQUEST_ABORTED',
+            });
+            releaseFetch?.();
+        });
+
+        it('states the reason the read failed on the wire', async () => {
+            const timings = [];
+            globalThis.fetch = vi.fn().mockRejectedValue(
+                Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:1080'), {
+                    code: 'ECONNREFUSED',
+                }),
+            );
+            const transport = createFuturesProductionWorkstationReviewedTransport({
+                onTiming: timing => timings.push(timing),
+            });
+
+            await expect(transport.loadExchangeInfo()).rejects.toMatchObject({
+                code: 'ECONNREFUSED',
+            });
+            expect(timings.at(-1)).toMatchObject({
+                phase: 'exchange-info',
+                outcome: 'error',
+                cache: 'miss',
+                code: 'ECONNREFUSED',
+            });
+        });
+
+        // This one used to leave no line at all: the read that never happened
+        // was also the read nothing recorded.
+        it('leaves a line when the read refused before it was issued', async () => {
+            process.env.https_proxy = 'ftp://127.0.0.1:1080';
+            try {
+                const timings = [];
+                globalThis.fetch = vi.fn();
+                const transport = createFuturesProductionWorkstationReviewedTransport({
+                    onTiming: timing => timings.push(timing),
+                });
+
+                await expect(transport.loadExchangeInfo()).rejects.toMatchObject({
+                    code: 'INVALID_PROXY_CONFIGURATION',
+                });
+                expect(globalThis.fetch).not.toHaveBeenCalled();
+                expect(timings).toEqual([expect.objectContaining({
+                    phase: 'exchange-info',
+                    outcome: 'error',
+                    cache: null,
+                    code: 'INVALID_PROXY_CONFIGURATION',
+                })]);
+            } finally {
+                delete process.env.https_proxy;
+            }
+        });
     });
 
     it('reports a warm-cache caller abort without invalidating the shared value', async () => {
