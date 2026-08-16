@@ -26,11 +26,23 @@ honestly be older than the window:
 | realized PnL not adding up to what the exchange reported | 1 of 4 000, off by 50 |
 
 The smallest case that shows it: buy 10 at 100, sell 9 at 100, buy 9 at 200, sell
-12 at 200, buy 2 at 150. The account held ten at 190 and reversed into a short of
-two. The review shows **one closed long of twenty-one units** at a recovered
-entry of 152.38, and no short at all — twenty-one units the account never held,
-labelled as a position whose entry had to be recovered because it was older than
-the window, when every fill of it is right there in the window.
+12 at 200, buy 2 at 150. The account held ten at 190, reversed into a short of
+two, and closed it. The review shows **a closed long of twenty-one units** at
+152.38 → 157.14 where nineteen were traded at 147.37 → 152.63, and marks *both*
+rounds "recovered from the realized PnL" — a label that says their opening fills
+are older than the read, when every one of them is right there in the window.
+Twenty-one units were never held; ten was the most the account ever carried.
+
+Stop one fill earlier — the operator still holding the short they reversed into —
+and the tab shows that phantom long of twenty-one as a *closed* position while
+the real position is open and, being open, is not in this tab at all.
+
+(An earlier wording of this, in the message of the commit that fixed it, said the
+short was missing from the five-fill case. It is not: it is shown, with its own
+numbers right and its label wrong. The missing short belongs to the four-fill
+case above, and it is missing because it is still open, which is what this tab
+is supposed to do. Caught by the neighbouring session reproducing the case
+independently rather than reading the claim.)
 
 And it does not stop at one row. Once the walk decides a round is a pre-window
 remainder it stops tracking that round's exposure, so every later reducing fill

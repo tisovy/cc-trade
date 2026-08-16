@@ -17,7 +17,9 @@ calls a pre-window remainder is a false one.
   9 at 100, buy 9 at 200, sell 12 at 200. At the fourth fill the exchange holds
   ten at 190; the round's cumulative average is 147.37. The check reads the
   reversal's realized PnL of 100 against a predicted 526 and declares it
-  inconsistent, so the reversal becomes a remainder.
+  inconsistent, so the reversal becomes a remainder. Reproduced independently
+  against `f891860^` by the neighbouring session, to the digit: twenty-one units
+  at 152.38, where nineteen were traded at 147.37.
 
 ## 1. Compare Against What The Exchange Settled Against
 
