@@ -803,10 +803,24 @@ export class FuturesProductionWorkstationService {
         // hundred-and-eighteen-kilobyte book twice, ten times a second, for a
         // number the first serialization already knew.
         const frame = JSON.stringify(event);
-        if (Buffer.byteLength(frame, 'utf8') > FUTURES_WORKSTATION_EVENT_MAX_BYTES) {
+        const frameBytes = Buffer.byteLength(frame, 'utf8');
+        if (frameBytes > FUTURES_WORKSTATION_EVENT_MAX_BYTES) {
             throw new FuturesProductionWorkstationServiceError('OUTBOUND_FRAME_TOO_LARGE');
         }
-        session.emit(event, frame);
+        // Handed over beside the frame rather than inside it. The event has been
+        // built and validated by here, and the protocol validates an exact key
+        // set — so anything added to it now is a frame the far side refuses. The
+        // sender puts these on the transport envelope and the far side takes them
+        // off again before validating; see `frameMarks.js`.
+        //
+        // `frameBytes` travels with them because the sender needs it to decide
+        // whether the stamp fits under the ceiling, and it has just been measured
+        // here. Measuring a hundred-and-eighteen-kilobyte book twice is the exact
+        // cost §2 of `carry-execution-ahead-of-market-data` was written to remove.
+        session.emit(event, frame, {
+            marks: session.upstreamMarks,
+            frameBytes,
+        });
         return true;
     }
 
@@ -1051,6 +1065,16 @@ export class FuturesProductionWorkstationService {
             staleResources: new Set(),
             lastClock: 0,
             clockRegressed: false,
+            // Where the newest upstream frame came from and when this process
+            // took it off the socket. Held on the session rather than threaded
+            // through the six paths that build a delivery, because what a
+            // delivered frame is *about* is the newest frame that fed it — a
+            // book emitted after three diffs is the market as of the third.
+            //
+            // Null until the first stream frame arrives, which is the honest
+            // answer for everything the desk delivers out of a REST read: a
+            // bootstrap book has no upstream socket leg to report.
+            upstreamMarks: null,
             startedAt: this.clock.now(),
         };
         // A contract opened with a reading already stated takes it here: the
@@ -1427,11 +1451,28 @@ export class FuturesProductionWorkstationService {
 
     handleStreamFrame(session, raw) {
         if (!this.isHeld(session)) return;
+        // Taken before the frame is read, so what it measures is the socket's
+        // arrival and not this desk's parsing of it. The parse is the first thing
+        // the frame waits for, and a mark taken after it would hide exactly the
+        // wait the operator is asking about.
+        const receivedAt = this.clock.now();
         try {
             const event = normalizeFuturesWorkstationStreamFrame(raw, {
                 symbol: session.symbol,
                 pair: session.pair,
                 interval: session.interval,
+            });
+            // `exchangeAt` is the frame's own `E` — when Binance sent it — which
+            // is the only mark an upstream delay can be measured from. It is not
+            // `event.eventTime`: that is what each resource means by "when", and
+            // for a trade it is the trade's time and for a kline its close.
+            // A frame stating none leaves the leg unknown rather than claiming
+            // it took no time.
+            session.upstreamMarks = Object.freeze({
+                exchangeAt: event.exchangeAt,
+                receivedAt: Number.isSafeInteger(receivedAt) && receivedAt >= 0
+                    ? receivedAt
+                    : null,
             });
             if (event.kind === 'kline' && session.intervalBootstrapping) {
                 if (session.pendingCandleEvents.length

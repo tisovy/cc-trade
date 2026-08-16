@@ -16,7 +16,7 @@
 import {
   FUTURES_PRODUCTION_WORKSTATION_EVENT_TYPE,
   isPotentialFuturesProductionWorkstationFrame,
-  parseFuturesProductionWorkstationEvent,
+  parseMarkedFuturesProductionWorkstationEvent,
 } from './futuresProductionWorkstationProtocol.js'
 
 export const DESK_FRAME_KINDS = Object.freeze({
@@ -64,11 +64,20 @@ const classifyDeskFrame = (payload) => {
  */
 export const readDeskFrame = (data) => {
   if (typeof data !== 'string') return null
+  // Taken before the frame is read, so the reading itself counts as the
+  // renderer's own work rather than as time on the wire. This is one clock call
+  // per frame on a path that already scans the string and parses it.
+  const receivedAt = Date.now()
   if (isPotentialFuturesProductionWorkstationFrame(data)) {
     try {
+      const { event, marks } = parseMarkedFuturesProductionWorkstationEvent(data)
       return Object.freeze({
         kind: DESK_FRAME_KINDS.WORKSTATION,
-        payload: parseFuturesProductionWorkstationEvent(data),
+        payload: event,
+        // Present only on a sampled frame; null on every other one, which is
+        // almost all of them.
+        marks,
+        receivedAt,
       })
     } catch {
       // Not a workstation event after all. Read below as whatever it is.

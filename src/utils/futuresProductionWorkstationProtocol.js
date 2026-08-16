@@ -9,6 +9,7 @@ import {
   validateFuturesWorkstationEvent,
   validateFuturesWorkstationRequest,
 } from './futuresWorkstationProtocolShared.js'
+import { splitFrameMarks } from './frameMarks.js'
 
 export const FUTURES_PRODUCTION_WORKSTATION_CHANNEL_ID = 'futures-production-workstation'
 export const FUTURES_PRODUCTION_WORKSTATION_ENVIRONMENT = 'PRODUCTION'
@@ -97,6 +98,23 @@ export const parseFuturesProductionWorkstationEvent = raw => (
     maxBytes: FUTURES_WORKSTATION_EVENT_MAX_BYTES,
   }))
 )
+
+/**
+ * The same reading, plus whatever the transport wrote on the envelope.
+ *
+ * The split happens here, between the parse and the validation, because those
+ * are the only two points it can happen between: before the parse there is
+ * nothing to take the marks off, and after the validation the frame has already
+ * been refused for carrying them. Still one parse — the cost §3 of
+ * `carry-execution-ahead-of-market-data` brought down from four is not given back
+ * for a diagnostic.
+ */
+export const parseMarkedFuturesProductionWorkstationEvent = (raw) => {
+  const { frame, marks } = splitFrameMarks(parseBoundedFuturesWorkstationJson(raw, {
+    maxBytes: FUTURES_WORKSTATION_EVENT_MAX_BYTES,
+  }))
+  return { event: readFuturesProductionWorkstationEvent(frame), marks }
+}
 
 export const isPotentialFuturesProductionWorkstationFrame = raw => (
   typeof raw === 'string'

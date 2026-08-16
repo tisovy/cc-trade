@@ -694,7 +694,31 @@ export const normalizeFuturesWorkstationStreamFrame = (
     else if (envelope.stream.includes('@kline_')) event = normalizeStreamKline(envelope.data, interval);
     else if (envelope.stream.endsWith('@markPrice@1s')) event = normalizeStreamMark(envelope.data);
     else event = normalizeStreamTicker(envelope.data);
-    return Object.freeze({ ...event, frameBytes });
+    // The exchange's own event time, kept beside the reading rather than inside
+    // it. Every USDⓈ-M stream frame states `E` and every normalizer above reads
+    // it — but they keep it differently, because they keep what each resource
+    // means by "when": a trade's time is the trade's, a kline's is its close,
+    // and a ticker's is the later of two. All of those are right for the
+    // resource and none of them is "when Binance sent this frame", which is the
+    // only thing a latency mark can be measured from.
+    //
+    // Read through `readFuturesWorkstationTimestamp` and not as a number, because
+    // on this side of the desk it is not one. The upstream parser answers every
+    // integer as a token holding its exact digits — that is what keeps a uint64
+    // depth sequence from being rounded to one Binance never sent — so
+    // `envelope.data.E` is a `FuturesWorkstationIntegerToken` and comparing it to
+    // a number silently yields nothing.
+    //
+    // Caught rather than propagated: this is a diagnostic on a frame that has
+    // already passed every rule that matters, so a missing or malformed `E`
+    // costs the mark and never the frame.
+    let exchangeAt = null;
+    try {
+        exchangeAt = readFuturesWorkstationTimestamp(envelope.data?.E);
+    } catch {
+        exchangeAt = null;
+    }
+    return Object.freeze({ ...event, frameBytes, exchangeAt });
 };
 
 export const updateFuturesWorkstationCandles = (current, row) => {

@@ -193,6 +193,44 @@ describe('production Futures workstation service', () => {
         }
     });
 
+    // The first two of the five marks, taken where they can only be taken: the
+    // exchange's own event time is on the frame, and "the main process received
+    // it" is the moment before the desk reads it. A mark taken after the parse
+    // would hide the wait the operator is actually asking about.
+    it('hands over where a delivered frame came from and when it arrived', async () => {
+        const runtime = track(createFuturesProductionWorkstationRuntime());
+        const delivered = [];
+        await runtime.service.handleRequest(productionRequest('service-marks-1'), {
+            emit: (event, frame, timing) => delivered.push([event, frame, timing]),
+        });
+        const session = runtime.service.shown;
+
+        // What is delivered before any stream frame has been read has no
+        // upstream leg to state — the status line that opens the session and the
+        // catalog come out of a REST read — and it says null rather than
+        // inventing one. Everything after the first stream frame states where it
+        // came from.
+        expect(delivered.length).toBeGreaterThan(2);
+        expect(delivered.slice(0, 2).map(([event, , timing]) => [event.resource, timing.marks]))
+            .toEqual([['status', null], ['catalog', null]]);
+        expect(delivered.slice(2).every(([, , timing]) => timing.marks !== null)).toBe(true);
+
+        const before = delivered.length;
+        const frame = JSON.parse(productionTradeFrame({ aggregateTradeId: 9_100_001 }));
+        const exchangeAt = frame.data.E;
+        runtime.service.handleStreamFrame(session, JSON.stringify(frame));
+        runtime.service.emitTrades(session, 'live', { recordWindow: true });
+
+        const [, text, timing] = delivered.at(-1);
+        expect(delivered.length).toBeGreaterThan(before);
+        expect(timing.marks.exchangeAt).toBe(exchangeAt);
+        // Taken on this machine's clock, so it is comparable with every mark
+        // after it; the exchange's is not, which is why only that one leg can
+        // come out unknown.
+        expect(timing.marks.receivedAt).toBeGreaterThanOrEqual(exchangeAt);
+        expect(timing.frameBytes).toBe(Buffer.byteLength(text, 'utf8'));
+    });
+
     // Measuring the string that is sent must not change what happens to a frame
     // too large to send: it is refused, and nothing is delivered.
     // A СТОРОЖ, not a finding, and worth saying so plainly: since the book

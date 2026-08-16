@@ -49,6 +49,11 @@ import {
 } from '../../src/utils/futuresOrderDraft.js';
 import { LOCAL_WEBSOCKET_AUTH_CLOSE_CODE } from '../../src/utils/localWebSocketAccess.js';
 import {
+    createFrameMarkSampler,
+    stampFrameMarks,
+} from '../../src/utils/frameMarks.js';
+import { FUTURES_WORKSTATION_EVENT_MAX_BYTES } from '../../src/utils/futuresWorkstationProtocolShared.js';
+import {
     FUTURES_HISTORY_LIMIT,
     FUTURES_REST_CONNECTION_POOL,
     FUTURES_TRADE_HISTORY_LIMIT,
@@ -754,6 +759,32 @@ const sendFrameText = (connection, text, delivery = ACCOUNT_FRAME) => {
 const sendJSON = (connection, payload, delivery = ACCOUNT_FRAME) => {
     if (!connection || !connection.connected) return false;
     return sendFrameText(connection, JSON.stringify(payload), delivery);
+};
+
+/**
+ * Puts a sampled frame's marks on it, on the way out.
+ *
+ * The queue mark is taken here because here is where the frame is handed to the
+ * transport — the outbox either writes it straight through or holds it, and
+ * either way this is the moment it stopped being the desk's and started being
+ * the socket's.
+ *
+ * Every path out answers the frame unchanged: an unsampled frame, a frame the
+ * service could state no upstream marks for, and a frame the stamp would push
+ * over the protocol ceiling. Producing the marks may not change what is
+ * delivered or when, so there is no branch here that can refuse to send.
+ */
+const markOutboundFrame = (text, payload, timing, sampler) => {
+    const marks = timing?.marks ?? null;
+    if (marks === null || !Number.isSafeInteger(marks.receivedAt)) return text;
+    if (!sampler.shouldSample(typeof payload?.resource === 'string' ? payload.resource : null)) {
+        return text;
+    }
+    return stampFrameMarks(
+        text,
+        { ...marks, queuedAt: Date.now() },
+        { frameBytes: timing?.frameBytes, maxBytes: FUTURES_WORKSTATION_EVENT_MAX_BYTES },
+    );
 };
 
 // Simple Depth Cache to maintain order book state
@@ -2538,6 +2569,11 @@ export function setupBinanceConnection({
                 '[renderer-outbox] Closing a renderer that stopped draining its account traffic',
             ),
         }));
+
+        // Which frames carry their marks, one per resource per interval. Per
+        // connection, so a renderer that reconnects starts its own sampling
+        // rather than inheriting a stale one.
+        const frameMarkSampler = createFrameMarkSampler();
 
         let panelSettings = {};
         let activeRequestId = null;
@@ -4762,11 +4798,12 @@ export function setupBinanceConnection({
                         {
                             // The workspace's status line is the only place a
                             // resynchronization names its cause.
-                            emit: (payload, frame) => {
+                            emit: (payload, frame, timing = null) => {
                                 diagnosticRecord.observeOutbound(payload);
+                                const text = frame ?? JSON.stringify(payload);
                                 sendFrameText(
                                     connection,
-                                    frame ?? JSON.stringify(payload),
+                                    markOutboundFrame(text, payload, timing, frameMarkSampler),
                                     workstationFrameDelivery(payload),
                                 );
                             },
@@ -4792,6 +4829,31 @@ export function setupBinanceConnection({
 
             if (data.action === 'get_startup_status') {
                 sendJSON(connection, startupEnvelope);
+                return;
+            }
+
+            // Where a sampled frame spent its time, closed by the half of the
+            // journey only the renderer can see.
+            //
+            // Answered before the credential gate and outside the market-scope
+            // machinery on purpose: this reaches no exchange, moves no order and
+            // reads no key, and a diagnostic that could be refused by an
+            // unconfigured desk would go missing exactly when the desk is worth
+            // asking about. It answers nothing and can refuse nothing — the
+            // record's own field rules are the validation, and a malformed
+            // report loses its line and no more.
+            if (data.action === 'report_frame_marks') {
+                diagnosticRecord.record('frame', {
+                    phase: 'frame',
+                    code: 'DELIVERED',
+                    resource: data.resource ?? null,
+                    symbol: data.symbol ?? null,
+                    upstreamMs: data.upstreamMs ?? null,
+                    queuedMs: data.queuedMs,
+                    deliveredMs: data.deliveredMs,
+                    committedMs: data.committedMs,
+                    totalMs: data.totalMs,
+                });
                 return;
             }
             if (!credentialPreflight.ready) {

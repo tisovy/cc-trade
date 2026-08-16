@@ -18,6 +18,7 @@ import {
   transitionFuturesWorkstationConnectionState,
 } from '../utils/futuresWorkstationProtocolShared.js'
 import { readStoredTapeSettings } from '../utils/futuresTapeSettings.js'
+import { measureFrameMarks } from '../utils/frameMarks.js'
 import {
   FUTURES_CANDLE_HISTORY_CACHE_MAX_ROWS,
   FUTURES_CANDLE_HISTORY_INTERVAL_MS,
@@ -206,6 +207,12 @@ const useFuturesProductionWorkstation = ({
   // unchanged is not sent twice.
   const sentDepthReadingRef = useRef(null)
   const ownerRef = useRef(0)
+  // The marks a sampled frame arrived carrying, held until the render that puts
+  // it on screen has committed. One at a time: a newer sampled frame replaces an
+  // older one that never reached the screen, which is the right answer — a frame
+  // the ownership guards dropped has no commit to time, and holding it would
+  // block the next sample behind a measurement that will never complete.
+  const pendingFrameMarksRef = useRef(null)
   const historyRequestRef = useRef(null)
   const historySelectionRef = useRef(null)
   const generationRef = useRef(0)
@@ -401,6 +408,17 @@ const useFuturesProductionWorkstation = ({
       let message = frame?.payload
       if (message === undefined || message === null) return
       if (message.requestId !== requestId || message.symbol !== symbol) return
+      // Only a sampled frame carries these, which is one frame per resource per
+      // ten seconds; every other frame skips this in one comparison.
+      if (frame.marks !== null && frame.marks !== undefined) {
+        pendingFrameMarksRef.current = {
+          marks: frame.marks,
+          receivedAt: frame.receivedAt,
+          revision: message.revision,
+          resource: message.resource,
+          symbol: message.symbol,
+        }
+      }
       if (message.resource === 'catalog') {
         const currentBuffer = catalogBufferRef.current
         const startsCatalog = message.payload.offset === 0
@@ -641,6 +659,35 @@ const useFuturesProductionWorkstation = ({
   useEffect(() => {
     generationRef.current = state.generation
   }, [state.generation])
+
+  // The last of the five marks, and the only one that has to be taken here.
+  //
+  // An effect rather than the `setState` above, because "committed to screen" is
+  // not "the state was set": a mark taken inside the reducer would time the
+  // desk's bookkeeping and miss the render, which is exactly the stage the
+  // operator's "the price crawled" complaint is about. This runs after React has
+  // committed the tree the frame produced.
+  //
+  // It reports and never blocks: the measurement is dropped rather than retried
+  // if anything about it fails, and `sendMessage` already answers false on a
+  // socket that is not open. Producing the marks may not change what is
+  // delivered or when.
+  useEffect(() => {
+    const pending = pendingFrameMarksRef.current
+    if (pending === null || pending.revision !== state.revision) return
+    pendingFrameMarksRef.current = null
+    const measured = measureFrameMarks(pending.marks, {
+      receivedAt: pending.receivedAt,
+      committedAt: Date.now(),
+    })
+    if (measured === null) return
+    sendMessage({
+      action: 'report_frame_marks',
+      resource: pending.resource,
+      symbol: pending.symbol,
+      ...measured,
+    })
+  }, [state.revision, sendMessage])
 
   // The window the stream re-sends, watched for what falls off its front. Held
   // rather than derived, because a frame carries only where the window is now —
