@@ -233,6 +233,54 @@ describe('buildFuturesTradeRounds', () => {
     })
   })
 
+  // The check that tells a reversal from the tail of a pre-window position
+  // compares one fill's realized PnL against what the round was entered at, and
+  // the exchange settles that PnL against the average of what is *still held*.
+  // A position scaled out of and back into at a different price leaves the two
+  // averages apart: here the exchange held 190 and the average over everything
+  // the round ever entered is 147.37. Read against the wrong one, a real
+  // reversal was filed as a pre-window remainder — twenty-one units the account
+  // never held, presented as one closed position with a recovered entry, and
+  // the short that actually opened never shown at all.
+  it('still reports a flip after the position was scaled out of and back into', () => {
+    const rounds = buildFuturesTradeRounds([
+      fill({ id: 1, side: 'BUY', price: '100', quantity: '10', commission: '0', time: 1000 }),
+      // Out at the price it went in at, so the exchange realizes nothing and the
+      // average entry of the one unit left is still 100.
+      fill({ id: 2, side: 'SELL', price: '100', quantity: '9', commission: '0', realizedPnl: '0', time: 2000 }),
+      // Back in at twice the price: the exchange now holds ten at 190.
+      fill({ id: 3, side: 'BUY', price: '200', quantity: '9', commission: '0', time: 3000 }),
+      // Twelve out: ten close at 190 for 100, and two open a short.
+      fill({ id: 4, side: 'SELL', price: '200', quantity: '12', commission: '0', realizedPnl: '100', time: 4000 }),
+      fill({ id: 5, side: 'BUY', price: '150', quantity: '2', commission: '0', realizedPnl: '100', time: 5000 }),
+    ])
+    expect(rounds).toHaveLength(2)
+    const long = rounds.find(round => round.positionSide === 'LONG')
+    const short = rounds.find(round => round.positionSide === 'SHORT')
+    expect(long).toMatchObject({
+      quantity: '19',
+      realizedPnl: 100,
+      open: false,
+      partial: false,
+      // Read from its own fills. Nothing here is older than the window.
+      entryImplied: false,
+    })
+    expect(long.entryPrice).toBeCloseTo(147.368421, 6)
+    expect(long.exitPrice).toBeCloseTo(152.631579, 6)
+    expect(short).toMatchObject({
+      quantity: '2',
+      entryPrice: 200,
+      exitPrice: 150,
+      realizedPnl: 100,
+      open: false,
+      partial: false,
+      entryImplied: false,
+    })
+    // Nothing invented and nothing lost: what the review shows adds up to what
+    // the exchange reported.
+    expect(rounds.reduce((total, round) => total + round.realizedPnl, 0)).toBe(200)
+  })
+
   it('orders the fills itself rather than trusting the order they arrive in', () => {
     const rounds = buildFuturesTradeRounds([
       fill({ id: 3, side: 'SELL', price: '3', quantity: '100', realizedPnl: '100', time: 3000 }),

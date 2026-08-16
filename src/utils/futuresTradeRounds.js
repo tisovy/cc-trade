@@ -67,6 +67,15 @@ const openRound = (fill, buy, mayBeClosing, fromFlat) => {
     closeTime: toNumber(fill?.time),
     entryAtoms: 0n,
     entryNotional: 0,
+    // What the units still held were entered at, kept the way the exchange keeps
+    // it: adding moves the average, closing does not move it at all. This is not
+    // what the round reports — that is the average over everything it ever
+    // entered, and it is the figure that makes exit minus entry times size come
+    // to the realized PnL of the whole round. But it is the only average a
+    // single fill's realized PnL can be checked against, because that is what
+    // the exchange settled it against.
+    heldAtoms: 0n,
+    heldEntry: 0,
     exitAtoms: 0n,
     exitNotional: 0,
     realizedPnl: 0,
@@ -85,9 +94,8 @@ const openRound = (fill, buy, mayBeClosing, fromFlat) => {
 // realize. Anything else means more was closed than the walk knows about.
 const flipIsConsistent = (round, { fill, held, price }) => {
   const size = Number(fromAtoms(held))
-  const entryQuantity = Number(fromAtoms(round.entryAtoms))
-  if (!(size > 0) || !(entryQuantity > 0)) return false
-  const entryPrice = round.entryNotional / entryQuantity
+  const entryPrice = round.heldEntry
+  if (!(size > 0) || !(entryPrice > 0)) return false
   const flipPnl = (round.positionSide === 'SHORT' ? entryPrice - price : price - entryPrice) * size
   // One per cent of what the closing part is worth: realized PnL is exact
   // arithmetic on both sides of this comparison, and the slack is only there so
@@ -101,6 +109,15 @@ const applyFill = (round, { fill, atoms, price, share, increasing }) => {
   if (increasing) {
     round.entryAtoms += atoms
     round.entryNotional += size * price
+    // Averaged against what is still held, not against everything ever entered.
+    // A position scaled out of and back into drifts between the two, and the
+    // check above compares a single fill's realized PnL — which the exchange
+    // settled against this one — so it has to use this one.
+    const heldSize = Number(fromAtoms(round.heldAtoms))
+    round.heldEntry = heldSize + size > 0
+      ? ((round.heldEntry * heldSize) + (price * size)) / (heldSize + size)
+      : price
+    round.heldAtoms += atoms
   } else {
     round.exitAtoms += atoms
     round.exitNotional += size * price
@@ -108,6 +125,7 @@ const applyFill = (round, { fill, atoms, price, share, increasing }) => {
     // the position; a fill that closes one position and opens the opposite one
     // realized all of it on the way out.
     round.realizedPnl += toNumber(fill.realizedPnl)
+    round.heldAtoms = round.heldAtoms > atoms ? round.heldAtoms - atoms : 0n
   }
   // A fee is charged on the whole fill, so a split fill splits its fee.
   round.fee += toNumber(fill.commission) * share
