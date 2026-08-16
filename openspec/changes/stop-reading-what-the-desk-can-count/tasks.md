@@ -173,10 +173,15 @@ does not later mistake it for something it introduced.*
 
 ## 2. The Decision
 
-- [ ] 2.1 Hold the measurement against the bar in the proposal, value by value, and write the numbers into this file.
-- [ ] 2.2 If any value misses the bar: withdraw this change, write the measured numbers and the likely cause into the proposal, and stop. The read stays.
-- [ ] 2.3 If the coverage is short rather than the agreement: keep gathering, and do not soften the bar to fit the evidence.
-- [ ] 2.4 Only with the bar cleared, continue.
+**Decided 2026-08-16: the bar is missed, and this change is withdrawn. The
+`unstated` read stays.** The numbers, their shape, and the two causes that were
+tested and refuted are written into the proposal, which is where 2.2 asks for
+them. Nothing below §2 is built.
+
+- [x] 2.1 Hold the measurement against the bar in the proposal, value by value, and write the numbers into this file. *(Written into the proposal instead — the withdrawal has to be readable from the proposal alone, and two copies of the same table would drift. All five values miss: notional and initial margin worst 24 bps and maintenance margin worst 25 bps against a 5 bp bar; free margin worst 545 bps against 10; liquidation price worst 198 bps and **median 167 bps** against 10, with 336 of 489 compared passes over the bar.)*
+- [x] 2.2 If any value misses the bar: withdraw this change, write the measured numbers and the likely cause into the proposal, and stop. The read stays. *(Done. The likely cause is bounded by what was measured rather than guessed: the liquidation deviations are discrete and hold still for the life of a position — 0, 35, 37, 64, 79, 167, 174, 198 bps — which is a wrong input rather than an estimate drifting between reads, and the formula itself matches Binance's documented one term for term. Two candidate causes were tested against the record and refuted: coupling between several cross positions, and an artefact of comparing against a cheap partial read.)*
+- [~] 2.3 If the coverage is short rather than the agreement: keep gathering, and do not soften the bar to fit the evidence. *(Does not apply, and the reason is worth stating so it is not reached for later. The coverage **is** short — two days of ten, and the coverage cases in 1.4 were never confirmed. But the agreement is what missed, on 489 compared liquidation passes against a coverage bar of 200, and the bar is written on the **worst** pass with "no pass at all above it". Worst is monotonic in the window: eight more days can only add passes above the bar, never withdraw the 336 already there. Gathering longer cannot clear it, so this is not the "keep gathering" case.)*
+- [ ] 2.4 Only with the bar cleared, continue. *(Not reached. The bar was not cleared.)*
 
 ## 3. Showing What The Desk Computes
 
