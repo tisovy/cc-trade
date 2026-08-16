@@ -146,18 +146,65 @@ the format cannot silently go back to implying one event.
 
 ## 4. A Burst Case With A Stated Bound
 
-- [ ] 4.1 Build a burst case that delivers a full depth frame every hundred milliseconds at the widest legal payload, candles alongside it, and a terminal execution report during the burst.
-- [ ] 4.2 Assert that the execution is applied within a stated bound, and state that bound from a measured run rather than from an estimate.
-- [ ] 4.3 Assert that the book delivered during the burst is the newest one, and that what was superseded is counted.
-- [ ] 4.4 Run it under the existing Vitest surface, with no browser or Electron automation runner.
-- [ ] 4.5 Make it callable on its own, and add it to the aggregate verification only if it is fast enough to belong there.
+- [x] 4.1 Build a burst case that delivers a full depth frame every hundred milliseconds at the widest legal payload, candles alongside it, and a terminal execution report during the burst.
+- [x] 4.2 Assert that the execution is applied within a stated bound, and state that bound from a measured run rather than from an estimate.
+- [x] 4.3 Assert that the book delivered during the burst is the newest one, and that what was superseded is counted.
+- [x] 4.4 Run it under the existing Vitest surface, with no browser or Electron automation runner.
+- [x] 4.5 Make it callable on its own, and add it to the aggregate verification only if it is fast enough to belong there.
+
+`src/App.futures-burst.test.jsx` drives the real renderer outbox, production
+protocol parser/reducer, execution hook and order-book view under Vitest/JSDOM.
+Six 41,795-byte books — all 64 rows per side and every bounded row value at its
+64-character legal maximum — are offered on absolute 100 ms deadlines, with a
+contract-candle frame beside each one. A terminal report is offered on cycle
+three while the socket is stalled. On drain the test requires the working order
+to leave the rendered ticket, the last book's exact first bid to reach the
+rendered book, and exact counts of four superseded books and five superseded
+candle frames.
+
+The 600 ms execution-application bound is measured, not estimated. Isolated
+final-harness calibration (n=20) was min 329.271 ms, p50 334.338 ms, p90 338.717
+ms, p99 345.136 ms, max 345.878 ms, range 16.607 ms and sample standard
+deviation 3.680 ms. Aggregate calibration (n=6) was min 373.844 ms, p50 423.635
+ms, p90 486.699 ms, p99 487.390 ms, max 487.467 ms, range 113.623 ms and sample
+standard deviation 49.193 ms. The bound is the aggregate maximum plus one full
+100 ms scheduler interval, rounded up to a cadence boundary: (487.467 + 100) ms
+→ 600 ms. `npm run test:futures-burst` calls it alone; one bound-enforcing run
+takes about 1.1 seconds, and twenty consecutive isolated plus six aggregate
+measurement runs passed, so the ordinary `npm test` Vitest glob includes it.
 
 ## 5. Verification
 
 - [ ] 5.1 `npm run lint`, `npm test`, `npm run check:futures-production`, and the new burst case.
-- [ ] 5.2 Record one measured run of the burst case ~~on master before any other change in this batch lands~~ at the revision it is actually run against, naming that revision, as the baseline later runs are measured against. See §0: the pre-batch run is no longer obtainable, and the batch it was meant to precede has landed.
+- [x] 5.2 Record one measured run of the burst case ~~on master before any other change in this batch lands~~ at the revision it is actually run against, naming that revision, as the baseline later runs are measured against. See §0: the pre-batch run is no longer obtainable, and the batch it was meant to precede has landed.
 - [ ] 5.2a Optionally, and labelled as the different thing it is: drive the same harness against `git archive 799931d` — the commit before the batch — and record it as "this change's harness against the old modules", never as a baseline run of the old desk.
 - [ ] 5.3 Operator confirms that the record names the stage a late frame waited in, on a contract that actually produced the complaint.
+
+### §4 baseline at `73fa5217da7350b60de83b360022fc95fb2ee37e`
+
+The baseline is twenty consecutive focused runs from an exact `git archive` of
+that revision with the repository's `node_modules` symlinked in. Execution
+application — from offering the terminal report to observing the completed
+order on screen — was min 330.104 ms, p50 335.060 ms, p90 347.276 ms, p99
+388.517 ms, max 390.134 ms, range 60.030 ms, mean 340.526 ms and sample standard
+deviation 15.806 ms (n=20). Whole-burst time was min 530.943 ms, p50 535.790 ms,
+p90 547.877 ms, p99 589.293 ms, max 590.837 ms, range 59.894 ms, mean 540.938
+ms and sample standard deviation 15.954 ms. Across all runs the offered cadence
+was 98.359–101.580 ms, every depth frame was 41,795 bytes, and the observed
+counts were exactly four superseded depth frames and five superseded candle
+frames.
+
+The asserted 600 ms execution bound remains deliberately based on the noisier
+aggregate calibration, not this faster focused baseline: its 487.467 ms maximum
+plus one complete 100 ms burst interval is 587.467 ms, rounded upward to the
+next cadence boundary. That leaves one scheduler beat of measured headroom
+without turning a renderer that waits through an additional beat green.
+
+5.2a was not run. Revision `799931d` has neither
+`electron/services/renderer-outbox.js` nor the burst test, so the same harness
+cannot load against its modules. Making it run would require a compatibility
+implementation and would no longer be the production-code-free comparison the
+optional task permits.
 
 ## 6. Do The Tests Bite?
 
@@ -203,3 +250,20 @@ stamp **is refused** by the exact-key rules — the `splitMarketGenerationStamp`
 defect, asserted rather than assumed — and `never raises, and never alters the
 frame it declines to stamp` is §1.4 held to twelve malformed mark sets and six
 non-frames.
+
+### §4, run against deliberately broken copies of `73fa5217da7350b60de83b360022fc95fb2ee37e`
+
+Both negative controls used an exact archived copy with symlinked
+`node_modules`; neither mutation touched the working tree.
+
+- Keeping the older queued market frame while accepting its replacement makes
+  the focused case fail at the rendered newest-book assertion: expected first
+  bid `900015…`, received `900007…`.
+- Replacing the queued frame but omitting only the `superseded` tally makes the
+  focused case fail at the backlog assertion: expected four superseded depth
+  frames, received zero.
+
+The timing assertion bites independently too: an aggregate run at the first
+400 ms candidate bound failed at 425.135 ms. That failure is what triggered the
+aggregate calibration and the measured 600 ms bound above; the threshold was
+not loosened speculatively.
