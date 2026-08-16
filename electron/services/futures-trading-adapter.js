@@ -39,7 +39,11 @@ export const redactFuturesListenKey = url => String(url)
     .replace(/(\/ws\/)[^/?#]+/, '$1<redacted>');
 
 const DEFAULT_RECV_WINDOW = 5000;
-const REQUEST_TIMEOUT_MS = 10000;
+// How long a futures REST request is given before the desk stops waiting for
+// it. Exported because the pool below is sized against it: this timeout and the
+// queue's admission spacing together decide the most requests that can be in
+// the air at once.
+export const FUTURES_REST_REQUEST_TIMEOUT_MS = 10000;
 
 export class FuturesApiError extends Error {
     constructor(message, { status, code, body, indeterminate = false } = {}) {
@@ -110,6 +114,9 @@ const toQueryString = (params = {}) => {
 // renewal that skip admission entirely. Below that the agent becomes a second
 // queue behind the first, and the effect compounds — queueing raises the
 // observed latency, which raises how many are in flight, which queues more.
+// The relationship is held by a test rather than by this paragraph:
+// `keeps the bound on the pool above the bound this queue needs`, which reads
+// both numbers from where they are defined.
 export const FUTURES_REST_CONNECTION_POOL = Object.freeze({
     keepAlive: true,
     maxSockets: 72,
@@ -163,7 +170,7 @@ const httpsJsonRequestOnce = ({ url, method, headers, body, agent, recordEvent }
             method,
             headers,
             agent,
-            timeout: REQUEST_TIMEOUT_MS,
+            timeout: FUTURES_REST_REQUEST_TIMEOUT_MS,
         }, (response) => {
             answering = true;
             const chunks = [];

@@ -223,3 +223,16 @@ what found the first two.
   The record reader groups any `timing` phase it has not seen, so
   `futures-rest-unpooled` needed no change to it. `setupBinanceConnection` runs
   once per process, so the agents cannot accumulate.
+- [x] 6.6 **The coupling in §6.2 is held by a test now, not by two paragraphs.**
+  The bound lives in this transport and the spacing it is derived from lives in
+  the read queue, and a comment in each file explaining the other is a form that
+  rots — raised by the session that owns the queue, and correct. Both numbers
+  are exported from where they are defined
+  (`FUTURES_REST_REQUEST_TIMEOUT_MS`, `FUTURES_REST_ADMISSION_SPACING_MS`) and
+  `keeps the bound on the pool above the bound this queue needs` asserts
+  `maxSockets >= ceil(timeout / spacing)` against both.
+
+  **A guard, and labelled one** — it cannot fail on today's numbers. Proved by
+  two mutations in a copy of the tree, each of which is the mistake it exists to
+  catch: dropping the spacing to 50 ms, and raising the request timeout to 30 s.
+  Both fail it with *expected 72 to be greater than or equal to 200*.

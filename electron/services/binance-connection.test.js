@@ -256,6 +256,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
     let SpotTradingAdapter;
     let LOCAL_RENDERER_WS_MAX_FRAME_BYTES;
     let LOCAL_RENDERER_WS_MAX_MESSAGE_BYTES;
+    let FUTURES_REST_ADMISSION_SPACING_MS;
 
     beforeEach(async () => {
         vi.resetModules();
@@ -288,6 +289,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
             setupBinanceConnection,
             LOCAL_RENDERER_WS_MAX_FRAME_BYTES,
             LOCAL_RENDERER_WS_MAX_MESSAGE_BYTES,
+            FUTURES_REST_ADMISSION_SPACING_MS,
         } = await import('./binance-connection.js'));
         ({ SpotTradingAdapter } = await import('./spot-trading-adapter.js'));
     });
@@ -517,6 +519,27 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(options.proxyAgentWithoutReuse.keepAlive).toBe(false);
         expect(options.proxyAgentWithoutReuse).not.toBe(options.proxyAgent);
         expect(typeof options.recordEvent).toBe('function');
+    });
+
+    // A guard, and named as one: it cannot fail on today's numbers. It exists
+    // because the two numbers live in two files and the coupling between them
+    // was a paragraph in each, which is a form that rots. A request that finds
+    // no free socket does not fail and does not queue where anyone is looking —
+    // it waits inside the agent. Admission is serialized and execution is not,
+    // so the desk can have one request in the air per spacing for as long as it
+    // is willing to wait for an answer, and the pool has to be wider than that.
+    it('keeps the bound on the pool above the bound this queue needs', async () => {
+        const {
+            FUTURES_REST_CONNECTION_POOL,
+            FUTURES_REST_REQUEST_TIMEOUT_MS,
+        } = await import('./futures-trading-adapter.js');
+
+        const inFlightCeiling = Math.ceil(
+            FUTURES_REST_REQUEST_TIMEOUT_MS / FUTURES_REST_ADMISSION_SPACING_MS,
+        );
+
+        expect(FUTURES_REST_CONNECTION_POOL.maxSockets)
+            .toBeGreaterThanOrEqual(inFlightCeiling);
     });
 
     it('broadcasts independent Futures account resource transitions and retains partial success', async () => {
