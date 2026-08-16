@@ -2111,12 +2111,25 @@ export function setupBinanceConnection({
         futuresUserDataReconnecting = true;
         markFuturesUserDataLoading();
         try {
+            // Ahead of ordinary reads, within the bound the queue already
+            // enforces. This is not something anybody asked to read: it is how
+            // the desk learns that a fill happened, and while it is shut every
+            // command reads the whole account back instead. A review of the
+            // session is two dozen admissions of this same queue, so in arrival
+            // order the key waits out the entire fan-out — measured at 25th of
+            // 25, 3 650 ms, which leaves the stream down 8 650 ms rather than
+            // the 5 000 the backoff above intends. Every start reaches the
+            // exchange through this one call — the first of the session, the
+            // reconnect, and each backoff retry — so the urgency covers them
+            // all without a branch that says which is which.
             const listenKey = await futuresRestLimiter.execute(
                 () => (generation !== futuresUserDataGeneration
                     || futuresRendererConnections.size === 0
                     ? FUTURES_LISTEN_KEY_NOT_REQUESTED
                     : futuresTradingAdapter.createUserDataStreamListenKey()),
                 1,
+                2,
+                { urgent: true },
             );
             if (listenKey === FUTURES_LISTEN_KEY_NOT_REQUESTED) {
                 abandonFuturesUserDataStream(generation);
@@ -2322,6 +2335,10 @@ export function setupBinanceConnection({
                 if (generation !== futuresUserDataGeneration
                     || futuresRendererConnections.size === 0
                     || futuresUserDataWs !== socket) return;
+                // Ordinary, and deliberately so. This beats every thirty
+                // minutes against a key that lives sixty, so no queue this desk
+                // can build will expire it — and the urgency above is a bounded
+                // thing that should be spent on the case that needs it.
                 void futuresRestLimiter.execute(
                     () => futuresTradingAdapter.renewUserDataStreamListenKey(),
                     1,

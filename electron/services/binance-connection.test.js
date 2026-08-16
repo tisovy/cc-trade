@@ -3430,6 +3430,68 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(history.futures_history.discoveryComplete).toBe(true);
     });
 
+    // The desk's own eyes against something the operator asked to read. A review
+    // is two dozen admissions of the same queue, so a listen key that arrives
+    // while one is queued waits out the whole fan-out — and everything the
+    // stream would have carried in that window is read back instead.
+    it('reopens the private stream ahead of a review already queued', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        const socket = await openFuturesHistoryStream();
+
+        // Every futures read the queue let out, in the order it let it out.
+        const admitted = [];
+        moduleMocks.futuresAdapter.getOrderHistory.mockImplementation(({ symbol }) => {
+            admitted.push(`orders:${symbol}`);
+            return Promise.resolve([]);
+        });
+        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({ symbol }) => {
+            admitted.push(`trades:${symbol}`);
+            return Promise.resolve([]);
+        });
+        moduleMocks.futuresAdapter.createUserDataStreamListenKey.mockImplementation(() => {
+            admitted.push('listen-key');
+            return Promise.resolve('futures-listen-key-restored');
+        });
+        const contracts = Array.from({ length: 10 }, (_, index) => `Q${index}USDT`);
+        moduleMocks.futuresAdapter.getTradedSymbolPage
+            .mockResolvedValue({ symbols: contracts, full: false, lastTime: 900 });
+
+        socket.handlers.close();
+        // The restore has 500 ms left to run when the review is asked for, which
+        // is long enough for the fan-out to be queued and not yet read.
+        await vi.advanceTimersByTimeAsync(4_500);
+        const review = moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                version: 1,
+                marketType: 'futures',
+                accountId: 'default',
+                action: 'account.history',
+                clientOrderId: 'history-behind-the-stream',
+                symbol: 'ETHUSDT',
+            }),
+        });
+        await vi.advanceTimersByTimeAsync(500);
+        await vi.advanceTimersByTimeAsync(60_000);
+        await review;
+
+        const key = admitted.indexOf('listen-key');
+        expect(key).toBeGreaterThanOrEqual(0);
+        // What the queue still owed the review when the key went out. Admitted
+        // in arrival order the key is last and this is zero: the stream stays
+        // shut for the whole fan-out rather than for the backoff the desk
+        // intends.
+        expect(admitted.length - key - 1).toBeGreaterThanOrEqual(10);
+        // And the review is not starved for it — every contract still read.
+        expect(admitted.filter(entry => entry.startsWith('orders:'))).toHaveLength(11);
+        expect(admitted.filter(entry => entry.startsWith('trades:'))).toHaveLength(11);
+    });
+
     it('keeps identical-timestamp income rows across a page boundary', async () => {
         setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
         moduleMocks.websocketServerHandlers.request({
