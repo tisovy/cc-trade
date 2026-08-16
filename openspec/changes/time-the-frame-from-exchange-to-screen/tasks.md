@@ -85,6 +85,20 @@ is built and validated, and comes off in `readDeskFrame` before the far side
 validates it. The protocol version does not move and no validator learns a new
 field. `src/utils/frameMarks.js` is the whole of it.
 
+**Two things §1 changed that anyone testing delivery should know, written here
+because the session that owns §4 was not reachable by message.** Neither breaks
+anything today — the full suite is green, burst case included — but both would be
+puzzling to hit blind:
+
+- The service's emitter is now `emit(event, frame, timing)`. The third argument
+  is `{marks, frameBytes}`. Existing `emit: event => …` callers are unaffected.
+- A **sampled** frame's delivered text carries the stamp, so `frame ===
+  JSON.stringify(event)` does not hold for it. The existing assertion that it
+  does (`hands the frame it measured to whatever delivers it`) still passes,
+  because the sampler lives per-connection in `binance-connection.js` and the
+  service is driven directly in that test — but a case built at the connection
+  level would see a stamped frame roughly once per resource per ten seconds.
+
 - [x] 1.1 Mark a frame with the exchange's own event time where the payload states one, and with the time the main process received it. *(Both in `handleStreamFrame`, and the receive mark is taken **before** the frame is read — the parse is the first thing a frame waits for, and a mark taken after it hides exactly the wait being asked about. **Discovered by running it, not by reading it:** the exchange's own event time is not `event.eventTime`. Each normalizer keeps what its resource means by "when" — a trade's is the trade's, a kline's its close, a ticker's the later of two — and none of those is when Binance sent the frame. It is read off `E` at the boundary in `normalizeFuturesWorkstationStreamFrame`, through `readFuturesWorkstationTimestamp`, because the upstream parser answers every integer as an exact-digit token and comparing one to a number silently yields null. That is the same token machinery `carry-execution` §4.8 kept its own parser for.)*
 - [x] 1.2 Mark it with the time it was queued for the renderer and the time the renderer received it. *(Queued in `markOutboundFrame`, at the moment the frame is handed to the outbox — the point where it stops being the desk's and becomes the socket's, whether it is written straight through or held. Received in `readDeskFrame`, before the frame is read, so the reading counts as the renderer's own work rather than as time on the wire.)*
 - [x] 1.3 Mark it with the time the desk committed it to screen, taken where the commit actually happens rather than where the state was set. *(An effect keyed on `state.revision`, not the reducer. A mark inside the reducer times the desk's bookkeeping and misses the render — and the render is the stage the complaint is about.)*

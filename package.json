@@ -23,6 +23,7 @@
     "dist": "electron-builder",
     "lint": "eslint .",
     "test": "vitest run",
+    "test:futures-burst": "vitest run src/App.futures-burst.test.jsx",
     "test:watch": "vitest",
     "test:ui": "vitest --ui",
     "test:all": "npm run test && npm run lint && npm run build && npm run check:circular && npm run check:runtime-mock && npm run check:futures-production && npm run check:command-path",
