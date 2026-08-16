@@ -14,7 +14,7 @@
 
 - [x] 3.1 `npm run lint`, `npm test`. 2060 passed.
 - [x] 3.2 Does the test bite? Yes — `carries a confirmation resize back to the rail` fails against `git archive HEAD` in a copy and passes after. The line width has no test and is not given one: it is a single constant with no behaviour behind it, and a test asserting `lineWidth === 1` would restate the line rather than prove anything about it. Said here rather than covered badly.
-- [x] 3.3 **Confirmed by the operator on the running desk, 2026-08-16**, both halves in their own words: "the line got better — not so thick", and "the slider from the popup now changes the slider in the main panel too, as I wanted."
+- [x] 3.3 **Confirmed by the operator on the running desk, 2026-08-16**, both halves in their own words: "the line got better — not so thick", and "the slider from the popup now changes the slider in the main panel too, as I wanted." Reconfirmed one action at a time against the complete acceptance surface: the operator answered `PASS` after the confirmation slider changed both the rail amount and its recomputed share, `PASS` after the resting-order line left the candles readable, and `PASS` while the drag-line remained emphasized. No order submission was requested or performed by the agent.
 
 ### Where these came from
 
