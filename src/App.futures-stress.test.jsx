@@ -1,4 +1,12 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import {
+  act,
+  cleanup,
+  configure,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App.jsx'
 import {
@@ -51,10 +59,22 @@ const resourceEvent = (requestId, revision, resource, payload) => (
   })
 )
 
+// Testing Library gives an async utility one second, which is its default and
+// not a measurement of anything here. Every wait in this case is a readiness
+// wait — get the workstation mounted, get the book on screen — and the case
+// itself is about what happens after that. Measured 2026-08-16 with twenty busy
+// loops beside the full suite: it failed at
+// `findByTestId('futures-production-workstation')`, before the ingress it exists
+// to exercise had started. Same reasoning, same number, as
+// `App.futures-burst.test.jsx`.
+const READINESS_TIMEOUT_MS = 5_000
+const TESTING_LIBRARY_DEFAULT_TIMEOUT_MS = 1_000
+
 describe('App dense Futures ingress', () => {
   let localStorageMock
 
   beforeEach(() => {
+    configure({ asyncUtilTimeout: READINESS_TIMEOUT_MS })
     localStorageMock = attachMockLocalStorage()
     localStorageMock.setItem(MARKET_WORKSPACE_STORAGE_KEY, MARKET_WORKSPACES.FUTURES_LIVE)
     FuturesAppStressSocket.reset()
@@ -74,6 +94,7 @@ describe('App dense Futures ingress', () => {
     FuturesAppStressSocket.reset()
     localStorageMock.clear()
     vi.unstubAllGlobals()
+    configure({ asyncUtilTimeout: TESTING_LIBRARY_DEFAULT_TIMEOUT_MS })
   })
 
   it('renders the newest book and stays interactive at 2 MiB per 100 ms cycle', async () => {

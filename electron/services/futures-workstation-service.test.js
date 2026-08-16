@@ -1675,7 +1675,13 @@ describe('production Futures workstation service', () => {
                 .toBe(Number(quantity));
         }
         expect(view.lastUpdateId).toBe(String(lastFrame.data.u));
-    });
+    // A hundred ticks of two thousand levels a side with twenty prints on each
+    // is the heaviest case in this file by an order of magnitude: it takes six
+    // to nine seconds on an idle machine, against vitest's five-second default,
+    // and twenty-two seconds measured beside a loaded suite on 2026-08-16. The
+    // default was never chosen for it. Nothing this case asserts is relaxed by
+    // the number — it only gets to finish counting.
+    }, 30_000);
 
     // The reason line holds what it was last given. A refusal that was stated
     // and then repaired would name a condition that is over for the rest of the

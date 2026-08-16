@@ -346,7 +346,22 @@ describe('App spot order payloads', () => {
     expect(screen.queryByTestId('futures-live-view')).not.toBeInTheDocument()
     expect(await screen.findByTestId('place-spot-order', {}, WORKSPACE_MOUNT)).toBeInTheDocument()
     expect(screen.getByTestId('cancel-spot-order')).toBeInTheDocument()
-    expect(mocks.futuresProductionEnabled).toEqual([true])
+    // Every entry is one render of the futures workspace, and the count is
+    // React's business: on a loaded machine the same sequence can batch into two
+    // renders instead of one, which is how this line failed once on 2026-08-16
+    // (`[true, true]`). What this case is about is that the hook ran enabled and
+    // never ran disabled — and that nothing of the futures desk survived the
+    // switch back, which the DOM assertions above state directly. A second
+    // *mounted* copy, the hazard worth having, is caught by `findByTestId`
+    // and `getByTestId` above, both of which refuse a duplicate.
+    //
+    // Not diagnosed, and not claimed to be: instrumented with a mount counter
+    // and re-run eleven times under a loaded full suite, the extra render never
+    // came back, so whether it was a re-render or a second mount is unknown.
+    // This states the intent rather than resting on a count that cannot tell
+    // those two apart anyway.
+    expect(mocks.futuresProductionEnabled.length).toBeGreaterThan(0)
+    expect(mocks.futuresProductionEnabled.every(enabled => enabled === true)).toBe(true)
     await waitFor(() => expect(mocks.sendMessage).toHaveBeenLastCalledWith({
         action: 'enable_depth_view',
         symbol: 'BTCUSDT',

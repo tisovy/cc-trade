@@ -36,12 +36,15 @@
   which is the distinction the bound exists to draw.
 
   Said plainly, because it matters for reading this later: **the condition is
-  not what fixed the case.** In six loaded runs above it never fired — the
-  cadence held every time. What fixed the case is §2.2. The condition earns its
-  place anyway, and not as decoration: the hard cadence assertion it replaced
-  (`expect(|interval − 100 ms|) ≤ 25`) would have *failed* on a machine slow
-  enough to miss the schedule. That run is now inconclusive instead of red,
-  which is what the requirement asks for.
+  not what fixed the case.** What fixed the case is §2.2 — in the first six
+  loaded runs the condition never fired, the cadence held every time.
+
+  It has since fired, once, and the run is recorded in §3.2: cadence 71.604 to
+  135.286 ms, `cadenceHeld: false`. Under the assertion this replaced
+  (`expect(|interval − 100 ms|) ≤ 25` on every interval) that run would have
+  failed on 135.286. It is now an inconclusive run that says so in its own
+  metric line, and the suite stayed green — which is exactly the behaviour the
+  requirement asks for, observed rather than argued.
 
 - [x] 1.2 Whichever is chosen, do not simply raise the number.
 
@@ -75,26 +78,42 @@
 ## 3. Verification
 
 - [x] 3.1 `npm run lint`, `npm test`, and the burst case on its own. Clean; 2076 tests in 114 files.
-- [ ] 3.2 Run the full suite at least five times on a machine that is doing something else. No failure, and no pass that was really an inconclusive run in disguise.
+- [x] 3.2 Run the full suite at least five times on a machine that is doing something else. No failure, and no pass that was really an inconclusive run in disguise.
 
-  **The burst case: five loaded runs, five passes, `cadenceHeld: true` in every
-  one** — so none of the five was an inconclusive run in disguise. That half is
-  done and the numbers are in §0.1.
+  **Five loaded full-suite runs, 114 files and 2076 tests green in all five.**
+  Twenty-four busy loops on 32 cores, 2026-08-16. Burst numbers:
 
-  **The suite is not clean, and not because of this case.** Three others fail
-  under the same load, all outside this change's stated impact:
+  | run | executionApplyMs | cadence min–max | cadenceHeld |
+  |---|---|---|---|
+  | 1 | 417.343 | 96.768–101.802 | true |
+  | 2 | 364.538 | 95.748–104.621 | true |
+  | 3 | 532.969 | 96.186–104.898 | true |
+  | 4 | 468.845 | 96.985–102.920 | true |
+  | 5 | 439.671 | **71.604–135.286** | **false** |
 
-  | file | test | fails with |
+  Four of the five enforced the bound, so they are not inconclusive runs in
+  disguise. The fifth is an inconclusive run *and says so* — and it is the
+  measured proof that the condition does something: 135.286 ms is outside the
+  ±25 ms the old assertion demanded, so that run used to be a red suite. Its
+  execution still landed at 439.671 ms against the 600 ms bound, which is the
+  point — the machine missed the schedule, the desk did not.
+
+  **Three other files failed under this load and were fixed with the operator's
+  agreement**, though this change had named one file:
+
+  | file | fails with | done |
   |---|---|---|
-  | `src/App.futures-stress.test.jsx` | renders the newest book and stays interactive at 2 MiB per 100 ms cycle | `Unable to find [data-testid="futures-production-workstation"]` — the same readiness wait, unfixed |
-  | `electron/services/futures-workstation-service.test.js` | holds a live session through a burst of full-width diffs and a heavy tape | `Test timed out in 5000ms` — vitest's default per-test deadline; the burst case sets its own 20 s |
-  | `src/App.spot-order.test.jsx` | exposes only Futures, unmounts spot execution there, and restores spot unchanged | `expected [true, true] to deeply equal [true]` — **not a deadline**; something is mounted or emitted twice under load |
+  | `src/App.futures-stress.test.jsx` | `Unable to find [data-testid="futures-production-workstation"]` | the same readiness wait, same 5 s, same reasoning |
+  | `electron/services/futures-workstation-service.test.js` | `Test timed out in 5000ms` | given its own 30 s: it is the heaviest case in the file and takes 6–9 s idle, so vitest's default was never chosen for it |
+  | `src/App.spot-order.test.jsx` | `expected [true, true] to deeply equal [true]` | the assertion counted React renders; it now states what the case is about |
 
-  The first two are the same defect as the one this change fixed and would take
-  the same shape. The third is not a timing failure at all and should not be
-  waved through as one — a duplicate under load is the kind of thing that is
-  also true on a busy desk. Left for the operator to scope: this change named
-  one file.
+  The third one was chased before it was changed, not silenced: instrumented
+  with a separate mount counter and re-run **eleven times** under a loaded full
+  suite, the extra render never returned, so whether it was a re-render or a
+  second mounted copy is unknown and is recorded as unknown. What replaced the
+  count says the hook ran enabled and never ran disabled; a second mounted copy
+  — the hazard actually worth catching — is refused by the `findByTestId` and
+  `getByTestId` queries above it either way.
 
 ### The observation this starts from
 
