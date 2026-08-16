@@ -17,3 +17,7 @@ passes, and that habit is what makes a real regression invisible.
 #### Scenario: The desk genuinely slows down
 - **WHEN** the cadence was held and the execution still lands outside the bound
 - **THEN** the case fails, because that is the regression it exists to catch
+
+#### Scenario: A wait that is not the measurement
+- **WHEN** a case waits for the desk to become ready before the part it measures begins
+- **THEN** the wait allows for a busy machine, so that a desk which is genuinely slow fails on the measured number and not on a readiness wait that gave up first
