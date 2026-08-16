@@ -453,7 +453,16 @@ export const formatDeskDiagnosticSummary = (summary, { day = null } = {}) => {
   }
 
   if (summary.frames.length > 0) {
+    // The first column is the only one measured across two clocks, and it is
+    // reported raw. Binance states when it sent the frame; this machine states
+    // when it arrived; the difference between the two clocks sits inside that
+    // number and is not corrected here, because correcting it needs a round trip
+    // to `/fapi/v1/time` and this reader never talks to the exchange. Measured
+    // 2026-08-13, the skew was around 170 ms against a true leg of about 345 ms
+    // — so read this column as "roughly, and probably understated", and the four
+    // that follow as exact. Those are all taken on one clock.
     out.push('', 'Where a frame spent its time (median, ms)')
+    out.push('  exchange→desk spans two clocks and is uncorrected; the rest are exact')
     for (const entry of summary.frames) {
       out.push(
         `  ${entry.key.padEnd(22)} n=${String(entry.count).padStart(5)}`
