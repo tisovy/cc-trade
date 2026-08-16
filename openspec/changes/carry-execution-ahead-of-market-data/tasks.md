@@ -143,7 +143,7 @@ reader will believe it.
 - [x] 5.1 Re-measure the renderer's per-frame parse-and-validate cost and the main process's per-frame outbound cost, and record before and after. Recorded below.
 - [x] 5.2 Measure the delay from an execution report arriving at the main process to the trading hook applying it, with a depth backlog present and without one. Recorded below.
 - [x] 5.3 `npm run lint`, `npm test` (1557 passed), `npm run check:futures-production`.
-- [ ] 5.4 Operator confirms on live data that a fill on a liquid contract leaves the working-orders list and the chart promptly during a fast move, not after it — step 31, «Исполнение впереди рыночных данных», in `verify-the-desk-in-one-sitting/runbook.md`, so the operator runs one list. It is the one step whose whole premise is a fast move, so it is the one step the operator may have to wait for rather than stage.
+- [x] 5.4 **Confirmed by the operator on live data, 2026-08-16:** "the price crossing on the chart really does remove the orders — it works as it should; I had several orders standing and they all filled at once." On a real move, not a staged one. It agrees with the record from the same run: a BUY LIMIT on HEMIUSDT left at 14:43:17.7 and the position was open by 14:43:19 — the count of compared positions went from one to two and stayed there. Operator confirms on live data that a fill on a liquid contract leaves the working-orders list and the chart promptly during a fast move, not after it — step 31, «Исполнение впереди рыночных данных», in `verify-the-desk-in-one-sitting/runbook.md`, so the operator runs one list. It is the one step whose whole premise is a fast move, so it is the one step the operator may have to wait for rather than stage.
 
 ### Measured
 
