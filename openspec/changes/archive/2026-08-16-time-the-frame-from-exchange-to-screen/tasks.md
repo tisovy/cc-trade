@@ -241,6 +241,12 @@ record contains 171 delivered-frame readings and its summary names
 Only the operator can confirm that one of those is the contract that produced
 the complaint, so 5.3 remains unchecked.
 
+The operator confirmed on 2026-08-16 that the latest HEMIUSDT orders worked
+normally. That is live confirmation that this change did not regress the order
+path, but it is not evidence about a frame reported late. Task 5.3 is therefore
+carried, still open, to `verify-the-desk-in-one-sitting` 3.5 and its
+"Опоздавший кадр" runbook section before this change is archived.
+
 ## 6. Do The Tests Bite?
 
 Run against the tree before this change (`git archive HEAD`, symlinked

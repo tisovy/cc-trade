@@ -19,11 +19,12 @@
 - [ ] 3.2 Check the confirmation items in `send-only-the-confirmed-order`, `answer-the-command-that-asked`, `say-which-readings-are-stale`, `keep-the-chart-loadable`, `isolate-markets-and-runtime`, `verify-live-futures-account-read`, `name-the-algo-order-that-fired`, `hear-the-exchange-out` and `keep-the-contracts-warm` from that record, and only those the record supports.
 - [ ] 3.3 Record the items marked `COVERED BY TEST ONLY` as exactly that in the ledger, naming the tests that cover them — a guarantee verified by test is not a guarantee unverified, and the difference belongs in writing.
 - [ ] 3.4 Open a defect for every `FAIL` before checking anything else in that change.
+- [ ] 3.5 When the late-frame complaint recurs, record the contract, time and desk revision, summarize that day's diagnostic record, then inspect the nearest raw `kind: "frame"` event for that contract and use that event's own `upstreamMs`, `queuedMs`, `deliveredMs` and `committedMs` to settle archived `time-the-frame-from-exchange-to-screen` 5.3. The summary's medians describe the day and SHALL NOT be attributed to the reported frame. Normal HEMIUSDT order operation on 2026-08-16 confirms no order-path regression but does not substitute for a reported-late frame.
 
 ## 4. Verification Of The Verification
 
 - [ ] 4.1 No confirmation item anywhere is checked without a line in the ledger behind it.
-- [x] 4.2 The runbook's "not ready to verify" list matches the open changes at the time the pass is run; if work landed in between, the pass covers it or the list says why not. *(Rebuilt 2026-08-13 against `openspec list`. It had gone stale in both directions: it still said `stop-rebuilding-the-desk-on-every-tick` had not been started, when the change is 20/21 and now owns steps 12 and 13; and it named `keep-the-chart-loadable` as open when the change is archived. It now names the six changes that are genuinely not ready, and separately the two known gaps that no change owns yet — the flat candle-freshness threshold, and the misleading wording on `TRADIFI_PERPETUAL` contracts.)*
+- [x] 4.2 The runbook's "not ready to verify" list matches the open changes at the time the pass is run; if work landed in between, the pass covers it or the list says why not. *(Rebuilt 2026-08-16 against `openspec list`. `time-the-frame-from-exchange-to-screen` is implemented and leaves that list on archive; its complaint-specific live check is now the separate, still-open 3.5. The list separately retains the two known gaps that no change owns yet — the flat candle-freshness threshold, and the misleading wording on `TRADIFI_PERPETUAL` contracts.)*
 
 ## 5. One List, Not A Main List And Four Appendices
 
