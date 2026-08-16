@@ -154,6 +154,42 @@ describe('frame marks', () => {
     expect(frame.payload.revision).toBe(7)
   })
 
+  // §1.4: producing the marks may not change what is delivered or when. So the
+  // stamp has to be total — there is no input for which it raises, and no input
+  // for which the frame that comes out is not still the frame that went in.
+  // A diagnostic that could throw on the delivery path would cost the operator
+  // the market to buy a measurement.
+  it('never raises, and never alters the frame it declines to stamp', () => {
+    const text = JSON.stringify(workstationEvent())
+    const hostile = [
+      null,
+      undefined,
+      42,
+      'marks',
+      {},
+      { receivedAt: 1 },
+      { queuedAt: 1 },
+      { receivedAt: -1, queuedAt: 2 },
+      { receivedAt: 1.5, queuedAt: 2 },
+      { receivedAt: 1, queuedAt: 2, exchangeAt: 'now' },
+      { receivedAt: Number.NaN, queuedAt: 2 },
+      { receivedAt: Number.MAX_SAFE_INTEGER + 2, queuedAt: 2 },
+    ]
+    for (const bad of hostile) {
+      let stamped
+      expect(() => { stamped = stampFrameMarks(text, bad, { frameBytes: text.length }) })
+        .not.toThrow()
+      expect(stamped).toBe(text)
+      expect(readFuturesProductionWorkstationEvent(JSON.parse(stamped))).toBeTruthy()
+    }
+    // And a frame that is not a frame is handed straight back rather than
+    // becoming one.
+    for (const notAFrame of [null, undefined, 42, '', '[1,2]', 'not json']) {
+      expect(() => stampFrameMarks(notAFrame, marks, { frameBytes: 10 })).not.toThrow()
+      expect(stampFrameMarks(notAFrame, marks, { frameBytes: 10 })).toBe(notAFrame)
+    }
+  })
+
   // One per resource per interval, so the record's line rate stays the desk's
   // business rather than the market's.
   it('samples one frame per resource per interval', () => {

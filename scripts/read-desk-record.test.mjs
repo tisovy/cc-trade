@@ -203,6 +203,90 @@ describe('summarizeDeskDiagnosticRecord', () => {
     expect(printed).not.toMatch(/58400|wallet|price/i)
   })
 
+  // The backlog reading says the desk was behind. This says which step it was
+  // behind in, which is the difference between "the desk is slow" and an answer
+  // the operator can act on.
+  it('names the step a late frame waited in', () => {
+    const late = summarizeDeskDiagnosticRecord([
+      line({
+        at: '2026-08-16T09:00:00.000Z',
+        kind: 'frame',
+        phase: 'frame',
+        code: 'DELIVERED',
+        resource: 'depth',
+        symbol: 'ACEUSDT',
+        upstreamMs: 345,
+        queuedMs: 1,
+        deliveredMs: 12,
+        committedMs: 30,
+        totalMs: 388,
+      }),
+      line({
+        at: '2026-08-16T09:00:10.000Z',
+        kind: 'frame',
+        phase: 'frame',
+        code: 'DELIVERED',
+        resource: 'depth',
+        symbol: 'ACEUSDT',
+        upstreamMs: 351,
+        queuedMs: 1,
+        deliveredMs: 40,
+        committedMs: 900,
+        totalMs: 1_292,
+      }),
+      // The exchange stated no usable time on this one. It must not be folded
+      // into the upstream median as a zero.
+      line({
+        at: '2026-08-16T09:00:20.000Z',
+        kind: 'frame',
+        phase: 'frame',
+        code: 'DELIVERED',
+        resource: 'candles',
+        symbol: 'ACEUSDT',
+        upstreamMs: null,
+        queuedMs: 0,
+        deliveredMs: 4,
+        committedMs: 9,
+        totalMs: 13,
+      }),
+    ].join(''))
+
+    expect(late.frames).toEqual([
+      {
+        key: 'depth ACEUSDT',
+        count: 2,
+        upstreamMs: 348,
+        queuedMs: 1,
+        deliveredMs: 26,
+        committedMs: 465,
+        totalMs: 840,
+        worstTotalMs: 1_292,
+        worstAt: '2026-08-16T09:00:10.000Z',
+        upstreamUnknown: 0,
+      },
+      {
+        key: 'candles ACEUSDT',
+        count: 1,
+        upstreamMs: null,
+        queuedMs: 0,
+        deliveredMs: 4,
+        committedMs: 9,
+        totalMs: 13,
+        worstTotalMs: 13,
+        worstAt: '2026-08-16T09:00:20.000Z',
+        upstreamUnknown: 1,
+      },
+    ])
+
+    const printed = formatDeskDiagnosticSummary(late)
+    expect(printed).toContain('Where a frame spent its time')
+    // The slow step is the one on screen, and it reads that way.
+    expect(printed).toContain('→screen   465')
+    // A leg nobody could measure prints as unmeasured, never as instant.
+    expect(printed).toContain('exchange→desk     —')
+    expect(printed).toContain('(1 without a usable exchange time)')
+  })
+
   // "The screen was late" is the complaint every change in this batch answers,
   // and until the backlog states its depth the record could say only that
   // something was superseded — never how far behind the renderer actually got,

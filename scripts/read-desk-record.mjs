@@ -116,6 +116,10 @@ export const summarizeDeskDiagnosticRecord = (text) => {
   // always "the screen was late", and this is the only reading that separates a
   // desk that was behind from a market that was fast.
   const backlogs = new Map()
+  // Where a sampled frame spent its time, per resource. The backlog reading
+  // above says the desk was behind; this says which step it was behind in,
+  // which is the difference between "the desk is slow" and an answer.
+  const frames = new Map()
   let refused = 0
   let first = null
   let last = null
@@ -235,6 +239,38 @@ export const summarizeDeskDiagnosticRecord = (text) => {
       observed.peakBytes = Math.max(observed.peakBytes, Number(line.bytes) || 0)
       backlogs.set(key, observed)
     }
+    if (line.kind === 'frame') {
+      const key = `${line.resource ?? '-'} ${line.symbol ?? '-'}`
+      const observed = frames.get(key) ?? {
+        count: 0,
+        upstream: [],
+        queued: [],
+        delivered: [],
+        committed: [],
+        total: [],
+        // The slowest frame and when it happened, kept together: the operator
+        // reports a moment, and this is what lets the record be opened at it.
+        worstTotalMs: 0,
+        worstAt: null,
+        // Frames whose upstream leg could not be measured — the exchange stated
+        // no time, or its clock was ahead of this one. Counted rather than
+        // folded into the median as zero, which would flatter the leg.
+        upstreamUnknown: 0,
+      }
+      observed.count += 1
+      if (Number.isFinite(line.upstreamMs)) observed.upstream.push(line.upstreamMs)
+      else observed.upstreamUnknown += 1
+      observed.queued.push(Number(line.queuedMs) || 0)
+      observed.delivered.push(Number(line.deliveredMs) || 0)
+      observed.committed.push(Number(line.committedMs) || 0)
+      const total = Number(line.totalMs) || 0
+      observed.total.push(total)
+      if (total > observed.worstTotalMs) {
+        observed.worstTotalMs = total
+        observed.worstAt = line.at ?? null
+      }
+      frames.set(key, observed)
+    }
     if (line.kind === 'session') sessions.push({ at: line.at, event: line.event, version: line.version ?? null })
     if (line.kind === 'command') {
       commands.push({
@@ -292,6 +328,23 @@ export const summarizeDeskDiagnosticRecord = (text) => {
     backlogs: [...backlogs.entries()]
       .map(([key, observed]) => ({ key, ...observed }))
       .sort((left, right) => right.peakFrames - left.peakFrames),
+    frames: [...frames.entries()]
+      .map(([key, observed]) => ({
+        key,
+        count: observed.count,
+        // Null, not `median([])`, which is 0. A leg nobody could measure must
+        // not print as a leg that took no time — that is the one reading that
+        // would send the operator looking in the wrong place.
+        upstreamMs: observed.upstream.length === 0 ? null : median(observed.upstream),
+        queuedMs: median(observed.queued),
+        deliveredMs: median(observed.delivered),
+        committedMs: median(observed.committed),
+        totalMs: median(observed.total),
+        worstTotalMs: observed.worstTotalMs,
+        worstAt: observed.worstAt,
+        upstreamUnknown: observed.upstreamUnknown,
+      }))
+      .sort((left, right) => right.worstTotalMs - left.worstTotalMs),
   }
 }
 
@@ -395,6 +448,25 @@ export const formatDeskDiagnosticSummary = (summary, { day = null } = {}) => {
         + `  heaviest ${String(Math.round(entry.peakBytes / 1024)).padStart(6)} KB`
         + `  superseded ${String(entry.superseded).padStart(5)}`
         + `  dropped ${String(entry.dropped).padStart(4)}`,
+      )
+    }
+  }
+
+  if (summary.frames.length > 0) {
+    out.push('', 'Where a frame spent its time (median, ms)')
+    for (const entry of summary.frames) {
+      out.push(
+        `  ${entry.key.padEnd(22)} n=${String(entry.count).padStart(5)}`
+        + `  exchange→desk ${String(entry.upstreamMs ?? '—').padStart(5)}`
+        + `  →queue ${String(entry.queuedMs).padStart(4)}`
+        + `  →renderer ${String(entry.deliveredMs).padStart(4)}`
+        + `  →screen ${String(entry.committedMs).padStart(5)}`
+        + `  total ${String(entry.totalMs).padStart(5)}`
+        + `  worst ${String(entry.worstTotalMs).padStart(6)}`
+        + (entry.worstAt === null ? '' : ` at ${entry.worstAt}`)
+        + (entry.upstreamUnknown === 0
+          ? ''
+          : `  (${entry.upstreamUnknown} without a usable exchange time)`),
       )
     }
   }
