@@ -503,6 +503,36 @@ describe('setupBinanceConnection user-data orchestration', () => {
         });
     });
 
+    // Spot paid the handshake on every request long after futures stopped. The
+    // two legs get their own agents rather than sharing one, so neither can
+    // exhaust the other's sockets, and the WebSocket callers keep the agent that
+    // does not pool — a stream opens one connection and holds it, so pooling
+    // would buy it nothing.
+    it('gives the spot REST leg a pooling connection and leaves the stream agent alone', () => {
+        vi.stubEnv('https_proxy', 'socks5://127.0.0.1:1080');
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1' },
+        });
+
+        const [spotOptions] = moduleMocks.Spot.mock.calls[0];
+        const restAgent = spotOptions.configurationRestAPI.httpsAgent;
+        expect(restAgent.keepAlive).toBe(true);
+        expect(restAgent.maxSockets).toBe(32);
+        expect(restAgent.maxFreeSockets).toBe(4);
+        // The flag beside it used to say the opposite while the agent decided
+        // everything; the two now agree.
+        expect(spotOptions.configurationRestAPI.keepAlive).toBe(true);
+
+        // The stream keeps its own agent, and that one still does not pool.
+        const streamAgent = spotOptions.configurationWebsocketStreams.agent;
+        expect(streamAgent).not.toBe(restAgent);
+        expect(streamAgent.keepAlive).toBeFalsy();
+
+        // And the futures pool is a third agent, not this one.
+        const [futuresOptions] = moduleMocks.FuturesTradingAdapter.mock.calls[0];
+        expect(futuresOptions.proxyAgent).not.toBe(restAgent);
+    });
+
     it('gives the futures leg a pooling connection and a fallback that cannot pool', () => {
         vi.stubEnv('https_proxy', 'socks5://127.0.0.1:1080');
         setupBinanceConnection({

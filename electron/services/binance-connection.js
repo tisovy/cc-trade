@@ -54,6 +54,11 @@ import {
 } from '../../src/utils/frameMarks.js';
 import { FUTURES_WORKSTATION_EVENT_MAX_BYTES } from '../../src/utils/futuresWorkstationProtocolShared.js';
 import {
+    SPOT_REST_CONNECTION_POOL,
+    createPooledSpotRestAgent,
+    observeSpotRestConnections,
+} from './spot-rest-pool.js';
+import {
     FUTURES_HISTORY_LIMIT,
     FUTURES_REST_CONNECTION_POOL,
     FUTURES_TRADE_HISTORY_LIMIT,
@@ -907,9 +912,33 @@ export function setupBinanceConnection({
     }
 
     const sharedProxyAgent = credentialPreflight.ready ? resolveProxyAgent() : null;
-    // The futures REST leg alone pools. The spot client's own keep-alive flag
-    // and the warning attached to it are left exactly as they are, and the
-    // WebSocket callers keep the agent above.
+    // The spot REST leg pools too, on an agent of its own.
+    //
+    // `sharedProxyAgent` above is still what the WebSocket callers take, and it
+    // still does not pool — a stream opens one connection and holds it, so
+    // pooling would buy it nothing. Spot REST is the opposite case and was
+    // taking the same agent, which is why it paid a handshake per request.
+    //
+    // Its own agent rather than the futures pool's, because the two legs are
+    // sized from different traffic and neither should be able to exhaust the
+    // other's sockets.
+    const spotRestProxyAgent = spotCredentialsReady
+        ? observeSpotRestConnections(
+            resolveProxyAgent(SPOT_REST_CONNECTION_POOL),
+            (kind, value) => diagnosticRecord.record(kind, value),
+        )
+        : null;
+    // Used when no proxy is configured, so that route pools too instead of
+    // falling through to whatever Node's global agent happens to be — which is
+    // a behaviour that has changed between Node versions and is not something a
+    // trading desk should inherit silently.
+    const spotRestDirectAgent = spotCredentialsReady && spotRestProxyAgent === null
+        ? observeSpotRestConnections(
+            createPooledSpotRestAgent(),
+            (kind, value) => diagnosticRecord.record(kind, value),
+        )
+        : null;
+    const spotRestAgent = spotRestProxyAgent ?? spotRestDirectAgent;
     // Gated on the futures flag, like every other construction gate here, and
     // not on `credentialPreflight.ready`: that one only answers "may any
     // workspace start at all", and a futures leg that reads it would go out
@@ -983,13 +1012,18 @@ export function setupBinanceConnection({
         const restConfig = {
             apiKey: APIKEY,
             apiSecret: APISECRET,
-            keepAlive: false,  // Disable keepAlive to avoid axios agent issues
+            // Was `false`, with "Disable keepAlive to avoid axios agent issues"
+            // beside it. The flag decides nothing while an agent is supplied —
+            // the SDK builds its own only when it has not been given one — and
+            // this desk supplies one on every route now, proxied or not. It is
+            // set true so the two do not disagree on the face of it.
+            keepAlive: true,
             compression: false, // Disable compression headers
             timeout: 10000      // Increase timeout to 10 seconds
         };
 
-        if (sharedProxyAgent) {
-            restConfig.httpsAgent = sharedProxyAgent;
+        if (spotRestAgent) {
+            restConfig.httpsAgent = spotRestAgent;
         }
 
         client = new Spot({
@@ -1004,8 +1038,11 @@ export function setupBinanceConnection({
         const restBaseOptions = client?.restAPI?.configuration?.baseOptions;
         if (restBaseOptions) {
             restBaseOptions.proxy = false;
-            if (sharedProxyAgent) {
-                restBaseOptions.httpsAgent = sharedProxyAgent;
+            // This is the one axios actually reads, so the pooled agent has to
+            // be set here and not only on the configuration above. It is also
+            // what stops the SDK building a keep-alive agent of its own.
+            if (spotRestAgent) {
+                restBaseOptions.httpsAgent = spotRestAgent;
             }
             if (!restBaseOptions.headers) {
                 restBaseOptions.headers = {};
