@@ -834,6 +834,18 @@ export function setupBinanceConnection({
     // contend with Spot admission (Binance meters fapi.* separately anyway).
     // fapi allows 2400 weight/min, so 150ms spacing at our tiny read weights
     // stays far inside the quota while keeping READY latency low.
+    //
+    // This spacing is also the only thing bounding how many requests are in the
+    // air at once, and something in another file is sized off it. Admission is
+    // serialized and execution is not, so in flight is ceil(latency / spacing)
+    // and nothing else — measured against this class on 2026-08-16 with a
+    // twenty-four request fan-out: 3 at 325ms, 5 at 630ms, 6 at 800ms, 9 at
+    // 1 200ms, 14 at 2 000ms. The futures REST agent's `maxSockets`
+    // (`futures-trading-adapter.js`) is set above the ceiling that arithmetic
+    // gives against the request timeout, and it has to stay there: lower this
+    // number without raising that one and the agent becomes a second queue in
+    // front of this one — invisible, compounding, and holding the operator's
+    // command as readily as a history page.
     const futuresRestLimiter = new RateLimiter(800, 60000, 150);
 
     // Optional fat-finger guard: FUTURES_MAX_ORDER_USDT caps the notional of
