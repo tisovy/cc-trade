@@ -94,14 +94,26 @@ const toQueryString = (params = {}) => {
 // with 2 ms of spread across four samples. The ~305 ms between the two was paid
 // on every account beat, every history page and every command.
 //
-// Eight in use is above the widest fan-out the account refresh issues at once;
-// two held idle is enough that a beat and the command behind it do not race for
-// one connection. Both are bounds rather than targets — an unbounded pool
-// answers a burst by opening connections, which is the cost this removes.
+// `maxFreeSockets` is held to what one account beat needs at once, read off the
+// live record on 2026-08-16: the beat asks for four resources, the desk admits
+// one read every 150 ms, and a reused connection answers in ~325 ms — so three
+// are in the air when the third is admitted. Held at two, the third had no free
+// connection and opened one, and the record showed exactly that: one
+// `futures-rest-unpooled` line every thirty seconds, once per beat, at the cold
+// price. Four is the beat's own width, so the beat costs no openings at all.
+//
+// `maxSockets` is a runaway bound and nothing else, and it must stay above
+// anything this desk can put in flight — a request that finds no free socket
+// waits in the agent, invisibly, and what waits may be the operator's command.
+// The desk's own ceiling is its admission spacing against its request timeout:
+// ceil(10 000 ms / 150 ms) = 67 reads, plus the commands and the listen-key
+// renewal that skip admission entirely. Below that the agent becomes a second
+// queue behind the first, and the effect compounds — queueing raises the
+// observed latency, which raises how many are in flight, which queues more.
 export const FUTURES_REST_CONNECTION_POOL = Object.freeze({
     keepAlive: true,
-    maxSockets: 8,
-    maxFreeSockets: 2,
+    maxSockets: 72,
+    maxFreeSockets: 4,
 });
 
 // Used when no proxy is configured, so that route has the same pool and the

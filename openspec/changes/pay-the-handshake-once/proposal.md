@@ -97,6 +97,7 @@ says what it cost.
   Coordinated with the operator before the edit.
 - Adds two requirements to `futures-live-readiness` and one to
   `trading-command-integrity`.
-- Operator-visible: commands answer in ~425 ms instead of ~730, and the
+- Operator-visible: commands answer in ~425 ms instead of ~730 — measured at
+  **337 ms** on the first command the operator issued on this change — and the
   thirty-second account beat finishes about a second sooner, so the panels spend
   less time in `loading`.

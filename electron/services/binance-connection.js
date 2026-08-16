@@ -856,8 +856,18 @@ export function setupBinanceConnection({
     // The futures REST leg alone pools. The spot client's own keep-alive flag
     // and the warning attached to it are left exactly as they are, and the
     // WebSocket callers keep the agent above.
-    const futuresRestProxyAgent = credentialPreflight.ready
+    // Gated on the futures flag, like every other construction gate here, and
+    // not on `credentialPreflight.ready`: that one only answers "may any
+    // workspace start at all", and a futures leg that reads it would go out
+    // unproxied the day the aggregate stops meaning what it means today.
+    const futuresRestProxyAgent = futuresCredentialsReady
         ? resolveProxyAgent(FUTURES_REST_CONNECTION_POOL)
+        : null;
+    // The fallback is the agent as it was built before this desk pooled
+    // anything — one connection per request — and it is the futures leg's own,
+    // so that leg does not depend on a flag the spot half also answers to.
+    const futuresRestFallbackProxyAgent = futuresCredentialsReady
+        ? resolveProxyAgent()
         : null;
     applyLogMasking([
         APIKEY,
@@ -910,7 +920,7 @@ export function setupBinanceConnection({
             apiSecret: FUTURES_APISECRET,
             recvWindow: SIGNED_RECV_WINDOW,
             proxyAgent: futuresRestProxyAgent,
-            proxyAgentWithoutReuse: sharedProxyAgent,
+            proxyAgentWithoutReuse: futuresRestFallbackProxyAgent,
             recordEvent: (kind, value) => diagnosticRecord.record(kind, value),
         });
     }

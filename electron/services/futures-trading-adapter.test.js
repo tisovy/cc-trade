@@ -1236,8 +1236,11 @@ describe('a connection the desk already has', () => {
     it('holds the pool to the bounds it was measured against', () => {
         expect(FUTURES_REST_CONNECTION_POOL).toEqual({
             keepAlive: true,
-            maxSockets: 8,
-            maxFreeSockets: 2,
+            // Above the 67 the desk's own admission spacing and request timeout
+            // allow in flight, so the agent can never become a second queue.
+            maxSockets: 72,
+            // The account beat's own width, so a beat pays for no openings.
+            maxFreeSockets: 4,
         });
         expect(Object.isFrozen(FUTURES_REST_CONNECTION_POOL)).toBe(true);
     });
@@ -1271,6 +1274,21 @@ describe('a connection the desk already has', () => {
                 }),
             },
         ]);
+    });
+
+    it('sends the request again when the pooled connection broke under the write', async () => {
+        const adapter = createPooledAdapter();
+        globalThis.__futuresTestReusedSocket = attempt => attempt === 0;
+        globalThis.__futuresTestTransport = attempt => (attempt === 0 ? connectionLost('EPIPE') : null);
+        globalThis.__futuresTestResponse = { orderId: 89, status: 'NEW', symbol: 'BTCUSDT' };
+
+        const report = await placeOne(adapter);
+
+        // The far side refused the bytes rather than answering them, which is
+        // the same fact `ECONNRESET` states and the same reason it is safe.
+        expect(requests).toHaveLength(2);
+        expect(requests[1].options.agent).toBe(ownConnection);
+        expect(report).toBeTruthy();
     });
 
     it('does not send again when the request opened the connection itself', async () => {

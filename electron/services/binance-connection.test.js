@@ -511,8 +511,8 @@ describe('setupBinanceConnection user-data orchestration', () => {
         // The option object, not the behaviour behind it: this is the whole of
         // what turns 630 ms per request into 325.
         expect(options.proxyAgent.keepAlive).toBe(true);
-        expect(options.proxyAgent.maxSockets).toBe(8);
-        expect(options.proxyAgent.maxFreeSockets).toBe(2);
+        expect(options.proxyAgent.maxSockets).toBe(72);
+        expect(options.proxyAgent.maxFreeSockets).toBe(4);
         // The fallback exists to be the connection the pool is not.
         expect(options.proxyAgentWithoutReuse.keepAlive).toBe(false);
         expect(options.proxyAgentWithoutReuse).not.toBe(options.proxyAgent);

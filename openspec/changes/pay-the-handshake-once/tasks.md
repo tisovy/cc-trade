@@ -40,7 +40,8 @@ documentation.
 
 - [x] 1.1 Give `futures-trading-adapter.js` one exported pool definition
   (`keepAlive`, `maxSockets`, `maxFreeSockets`) with the measurement above beside
-  it, so the numbers that justify it live where it is defined.
+  it, so the numbers that justify it live where it is defined. Both bounds were
+  corrected by the audit in §6 once the live record showed what they cost.
 - [x] 1.2 Teach `resolveProxyAgent` to build a pooling agent on request, leaving
   its current no-argument behaviour exactly as it is for the WebSocket and spot
   callers.
@@ -155,8 +156,70 @@ documentation.
   whether the pool is being used and whether the fallback fired, and what each
   answer means. Unchecked there, and not to be marked by the session that wrote
   it.
-- [ ] 5.2 Report the before-and-after to the operator from the record rather than
-  from a claim: the command durations of the 07:19:46 session against the first
-  session running this change. Open until the desk runs it — it was stopped at
-  2026-08-16 07:57:43 UTC, before this change reached the tree, so no session
-  has run this code yet.
+- [x] 5.2 **Reported from the record, not from a claim.** The operator started
+  the desk at 2026-08-16 08:04:43 UTC on this change and placed a futures order
+  by hand at 08:05:06: `trade.placeOrder` ACEUSDT answered in **337 ms**. The
+  same four commands the same operator issued by hand the session before, on the
+  code this replaced: 729, 739, 729, 719 ms. Better than the ~425 ms predicted,
+  because the command found a connection the account beat had already opened.
+  No `CONNECTION_REUSE_FALLBACK` in that session, so no pooled connection was
+  lost; the only faults recorded are `book-recovery`, which this change does not
+  touch.
+
+## 6. Audited
+
+Audited on 2026-08-16 at the operator's request, nine minutes into the first
+session that ran this change. Four defects found, four fixed; the live record is
+what found the first two.
+
+- [x] 6.1 **The pool was buying one connection per beat and the record said so.**
+  Session 08:04:43: after the bootstrap burst, exactly one
+  `futures-rest-unpooled` line every thirty seconds — 08:05:17, 08:05:47,
+  08:06:17 and on, at 720–1015 ms, the cold price. One per beat, and the beat
+  reads four resources, so three of four were being served from the pool and the
+  fourth was not. The arithmetic says why: four resources admitted 150 ms apart,
+  a warm answer ~325 ms, so three are in the air when the third is admitted, and
+  `maxFreeSockets: 2` had only two to hand out. Raised to 4 — the beat's own
+  width. **Confirmed on the operator's desk after the fix**, session 08:15:13:
+  six openings in the bootstrap burst, where the pool is empty by definition,
+  and then not one more — nine account reads across the beats that followed, all
+  of them served from the pool. The thirty-second line is gone.
+- [x] 6.2 **`maxSockets: 8` could put a second queue in front of the first.** The
+  neighbouring session, which owns `RateLimiter`, measured the relationship on a
+  24-request fan-out: in flight = ceil(latency / 150 ms) — 3 at 325 ms, 5 at
+  630, 6 at 800, **9 at 1200**. Past ~1.2 s the bound starts holding requests
+  back, and it compounds, because queueing raises the latency that decides how
+  many are in flight. `refreshFuturesPositionConfigs` can queue 16 reads at once
+  besides. A request held by the agent waits invisibly, and what waits may be
+  the operator's command — the exact cost this change exists to remove. Raised
+  to 72: above the 67 that this transport's own 10 s timeout and the desk's
+  150 ms admission spacing allow in flight, plus the commands and the listen-key
+  renewal that skip admission entirely. Before this change the bound was Node's
+  default of `Infinity`, so this narrows nothing that was ever wide.
+- [x] 6.3 **Both futures agents were gated on `credentialPreflight.ready`.** That
+  flag answers "may any workspace start at all", and `binance-connection.js`
+  says in its own comment that every construction gate must read
+  `markets.<market>.ready` instead. It is `spot.ready || futures.ready` today,
+  so the futures leg does get its agent — but the day that aggregate changes
+  meaning, the futures leg goes out with no proxy at all and the operator's
+  address goes to the exchange. Both now read `futuresCredentialsReady`, and the
+  fallback is the futures leg's own agent instead of the one the spot and
+  WebSocket callers share. **No test can bite here** while `ready` is an OR: the
+  mutation back to the aggregate is invisible from outside the function. Stated
+  as a rule kept, not as a behaviour proved.
+- [x] 6.4 **One retry code was in the rule and in no test.**
+  `CONNECTION_LOST_BEFORE_ANSWER` holds `ECONNRESET` and `EPIPE`; only the first
+  was exercised, so removing `EPIPE` would have killed nothing. Added a test for
+  a pooled connection broken under the write, and proved it bites — with `EPIPE`
+  removed from the set in a copy of the tree, it fails and nothing else does.
+- [x] 6.5 Examined and found sound, so nothing was changed for it: mutating
+  futures commands reach the adapter directly and never through
+  `futuresRestLimiter.execute`, so its `maxRetries = 2` network retry cannot
+  double an order — the retry added here is the only one an order can get.
+  (`setLeverage` and `setMarginType` do go through it; both are idempotent
+  settings.) A malformed or unwritable diagnostic event is dropped rather than
+  thrown, so a recorder cannot hang a request on the command path.
+  `resolveProxyAgent()` with no argument builds exactly what it built before.
+  The record reader groups any `timing` phase it has not seen, so
+  `futures-rest-unpooled` needed no change to it. `setupBinanceConnection` runs
+  once per process, so the agents cannot accumulate.
