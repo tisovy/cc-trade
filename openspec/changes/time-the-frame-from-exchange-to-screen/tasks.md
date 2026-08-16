@@ -65,19 +65,31 @@ against, with the pre-batch comparison offered as the separate, honestly-labelle
 thing it is. The number the burst case's bound is set from (4.2) comes from the
 first, not the second.
 
-§2 is done and §1, §3 and §4 are not. §1 opens `binance-connection.js`,
-`futures-production-workstation-service.js` and the two renderer hooks — all
-four were committed to within hours by another session, which also has a
-stream-recovery fix expected to land in `binance-connection.js`. Coordinate
-before opening 1.1.
+~~§2 is done and §1, §3 and §4 are not.~~ **§1, §2 and §3 are done as of
+2026-08-16.** §1 opened `binance-connection.js`,
+`futures-production-workstation-service.js` and the two renderer hooks, and the
+coordination this paragraph asked for did happen: three sessions were in this
+tree at once, and the marks were built without touching the burst case or the
+history path either of the others held. What made that cheap was keeping the
+whole of §1 in one new module — `src/utils/frameMarks.js` — so the four contended
+files took an import and a line each rather than a design.
 
 ## 1. A Frame Carries Where It Has Been
 
-- [ ] 1.1 Mark a frame with the exchange's own event time where the payload states one, and with the time the main process received it.
-- [ ] 1.2 Mark it with the time it was queued for the renderer and the time the renderer received it.
-- [ ] 1.3 Mark it with the time the desk committed it to screen, taken where the commit actually happens rather than where the state was set.
-- [ ] 1.4 Keep the marks off the trading path: producing them SHALL NOT change what is delivered or when.
-- [ ] 1.5 Prove by test that a delivered frame carries all five marks in order, and that a frame missing an exchange event time is still marked for the rest.
+**The marks ride the transport envelope and never the protocol.** That is not a
+preference, it is the lesson already paid for by `splitMarketGenerationStamp`:
+the workstation channel validates an exact key set, so a frame still carrying a
+stamp is refused as malformed — which is how a chart, a book and a tape that were
+correct on both sides went dark between them. The stamp goes on after the event
+is built and validated, and comes off in `readDeskFrame` before the far side
+validates it. The protocol version does not move and no validator learns a new
+field. `src/utils/frameMarks.js` is the whole of it.
+
+- [x] 1.1 Mark a frame with the exchange's own event time where the payload states one, and with the time the main process received it. *(Both in `handleStreamFrame`, and the receive mark is taken **before** the frame is read — the parse is the first thing a frame waits for, and a mark taken after it hides exactly the wait being asked about. **Discovered by running it, not by reading it:** the exchange's own event time is not `event.eventTime`. Each normalizer keeps what its resource means by "when" — a trade's is the trade's, a kline's its close, a ticker's the later of two — and none of those is when Binance sent the frame. It is read off `E` at the boundary in `normalizeFuturesWorkstationStreamFrame`, through `readFuturesWorkstationTimestamp`, because the upstream parser answers every integer as an exact-digit token and comparing one to a number silently yields null. That is the same token machinery `carry-execution` §4.8 kept its own parser for.)*
+- [x] 1.2 Mark it with the time it was queued for the renderer and the time the renderer received it. *(Queued in `markOutboundFrame`, at the moment the frame is handed to the outbox — the point where it stops being the desk's and becomes the socket's, whether it is written straight through or held. Received in `readDeskFrame`, before the frame is read, so the reading counts as the renderer's own work rather than as time on the wire.)*
+- [x] 1.3 Mark it with the time the desk committed it to screen, taken where the commit actually happens rather than where the state was set. *(An effect keyed on `state.revision`, not the reducer. A mark inside the reducer times the desk's bookkeeping and misses the render — and the render is the stage the complaint is about.)*
+- [x] 1.4 Keep the marks off the trading path: producing them SHALL NOT change what is delivered or when. *(Three refusals, each of which would otherwise be worse than having no diagnostic. A sample that would push a frame past the byte ceiling **is not taken** — a book just under the limit, stamped, is a frame the far side will not parse, and a refused book is a market that looks like it went quiet. The stamp is spliced into the string that was already serialized and already measured, so it is not paid for twice. And `stampFrameMarks` is total: proven against twelve malformed mark sets and six non-frames that it never raises and never alters the frame it declines to stamp.)*
+- [x] 1.5 Prove by test that a delivered frame carries all five marks in order, and that a frame missing an exchange event time is still marked for the rest. *(Two tests. `frameMarks.test.js` carries a frame through the real wire path — stamp, `readDeskFrame`, measure — and asserts the five marks are ordered and every leg non-negative; the service test asserts the first two marks come off a real stream frame, and that what the desk delivers **before** any stream frame has arrived states no upstream leg rather than inventing one. A frame with no usable exchange time reports `upstreamMs: null` and every other leg normally — null meaning **not knowable**, which covers both a frame that states no time and one whose stated time is ahead of local receipt. The second is not a corner: the desk's own measured skew against Binance is ~170 ms on a 345 ms leg, so reporting `0` there would claim the exchange reached the desk instantly.)*
 
 ## 2. The Queue States Its Depth
 
@@ -113,10 +125,10 @@ the format cannot silently go back to implying one event.
 ## 3. The Record Takes The Marks
 
 - [x] 3.1 Add a diagnostic event kind for a frame's timing, with a recognized phase and code, so the record accepts it under the rule it already enforces. *(The `frame` kind carries the four gaps between the five marks plus the whole, as counts — a delay is a count of milliseconds, and `count` cannot spell a decimal, which is the same rule that keeps every other amount out of this file. `upstreamMs` alone is nullable: a frame stating no event time and a frame whose stated event time is ahead of local receive are the same case, and both say null rather than 0 — reporting 0 would claim the exchange reached the desk instantly. `frame` joins `estimate` as a **sealed** kind, so an unexpected field loses the whole line instead of being quietly not-copied: both are built for this record alone, so an extra property is a caller handing the privacy boundary something it never declared.)*
-- [ ] 3.2 Record the per-stage delays and the queue readings; record no price, size, notional or profit-and-loss value with them. — **queue readings done**, per-stage delays wait on §1. `frames` and `bytes` are counts under the record's existing `count` rule, so neither can spell a decimal; a test asserts a `bytes` of `'0.5'` refuses the whole line. `scripts/read-desk-record.mjs` grew a "How far behind the renderer fell" section so the reading reaches the operator rather than only the file.
-- [ ] 3.3 Sample rather than record every frame, and state the sampling rule in the code that enforces it, so the record stays inside its existing bounds at ten frames a second.
-- [ ] 3.4 Keep writing the record incapable of raising into a caller or delaying a delivery, as it is today.
-- [ ] 3.5 Prove by test that a timing event carrying a money value is refused or stripped, and that a record that cannot be written loses the line and nothing else.
+- [x] 3.2 Record the per-stage delays and the queue readings; record no price, size, notional or profit-and-loss value with them. — queue readings were already done; **the per-stage delays now land too.** `frames` and `bytes` are counts under the record's existing `count` rule, so neither can spell a decimal; a test asserts a `bytes` of `'0.5'` refuses the whole line. The same rule carries the delays: every leg is a count of milliseconds, which is precisely why a delay may sit in this file at all. `scripts/read-desk-record.mjs` grew a "Where a frame spent its time" section beside "How far behind the renderer fell" — the first says the desk was behind, the second says **which step** it was behind in, and only the second is an answer the operator can act on. A leg nobody could measure prints as `—`, never as `0`: `median([])` is 0, and a leg that reads as instant would send the operator looking in the wrong place.
+- [x] 3.3 Sample rather than record every frame, and state the sampling rule in the code that enforces it, so the record stays inside its existing bounds at ten frames a second. *(One frame per resource per ten seconds, in `createFrameMarkSampler`, with the arithmetic that chose the number written beside it. Time-based rather than one-in-N deliberately: what has to stay bounded is the record's line rate, and the frame rate is the market's business — a one-in-fifty rule writes five lines a second on a busy contract and none at all on a quiet one, which is backwards on both counts. At five resources this is a line every two seconds, ~6 MB a day against the record's 32 MB bound.)*
+- [x] 3.4 Keep writing the record incapable of raising into a caller or delaying a delivery, as it is today. *(Unchanged, and nothing new was added that could. The record's own write path is untouched. On the producing side the frame kind goes through `record()` like every other kind, and the two new sites that feed it — the stamp on the way out and the report on the way back — are both total; see 1.4. The report is answered before the credential gate and outside the market-scope machinery, because it reaches no exchange and moves no order, and a diagnostic that an unconfigured desk could refuse would go missing exactly when the desk is worth asking about.)*
+- [x] 3.5 Prove by test that a timing event carrying a money value is refused or stripped, and that a record that cannot be written loses the line and nothing else. *(First half proven directly: `frame` joins `estimate` as a **sealed** kind, so a `markPrice` offered beside the delays loses the whole line rather than being quietly not-copied — both kinds are built for this record alone, so an undeclared field is a caller handing the privacy boundary something it never declared. Second half: already proven and **not duplicated**. `record()` routes every kind through one `writeEvent`, and the four degradation tests — cannot open, write fails, stream fails after handover, disk stops keeping up — are generic over kinds. A frame-shaped copy of them would pass for the wrong reason and prove nothing this change did; saying so is worth more than another green tick.)*
 
 ## 4. A Burst Case With A Stated Bound
 
@@ -145,3 +157,35 @@ Run against the tree before this change (`git archive HEAD`, symlinked
 - reader: states how far behind the renderer fell, not only what it lost
 
 None of the seven are guards; all seven describe behaviour that did not exist.
+
+### §1 and §3, run against `18013e2` — the commit before this session's first
+
+Four bite, one is a guard and says so in its own title, and ten cannot be asked
+the question at all. All three groups are listed, because "eleven new tests" and
+"four that would have caught the bug" are very different claims.
+
+**Bite** — they fail against the tree before the change and pass after it:
+
+- record: keeps a frame timing as delays, and refuses an amount beside them
+- record: states an unmeasurable upstream leg as null and still marks the rest
+- service: hands over where a delivered frame came from and when it arrived
+- reader: names the step a late frame waited in
+
+**A guard, and named one in its own title** — `guards: refuses a delay that is
+not a whole count of milliseconds`. It passes against the old tree for the wrong
+reason: before the `frame` kind existed every frame event was refused whatever it
+carried, so a test of *how* it refuses proves nothing about this change. It is
+kept because it bites on a future change that widens one of those fields off
+`count` — which is the change worth stopping, since `count` is the only reason a
+delay may sit in a file that keeps amounts out.
+
+**Cannot be asked** — the ten in `frameMarks.test.js`. The module does not exist
+at `18013e2`, so they fail there on an import error, which is not the same thing
+as biting and should not be counted as it. What they are is a description of
+behaviour that did not exist. Two of them are worth naming anyway because they
+assert a failure this repository has already paid for once: `rides the envelope
+without the protocol ever seeing it` asserts that a frame still carrying its
+stamp **is refused** by the exact-key rules — the `splitMarketGenerationStamp`
+defect, asserted rather than assumed — and `never raises, and never alters the
+frame it declines to stamp` is §1.4 held to twelve malformed mark sets and six
+non-frames.
