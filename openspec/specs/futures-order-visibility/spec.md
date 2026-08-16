@@ -287,7 +287,11 @@ SHALL never disagree about the size being closed. The panel SHALL state what the
 exit would settle — the size the position is left holding, the value coming off
 the table and the profit that size would realize at the price the exit is priced
 at — and SHALL NOT spend a summary cell restating the side or the reduce-only
-nature that every close from it carries.
+nature that every close from it carries. While the panel remains open, it SHALL
+read the latest live state of the position it was opened for. A market-close
+preview SHALL follow the same current valuation used by the open-position
+surface; an operator-entered limit price SHALL remain the price of a limit-close
+preview. Live valuation changes SHALL NOT reset an operator-edited close size.
 
 #### Scenario: Operator closes at market
 - **WHEN** the operator confirms a market close
@@ -320,6 +324,18 @@ nature that every close from it carries.
 #### Scenario: A limit price is entered
 - **WHEN** the operator sets a limit close price
 - **THEN** the value and the profit are computed at that price rather than at the mark, and the side the limit rests on is stated beside the price
+
+#### Scenario: The market moves while a market close is being reviewed
+- **WHEN** the live valuation of the selected position changes while its close panel remains in market mode
+- **THEN** the panel recomputes the close value and estimated PnL from that current valuation, in step with the open-position surface
+
+#### Scenario: The market moves after the operator edits the close size
+- **WHEN** the operator has entered a partial close size and the selected position receives a valuation-only update
+- **THEN** the entered size remains unchanged while the market-close value and estimated PnL are recomputed for that size
+
+#### Scenario: The position changes while a limit close is being reviewed
+- **WHEN** the selected position receives a live update after the operator has entered a limit close price
+- **THEN** the preview uses the current position and the operator's limit price, and a market-price update does not replace that limit price
 
 ### Requirement: Every order surface opens the same editor
 The system SHALL open the order editor from a chart order handle, from an order
