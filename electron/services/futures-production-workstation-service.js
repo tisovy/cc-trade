@@ -1451,12 +1451,18 @@ export class FuturesProductionWorkstationService {
 
     handleStreamFrame(session, raw) {
         if (!this.isHeld(session)) return;
-        // Taken before the frame is read, so what it measures is the socket's
-        // arrival and not this desk's parsing of it. The parse is the first thing
-        // the frame waits for, and a mark taken after it would hide exactly the
-        // wait the operator is asking about.
-        const receivedAt = this.clock.now();
         try {
+            // Taken before the frame is read, so what it measures is the
+            // socket's arrival and not this desk's parsing of it. The parse is
+            // the first thing the frame waits for, and a mark taken after it
+            // would hide exactly the wait the operator is asking about.
+            //
+            // Inside the try, and read straight off the clock rather than
+            // through `observedNow`: that one throws on a clock that has gone
+            // backwards, and a diagnostic must not be able to take a market
+            // frame down with it. A reading that is not a sane timestamp is
+            // dropped below instead.
+            const receivedAt = this.clock.now();
             const event = normalizeFuturesWorkstationStreamFrame(raw, {
                 symbol: session.symbol,
                 pair: session.pair,

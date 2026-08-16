@@ -1,4 +1,6 @@
 import http from 'node:http';
+import net from 'node:net';
+import { Agent as BaseAgent } from 'agent-base';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
     SPOT_REST_CONNECT_PHASE,
@@ -119,6 +121,41 @@ describe('spot REST connection pool', () => {
         await get(agent, port);
 
         expect(record).toHaveBeenCalledTimes(1);
+        agent.destroy();
+    });
+
+    // The route the operator is actually on is proxied, and a proxy agent does
+    // not open sockets the way a plain one does: `agent-base` makes the
+    // connection inside `connect()`, stashes it, and `createConnection()` only
+    // hands it over. If the count were hooked on the wrong one of those, the
+    // operator's own verification step would grep for these lines, find none,
+    // and read the silence as "reuse is working" when it means "nothing is
+    // being counted". Driven through `agent-base` itself rather than argued
+    // from reading it.
+    it('counts opens on a proxy-style agent too, not only a direct one', async () => {
+        const { port, opened } = await startServer();
+        const record = vi.fn();
+        let connectCalls = 0;
+
+        class ProxyStyleAgent extends BaseAgent {
+            connect() {
+                connectCalls += 1;
+                return net.connect({ host: '127.0.0.1', port });
+            }
+        }
+        const agent = observeSpotRestConnections(
+            new ProxyStyleAgent(SPOT_REST_CONNECTION_POOL),
+            record,
+        );
+
+        for (let index = 0; index < 3; index += 1) await get(agent, port);
+
+        // One real connection, made through `connect()` — the proxy agent's own
+        // path — and the counter saw it.
+        expect(connectCalls).toBe(1);
+        expect(opened()).toBe(1);
+        expect(record).toHaveBeenCalledTimes(1);
+        expect(record.mock.calls[0][1]).toMatchObject({ phase: SPOT_REST_CONNECT_PHASE });
         agent.destroy();
     });
 
