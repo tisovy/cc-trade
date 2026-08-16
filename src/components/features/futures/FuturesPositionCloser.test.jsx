@@ -118,6 +118,55 @@ describe('FuturesPositionCloser', () => {
     })
   })
 
+  it('revalues a partial market close live without resetting its drafts', () => {
+    const initialPosition = {
+      ...position,
+      valuationPrice: '58500',
+    }
+    const properties = {
+      contract,
+      anchor: { x: 200, y: 150 },
+      onCloseMarket: vi.fn(),
+      onCloseLimit: vi.fn(),
+      onClose: vi.fn(),
+    }
+    const { rerender } = render(
+      <FuturesPositionCloser position={initialPosition} {...properties} />,
+    )
+
+    fireEvent.change(screen.getByLabelText('Close size'), { target: { value: '0.2' } })
+    expect(screen.getByLabelText('Close BTCUSDT LONG position')).toHaveTextContent('11700.00')
+    expect(screen.getByLabelText('Close BTCUSDT LONG position')).toHaveTextContent('+300.00')
+
+    const livePosition = {
+      ...initialPosition,
+      valuationPrice: '58600',
+    }
+    rerender(<FuturesPositionCloser position={livePosition} {...properties} />)
+
+    expect(screen.getByLabelText('Close size')).toHaveValue('0.2')
+    expect(screen.getByLabelText('Close BTCUSDT LONG position')).toHaveTextContent('11720.00')
+    expect(screen.getByLabelText('Close BTCUSDT LONG position')).toHaveTextContent('+320.00')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Limit' }))
+    fireEvent.change(screen.getByLabelText('Close price'), { target: { value: '59000.07' } })
+    expect(screen.getByLabelText('Close BTCUSDT LONG position')).toHaveTextContent('11800.00')
+    expect(screen.getByLabelText('Close BTCUSDT LONG position')).toHaveTextContent('+400.00')
+
+    rerender(
+      <FuturesPositionCloser
+        position={{ ...livePosition, valuationPrice: '60000', markPrice: '60000' }}
+        {...properties}
+      />,
+    )
+
+    expect(screen.getByRole('button', { name: 'Limit' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByLabelText('Close size')).toHaveValue('0.2')
+    expect(screen.getByLabelText('Close price')).toHaveValue('59000.07')
+    expect(screen.getByLabelText('Close BTCUSDT LONG position')).toHaveTextContent('11800.00')
+    expect(screen.getByLabelText('Close BTCUSDT LONG position')).toHaveTextContent('+400.00')
+  })
+
   it('buys back a short instead of selling more of it', () => {
     const { onCloseMarket } = renderCloser({
       position: { ...position, quantity: '-0.500' },

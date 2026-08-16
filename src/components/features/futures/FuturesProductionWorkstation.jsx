@@ -388,6 +388,20 @@ export const FuturesProductionWorkstation = ({
     return position?.quantity ?? null
   }, [editorPositionsConfirmed, executionPositions, orderEditor])
 
+  // Keep the close panel attached to the account row that is being refreshed.
+  // The opening row is retained only for a transient gap in the live positions
+  // read; the identity-based panel key below keeps its operator-owned drafts
+  // mounted while valuation and quantity props change.
+  const positionCloserTarget = positionCloser?.position
+  const closePosition = useMemo(() => {
+    if (!positionCloserTarget) return null
+    const live = Array.isArray(executionPositions)
+      ? executionPositions.find(position => position.symbol === positionCloserTarget.symbol
+        && position.positionSide === positionCloserTarget.positionSide)
+      : null
+    return live ?? positionCloserTarget
+  }, [executionPositions, positionCloserTarget])
+
   // The panel is opened from a row, but it stays open while the account keeps
   // refreshing. It reads the live position rather than the snapshot it was
   // opened with, so the margin it shows is never one adjustment behind.
@@ -512,10 +526,9 @@ export const FuturesProductionWorkstation = ({
         onRetry={orderDrag.retry}
         onDismiss={orderDrag.dismiss}
       />
-      {/* Keyed by the object each panel edits. The panels seed their price, size
-          and amount from props once, so re-targeting one at another order or
-          position without remounting would submit the first target's draft
-          against the second target's identity. */}
+      {/* Keyed by the identity each panel edits. The panels seed their price,
+          size and amount from props once, so replacing live data for that same
+          identity rerenders without discarding operator-owned draft state. */}
       {orderEditor ? (
         <FuturesOrderEditor
           key={`${orderEditor.order.symbol}:${orderEditor.order.orderKind ?? 'REGULAR'}:${orderEditor.order.orderId ?? orderEditor.order.clientOrderId}`}
@@ -530,11 +543,11 @@ export const FuturesProductionWorkstation = ({
           onClose={closeOrderEditor}
         />
       ) : null}
-      {positionCloser ? (
+      {positionCloser && closePosition ? (
         <FuturesPositionCloser
           key={`${positionCloser.position.symbol}:${positionCloser.position.positionSide}`}
-          position={positionCloser.position}
-          contract={positionCloser.position.symbol === symbol ? selectedContract : null}
+          position={closePosition}
+          contract={closePosition.symbol === symbol ? selectedContract : null}
           anchor={positionCloser.anchor}
           onCloseMarket={(position, options) => executionState?.closePosition?.(position, options)}
           onCloseLimit={close => executionState?.placeOrder?.({

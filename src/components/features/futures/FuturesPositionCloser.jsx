@@ -85,9 +85,12 @@ export const FuturesPositionCloser = ({
 
   // What the exit would actually do, which is what the panel used to spend two
   // cells not saying: the size left behind, the money coming off the table, and
-  // the profit that comes with it. Priced at the mark for a market exit and at
-  // the level for a limit — the level is the whole point of choosing one.
-  const exitPrice = orderType === 'MARKET' ? position?.markPrice : normalizedPrice
+  // the profit that comes with it. A market exit follows the position surface's
+  // resolved live valuation (with the exchange mark as a compatibility
+  // fallback); a limit stays at the operator's normalized draft price.
+  const exitPrice = orderType === 'MARKET'
+    ? (position?.valuationPrice ?? position?.markPrice)
+    : normalizedPrice
   const outcome = describeFuturesCloseOutcome({
     positionSide: presentation.positionSide,
     entryPrice: position?.entryPrice,

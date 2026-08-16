@@ -1,4 +1,4 @@
-import { act, render } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { readFuturesSymbolHistory } from '../../../utils/futuresSymbolHistory.js'
 import { FUTURES_COMMAND_OUTCOME } from '../../../utils/futuresCommandOutcome.js'
@@ -205,6 +205,48 @@ describe('FuturesProductionWorkstation account review', () => {
     )
     expect(productionWorkstationMocks.orderEditorRender.mock.lastCall[0].positionQuantity)
       .toBe('2')
+  })
+
+  it('keeps an open close panel bound to the latest matching position row', () => {
+    const closePosition = vi.fn()
+    const openingPosition = {
+      symbol: 'BTCUSDT',
+      positionSide: 'BOTH',
+      quantity: '0.5',
+      entryPrice: '57000',
+      markPrice: '58000',
+      valuationPrice: '58100',
+    }
+    const { rerender } = render(
+      <FuturesProductionWorkstation
+        enabled
+        executionState={executionState({ positions: [openingPosition], closePosition })}
+      />,
+    )
+
+    act(() => {
+      productionWorkstationMocks.viewRender.mock.lastCall[0].tradingRail.props
+        .onPositionClose(openingPosition, { x: 200, y: 150 })
+    })
+
+    const livePosition = {
+      ...openingPosition,
+      markPrice: '58900',
+      valuationPrice: '59000',
+    }
+    rerender(
+      <FuturesProductionWorkstation
+        enabled
+        executionState={executionState({ positions: [livePosition], closePosition })}
+      />,
+    )
+
+    expect(screen.getByLabelText('Close BTCUSDT LONG position')).toHaveTextContent('29500.00')
+    fireEvent.click(screen.getByRole('button', { name: 'Close at market' }))
+    expect(closePosition).toHaveBeenCalledExactlyOnceWith(
+      livePosition,
+      { quantity: '0.5' },
+    )
   })
 })
 
