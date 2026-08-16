@@ -570,6 +570,44 @@ describe('FuturesTradingTicket', () => {
     })
   })
 
+  // The size is one value, not two. Resizing at the cursor used to leave the
+  // rail showing whatever the operator had set there earlier — the panel said
+  // one amount while the order about to be sent was for another.
+  it('carries a confirmation resize back to the rail', () => {
+    const state = createState()
+    const props = {
+      state,
+      selectedSymbol: 'BTCUSDT',
+      selectedContract: contract,
+      draftPrice: '58445.0',
+    }
+    const { rerender } = render(<FuturesTradingTicket {...props} />)
+    sizeTo(25)
+    expect(screen.getByRole('textbox', { name: 'Order notional USDT' })).toHaveValue('250')
+
+    rerender(
+      <FuturesTradingTicket
+        {...props}
+        gestureRequest={{
+          id: 202,
+          side: 'BUY',
+          positionSide: 'LONG',
+          positionEffect: 'ENTRY',
+          price: '58445.0',
+        }}
+      />,
+    )
+    fireEvent.change(
+      within(screen.getByRole('alertdialog'))
+        .getByRole('slider', { name: 'Confirmation order size percent' }),
+      { target: { value: '37.5' } },
+    )
+
+    // The rail follows, both readings of it: the amount and the share.
+    expect(screen.getByRole('textbox', { name: 'Order notional USDT' })).toHaveValue('375')
+    expect(screen.getByRole('slider', { name: 'Order size percent' })).toHaveValue('37.5')
+  })
+
   it('resizes a staged exit from the matching position before Send', () => {
     const state = createState({
       positions: [{

@@ -805,8 +805,14 @@ export const FuturesWorkstationChart = ({
     restingOrders.forEach((order) => {
       const intent = describeFuturesOrderIntent(order)
       addLine(order.price, {
+        // One pixel, like every other line on this chart. A resting order was
+        // the only overlay drawn at two, and against candles a few pixels wide
+        // it read as a band rather than as a price — it hid the bars sitting at
+        // it, which is the one place the operator is looking when the order is
+        // about to fill. Weight is kept for the drag, where it marks an action
+        // in progress rather than a standing fact.
         color: intent.tone === 'buy' ? '#2bc48a' : '#ef5b69',
-        lineWidth: 2,
+        lineWidth: 1,
         lineStyle: LineStyle.Solid,
         axisLabelVisible: true,
         title: '',

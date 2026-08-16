@@ -424,6 +424,16 @@ const FuturesTradingTicket = ({
       leverage: entryLeverage ?? 1,
     })
     setUnsentConfirmation(null)
+    // The size is one value, not two. Resizing on the confirmation used to move
+    // only the pending order, so the rail went on showing the figure the
+    // operator had left there — 17k on the panel while the order at the cursor
+    // was for something else. The rail follows.
+    //
+    // The notional is carried back rather than the percent, because the two
+    // panels measure percent against different things: the rail's slider is a
+    // share of the available balance, and an exit's slider on the confirmation
+    // is a share of the position being closed. The amount means the same on both.
+    setCustomNotionalUsdt(nextNotionalUsdt)
     setPendingOrder(previous => previous ? {
       ...previous,
       draft: nextDraft,
