@@ -41,6 +41,15 @@ calls a pre-window remainder is a false one.
   against the 137, 4 and 1 above. Run from a scratch harness rather than added to
   the suite — it simulates an exchange, which is a thing to measure with, not a
   thing to keep.
+- [x] 2.4 The same sequence stopped one fill earlier — the operator still
+  holding the short the reversal opened — asserted apart, because the symptom is
+  a different and worse one: the old walk produced a single *closed* long of
+  twenty-one units while the account stood in the opposite position, and the
+  short did not exist in the walk at all. Written by the neighbouring session
+  after it reproduced both halves against `f891860^`; it fails there on the
+  short being absent. Confirmed here at `cc509cc`: four fills now give an open
+  short of two, correctly outside a tab of closed positions, and a closed long
+  of nineteen at 147.37 → 152.63.
 - [x] 2.3 `npx vitest run` on the committed tree, extracted with `git archive`,
   with `eslint`, `check:futures-production` and `check:command-path` beside it.
 

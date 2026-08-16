@@ -35,7 +35,9 @@ Twenty-one units were never held; ten was the most the account ever carried.
 
 Stop one fill earlier — the operator still holding the short they reversed into —
 and the tab shows that phantom long of twenty-one as a *closed* position while
-the real position is open and, being open, is not in this tab at all.
+the real position is open and, being open, is not in this tab at all. That is the
+worse of the two: not a wrong row about the past, but a finished position stated
+beside a live one that contradicts it.
 
 (An earlier wording of this, in the message of the commit that fixed it, said the
 short was missing from the five-fill case. It is not: it is shown, with its own
