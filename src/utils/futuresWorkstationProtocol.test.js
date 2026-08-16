@@ -217,6 +217,44 @@ describe('Futures workstation environment-specific protocols', () => {
     expect(Object.isFrozen(request)).toBe(true)
   })
 
+  // The key a session is matched by, and the only field in this file that was
+  // pattern-tested without a `typeof` in front of it. `RegExp.test` coerces and
+  // `?? ''` catches only null and undefined, so a number, a boolean and an array
+  // all passed as an identity under whatever they stringify to.
+  //
+  // Both call sites, because a fix applied to one of them is the likelier
+  // mistake than no fix at all.
+  it('refuses an identity that is not a string, on a request', () => {
+    const request = createFuturesProductionWorkstationUnsubscribeRequest({
+      requestId: requestValues.requestId,
+    })
+    for (const identity of [12345, true, [1], 1e2, { toString: () => 'r1' }]) {
+      const frame = JSON.stringify({ ...request, requestId: identity })
+      expect(() => readFuturesProductionWorkstationRequest(frame))
+        .toThrow(FuturesWorkstationProtocolError)
+    }
+    // The one that has teeth: past 2^53 the platform parser rounds, so this used
+    // to be accepted under 9007199254740992 — an identity the sender never
+    // wrote, and one every id rounding to the same double would share.
+    expect(() => readFuturesProductionWorkstationRequest(
+      JSON.stringify(request).replace('"protocol-request-1"', '9007199254740993'),
+    )).toThrow(FuturesWorkstationProtocolError)
+    // And the string it always accepted still passes, unchanged.
+    expect(readFuturesProductionWorkstationRequest(JSON.stringify(request))).toEqual(request)
+  })
+
+  it('refuses an identity that is not a string, on an event', () => {
+    const event = createFuturesProductionWorkstationEvent(
+      createEventValues(FUTURES_WORKSTATION_RESOURCES.TRADES),
+    )
+    for (const identity of [12345, true, [1]]) {
+      const frame = JSON.stringify({ ...event, requestId: identity })
+      expect(() => parseFuturesProductionWorkstationEvent(frame))
+        .toThrow(FuturesWorkstationProtocolError)
+    }
+    expect(parseFuturesProductionWorkstationEvent(JSON.stringify(event))).toEqual(event)
+  })
+
   it('uses an exact smaller unsubscribe shape', () => {
     const request = createFuturesProductionWorkstationUnsubscribeRequest({
       requestId: requestValues.requestId,

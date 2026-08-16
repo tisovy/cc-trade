@@ -212,6 +212,27 @@ export const isFuturesWorkstationSymbol = value => (
 
 export const isFuturesWorkstationInterval = value => INTERVAL_VALUES.has(value)
 
+// The key a session is matched by, and the reason it is typed here rather than
+// tested where it is used.
+//
+// `RegExp.prototype.test` coerces, and `?? ''` intercepts only null and
+// undefined — so `REQUEST_ID_PATTERN.test(value.requestId ?? '')`, which is what
+// both call sites used to read, accepted a number, a boolean and an array under
+// whatever string they stringify to. `12345`, `true` and `[1]` all passed. Every
+// other `.test(` in this file is preceded by an explicit `typeof`; these two
+// were the exceptions.
+//
+// It mattered because ten strict comparisons decide session ownership by this
+// field — whether a request belongs to the session it names, whether a frame
+// belongs to the subscription listening for it, whether an unsubscribe releases
+// the contract on screen. And once the local protocol moved to the platform's
+// parser, an id past 2^53 stopped being refused and started arriving rounded:
+// `9007199254740993` was accepted as `9007199254740992`, an identity the sender
+// never wrote and one that every id rounding to the same double would share.
+const isFuturesWorkstationRequestId = value => (
+  typeof value === 'string' && REQUEST_ID_PATTERN.test(value)
+)
+
 // The key a row is matched by: its bucket boundary in the grouper's own fixed
 // point. Not an exchange identity — those are bounded by uint64, and a bucket
 // key is a price scaled by 1e18, so a five-figure contract's keys run to
@@ -268,8 +289,19 @@ const isReasonCode = value => (
 // Measured, not encoded. A full depth frame carries six thousand short strings
 // and each one used to be encoded into a throwaway buffer — behind a throwaway
 // encoder — purely to learn its length. Counting the bytes is the same number.
-// Lone surrogates are counted as if paired; hasOnlyUnicodeScalars rejects them
-// on the same expression, so the value never survives the miscount.
+//
+// Lone surrogates are counted as if paired, and this used to say that
+// `hasOnlyUnicodeScalars` rejected them "on the same expression, so the value
+// never survives the miscount". That guard was removed with the hand-written
+// parser and the sentence was left behind, so it was false: measured, a string
+// of lone high surrogates counts as 4 000 bytes against a truth of 6 000, and a
+// frame could pass a byte ceiling by half again.
+//
+// Not reachable in the desk as it stands, and the reason is worth keeping rather
+// than the reassurance: a WebSocket text frame is UTF-8 decoded by the transport
+// on both sockets, so a lone surrogate cannot arrive over the wire at all. Only
+// an in-process caller could hand one in. If this ever gains a caller that is
+// not a socket, the ceiling needs the scalar check back in front of it.
 const utf8Length = (value) => {
   let bytes = 0
   for (let index = 0; index < value.length; index += 1) {
@@ -651,7 +683,7 @@ export const validateFuturesWorkstationRequest = ({
     || value.marketType !== FUTURES_WORKSTATION_MARKET_TYPE
     || value.environment !== environment
     || !Object.values(actions).includes(value.action)
-    || !REQUEST_ID_PATTERN.test(value.requestId ?? '')) {
+    || !isFuturesWorkstationRequestId(value.requestId)) {
     fail('INVALID_REQUEST_IDENTITY')
   }
 
@@ -785,7 +817,7 @@ export const validateFuturesWorkstationEvent = ({
     || value.marketType !== FUTURES_WORKSTATION_MARKET_TYPE
     || value.environment !== environment
     || value.type !== eventType
-    || !REQUEST_ID_PATTERN.test(value.requestId ?? '')
+    || !isFuturesWorkstationRequestId(value.requestId)
     || !isFuturesWorkstationSymbol(value.symbol)
     || !isPositiveSafeInteger(value.generation)
     || !isPositiveSafeInteger(value.revision)
