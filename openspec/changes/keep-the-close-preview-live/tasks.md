@@ -20,3 +20,11 @@
 - [x] 4.1 Re-run `OPENSPEC_TELEMETRY=0 openspec validate keep-the-close-preview-live` after implementation.
 - [x] 4.2 Run GitNexus `detect_changes` against `master`, verify only the intended symbols and execution flows are affected, and report the result before committing directly to `master`.
 - [x] 4.3 Leave the change unarchived until the operator confirms the live-data behavior.
+
+## 5. Post-implementation Audit
+
+- [x] 5.1 Re-index GitNexus on `main`, trace the live close-preview flows, audit the committed implementation and report upstream impact before any production fix.
+- [x] 5.2 Fix every production defect found in live target selection, valuation, draft preservation, quantity validation or submit behavior, keeping production changes ahead of test changes.
+- [x] 5.3 After production fixes, add or strengthen regression coverage for every confirmed defect and uncovered requirement edge.
+- [x] 5.4 Run focused and relevant broader tests, static checks, and `OPENSPEC_TELEMETRY=0 openspec validate keep-the-close-preview-live`.
+- [x] 5.5 Run GitNexus `detect_changes` against `main`, verify the final scope, commit directly to `main`, and leave the change unarchived pending live-data confirmation.

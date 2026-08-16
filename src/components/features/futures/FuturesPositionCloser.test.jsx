@@ -64,6 +64,16 @@ describe('FuturesPositionCloser', () => {
     expect(panel).not.toHaveTextContent('reduce-only')
   })
 
+  it('falls back to the mark when the resolved valuation is unusable', () => {
+    renderCloser({
+      position: { ...position, valuationPrice: '' },
+    })
+
+    const panel = screen.getByLabelText('Close BTCUSDT LONG position')
+    expect(panel).toHaveTextContent('29222.53')
+    expect(panel).toHaveTextContent('+722.53')
+  })
+
   // Four percentage buttons could offer four of the hundred sizes a position can
   // be cut to; a slider offers all of them, snapped to the same lot step.
   it('closes at market for the size the slider was dragged to', () => {
@@ -165,6 +175,40 @@ describe('FuturesPositionCloser', () => {
     expect(screen.getByLabelText('Close price')).toHaveValue('59000.07')
     expect(screen.getByLabelText('Close BTCUSDT LONG position')).toHaveTextContent('11800.00')
     expect(screen.getByLabelText('Close BTCUSDT LONG position')).toHaveTextContent('+400.00')
+  })
+
+  it('validates a held draft against the exact live position quantity', () => {
+    const properties = {
+      contract: null,
+      anchor: { x: 200, y: 150 },
+      onCloseMarket: vi.fn(),
+      onCloseLimit: vi.fn(),
+      onClose: vi.fn(),
+    }
+    const initialPosition = {
+      ...position,
+      quantity: '0.00000002',
+      valuationPrice: '58500',
+    }
+    const { rerender } = render(
+      <FuturesPositionCloser position={initialPosition} {...properties} />,
+    )
+
+    fireEvent.change(screen.getByLabelText('Close size'), {
+      target: { value: '0.00000001' },
+    })
+    expect(screen.getByRole('button', { name: 'Close at market' })).toBeEnabled()
+
+    rerender(
+      <FuturesPositionCloser
+        position={{ ...initialPosition, quantity: '0.00000001', valuationPrice: '58600' }}
+        {...properties}
+      />,
+    )
+
+    expect(screen.getByLabelText('Close size')).toHaveValue('0.00000001')
+    expect(sizeSlider()).toHaveValue('100')
+    expect(screen.getByRole('button', { name: 'Close at market' })).toBeEnabled()
   })
 
   it('buys back a short instead of selling more of it', () => {

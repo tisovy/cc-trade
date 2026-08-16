@@ -38,9 +38,17 @@ export const FuturesPositionCloser = ({
   const filters = contract?.filters ?? null
   const tickSize = filters?.price?.tickSize ?? null
   const stepSize = filters?.quantity?.stepSize ?? null
-  const openQuantity = presentation.absoluteQuantity === null
+  const rawQuantity = position?.quantity
+  const exactOpenQuantity = presentation.absoluteQuantity === null
     ? ''
-    : String(presentation.absoluteQuantity)
+    : typeof rawQuantity === 'string'
+      ? rawQuantity.replace(/^-/, '')
+      : String(presentation.absoluteQuantity)
+  // Keep the exchange decimal exact for validation, but retain the compact
+  // field presentation the panel already had (`0.500` opens as `0.5`).
+  const openQuantity = exactOpenQuantity.includes('.')
+    ? exactOpenQuantity.replace(/0+$/, '').replace(/\.$/, '')
+    : exactOpenQuantity
   const [orderType, setOrderType] = useState('MARKET')
   const [price, setPrice] = useState(() => (
     formatExchangePrice(position?.markPrice, tickSize, '')
@@ -88,9 +96,11 @@ export const FuturesPositionCloser = ({
   // the profit that comes with it. A market exit follows the position surface's
   // resolved live valuation (with the exchange mark as a compatibility
   // fallback); a limit stays at the operator's normalized draft price.
-  const exitPrice = orderType === 'MARKET'
-    ? (position?.valuationPrice ?? position?.markPrice)
-    : normalizedPrice
+  const valuationPrice = Number(position?.valuationPrice)
+  const marketPrice = Number.isFinite(valuationPrice) && valuationPrice > 0
+    ? position.valuationPrice
+    : position?.markPrice
+  const exitPrice = orderType === 'MARKET' ? marketPrice : normalizedPrice
   const outcome = describeFuturesCloseOutcome({
     positionSide: presentation.positionSide,
     entryPrice: position?.entryPrice,
