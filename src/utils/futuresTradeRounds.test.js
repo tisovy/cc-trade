@@ -314,6 +314,92 @@ describe('buildFuturesTradeRounds', () => {
     })
   })
 
+  // Realized PnL is the evidence that a fill closed something, and it settles
+  // every case but one: a close at exactly the position's own average entry
+  // realizes nothing, which is what an opening fill also reports. At a window
+  // edge the two are the same row of data, and read as an opening one it invented
+  // a short, folded the real close into it as an increase — an increase carries
+  // no realized PnL — and left it open, so the closed-position tab showed neither
+  // the position nor its profit. The fills after it say which it was: inside a
+  // run on one side the position only moves one way, so a later fill in that run
+  // realizing anything proves the run is closing.
+  it('reads a close that realized nothing as a close when the fills after it say so', () => {
+    const rounds = buildFuturesTradeRounds([
+      // Ten held at 100 from before the window. Four out at cost, then the rest.
+      fill({ id: 1, side: 'SELL', price: '100', quantity: '4', commission: '0', realizedPnl: '0', time: 1000 }),
+      fill({ id: 2, side: 'SELL', price: '120', quantity: '6', commission: '0', realizedPnl: '120', time: 2000 }),
+    ])
+    expect(rounds).toHaveLength(1)
+    expect(rounds[0]).toMatchObject({
+      positionSide: 'LONG',
+      quantity: '10',
+      // (4 × 100 + 6 × 120) / 10, and 112 − 120/10 back to the entry.
+      exitPrice: 112,
+      entryPrice: 100,
+      entryImplied: true,
+      realizedPnl: 120,
+      partial: true,
+      open: false,
+    })
+  })
+
+  // The mirror. A short recovers its entry by adding the per-unit PnL where a
+  // long subtracts it, so a fix that read one side only would pass the case
+  // above and still lose this one.
+  it('reads the same close on a short', () => {
+    const rounds = buildFuturesTradeRounds([
+      fill({ id: 1, side: 'BUY', price: '100', quantity: '4', commission: '0', realizedPnl: '0', time: 1000 }),
+      fill({ id: 2, side: 'BUY', price: '80', quantity: '6', commission: '0', realizedPnl: '120', time: 2000 }),
+    ])
+    expect(rounds).toHaveLength(1)
+    expect(rounds[0]).toMatchObject({
+      positionSide: 'SHORT',
+      quantity: '10',
+      exitPrice: 88,
+      entryPrice: 100,
+      entryImplied: true,
+      realizedPnl: 120,
+      open: false,
+    })
+  })
+
+  // The other half of the same rule, and the one that catches it firing where it
+  // should not: a run of fills that realizes nothing throughout is a position
+  // being built, and must stay one.
+  it('still reads a position being built as the position it opened', () => {
+    const rounds = buildFuturesTradeRounds([
+      fill({ id: 1, side: 'SELL', price: '100', quantity: '4', commission: '0', realizedPnl: '0', time: 1000 }),
+      fill({ id: 2, side: 'SELL', price: '120', quantity: '6', commission: '0', realizedPnl: '0', time: 2000 }),
+      fill({ id: 3, side: 'BUY', price: '110', quantity: '10', commission: '0', realizedPnl: '20', time: 3000 }),
+    ])
+    expect(rounds).toHaveLength(1)
+    expect(rounds[0]).toMatchObject({
+      positionSide: 'SHORT',
+      quantity: '10',
+      // Read from its own fills: (4 × 100 + 6 × 120) / 10.
+      entryPrice: 112,
+      entryImplied: false,
+      exitPrice: 110,
+      realizedPnl: 20,
+      partial: false,
+      open: false,
+    })
+  })
+
+  // A hedge account names the leg each fill belongs to, and two sells in a row
+  // can be one position opening beside another closing. The run stops at the leg
+  // boundary rather than reading the second sell as evidence about the first.
+  it('does not read one position leg as evidence about the other', () => {
+    const rounds = buildFuturesTradeRounds([
+      fill({ id: 1, side: 'SELL', price: '100', quantity: '4', commission: '0', realizedPnl: '0', time: 1000, positionSide: 'SHORT' }),
+      fill({ id: 2, side: 'SELL', price: '120', quantity: '6', commission: '0', realizedPnl: '120', time: 2000, positionSide: 'LONG' }),
+    ])
+    // The walk still folds both legs into one contract's exposure, which is its
+    // own limitation — what this asserts is only that the first fill was not
+    // re-read as a close on the strength of the second.
+    expect(rounds[0].entryImplied).toBe(false)
+  })
+
   it('orders the fills itself rather than trusting the order they arrive in', () => {
     const rounds = buildFuturesTradeRounds([
       fill({ id: 3, side: 'SELL', price: '3', quantity: '100', realizedPnl: '100', time: 3000 }),

@@ -42,48 +42,80 @@ const isBuy = fill => String(fill?.side).toUpperCase() === 'BUY'
 
 const symbolOf = fill => (typeof fill?.symbol === 'string' ? fill.symbol.toUpperCase() : '')
 
-// `mayBeClosing` is false for the leftover of a fill that flipped the position:
-// that part is known to be opening, and its fill's realized PnL was made on the
-// way out of the position it just closed.
+// One-way accounts report `BOTH`; a hedge account names the leg the fill belongs
+// to, and its two legs are two positions on one contract.
+const legOf = fill => String(fill?.positionSide ?? 'BOTH').toUpperCase()
+
+// `closing` says this round begins by closing a position opened before this
+// window of fills, whose entry price is therefore not in the data. Its leg is the
+// one being closed, not the side of the fill — a BUY that closes closed a short.
 //
 // `fromFlat` records whether the walk actually saw this round start from no
 // position at all. The first round of a contract did not — the window of fills
 // begins wherever the read reached, and the operator may already have been in
 // the trade — and neither did one that follows a round closing a position older
 // than the window.
-const openRound = (fill, buy, mayBeClosing, fromFlat) => {
-  // A fill that already realizes PnL is closing something: the position it belongs
-  // to was opened before this window of trades, and its entry price is not in the
-  // data. Its leg is the one being closed, not the side of the fill — a BUY that
-  // realizes PnL closed a short.
-  const closing = mayBeClosing && toNumber(fill?.realizedPnl) !== 0
-  return {
-    symbol: symbolOf(fill),
-    // Trade ids are numbered per contract, so two symbols can hand out the same
-    // one: the symbol is part of the identity, not decoration.
-    key: `${symbolOf(fill)}:${fill?.id ?? fill?.orderId ?? 'round'}:${toNumber(fill?.time)}`,
-    positionSide: closing === buy ? 'SHORT' : 'LONG',
-    openTime: toNumber(fill?.time),
-    closeTime: toNumber(fill?.time),
-    entryAtoms: 0n,
-    entryNotional: 0,
-    // What the units still held were entered at, kept the way the exchange keeps
-    // it: adding moves the average, closing does not move it at all. This is not
-    // what the round reports — that is the average over everything it ever
-    // entered, and it is the figure that makes exit minus entry times size come
-    // to the realized PnL of the whole round. But it is the only average a
-    // single fill's realized PnL can be checked against, because that is what
-    // the exchange settled it against.
-    heldAtoms: 0n,
-    heldEntry: 0,
-    exitAtoms: 0n,
-    exitNotional: 0,
-    realizedPnl: 0,
-    fee: 0,
-    fills: 0,
-    partial: closing,
-    fromFlat,
+const openRound = (fill, buy, closing, fromFlat) => ({
+  symbol: symbolOf(fill),
+  // Trade ids are numbered per contract, so two symbols can hand out the same
+  // one: the symbol is part of the identity, not decoration.
+  key: `${symbolOf(fill)}:${fill?.id ?? fill?.orderId ?? 'round'}:${toNumber(fill?.time)}`,
+  positionSide: closing === buy ? 'SHORT' : 'LONG',
+  openTime: toNumber(fill?.time),
+  closeTime: toNumber(fill?.time),
+  entryAtoms: 0n,
+  entryNotional: 0,
+  // What the units still held were entered at, kept the way the exchange keeps
+  // it: adding moves the average, closing does not move it at all. This is not
+  // what the round reports — that is the average over everything it ever
+  // entered, and it is the figure that makes exit minus entry times size come
+  // to the realized PnL of the whole round. But it is the only average a
+  // single fill's realized PnL can be checked against, because that is what
+  // the exchange settled it against.
+  heldAtoms: 0n,
+  heldEntry: 0,
+  exitAtoms: 0n,
+  exitNotional: 0,
+  realizedPnl: 0,
+  fee: 0,
+  fills: 0,
+  partial: closing,
+  fromFlat,
+})
+
+// Whether the fill a round is about to open on is closing a position opened
+// before this window. Realized PnL says so whenever there is any: an opening fill
+// realizes nothing.
+//
+// Nothing is the one answer it cannot settle. A close at exactly the position's
+// own average entry realizes nothing either, and at a window edge — where the
+// position's opening fills are not in hand to size it — the two are the same row
+// of data. Read as an opening fill it invents a position in the opposite
+// direction; every fill after it on that side then reads as adding to the
+// invention, an increase carries no realized PnL, and the real close leaves the
+// review taking its profit with it.
+//
+// The fills that follow settle what the fill itself cannot. Inside a run on one
+// side the position only moves one way, so a later fill in that run realizing
+// anything at all proves the run is reducing a position rather than building one
+// — and a position being reduced that the walk never saw opened was opened before
+// this window. The run ends at the first fill on the other side, or on another
+// position leg: in a hedge account two sells in a row can be one position opening
+// and another closing, and that is a different reading of the same two rows.
+const opensByClosing = (fills, from, fromFlat) => {
+  const opener = fills[from].fill
+  if (toNumber(opener?.realizedPnl) !== 0) return true
+  // The walk has seen this contract flat, so there is no older position left to
+  // close and no ambiguity to settle.
+  if (fromFlat) return false
+  const buy = isBuy(opener)
+  const leg = legOf(opener)
+  for (let index = from + 1; index < fills.length; index += 1) {
+    const next = fills[index].fill
+    if (isBuy(next) !== buy || legOf(next) !== leg) return false
+    if (toNumber(next?.realizedPnl) !== 0) return true
   }
+  return false
 }
 
 // A reducing fill larger than the round is holding has two readings: the
@@ -205,12 +237,18 @@ const foldContractFills = (fills) => {
   // The walk has not seen a flat position yet: the contract's first round may
   // have been open before these fills begin.
   let openedFromFlat = false
-  for (const entry of fills) {
+  for (let index = 0; index < fills.length; index += 1) {
+    const entry = fills[index]
     const buy = isBuy(entry.fill)
     let remaining = entry.atoms
     while (remaining > 0n) {
       if (round === null) {
-        round = openRound(entry.fill, buy, remaining === entry.atoms, openedFromFlat)
+        // Only a whole fill can be closing. The leftover of one that flipped the
+        // position is known to be opening, and its fill's realized PnL was made
+        // on the way out of the position it just closed.
+        const whole = remaining === entry.atoms
+        round = openRound(entry.fill, buy,
+          whole && opensByClosing(fills, index, openedFromFlat), openedFromFlat)
         openedFromFlat = false
         running = 0n
       }

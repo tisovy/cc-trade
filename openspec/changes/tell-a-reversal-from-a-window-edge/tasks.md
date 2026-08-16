@@ -150,3 +150,8 @@ and kept out of the suite for the reason §2.2 gave.*
   which is a new rule about how a round opens, and this change's whole argument
   is about a rule for how one closes. Left for the operator to decide whether
   it earns a change.
+
+  It did: fixed by `read-a-break-even-close-as-a-close`, by the look-ahead this
+  paragraph names. What survives it is narrower and written down there — a
+  break-even close with no fill after it on the same side, and one the operator
+  adds to before closing the rest.
