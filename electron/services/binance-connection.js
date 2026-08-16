@@ -2784,6 +2784,32 @@ export function setupBinanceConnection({
             }
         };
 
+        /**
+         * The read a command asks for because it changed something, issued and
+         * not waited for.
+         *
+         * Futures already draws this line and these are its words: a read the
+         * stream stated a change to but cannot carry goes out `unstated` and
+         * nothing waits on it (`refreshFuturesAccountState({ reason:
+         * 'unstated' })`); a read the screen is wrong without is `unresolved`
+         * and is awaited. Spot awaited both, so every command cost its exchange
+         * round trip plus a whole account pass — 1696, 1882, 3285, 1696 and
+         * 2169ms measured on 2026-08-16, against the 335ms of the one command
+         * that arrived while a pass was already in flight and so skipped the
+         * wait.
+         *
+         * The catch is what Futures' bare `void` does not have. Each operation
+         * inside a pass already reports its own failure; this is for the pass
+         * itself failing, which unwatched reaches the operator as an anonymous
+         * `[Electron] Unhandled rejection` and says nothing about which read it
+         * was.
+         */
+        const refreshAccountStateUnstated = (symbol) => {
+            void refreshAccountState(symbol).catch((error) => {
+                logger.error('Spot account refresh failed:', error?.code || error?.message);
+            });
+        };
+
         const RECONCILE_ATTEMPTS = 3;
         const RECONCILE_BACKOFF_MS = 500;
         const pause = ms => new Promise((resolve) => { setTimeout(resolve, ms); });
@@ -2880,6 +2906,11 @@ export function setupBinanceConnection({
                             'Binance holds this order — it was accepted.',
                             { marketType: SPOT_MARKET_TYPE, ...identity, reconciled: true },
                         ));
+                        // Awaited, the `unresolved` case: the desk has just
+                        // learned what became of an order it could not account
+                        // for, and until this answers the panel still shows the
+                        // account from before it. The operator is released from
+                        // the warning here and may act immediately.
                         await refreshAccountState(symbol);
                         return;
                     }
@@ -2958,7 +2989,10 @@ export function setupBinanceConnection({
                 });
                 noteSpotMutation();
                 emit({ execution_update: executionReport });
-                await refreshAccountState(symbol);
+                // The exchange has answered and the answer is on its way to the
+                // operator on the line above. The read that follows proves what
+                // the order did, but nobody is waiting in front of it.
+                refreshAccountStateUnstated(symbol);
             } catch (error) {
                 await reportSpotCommandFailure({
                     action: TRADING_COMMAND_ACTIONS.PLACE_ORDER,
@@ -3007,7 +3041,10 @@ export function setupBinanceConnection({
                 });
                 noteSpotMutation();
                 emit({ execution_update: executionReport });
-                await refreshAccountState(targetSymbol);
+                // Same as the placement above: the cancellation is already
+                // reported, so its account pass runs behind the operator rather
+                // than in front of them.
+                refreshAccountStateUnstated(targetSymbol);
             } catch (error) {
                 await reportSpotCommandFailure({
                     action: TRADING_COMMAND_ACTIONS.CANCEL_ORDER,
@@ -4086,6 +4123,9 @@ export function setupBinanceConnection({
                     await handleCancelOrder(command.cancelPayload);
                     break;
                 case TRADING_COMMAND_ACTIONS.ACCOUNT_REFRESH:
+                    // Awaited, and not for the same reason as the reconciliation
+                    // above: here the read is the whole command. There is no
+                    // outcome emitted in front of it to wait behind.
                     await refreshAccountState(command.symbol);
                     break;
             }

@@ -21,3 +21,7 @@ and the operator must not act on a screen that predates it.
 #### Scenario: An unknown outcome has just been resolved
 - **WHEN** a spot command's outcome was unknown and reconciliation has just established what happened
 - **THEN** the account read is awaited, because the screen is wrong until it answers and the operator may act on it
+
+#### Scenario: The read is the command
+- **WHEN** the operator asks the desk to refresh the spot account
+- **THEN** the read is awaited, because it is the whole of what was asked for and no outcome was emitted in front of it

@@ -7311,6 +7311,145 @@ describe('setupBinanceConnection user-data orchestration', () => {
             'emit:history',
         ]);
     });
+
+    // What the operator was waiting on. Six spot commands measured on live data
+    // 2026-08-16 cost 1696, 1882, 335, 3285, 1696 and 2169ms — and the 335 is
+    // the one that arrived while an account pass was already in flight, skipped
+    // the wait and so measured the exchange round trip alone. These two pin
+    // which reads a command holds for and which it does not.
+    describe('what a spot command waits for', () => {
+        // Held open from the moment it is installed, so anything that waits on
+        // this read cannot answer at all. Installed only after the desk has
+        // opened: the startup snapshot reads the account too, and holding that
+        // one would leave a pass in flight — which is the case where even the
+        // old code did not wait, and the test would prove nothing.
+        const holdTheAccountRead = () => {
+            let release;
+            const held = new Promise((resolve) => { release = resolve; });
+            moduleMocks.spotClient.restAPI.getAccount = vi.fn(async () => {
+                await held;
+                return { data: vi.fn().mockResolvedValue({
+                    balances: [{ asset: 'USDT', free: '100', locked: '0' }],
+                }) };
+            });
+            return release;
+        };
+
+        const openSpotDesk = async () => {
+            setupBinanceConnection({
+                localWebSocketAccess: { host: '127.0.0.1', port: 14477 },
+            });
+            moduleMocks.websocketServerHandlers.request({
+                origin: 'http://localhost:5174',
+                accept: vi.fn(() => moduleMocks.rendererConnection),
+            });
+            await activateMarket('spot');
+            await flushMicrotasks();
+            await vi.advanceTimersByTimeAsync(2_500);
+            await flushMicrotasks();
+            // The startup read has answered and nothing is left in flight.
+            expect(moduleMocks.spotClient.restAPI.getAccount).toHaveBeenCalled();
+            moduleMocks.rendererConnection.sendUTF.mockClear();
+        };
+
+        const placeSpotOrder = (clientOrderId) => moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'trade.placeOrder',
+                version: 1,
+                marketType: 'spot',
+                accountId: 'default',
+                clientOrderId,
+                symbol: 'BTCUSDT',
+                side: 'BUY',
+                orderType: 'LIMIT',
+                timeInForce: 'GTC',
+                price: '12346',
+                quantity: '99.9',
+            }),
+        });
+
+        const sent = () => moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message));
+        const balancesReached = () => sent().some(payload => payload.balances);
+
+        // Drives time forward until the command answers, bounded so a command
+        // that never answers ends the test instead of hanging it.
+        const driveUntilAnswered = async (answered) => {
+            for (let step = 0; step < 20 && !answered(); step += 1) {
+                await vi.advanceTimersByTimeAsync(500);
+                await flushMicrotasks();
+            }
+        };
+
+        it('answers an accepted placement without waiting for the account read it triggers', async () => {
+            await openSpotDesk();
+            const releaseAccountRead = holdTheAccountRead();
+
+            const command = placeSpotOrder('spot-place-unstated');
+            let answered = false;
+            void command.then(() => { answered = true; });
+            await driveUntilAnswered(() => answered);
+
+            // The command is done although the read it asked for is not.
+            expect(answered).toBe(true);
+            expect(moduleMocks.spotClient.restAPI.newOrder).toHaveBeenCalledOnce();
+            expect(sent().filter(payload => payload.execution_update)).toHaveLength(1);
+
+            // And the read did go out — it is simply nobody's turnstile.
+            await vi.advanceTimersByTimeAsync(2_000);
+            await flushMicrotasks();
+            expect(moduleMocks.spotClient.restAPI.getAccount).toHaveBeenCalledOnce();
+            expect(balancesReached()).toBe(false);
+
+            releaseAccountRead();
+            await vi.advanceTimersByTimeAsync(2_000);
+            await flushMicrotasks();
+            expect(balancesReached()).toBe(true);
+            await command;
+        });
+
+        // A guard: this is what a find-and-replace over the `await` would take
+        // with it. It does not fail against the tree before the change — it
+        // fails against the shortcut.
+        it('guards the wait after a reconciled unknown outcome, which the screen is wrong without', async () => {
+            await openSpotDesk();
+            const releaseAccountRead = holdTheAccountRead();
+            moduleMocks.spotClient.restAPI.newOrder = vi.fn()
+                .mockRejectedValue(Object.assign(new Error('gateway timed out'), {
+                    indeterminate: true,
+                }));
+            moduleMocks.spotClient.restAPI.getOrder = vi.fn(async () => ({
+                data: vi.fn().mockResolvedValue({
+                    symbol: 'BTCUSDT', orderId: 41, status: 'NEW', side: 'BUY',
+                }),
+            }));
+
+            const command = placeSpotOrder('spot-place-unresolved');
+            let answered = false;
+            void command.then(() => { answered = true; });
+            await driveUntilAnswered(() => answered);
+
+            // Binance was asked what became of the order and said it holds it,
+            // so the operator is about to be released from the warning — but
+            // the panel still shows the account from before the order.
+            expect(moduleMocks.spotClient.restAPI.getOrder).toHaveBeenCalledOnce();
+            expect(sent().some(payload => (
+                payload.command_resolved?.code === 'SPOT_OUTCOME_EXECUTED'
+            ))).toBe(true);
+            expect(moduleMocks.spotClient.restAPI.getAccount).toHaveBeenCalledOnce();
+            expect(balancesReached()).toBe(false);
+            expect(answered).toBe(false);
+
+            releaseAccountRead();
+            await vi.advanceTimersByTimeAsync(2_000);
+            await flushMicrotasks();
+            expect(balancesReached()).toBe(true);
+            expect(answered).toBe(true);
+            await command;
+        });
+    });
+
     // The Spot chart used to end at the 500 candles the bootstrap delivers.
     // Depth behind that window is read on demand from the same reviewed public
     // klines route, and only for the selection the chart is actually showing.
