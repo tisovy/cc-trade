@@ -34,6 +34,16 @@
 
   Six spot commands, three connections opened. **Reuse is happening** — that is what this change claims and it is proven.
 
+  The day's record contains **5** `spot-rest-connect` rows in total. The run that carried these commands contains **3**, all before the first command:
+
+  ```json
+  {"at":"2026-08-16T17:37:26.971Z","kind":"timing","phase":"spot-rest-connect","durationMs":0,"outcome":"ok","cache":"miss"}
+  {"at":"2026-08-16T17:39:33.527Z","kind":"timing","phase":"spot-rest-connect","durationMs":0,"outcome":"ok","cache":"miss"}
+  {"at":"2026-08-16T17:39:34.027Z","kind":"timing","phase":"spot-rest-connect","durationMs":0,"outcome":"ok","cache":"miss"}
+  ```
+
+  The command/answer interval runs from `2026-08-16T17:39:49.532Z` through `2026-08-16T17:40:03.683Z` with **zero further** connect rows. A case-insensitive search of the whole day's record for `unresolved` or `indeterminate` returned **zero rows**; all six answers carried `"outcome":"ok"`.
+
   But the commands answered in **1696, 1882, 335, 3285, 1696 and 2169 ms**, not the 330–470 predicted below. The prediction was wrong because it assumed the `answer` line measures the same thing on both markets, and it does not. It measures the whole dispatch, and spot awaits a full account refresh inside it — `handleOrderPlacement` ends `await refreshAccountState(symbol)`, three serialized reads. Futures does not: it fires the same read with `void` and does not wait (`binance-connection.js:1889`). So the futures number is one round trip and the spot number is a round trip plus an account pass.
 
   The order's own round trip *is* now ~330 ms, and the record shows it plainly: the third command answered in **335 ms** — because `refreshAccountState` returns immediately when a refresh is already in flight, so that one command skipped the wait. It is the only one of the six that measured what this change actually changed, and it landed exactly where the change predicted.
