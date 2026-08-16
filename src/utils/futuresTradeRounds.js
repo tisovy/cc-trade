@@ -125,6 +125,10 @@ const applyFill = (round, { fill, atoms, price, share, increasing }) => {
     // the position; a fill that closes one position and opens the opposite one
     // realized all of it on the way out.
     round.realizedPnl += toNumber(fill.realizedPnl)
+    // Only the quantity is given back. `heldEntry` is deliberately left where it
+    // was: with nothing held it describes nothing, and the next entry above
+    // multiplies it by a `heldSize` of zero, so the stale figure cannot reach an
+    // average. Clearing it would read as though something depended on it.
     round.heldAtoms = round.heldAtoms > atoms ? round.heldAtoms - atoms : 0n
   }
   // A fee is charged on the whole fill, so a split fill splits its fee.

@@ -281,6 +281,39 @@ describe('buildFuturesTradeRounds', () => {
     expect(rounds.reduce((total, round) => total + round.realizedPnl, 0)).toBe(200)
   })
 
+  // The same sequence stopped one fill earlier, which is what the operator
+  // actually sees mid-session: the reversal has happened and the short it
+  // opened is still on. Read against the wrong average this was the worse of
+  // the two — the only round the walk produced was a *closed* long of
+  // twenty-one units, so the tab stated a position that had ended while the
+  // account was in the opposite one, and the short did not exist in the walk at
+  // all. Asserted apart from the case above because the symptom is different:
+  // there a closed row carried wrong numbers, here a live position is missing
+  // and a finished one is invented beside it.
+  it('does not close a position the account is still in', () => {
+    const rounds = buildFuturesTradeRounds([
+      fill({ id: 1, side: 'BUY', price: '100', quantity: '10', commission: '0', time: 1000 }),
+      fill({ id: 2, side: 'SELL', price: '100', quantity: '9', commission: '0', realizedPnl: '0', time: 2000 }),
+      fill({ id: 3, side: 'BUY', price: '200', quantity: '9', commission: '0', time: 3000 }),
+      // Twelve out of ten held: the long ends and a short of two begins, and
+      // nothing after this says what became of the short.
+      fill({ id: 4, side: 'SELL', price: '200', quantity: '12', commission: '0', realizedPnl: '100', time: 4000 }),
+    ])
+    const short = rounds.find(round => round.positionSide === 'SHORT')
+    expect(short).toMatchObject({ quantity: '2', entryPrice: 200, open: true })
+    // What the closed-position tab is left holding: the long that did end, at
+    // the size it was, and nothing else.
+    const closed = rounds.filter(round => !round.open)
+    expect(closed).toHaveLength(1)
+    expect(closed[0]).toMatchObject({
+      positionSide: 'LONG',
+      quantity: '19',
+      open: false,
+      partial: false,
+      entryImplied: false,
+    })
+  })
+
   it('orders the fills itself rather than trusting the order they arrive in', () => {
     const rounds = buildFuturesTradeRounds([
       fill({ id: 3, side: 'SELL', price: '3', quantity: '100', realizedPnl: '100', time: 3000 }),
