@@ -170,7 +170,7 @@ describe('FuturesTradingTicket', () => {
 
   it('starts unsized so a gesture cannot fire a size the operator never chose', () => {
     const state = createState()
-    const { rerender } = render(
+    const { container, rerender } = render(
       <FuturesTradingTicket
         state={state}
         selectedSymbol="BTCUSDT"
@@ -181,6 +181,9 @@ describe('FuturesTradingTicket', () => {
     expect(screen.getByRole('slider', { name: 'Order size percent' })).toHaveValue('0')
     expect(screen.getByRole('status', { name: 'Size 0' })).toHaveTextContent('0%')
     expect(screen.queryByRole('button', { name: '0%' })).not.toBeInTheDocument()
+    expect(container.querySelector('.futures-production-draft-reason')).toBeNull()
+    expect(screen.getByRole('button', { name: 'LONG entry' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'SHORT entry' })).toBeDisabled()
 
     rerender(
       <FuturesTradingTicket
@@ -194,6 +197,25 @@ describe('FuturesTradingTicket', () => {
       />,
     )
     expect(state.placeOrder).not.toHaveBeenCalled()
+    expect(screen.getByLabelText('Futures gesture feedback'))
+      .toHaveTextContent('Order size is 0 — choose a size first.')
+  })
+
+  it('describes invalid positive draft input without blaming Binance filters', () => {
+    render(
+      <FuturesTradingTicket
+        state={createState()}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+        draftPrice="not-a-price"
+      />,
+    )
+    sizeTo(25)
+
+    expect(screen.getByText('Enter a valid limit price and order size')).toBeInTheDocument()
+    expect(screen.queryByText('Price or Binance symbol filters are unavailable'))
+      .not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'LONG entry' })).toBeDisabled()
   })
 
   it('values a position size request at the price the operator is working at', () => {
@@ -483,6 +505,17 @@ describe('FuturesTradingTicket', () => {
     )
     expect(screen.getByText('Select an active USDⓈ-M contract.')).toBeInTheDocument()
     expect(screen.queryByText('CONTRACT')).not.toBeInTheDocument()
+
+    rerender(
+      <FuturesTradingTicket
+        state={createState()}
+        selectedSymbol="BTCUSDT"
+        selectedContract={{ symbol: 'BTCUSDT', tradable: true, filters: null }}
+        draftPrice="58445.0"
+      />,
+    )
+    expect(screen.getByText('Loading exact Binance price, quantity, and notional filters…'))
+      .toBeInTheDocument()
 
     rerender(
       <FuturesTradingTicket

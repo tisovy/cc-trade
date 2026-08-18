@@ -1596,7 +1596,7 @@ describe('instrument recency and interface scale', () => {
     expect(recentRule).toContain('overflow-y: auto;')
   })
 
-  it('uses neutral chrome for inactive recent contracts and blue only for selection', () => {
+  it('preserves amber recent-contract chrome and blue selection', () => {
     renderView({
       symbolHistory: {
         recent: [
@@ -1621,9 +1621,8 @@ describe('instrument recency and interface scale', () => {
       /\.futures-workstation-recent-contract\.is-selected\s*\{(?<declarations>[^}]*)\}/,
     )?.groups?.declarations
 
-    expect(inactiveRule).toContain('border: 1px solid rgba(126, 143, 166, 0.25);')
-    expect(inactiveRule).toContain('background: rgba(126, 143, 166, 0.06);')
-    expect(inactiveRule).not.toContain('240, 185, 11')
+    expect(inactiveRule).toContain('border: 1px solid rgba(240, 185, 11, 0.24);')
+    expect(inactiveRule).toContain('background: rgba(240, 185, 11, 0.06);')
     expect(selectedRule).toContain('border-color: var(--futures-accent);')
     expect(selectedRule).toContain('background: var(--futures-accent-soft);')
   })

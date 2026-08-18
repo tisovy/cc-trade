@@ -15,6 +15,25 @@ The Futures chart SHALL format every visible time-axis tick and crosshair time l
 - **WHEN** host-local formatting is applied to candle timestamps
 - **THEN** candle and volume rows keep their original instants, order, interval alignment, and shared time coordinates
 
+### Requirement: An untouched zero-size ticket is not presented as an operational error
+The Futures trading ticket SHALL distinguish an ordinary incomplete draft from an exchange, connection, account, or validation fault. When the selected price is usable but the operator has not chosen a positive order size, order actions SHALL remain disabled without showing an error-like draft notice. Actionable readiness and validation failures SHALL remain visible, and an attempted gesture or submission SHALL continue to explain why no order was sent.
+
+#### Scenario: Price is selected before size
+- **WHEN** a usable limit price is selected and the ticket size remains zero
+- **THEN** the manual order actions are disabled and no draft-error notice is shown
+
+#### Scenario: An operational prerequisite is unavailable
+- **WHEN** the ticket is blocked by connection, contract metadata, an account failure, balance, pause, or risk-cap state
+- **THEN** the corresponding actionable readiness reason remains visible
+
+#### Scenario: A positive draft contains invalid input
+- **WHEN** the operator has chosen a positive size but the limit price or entered size is invalid
+- **THEN** the ticket shows a validation reason that describes invalid draft input rather than claiming that Binance filters are unavailable
+
+#### Scenario: A gesture cannot be staged
+- **WHEN** the operator attempts a chart gesture while the draft cannot be submitted
+- **THEN** the ticket continues to state that the order was not sent and gives the blocking reason
+
 ## MODIFIED Requirements
 
 ### Requirement: The market header never hides the contract's numbers
@@ -31,31 +50,6 @@ The market header SHALL present the selected contract identity together with the
 #### Scenario: The responsive header is narrower than the desktop composition
 - **WHEN** the available width cannot keep the identity and paired readings beside one another without overlap
 - **THEN** the header wraps into a readable fallback without clipping a value or introducing a header scrollbar
-
-### Requirement: Structural color is distinct from trading risk
-The futures workstation SHALL use neutral dark surfaces and borders for layout,
-including ordinary inactive recent-contract pills, and a calm non-red accent for
-ordinary selection, focus, and active workspace identity. Red SHALL be reserved
-for sell direction, negative performance, liquidation risk, destructive controls,
-unavailable or disconnected state, and errors. Positive outcomes SHALL remain
-green and cautionary state SHALL remain amber so ordinary navigation cannot be
-mistaken for trading risk.
-
-#### Scenario: Operator selects an ordinary control
-- **WHEN** the operator selects a recent contract, chart interval, or display-only chart tool
-- **THEN** the control uses the calm interaction accent rather than the red negative-state color
-
-#### Scenario: An inactive recent contract is shown
-- **WHEN** a recent-contract pill is neither selected nor in a cautionary or error state
-- **THEN** its surface and border are neutral rather than amber, red, or another status color
-
-#### Scenario: Negative and positive readings are shown together
-- **WHEN** the workstation renders a loss or sell state beside a profitable or buy state
-- **THEN** the former remains red, the latter remains green, and neither color is reused by surrounding panel borders
-
-#### Scenario: Workstation structure is rendered
-- **WHEN** the futures desk draws its shell, panel separators, and inactive surfaces
-- **THEN** those structural elements use neutral slate tones rather than a saturated red outline
 
 ### Requirement: Recent contracts fill three complete pill rows
 The Futures workstation SHALL retain at most the nine most recently selected unique contracts and SHALL present them in the existing three-column recent-contract group. A tenth distinct selection SHALL discard only the least recent retained contract, and reading an existing persisted history SHALL preserve up to nine valid entries without changing the storage identity or the most-recent-first ordering. At a supported desktop height that can hold the complete group and execution ticket, the group SHALL show all retained rows without a scrollbar; internal scrolling SHALL remain available only when the rail is genuinely shorter than their combined allocation requires.

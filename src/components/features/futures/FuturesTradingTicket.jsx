@@ -80,7 +80,7 @@ const ORDER_ACTIONS = Object.freeze([
 ])
 
 const DRAFT_REASON_MESSAGES = Object.freeze({
-  INVALID_DRAFT_INPUT: 'Price or Binance symbol filters are unavailable',
+  INVALID_DRAFT_INPUT: 'Enter a valid limit price and order size',
   BELOW_MINIMUM_QUANTITY: 'Size is below the Binance minimum quantity',
   ABOVE_MAXIMUM_QUANTITY: 'Size is above the Binance maximum quantity',
   BELOW_MINIMUM_NOTIONAL: 'Size is below the Binance minimum notional',
@@ -567,9 +567,17 @@ const FuturesTradingTicket = ({
     && readiness.code !== FUTURES_READINESS_CODES.ACCOUNT_LOADING
     ? readiness.reason
     : null
-  const draftReason = readinessBlockReason ?? (orderDraft.ok
-    ? (!amountWithinBudget && sizingReady ? 'Order size exceeds the available balance' : null)
-    : (price ? DRAFT_REASON_MESSAGES[orderDraft.reason] ?? null : 'Pick a chart or order-book price'))
+  // Zero is the ticket's ordinary starting size, not evidence that price or
+  // exchange metadata failed. Keep the actions gated, but wait until the
+  // operator starts sizing before presenting draft validation as a problem.
+  // Readiness failures retain priority, so a real metadata or account outage is
+  // never hidden by the quiet idle state.
+  const untouchedZeroSize = customNotionalUsdt === null && sizePercent === 0
+  const draftReason = readinessBlockReason ?? (untouchedZeroSize
+    ? null
+    : orderDraft.ok
+      ? (!amountWithinBudget && sizingReady ? 'Order size exceeds the available balance' : null)
+      : (price ? DRAFT_REASON_MESSAGES[orderDraft.reason] ?? null : 'Pick a chart or order-book price'))
   const selectedOpenOrders = openOrders.filter(order => order.symbol === selectedSymbol)
   // Adjusting state during render rather than in an effect: the rejection must
   // be on screen in the same commit it arrived in, not one paint later.
