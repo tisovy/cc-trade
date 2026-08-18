@@ -229,7 +229,7 @@ export const isFuturesWorkstationInterval = value => INTERVAL_VALUES.has(value)
 // parser, an id past 2^53 stopped being refused and started arriving rounded:
 // `9007199254740993` was accepted as `9007199254740992`, an identity the sender
 // never wrote and one that every id rounding to the same double would share.
-const isFuturesWorkstationRequestId = value => (
+export const isFuturesWorkstationRequestId = value => (
   typeof value === 'string' && REQUEST_ID_PATTERN.test(value)
 )
 

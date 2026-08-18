@@ -1,6 +1,7 @@
 import {
     FUTURES_PRODUCTION_WORKSTATION_ACTIONS,
     createFuturesProductionWorkstationEvent,
+    createFuturesProductionWorkstationHistoryOutcome,
     readFuturesProductionWorkstationRequest,
 } from '../../src/utils/futuresProductionWorkstationProtocol.js';
 import {
@@ -322,7 +323,13 @@ export class FuturesProductionWorkstationService {
             return;
         }
         if (request.action === FUTURES_PRODUCTION_WORKSTATION_ACTIONS.LOAD_CANDLE_HISTORY) {
-            await this.loadCandleHistory(request);
+            try {
+                await this.loadCandleHistory(request);
+            } catch (error) {
+                if (error?.code !== 'CANDLE_HISTORY_OWNER_UNAVAILABLE') throw error;
+                const outcome = createFuturesProductionWorkstationHistoryOutcome(request);
+                emit(outcome, JSON.stringify(outcome));
+            }
             return;
         }
         if (request.action === FUTURES_PRODUCTION_WORKSTATION_ACTIONS.UNSUBSCRIBE) {

@@ -2648,7 +2648,7 @@ describe('production Futures workstation service', () => {
             }]);
         });
 
-        it('refuses history for a subscription, contract or interval it does not own', async () => {
+        it('answers history the shown owner cannot serve with one typed unavailable outcome', async () => {
             const { runtime } = await historyRuntime('history-owner', {
                 readCandleHistory: async () => historyKlines(10),
             });
@@ -2658,10 +2658,25 @@ describe('production Futures workstation service', () => {
                 { symbol: 'ETHUSDT' },
                 { interval: '15m' },
             ]) {
-                await expect(runtime.service.handleRequest(
+                const emitted = [];
+                await runtime.service.handleRequest(
                     productionCandleHistoryRequest('history-owner', overrides),
-                    { emit: () => {} },
-                )).rejects.toMatchObject({ code: 'CANDLE_HISTORY_OWNER_UNAVAILABLE' });
+                    { emit: (outcome, frame) => emitted.push({ outcome, frame }) },
+                );
+
+                expect(emitted).toHaveLength(1);
+                expect(emitted[0].outcome).toMatchObject({
+                    type: 'futures.production.workstation.history-outcome',
+                    action: 'futures.production.workstation.load-candle-history',
+                    requestId: overrides.requestId ?? 'history-owner',
+                    symbol: overrides.symbol ?? 'BTCUSDT',
+                    interval: overrides.interval ?? '1m',
+                    endTime: 1_784_000_000_000,
+                    outcome: 'unavailable',
+                    reasonCode: 'CANDLE_HISTORY_OWNER_UNAVAILABLE',
+                });
+                expect(emitted[0].outcome).not.toHaveProperty('generation');
+                expect(JSON.parse(emitted[0].frame)).toEqual(emitted[0].outcome);
             }
         });
 

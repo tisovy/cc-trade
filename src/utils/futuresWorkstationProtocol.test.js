@@ -12,6 +12,9 @@ import {
 } from './futuresWorkstationProtocolShared.js'
 import {
   FUTURES_PRODUCTION_WORKSTATION_ACTIONS,
+  FUTURES_PRODUCTION_WORKSTATION_HISTORY_OUTCOME_TYPE,
+  FUTURES_PRODUCTION_WORKSTATION_HISTORY_OUTCOMES,
+  createFuturesProductionWorkstationHistoryOutcome,
   createFuturesProductionWorkstationConfigureDepthRequest,
   createFuturesProductionWorkstationConfigureTapeRequest,
   createFuturesProductionWorkstationEvent,
@@ -20,6 +23,7 @@ import {
   createFuturesProductionWorkstationSubscribeRequest,
   createFuturesProductionWorkstationUnsubscribeRequest,
   parseFuturesProductionWorkstationEvent,
+  parseFuturesProductionWorkstationHistoryOutcome,
   readFuturesProductionWorkstationRequest,
 } from './futuresProductionWorkstationProtocol.js'
 
@@ -171,6 +175,45 @@ describe('Futures workstation environment-specific protocols', () => {
   // instead — once, legibly.
   it('uses protocol revision 11 for rows that say which of them are whole', () => {
     expect(FUTURES_WORKSTATION_PROTOCOL_VERSION).toBe('11')
+  })
+
+  it('round-trips the exact bounded owner-unavailable history outcome without ordering fields', () => {
+    const outcome = createFuturesProductionWorkstationHistoryOutcome({
+      ...requestValues,
+      endTime: 1_784_000_000_000,
+    })
+
+    expect(outcome).toEqual({
+      channelId: 'futures-production-workstation',
+      version: '11',
+      marketType: 'USD_M_FUTURES',
+      environment: 'PRODUCTION',
+      type: FUTURES_PRODUCTION_WORKSTATION_HISTORY_OUTCOME_TYPE,
+      action: FUTURES_PRODUCTION_WORKSTATION_ACTIONS.LOAD_CANDLE_HISTORY,
+      requestId: requestValues.requestId,
+      symbol: requestValues.symbol,
+      interval: requestValues.interval,
+      endTime: 1_784_000_000_000,
+      outcome: FUTURES_PRODUCTION_WORKSTATION_HISTORY_OUTCOMES.UNAVAILABLE,
+      reasonCode: 'CANDLE_HISTORY_OWNER_UNAVAILABLE',
+    })
+    expect(outcome).not.toHaveProperty('generation')
+    expect(outcome).not.toHaveProperty('revision')
+    expect(parseFuturesProductionWorkstationHistoryOutcome(JSON.stringify(outcome)))
+      .toEqual(outcome)
+
+    for (const malformed of [
+      { ...outcome, extra: true },
+      { ...outcome, requestId: 'x'.repeat(97) },
+      { ...outcome, symbol: 'btcusdt' },
+      { ...outcome, interval: '2m' },
+      { ...outcome, endTime: 0 },
+      { ...outcome, outcome: 'served' },
+      { ...outcome, reasonCode: 'SOMETHING_ELSE' },
+    ]) {
+      expect(() => parseFuturesProductionWorkstationHistoryOutcome(JSON.stringify(malformed)))
+        .toThrow(FuturesWorkstationProtocolError)
+    }
   })
 
   it('preserves an unavailable per-symbol algo limit instead of inventing one', () => {

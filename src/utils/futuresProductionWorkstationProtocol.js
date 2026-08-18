@@ -3,8 +3,14 @@ import {
   FUTURES_WORKSTATION_MARKET_TYPE,
   FUTURES_WORKSTATION_PROTOCOL_VERSION,
   FUTURES_WORKSTATION_REQUEST_MAX_BYTES,
+  FuturesWorkstationProtocolError,
   createFuturesWorkstationEvent,
   createFuturesWorkstationRequest,
+  freezeFuturesWorkstationValue,
+  hasExactFuturesWorkstationKeys,
+  isFuturesWorkstationInterval,
+  isFuturesWorkstationRequestId,
+  isFuturesWorkstationSymbol,
   parseBoundedFuturesWorkstationJson,
   validateFuturesWorkstationEvent,
   validateFuturesWorkstationRequest,
@@ -14,8 +20,19 @@ import { splitFrameMarks } from './frameMarks.js'
 export const FUTURES_PRODUCTION_WORKSTATION_CHANNEL_ID = 'futures-production-workstation'
 export const FUTURES_PRODUCTION_WORKSTATION_ENVIRONMENT = 'PRODUCTION'
 export const FUTURES_PRODUCTION_WORKSTATION_EVENT_TYPE = 'futures.production.workstation.resource'
+export const FUTURES_PRODUCTION_WORKSTATION_HISTORY_OUTCOME_TYPE = (
+  'futures.production.workstation.history-outcome'
+)
 export const FUTURES_PRODUCTION_WORKSTATION_PROTOCOL_VERSION = FUTURES_WORKSTATION_PROTOCOL_VERSION
 export const FUTURES_PRODUCTION_WORKSTATION_MARKET_TYPE = FUTURES_WORKSTATION_MARKET_TYPE
+
+export const FUTURES_PRODUCTION_WORKSTATION_HISTORY_OUTCOMES = Object.freeze({
+  UNAVAILABLE: 'unavailable',
+})
+
+export const FUTURES_PRODUCTION_WORKSTATION_HISTORY_REASON_CODES = Object.freeze({
+  OWNER_UNAVAILABLE: 'CANDLE_HISTORY_OWNER_UNAVAILABLE',
+})
 
 export const FUTURES_PRODUCTION_WORKSTATION_ACTIONS = Object.freeze({
   SUBSCRIBE: 'futures.production.workstation.subscribe',
@@ -99,6 +116,66 @@ export const parseFuturesProductionWorkstationEvent = raw => (
   }))
 )
 
+export const readFuturesProductionWorkstationHistoryOutcome = (value) => {
+  if (!hasExactFuturesWorkstationKeys(value, [
+    'channelId',
+    'version',
+    'marketType',
+    'environment',
+    'type',
+    'action',
+    'requestId',
+    'symbol',
+    'interval',
+    'endTime',
+    'outcome',
+    'reasonCode',
+  ])
+    || value.channelId !== FUTURES_PRODUCTION_WORKSTATION_CHANNEL_ID
+    || value.version !== FUTURES_PRODUCTION_WORKSTATION_PROTOCOL_VERSION
+    || value.marketType !== FUTURES_PRODUCTION_WORKSTATION_MARKET_TYPE
+    || value.environment !== FUTURES_PRODUCTION_WORKSTATION_ENVIRONMENT
+    || value.type !== FUTURES_PRODUCTION_WORKSTATION_HISTORY_OUTCOME_TYPE
+    || value.action !== FUTURES_PRODUCTION_WORKSTATION_ACTIONS.LOAD_CANDLE_HISTORY
+    || !isFuturesWorkstationRequestId(value.requestId)
+    || !isFuturesWorkstationSymbol(value.symbol)
+    || !isFuturesWorkstationInterval(value.interval)
+    || !Number.isSafeInteger(value.endTime)
+    || value.endTime <= 0
+    || value.outcome !== FUTURES_PRODUCTION_WORKSTATION_HISTORY_OUTCOMES.UNAVAILABLE
+    || value.reasonCode !== FUTURES_PRODUCTION_WORKSTATION_HISTORY_REASON_CODES.OWNER_UNAVAILABLE) {
+    throw new FuturesWorkstationProtocolError('INVALID_HISTORY_OUTCOME')
+  }
+  return freezeFuturesWorkstationValue(value)
+}
+
+export const createFuturesProductionWorkstationHistoryOutcome = ({
+  requestId,
+  symbol,
+  interval,
+  endTime,
+  reasonCode = FUTURES_PRODUCTION_WORKSTATION_HISTORY_REASON_CODES.OWNER_UNAVAILABLE,
+}) => readFuturesProductionWorkstationHistoryOutcome({
+  channelId: FUTURES_PRODUCTION_WORKSTATION_CHANNEL_ID,
+  version: FUTURES_PRODUCTION_WORKSTATION_PROTOCOL_VERSION,
+  marketType: FUTURES_PRODUCTION_WORKSTATION_MARKET_TYPE,
+  environment: FUTURES_PRODUCTION_WORKSTATION_ENVIRONMENT,
+  type: FUTURES_PRODUCTION_WORKSTATION_HISTORY_OUTCOME_TYPE,
+  action: FUTURES_PRODUCTION_WORKSTATION_ACTIONS.LOAD_CANDLE_HISTORY,
+  requestId,
+  symbol,
+  interval,
+  endTime,
+  outcome: FUTURES_PRODUCTION_WORKSTATION_HISTORY_OUTCOMES.UNAVAILABLE,
+  reasonCode,
+})
+
+export const parseFuturesProductionWorkstationHistoryOutcome = raw => (
+  readFuturesProductionWorkstationHistoryOutcome(parseBoundedFuturesWorkstationJson(raw, {
+    maxBytes: FUTURES_WORKSTATION_EVENT_MAX_BYTES,
+  }))
+)
+
 /**
  * The same reading, plus whatever the transport wrote on the envelope.
  *
@@ -114,6 +191,21 @@ export const parseMarkedFuturesProductionWorkstationEvent = (raw) => {
     maxBytes: FUTURES_WORKSTATION_EVENT_MAX_BYTES,
   }))
   return { event: readFuturesProductionWorkstationEvent(frame), marks }
+}
+
+export const parseMarkedFuturesProductionWorkstationFrame = (raw) => {
+  const { frame, marks } = splitFrameMarks(parseBoundedFuturesWorkstationJson(raw, {
+    maxBytes: FUTURES_WORKSTATION_EVENT_MAX_BYTES,
+  }))
+  try {
+    return { event: readFuturesProductionWorkstationEvent(frame), marks }
+  } catch (eventError) {
+    try {
+      return { event: readFuturesProductionWorkstationHistoryOutcome(frame), marks }
+    } catch {
+      throw eventError
+    }
+  }
 }
 
 export const isPotentialFuturesProductionWorkstationFrame = raw => (

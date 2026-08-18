@@ -278,6 +278,10 @@ for (const [name, source] of [[PRODUCTION_PROTOCOL, productionProtocol]]) {
         .map(match => match[1]);
     const allowed = new Set([
         'resource',
+        // Typed answer to a reviewed history read that no live session owns.
+        // It carries only the rejected subscription identity and selection;
+        // no exchange route or write authority is added by the outcome.
+        'history-outcome',
         'subscribe',
         'select-symbol',
         'select-interval',
@@ -294,7 +298,7 @@ for (const [name, source] of [[PRODUCTION_PROTOCOL, productionProtocol]]) {
         'load-candle-history',
         'unsubscribe',
     ]);
-    if (actions.length !== 8 || actions.some(action => !allowed.has(action))) {
+    if (actions.length !== 9 || actions.some(action => !allowed.has(action))) {
         fail(`${name} exposes an action outside the exact read-only workstation protocol`);
     }
 }

@@ -15,8 +15,9 @@
 
 import {
   FUTURES_PRODUCTION_WORKSTATION_EVENT_TYPE,
+  FUTURES_PRODUCTION_WORKSTATION_HISTORY_OUTCOME_TYPE,
   isPotentialFuturesProductionWorkstationFrame,
-  parseMarkedFuturesProductionWorkstationEvent,
+  parseMarkedFuturesProductionWorkstationFrame,
 } from './futuresProductionWorkstationProtocol.js'
 import { FRAME_MARKS_KEY, readFrameMarks, splitFrameMarks } from './frameMarks.js'
 
@@ -71,7 +72,7 @@ export const readDeskFrame = (data) => {
   const receivedAt = Date.now()
   if (isPotentialFuturesProductionWorkstationFrame(data)) {
     try {
-      const { event, marks } = parseMarkedFuturesProductionWorkstationEvent(data)
+      const { event, marks } = parseMarkedFuturesProductionWorkstationFrame(data)
       return Object.freeze({
         kind: DESK_FRAME_KINDS.WORKSTATION,
         payload: event,
@@ -94,7 +95,8 @@ export const readDeskFrame = (data) => {
   // A frame that names the workstation event type but did not survive the rules
   // above is refused rather than passed on as an account frame under its own
   // stated type.
-  if (payload.type === FUTURES_PRODUCTION_WORKSTATION_EVENT_TYPE) return null
+  if (payload.type === FUTURES_PRODUCTION_WORKSTATION_EVENT_TYPE
+    || payload.type === FUTURES_PRODUCTION_WORKSTATION_HISTORY_OUTCOME_TYPE) return null
   // The marks come off here, before any subscriber sees the frame, for the
   // reason `frameMarks.js` states: the stamp belongs to the transport envelope
   // and never to what the desk reads. Present only on the frames the exchange

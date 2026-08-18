@@ -4,6 +4,7 @@ import useFuturesProductionWorkstation from './useFuturesProductionWorkstation.j
 import {
   FUTURES_PRODUCTION_WORKSTATION_ACTIONS,
   createFuturesProductionWorkstationEvent,
+  createFuturesProductionWorkstationHistoryOutcome,
 } from '../utils/futuresProductionWorkstationProtocol.js'
 import { FUTURES_CANDLE_HISTORY_CACHE_MAX_ROWS } from '../utils/futuresCandleHistoryCache.js'
 
@@ -671,6 +672,28 @@ describe('useFuturesProductionWorkstation candle history', () => {
     })))
   }
 
+  const emitHistoryResponse = (socket, requestId, firstRevision, rows) => {
+    for (let offset = 0; offset < rows.length; offset += 80) {
+      const page = rows.slice(offset, offset + 80)
+      emitHistoryPage(socket, requestId, firstRevision + (offset / 80), {
+        offset,
+        total: rows.length,
+        complete: offset + page.length === rows.length,
+        rows: page,
+      })
+    }
+  }
+
+  const emitUnavailableHistoryOutcome = (socket, requestId, overrides = {}) => {
+    socket.emitMessage(createFuturesProductionWorkstationHistoryOutcome({
+      requestId,
+      symbol: 'BTCUSDT',
+      interval: '1m',
+      endTime: START,
+      ...overrides,
+    }))
+  }
+
   it('assembles a paged response into one history and remembers it for next time', async () => {
     const socket = new LocalSocket()
     const sendMessage = vi.fn(() => true)
@@ -708,6 +731,77 @@ describe('useFuturesProductionWorkstation candle history', () => {
       symbol: 'BTCUSDT',
       interval: '1m',
     }))
+  })
+
+  it('applies a completed page from its accepted event through a same-cycle outage', async () => {
+    const socket = new LocalSocket()
+    const sendMessage = vi.fn(() => true)
+    const { result } = renderHook(props => useFuturesProductionWorkstation(props), {
+      initialProps: defaultProps(socket, sendMessage, { candleHistoryCache: missingCache() }),
+    })
+    const requestId = sendMessage.mock.calls[0][0].requestId
+    await act(async () => { await result.current.loadCandleHistory(START) })
+
+    await act(async () => {
+      emitHistoryPage(socket, requestId, 2, {
+        offset: 0,
+        total: 20,
+        complete: true,
+        rows: historyRows(-20, 0),
+      })
+      emitStatus(socket, requestId, 3, 'disconnected', 'SOCKET_DISCONNECTED')
+    })
+
+    expect(result.current.status).toBe('disconnected')
+    expect(result.current.candleHistory.rows).toHaveLength(20)
+    expect(result.current.candleHistory.rows[0].openTime).toBe(START - (20 * MINUTE))
+    expect(result.current.candleHistory.readFailed).toBe(false)
+  })
+
+  it('does not let a mismatched unavailable outcome release another history read', async () => {
+    const socket = new LocalSocket()
+    const sendMessage = vi.fn(() => true)
+    const { result } = renderHook(props => useFuturesProductionWorkstation(props), {
+      initialProps: defaultProps(socket, sendMessage, { candleHistoryCache: missingCache() }),
+    })
+    const requestId = sendMessage.mock.calls[0][0].requestId
+    const reads = () => sendMessage.mock.calls.filter(([message]) => (
+      message.action === FUTURES_PRODUCTION_WORKSTATION_ACTIONS.LOAD_CANDLE_HISTORY
+    ))
+    await act(async () => { await result.current.loadCandleHistory(START) })
+
+    await act(async () => emitUnavailableHistoryOutcome(socket, requestId, {
+      endTime: START - (100 * MINUTE),
+    }))
+
+    expect(result.current.candleHistory.readFailed).toBe(false)
+    await act(async () => { await result.current.loadCandleHistory(START) })
+    expect(reads()).toHaveLength(1)
+  })
+
+  it('ignores an owner-unavailable outcome for an abandoned selection', async () => {
+    const socket = new LocalSocket()
+    const sendMessage = vi.fn(() => true)
+    const { result, rerender } = renderHook(props => useFuturesProductionWorkstation(props), {
+      initialProps: defaultProps(socket, sendMessage, { candleHistoryCache: missingCache() }),
+    })
+    const abandonedRequestId = sendMessage.mock.calls[0][0].requestId
+    await act(async () => { await result.current.loadCandleHistory(START) })
+
+    rerender(defaultProps(socket, sendMessage, {
+      symbol: 'ETHUSDT',
+      candleHistoryCache: missingCache(),
+    }))
+    await act(async () => emitUnavailableHistoryOutcome(socket, abandonedRequestId))
+
+    expect(result.current.symbol).toBe('ETHUSDT')
+    expect(result.current.candleHistory.readFailed).toBe(false)
+    await act(async () => { await result.current.loadCandleHistory(START) })
+    const latestRead = sendMessage.mock.calls
+      .map(([message]) => message)
+      .filter(message => message.action === FUTURES_PRODUCTION_WORKSTATION_ACTIONS.LOAD_CANDLE_HISTORY)
+      .at(-1)
+    expect(latestRead.symbol).toBe('ETHUSDT')
   })
 
   it('serves a cached page without asking the exchange for it again', async () => {
@@ -1017,10 +1111,11 @@ describe('useFuturesProductionWorkstation candle history', () => {
 
       expect(result.current.candleHistory.exhausted).toBe(false)
       expect(result.current.candleHistory.exhaustedBy).toBeNull()
-      // The notice stands, and what it instructs is still true.
+      // The notice stands. A status transition is not the answer to the newer
+      // read already in flight, so it cannot release that read's lock.
       expect(result.current.candleHistory.readFailed).toBe(true)
       await act(async () => { await result.current.loadCandleHistory(START) })
-      expect(reads()).toHaveLength(3)
+      expect(reads()).toHaveLength(2)
     })
 
     // The link comes back and the session is rebuilt under a new generation.
@@ -1084,19 +1179,22 @@ describe('useFuturesProductionWorkstation candle history', () => {
       const requestId = sendMessage.mock.calls[0][0].requestId
 
       await act(async () => { await result.current.loadCandleHistory(START) })
-      await act(async () => emitHistoryPage(socket, requestId, 2, {
-        offset: 0, total: 1_000, complete: true, rows: historyRows(-20, 0),
-      }))
+      await act(async () => emitHistoryResponse(
+        socket,
+        requestId,
+        2,
+        historyRows(-1_000, 0),
+      ))
       expect(result.current.candleHistory.exhausted).toBe(false)
       // A page the exchange served in full, reaching no further back than the
       // rows already held: the desk stops asking, and the reason is the desk's.
       await act(async () => { await result.current.loadCandleHistory(START) })
-      await act(async () => emitHistoryPage(socket, requestId, 3, {
-        offset: 0,
-        total: 1_000,
-        complete: true,
-        rows: historyRows(-10, 0),
-      }))
+      await act(async () => emitHistoryResponse(
+        socket,
+        requestId,
+        15,
+        historyRows(-1_000, 0),
+      ))
 
       expect(result.current.candleHistory.exhausted).toBe(true)
       expect(result.current.candleHistory.exhaustedBy).toBe('chart-limit')

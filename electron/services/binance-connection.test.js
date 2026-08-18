@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
     FUTURES_PRODUCTION_WORKSTATION_EVENT_TYPE,
+    FUTURES_PRODUCTION_WORKSTATION_HISTORY_OUTCOME_TYPE,
+    createFuturesProductionWorkstationLoadCandleHistoryRequest,
     createFuturesProductionWorkstationSubscribeRequest,
 } from '../../src/utils/futuresProductionWorkstationProtocol.js';
 import {
@@ -6782,6 +6784,41 @@ describe('setupBinanceConnection user-data orchestration', () => {
             expect(emitted().some(payload => (
                 payload.type === FUTURES_PRODUCTION_WORKSTATION_EVENT_TYPE
             ))).toBe(true);
+        });
+
+        it('routes one typed owner-unavailable history outcome through the workstation path', async () => {
+            await connectRenderer('futures-live');
+
+            await moduleMocks.rendererHandlers.message({
+                type: 'utf8',
+                utf8Data: JSON.stringify({
+                    ...createFuturesProductionWorkstationLoadCandleHistoryRequest({
+                        requestId: 'workstation-history-unowned-1',
+                        symbol: 'BTCUSDT',
+                        interval: '1m',
+                        endTime: 1_784_000_000_000,
+                        limit: 1_000,
+                    }),
+                    generation: 1,
+                }),
+            });
+            await flushMicrotasks();
+
+            const outcomes = emitted().filter(payload => (
+                payload.type === FUTURES_PRODUCTION_WORKSTATION_HISTORY_OUTCOME_TYPE
+            ));
+            expect(outcomes).toHaveLength(1);
+            expect(outcomes[0]).toMatchObject({
+                action: 'futures.production.workstation.load-candle-history',
+                requestId: 'workstation-history-unowned-1',
+                symbol: 'BTCUSDT',
+                interval: '1m',
+                endTime: 1_784_000_000_000,
+                outcome: 'unavailable',
+                reasonCode: 'CANDLE_HISTORY_OWNER_UNAVAILABLE',
+            });
+            expect(outcomes[0]).not.toHaveProperty('generation');
+            expect(outcomes[0]).not.toHaveProperty('revision');
         });
 
         it('still refuses a workstation request issued under a superseded activation', async () => {

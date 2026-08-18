@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   FUTURES_PRODUCTION_WORKSTATION_ENVIRONMENT,
+  FUTURES_PRODUCTION_WORKSTATION_HISTORY_OUTCOME_TYPE,
+  FUTURES_PRODUCTION_WORKSTATION_HISTORY_OUTCOMES,
   createFuturesProductionWorkstationConfigureDepthRequest,
   createFuturesProductionWorkstationConfigureTapeRequest,
   createFuturesProductionWorkstationLoadCandleHistoryRequest,
@@ -167,6 +169,64 @@ const applyCandleHistoryPage = (previous, { symbol, interval, rows, exhausted })
   })
 }
 
+const advanceCandleHistoryAnswer = (state, message) => {
+  const page = message.payload
+  const startsAnswer = page.offset === 0
+  const held = startsAnswer
+    ? {
+        requestId: message.requestId,
+        symbol: message.symbol,
+        generation: message.generation,
+        resourceState: message.state,
+        interval: page.interval,
+        endTime: page.endTime,
+        total: page.total,
+        rows: Object.freeze([]),
+      }
+    : state.historyBuffer
+  const pageEnd = page.offset + page.rows.length
+  if (held === null
+    || held.requestId !== message.requestId
+    || held.symbol !== message.symbol
+    || held.generation !== message.generation
+    || held.resourceState !== message.state
+    || held.interval !== page.interval
+    || held.endTime !== page.endTime
+    || held.total !== page.total
+    || page.offset !== held.rows.length
+    || pageEnd > page.total
+    || (page.complete && pageEnd !== page.total)
+    || (!page.complete && pageEnd >= page.total)) {
+    return { historyBuffer: null, historyAnswer: state.historyAnswer }
+  }
+  const rows = Object.freeze([...held.rows, ...page.rows])
+  if (!page.complete) {
+    return {
+      historyBuffer: Object.freeze({ ...held, rows }),
+      historyAnswer: state.historyAnswer,
+    }
+  }
+  return {
+    historyBuffer: null,
+    historyAnswer: Object.freeze({
+      requestId: message.requestId,
+      symbol: message.symbol,
+      interval: page.interval,
+      endTime: page.endTime,
+      generation: message.generation,
+      revision: message.revision,
+      outcome: message.state === FUTURES_WORKSTATION_STATES.LIVE
+        ? 'served'
+        : FUTURES_PRODUCTION_WORKSTATION_HISTORY_OUTCOMES.UNAVAILABLE,
+      reasonCode: message.state === FUTURES_WORKSTATION_STATES.LIVE
+        ? null
+        : 'CANDLE_HISTORY_READ_FAILED',
+      total: page.total,
+      rows,
+    }),
+  }
+}
+
 const createState = ({ status, symbol, interval, requestId = null, reasonCode = null }) => (
   Object.freeze({
     status,
@@ -178,6 +238,8 @@ const createState = ({ status, symbol, interval, requestId = null, reasonCode = 
     revision: 0,
     observedAt: null,
     reasonCode,
+    historyBuffer: null,
+    historyAnswer: null,
     resources: emptyResources(),
   })
 )
@@ -408,6 +470,14 @@ const useFuturesProductionWorkstation = ({
       let message = frame?.payload
       if (message === undefined || message === null) return
       if (message.requestId !== requestId || message.symbol !== symbol) return
+      if (message.type === FUTURES_PRODUCTION_WORKSTATION_HISTORY_OUTCOME_TYPE) {
+        setState(previousState => (
+          previousState.requestId !== requestId
+            ? previousState
+            : Object.freeze({ ...previousState, historyAnswer: message })
+        ))
+        return
+      }
       // Only a sampled frame carries these, which is one frame per resource per
       // ten seconds; every other frame skips this in one comparison.
       if (frame.marks !== null && frame.marks !== undefined) {
@@ -469,10 +539,19 @@ const useFuturesProductionWorkstation = ({
               catalog: previousState.resources.catalog,
             })
           : next.resources
+        const history = message.resource === 'candleHistory'
+          ? advanceCandleHistoryAnswer(previousState, message)
+          : {
+              historyBuffer: message.generation > previousState.generation
+                ? null
+                : previousState.historyBuffer,
+              historyAnswer: previousState.historyAnswer,
+            }
         return Object.freeze({
           ...next,
           interval,
           resources,
+          ...history,
           reasonCode: message.resource === 'status' ? message.payload.reasonCode : next.reasonCode,
         })
       })
@@ -580,12 +659,14 @@ const useFuturesProductionWorkstation = ({
   // History is accumulated outside the resource snapshot: a resource is what the
   // exchange says now, while history is what the operator has already pulled
   // into view and must not lose to the next status transition.
-  const historyResponse = state.resources.candleHistory
+  const historyResponse = state.historyAnswer
   useEffect(() => {
-    if (!historyResponse?.complete) return
+    if (historyResponse === null) return
     const selection = historySelectionRef.current
     if (selection === null
+      || selection.requestId !== historyResponse.requestId
       || selection.symbol !== state.symbol
+      || selection.symbol !== historyResponse.symbol
       || selection.interval !== historyResponse.interval) return
     if (selection.endTime !== historyResponse.endTime) return
     historyRequestRef.current = null
@@ -610,20 +691,20 @@ const useFuturesProductionWorkstation = ({
     // deepening nothing, which is how a dropped link came to mean the contract's
     // history starts here and the chart stopped asking for the rest of the
     // session. That is runbook step 19.
-    if (historyResponse.state !== FUTURES_WORKSTATION_STATES.LIVE) {
+    if (historyResponse.outcome !== 'served') {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setCandleHistory((previous) => {
         // Named for the contract it failed on, or it is a failure the desk
         // holds for a chart nobody is looking at: what is handed back is gated
         // on the selection, and an unnamed run is gated out.
-        const base = previous.symbol === state.symbol
+        const base = previous.symbol === historyResponse.symbol
           && previous.interval === historyResponse.interval
           ? previous
           : EMPTY_CANDLE_HISTORY
         if (base === previous && previous.readFailed) return previous
         return Object.freeze({
           ...base,
-          symbol: state.symbol,
+          symbol: historyResponse.symbol,
           interval: historyResponse.interval,
           readFailed: true,
         })
@@ -632,12 +713,12 @@ const useFuturesProductionWorkstation = ({
     }
     // Written back so the next run of the app starts where this one left off.
     void candleHistoryCache.writePage({
-      symbol: state.symbol,
+      symbol: historyResponse.symbol,
       interval: historyResponse.interval,
       rows: historyResponse.rows,
     })
     setCandleHistory(previous => applyCandleHistoryPage(previous, {
-      symbol: state.symbol,
+      symbol: historyResponse.symbol,
       interval: historyResponse.interval,
       rows: historyResponse.rows,
       // A short answer is the exchange saying there is nothing older.
@@ -730,7 +811,13 @@ const useFuturesProductionWorkstation = ({
     if (historyRequestRef.current !== null
       && historyRequestRef.current.generation === generation) return false
     const limit = FUTURES_WORKSTATION_CANDLE_HISTORY_LIMITS.DEFAULT_ROWS
-    const selection = { symbol, interval, endTime, generation }
+    const selection = {
+      requestId: activeSubscription.requestId,
+      symbol,
+      interval,
+      endTime,
+      generation,
+    }
     historyRequestRef.current = selection
     historySelectionRef.current = selection
 

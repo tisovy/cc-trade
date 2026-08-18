@@ -7,6 +7,7 @@ import {
 } from './deskFrameRouter.js'
 import {
   createFuturesProductionWorkstationEvent,
+  createFuturesProductionWorkstationHistoryOutcome,
 } from './futuresProductionWorkstationProtocol.js'
 
 const workstationEvent = (overrides = {}) => createFuturesProductionWorkstationEvent({
@@ -65,6 +66,21 @@ describe('readDeskFrame', () => {
 
     expect(frame.kind).toBe(DESK_FRAME_KINDS.WORKSTATION)
     expect(frame.payload).toMatchObject({ resource: 'depth', symbol: 'BTCUSDT' })
+  })
+
+  it('names a validated history outcome as workstation traffic', () => {
+    const outcome = createFuturesProductionWorkstationHistoryOutcome({
+      requestId: 'router-history-1',
+      symbol: 'BTCUSDT',
+      interval: '1m',
+      endTime: 1_784_000_000_000,
+    })
+
+    const frame = readDeskFrame(JSON.stringify(outcome))
+
+    expect(frame.kind).toBe(DESK_FRAME_KINDS.WORKSTATION)
+    expect(frame.payload).toEqual(outcome)
+    expect(frame.payload).not.toHaveProperty('generation')
   })
 
   // The channel's name appears in the text of a rejection about the channel. A
