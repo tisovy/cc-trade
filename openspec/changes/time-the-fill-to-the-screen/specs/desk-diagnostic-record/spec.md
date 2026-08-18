@@ -15,11 +15,20 @@ market data cannot answer them at all.
 
 A frame about an order SHALL name the order, using the same identity the
 command and answer lines carry, and SHALL name the state the exchange gave it,
-so a day reads as one story rather than as two files to be joined by hand. It
-SHALL further state whether the desk's own working orders changed when the frame
-was applied: a frame that arrived and left the screen as it was is a distinct
-observation from one that was never delivered, and neither may be inferred from
-the other's absence.
+so a day reads as one story rather than as two files to be joined by hand.
+
+It SHALL further state what became of the frame on the screen, in three readings
+that SHALL be kept apart: that the screen now shows what the frame said and
+drawing it moved something; that the screen already showed it; and that the
+screen does not show it at all. The last is the fault, and it is what an operator
+reporting "the order did not update" is describing. The middle is not a fault and
+SHALL NOT be recorded as one: one settlement produces more than one frame
+carrying the same fact, so the second of them changes nothing by arriving after a
+sibling that was already applied. A record that judged a frame by whether the
+screen moved would call that second frame undelivered on every ordinary fill.
+
+None of the three SHALL be inferred from the absence of a line. A frame that
+arrived is recorded whatever it did.
 
 The record SHALL also state the outbound queue's depth, in bytes and in frames
 per resource, and what that queue superseded or dropped. A frame dropped without
@@ -44,9 +53,13 @@ so the record stays inside the bounds it already keeps.
 - **WHEN** the exchange reports on an order and the desk draws what it said
 - **THEN** the record states the same delays for that frame, names the order by the identity its command carries and the state the exchange gave it, and says that the working orders changed
 
-#### Scenario: A report arrives and changes nothing on screen
-- **WHEN** a report about an order arrives and the desk's working orders are left exactly as they were
-- **THEN** the record states that frame as delivered and unchanged, rather than not stating it
+#### Scenario: The second frame of one settlement arrives
+- **WHEN** a frame states what the screen already shows, because a sibling frame of the same settlement was applied first
+- **THEN** the record states it as already drawn, and does not present it as a frame the screen never showed
+
+#### Scenario: A report arrives and the screen does not show it
+- **WHEN** the exchange reports on an order and the desk's surfaces do not end up showing what it said
+- **THEN** the record states that frame as not drawn, rather than not stating it
 
 #### Scenario: The transport falls behind
 - **WHEN** frames arrive faster than the socket accepts them

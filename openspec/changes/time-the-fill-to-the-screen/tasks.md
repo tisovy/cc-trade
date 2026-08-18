@@ -53,7 +53,11 @@ of the work below.
       unmeasured rather than carrying the key twice, which parses as the
       payload's and would lose the measurement silently.
 - [x] 2.2 Report the commit from an effect that runs after React has committed the tree the frame produced, not from inside the reducer: "the state was set" is not "the operator saw it", and the difference is the stage the complaint is about.
-- [x] 2.3 Report which order the frame was about and what the exchange said about it, and whether the working orders the desk holds actually changed when it was applied.
+- [x] 2.3 Report which order the frame was about, what the exchange said about it, and what became of it on the screen — in three readings, not two: shown and moved, already shown, and **not shown at all**.
+      The two-reading version was wrong in the ordinary case, and §6.2 has the
+      finding. A frame is judged against its own subject — the row the report
+      names, as the desk draws it after the commit — rather than against whether
+      anything on the screen moved.
 - [x] 2.4 Never let the measurement cost the frame: a report that cannot be built or sent is dropped, and nothing about producing it may change what is drawn or when.
 - [x] 2.5 Prove by test that a marked report is reported after the commit with its identity, its state and the four legs; that a report which changes no order is reported as unchanged rather than not at all; and that an unmarked frame reports nothing.
 
@@ -109,8 +113,106 @@ of the work below.
       place/cancel commands just before them and the focused 329-test pass are
       corroboration, not substitutes for a fill. Desk revision was not written
       into the diagnostic record and remains `NOT RECORDED`.
+
+      *Read those four lines under the reading they were written by.* They
+      predate §6.2, where `UNCHANGED` still meant "nothing on the screen moved".
+      Under the reading that shipped with it the same four would read
+      `UNCHANGED` again — a `CANCELED` report whose row is already gone is a
+      frame the screen shows — but the label now says that rather than being
+      right by coincidence, and a frame the screen does **not** show says
+      `NOT_DRAWN` instead of borrowing the same word. Lines written before
+      2026-08-18 21:00 UTC cannot be compared to later ones on that field.
 - [ ] 5.5 Operator check: none of its own. The whole point of this change is that the next report needs no operator to be asked what and where. Runbook step 41 and step 30's open follow-up are settled from the record once §5.4 has a fill in it.
       **Still open because 5.4 has no qualifying fill.** The live cancellation
       frames settle the private-stream/renderer seam but do not exercise the
       remaining-size/Total behaviour. Runbook step 41 and step 30's partial-fill
       Total follow-up therefore remain open.
+
+## 6. The Audit Of This Change's Own Work
+
+Run before committing, on the finding that a diagnostic which lies is worse than
+no diagnostic: everything below was found by auditing the change rather than by
+the suite going red on its own, and each one is now held by a test and a
+mutation.
+
+- [x] 6.1 **Two frames of one fill, one React commit, one line lost.** A fill
+      sends the folded account envelope and then the report itself. Delivered in
+      the same tick they become one commit, and a single pending slot reported
+      the second and dropped the first — usually the order line, which is the
+      one this change exists for. Now a bounded list, drained by revision.
+      Proved by `reports every marked frame of a batch, not only the last`,
+      which is red against the slot version (**M6**).
+- [x] 6.2 **"Did the screen move" is the wrong question, and it answers wrongly
+      on every ordinary fill.** Both frames of a settlement carry the same fact,
+      so whichever is drawn second moves nothing — and would have been recorded
+      exactly like a frame the desk never applied. The reading a session would
+      have taken from that is the opposite of the truth. A frame is now judged
+      against its own subject, and the three readings are told apart:
+      `DELIVERED`, `UNCHANGED`, `NOT_DRAWN`. Held by
+      `reports the second frame of one fill as already drawn, not as missing`
+      and `reports a frame the screen does not show as not drawn`; mutations
+      **M9** (the fault called already-drawn) and **M10** (judged by movement
+      again) each kill exactly the case that names them.
+- [x] 6.3 **The stamp's name is taken on this lane.** In §2.1: `marks` is the
+      desk's own word for position mark prices. Found by the suite, not by
+      reading.
+- [x] 6.4 **One input was counted late.** `ALGO_UPDATE` folds into the same
+      account envelope and went out unmarked — a fired stop is drawn on this
+      lane too, and "when did it leave the chart" is the same question. Marked,
+      and the test asserts the fold actually happened rather than passing over
+      an empty list (**M7**). The margin call and the conditional-trigger
+      rejection beside it stay deliberately unmarked: nothing closes their
+      commit, and a stamp nobody closes is a measurement nobody takes.
+- [x] 6.5 **The other `executionReport` handler was checked and is not this
+      lane.** `binance-connection.js` has a second one; it belongs to the spot
+      user-data socket, which this change states as a non-goal. No futures frame
+      reaches the renderer unmarked through it.
+- [x] 6.6 **State what a missing line means, since the whole point is that
+      absence stops being the answer.** A frame is not recorded when its marks
+      do not describe a journey — a clock stepped backwards between two of them,
+      which cannot happen while the desk's four inner marks come from one
+      machine — and when the renderer socket is not open at the moment of the
+      commit. Both drop the line and nothing else. Everything else that arrives
+      is written, including the frames that drew nothing.
+
+## 7. The Operator's Observation, And Where Its Result Goes
+
+**For the session that picks this up.** The operator is watching fills on the
+live desk and will report back. Everything needed is here; nothing has to be
+asked of them again.
+
+- [ ] 7.1 Read the day's record first, before asking anything:
+      `node scripts/read-desk-record.mjs` — section **"What the exchange said
+      about an order, and when it was drawn"**. One line per frame the exchange
+      caused, listed rather than averaged. A specific day:
+      `node scripts/read-desk-record.mjs ~/.config/cc-trade/diagnostics/desk-<YYYY-MM-DD>-000.jsonl`.
+      Read the whole day's lines for the contract the operator names, not only
+      the one nearest the moment they remember.
+- [ ] 7.2 Answer the operator's report from the table below rather than from
+      reasoning. `resource` is `orders` for what the exchange said about an
+      order and `account` for the envelope folded from the same event.
+
+      | What the record shows | What it means, and what follows |
+      |---|---|
+      | `orders` line, `DELIVERED`, `→screen` small | The frame arrived and was drawn. If the operator still saw a stale number, the fault is downstream of this hook — a surface reading its own copy — and the next suspect is the component, not the transport. |
+      | `orders` line, `DELIVERED`, `→screen` large | The desk had it and took that long to draw it. A renderer problem, and the leg says how much of it. |
+      | `orders` line, large `exchange→desk` | The exchange was late to say it. Nothing here to fix; note that leg spans two clocks and is uncorrected. |
+      | `orders` line, `NOT_DRAWN` | **The fault this was built to catch.** The frame arrived and the surfaces do not show what it said. Open a change against the fold and the merge, with the identity and the timestamp from the line. |
+      | `orders` line, `UNCHANGED` only | The screen already showed it — usually because the account envelope of the same settlement was drawn first. Not a fault on its own; read the `account` line beside it. |
+      | No line at all for that moment | The frame never reached the renderer. Look at `futures-user-data` faults on the same day: `STREAM_SILENT`, `ECONNRESET`, `RECONNECT_EXHAUSTED` all mean the private stream was not carrying, and the 30-second beat was the only thing updating the screen. |
+
+- [ ] 7.3 Write the operator's own words and the lines that answered them into
+      this file, verbatim, with the date, the contract and the order identity.
+      Their words are the observation; the record is the evidence; keep both.
+- [ ] 7.4 Then, and only then, settle the two items that have been waiting on a
+      real fill: runbook **step 41** (the size of a partly filled order on four
+      surfaces) and the open observation in that runbook's tail about the
+      order's **Total in USDT while a large order is bought back in parts**.
+      That runbook was archived on 2026-08-18 and now lives at
+      `openspec/changes/archive/2026-08-18-verify-the-desk-in-one-sitting/runbook.md`;
+      its verification state is tracked in that change's `evidence.md` and in
+      `openspec/live-verification-ledger.md`. Record the result in the ledger
+      with the date and the desk revision, as that file requires.
+- [ ] 7.5 If the fills came out clean, say so plainly and archive this change.
+      A measurement that found nothing wrong is a result, and the desk keeps the
+      instrument either way.
