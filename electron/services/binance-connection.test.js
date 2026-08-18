@@ -1171,6 +1171,105 @@ describe('setupBinanceConnection user-data orchestration', () => {
         );
     };
 
+    const captureUnhandledRejections = async (exercise) => {
+        const rejections = [];
+        const capture = reason => rejections.push(reason);
+        process.on('unhandledRejection', capture);
+        try {
+            await exercise();
+            await flushMicrotasks();
+            await vi.advanceTimersByTimeAsync(0);
+            return rejections;
+        } finally {
+            process.off('unhandledRejection', capture);
+        }
+    };
+
+    it('settles a rejected detached bootstrap refresh with a bounded local reason', async () => {
+        const rawError = Object.assign(new Error('signed-query=secret-bootstrap'), {
+            code: -2015,
+            response: { data: 'raw-bootstrap-response' },
+        });
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockImplementationOnce(() => {
+            throw rawError;
+        });
+
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        const unhandled = await captureUnhandledRejections(async () => {
+            await moduleMocks.rendererHandlers.message({
+                type: 'utf8',
+                utf8Data: JSON.stringify({
+                    action: 'activate_market',
+                    marketMode: 'futures-live',
+                }),
+            });
+        });
+
+        expect(console.error).toHaveBeenCalledWith(
+            '[futures-account] detached refresh failed: reason=bootstrap'
+            + ' code=FUTURES_PERMISSION_DENIED category=permission',
+        );
+        expect(console.error.mock.calls.flat().join(' ')).not.toContain('signed-query');
+        expect(console.error.mock.calls.flat().join(' ')).not.toContain('raw-bootstrap-response');
+        expect(unhandled).toEqual([]);
+    });
+
+    it('settles a rejected detached stream refresh with a bounded local reason', async () => {
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([]);
+        await startFuturesDesk();
+        const rawError = Object.assign(new Error('signed-query=secret-stream'), {
+            code: 'ECONNRESET',
+        });
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockImplementationOnce(() => {
+            throw rawError;
+        });
+
+        const unhandled = await captureUnhandledRejections(async () => {
+            moduleMocks.futuresUserDataSockets[0].handlers.open();
+        });
+
+        expect(console.error).toHaveBeenCalledWith(
+            '[futures-account] detached refresh failed: reason=stream'
+            + ' code=FUTURES_NETWORK_ERROR category=network',
+        );
+        expect(console.error.mock.calls.flat().join(' ')).not.toContain('signed-query');
+        expect(unhandled).toEqual([]);
+    });
+
+    it('settles a rejected detached unstated refresh with a bounded local reason', async () => {
+        futuresAccountLoads();
+        await startFuturesDesk();
+        const socket = moduleMocks.futuresUserDataSockets[0];
+        socket.handlers.open();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+        const rawError = Object.assign(new Error('signed-query=secret-unstated'), {
+            status: 503,
+        });
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockImplementationOnce(() => {
+            throw rawError;
+        });
+
+        const unhandled = await captureUnhandledRejections(async () => {
+            socket.handlers.message(accountUpdate({
+                B: [{ a: 'USDT', wb: '1010.5', cw: '1010.5' }],
+                P: [{ s: 'TUTUSDT', pa: '25', ep: '2.1', up: '3', mt: 'cross', iw: '0', ps: 'BOTH' }],
+            }));
+            await vi.advanceTimersByTimeAsync(400);
+        });
+
+        expect(console.error).toHaveBeenCalledWith(
+            '[futures-account] detached refresh failed: reason=unstated'
+            + ' code=FUTURES_EXCHANGE_UNAVAILABLE category=exchange',
+        );
+        expect(console.error.mock.calls.flat().join(' ')).not.toContain('signed-query');
+        expect(unhandled).toEqual([]);
+    });
+
     // The frame *is* the account change. Asking Binance for it back put the
     // position on screen a signed round trip after the exchange had already
     // stated it — 340–800 ms through the operator's proxy, on their own record.

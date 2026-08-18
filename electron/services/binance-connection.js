@@ -98,6 +98,7 @@ import {
     reconcileFuturesUnstatedBalanceRead,
     reconcileFuturesUnstatedPositionRead,
     reconcileFuturesWorkingOrderRead,
+    sanitizeFuturesAccountError,
     widenFuturesAccountReadReason,
 } from './futures-account-state.js';
 import WebSocket from 'ws';
@@ -1919,6 +1920,14 @@ export function setupBinanceConnection({
         }
     };
 
+    const reportDetachedFuturesAccountRefreshFailure = (reason, error) => {
+        const failure = sanitizeFuturesAccountError(error);
+        logger.error(
+            `[futures-account] detached refresh failed: reason=${reason}`
+            + ` code=${failure.code} category=${failure.category}`,
+        );
+    };
+
     // Long enough that the frames belonging to one event — the fills of a single
     // order, an amendment's cancel and its replacement — arrive inside it and
     // cost one read between them; short enough that a position opened on a
@@ -1950,7 +1959,8 @@ export function setupBinanceConnection({
             const requested = [..._futuresUnstatedReadResources];
             _futuresUnstatedReadResources = new Set();
             if (requested.length === 0) return;
-            void refreshFuturesAccountState({ resources: requested, reason: 'unstated' });
+            void refreshFuturesAccountState({ resources: requested, reason: 'unstated' })
+                .catch(error => reportDetachedFuturesAccountRefreshFailure('unstated', error));
         }, FUTURES_UNSTATED_READ_DELAY_MS);
         _futuresUnstatedReadTimer.unref?.();
     };
@@ -2340,7 +2350,8 @@ export function setupBinanceConnection({
                 // this is for.
                 noteFuturesUserDataTraffic(socket, generation);
                 logger.info('Futures user data stream connected.');
-                void refreshFuturesAccountState({ reason: 'stream' });
+                void refreshFuturesAccountState({ reason: 'stream' })
+                    .catch(error => reportDetachedFuturesAccountRefreshFailure('stream', error));
             });
 
             // The exchange's own keep-alive: the one traffic that proves the
@@ -4718,7 +4729,8 @@ export function setupBinanceConnection({
             futuresDataInitialized = true;
             futuresRendererConnections.add(connection);
             ensureFuturesUserDataStream();
-            void refreshFuturesAccountState({ reason: 'bootstrap' });
+            void refreshFuturesAccountState({ reason: 'bootstrap' })
+                .catch(error => reportDetachedFuturesAccountRefreshFailure('bootstrap', error));
         };
 
         const deactivateFuturesData = async () => {
