@@ -47,6 +47,7 @@ export const FUTURES_PRODUCTION_WORKSTATION_FRESHNESS = Object.freeze({
     // bursts of dozens; the operator reads one number, and five updates a second
     // is already faster than the eye resolves.
     LAST_PRICE_MS: 200,
+    DEPTH_DELIVERY_MS: 200,
     RECONNECT_BASE_MS: 500,
     RECONNECT_MAX_MS: 30_000,
     RECONNECT_ATTEMPTS: 8,
@@ -293,6 +294,91 @@ export class FuturesProductionWorkstationService {
         });
     }
 
+    clearPendingDepthDelivery(session) {
+        if (session?.pendingDepthTimer !== null
+            && session?.pendingDepthTimer !== undefined) {
+            this.clock.clearTimeout(session.pendingDepthTimer);
+            session.pendingDepthTimer = null;
+        }
+        if (session) session.pendingDepthDelivery = null;
+    }
+
+    emitDepthNow(session, {
+        state = undefined,
+        payload = undefined,
+        shortfall = null,
+    } = {}) {
+        if (!this.isHeld(session) || !this.isShown(session)) return false;
+        const view = payload === undefined ? this.depthView(session) : payload;
+        if (view === null || view === undefined) return false;
+        const emitted = this.emitResource(
+            session,
+            FUTURES_WORKSTATION_RESOURCES.DEPTH,
+            state ?? this.depthDeliveryState(session, shortfall),
+            view,
+        );
+        if (emitted) {
+            session.lastDepthView = view;
+            session.lastDepthDeliveryAt = session.lastClock;
+        }
+        return emitted;
+    }
+
+    deliverDepth(session, {
+        immediate = false,
+        state = undefined,
+        payload = undefined,
+        shortfall = null,
+    } = {}) {
+        if (!this.isHeld(session) || !this.isShown(session)) return false;
+        const deliveryState = state ?? this.depthDeliveryState(session, shortfall);
+        if (immediate || deliveryState !== FUTURES_WORKSTATION_STATES.LIVE) {
+            this.clearPendingDepthDelivery(session);
+            return this.emitDepthNow(session, {
+                state: deliveryState,
+                payload,
+                shortfall,
+            });
+        }
+
+        const now = this.observedNow(session);
+        const elapsed = session.lastDepthDeliveryAt === null
+            ? FUTURES_PRODUCTION_WORKSTATION_FRESHNESS.DEPTH_DELIVERY_MS
+            : Math.max(0, now - session.lastDepthDeliveryAt);
+        if (elapsed >= FUTURES_PRODUCTION_WORKSTATION_FRESHNESS.DEPTH_DELIVERY_MS) {
+            this.clearPendingDepthDelivery(session);
+            return this.emitDepthNow(session, {
+                state: deliveryState,
+                payload,
+                shortfall,
+            });
+        }
+
+        session.pendingDepthDelivery = Object.freeze({
+            requestId: session.requestId,
+            generation: session.generation,
+            state: deliveryState,
+            shortfall,
+        });
+        if (session.pendingDepthTimer !== null) return false;
+        session.pendingDepthTimer = this.clock.setTimeout(() => {
+            session.pendingDepthTimer = null;
+            const pending = session.pendingDepthDelivery;
+            session.pendingDepthDelivery = null;
+            if (!pending
+                || !this.isHeld(session)
+                || !this.isShown(session)
+                || session.requestId !== pending.requestId
+                || session.generation !== pending.generation) return;
+            this.deliverDepth(session, {
+                state: pending.state,
+                shortfall: pending.shortfall,
+            });
+        }, FUTURES_PRODUCTION_WORKSTATION_FRESHNESS.DEPTH_DELIVERY_MS - elapsed);
+        session.pendingDepthTimer?.unref?.();
+        return false;
+    }
+
     // Up by however much is short, never back down on its own: a market that
     // walks out of a band it has already outgrown would otherwise buy the same
     // page again and again. `factor` is how many times deeper the band has to
@@ -475,16 +561,7 @@ export class FuturesProductionWorkstationService {
         // within a diff or two on a busy contract and never on a quiet one,
         // which is the contract most likely to be read at a coarse step.
         const shortfall = session.orderBook.rangeShortfall(session.depthRange);
-        const view = this.depthView(session);
-        if (view !== null) {
-            session.lastDepthView = view;
-            this.emitResource(
-                session,
-                FUTURES_WORKSTATION_RESOURCES.DEPTH,
-                this.depthDeliveryState(session, shortfall),
-                view,
-            );
-        }
+        this.deliverDepth(session, { immediate: true, shortfall });
         this.ensureDepthCovers(session, shortfall);
     }
 
@@ -755,6 +832,7 @@ export class FuturesProductionWorkstationService {
         // still a timer per held contract, arming and firing forever.
         if (this.shown !== null && this.shown !== session) {
             this.clearPendingTapeTimer(this.shown);
+            this.clearPendingDepthDelivery(this.shown);
         }
         this.selection += 1;
         session.shownOrder = this.selection;
@@ -919,16 +997,7 @@ export class FuturesProductionWorkstationService {
             }
             if (session.header !== null) this.emitHeader(session, this.observedNow(session));
             shortfall = session.orderBook.rangeShortfall(session.depthRange);
-            const view = this.depthView(session);
-            if (view !== null) {
-                session.lastDepthView = view;
-                this.emitResource(
-                    session,
-                    FUTURES_WORKSTATION_RESOURCES.DEPTH,
-                    this.depthDeliveryState(session, shortfall),
-                    view,
-                );
-            }
+            this.deliverDepth(session, { immediate: true, shortfall });
             this.emitTrades(
                 session,
                 session.staleResources.has(FUTURES_WORKSTATION_RESOURCES.TRADES)
@@ -1031,6 +1100,9 @@ export class FuturesProductionWorkstationService {
             // The last book the renderer was given, kept so a recovery can leave
             // it on screen rather than blanking the panel.
             lastDepthView: null,
+            lastDepthDeliveryAt: null,
+            pendingDepthDelivery: null,
+            pendingDepthTimer: null,
             bookRecovering: false,
             bookRecoveredAt: null,
             frameRefusedAt: null,
@@ -1294,13 +1366,7 @@ export class FuturesProductionWorkstationService {
             if (!this.isHeld(session)) return;
             if (bookResult.live) {
                 const shortfall = session.orderBook.rangeShortfall(session.depthRange);
-                session.lastDepthView = this.depthView(session);
-                this.emitResource(
-                    session,
-                    FUTURES_WORKSTATION_RESOURCES.DEPTH,
-                    this.depthDeliveryState(session, shortfall),
-                    session.lastDepthView,
-                );
+                this.deliverDepth(session, { immediate: true, shortfall });
                 // The reading travelled with the request that opened the
                 // contract, so the page that covers it is bought as soon as the
                 // first band is measured rather than on whichever diff happens
@@ -1513,7 +1579,9 @@ export class FuturesProductionWorkstationService {
                 if (result.resync) void this.recoverBook(session, 'DEPTH_SEQUENCE_GAP');
                 else if (result.applied && session.bootstrapped) {
                     session.lastDepthAt = this.observedNow(session);
-                    session.staleResources.delete(FUTURES_WORKSTATION_RESOURCES.DEPTH);
+                    const recovered = session.staleResources.delete(
+                        FUTURES_WORKSTATION_RESOURCES.DEPTH,
+                    );
                     // Asked before the frame is delivered, not after it: the
                     // state a frame carries is decided by the book that frame
                     // contains. Asked afterwards, the operator had already read
@@ -1529,13 +1597,10 @@ export class FuturesProductionWorkstationService {
                     // the book they would be built from is delivered whole the
                     // moment the contract is selected.
                     if (this.isShown(session)) {
-                        session.lastDepthView = this.depthView(session);
-                        this.emitResource(
-                            session,
-                            FUTURES_WORKSTATION_RESOURCES.DEPTH,
-                            this.depthDeliveryState(session, shortfall),
-                            session.lastDepthView,
-                        );
+                        this.deliverDepth(session, {
+                            immediate: recovered,
+                            shortfall,
+                        });
                     }
                     // The market moves; the band the snapshot proved does not.
                     // When it stops reaching as far as the rows on screen, the
@@ -1638,13 +1703,7 @@ export class FuturesProductionWorkstationService {
                 }
                 session.lastDepthAt = this.observedNow(session);
                 session.staleResources.delete(FUTURES_WORKSTATION_RESOURCES.DEPTH);
-                session.lastDepthView = this.depthView(session);
-                this.emitResource(
-                    session,
-                    FUTURES_WORKSTATION_RESOURCES.DEPTH,
-                    this.depthDeliveryState(session),
-                    session.lastDepthView,
-                );
+                this.deliverDepth(session, { immediate: true });
                 // The reason line holds the last code it was given until another
                 // status replaces it. A refusal the desk stated and then repaired
                 // would otherwise sit there for the rest of the session, naming a
@@ -1717,6 +1776,12 @@ export class FuturesProductionWorkstationService {
             this.emitCandleSeries(session, 'contract', session.candles, FUTURES_WORKSTATION_STATES.STALE);
         } else if (resource === FUTURES_WORKSTATION_RESOURCES.TRADES) {
             this.emitTrades(session, FUTURES_WORKSTATION_STATES.STALE);
+        } else if (resource === FUTURES_WORKSTATION_RESOURCES.DEPTH) {
+            this.deliverDepth(session, {
+                immediate: true,
+                state: FUTURES_WORKSTATION_STATES.STALE,
+                payload,
+            });
         } else if (payload !== null && payload !== undefined) {
             this.emitResource(session, resource, FUTURES_WORKSTATION_STATES.STALE, payload);
         }
@@ -1888,6 +1953,7 @@ export class FuturesProductionWorkstationService {
         session.intervalBootstrapping = false;
         session.pendingCandleEvents = [];
         this.clearPendingTapeTimer(session);
+        this.clearPendingDepthDelivery(session);
         if (session.intervalReconnectTimer !== null) {
             this.clock.clearTimeout(session.intervalReconnectTimer);
             session.intervalReconnectTimer = null;
@@ -1944,6 +2010,7 @@ export class FuturesProductionWorkstationService {
         this.release(() => session.stream?.close?.());
         this.release(() => session.orderBook.stop());
         this.release(() => this.clearPendingTapeTimer(session));
+        this.release(() => this.clearPendingDepthDelivery(session));
         this.release(() => {
             if (session.freshnessTimer !== null) this.clock.clearInterval(session.freshnessTimer);
             if (session.reconnectTimer !== null) this.clock.clearTimeout(session.reconnectTimer);

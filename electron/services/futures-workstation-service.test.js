@@ -1513,6 +1513,174 @@ describe('production Futures workstation service', () => {
         expect(events).toHaveLength(count);
     });
 
+    it('bounds routine depth construction and retains only the newest trailing book', async () => {
+        const manual = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport({ clock: manual.clock });
+        let subscriber;
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock: manual.clock,
+            transport: {
+                ...base,
+                connect: (options) => {
+                    subscriber = options;
+                    return base.connect(options);
+                },
+            },
+        }));
+        const events = [];
+        await runtime.service.handleRequest(productionRequest('depth-bounded'), {
+            emit: event => events.push(event),
+        });
+        const session = runtime.service.shown;
+        const renderAt = [];
+        const render = session.orderBook.toRendererRows.bind(session.orderBook);
+        vi.spyOn(session.orderBook, 'toRendererRows').mockImplementation((options) => {
+            renderAt.push(manual.clock.now());
+            return render(options);
+        });
+        const settled = events.length;
+
+        manual.advance(200);
+        subscriber.onMessage(
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.streams.makeCycle(1)[0],
+        );
+        expect(renderAt).toEqual([1_784_000_001_200]);
+
+        manual.advance(50);
+        subscriber.onMessage(
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.streams.makeCycle(2)[0],
+        );
+        const firstPending = session.pendingDepthDelivery;
+        subscriber.onMessage(
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.streams.makeCycle(3)[0],
+        );
+        expect(session.pendingDepthDelivery).not.toBe(firstPending);
+        expect(session.pendingDepthDelivery).toMatchObject({
+            requestId: 'depth-bounded',
+            generation: 1,
+        });
+        expect(manual.timeoutCount()).toBe(1);
+        expect(renderAt).toHaveLength(1);
+
+        manual.advance(149);
+        manual.runTimeouts();
+        expect(renderAt).toHaveLength(1);
+        expect(manual.timeoutCount()).toBe(1);
+        manual.advance(1);
+        manual.runTimeouts();
+
+        const depth = events.slice(settled).filter(event => event.resource === 'depth');
+        expect(depth).toHaveLength(2);
+        expect(depth.map(event => event.observedAt)).toEqual([
+            1_784_000_001_200,
+            1_784_000_001_400,
+        ]);
+        expect(depth.at(-1).payload.lastUpdateId).toBe('1004');
+        expect(renderAt).toEqual([1_784_000_001_200, 1_784_000_001_400]);
+        expect(session.pendingDepthDelivery).toBeNull();
+        expect(session.pendingDepthTimer).toBeNull();
+    });
+
+    it('delivers stale and recovered depth immediately ahead of a pending routine book', async () => {
+        const manual = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport({ clock: manual.clock });
+        const snapshot = JSON.parse(
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.depthSnapshot,
+        );
+        const readDepthSnapshot = vi.fn(async (options) => (
+            readDepthSnapshot.mock.calls.length === 1
+                ? base.readDepthSnapshot(options)
+                : JSON.stringify({ ...snapshot, lastUpdateId: 1006 })
+        ));
+        let subscriber;
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock: manual.clock,
+            transport: {
+                ...base,
+                readDepthSnapshot,
+                connect: (options) => {
+                    subscriber = options;
+                    return base.connect(options);
+                },
+            },
+        }));
+        const events = [];
+        await runtime.service.handleRequest(productionRequest('depth-recovery-now'), {
+            emit: event => events.push(event),
+        });
+        const session = runtime.service.shown;
+
+        manual.advance(200);
+        subscriber.onMessage(
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.streams.makeCycle(1)[0],
+        );
+        manual.advance(50);
+        subscriber.onMessage(
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.streams.makeCycle(2)[0],
+        );
+        expect(session.pendingDepthDelivery).not.toBeNull();
+
+        subscriber.onMessage(
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.streams.makeCycle(4)[0],
+        );
+        expect(events.at(-1)).toMatchObject({
+            resource: 'depth',
+            state: 'stale',
+            observedAt: 1_784_000_001_250,
+        });
+        expect(session.pendingDepthDelivery).toBeNull();
+        subscriber.onMessage(
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.streams.makeCycle(5)[0],
+        );
+        manual.advance(50);
+        manual.runTimeouts();
+
+        await vi.waitFor(() => expect(events.at(-1)).toMatchObject({
+            resource: 'depth',
+            state: 'live',
+            observedAt: 1_784_000_001_300,
+        }));
+        expect(events.at(-1).payload.lastUpdateId).toBe('1006');
+        expect(readDepthSnapshot).toHaveBeenCalledTimes(2);
+    });
+
+    it('discards a pending routine depth delivery when its owner is released', async () => {
+        const manual = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport({ clock: manual.clock });
+        let subscriber;
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock: manual.clock,
+            transport: {
+                ...base,
+                connect: (options) => {
+                    subscriber = options;
+                    return base.connect(options);
+                },
+            },
+        }));
+        const events = [];
+        await runtime.service.handleRequest(productionRequest('depth-release-pending'), {
+            emit: event => events.push(event),
+        });
+        const session = runtime.service.shown;
+        subscriber.onMessage(
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.streams.makeCycle(1)[0],
+        );
+        expect(session.pendingDepthDelivery).not.toBeNull();
+        const delivered = events.length;
+
+        await runtime.service.handleRequest(JSON.stringify(
+            createFuturesProductionWorkstationUnsubscribeRequest({
+                requestId: 'depth-release-pending',
+            }),
+        ), { emit: event => events.push(event) });
+        expect(session.pendingDepthDelivery).toBeNull();
+        expect(session.pendingDepthTimer).toBeNull();
+        manual.advance(200);
+        manual.runTimeouts();
+        expect(events).toHaveLength(delivered);
+    });
+
     it('treats malformed stream data as uncertain and schedules resync', async () => {
         const base = createFuturesProductionWorkstationFakeTransport();
         let subscriber;
@@ -1651,7 +1819,7 @@ describe('production Futures workstation service', () => {
 
         const burst = events.slice(settled);
         const depth = burst.filter(event => event.resource === 'depth');
-        expect(depth).toHaveLength(TICKS);
+        expect(depth).toHaveLength(TICKS / 2);
         expect(burst.every(event => event.state === 'live')).toBe(true);
         expect(burst.every(event => event.generation === 1)).toBe(true);
         expect(faults).toEqual([]);
