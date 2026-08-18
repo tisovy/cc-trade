@@ -3,7 +3,7 @@ import FuturesProductionWorkstation from '../components/features/futures/Futures
 import { useGatewayContext } from '../context/GatewayContext.jsx'
 import useFuturesTrading from '../hooks/useFuturesTrading.js'
 
-const FuturesWorkspace = () => {
+const FuturesWorkspace = ({ marketClock = null }) => {
   const {
     marketGeneration,
     notifyError,
@@ -62,6 +62,7 @@ const FuturesWorkspace = () => {
       <FuturesProductionWorkstation
         enabled
         executionState={futuresTrading}
+        marketClock={marketClock}
         wsConnection={wsConnection}
         sendMessage={sendMessage}
       />

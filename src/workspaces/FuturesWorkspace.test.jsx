@@ -5,6 +5,7 @@ import FuturesWorkspace from './FuturesWorkspace.jsx'
 const mocks = vi.hoisted(() => ({
   notifyError: vi.fn(),
   state: null,
+  workstationProps: null,
 }))
 
 vi.mock('../context/GatewayContext.jsx', () => ({
@@ -21,7 +22,10 @@ vi.mock('../hooks/useFuturesTrading.js', () => ({
 }))
 
 vi.mock('../components/features/futures/FuturesProductionWorkstation.jsx', () => ({
-  default: () => <div data-testid="futures-workstation-stub" />,
+  default: properties => {
+    mocks.workstationProps = properties
+    return <div data-testid="futures-workstation-stub" />
+  },
 }))
 
 const state = overrides => ({
@@ -34,6 +38,14 @@ describe('FuturesWorkspace operational alerts', () => {
   beforeEach(() => {
     mocks.notifyError.mockClear()
     mocks.state = state()
+    mocks.workstationProps = null
+  })
+
+  it('forwards the app-owned market clock into the production workstation', () => {
+    const marketClock = <time>Tue 18 Aug 12:25:56</time>
+    render(<FuturesWorkspace marketClock={marketClock} />)
+
+    expect(mocks.workstationProps.marketClock).toBe(marketClock)
   })
 
   it('deduplicates a resource error and re-arms the same code after recovery', () => {

@@ -186,6 +186,7 @@ const readHistoryNotice = (candleHistory) => {
 
 export const FuturesWorkstationView = ({
   identity,
+  marketClock = null,
   state,
   selectedSymbol,
   selectedInterval,
@@ -895,7 +896,10 @@ export const FuturesWorkstationView = ({
   ), [displayedTrades])
 
   return (
-    <section className="futures-workstation" aria-label={`${identity} live trading workstation`}>
+    <section
+      className={`futures-workstation${marketClock ? ' has-market-clock' : ''}`}
+      aria-label={`${identity} live trading workstation`}
+    >
       <div className="futures-workstation-identity" data-testid="futures-workstation-identity">
         <strong>{identity}</strong>
         <StateBadge state={identityState} />
@@ -932,6 +936,12 @@ export const FuturesWorkstationView = ({
           </button>
         </div>
       </div>
+
+      {marketClock ? (
+        <div className="futures-workstation-clock" data-testid="futures-workstation-clock">
+          {marketClock}
+        </div>
+      ) : null}
 
       <aside className="futures-workstation-instruments" aria-label="USDⓈ-M contract selector">
         <div className="futures-workstation-section-heading">

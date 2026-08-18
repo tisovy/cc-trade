@@ -184,6 +184,8 @@ const WorkspaceGateway = ({ marketMode, onMarketModeChange }) => {
     return <MarketWorkspaceSelector onChange={onMarketModeChange} startupStatus={startupStatus} />
   }
 
+  const isWorkspaceActive = marketActivation?.marketMode === marketMode
+
   return (
     <div className={`App market-mode-${marketMode}`}>
       <MarketModeSwitch
@@ -191,18 +193,23 @@ const WorkspaceGateway = ({ marketMode, onMarketModeChange }) => {
         onChange={onMarketModeChange}
         startupStatus={startupStatus}
       />
-      <MarketClock />
+      {marketMode === MARKET_MODES.SPOT || !isWorkspaceActive ? <MarketClock /> : null}
       {/* The workspace mounts only once the backend has acknowledged this
           market. Its children issue refreshes and subscriptions from their own
           effects, and on a warm lazy switch those used to run before the
           parent's activation had been sent at all — ordering that rested on
           nothing but effect scheduling. */}
-      {marketActivation?.marketMode === marketMode ? (
-        <Suspense fallback={<WorkspaceLoading mode={marketMode} />}>
+      {isWorkspaceActive ? (
+        <Suspense fallback={(
+          <>
+            {marketMode === MARKET_MODES.FUTURES_LIVE ? <MarketClock /> : null}
+            <WorkspaceLoading mode={marketMode} />
+          </>
+        )}>
           {marketMode === MARKET_MODES.SPOT ? (
             <SpotWorkspace />
           ) : (
-            <FuturesWorkspace />
+            <FuturesWorkspace marketClock={<MarketClock />} />
           )}
         </Suspense>
       ) : (

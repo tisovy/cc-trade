@@ -283,6 +283,54 @@ afterEach(() => {
 })
 
 describe('pure Futures workstation presentation', () => {
+  it('places the local clock in its own row immediately after the identity strip', () => {
+    const { container } = renderView({
+      marketClock: (
+        <time className="market-local-clock" dateTime="2026-08-18T09:25:56.000Z">
+          Tue 18 Aug 12:25:56
+        </time>
+      ),
+    })
+
+    const workstation = container.querySelector('.futures-workstation')
+    const identity = screen.getByTestId('futures-workstation-identity')
+    const clockRow = screen.getByTestId('futures-workstation-clock')
+    expect(workstation).toHaveClass('has-market-clock')
+    expect(identity.nextElementSibling).toBe(clockRow)
+    expect(clockRow).toContainElement(screen.getByText('Tue 18 Aug 12:25:56'))
+    expect(clockRow.nextElementSibling).toHaveClass('futures-workstation-instruments')
+  })
+
+  it('starts Futures with the identity overlay and reserves responsive clock space', () => {
+    const appStylesheet = readFileSync('src/styles/app-layout.css', 'utf8')
+    const workstationStylesheet = readFileSync(
+      'src/components/features/futures/FuturesWorkstation.css',
+      'utf8',
+    )
+    const futuresPageRule = appStylesheet.match(
+      /\.futures-mode-view\s*\{(?<declarations>[^}]*)\}/,
+    )?.groups?.declarations
+    const switchOverlayRule = appStylesheet.match(
+      /\.market-mode-FUTURES_LIVE > \.market-mode-switch\s*\{(?<declarations>[^}]*)\}/,
+    )?.groups?.declarations
+    const clockedGridRule = workstationStylesheet.match(
+      /\.futures-workstation\.has-market-clock\s*\{(?<declarations>[^}]*)\}/,
+    )?.groups?.declarations
+    const embeddedClockRule = workstationStylesheet.match(
+      /\.futures-workstation-clock \.market-local-clock\s*\{(?<declarations>[^}]*)\}/,
+    )?.groups?.declarations
+
+    expect(futuresPageRule).toContain('padding: 0 18px 18px;')
+    expect(switchOverlayRule).toContain('position: absolute;')
+    expect(clockedGridRule).toContain('"identity identity identity"')
+    expect(clockedGridRule).toContain('"clock clock clock"')
+    expect(clockedGridRule).toContain('border-top: 0;')
+    expect(embeddedClockRule).toContain('position: static;')
+    expect(workstationStylesheet).toMatch(
+      /@media \(max-width: 844px\)[\s\S]*?\.market-mode-FUTURES_LIVE \.futures-workstation-identity\s*\{[^}]*padding-top: 43px;/,
+    )
+  })
+
   it('renders identity, exact market context, filters, book and bounded tape', () => {
     renderView()
     const identity = screen.getByTestId('futures-workstation-identity')
@@ -2417,6 +2465,21 @@ describe('a history read that could not be served', () => {
 })
 
 describe('production workstation container', () => {
+  it('passes the market clock through to the workstation layout row', () => {
+    render(
+      <FuturesProductionWorkstation
+        enabled={false}
+        executionState={productionExecutionState}
+        marketClock={<time>Tue 18 Aug 12:25:56</time>}
+        sendMessage={() => false}
+        wsConnection={null}
+      />,
+    )
+
+    expect(screen.getByTestId('futures-workstation-clock'))
+      .toContainElement(screen.getByText('Tue 18 Aug 12:25:56'))
+  })
+
   it('adds no chart or execution-ticket render for a depth-only workstation commit', () => {
     const initialState = createState()
     const stableProperties = {

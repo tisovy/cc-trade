@@ -44,6 +44,19 @@
   color: #dbe6f0;
 }
 
+.futures-workstation.has-market-clock {
+  grid-template-rows: auto auto auto minmax(420px, 1fr) auto auto;
+  grid-template-areas:
+    "identity identity identity"
+    "clock clock clock"
+    "instruments header header"
+    "instruments chart depth"
+    "instruments chart trades"
+    "dock dock dock";
+  border-top: 0;
+  border-radius: 0 0 12px 12px;
+}
+
 .futures-workstation button,
 .futures-workstation input {
   font: inherit;
@@ -89,6 +102,22 @@
   margin-left: 0;
   color: #fff;
   overflow-wrap: anywhere;
+}
+
+.futures-workstation-clock {
+  grid-area: clock;
+  display: grid;
+  place-items: center;
+  min-height: 36px;
+  padding: 4px 12px;
+  background: var(--futures-shell);
+}
+
+.futures-workstation-clock .market-local-clock {
+  position: static;
+  z-index: auto;
+  display: block;
+  transform: none;
 }
 
 .futures-workstation-state {
@@ -1481,6 +1510,23 @@
   .futures-workstation-identity {
     flex-wrap: wrap;
     min-height: 52px;
+  }
+
+  .futures-workstation.has-market-clock {
+    grid-template-rows: auto auto auto auto minmax(390px, 56vh) auto auto auto;
+    grid-template-areas:
+      "identity"
+      "clock"
+      "header"
+      "instruments"
+      "chart"
+      "depth"
+      "trades"
+      "dock";
+  }
+
+  .market-mode-FUTURES_LIVE .futures-workstation-identity {
+    padding-top: 43px;
   }
 
   .futures-workstation-identity code {

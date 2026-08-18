@@ -29,9 +29,14 @@ vi.mock('./workspaces/SpotWorkspace.jsx', () => {
 vi.mock('./workspaces/FuturesWorkspace.jsx', () => {
   mocks.futuresModuleLoads += 1
   return {
-    default: () => {
+    default: ({ marketClock = null }) => {
       mocks.futuresRenders += 1
-      return <main data-testid="lazy-futures-workspace">Futures workspace</main>
+      return (
+        <main data-testid="lazy-futures-workspace">
+          Futures workspace
+          {marketClock}
+        </main>
+      )
     },
   }
 })
@@ -95,8 +100,9 @@ describe('App lazy market workspace ownership', () => {
     expect(mocks.futuresRenders).toBe(0)
 
     fireEvent.click(screen.getByTestId('market-mode-futures-live'))
-    expect(await screen.findByTestId('lazy-futures-workspace')).toBeInTheDocument()
-    expect(screen.getByLabelText(/^Local time /)).toBeInTheDocument()
+    const futuresWorkspace = await screen.findByTestId('lazy-futures-workspace')
+    expect(futuresWorkspace).toBeInTheDocument()
+    expect(futuresWorkspace).toContainElement(screen.getByLabelText(/^Local time /))
     expect(mocks.futuresModuleLoads).toBe(1)
     expect(mocks.spotModuleLoads).toBe(0)
     expect(mocks.spotRenders).toBe(0)

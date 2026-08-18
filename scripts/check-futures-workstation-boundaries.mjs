@@ -353,11 +353,11 @@ const sharedGatewayAssertions = [
     ],
     [
         'Futures workstation wiring',
-        /<FuturesProductionWorkstation\s+enabled\s+executionState=\{futuresTrading\}\s+wsConnection=\{wsConnection\}\s+sendMessage=\{sendMessage\}\s*\/>/.test(futuresWorkspace),
+        /<FuturesProductionWorkstation\s+enabled\s+executionState=\{futuresTrading\}\s+(?:marketClock=\{marketClock\}\s+)?wsConnection=\{wsConnection\}\s+sendMessage=\{sendMessage\}\s*\/>/.test(futuresWorkspace),
     ],
     [
         'Futures workstation transport props',
-        /export const FuturesProductionWorkstation = \(\{\s*enabled,\s*executionState,\s*wsConnection,\s*sendMessage,\s*\}\) =>/.test(productionWorkstationContainer),
+        /export const FuturesProductionWorkstation = \(\{\s*enabled,\s*executionState,\s*(?:marketClock\s*=\s*null,\s*)?wsConnection,\s*sendMessage,\s*\}\) =>/.test(productionWorkstationContainer),
     ],
     [
         'Futures hook transport props',

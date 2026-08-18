@@ -37,6 +37,7 @@ const DEFAULT_FUTURES_INTERVAL = '15m'
 export const FuturesProductionWorkstation = ({
   enabled,
   executionState,
+  marketClock = null,
   wsConnection,
   sendMessage,
 }) => {
@@ -487,6 +488,7 @@ export const FuturesProductionWorkstation = ({
     >
       <FuturesWorkstationView
         identity="USDⓈ-M FUTURES"
+        marketClock={marketClock}
         state={workstationState}
         selectedSymbol={symbol}
         selectedInterval={interval}
