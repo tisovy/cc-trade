@@ -69,8 +69,17 @@
   `REQUEST_ABORTED` now records `outcome: "aborted"`; genuine failures keep
   `outcome: "error"` and their reason. The transport test aborts the first
   caller while its shared read is in flight, has the replacement join that
-  read, and proves the replacement receives the catalog with one fetch. The
-  focused suite passes all 47 tests.
+  read, and proves the replacement receives the catalog with one fetch.
+
+  Full-audit finding: the diagnostic record accepts only `cache: "hit"` and
+  `cache: "miss"`, so it drops the successful replacement timing whose cache
+  state is `shared` (and also drops valid bounded-stale timings). Correct the
+  record vocabulary in production, then prove at the record boundary that the
+  aborted `miss` and successful `shared` retry are both retained. This task is
+  complete: the record now accepts `shared` and `stale`, and the regression test
+  writes and reads back the aborted `miss`, successful `shared` retry, and
+  bounded-stale timing. The diagnostic-record and transport suites pass 86/86;
+  the transport assertion still proves the two callers used one fetch.
 - [x] 3.3 Either way, state in the proposal which of the two it was — the value of this change is mostly in the answer.
 
   The proposal selects 3.2: a generation superseded while waiting on the shared
@@ -85,7 +94,10 @@
   114 files; and the Futures workstation boundary check passed. The full suite
   was run with `LC_ALL=ru_RU.UTF-8`, matching the desk locale instead of the
   shell's overriding `C.UTF-8`, and outside the filesystem/network sandbox so
-  its loopback integration tests could bind their local ports.
+  its loopback integration tests could bind their local ports. Reopened after
+  the full-audit correction to the diagnostic record and rerun against the
+  final tree: lint passed; the full suite passed 2,101 tests in 114 files; and
+  the Futures workstation boundary check passed. `git diff --check` is clean.
 - [ ] 4.2 Operator confirms across a few starts that the line is either gone or now says what it is.
 
 ### The evidence this starts from

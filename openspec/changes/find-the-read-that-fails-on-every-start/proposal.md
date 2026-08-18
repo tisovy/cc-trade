@@ -66,6 +66,30 @@ not as an error, and prove that the replacement attempt succeeds.
 **3.1 is N/A.** There is no real fast-rejection defect to fix: the genuine
 exchange-info faults remain errors under their own reason and retry path.
 
+## Audit correction on 2026-08-18
+
+The transport-level proof exposed a second observability defect while this
+change was audited. `loadExchangeInfo` reports the replacement caller as
+`cache: "shared"` (and bounded-stale reads as `cache: "stale"`), but the desk
+record accepted only `hit` and `miss`. Because a malformed declared field drops
+the whole event, the live record could show the superseded caller as
+`outcome: "aborted"` while silently losing the successful shared retry beside
+it.
+
+That does not change the branch decision above: the underlying shared request
+still succeeds and 3.2 remains the confirmed path. It does mean 3.2 is not
+fully proved at the persisted-record boundary until the record accepts every
+cache state the transport emits and a test carries the successful `shared`
+timing through that boundary. The correction is diagnostic-only; it does not
+change fetching, retry, cache, or workstation behaviour.
+
+The correction now accepts `shared` and `stale` alongside the existing `hit`
+and `miss` vocabulary. The record-boundary regression test writes the expected
+aborted `miss`, its successful `shared` retry, and a valid bounded-stale timing,
+then reads all three back from the diagnostic file. Together with the transport
+test's single-fetch assertion, this proves both the retry and its persisted
+account of itself.
+
 ## What Changes
 
 - Find out which of the fast-rejection paths this is, by making the record say
@@ -89,4 +113,6 @@ line does not say which.
 
 - `electron/services/futures-production-workstation-transport.js` — the failure
   states its reason.
+- `electron/services/desk-diagnostic-record.js` — the persisted timing accepts
+  every exchange-info cache state the transport already emits.
 - Adds a requirement to `futures-workstation-presentation`.

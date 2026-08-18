@@ -765,6 +765,63 @@ describe('the record on disk', () => {
         ]);
     });
 
+    it('keeps the expected abort and the successful shared retry beside it', () => {
+        const { record, clock } = createRecord(disk);
+        record.record('timing', {
+            phase: 'exchange-info',
+            durationMs: 4,
+            outcome: 'aborted',
+            cache: 'miss',
+            code: 'REQUEST_ABORTED',
+        });
+        clock.now += 700;
+        record.record('timing', {
+            phase: 'exchange-info',
+            durationMs: 704,
+            outcome: 'ok',
+            cache: 'shared',
+            code: null,
+        });
+        clock.now += 1_000;
+        record.record('timing', {
+            phase: 'exchange-info',
+            durationMs: 0,
+            outcome: 'ok',
+            cache: 'stale',
+            code: null,
+        });
+
+        expect(disk.lines(TODAY)).toEqual([
+            {
+                at: '2026-08-11T14:20:31.482Z',
+                kind: 'timing',
+                phase: 'exchange-info',
+                durationMs: 4,
+                outcome: 'aborted',
+                cache: 'miss',
+                code: 'REQUEST_ABORTED',
+            },
+            {
+                at: '2026-08-11T14:20:32.182Z',
+                kind: 'timing',
+                phase: 'exchange-info',
+                durationMs: 704,
+                outcome: 'ok',
+                cache: 'shared',
+                code: null,
+            },
+            {
+                at: '2026-08-11T14:20:33.182Z',
+                kind: 'timing',
+                phase: 'exchange-info',
+                durationMs: 0,
+                outcome: 'ok',
+                cache: 'stale',
+                code: null,
+            },
+        ]);
+    });
+
     it('adds to the record a previous run left behind', () => {
         disk.seed(TODAY, {
             text: '{"at":"2026-08-11T09:00:00.000Z","kind":"session","event":"started","version":null}\n',

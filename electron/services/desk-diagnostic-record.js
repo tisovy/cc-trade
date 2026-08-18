@@ -69,9 +69,11 @@ const ORDER_STATE = /^[A-Z][A-Z_]{0,31}$/;
 // an identity from somewhere else loses its line rather than widening it.
 const IDENTITY = /^[A-Za-z0-9_-]{1,64}$/;
 const OUTCOME = /^[a-z][a-z-]{0,31}$/;
-// Whether a read was answered from the shared exchange-info cache. Only the
-// reads that have a cache carry it; the rest state nothing.
-const CACHE = /^(?:hit|miss)$/;
+// How an exchange-info read used the shared cache: a fresh value, a new fetch,
+// an in-flight fetch another caller started, or a bounded-stale value served
+// while it is revalidated. Only reads that have a cache carry it; the rest
+// state nothing.
+const CACHE = /^(?:hit|miss|shared|stale)$/;
 const RESULT = /^(?:rejected|unresolved|resolved)$/;
 // The exchange's own name for a refusal. Binance answers with a small signed
 // integer (-2019, "insufficient margin"); a request that never reached an answer
