@@ -792,6 +792,8 @@
 }
 
 .futures-workstation-chart-canvas-shell {
+  --futures-position-annotation-font-size: calc(var(--fx-ui-scale, 1) * 9px);
+
   position: absolute;
   inset: 0;
 }
@@ -809,6 +811,40 @@
   z-index: 3;
   overflow: hidden;
   pointer-events: none;
+}
+
+.futures-workstation-position-annotation {
+  position: absolute;
+  right: 0;
+  box-sizing: border-box;
+  max-width: min(112px, 100%);
+  height: 16px;
+  padding: 0 5px;
+  transform: translateY(-50%);
+  overflow: hidden;
+  border-left: 2px solid currentcolor;
+  border-radius: 3px 0 0 3px;
+  background: rgba(5, 12, 19, 0.86);
+  color: #9eb0c2;
+  font-size: var(--futures-position-annotation-font-size);
+  font-weight: 800;
+  line-height: 16px;
+  letter-spacing: 0.04em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.futures-workstation-position-annotation.is-buy {
+  color: #2bc48a;
+}
+
+.futures-workstation-position-annotation.is-sell {
+  color: #ef5b69;
+}
+
+.futures-workstation-position-annotation.is-liquidation {
+  color: #f0b90b;
 }
 
 .futures-workstation-gesture-hint {

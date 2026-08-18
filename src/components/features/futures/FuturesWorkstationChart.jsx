@@ -166,6 +166,10 @@ const futuresOrderIdentity = order => (
   `${order?.symbol}:${order?.orderKind}:${order?.orderId}:${order?.clientOrderId}`
 )
 
+const futuresPositionIdentity = position => (
+  `${position?.symbol}:${position?.positionSide}`
+)
+
 const layoutOrderCoordinates = (entries, height) => {
   if (entries.length === 0 || height <= 0) return []
   const top = Math.min(ORDER_HANDLE_HALF_HEIGHT, height / 2)
@@ -249,6 +253,7 @@ export const FuturesWorkstationChart = ({
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 })
   const [measurement, setMeasurement] = useState(null)
   const [orderCoordinates, setOrderCoordinates] = useState([])
+  const [positionAnnotationCoordinates, setPositionAnnotationCoordinates] = useState([])
   // The order the drag holds: `lifting` while the exchange is being asked to
   // cancel it, `moving` once it has, `placing` while its replacement is in
   // flight. Nothing on the book corresponds to it after the lift, which is why
@@ -370,11 +375,9 @@ export const FuturesWorkstationChart = ({
         background: { type: ColorType.Solid, color: '#071019' },
         textColor: '#9eb0c2',
         attributionLogo: false,
-        // Every label the library draws — the price line titles (ENTRY, LIQ,
-        // ALERT) and the plates they put on the scale — is set from this one
-        // size, and at the default twelve they carried the weight of the candles
-        // they annotate. Nine is as small as the price scale stays readable at.
-        fontSize: 9,
+        // Standard scale ticks stay readable independently of the smaller DOM
+        // annotations that name entry and liquidation lines inside the plot.
+        fontSize: 11,
       },
       grid: {
         vertLines: { color: 'rgba(135, 151, 170, 0.08)' },
@@ -649,6 +652,7 @@ export const FuturesWorkstationChart = ({
       seriesRef.current = null
       overlayLinesRef.current = []
       rowStateRef.current = { contract: null }
+      setPositionAnnotationCoordinates([])
     }
   }, [cancelMeasurement])
 
@@ -789,6 +793,28 @@ export const FuturesWorkstationChart = ({
       ? ownedOrders
       : ownedOrders.filter(order => !liftedOrderIdentities.has(futuresOrderIdentity(order)))
   ), [liftedOrderIdentities, ownedOrders])
+  const positionAnnotations = useMemo(() => positions.flatMap((position) => {
+    const presentation = describeFuturesPosition(position)
+    const identity = futuresPositionIdentity(position)
+    const entryPrice = toNumber(position.entryPrice)
+    const liquidationPrice = toNumber(position.liquidationPrice)
+    return [
+      ...(entryPrice !== null && entryPrice > 0 ? [{
+        key: `${identity}:entry`,
+        kind: 'entry',
+        label: `ENTRY ${presentation.positionSide}`,
+        price: entryPrice,
+        tone: presentation.tone,
+      }] : []),
+      ...(liquidationPrice !== null && liquidationPrice > 0 ? [{
+        key: `${identity}:liquidation`,
+        kind: 'liquidation',
+        label: 'LIQ',
+        price: liquidationPrice,
+        tone: 'liquidation',
+      }] : []),
+    ]
+  }), [positions])
 
   useEffect(() => {
     const series = seriesRef.current?.contractSeries
@@ -838,14 +864,14 @@ export const FuturesWorkstationChart = ({
         lineWidth: 1,
         lineStyle: LineStyle.Dashed,
         axisLabelVisible: true,
-        title: `ENTRY ${presentation.positionSide}`,
+        title: '',
       })
       addLine(position.liquidationPrice, {
         color: '#f0b90b',
         lineWidth: 1,
         lineStyle: LineStyle.LargeDashed,
         axisLabelVisible: true,
-        title: 'LIQ',
+        title: '',
       })
     })
     // One-way accounts report positionSide BOTH, so a `positionSide === 'LONG'`
@@ -898,6 +924,26 @@ export const FuturesWorkstationChart = ({
         ))
         return unchanged ? previous : next
       })
+      const nextPositionAnnotations = !series || typeof series.priceToCoordinate !== 'function'
+        ? []
+        : positionAnnotations.flatMap((annotation) => {
+          const y = series.priceToCoordinate(annotation.price)
+          return typeof y === 'number'
+            && Number.isFinite(y)
+            && y >= 0
+            && y <= containerSize.height
+            ? [{ ...annotation, y }]
+            : []
+        })
+      setPositionAnnotationCoordinates((previous) => {
+        const unchanged = previous.length === nextPositionAnnotations.length
+          && previous.every((annotation, index) => (
+            annotation.key === nextPositionAnnotations[index].key
+            && annotation.price === nextPositionAnnotations[index].price
+            && annotation.y === nextPositionAnnotations[index].y
+          ))
+        return unchanged ? previous : nextPositionAnnotations
+      })
     }
     const scheduleUpdate = () => {
       if (pending !== null) return
@@ -923,7 +969,7 @@ export const FuturesWorkstationChart = ({
       if (pending?.kind === 'timer') globalThis.clearTimeout(pending.id)
       pending = null
     }
-  }, [candles, containerSize.height, restingOrders])
+  }, [candles, containerSize.height, positionAnnotations, restingOrders])
 
   // A dragged order is shown as its own price line so the move is read on the
   // chart and on the price axis, not only on the handle badge.
@@ -1315,6 +1361,19 @@ export const FuturesWorkstationChart = ({
         </div>
       ) : null}
       <div className="futures-workstation-owned-order-layer" aria-label="Owned Futures orders">
+        {positionAnnotationCoordinates.map(annotation => (
+          <span
+            className={`futures-workstation-position-annotation is-${annotation.tone}`}
+            key={annotation.key}
+            style={{ top: `${annotation.y}px` }}
+            data-position-annotation={annotation.kind}
+            data-price={annotation.price}
+            role="note"
+            aria-label={`${annotation.label} at ${annotation.price}`}
+          >
+            {annotation.label}
+          </span>
+        ))}
         {liftedMarks.map(liftedMark => (
           <div
             key={liftedMark.key}

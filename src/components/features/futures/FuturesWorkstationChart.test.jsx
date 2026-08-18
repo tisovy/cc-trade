@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs'
 import { act, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { createChart, TickMarkType } from 'lightweight-charts'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -144,14 +145,26 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     expect(chart.series[0].update).toHaveBeenCalledTimes(1)
   })
 
-  // The library draws every label it owns at one size — the price line titles
-  // (ENTRY, LIQ, ALERT) and the plates it puts on the scale — and at the default
-  // it annotated the candles at the weight of the candles. And the newest bar's
-  // volume was stamped onto the price scale, where every other plate is a price.
-  it('draws its own labels small and puts no volume badge on the price scale', () => {
+  // Position annotations live in the DOM so their smaller type does not make
+  // ordinary price ticks hard to read. The volume badge is also kept off that
+  // price scale, where its quantity would be mistaken for a price.
+  it('sizes position annotations independently and puts no volume badge on the price scale', () => {
     render(<FuturesWorkstationChart {...properties([candle(1_784_000_000_000)])} />)
 
-    expect(createChart.mock.calls.at(-1)[1].layout.fontSize).toBe(9)
+    const scaleFontSize = createChart.mock.calls.at(-1)[1].layout.fontSize
+    expect(scaleFontSize).toBe(11)
+    const stylesheet = readFileSync(
+      'src/components/features/futures/FuturesWorkstation.css',
+      'utf8',
+    )
+    const annotationRule = stylesheet.match(
+      /--futures-position-annotation-font-size:\s*calc\([^;]*\*\s*([\d.]+)px\)/,
+    )
+    expect(annotationRule).not.toBeNull()
+    expect(Number(annotationRule[1])).toBeLessThan(scaleFontSize)
+    expect(stylesheet).toMatch(
+      /\.futures-workstation-position-annotation\s*\{[^}]*font-size:\s*var\(--futures-position-annotation-font-size\)/s,
+    )
     const [, volumeOptions] = chartMock.charts[0].addSeries.mock.calls
       .find(([type]) => type === 'HistogramSeries')
     expect(volumeOptions).toMatchObject({ lastValueVisible: false, priceLineVisible: false })
@@ -289,7 +302,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     expect(document.body.textContent).not.toMatch(/\bMARK\b|\bINDEX\b/)
   })
 
-  it('still hands mark price to the surfaces that own it', () => {
+  it('still hands mark price to the surfaces that own it', async () => {
     // Distinguishes "the overlay was removed" from "mark price was lost": the
     // chart must not draw it, and the position row must still read it.
     render(
@@ -298,9 +311,9 @@ describe('FuturesWorkstationChart viewport ownership', () => {
         positions={[{
           symbol: 'BTCUSDT',
           positionAmt: '0.500',
-          entryPrice: '58000.00',
+          entryPrice: '59900.00',
           markPrice: '58500.00',
-          liquidationPrice: '50000.00',
+          liquidationPrice: '59800.00',
         }]}
       />,
     )
@@ -310,8 +323,8 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     const overlayTitles = chart.series
       .flatMap(series => series.createPriceLine.mock.calls)
       .map(([options]) => options?.title ?? '')
-    expect(overlayTitles.some(title => /ENTRY/i.test(title))).toBe(true)
     expect(overlayTitles.join(' ')).not.toMatch(/MARK|INDEX/i)
+    expect(await screen.findByRole('note', { name: 'ENTRY LONG at 59900' })).toBeInTheDocument()
   })
 
   it('keeps a Shift-click measurement after Shift release and clears it on the next click', () => {
@@ -573,7 +586,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
       .not.toBeInTheDocument()
   })
 
-  it('marks the entry and liquidation prices of an open position on the chart', async () => {
+  it('keeps custom position labels on their price coordinates without standard titles', async () => {
     const props = {
       ...properties([candle(1_784_000_000_000)]),
       positions: [{
@@ -581,25 +594,47 @@ describe('FuturesWorkstationChart viewport ownership', () => {
         positionSide: 'BOTH',
         quantity: '-0.5',
         entryPrice: '59900',
-        liquidationPrice: '61200',
+        liquidationPrice: '59800',
       }],
     }
-    render(<FuturesWorkstationChart {...props} />)
+    const { rerender } = render(<FuturesWorkstationChart {...props} />)
+    const series = chartMock.charts[0].series[0]
     await waitFor(() => {
-      expect(chartMock.charts[0].series[0].createPriceLine).toHaveBeenCalledWith(
+      expect(series.createPriceLine).toHaveBeenCalledWith(
         // Half-opaque on purpose: the entry band must not hide the candles at
         // its own price, and its label plate carries the same translucency
         // pre-composited, because the library drops alpha from label plates.
         expect.objectContaining({
           price: 59900,
-          title: 'ENTRY SHORT',
+          title: '',
+          axisLabelVisible: true,
           color: 'rgba(239, 91, 105, 0.5)',
           axisLabelColor: '#7b3541',
         }),
       )
     })
-    expect(chartMock.charts[0].series[0].createPriceLine).toHaveBeenCalledWith(
-      expect.objectContaining({ price: 61200, title: 'LIQ' }),
+    expect(series.createPriceLine).toHaveBeenCalledWith(
+      expect.objectContaining({ price: 59800, title: '', axisLabelVisible: true }),
+    )
+    const entry = await screen.findByRole('note', { name: 'ENTRY SHORT at 59900' })
+    const liquidation = await screen.findByRole('note', { name: 'LIQ at 59800' })
+    expect(entry).toHaveStyle({ top: '100px' })
+    expect(liquidation).toHaveStyle({ top: '200px' })
+
+    series.priceToCoordinate.mockImplementation(price => 59_950 - price)
+    act(() => chartMock.charts[0].timeScale().emitVisibleLogicalRangeChange())
+
+    await waitFor(() => expect(entry).toHaveStyle({ top: '50px' }))
+    expect(liquidation).toHaveStyle({ top: '150px' })
+
+    series.createPriceLine.mockClear()
+    rerender(<FuturesWorkstationChart {...props} positions={[{
+      ...props.positions[0],
+      liquidationPrice: '0',
+    }]} />)
+    await waitFor(() => expect(screen.queryByRole('note', { name: /LIQ at/ })).not.toBeInTheDocument())
+    expect(series.createPriceLine).not.toHaveBeenCalledWith(
+      expect.objectContaining({ price: 0 }),
     )
   })
 
