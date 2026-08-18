@@ -98,14 +98,19 @@ of the work below.
       change nothing was ever reported, so it can only catch a later change that
       starts reporting frames it should not.
 - [ ] 5.4 Measure one live fill end to end from the record after this lands, and write the numbers here — the legs, and whether the screen changed. This is the first answer the desk will have given to a question it has been asked twice.
-      **Still open after the 2026-08-18 record audit.** The first frame carrying
-      the landed schema (`identity`/`status`, null on a market frame) is at
-      16:03:52 UTC. The last real trading commands are earlier, at 15:21:27 UTC.
-      Across every later session the record contains zero `orders`/`account`
-      frames with an order identity and exchange status, so there is no live
-      fill whose four legs and `DELIVERED`/`UNCHANGED` result can be written
-      here. Market frames and pre-instrumentation command timings were not used
-      as substitutes.
+      **Partial live evidence, still open after the 2026-08-18 re-audit.** Four
+      identified private order reports and their paired account frames landed
+      at 18:02:30–18:02:32 UTC. All four reports say `CANCELED` and `UNCHANGED`:
+      exchange→desk 185–202 ms, desk→queue 0 ms, queue→renderer 0–1 ms and
+      renderer→screen 9–11 ms (195–213 ms total). They prove on live Production
+      traffic that the private stream reaches the renderer, is committed and is
+      recorded with identity/status. They do not supply the `FILLED` or
+      `PARTIALLY_FILLED` observation this task requires. The successful live
+      place/cancel commands just before them and the focused 329-test pass are
+      corroboration, not substitutes for a fill. Desk revision was not written
+      into the diagnostic record and remains `NOT RECORDED`.
 - [ ] 5.5 Operator check: none of its own. The whole point of this change is that the next report needs no operator to be asked what and where. Runbook step 41 and step 30's open follow-up are settled from the record once §5.4 has a fill in it.
-      **Still open because 5.4 has no qualifying fill.** Runbook step 41 and
-      step 30's partial-fill Total follow-up remain open.
+      **Still open because 5.4 has no qualifying fill.** The live cancellation
+      frames settle the private-stream/renderer seam but do not exercise the
+      remaining-size/Total behaviour. Runbook step 41 and step 30's partial-fill
+      Total follow-up therefore remain open.

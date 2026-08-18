@@ -62,7 +62,7 @@ from a nearby commit.
 | `hear-the-exchange-out` | 5.3 | `PARTIAL` | 2026-08-15 | Production | `NOT RECORDED` | Results 36–38: no ALGO measurement, leverage delayed, proxy method invalid for a silent stream. The checkbox records runbook handoff, not live success. |
 | `keep-the-contracts-warm` | 5.4 | `CONFIRMED` | 2026-08-15 | Production | `NOT RECORDED` | Result 39: AKE/APR/ACE switches were seamless and retained their books. |
 | `lift-the-next-order-while-the-last-lands` | 4.4 | `CONFIRMED` | 2026-08-15 | Production | `NOT RECORDED` | Result 40: several orders dragged before earlier replacements landed; all completed correctly. |
-| `price-an-order-at-what-still-rests` | 2.4 | `OUTSTANDING` | 2026-08-15 | Production | `NOT RECORDED` | Result 41 was delayed; a partial fill is still required. |
+| `price-an-order-at-what-still-rests` | 2.4 | `OUTSTANDING` | 2026-08-15 | Production | `NOT RECORDED` | Result 41 was delayed; a live partial fill is still required. Indirect coverage remains green in `futuresOrderPresentation.test.js`, `prices a partly filled order at what is still working`: both snapshot `executedQty` and stream `z` value the remainder at 500 rather than 1000, and the shared total is 900 with a second 400 order. That proves the shared derivation, not all four live surfaces. |
 | `keep-the-book-under-the-market` | 3.3 | `OUTSTANDING` | 2026-08-15 | Production | `NOT RECORDED` | Result 42 was delayed pending a real sharp break. |
 | `end-the-book-where-the-market-does` | 4.3 | `CONFIRMED` | 2026-08-15 | Production | `NOT RECORDED` | Result 43: step ladder checked against Binance and passed. |
 | `keep-the-book-the-stream-restates` | 5.4 | `CONFIRMED` | 2026-08-15 | Production | `NOT RECORDED` | Result 44: live comparison with Binance passed. |
@@ -127,7 +127,7 @@ that archival implied verification.
 | `compute-the-unstated-values-beside-the-read` | 4.3 | `CONFIRMED BY DIAGNOSTIC RECORD` | 2026-08-15 | Production | `NOT RECORDED` | Archived task records 1,314 comparison lines with all five values named after the operator delegated reading the journal to the session. |
 | `thin-the-scrollbars-and-split-the-market-rail` | 3.4 | `OUTSTANDING` | `NOT RECORDED` | `NOT RECORDED` | `NOT RECORDED` | The archived task contains a gate to wait for live confirmation but no result; its false check was removed on 2026-08-18. |
 | `keep-the-close-preview-live` | 4.3 | `OUTSTANDING` | `NOT RECORDED` | `NOT RECORDED` | `NOT RECORDED` | The archived task contains a gate to wait for live confirmation but no result; its false check was removed on 2026-08-18. |
-| `time-the-fill-to-the-screen` | 5.4 | `OUTSTANDING` | 2026-08-18 audit | Production | `NOT RECORDED` | The landed frame schema first appears at 16:03:52 UTC; the last trading command was at 15:21:27 UTC, and all later sessions contain zero order/account frames with identity/status. |
+| `time-the-fill-to-the-screen` | 5.4 | `PARTIAL` | 2026-08-18, 18:02:30–18:02:32 UTC | Production | `NOT RECORDED` | Four identified `CANCELED` order reports and their paired account frames carry all four legs and commit as `UNCHANGED`: exchange→desk 185–202 ms, desk→queue 0 ms, queue→renderer 0–1 ms, renderer→screen 9–11 ms, total 195–213 ms. This proves the live private-stream/renderer measurement but is not the required `FILLED`/`PARTIALLY_FILLED` observation. |
 | `time-the-fill-to-the-screen` | 5.5 | `OUTSTANDING` | 2026-08-18 audit | Production | `NOT RECORDED` | Depends on 5.4; runbook step 41 and the step-30 partial-fill Total follow-up remain open. |
 
 ## Test-Only Guarantees
@@ -152,6 +152,10 @@ that archival implied verification.
 - Result 31 proves that ordinary fast fills reached the old screen promptly. It
   does not prove the newer per-frame timing record or the partial-fill Total
   request.
+- The 2026-08-18 18:02 UTC cancellation reports prove that the newer private
+  frame record reaches a committed renderer. They do not prove how a fill or
+  partial-fill changes the screen, so they cannot close `time-the-fill-to-the-screen`
+  5.4 or its dependent 5.5.
 - The late-frame item remains open until a complaint supplies contract and time
   and the nearest raw `kind: "frame"` supplies its own four legs. Daily medians
   are explicitly not evidence for it.
