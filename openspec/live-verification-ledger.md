@@ -160,6 +160,16 @@ that archival implied verification.
   frame record reaches a committed renderer. They do not prove how a fill or
   partial-fill changes the screen, so they cannot close `time-the-fill-to-the-screen`
   5.4 or its dependent 5.5.
+- Those four lines were written under the earlier reading of the `code` field,
+  where `UNCHANGED` meant "nothing on the screen moved". Since the audit landed
+  that afternoon a frame is judged against its own subject and says one of three
+  things — `DELIVERED`, `UNCHANGED` (the screen already showed what it said) and
+  `NOT_DRAWN` (the screen does not show it, which is the fault). Lines written
+  before 2026-08-18 21:00 UTC cannot be compared with later ones on that field.
+- What to do when the fill finally happens is written out, step by step with a
+  reading table, in that change's own §7:
+  `openspec/changes/archive/2026-08-18-time-the-fill-to-the-screen/tasks.md`.
+  It needs nothing asked of the operator beyond the contract and roughly when.
 - The late-frame item remains open until a complaint supplies contract and time
   and the nearest raw `kind: "frame"` supplies its own four legs. Daily medians
   are explicitly not evidence for it.
