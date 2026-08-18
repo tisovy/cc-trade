@@ -22,3 +22,10 @@
 - [x] 3.1 Run `git diff --check` and strict OpenSpec validation for `finish-futures-order-values` after implementation.
 - [x] 3.2 Stage only this change's files and implementation, then run GitNexus `detect_changes` on staged scope and confirm the affected symbols/flows are expected.
 - [x] 3.3 Commit the completed change directly to `main` without archiving it.
+
+## 4. Post-implementation audit
+
+- [x] 4.1 Run upstream GitNexus impact analysis for the workstation container and chart symbols before the audit fix.
+- [x] 4.2 Preserve the original ALGO order price through the container and derive trigger/spawned chart coordinates only at the chart presentation boundary.
+- [x] 4.3 Add container and chart regressions proving display prices never replace the order price carried by edit/drag/cancel actions.
+- [x] 4.4 Re-run the focused workstation/chart tests, `npm run lint`, `npm run build`, `npm run check:futures-production`, `git diff --check` and strict OpenSpec validation.

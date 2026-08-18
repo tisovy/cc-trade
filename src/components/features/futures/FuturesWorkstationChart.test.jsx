@@ -680,14 +680,14 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     })
 
     const grip = screen.getByRole('button', {
-      name: 'Move SELL LONG order at 0 with Ctrl or Alt drag',
+      name: 'Move SELL LONG order at 59850 with Ctrl or Alt drag',
     })
     fireEvent.doubleClick(grip, { clientX: 120, clientY: 220 })
     expect(props.onOrderEdit).toHaveBeenCalledExactlyOnceWith(
       regularStop,
       { x: 120, y: 220 },
     )
-    fireEvent.click(screen.getByRole('button', { name: 'Cancel SELL LONG order at 0' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel SELL LONG order at 59850' }))
     expect(props.onOrderCancel).toHaveBeenCalledExactlyOnceWith({
       symbol: 'BTCUSDT',
       orderId: 'stop-market',
@@ -1450,7 +1450,8 @@ describe('FuturesWorkstationChart viewport ownership', () => {
           orderId: '82',
           positionSide: 'SHORT',
           positionEffect: 'ENTRY',
-          price: '59850',
+          price: '0',
+          triggerPrice: '59850',
           actualOrderId: '990281234',
           actualPrice: '59848.3',
         }),
@@ -1461,7 +1462,14 @@ describe('FuturesWorkstationChart viewport ownership', () => {
       left: 0, top: 0, width: 320, height: 320, right: 320, bottom: 320,
     })
 
-    const fired = await screen.findByRole('note', { name: /triggered at 59850/ })
+    const series = chartMock.charts[0].series[0]
+    await waitFor(() => {
+      expect(series.createPriceLine).toHaveBeenCalledWith(
+        expect.objectContaining({ price: 59848.3 }),
+      )
+      expect(series.priceToCoordinate).toHaveBeenCalledWith(59848.3)
+    })
+    const fired = await screen.findByRole('note', { name: /triggered at 59848\.3/ })
     expect(fired.getAttribute('aria-label'))
       .toContain('fired into order 990281234 and is awaiting confirmation')
     expect(fired.getAttribute('aria-label')).toContain('cannot be moved or cancelled')

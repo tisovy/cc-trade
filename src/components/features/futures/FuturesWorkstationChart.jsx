@@ -71,6 +71,17 @@ const toNumber = (value) => {
   return Number.isFinite(parsed) ? parsed : null
 }
 
+// A fired conditional is shown where its spawned order fired; one still resting
+// uses the ordinary positive limit and then its trigger. This is deliberately a
+// chart-only projection: the derived value never replaces `order.price` on the
+// object sent to edit, drag, lift, drop or cancellation paths.
+const chartOrderPresentationPrice = (order) => {
+  const spawnedPrice = describeFuturesAlgoTrigger(order).spawnedPrice
+  return spawnedPrice === null
+    ? orderPresentationPrice(order)
+    : orderPresentationPrice({ price: spawnedPrice, triggerPrice: orderPresentationPrice(order) })
+}
+
 // The candles and their volume must cover exactly the same times. The library
 // colours a histogram bar by looking up the row at the time it is drawing, so a
 // row that reaches the candle series but not the volume series leaves it
@@ -878,7 +889,7 @@ export const FuturesWorkstationChart = ({
     // test painted every order — including plain buys — red. Colour by side.
     restingOrders.forEach((order) => {
       const intent = describeFuturesOrderIntent(order)
-      addLine(orderPresentationPrice(order), {
+      addLine(chartOrderPresentationPrice(order), {
         // One pixel, like every other line on this chart. A resting order was
         // the only overlay drawn at two, and against candles a few pixels wide
         // it read as a band rather than as a price — it hid the bars sitting at
@@ -904,7 +915,7 @@ export const FuturesWorkstationChart = ({
       const coordinates = !series || typeof series.priceToCoordinate !== 'function'
         ? []
         : restingOrders.flatMap((order) => {
-          const displayPrice = orderPresentationPrice(order)
+          const displayPrice = chartOrderPresentationPrice(order)
           const price = toNumber(displayPrice)
           const y = price === null ? null : series.priceToCoordinate(price)
           return typeof y === 'number'
@@ -1413,7 +1424,7 @@ export const FuturesWorkstationChart = ({
             longer rests. */}
         {orderCoordinates.filter(({ order }) => (
           !liftedOrderIdentities.has(futuresOrderIdentity(order))
-        )).map(({ order, y, anchorY }) => {
+        )).map(({ order, displayPrice, y, anchorY }) => {
           const orderIdentity = futuresOrderIdentity(order)
           // The cancellation that lifts this order is in flight: it is still
           // working on the exchange, so it stays drawn where it rests and says
@@ -1469,8 +1480,8 @@ export const FuturesWorkstationChart = ({
                 data-anchor-y={anchorY}
                 role="note"
                 aria-label={trigger.triggered
-                  ? `ALGO ${intent.side} ${intent.label} order triggered at ${order.price}; it fired into order ${trigger.spawnedOrderId} and is awaiting confirmation, so it is no longer working and cannot be moved or cancelled`
-                  : `ALGO ${intent.side} ${intent.label} order at ${order.price}; price is managed by Binance and is not draggable`}
+                  ? `ALGO ${intent.side} ${intent.label} order triggered at ${displayPrice}; it fired into order ${trigger.spawnedOrderId} and is awaiting confirmation, so it is no longer working and cannot be moved or cancelled`
+                  : `ALGO ${intent.side} ${intent.label} order at ${displayPrice}; price is managed by Binance and is not draggable`}
               >
                 {content}
               </div>
@@ -1486,7 +1497,7 @@ export const FuturesWorkstationChart = ({
               <button
                 type="button"
                 className="futures-workstation-owned-order-grip"
-                aria-label={`Move ${intent.side} ${intent.label} order at ${order.price} with Ctrl or Alt drag`}
+                aria-label={`Move ${intent.side} ${intent.label} order at ${displayPrice} with Ctrl or Alt drag`}
                 onPointerDown={event => beginOrderDrag(event, order)}
                 onDoubleClick={event => onOrderEditRef.current?.(order, {
                   x: event.clientX,
@@ -1498,7 +1509,7 @@ export const FuturesWorkstationChart = ({
               <button
                 type="button"
                 className="futures-workstation-owned-order-cancel"
-                aria-label={`Cancel ${intent.side} ${intent.label} order at ${order.price}`}
+                aria-label={`Cancel ${intent.side} ${intent.label} order at ${displayPrice}`}
                 onClick={() => onOrderCancelRef.current?.({
                   symbol: order.symbol,
                   orderId: order.orderId,

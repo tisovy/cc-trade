@@ -83,10 +83,10 @@ describe('FuturesProductionWorkstation account review', () => {
       .toBe('TUTUSDT')
   })
 
-  // The chart marker, the dock row and the rail row have to price one order the
-  // same way. A parent that has fired is priced where it fired; one still
-  // resting is priced at its trigger, as it always was.
-  it('draws an algo that has fired at the price it fired at, not at its trigger', () => {
+  // Display coordinates are a chart concern. The container must keep the
+  // exchange order intact so a later action never inherits a trigger or spawned
+  // display price as its ordinary price.
+  it('keeps an algo ordinary price intact while carrying its display inputs to the chart', () => {
     const algo = {
       symbol: 'BTCUSDT',
       orderKind: 'ALGO',
@@ -108,7 +108,12 @@ describe('FuturesProductionWorkstation account review', () => {
       />,
     )
     expect(productionWorkstationMocks.viewRender.mock.lastCall[0].ownedOrders[0])
-      .toMatchObject({ orderKind: 'ALGO', price: '56980.10', triggerPrice: '57000.00' })
+      .toMatchObject({
+        orderKind: 'ALGO',
+        price: '0',
+        triggerPrice: '57000.00',
+        actualPrice: '56980.10',
+      })
 
     rerender(
       <FuturesProductionWorkstation
@@ -119,7 +124,7 @@ describe('FuturesProductionWorkstation account review', () => {
       />,
     )
     expect(productionWorkstationMocks.viewRender.mock.lastCall[0].ownedOrders[0])
-      .toMatchObject({ orderKind: 'ALGO', price: '57000.00' })
+      .toMatchObject({ orderKind: 'ALGO', price: '0', triggerPrice: '57000.00' })
   })
 
   // Nothing is read for the review from here any more. A read issued before a
