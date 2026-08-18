@@ -482,21 +482,17 @@ element that the entry was recovered rather than read.
 - **THEN** its size is what the position was worth in USDT at its entry, and the contract count is on the element
 
 ### Requirement: An order is valued at the price it rests at
-An order's stated price and value SHALL be taken from the price it is actually
-working at. For a stop or take-profit that is the trigger, which the exchange
-reports separately and alongside a `price` of zero for the market-triggered
-kinds; the normalized order SHALL carry that trigger for regular orders as it
-already does for algorithmic ones, and SHALL omit the field where the exchange
-reports no trigger rather than carrying a zero that would be read as a price.
+An order's stated value SHALL use its own usable positive limit price where it has one. A stop-limit or take-profit-limit order therefore SHALL be valued at its limit price, not at the trigger that decides when it becomes active. Only an order without a usable limit price, including a market-triggered stop whose ordinary `price` is zero, SHALL fall back to its positive trigger price. The normalized order SHALL carry that trigger for regular orders as it already does for algorithmic ones, and SHALL omit the field where the exchange reports no trigger rather than carrying a zero that would be read as a price.
 
-An order SHALL NOT be valued at zero because a field it needs is missing. An
-order with no usable price or no usable size SHALL be reported as unvaluable, so
-that a row which could not be read is distinguishable from an order that commits
-nothing.
+An order SHALL NOT be valued at zero because a field it needs is missing. An order with no usable price or no usable size SHALL be reported as unvaluable, so that a row which could not be read is distinguishable from an order that commits nothing.
 
 #### Scenario: A stop rests in the list
 - **WHEN** the exchange reports a resting stop with `price` `0` and a trigger of `58000` for `0.5` contracts
 - **THEN** the order is shown at `58000` and valued at `29000` USDT, in the list and in any total of the working orders
+
+#### Scenario: A stop-limit has both prices
+- **WHEN** a stop-limit order has a trigger of `58000`, a limit price of `57900` and a working quantity of `0.5` contracts
+- **THEN** its stated value is `28950` USDT from the limit price, while the trigger remains separately available as the activation price
 
 #### Scenario: A limit order has no trigger
 - **WHEN** the exchange reports a plain limit order
@@ -554,12 +550,13 @@ track and SHALL shorten its own content when it does not fit, so that no column
 can be squeezed out of the row by another and the cancel control keeps its
 place at every width.
 
-A price SHALL be stated at the precision the contract quotes where that
-precision is known, and with the exchange's float padding removed where it is
-not; the padded string the exchange sends SHALL NOT be rendered as though it
-were precision. A symbol MAY be shortened to its base asset where the quote
-asset is the one every contract on the desk settles in, provided the whole name
-remains available on the cell and on every control that acts on the contract.
+A price SHALL be stated at the precision the row's own contract quotes where
+that precision is known, regardless of which contract is currently selected,
+and with the exchange's float padding removed where it is not; the padded string
+the exchange sends SHALL NOT be rendered as though it were precision. A symbol
+MAY be shortened to its base asset where the quote asset is the one every
+contract on the desk settles in, provided the whole name remains available on
+the cell and on every control that acts on the contract.
 
 #### Scenario: A row states a value
 - **WHEN** an order worth 10 982 USDT rests in the list
@@ -572,6 +569,10 @@ remains available on the cell and on every control that acts on the contract.
 #### Scenario: An order rests on another contract
 - **WHEN** the account holds orders on contracts other than the one on screen
 - **THEN** every row names its own contract, shortened to its base asset with the whole name on the cell, rather than losing the column to its neighbours
+
+#### Scenario: Another contract uses its own tick
+- **WHEN** an order belongs to another contract whose tick is `0.0000100` while the selected contract's tick is `0.1`
+- **THEN** its price is formatted to that order contract's tick rather than the selected contract's tick or a generic float trim
 
 ### Requirement: Orders the stream does not report are read on their own beat
 Order kinds the desk does not learn from the authenticated stream — the
@@ -954,6 +955,16 @@ read as closing a position opened before this window. Fills SHALL be read as one
 run only while they stay on the same side and the same position leg. Where the
 run settles nothing, the reading SHALL NOT change.
 
+An opposite-side fill SHALL also be allowed to disprove that ambiguous opening
+reading. If the tentative opposite position would have realized a non-zero
+profit or loss on that fill but the exchange reports zero, the tentative round
+SHALL be restarted as a partial close of a position older than the window. The
+opposite-side zero-PnL fill SHALL then be treated as adding to that original
+position, and later closing fills SHALL carry the complete closed size and
+realized PnL. This reconsideration SHALL remain within one contract and position
+leg and SHALL NOT rewrite a reversal whose reported PnL is consistent with the
+tentative position.
+
 #### Scenario: The window of fills opens while a position is already held
 - **WHEN** the operator adds to a position opened before the read's window and then closes all of it
 - **THEN** the review shows one closed position of the whole size, and no position in the opposite direction
@@ -969,6 +980,14 @@ run settles nothing, the reading SHALL NOT change.
 #### Scenario: The window opens on a close that realized nothing
 - **WHEN** the first fill of a contract in the read's window closes part of a position older than the window at exactly its average entry, and a later fill on the same side closes the rest at a profit
 - **THEN** the review shows one closed position covering both, at the entry the realized PnL states, carrying all of what was realized — and no position in the opposite direction
+
+#### Scenario: The operator adds after a break-even partial close
+- **WHEN** a pre-window long is sold partly at its average entry for zero realized PnL, the operator buys more at a different price for zero realized PnL, and a later sell closes the remaining position with non-zero realized PnL
+- **THEN** the review shows one real long round with the complete closed size, fees and reported realized PnL, and shows no open or closed short round from those fills
+
+#### Scenario: A short is added after a break-even partial close
+- **WHEN** a pre-window short is bought partly at its average entry for zero realized PnL, the operator sells more at a different price for zero realized PnL, and a later buy closes the remaining position with non-zero realized PnL
+- **THEN** the review shows one real short round with the complete closed size, fees and reported realized PnL, and shows no open or closed long round from those fills
 
 #### Scenario: The window opens on a position being built
 - **WHEN** the first fills of a contract in the read's window open a position and none of them realizes anything
@@ -1301,3 +1320,24 @@ the burst that produces the backlog.
 - **WHEN** the desk is exercised with and without a market-data backlog
 - **THEN** the delay from execution report to applied state is recorded for both, rather than being inferred from the absence of complaints
 
+### Requirement: A working order's filled portion is stated in USDT
+The working-orders table SHALL state the filled portion as a USDT value under a header naming USDT, using the same order-price selection rules as the order's stated size. The exact executed contract quantity SHALL remain available as secondary detail. A zero filled quantity SHALL be presented as zero USDT rather than as an absent reading.
+
+#### Scenario: A limit order is partly filled
+- **WHEN** a working limit order at `100` has executed `2` contracts
+- **THEN** its Filled column states `200` USDT and its secondary detail states exactly `2 contracts`
+
+#### Scenario: A market-triggered stop is partly filled
+- **WHEN** a working stop has no positive limit price, a trigger of `58000` and an executed quantity of `0.1` contracts
+- **THEN** its Filled column states `5800` USDT from the trigger and retains `0.1 contracts` as secondary detail
+
+### Requirement: A market-triggered stop has a chart price
+A working order drawn on the chart SHALL use its positive limit price where it has one and otherwise SHALL use its positive trigger price. A regular or algorithmic market-triggered stop whose ordinary price is zero SHALL therefore remain visible at its trigger. This presentation rule SHALL NOT change submission, execution, editing, dragging or cancellation semantics.
+
+#### Scenario: A stop-market reports price zero
+- **WHEN** a working stop-market order reports ordinary price `0` and trigger price `58000`
+- **THEN** the chart draws the order at `58000`, keeps the original order data unchanged, and keeps all execution and cancellation actions governed by their existing rules
+
+#### Scenario: A stop-limit reports both prices
+- **WHEN** a working stop-limit reports a positive limit price and a different trigger price
+- **THEN** the chart draws its working order line at the limit price and keeps the trigger as activation information

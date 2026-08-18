@@ -2718,3 +2718,54 @@ is holding it.
 #### Scenario: An order is being dragged
 - **WHEN** the operator lifts an order and drags it to a new price
 - **THEN** the line following the pointer stays emphasized, because it is an action rather than a level
+
+### Requirement: A candle-history request settles from the answer issued for it
+A completed candle-history response SHALL be applied from the workstation event that carried that response, not re-read from a resource snapshot that a later status event may have rewritten. A rejection issued before a session can own and serve the history request SHALL be returned as an explicit unavailable workstation outcome carrying the subscription request identity and selection, without claiming a resource generation or revision. Either kind of answer SHALL release only the matching in-flight read; a failure SHALL leave loaded rows intact, SHALL NOT imply exhaustion, and SHALL allow the next scroll to retry.
+
+#### Scenario: A served page and an outage arrive in one renderer cycle
+- **WHEN** a complete live candle-history page is followed by an outage event before the renderer commits the page
+- **THEN** the rows from the live page are applied and the later outage does not reclassify or discard that answer
+
+#### Scenario: The workstation no longer owns the history request
+- **WHEN** the backend refuses a candle-history command because its request, contract or interval is no longer owned
+- **THEN** it emits a bounded unavailable history outcome naming that subscription request, contract, interval and end time so a matching renderer releases the read and may ask again
+
+#### Scenario: An ownership refusal belongs to an abandoned selection
+- **WHEN** an unavailable history answer names a request or selection the renderer no longer waits for
+- **THEN** the renderer ignores it and does not release or alter the current selection's in-flight read
+
+### Requirement: Routine depth delivery is bounded and latest-wins
+Consecutive routine order-book deliveries for the shown contract SHALL be separated by at least 200 milliseconds. The first eligible update MAY be delivered immediately; updates arriving before the next eligible instant SHALL occupy one replaceable pending slot, and the newest complete book SHALL be delivered at that trailing instant. The pending queue SHALL therefore remain bounded to one book and SHALL NOT lose the last state received during the spacing period.
+
+Depth state transitions that tell the operator the book is stale, unavailable or resynchronizing, and the first live depth after recovery, SHALL bypass the routine delay. Releasing, replacing or hiding the owning session SHALL cancel its pending timer and payload so no late book can be delivered under another owner.
+
+#### Scenario: Several diffs arrive in one delivery window
+- **WHEN** multiple valid depth diffs update the shown book within 200 milliseconds
+- **THEN** an eligible leading book may be delivered immediately, exactly one newest book remains pending for the earliest instant at least 200 milliseconds later, no intermediate book is queued, and that trailing book contains the latest state
+
+#### Scenario: A book failure occurs while a routine update is pending
+- **WHEN** the book becomes stale or unavailable before a pending routine delivery fires
+- **THEN** the non-live state is delivered immediately and is not delayed behind the routine book
+
+#### Scenario: Book recovery completes while routine delivery is bounded
+- **WHEN** a recovery rebuilds a live book
+- **THEN** the recovered live state is delivered immediately rather than waiting for the ordinary depth window
+
+#### Scenario: The depth owner is released
+- **WHEN** a contract session with a pending depth delivery is released or replaced
+- **THEN** its pending timer and book are discarded and nothing from that session is emitted later
+
+### Requirement: Position labels are independent from price-scale typography
+The `ENTRY` and `LIQ` annotations SHALL be drawn independently from the chart library's standard price-line titles and price-scale tick typography. Changing either annotation's font size SHALL NOT require reducing the price-scale font size. Their entry and liquidation lines and numeric scale prices SHALL remain visible, and each custom label SHALL stay aligned with the line it names as the chart resizes, scrolls or changes price range.
+
+#### Scenario: Annotation text is made smaller
+- **WHEN** the entry and liquidation annotation font is configured below the price-scale font
+- **THEN** `ENTRY` and `LIQ` use the annotation size while ordinary scale ticks retain the independently configured scale size
+
+#### Scenario: The chart range changes
+- **WHEN** candles, positions or viewport movement change the price-to-coordinate mapping
+- **THEN** each custom position label moves to the current coordinate of its own line
+
+#### Scenario: A position lacks a usable liquidation price
+- **WHEN** an open position has an entry price but no positive liquidation price
+- **THEN** the entry annotation is drawn and no liquidation label or invented liquidation price is shown
