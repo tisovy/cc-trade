@@ -446,6 +446,7 @@ export const FuturesProductionWorkstation = ({
       state={executionState}
       selectedSymbol={symbol}
       selectedContract={selectedContract}
+      tickSizes={tickSizes}
       leverage={executionState?.symbolConfigs?.[symbol]?.leverage ?? null}
       onLeverageEdit={handleLeverageEdit}
       draftPrice={draftPrice}

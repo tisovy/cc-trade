@@ -14,6 +14,7 @@ import {
   describeFuturesOrderIntent,
   exitTitle,
   describeFuturesPosition,
+  orderPresentationPrice,
   orderNotionalUsdt,
 } from '../../../utils/futuresOrderPresentation.js'
 import {
@@ -851,7 +852,7 @@ export const FuturesWorkstationChart = ({
     // test painted every order — including plain buys — red. Colour by side.
     restingOrders.forEach((order) => {
       const intent = describeFuturesOrderIntent(order)
-      addLine(order.price, {
+      addLine(orderPresentationPrice(order), {
         // One pixel, like every other line on this chart. A resting order was
         // the only overlay drawn at two, and against candles a few pixels wide
         // it read as a band rather than as a price — it hid the bars sitting at
@@ -877,20 +878,21 @@ export const FuturesWorkstationChart = ({
       const coordinates = !series || typeof series.priceToCoordinate !== 'function'
         ? []
         : restingOrders.flatMap((order) => {
-          const price = toNumber(order?.price)
+          const displayPrice = orderPresentationPrice(order)
+          const price = toNumber(displayPrice)
           const y = price === null ? null : series.priceToCoordinate(price)
           return typeof y === 'number'
             && Number.isFinite(y)
             && y >= 0
             && y <= containerSize.height
-            ? [{ order, y }]
+            ? [{ order, displayPrice, y }]
             : []
         })
       const next = layoutOrderCoordinates(coordinates, containerSize.height)
       setOrderCoordinates((previous) => {
         const unchanged = previous.length === next.length && previous.every((entry, index) => (
           futuresOrderIdentity(entry.order) === futuresOrderIdentity(next[index].order)
-          && entry.order.price === next[index].order.price
+          && entry.displayPrice === next[index].displayPrice
           && entry.anchorY === next[index].anchorY
           && entry.y === next[index].y
         ))

@@ -8,7 +8,9 @@ import {
   formatSignedPercent,
   formatSignedUsdt,
   formatUsdt,
+  orderFilledNotionalUsdt,
   orderNotionalUsdt,
+  orderPresentationPrice,
   orderWorkingQuantity,
 } from '../../../utils/futuresOrderPresentation.js'
 import { formatExchangePrice } from '../../../utils/futuresPriceFormat.js'
@@ -505,13 +507,27 @@ export const FuturesPortfolioDock = ({
               <span role="columnheader">Intent</span>
               <span role="columnheader">Price</span>
               <span role="columnheader">Size (USDT)</span>
-              <span role="columnheader">Filled</span>
+              <span role="columnheader">Filled (USDT)</span>
               <span role="columnheader" />
             </div>
             {openOrders.map((order) => {
               const intent = describeFuturesOrderIntent(order)
               const trigger = describeFuturesAlgoTrigger(order)
               const editable = order.orderKind !== 'ALGO' && typeof onOrderEdit === 'function'
+              const restingPrice = priceOf(order.symbol, orderPresentationPrice(order))
+              const presentationPrice = trigger.spawnedPrice === null
+                ? restingPrice
+                : priceOf(order.symbol, trigger.spawnedPrice)
+              const executedContracts = order.z ?? order.executedQty
+              const displayedTrigger = priceOf(
+                order.symbol,
+                order.triggerPrice ?? order.price,
+              )
+              const priceTitle = trigger.triggered
+                ? `fired from a trigger at ${displayedTrigger}`
+                : displayedTrigger !== '—' && displayedTrigger !== restingPrice
+                  ? `activates at ${displayedTrigger}`
+                  : undefined
               return (
                 <div
                   className={`futures-workstation-dock-row is-orders is-${intent.tone}${order.symbol === selectedSymbol ? ' is-current-symbol' : ''}${editable ? ' is-editable' : ''}${trigger.triggered ? ' is-triggered' : ''}`}
@@ -571,11 +587,9 @@ export const FuturesPortfolioDock = ({
                       so the row never loses the number it was placed against. */}
                   <span
                     role="cell"
-                    title={trigger.spawnedPrice === null
-                      ? undefined
-                      : `fired from a trigger at ${exactText(order.triggerPrice ?? order.price)}`}
+                    title={priceTitle}
                   >
-                    {exactText(trigger.spawnedPrice ?? order.triggerPrice ?? order.price)}
+                    {presentationPrice}
                   </span>
                   {/* Sized the way the ticket, the editor and the chart label
                       size it, so one order reads as one number everywhere. The
@@ -584,7 +598,16 @@ export const FuturesPortfolioDock = ({
                   <span role="cell" title={`${exactText(orderWorkingQuantity(order))} contracts`}>
                     {orderNotionalUsdt(order) ?? '—'}
                   </span>
-                  <span role="cell">{exactText(order.z ?? '0')}</span>
+                  <span
+                    role="cell"
+                    title={executedContracts === null
+                      || executedContracts === undefined
+                      || executedContracts === ''
+                      ? undefined
+                      : `${executedContracts} contracts`}
+                  >
+                    {orderFilledNotionalUsdt(order) ?? '—'}
+                  </span>
                   <span role="cell">
                     {/* Cancel is not offered on an algo at all — the desk lists
                         and cancels them on Binance — and on one that has fired

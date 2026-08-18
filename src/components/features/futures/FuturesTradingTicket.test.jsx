@@ -1369,6 +1369,44 @@ describe('FuturesTradingTicket', () => {
     expect(within(panel).getByText('0.014841')).toBeInTheDocument()
   })
 
+  it('uses each order contract tick and keeps stop limit and trigger prices distinct', () => {
+    const state = createState({
+      openOrders: [
+        {
+          symbol: 'GRVTUSDT', orderId: 21, side: 'BUY', positionSide: 'LONG',
+          type: 'LIMIT', status: 'NEW', price: '0.01480', origQty: '740000', z: '0',
+        },
+        {
+          symbol: 'BTCUSDT', orderId: 22, side: 'SELL', positionSide: 'LONG',
+          type: 'STOP', status: 'NEW', price: '57900', triggerPrice: '58000',
+          origQty: '0.5', z: '0',
+        },
+        {
+          symbol: 'BTCUSDT', orderId: 23, side: 'SELL', positionSide: 'LONG',
+          type: 'STOP_MARKET', status: 'NEW', price: '0', triggerPrice: '58000',
+          origQty: '0.5', z: '0',
+        },
+      ],
+    })
+    render(
+      <FuturesTradingTicket
+        state={state}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+        tickSizes={{ GRVTUSDT: '0.0000100', BTCUSDT: '0.1' }}
+      />,
+    )
+    fireEvent.click(screen.getByRole('tab', { name: /Orders/ }))
+    const panel = screen.getByLabelText('Current Futures orders')
+
+    expect(within(panel).getByText('0.01480')).toBeInTheDocument()
+    expect(within(panel).getByTitle('57900.0 · activates at 58000.0'))
+      .toHaveTextContent('57900.0')
+    expect(within(panel).getByTitle('58000.0')).toHaveTextContent('58000.0')
+    expect(within(panel).getByText('28950')).toBeInTheDocument()
+    expect(within(panel).getByText('29000')).toBeInTheDocument()
+  })
+
   it('switches from an explicit order-symbol control and keeps a small price whole', () => {
     const onSymbolChange = vi.fn()
     const onOrderEdit = vi.fn()

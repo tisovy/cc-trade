@@ -8,7 +8,9 @@ import {
   formatSignedPercent,
   formatSignedUsdt,
   formatUsdt,
+  orderFilledNotionalUsdt,
   orderNotionalUsdt,
+  orderPresentationPrice,
   projectLiquidationPrice,
   totalOrderNotionalUsdt,
 } from './futuresOrderPresentation.js'
@@ -27,6 +29,24 @@ describe('totalOrderNotionalUsdt', () => {
     const stop = order('0', '0.5', { triggerPrice: '60000' })
     expect(orderNotionalUsdt(stop)).toBe('30000')
     expect(totalOrderNotionalUsdt([stop])).toBe(30000)
+  })
+
+  it('prices a stop-limit at its positive limit before its trigger', () => {
+    const stopLimit = order('57900', '0.5', { triggerPrice: '58000' })
+    expect(orderPresentationPrice(stopLimit)).toBe('57900')
+    expect(orderNotionalUsdt(stopLimit)).toBe('28950')
+    expect(totalOrderNotionalUsdt([stopLimit])).toBe(28950)
+    expect(orderPresentationPrice(order('0', '0.5', { triggerPrice: '58000' })))
+      .toBe('58000')
+  })
+
+  it('states filled value in USDT from stream or snapshot executed contracts', () => {
+    expect(orderFilledNotionalUsdt(order('100', '10', { z: '2' }))).toBe('200')
+    expect(orderFilledNotionalUsdt(order('100', '10', { executedQty: '2' }))).toBe('200')
+    expect(orderFilledNotionalUsdt(order('0', '1', {
+      triggerPrice: '58000', executedQty: '0.1',
+    }))).toBe('5800')
+    expect(orderFilledNotionalUsdt(order('100', '10', { z: '0' }))).toBe('0.00')
   })
 
   // Half of a working order can already be a position. What rests on the book

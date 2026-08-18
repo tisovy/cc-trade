@@ -14,6 +14,7 @@ import {
   describeFuturesPosition,
   describeFuturesPositionMargin,
   exitTitle,
+  orderPresentationPrice,
   orderNotionalUsdt,
   orderWorkingQuantity,
   totalOrderNotionalUsdt,
@@ -87,6 +88,7 @@ const DRAFT_REASON_MESSAGES = Object.freeze({
 })
 
 const SEND_FAILED_MESSAGE = 'Local backend connection unavailable — reconnect.'
+const EMPTY_TICKS = Object.freeze({})
 
 const isExactPositiveDecimal = value => (
   typeof value === 'string' && value.length <= 42 && EXACT_POSITIVE_DECIMAL.test(value)
@@ -126,6 +128,7 @@ const FuturesTradingTicket = ({
   state,
   selectedSymbol = 'BTCUSDT',
   selectedContract = null,
+  tickSizes = EMPTY_TICKS,
   leverage = null,
   onLeverageEdit,
   draftPrice = null,
@@ -189,9 +192,9 @@ const FuturesTradingTicket = ({
   const minQuantity = selectedContract?.filters?.quantity?.min
   const maxQuantity = selectedContract?.filters?.quantity?.max
   const minNotionalUsdt = selectedContract?.filters?.minimumNotional
-  // Only the selected contract's filters are loaded, so another symbol's rows
-  // are cleaned of float noise but never rounded to a foreign tick.
-  const tickOf = symbol => (symbol === selectedSymbol ? tickSize ?? null : null)
+  const tickOf = symbol => (
+    tickSizes?.[symbol] ?? (symbol === selectedSymbol ? tickSize ?? null : null)
+  )
   const hasFilters = isExactPositiveDecimal(tickSize)
     && isExactPositiveDecimal(stepSize)
     && isExactPositiveDecimal(minQuantity)
@@ -819,9 +822,18 @@ const FuturesTradingTicket = ({
                     const trigger = describeFuturesAlgoTrigger(order)
                     const editable = !isAlgo && typeof onOrderEdit === 'function'
                     const displayedPrice = formatPriceOrAbsent(
-                      trigger.spawnedPrice ?? order.triggerPrice ?? order.price,
+                      trigger.spawnedPrice ?? orderPresentationPrice(order),
                       tickOf(order.symbol),
                     )
+                    const displayedTrigger = formatPriceOrAbsent(
+                      order.triggerPrice ?? order.price,
+                      tickOf(order.symbol),
+                    )
+                    const priceTitle = trigger.triggered
+                      ? `${displayedPrice} · fired from a trigger at ${displayedTrigger}`
+                      : displayedTrigger !== '—' && displayedTrigger !== displayedPrice
+                        ? `${displayedPrice} · activates at ${displayedTrigger}`
+                        : displayedPrice === '—' ? undefined : displayedPrice
                     return (
                       <div
                         className={`futures-production-order-row is-${intent.tone}${order.symbol === selectedSymbol ? ' is-current-symbol' : ''}${editable ? ' is-editable' : ''}${trigger.triggered ? ' is-triggered' : ''}`}
@@ -872,7 +884,8 @@ const FuturesTradingTicket = ({
                             {intent.label}
                           </span>
                         </span>
-                        {/* An order rests at its trigger where it has one, at the
+                        {/* An order rests at its positive limit where it has one,
+                            falling back to its trigger for a market stop, at the
                             contract's tick rather than at the stream's padded
                             width — `8.1200000` is nine characters of which three
                             carry information, and in this column it wrapped onto a
@@ -880,9 +893,7 @@ const FuturesTradingTicket = ({
                             absent rather than as resting at zero. */}
                         <span
                           role="cell"
-                          title={trigger.spawnedPrice === null
-                            ? displayedPrice === '—' ? undefined : displayedPrice
-                            : `${displayedPrice} · fired from a trigger at ${order.triggerPrice ?? order.price}`}
+                          title={priceTitle}
                         >
                           {/* A parent that fired is priced where it fired, not
                               where it was waiting to. */}

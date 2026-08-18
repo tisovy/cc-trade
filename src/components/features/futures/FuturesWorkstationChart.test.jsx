@@ -603,6 +603,67 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     )
   })
 
+  it('draws stop-market orders at trigger and stop-limit orders at limit without rewriting actions', async () => {
+    const regularStop = Object.freeze(workingOrder({
+      orderId: 'stop-market',
+      clientOrderId: 'regular-stop-market',
+      price: '0',
+      triggerPrice: '59850',
+    }))
+    const algoStop = Object.freeze(workingOrder({
+      orderKind: 'ALGO',
+      algoType: 'CONDITIONAL',
+      orderId: 'algo-stop-market',
+      clientOrderId: 'algo-stop-market',
+      price: '0',
+      triggerPrice: '59750',
+    }))
+    const stopLimit = Object.freeze(workingOrder({
+      orderId: 'stop-limit',
+      clientOrderId: 'regular-stop-limit',
+      price: '59910',
+      triggerPrice: '59800',
+    }))
+    const props = {
+      ...properties([candle(1_784_000_000_000)]),
+      ownedOrders: [regularStop, algoStop, stopLimit],
+      onOrderCancel: vi.fn(),
+      onOrderEdit: vi.fn(),
+    }
+    render(<FuturesWorkstationChart {...props} />)
+    const canvas = screen.getByTestId('futures-workstation-chart')
+    canvas.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 320, height: 320, right: 320, bottom: 320,
+    })
+    const series = chartMock.charts[0].series[0]
+
+    await waitFor(() => {
+      for (const price of [59850, 59750, 59910]) {
+        expect(series.createPriceLine).toHaveBeenCalledWith(expect.objectContaining({ price }))
+        expect(series.priceToCoordinate).toHaveBeenCalledWith(price)
+      }
+    })
+
+    const grip = screen.getByRole('button', {
+      name: 'Move SELL LONG order at 0 with Ctrl or Alt drag',
+    })
+    fireEvent.doubleClick(grip, { clientX: 120, clientY: 220 })
+    expect(props.onOrderEdit).toHaveBeenCalledExactlyOnceWith(
+      regularStop,
+      { x: 120, y: 220 },
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel SELL LONG order at 0' }))
+    expect(props.onOrderCancel).toHaveBeenCalledExactlyOnceWith({
+      symbol: 'BTCUSDT',
+      orderId: 'stop-market',
+    })
+    fireEvent.pointerDown(grip, { pointerId: 31, button: 0, altKey: true })
+    await settle()
+    expect(props.onOrderLift).toHaveBeenCalledExactlyOnceWith(regularStop)
+    expect(regularStop).toEqual(expect.objectContaining({ price: '0', triggerPrice: '59850' }))
+    expect(algoStop).toEqual(expect.objectContaining({ price: '0', triggerPrice: '59750' }))
+  })
+
   // The drag is a cancellation followed by a placement, and the operator asked
   // for exactly that: the order they pick up leaves the book.
   it('cancels the order the drag lifts and places it again where it is dropped', async () => {

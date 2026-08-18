@@ -114,6 +114,19 @@ export const describeFuturesAlgoTrigger = (order) => {
   })
 }
 
+const usableOrderPrice = (value) => {
+  if (value === null || value === undefined || value === '') return null
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed > 0 ? value : null
+}
+
+// The price where the order rests. Conditional activation remains a separate
+// reading: a stop-limit rests at its positive limit, while a stop-market whose
+// ordinary price is zero has only its trigger to draw and value.
+export const orderPresentationPrice = order => (
+  usableOrderPrice(order?.price) ?? usableOrderPrice(order?.triggerPrice)
+)
+
 // What an order is worth, unrounded. Every surface that prices an order — the
 // row, the editor, the chart label, the ticket's total — goes through here, so
 // none of them can price the same order differently.
@@ -145,18 +158,34 @@ export const orderWorkingQuantity = (order) => {
 }
 
 const orderNotionalValue = (order) => {
-  const price = Number(order?.triggerPrice ?? order?.price)
+  const price = Number(orderPresentationPrice(order))
   const quantity = orderWorkingQuantity(order)
   if (!(price > 0) || quantity === null || !(Math.abs(quantity) > 0)) return null
   return Math.abs(price * quantity)
 }
+
+const formatOrderNotionalUsdt = notional => (
+  notional >= 1 ? String(Math.round(notional)) : notional.toFixed(2)
+)
 
 // What an order is worth is the number a trader compares against balance and
 // risk; the exact quantity in base units is secondary.
 export const orderNotionalUsdt = (order) => {
   const notional = orderNotionalValue(order)
   if (notional === null) return null
-  return notional >= 1 ? String(Math.round(notional)) : notional.toFixed(2)
+  return formatOrderNotionalUsdt(notional)
+}
+
+// The Filled column is a value, not another quantity column. The exact
+// contracts stay on the cell as secondary detail; this helper supplies only
+// the USDT reading derived from the same price rule as the working size.
+export const orderFilledNotionalUsdt = (order) => {
+  const price = Number(orderPresentationPrice(order))
+  const rawExecuted = order?.z ?? order?.executedQty
+  if (rawExecuted === null || rawExecuted === undefined || rawExecuted === '') return null
+  const executed = Number(rawExecuted)
+  if (!(price > 0) || !Number.isFinite(executed) || executed < 0) return null
+  return formatOrderNotionalUsdt(price * executed)
 }
 
 // What the resting orders come to, over the same arithmetic as the column they
