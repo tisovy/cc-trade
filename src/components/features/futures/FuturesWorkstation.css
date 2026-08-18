@@ -391,10 +391,15 @@
      shrinkable scroll container it gives height back only when the ticket and
      the fixed selector chrome genuinely exhaust the rail; a fixed two-row cap
      used to show a scrollbar above an otherwise empty lower column. */
-  flex: 0 1 auto;
+  /* At most nine contracts live here, so their three rows are bounded content,
+     not an unbounded list competing with the ticket for flex shrink. Keep their
+     natural height while the rail can pay it. A genuinely short rail caps the
+     group to its share and the existing internal overflow takes over. */
+  flex: 0 0 auto;
   align-content: flex-start;
   gap: 3px;
   min-height: 0;
+  max-height: 25%;
   margin-bottom: 5px;
   overflow-x: hidden;
   overflow-y: auto;
@@ -408,10 +413,10 @@
   min-width: 0;
   max-width: 100%;
   min-height: 22px;
-  border: 1px solid rgba(240, 185, 11, 0.24);
+  border: 1px solid rgba(126, 143, 166, 0.25);
   border-radius: 5px;
   overflow: hidden;
-  background: rgba(240, 185, 11, 0.06);
+  background: rgba(126, 143, 166, 0.06);
 }
 
 .futures-workstation-recent-contract.is-selected {
@@ -626,7 +631,7 @@
   grid-area: header;
   display: flex;
   align-items: stretch;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   gap: 6px 12px;
   padding: 9px 12px;
   /* Never `overflow-x: auto` here. CSS computes the other axis to `auto` as soon
@@ -639,6 +644,7 @@
 
 .futures-workstation-symbol-title {
   display: flex;
+  flex: 0 0 110px;
   flex-direction: column;
   justify-content: center;
   min-width: 110px;
@@ -660,10 +666,17 @@
 
 .futures-workstation-market-header dl {
   display: grid;
-  grid-auto-columns: minmax(82px, auto);
+  flex: 1 1 auto;
+  grid-template-columns:
+    minmax(90px, 1fr)
+    minmax(82px, 1fr)
+    minmax(112px, 1.2fr)
+    minmax(90px, 1fr);
+  grid-template-rows: repeat(2, minmax(0, auto));
   grid-auto-flow: column;
-  gap: 12px;
+  gap: 6px 12px;
   align-items: center;
+  min-width: 0;
   margin: 0;
 }
 
@@ -1536,11 +1549,15 @@
 
   .futures-workstation-market-header {
     flex-direction: column;
+    flex-wrap: wrap;
   }
 
   .futures-workstation-market-header dl {
-    grid-auto-columns: minmax(80px, 1fr);
-    overflow-x: auto;
+    grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+    grid-template-rows: none;
+    grid-auto-flow: row;
+    width: 100%;
+    overflow: visible;
   }
 
   .futures-workstation-instruments {

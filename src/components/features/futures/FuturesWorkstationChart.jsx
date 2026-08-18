@@ -5,6 +5,7 @@ import {
   CrosshairMode,
   HistogramSeries,
   LineStyle,
+  TickMarkType,
   createChart,
 } from 'lightweight-charts'
 import { buildVolumeHistogramPresentation } from '../../../utils/chartVolume.js'
@@ -24,6 +25,45 @@ import { MeasurementOverlay } from '../../common/MeasurementOverlay.jsx'
 import '../charts/ChartWrapper.css'
 
 const toSeconds = milliseconds => Math.floor(milliseconds / 1000)
+
+const LOCAL_CHART_MONTHS = Object.freeze([
+  'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+  'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+])
+
+const padLocalChartPart = value => String(value).padStart(2, '0')
+
+const localChartParts = (time) => {
+  if (typeof time !== 'number' || !Number.isFinite(time)) return null
+  const date = new Date(time * 1_000)
+  if (!Number.isFinite(date.getTime())) return null
+  return Object.freeze({
+    year: String(date.getFullYear()),
+    month: LOCAL_CHART_MONTHS[date.getMonth()],
+    day: padLocalChartPart(date.getDate()),
+    hour: padLocalChartPart(date.getHours()),
+    minute: padLocalChartPart(date.getMinutes()),
+    second: padLocalChartPart(date.getSeconds()),
+  })
+}
+
+const formatLocalChartTime = (time) => {
+  const parts = localChartParts(time)
+  if (!parts) return ''
+  return `${parts.day} ${parts.month} ${parts.year} ${parts.hour}:${parts.minute}`
+}
+
+const formatLocalChartTick = (time, tickMarkType) => {
+  const parts = localChartParts(time)
+  if (!parts) return null
+  if (tickMarkType === TickMarkType.Year) return parts.year
+  if (tickMarkType === TickMarkType.Month) return parts.month
+  if (tickMarkType === TickMarkType.DayOfMonth) return `${parts.day} ${parts.month}`
+  if (tickMarkType === TickMarkType.TimeWithSeconds) {
+    return `${parts.hour}:${parts.minute}:${parts.second}`
+  }
+  return `${parts.hour}:${parts.minute}`
+}
 
 const toNumber = (value) => {
   const parsed = Number(value)
@@ -339,12 +379,19 @@ export const FuturesWorkstationChart = ({
         vertLines: { color: 'rgba(135, 151, 170, 0.08)' },
         horzLines: { color: 'rgba(135, 151, 170, 0.08)' },
       },
+      localization: {
+        // The data keeps its exchange instant. Only the labels read that instant
+        // through the host clock, so Moscow (or any other local zone) agrees
+        // with the workspace clock without shifting a candle on the timeline.
+        timeFormatter: formatLocalChartTime,
+      },
       crosshair: { mode: CrosshairMode.Normal },
       rightPriceScale: { borderColor: 'rgba(135, 151, 170, 0.2)' },
       timeScale: {
         borderColor: 'rgba(135, 151, 170, 0.2)',
         timeVisible: true,
         secondsVisible: false,
+        tickMarkFormatter: formatLocalChartTick,
       },
     })
     const contractSeries = chart.addSeries(CandlestickSeries, {

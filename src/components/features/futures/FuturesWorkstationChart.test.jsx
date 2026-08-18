@@ -1,5 +1,5 @@
 import { act, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { createChart } from 'lightweight-charts'
+import { createChart, TickMarkType } from 'lightweight-charts'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { LIGHTWEIGHT_CHARTS_MAX_SERIES_VALUE } from '../../../utils/chartVolume.js'
 import FuturesWorkstationChart, {
@@ -16,6 +16,9 @@ vi.mock('lightweight-charts', () => ({
   LineSeries: 'LineSeries',
   LineStyle: {
     Dashed: 'Dashed', Dotted: 'Dotted', LargeDashed: 'LargeDashed', Solid: 'Solid',
+  },
+  TickMarkType: {
+    Year: 0, Month: 1, DayOfMonth: 2, Time: 3, TimeWithSeconds: 4,
   },
   createChart: vi.fn(() => {
     const visibleLogicalRangeListeners = new Set()
@@ -152,6 +155,37 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     const [, volumeOptions] = chartMock.charts[0].addSeries.mock.calls
       .find(([type]) => type === 'HistogramSeries')
     expect(volumeOptions).toMatchObject({ lastValueVisible: false, priceLineVisible: false })
+  })
+
+  it('formats chart labels in host-local time without shifting shared series coordinates', () => {
+    const NativeDate = globalThis.Date
+    const openTime = NativeDate.parse('2026-08-18T15:22:41.000Z')
+    // A non-UTC host probe: local getters read 18:22 while the inherited UTC
+    // getters still read 15:22. This exercises the formatter's choice without
+    // mutating process.env.TZ while other Vitest files run in parallel.
+    class NonUtcDate extends NativeDate {
+      getFullYear() { return 2026 }
+      getMonth() { return 7 }
+      getDate() { return 18 }
+      getHours() { return 18 }
+      getMinutes() { return 22 }
+      getSeconds() { return 41 }
+    }
+    vi.stubGlobal('Date', NonUtcDate)
+
+    render(<FuturesWorkstationChart {...properties([candle(openTime)])} />)
+
+    const options = createChart.mock.calls.at(-1)[1]
+    const time = Math.floor(openTime / 1_000)
+    expect(options.localization.timeFormatter(time)).toBe('18 Aug 2026 18:22')
+    expect(options.timeScale.tickMarkFormatter(time, TickMarkType.DayOfMonth))
+      .toBe('18 Aug')
+    expect(options.timeScale.tickMarkFormatter(time, TickMarkType.TimeWithSeconds))
+      .toBe('18:22:41')
+
+    const [contractSeries, volumeSeries] = chartMock.charts[0].series
+    expect(contractSeries.setData.mock.calls.at(-1)[0][0].time).toBe(time)
+    expect(volumeSeries.setData.mock.calls.at(-1)[0][0].time).toBe(time)
   })
 
   // A row that reached the candles but not the volume left the library colouring

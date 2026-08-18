@@ -361,6 +361,45 @@ describe('pure Futures workstation presentation', () => {
     expect(screen.getByTitle('0.25 base')).toHaveTextContent('14.6k')
   })
 
+  it('keeps the seven market readings in paired desktop rows beside the symbol', () => {
+    const { container } = renderView()
+    const header = screen.getByLabelText('Futures market header')
+    expect([...header.querySelectorAll('dl > div')].map(reading => (
+      reading.querySelector('dt')?.textContent
+    ))).toEqual([
+      'Last',
+      '24h change',
+      '24h high',
+      '24h low',
+      '24h volume, USDT',
+      'Funding',
+      'Next funding',
+    ])
+
+    const stylesheet = readFileSync(
+      'src/components/features/futures/FuturesWorkstation.css',
+      'utf8',
+    )
+    const headerRule = stylesheet.match(
+      /\.futures-workstation-market-header\s*\{(?<declarations>[^}]*)\}/,
+    )?.groups?.declarations
+    const readingsRule = stylesheet.match(
+      /\.futures-workstation-market-header dl\s*\{(?<declarations>[^}]*)\}/,
+    )?.groups?.declarations
+    const narrowReadingsRule = stylesheet.match(
+      /@media \(max-width: 844px\) \{[\s\S]*?\.futures-workstation-market-header dl\s*\{(?<declarations>[^}]*)\}/,
+    )?.groups?.declarations
+
+    expect(container.querySelector('.futures-workstation-symbol-title')?.nextElementSibling)
+      .toBe(header.querySelector('dl'))
+    expect(headerRule).toContain('flex-wrap: nowrap;')
+    expect(readingsRule).toContain('grid-template-rows: repeat(2, minmax(0, auto));')
+    expect(readingsRule).toContain('grid-auto-flow: column;')
+    expect(readingsRule).toMatch(/grid-template-columns:[\s\S]*minmax\(112px, 1\.2fr\)/)
+    expect(narrowReadingsRule).toContain('grid-auto-flow: row;')
+    expect(narrowReadingsRule).toContain('overflow: visible;')
+  })
+
   it('shows account synchronization only in place of a routine live identity state', () => {
     const { rerender } = renderView({ accountSynchronizing: true })
     const identity = screen.getByTestId('futures-workstation-identity')
@@ -1540,7 +1579,7 @@ describe('instrument recency and interface scale', () => {
     expect(container.querySelector('.futures-workstation-contract-list')).toBeNull()
   })
 
-  it('lets recent pills use free rail height before enabling vertical overflow', () => {
+  it('keeps the complete bounded recent group before a short rail enables overflow', () => {
     const stylesheet = readFileSync(
       'src/components/features/futures/FuturesWorkstation.css',
       'utf8',
@@ -1551,10 +1590,42 @@ describe('instrument recency and interface scale', () => {
 
     expect(recentRule).toContain('display: grid;')
     expect(recentRule).toContain('grid-template-columns: repeat(3, minmax(0, 1fr));')
-    expect(recentRule).toContain('flex: 0 1 auto;')
+    expect(recentRule).toContain('flex: 0 0 auto;')
     expect(recentRule).toContain('min-height: 0;')
+    expect(recentRule).toContain('max-height: 25%;')
     expect(recentRule).toContain('overflow-y: auto;')
-    expect(recentRule).not.toMatch(/max-height\s*:/)
+  })
+
+  it('uses neutral chrome for inactive recent contracts and blue only for selection', () => {
+    renderView({
+      symbolHistory: {
+        recent: [
+          'BTCUSDT', 'ETHUSDT', 'SOLUSDT',
+          'BNBUSDT', 'XRPUSDT', 'ADAUSDT',
+          'DOGEUSDT', 'LINKUSDT', 'AVAXUSDT',
+        ],
+        favorites: [],
+      },
+    })
+    expect(within(screen.getByRole('list', { name: 'Recent contracts' }))
+      .getAllByRole('listitem')).toHaveLength(9)
+
+    const stylesheet = readFileSync(
+      'src/components/features/futures/FuturesWorkstation.css',
+      'utf8',
+    )
+    const inactiveRule = stylesheet.match(
+      /\.futures-workstation-recent-contract\s*\{(?<declarations>[^}]*)\}/,
+    )?.groups?.declarations
+    const selectedRule = stylesheet.match(
+      /\.futures-workstation-recent-contract\.is-selected\s*\{(?<declarations>[^}]*)\}/,
+    )?.groups?.declarations
+
+    expect(inactiveRule).toContain('border: 1px solid rgba(126, 143, 166, 0.25);')
+    expect(inactiveRule).toContain('background: rgba(126, 143, 166, 0.06);')
+    expect(inactiveRule).not.toContain('240, 185, 11')
+    expect(selectedRule).toContain('border-color: var(--futures-accent);')
+    expect(selectedRule).toContain('background: var(--futures-accent-soft);')
   })
 
   it('wraps every character of a long recent symbol inside its grid slot', () => {
