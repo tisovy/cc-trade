@@ -140,7 +140,7 @@ Both experiments are the operator's own words, recorded during the run.
 - [x] 4.1 `npm run lint`, `npm test` (1803 passed, 109 files),
       `npm run check:futures-production`, `npm run check:circular`,
       `npm run check:runtime-mock`, `npm run check:command-path` — all green.
-- [ ] 4.2 Operator steps handed to `verify-the-desk-in-one-sitting`'s runbook
+- [x] 4.2 Operator steps handed to `verify-the-desk-in-one-sitting`'s runbook
       under "Дописано 2026-08-13: рынок возвращается сам". Not checked off here;
       the runbook is where operator verification lives.
 

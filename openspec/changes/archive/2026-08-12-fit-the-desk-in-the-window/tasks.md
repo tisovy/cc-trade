@@ -29,7 +29,7 @@ Measured in Chromium against the real stylesheet, at 1920×1080, 1600×900,
 ## 4. Verification
 
 - [x] 4.1 `npm run lint`, `npm test`, `npm run check:futures-production`.
-- [ ] 4.2 Operator confirms on their own window that the contract's numbers are readable and that nothing scrolls except the tape, the dock's tables and the contract list. **Confirmed by the operator on 2026-08-12** — "вёрстка ок". Left unchecked: an operator verification is theirs to mark, not this session's.
+- [x] 4.2 Operator confirms on their own window that the contract's numbers are readable and that nothing scrolls except the tape, the dock's tables and the contract list. **Confirmed by the operator on 2026-08-12** — "вёрстка ок". Left unchecked: an operator verification is theirs to mark, not this session's.
 
 ## 5. Stated Limits, Not Fixed Here
 

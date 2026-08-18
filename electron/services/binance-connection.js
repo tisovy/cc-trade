@@ -49,6 +49,7 @@ import {
 } from '../../src/utils/futuresOrderDraft.js';
 import { LOCAL_WEBSOCKET_AUTH_CLOSE_CODE } from '../../src/utils/localWebSocketAccess.js';
 import {
+    FRAME_MARKS_KEY,
     createFrameMarkSampler,
     stampFrameMarks,
 } from '../../src/utils/frameMarks.js';
@@ -792,6 +793,54 @@ const markOutboundFrame = (text, payload, timing, sampler) => {
     );
 };
 
+/**
+ * When the exchange says it sent a user-data frame.
+ *
+ * `E` is the event time every user-data frame carries; `T` is the transaction
+ * time a few of them carry instead. Answers null rather than zero for a frame
+ * that states neither, or states something that is not a whole millisecond
+ * count: null is "not knowable", and `measureFrameMarks` and the record both
+ * keep that distinction for the same reason — a zero would claim the exchange
+ * reached the desk instantly.
+ */
+// What a renderer may say a frame did. `DELIVERED` is the market lane's, and
+// the other two belong to the account lane; anything else is recorded as
+// delivered rather than believed.
+const FRAME_DELIVERY_CODES = new Set(['DELIVERED', 'UNCHANGED', 'NOT_DRAWN']);
+
+const streamFrameEventTime = (payload) => {
+    const stated = Number(payload?.E ?? payload?.T);
+    return Number.isSafeInteger(stated) && stated >= 0 ? stated : null;
+};
+
+/**
+ * Puts the marks on an account frame, on the way out.
+ *
+ * Unsampled, unlike the market lane above, and that is a decision rather than an
+ * omission. `FRAME_MARK_SAMPLE_MS` exists because a book arrives ten times a
+ * second and the *record's* line rate is what has to stay bounded. This lane
+ * arrives at the account's cadence — the operator's own record holds 75 commands
+ * and 93 stream-driven reads on its busiest day, tens on an ordinary one — so
+ * the whole lane costs less than one sampled resource, and a sample here would
+ * drop exactly the frame the record is being asked about: the fill.
+ *
+ * Answers the frame unchanged when there are no marks, which is every frame the
+ * desk sends for a reason of its own. Producing the marks may not change what is
+ * delivered or when, so there is no path here that can refuse to send.
+ */
+const markAccountFrame = (text, payload, marks) => {
+    if (marks === null || !Number.isSafeInteger(marks.receivedAt)) return text;
+    // This lane already uses the word. `futures_position_marks` carries the mark
+    // price of every open position under `marks`, and a stamp spliced in front
+    // of it would be the same key twice in one object — parsed as the payload's,
+    // so the measurement would be silently lost rather than noisily wrong. A
+    // frame that names it is left unmeasured, which is the honest of the two.
+    if (payload !== null && typeof payload === 'object' && Object.hasOwn(payload, FRAME_MARKS_KEY)) {
+        return text;
+    }
+    return stampFrameMarks(text, { ...marks, queuedAt: Date.now() });
+};
+
 // Simple Depth Cache to maintain order book state
 class DepthCache {
     constructor() {
@@ -1131,9 +1180,16 @@ export function setupBinanceConnection({
     const spotRendererConnections = new Set();
     const futuresRendererConnections = new Set();
 
-    // Broadcast to all connected renderers
-    const broadcastToRenderers = (payload, delivery = ACCOUNT_FRAME) => {
-        const message = JSON.stringify(payload);
+    // Broadcast to all connected renderers.
+    //
+    // `marks` are present only on a frame the exchange caused — an execution
+    // report and the account envelope folded from it — and absent on every
+    // frame the desk produced for a reason of its own. The queue mark is taken
+    // here, once for all connections, because here is where the frame stops
+    // being the desk's and becomes the socket's: the same moment
+    // `markOutboundFrame` takes it on the market lane.
+    const broadcastToRenderers = (payload, delivery = ACCOUNT_FRAME, marks = null) => {
+        const message = markAccountFrame(JSON.stringify(payload), payload, marks);
         for (const conn of rendererConnections) {
             sendFrameText(conn, message, delivery);
         }
@@ -1285,9 +1341,17 @@ export function setupBinanceConnection({
         regularOrders: 'futures_regular_orders',
         algoOrders: 'futures_algo_orders',
     });
-    const broadcastFuturesAccountState = () => {
+    const broadcastFuturesAccountState = (marks = null) => {
         // Versioned renderer contract: futures_account_state.
-        broadcastToRenderers(createFuturesAccountStateEnvelope(futuresAccountResources));
+        //
+        // `marks` only when the exchange caused this envelope. A broadcast after
+        // a read has no exchange time and no arrival to measure from, and a mark
+        // invented for it would time the desk's own beat and call it a journey.
+        broadcastToRenderers(
+            createFuturesAccountStateEnvelope(futuresAccountResources),
+            ACCOUNT_FRAME,
+            marks,
+        );
     };
 
     // The exchange announces a leverage change on the authenticated stream, so
@@ -2286,11 +2350,17 @@ export function setupBinanceConnection({
             socket.on('pong', () => noteFuturesUserDataTraffic(socket, generation));
 
             socket.on('message', (data) => {
+                // Taken before the frame is read, so reading it counts as the
+                // desk's own work and not as time on the wire.
+                const receivedAt = Date.now();
                 noteFuturesUserDataTraffic(socket, generation);
                 const payload = extractStreamPayload(data);
                 if (!payload) return;
                 const streamEvent = normalizeFuturesUserDataStreamEvent(payload);
                 if (!streamEvent) return;
+                // The first two of the five marks. Everything the exchange
+                // caused here carries them; nothing the desk caused does.
+                const marks = { exchangeAt: streamFrameEventTime(payload), receivedAt };
                 if (streamEvent.type === 'executionReport') {
                     const report = streamEvent.executionReport;
                     noteFuturesHistoryActivity(report.symbol);
@@ -2304,9 +2374,9 @@ export function setupBinanceConnection({
                     });
                     if (folded !== futuresAccountResources) {
                         futuresAccountResources = folded;
-                        broadcastFuturesAccountState();
+                        broadcastFuturesAccountState(marks);
                     }
-                    broadcastToRenderers(streamEvent.rendererPayload);
+                    broadcastToRenderers(streamEvent.rendererPayload, ACCOUNT_FRAME, marks);
                     // Placing, amending or cancelling an order locks or releases
                     // margin, and no stream says so — the frame describes the
                     // order, never the free margin behind it. A fill needs
@@ -2326,7 +2396,7 @@ export function setupBinanceConnection({
                     if (resources !== futuresAccountResources) {
                         const positionsMoved = resources.positions !== futuresAccountResources.positions;
                         futuresAccountResources = resources;
-                        broadcastFuturesAccountState();
+                        broadcastFuturesAccountState(marks);
                         if (positionsMoved) {
                             const positions = resources.positions.data ?? [];
                             // A folded position set is a position set: the marks
@@ -2375,7 +2445,13 @@ export function setupBinanceConnection({
                     );
                     if (folded !== futuresAccountResources) {
                         futuresAccountResources = folded;
-                        broadcastFuturesAccountState();
+                        // Marked like the other two: a stop the exchange has just
+                        // fired is drawn on the same lane, and "when did it leave
+                        // the chart" is the same question asked of a different
+                        // frame. The margin call and the trigger rejection beside
+                        // it stay unmarked — nothing closes their commit, and a
+                        // stamp nobody closes is a measurement nobody takes.
+                        broadcastFuturesAccountState(marks);
                     }
                 }
                 if (streamEvent.type === 'listenKeyExpired') {
@@ -4923,7 +4999,18 @@ export function setupBinanceConnection({
             if (data.action === 'report_frame_marks') {
                 diagnosticRecord.record('frame', {
                     phase: 'frame',
-                    code: 'DELIVERED',
+                    // What the frame did when it landed. `DELIVERED` is the
+                    // market lane's only answer — a book that arrives is a book
+                    // that is drawn. An order frame has three: it may show what
+                    // the exchange said, restate what was already drawn, or
+                    // arrive and leave the screen not showing it at all. The
+                    // last is the operator's complaint stated precisely, and it
+                    // is invisible unless the three are told apart.
+                    //
+                    // Read from a closed set rather than passed through: the
+                    // renderer is the desk's own, and this is still the one
+                    // field on this line a caller chooses the value of.
+                    code: FRAME_DELIVERY_CODES.has(data.code) ? data.code : 'DELIVERED',
                     resource: data.resource ?? null,
                     symbol: data.symbol ?? null,
                     upstreamMs: data.upstreamMs ?? null,
@@ -4931,6 +5018,8 @@ export function setupBinanceConnection({
                     deliveredMs: data.deliveredMs,
                     committedMs: data.committedMs,
                     totalMs: data.totalMs,
+                    identity: data.identity ?? null,
+                    status: data.status ?? null,
                 });
                 return;
             }

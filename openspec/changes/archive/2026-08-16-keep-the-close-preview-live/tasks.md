@@ -19,7 +19,7 @@
 
 - [x] 4.1 Re-run `OPENSPEC_TELEMETRY=0 openspec validate keep-the-close-preview-live` after implementation.
 - [x] 4.2 Run GitNexus `detect_changes` against `master`, verify only the intended symbols and execution flows are affected, and report the result before committing directly to `master`.
-- [x] 4.3 Leave the change unarchived until the operator confirms the live-data behavior.
+- [ ] 4.3 Leave the change unarchived until the operator confirms the live-data behavior. *(Corrected by the 2026-08-18 ledger audit: no live-data result is recorded in this change or the runbook, so archival alone is not evidence.)*
 
 ## 5. Post-implementation Audit
 

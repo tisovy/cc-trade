@@ -36,7 +36,7 @@
 ## 6. Verification
 
 - [x] 6.1 `npm run lint`, `npm test`, `npm run check:futures-production`, `npm run check:command-path`.
-- [ ] 6.2 Operator confirms on live data, on a small order far from the market: picking it up removes it from the book and the screen; dropping it places it at the new price; abandoning puts it back; and a deliberately over-cap drop states that the order is gone and offers to place it again. **Confirmed by the operator on 2026-08-12** — lift, drop and abandon all behaved. The fourth case fired on the exchange's minimum notional rather than the desk's cap, which is the same branch: "APRUSDT BUY 19 @ 0.1983 was cancelled and could not be placed again… Place it again at 0.2655000". The record shows eleven clean cancel→place pairs and no `replaceOrder`.
+- [x] 6.2 Operator confirms on live data, on a small order far from the market: picking it up removes it from the book and the screen; dropping it places it at the new price; abandoning puts it back; and a deliberately over-cap drop states that the order is gone and offers to place it again. **Confirmed by the operator on 2026-08-12** — lift, drop and abandon all behaved. The fourth case fired on the exchange's minimum notional rather than the desk's cap, which is the same branch: "APRUSDT BUY 19 @ 0.1983 was cancelled and could not be placed again… Place it again at 0.2655000". The record shows eleven clean cancel→place pairs and no `replaceOrder`.
 
 ## 7. Discovered While Implementing
 

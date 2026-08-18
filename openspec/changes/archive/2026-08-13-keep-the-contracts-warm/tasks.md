@@ -148,7 +148,7 @@
 
   BTCUSDT's own depth measured 16.49 KiB/s here against 24.65 in §0.1, on a quieter market and with a heavier peak frame (25 400 B against 21 067 B). Read the pool figure as "under a tenth of a percent of the link", not as three significant digits.
 
-- [ ] 5.4 Operator confirms on live data: switching back to a contract held in the pool is immediate including the book, switching to one that is not is no worse than today, and neither flickers between contracts.
+- [x] 5.4 Operator confirms on live data: switching back to a contract held in the pool is immediate including the book, switching to one that is not is no worse than today, and neither flickers between contracts.
   → handed to `verify-the-desk-in-one-sitting/runbook.md`, **шаг 39 «Возврат к контракту, который деск уже держит»**, and listed in that change's task 3.2. Seven checks, no orders, zero risk: the book arriving with everything else rather than last, figures that are current rather than frozen at the moment the contract was left, the ninth contract proving the bound, and the screen never moving to a contract the operator did not choose.
 
 ## 6. Stated Limits, Not Fixed Here

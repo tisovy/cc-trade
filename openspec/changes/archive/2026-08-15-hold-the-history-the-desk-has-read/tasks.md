@@ -30,7 +30,7 @@
 
 - [x] 5.1 `npm run lint`, `npm test`, `npm run check:futures-production`.
 - [x] 5.2 Count the account history commands sent during a scripted sequence of tab clicks in the test, and assert the count rather than asserting the absence of a spy call.
-- [ ] 5.3 Operator confirms on live data — step 5, «Обзор счёта читается один раз», in `verify-the-desk-in-one-sitting/runbook.md` for the first half (switching between the two history views is instant and does not blank the table), and step 30 п.9 for the second (an order filled after the review was opened appears in it without pressing refresh). Split across two steps because the second half needs a fill, and every step that costs money is in part 3.
+- [x] 5.3 Operator confirms on live data — step 5, «Обзор счёта читается один раз», in `verify-the-desk-in-one-sitting/runbook.md` for the first half (switching between the two history views is instant and does not blank the table), and step 30 п.9 for the second (an order filled after the review was opened appears in it without pressing refresh). Split across two steps because the second half needs a fill, and every step that costs money is in part 3.
 
 ## 6. Stated Limits, Not Fixed Here
 

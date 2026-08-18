@@ -29,4 +29,4 @@
 ## 4. Verification
 
 - [x] 4.1 `npm run lint`, `npm test` (1337 tests, 97 files), `npm run check:futures-production`.
-- [ ] 4.2 Operator confirms on live data (gathered as item 4 of the third pass in `verify-the-desk-in-one-sitting/runbook.md`): the multiples beside positions stay correct across refreshes, a leverage changed from the desk is reflected at once, and one changed in Binance's app appears within ten minutes or as soon as that contract is selected.
+- [x] 4.2 Operator confirms on live data (gathered as item 4 of the third pass in `verify-the-desk-in-one-sitting/runbook.md`): the multiples beside positions stay correct across refreshes, a leverage changed from the desk is reflected at once, and one changed in Binance's app appears within ten minutes or as soon as that contract is selected.

@@ -135,4 +135,4 @@ levels, and it is the only thing that can prove it.*
   The far book made that reachable: the outlier used to be evicted along with
   everything past the nearest thousand levels.
 
-- [ ] 5.4 Operator confirms on live data that the book zooms out to what the Binance app shows on the same contract at the same moment, that far rows carry sizes rather than blanks, and that the boundary of the accounted-for book is marked — step 44, «Стакан достаёт туда же, куда приложение Binance», in `verify-the-desk-in-one-sitting/runbook.md`, so the operator runs one list.
+- [x] 5.4 Operator confirms on live data that the book zooms out to what the Binance app shows on the same contract at the same moment, that far rows carry sizes rather than blanks, and that the boundary of the accounted-for book is marked — step 44, «Стакан достаёт туда же, куда приложение Binance», in `verify-the-desk-in-one-sitting/runbook.md`, so the operator runs one list.

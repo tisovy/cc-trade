@@ -1,50 +1,48 @@
 ## Why
 
-Eight changes have shipped with their operator-confirmation item unchecked, and
-they are unchecked for a good reason: nobody has sat down with the live desk and
-gone through them. They are spread across eight `tasks.md` files, each phrased
-for the change it belongs to, so performing them means reading eight documents
-and reconstructing what to click from each.
+Live verification was performed repeatedly, but its evidence was split between
+archived `tasks.md` files, this change's runbook and the live-verification
+ledger. The original requirement to repeat every check in one uninterrupted
+sitting became obsolete as the runbook grew from thirteen to fifty-one steps:
+it now asks the operator to re-prove basic behaviour that already has dated
+observations while current failures wait elsewhere.
 
-The operator works several sessions at once and is interrupted constantly. A
-verification pass that requires reassembling its own instructions will keep not
-happening — which is how the repository arrived at archived changes whose
-confirmation marks were checked without a live check behind them
-(`state-only-verified-completion`).
-
-What is missing is not willingness. It is one document that says, in order, what
-to do, what should be seen, and what each observation settles.
+The missing work is reconciliation, not another full desk exam. Existing
+operator observations and diagnostic records must become the completion marks
+they support, and every genuine evidence gap must remain visible without being
+filled by inference.
 
 ## What Changes
 
-- One runbook, `runbook.md` in this change, holding every outstanding operator
-  confirmation as a numbered step: the action, the expected reading, and the task
-  it closes. It is written in Russian, because the operator is the only person
-  who executes it, and it opens with the protocol for the session that leads the
-  pass — one step at a time, recorded verbatim, stopping on a failure.
-- The steps are ordered so the pass runs once, front to back, in roughly forty
-  minutes: everything read-only first, then the checks that need the exchange
-  cut off, then the few that place a real order.
-- Each step states plainly whether it can be staged by hand at all. Some
-  guarantees can only be exercised by a failure the operator cannot cause safely;
-  the runbook says so rather than inventing a procedure, and those items go to
-  the ledger as covered by test only.
-- The results are written into the live-verification ledger created by
-  `state-only-verified-completion`, and the confirmation items in the eight
-  changes are checked from that record — not from memory.
+- Treat a dated operator observation or a diagnostic record that directly
+  states the behaviour as live evidence. Do not repeat a supported check merely
+  because it was recorded in another sitting or left unchecked in an archive.
+- Reconcile the runbook, archived confirmation tasks and
+  `openspec/live-verification-ledger.md` into one auditable record. Each entry
+  names its evidence, date, Production account and desk revision; legacy
+  metadata that was not preserved is written as `NOT RECORDED`, never invented.
+- Check archived confirmation items only after a matching ledger row exists.
+  Record unstageable guarantees as exactly `COVERED BY TEST ONLY` with the tests
+  that hold them, and leave unsupported items open.
+- Keep complaint-specific measurements complaint-specific. A reported late
+  frame is settled only from the nearest raw `kind: "frame"` event for that
+  contract; a live fill is settled only from an order frame that names its four
+  legs and whether the screen changed.
+- Preserve the runbook as historical evidence and an unresolved queue, not as a
+  fifty-one-step ritual that must be replayed from the beginning.
 
 ## Capabilities
 
-No capability specification changes. This change performs verification that
-existing requirements already state; it adds, modifies and removes nothing.
+No capability specification changes. This change reconciles verification of
+requirements that already exist; it adds, modifies and removes no runtime
+behaviour.
 
 ## Impact
 
-- Requires the operator, the live Production Futures account, and one
-  uninterrupted sitting.
-- Two steps place real orders. They are sized at the exchange minimum on a
-  liquid contract and are cancelled within the same step; the expected cost is
-  fees on one small fill, and the runbook states the exposure at each such step
-  before it is taken.
-- Everything before those steps is read-only and can be stopped at any point
-  without leaving anything on the exchange.
+- Documentation and historical task metadata only: this change, archived
+  confirmation tasks and `openspec/live-verification-ledger.md`.
+- No UI launch, exchange command or real order is required to accept evidence
+  already recorded. A genuinely missing live condition remains outstanding
+  until it occurs naturally or the operator deliberately stages its existing
+  runbook step.
+- No production code, API, dependency or runtime behaviour changes.

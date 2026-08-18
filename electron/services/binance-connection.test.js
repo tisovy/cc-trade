@@ -1467,6 +1467,119 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(workingOrders().map(order => order.orderId)).toEqual([31, 32]);
     });
 
+    // The market lane has been timed since `time-the-frame-from-exchange-to-screen`
+    // and the account lane never was, which is why an operator reporting a fill
+    // drawn late could only be asked what and where. Every frame the exchange
+    // causes carries the marks now — the report, the account envelope folded
+    // from it, and the envelope a fired algorithmic order folds; nothing the
+    // desk sends for a reason of its own does, because a mark invented for a
+    // read would time the desk's own beat and call it a journey.
+    it('marks every frame the private stream causes, and no frame a read causes', async () => {
+        const loads = {
+            balances: vi.fn().mockResolvedValue({
+                futures_balances: { USDT: { available: '100', total: '100' } },
+            }),
+            regularOrders: vi.fn().mockResolvedValue({
+                futures_regular_orders: [{
+                    symbol: 'TUTUSDT', orderId: 41, orderKind: 'REGULAR', status: 'NEW', transactTime: 1_000,
+                }],
+            }),
+            algoOrders: vi.fn().mockResolvedValue({
+                futures_algo_orders: [{
+                    symbol: 'TUTUSDT', algoId: 77, orderKind: 'ALGO', status: 'NEW',
+                }],
+            }),
+            positions: vi.fn().mockResolvedValue({ futures_positions: [] }),
+        };
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue(
+            ['balances', 'regularOrders', 'algoOrders', 'positions'].map(type => ({
+                type,
+                weight: 5,
+                errorLabel: type,
+                loadPayload: loads[type],
+            })),
+        );
+
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({ action: 'activate_market', marketMode: 'futures-live' }),
+        });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+        const socket = moduleMocks.futuresUserDataSockets[0];
+        socket.handlers.open();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+
+        const framesOut = () => moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message));
+
+        // Everything sent so far was a read's doing: the bootstrap and the
+        // account state the stream's own opening asked for.
+        expect(framesOut().filter(frame => frame.type === 'futures_account_state')).not.toHaveLength(0);
+        for (const frame of framesOut()) expect(frame.marks).toBeUndefined();
+
+        moduleMocks.rendererConnection.sendUTF.mockClear();
+        // The half fill: the order rests at part of what it was placed at, which
+        // is the case the operator reports and the one nothing could time.
+        socket.handlers.message(JSON.stringify({
+            e: 'ORDER_TRADE_UPDATE',
+            E: 5_000,
+            o: {
+                s: 'TUTUSDT', i: 41, X: 'PARTIALLY_FILLED', S: 'BUY', o: 'LIMIT',
+                p: '1', q: '5', z: '2', T: 5_000,
+            },
+        }));
+        await flushMicrotasks();
+
+        const report = framesOut().find(frame => frame.futures_execution_update);
+        const folded = framesOut().findLast(frame => frame.type === 'futures_account_state');
+        // The exchange's own event time on both, so the leg that crosses two
+        // clocks is measured from what Binance said rather than from when the
+        // desk got round to it.
+        expect(report.marks.exchangeAt).toBe(5_000);
+        expect(folded.marks.exchangeAt).toBe(5_000);
+        for (const frame of [report, folded]) {
+            expect(Number.isSafeInteger(frame.marks.receivedAt)).toBe(true);
+            expect(frame.marks.queuedAt).toBeGreaterThanOrEqual(frame.marks.receivedAt);
+        }
+        // The stamp belongs to the envelope: what the report says about the
+        // order is untouched by having been measured.
+        expect(report.futures_execution_update).toMatchObject({
+            symbol: 'TUTUSDT', orderId: 41, status: 'PARTIALLY_FILLED', z: '2',
+        });
+
+        // The other frame the same socket folds. A fired stop is drawn on this
+        // lane too, and until it was marked the desk could say when it heard one
+        // and not when it showed it.
+        moduleMocks.rendererConnection.sendUTF.mockClear();
+        socket.handlers.message(JSON.stringify({
+            e: 'ALGO_UPDATE',
+            E: 6_000,
+            o: { s: 'TUTUSDT', aid: 77, X: 'FINISHED' },
+        }));
+        await flushMicrotasks();
+        const algoFrames = framesOut().filter(frame => frame.type === 'futures_account_state');
+        // The fold has to have happened, or this asserts nothing: the algo is
+        // read into the list above so that finishing it takes it out again.
+        expect(algoFrames).not.toHaveLength(0);
+        expect(algoFrames.at(-1).resources.algoOrders.data).toEqual([]);
+        for (const frame of algoFrames) expect(frame.marks?.exchangeAt).toBe(6_000);
+
+        // A frame the desk produced on its own beat states no journey.
+        moduleMocks.rendererConnection.sendUTF.mockClear();
+        await vi.advanceTimersByTimeAsync(31_000);
+        await flushMicrotasks();
+        const beat = framesOut().filter(frame => frame.type === 'futures_account_state');
+        expect(beat).not.toHaveLength(0);
+        for (const frame of beat) expect(frame.marks).toBeUndefined();
+    });
+
     // Which orders the stream reported settled is what keeps a read that left
     // before the settle from putting one back. It is a memory of one account's
     // stream, and an account nobody is on has no stream — held across a market
@@ -5706,6 +5819,89 @@ describe('setupBinanceConnection user-data orchestration', () => {
             // The price and the size the command carried are not in any of it,
             // and neither is the sentence the exchange wrote for a human.
             expect(JSON.stringify(kept)).not.toMatch(/50000|0\.01\b|Margin is insufficient/);
+        });
+
+        // The renderer closes the only leg it can see. Accepted before the
+        // credential gate and outside the market machinery, for the reason the
+        // market lane's report already is: this reaches no exchange and moves no
+        // order, and a diagnostic an unconfigured desk cannot file goes missing
+        // exactly when the desk is worth asking about.
+        it('keeps the order a frame was about and whether drawing it changed anything', async () => {
+            await connectRecordedRenderer(null);
+
+            await moduleMocks.rendererHandlers.message({
+                type: 'utf8',
+                utf8Data: JSON.stringify({
+                    action: 'report_frame_marks',
+                    resource: 'orders',
+                    symbol: 'TUTUSDT',
+                    identity: 41,
+                    status: 'PARTIALLY_FILLED',
+                    code: 'DELIVERED',
+                    upstreamMs: 210,
+                    queuedMs: 0,
+                    deliveredMs: 2,
+                    committedMs: 9,
+                    totalMs: 221,
+                }),
+            });
+
+            await moduleMocks.rendererHandlers.message({
+                type: 'utf8',
+                utf8Data: JSON.stringify({
+                    action: 'report_frame_marks',
+                    resource: 'orders',
+                    symbol: 'TUTUSDT',
+                    identity: 41,
+                    status: 'FILLED',
+                    code: 'UNCHANGED',
+                    upstreamMs: null,
+                    queuedMs: 0,
+                    deliveredMs: 1,
+                    committedMs: 3,
+                    totalMs: 4,
+                }),
+            });
+
+            // A word this desk does not use for a delivery is recorded as the
+            // market lane's own answer rather than believed: the renderer is
+            // ours, and this is still the one field on the line whose value a
+            // caller chooses.
+            await moduleMocks.rendererHandlers.message({
+                type: 'utf8',
+                utf8Data: JSON.stringify({
+                    action: 'report_frame_marks',
+                    resource: 'orders',
+                    symbol: 'TUTUSDT',
+                    identity: 41,
+                    status: 'NEW',
+                    code: 'WHATEVER',
+                    upstreamMs: null,
+                    queuedMs: 0,
+                    deliveredMs: 1,
+                    committedMs: 1,
+                    totalMs: 2,
+                }),
+            });
+
+            expect(held('frame')).toEqual([
+                expect.objectContaining({
+                    resource: 'orders',
+                    symbol: 'TUTUSDT',
+                    identity: 41,
+                    status: 'PARTIALLY_FILLED',
+                    code: 'DELIVERED',
+                    committedMs: 9,
+                }),
+                expect.objectContaining({
+                    identity: 41,
+                    status: 'FILLED',
+                    // Arrived, and the screen already showed it. Not a fault,
+                    // and told apart from the one that is.
+                    code: 'UNCHANGED',
+                }),
+                expect.objectContaining({ status: 'NEW', code: 'DELIVERED' }),
+            ]);
         });
 
         // The command's own line says when it was asked for and nothing said

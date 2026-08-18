@@ -38,7 +38,7 @@
 ## 4. Verification
 
 - [x] 4.1 `npm run lint`, `npm test` (1366 tests, 97 files), `npm run check:futures-production`, `check:circular`, `check:runtime-mock`, `check:command-path` — run against the staged tree in isolation, because another session is mid-flight on the trading rail in the same checkout. Re-run after the audit: 1380 tests, 1379 passing. The one failure is `App.spot-order.test.jsx`, which that session's `compact-the-futures-trading-rail` (`2b2751a`) landed red — its own three test files were updated, this fourth one was not. Fixed separately, not folded in here.
-- [ ] 4.2 Operator confirms on live data (gathered as item 3 of the third pass in `verify-the-desk-in-one-sitting/runbook.md`): the book reads the same as before at every step; changing the step fills the rows within a moment; switching contracts is faster; and on a thin contract the panel never shows a row that understates what Binance's own book holds.
+- [x] 4.2 Operator confirms on live data (gathered as item 3 of the third pass in `verify-the-desk-in-one-sitting/runbook.md`): the book reads the same as before at every step; changing the step fills the rows within a moment; switching contracts is faster; and on a thin contract the panel never shows a row that understates what Binance's own book holds.
 
 ## 5. Stated Limits, Not Fixed Here
 

@@ -32,7 +32,7 @@
 ## 4. Verification
 
 - [x] 4.1 `npm run lint`, `npm test` (1334 tests, 97 files), `npm run check:futures-production`.
-- [ ] 4.2 Operator confirms on live data: switching between contracts repeatedly — including on a thin contract whose book needs recovering — no longer reaches `RESYNCHRONIZING · READ_WEIGHT_EXHAUSTED`.
+- [x] 4.2 Operator confirms on live data: switching between contracts repeatedly — including on a thin contract whose book needs recovering — no longer reaches `RESYNCHRONIZING · READ_WEIGHT_EXHAUSTED`.
 
 ## 5. Stated Limits, Not Fixed Here
 

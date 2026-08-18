@@ -45,7 +45,7 @@
   between the cut and the reach, which is the ladder's own spacing: at most one
   rung, and never a level the desk had.
 
-- [ ] 4.3 Operator confirms on live data that the coarsest step fills every row of the book, on AKEUSDT and on a contract quoted very differently, and that the stated reach matches where the rows stop — step 43, «Лестница шагов кончается там, где кончается книга у деска», in `verify-the-desk-in-one-sitting/runbook.md`, so the operator runs one list.
+- [x] 4.3 Operator confirms on live data that the coarsest step fills every row of the book, on AKEUSDT and on a contract quoted very differently, and that the stated reach matches where the rows stop — step 43, «Лестница шагов кончается там, где кончается книга у деска», in `verify-the-desk-in-one-sitting/runbook.md`, so the operator runs one list.
 
 - [x] 4.4 Correct what this change first claimed. *(The proposal argued that a
   thousand levels a side is the whole of what Binance publishes, so ±75% of price

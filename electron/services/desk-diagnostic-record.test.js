@@ -223,6 +223,11 @@ describe('describeDeskDiagnosticEvent', () => {
             deliveredMs: 12,
             committedMs: 30,
             totalMs: 388,
+            // A book is about a contract, not about an order. Stated as absent
+            // rather than left off, so a reader never has to decide whether a
+            // missing field means "no order" or "an older desk".
+            identity: null,
+            status: null,
         });
         // Built for this record alone, like an estimate: a price offered beside
         // the delays loses the whole line rather than being quietly dropped.
@@ -237,6 +242,97 @@ describe('describeDeskDiagnosticEvent', () => {
             committedMs: 30,
             totalMs: 388,
             markPrice: '0.5321',
+        })).toBeNull();
+    });
+
+    // The account lane's own line. The market lane answers "which step was slow";
+    // this one has to answer "slow for which order, and did the screen change" —
+    // and it has to do it without ever holding what the order was worth.
+    it('names the order a frame was about, and what the exchange said about it', () => {
+        expect(describeDeskDiagnosticEvent('frame', {
+            phase: 'frame',
+            code: 'DELIVERED',
+            resource: 'orders',
+            symbol: 'TUTUSDT',
+            upstreamMs: 210,
+            queuedMs: 0,
+            deliveredMs: 2,
+            committedMs: 9,
+            totalMs: 221,
+            identity: 41,
+            status: 'PARTIALLY_FILLED',
+        })).toMatchObject({
+            resource: 'orders',
+            // Read as the `command` and `answer` lines read it, so a fill and
+            // the order that was placed join without a second vocabulary.
+            identity: '41',
+            status: 'PARTIALLY_FILLED',
+        });
+
+        // A frame that arrived and left the screen as it was. Recorded, because
+        // the absence of a line is what an operator reporting exactly this has
+        // been up against.
+        expect(describeDeskDiagnosticEvent('frame', {
+            phase: 'frame',
+            code: 'UNCHANGED',
+            resource: 'orders',
+            symbol: 'TUTUSDT',
+            upstreamMs: null,
+            queuedMs: 0,
+            deliveredMs: 1,
+            committedMs: 4,
+            totalMs: 5,
+            identity: 'f-msyt8v4t-wwtt56je',
+            status: 'FILLED',
+        })).toMatchObject({ code: 'UNCHANGED', identity: 'f-msyt8v4t-wwtt56je' });
+
+        // And the reading that is a fault: the exchange said something about an
+        // order and the screen does not show it.
+        expect(describeDeskDiagnosticEvent('frame', {
+            phase: 'frame',
+            code: 'NOT_DRAWN',
+            resource: 'orders',
+            symbol: 'TUTUSDT',
+            upstreamMs: 190,
+            queuedMs: 0,
+            deliveredMs: 1,
+            committedMs: 2,
+            totalMs: 193,
+            identity: 41,
+            status: 'PARTIALLY_FILLED',
+        })).toMatchObject({ code: 'NOT_DRAWN', status: 'PARTIALLY_FILLED' });
+
+        // The one thing this line may not become. A filled *quantity* is an
+        // amount, and the state above is what a partial fill is read by instead.
+        expect(describeDeskDiagnosticEvent('frame', {
+            phase: 'frame',
+            code: 'DELIVERED',
+            resource: 'orders',
+            symbol: 'TUTUSDT',
+            upstreamMs: 210,
+            queuedMs: 0,
+            deliveredMs: 2,
+            committedMs: 9,
+            totalMs: 221,
+            identity: 41,
+            status: 'PARTIALLY_FILLED',
+            executedQty: '2.5',
+        })).toBeNull();
+
+        // A state in a shape this file will not repeat costs the whole line, as
+        // every other sealed field does: half a fact is worse than none.
+        expect(describeDeskDiagnosticEvent('frame', {
+            phase: 'frame',
+            code: 'DELIVERED',
+            resource: 'orders',
+            symbol: 'TUTUSDT',
+            upstreamMs: 210,
+            queuedMs: 0,
+            deliveredMs: 2,
+            committedMs: 9,
+            totalMs: 221,
+            identity: 41,
+            status: '0.5',
         })).toBeNull();
     });
 

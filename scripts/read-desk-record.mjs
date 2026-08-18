@@ -120,6 +120,11 @@ export const summarizeDeskDiagnosticRecord = (text) => {
   // above says the desk was behind; this says which step it was behind in,
   // which is the difference between "the desk is slow" and an answer.
   const frames = new Map()
+  // Every account frame, kept whole rather than aggregated. There are tens of
+  // them in a day against tens of thousands of market frames, and they are read
+  // for a different question: the operator reports one moment and one order, and
+  // a median cannot be opened at it.
+  const orderFrames = []
   let refused = 0
   let first = null
   let last = null
@@ -270,6 +275,21 @@ export const summarizeDeskDiagnosticRecord = (text) => {
         observed.worstAt = line.at ?? null
       }
       frames.set(key, observed)
+      if (line.identity != null || line.resource === 'orders' || line.resource === 'account') {
+        orderFrames.push({
+          at: line.at ?? null,
+          resource: line.resource ?? '-',
+          symbol: line.symbol ?? '-',
+          identity: line.identity ?? '-',
+          status: line.status ?? '-',
+          code: line.code ?? '-',
+          upstreamMs: Number.isFinite(line.upstreamMs) ? line.upstreamMs : null,
+          queuedMs: Number(line.queuedMs) || 0,
+          deliveredMs: Number(line.deliveredMs) || 0,
+          committedMs: Number(line.committedMs) || 0,
+          totalMs: Number(line.totalMs) || 0,
+        })
+      }
     }
     if (line.kind === 'session') sessions.push({ at: line.at, event: line.event, version: line.version ?? null })
     if (line.kind === 'command') {
@@ -328,6 +348,7 @@ export const summarizeDeskDiagnosticRecord = (text) => {
     backlogs: [...backlogs.entries()]
       .map(([key, observed]) => ({ key, ...observed }))
       .sort((left, right) => right.peakFrames - left.peakFrames),
+    orderFrames,
     frames: [...frames.entries()]
       .map(([key, observed]) => ({
         key,
@@ -476,6 +497,26 @@ export const formatDeskDiagnosticSummary = (summary, { day = null } = {}) => {
         + (entry.upstreamUnknown === 0
           ? ''
           : `  (${entry.upstreamUnknown} without a usable exchange time)`),
+      )
+    }
+  }
+
+  if (summary.orderFrames.length > 0) {
+    // Listed, not averaged. This is the section that answers "the number on my
+    // order updated late": when the exchange sent it, when the desk drew it, and
+    // whether drawing it changed anything on the screen.
+    out.push('', 'What the exchange said about an order, and when it was drawn (ms)')
+    out.push('  exchange→desk spans two clocks and is uncorrected; the rest are exact')
+    for (const entry of summary.orderFrames) {
+      out.push(
+        `  ${(entry.at ?? '-').padEnd(24)} ${entry.resource.padEnd(7)}`
+        + ` ${entry.symbol.padEnd(10)} ${String(entry.identity).padEnd(12)}`
+        + ` ${entry.status.padEnd(17)} ${entry.code.padEnd(9)}`
+        + `  exchange→desk ${String(entry.upstreamMs ?? '—').padStart(5)}`
+        + `  →queue ${String(entry.queuedMs).padStart(4)}`
+        + `  →renderer ${String(entry.deliveredMs).padStart(4)}`
+        + `  →screen ${String(entry.committedMs).padStart(5)}`
+        + `  total ${String(entry.totalMs).padStart(5)}`,
       )
     }
   }

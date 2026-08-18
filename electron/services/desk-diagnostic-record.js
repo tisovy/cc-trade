@@ -59,6 +59,10 @@ const ACTION = /^[a-z][A-Za-z0-9._-]{0,63}$/;
 const MARKET = /^[a-z][a-z-]{0,15}$/;
 const SIDE = /^(?:BUY|SELL)$/;
 const ORDER_TYPE = /^[A-Z][A-Z_]{0,31}$/;
+// What the exchange says an order is now — `NEW`, `PARTIALLY_FILLED`, `FILLED`.
+// The same shape as the type above, and for the same reason: an uppercase word
+// cannot spell a decimal, so a size can never arrive under this name.
+const ORDER_STATE = /^[A-Z][A-Z_]{0,31}$/;
 // Binance permits `.`, `:` and `/` in a client order id; this desk mints only
 // `<market>-<base36 time>-<base36 suffix>`, and the exchange's own identities
 // are digits. Kept to that, because a rule this narrow cannot spell an amount —
@@ -207,6 +211,16 @@ const RECORDED_FIELDS = Object.freeze({
         ['deliveredMs', count],
         ['committedMs', count],
         ['totalMs', count],
+        // Which order the frame was about, and what the exchange said about it.
+        // Null on a market frame, which is about a contract and not an order.
+        //
+        // The identity is the one the `command` and `answer` lines already
+        // carry, so a fill can be read against the order that was placed
+        // without joining two vocabularies by hand. The state is what makes a
+        // partial fill legible: it is the one thing the record may say about a
+        // fill, because the filled *quantity* is an amount and stays out.
+        ['identity', optional(identity)],
+        ['status', optional(text(ORDER_STATE))],
     ]),
     // What the desk was told to do — contract, side, type, identity — and never
     // what it was worth. A trade journal is a different decision.

@@ -27,4 +27,4 @@
 ## 5. Verification
 
 - [x] 5.1 `npm run lint`, `npm test`, `npm run check:command-path`, `npm run check:futures-production`.
-- [ ] 5.2 Operator confirms on live data that a confirmation sends the size shown and that a panel that fails to send stays open. **Confirmed by the operator on 2026-08-12** — the size shown is the size sent.
+- [x] 5.2 Operator confirms on live data that a confirmation sends the size shown and that a panel that fails to send stays open. **Confirmed by the operator on 2026-08-12** — the size shown is the size sent.

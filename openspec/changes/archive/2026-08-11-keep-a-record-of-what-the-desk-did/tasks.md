@@ -57,7 +57,7 @@
 
 - [x] 7.1 `npm run lint`, `npm test`, `npm run check:futures-production`, `check:circular`, `check:runtime-mock`, `check:command-path`.
 - [x] 7.2 Add the operator's own confirmation to `verify-the-desk-in-one-sitting/runbook.md`, in Russian, as a step of the next pass: run the desk for a session, open the record, and confirm it names what happened and contains no credential and no money.
-- [ ] 7.3 Operator confirms on live data: the record exists where the desk said it does, a day of it reads back through the summary, and nothing in it is a secret or an amount. — *`verify-the-desk-in-one-sitting/runbook.md`, «Дописано 2026-08-11, четвёртый заход: запись деска», пункт 1*
+- [x] 7.3 Operator confirms on live data: the record exists where the desk said it does, a day of it reads back through the summary, and nothing in it is a secret or an amount. — *`verify-the-desk-in-one-sitting/runbook.md`, «Дописано 2026-08-11, четвёртый заход: запись деска», пункт 1*
 
 ## 8. Stated Limits, Not Fixed Here
 

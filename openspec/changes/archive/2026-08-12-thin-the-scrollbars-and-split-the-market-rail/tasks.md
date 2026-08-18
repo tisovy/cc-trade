@@ -13,4 +13,4 @@
 - [x] 3.1 Run the focused Futures workstation and portfolio-dock Vitest suites, then run lint and the production build.
 - [x] 3.2 Inspect representative 1920×1080 and 1366×768 Chromium/Electron layouts, confirming the computed 65/35 panel ratio, compact vertical and horizontal chrome, preserved scrolling, and no panel overlap.
 - [x] 3.3 Run GitNexus `detect_changes` against `master`, review the complete diff for unexpected symbols or execution flows, and report audit findings separately from pre-existing working-tree changes.
-- [x] 3.4 Leave the validated change unarchived until the operator confirms the presentation on live market data.
+- [ ] 3.4 Leave the validated change unarchived until the operator confirms the presentation on live market data. *(Corrected by the 2026-08-18 ledger audit: the archive contains no recorded operator result, so archival alone is not evidence.)*

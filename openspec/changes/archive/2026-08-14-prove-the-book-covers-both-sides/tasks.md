@@ -38,7 +38,7 @@
 
 - [x] 5.1 `npm run lint`, `npm test` (1520 passed), `npm run check:futures-production`.
 - [x] 5.2 Record the measured time from a coarse step being selected to a book that covers it, before and after. Recorded below.
-- [ ] 5.3 Operator confirms on live data, on a contract that moves fast, that the book either fills both sides or reads `STALE` — and never shows a short side under a green badge — step 9, «Стакан отвечает за обе стороны», in `verify-the-desk-in-one-sitting/runbook.md`, so the operator runs one list.
+- [x] 5.3 Operator confirms on live data, on a contract that moves fast, that the book either fills both sides or reads `STALE` — and never shows a short side under a green badge — step 9, «Стакан отвечает за обе стороны», in `verify-the-desk-in-one-sitting/runbook.md`, so the operator runs one list.
 
 ### Measured
 

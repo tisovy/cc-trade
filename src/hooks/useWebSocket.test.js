@@ -100,10 +100,15 @@ describe('useWebSocket', () => {
         const [receivedEvent, receivedWs, frame] = handleMessage.mock.calls[0]
         expect(receivedEvent).toEqual(jsonEvent)
         expect(receivedWs).toBe(mockWebSocket)
-        expect(frame).toEqual({
+        // The arrival is on every frame now, and the marks on the few the
+        // exchange caused — the account lane is timed the same way the market
+        // lane has been since `time-the-frame-from-exchange-to-screen`.
+        expect(frame).toMatchObject({
             kind: 'account',
             payload: { type: 'test', payload: 'data' },
+            marks: null,
         })
+        expect(Number.isSafeInteger(frame.receivedAt)).toBe(true)
     })
 
     // Four subscribers used to parse the same frame four times, each to find out

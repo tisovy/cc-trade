@@ -26,6 +26,7 @@ import {
 } from '../utils/tradingCommands.js'
 import { describeFuturesAlgoTrigger } from '../utils/futuresOrderPresentation.js'
 import { DESK_FRAME_KINDS, ensureDeskFrameRouter } from '../utils/deskFrameRouter.js'
+import { measureFrameMarks } from '../utils/frameMarks.js'
 import { createUnsentCommandStore } from '../utils/unsentTradingCommand.js'
 import { answersUnresolvedCommand } from '../utils/unresolvedCommandIdentity.js'
 import {
@@ -143,7 +144,74 @@ const createInitialState = ({ enabled, connection, historyStoreReady = false }) 
   // gate the workstation can send a full discovery command while the persisted
   // coverage that would have answered it is still opening.
   historyStoreReady,
+  // Which marked frame this state was produced by. Only frames the exchange
+  // caused move it, so the commit effect below runs on those and on nothing
+  // else — a state set for any other reason leaves it where it was.
+  frameRevision: 0,
 })
+
+// What one drawn frame is recorded as. Kept beside the marks rather than in the
+// effect, so the three readings can be read in one place.
+const readingOf = (entry, drawnMark, drawnOrders) => {
+  const shows = orderReportDrawn(drawnOrders, entry.report)
+  if (shows === false) return 'NOT_DRAWN'
+  return drawnMark === entry.before ? 'UNCHANGED' : 'DELIVERED'
+}
+
+// How many frames may be waiting for the commit that draws them. A fill is two;
+// a burst of partial fills against one order is one per fill, and they are drawn
+// within a tick of each other. Bounded because a memory that cannot be bounded
+// is a leak, not because this is expected to fill.
+const PENDING_FRAME_MARKS_MEMORY = 64
+
+// What these surfaces would draw, as a value two states can be compared by.
+//
+// Not a hash of the account: an order's identity, what the exchange says it is,
+// how much of it has traded and what it rests at are exactly the fields the
+// chart label, the rail row and the ticket total are derived from, and a
+// position's contract and size are what the dock draws. Two states that agree
+// here drew the same thing, which is what separates a frame that changed the
+// screen from one that arrived and changed nothing. It never leaves the
+// renderer — what is reported is which of the two it was.
+const orderScreenMark = order => [
+  orderIdentity(order),
+  order?.status ?? '',
+  order?.z ?? order?.executedQty ?? '',
+  order?.origQty ?? '',
+  order?.price ?? '',
+  order?.triggerPrice ?? order?.stopPrice ?? '',
+].join('|')
+
+// Whether the screen ended up showing what one report said.
+//
+// "Did anything change" is the wrong question to ask of an order frame, and
+// asking it produced a wrong answer in the ordinary case: a fill sends two
+// frames carrying the same fact — the folded account envelope and the report —
+// so whichever landed second changed nothing and would have been recorded as
+// though it had not arrived. That is the exact misreading this whole change
+// exists to remove.
+//
+// So the frame is judged against its own subject: the row the report names, as
+// the desk draws it after the commit. A terminal report is shown by the row
+// being gone; a working one by the row carrying the state and the filled
+// quantity the exchange stated.
+const orderReportDrawn = (openOrders, report) => {
+  if (report === null) return null
+  const identity = orderIdentity(normalizeOrderSource(report, 'REGULAR'))
+  const drawn = openOrders.find(order => orderIdentity(order) === identity) ?? null
+  const status = String(report?.status ?? report?.X ?? '').toUpperCase()
+  if (TERMINAL_FUTURES_ORDER_STATUSES.has(status)) return drawn === null
+  if (drawn === null) return false
+  const filled = order => String(order?.z ?? order?.executedQty ?? '')
+  return String(drawn.status ?? '').toUpperCase() === status && filled(drawn) === filled(report)
+}
+
+const screenMark = ({ openOrders = [], positions = [] } = {}) => [
+  [...openOrders].map(orderScreenMark).sort().join(';'),
+  (Array.isArray(positions) ? positions : [])
+    .map(position => `${position?.symbol ?? ''}|${position?.positionAmt ?? ''}`)
+    .join(';'),
+].join('#')
 
 const normalizeOrderSource = (order, fallback = 'REGULAR') => {
   const orderKind = order?.orderKind === 'ALGO' ? 'ALGO' : fallback
@@ -381,6 +449,22 @@ const useFuturesTrading = ({
   // against one of them stays one read.
   const resolvedParentsRef = useRef(new Set())
 
+  // The half of a marked frame's journey only this side can close.
+  //
+  // `pendingFrameMarksRef` holds the frames waiting for the commit that draws
+  // them; `frameMarkSeqRef` numbers them, so the effect below reports the frames
+  // it was armed for and never a later state that happened to render;
+  // `screenMarkRef` holds what these surfaces last drew, which is what says
+  // whether a frame changed anything at all.
+  //
+  // A list rather than one slot, because a fill is two frames — the folded
+  // account envelope and the report itself, sent back to back. Delivered in one
+  // tick they become one React commit, and a single slot reported the second and
+  // lost the first: the order line, which is the one this was built for.
+  const pendingFrameMarksRef = useRef([])
+  const frameMarkSeqRef = useRef(0)
+  const screenMarkRef = useRef(screenMark())
+
   // Assigned rather than closed over: the stream handler is installed once per
   // connection, and `sendCommand` is rebuilt whenever the market activation
   // changes. Closing over it would re-subscribe, which resends the opening
@@ -495,8 +579,51 @@ const useFuturesTrading = ({
       const payload = frame?.payload
       if (payload === null || typeof payload !== 'object') return
 
+      // Present only on the frames the exchange caused. Arming answers the
+      // revision the commit effect waits for, or `0` for a frame carrying no
+      // marks — which is most of this lane, and costs it nothing.
+      const armFrameMarks = ({
+        resource,
+        symbol = null,
+        identity = null,
+        status = null,
+        report = null,
+      }) => {
+        const marks = frame?.marks ?? null
+        const receivedAt = frame?.receivedAt ?? null
+        if (marks === null || !Number.isSafeInteger(receivedAt)) return 0
+        const revision = frameMarkSeqRef.current + 1
+        frameMarkSeqRef.current = revision
+        pendingFrameMarksRef.current = [
+          // Bounded for the reason every other memory here is: this is a guard
+          // against a burst, not a record. Nothing but a commit that never came
+          // can leave an entry behind, and one that did is not worth a leak.
+          ...pendingFrameMarksRef.current.slice(-(PENDING_FRAME_MARKS_MEMORY - 1)),
+          {
+            revision,
+            marks,
+            receivedAt,
+            resource,
+            symbol,
+            identity,
+            status,
+            // The frame's own subject, where it has one. An account envelope
+            // has none — it restates the whole account — so it is judged by
+            // whether the screen moved and nothing more.
+            report,
+            // What the screen showed before this frame was applied.
+            before: screenMarkRef.current,
+          },
+        ]
+        return revision
+      }
+
       if (payload.type === 'futures_account_state') {
-        setState(previous => applyAccountEnvelope(previous, payload))
+        const revision = armFrameMarks({ resource: 'account' })
+        setState((previous) => {
+          const next = applyAccountEnvelope(previous, payload)
+          return revision === 0 ? next : { ...next, frameRevision: revision }
+        })
       }
       if (payload.type === 'futures_position_marks') {
         const positionMarks = readFuturesPositionMarks(payload.marks)
@@ -549,6 +676,18 @@ const useFuturesTrading = ({
       }
       if (payload.futures_execution_update) {
         const report = payload.futures_execution_update
+        // The frame the operator's complaint is about: what the exchange says
+        // an order is now. Named by the identity the command that placed it
+        // carries, and by the state the exchange gave it — `PARTIALLY_FILLED`
+        // is what makes a partial fill legible in the record without the
+        // record ever holding a quantity.
+        const frameRevisionForReport = armFrameMarks({
+          resource: 'orders',
+          symbol: report?.symbol ?? report?.s ?? null,
+          identity: report?.orderId ?? report?.i ?? null,
+          status: report?.status ?? report?.X ?? null,
+          report,
+        })
         // A parent that fires would sit on the chart at its trigger price until
         // the beat came round. It does not have to: the desk already holds the
         // identity of the regular order that parent spawned, and this is that
@@ -599,6 +738,9 @@ const useFuturesTrading = ({
             // panels are: an order that settles or a fill that closes a position
             // belongs in it without asking Binance for the account again.
             history: foldExecutionIntoFuturesHistory(previous.history, report),
+            ...(frameRevisionForReport === 0
+              ? {}
+              : { frameRevision: frameRevisionForReport }),
           }
         })
         answerCommandWatchers({ kind: 'execution', report })
@@ -750,6 +892,72 @@ const useFuturesTrading = ({
       wsConnection.removeEventListener('error', handleDisconnect)
     }
   }, [abandonCommandWatchers, answerCommandWatchers, enabled, wsConnection])
+
+  // What these surfaces last drew. Updated before the effect below reads it —
+  // effects run in the order they are written, and that order is what lets the
+  // report say whether the frame it is measuring changed anything.
+  const drawnOrders = state.openOrders
+  const drawnPositions = state.positions
+  const drawnOrdersRef = useRef(drawnOrders)
+  useEffect(() => {
+    drawnOrdersRef.current = drawnOrders
+    screenMarkRef.current = screenMark({
+      openOrders: drawnOrders,
+      positions: drawnPositions,
+    })
+  }, [drawnOrders, drawnPositions])
+
+  // The last of the five marks, and the only one that has to be taken here.
+  //
+  // An effect rather than the reducer, for the reason the workstation's own
+  // measurement states: "the state was set" is not "the operator saw it", and
+  // the stage between them is exactly what the complaint is about. This runs
+  // after React has committed the tree the frame produced.
+  //
+  // It reports and never blocks. A measurement that cannot be built or sent is
+  // dropped: producing it may not change what is drawn or when.
+  const frameRevision = state.frameRevision
+  useEffect(() => {
+    const pending = pendingFrameMarksRef.current
+    if (pending.length === 0) return
+    const drawn = pending.filter(entry => entry.revision <= frameRevision)
+    if (drawn.length === 0) return
+    pendingFrameMarksRef.current = pending.filter(entry => entry.revision > frameRevision)
+    const committedAt = Date.now()
+    if (!isOpenSocket(wsConnection) || typeof wsConnection?.send !== 'function') return
+    for (const entry of drawn) {
+      const measured = measureFrameMarks(entry.marks, {
+        receivedAt: entry.receivedAt,
+        committedAt,
+      })
+      // Marks that do not describe a journey — a clock stepped backwards
+      // between two of them — cost this line and nothing else.
+      if (measured === null) continue
+      try {
+        wsConnection.send(JSON.stringify({
+          action: 'report_frame_marks',
+          resource: entry.resource,
+          symbol: entry.symbol,
+          identity: entry.identity,
+          status: entry.status,
+          // Three readings, and the third is the one worth having.
+          //
+          // `DELIVERED` — the screen shows what this frame said, and drawing it
+          // moved something. `UNCHANGED` — the screen already showed it: the
+          // sibling frame of the same fill got there first, or the exchange
+          // restated what was drawn. Neither is a fault.
+          //
+          // `NOT_DRAWN` — the frame arrived and the screen does not show what
+          // it said. That is the operator's complaint stated exactly, and it is
+          // what the absence of a line used to look like.
+          code: readingOf(entry, screenMarkRef.current, drawnOrdersRef.current),
+          ...measured,
+        }))
+      } catch {
+        // A diagnostic may never raise into the desk.
+      }
+    }
+  }, [frameRevision, wsConnection])
 
   // Every command carries the market activation it was issued under. The
   // backend refuses one from a superseded activation, so a command composed

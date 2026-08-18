@@ -45,7 +45,7 @@
 ## 5. Verification
 
 - [x] 5.1 `npm run lint`, `npm test` (1349 tests, 97 files), `npm run check:futures-production`, `npm run check:command-path`.
-- [ ] 5.2 Operator confirms on live data (gathered as item 5 of the third pass in `verify-the-desk-in-one-sitting/runbook.md`): placing, filling and cancelling orders keeps the working-orders list exactly right without waiting for a refresh, and an order cancelled from Binance's app disappears within the beat.
+- [x] 5.2 Operator confirms on live data (gathered as item 5 of the third pass in `verify-the-desk-in-one-sitting/runbook.md`): placing, filling and cancelling orders keeps the working-orders list exactly right without waiting for a refresh, and an order cancelled from Binance's app disappears within the beat.
 
 ## 6. Stated Limits, Not Fixed Here
 

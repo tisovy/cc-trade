@@ -30,4 +30,4 @@
 ## 5. Verification
 
 - [x] 5.1 `npm run lint`, `npm test`, `npm run check:futures-production`.
-- [ ] 5.2 Operator confirms on live data: reconnect blocks sizing until the account answers; a stalled mark is visibly stale. **Confirmed by the operator on 2026-08-12** — the proxy was stopped mid-session: the desk refused to size immediately and recovered 8–10 s after it came back. The record corroborates: `SOCKET_CLOSED` at 07:05:25Z, five backoff attempts, live again at 07:05:59Z.
+- [x] 5.2 Operator confirms on live data: reconnect blocks sizing until the account answers; a stalled mark is visibly stale. **Confirmed by the operator on 2026-08-12** — the proxy was stopped mid-session: the desk refused to size immediately and recovered 8–10 s after it came back. The record corroborates: `SOCKET_CLOSED` at 07:05:25Z, five backoff attempts, live again at 07:05:59Z.

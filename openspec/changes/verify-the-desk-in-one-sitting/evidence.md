@@ -1,10 +1,6 @@
-# Live Verification Ledger
+# Reconciled Live-Verification Evidence
 
-This is the normative ledger of live, partial, outstanding and test-only
-verification.
-
-Assembled 2026-08-18 from the dated operator observations in
-`changes/verify-the-desk-in-one-sitting/runbook.md`,
+Assembled 2026-08-18 from the dated operator observations in `runbook.md`,
 the archived task records they reference, the existing live-verification
 ledger, and the diagnostic observations quoted by those records. A broad
 statement such as “everything works” is evidence for the numbered step the

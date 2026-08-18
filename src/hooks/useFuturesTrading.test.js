@@ -176,6 +176,277 @@ describe('useFuturesTrading', () => {
     expect(result.current.lastExecution.status).toBe('CANCELED')
   })
 
+  // What the record could not say until now: when the exchange stated something
+  // about an order, and when the desk drew it. The operator has reported a
+  // number updating late twice, and both times the answer was to ask them what
+  // and where — because the account lane carried no marks and the trading hook
+  // closed none.
+  describe('the marks a fill leaves behind', () => {
+    const stamped = (payload, at) => ({
+      marks: { exchangeAt: at - 300, receivedAt: at - 120, queuedAt: at - 100 },
+      ...payload,
+    })
+
+    const reportedMarks = socket => socket.sent.filter(
+      message => message.action === 'report_frame_marks',
+    )
+
+    it('reports the fill after the commit that drew it, naming the order and its state', () => {
+      const socket = createSocket()
+      renderHook(() => useFuturesTrading({
+        enabled: true,
+        symbol: 'TUTUSDT',
+        wsConnection: socket,
+      }))
+
+      act(() => {
+        socket.receive({
+          futures_execution_update: {
+            symbol: 'TUTUSDT', orderId: 41, status: 'NEW', side: 'BUY',
+            price: '1', origQty: '5', z: '0', T: 1_000,
+          },
+        })
+      })
+      expect(reportedMarks(socket)).toHaveLength(0)
+
+      act(() => {
+        socket.receive(stamped({
+          futures_execution_update: {
+            symbol: 'TUTUSDT', orderId: 41, status: 'PARTIALLY_FILLED', side: 'BUY',
+            price: '1', origQty: '5', z: '2', T: 2_000,
+          },
+        }, Date.now()))
+      })
+
+      const [reported] = reportedMarks(socket)
+      expect(reported).toMatchObject({
+        action: 'report_frame_marks',
+        resource: 'orders',
+        symbol: 'TUTUSDT',
+        identity: 41,
+        status: 'PARTIALLY_FILLED',
+        // The half fill changed what these surfaces draw, and the record says
+        // so rather than leaving it to be inferred from a line existing.
+        code: 'DELIVERED',
+      })
+      expect(reported.upstreamMs).toBeGreaterThanOrEqual(0)
+      expect(reported.status).toBe('PARTIALLY_FILLED')
+      expect(reported.deliveredMs).toBeGreaterThanOrEqual(0)
+      expect(reported.committedMs).toBeGreaterThanOrEqual(0)
+      expect(reported.totalMs).toBeGreaterThanOrEqual(reported.committedMs)
+    })
+
+    // The operator's own description — "the report arrives and nothing on the
+    // order changes" — has to be a reading rather than the absence of one.
+    it('reports a frame that changed nothing as unchanged', () => {
+      const socket = createSocket()
+      renderHook(() => useFuturesTrading({
+        enabled: true,
+        symbol: 'TUTUSDT',
+        wsConnection: socket,
+      }))
+
+      act(() => {
+        socket.receive(stamped({
+          futures_execution_update: {
+            symbol: 'TUTUSDT', orderId: 77, status: 'FILLED', side: 'BUY',
+            price: '1', origQty: '5', z: '5', T: 2_000,
+          },
+        }, Date.now()))
+      })
+
+      expect(reportedMarks(socket)).toHaveLength(1)
+      expect(reportedMarks(socket)[0]).toMatchObject({
+        resource: 'orders',
+        identity: 77,
+        status: 'FILLED',
+        code: 'UNCHANGED',
+      })
+    })
+
+    it('reports the account envelope the same fill folded', () => {
+      const socket = createSocket()
+      renderHook(() => useFuturesTrading({
+        enabled: true,
+        symbol: 'TUTUSDT',
+        wsConnection: socket,
+      }))
+
+      act(() => {
+        socket.receive(stamped({
+          version: 1,
+          type: 'futures_account_state',
+          resources: {
+            regularOrders: {
+              status: 'ready',
+              data: [{
+                symbol: 'TUTUSDT', orderId: 41, status: 'PARTIALLY_FILLED',
+                side: 'BUY', price: '1', origQty: '5', executedQty: '2',
+              }],
+              lastSuccessfulAt: 100,
+            },
+          },
+        }, Date.now()))
+      })
+
+      expect(reportedMarks(socket)[0]).toMatchObject({
+        resource: 'account',
+        code: 'DELIVERED',
+      })
+    })
+
+    // A fill produces two frames back to back — the folded account envelope and
+    // the report itself. Delivered in one tick they become one React commit, and
+    // a single pending slot would report the second and lose the first: the
+    // order line, which is the one the operator asked for.
+    it('reports every marked frame of a batch, not only the last', () => {
+      const socket = createSocket()
+      renderHook(() => useFuturesTrading({
+        enabled: true,
+        symbol: 'TUTUSDT',
+        wsConnection: socket,
+      }))
+
+      const at = Date.now()
+      act(() => {
+        socket.receive(stamped({
+          version: 1,
+          type: 'futures_account_state',
+          resources: {
+            regularOrders: {
+              status: 'ready',
+              data: [{
+                symbol: 'TUTUSDT', orderId: 41, status: 'PARTIALLY_FILLED',
+                side: 'BUY', price: '1', origQty: '5', executedQty: '2',
+              }],
+              lastSuccessfulAt: 100,
+            },
+          },
+        }, at))
+        socket.receive(stamped({
+          futures_execution_update: {
+            symbol: 'TUTUSDT', orderId: 41, status: 'PARTIALLY_FILLED', side: 'BUY',
+            price: '1', origQty: '5', z: '2', T: 2_000,
+          },
+        }, at))
+      })
+
+      // Both are reported, and both as delivered: they were drawn in the same
+      // commit, so neither can be said to have arrived after the other. What
+      // matters here is that the order line exists at all — a single pending
+      // slot reported the envelope and lost it.
+      expect(reportedMarks(socket).map(entry => entry.resource)).toEqual(['account', 'orders'])
+      expect(reportedMarks(socket).at(-1)).toMatchObject({
+        identity: 41,
+        status: 'PARTIALLY_FILLED',
+        code: 'DELIVERED',
+      })
+    })
+
+    // The ordinary case on a live desk: the two frames of one fill arrive as two
+    // socket messages and are drawn in two commits. The second says what the
+    // first already drew, and that is not a fault — it is what separates it from
+    // a frame the screen never showed.
+    it('reports the second frame of one fill as already drawn, not as missing', () => {
+      const socket = createSocket()
+      renderHook(() => useFuturesTrading({
+        enabled: true,
+        symbol: 'TUTUSDT',
+        wsConnection: socket,
+      }))
+
+      act(() => {
+        socket.receive(stamped({
+          version: 1,
+          type: 'futures_account_state',
+          resources: {
+            regularOrders: {
+              status: 'ready',
+              data: [{
+                symbol: 'TUTUSDT', orderId: 41, status: 'PARTIALLY_FILLED',
+                side: 'BUY', price: '1', origQty: '5', executedQty: '2',
+              }],
+              lastSuccessfulAt: 100,
+            },
+          },
+        }, Date.now()))
+      })
+      act(() => {
+        socket.receive(stamped({
+          futures_execution_update: {
+            symbol: 'TUTUSDT', orderId: 41, status: 'PARTIALLY_FILLED', side: 'BUY',
+            price: '1', origQty: '5', z: '2', T: 2_000,
+          },
+        }, Date.now()))
+      })
+
+      expect(reportedMarks(socket).map(entry => [entry.resource, entry.code])).toEqual([
+        ['account', 'DELIVERED'],
+        ['orders', 'UNCHANGED'],
+      ])
+    })
+
+    // The reading the whole change exists for: the exchange said something
+    // about an order and the screen does not show it. Reached here through the
+    // settled memory, which is the desk's own refusal to redraw an order it has
+    // already seen finish — a real path, and the only one a test can take
+    // without breaking the hook on purpose.
+    it('reports a frame the screen does not show as not drawn', () => {
+      const socket = createSocket()
+      renderHook(() => useFuturesTrading({
+        enabled: true,
+        symbol: 'TUTUSDT',
+        wsConnection: socket,
+      }))
+
+      act(() => {
+        socket.receive({
+          futures_execution_update: {
+            symbol: 'TUTUSDT', orderId: 41, status: 'FILLED', side: 'BUY',
+            price: '1', origQty: '5', z: '5', T: 3_000,
+          },
+        })
+      })
+
+      act(() => {
+        socket.receive(stamped({
+          futures_execution_update: {
+            symbol: 'TUTUSDT', orderId: 41, status: 'PARTIALLY_FILLED', side: 'BUY',
+            price: '1', origQty: '5', z: '2', T: 2_000,
+          },
+        }, Date.now()))
+      })
+
+      expect(reportedMarks(socket)).toHaveLength(1)
+      expect(reportedMarks(socket)[0]).toMatchObject({
+        resource: 'orders',
+        identity: 41,
+        status: 'PARTIALLY_FILLED',
+        code: 'NOT_DRAWN',
+      })
+    })
+
+    it('reports nothing for the frames that carry no marks, which is most of them', () => {
+      const socket = createSocket()
+      renderHook(() => useFuturesTrading({
+        enabled: true,
+        symbol: 'TUTUSDT',
+        wsConnection: socket,
+      }))
+
+      act(() => {
+        socket.receive({
+          futures_execution_update: {
+            symbol: 'TUTUSDT', orderId: 41, status: 'PARTIALLY_FILLED', side: 'BUY',
+            price: '1', origQty: '5', z: '2', T: 2_000,
+          },
+        })
+      })
+
+      expect(reportedMarks(socket)).toHaveLength(0)
+    })
+  })
+
   it('keeps a confirmed amendment when the snapshot that follows is older', () => {
     const socket = createSocket()
     const { result } = renderHook(() => useFuturesTrading({

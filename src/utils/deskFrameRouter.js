@@ -18,6 +18,7 @@ import {
   isPotentialFuturesProductionWorkstationFrame,
   parseMarkedFuturesProductionWorkstationEvent,
 } from './futuresProductionWorkstationProtocol.js'
+import { FRAME_MARKS_KEY, readFrameMarks, splitFrameMarks } from './frameMarks.js'
 
 export const DESK_FRAME_KINDS = Object.freeze({
   // The backend's answer about its own configuration, and its acknowledgement of
@@ -94,7 +95,28 @@ export const readDeskFrame = (data) => {
   // above is refused rather than passed on as an account frame under its own
   // stated type.
   if (payload.type === FUTURES_PRODUCTION_WORKSTATION_EVENT_TYPE) return null
-  return Object.freeze({ kind: classifyDeskFrame(payload), payload })
+  // The marks come off here, before any subscriber sees the frame, for the
+  // reason `frameMarks.js` states: the stamp belongs to the transport envelope
+  // and never to what the desk reads. Present only on the frames the exchange
+  // caused — an execution report and the account envelope folded from it — and
+  // null on everything else, which is most of this lane.
+  //
+  // Read before it is taken, which the workstation lane does not have to do and
+  // this one does: `marks` is a word no workstation event uses, and it is a word
+  // this lane already uses — `futures_position_marks` carries the live mark
+  // price of every open position under exactly this name. Taking it off by name
+  // alone stripped the position marks off their own frame. So a value that is
+  // not a stamp is not treated as one, and the frame keeps it.
+  const carried = readFrameMarks(payload[FRAME_MARKS_KEY])
+  const { frame, marks } = carried === null
+    ? { frame: payload, marks: null }
+    : splitFrameMarks(payload)
+  return Object.freeze({
+    kind: classifyDeskFrame(frame),
+    payload: frame,
+    marks,
+    receivedAt,
+  })
 }
 
 /**

@@ -287,6 +287,100 @@ describe('summarizeDeskDiagnosticRecord', () => {
     expect(printed).toContain('(1 without a usable exchange time)')
   })
 
+  // The account lane is read for a different question than the market one. The
+  // operator reports one moment and one order — "the number on my order updated
+  // late" — and a median over the day cannot be opened at it. So these are
+  // listed, and the market lane stays aggregated beside them.
+  it('lists the order frames of a day and leaves the market lane aggregated', () => {
+    const day = summarizeDeskDiagnosticRecord([
+      line({
+        at: '2026-08-18T09:00:00.000Z',
+        kind: 'frame',
+        phase: 'frame',
+        code: 'DELIVERED',
+        resource: 'depth',
+        symbol: 'ACEUSDT',
+        upstreamMs: 345,
+        queuedMs: 1,
+        deliveredMs: 12,
+        committedMs: 30,
+        totalMs: 388,
+        identity: null,
+        status: null,
+      }),
+      line({
+        at: '2026-08-18T09:00:04.000Z',
+        kind: 'frame',
+        phase: 'frame',
+        code: 'DELIVERED',
+        resource: 'orders',
+        symbol: 'TUTUSDT',
+        upstreamMs: 210,
+        queuedMs: 0,
+        deliveredMs: 2,
+        committedMs: 9,
+        totalMs: 221,
+        identity: '41',
+        status: 'PARTIALLY_FILLED',
+      }),
+      line({
+        at: '2026-08-18T09:00:04.100Z',
+        kind: 'frame',
+        phase: 'frame',
+        code: 'UNCHANGED',
+        resource: 'orders',
+        symbol: 'TUTUSDT',
+        upstreamMs: null,
+        queuedMs: 0,
+        deliveredMs: 1,
+        committedMs: 3,
+        totalMs: 4,
+        identity: '41',
+        status: 'FILLED',
+      }),
+      line({
+        at: '2026-08-18T09:00:09.000Z',
+        kind: 'frame',
+        phase: 'frame',
+        code: 'NOT_DRAWN',
+        resource: 'orders',
+        symbol: 'TUTUSDT',
+        upstreamMs: 190,
+        queuedMs: 0,
+        deliveredMs: 1,
+        committedMs: 2,
+        totalMs: 193,
+        identity: '42',
+        status: 'PARTIALLY_FILLED',
+      }),
+    ].join(''))
+
+    expect(day.orderFrames.map(entry => [entry.identity, entry.status, entry.code])).toEqual([
+      ['41', 'PARTIALLY_FILLED', 'DELIVERED'],
+      ['41', 'FILLED', 'UNCHANGED'],
+      ['42', 'PARTIALLY_FILLED', 'NOT_DRAWN'],
+    ])
+    // The market frame is not in the list and is still in the aggregate.
+    expect(day.frames.map(entry => entry.key)).toContain('depth ACEUSDT')
+
+    const printed = formatDeskDiagnosticSummary(day)
+    expect(printed).toContain('What the exchange said about an order, and when it was drawn')
+    expect(printed).toContain('PARTIALLY_FILLED')
+    // The two readings an operator saying "nothing updated" could be
+    // describing, kept apart: already drawn, and not drawn at all.
+    expect(printed).toContain('UNCHANGED')
+    expect(printed).toContain('NOT_DRAWN')
+    expect(printed).toContain('Where a frame spent its time')
+  })
+
+  it('prints no order section for a day that has none', () => {
+    const day = summarizeDeskDiagnosticRecord(DAY)
+
+    expect(day.orderFrames).toEqual([])
+    expect(formatDeskDiagnosticSummary(day))
+      .not.toContain('What the exchange said about an order')
+  })
+
   // "The screen was late" is the complaint every change in this batch answers,
   // and until the backlog states its depth the record could say only that
   // something was superseded — never how far behind the renderer actually got,

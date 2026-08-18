@@ -113,6 +113,67 @@ describe('readDeskFrame', () => {
   })
 })
 
+describe('readDeskFrame, account marks', () => {
+  // The account lane went untimed for as long as the marks existed, so a fill
+  // the operator said was drawn late could not be answered from the record at
+  // all. Both halves matter here: the marks reach the subscriber, and the frame
+  // it is handed is the frame the protocol expects — a stamp left on the payload
+  // is how a correct desk goes dark between two correct sides.
+  it('takes the marks off an account frame and answers when it arrived', () => {
+    const frame = readDeskFrame(JSON.stringify({
+      marks: { exchangeAt: 1_000, receivedAt: 1_100, queuedAt: 1_150 },
+      futures_execution_update: { symbol: 'TUTUSDT', orderId: 41, status: 'PARTIALLY_FILLED' },
+    }))
+
+    expect(frame.kind).toBe(DESK_FRAME_KINDS.ACCOUNT)
+    expect(frame.marks).toEqual({ exchangeAt: 1_000, receivedAt: 1_100, queuedAt: 1_150 })
+    expect(Number.isSafeInteger(frame.receivedAt)).toBe(true)
+    expect(frame.payload).toEqual({
+      futures_execution_update: { symbol: 'TUTUSDT', orderId: 41, status: 'PARTIALLY_FILLED' },
+    })
+  })
+
+  it('answers no marks for the frames that carry none, which is most of them', () => {
+    const frame = readDeskFrame(JSON.stringify({ type: 'futures_account_state', version: 1 }))
+
+    expect(frame.kind).toBe(DESK_FRAME_KINDS.ACCOUNT)
+    expect(frame.marks).toBeNull()
+    expect(frame.payload).toEqual({ type: 'futures_account_state', version: 1 })
+  })
+
+  // A malformed stamp costs the measurement and never the frame: a diagnostic
+  // that could refuse an execution report would be worse than no diagnostic.
+  it('loses a malformed stamp and keeps the frame', () => {
+    const frame = readDeskFrame(JSON.stringify({
+      marks: { exchangeAt: 'soon', receivedAt: 1_100, queuedAt: 1_150 },
+      futures_execution_update: { symbol: 'TUTUSDT', orderId: 41 },
+    }))
+
+    expect(frame.marks).toBeNull()
+    expect(frame.payload.futures_execution_update).toEqual({ symbol: 'TUTUSDT', orderId: 41 })
+  })
+
+  // The collision this lane has and the workstation lane does not: `marks` is
+  // the word the desk already uses for the live mark price of every open
+  // position. Taking it off by name alone emptied that frame — the positions
+  // kept their snapshot price and stopped ticking. So a value under that name
+  // which is not a stamp stays exactly where it is.
+  it('leaves the position marks alone, which are carried under the same word', () => {
+    const frame = readDeskFrame(JSON.stringify({
+      type: 'futures_position_marks',
+      version: 1,
+      marks: { BMTUSDT: { markPrice: '0.03600', updatedAt: 200 } },
+    }))
+
+    expect(frame.marks).toBeNull()
+    expect(frame.payload).toEqual({
+      type: 'futures_position_marks',
+      version: 1,
+      marks: { BMTUSDT: { markPrice: '0.03600', updatedAt: 200 } },
+    })
+  })
+})
+
 describe('createDeskFrameRouter', () => {
   // The measured cost the change is about: the trading hook parsed a
   // hundred-and-eighteen-kilobyte book ten times a second to find out it was not
