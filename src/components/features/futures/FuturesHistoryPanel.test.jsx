@@ -76,6 +76,43 @@ describe('FuturesHistoryPanel', () => {
       .toBeInTheDocument()
   })
 
+  it('shows the complete reconstructed round after a break-even edge close and add', () => {
+    render(
+      <FuturesHistoryPanel
+        view="tradeHistory"
+        symbol="BICOUSDT"
+        tickSizes={ticks}
+        history={{
+          ...history,
+          symbol: 'BICOUSDT',
+          trades: [
+            { id: 1, symbol: 'BICOUSDT', side: 'SELL', price: '100', quantity: '4', commission: '1', realizedPnl: '0', time: 1000 },
+            { id: 2, symbol: 'BICOUSDT', side: 'BUY', price: '90', quantity: '2', commission: '2', realizedPnl: '0', time: 2000 },
+            { id: 3, symbol: 'BICOUSDT', side: 'SELL', price: '120', quantity: '8', commission: '3', realizedPnl: '190', time: 3000 },
+          ],
+        }}
+      />,
+    )
+
+    const rows = screen.getAllByRole('row')
+    expect(rows).toHaveLength(2)
+    const cells = within(rows[1]).getAllByRole('cell')
+    expect(cells[2]).toHaveTextContent('LONG')
+    expect(cells[3]).toHaveAttribute('title', '12 contracts · 3 fills')
+    expect(cells[4]).toHaveTextContent('97.500')
+    expect(cells[4]).toHaveAttribute(
+      'title',
+      'Opened before this window of trades — entry recovered from the realized PnL',
+    )
+    expect(cells[5]).toHaveTextContent('113.333')
+    expect(cells[6]).toHaveTextContent('+190.00')
+    expect(cells[6]).toHaveAttribute(
+      'title',
+      '+190.00 realized less 6.0000 in fees is +184.00 net',
+    )
+    expect(screen.queryByText('SHORT')).not.toBeInTheDocument()
+  })
+
   // The window of trades the exchange returns is bounded: its oldest rows can be
   // the closing fills of a position opened before it. That position was still
   // entered at a knowable price — the realized PnL states it — so the row reports

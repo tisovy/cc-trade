@@ -81,6 +81,13 @@ const openRound = (fill, buy, closing, fromFlat) => ({
   fills: 0,
   partial: closing,
   fromFlat,
+  leg: legOf(fill),
+  // A zero-PnL first fill can be an opening or a break-even close when the
+  // bounded read did not witness flat. Keep that uncertainty only until the
+  // first reducing fill supplies evidence; it must never leak across a leg.
+  ambiguousWindowEdge: !closing && !fromFlat && toNumber(fill?.realizedPnl) === 0,
+  edgePhase: null,
+  aggregateEntryImplied: false,
 })
 
 // Whether the fill a round is about to open on is closing a position opened
@@ -134,6 +141,24 @@ const flipIsConsistent = (round, { fill, held, price }) => {
   // that a rounded price cannot decide it.
   const tolerance = Math.abs(price * size) * 0.01
   return Math.abs(toNumber(fill.realizedPnl) - flipPnl) <= tolerance
+}
+
+// The tentative round treated the window-edge sells as a short entry (or buys
+// as a long entry). Later evidence says they were instead exits from the real,
+// older position. Move their already-counted quantity and notional across in
+// place: fills and fees stay on the same round and are therefore counted once.
+const restartAmbiguousWindowEdgeRound = (round) => {
+  round.positionSide = round.positionSide === 'SHORT' ? 'LONG' : 'SHORT'
+  round.exitAtoms += round.entryAtoms
+  round.exitNotional += round.entryNotional
+  round.entryAtoms = 0n
+  round.entryNotional = 0
+  round.heldAtoms = 0n
+  round.heldEntry = 0
+  round.partial = true
+  round.ambiguousWindowEdge = false
+  round.edgePhase = 'adding-after-edge-close'
+  round.aggregateEntryImplied = true
 }
 
 const applyFill = (round, { fill, atoms, price, share, increasing }) => {
@@ -190,14 +215,14 @@ const finishRound = (round, open) => {
   const quantity = Number(fromAtoms(quantityAtoms))
   const exitPrice = exitQuantity > 0 ? round.exitNotional / exitQuantity : null
   const enteredHere = entryQuantity > 0
-  const entryPrice = enteredHere
-    ? round.entryNotional / entryQuantity
-    : impliedEntryPrice({
+  const entryPrice = round.aggregateEntryImplied || !enteredHere
+    ? impliedEntryPrice({
       positionSide: round.positionSide,
       exitPrice,
       realizedPnl: round.realizedPnl,
       quantity: exitQuantity,
     })
+    : round.entryNotional / entryQuantity
   return Object.freeze({
     key: round.key,
     symbol: round.symbol,
@@ -214,7 +239,7 @@ const finishRound = (round, open) => {
     entryPrice,
     // Stated so the surface can say where the entry came from: read from the
     // fills, or recovered from what the position realized.
-    entryImplied: !enteredHere,
+    entryImplied: round.aggregateEntryImplied || !enteredHere,
     exitPrice,
     realizedPnl: round.realizedPnl,
     fee: round.fee,
@@ -252,16 +277,40 @@ const foldContractFills = (fills) => {
         openedFromFlat = false
         running = 0n
       }
-      const increasing = buy === (round.positionSide === 'LONG')
+      let increasing = buy === (round.positionSide === 'LONG')
+      const held = running < 0n ? -running : running
+      if (round.ambiguousWindowEdge) {
+        if (legOf(entry.fill) !== round.leg) {
+          // A hedge leg is independent evidence about another position.
+          round.ambiguousWindowEdge = false
+        } else if (!increasing) {
+          const reducing = remaining < held ? remaining : held
+          const disproved = toNumber(entry.fill.realizedPnl) === 0
+            && reducing > 0n
+            && !flipIsConsistent(round, {
+              fill: entry.fill,
+              held: reducing,
+              price: entry.price,
+            })
+          if (disproved) {
+            restartAmbiguousWindowEdgeRound(round)
+            running = 0n
+            increasing = true
+          } else {
+            // The first reduction agreed with the tentative position (including
+            // a genuine break-even reduction), so this was a real opening.
+            round.ambiguousWindowEdge = false
+          }
+        }
+      }
       // A round that began by closing a position opened before this window has no
       // size of its own to run down, so it ends where its run of closing fills
       // ends rather than swallowing the next position that opens.
-      if (round.partial && increasing) {
+      if (round.partial && increasing && round.edgePhase !== 'adding-after-edge-close') {
         rounds.push(finishRound(round, false))
         round = null
         continue
       }
-      const held = running < 0n ? -running : running
       // The position was open before this window began: what looked like a flip
       // is the rest of it being closed. Absorb the whole fill instead, and let
       // the entry come from the realized PnL — which states the position's true
@@ -273,6 +322,9 @@ const foldContractFills = (fills) => {
         round.partial = true
         round.entryAtoms = 0n
         round.entryNotional = 0
+      }
+      if (!increasing && round.edgePhase === 'adding-after-edge-close') {
+        round.edgePhase = 'reclosing'
       }
       // Reducing more than the position holds closes it and opens the opposite
       // one with what is left over.

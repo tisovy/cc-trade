@@ -363,6 +363,124 @@ describe('buildFuturesTradeRounds', () => {
     })
   })
 
+  it('reconstructs a long after a break-even edge close, add, and final close', () => {
+    const rounds = buildFuturesTradeRounds([
+      // Ten longs at 100 predate the window. Four close at break-even, two are
+      // added, then all eight that remain close with the reported 190 profit.
+      fill({ id: 1, side: 'SELL', price: '100', quantity: '4', commission: '1', realizedPnl: '0', time: 1000 }),
+      fill({ id: 2, side: 'BUY', price: '90', quantity: '2', commission: '2', realizedPnl: '0', time: 2000 }),
+      fill({ id: 3, side: 'SELL', price: '120', quantity: '8', commission: '3', realizedPnl: '190', time: 3000 }),
+    ])
+
+    expect(rounds).toHaveLength(1)
+    expect(rounds[0]).toMatchObject({
+      positionSide: 'LONG',
+      quantity: '12',
+      entryPrice: 97.5,
+      entryImplied: true,
+      realizedPnl: 190,
+      fee: 6,
+      netPnl: 184,
+      fills: 3,
+      partial: true,
+      open: false,
+    })
+    expect(rounds[0].exitPrice).toBeCloseTo(113.333333, 6)
+    expect(rounds.some(round => round.positionSide === 'SHORT')).toBe(false)
+  })
+
+  it('reconstructs the short mirror without inventing a long', () => {
+    const rounds = buildFuturesTradeRounds([
+      fill({ id: 1, side: 'BUY', price: '100', quantity: '4', commission: '1', realizedPnl: '0', time: 1000 }),
+      fill({ id: 2, side: 'SELL', price: '110', quantity: '2', commission: '2', realizedPnl: '0', time: 2000 }),
+      fill({ id: 3, side: 'BUY', price: '80', quantity: '8', commission: '3', realizedPnl: '190', time: 3000 }),
+    ])
+
+    expect(rounds).toHaveLength(1)
+    expect(rounds[0]).toMatchObject({
+      positionSide: 'SHORT',
+      quantity: '12',
+      entryPrice: 102.5,
+      entryImplied: true,
+      realizedPnl: 190,
+      fee: 6,
+      netPnl: 184,
+      fills: 3,
+      partial: true,
+      open: false,
+    })
+    expect(rounds[0].exitPrice).toBeCloseTo(86.666667, 6)
+    expect(rounds.some(round => round.positionSide === 'LONG')).toBe(false)
+  })
+
+  it('keeps a genuine opening when its first reduction realizes the predicted break-even', () => {
+    const rounds = buildFuturesTradeRounds([
+      fill({ id: 1, side: 'SELL', price: '100', quantity: '4', commission: '0', realizedPnl: '0', time: 1000 }),
+      fill({ id: 2, side: 'BUY', price: '100', quantity: '2', commission: '0', realizedPnl: '0', time: 2000 }),
+      fill({ id: 3, side: 'BUY', price: '90', quantity: '2', commission: '0', realizedPnl: '20', time: 3000 }),
+    ])
+
+    expect(rounds).toHaveLength(1)
+    expect(rounds[0]).toMatchObject({
+      positionSide: 'SHORT',
+      quantity: '4',
+      entryPrice: 100,
+      entryImplied: false,
+      realizedPnl: 20,
+      partial: false,
+      open: false,
+    })
+  })
+
+  it('keeps a PnL-consistent reversal and its opposite remainder', () => {
+    const rounds = buildFuturesTradeRounds([
+      fill({ id: 1, side: 'SELL', price: '100', quantity: '4', commission: '0', realizedPnl: '0', time: 1000 }),
+      // Four close the short for 40; two open the long.
+      fill({ id: 2, side: 'BUY', price: '90', quantity: '6', commission: '0', realizedPnl: '40', time: 2000 }),
+    ])
+
+    expect(rounds).toHaveLength(2)
+    expect(rounds.find(round => !round.open)).toMatchObject({
+      positionSide: 'SHORT', quantity: '4', realizedPnl: 40, partial: false,
+    })
+    expect(rounds.find(round => round.open)).toMatchObject({
+      positionSide: 'LONG', quantity: '2', entryPrice: 90, partial: false,
+    })
+  })
+
+  it('does not use an opposite fill from another hedge leg to restart a round', () => {
+    const rounds = buildFuturesTradeRounds([
+      fill({ id: 1, side: 'SELL', positionSide: 'SHORT', price: '100', quantity: '4', commission: '0', realizedPnl: '0', time: 1000 }),
+      fill({ id: 2, side: 'BUY', positionSide: 'LONG', price: '90', quantity: '2', commission: '0', realizedPnl: '0', time: 2000 }),
+    ])
+
+    expect(rounds).toHaveLength(1)
+    expect(rounds[0]).toMatchObject({
+      positionSide: 'SHORT',
+      entryImplied: false,
+      partial: false,
+      open: true,
+    })
+  })
+
+  it('finishes the reconstructed partial round before an add after reclosing', () => {
+    const rounds = buildFuturesTradeRounds([
+      fill({ id: 1, side: 'SELL', price: '100', quantity: '4', commission: '0', realizedPnl: '0', time: 1000 }),
+      fill({ id: 2, side: 'BUY', price: '90', quantity: '2', commission: '0', realizedPnl: '0', time: 2000 }),
+      fill({ id: 3, side: 'SELL', price: '120', quantity: '3', commission: '0', realizedPnl: '70', time: 3000 }),
+      fill({ id: 4, side: 'BUY', price: '95', quantity: '1', commission: '0', realizedPnl: '0', time: 4000 }),
+    ])
+
+    expect(rounds).toHaveLength(2)
+    expect(rounds[0]).toMatchObject({
+      positionSide: 'LONG', quantity: '1', entryPrice: 95, open: true, partial: false,
+    })
+    expect(rounds[1]).toMatchObject({
+      positionSide: 'LONG', quantity: '7', realizedPnl: 70, fills: 3, open: false, partial: true,
+    })
+    expect(rounds.some(round => round.positionSide === 'SHORT')).toBe(false)
+  })
+
   // The other half of the same rule, and the one that catches it firing where it
   // should not: a run of fills that realizes nothing throughout is a position
   // being built, and must stay one.
