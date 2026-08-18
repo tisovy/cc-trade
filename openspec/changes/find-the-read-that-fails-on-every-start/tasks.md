@@ -54,20 +54,38 @@
   and no `fault` line beside it. If the record says anything else, that reading
   is wrong and this is not the once-per-start abort it looks like.
 
-- [ ] 2.2 Write the answer into this proposal before building anything on it.
+- [x] 2.2 Write the answer into this proposal before building anything on it.
+
+  Read from the retained 2026-08-16–18 record after the reason field landed:
+  all eleven 1–5 ms failures are `REQUEST_ABORTED`; the seven genuine
+  exchange-info failures are separately named `REQUEST_DEADLINE_EXCEEDED` and
+  take 10,001–10,007 ms. The proposal now records the answer before §3 changes.
 
 ## 3. Then Fix What It Is
 
-- [ ] 3.1 If it is a real fault: fix it, and prove by test that the path which was rejecting no longer does.
-- [ ] 3.2 If it is a first attempt expected to lose a race and be retried: stop recording it as an error, say what it is where the reader is, and prove by test that the retry is what succeeds. An error line that is normal is worse than no line, because it teaches everyone to ignore error lines.
-- [ ] 3.3 Either way, state in the proposal which of the two it was — the value of this change is mostly in the answer.
+- [ ] 3.1 If it is a real fault: fix it, and prove by test that the path which was rejecting no longer does. *(N/A: the fast rejection is the expected `REQUEST_ABORTED` loser of a superseded generation, not a real fault. Left unchecked because no defect fix was performed.)*
+- [x] 3.2 If it is a first attempt expected to lose a race and be retried: stop recording it as an error, say what it is where the reader is, and prove by test that the retry is what succeeds. An error line that is normal is worse than no line, because it teaches everyone to ignore error lines.
+
+  `REQUEST_ABORTED` now records `outcome: "aborted"`; genuine failures keep
+  `outcome: "error"` and their reason. The transport test aborts the first
+  caller while its shared read is in flight, has the replacement join that
+  read, and proves the replacement receives the catalog with one fetch. The
+  focused suite passes all 47 tests.
+- [x] 3.3 Either way, state in the proposal which of the two it was — the value of this change is mostly in the answer.
+
+  The proposal selects 3.2: a generation superseded while waiting on the shared
+  exchange-info read. Task 3.1 is explicitly N/A there; it remains unchecked
+  because no real-defect fix was performed or claimed.
 
 ## 4. Verification
 
-- [ ] 4.1 `npm run lint`, `npm test`, `npm run check:futures-production`.
+- [x] 4.1 `npm run lint`, `npm test`, `npm run check:futures-production`.
 
-  All three clean after §1 (2076 tests, 114 files; boundary check passed). To be
-  re-run after §3, which is the state they have to be green in.
+  All three clean after §3: lint passed; the full suite passed 2,100 tests in
+  114 files; and the Futures workstation boundary check passed. The full suite
+  was run with `LC_ALL=ru_RU.UTF-8`, matching the desk locale instead of the
+  shell's overriding `C.UTF-8`, and outside the filesystem/network sandbox so
+  its loopback integration tests could bind their local ports.
 - [ ] 4.2 Operator confirms across a few starts that the line is either gone or now says what it is.
 
 ### The evidence this starts from

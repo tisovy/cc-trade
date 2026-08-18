@@ -581,7 +581,7 @@ export const createFuturesProductionWorkstationReviewedTransport = ({
             fail(backendProxy.errorCode);
         }
         if (signal?.aborted) {
-            emitTiming(onTiming, 'exchange-info', startedAt, 'error', null, 'REQUEST_ABORTED');
+            emitTiming(onTiming, 'exchange-info', startedAt, 'aborted', null, 'REQUEST_ABORTED');
             throw new FuturesProductionWorkstationTransportError('REQUEST_ABORTED');
         }
         const fetchIdentity = globalThis.fetch;
@@ -605,7 +605,13 @@ export const createFuturesProductionWorkstationReviewedTransport = ({
                 // the request is issued. Both arrive here as an error carrying
                 // its own reason, so the reason is taken from the error rather
                 // than guessed from the site.
-                emitTiming(onTiming, 'exchange-info', startedAt, 'error', cache, timingCode(error));
+                const code = timingCode(error);
+                // A superseded generation abandons only its own wait. The
+                // shared read remains in flight for the replacement attempt,
+                // so calling this an error made the normal loser of that race
+                // indistinguishable from a read that actually failed.
+                const outcome = code === 'REQUEST_ABORTED' ? 'aborted' : 'error';
+                emitTiming(onTiming, 'exchange-info', startedAt, outcome, cache, code);
                 throw error;
             },
         );

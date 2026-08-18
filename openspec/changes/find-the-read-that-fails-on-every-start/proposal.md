@@ -36,13 +36,35 @@ and all succeed, so the exchange is reachable and the credentials are good.
 
 ## What is not known
 
-The cause. `loadExchangeInfo` in
+At proposal time, the cause. `loadExchangeInfo` in
 `electron/services/futures-production-workstation-transport.js` has several ways
 to reject quickly — a backend-proxy error code, an aborted signal, a refusal from
 the admission ladder before the request is issued — and the record cannot tell
 them apart, because the timing line carries a phase and an outcome and no reason.
 Guessing between them and "fixing" the guess is how a symptom moves rather than
 goes away.
+
+## Answer read from the record on 2026-08-18
+
+The once-per-start-shaped line is `REQUEST_ABORTED`: after the reason field
+landed, the retained 2026-08-16–18 record contains eleven fast
+`exchange-info` rejections, all `REQUEST_ABORTED`, all in 1–5 ms. The same
+record separately contains seven real exchange-info failures, all
+`REQUEST_DEADLINE_EXCEEDED`, all in 10,001–10,007 ms. The reason and duration
+therefore distinguish the two populations rather than folding a network fault
+into the startup shape.
+
+Each fast abort sits between two `loading` states for the same contract: a
+generation begins, is superseded while it waits on the shared exchange-info
+read, and its replacement begins. The underlying shared read is not cancelled;
+the replacement attempt joins it and reaches `live`. This is the normal
+loser of the generation race, not a failed exchange read.
+
+**Confirmed branch: 3.2.** Record that caller as an aborted/superseded attempt,
+not as an error, and prove that the replacement attempt succeeds.
+
+**3.1 is N/A.** There is no real fast-rejection defect to fix: the genuine
+exchange-info faults remain errors under their own reason and retry path.
 
 ## What Changes
 

@@ -167,9 +167,23 @@ this change's blocker and is not diagnosed here; it is written down so the windo
 does not later mistake it for something it introduced.*
 
 - [ ] 1.1 Do not start this change until `compute-the-unstated-values-beside-the-read` has been running for the window in the proposal. There is nothing to decide before then.
+
+  Checked from the retained record on 2026-08-18, without starting the desk.
+  The countable window is 2026-08-15 through 2026-08-18: four trading days,
+  not the required ten. The 2026-08-11–14 segments cannot extend it because
+  free margin was unavailable by construction before the 2026-08-15 fix. This
+  task stays open: the required window did not finish.
 - [ ] 1.2 Operator copies the day's record files aside if the window is to run longer than the fourteen days the record keeps.
 - [ ] 1.3 Operator reads `node scripts/read-desk-record.mjs` over the window and states, per value, the passes compared, the worst disagreement and where, and the passes that could not be computed.
-- [ ] 1.4 Check the coverage the bar asks for — both margin modes, a position past the first bracket, a funding payment, a partial fill, a leverage change, a margin adjustment — and say plainly which of them the window does not contain.
+- [x] 1.4 Check the coverage the bar asks for — both margin modes, a position past the first bracket, a funding payment, a partial fill, a leverage change, a margin adjustment — and say plainly which of them the window does not contain.
+
+  Checked across the countable 2026-08-15–18 segments. Present: three
+  `trade.setLeverage` commands (BTCDOMUSDT, HEMIUSDT and PUMPBTCUSDT) and one
+  `trade.adjustPositionMargin` command (APRUSDT). Missing or unprovable from
+  the record: both margin modes (three `trade.setMarginType` commands exist,
+  but the record carries no target mode), a position past the first bracket
+  (the record deliberately carries no position amount), a funding payment (no
+  funding event), and a partial fill (zero `PARTIALLY_FILLED` frames).
 
 ## 2. The Decision
 
@@ -181,12 +195,12 @@ them. Nothing below §2 is built.
 - [x] 2.1 Hold the measurement against the bar in the proposal, value by value, and write the numbers into this file. *(Written into the proposal instead — the withdrawal has to be readable from the proposal alone, and two copies of the same table would drift. All five values miss: notional and initial margin worst 24 bps and maintenance margin worst 25 bps against a 5 bp bar; free margin worst 545 bps against 10; liquidation price worst 198 bps and **median 167 bps** against 10, with 336 of 489 compared passes over the bar.)*
 - [x] 2.2 If any value misses the bar: withdraw this change, write the measured numbers and the likely cause into the proposal, and stop. The read stays. *(Done. The likely cause is bounded by what was measured rather than guessed: the liquidation deviations are discrete and hold still for the life of a position — 0, 35, 37, 64, 79, 167, 174, 198 bps — which is a wrong input rather than an estimate drifting between reads, and the formula itself matches Binance's documented one term for term. Two candidate causes were tested against the record and refuted: coupling between several cross positions, and an artefact of comparing against a cheap partial read.)*
 - [~] 2.3 If the coverage is short rather than the agreement: keep gathering, and do not soften the bar to fit the evidence. *(Does not apply, and the reason is worth stating so it is not reached for later. The coverage **is** short — two days of ten, and the coverage cases in 1.4 were never confirmed. But the agreement is what missed, on 489 compared liquidation passes against a coverage bar of 200, and the bar is written on the **worst** pass with "no pass at all above it". Worst is monotonic in the window: eight more days can only add passes above the bar, never withdraw the 336 already there. Gathering longer cannot clear it, so this is not the "keep gathering" case.)*
-- [ ] 2.4 Only with the bar cleared, continue. *(Not reached. The bar was not cleared.)*
+- [ ] 2.4 Only with the bar cleared, continue. *(Not reached. Rechecked on 2026-08-18: the window is four of ten trading days; both margin modes, a position past the first bracket, funding and a partial fill are not evidenced; and the agreement bar is already missed. The threshold is not cleared.)*
 
 ## 3. Showing What The Desk Computes
 
-- [ ] 3.1 Publish the computed liquidation price, notional, initial and maintenance margin and free margin as the values the desk shows, recomputed as the mark price moves.
-- [ ] 3.2 Say on screen that the liquidation price between beats is the desk's own estimate, without making the panel shout it.
+- [ ] 3.1 Publish the computed liquidation price, notional, initial and maintenance margin and free margin as the values the desk shows, recomputed as the mark price moves. *(Blocked by 2.4: the evidence threshold is not cleared; no production change made.)*
+- [ ] 3.2 Say on screen that the liquidation price between beats is the desk's own estimate, without making the panel shout it. *(Blocked by 2.4: the evidence threshold is not cleared; no UI change made.)*
 - [ ] 3.3 Show nothing rather than a stale value where the desk cannot compute — the same rule the comparison ran under.
 - [ ] 3.4 Size an order against the computed free margin, and keep the exchange's refusal as the final word it already is.
 - [ ] 3.5 Prove 3.1–3.4 by test.

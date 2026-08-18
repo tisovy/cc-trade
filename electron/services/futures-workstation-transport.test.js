@@ -816,7 +816,7 @@ describe('reviewed environment-specific Futures workstation transports', () => {
         expect(timings).toHaveLength(1);
         expect(timings[0]).toMatchObject({
             phase: 'exchange-info',
-            outcome: 'error',
+            outcome: 'aborted',
             cache: null,
             code: 'REQUEST_ABORTED',
         });
@@ -828,7 +828,7 @@ describe('reviewed environment-specific Futures workstation transports', () => {
     // to be a round trip that failed, and the line would not say what refused.
     // There are three ways to end that fast and each now names itself.
     describe('why an exchange-info read ended in milliseconds', () => {
-        it('states the reason a caller abandoned a read that had not answered', async () => {
+        it('records a superseded caller as aborted and lets its replacement succeed', async () => {
             const timings = [];
             let releaseFetch = null;
             globalThis.fetch = vi.fn(async url => new Promise((resolve) => {
@@ -845,15 +845,26 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             const pending = transport.loadExchangeInfo({ signal: controller.signal });
             await vi.waitFor(() => expect(globalThis.fetch).toHaveBeenCalled());
             controller.abort();
+            const retry = transport.loadExchangeInfo();
 
             await expect(pending).rejects.toMatchObject({ code: 'REQUEST_ABORTED' });
-            expect(timings.at(-1)).toMatchObject({
+            expect(timings[0]).toMatchObject({
                 phase: 'exchange-info',
-                outcome: 'error',
+                outcome: 'aborted',
                 cache: 'miss',
                 code: 'REQUEST_ABORTED',
             });
             releaseFetch?.();
+            await expect(retry).resolves.toBe(
+                FUTURES_PRODUCTION_WORKSTATION_FIXTURE.catalog,
+            );
+            expect(globalThis.fetch).toHaveBeenCalledOnce();
+            expect(timings.at(-1)).toMatchObject({
+                phase: 'exchange-info',
+                outcome: 'ok',
+                cache: 'shared',
+                code: null,
+            });
         });
 
         it('states the reason the read failed on the wire', async () => {
@@ -924,7 +935,7 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             FUTURES_PRODUCTION_WORKSTATION_FIXTURE.catalog,
         );
         expect(globalThis.fetch).toHaveBeenCalledOnce();
-        expect(timings.at(-2)).toMatchObject({ cache: 'hit', outcome: 'error' });
+        expect(timings.at(-2)).toMatchObject({ cache: 'hit', outcome: 'aborted' });
         expect(timings.at(-1)).toMatchObject({ cache: 'hit', outcome: 'ok' });
     });
 
