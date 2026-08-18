@@ -758,6 +758,36 @@ describe('useFuturesProductionWorkstation candle history', () => {
     expect(result.current.candleHistory.readFailed).toBe(false)
   })
 
+  it('keeps a matching served page when a mismatched outcome follows in the same batch', async () => {
+    const socket = new LocalSocket()
+    const sendMessage = vi.fn(() => true)
+    const { result } = renderHook(props => useFuturesProductionWorkstation(props), {
+      initialProps: defaultProps(socket, sendMessage, { candleHistoryCache: missingCache() }),
+    })
+    const requestId = sendMessage.mock.calls[0][0].requestId
+    const reads = () => sendMessage.mock.calls.filter(([message]) => (
+      message.action === FUTURES_PRODUCTION_WORKSTATION_ACTIONS.LOAD_CANDLE_HISTORY
+    ))
+    await act(async () => { await result.current.loadCandleHistory(START) })
+
+    await act(async () => {
+      emitHistoryPage(socket, requestId, 2, {
+        offset: 0,
+        total: 20,
+        complete: true,
+        rows: historyRows(-20, 0),
+      })
+      emitUnavailableHistoryOutcome(socket, requestId, {
+        endTime: START - (100 * MINUTE),
+      })
+    })
+
+    expect(result.current.candleHistory.rows).toHaveLength(20)
+    expect(result.current.candleHistory.readFailed).toBe(false)
+    await act(async () => { await result.current.loadCandleHistory(START - (20 * MINUTE)) })
+    expect(reads()).toHaveLength(2)
+  })
+
   it('does not let a mismatched unavailable outcome release another history read', async () => {
     const socket = new LocalSocket()
     const sendMessage = vi.fn(() => true)

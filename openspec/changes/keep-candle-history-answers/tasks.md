@@ -20,3 +20,10 @@
 - [x] 3.1 Run `git diff --check` and strict OpenSpec validation for `keep-candle-history-answers` after implementation.
 - [x] 3.2 Stage only this change's files and implementation, then run GitNexus `detect_changes` on staged scope and confirm the affected symbols/flows are expected.
 - [x] 3.3 Commit the completed change directly to `main` without archiving it.
+
+## 4. Post-implementation audit
+
+- [x] 4.1 Run upstream GitNexus impact analysis for the history hook symbol before the audit fix.
+- [x] 4.2 Prevent a mismatched unavailable outcome from replacing an already accepted matching history answer in the same renderer batch.
+- [x] 4.3 Add a hook regression proving a mismatched outcome delivered after a matching served page cannot discard that page or retain its request lock.
+- [x] 4.4 Re-run the focused hook tests, `npm run lint`, `git diff --check` and strict OpenSpec validation.

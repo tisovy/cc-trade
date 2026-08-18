@@ -471,8 +471,19 @@ const useFuturesProductionWorkstation = ({
       if (message === undefined || message === null) return
       if (message.requestId !== requestId || message.symbol !== symbol) return
       if (message.type === FUTURES_PRODUCTION_WORKSTATION_HISTORY_OUTCOME_TYPE) {
+        const historySelection = historySelectionRef.current
+        // The subscription request id is shared by every history read in this
+        // workstation session. The selection is therefore part of the answer's
+        // identity: a late refusal for an older end time must not replace a page
+        // already accepted for the read currently in flight.
+        if (historySelection === null
+          || historySelection.requestId !== message.requestId
+          || historySelection.symbol !== message.symbol
+          || historySelection.interval !== message.interval
+          || historySelection.endTime !== message.endTime) return
         setState(previousState => (
           previousState.requestId !== requestId
+            || historySelectionRef.current !== historySelection
             ? previousState
             : Object.freeze({ ...previousState, historyAnswer: message })
         ))
