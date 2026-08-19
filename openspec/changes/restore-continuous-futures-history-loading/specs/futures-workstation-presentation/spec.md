@@ -8,7 +8,9 @@ before the window arrived, and SHALL present the history and the live window as
 one continuous series ordered by open time, with no duplicated or missing bar
 at the seam. A new contract or interval SHALL start a distinct chart session
 whose initial viewport is fitted to that selection rather than inherited from
-the series it replaced.
+the series it replaced. Candle rows SHALL be shown only when both their contract
+and interval own the current selection, and the series being replaced SHALL be
+cleared before the browser paints the new selection.
 
 #### Scenario: A contract is opened
 - **WHEN** the contract's bootstrap completes and history is delivered
@@ -21,6 +23,10 @@ the series it replaced.
 #### Scenario: The interval changes
 - **WHEN** a live chart replaces its selected interval with another interval whose candle window arrives after the selection
 - **THEN** the replacement interval receives a fresh fitted viewport and its own initial history request
+
+#### Scenario: A previous selection is still committed during an interval change
+- **WHEN** the operator selects a new interval before the workstation state and candle window for that interval have committed
+- **THEN** the chart shows no candles until the new selection owns its rows, and no frame displays candles from the selection being replaced
 
 #### Scenario: History overlaps the live window
 - **WHEN** a delivered history page contains a candle whose open time is already in the live window

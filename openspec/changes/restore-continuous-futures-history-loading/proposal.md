@@ -5,9 +5,10 @@ The Futures chart can mount before its first live candle window arrives, while i
 ## What Changes
 
 - Make the chart session identity include both contract and interval so a newly selected interval resets its drawn-row bookkeeping, initial fit, and interaction generation.
+- Keep candle rows behind the exact contract-and-interval owner that delivered them, and clear the imperative chart series before the browser can paint a replacement selection.
 - Re-evaluate the history prefetch condition when the oldest loaded candle first appears or moves, while retaining the existing single-flight and exhaustion guards.
 - Preserve viewport anchoring after a prepend and prove that a later trip to the new left edge requests the next page.
-- Add renderer regression coverage for an empty-at-mount chart, interval replacement, and consecutive left-edge pages.
+- Add renderer regression coverage for an empty-at-mount chart, interval replacement without a stale-selection frame, and consecutive left-edge pages.
 
 ## Capabilities
 
@@ -26,4 +27,4 @@ None.
 - Focused chart and view tests
 - No backend, protocol, exchange route, credential, cache schema, or trading-action change
 
-GitNexus reports LOW upstream risk for `FuturesWorkstationChart` (2 direct dependants, 2 affected process groups) and MEDIUM for `FuturesWorkstationView` (one production caller plus test helpers, one affected production flow).
+After rebuilding the corrupt local index, GitNexus reports LOW upstream risk for `FuturesWorkstationChart` (one direct caller, 3 upstream symbols, 2 affected process groups) and LOW for `FuturesWorkstationView` (one direct caller, 2 upstream symbols, one affected process group).

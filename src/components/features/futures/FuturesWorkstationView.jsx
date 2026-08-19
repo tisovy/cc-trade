@@ -296,9 +296,13 @@ export const FuturesWorkstationView = ({
 
   const resources = state.resources
   const selectionOwned = state.symbol === selectedSymbol
+  const candleSelectionOwned = selectionOwned && state.interval === selectedInterval
   const contracts = resources.catalog?.contracts ?? EMPTY_ROWS
   const header = selectionOwned ? resources.header : null
-  const candles = selectionOwned ? resources.candles : null
+  const candles = candleSelectionOwned
+    && resources.candles?.interval === selectedInterval
+    ? resources.candles
+    : null
   const depth = selectionOwned ? resources.depth : null
   const trades = selectionOwned ? resources.trades : null
   const liveTrades = trades?.rows ?? EMPTY_ROWS

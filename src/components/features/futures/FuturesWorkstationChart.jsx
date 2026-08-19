@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   CandlestickSeries,
   ColorType,
@@ -122,6 +122,7 @@ const NOOP_ORDER_COORDINATE_REFRESH = () => {}
 // Ask for the next page a few bars before the edge, so the candles are there by
 // the time the operator scrolls onto them.
 const HISTORY_PREFETCH_BARS = 12
+const EMPTY_CHART_ROWS = Object.freeze([])
 const EMPTY_SETTLING = Object.freeze([])
 
 // What the render needs of a drag: everything it draws, and nothing that only
@@ -314,6 +315,22 @@ export const FuturesWorkstationChart = ({
   useEffect(() => {
     onOrderEditRef.current = onOrderEdit
   }, [onOrderEdit])
+
+  // The chart canvas is imperative and survives React renders. An interval can
+  // therefore change one commit before its candle window arrives, and a passive
+  // effect would let the previous selection reach the screen under the new
+  // label. Clear both coupled series in the layout phase so that replacement is
+  // atomic from the operator's point of view. Dropping the candle ref first also
+  // keeps the previous range subscription from issuing a history read if
+  // setData changes the logical range synchronously.
+  useLayoutEffect(() => {
+    candlesRef.current = EMPTY_CHART_ROWS
+    rowStateRef.current = { contract: null }
+    const series = seriesRef.current
+    if (!series) return
+    series.volumeSeries.setData(EMPTY_CHART_ROWS)
+    series.contractSeries.setData(EMPTY_CHART_ROWS)
+  }, [measurementGeneration])
 
   useEffect(() => {
     symbolRef.current = symbol

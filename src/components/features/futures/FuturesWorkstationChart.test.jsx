@@ -1669,6 +1669,30 @@ describe('FuturesWorkstationChart history loading', () => {
     expect(onLoadHistory).toHaveBeenCalledExactlyOnceWith(START - (80 * MINUTE))
   })
 
+  it('clears both imperative series when a replacement interval commits', () => {
+    const rows = series(0, 80)
+    const { rerender } = render(<FuturesWorkstationChart
+      {...properties(rows)}
+      symbol="BTCUSDT"
+      interval="15m"
+    />)
+    const [contractSeries, volumeSeries] = chartMock.charts[0].series
+    contractSeries.setData.mockClear()
+    volumeSeries.setData.mockClear()
+
+    // Keep the same row reference deliberately. The ordinary candle effect has
+    // nothing new to draw, so only the selection layout boundary can remove the
+    // retained canvas before it is painted under the new interval label.
+    rerender(<FuturesWorkstationChart
+      {...properties(rows)}
+      symbol="BTCUSDT"
+      interval="1m"
+    />)
+
+    expect(volumeSeries.setData).toHaveBeenCalledExactlyOnceWith([])
+    expect(contractSeries.setData).toHaveBeenCalledExactlyOnceWith([])
+  })
+
   it('asks again when scrolling reaches the oldest loaded candle', () => {
     const onLoadHistory = vi.fn()
     render(<FuturesWorkstationChart

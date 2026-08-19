@@ -60,9 +60,20 @@ vi.mock('../../../utils/futuresPriceFormat.js', async (importOriginal) => {
 vi.mock('./FuturesWorkstationChart.jsx', async () => {
   const { memo } = await import('react')
   const MockFuturesWorkstationChart = (
-    { onPricePick, onTradingGesture, onOrderLift, priceTickSize, draftPrice, drawings, alerts },
+    {
+      symbol,
+      interval,
+      candles,
+      onPricePick,
+      onTradingGesture,
+      onOrderLift,
+      priceTickSize,
+      draftPrice,
+      drawings,
+      alerts,
+    },
   ) => {
-    workstationViewMocks.chartRender()
+    workstationViewMocks.chartRender({ symbol, interval, candles })
     return (
       <div data-testid="mock-futures-chart">
         <button type="button" onClick={() => onPricePick('58420.25')}>Pick chart price</button>
@@ -552,6 +563,19 @@ describe('pure Futures workstation presentation', () => {
     const group = screen.getByRole('group', { name: 'Chart interval' })
     fireEvent.click(within(group).getByRole('button', { name: '5m' }))
     expect(onIntervalChange).toHaveBeenCalledWith('5m')
+  })
+
+  it('withholds candles from the previous interval while the new selection is taking ownership', () => {
+    renderView({ selectedInterval: '5m' })
+
+    expect(workstationViewMocks.chartRender).toHaveBeenLastCalledWith({
+      symbol: 'BTCUSDT',
+      interval: '5m',
+      candles: [],
+    })
+    // Header, book and tape belong to the symbol rather than its candle width,
+    // so the exact candle gate must not blank the rest of the live workspace.
+    expect(screen.getByLabelText('Futures market header')).toHaveTextContent('58420.25')
   })
 
   it('keeps every ordered interval visible in the compact toolbar and selects weekly explicitly', () => {
