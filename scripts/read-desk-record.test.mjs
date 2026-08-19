@@ -123,10 +123,62 @@ describe('summarizeDeskDiagnosticRecord', () => {
       line({ kind: 'command' }),
       line({ at: '2026-08-10T15:02:00.000Z', kind: 'status', state: 'resynchronizing' }),
       line({ at: '2026-08-10T15:03:00.000Z', kind: 'timing', phase: 'depth' }),
+      // The writer always states the market on an answer; only a hand-edited
+      // file can lose it, and the summary must group it as unstated, not fail.
+      line({ at: '2026-08-10T15:04:00.000Z', kind: 'answer', action: 'trade.placeOrder', durationMs: 640, outcome: 'ok' }),
     ].join(''))
     expect(damaged.refused).toBe(0)
     expect(() => formatDeskDiagnosticSummary(damaged, { day: '2026-08-10' })).not.toThrow()
     expect(formatDeskDiagnosticSummary(damaged)).toContain('Commands (2)')
+  })
+
+  // The same action does not measure the same span on both markets: a futures
+  // answer is the command's round trip, a spot answer is the round trip plus
+  // the account re-read behind it. Folded into one distribution, the summary of
+  // 2026-08-16 reported "slowest 3285ms" over a day of futures orders when that
+  // sample was a spot re-read. Every row here is shaped exactly as the writer
+  // emits it (`answer` in electron/services/desk-diagnostic-record.js), values
+  // from the real record of that day.
+  it('times each market apart, never folding their answers together', () => {
+    const answered = summarizeDeskDiagnosticRecord([
+      line({ at: '2026-08-16T07:23:32.604Z', kind: 'answer', action: 'trade.placeOrder', market: 'futures', durationMs: 739, outcome: 'ok', symbol: 'ACEUSDT', identity: 'f-msvhaj6h-fpezm8wh' }),
+      line({ at: '2026-08-16T07:23:35.105Z', kind: 'answer', action: 'trade.placeOrder', market: 'futures', durationMs: 729, outcome: 'ok', symbol: 'ACEUSDT', identity: 'f-msvhal48-x8ldk8lf' }),
+      line({ at: '2026-08-16T17:39:53.435Z', kind: 'answer', action: 'trade.cancelOrder', market: 'spot', durationMs: 1_882, outcome: 'ok', symbol: 'BTCUSDT', identity: '65412066378' }),
+      line({ at: '2026-08-16T17:39:57.902Z', kind: 'answer', action: 'trade.placeOrder', market: 'spot', durationMs: 3_285, outcome: 'ok', symbol: 'BTCUSDT', identity: 's-msw3b795-9n5yf9l9' }),
+    ].join(''))
+
+    expect(answered.answers).toEqual([
+      { key: 'trade.placeOrder[spot]', count: 1, medianMs: 3_285, slowestMs: 3_285, slowestAt: '2026-08-16T17:39:57.902Z', errors: 0 },
+      { key: 'trade.cancelOrder[spot]', count: 1, medianMs: 1_882, slowestMs: 1_882, slowestAt: '2026-08-16T17:39:53.435Z', errors: 0 },
+      { key: 'trade.placeOrder[futures]', count: 2, medianMs: 734, slowestMs: 739, slowestAt: '2026-08-16T07:23:32.604Z', errors: 0 },
+    ])
+
+    // The load-bearing assertion: the futures group does not carry the spot
+    // sample. Its slowest is its own 739, not the day's 3285.
+    const futures = answered.answers.find(entry => entry.key === 'trade.placeOrder[futures]')
+    expect(futures.count).toBe(2)
+    expect(futures.slowestMs).toBe(739)
+    expect(futures.slowestAt).toBe('2026-08-16T07:23:32.604Z')
+
+    const printed = formatDeskDiagnosticSummary(answered)
+    expect(printed).toContain('trade.placeOrder[spot]')
+    expect(printed).toContain('trade.placeOrder[futures]')
+    // No unlabeled row: a reader must never meet a distribution whose market
+    // it has to guess.
+    expect(printed).not.toMatch(/trade\.placeOrder\s+n=/)
+    expect(printed).toContain('each market is its own distribution')
+  })
+
+  it('prints just the one market a day held', () => {
+    const futuresOnly = summarizeDeskDiagnosticRecord(
+      line({ at: '2026-08-16T07:23:36.046Z', kind: 'answer', action: 'trade.cancelOrder', market: 'futures', durationMs: 719, outcome: 'ok', symbol: 'ACEUSDT', identity: '5155004042' }),
+    )
+    expect(futuresOnly.answers).toEqual([
+      { key: 'trade.cancelOrder[futures]', count: 1, medianMs: 719, slowestMs: 719, slowestAt: '2026-08-16T07:23:36.046Z', errors: 0 },
+    ])
+    const printed = formatDeskDiagnosticSummary(futuresOnly)
+    expect(printed).toContain('trade.cancelOrder[futures]')
+    expect(printed).not.toContain('[spot]')
   })
 
   // The one question this whole design turns on: is the desk reading the signed
@@ -513,6 +565,63 @@ describe('the summary as the operator runs it', () => {
   it('says where it looked when there is no record', () => {
     expect(runDeskRecordSummary(['--dir', directory])).toBe(false)
     expect(errored.join('\n')).toContain(directory)
+  })
+
+  // The runbook has told the operator to name a file —
+  // `node scripts/read-desk-record.mjs ~/.config/cc-trade/diagnostics/desk-<day>-000.jsonl`
+  // — since `time-the-fill-to-the-screen` §7.1. The reader used to drop the
+  // name on the floor and print the latest day instead: a summary of the wrong
+  // day, exit 0, nothing on the page saying so.
+  it('reads the file it was named, not the latest day', async () => {
+    await writeFile(path.join(directory, 'desk-2026-08-09-000.jsonl'), DAY, 'utf8')
+    await writeFile(
+      path.join(directory, 'desk-2026-08-10-000.jsonl'),
+      line({ at: '2026-08-10T16:00:00.000Z', kind: 'fault', phase: 'freshness', code: 'CLOCK_REGRESSION' }),
+      'utf8',
+    )
+
+    expect(runDeskRecordSummary([path.join(directory, 'desk-2026-08-09-000.jsonl')])).toBe(true)
+    const report = printed.join('\n')
+    expect(report).toContain('Desk record for 2026-08-09 — 17 events')
+    // Nothing of the latest day leaked in.
+    expect(report).not.toContain('CLOCK_REGRESSION')
+  })
+
+  it('reads every segment it is handed as one day', async () => {
+    const first = path.join(directory, 'desk-2026-08-10-000.jsonl')
+    const second = path.join(directory, 'desk-2026-08-10-001.jsonl')
+    await writeFile(first, DAY, 'utf8')
+    await writeFile(
+      second,
+      line({ at: '2026-08-10T16:00:00.000Z', kind: 'fault', phase: 'freshness', code: 'CLOCK_REGRESSION' }),
+      'utf8',
+    )
+    expect(runDeskRecordSummary([first, second])).toBe(true)
+    expect(printed.join('\n')).toContain('Desk record for 2026-08-10 — 18 events')
+  })
+
+  it('refuses a file it cannot read rather than substituting the latest day', async () => {
+    await writeFile(path.join(directory, 'desk-2026-08-10-000.jsonl'), DAY, 'utf8')
+    const missing = path.join(directory, 'desk-2026-08-01-000.jsonl')
+    expect(runDeskRecordSummary([missing])).toBe(false)
+    expect(errored.join('\n')).toContain(missing)
+    // A refusal prints no summary at all — half an answer is the old defect.
+    expect(printed).toEqual([])
+  })
+
+  it('refuses to be asked for a file and a day at once', async () => {
+    const file = path.join(directory, 'desk-2026-08-10-000.jsonl')
+    await writeFile(file, DAY, 'utf8')
+    expect(runDeskRecordSummary(['--day', '2026-08-10', file])).toBe(false)
+    expect(errored.join('\n')).toContain('not both')
+    expect(printed).toEqual([])
+  })
+
+  it('refuses an option it does not know rather than reading the wrong thing', async () => {
+    await writeFile(path.join(directory, 'desk-2026-08-10-000.jsonl'), DAY, 'utf8')
+    expect(runDeskRecordSummary(['--dya', '2026-08-09', '--dir', directory])).toBe(false)
+    expect(errored.join('\n')).toContain('--dya')
+    expect(printed).toEqual([])
   })
 
   it('ignores whatever else is in the directory', async () => {

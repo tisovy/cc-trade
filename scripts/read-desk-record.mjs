@@ -10,6 +10,7 @@
 //   node scripts/read-desk-record.mjs                  # the latest day on disk
 //   node scripts/read-desk-record.mjs --day 2026-08-10
 //   node scripts/read-desk-record.mjs --dir /path/to/diagnostics --list
+//   node scripts/read-desk-record.mjs /path/to/desk-2026-08-10-000.jsonl
 //
 // Times in the record are UTC, and so are the day names: the exchange's day is
 // the one a market question is asked about.
@@ -100,9 +101,10 @@ export const summarizeDeskDiagnosticRecord = (text) => {
   const refusals = new Map()
   const sessions = []
   const commands = []
-  // How long each kind of command took to answer. Keyed by the action, because
-  // a placement and a cancellation are not the same wait and averaging them
-  // hides whichever is the slow one.
+  // How long each kind of command took to answer. Keyed by action and market
+  // both: a placement and a cancellation are not the same wait, and neither
+  // are a spot answer and a futures answer to the same action — averaging
+  // either pair hides whichever is the slow one.
   const answers = new Map()
   // How often the desk went to the exchange for the signed account, and what
   // for. Keyed by the reason the read site stated, because "the desk reads a
@@ -169,9 +171,18 @@ export const summarizeDeskDiagnosticRecord = (text) => {
       bump(refusals, line.exchangeCode ?? '(the exchange stated none)')
     }
     if (line.kind === 'answer' && typeof line.action === 'string') {
-      const observed = answers.get(line.action) ?? []
+      // Keyed by market as well as by action, because the same action does not
+      // measure the same span on both markets: a futures answer is the
+      // command's round trip, a spot answer is the round trip plus the account
+      // re-read behind it. Folded into one distribution, the summary of
+      // 2026-08-16 reported "slowest 3285ms" over a day of futures orders when
+      // that sample was a spot re-read — the number was true and the reading
+      // of it was not. The market on the line is the writer's own; `-` can
+      // only come from a hand-edited file.
+      const key = `${line.action}[${typeof line.market === 'string' ? line.market : '-'}]`
+      const observed = answers.get(key) ?? []
       observed.push({ durationMs: Number(line.durationMs) || 0, at: line.at, outcome: line.outcome })
-      answers.set(line.action, observed)
+      answers.set(key, observed)
     }
     if (line.kind === 'read' && typeof line.reason === 'string') {
       const observed = reads.get(line.reason) ?? { count: 0, weight: 0, resources: 0 }
@@ -415,10 +426,14 @@ export const formatDeskDiagnosticSummary = (summary, { day = null } = {}) => {
   }
 
   if (summary.answers.length > 0) {
+    // One line per command per market. Never merged across markets: the two do
+    // not measure the same span, and a merged "slowest" attributes one
+    // market's wait to the other. A day that held one market prints only it.
     out.push('', 'How long commands took to answer')
+    out.push('  each market is its own distribution; the two do not measure the same span')
     for (const answer of summary.answers) {
       out.push(
-        `  ${answer.key.padEnd(22)} n=${String(answer.count).padStart(5)}`
+        `  ${answer.key.padEnd(30)} n=${String(answer.count).padStart(5)}`
         + `  median ${String(answer.medianMs).padStart(6)}ms`
         + `  slowest ${String(answer.slowestMs).padStart(6)}ms`
         + (answer.slowestAt === null ? '' : ` at ${answer.slowestAt}`)
@@ -546,17 +561,66 @@ export const formatDeskDiagnosticSummary = (summary, { day = null } = {}) => {
 }
 
 const readArguments = (argv) => {
-  const options = { directory: null, day: null, list: false }
+  const options = { directory: null, day: null, list: false, files: [], unknown: null }
   for (let index = 0; index < argv.length; index += 1) {
     if (argv[index] === '--dir') options.directory = argv[index += 1] ?? null
     else if (argv[index] === '--day') options.day = argv[index += 1] ?? null
     else if (argv[index] === '--list') options.list = true
+    // Anything else dashed is a misspelling, and anything else is a file. Both
+    // used to be dropped on the floor, and what that printed was the latest
+    // day: an operator asking about the 10th read a summary of the 19th with
+    // nothing on the page saying so. An argument this reader does not
+    // understand now stops it instead of steering it.
+    else if (argv[index].startsWith('--')) options.unknown = options.unknown ?? argv[index]
+    else options.files.push(argv[index])
   }
   return options
 }
 
+// The day a named record file belongs to, read off its own name so the summary
+// can carry its heading — or null for a name this record never writes.
+const dayOfSegmentFiles = (files) => {
+  const days = new Set(files.map((file) => {
+    const match = SEGMENT_NAME.exec(path.basename(file))
+    return match === null ? null : match[1]
+  }))
+  const [day] = days
+  return days.size === 1 && day !== null ? day : null
+}
+
 export const runDeskRecordSummary = (argv = process.argv.slice(2)) => {
   const options = readArguments(argv)
+  if (options.unknown !== null) {
+    console.error(
+      `Unknown option ${options.unknown}. This reads --dir, --day, --list, or a record file's path.`,
+    )
+    return false
+  }
+  if (options.files.length > 0) {
+    // A named file already answers everything the flags ask — where to look
+    // and which day. A call that names both is contradicting itself, and
+    // half-obeying it is how the wrong day got printed before. Refused whole.
+    if (options.directory !== null || options.day !== null || options.list) {
+      console.error('Name a record file or ask a directory (--dir, --day, --list) — not both.')
+      return false
+    }
+    let text = ''
+    for (const file of options.files) {
+      try {
+        text += readFileSync(file, 'utf8')
+      } catch (error) {
+        // Never the latest day instead. A summary of the wrong day reads
+        // exactly like a summary of the right one.
+        console.error(`Cannot read ${file}: ${error?.code ?? error?.message ?? error}`)
+        return false
+      }
+    }
+    console.log(formatDeskDiagnosticSummary(
+      summarizeDeskDiagnosticRecord(text),
+      { day: dayOfSegmentFiles(options.files) },
+    ))
+    return true
+  }
   const directory = options.directory ?? defaultDeskRecordDirectory()
   const segments = listDeskRecordSegments(directory)
   if (segments.length === 0) {
