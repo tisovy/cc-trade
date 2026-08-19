@@ -284,6 +284,58 @@ describe('reviewed environment-specific Futures workstation transports', () => {
             .toBe(false);
     });
 
+    it('routes weekly bootstrap, history and live candles while refusing an unreviewed interval', async () => {
+        vi.useFakeTimers();
+        const calls = [];
+        globalThis.fetch = vi.fn(async (url) => {
+            calls.push(url.href);
+            return responseFor(url.href, FUTURES_PRODUCTION_WORKSTATION_FIXTURE);
+        });
+        const transport = createFuturesProductionWorkstationReviewedTransport();
+
+        await transport.bootstrapInterval({
+            symbol: 'BTCUSDT',
+            pair: 'BTCUSDT',
+            interval: '1w',
+        });
+        await transport.readCandleHistory({
+            symbol: 'BTCUSDT',
+            interval: '1w',
+            endTime: 1_784_000_000_000,
+            limit: 1_000,
+        });
+        const connection = transport.connect({
+            symbol: 'BTCUSDT',
+            interval: '1w',
+            onMessage: () => {},
+            onDisconnect: () => {},
+            onCandleDisconnect: () => {},
+        });
+
+        const candleReads = calls.map(url => new URL(url)).filter(url => (
+            url.pathname === '/fapi/v1/klines'
+            || url.pathname === '/fapi/v1/indexPriceKlines'
+        ));
+        expect(candleReads).toHaveLength(3);
+        expect(candleReads.every(url => url.searchParams.get('interval') === '1w')).toBe(true);
+        expect(candleReads.find(url => url.searchParams.get('limit') === '1000')
+            ?.searchParams.get('endTime')).toBe('1783999999999');
+        expect(socketMock.instances[2].url).toBe(
+            `${FUTURES_PRODUCTION_WORKSTATION_WSS_ORIGIN}/market/stream?streams=btcusdt@kline_1w`,
+        );
+
+        globalThis.fetch.mockClear();
+        await expect(transport.readCandleHistory({
+            symbol: 'BTCUSDT',
+            interval: '3m',
+            endTime: 1_784_000_000_000,
+            limit: 1_000,
+        })).rejects.toMatchObject({ code: 'INVALID_SELECTION' });
+        expect(globalThis.fetch).not.toHaveBeenCalled();
+        connection.close();
+        transport.close();
+    });
+
     it('accepts bounded Unicode identities only on the public workstation transport', async () => {
         const symbol = '测试测试USDT';
         globalThis.fetch = vi.fn();

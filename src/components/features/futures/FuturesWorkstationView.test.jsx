@@ -6,6 +6,7 @@ import FuturesProductionWorkstation from './FuturesProductionWorkstation.jsx'
 import FuturesTradingTicket from './FuturesTradingTicket.jsx'
 import { GROUPING_MULTIPLIERS, groupFuturesBookLevels } from '../../../utils/futuresOrderBook.js'
 import { formatCompactUsdt } from '../../../utils/futuresPriceFormat.js'
+import { FUTURES_PRODUCTION_WORKSTATION_ACTIONS } from '../../../utils/futuresProductionWorkstationProtocol.js'
 // The desk's own book, so the rows under test are the rows the desk actually
 // delivers rather than a fixture's idea of them.
 import { FuturesWorkstationOrderBook } from '../../../../electron/services/futures-workstation-order-book.js'
@@ -551,6 +552,31 @@ describe('pure Futures workstation presentation', () => {
     const group = screen.getByRole('group', { name: 'Chart interval' })
     fireEvent.click(within(group).getByRole('button', { name: '5m' }))
     expect(onIntervalChange).toHaveBeenCalledWith('5m')
+  })
+
+  it('keeps every ordered interval visible in the compact toolbar and selects weekly explicitly', () => {
+    const { onIntervalChange } = renderView()
+    const group = screen.getByRole('group', { name: 'Chart interval' })
+    const buttons = within(group).getAllByRole('button')
+    expect(buttons.map(button => button.textContent))
+      .toEqual(['1m', '5m', '15m', '1h', '4h', '1d', '1w'])
+    for (const button of buttons) expect(button).toBeVisible()
+    fireEvent.click(within(group).getByRole('button', { name: '1w' }))
+    expect(onIntervalChange).toHaveBeenCalledWith('1w')
+
+    const stylesheet = readFileSync(
+      'src/components/features/futures/FuturesWorkstation.css',
+      'utf8',
+    )
+    const toolbarRule = stylesheet.match(
+      /\.futures-workstation-chart-toolbar\s*\{(?<declarations>[^}]*)\}/,
+    )?.groups?.declarations
+    const narrowRule = stylesheet.match(
+      /@media \(max-width: 844px\) \{[\s\S]*?\.futures-workstation-chart-toolbar,[\s\S]*?\{(?<declarations>[^}]*)\}/,
+    )?.groups?.declarations
+    expect(toolbarRule).toContain('overflow: hidden;')
+    expect(toolbarRule).not.toMatch(/overflow-x\s*:\s*auto/)
+    expect(narrowRule).toContain('flex-direction: column;')
   })
 
   it('keeps chart tools compact without hiding their complete names', () => {
@@ -2738,6 +2764,38 @@ describe('production workstation container', () => {
       .toEqual(['5m', '15m'])
     fireEvent.keyDown(popup, { key: 'Enter' })
     expect(screen.getByRole('button', { name: '5m' })).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('selects weekly through the keyboard interval picker without changing the default', () => {
+    const socket = new EventTarget()
+    socket.readyState = 1
+    const sendMessage = vi.fn(() => true)
+    render(
+      <FuturesProductionWorkstation
+        enabled
+        wsConnection={socket}
+        sendMessage={sendMessage}
+        executionState={productionExecutionState}
+      />,
+    )
+
+    expect(screen.getByRole('button', { name: '15m' }))
+      .toHaveAttribute('aria-pressed', 'true')
+    expect(sendMessage.mock.calls[0][0]).toMatchObject({ interval: '15m' })
+    fireEvent.keyDown(document, { key: '1' })
+    const popup = screen.getByPlaceholderText('Type interval (e.g. 15m)')
+    fireEvent.input(popup, { target: { value: '1w' } })
+    expect(Array.from(document.querySelectorAll('.quick-switch-item')).map(i => i.textContent))
+      .toEqual(['1w'])
+    fireEvent.keyDown(popup, { key: 'Enter' })
+
+    expect(screen.queryByPlaceholderText('Type interval (e.g. 15m)')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '1w' }))
+      .toHaveAttribute('aria-pressed', 'true')
+    expect(sendMessage.mock.calls.at(-1)[0]).toMatchObject({
+      action: FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SELECT_INTERVAL,
+      interval: '1w',
+    })
   })
 
   // Typing into a field is typing, and a modifier is a gesture, not a search.

@@ -352,6 +352,18 @@ describe('official Futures workstation market schemas', () => {
         ).kind)).toEqual(['depth', 'trade', 'kline', 'mark', 'ticker']);
     });
 
+    it('normalizes the reviewed weekly kline stream and still rejects another interval', () => {
+        const weekly = fixtureFor('BTCUSDT').streams.makeCycle(1, '1w')[2];
+        expect(normalizeFuturesWorkstationStreamFrame(
+            weekly,
+            expectation('BTCUSDT', '1w'),
+        )).toMatchObject({ kind: 'kline' });
+        expect(() => normalizeFuturesWorkstationStreamFrame(
+            weekly,
+            expectation('BTCUSDT', '3m'),
+        )).toThrowError(expect.objectContaining({ code: 'INVALID_STREAM_EXPECTATION' }));
+    });
+
     it('normalizes a dated delivery-contract stream identity exactly', () => {
         const raw = fixtureFor('BTCUSDT').streams.bridgeDepth
             .replace('btcusdt@depth@100ms', 'btcusdt_260925@depth@100ms')

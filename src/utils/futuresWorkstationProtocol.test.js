@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   FUTURES_WORKSTATION_DEPTH_ROWS_PER_SIDE,
   FUTURES_WORKSTATION_EVENT_MAX_BYTES,
+  FUTURES_WORKSTATION_INTERVALS,
   FUTURES_WORKSTATION_PROTOCOL_VERSION,
   FUTURES_WORKSTATION_RESOURCES,
   FUTURES_WORKSTATION_STATES,
@@ -258,6 +259,32 @@ describe('Futures workstation environment-specific protocols', () => {
     expect(readFuturesProductionWorkstationRequest(JSON.stringify(request))).toEqual(request)
     expect(request.action).toBe(action)
     expect(Object.isFrozen(request)).toBe(true)
+  })
+
+  it('round-trips the reviewed weekly interval through requests, live candles and history', () => {
+    expect(FUTURES_WORKSTATION_INTERVALS).toEqual([
+      '1m', '5m', '15m', '1h', '4h', '1d', '1w',
+    ])
+    const request = createFuturesProductionWorkstationSelectIntervalRequest({
+      ...requestValues,
+      interval: '1w',
+    })
+    expect(readFuturesProductionWorkstationRequest(JSON.stringify(request))).toEqual(request)
+
+    const event = createFuturesProductionWorkstationEvent({
+      ...createEventValues(FUTURES_WORKSTATION_RESOURCES.CANDLES),
+      payload: { ...payloads.candles, interval: '1w' },
+    })
+    expect(parseFuturesProductionWorkstationEvent(JSON.stringify(event)))
+      .toMatchObject({ payload: { interval: '1w' } })
+
+    const outcome = createFuturesProductionWorkstationHistoryOutcome({
+      ...requestValues,
+      interval: '1w',
+      endTime: 1_784_000_000_000,
+    })
+    expect(parseFuturesProductionWorkstationHistoryOutcome(JSON.stringify(outcome)))
+      .toEqual(outcome)
   })
 
   // The key a session is matched by, and the only field in this file that was

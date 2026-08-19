@@ -947,6 +947,79 @@ describe('useFuturesProductionWorkstation candle history', () => {
     expect(result.current.candleHistory.exhausted).toBe(false)
   })
 
+  it('gives weekly candles and history a fresh owner and ignores the abandoned interval', async () => {
+    const socket = new LocalSocket()
+    const sendMessage = vi.fn(() => true)
+    const candleHistoryCache = missingCache()
+    const { result, rerender } = renderHook(props => useFuturesProductionWorkstation(props), {
+      initialProps: defaultProps(socket, sendMessage, { candleHistoryCache }),
+    })
+    const abandonedRequestId = sendMessage.mock.calls[0][0].requestId
+    await act(async () => { await result.current.loadCandleHistory(START) })
+
+    rerender(defaultProps(socket, sendMessage, { interval: '1w', candleHistoryCache }))
+    const weeklyRequest = sendMessage.mock.calls.at(-1)[0]
+    expect(weeklyRequest).toMatchObject({
+      action: FUTURES_PRODUCTION_WORKSTATION_ACTIONS.SELECT_INTERVAL,
+      interval: '1w',
+    })
+    expect(result.current.interval).toBe('1w')
+    expect(result.current.candleHistory).toMatchObject({ interval: null, rows: [] })
+
+    await act(async () => emitHistoryPage(socket, abandonedRequestId, 2, {
+      offset: 0,
+      total: 20,
+      complete: true,
+      rows: historyRows(-20, 0),
+    }))
+    act(() => socket.emitMessage(createFuturesProductionWorkstationEvent(
+      eventValues(abandonedRequestId, {
+        revision: 3,
+        resource: 'candles',
+        payload: Object.freeze({
+          series: 'contract',
+          interval: '1m',
+          rows: Object.freeze([historyRows(-1, 0)[0]]),
+        }),
+      }),
+    )))
+    expect(result.current.candleHistory.rows).toHaveLength(0)
+    expect(result.current.resources.candles).toBeNull()
+
+    await act(async () => { await result.current.loadCandleHistory(START) })
+    expect(sendMessage.mock.calls.at(-1)[0]).toMatchObject({
+      action: FUTURES_PRODUCTION_WORKSTATION_ACTIONS.LOAD_CANDLE_HISTORY,
+      requestId: weeklyRequest.requestId,
+      interval: '1w',
+    })
+    await act(async () => emitHistoryPage(socket, weeklyRequest.requestId, 4, {
+      interval: '1w',
+      offset: 0,
+      total: 20,
+      complete: true,
+      rows: historyRows(-20, 0),
+    }))
+    act(() => socket.emitMessage(createFuturesProductionWorkstationEvent(
+      eventValues(weeklyRequest.requestId, {
+        revision: 5,
+        resource: 'candles',
+        payload: Object.freeze({
+          series: 'contract',
+          interval: '1w',
+          rows: Object.freeze([historyRows(-1, 0)[0]]),
+        }),
+      }),
+    )))
+
+    expect(result.current.candleHistory).toMatchObject({ interval: '1w' })
+    expect(result.current.candleHistory.rows).toHaveLength(20)
+    expect(result.current.resources.candles).toMatchObject({ interval: '1w' })
+    expect(candleHistoryCache.writePage).toHaveBeenCalledWith(expect.objectContaining({
+      symbol: 'BTCUSDT',
+      interval: '1w',
+    }))
+  })
+
   // The disk cache has held five thousand rows per contract and interval from
   // the start; the renderer held whatever the operator had scrolled through.
   // Six pages is a minute of scrolling and puts the chart a fifth past the

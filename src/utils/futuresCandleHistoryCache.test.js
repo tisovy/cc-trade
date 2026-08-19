@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import {
   FUTURES_CANDLE_HISTORY_CACHE_MAX_ROWS,
+  FUTURES_CANDLE_HISTORY_INTERVAL_MS,
   createFuturesCandleHistoryCache,
   mergeCandleHistoryRun,
   selectCandleHistoryPage,
 } from './futuresCandleHistoryCache.js'
 
 const MINUTE = 60_000
+const WEEK = 604_800_000
 const START = 1_784_000_000_000
 
 const candle = (index, { closed = true } = {}) => ({
@@ -21,6 +23,17 @@ const candle = (index, { closed = true } = {}) => ({
 })
 
 const run = (from, to) => Array.from({ length: to - from }, (_, index) => candle(from + index))
+
+const weeklyCandle = index => ({
+  ...candle(0),
+  openTime: START + (index * WEEK),
+  closeTime: START + ((index + 1) * WEEK) - 1,
+})
+
+const weeklyRun = (from, to) => Array.from(
+  { length: to - from },
+  (_, index) => weeklyCandle(from + index),
+)
 
 const createMemoryCache = (seed = new Map()) => {
   const store = seed
@@ -95,6 +108,30 @@ describe('mergeCandleHistoryRun', () => {
 })
 
 describe('futures candle history cache', () => {
+  it('reuses an exact seven-day weekly run without bridging gaps or mixing intervals', async () => {
+    expect(FUTURES_CANDLE_HISTORY_INTERVAL_MS['1w']).toBe(604_800_000)
+    const { cache, store } = createMemoryCache()
+    await cache.writePage({ symbol: 'BTCUSDT', interval: '1w', rows: weeklyRun(0, 4) })
+    await cache.writePage({ symbol: 'BTCUSDT', interval: '1d', rows: run(0, 4) })
+
+    expect([...store.keys()].sort()).toEqual(['BTCUSDT:1d', 'BTCUSDT:1w'])
+    expect(store.get('BTCUSDT:1w').map(row => row.openTime)).toEqual(
+      weeklyRun(0, 4).map(row => row.openTime),
+    )
+    expect(await cache.readPage({
+      symbol: 'BTCUSDT',
+      interval: '1w',
+      endTime: START + (4 * WEEK),
+      limit: 4,
+    })).toEqual(weeklyRun(0, 4))
+
+    await cache.writePage({ symbol: 'BTCUSDT', interval: '1w', rows: weeklyRun(6, 8) })
+    expect(store.get('BTCUSDT:1w').map(row => row.openTime)).toEqual(
+      weeklyRun(6, 8).map(row => row.openTime),
+    )
+    expect(store.get('BTCUSDT:1d')).toEqual(run(0, 4))
+  })
+
   it('serves a written page back without a second read of the exchange', async () => {
     const { cache } = createMemoryCache()
     await cache.writePage({ symbol: 'BTCUSDT', interval: '1m', rows: run(0, 100) })

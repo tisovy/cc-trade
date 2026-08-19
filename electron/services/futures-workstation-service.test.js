@@ -825,6 +825,46 @@ describe('production Futures workstation service', () => {
         expect(base.getActiveTimerCount()).toBe(1);
     });
 
+    it('owns weekly live candles and history in the deterministic service', async () => {
+        const clock = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport({ clock: clock.clock });
+        const fixture = FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT;
+        const readCandleHistory = vi.fn(async () => fixture.contractKlines);
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            transport: { ...base, readCandleHistory },
+            clock: clock.clock,
+        }));
+        const events = [];
+
+        await runtime.service.handleRequest(productionRequest('weekly-service', 'BTCUSDT', '1w'), {
+            emit: event => events.push(event),
+        });
+        clock.advance(750);
+        clock.runIntervals();
+        await runtime.service.handleRequest(productionCandleHistoryRequest('weekly-service', {
+            interval: '1w',
+        }), { emit: event => events.push(event) });
+
+        expect(runtime.service.shown).toMatchObject({
+            requestId: 'weekly-service',
+            symbol: 'BTCUSDT',
+            interval: '1w',
+        });
+        expect(events.filter(event => event.resource === 'candles'))
+            .not.toHaveLength(0);
+        expect(events.filter(event => event.resource === 'candles')
+            .every(event => event.payload.interval === '1w')).toBe(true);
+        expect(readCandleHistory).toHaveBeenCalledWith(expect.objectContaining({
+            symbol: 'BTCUSDT',
+            interval: '1w',
+            limit: 1_000,
+        }));
+        expect(events.filter(event => event.resource === 'candleHistory'))
+            .toHaveLength(2);
+        expect(events.filter(event => event.resource === 'candleHistory')
+            .every(event => event.payload.interval === '1w')).toBe(true);
+    });
+
     // The operator's crash: closing a stream whose socket was still in its
     // handshake threw out of `AbortController.abort()`, which is the first
     // statement of the teardown — so the streams stayed open, the timers stayed
@@ -1084,6 +1124,54 @@ describe('production Futures workstation service', () => {
             generation: 1,
         });
         expect(bootstrapInterval).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps weekly ownership when an abandoned interval bootstrap answers late', async () => {
+        const base = createFuturesProductionWorkstationFakeTransport();
+        const deferred = new Map();
+        const bootstrapInterval = vi.fn(options => new Promise((resolve) => {
+            deferred.set(options.interval, resolve);
+        }));
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            transport: { ...base, bootstrapInterval },
+        }));
+        await runtime.service.handleRequest(productionRequest('weekly-owner-base'), {
+            emit: () => {},
+        });
+
+        const abandonedEvents = [];
+        const weeklyEvents = [];
+        const abandoned = runtime.service.handleRequest(
+            productionIntervalRequest('weekly-owner-old', 'BTCUSDT', '5m'),
+            { emit: event => abandonedEvents.push(event) },
+        );
+        await vi.waitFor(() => expect(deferred.has('5m')).toBe(true));
+        const weekly = runtime.service.handleRequest(
+            productionIntervalRequest('weekly-owner-current', 'BTCUSDT', '1w'),
+            { emit: event => weeklyEvents.push(event) },
+        );
+        await vi.waitFor(() => expect(deferred.has('1w')).toBe(true));
+
+        const fixture = FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT;
+        const candleSnapshot = {
+            contractKlines: fixture.contractKlines,
+            indexKlines: fixture.indexKlines,
+        };
+        deferred.get('1w')(candleSnapshot);
+        await weekly;
+        deferred.get('5m')(candleSnapshot);
+        await abandoned;
+
+        expect(abandonedEvents.map(event => event.resource)).toEqual(['status']);
+        expect(weeklyEvents.filter(event => event.resource === 'candles'))
+            .toHaveLength(2);
+        expect(weeklyEvents.filter(event => event.resource === 'candles')
+            .every(event => event.payload.interval === '1w')).toBe(true);
+        expect(runtime.service.shown).toMatchObject({
+            requestId: 'weekly-owner-current',
+            interval: '1w',
+            generation: 1,
+        });
     });
 
     it('starts a clean generation when interval selection races initial exchange info', async () => {

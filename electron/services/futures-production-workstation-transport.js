@@ -132,7 +132,7 @@ const EXCHANGE_INFO_CACHE = {
 const SYMBOL_PATTERN = /^(?:[\p{Lu}\p{Lt}\p{Lo}\p{N}]{1,20}|[\p{Lu}\p{Lt}\p{Lo}\p{N}]{1,13}_[0-9]{6})$/u;
 const PAIR_PATTERN = /^[\p{Lu}\p{Lt}\p{Lo}\p{N}]{1,20}$/u;
 const EXCHANGE_IDENTITY_MAX_BYTES = 64;
-const INTERVALS = new Set(['1m', '5m', '15m', '1h', '4h', '1d']);
+const INTERVALS = new Set(['1m', '5m', '15m', '1h', '4h', '1d', '1w']);
 const PROXY_PROTOCOLS = new Set(['http:', 'https:', 'socks:', 'socks4:', 'socks4a:', 'socks5:', 'socks5h:']);
 
 export class FuturesProductionWorkstationTransportError extends Error {

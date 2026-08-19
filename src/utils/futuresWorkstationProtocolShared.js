@@ -106,6 +106,7 @@ export const FUTURES_WORKSTATION_INTERVALS = Object.freeze([
   '1h',
   '4h',
   '1d',
+  '1w',
 ])
 
 export const FUTURES_WORKSTATION_RESOURCES = Object.freeze({

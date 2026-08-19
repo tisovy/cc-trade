@@ -16,7 +16,7 @@ const throwIfAborted = (signal) => {
     if (signal?.aborted) throw abortError();
 };
 
-const FUTURES_WORKSTATION_FAKE_INTERVALS = new Set(['1m', '5m', '15m', '1h', '4h', '1d']);
+const FUTURES_WORKSTATION_FAKE_INTERVALS = new Set(['1m', '5m', '15m', '1h', '4h', '1d', '1w']);
 
 export const createFuturesWorkstationSystemClock = () => Object.freeze({
     now: () => Date.now(),

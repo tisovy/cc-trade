@@ -16,6 +16,7 @@ export const FUTURES_CANDLE_HISTORY_INTERVAL_MS = Object.freeze({
   '1h': 3_600_000,
   '4h': 14_400_000,
   '1d': 86_400_000,
+  '1w': 604_800_000,
 })
 
 export const candleHistoryKey = (symbol, interval) => `${symbol}:${interval}`

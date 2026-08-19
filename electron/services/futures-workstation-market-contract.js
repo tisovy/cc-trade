@@ -80,7 +80,7 @@ const isExchangeIdentity = (value, maximum, allowDeliverySuffix = false) => {
 };
 const isSymbol = value => isExchangeIdentity(value, 20, true);
 const isPair = value => isExchangeIdentity(value, 20);
-const isInterval = value => ['1m', '5m', '15m', '1h', '4h', '1d'].includes(value);
+const isInterval = value => ['1m', '5m', '15m', '1h', '4h', '1d', '1w'].includes(value);
 const cloneFrozen = (value) => {
     if (Array.isArray(value)) return Object.freeze(value.map(cloneFrozen));
     if (isRecord(value)) {
