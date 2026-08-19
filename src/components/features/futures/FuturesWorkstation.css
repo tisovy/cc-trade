@@ -104,6 +104,50 @@
   overflow-wrap: anywhere;
 }
 
+/* The market-mode switch hangs over the viewport centre (top −1px, active
+   button min-height 35px → it owns y ≤ 34, and its drop-shadow reaches
+   ≈ 47). Inline, the reason code flows under it: measured at 1366×768 the
+   switch [604..762] sat on the reason [317..790] across y 17..34 — covered
+   exactly when the operator must read why the desk is degraded. On desktop
+   the reason therefore takes its own full-width row below the switch. Row
+   one keeps title, state and scale (floors: badge 26px, scale buttons
+   24px), so with the 16px row gap the reason's top lands at ≥ 49px at
+   every ui-scale — clear of the switch and its shadow at every desktop
+   width with no viewport-centre arithmetic. Two measured traps shaped the
+   form this takes. A wrapped flex row cannot deliver it: the strip's
+   intrinsic height is measured as a single line (the second line's
+   percentage width never resolves during track sizing), so the identity
+   row stayed 52px and the reason bled into the clock row — hence the
+   explicit two-row grid, which sizes from the sum of its rows. And the
+   desk grid is deliberately window-bound (height: calc(100vh − 18px)), so
+   its auto rows collapse to their MINIMUM contributions — which for an
+   item with a specified min-height is that min-height, not its content
+   (the 38px floor was silently capping the row at 52px). While a reason is
+   up, min-height returns to auto so the content-based minimum carries the
+   second row into the track; without one the 38px stature stands
+   unchanged. ≤ 844px already wraps the code onto its own row under a 43px
+   padding, so this block must not leak there. */
+@media (min-width: 845px) {
+  .futures-workstation-identity {
+    display: grid;
+    grid-template-columns: max-content max-content minmax(0, 1fr);
+    gap: 16px 12px;
+  }
+
+  .futures-workstation-identity:has(.futures-workstation-reason) {
+    min-height: auto;
+  }
+
+  .futures-workstation-identity .futures-workstation-scale {
+    justify-self: end;
+  }
+
+  .futures-workstation-identity .futures-workstation-reason {
+    grid-row: 2;
+    grid-column: 1 / -1;
+  }
+}
+
 .futures-workstation-clock {
   grid-area: clock;
   display: grid;

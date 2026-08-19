@@ -343,6 +343,40 @@ describe('pure Futures workstation presentation', () => {
     )
   })
 
+  it('gives the degradation reason its own desktop row clear of the mode switch', () => {
+    // The mode switch hangs over the viewport centre (top −1px, active button
+    // min-height 35px → it owns y ≤ 34). Inline, the reason flowed under it:
+    // measured in headless Chromium at 1366×768, switch [604..762] sat on
+    // reason [317..790] across y 17..34 — covered exactly when the operator
+    // must read why the desk is degraded. With these rules the reason row
+    // tops out at y 49 at 1366×768 and 1920×993 alike. jsdom has no layout,
+    // so this guard holds the rule text; the numbers are the real evidence.
+    const stylesheet = readFileSync(
+      'src/components/features/futures/FuturesWorkstation.css',
+      'utf8',
+    )
+    const desktopIdentityRule = stylesheet.match(
+      /@media \(min-width: 845px\)[\s\S]*?\.futures-workstation-identity\s*\{(?<declarations>[^}]*)\}/,
+    )?.groups?.declarations
+    const degradedIdentityRule = stylesheet.match(
+      /@media \(min-width: 845px\)[\s\S]*?\.futures-workstation-identity:has\(\.futures-workstation-reason\)\s*\{(?<declarations>[^}]*)\}/,
+    )?.groups?.declarations
+    const desktopReasonRule = stylesheet.match(
+      /@media \(min-width: 845px\)[\s\S]*?\.futures-workstation-identity \.futures-workstation-reason\s*\{(?<declarations>[^}]*)\}/,
+    )?.groups?.declarations
+
+    expect(desktopIdentityRule).toContain('display: grid;')
+    expect(desktopIdentityRule).toContain(
+      'grid-template-columns: max-content max-content minmax(0, 1fr);',
+    )
+    // The desk grid is window-bound, so its auto rows collapse to an item's
+    // specified min-height; only min-height: auto lets the content-based
+    // minimum carry the reason row into the track.
+    expect(degradedIdentityRule).toContain('min-height: auto;')
+    expect(desktopReasonRule).toContain('grid-row: 2;')
+    expect(desktopReasonRule).toContain('grid-column: 1 / -1;')
+  })
+
   it('renders identity, exact market context, filters, book and bounded tape', () => {
     renderView()
     const identity = screen.getByTestId('futures-workstation-identity')
