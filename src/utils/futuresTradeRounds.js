@@ -305,8 +305,23 @@ const foldContractFills = (fills) => {
       }
       // A round that began by closing a position opened before this window has no
       // size of its own to run down, so it ends where its run of closing fills
-      // ends rather than swallowing the next position that opens.
-      if (round.partial && increasing && round.edgePhase !== 'adding-after-edge-close') {
+      // ends rather than swallowing the next position that opens. Unless it is
+      // a restarted edge round still holding some of what it added: that
+      // position is live, and more entry is more of it.
+      if (round.partial && increasing && round.edgePhase !== 'adding-after-edge-close'
+        && round.heldAtoms === 0n) {
+        rounds.push(finishRound(round, false))
+        round = null
+        continue
+      }
+      // The re-close exists to take back what the restarted round added, and
+      // whatever of the older position the window can still see. Once nothing
+      // it added is held, a further reducing fill is indistinguishable from a
+      // new position opening, so it is not absorbed on faith: the round ends
+      // and the fill is read on its own evidence. Absorbed anyway, a genuinely
+      // new short was folded into a closed long as extra exited contracts, and
+      // the short's own round was left holding only its closing fill.
+      if (!increasing && round.edgePhase === 'reclosing' && round.heldAtoms === 0n) {
         rounds.push(finishRound(round, false))
         round = null
         continue
@@ -350,7 +365,15 @@ const foldContractFills = (fills) => {
       }
     }
   }
-  if (round !== null) rounds.push(finishRound(round, !round.partial && running !== 0n))
+  if (round !== null) {
+    // A restarted edge round holding any of what it added is a live position:
+    // published closed, it filed a phantom closed round in the review while
+    // the operator was still in the trade, and the added size was held
+    // nowhere. `heldAtoms` is exactly that size — only entries raise it and
+    // only the restart path leaves `partial` set with entries behind it.
+    const holdingRestartedAdds = round.edgePhase !== null && round.heldAtoms > 0n
+    rounds.push(finishRound(round, holdingRestartedAdds || (!round.partial && running !== 0n)))
+  }
   return rounds
 }
 

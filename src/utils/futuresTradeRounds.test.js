@@ -366,49 +366,55 @@ describe('buildFuturesTradeRounds', () => {
   it('reconstructs a long after a break-even edge close, add, and final close', () => {
     const rounds = buildFuturesTradeRounds([
       // Ten longs at 100 predate the window. Four close at break-even, two are
-      // added, then all eight that remain close with the reported 190 profit.
+      // added at 90, then all eight that remain close at 120. The exchange
+      // would report exactly 6×20 + 2×30 = 180 for that close — the PnL here
+      // is what the story arithmetically settles to, so the implied entry the
+      // round recovers is the true aggregate entry of everything it exited:
+      // (4×100 + 6×100 + 2×90) / 12.
       fill({ id: 1, side: 'SELL', price: '100', quantity: '4', commission: '1', realizedPnl: '0', time: 1000 }),
       fill({ id: 2, side: 'BUY', price: '90', quantity: '2', commission: '2', realizedPnl: '0', time: 2000 }),
-      fill({ id: 3, side: 'SELL', price: '120', quantity: '8', commission: '3', realizedPnl: '190', time: 3000 }),
+      fill({ id: 3, side: 'SELL', price: '120', quantity: '8', commission: '3', realizedPnl: '180', time: 3000 }),
     ])
 
     expect(rounds).toHaveLength(1)
     expect(rounds[0]).toMatchObject({
       positionSide: 'LONG',
       quantity: '12',
-      entryPrice: 97.5,
       entryImplied: true,
-      realizedPnl: 190,
+      realizedPnl: 180,
       fee: 6,
-      netPnl: 184,
+      netPnl: 174,
       fills: 3,
       partial: true,
       open: false,
     })
+    expect(rounds[0].entryPrice).toBeCloseTo(1180 / 12, 6)
     expect(rounds[0].exitPrice).toBeCloseTo(113.333333, 6)
     expect(rounds.some(round => round.positionSide === 'SHORT')).toBe(false)
   })
 
   it('reconstructs the short mirror without inventing a long', () => {
     const rounds = buildFuturesTradeRounds([
+      // The mirror story settles to 6×20 + 2×30 = 180 as well, and the implied
+      // entry to (4×100 + 6×100 + 2×110) / 12.
       fill({ id: 1, side: 'BUY', price: '100', quantity: '4', commission: '1', realizedPnl: '0', time: 1000 }),
       fill({ id: 2, side: 'SELL', price: '110', quantity: '2', commission: '2', realizedPnl: '0', time: 2000 }),
-      fill({ id: 3, side: 'BUY', price: '80', quantity: '8', commission: '3', realizedPnl: '190', time: 3000 }),
+      fill({ id: 3, side: 'BUY', price: '80', quantity: '8', commission: '3', realizedPnl: '180', time: 3000 }),
     ])
 
     expect(rounds).toHaveLength(1)
     expect(rounds[0]).toMatchObject({
       positionSide: 'SHORT',
       quantity: '12',
-      entryPrice: 102.5,
       entryImplied: true,
-      realizedPnl: 190,
+      realizedPnl: 180,
       fee: 6,
-      netPnl: 184,
+      netPnl: 174,
       fills: 3,
       partial: true,
       open: false,
     })
+    expect(rounds[0].entryPrice).toBeCloseTo(1220 / 12, 6)
     expect(rounds[0].exitPrice).toBeCloseTo(86.666667, 6)
     expect(rounds.some(round => round.positionSide === 'LONG')).toBe(false)
   })
@@ -479,6 +485,72 @@ describe('buildFuturesTradeRounds', () => {
       positionSide: 'LONG', quantity: '7', realizedPnl: 70, fills: 3, open: false, partial: true,
     })
     expect(rounds.some(round => round.positionSide === 'SHORT')).toBe(false)
+  })
+
+  // The closed-position review lists rounds that are not open. A restarted
+  // edge round that is still holding what it added is a live position, and
+  // published closed it filed a phantom closed trade in that review while the
+  // operator was still in it.
+  it('keeps a restarted edge round open while its add is still held', () => {
+    const rounds = buildFuturesTradeRounds([
+      // A pre-window long: four close at break-even, six are added at 110,
+      // and the window ends with the position live.
+      fill({ id: 1, side: 'SELL', price: '100', quantity: '4', commission: '0.1', realizedPnl: '0', time: 1000 }),
+      fill({ id: 2, side: 'BUY', price: '110', quantity: '6', commission: '0.1', realizedPnl: '0', time: 2000 }),
+    ])
+
+    expect(rounds).toHaveLength(1)
+    expect(rounds[0]).toMatchObject({
+      positionSide: 'LONG',
+      quantity: '6',
+      fills: 2,
+      partial: true,
+      open: true,
+    })
+    expect(rounds.filter(round => !round.open)).toHaveLength(0)
+  })
+
+  // Once the re-close has taken back everything the restarted round added, a
+  // further same-side fill is indistinguishable from a new position opening.
+  // Absorbed on faith, a genuinely new short was folded into the closed long
+  // as extra exited contracts, and the short's own round held only its
+  // closing fill.
+  it('does not absorb a new position into a fully reclosed edge round', () => {
+    const rounds = buildFuturesTradeRounds([
+      // Ten longs at 100 predate the window: four close at break-even, six
+      // are added at 110, and the whole twelve close at 120 — the exchange
+      // settles 6×20 + 6×10 = 180. Then a new five-lot short at 121 closes
+      // at 119 for its own 10.
+      fill({ id: 1, side: 'SELL', price: '100', quantity: '4', commission: '0', realizedPnl: '0', time: 1000 }),
+      fill({ id: 2, side: 'BUY', price: '110', quantity: '6', commission: '0', realizedPnl: '0', time: 2000 }),
+      fill({ id: 3, side: 'SELL', price: '120', quantity: '12', commission: '0', realizedPnl: '180', time: 3000 }),
+      fill({ id: 4, side: 'SELL', price: '121', quantity: '5', commission: '0', realizedPnl: '0', time: 4000 }),
+      fill({ id: 5, side: 'BUY', price: '119', quantity: '5', commission: '0', realizedPnl: '10', time: 5000 }),
+    ])
+
+    expect(rounds).toHaveLength(2)
+    const long = rounds.find(round => round.positionSide === 'LONG')
+    expect(long).toMatchObject({
+      quantity: '16',
+      realizedPnl: 180,
+      fills: 3,
+      partial: true,
+      open: false,
+    })
+    // The recovered entry is the true aggregate of everything the long
+    // exited: (4×100 + 6×100 + 6×110) / 16.
+    expect(long.entryPrice).toBeCloseTo(103.75, 6)
+    const short = rounds.find(round => round.positionSide === 'SHORT')
+    expect(short).toMatchObject({
+      quantity: '5',
+      entryPrice: 121,
+      entryImplied: false,
+      exitPrice: 119,
+      realizedPnl: 10,
+      fills: 2,
+      partial: false,
+      open: false,
+    })
   })
 
   // The other half of the same rule, and the one that catches it firing where it
