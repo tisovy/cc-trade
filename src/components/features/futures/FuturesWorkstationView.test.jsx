@@ -1675,6 +1675,25 @@ describe('instrument recency and interface scale', () => {
     expect(desktopRule).toContain(
       'grid-template-rows: auto auto minmax(0, 65fr) minmax(0, 35fr) auto;',
     )
+    // The page's only chrome around the desk is 18px of bottom padding, and
+    // the desk's own border lives inside the budget: anything else leaves a
+    // dead band under the dock or scrolls the page by the border's width.
+    expect(desktopRule).toContain('height: calc(100vh - 18px);')
+    expect(desktopRule).toContain('box-sizing: border-box;')
+
+    // The clock rule at the top of the file carries two classes, and a media
+    // query adds no specificity: without a desktop restatement of the clocked
+    // rows, mounting the clock resurrects the mobile 420px chart floor and a
+    // content-sized tape on every desktop width. Measured before this guard
+    // existed: a 16px tape at 1920×993, and at 1366×681 the dock clipped
+    // entirely below the desk's bottom edge.
+    const desktopClockRule = stylesheet.match(
+      /@media \(min-width: 845px\) \{[\s\S]*?\.futures-workstation\.has-market-clock\s*\{(?<declarations>[^}]*)\}/,
+    )?.groups?.declarations
+
+    expect(desktopClockRule).toContain(
+      'grid-template-rows: auto auto auto minmax(0, 65fr) minmax(0, 35fr) auto;',
+    )
 
     // The two integer-width media queries are complementary: no viewport falls
     // between them and no narrow width receives the desktop minimum tracks.

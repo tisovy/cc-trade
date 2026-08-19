@@ -260,7 +260,13 @@
      other rows do not. Panels scroll inside themselves — the layout a desk
      needs, and the only way a row cannot move when data arrives. */
   .futures-workstation {
-    height: calc(100vh - 90px);
+    /* The page's only chrome around the desk is `.futures-mode-view`'s 18px of
+       bottom padding. This number once also carried 72px of top padding; the
+       header recompose removed that padding but not the subtraction, and the
+       desk sat over a 72px dead band it could have used. The border belongs
+       inside the budget too, or the page scrolls by exactly its width. */
+    height: calc(100vh - 18px);
+    box-sizing: border-box;
     /* Told to fill the window, it may not also demand more than the window has:
        a 690px floor plus a 420px floor under the chart is how the page itself
        gained a scrollbar on a short screen. */
@@ -270,6 +276,17 @@
        row first, and the book — which cannot shrink below its own floor — was
        pushed out of its area and drawn over the tape. */
     grid-template-rows: auto auto minmax(0, 65fr) minmax(0, 35fr) auto;
+  }
+
+  /* The clock row rides on the same window-shared grid. The clock rule at the
+     top of the file restates the mobile rows with the clock added, and its
+     two-class selector outweighs anything a media query can say about
+     `.futures-workstation` alone — media queries add no specificity. Without
+     this desktop restatement the clock quietly brought back the 420px chart
+     floor and the content-sized tape: a 16px tape on a 1080p screen, and on a
+     681px-tall window a dock clipped entirely below the desk's own edge. */
+  .futures-workstation.has-market-clock {
+    grid-template-rows: auto auto auto minmax(0, 65fr) minmax(0, 35fr) auto;
   }
 
 
