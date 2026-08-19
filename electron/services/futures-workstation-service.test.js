@@ -1732,6 +1732,90 @@ describe('production Futures workstation service', () => {
         expect(readDepthSnapshot).toHaveBeenCalledTimes(2);
     });
 
+    // Immediacy belongs to the change of state, not to the state. A book whose
+    // shortfall stands — a band bought at the deepest page and short of the rows
+    // reports the same shortfall for the rest of the session — is stale on every
+    // diff, and keying the bypass on the state's value let that book skip the
+    // bound entirely: a full-book sort ten times a second, for as long as the
+    // contract stayed open, in exactly the loaded regime the bound was built for.
+    it('keeps a book that stays stale on the routine bound after the transition is stated', async () => {
+        const manual = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport({ clock: manual.clock });
+        let subscriber;
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock: manual.clock,
+            transport: {
+                ...base,
+                connect: (options) => {
+                    subscriber = options;
+                    return base.connect(options);
+                },
+            },
+        }));
+        const events = [];
+        await runtime.service.handleRequest(productionRequest('depth-standing-stale'), {
+            emit: event => events.push(event),
+        });
+        const session = runtime.service.shown;
+        const renderAt = [];
+        const render = session.orderBook.toRendererRows.bind(session.orderBook);
+        vi.spyOn(session.orderBook, 'toRendererRows').mockImplementation((options) => {
+            renderAt.push(manual.clock.now());
+            return render(options);
+        });
+        const settled = events.length;
+        // The standing regime itself: the deepest page already bought, and a
+        // reading it cannot prove. `ensureDepthCovers` correctly buys nothing —
+        // there is no rung left — so the shortfall, and the stale state it
+        // decides, stand for every diff that follows.
+        session.depthPage = 3;
+        session.orderBook.rangeShortfall = () => 4;
+
+        // The diff on which the book BECOMES stale is operational news and is
+        // delivered on its own instant, not behind the bound.
+        manual.advance(200);
+        subscriber.onMessage(
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.streams.makeCycle(1)[0],
+        );
+        expect(events.at(-1)).toMatchObject({
+            resource: 'depth',
+            state: 'stale',
+            observedAt: 1_784_000_001_200,
+        });
+        expect(renderAt).toEqual([1_784_000_001_200]);
+
+        // The diffs on which the book merely STAYS stale are routine deliveries:
+        // one replaceable pending slot, newest book wins, nothing rendered until
+        // the trailing instant.
+        manual.advance(50);
+        subscriber.onMessage(
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.streams.makeCycle(2)[0],
+        );
+        subscriber.onMessage(
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.streams.makeCycle(3)[0],
+        );
+        expect(renderAt).toHaveLength(1);
+        expect(session.pendingDepthDelivery).toMatchObject({
+            requestId: 'depth-standing-stale',
+            generation: 1,
+            state: 'stale',
+        });
+        expect(manual.timeoutCount()).toBe(1);
+
+        manual.advance(150);
+        manual.runTimeouts();
+        const depth = events.slice(settled).filter(event => event.resource === 'depth');
+        expect(depth.map(event => event.observedAt)).toEqual([
+            1_784_000_001_200,
+            1_784_000_001_400,
+        ]);
+        expect(depth.map(event => event.state)).toEqual(['stale', 'stale']);
+        expect(depth.at(-1).payload.lastUpdateId).toBe('1004');
+        expect(renderAt).toEqual([1_784_000_001_200, 1_784_000_001_400]);
+        expect(session.pendingDepthDelivery).toBeNull();
+        expect(session.pendingDepthTimer).toBeNull();
+    });
+
     it('discards a pending routine depth delivery when its owner is released', async () => {
         const manual = createManualClock();
         const base = createFuturesProductionWorkstationFakeTransport({ clock: manual.clock });

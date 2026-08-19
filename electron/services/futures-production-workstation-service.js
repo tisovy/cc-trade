@@ -311,15 +311,22 @@ export class FuturesProductionWorkstationService {
         if (!this.isHeld(session) || !this.isShown(session)) return false;
         const view = payload === undefined ? this.depthView(session) : payload;
         if (view === null || view === undefined) return false;
+        const deliveryState = state ?? this.depthDeliveryState(session, shortfall);
         const emitted = this.emitResource(
             session,
             FUTURES_WORKSTATION_RESOURCES.DEPTH,
-            state ?? this.depthDeliveryState(session, shortfall),
+            deliveryState,
             view,
         );
         if (emitted) {
             session.lastDepthView = view;
             session.lastDepthDeliveryAt = session.lastClock;
+            // The state the renderer last heard, kept so the next delivery can
+            // tell a change of state from a state that merely persists. Recorded
+            // only on an emission that happened: a delivery that found nothing
+            // to send has told the operator nothing, and the change it carried
+            // is still owed.
+            session.lastDepthDeliveredState = deliveryState;
         }
         return emitted;
     }
@@ -332,7 +339,18 @@ export class FuturesProductionWorkstationService {
     } = {}) {
         if (!this.isHeld(session) || !this.isShown(session)) return false;
         const deliveryState = state ?? this.depthDeliveryState(session, shortfall);
-        if (immediate || deliveryState !== FUTURES_WORKSTATION_STATES.LIVE) {
+        // Immediacy belongs to the change of state, not to the state's value.
+        // The book becoming stale — or live again — is operational news the
+        // bound must not sit on. But a book that merely stays stale is not
+        // news, and it is not rare either: a band bought at the deepest page
+        // and short of the rows reports the same shortfall for the rest of the
+        // session, and keying this bypass on the value let exactly that book
+        // skip the bound on every diff — a full-book sort ten times a second,
+        // for as long as the contract stayed open, in the loaded regime the
+        // bound was built for. So a state that matches the one last delivered
+        // rides the routine bound, stale included, and a state that differs
+        // goes out on its own instant.
+        if (immediate || deliveryState !== session.lastDepthDeliveredState) {
             this.clearPendingDepthDelivery(session);
             return this.emitDepthNow(session, {
                 state: deliveryState,
@@ -1101,6 +1119,9 @@ export class FuturesProductionWorkstationService {
             // it on screen rather than blanking the panel.
             lastDepthView: null,
             lastDepthDeliveryAt: null,
+            // Null until the first delivery, so a session's opening book is a
+            // transition by definition and goes out immediately.
+            lastDepthDeliveredState: null,
             pendingDepthDelivery: null,
             pendingDepthTimer: null,
             bookRecovering: false,
