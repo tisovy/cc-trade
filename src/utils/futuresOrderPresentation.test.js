@@ -49,6 +49,32 @@ describe('totalOrderNotionalUsdt', () => {
     expect(orderFilledNotionalUsdt(order('100', '10', { z: '0' }))).toBe('0.00')
   })
 
+  // A stop-limit that fills through a gap executes at the market's price, not
+  // at the price it rested at. The exchange states what actually printed as
+  // `avgPrice` on the same payload; valued at the resting price, the column
+  // states what was asked rather than what happened.
+  it('values the filled portion at the average fill price when the exchange states one', () => {
+    expect(orderFilledNotionalUsdt(order('58000', '0.2', {
+      executedQty: '0.1', avgPrice: '58120',
+    }))).toBe('5812')
+    // The stream's executed quantity reads against the same fill price.
+    expect(orderFilledNotionalUsdt(order('100', '10', {
+      z: '2', avgPrice: '99.5',
+    }))).toBe('199')
+  })
+
+  // Binance states "nothing filled yet" as an avgPrice of `0`, which is no
+  // price. Only then does the resting price stand in, so a zero fill still
+  // reads as zero USDT rather than as absent.
+  it('falls back to the resting price when no positive average fill price is stated', () => {
+    expect(orderFilledNotionalUsdt(order('100', '10', { z: '0', avgPrice: '0' }))).toBe('0.00')
+    expect(orderFilledNotionalUsdt(order('100', '10', { z: '2', avgPrice: '0' }))).toBe('200')
+    // A payload that never mentioned the field says nothing either way.
+    expect(orderFilledNotionalUsdt(order('0', '1', {
+      triggerPrice: '58000', executedQty: '0.1',
+    }))).toBe('5800')
+  })
+
   // Half of a working order can already be a position. What rests on the book
   // is the remainder, and pricing the order at the size it was placed at
   // overstates what the operator still has working — on the chart label, in the

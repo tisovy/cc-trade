@@ -322,6 +322,19 @@ describe('FuturesPortfolioDock', () => {
     expect(screen.getByTitle('2 contracts')).toHaveTextContent('200')
   })
 
+  // A stop-limit that fills through a gap executes at the market's price. The
+  // column states what actually filled, from the exchange's avgPrice, not what
+  // the resting price would have bought.
+  it('values the filled portion at the fill price, not the resting price', () => {
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        openOrders={[{ ...order, price: '58000', origQty: '0.5', z: '0.1', avgPrice: '58120' }]}
+      />,
+    )
+    expect(screen.getByTitle('0.1 contracts')).toHaveTextContent('5812')
+  })
+
   // A stop carries its size against the price it triggers at; `price` is 0 on a
   // stop-market, so sizing from it would print every algo order as worth nothing.
   it('sizes an algo order from the price it triggers at', () => {

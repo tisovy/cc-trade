@@ -178,12 +178,20 @@ export const orderNotionalUsdt = (order) => {
 
 // The Filled column is a value, not another quantity column. The exact
 // contracts stay on the cell as secondary detail; this helper supplies only
-// the USDT reading derived from the same price rule as the working size.
+// the USDT reading.
+//
+// What filled is valued at what it filled at. The exchange states the average
+// fill price as `avgPrice` on the same payload, and a stop-limit that fills
+// through a gap executes at the market's price, not at the price it rested
+// at — valued at the resting price, the column states what was asked rather
+// than what happened. Binance states "nothing filled yet" as an `avgPrice` of
+// `0`, which is no price: only then does the resting price stand in, so a
+// zero fill still reads as zero USDT rather than as absent.
 export const orderFilledNotionalUsdt = (order) => {
-  const price = Number(orderPresentationPrice(order))
   const rawExecuted = order?.z ?? order?.executedQty
   if (rawExecuted === null || rawExecuted === undefined || rawExecuted === '') return null
   const executed = Number(rawExecuted)
+  const price = Number(usableOrderPrice(order?.avgPrice) ?? orderPresentationPrice(order))
   if (!(price > 0) || !Number.isFinite(executed) || executed < 0) return null
   return formatOrderNotionalUsdt(price * executed)
 }
