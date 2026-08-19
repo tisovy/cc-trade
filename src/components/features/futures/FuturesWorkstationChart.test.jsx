@@ -1616,6 +1616,59 @@ describe('FuturesWorkstationChart history loading', () => {
     expect(onLoadHistory).toHaveBeenCalledWith(START)
   })
 
+  it('asks when the live window arrives after the chart mounted empty', () => {
+    chartMock.openingLogicalRange = { from: 0, to: 79 }
+    const onLoadHistory = vi.fn()
+    const { rerender } = render(<FuturesWorkstationChart
+      {...properties([])}
+      symbol="BTCUSDT"
+      interval="1m"
+      onLoadHistory={onLoadHistory}
+    />)
+    expect(onLoadHistory).not.toHaveBeenCalled()
+
+    rerender(<FuturesWorkstationChart
+      {...properties(series(0, 80))}
+      symbol="BTCUSDT"
+      interval="1m"
+      onLoadHistory={onLoadHistory}
+    />)
+
+    expect(onLoadHistory).toHaveBeenCalledExactlyOnceWith(START)
+  })
+
+  it('fits and pages an interval that replaces the series without remounting the chart', () => {
+    chartMock.openingLogicalRange = { from: 40, to: 79 }
+    const onLoadHistory = vi.fn()
+    const { rerender } = render(<FuturesWorkstationChart
+      {...properties(series(0, 80))}
+      symbol="BTCUSDT"
+      interval="15m"
+      onLoadHistory={onLoadHistory}
+    />)
+    const chart = chartMock.charts[0]
+    expect(chart.timeScale().fitContent).toHaveBeenCalledTimes(1)
+    expect(onLoadHistory).not.toHaveBeenCalled()
+
+    rerender(<FuturesWorkstationChart
+      {...properties([])}
+      symbol="BTCUSDT"
+      interval="1m"
+      onLoadHistory={onLoadHistory}
+    />)
+    chart.timeScale().visibleLogicalRange = { from: 0, to: 79 }
+    rerender(<FuturesWorkstationChart
+      {...properties(series(-80, 0))}
+      symbol="BTCUSDT"
+      interval="1m"
+      onLoadHistory={onLoadHistory}
+    />)
+
+    expect(chartMock.charts).toHaveLength(1)
+    expect(chart.timeScale().fitContent).toHaveBeenCalledTimes(2)
+    expect(onLoadHistory).toHaveBeenCalledExactlyOnceWith(START - (80 * MINUTE))
+  })
+
   it('asks again when scrolling reaches the oldest loaded candle', () => {
     const onLoadHistory = vi.fn()
     render(<FuturesWorkstationChart
@@ -1631,6 +1684,32 @@ describe('FuturesWorkstationChart history loading', () => {
     onLoadHistory.mockClear()
     act(() => chartMock.charts[0].timeScale().emitVisibleLogicalRangeChange({ from: 40, to: 79 }))
     expect(onLoadHistory).not.toHaveBeenCalled()
+  })
+
+  it('asks for the page behind the new oldest candle on the next trip to the edge', () => {
+    const onLoadHistory = vi.fn()
+    const { rerender } = render(<FuturesWorkstationChart
+      {...properties(series(0, 80))}
+      symbol="BTCUSDT"
+      interval="1m"
+      onLoadHistory={onLoadHistory}
+    />)
+    const timeScale = chartMock.charts[0].timeScale()
+    act(() => timeScale.emitVisibleLogicalRangeChange({ from: 0, to: 79 }))
+    expect(onLoadHistory).toHaveBeenCalledExactlyOnceWith(START)
+
+    timeScale.visibleLogicalRange = { from: 0, to: 79 }
+    rerender(<FuturesWorkstationChart
+      {...properties(series(-20, 80))}
+      symbol="BTCUSDT"
+      interval="1m"
+      onLoadHistory={onLoadHistory}
+    />)
+    expect(timeScale.setVisibleLogicalRange).toHaveBeenCalledWith({ from: 20, to: 99 })
+    expect(onLoadHistory).toHaveBeenCalledTimes(1)
+
+    act(() => timeScale.emitVisibleLogicalRangeChange({ from: 0, to: 79 }))
+    expect(onLoadHistory).toHaveBeenNthCalledWith(2, START - (20 * MINUTE))
   })
 
   it('says nothing once the contract has no history left', () => {

@@ -217,6 +217,7 @@ const layoutOrderCoordinates = (entries, height) => {
 
 export const FuturesWorkstationChart = ({
   symbol,
+  interval,
   candles,
   historyExhausted = false,
   onLoadHistory,
@@ -232,7 +233,13 @@ export const FuturesWorkstationChart = ({
   onOrderCancel,
   onOrderEdit,
 }) => {
-  const measurementGeneration = useMemo(() => Symbol(symbol), [symbol])
+  // A candle scale belongs to both halves of the market selection. Reusing the
+  // symbol's generation across an interval change left the replacement series
+  // carrying the previous interval's fitted viewport and interaction state.
+  const measurementGeneration = useMemo(
+    () => Symbol(`${symbol}:${interval}`),
+    [interval, symbol],
+  )
   const containerRef = useRef(null)
   // Everything the drag listens on. The grip the drag starts from is gone a
   // moment later — the order it belonged to has been cancelled — so the pointer
@@ -366,7 +373,7 @@ export const FuturesWorkstationChart = ({
     settlingRef.current.clear()
     setSettlingDrags(EMPTY_SETTLING)
     measurementRef.current = null
-  }, [measurementGeneration, symbol])
+  }, [interval, measurementGeneration, symbol])
 
   const cancelMeasurement = useCallback(() => {
     measurementRef.current = null
@@ -709,6 +716,8 @@ export const FuturesWorkstationChart = ({
     onLoadHistoryRef.current = onLoadHistory
   }, [onLoadHistory])
 
+  const oldestCandleTime = rowTime(candles?.[0])
+
   useEffect(() => {
     if (!seriesRef.current) return
     const { contractSeries, volumeSeries } = seriesRef.current
@@ -782,7 +791,7 @@ export const FuturesWorkstationChart = ({
     // otherwise a contract would only deepen once the operator scrolled.
     handleRangeChange(timeScale.getVisibleLogicalRange?.() ?? null)
     return () => timeScale.unsubscribeVisibleLogicalRangeChange(handleRangeChange)
-  }, [historyExhausted, onLoadHistory])
+  }, [historyExhausted, oldestCandleTime, onLoadHistory])
 
   // The order a drag is holding is not resting anywhere: it was cancelled when
   // the drag picked it up. It is drawn once, by the drag, so it is taken out of

@@ -1164,6 +1164,7 @@ export const FuturesWorkstationView = ({
         <div className="futures-workstation-chart-frame">
           <FuturesWorkstationChart
             symbol={selectedSymbol}
+            interval={selectedInterval}
             candles={chartCandles}
             historyExhausted={candleHistory.exhausted}
             onLoadHistory={onLoadHistory}
