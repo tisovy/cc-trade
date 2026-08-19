@@ -228,3 +228,13 @@ them. Nothing below §2 is built.
 - [ ] 6.3 Operator confirms the liquidation line tracks the mark instead of stepping when a read answers, and that it agrees with Binance's own screen.
 - [ ] 6.4 Operator confirms in the record that the reads left are the ones named in the proposal, and that `unstated` no longer appears.
 - [ ] 6.5 Operator runs a week on the new arrangement and confirms no beat has had to correct the desk's arithmetic.
+
+## 5. Disarmed
+
+- [x] 5.1 The spec delta this change staged
+  (`specs/futures-live-readiness/spec.md`) was removed on 2026-08-19 by the
+  audit. The change is withdrawn — the measured agreement missed the bar —
+  but the delta still described the withdrawn behaviour in full, and a future
+  archive sweep would have written it over the living spec and deleted the
+  requirement that stands. A withdrawn change keeps its proposal and its
+  evidence; it does not keep a loaded delta.

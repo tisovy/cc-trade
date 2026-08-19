@@ -123,7 +123,7 @@ that archival implied verification.
 | `carry-execution-ahead-of-market-data` | 5.4 | `CONFIRMED` | 2026-08-16 | Production | `NOT RECORDED` | Same direct observation as result 31; included above. |
 | `say-one-size-and-draw-one-line` | 3.3 | `CONFIRMED` | 2026-08-16 | Production | `NOT RECORDED` | Archived task quotes the operator and three one-action PASS responses. |
 | `pay-the-spot-handshake-once` | 5.2 | `CONFIRMED` | 2026-08-16 | Production | `NOT RECORDED` | Same direct observation as result 51; included above. |
-| `align-futures-chart-time-and-header` | 3.3 | `CONFIRMED` | 2026-08-18 | Production | `NOT RECORDED` | Archived task records live confirmation before archive. |
+| `align-futures-chart-time-and-header` | 3.3 | `OUTSTANDING` | `NOT RECORDED` | Production | `NOT RECORDED` | The archived task's check was flipped inside the archive commit with no recorded observation; its false check was removed on 2026-08-19. No confirmation exists to cite. |
 | `compute-the-unstated-values-beside-the-read` | 4.3 | `CONFIRMED BY DIAGNOSTIC RECORD` | 2026-08-15 | Production | `NOT RECORDED` | Archived task records 1,314 comparison lines with all five values named after the operator delegated reading the journal to the session. |
 | `thin-the-scrollbars-and-split-the-market-rail` | 3.4 | `OUTSTANDING` | `NOT RECORDED` | `NOT RECORDED` | `NOT RECORDED` | The archived task contains a gate to wait for live confirmation but no result; its false check was removed on 2026-08-18. |
 | `keep-the-close-preview-live` | 4.3 | `OUTSTANDING` | `NOT RECORDED` | `NOT RECORDED` | `NOT RECORDED` | The archived task contains a gate to wait for live confirmation but no result; its false check was removed on 2026-08-18. |

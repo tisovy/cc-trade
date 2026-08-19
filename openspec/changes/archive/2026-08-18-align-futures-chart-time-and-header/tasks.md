@@ -16,6 +16,13 @@
 
 - [x] 3.1 Run the focused Futures chart and workstation view test suites, then run the repository lint/verification commands appropriate to the changed renderer scope.
 - [x] 3.2 Run `OPENSPEC_TELEMETRY=0 openspec validate align-futures-chart-time-and-header` and GitNexus change detection; confirm that only the expected chart-label and workstation-presentation symbols and flows are affected before any commit.
-- [x] 3.3 Record the operator's live confirmation of current local chart time, all nine recent contracts, and the compact header; obtain confirmation that the zero-size ticket no longer shows the misleading filter error, then archive.
+- [ ] 3.3 Record the operator's live confirmation of current local chart time, all nine recent contracts, and the compact header; obtain confirmation that the zero-size ticket no longer shows the misleading filter error, then archive.
+
+  **Correction 2026-08-19:** this box arrived checked inside the archive
+  commit itself, with no observation behind it — no date, no operator words,
+  where every genuine record in this project quotes the operator. The false
+  check was removed by the audit. The confirmation is outstanding and belongs
+  to a live sitting; the ledger row that cited this check has been corrected
+  with it.
 - [x] 3.4 Audit the complete change against its proposal, delta spec, design, production diff, responsive CSS contracts, and trading-safety behavior; fix every in-scope defect found before handoff.
 - [x] 3.5 Re-run focused and full automated verification, OpenSpec validation, GitNexus change detection, and staged-scope review before the final implementation commit.

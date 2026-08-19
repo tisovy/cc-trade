@@ -108,3 +108,15 @@ always `miss`. In the same second, five `futures-rest-unpooled` calls take
 745–889 ms and all succeed — so the exchange is reachable and the credentials are
 good, and three milliseconds is not a network round trip that failed. It is
 something refusing before the request goes out.
+
+## 5. Archive Note
+
+- [ ] 5.1 **Before archiving, read this.** The delta in
+  `specs/futures-workstation-presentation/spec.md` was synced into the
+  canonical spec ahead of archive (commit `00b3a88`, while this change was
+  still open) and sits there verbatim — `### Requirement: A failed read
+  states why it failed`, canonical line ~2210. An archive sweep must not
+  append a second copy, and a tool that answers "+0, already in sync" has
+  previously said so while writing lines anyway. Verify by grep that the
+  requirement title appears exactly once in the canonical spec after the
+  sweep. *(Noted by the 2026-08-19 audit.)*
