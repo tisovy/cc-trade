@@ -638,6 +638,35 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     )
   })
 
+  // One-way accounts report positionSide BOTH in both directions, so a flip at
+  // the same entry price changes nothing the coordinate gate used to compare —
+  // key, price and y all hold — while the label and tone it must repaint both
+  // changed. The annotation has to state the new side without waiting for the
+  // price or the viewport to move.
+  it('renames the entry annotation when a one-way position flips at an unchanged entry price', async () => {
+    const short = {
+      symbol: 'BTCUSDT',
+      positionSide: 'BOTH',
+      quantity: '-0.5',
+      entryPrice: '59900',
+      // No liquidation figure, as a cross position can report: the entry is
+      // then the only annotation, and every coordinate the gate compares is
+      // identical on both sides of the flip.
+      liquidationPrice: '0',
+    }
+    const props = { ...properties([candle(1_784_000_000_000)]), positions: [short] }
+    const { rerender } = render(<FuturesWorkstationChart {...props} />)
+    const annotation = await screen.findByRole('note', { name: 'ENTRY SHORT at 59900' })
+    expect(annotation).toHaveClass('is-sell')
+
+    rerender(<FuturesWorkstationChart {...props} positions={[{ ...short, quantity: '0.5' }]} />)
+
+    const flipped = await screen.findByRole('note', { name: 'ENTRY LONG at 59900' })
+    expect(flipped).toHaveClass('is-buy')
+    expect(flipped).not.toHaveClass('is-sell')
+    expect(screen.queryByRole('note', { name: 'ENTRY SHORT at 59900' })).not.toBeInTheDocument()
+  })
+
   it('draws stop-market orders at trigger and stop-limit orders at limit without rewriting actions', async () => {
     const regularStop = Object.freeze(workingOrder({
       orderId: 'stop-market',

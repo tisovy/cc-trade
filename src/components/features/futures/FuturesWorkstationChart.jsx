@@ -973,9 +973,18 @@ export const FuturesWorkstationChart = ({
             : []
         })
       setPositionAnnotationCoordinates((previous) => {
+        // Everything the annotation renders takes part in the comparison. Key,
+        // price and y alone let a one-way flip through: positionSide stays
+        // BOTH, so the key holds, and a flip at the same entry under a still
+        // viewport moves neither the price nor the coordinate — yet the label
+        // and the tone both changed, and a plate reading ENTRY SHORT over a
+        // long position misstates the trade until something else repaints it.
         const unchanged = previous.length === nextPositionAnnotations.length
           && previous.every((annotation, index) => (
             annotation.key === nextPositionAnnotations[index].key
+            && annotation.kind === nextPositionAnnotations[index].kind
+            && annotation.label === nextPositionAnnotations[index].label
+            && annotation.tone === nextPositionAnnotations[index].tone
             && annotation.price === nextPositionAnnotations[index].price
             && annotation.y === nextPositionAnnotations[index].y
           ))
