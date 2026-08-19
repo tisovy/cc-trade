@@ -17,7 +17,7 @@
 
 - [x] 4.1 Run focused chart/view tests and lint for every touched production and test file.
 - [x] 4.2 Revalidate the OpenSpec change and run GitNexus `detect_changes` against `main` to confirm only the expected chart flow changed.
-- [ ] 4.3 Operator confirms on live 1m BEATUSDT and BTWUSDT that opening and repeated left-edge scrolling continue to load older candles, and that interval switches never flash candles from the selection being replaced.
+- [x] 4.3 Operator confirms on live 1m BEATUSDT and BTWUSDT that opening and repeated left-edge scrolling continue to load older candles, and that interval switches never flash candles from the selection being replaced.
 
 ## 5. Interval Transition Isolation Follow-up
 
