@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { act, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { createChart, TickMarkType } from 'lightweight-charts'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { useFuturesOrderDrag } from '../../../hooks/useFuturesOrderDrag.js'
 import { LIGHTWEIGHT_CHARTS_MAX_SERIES_VALUE } from '../../../utils/chartVolume.js'
 import FuturesWorkstationChart, {
   FuturesWorkstationChart as UnmemoizedFuturesWorkstationChart,
@@ -111,6 +112,39 @@ const workingOrder = (overrides = {}) => ({
   origQty: '0.5',
   ...overrides,
 })
+
+// A stop-market order as Binance reports it through the regular order read:
+// REGULAR to the desk, resting with `price: '0'` while the trigger lives in
+// stopPrice. There is no resting price a drag could lift it from.
+const stopMarketOrder = (overrides = {}) => workingOrder({
+  orderId: '77',
+  clientOrderId: 'cc7-stop-market-order',
+  type: 'STOP_MARKET',
+  price: '0',
+  triggerPrice: '57000',
+  ...overrides,
+})
+
+// The chart wired to the real drag hook rather than to a mock that confirms
+// every lift. The mocked `{ ok: true }` in `properties()` masked exactly the
+// case this exists for: a grip offered on an order the lift path refuses.
+const RealLiftHarness = ({ chartProps, dragProps }) => {
+  const drag = useFuturesOrderDrag(dragProps)
+  return (
+    <>
+      <FuturesWorkstationChart
+        {...chartProps}
+        onOrderLift={drag.lift}
+        onOrderDrop={({ order, price, restored }) => drag.drop({ order, price, restored })}
+      />
+      <ol data-testid="drag-refusals">
+        {drag.alerts.map(alert => (
+          <li key={alert.id}>{alert.title}: {alert.detail}</li>
+        ))}
+      </ol>
+    </>
+  )
+}
 
 // The shell captures the pointer, because the grip the drag started from is
 // gone the moment the exchange confirms the cancellation.
@@ -708,22 +742,27 @@ describe('FuturesWorkstationChart viewport ownership', () => {
       }
     })
 
-    const grip = screen.getByRole('button', {
-      name: 'Move SELL LONG order at 59850 with Ctrl or Alt drag',
+    // The stop-market is drawn at its trigger but rests at no price, so it
+    // offers no grip and no double-click editor — the lift path could only
+    // ever refuse it, and the editor edits the resting price it does not
+    // have. Cancelling stays, named at the price the order is drawn at.
+    const plate = screen.getByRole('note', {
+      name: 'SELL LONG order resting at no price; it cannot be moved by dragging',
     })
-    fireEvent.doubleClick(grip, { clientX: 120, clientY: 220 })
-    expect(props.onOrderEdit).toHaveBeenCalledExactlyOnceWith(
-      regularStop,
-      { x: 120, y: 220 },
-    )
+    fireEvent.doubleClick(plate, { clientX: 120, clientY: 220 })
+    expect(props.onOrderEdit).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button', { name: 'Cancel SELL LONG order at 59850' }))
     expect(props.onOrderCancel).toHaveBeenCalledExactlyOnceWith({
       symbol: 'BTCUSDT',
       orderId: 'stop-market',
     })
-    fireEvent.pointerDown(grip, { pointerId: 31, button: 0, altKey: true })
+    fireEvent.pointerDown(plate, { pointerId: 31, button: 0, altKey: true })
     await settle()
-    expect(props.onOrderLift).toHaveBeenCalledExactlyOnceWith(regularStop)
+    expect(props.onOrderLift).not.toHaveBeenCalled()
+    // The stop-limit rests at its limit price and keeps its grip.
+    expect(screen.getByRole('button', {
+      name: 'Move SELL LONG order at 59910 with Ctrl or Alt drag',
+    })).toBeInTheDocument()
     expect(regularStop).toEqual(expect.objectContaining({ price: '0', triggerPrice: '59850' }))
     expect(algoStop).toEqual(expect.objectContaining({ price: '0', triggerPrice: '59750' }))
   })
@@ -1621,6 +1660,97 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     expect(within(algoOrder).getByTitle(/^Exit —/)).toHaveTextContent('exit')
     expect(props.onOrderLift).not.toHaveBeenCalled()
     expect(screen.queryByRole('button')).not.toBeInTheDocument()
+  })
+
+  // A grip is a promise — "Move … with Ctrl or Alt drag" — and for an order
+  // resting at no price it is one the lift path always refuses: there is no
+  // resting price to put the order back at. A control that invites a gesture
+  // that can never succeed is worse than no control.
+  it('offers no drag grip on an order resting at no price', async () => {
+    const props = {
+      ...properties([candle(1_784_000_000_000)]),
+      ownedOrders: [stopMarketOrder()],
+    }
+    render(<FuturesWorkstationChart {...props} />)
+    // Price 0 sits on the pane for this scale, the way it does when the
+    // operator has dragged the price scale down to it.
+    const chart = chartMock.charts[0]
+    chart.series[0].priceToCoordinate.mockImplementation(price => 300 - price / 1000)
+    act(() => chart.timeScale().emitVisibleLogicalRangeChange())
+
+    // Still drawn, and still cancellable: refusing the drag is not hiding the
+    // order.
+    const cancel = await screen.findByRole('button', { name: 'Cancel SELL LONG order at 57000' })
+    expect(screen.queryByRole('button', { name: /with Ctrl or Alt drag/ }))
+      .not.toBeInTheDocument()
+    const note = within(handleOf(cancel)).getByRole('note', {
+      name: 'SELL LONG order resting at no price; it cannot be moved by dragging',
+    })
+    // The plate still states what the order is worth — valued at its trigger,
+    // the way the order-values change reads a stop-market: 0.5 × 57000.
+    expect(note).toHaveTextContent('28500 USDT')
+  })
+
+  it('begins no drag and draws no pending mark for an order resting at no price', async () => {
+    const props = {
+      ...properties([candle(1_784_000_000_000)]),
+      ownedOrders: [stopMarketOrder()],
+    }
+    render(<FuturesWorkstationChart {...props} />)
+    const chart = chartMock.charts[0]
+    chart.series[0].priceToCoordinate.mockImplementation(price => 300 - price / 1000)
+    act(() => chart.timeScale().emitVisibleLogicalRangeChange())
+    const cancel = await screen.findByRole('button', { name: 'Cancel SELL LONG order at 57000' })
+    // Whatever plate the order is drawn on, the gesture lands on it: on the
+    // grip while one is offered, on the bare plate once none is.
+    const plate = within(handleOf(cancel)).queryByRole('button', { name: /with Ctrl or Alt drag/ })
+      ?? within(handleOf(cancel)).getByRole('note')
+
+    fireEvent.pointerDown(plate, { pointerId: 5, button: 0, ctrlKey: true })
+    await settle()
+
+    expect(props.onOrderLift).not.toHaveBeenCalled()
+    // No pending mark either — before this, one was published at the
+    // y-coordinate of price 0, off the visible pane.
+    expect(screen.queryByRole('status', { name: /heading for|lifted off the book/ }))
+      .not.toBeInTheDocument()
+  })
+
+  // The refusal path itself, unmasked: through the real drag hook rather than
+  // a mock answering `{ ok: true }` to every lift. A lift the desk's own bound
+  // refuses cancels nothing, states the refusal, and leaves the grip standing.
+  it('refuses a broken lift through the real hook and leaves the order resting', async () => {
+    const cancelOrder = vi.fn()
+    const placeOrder = vi.fn()
+    const chartProps = {
+      ...properties([candle(1_784_000_000_000)]),
+      ownedOrders: [workingOrder()],
+    }
+    render(<RealLiftHarness
+      chartProps={chartProps}
+      dragProps={{ maxOrderNotionalUsdt: '100', cancelOrder, placeOrder }}
+    />)
+    const grip = await screen.findByRole('button', {
+      name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
+    })
+
+    fireEvent.pointerDown(grip, { pointerId: 6, button: 0, ctrlKey: true })
+    await settle()
+
+    // Nothing left the desk: the refusal came before the cancellation.
+    expect(cancelOrder).not.toHaveBeenCalled()
+    expect(placeOrder).not.toHaveBeenCalled()
+    expect(screen.getByTestId('drag-refusals')).toHaveTextContent(
+      'Order NOT lifted: The order would be 29950 USDT, above the local 100 USDT limit. '
+      + 'The order was left where it is.',
+    )
+    // The order is still resting, still gripped, still worth what it was, and
+    // no mark of a drag survives.
+    expect(screen.getByRole('button', {
+      name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
+    })).toHaveTextContent('29950 USDT')
+    expect(screen.queryByRole('status', { name: /heading for|lifted off the book/ }))
+      .not.toBeInTheDocument()
   })
 })
 

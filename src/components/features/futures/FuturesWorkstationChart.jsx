@@ -1202,6 +1202,12 @@ export const FuturesWorkstationChart = ({
   // keyboard does while it is held is not the desk's business.
   const beginOrderDrag = useCallback((event, order) => {
     if (order?.orderKind !== 'REGULAR'
+      // An order resting at no price cannot be lifted: a stop-market order
+      // rests with `price: '0'` — its trigger lives in stopPrice — and the lift
+      // path refuses a replacement it cannot price before anything is
+      // cancelled. Refused here too, so no drag ever begins on one and no
+      // pending mark is ever drawn at the y-coordinate of price zero.
+      || !(toNumber(order?.price) > 0)
       || event.button !== 0
       || event.metaKey
       || event.shiftKey
@@ -1522,6 +1528,14 @@ export const FuturesWorkstationChart = ({
               </div>
             )
           }
+          // A grip is a promise: "Move … with Ctrl or Alt drag". An order
+          // resting at no price is one the lift path always refuses — a
+          // stop-market order rests with `price: '0'`, the trigger lives in
+          // stopPrice, and there is no resting price to put it back at — so the
+          // promise cannot be kept and none is made. The order stays drawn and
+          // stays cancellable, on the bare plate an exchange-managed order is
+          // drawn on.
+          const draggable = toNumber(order.price) > 0
           return (
             <div
               className={`futures-workstation-owned-order is-${intent.tone}${displaced ? ' is-displaced' : ''}${lifting ? ' is-lifting' : ''}`}
@@ -1529,18 +1543,28 @@ export const FuturesWorkstationChart = ({
               style={{ top: `${top}px` }}
               data-anchor-y={anchorY}
             >
-              <button
-                type="button"
-                className="futures-workstation-owned-order-grip"
-                aria-label={`Move ${intent.side} ${intent.label} order at ${displayPrice} with Ctrl or Alt drag`}
-                onPointerDown={event => beginOrderDrag(event, order)}
-                onDoubleClick={event => onOrderEditRef.current?.(order, {
-                  x: event.clientX,
-                  y: event.clientY,
-                })}
-              >
-                {content}
-              </button>
+              {draggable ? (
+                <button
+                  type="button"
+                  className="futures-workstation-owned-order-grip"
+                  aria-label={`Move ${intent.side} ${intent.label} order at ${displayPrice} with Ctrl or Alt drag`}
+                  onPointerDown={event => beginOrderDrag(event, order)}
+                  onDoubleClick={event => onOrderEditRef.current?.(order, {
+                    x: event.clientX,
+                    y: event.clientY,
+                  })}
+                >
+                  {content}
+                </button>
+              ) : (
+                <span
+                  className="futures-workstation-owned-order-plate"
+                  role="note"
+                  aria-label={`${intent.side} ${intent.label} order resting at no price; it cannot be moved by dragging`}
+                >
+                  {content}
+                </span>
+              )}
               <button
                 type="button"
                 className="futures-workstation-owned-order-cancel"
