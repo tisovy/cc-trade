@@ -12,7 +12,15 @@
   credits is the net cost and nothing changed; if it is already net of them, the
   old reading added the credit twice and this one does not. A question whose
   answer changes no behaviour is not a gate.
-- [ ] 1.3 Whether this account's positions are crossed or isolated. Still worth
+- [ ] 1.3 **Whether a rebate row names a contract.** Found while auditing, and it
+  is the one thing above that could still move a number. The desk keeps only
+  income rows the exchange named a symbol on — a credit with nothing to attribute
+  it to cannot go against a position — so if this account's rebate rows carry no
+  symbol, they never reach the column, and the commission it states is the gross
+  charge whether it is read from the fills or from the income record. That is not
+  a defect either way; it decides whether those four kinds are worth 120 weight a
+  pass. The probe now prints the count, the split, and the per-kind totals.
+- [ ] 1.4 Whether this account's positions are crossed or isolated. Still worth
   recording — a crossed funding `ACCOUNT_UPDATE` carries no position message, so
   it says when a settlement happened and never which contract — but it gates
   nothing here: the income record is read for the attribution regardless, and the

@@ -337,7 +337,24 @@ say('\n--- WHAT THE NARROW READ WOULD COST ---');
     say(`  rebate rows in the window: ${rebates.length}`
         + (rebates.length === 0
             ? ' — none, so a fill\'s gross commission is the account\'s real cost'
-            : ` totalling ${usdt(total)} — commission must stay on the income read`));
+            : ` totalling ${usdt(total)}`));
+    // And whether the exchange names a contract on them. A credit with no symbol
+    // cannot be attributed to a position and the desk drops it — correctly, since
+    // there is nothing to attribute it to — but then reading these four kinds
+    // costs 120 weight a pass for rows that never reach a column, and the
+    // commission the column states is the gross charge whatever the income
+    // record's own commission rows meant.
+    if (rebates.length > 0) {
+        const named = rebates.filter(r => typeof r.symbol === 'string' && r.symbol.length > 0);
+        say(`    of those, ${named.length} name a contract and ${rebates.length - named.length} do not`
+            + `${named.length === 0
+                ? ' — none reach a position, so the settled column states the gross charge'
+                : ''}`);
+        for (const type of REBATES) {
+            const of = rebates.filter(r => r.incomeType === type);
+            if (of.length > 0) say(`    ${type}: ${of.length} rows, ${usdt(of.reduce((t, r) => t + Number(r.income), 0))}`);
+        }
+    }
 }
 // The one thing the private stream cannot tell the desk on a crossed position.
 say(`  positions: ${positions.map(p => `${p.symbol}=${p.marginType ?? (p.isolated === true ? 'isolated' : 'cross')}`).join(' ') || 'none open'}`);
