@@ -23,6 +23,36 @@ it was charged in and SHALL NOT be added into the settlement-asset total, becaus
 the desk holds no rate at which to convert it and a converted guess would be
 printed beside money.
 
+Where the components are taken from the exchange's income record they SHALL be
+summed as the signed amounts that record states — an outflow is already negative
+there — and SHALL NOT additionally be subtracted. Where a commission is taken
+from a fill it is an unsigned magnitude and SHALL be subtracted. A surface SHALL
+NOT combine the two conventions without resolving the sign, because doing so
+counts every fee twice or not at all.
+
+Rebates that offset commission SHALL be counted with it. An account trading on a
+rebate that counted only what it was charged would overstate what the position
+cost it.
+
+A position's settled money SHALL be attributed to a position leg only where the
+exchange states the leg, directly or through a trade the row names. Where it does
+not — funding is charged against a contract and names no trade and no leg — the
+figure SHALL be stated on the contract rather than divided between the legs of a
+hedged position by a rule the exchange did not apply, and the row SHALL say that
+is what it is.
+
+#### Scenario: An outflow is counted once
+- **WHEN** a position's settled money is folded from income rows in which the commission is stated as a negative amount
+- **THEN** the commission reduces the total exactly once, rather than being subtracted from an amount that already carried its sign
+
+#### Scenario: The account trades on a commission rebate
+- **WHEN** an open position's contract has both commission and commission-rebate rows against it
+- **THEN** the rebate is counted with the commission, and the stated cost is the net of the two
+
+#### Scenario: Both legs of one contract are held
+- **WHEN** a hedge account holds a long and a short on the same contract and funding is charged against it
+- **THEN** the funding is stated on the contract rather than divided between the two legs, and the rows say the funding is the contract's
+
 #### Scenario: A position has been scaled out of
 - **WHEN** an open position has had part of it closed at a profit
 - **THEN** its row states that realized profit as settled money, separately from the unrealized PnL of the part still held

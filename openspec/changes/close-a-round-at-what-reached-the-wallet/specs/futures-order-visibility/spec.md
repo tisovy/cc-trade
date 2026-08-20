@@ -28,9 +28,23 @@ desk holds no rate at which to convert it, and a converted guess would be printe
 beside money.
 
 Funding SHALL be attributed to a round from the exchange's income record, on the
-round's own contract and position leg, over the span between its open and its
-close. Where the income the desk has read does not reach back to a round's open,
-the round SHALL state that its result is missing funding the read did not cover,
+round's own contract, over the span between its open and its close. It SHALL NOT
+be attributed to a position leg: an income row states no leg and names no trade
+for funding, so on a hedge account holding both legs of one contract there is
+nothing in the record to divide the charge by, and a division the exchange never
+made is a number the desk invented. Where both legs of one contract were open
+across a funding charge, the round SHALL state the funding as the contract's
+rather than claim a share of it.
+
+The components SHALL be combined in the sign each record states them in. The
+exchange's realized PnL and a fill's commission come from the trade record, where
+commission is an unsigned magnitude and is therefore subtracted; funding and
+insurance clearance come from the income record, where an outflow is already
+negative and is therefore added. A fold that subtracted an already-negative
+income row would add the charge back to the operator's result.
+
+Where the income the desk has read does not reach back to a round's open, the
+round SHALL state that its result is missing funding the read did not cover,
 rather than presenting an incomplete total as a complete one.
 
 The size SHALL be stated in USDT, valued at the price the round was entered at,
@@ -79,6 +93,14 @@ element that the entry was recovered rather than read.
 #### Scenario: The income read does not reach the round's open
 - **WHEN** a round opened before the earliest income row the desk has read
 - **THEN** the row states that its result is missing funding the read did not cover, rather than reporting the total as complete
+
+#### Scenario: Both legs of one contract were open across a funding charge
+- **WHEN** a hedge account held a long and a short on the same contract across a funding charge and one of them has since closed
+- **THEN** the closed round states the funding as the contract's rather than claiming a share of it
+
+#### Scenario: An income row is already signed
+- **WHEN** a round's funding arrives from the income record as `-7` and its commission from the trade record as `4`
+- **THEN** the result is realized PnL `- 4 + (-7)`, and the funding is not subtracted a second time
 
 #### Scenario: A round was never charged funding
 - **WHEN** a round opened and closed between two funding boundaries and the income record has no funding row for it

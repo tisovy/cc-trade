@@ -14,8 +14,11 @@
 - [ ] 1.4 Settle which Binance screen is the target, and what it nets. Ask the
   operator which screen the comparison was made on before fixing arithmetic to
   match a screen they were not looking at.
-- [ ] 1.5 Confirm funding is never on a `userTrades` fill, so the income record is
-  the only source.
+- [x] 1.5 Confirmed from Binance's OpenAPI: a `userTrades` fill carries
+  `realizedPnl` and `commission` and no funding of any kind, and `/fapi/v1/income`
+  is where `FUNDING_FEE` lives. Recorded in full under
+  `state-what-an-open-position-has-already-paid` tasks 1.2, which also settles the
+  sign convention and the absent `positionSide` this change depends on.
 - [ ] 1.6 Blast radius by grep for `foldFuturesTradeRounds`, `realizedPnl`,
   `netPnl` and `round.fee`.
 
@@ -31,12 +34,15 @@
 - [ ] 3.1 Accumulate commission per asset in the fold; keep the split fill's
   share arithmetic exactly as it is.
 - [ ] 3.2 Attribute funding and insurance clearance to a round from the income
-  rows, matched on contract, leg and the span between open and close. Boundary
-  rule stated and tested: a charge stamped exactly at the close belongs to the
-  round.
-- [ ] 3.3 Report the round's result as realized less commission plus funding plus
-  insurance clearance, keeping the pre-fee realized PnL and each component
-  available.
+  rows, matched on contract and the span between open and close — not on leg,
+  which an income row does not state (see `state-what-an-open-position-has-already-paid`
+  tasks 1.2). Boundary rule stated and tested: a charge stamped exactly at the
+  close belongs to the round.
+- [ ] 3.3 Report the round's result as realized less the fill record's unsigned
+  commission plus the income record's already-signed funding and insurance
+  clearance, keeping the pre-fee realized PnL and each component available. Prove
+  the sign convention with a test that would pass if a fee were counted twice in
+  one direction and fail in the other.
 - [ ] 3.4 Carry whether the income read reaches the round's open, and state it on
   the row where it does not.
 - [ ] 3.5 Render the result in the PnL cell, and decompose it in the title.

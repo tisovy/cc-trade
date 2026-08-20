@@ -36,8 +36,17 @@ added into a USDT total. That total then appears in the row's title as
   it is the number that reconciles against `/fapi/v1/userTrades` row by row.
 - **Funding is attributed to the round it was charged during**, from the income
   rows made available by `state-what-an-open-position-has-already-paid`: rows of
-  type `FUNDING_FEE` on the round's contract and leg, timestamped between the
-  round's open and its close.
+  type `FUNDING_FEE` on the round's contract, timestamped between the round's
+  open and its close. Not per leg — an income row states no `positionSide` and
+  names no trade for funding, so on a hedge account holding both legs there is
+  nothing to divide the charge by, and the round says the funding is the
+  contract's rather than claiming a share of it.
+- **Each component keeps the sign its own record states it in.** Realized PnL and
+  commission come from the trade record, where commission is an unsigned
+  magnitude and is subtracted; funding and insurance clearance come from the
+  income record, where an outflow is already negative and is added. Subtracting
+  an already-negative income row would hand the charge back to the operator as
+  profit.
 - **Commission is summed per asset.** A fee charged in an asset other than the
   contract's settlement asset is stated in the asset it was charged in and is not
   added into the settlement-asset total. The desk holds no rate to convert it at

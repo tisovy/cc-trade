@@ -14,11 +14,18 @@ did.
 Settled money is unstated in a way of its own: `ACCOUNT_UPDATE` reports a funding
 charge as a wallet movement and names no contract for it, so a fold can tell that
 funding was charged but not against which position. It SHALL therefore be read
-from the exchange's income history, and that read SHALL be account-wide rather
-than per contract — the endpoint answers without a symbol, so one read covers
-every open position for the weight that one contract would otherwise cost. It
-SHALL be issued when a fold reports a realizing fill or a funding cause, and not
-on a timer.
+from the exchange's income history. That read SHALL be account-wide rather than
+per contract and SHALL ask for every kind of flow in one request rather than one
+request per kind — the endpoint answers without a symbol and, given no income
+type, returns them all — so one read covers every open position and every
+component for the weight a single contract would otherwise cost. It SHALL be
+issued when a fold reports a realizing fill or a funding cause, and not on a
+timer.
+
+This read SHALL NOT be served from the contract-discovery walk's cache. That walk
+answers which contracts the account has traded, which changes when a trade is
+made; settled money changes on every fill and every funding boundary, and a
+figure held behind a discovery hold would be correct once and stale afterwards.
 
 The system MAY compute the same values for comparison, and SHALL keep any value
 so computed out of everything the operator sees or trades against. A computed

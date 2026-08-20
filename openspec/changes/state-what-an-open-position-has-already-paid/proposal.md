@@ -20,13 +20,21 @@ amounts on these rows are never read."
 
 ## What Changes
 
-- **The income walk carries its amounts and its types.** The existing
-  account-wide, page-bounded walk is widened from `REALIZED_PNL` to also cover
-  `FUNDING_FEE`, `COMMISSION` and `INSURANCE_CLEAR`, and returns the rows'
-  amounts, assets, symbols and times rather than only the set of symbols it
-  found. It stays one account-wide read — Binance answers `/fapi/v1/income`
-  without a symbol — so it costs the same weight for every open position
-  together as it does for one, which is why it is not read per symbol.
+- **Settled money gets its own read of `/fapi/v1/income`, carrying the amounts.**
+  Binance's own OpenAPI settles the shape (see `tasks.md` 1.2): `incomeType` is a
+  single enum value and *"if `incomeType` is not sent, all kinds of flow will be
+  returned"*, so this is **one account-wide read at weight 30** covering realized
+  PnL, funding, commission, insurance clearance and the rebates that offset
+  commission — not one read per type and not one per contract.
+
+  It is deliberately **not** the existing `collectFuturesHistorySymbols` walk.
+  That walk answers "which contracts has this account traded this week", which
+  moves slowly, and it is built for that: cached behind a discovery hold,
+  persisted through the renderer's coverage store, bounded by a page budget.
+  Settled money moves on every fill and every funding boundary, and hanging it
+  off a cache tuned for a weekly answer would have shown the operator a figure
+  that was right the first time and stale after. The two share the row
+  normalizer and nothing else.
 - **Each open position states the settled money it has already produced**, as a
   new `PnL` column beside `uPnL` in the Positions panel: realized PnL of the
   parts already closed, plus funding, plus commission, plus insurance clearance
@@ -41,6 +49,18 @@ amounts on these rows are never read."
 - **Commission and funding are summed per asset.** Binance charges commission in
   BNB when the account holds it, and a BNB amount added to a USDT total is not a
   total. A non-USDT component is stated in its own asset rather than folded in.
+- **The components are summed, not subtracted.** An income row's `income` is
+  signed — positive is an inflow — so funding paid, commission and insurance
+  clearance all arrive negative and the settled figure is their sum. Commission
+  read off a *fill* is the opposite: a positive magnitude that has to be
+  subtracted. Both records are in play on this desk, and the rule is written down
+  because mixing them silently double-counts every fee.
+- **A leg is only claimed where the exchange states one.** An income row carries
+  no `positionSide`; only rows with a `tradeId` can be joined to the fill that
+  has the leg. Funding is not a trade and carries no `tradeId`, so on a hedge
+  account holding both legs of one contract the funding is stated on the
+  contract rather than split between the legs by a rule the exchange never
+  applied.
 - **ADDS** to `futures-order-visibility`: "An open position states the money it
   has already settled" and "A settled-money reading names its own window".
 - **MODIFIES** `futures-live-readiness` → "Values no stream carries are read, not
@@ -52,13 +72,14 @@ amounts on these rows are never read."
 
 ## Impact
 
-- `electron/services/futures-trading-adapter.js` — `getTradedSymbolPage` gains
-  the income types and returns rows; `readFuturesTradedSymbols` keeps working off
-  the same rows so symbol discovery is unchanged.
-- `electron/services/binance-connection.js` — the income walk (`:3393`, `:3495`)
-  broadcasts the folded per-contract settled totals alongside the symbols it
-  already publishes; re-walked when a fold reports a realizing fill or a
-  `FUNDING_FEE` cause, not on a timer.
+- `electron/services/futures-trading-adapter.js` — a `getIncomeRows` read that
+  sends no `incomeType` and normalizes `symbol`, `incomeType`, `income`, `asset`,
+  `time`, `tranId` and `tradeId`. `getTradedSymbolPage` and
+  `readFuturesTradedSymbols` are left exactly as they are, so contract discovery
+  is untouched.
+- `electron/services/binance-connection.js` — issues that read and broadcasts the
+  folded per-contract settled totals, on a realizing fill or a funding cause, not
+  on a timer.
 - `src/utils/` — a new fold from income rows to per-contract, per-leg settled
   totals, bounded by the open round's start.
 - `src/components/features/futures/FuturesPortfolioDock.jsx` — one column, and
@@ -66,6 +87,12 @@ amounts on these rows are never read."
 - `src/utils/futuresOrderPresentation.js` — the row presentation gains the
   settled figures; `describeFuturesPosition`'s existing fields are untouched.
 - Tests: the adapter read, the fold, and the dock column.
+
+## Bounds worth stating
+
+Binance keeps income history for the last three months. Any window this reads is
+floored by that, whatever the desk's own history window is, and a position older
+than three months can never have a complete settled figure from this source.
 
 ## Non-goals
 
