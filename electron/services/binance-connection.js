@@ -2049,6 +2049,10 @@ export function setupBinanceConnection({
             // only those the exchange named a contract on. A transfer into the
             // futures wallet is the operator moving money, not a position
             // earning it.
+            //
+            // The renderer reads these again on arrival and the fold reads them
+            // once more; the reader is idempotent so that costs nothing. It was
+            // not, and every row was dropped between here and the screen.
             rows: readFuturesSettledIncome(rows),
             // What the reading covers, so a surface can say whether it reaches
             // back to when a position was opened. Never implied from the rows:

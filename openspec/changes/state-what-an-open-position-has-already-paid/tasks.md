@@ -203,6 +203,34 @@
   Neither is a timer, which is the thing the requirement exists to forbid. Spec
   and scenarios updated to match rather than left describing the narrower rule.
 
+## 5d. Operator check 2026-08-20: the column was empty — and why
+
+- [x] 5d.1 Operator reported the `PnL` column blank on a live position the
+  Binance app showed **−264.38 USDT** against: −229.43 funding, −34.95 trading
+  commission, insurance 0, realized-after-close 0.
+- [x] 5d.2 Cause, reproduced on the wire shape rather than inferred: the reader
+  that turns exchange income rows into entries ran **three times** on one path —
+  the main process before broadcasting, the renderer validating the frame, and
+  the fold — and it was not idempotent. The first call consumed `incomeType` and
+  `income`; every later call looked for them, matched nothing, and dropped every
+  row. Driving the real path printed `renderer keeps: []` and a folded total of
+  `null`, which is the `—` the operator saw.
+
+  Both halves had tests. The **seam** had none: `readFuturesSettledIncome` was
+  tested on exchange rows and `readFuturesSettledIncomeFrame` was tested on
+  exchange rows, and nothing ever fed one into the other. Same shape of miss as
+  `trace-the-whole-path-before-claiming-a-fix` records — cover the seam, not both
+  sides of it.
+- [x] 5d.3 Fixed by making the reader idempotent: an entry it has already
+  produced is accepted as itself, held to the same rules a fresh row is (a
+  contract, a known component, a finite amount). A caller can no longer get it
+  wrong by calling it once too often, which a comment saying "call me once"
+  cannot guarantee. Driving the whole path now yields exactly the operator's
+  figures: funding −229.43, commission −34.95, insurance absent (nothing was ever
+  cleared, so not `0.00`), total **−264.38**.
+- [x] 5d.4 Three tests added that drive the seam end to end, all failing against
+  the previous commit.
+
 ## 6. Carried forward
 
 - Task 1.3 is unresolved by choice: whether `ACCOUNT_UPDATE` carries an

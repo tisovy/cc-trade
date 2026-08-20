@@ -52,11 +52,45 @@ const toFiniteNumber = (value) => {
 // twice, which is a funding charge counted twice if nothing catches it.
 const incomeRowKey = row => `${row?.incomeType ?? ''}:${row?.tranId ?? ''}`
 
+// Whether an income row, as the exchange states it, is one a position can be
+// charged or credited with.
+export const isFuturesSettledIncomeRow = row => (
+  COMPONENT_OF_INCOME_TYPE[row?.incomeType] !== undefined
+  && typeof row?.symbol === 'string'
+  && row.symbol.length > 0
+)
+
+/**
+ * Reads a page of income into the entries a position's money is made of.
+ *
+ * **Idempotent, and that is load-bearing rather than tidy.** This runs at three
+ * points on one path — the main process narrowing what it broadcasts, the
+ * renderer validating the frame, and the fold below — and on 2026-08-20 it
+ * silently emptied the operator's column because it did not. The main process
+ * sent rows already read into `{component, amount}`; every later call looked for
+ * the `incomeType` and `income` that the first had consumed, matched nothing,
+ * and dropped every row. The Positions column showed `—` against a position the
+ * Binance app had 264.38 USDT of charges on. Both halves had tests; the seam
+ * between them did not.
+ *
+ * So an entry this function has already produced is accepted as itself. A caller
+ * cannot get it wrong by calling it once too often, which is the only way this
+ * shape of bug is prevented for good — a comment saying "call me once" is not.
+ */
 export const readFuturesSettledIncome = (rows) => {
   if (!Array.isArray(rows)) return []
   const seen = new Set()
   const kept = []
   for (const row of rows) {
+    // Already read: keep it as it is rather than looking for exchange fields it
+    // no longer carries.
+    if (FUTURES_SETTLED_COMPONENTS.includes(row?.component)
+      && Number.isFinite(row?.amount)
+      && typeof row?.symbol === 'string'
+      && row.symbol.length > 0) {
+      kept.push(row)
+      continue
+    }
     const component = COMPONENT_OF_INCOME_TYPE[row?.incomeType]
     if (component === undefined) continue
     const amount = toFiniteNumber(row?.income)

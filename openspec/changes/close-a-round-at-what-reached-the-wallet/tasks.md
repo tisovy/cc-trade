@@ -150,6 +150,44 @@ guard.
   peer's question. Any new flag on a round wants the question asked explicitly:
   is this about the data in hand, or about the position?
 
+## 6c. Operator check 2026-08-20: the closed rows still disagreed
+
+Reported figures, desk against the Binance app:
+
+| Contract | Row | Desk | App | App − Desk |
+|---|---|---:|---:|---:|
+| BTWUSDT | 1st | 605.72 | 605.71 | −0.01 |
+| BTWUSDT | 2nd | 1280.83 | 1337.39 | **+56.56** |
+| CYSUSDT | 1st | 185.21 | 185.20 | −0.01 |
+| CYSUSDT | 2nd | 1755.93 | 1757.57 | **+1.64** |
+
+- [x] 6c.1 **These rows were computed with no funding at all**, for the same
+  reason the `PnL` column was blank: the income rows never survived the wire (see
+  `state-what-an-open-position-has-already-paid` 5d). So what the operator
+  compared was `realized − commission` against the app's `realized − commission +
+  funding`, and the gap on each row is that round's funding.
+- [x] 6c.2 That makes a falsifiable prediction rather than an explanation after
+  the fact. `funding = app − desk`, so after the fix each row's tooltip should
+  state:
+
+  | Contract | Row | Predicted funding |
+  |---|---|---:|
+  | BTWUSDT | 1st | −0.01 |
+  | BTWUSDT | 2nd | **+56.56** (received, not paid) |
+  | CYSUSDT | 1st | −0.01 |
+  | CYSUSDT | 2nd | **+1.64** (received) |
+
+  The signs are not a problem: funding is paid or received depending on the leg
+  and the rate, and a short in a positive-funding market receives it. The two
+  −0.01 rows may equally be rounding rather than a real charge; what matters is
+  that the two large gaps are funding, and the tooltip now names the figure.
+- [ ] 6c.3 Operator re-checks the same four rows. **If the two large gaps close
+  and the tooltip's funding matches the prediction, this is done.** If a gap
+  remains, the tooltip decomposes the row into realized / commission / funding —
+  report those three numbers for the disagreeing row and the remaining cause is
+  arithmetic rather than guesswork. This also settles open task 1.4, since the
+  screen being compared is the one whose numbers are in the table above.
+
 ## 7. Carried forward
 
 - **`round.fee` narrowed, and an external checker will weaken silently rather

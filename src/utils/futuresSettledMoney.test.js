@@ -146,6 +146,61 @@ describe('foldFuturesSettledMoney', () => {
   })
 })
 
+// The test that was missing. Both halves of this path had tests and the path
+// did not, so a transform applied twice emptied the operator's column without a
+// single failure: the main process read the rows, the renderer read them again
+// looking for exchange fields the first read had consumed, and every row was
+// dropped. Drive the whole seam, with the numbers the operator read off the
+// Binance app for the position that showed `—`.
+describe('the settled-money path, end to end', () => {
+  const exchangeRows = [
+    { symbol: 'BTWUSDT', incomeType: 'FUNDING_FEE', income: '-229.43', asset: 'USDT', time: 2_000, tranId: '1', tradeId: null },
+    { symbol: 'BTWUSDT', incomeType: 'COMMISSION', income: '-34.95', asset: 'USDT', time: 2_000, tranId: '2', tradeId: '9' },
+    // The operator moving their own money is not the position earning it.
+    { symbol: null, incomeType: 'TRANSFER', income: '5000', asset: 'USDT', time: 2_100, tranId: '4', tradeId: null },
+  ]
+
+  it('carries the exchange’s charges from the read to the column', () => {
+    // Main process → wire → renderer boundary → hook.
+    const broadcast = readFuturesSettledIncome(exchangeRows)
+    const frame = readFuturesSettledIncomeFrame({
+      rows: broadcast, from: 1_000, readAt: 3_000, complete: true,
+    })
+    const reading = foldFuturesSettledMoney(frame.rows, { starts: { BTWUSDT: 1_000 } }).BTWUSDT
+    expect(reading.funding).toBeCloseTo(-229.43, 6)
+    expect(reading.commission).toBeCloseTo(-34.95, 6)
+    // Nothing was ever cleared against insurance, so it is absent rather than 0.
+    expect(reading.insuranceClear).toBeNull()
+    expect(reading.total).toBeCloseTo(-264.38, 6)
+  })
+
+  // The property that makes the seam safe. Three points on this path read the
+  // same rows; a reader that only worked on the exchange's shape turned the
+  // second and third into silent data loss.
+  it('reads the same rows any number of times without losing them', () => {
+    const once = readFuturesSettledIncome(exchangeRows)
+    const twice = readFuturesSettledIncome(once)
+    const thrice = readFuturesSettledIncome(twice)
+    expect(twice).toEqual(once)
+    expect(thrice).toEqual(once)
+    expect(foldFuturesSettledMoney(thrice, { starts: { BTWUSDT: 1_000 } }).BTWUSDT.total)
+      .toBeCloseTo(-264.38, 6)
+  })
+
+  // Reading an entry back must not reopen it to the dedup that already ran, nor
+  // let an already-read row in without a contract on it.
+  it('holds an already-read entry to the same rules as a fresh row', () => {
+    expect(readFuturesSettledIncome([
+      { symbol: 'BTWUSDT', component: 'funding', amount: -1, asset: 'USDT', time: 1 },
+      { symbol: '', component: 'funding', amount: -2, asset: 'USDT', time: 2 },
+      { symbol: 'BTWUSDT', component: 'nonsense', amount: -3, asset: 'USDT', time: 3 },
+      { symbol: 'BTWUSDT', component: 'funding', amount: Number.NaN, asset: 'USDT', time: 4 },
+    ])).toEqual([
+      { symbol: 'BTWUSDT', component: 'funding', amount: -1, asset: 'USDT', time: 1 },
+    ])
+  })
+})
+
 describe('readFuturesOpenPositionStarts', () => {
   // The two flags answer different questions and only one is about time.
   // `entryImplied` says the entry *price* was recovered from what the round
