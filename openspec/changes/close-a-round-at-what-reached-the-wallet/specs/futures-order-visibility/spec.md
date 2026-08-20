@@ -17,9 +17,19 @@ boundary settles for a different amount than its realized PnL states, and a
 review that reports the latter disagrees with the exchange's own record of the
 same position.
 
-The exchange's pre-fee realized PnL SHALL remain available on the element, with
-the components that were applied to it, because it is the figure that reconciles
-against the exchange's own per-fill record.
+The exchange's pre-fee realized PnL SHALL be stated as a reading of its own,
+beside the result and not inside it, with the components that were applied to it
+available on the element. It is the one figure on the row that can be checked
+against Binance without knowing anything about how this desk folds fills, and the
+operator checks the desk against Binance with it.
+
+The two SHALL NOT share a column heading. They are two different quantities —
+one is what the exchange realized, the other is what the round left in the wallet
+— and a column named for the first while holding the second reports a
+disagreement with the Binance app that is not a disagreement about any number:
+the operator compares the column against the app's column of the same name and
+finds two figures that were never the same measurement. Each heading SHALL name
+the quantity under it.
 
 Commission SHALL be summed per asset. Where a fill's commission was charged in an
 asset other than the contract's settlement asset, it SHALL be stated in the asset
@@ -130,3 +140,11 @@ element that the entry was recovered rather than read.
 #### Scenario: A round was never charged funding
 - **WHEN** a round opened and closed between two funding boundaries and the income record has no funding row for it
 - **THEN** its result is realized PnL less commission, and no funding component is stated
+
+#### Scenario: A round's result differs from what the exchange realized
+- **WHEN** a round realized `120` USDT, paid `4` in commission and `7` in funding
+- **THEN** the row states `120` under a heading naming the exchange's realized PnL and `109` under a heading naming the result, rather than `109` alone under the exchange's name
+
+#### Scenario: The result is qualified and the exchange's figure is not
+- **WHEN** a round's result is missing funding the income read did not reach
+- **THEN** the result is marked as qualified and the exchange's own realized PnL is not, because no funding was ever part of it

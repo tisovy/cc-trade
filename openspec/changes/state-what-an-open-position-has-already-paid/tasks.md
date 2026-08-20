@@ -245,3 +245,48 @@
   written into the spec but not into the code. It becomes load-bearing the first
   time a hedged account uses this column, and
   `close-a-round-at-what-reached-the-wallet` is where the join lands.
+
+## 5e. Operator check 2026-08-20, second sitting: still empty — and the record could not say why
+
+- [x] 5e.1 Operator re-checked after `73cefbc` and reported the column still
+  empty and the closed rounds still disagreeing. The idempotence fix was
+  therefore not the cause, or not the only one.
+- [x] 5e.2 Re-read the whole path statically — main-process read, the four
+  trigger sites, the rate limiter's budget, the broadcast lane, the renderer's
+  frame reader, the fold, the dock's props and its cell. Every step is correct on
+  paper. That is the point at which reading stops being evidence.
+- [x] 5e.3 Tried to re-run the case against the live account rather than reason
+  about it. Not possible from a worktree: `.env.futures-live` holds no key —
+  the desk's credentials live in the OS keyring behind Electron's `safeStorage`
+  — so the exchange cannot be asked what it would have answered.
+- [x] 5e.4 **The actual defect this sitting found is the absence of an
+  instrument.** The desk's diagnostic record has kinds for `read`, `estimate`,
+  `frame`, `timing`, `fault`, `command`, `answer` and `backlog`, and none at all
+  for the income read. So four different failures leave exactly the same empty
+  cell and exactly the same silent journal: the read never fired, the exchange
+  refused it, it was answered and named no contract the operator holds, or it was
+  answered and sent to nobody. Nothing in `~/.config/cc-trade/diagnostics` could
+  separate them, which is why the previous sitting cost a full path re-read and
+  still shipped the wrong cause. This matches the standing operator preference
+  recorded as *instrument instead of asking*.
+- [x] 5e.5 Added a `settled` record kind: `reason`, `pages`, `rows`, `kept`,
+  `contracts`, `recipients`, `outcome`, `code`. Counts only — no amount reaches
+  the file, under the same rule every other kind is held to. One line per pass,
+  and **every** way out of the read writes one: `complete`, `partial` (page
+  budget), `failed` (with the refusal's code), `abandoned` (a newer activation
+  overtook it, or there is no futures adapter at all).
+- [x] 5e.6 Its own reason vocabulary rather than the account read's. Three of the
+  four settled reasons — `fill`, `funding`, `stream` — are not reasons to read the
+  signed account, and `FUTURES_ACCOUNT_READ_REASONS` has no word for two of them.
+  Sharing that list would have dropped most of these lines silently, which is the
+  exact failure mode being fixed.
+- [x] 5e.7 The renderer half named apart too. `—` was one sentence, "not read
+  yet", for three different absences: no frame ever arrived, a frame arrived
+  naming other contracts, and a contract that was read with nothing charged. The
+  first two are now distinguished in the cell's title, so the operator can place
+  the fault on the wire without a journal at all.
+- [x] 5e.8 Four tests, all failing against the previous commit in an isolated
+  checkout: the record keeps a settled read as counts and drops the money offered
+  beside it; it keeps `fill` and `funding` while still refusing `bootstrap`; a
+  refusal keeps its code and an unrepeatable one still keeps its line; and the
+  dock separates a read that named other contracts from one that never answered.

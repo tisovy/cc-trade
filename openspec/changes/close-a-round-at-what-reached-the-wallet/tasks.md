@@ -207,3 +207,82 @@ Reported figures, desk against the Binance app:
   and commission per leg is written into
   `state-what-an-open-position-has-already-paid`'s spec and is still not in the
   code; nothing on either surface needs it yet, because both key by contract.
+
+## 7. Operator's screenshots 2026-08-20: the cause is proven, and one more defect
+
+- [x] 7.1 The operator answered "if you don't believe me, look" with the desk's
+  Closed Positions beside the Binance app's Position History. They did more than
+  confirm the report — they closed the arithmetic. Gross from the app's own
+  averages, times converted from MSK to UTC:
+
+  | Round | Gross | Desk | App | App − desk | Funding boundary |
+  |---|---:|---:|---:|---:|---|
+  | BTWUSDT short, 14 min | 622.06 | 605.72 | 605.71 | −0.01 | none |
+  | BTWUSDT short, 4 h 19 min | 1405.13 | 1280.83 | 1337.59 | **+56.76** | one, 08:00 UTC |
+  | CYSUSDT long, 16 min | 187.67 | 185.21 | 185.20 | −0.01 | none |
+  | CYSUSDT long | — | 1755.93 | 1757.57 | **+1.64** | open time off-screen |
+
+  Every round that crossed a funding settlement is short by a funding-sized
+  amount; every round that crossed none agrees to a cent. Row 2 closes exactly:
+  `1405.13 − 124.30 + 56.76 = 1337.59`.
+- [x] 7.2 **Task 1.4 is settled by this.** The desk's definition of a round's
+  result and the app's "Реализ. PnL" agree — both are realized net of commission
+  and funding — so there is no definitional gap. The desk is missing funding and
+  nothing else, which is the same root as the empty column in
+  `state-what-an-open-position-has-already-paid`: income rows are not reaching
+  the renderer.
+- [x] 7.3 The earlier prediction is corrected, not overturned: the second
+  BTWUSDT row is **1 337,59** in the app, not the 1337.39 first reported, so its
+  funding is **+56.76** received rather than +56.56. CYSUSDT's **+1.64** stands.
+  The two one-cent differences are rounding between two independent computations,
+  not a defect — those rounds have no funding to be missing.
+- [x] 7.4 A defect the screenshots exposed on their own. All four rows qualified
+  as "funding not covered" and all four were drawn as plain whole figures.
+  `is-partial` is set on the round result cell, but the only rule in the
+  stylesheet was `.futures-workstation-dock-settled.is-partial` — the settled
+  column's — and this cell is `.futures-workstation-dock-pnl`. The class matched
+  nothing, so a figure the desk knew was incomplete looked exactly like one that
+  was whole, for the entire time the operator was reconciling against Binance.
+  Given the rule it was always meant to have, marked like the estimated uPnL the
+  operator already reads as qualified.
+- [x] 7.5 Why the tests did not catch it, and what now does. Two tests assert
+  `is-partial` is on the cell and pass — they assert the class, never that it
+  renders as anything. The guard that requires every rendered class to have a
+  rule reads static `className="..."` and templates without interpolation, so
+  the conditional modifiers spliced in by `${cond ? ' is-x' : ''}` were never in
+  its sample. Added a guard that pairs each conditional modifier with the class
+  it is spliced onto and requires `.base.modifier` in the stylesheet; it fails
+  against the previous commit.
+
+## 8. The column the app was compared against
+
+- [x] 8.1 With the income rows finally reaching the renderer (the collision fixed
+  in `read-the-settled-money-from-the-newest-end` §11), the closed rows carry
+  their funding. What was left of the third complaint is not a number at all:
+  the column was headed **Realized PnL** and held `netPnl`. The Binance app
+  prints a column of that name too, and prints the exchange's own figure under
+  it — Binance staff state plainly that the `income` amount "has not deducted the
+  fee yet". So the operator compared two columns with the same name holding two
+  different measurements, and every row disagreed by exactly the commission and
+  funding. Nothing on the row said the names meant different things.
+- [x] 8.2 Two columns now, because there are two figures. **Realized** is the
+  exchange's own: the sum of the realized PnL Binance reported on this round's
+  fills, unadjusted, unqualified, and directly comparable against the app.
+  **Net** is what the round left in the wallet — that figure less the commission,
+  plus the funding — and keeps the full decomposition on the element. The net
+  keeps the emphasis, because it is the one the operator asked for; the gross
+  keeps its own tone, because a round that realized a profit and gave it all back
+  in funding is a different row from one that realized nothing.
+- [x] 8.3 The qualification stays on the result alone. A result missing funding
+  the read did not reach is marked; the exchange's realized PnL is not, because
+  no funding was ever part of it and marking it would qualify a figure that
+  needs none.
+- [x] 8.4 Measured rather than assumed to fit. Eight tracks against the seven
+  before: 600px at their narrowest plus gaps is 656px, against the 796px the
+  positions row above already asks for, so the rounds row is still the narrower
+  of the two. Checked in Chromium over a fixture at 640, 720, 796, 880, 1040 and
+  1280px: no cell clips its own content at any of them.
+- [x] 8.5 The tests bite. Five existing assertions moved from cell 6 to cell 7
+  and gained a cell-6 assertion for the exchange's own figure; against the
+  previous commit all five fail, because there is no cell 7.
+

@@ -161,10 +161,75 @@ One sitting covers all of them.
 | `hold-the-position-value-to-one-price` | 5.6 | `OUTSTANDING` | On a fast-moving position, the Positions row's sign must agree with the Binance app and must stop flipping between two values once a second. Before this, a short with the mark above the entry and the tape below it read `+129.28` and `−43.10` in the same second. |
 | `hold-the-position-value-to-one-price` | 5.7 | `OUTSTANDING` | Work **more than one contract**. Opening or closing any position used to blank every other row's live mark until a rebuilt socket delivered — that is the "uPnL lags" half of the report, and one contract will not show it. |
 | `hold-the-position-value-to-one-price` | 5.8 | `OUTSTANDING` | When the tape crosses an entry and the mark has not, the row now explains itself in its title. Does that read as useful or as noise? |
-| `state-what-an-open-position-has-already-paid` | 5.7 | `FAILED 2026-08-20, FIXED, AWAITING RECHECK` | Column was blank on a position the app charged −264.38 (−229.43 funding, −34.95 commission). Cause: the income reader ran three times on one path and was not idempotent, so every row was dropped between the read and the screen. Fixed in `73cefbc`; driving the whole path now reproduces −264.38 component for component. Re-check the same position. |
+| `state-what-an-open-position-has-already-paid` | 5.7 | `CAUSE FOUND AND FIXED 2026-08-20, AWAITING RECHECK` | Column blank on a position the app charged −264.38 (−229.43 funding, −34.95 commission). First cause found and fixed in `73cefbc` (the income reader ran three times on one path and was not idempotent). **The operator re-checked and it was still blank**, so that was not the whole of it. The path is correct on paper end to end and the account cannot be re-read from a worktree — the desk's keys are in the OS keyring. The read is therefore now recorded: a `settled` line per pass carrying `pages`, `rows`, `kept`, `contracts`, `fundingRows`, `recipients`, `outcome`, `code`. **That line named the cause on sight**: `rows: 2831, fundingRows: 1`. Rows the exchange gave no usable `tranId` all keyed to `FUNDING_FEE:` and a `Map` keeps one per key. Fixed; live on the operator's desk `fundingRows` went 1 → 45 and a complete pass holds 13 330 rows, the same count their own probe read from Binance for the same window. Re-check: the column should read **−270.49** (funding −237.04, commission −33.45), not −33.45. |
 | `state-what-an-open-position-has-already-paid` | 5.8 | `OUTSTANDING` | Hold a position across a funding boundary and confirm the funding component appears. The read is triggered by the `FUNDING_FEE` cause and that path cannot be exercised offline. |
-| `close-a-round-at-what-reached-the-wallet` | 4.5 | `FAILED 2026-08-20, FIXED, AWAITING RECHECK` | Four rows disagreed (BTWUSDT 605.72/605.71 and 1280.83/1337.39; CYSUSDT 185.21/185.20 and 1755.93/1757.57). Same cause: those rows carried no funding at all. The fix predicts each gap **is** that round's funding — BTWUSDT 2nd `+56.56` received, CYSUSDT 2nd `+1.64` received. Re-check the same four; if a gap remains, the cell's tooltip decomposes it into realized / commission / funding and those three numbers settle it. |
+| `close-a-round-at-what-reached-the-wallet` | 4.5 | `CAUSE PROVEN AND FIXED 2026-08-20, AWAITING RECHECK` | Four rows disagreed. The operator's two screenshots close the arithmetic exactly — see "The four rows, settled" below. The desk is short by precisely the funding of each round, and only on the rounds that crossed a settlement. No longer a prediction to re-check but a measured cause: the income rows were not reaching the rounds, same root as 5.7 above and fixed with it. Two things to check now. The rounds that crossed a settlement should have moved by their funding (BTWUSDT 2nd **+56.76**, CYSUSDT 2nd **+1.64**). And the table now has **two** money columns — *Realized*, which is Binance's own figure and is what the app's column of that name holds, and *Net*, which is that less commission plus funding. The one-cent rows were never a defect; they are two independent roundings of the same number. |
 | `close-a-round-at-what-reached-the-wallet` | 4.6 | `OUTSTANDING` | A round held across a funding boundary must show its funding component. |
+
+### The four rows, settled — 2026-08-20, from the operator's screenshots
+
+The operator sent the desk's Closed Positions beside the Binance app's Position
+History. The two together close the arithmetic, so this stopped being a
+prediction. Gross is `(entry − exit) × qty` on a short, `(exit − entry) × qty` on
+a long, from the app's own averages; times converted from the phone's MSK to UTC.
+
+| Round | Gross | Desk | App | Desk = gross − | App − desk | Funding boundary crossed |
+|---|---:|---:|---:|---:|---:|---|
+| BTWUSDT short, 14 min, closed 19.08 13:50 | 622.06 | 605.72 | 605.71 | 16.34 commission | **−0.01** | none (10:36→10:50 UTC) |
+| BTWUSDT short, 4 h 19 min, closed 19.08 13:29 | 1405.13 | 1280.83 | 1337.59 | 124.30 commission | **+56.76** | one, 08:00 UTC (06:10→10:29) |
+| CYSUSDT long, 16 min, closed 18.08 12:23 | 187.67 | 185.21 | 185.20 | 2.46 commission | **−0.01** | none (09:07→09:23 UTC) |
+| CYSUSDT long, closed 18.08 10:44 | — | 1755.93 | 1757.57 | — | **+1.64** | open time not on the screen |
+
+Read down the last two columns. **Every round that crossed a funding settlement
+is short by a funding-sized amount; every round that crossed none agrees with the
+app to one cent.** Row 2 closes exactly: `1405.13 − 124.30 + 56.76 = 1337.59`.
+
+Three consequences. The desk's definition of a round's result and the app's
+"Реализ. PnL" **agree** — both are realized net of commission and funding — so
+there is no definitional gap to chase, which settles task 1.4. The desk is
+missing funding and nothing else. And the two one-cent differences are rounding
+between two independent computations, not a defect: those rounds have no funding
+to be missing.
+
+One correction to the earlier prediction: the second BTWUSDT row is **1 337,59**
+in the app, not the 1337.39 first reported, so its funding is **+56.76** received,
+not +56.56. CYSUSDT's **+1.64** received stands.
+
+A defect the screenshots exposed on their own: every one of those four rows was
+drawn as a plain, whole figure. `is-partial` is set on the cell whenever the
+income read did not cover a round's funding — all four qualified — but the only
+rule in the stylesheet was `.futures-workstation-dock-settled.is-partial`, and
+the round result cell is `.futures-workstation-dock-pnl`. The class matched
+nothing and the qualification was invisible. The tests asserted the class and
+never that it renders as anything; the guard that checks every rendered class has
+a rule reads static class names only, so the conditional modifiers were never in
+its sample. Both are fixed.
+
+### Reading the `settled` line — 2026-08-20, after the second failed sitting
+
+The empty column has four possible causes and until now the journal could not
+separate them. One line in `~/.config/cc-trade/diagnostics/desk-<date>-000.jsonl`
+now does:
+
+```
+grep '"kind":"settled"' ~/.config/cc-trade/diagnostics/desk-2026-08-20-000.jsonl
+```
+
+| What the line says | Where the fault is |
+|---|---|
+| no line at all | the read never fired — no trigger reached `scheduleFuturesSettledRead` |
+| `"outcome":"abandoned"` | overtaken by a newer activation, or no futures adapter (`"code":"NO_ADAPTER"`) |
+| `"outcome":"failed"` | the exchange or the route refused it; `code` names which |
+| `"rows":0` | the read was answered and the account has no income in the window |
+| `"kept":0` with `rows` > 0 | rows came back but none is a position's own money — the type map or the contract filter is wrong |
+| `"recipients":0` | correct answer, sent to nobody — the frame was produced before any renderer was listening |
+| `"contracts"` > 0 and the column still empty | the main process is right and the fault is renderer-side: the fold, the position starts, or the props |
+
+The last row is also answerable without the journal. Hovering the `—` now says
+which of three absences it is: *not read yet* (no frame ever arrived), *the
+income read answered N other contracts and nothing against this one* (the frame
+arrived and this contract was not in it), or *nothing settled on this position
+yet* (it was read and there is genuinely no charge).
 
 Two things worth knowing before the sitting. An account that pays fees in **BNB**
 exercises the sharpest defect fixed here — a BNB fee was being subtracted from a
