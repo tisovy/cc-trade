@@ -107,8 +107,12 @@ describe('FuturesHistoryPanel', () => {
       'Opened before this window of trades — entry recovered from the realized PnL',
     )
     expect(cells[5]).toHaveTextContent('113.333')
-    expect(cells[6]).toHaveTextContent('+184.00')
-    expect(cells[6]).toHaveAttribute(
+    // The exchange's own figure and the desk's result are two columns, because
+    // they are two numbers: the first is what Binance reports and what its app
+    // shows, the second is what the round left in the wallet.
+    expect(cells[6]).toHaveTextContent('+190.00')
+    expect(cells[7]).toHaveTextContent('+184.00')
+    expect(cells[7]).toHaveAttribute(
       'title',
       '+190.00 realized · less 6.0000 commission · is +184.00 in the wallet '
       + '· missing funding the income read did not cover',
@@ -135,8 +139,10 @@ describe('FuturesHistoryPanel', () => {
       'Opened before this window of trades — entry recovered from the realized PnL',
     )
     expect(cells[5]).toHaveTextContent('58500.0')
-    // −96.74 realized, less the 0.02 commission on the fill.
-    expect(cells[6]).toHaveTextContent('−96.76')
+    // −96.74 realized, which is Binance's own figure and stands alone in its
+    // own column; less the 0.02 commission on the fill, which is the result.
+    expect(cells[6]).toHaveTextContent('−96.74')
+    expect(cells[7]).toHaveTextContent('−96.76')
   })
 
   // Binance reports realized PnL before its own commission and reports funding on
@@ -171,12 +177,13 @@ describe('FuturesHistoryPanel', () => {
     )
     const cells = within(screen.getAllByRole('row')[1]).getAllByRole('cell')
     // 120 realized, less 4 commission, less 7.1 funding.
-    expect(cells[6]).toHaveTextContent('+108.90')
-    expect(cells[6]).toHaveAttribute(
+    expect(cells[6]).toHaveTextContent('+120.00')
+    expect(cells[7]).toHaveTextContent('+108.90')
+    expect(cells[7]).toHaveAttribute(
       'title',
       '+120.00 realized · less 4.0000 commission · −7.10 funding · is +108.90 in the wallet',
     )
-    expect(cells[6]).not.toHaveClass('is-partial')
+    expect(cells[7]).not.toHaveClass('is-partial')
   })
 
   // Binance charges commission in BNB whenever the account holds it — the
@@ -204,7 +211,8 @@ describe('FuturesHistoryPanel', () => {
     // The BNB fee is not subtracted from a USDT result — there is no rate here
     // to subtract it by.
     expect(cells[6]).toHaveTextContent('+120.00')
-    expect(cells[6].getAttribute('title')).toContain('0.00850000 BNB commission, not included')
+    expect(cells[7]).toHaveTextContent('+120.00')
+    expect(cells[7].getAttribute('title')).toContain('0.00850000 BNB commission, not included')
   })
 
   // A total silently missing eight hours of funding is worse than one that names
@@ -227,8 +235,12 @@ describe('FuturesHistoryPanel', () => {
       />,
     )
     const cells = within(screen.getAllByRole('row')[1]).getAllByRole('cell')
-    expect(cells[6]).toHaveClass('is-partial')
-    expect(cells[6].getAttribute('title'))
+    // The qualification belongs to the result, not to the exchange's own
+    // figure: what Binance realized is not made incomplete by funding nobody
+    // read, and marking it so would qualify a number that needs none.
+    expect(cells[6]).not.toHaveClass('is-partial')
+    expect(cells[7]).toHaveClass('is-partial')
+    expect(cells[7].getAttribute('title'))
       .toContain('missing funding the income read did not cover')
   })
 

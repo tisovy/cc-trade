@@ -2340,6 +2340,18 @@
   text-underline-offset: 3px;
 }
 
+/* A closed round whose funding the income read did not cover. The class was
+   being set on the cell from the day the column shipped and no rule ever matched
+   it — only `.futures-workstation-dock-settled.is-partial` existed — so a result
+   the desk knew was missing funding was drawn exactly like one that was whole.
+   The operator compared four such rows against the Binance app on 2026-08-20 and
+   the screen gave them nothing to go on. Marked like the estimated uPnL above,
+   which the operator already reads as "this number has a qualification". */
+.futures-workstation-dock-pnl.is-partial strong {
+  text-decoration: underline dotted currentColor;
+  text-underline-offset: 3px;
+}
+
 .futures-workstation-dock-pnl.is-positive {
   color: #3fd79b;
 }
@@ -2861,13 +2873,19 @@
 }
 
 /* One row per closed position rather than per execution, so it carries both ends
-   of the round: what it was entered at and what it left at. Seven tracks, because
-   the eighth — the fee — was crowding the realized PnL off the right edge, and the
-   PnL is the one column the panel exists for. */
+   of the round: what it was entered at and what it left at. Then both money
+   figures, side by side: the exchange's own realized PnL, which is what the
+   Binance app prints and therefore what the operator reconciles against, and the
+   net that reached the wallet after commission and funding. The fee is still not
+   a column — it is a component of the second figure and lives on the element —
+   but the two figures themselves are not one column, because they are not one
+   number, and printing the second under the first's name is what made the desk
+   disagree with the app. Eight tracks come to 600px at their narrowest, well
+   inside the 796px the positions row above already asks for. */
 .futures-workstation-dock-row.is-rounds {
   grid-template-columns:
     minmax(88px, 1fr) minmax(68px, 0.8fr) minmax(56px, 0.7fr) minmax(68px, 1fr)
-    minmax(64px, 1fr) minmax(64px, 1fr) minmax(96px, 1.2fr);
+    minmax(64px, 1fr) minmax(64px, 1fr) minmax(96px, 1.1fr) minmax(96px, 1.2fr);
 }
 
 .futures-workstation-dock-status {

@@ -424,9 +424,16 @@ export const FuturesHistoryPanel = ({
       <>
         {notice}
         <div className="futures-workstation-dock-table" role="table" aria-label="Position history">
-          {/* Seven columns, not eight: the fee is a component of the result rather
-              than a reading of its own, so it moved into the PnL cell's title — the
-              column it was crowding is the only one this panel exists for. */}
+          {/* Two money columns, because they are two different figures and the
+              operator reconciles the desk against Binance with both. "Realized"
+              is the exchange's own: the sum of the realized PnL it reported on
+              this round's fills, before its commission and with no funding in it
+              — the number the Binance app prints under that name, so the two can
+              be compared straight across. "Net" is what the round did to the
+              wallet once the commission came off and the funding went on.
+              One column carrying the net under the exchange's name was the whole
+              of the third complaint: the figures differed from the app because
+              they were not the same quantity, and nothing on the row said so. */}
           <div className="futures-workstation-dock-row is-head is-rounds" role="row">
             <span role="columnheader">Symbol</span>
             <span role="columnheader">Closed</span>
@@ -434,7 +441,8 @@ export const FuturesHistoryPanel = ({
             <span role="columnheader">Size</span>
             <span role="columnheader">Entry</span>
             <span role="columnheader">Exit</span>
-            <span role="columnheader">Realized PnL</span>
+            <span role="columnheader" title="What Binance reported realized on this round’s fills, before its own commission and with no funding in it — the figure the Binance app shows under this name">Realized</span>
+            <span role="columnheader" title="What the round left in the wallet: the realized PnL less the commission, plus the funding paid or received while it was held">Net</span>
           </div>
           {groupedRounds.map(group => dayGroup(group, (round) => {
             // The tone follows the result the row states, not the gross the
@@ -443,6 +451,14 @@ export const FuturesHistoryPanel = ({
             const tone = round.netPnl === 0
               ? 'flat'
               : round.netPnl > 0 ? 'positive' : 'negative'
+            // The gross carries its own tone rather than the result's. A round
+            // that realized a profit and gave all of it back in funding is not a
+            // winner, and it did still realize the profit: colouring the two
+            // cells alike would hide exactly the case the second column exists
+            // to show.
+            const grossTone = round.realizedPnl === 0
+              ? 'flat'
+              : round.realizedPnl > 0 ? 'positive' : 'negative'
             const leg = round.positionSide === 'LONG' ? 'buy' : 'sell'
             return (
               <div className={rowClass('is-rounds', leg, round.symbol)} role="row" key={round.key}>
@@ -475,12 +491,29 @@ export const FuturesHistoryPanel = ({
                   {formatPriceOrAbsent(round.entryPrice, tickOf(round.symbol))}
                 </span>
                 <span role="cell">{formatPriceOrAbsent(round.exitPrice, tickOf(round.symbol))}</span>
-                {/* What the round actually put into or took out of the wallet.
-                    The exchange's own realized PnL is before its commission and
-                    carries no funding at all, so it is the gross rather than the
-                    result — it stays in the title, with every component that was
-                    applied to it, because a net figure nobody can decompose
-                    cannot be checked against Binance. */}
+                {/* The exchange's own figure, stated as the exchange states it.
+                    It is the one number on this row that can be checked against
+                    Binance without knowing anything about how the desk folds
+                    fills, so it is not adjusted, netted or qualified here. */}
+                <span
+                  role="cell"
+                  className={`futures-workstation-dock-pnl is-${grossTone}`}
+                  title={round.partial === true
+                    ? 'Binance’s own realized PnL on the fills of this round that '
+                      + 'are inside the read — the position was opened before it, so '
+                      + 'what it realized earlier is not in this figure'
+                    : 'Binance’s own realized PnL on this round’s fills, before '
+                      + 'its commission and with no funding in it'}
+                >
+                  {formatSignedUsdt(round.realizedPnl)}
+                </span>
+                {/* What the round actually put into or took out of the wallet:
+                    the figure beside it less the commission the exchange charged
+                    on the fills, plus the funding it charged or paid while the
+                    position was held. Every component is on the element, because
+                    a net figure nobody can decompose cannot be checked against
+                    Binance — which is the only check that settles an argument
+                    about it. */}
                 <span
                   role="cell"
                   className={`futures-workstation-dock-pnl is-${tone}${
