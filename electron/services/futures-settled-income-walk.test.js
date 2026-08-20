@@ -41,6 +41,42 @@ const createExchange = ({ spacingMs, limit = 1000, from = WINDOW_FROM - DAY }) =
 };
 
 describe('walkFuturesSettledIncome', () => {
+    // A page is one read per kind of flow now that the desk asks for the kinds it
+    // cannot derive instead of for all of them, and the kinds fill independently:
+    // a thousand commission rows covering three days beside nine funding rows
+    // covering the whole week. The merged newest row then belongs to the kind
+    // that came back short, and a walk stepping to it steps over every row of the
+    // kind that filled. So the reader states the point itself and the walk uses
+    // it in place of what its own rows say.
+    it('advances a full page only as far as the reader says every kind was read', async () => {
+        const asked = [];
+        const walked = await walkFuturesSettledIncome({
+            readPage: async ({ startTime, endTime }) => {
+                asked.push({ startTime, endTime });
+                if (asked.length > 3) return { rows: [], full: false };
+                return {
+                    rows: [
+                        // The kind that filled, read only as far as here.
+                        { symbol: 'BTWUSDT', incomeType: 'COMMISSION', income: '-1', time: startTime + HOUR, tranId: `c${asked.length}` },
+                        // The kind that came back short, whose rows reach the
+                        // whole range asked for.
+                        { symbol: 'BTWUSDT', incomeType: 'FUNDING_FEE', income: '-2', time: endTime - 1, tranId: `f${asked.length}` },
+                    ],
+                    full: true,
+                    newest: startTime + HOUR,
+                };
+            },
+            now: NOW,
+            windowFrom: WINDOW_FROM,
+            held: { ...emptyFuturesSettledState(), from: NOW - DAY, to: NOW - DAY },
+        });
+
+        // The second ask resumes at the stated point, not at the newest row the
+        // merged page happened to carry.
+        expect(asked[1].startTime).toBe(asked[0].startTime + HOUR);
+        expect(walked.rows.size).toBeGreaterThan(0);
+    });
+
     // The defect of 2026-08-20. Reading forward from the window's far edge spends
     // the whole budget on the oldest rows there are, and every figure the
     // operator was looking at sat behind the last page.
@@ -273,9 +309,12 @@ describe('walkFuturesSettledIncome', () => {
         const walked = await walkFuturesSettledIncome({
             now: NOW,
             windowFrom: WINDOW_FROM,
+            // A sparse week is two chunks now that the first one is half the
+            // window, so the refusal has to land on the second page to be a
+            // refusal at all.
             readPage: async (range) => {
                 calls += 1;
-                return calls > 2 ? null : exchange.readPage(range);
+                return calls > 1 ? null : exchange.readPage(range);
             },
         });
         expect(walked.failed).toBe(true);

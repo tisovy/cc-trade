@@ -94,7 +94,7 @@ const READ_REASON = new RegExp(`^(?:${FUTURES_ACCOUNT_READ_REASONS.join('|')})$`
 // funding charge, the stream coming up — are not reasons to read the signed
 // account at all. Sharing one list would have dropped every line whose reason
 // was `fill` or `funding`, which is most of them.
-const SETTLED_REASON = /^(?:stream|fill|funding|refresh)$/;
+const SETTLED_REASON = /^(?:stream|fill|funding|settlement|refresh)$/;
 // Which way round the exchange hands back a page of the income record. The whole
 // backward walk rests on it being oldest-first — a full page is then the *oldest*
 // thousand rows of the range asked for — and the endpoint's documentation does
@@ -289,6 +289,17 @@ const RECORDED_FIELDS = Object.freeze({
         // assumed. `none` means no page carried two rows to compare.
         ['order', text(SETTLED_ORDER)],
         ['pages', count],
+        // What the pass actually asked the exchange for. A page is one read per
+        // kind of flow now that the desk asks for the kinds it cannot derive
+        // instead of for all of them, so `pages` alone stopped being the cost:
+        // weight is `reads` times the endpoint's 30. Recorded because the whole
+        // point of narrowing the read is a number, and a change that cannot be
+        // read off the operator's own journal is a claim rather than a result.
+        ['reads', count],
+        // How many kinds of flow this pass asked for. `pages * types` is
+        // `reads` while every kind answers; where it is not, a kind filled its
+        // page and the walk went round again for it alone.
+        ['types', count],
         ['rows', count],
         ['kept', count],
         ['contracts', count],

@@ -64,25 +64,24 @@ export const futuresIncomeRowKey = (row) => {
 };
 
 export const FUTURES_SETTLED_WALK = Object.freeze({
-    // At weight 30 a request each, eight is 240 against an 800-weight minute.
-    // Only ever spent in full while coverage is still being extended: once the
-    // window is covered a pass costs one request for the tail.
-    MAX_REQUESTS: 8,
-    // Where a walk with nothing learned yet starts. Deliberately wide: the right
-    // width is a property of the account, not of the desk — the operator's
-    // produced thirteen thousand income rows in a week — and one page is enough
-    // to measure it, so guessing too wide costs one request while guessing too
-    // narrow costs a doubling per request for the whole of a quiet week. What
-    // the account answers replaces it, and the result is carried between passes:
-    // re-deriving it from this constant every pass is how a read that needed
-    // seventeen requests took a hundred.
+    // A page is one read per kind of flow the caller asks for — six, since the
+    // desk stopped asking for the whole record — so four pages is up to
+    // twenty-four requests at weight 30. Only ever spent in full while coverage
+    // is still being extended, and on the shape this now reads it is never spent
+    // at all: forty-five funding rows in a week fit one page, so the first one
+    // covers the window and the walk is done.
+    MAX_REQUESTS: 4,
+    // A floor, not a starting width. The walk starts at half the window — see
+    // below — and this is only what a caller with no window to speak of gets.
     SLICE_START_MS: 24 * 60 * 60 * 1000,
     SLICE_MIN_MS: 60 * 1000,
-    // Wide enough that a quiet week is covered inside one budget. At a day it was
-    // not: six hours doubling to a ceiling of a day reaches 6.75 days in eight
-    // requests, and a seven-day window stayed a pass short of complete forever on
-    // an account that could have been read in six.
-    SLICE_MAX_MS: 2 * 24 * 60 * 60 * 1000,
+    // The whole of the desk's window. Narrower was right when a day of this
+    // account's income was four thousand rows and a page held a thousand; asking
+    // for one kind of flow changed the density by two orders of magnitude, and a
+    // ceiling below the window then costs a page per chunk to cover a week that
+    // one page answers. What the account demonstrates still overrides it in
+    // either direction.
+    SLICE_MAX_MS: 7 * 24 * 60 * 60 * 1000,
     // A ceiling on what is held, so an account that trades all week cannot grow
     // this without bound. Reached before the window's start is, it stops the
     // backward walk — and because coverage is stated rather than implied, the
@@ -106,14 +105,35 @@ const newestTimeIn = (answered, floor) => (answered.rows ?? []).reduce(
     floor,
 );
 
+// How far a full page lets the cursor move.
+//
+// With one kind of flow asked for, that is the newest row the page returned: the
+// page is the oldest thousand rows of the range, so everything up to its newest
+// row is now held.
+//
+// With several, it is not. A page here is the merge of one read per kind, and
+// they fill independently — a thousand commission rows covering three days
+// beside nine funding rows covering the whole week. The merged newest row then
+// belongs to the kind that came back *short*, and advancing to it steps over
+// every commission row between the two. So a reader that merges kinds states
+// the point itself, as the oldest newest-row among the kinds that filled, and
+// this only falls back to the merged rows when it does not.
+const pageNewest = (answered, floor) => (Number.isFinite(answered?.newest)
+    ? answered.newest
+    : newestTimeIn(answered, floor));
+
 /**
  * Extends a held reading of the income record towards now and towards the
  * window's start.
  *
- * `readPage` is given `{startTime, endTime}` and answers `{rows, full}`, or
- * `null` when the read was refused or overtaken — the difference between "there
- * is nothing there" and "nobody asked" is the difference between a position that
- * settled nothing and one whose charges were never read.
+ * `readPage` is given `{startTime, endTime}` and answers `{rows, full}` — and
+ * optionally `newest`, the instant a full page lets the walk advance to, which a
+ * reader merging several kinds of flow into one page has to state because the
+ * merged rows no longer say it.
+ *
+ * Or `null` when the read was refused or overtaken — the difference between
+ * "there is nothing there" and "nobody asked" is the difference between a
+ * position that settled nothing and one whose charges were never read.
  *
  * Answers the new state plus what the pass cost and how it ended. The held rows
  * are never discarded on a failure: rows in hand are money the desk can account
@@ -132,9 +152,31 @@ export const walkFuturesSettledIncome = async ({
     const rows = new Map(held.rows);
     let from = held.from;
     let to = held.to;
+    // Where a walk with nothing learned yet starts: half the window.
+    //
+    // The right width is a property of the account and of what is being asked
+    // for, not of the desk, and one page is enough to measure it — so what the
+    // account answers replaces this immediately, and is carried between passes.
+    // Re-deriving it from a constant every pass is how a read that needed
+    // seventeen requests took a hundred.
+    //
+    // Half, rather than a day or the whole thing, because the two failures are
+    // not symmetrical. Too narrow costs a page per chunk to cover a week that one
+    // page answers — which is what a day-wide start cost once the read was
+    // narrowed to one kind of flow and the density fell by two orders of
+    // magnitude. Too wide costs the *recency* of a partial reading: a full page
+    // is the oldest rows of the range asked for, so a chunk spanning the whole
+    // window hands back the far end of it first, which is the defect this walk
+    // was written to fix. Half covers a sparse window in two pages and still
+    // starts a dense one near the present.
     let slice = Number.isFinite(held.slice) && held.slice > 0
         ? held.slice
-        : limits.SLICE_START_MS;
+        : Math.min(
+            limits.SLICE_MAX_MS,
+            Math.max(limits.SLICE_MIN_MS, Number.isFinite(windowFrom) && now > windowFrom
+                ? Math.floor((now - windowFrom) / 2)
+                : limits.SLICE_START_MS),
+        );
     // A backward chunk this walk committed to and has not finished reading.
     // Carried between passes: abandoning it would re-ask the pages already paid
     // for, which is the whole of what made the read slow.
@@ -177,7 +219,7 @@ export const walkFuturesSettledIncome = async ({
                 cursor = now;
                 break;
             }
-            const newest = newestTimeIn(answered, cursor);
+            const newest = pageNewest(answered, cursor);
             // A full page whose rows all share the cursor instant cannot be
             // advanced past without losing them. Stop rather than spin.
             if (newest <= cursor) break;
@@ -231,7 +273,7 @@ export const walkFuturesSettledIncome = async ({
             gap = null;
             continue;
         }
-        const newest = newestTimeIn(answered, gap.cursor);
+        const newest = pageNewest(answered, gap.cursor);
         // More than a page of rows sharing one millisecond across the whole
         // account is not something the exchange produces; stepping past it is
         // still better than asking the same page until the budget is gone.

@@ -1494,6 +1494,12 @@ export function setupBinanceConnection({
                 handshakeTimeout: 10_000,
             }),
             broadcast: broadcastToRenderers,
+            // The one event that moves an open position's settled money, seen on
+            // a public socket the desk already runs. The private stream reports
+            // the same settlement and is the better witness — it says the wallet
+            // moved — but it is one socket, and this one is another. Either is
+            // enough; both cost nothing.
+            onSettlement: () => scheduleFuturesSettledRead('settlement'),
             logger,
         })
         : null;
@@ -1994,15 +2000,62 @@ export function setupBinanceConnection({
     // position for it, so a fold can tell that funding was charged and not
     // against what. The income history is the only record that says.
     //
-    // One read, not one per contract and not one per kind of flow: Binance
-    // answers `/fapi/v1/income` without a symbol, and given no `incomeType`
-    // returns every kind at once. A desk holding five positions pays weight 30
-    // for all five and all four components together.
+    // One read for the whole account, not one per contract: Binance answers
+    // `/fapi/v1/income` without a symbol, so a desk holding five positions pays
+    // once.
     //
+    // But one read per *kind of flow*, and only for the kinds the desk cannot
+    // work out for itself. Until 2026-08-20 no `incomeType` was sent at all, and
+    // the endpoint's own note says what that asks for: *"If incomeType is not
+    // sent, all kinds of flow will be returned."* On the operator's account that
+    // was **13 330** rows for a week — of which **45** were funding, and 13 285
+    // were per-fill realized PnL and commission already held from
+    // `/fapi/v1/userTrades`, read anyway at weight 5 a contract for the history
+    // panel. Thirteen thousand rows paged at weight 30 to reach forty-five.
+    //
+    // What is left is what no other record states:
+    //
+    // - **funding**, charged against a contract by the exchange and named on no
+    //   fill, no order and no stream frame that carries a symbol;
+    // - **insurance clearance**, the same for a part-liquidated position;
+    // - **the rebates**, which are credits the trade record does not carry.
+    //
+    // The rebates are the subtle one and they are read for a reason that holds
+    // whichever way Binance means its `COMMISSION` rows. Commission now comes
+    // from the fills, gross, the way the closed rounds have always taken it. If
+    // an income `COMMISSION` row is the same gross charge, then gross-from-fills
+    // plus these credits is the net cost — unchanged. If it is already net of
+    // them, then the old reading added the credit twice and this one does not.
+    // Correct under both, which is why it needs no measurement to be safe.
+    const FUTURES_SETTLED_INCOME_TYPES = Object.freeze([
+        'FUNDING_FEE',
+        'INSURANCE_CLEAR',
+        'COMMISSION_REBATE',
+        'REFERRAL_KICKBACK',
+        'API_REBATE',
+        'FEE_RETURN',
+    ]);
     // Deliberately not the contract-discovery walk beside it. That walk answers
     // which contracts were traded, which moves when a trade is made, and it is
-    // cached and page-budgeted for exactly that. This moves on every fill.
+    // cached and page-budgeted for exactly that. This moves on every settlement.
     const FUTURES_SETTLED_READ_DELAY_MS = 1200;
+    // How long a read asked for by something other than the event it observes
+    // may be deferred.
+    //
+    // Funding is the only thing that moves this reading, it settles six times a
+    // day on this account, and it announces itself twice over on two independent
+    // sockets: the private stream's `ACCOUNT_UPDATE`, and the public mark
+    // frame's countdown stepping forward. Both are free. A read on the account
+    // tick's thirty seconds is 2 880 requests a day to observe six events — and
+    // it was the cost that made the whole read look expensive.
+    //
+    // So the clock is left in only as the third answer to "what if both sockets
+    // missed it", at a cadence sized to that being wrong rather than to how
+    // often something asks.
+    const FUTURES_SETTLED_RECONCILE_MS = 60 * 60 * 1000;
+    // Reasons that are the event itself. Everything else is somebody asking on a
+    // clock and waits for the reconciliation window.
+    const FUTURES_SETTLED_EVENT_REASONS = new Set(['funding', 'settlement', 'stream']);
     let _futuresSettledReadTimer = null;
     let _futuresSettledReadPending = false;
     // What the desk holds, and the contiguous span it holds it for. Rows are
@@ -2014,6 +2067,9 @@ export function setupBinanceConnection({
     // something anything could drive.
     let _futuresSettled = emptyFuturesSettledState();
     let _futuresSettledSent = null;
+    // When a pass last finished. Only the clock-driven reasons consult it; an
+    // event that moved the money is never deferred.
+    let _futuresSettledReadAt = null;
     // The pass currently walking, and the reason that asked for another while it
     // was walking.
     let _futuresSettledInFlight = null;
@@ -2022,6 +2078,27 @@ export function setupBinanceConnection({
     const clearFuturesSettledMoney = () => {
         _futuresSettled = emptyFuturesSettledState();
         _futuresSettledSent = null;
+        _futuresSettledReadAt = null;
+    };
+
+    // Whether this reason has earned a read.
+    //
+    // The events funding actually makes — the private stream's `ACCOUNT_UPDATE`,
+    // the public mark countdown stepping forward, a stream coming up against an
+    // account whose history the desk has not seen — always have. Everything else
+    // is a caller asking on a clock: the account tick that fires every thirty
+    // seconds while an order rests, a fill that realized something, the
+    // operator's refresh. None of those move funding, and reading on them is
+    // what cost 60 weight a minute to watch a number that changes six times a
+    // day.
+    //
+    // A reading still being built is never deferred, whatever asked for it: the
+    // deferral is for a reading that is complete and has nothing to learn.
+    const futuresSettledReadIsDue = (reason) => {
+        if (FUTURES_SETTLED_EVENT_REASONS.has(reason)) return true;
+        if (_futuresSettledReadAt === null) return true;
+        if (_futuresSettled.complete !== true) return true;
+        return Date.now() - _futuresSettledReadAt >= FUTURES_SETTLED_RECONCILE_MS;
     };
 
     const readFuturesSettledMoney = async (reason) => {
@@ -2036,6 +2113,10 @@ export function setupBinanceConnection({
             now - FUTURES_INCOME_HISTORY_REACH_MS,
         );
         let requests = 0;
+        // What the pass actually spent at the exchange. A page here is one read
+        // per kind of flow, so the walk's request count is no longer the number
+        // of times the desk asked for anything.
+        let reads = 0;
         let failureCode = null;
         // Which way round the exchange hands a page back. Every decision the walk
         // makes about a full page — that it is the *oldest* thousand rows of the
@@ -2054,6 +2135,10 @@ export function setupBinanceConnection({
                 reason,
                 order: pageOrder,
                 pages: requests,
+                // One page is one read per kind. Weight spent is this times the
+                // endpoint's 30, and it is the number the whole change is about.
+                reads,
+                types: FUTURES_SETTLED_INCOME_TYPES.length,
                 rows: held.length,
                 kept: held.length,
                 contracts: new Set(held.map(row => row.symbol)).size,
@@ -2085,20 +2170,52 @@ export function setupBinanceConnection({
             keepRow: isFuturesSettledIncomeRow,
             readPage: async ({ startTime, endTime }) => {
                 try {
-                    const page = await futuresRestLimiter.execute(
-                        () => (current()
-                            ? futuresTradingAdapter.getIncomePage({ startTime, endTime, page: 1 })
-                            : null),
-                        FUTURES_INCOME_READ_WEIGHT,
-                    );
-                    if (pageOrder === 'none' && (page?.rows?.length ?? 0) > 1) {
-                        const first = page.rows[0]?.time;
-                        const last = page.rows[page.rows.length - 1]?.time;
-                        pageOrder = first < last ? 'ascending'
-                            : first > last ? 'descending'
-                                : 'flat';
+                    const rows = [];
+                    let full = false;
+                    // How far a full page lets the walk advance. Merging kinds
+                    // takes this away from it: the merged newest row belongs to
+                    // whichever kind came back short, and a walk stepping to it
+                    // would step over the rows of a kind that filled. So the
+                    // oldest newest-row among the kinds that filled is stated
+                    // here, which is the furthest point every kind has been read
+                    // up to.
+                    let newest = null;
+                    for (const incomeType of FUTURES_SETTLED_INCOME_TYPES) {
+                        const page = await futuresRestLimiter.execute(
+                            () => (current()
+                                ? futuresTradingAdapter.getIncomePage({
+                                    startTime,
+                                    endTime,
+                                    incomeType,
+                                    page: 1,
+                                })
+                                : null),
+                            FUTURES_INCOME_READ_WEIGHT,
+                        );
+                        // Overtaken by a newer activation part-way through the
+                        // kinds. Half a page is not a page: returning it would
+                        // let the walk claim a span it only read some kinds of.
+                        if (page === null || page === undefined) return null;
+                        reads += 1;
+                        rows.push(...(page.rows ?? []));
+                        if (pageOrder === 'none' && (page.rows?.length ?? 0) > 1) {
+                            const first = page.rows[0]?.time;
+                            const last = page.rows[page.rows.length - 1]?.time;
+                            pageOrder = first < last ? 'ascending'
+                                : first > last ? 'descending'
+                                    : 'flat';
+                        }
+                        if (!page.full) continue;
+                        full = true;
+                        const pageNewest = (page.rows ?? []).reduce(
+                            (latest, row) => (Number.isFinite(row?.time) && row.time > latest
+                                ? row.time
+                                : latest),
+                            startTime,
+                        );
+                        newest = newest === null ? pageNewest : Math.min(newest, pageNewest);
                     }
-                    return page;
+                    return { rows, full, newest };
                 } catch (error) {
                     // The rows already held are money the desk can account for.
                     // Throwing them away because one slice timed out would
@@ -2155,6 +2272,9 @@ export function setupBinanceConnection({
                 reason,
             });
         }
+        // Stamped on the way out rather than on the way in, so a pass that took
+        // a minute does not make the next one due a minute early.
+        _futuresSettledReadAt = Date.now();
         recordSettled(
             failureCode !== null ? 'failed' : (walked.complete ? 'complete' : 'partial'),
             failureCode,
@@ -2185,6 +2305,7 @@ export function setupBinanceConnection({
     };
 
     const scheduleFuturesSettledRead = (reason) => {
+        if (!futuresSettledReadIsDue(reason)) return;
         _futuresSettledReadPending = true;
         if (_futuresSettledReadTimer !== null) return;
         _futuresSettledReadTimer = setTimeout(() => {

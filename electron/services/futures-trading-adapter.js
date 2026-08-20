@@ -1382,9 +1382,21 @@ export class FuturesTradingAdapter {
     // budgeted for an answer that moves when a trade is made. This one is the
     // amounts, and they move on every fill and every funding boundary.
     //
-    // No `incomeType` is sent, so one weight-30 read answers for every kind of
-    // flow rather than one read per kind. No `symbol` either: the endpoint
-    // answers without one, so a desk holding five positions pays once.
+    // No `symbol`: the endpoint answers without one, so a desk holding five
+    // positions pays once.
+    //
+    // `incomeType` is the caller's, and sending one is the point. The endpoint's
+    // own note says what happens without it — *"If incomeType is not sent, all
+    // kinds of flow will be returned"* — and until 2026-08-20 this desk sent
+    // none. On the operator's account that answered **13 330** rows for a week,
+    // of which **45** were funding and the other 13 285 were per-fill realized
+    // PnL and commission the desk already holds from `/fapi/v1/userTrades`. It
+    // paged through thirteen thousand rows of a record it was duplicating in
+    // order to reach forty-five it could get nowhere else, at weight 30 a page.
+    //
+    // The parameter takes one value, not a list — the enum is single-valued —
+    // so a caller wanting two kinds pays for two reads and still pays a fraction
+    // of what asking for all of them costs.
     //
     // Paged by the endpoint's own page number against fixed time bounds. Walking
     // `startTime` forward past a page's last row would skip every other row
@@ -1392,14 +1404,17 @@ export class FuturesTradingAdapter {
     async getIncomePage({
         startTime,
         endTime = null,
+        incomeType = null,
         page = 1,
         limit = FUTURES_INCOME_PAGE_LIMIT,
     }) {
         const bounded = Math.min(Math.max(Number(limit) || FUTURES_INCOME_PAGE_LIMIT, 1), 1000);
         const selectedPage = Math.max(Math.floor(Number(page) || 1), 1);
+        const kind = typeof incomeType === 'string' && incomeType.length > 0 ? incomeType : null;
         const data = await this.#signedRequest('GET', '/fapi/v1/income', {
             startTime,
             ...(Number.isFinite(Number(endTime)) ? { endTime: Number(endTime) } : {}),
+            ...(kind === null ? {} : { incomeType: kind }),
             page: selectedPage,
             limit: bounded,
         });

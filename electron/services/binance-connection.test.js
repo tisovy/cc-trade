@@ -86,6 +86,12 @@ const moduleMocks = vi.hoisted(() => {
             setLeverage: vi.fn().mockResolvedValue({ symbol: 'BTCUSDT', leverage: 20 }),
             setMarginType: vi.fn().mockResolvedValue({ code: 200, msg: 'success' }),
             getAccountRefreshOperations: vi.fn(() => []),
+            // What an open position has already settled. Absent from this mock
+            // until 2026-08-20, which is how the desk shipped a read that asked
+            // the exchange for every kind of flow there is with nothing in the
+            // suite able to say so: the call threw, the walk caught it, and the
+            // pass recorded a failure nobody was asserting on.
+            getIncomePage: vi.fn().mockResolvedValue({ rows: [], full: false }),
             createUserDataStreamListenKey: vi.fn().mockResolvedValue('futures-listen-key'),
             renewUserDataStreamListenKey: vi.fn().mockResolvedValue({}),
         };
@@ -3552,7 +3558,19 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 ...command,
             }),
         });
-        await vi.advanceTimersByTimeAsync(5_000);
+        // Advanced until the handler is done rather than for a fixed span. A
+        // command's fan-out shares the admission queue with whatever else the
+        // desk had already asked for — the settled read a stream's opening
+        // schedules, for one — and a helper that advances a fixed five seconds
+        // hangs on `pending` the moment the two together need six. It stops at
+        // the first step where nothing is left, so a command that finishes
+        // inside the first span moves the clock exactly as far as it always did.
+        let settled = false;
+        const done = () => { settled = true; };
+        pending.then(done, done);
+        for (let step = 0; step < 6 && !settled; step += 1) {
+            await vi.advanceTimersByTimeAsync(5_000);
+        }
         await pending;
     };
 
@@ -3579,6 +3597,124 @@ describe('setupBinanceConnection user-data orchestration', () => {
         .map(([message]) => JSON.parse(message))
         .filter(payload => payload.futures_history)
         .map(payload => payload.futures_history);
+
+    const startFuturesDeskForSettled = async () => {
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1' },
+        });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        await vi.advanceTimersByTimeAsync(5_000);
+        await flushMicrotasks();
+    };
+
+    const incomeKindsAsked = () => moduleMocks.futuresAdapter.getIncomePage.mock.calls
+        .map(([request]) => request?.incomeType ?? null);
+
+    // The read that cost the operator 60 weight a minute asked for nothing in
+    // particular, and `/fapi/v1/income` says what that means: *"If incomeType is
+    // not sent, all kinds of flow will be returned."* Thirteen thousand rows a
+    // week on this account, of which forty-five were funding and the rest were
+    // per-fill realized PnL and commission the desk already had from the trade
+    // record.
+    //
+    // Asserted on what goes onto the wire, not on what comes back. A test that
+    // only checks the rows passes unchanged against a read that still asks for
+    // everything — which is exactly the test this file did not have.
+    it('asks the income record only for the kinds of flow no other record states', async () => {
+        await startFuturesDeskForSettled();
+
+        await runFuturesCommand({
+            action: 'account.refresh', clientOrderId: 'settled-narrow', symbol: 'BTCUSDT',
+        });
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+
+        const kinds = incomeKindsAsked();
+        expect(kinds.length).toBeGreaterThan(0);
+        // Never the whole record.
+        expect(kinds).not.toContain(null);
+        expect(kinds).not.toContain(undefined);
+        expect(new Set(kinds)).toEqual(new Set([
+            'FUNDING_FEE',
+            'INSURANCE_CLEAR',
+            'COMMISSION_REBATE',
+            'REFERRAL_KICKBACK',
+            'API_REBATE',
+            'FEE_RETURN',
+        ]));
+        // And never the two the fills already state.
+        expect(kinds).not.toContain('REALIZED_PNL');
+        expect(kinds).not.toContain('COMMISSION');
+    });
+
+    // Funding settles six times a day on this account and the account tick fires
+    // every thirty seconds while an order rests. Reading on the tick is 2 880
+    // requests a day to observe six events, and it was most of what the settled
+    // read cost.
+    it('does not re-read a complete reading because a clock asked', async () => {
+        await startFuturesDeskForSettled();
+
+        await runFuturesCommand({
+            action: 'account.refresh', clientOrderId: 'settled-first', symbol: 'BTCUSDT',
+        });
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        const afterFirst = moduleMocks.futuresAdapter.getIncomePage.mock.calls.length;
+        expect(afterFirst).toBeGreaterThan(0);
+
+        for (const clientOrderId of ['tick-1', 'tick-2', 'tick-3']) {
+            await runFuturesCommand({
+                action: 'account.refresh', clientOrderId, symbol: 'BTCUSDT',
+            });
+            await vi.advanceTimersByTimeAsync(30_000);
+            await flushMicrotasks();
+        }
+
+        expect(moduleMocks.futuresAdapter.getIncomePage.mock.calls.length).toBe(afterFirst);
+    });
+
+    // A guard, and named as one: it cannot fail on the reading before this
+    // change, because that one read on everything. Its job is the other
+    // direction — the cheap way to cut what a read costs is to defer it, and
+    // deferring the event itself would leave the column stale for as long as
+    // funding takes to settle again while every test about cost still passed.
+    // The deferral is for a clock. The charge is not a clock.
+    it('reads on the funding the exchange reports, whatever the clock says', async () => {
+        await startFuturesDeskForSettled();
+
+        await runFuturesCommand({
+            action: 'account.refresh', clientOrderId: 'settled-before-funding', symbol: 'BTCUSDT',
+        });
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        const beforeFunding = moduleMocks.futuresAdapter.getIncomePage.mock.calls.length;
+
+        const socket = moduleMocks.futuresUserDataSockets.at(-1);
+        expect(socket).toBeDefined();
+        socket.handlers.open();
+        await vi.advanceTimersByTimeAsync(5_000);
+        await flushMicrotasks();
+        const beforeCharge = moduleMocks.futuresAdapter.getIncomePage.mock.calls.length;
+
+        socket.handlers.message(JSON.stringify({
+            e: 'ACCOUNT_UPDATE', E: 9_000, T: 9_000,
+            a: {
+                m: 'FUNDING_FEE',
+                B: [{ a: 'USDT', wb: '990.5', cw: '990.5', bc: '-9.5' }],
+                P: [],
+            },
+        }));
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+
+        expect(beforeCharge).toBeGreaterThanOrEqual(beforeFunding);
+        expect(moduleMocks.futuresAdapter.getIncomePage.mock.calls.length)
+            .toBeGreaterThan(beforeCharge);
+    });
 
     it('answers a futures history command without touching account resources', async () => {
         setupBinanceConnection({

@@ -59,7 +59,18 @@ export const readFuturesMarkPriceEvent = (payload) => {
     const markPrice = typeof event.p === 'string' ? event.p : null;
     if (!symbol || markPrice === null || !(Number(markPrice) > 0)) return null;
     const eventTime = Number.isSafeInteger(event.E) ? event.E : null;
-    return { symbol, markPrice, updatedAt: eventTime };
+    // When the exchange will next charge this contract funding. Carried on every
+    // mark frame, once a second, and dropped here until 2026-08-20 — while the
+    // desk asked the income record every thirty seconds whether funding had
+    // happened yet. It is the schedule of the only event that moves the settled
+    // figure, delivered free on a public socket, and a contract does not
+    // announce it anywhere else.
+    //
+    // Zero is not a time. Contracts whose funding the exchange has not scheduled
+    // send it as 0, and treating that as an instant would put every settlement
+    // in 1970.
+    const nextSettlementAt = Number.isSafeInteger(event.T) && event.T > 0 ? event.T : null;
+    return { symbol, markPrice, updatedAt: eventTime, nextSettlementAt };
 };
 
 // The last price the contract traded at. Separate from the mark on purpose: the
@@ -97,6 +108,9 @@ export const createFuturesMarkPriceFeed = ({
     streamOrigin,
     createSocket,
     broadcast,
+    // Called with the contract whose funding has just settled, as the mark
+    // stream reports it. Optional: a desk that only wants prices passes nothing.
+    onSettlement = null,
     logger = console,
     clock = { setTimeout, clearTimeout },
     batchIntervalMs = FUTURES_MARK_PRICE_BATCH_MS,
@@ -114,6 +128,33 @@ export const createFuturesMarkPriceFeed = ({
     let stallReported = false;
     let published = false;
     const marks = new Map();
+    // The settlement each tracked contract is counting down to. Kept apart from
+    // `marks` on purpose: marks are cleared whenever the feed stops being able
+    // to vouch for a price — a close, a stall, a rebuild — and the countdown is
+    // not a price. Dropping it there would lose the baseline exactly across the
+    // gap where a settlement is most likely to have gone unobserved, which is
+    // the one case this exists for.
+    const settlements = new Map();
+
+    // A settlement is not a clock reading; it is the countdown moving on.
+    //
+    // Every mark frame says when this contract is next charged. While that
+    // instant stands still, nothing has happened. The moment it steps forward,
+    // the settlement it named has been made — and that is the event, observed
+    // rather than waited for, on a socket the desk is already paying nothing
+    // for. A contract seen for the first time only sets the baseline: it has
+    // announced its next charge, not made one.
+    const noteSettlementSchedule = (symbol, nextSettlementAt) => {
+        if (nextSettlementAt === null) return;
+        const held = settlements.get(symbol);
+        settlements.set(symbol, nextSettlementAt);
+        if (held === undefined || nextSettlementAt <= held) return;
+        try {
+            onSettlement?.(symbol);
+        } catch (error) {
+            logger.warn?.('Futures settlement observer failed:', error?.message);
+        }
+    };
 
     const publish = () => {
         broadcast({
@@ -269,6 +310,7 @@ export const createFuturesMarkPriceFeed = ({
                 // Liveness is the mark's alone: a contract can go minutes
                 // without a print and the feed is not stalled for it.
                 markSeenSinceCheck = true;
+                noteSettlementSchedule(mark.symbol, mark.nextSettlementAt);
                 const held = marks.get(mark.symbol);
                 marks.set(mark.symbol, {
                     ...held,
@@ -344,6 +386,12 @@ export const createFuturesMarkPriceFeed = ({
             if (stopped) return;
             const next = readFuturesPositionSymbols(positions);
             if (sameSymbols(next, symbols)) return;
+            // A contract with no position left is charged no funding, and its
+            // countdown would be stale if it is opened again days later — a
+            // stale baseline reads as a settlement on the first frame back.
+            for (const symbol of [...settlements.keys()]) {
+                if (!next.includes(symbol)) settlements.delete(symbol);
+            }
             disconnect({ retain: next });
             symbols = next;
             connect();
@@ -366,6 +414,7 @@ export const createFuturesMarkPriceFeed = ({
         stop() {
             stopped = true;
             symbols = [];
+            settlements.clear();
             disconnect();
         },
         // Test and diagnostic surface: what the feed believes it is watching.

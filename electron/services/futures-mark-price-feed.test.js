@@ -11,9 +11,22 @@ import {
 
 const STREAM_ORIGIN = 'wss://stream.test';
 
-const markFrame = (symbol, price, eventTime = 1_700_000_000_000) => JSON.stringify({
+const markFrame = (
+    symbol,
+    price,
+    eventTime = 1_700_000_000_000,
+    nextSettlementAt = 1_700_014_400_000,
+) => JSON.stringify({
     stream: `${symbol.toLowerCase()}@markPrice@1s`,
-    data: { e: 'markPriceUpdate', E: eventTime, s: symbol, p: price },
+    data: {
+        e: 'markPriceUpdate',
+        E: eventTime,
+        s: symbol,
+        p: price,
+        // The next funding time. Carried on every mark frame the exchange
+        // sends, so a fixture without it is not the frame the desk reads.
+        T: nextSettlementAt,
+    },
 });
 
 const tradeFrame = (symbol, price, tradeTime = 1_700_000_000_500) => JSON.stringify({
@@ -40,8 +53,11 @@ const createHarness = () => {
         for (const timer of pending) timer.callback();
     };
     const logger = { info: vi.fn(), warn: vi.fn() };
+    // Which contracts the feed said had just been charged funding.
+    const settlements = [];
     const feed = createFuturesMarkPriceFeed({
         streamOrigin: STREAM_ORIGIN,
+        onSettlement: symbol => settlements.push(symbol),
         createSocket: (url) => {
             const handlers = {};
             const socket = {
@@ -62,7 +78,7 @@ const createHarness = () => {
         logger,
         clock,
     });
-    return { feed, sockets, broadcasts, logger, timers, runTimers };
+    return { feed, sockets, broadcasts, logger, settlements, timers, runTimers };
 };
 
 describe('readFuturesPositionSymbols', () => {
@@ -85,7 +101,34 @@ describe('readFuturesPositionSymbols', () => {
 describe('readFuturesMarkPriceEvent', () => {
     it('reads a combined-stream mark update', () => {
         expect(readFuturesMarkPriceEvent(JSON.parse(markFrame('BTCUSDT', '60600.10'))))
-            .toEqual({ symbol: 'BTCUSDT', markPrice: '60600.10', updatedAt: 1_700_000_000_000 });
+            .toEqual({
+                symbol: 'BTCUSDT',
+                markPrice: '60600.10',
+                updatedAt: 1_700_000_000_000,
+                nextSettlementAt: 1_700_014_400_000,
+            });
+    });
+
+    // The schedule of the only event that moves an open position's settled
+    // money, delivered once a second on a socket that costs nothing — and
+    // dropped on the floor here until 2026-08-20, while the desk asked a
+    // weight-30 endpoint every thirty seconds whether it had happened yet.
+    it('carries when the contract is next charged funding', () => {
+        expect(readFuturesMarkPriceEvent(JSON.parse(
+            markFrame('BEATUSDT', '0.1876', 1_700_000_000_000, 1_700_014_400_000),
+        )).nextSettlementAt).toBe(1_700_014_400_000);
+    });
+
+    // Contracts whose funding the exchange has not scheduled send zero, and an
+    // instant of zero is 1970 — which every countdown would then read as long
+    // past.
+    it('refuses a settlement time the exchange did not state', () => {
+        expect(readFuturesMarkPriceEvent({
+            e: 'markPriceUpdate', E: 1, s: 'BTCUSDT', p: '1', T: 0,
+        }).nextSettlementAt).toBeNull();
+        expect(readFuturesMarkPriceEvent({
+            e: 'markPriceUpdate', E: 1, s: 'BTCUSDT', p: '1',
+        }).nextSettlementAt).toBeNull();
     });
 
     it('refuses anything that is not a usable mark update', () => {
@@ -144,6 +187,64 @@ describe('createFuturesMarkPriceFeed', () => {
         expect(harness.sockets).toHaveLength(1);
         expect(harness.sockets[0].url).toContain('bmtusdt@markPrice@1s');
         expect(harness.feed.trackedSymbols).toEqual(['BMTUSDT']);
+    });
+
+    // The event the settled read exists to observe, seen on a socket that costs
+    // nothing. Funding settles six times a day on this account and the desk was
+    // asking a weight-30 endpoint every thirty seconds whether it had happened —
+    // 2 880 requests a day to observe six events. The countdown moving on is the
+    // event; while it stands still, nothing has happened.
+    it('reports a settlement when the contract’s countdown steps forward', () => {
+        harness.feed.track([{ symbol: 'BEATUSDT', quantity: '677491' }]);
+        const socket = harness.sockets[0];
+
+        socket.emit('message', markFrame('BEATUSDT', '0.1876', 1_700_000_000_000, 1_700_014_400_000));
+        // The first frame only says when the next charge is due.
+        expect(harness.settlements).toEqual([]);
+
+        socket.emit('message', markFrame('BEATUSDT', '0.1877', 1_700_000_001_000, 1_700_014_400_000));
+        expect(harness.settlements).toEqual([]);
+
+        // 16:00 has been charged; the contract now counts down to 20:00.
+        socket.emit('message', markFrame('BEATUSDT', '0.1878', 1_700_014_401_000, 1_700_028_800_000));
+        expect(harness.settlements).toEqual(['BEATUSDT']);
+
+        // And not again for the same one.
+        socket.emit('message', markFrame('BEATUSDT', '0.1879', 1_700_014_402_000, 1_700_028_800_000));
+        expect(harness.settlements).toEqual(['BEATUSDT']);
+    });
+
+    // A guard on the test above rather than a second finding: against a feed with
+    // no countdown at all it passes trivially, because nothing is reported
+    // either way. What it holds is the false positive — a contract with no
+    // position left is charged no funding, and a countdown kept from the last
+    // time it was held reads as a settlement on the first frame after it is
+    // opened again.
+    it('forgets the countdown of a contract that left the set', () => {
+        harness.feed.track([{ symbol: 'BEATUSDT', quantity: '677491' }]);
+        harness.sockets[0].emit(
+            'message',
+            markFrame('BEATUSDT', '0.1876', 1_700_000_000_000, 1_700_014_400_000),
+        );
+        harness.feed.track([{ symbol: 'BMTUSDT', quantity: '-446082' }]);
+        harness.feed.track([{ symbol: 'BEATUSDT', quantity: '677491' }]);
+
+        harness.sockets.at(-1).emit(
+            'message',
+            markFrame('BEATUSDT', '0.19', 1_700_100_000_000, 1_700_100_800_000),
+        );
+        expect(harness.settlements).toEqual([]);
+    });
+
+    // The same shape of guard, at the feed rather than the reader. A contract
+    // whose funding the exchange has not scheduled sends zero; read as an
+    // instant, that is 1970, and every frame after the first would report a
+    // settlement that never happened.
+    it('reports nothing for a contract with no settlement scheduled', () => {
+        harness.feed.track([{ symbol: 'BMTUSDT', quantity: '-446082' }]);
+        harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.0352', 1_700_000_000_000, 0));
+        harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.0353', 1_700_000_001_000, 0));
+        expect(harness.settlements).toEqual([]);
     });
 
     it('broadcasts marks in one batch per interval', () => {
