@@ -59,6 +59,7 @@ import { FUTURES_WORKSTATION_EVENT_MAX_BYTES } from '../../src/utils/futuresWork
 // position opened, and both sides must agree on which flows are a position's at
 // all. One list, one place.
 import {
+    FUTURES_UNDERIVABLE_INCOME_TYPES,
     isFuturesSettledIncomeRow,
     readFuturesSettledIncome,
 } from '../../src/utils/futuresSettledMoney.js';
@@ -2027,14 +2028,13 @@ export function setupBinanceConnection({
     // plus these credits is the net cost — unchanged. If it is already net of
     // them, then the old reading added the credit twice and this one does not.
     // Correct under both, which is why it needs no measurement to be safe.
-    const FUTURES_SETTLED_INCOME_TYPES = Object.freeze([
-        'FUNDING_FEE',
-        'INSURANCE_CLEAR',
-        'COMMISSION_REBATE',
-        'REFERRAL_KICKBACK',
-        'API_REBATE',
-        'FEE_RETURN',
-    ]);
+    //
+    // Taken from the fold rather than written out here. The list was a literal
+    // in this file for one afternoon, which is one copy too many: the fold's
+    // table is what decides whether a kind can be derived from the fills, so a
+    // kind marked underivable there and missing here is money the column never
+    // sees and nothing anywhere fails.
+    const FUTURES_SETTLED_INCOME_TYPES = FUTURES_UNDERIVABLE_INCOME_TYPES;
     // Deliberately not the contract-discovery walk beside it. That walk answers
     // which contracts were traded, which moves when a trade is made, and it is
     // cached and page-budgeted for exactly that. This moves on every settlement.
@@ -2053,6 +2053,24 @@ export function setupBinanceConnection({
     // missed it", at a cadence sized to that being wrong rather than to how
     // often something asks.
     const FUTURES_SETTLED_RECONCILE_MS = 60 * 60 * 1000;
+    // How long a reading that has not yet reached its window's start may be
+    // asked for again.
+    //
+    // A reading still being built is due for whatever reason asks, because it
+    // has something to learn — but "whatever reason asks" is every fill on a
+    // busy desk, and a page is no longer one request. A pass that spends its
+    // whole budget is `MAX_REQUESTS` pages of `FUTURES_SETTLED_INCOME_TYPES`
+    // reads at weight 30: four by six by thirty, 720, against a limiter of 800 a
+    // minute. Unbounded, that phase starves every other account read on the
+    // desk — the exact complaint this change exists to answer, moved rather than
+    // removed. One pass a minute keeps the worst case inside the minute's
+    // budget, and it is the arithmetic that decides the page budget too: eight
+    // pages would no longer fit.
+    //
+    // On the shape this account actually has it costs nothing at all: a week of
+    // funding is forty-five rows, the first pass covers the window, and the
+    // reading is complete before a second pass could be asked for.
+    const FUTURES_SETTLED_EXTEND_MS = 60 * 1000;
     // Reasons that are the event itself. Everything else is somebody asking on a
     // clock and waits for the reconciliation window.
     const FUTURES_SETTLED_EVENT_REASONS = new Set(['funding', 'settlement', 'stream']);
@@ -2092,13 +2110,17 @@ export function setupBinanceConnection({
     // what cost 60 weight a minute to watch a number that changes six times a
     // day.
     //
-    // A reading still being built is never deferred, whatever asked for it: the
-    // deferral is for a reading that is complete and has nothing to learn.
+    // A reading still being built is deferred far less — a minute rather than an
+    // hour — because it has something to learn. It is not exempt: a pass is
+    // twenty-four reads when it spends its budget, and every fill asking for one
+    // is how the cost this change removed would come back somewhere else.
     const futuresSettledReadIsDue = (reason) => {
         if (FUTURES_SETTLED_EVENT_REASONS.has(reason)) return true;
         if (_futuresSettledReadAt === null) return true;
-        if (_futuresSettled.complete !== true) return true;
-        return Date.now() - _futuresSettledReadAt >= FUTURES_SETTLED_RECONCILE_MS;
+        const since = Date.now() - _futuresSettledReadAt;
+        // Still short of the window's start: due sooner, but not on every fill.
+        if (_futuresSettled.complete !== true) return since >= FUTURES_SETTLED_EXTEND_MS;
+        return since >= FUTURES_SETTLED_RECONCILE_MS;
     };
 
     const readFuturesSettledMoney = async (reason) => {

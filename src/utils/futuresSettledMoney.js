@@ -59,6 +59,18 @@ export const FUTURES_SETTLED_COMPONENTS = Object.freeze([
 // charge counted twice or not at all.
 const DERIVABLE_COMPONENTS = Object.freeze(['realizedPnl', 'commission'])
 
+// The kinds of flow no other record the desk reads can state, and therefore the
+// only ones worth paying `/fapi/v1/income` for. Derived from the table above
+// rather than written out again: a kind added there as underivable is a kind the
+// desk must start asking for, and a second copy of this list is a kind that is
+// folded but never read — money simply missing from the column, with nothing
+// failing. The main process imports this and asks for exactly these.
+export const FUTURES_UNDERIVABLE_INCOME_TYPES = Object.freeze(
+  Object.entries(COMPONENT_OF_INCOME_TYPE)
+    .filter(([, flow]) => flow.derivable !== true)
+    .map(([incomeType]) => incomeType),
+)
+
 const toFiniteNumber = (value) => {
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : null

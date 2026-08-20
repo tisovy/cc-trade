@@ -320,8 +320,8 @@ export const walkFuturesSettledIncome = async ({
         failed,
         // Whether the reading reaches the window's start. Not whether the walk
         // ran out of budget: a pass that spent nothing because everything was
-        // already held is complete, and one that spent all eight and is still
-        // three days short is not.
+        // already held is complete, and one that spent every page it had and is
+        // still three days short is not.
         complete: from !== null && from <= windowFrom,
     };
 };

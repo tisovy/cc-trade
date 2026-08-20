@@ -5,6 +5,7 @@ import {
     createFuturesProductionWorkstationLoadCandleHistoryRequest,
     createFuturesProductionWorkstationSubscribeRequest,
 } from '../../src/utils/futuresProductionWorkstationProtocol.js';
+import { FUTURES_UNDERIVABLE_INCOME_TYPES } from '../../src/utils/futuresSettledMoney.js';
 import {
     describeDeskDiagnosticEvent,
     readDeskDiagnosticCommandEvent,
@@ -3638,7 +3639,16 @@ describe('setupBinanceConnection user-data orchestration', () => {
         // Never the whole record.
         expect(kinds).not.toContain(null);
         expect(kinds).not.toContain(undefined);
-        expect(new Set(kinds)).toEqual(new Set([
+        // Against the fold's own table, not against a copy of it. Which kinds
+        // the fills can state is decided in one place, and a kind marked
+        // underivable there but not asked for here is money the column never
+        // sees with nothing failing anywhere.
+        expect(new Set(kinds)).toEqual(new Set(FUTURES_UNDERIVABLE_INCOME_TYPES));
+        // And what that table currently holds, written out. A guard, not a
+        // measure of anything: it cannot fail against the reading before this
+        // change. Its job is that adding a metered kind to the table is a
+        // decision someone makes rather than one the assertion above absorbs.
+        expect(new Set(FUTURES_UNDERIVABLE_INCOME_TYPES)).toEqual(new Set([
             'FUNDING_FEE',
             'INSURANCE_CLEAR',
             'COMMISSION_REBATE',
@@ -3714,6 +3724,56 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(beforeCharge).toBeGreaterThanOrEqual(beforeFunding);
         expect(moduleMocks.futuresAdapter.getIncomePage.mock.calls.length)
             .toBeGreaterThan(beforeCharge);
+    });
+
+    // A reading that has not reached its window's start is due sooner than a
+    // complete one — but not on every ask. A page is six reads now, so a pass
+    // that spends its budget is twenty-four requests at weight 30 against a
+    // limiter of 800 a minute, and a desk filling orders asks on every fill.
+    // Unbounded, the extending phase starves every other account read: the cost
+    // this change removed, moved rather than removed.
+    it('does not restart an unfinished reading on every ask', async () => {
+        // A page the reader calls full that advances the walk by three
+        // milliseconds. The window's start is a week away, so the reading stays
+        // short of it however many passes it is given.
+        moduleMocks.futuresAdapter.getIncomePage.mockImplementation(async ({ startTime }) => ({
+            rows: Array.from({ length: 3 }, (unused, index) => ({
+                symbol: 'BTCUSDT',
+                incomeType: 'FUNDING_FEE',
+                income: '-0.5',
+                asset: 'USDT',
+                time: startTime + index + 1,
+                tranId: `${startTime}-${index}`,
+            })),
+            full: true,
+        }));
+        await startFuturesDeskForSettled();
+
+        await runFuturesCommand({
+            action: 'account.refresh', clientOrderId: 'unfinished-first', symbol: 'BTCUSDT',
+        });
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        const afterFirst = moduleMocks.futuresAdapter.getIncomePage.mock.calls.length;
+        expect(afterFirst).toBeGreaterThan(0);
+
+        // Well inside the minute: the reading has something to learn and is
+        // still not read again for it.
+        await runFuturesCommand({
+            action: 'account.refresh', clientOrderId: 'unfinished-soon', symbol: 'BTCUSDT',
+        });
+        await flushMicrotasks();
+        expect(moduleMocks.futuresAdapter.getIncomePage.mock.calls.length).toBe(afterFirst);
+
+        // Past it: an incomplete reading is deferred, never abandoned.
+        await vi.advanceTimersByTimeAsync(90_000);
+        await runFuturesCommand({
+            action: 'account.refresh', clientOrderId: 'unfinished-later', symbol: 'BTCUSDT',
+        });
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        expect(moduleMocks.futuresAdapter.getIncomePage.mock.calls.length)
+            .toBeGreaterThan(afterFirst);
     });
 
     it('answers a futures history command without touching account resources', async () => {
