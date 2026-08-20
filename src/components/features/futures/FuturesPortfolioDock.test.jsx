@@ -238,7 +238,9 @@ describe('FuturesPortfolioDock', () => {
             total: 40,
             settlementAsset: 'USDT',
             otherAssets: [],
-            from: null,
+            // The position's start is known; the read simply has not walked back
+            // to it yet. That is a qualified figure, not an unattributable one.
+            from: 1_699_000_000_000,
             complete: false,
           },
         }}
@@ -249,6 +251,44 @@ describe('FuturesPortfolioDock', () => {
       .querySelector('.futures-workstation-dock-settled')
     expect(settled).toHaveClass('is-partial')
     expect(settled.getAttribute('title')).toContain('not the whole life of the position')
+  })
+
+  // The failure of 2026-08-20. With no start for the position, every amount the
+  // contract settled anywhere in the read's window was summed into the column —
+  // rounds closed days before the position was opened included — and printed as
+  // what this position had settled. The operator read it as a lie because it was
+  // one. A dash that explains itself is the only honest answer here.
+  it('states no settled figure at all when it cannot tell whose money it is', () => {
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[position]}
+        settledMoney={{
+          BTCUSDT: {
+            symbol: 'BTCUSDT',
+            realizedPnl: null,
+            funding: null,
+            commission: null,
+            insuranceClear: null,
+            total: null,
+            settlementAsset: 'USDT',
+            otherAssets: [],
+            from: null,
+            complete: false,
+          },
+        }}
+        settledWindow={{ from: 1_700_000_000_000, readAt: 1_700_000_600_000, complete: true }}
+      />,
+    )
+    const settled = screen.getByRole('table', { name: 'Open positions' })
+      .querySelector('.futures-workstation-dock-settled')
+    expect(settled.textContent).not.toMatch(/\d/)
+    const title = settled.getAttribute('title')
+    expect(title).toContain('unknown')
+    expect(title).toContain('does not reach back')
+    // And it must not read as "this position has settled nothing", which is a
+    // different answer the same dash is used for.
+    expect(title).not.toContain('Nothing settled')
   })
 
   // A BNB fee added into a USDT total is not a quantity of anything, and the
@@ -298,6 +338,41 @@ describe('FuturesPortfolioDock', () => {
     expect(settled).toHaveTextContent('—')
     expect(settled).toHaveClass('is-absent')
     expect(settled.getAttribute('title')).toContain('not read yet')
+  })
+
+  // The absence that cost the operator an afternoon on 2026-08-20. A read that
+  // answered and named other contracts leaves the same `—` as a read that never
+  // arrived, and while both said "not read yet" the row could not be asked which
+  // half of the path had failed.
+  it('separates a read that named other contracts from one that never answered', () => {
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[position]}
+        settledMoney={{
+          ETHUSDT: {
+            symbol: 'ETHUSDT',
+            realizedPnl: null,
+            funding: -1.5,
+            commission: null,
+            insuranceClear: null,
+            total: -1.5,
+            settlementAsset: 'USDT',
+            otherAssets: [],
+            from: 1,
+            complete: true,
+          },
+        }}
+        settledWindow={{ from: 1, readAt: Date.parse('2026-08-20T14:20:31.482Z'), complete: true }}
+      />,
+    )
+    const settled = screen.getByRole('table', { name: 'Open positions' })
+      .querySelector('.futures-workstation-dock-settled')
+    expect(settled).toHaveTextContent('—')
+    const title = settled.getAttribute('title')
+    expect(title).toContain('1 other contract')
+    expect(title).toContain('nothing against this one')
+    expect(title).not.toContain('not read yet')
   })
 
   // The estimate ticks five times a second. What it may cost is the position
@@ -1073,6 +1148,37 @@ describe('FuturesPortfolioDock', () => {
     expect(rendered.length).toBeGreaterThan(0)
     for (const name of new Set(rendered)) {
       expect(stylesheet, `${name} has no rule`).toContain(`.${name}`)
+    }
+  })
+
+  // The guard above reads static class names and simple templates, so it never
+  // saw the conditional modifiers — the ones spliced in by `${cond ? ' is-x' :
+  // ''}`. `.futures-workstation-dock-pnl.is-partial` was therefore set on every
+  // closed round whose funding the income read had not covered, and styled by
+  // nothing: only the settled column's twin rule existed. A round the desk knew
+  // was missing funding was drawn exactly like a whole one, and the operator
+  // compared four of them against the Binance app on 2026-08-20 with the screen
+  // saying nothing. The class assertions beside it passed the whole time — they
+  // asserted the class, never that it renders as anything.
+  it('styles every conditional modifier against the class it is spliced onto', () => {
+    const here = 'src/components/features/futures'
+    const stylesheet = readFileSync(`${here}/FuturesWorkstation.css`, 'utf8')
+    const pairs = []
+    for (const file of ['FuturesPortfolioDock.jsx', 'FuturesHistoryPanel.jsx']) {
+      const source = readFileSync(`${here}/${file}`, 'utf8')
+      for (const template of source.matchAll(/className=\{`([^`]*)`\}/g)) {
+        const body = template[1]
+        const base = body.match(/^(futures-[a-z0-9-]+)/)?.[1]
+        if (base === undefined) continue
+        for (const modifier of body.matchAll(/'\s+(is-[a-z0-9-]+)'/g)) {
+          pairs.push([file, base, modifier[1]])
+        }
+      }
+    }
+    expect(pairs.length).toBeGreaterThan(0)
+    for (const [file, base, modifier] of pairs) {
+      expect(stylesheet, `${file}: .${base}.${modifier} has no rule`)
+        .toContain(`.${base}.${modifier}`)
     }
   })
 

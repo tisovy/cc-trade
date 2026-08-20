@@ -94,7 +94,7 @@ describe('foldFuturesSettledMoney', () => {
     const [reading] = Object.values(foldFuturesSettledMoney([
       row({ income: '999', time: 500, tranId: '1' }),
       row({ income: '10', time: 2_000, tranId: '2' }),
-    ], { starts: { BEATUSDT: 1_000 } }))
+    ], { starts: { BEATUSDT: 1_000 }, from: 900 }))
     expect(reading.realizedPnl).toBeCloseTo(10, 6)
     expect(reading.complete).toBe(true)
     expect(reading.from).toBe(1_000)
@@ -108,6 +108,44 @@ describe('foldFuturesSettledMoney', () => {
     ], { starts: {} }))
     expect(reading.complete).toBe(false)
     expect(reading.from).toBeNull()
+  })
+
+  // Knowing when a position began is not the same as having read back to it. On
+  // 2026-08-20 the read covered one day of a seven-day window and every contract
+  // in it was reported completely accounted for, so the desk presented a total
+  // missing days of funding as though it were the whole of what the position had
+  // settled — and marked nothing.
+  it('is incomplete when the read does not reach back to the position', () => {
+    const [reading] = Object.values(foldFuturesSettledMoney([
+      row({ income: '10', time: 5_000, tranId: '1' }),
+    ], { starts: { BEATUSDT: 1_000 }, from: 4_000 }))
+    expect(reading.complete).toBe(false)
+    expect(reading.from).toBe(1_000)
+  })
+
+  // The absence of a stated coverage is not a coverage of zero. `Number(null)`
+  // is 0, and 0 is the epoch: every position that ever opened would read as
+  // covered by a read that stated nothing at all.
+  it('treats an unstated coverage as unknown rather than as the epoch', () => {
+    const [reading] = Object.values(foldFuturesSettledMoney([
+      row({ income: '10', time: 5_000, tranId: '1' }),
+    ], { starts: { BEATUSDT: 1_000 } }))
+    expect(reading.complete).toBe(false)
+  })
+
+  // A contract the read reached and found nothing against is a different answer
+  // from one it never reached far enough to look at.
+  it('separates nothing settled from not read back far enough', () => {
+    const reached = Object.values(foldFuturesSettledMoney([], {
+      starts: { BEATUSDT: 1_000 }, from: 900,
+    }))[0]
+    const short = Object.values(foldFuturesSettledMoney([], {
+      starts: { BEATUSDT: 1_000 }, from: 4_000,
+    }))[0]
+    expect(reached.total).toBeNull()
+    expect(reached.complete).toBe(true)
+    expect(short.total).toBeNull()
+    expect(short.complete).toBe(false)
   })
 
   // Binance charges commission in BNB whenever the account holds it. A BNB
@@ -130,6 +168,7 @@ describe('foldFuturesSettledMoney', () => {
   it('reports a position that has settled nothing without inventing zeros', () => {
     const [reading] = Object.values(foldFuturesSettledMoney([], {
       starts: { BEATUSDT: 1_000 },
+      from: 900,
     }))
     expect(reading.total).toBeNull()
     expect(reading.realizedPnl).toBeNull()
@@ -333,5 +372,100 @@ describe('readFuturesSettledIncomeFrame', () => {
     expect(readFuturesSettledIncomeFrame({
       rows: [], from: 1, readAt: 2, complete: false,
     }).complete).toBe(false)
+  })
+})
+
+// The failure of 2026-08-20. `starts` is what scopes a contract's income to the
+// position holding it; without it the fold summed the contract's whole covered
+// window — realized PnL of rounds closed days before the position was opened
+// included — and the column presented that as what the position had settled.
+describe('a contract whose position start is unknown', () => {
+  const T = Date.parse('2026-08-20T12:00:00.000Z')
+  const income = [
+    { symbol: 'BTCUSDT', incomeType: 'REALIZED_PNL', income: '900', asset: 'USDT', time: T - 3 * 86400000, tranId: '1' },
+    { symbol: 'BTCUSDT', incomeType: 'COMMISSION', income: '-40', asset: 'USDT', time: T - 3 * 86400000, tranId: '2' },
+    { symbol: 'BTCUSDT', incomeType: 'FUNDING_FEE', income: '-4.7', asset: 'USDT', time: T - 3600000, tranId: '3' },
+  ]
+
+  it('states no amount at all rather than the contract\u2019s own history', () => {
+    const folded = foldFuturesSettledMoney(income, { starts: {}, from: T - 7 * 86400000 })
+    const reading = folded.BTCUSDT
+    expect(reading).toBeDefined()
+    expect(reading.total).toBeNull()
+    // Not one component either: each of them would be the contract's.
+    expect(reading.realizedPnl).toBeNull()
+    expect(reading.funding).toBeNull()
+    expect(reading.commission).toBeNull()
+    // And `from` stays absent, which is what a surface reads to say why.
+    expect(reading.from).toBeNull()
+    expect(reading.complete).toBe(false)
+  })
+
+  it('still states the position\u2019s own money once the start is known', () => {
+    const folded = foldFuturesSettledMoney(income, {
+      starts: { BTCUSDT: T - 6 * 3600000 },
+      from: T - 7 * 86400000,
+    })
+    const reading = folded.BTCUSDT
+    // Only the funding charged since the position opened; the closed round's
+    // +900 and its commission belong to a position that no longer exists.
+    expect(reading.funding).toBe(-4.7)
+    expect(reading.realizedPnl).toBeNull()
+    expect(reading.total).toBe(-4.7)
+    expect(reading.complete).toBe(true)
+  })
+})
+
+// Binance hands `tranId` back as a JSON integer; one past 2^53 has lost digits
+// before it is parsed, and the adapter refuses a rounded identity rather than
+// page from it. The rows then arrive with none, and keying them all alike is how
+// twenty funding charges became one.
+describe('rows the exchange gave no usable identity to', () => {
+  const charge = (at, income) => ({
+    symbol: 'BEATUSDT',
+    incomeType: 'FUNDING_FEE',
+    income,
+    asset: 'USDT',
+    time: Date.parse(at),
+    tranId: null,
+  })
+
+  it('keeps each of them, and still counts a repeated one once', () => {
+    const rows = [
+      charge('2026-08-19T20:00:00.000Z', '-32.9282'),
+      charge('2026-08-20T00:00:00.000Z', '-34.8880'),
+      charge('2026-08-20T04:00:00.000Z', '-10.8291'),
+    ]
+    const read = readFuturesSettledIncome(rows)
+    expect(read).toHaveLength(3)
+    expect(read.reduce((sum, entry) => sum + entry.amount, 0)).toBeCloseTo(-78.6453, 4)
+    // A page boundary inside one millisecond hands the same row back twice.
+    const withRepeat = readFuturesSettledIncome([...rows, charge('2026-08-20T04:00:00.000Z', '-10.8291')])
+    expect(withRepeat).toHaveLength(3)
+  })
+
+  // Funding cannot collide with itself — a contract is charged once per
+  // settlement. Commission can, and on the account this desk runs on it does:
+  // every fill is charged, and filling the same size at the same price twice in
+  // one millisecond pays the same fee twice. Told apart by the fill each was
+  // charged on, which the exchange states and which is small enough to survive
+  // being parsed.
+  const fee = (tradeId) => ({
+    symbol: 'BEATUSDT',
+    incomeType: 'COMMISSION',
+    income: '-0.0141',
+    asset: 'USDT',
+    time: Date.parse('2026-08-20T09:14:22.418Z'),
+    tranId: null,
+    tradeId: String(tradeId),
+  })
+
+  it('keeps two identical charges the exchange made on two different fills', () => {
+    const read = readFuturesSettledIncome([fee(11884301), fee(11884302), fee(11884303)])
+    expect(read).toHaveLength(3)
+    expect(read.reduce((sum, entry) => sum + entry.amount, 0)).toBeCloseTo(-0.0423, 4)
+    // The same fill handed back twice is still one charge.
+    expect(readFuturesSettledIncome([fee(11884301), fee(11884302), fee(11884301)]))
+      .toHaveLength(2)
   })
 })

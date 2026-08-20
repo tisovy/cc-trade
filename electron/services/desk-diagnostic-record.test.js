@@ -160,6 +160,145 @@ describe('describeDeskDiagnosticEvent', () => {
         })).toBeNull();
     });
 
+    // What an open position has already been charged, counted but never priced.
+    // The column built on this read was empty for a whole afternoon and the
+    // record could not say whether the read had fired, been refused, or been
+    // answered and sent to nobody.
+    it('keeps a settled-income read as counts, and never the money it counted', () => {
+        expect(describeDeskDiagnosticEvent('settled', {
+            reason: 'refresh',
+            order: 'ascending',
+            pages: 1,
+            rows: 214,
+            kept: 198,
+            contracts: 6,
+            fundingRows: 12,
+            recipients: 1,
+            coveredMs: 604800000,
+            outcome: 'complete',
+            code: null,
+            funding: '-229.43',
+            total: '-264.38',
+        })).toEqual({
+            kind: 'settled',
+            reason: 'refresh',
+            order: 'ascending',
+            pages: 1,
+            rows: 214,
+            kept: 198,
+            contracts: 6,
+            fundingRows: 12,
+            recipients: 1,
+            coveredMs: 604800000,
+            outcome: 'complete',
+            code: null,
+        });
+    });
+
+    // The account read's vocabulary has no word for a fill or a funding charge,
+    // because neither is a reason to read the signed account. Sharing that list
+    // would have dropped the two lines this record exists to carry.
+    it('keeps the settled reasons the account read has no word for', () => {
+        for (const reason of ['stream', 'fill', 'funding', 'refresh']) {
+            expect(describeDeskDiagnosticEvent('settled', {
+                reason,
+                order: 'ascending',
+                pages: 1,
+                rows: 0,
+                kept: 0,
+                contracts: 0,
+                fundingRows: 0,
+                recipients: 0,
+                coveredMs: 0,
+                outcome: 'complete',
+                code: null,
+            })).toMatchObject({ kind: 'settled', reason });
+        }
+        // And still a closed vocabulary: `bootstrap` reads the account, never
+        // this.
+        expect(describeDeskDiagnosticEvent('settled', {
+            reason: 'bootstrap',
+            order: 'ascending',
+            pages: 1,
+            rows: 0,
+            kept: 0,
+            contracts: 0,
+            fundingRows: 0,
+            recipients: 0,
+            coveredMs: 0,
+            outcome: 'complete',
+            code: null,
+        })).toBeNull();
+    });
+
+    // The ordering the exchange answers in is the one fact the whole backward walk
+    // rests on, and the endpoint documents it nowhere. A record that accepted any
+    // word for it would answer the question with whatever the desk believed, which
+    // is what it was believing already.
+    it('keeps the measured wire ordering, and only the four it can mean', () => {
+        for (const order of ['ascending', 'descending', 'flat', 'none']) {
+            expect(describeDeskDiagnosticEvent('settled', {
+                reason: 'refresh',
+                order,
+                pages: 1,
+                rows: 2,
+                kept: 2,
+                contracts: 1,
+                fundingRows: 1,
+                recipients: 1,
+                coveredMs: 1000,
+                outcome: 'partial',
+                code: null,
+            })).toMatchObject({ order });
+        }
+        for (const order of ['unknown', 'oldest-first', '', 'ASCENDING']) {
+            expect(describeDeskDiagnosticEvent('settled', {
+                reason: 'refresh',
+                order,
+                pages: 1,
+                rows: 2,
+                kept: 2,
+                contracts: 1,
+                fundingRows: 1,
+                recipients: 1,
+                coveredMs: 1000,
+                outcome: 'partial',
+                code: null,
+            })).toBeNull();
+        }
+    });
+
+    // A refusal keeps its cause; a refusal the exchange named in a shape this
+    // file will not repeat still keeps the fact that it happened.
+    it('keeps why a settled read ended badly, and the line when it cannot', () => {
+        expect(describeDeskDiagnosticEvent('settled', {
+            reason: 'fill',
+            order: 'ascending',
+            pages: 2,
+            rows: 1000,
+            kept: 0,
+            contracts: 0,
+            fundingRows: 0,
+            recipients: 1,
+            coveredMs: 604800000,
+            outcome: 'failed',
+            code: 'ETIMEDOUT',
+        })).toMatchObject({ outcome: 'failed', code: 'ETIMEDOUT' });
+        expect(describeDeskDiagnosticEvent('settled', {
+            reason: 'fill',
+            order: 'ascending',
+            pages: 0,
+            rows: 0,
+            kept: 0,
+            contracts: 0,
+            fundingRows: 0,
+            recipients: 1,
+            coveredMs: 604800000,
+            outcome: 'abandoned',
+            code: 'gave up',
+        })).toMatchObject({ outcome: 'abandoned', code: null });
+    });
+
     it('keeps only bounded basis-point estimate aggregates and counters', () => {
         expect(describeDeskDiagnosticEvent('estimate', {
             value: 'liquidation-price',

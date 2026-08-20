@@ -1288,6 +1288,10 @@ const useFuturesTrading = ({
     if (state.settledIncome === null) return null
     return foldFuturesSettledMoney(state.settledIncome.rows, {
       starts: openPositionStarts,
+      // How far back the read actually reached. Without it a contract is
+      // reported complete on the strength of knowing when its position began,
+      // which says nothing about whether the charges since then were read.
+      from: state.settledIncome.from,
     })
   }, [state.settledIncome, openPositionStarts])
 

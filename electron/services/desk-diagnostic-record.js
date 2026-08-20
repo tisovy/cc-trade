@@ -88,6 +88,20 @@ const EVENT = /^(?:started|stopped)$/;
 // text: a reason the record does not know is a read site that never stated one,
 // and losing that line is how it says so.
 const READ_REASON = new RegExp(`^(?:${FUTURES_ACCOUNT_READ_REASONS.join('|')})$`);
+// Why the desk read what an open position has already settled. Its own closed
+// vocabulary rather than the account read's above: these are the events that
+// move settled money, and three of them — a fill that realized something, a
+// funding charge, the stream coming up — are not reasons to read the signed
+// account at all. Sharing one list would have dropped every line whose reason
+// was `fill` or `funding`, which is most of them.
+const SETTLED_REASON = /^(?:stream|fill|funding|refresh)$/;
+// Which way round the exchange hands back a page of the income record. The whole
+// backward walk rests on it being oldest-first — a full page is then the *oldest*
+// thousand rows of the range asked for — and the endpoint's documentation does
+// not state it either way. Assumed once already, and an assumption that decides
+// which rows the desk holds is not something to assume twice. Measured on the
+// wire, per pass, from the rows themselves.
+const SETTLED_ORDER = /^(?:ascending|descending|flat|none)$/;
 // The desk's own name for a stream of market data — `depth`, `candles`,
 // `trades`, `ticker`. Same shape as the workstation protocol's resource names.
 const RESOURCE = /^[a-z][a-zA-Z0-9]{0,31}$/;
@@ -257,6 +271,46 @@ const RECORDED_FIELDS = Object.freeze({
         ['reason', text(READ_REASON)],
         ['resources', count],
         ['weight', count],
+    ]),
+    // One line per pass over the income record — what the open positions have
+    // already been charged or paid. Counts only, never the money itself: how
+    // many pages were walked, how many rows the exchange answered with, how many
+    // of those are a position's own money, how many contracts they name, and how
+    // many renderers were listening when the answer went out.
+    //
+    // Written because on 2026-08-20 the operator's column was empty and nothing
+    // in this file could say whether the read had fired, whether the exchange
+    // had answered it, or whether what came back ever left the process. A figure
+    // that disagrees with the exchange is a bug with a trail; an absent one had
+    // none, and the whole path had to be read by hand to find that out.
+    settled: Object.freeze([
+        ['reason', text(SETTLED_REASON)],
+        // What the exchange's own ordering was this pass, measured rather than
+        // assumed. `none` means no page carried two rows to compare.
+        ['order', text(SETTLED_ORDER)],
+        ['pages', count],
+        ['rows', count],
+        ['kept', count],
+        ['contracts', count],
+        // How many of the held rows are funding charges. Split out from `rows`
+        // because on 2026-08-20 the column beside an open position printed its
+        // commission exactly and its funding not at all — and a single total of
+        // rows held cannot tell "the read never got them" from "they were
+        // dropped on the way to the screen".
+        ['fundingRows', count],
+        // Zero recipients is the failure that reads exactly like a read which
+        // never happened: the answer was correct and went nowhere.
+        ['recipients', count],
+        // How much of the window the held rows actually reach, as a span rather
+        // than a clock reading — the same rule that keeps every other amount out
+        // of this file, and the number that would have named the defect on the
+        // first line: a reading covering one day of a seven-day window.
+        ['coveredMs', count],
+        // `complete` reaches the window's start, `partial` stopped at the request
+        // budget or the row ceiling, `failed` was refused, `abandoned` was
+        // overtaken by a newer activation before it could answer.
+        ['outcome', text(OUTCOME)],
+        ['code', tolerated(text(CODE))],
     ]),
     // The calculator's amounts never arrive here. One event is the aggregate
     // distance for one value in one pass, plus the count that could not be

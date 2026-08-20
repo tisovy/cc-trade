@@ -50,7 +50,25 @@ const toFiniteNumber = (value) => {
 // collapse a real commission row onto the realized-PnL row it was charged
 // beside — and a page boundary inside one millisecond hands the same row back
 // twice, which is a funding charge counted twice if nothing catches it.
-const incomeRowKey = row => `${row?.incomeType ?? ''}:${row?.tranId ?? ''}`
+// Falls back to what the row *is* when the exchange gave it no identity this
+// desk can use — a `tranId` past 2^53 has lost digits before it is parsed, and
+// the adapter refuses a rounded one. Keying every such row alike is what left the
+// desk holding one funding charge out of twenty on 2026-08-20.
+//
+// The fill the row was charged on is part of that fallback, because contract,
+// kind, instant and amount are not enough to tell two commission rows apart: an
+// account filling the same size at the same price twice in one millisecond pays
+// the same fee twice, and without `tradeId` the second charge is read as a
+// repeat of the first and dropped. Funding names no fill and needs none — a
+// contract is charged once per settlement.
+const incomeRowKey = (row) => {
+  const identity = row?.tranId
+  if (identity !== null && identity !== undefined && identity !== '') {
+    return `${row?.incomeType ?? ''}:${identity}`
+  }
+  return `${row?.incomeType ?? ''}:${row?.symbol ?? ''}:${row?.time ?? ''}`
+    + `:${row?.income ?? ''}:${row?.tradeId ?? ''}`
+}
 
 // Whether an income row, as the exchange states it, is one a position can be
 // charged or credited with.
@@ -100,11 +118,12 @@ export const readFuturesSettledIncome = (rows) => {
     // A flow with no contract against it cannot be attributed to a position, and
     // an unreadable amount is not a zero.
     if (amount === null || symbol === null) continue
-    // Only a row the exchange gave an identity to can be deduplicated. One
-    // without is kept rather than dropped: an uncounted charge is a wrong total
-    // just as surely as a doubled one, and the identity is the exchange's to
-    // provide.
-    if (row?.tranId !== null && row?.tranId !== undefined) {
+    // Every row is deduplicated, by the exchange's identity where there is one
+    // and by what the row is where there is not. Skipping the check for rows
+    // without an identity let a page boundary inside one millisecond count a
+    // funding charge twice; keying them all alike let a Map keep one of twenty.
+    // Both are wrong totals, and the natural key is wrong in neither direction.
+    {
       const key = incomeRowKey(row)
       if (seen.has(key)) continue
       seen.add(key)
@@ -197,19 +216,41 @@ const addAmount = (totals, component, amount) => {
 /**
  * Folds settled income into one reading per contract.
  *
- * `from` bounds each contract's window at the moment its open position began, so
- * that what is stated is the position's own settled money rather than the
- * account's history on that contract. A contract with no known start is not
- * excluded — it is reported with `complete: false`, and the surface says the
- * reading covers the read's window rather than the position's life. A partial
- * total presented as a whole one is the failure this guards against; a partial
- * total that says so is useful.
+ * `starts` bounds each contract's window at the moment its open position began,
+ * so that what is stated is the position's own settled money rather than the
+ * account's history on that contract.
+ *
+ * A contract with **no** known start states no total at all. Until 2026-08-20 it
+ * stated one anyway — the sum of everything the contract settled anywhere in the
+ * read's window — and that is not a partial answer to the question the column
+ * asks, it is a whole answer to a different one: a round closed three days ago
+ * for +900 and one closed two days ago for -900 both land in the figure beside a
+ * position opened this morning. The operator read -34.7 against a position that
+ * had settled -34.7 of its own and called it a lie, and it was. `from` is null
+ * for such a contract, which is what a surface tests to say why the figure is
+ * absent.
+ *
+ * A partial total that says so is useful; a total of the wrong thing is not.
  *
  * Assets are kept apart. Binance charges commission in BNB whenever the account
  * holds it, and a BNB amount added into a USDT total is not a quantity of
  * anything. The settlement asset leads; anything else is stated in its own.
  */
-export const foldFuturesSettledMoney = (income, { starts = {}, settlementAsset = 'USDT' } = {}) => {
+export const foldFuturesSettledMoney = (
+  income,
+  { starts = {}, from = null, settlementAsset = 'USDT' } = {},
+) => {
+  // Not `toFiniteNumber` on its own: `Number(null)` is 0, and a coverage of zero
+  // is the epoch — every position that ever opened would read as covered by a
+  // read that stated nothing at all. The absence has to be kept as an absence.
+  const covered = from === null || from === undefined ? null : toFiniteNumber(from)
+  // Knowing when a position began is not the same as having read back to it.
+  // Until 2026-08-20 this asked only the first question, so a read that had
+  // covered a single day of its window reported every contract in it as
+  // completely accounted for — and the desk believed its own truncated reading
+  // rather than marking it. Both halves are required: the start must be known,
+  // and the read must reach it.
+  const reaches = start => covered !== null && covered <= start
   const byContract = new Map()
   for (const entry of readFuturesSettledIncome(income)) {
     const start = starts[entry.symbol]
@@ -221,9 +262,15 @@ export const foldFuturesSettledMoney = (income, { starts = {}, settlementAsset =
         settled: emptyTotals(),
         byAsset: new Map(),
         from: known ? start : null,
-        complete: known,
+        complete: known && reaches(start),
       })
     }
+    // Nothing is attributed to a contract whose position start is unknown. The
+    // contract is still recorded, so a surface can tell "the read answered
+    // nothing about this one" from "the read cannot say which of this contract's
+    // money is this position's" — but no amount is accumulated, because every
+    // amount here would be the contract's rather than the position's.
+    if (!known) continue
     const held = byContract.get(entry.symbol)
     const asset = entry.asset ?? settlementAsset
     if (asset === settlementAsset) {
@@ -243,7 +290,7 @@ export const foldFuturesSettledMoney = (income, { starts = {}, settlementAsset =
       settled: emptyTotals(),
       byAsset: new Map(),
       from: start,
-      complete: true,
+      complete: reaches(start),
     })
   }
   const readings = {}
@@ -272,8 +319,10 @@ export const foldFuturesSettledMoney = (income, { starts = {}, settlementAsset =
             .reduce((sum, name) => sum + totals[name], 0),
         }))
         .sort((left, right) => (left.asset < right.asset ? -1 : 1))),
-      // Whether this covers the position's life or only as far back as the read
-      // reached.
+      // When this reading starts: the moment the position began. Null when the
+      // desk could not establish that — and then every amount above is null too,
+      // because a figure bounded by nothing is the contract's history, not the
+      // position's.
       from: held.from,
       complete: held.complete,
     })

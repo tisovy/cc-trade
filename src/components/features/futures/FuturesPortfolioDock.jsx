@@ -59,9 +59,31 @@ const settledBreakdown = totals => Object.entries(SETTLED_COMPONENT_LABELS)
   .filter(([name]) => totals?.[name] !== null && totals?.[name] !== undefined)
   .map(([name, label]) => `${formatSignedUsdt(totals[name])} ${label}`)
 
-const settledTitle = (settled, window) => {
+// Three different absences wear the same `—`, and until 2026-08-20 they wore the
+// same sentence too: a read that never arrived, a read that arrived and named
+// other contracts, and a contract the read reached with nothing charged against
+// it. The operator reported an empty column and the desk could not say which of
+// the three it was, so the whole path had to be read by hand. They are named
+// apart here for the same reason the journal now counts the read: an absence
+// that explains itself is a fault with a trail.
+const settledTitle = (settled, window, read) => {
   if (settled === null) {
-    return 'What this position has already settled — not read yet'
+    if (read === null) {
+      return 'What this position has already settled — not read yet'
+    }
+    return 'What this position has already settled — the income read answered '
+      + `${read.contracts === 0 ? 'no contracts' : `${read.contracts} other contract${read.contracts === 1 ? '' : 's'}`}`
+      + ` and nothing against this one${window?.readAt ? `, read ${exactFuturesDeskTime(window.readAt)}` : ''}`
+  }
+  // Two absences that print the same dash. A position that has settled nothing
+  // is an answer; a contract the desk cannot tell this position's money from the
+  // rest of the account's is a refusal to guess, and until 2026-08-20 it was not
+  // a refusal at all — the column stated the contract's whole week against a
+  // position opened that morning.
+  if (settled.from === null) {
+    return 'What this position has already settled — unknown: the fills read does not '
+      + 'reach back to when this position was opened, so the desk cannot tell which of '
+      + 'this contract’s realized PnL, funding and commission is this position’s'
   }
   if (settled.total === null && settled.otherAssets.length === 0) {
     return 'Nothing settled on this position yet — no realized PnL, funding or commission against it'
@@ -149,6 +171,13 @@ export const FuturesPortfolioDock = ({
 }) => {
   const [ordersTab, setOrdersTab] = useState('working')
   const [isCollapsed, setIsCollapsed] = useState(false)
+  // Whether an income read has answered at all, and what it named. A row with no
+  // reading of its own is a different fault depending on this: null here means
+  // nothing ever arrived, and a contract count means something did and this
+  // contract was not in it.
+  const settledRead = useMemo(() => (settledMoney === null
+    ? null
+    : Object.freeze({ contracts: Object.keys(settledMoney).length })), [settledMoney])
   const describedPositions = useMemo(() => positions.map(position => ({
     position,
     presentation: describeFuturesPosition(position),
@@ -462,7 +491,7 @@ export const FuturesPortfolioDock = ({
                   role="cell"
                   className={`futures-workstation-dock-settled is-${settledToneOf(settled)}${
                     settled !== null && settled.complete === false ? ' is-partial' : ''}`}
-                  title={settledTitle(settled, settledWindow)}
+                  title={settledTitle(settled, settledWindow, settledRead)}
                 >
                   {settled === null || settled.total === null
                     ? '—'

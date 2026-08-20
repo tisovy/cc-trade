@@ -58,7 +58,14 @@ import { FUTURES_WORKSTATION_EVENT_MAX_BYTES } from '../../src/utils/futuresWork
 // position's settled money runs there, beside the fills that say when each
 // position opened, and both sides must agree on which flows are a position's at
 // all. One list, one place.
-import { readFuturesSettledIncome } from '../../src/utils/futuresSettledMoney.js';
+import {
+    isFuturesSettledIncomeRow,
+    readFuturesSettledIncome,
+} from '../../src/utils/futuresSettledMoney.js';
+import {
+    emptyFuturesSettledState,
+    walkFuturesSettledIncome,
+} from './futures-settled-income-walk.js';
 import {
     SPOT_REST_CONNECTION_POOL,
     createPooledSpotRestAgent,
@@ -1996,72 +2003,184 @@ export function setupBinanceConnection({
     // which contracts were traded, which moves when a trade is made, and it is
     // cached and page-budgeted for exactly that. This moves on every fill.
     const FUTURES_SETTLED_READ_DELAY_MS = 1200;
-    const FUTURES_SETTLED_MAX_PAGES = 4;
     let _futuresSettledReadTimer = null;
     let _futuresSettledReadPending = false;
+    // What the desk holds, and the contiguous span it holds it for. Rows are
+    // kept across passes: re-reading a held span on every pass is what spends the
+    // budget that should be extending coverage, and it is why a busy account
+    // stayed permanently short of the rows on its own screen. The walk that
+    // extends it is in `futures-settled-income-walk.js`, where a test can drive
+    // it — the defect was in the walk, and a walk inside this service was not
+    // something anything could drive.
+    let _futuresSettled = emptyFuturesSettledState();
+    let _futuresSettledSent = null;
+    // The pass currently walking, and the reason that asked for another while it
+    // was walking.
+    let _futuresSettledInFlight = null;
+    let _futuresSettledAgain = null;
+
+    const clearFuturesSettledMoney = () => {
+        _futuresSettled = emptyFuturesSettledState();
+        _futuresSettledSent = null;
+    };
 
     const readFuturesSettledMoney = async (reason) => {
-        if (futuresTradingAdapter === null) return;
         const activation = futuresActivationGeneration;
         // The desk's own history window, floored by how far Binance keeps income
         // at all. Asking past the exchange's reach is not answered with older
         // rows — it is answered with silence, which reads exactly like a
         // position that was never charged anything.
         const now = Date.now();
-        const from = Math.max(
+        const windowFrom = Math.max(
             now - FUTURES_HISTORY_WINDOW_MS,
             now - FUTURES_INCOME_HISTORY_REACH_MS,
         );
-        const rows = [];
-        let complete = true;
-        for (let page = 0; page < FUTURES_SETTLED_MAX_PAGES; page += 1) {
-            if (activation !== futuresActivationGeneration) return;
-            let answered = null;
-            try {
-                answered = await futuresRestLimiter.execute(
-                    () => (activation === futuresActivationGeneration
-                        ? futuresTradingAdapter.getIncomePage({
-                            startTime: from,
-                            endTime: now,
-                            page: page + 1,
-                        })
-                        : null),
-                    FUTURES_INCOME_READ_WEIGHT,
-                );
-            } catch (error) {
-                // The rows already in hand are money the desk can account for.
-                // Throwing them away because the third page timed out would
-                // replace a partial reading that says so with no reading at all.
-                logger.warn('[futures-settled] income read failed:', error?.code || error?.message);
-                complete = false;
-                break;
-            }
-            if (answered === null) return;
-            rows.push(...answered.rows);
-            if (!answered.full) break;
-            if (page === FUTURES_SETTLED_MAX_PAGES - 1) complete = false;
+        let requests = 0;
+        let failureCode = null;
+        // Which way round the exchange hands a page back. Every decision the walk
+        // makes about a full page — that it is the *oldest* thousand rows of the
+        // range, so the newest part is still unread — rests on this, and the
+        // endpoint's documentation states it nowhere. Read off the wire instead of
+        // assumed: the first page of the pass that carries two rows answers it.
+        let pageOrder = 'none';
+        // Every way out of this read states itself. The read that says nothing is
+        // the one that cost the operator an afternoon: an empty column could not
+        // be told from a read that never fired, one the exchange refused, one a
+        // newer activation overtook — or, as it turned out, one that spent its
+        // whole budget on the wrong end of the window.
+        const recordSettled = (outcome, code = null) => {
+            const held = [..._futuresSettled.rows.values()];
+            diagnosticRecord.record('settled', {
+                reason,
+                order: pageOrder,
+                pages: requests,
+                rows: held.length,
+                kept: held.length,
+                contracts: new Set(held.map(row => row.symbol)).size,
+                fundingRows: held.filter(row => row.incomeType === 'FUNDING_FEE').length,
+                recipients: rendererConnections.size,
+                // How much of the window the held rows actually reach, as a span
+                // rather than a clock reading. This is the number that would have
+                // named the defect on the first line.
+                coveredMs: _futuresSettled.from === null || _futuresSettled.to === null
+                    ? 0
+                    : Math.max(0, _futuresSettled.to - _futuresSettled.from),
+                outcome,
+                code,
+            });
+        };
+        // Recorded rather than returned silently: a desk with no futures adapter
+        // and a desk whose read was never scheduled leave the same empty column,
+        // and only this line tells them apart.
+        if (futuresTradingAdapter === null) {
+            recordSettled('abandoned', 'NO_ADAPTER');
+            return;
         }
-        if (activation !== futuresActivationGeneration) return;
-        broadcastToRenderers({
-            type: 'futures_settled_income',
-            version: 1,
-            // Only the flows a position can be charged or credited with, and
-            // only those the exchange named a contract on. A transfer into the
-            // futures wallet is the operator moving money, not a position
-            // earning it.
-            //
-            // The renderer reads these again on arrival and the fold reads them
-            // once more; the reader is idempotent so that costs nothing. It was
-            // not, and every row was dropped between here and the screen.
-            rows: readFuturesSettledIncome(rows),
-            // What the reading covers, so a surface can say whether it reaches
-            // back to when a position was opened. Never implied from the rows:
-            // a contract with no row inside the window is indistinguishable from
-            // one the read never reached.
-            from,
-            readAt: now,
-            complete,
-            reason,
+        const current = () => activation === futuresActivationGeneration;
+        const walked = await walkFuturesSettledIncome({
+            now,
+            windowFrom,
+            held: _futuresSettled,
+            isCurrent: current,
+            keepRow: isFuturesSettledIncomeRow,
+            readPage: async ({ startTime, endTime }) => {
+                try {
+                    const page = await futuresRestLimiter.execute(
+                        () => (current()
+                            ? futuresTradingAdapter.getIncomePage({ startTime, endTime, page: 1 })
+                            : null),
+                        FUTURES_INCOME_READ_WEIGHT,
+                    );
+                    if (pageOrder === 'none' && (page?.rows?.length ?? 0) > 1) {
+                        const first = page.rows[0]?.time;
+                        const last = page.rows[page.rows.length - 1]?.time;
+                        pageOrder = first < last ? 'ascending'
+                            : first > last ? 'descending'
+                                : 'flat';
+                    }
+                    return page;
+                } catch (error) {
+                    // The rows already held are money the desk can account for.
+                    // Throwing them away because one slice timed out would
+                    // replace a partial reading that says so with no reading at
+                    // all, so the refusal ends the walk and keeps its result.
+                    logger.warn('[futures-settled] income read failed:', error?.code || error?.message);
+                    failureCode = error?.code ?? error?.exchangeCode ?? null;
+                    return null;
+                }
+            },
+        });
+        requests = walked.requests;
+        if (!current()) {
+            // A newer activation owns the account now. What was read belongs to
+            // an account this desk is no longer on.
+            clearFuturesSettledMoney();
+            recordSettled('abandoned', failureCode);
+            return;
+        }
+        _futuresSettled = walked;
+
+        const kept = readFuturesSettledIncome([...walked.rows.values()]);
+        const from = walked.from ?? now;
+        // Broadcast only what moved. In the steady state the tail is empty and
+        // the coverage is unchanged, and a frame every thirty seconds saying
+        // exactly what the last one said is how a record of the account becomes
+        // a load on the socket carrying it.
+        const revision = `${kept.length}:${from}:${walked.to}:${walked.complete}`;
+        if (revision !== _futuresSettledSent) {
+            _futuresSettledSent = revision;
+            broadcastToRenderers({
+                type: 'futures_settled_income',
+                version: 1,
+                // Only the flows a position can be charged or credited with, and
+                // only those the exchange named a contract on. A transfer into
+                // the futures wallet is the operator moving money, not a
+                // position earning it.
+                //
+                // The renderer reads these again on arrival and the fold reads
+                // them once more; the reader is idempotent so that costs
+                // nothing. It was not, and every row was dropped between here
+                // and the screen.
+                rows: kept,
+                // The oldest instant actually covered — never the window that
+                // was asked for. `from <= openTime` is what decides downstream
+                // whether a round's funding is fully accounted for, so a read
+                // that names the window while having reached a day of it
+                // reports every figure built from it as whole. That is exactly
+                // what happened, and why nothing on screen was ever marked as
+                // qualified.
+                from,
+                readAt: now,
+                complete: walked.complete,
+                reason,
+            });
+        }
+        recordSettled(
+            failureCode !== null ? 'failed' : (walked.complete ? 'complete' : 'partial'),
+            failureCode,
+        );
+    };
+
+    // One pass at a time, and the ask that arrived during a pass runs after it.
+    //
+    // The debounce above coalesces *scheduling*, not running: a pass spends eight
+    // requests through the rate limiter and takes seconds, and a second reason —
+    // the stream and the refresh land within two seconds of each other all day —
+    // started another walk from the same held state while the first was still in
+    // flight. Both then wrote `_futuresSettled`, and the second to finish
+    // overwrote the first with a reading built from the older state. On the
+    // operator's desk coverage measurably went backwards, 136809478 ms to
+    // 130692102 ms across three seconds, while both passes spent a full budget.
+    const runFuturesSettledRead = (reason) => {
+        if (_futuresSettledInFlight !== null) {
+            _futuresSettledAgain = reason;
+            return;
+        }
+        _futuresSettledInFlight = readFuturesSettledMoney(reason).finally(() => {
+            _futuresSettledInFlight = null;
+            const next = _futuresSettledAgain;
+            _futuresSettledAgain = null;
+            if (next !== null) scheduleFuturesSettledRead(next);
         });
     };
 
@@ -2072,7 +2191,7 @@ export function setupBinanceConnection({
             _futuresSettledReadTimer = null;
             if (!_futuresSettledReadPending) return;
             _futuresSettledReadPending = false;
-            void readFuturesSettledMoney(reason);
+            runFuturesSettledRead(reason);
         }, FUTURES_SETTLED_READ_DELAY_MS);
         _futuresSettledReadTimer.unref?.();
     };
@@ -2081,6 +2200,14 @@ export function setupBinanceConnection({
         if (_futuresSettledReadTimer !== null) clearTimeout(_futuresSettledReadTimer);
         _futuresSettledReadTimer = null;
         _futuresSettledReadPending = false;
+        // A pass asked for during the one in flight belonged to the activation
+        // being cancelled, and running it afterwards would read for an account
+        // this desk is no longer on.
+        _futuresSettledAgain = null;
+        // The rows go with it. They are one account's settled money and the next
+        // activation may be a different account; carrying them across would state
+        // one account's charges against another's positions.
+        clearFuturesSettledMoney();
     };
 
     // How long the private socket may say nothing at all before the desk stops
