@@ -191,10 +191,44 @@ const OUTCOME_FILTERS = Object.freeze([
 // session they had, and half of it was on the pairs they have since switched away
 // from. Every row therefore names its contract and is priced at that contract's
 // own tick, and the selected one is only tinted rather than being all there is.
+// Every component that was applied to the exchange's own realized PnL, named for
+// the record it came from. Two sign conventions meet in this one sentence and
+// only one of them is negated: the commission comes off the trade record as an
+// unsigned magnitude and is subtracted, while funding and insurance clearance
+// come off the income record already signed and are added. Stating them apart is
+// what lets an operator reconcile the row against Binance instead of taking the
+// desk's word for it.
+const roundResultTitle = (round) => {
+  const parts = [`${formatSignedUsdt(round.realizedPnl)} realized`]
+  for (const fee of round.feesByAsset ?? []) {
+    parts.push(fee.asset === 'USDT'
+      ? `less ${formatUsdtAmount(fee.amount, 4)} commission`
+      // No rate to convert it at, so it is stated in its own asset and is not in
+      // the result beside it.
+      : `less ${formatUsdtAmount(fee.amount, 8)} ${fee.asset} commission, not included`)
+  }
+  if (round.funding !== null && round.funding !== undefined) {
+    parts.push(`${formatSignedUsdt(round.funding)} funding${
+      round.fundingShared ? ' (the contract\u2019s \u2014 both legs were open)' : ''}`)
+  }
+  if (round.insuranceClear !== null && round.insuranceClear !== undefined) {
+    parts.push(`${formatSignedUsdt(round.insuranceClear)} insurance`)
+  }
+  parts.push(`is ${formatSignedUsdt(round.netPnl)} in the wallet`)
+  if (round.fundingComplete === false) {
+    parts.push('missing funding the income read did not cover')
+  }
+  return parts.join(' \u00b7 ')
+}
+
 export const FuturesHistoryPanel = ({
   view,
   symbol,
   history = null,
+  // The exchange's income rows and the window they were read over. A closed
+  // round's result is not what reached the wallet without them: Binance reports
+  // realized PnL before its own commission and reports funding on no fill at all.
+  settledIncome = null,
   tickSizes = EMPTY_TICKS,
   onSymbolChange,
 }) => {
@@ -236,9 +270,15 @@ export const FuturesHistoryPanel = ({
   // re-renders whenever a contract config arrives.
   const rounds = useMemo(() => (
     view === 'tradeHistory'
-      ? buildFuturesTradeRounds(trades).filter(round => !round.open && round.exitPrice !== null)
+      ? buildFuturesTradeRounds(trades, {
+        // What the exchange charged the contract while each round was held.
+        // Without it a round's result is the trade's own arithmetic and nothing
+        // else, which is not what reached the wallet.
+        income: settledIncome?.rows ?? null,
+        incomeFrom: settledIncome?.from ?? null,
+      }).filter(round => !round.open && round.exitPrice !== null)
       : EMPTY_ROWS
-  ), [trades, view])
+  ), [trades, view, settledIncome])
   const groupedOrders = useMemo(
     () => groupRowsByDay(narrowedOrders, order => order?.time),
     [narrowedOrders],
@@ -397,9 +437,12 @@ export const FuturesHistoryPanel = ({
             <span role="columnheader">Realized PnL</span>
           </div>
           {groupedRounds.map(group => dayGroup(group, (round) => {
-            const tone = round.realizedPnl === 0
+            // The tone follows the result the row states, not the gross the
+            // exchange settled before its own fees: a round that realized a
+            // profit and gave all of it back in funding is not a winner.
+            const tone = round.netPnl === 0
               ? 'flat'
-              : round.realizedPnl > 0 ? 'positive' : 'negative'
+              : round.netPnl > 0 ? 'positive' : 'negative'
             const leg = round.positionSide === 'LONG' ? 'buy' : 'sell'
             return (
               <div className={rowClass('is-rounds', leg, round.symbol)} role="row" key={round.key}>
@@ -432,14 +475,19 @@ export const FuturesHistoryPanel = ({
                   {formatPriceOrAbsent(round.entryPrice, tickOf(round.symbol))}
                 </span>
                 <span role="cell">{formatPriceOrAbsent(round.exitPrice, tickOf(round.symbol))}</span>
-                {/* The exchange's realized PnL is before its own commission, so the
-                    fee and the net are both stated in the title. */}
+                {/* What the round actually put into or took out of the wallet.
+                    The exchange's own realized PnL is before its commission and
+                    carries no funding at all, so it is the gross rather than the
+                    result — it stays in the title, with every component that was
+                    applied to it, because a net figure nobody can decompose
+                    cannot be checked against Binance. */}
                 <span
                   role="cell"
-                  className={`futures-workstation-dock-pnl is-${tone}`}
-                  title={`${formatSignedUsdt(round.realizedPnl)} realized less ${formatUsdtAmount(round.fee, 4)} in fees is ${formatSignedUsdt(round.netPnl)} net`}
+                  className={`futures-workstation-dock-pnl is-${tone}${
+                    round.fundingComplete === false ? ' is-partial' : ''}`}
+                  title={roundResultTitle(round)}
                 >
-                  <strong>{formatSignedUsdt(round.realizedPnl)}</strong>
+                  <strong>{formatSignedUsdt(round.netPnl)}</strong>
                 </span>
               </div>
             )

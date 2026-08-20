@@ -465,6 +465,7 @@ export const FuturesProductionWorkstation = ({
       history={executionState?.history}
       settledMoney={executionState?.settledMoney}
       settledWindow={executionState?.settledIncomeWindow}
+      settledIncome={executionState?.settledIncome}
       onClosePosition={handlePositionClose}
       onCancelOrder={executionState?.cancelOrder}
       onOrderEdit={handleOrderEdit}

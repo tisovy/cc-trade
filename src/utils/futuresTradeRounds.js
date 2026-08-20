@@ -77,7 +77,13 @@ const openRound = (fill, buy, closing, fromFlat) => ({
   exitAtoms: 0n,
   exitNotional: 0,
   realizedPnl: 0,
-  fee: 0,
+  // Per asset, because Binance charges commission in BNB whenever the account
+  // holds it — that is the default, since it discounts the fee for doing so.
+  // Summed as one number, a BNB quantity was subtracted from a USDT result: on a
+  // 1 120 USDT round paying 0.0085 BNB the row reported a fee of `0.0085` and a
+  // net `0.01` below the gross, when the fee actually cost about five USDT. Not
+  // a rounding error — a quantity of the wrong thing.
+  feeByAsset: new Map(),
   fills: 0,
   partial: closing,
   fromFlat,
@@ -188,8 +194,16 @@ const applyFill = (round, { fill, atoms, price, share, increasing }) => {
     // average. Clearing it would read as though something depended on it.
     round.heldAtoms = round.heldAtoms > atoms ? round.heldAtoms - atoms : 0n
   }
-  // A fee is charged on the whole fill, so a split fill splits its fee.
-  round.fee += toNumber(fill.commission) * share
+  // A fee is charged on the whole fill, so a split fill splits its fee. Kept
+  // under the asset it was charged in: the desk holds no rate to convert BNB at,
+  // and a converted guess would be printed beside money.
+  const commission = toNumber(fill.commission) * share
+  if (commission !== 0) {
+    const asset = typeof fill.commissionAsset === 'string' && fill.commissionAsset.length > 0
+      ? fill.commissionAsset.toUpperCase()
+      : null
+    round.feeByAsset.set(asset, (round.feeByAsset.get(asset) ?? 0) + commission)
+  }
   round.closeTime = toNumber(fill.time)
   round.fills += 1
 }
@@ -207,7 +221,32 @@ const impliedEntryPrice = ({ positionSide, exitPrice, realizedPnl, quantity }) =
   return Number.isFinite(entry) && entry > 0 ? entry : null
 }
 
-const finishRound = (round, open) => {
+// What the income record says happened to this round's contract while it was
+// held. Nothing is invented: a component with no row at all stays null, so the
+// surface can tell "charged nothing" apart from "not read".
+// USDⓈ-M settles in USDT. Named rather than inlined because it is the thing a
+// fee in any other asset is measured against, and there are three places that
+// have to agree about it.
+const SETTLEMENT_ASSET = 'USDT'
+
+const NO_ROUND_INCOME = Object.freeze({
+  funding: null,
+  insuranceClear: null,
+  shared: false,
+  // Nothing has been read, so nothing is covered. A round built without the
+  // income record is missing whatever funding it was charged, and reading that
+  // as "complete" would present the trade's own arithmetic as the whole of what
+  // the round did to the wallet.
+  complete: false,
+})
+
+const finishRound = (round, open, settlementAsset = SETTLEMENT_ASSET) => {
+  // A fill that names no commission asset is taken to have paid in the asset the
+  // contract settles in, which is what a USDⓈ-M contract does unless the account
+  // opted into BNB.
+  const settlementFee = (round.feeByAsset.get(settlementAsset) ?? 0)
+    + (round.feeByAsset.get(null) ?? 0)
+  const income = NO_ROUND_INCOME
   const entryQuantity = Number(fromAtoms(round.entryAtoms))
   const exitQuantity = Number(fromAtoms(round.exitAtoms))
   // An open restarted edge round is the position it is holding: the size still
@@ -253,10 +292,41 @@ const finishRound = (round, open) => {
     entryImplied,
     exitPrice,
     realizedPnl: round.realizedPnl,
-    fee: round.fee,
-    // What reached the wallet. The exchange reports realized PnL before its own
-    // commission, so the two are shown apart and the difference is stated.
-    netPnl: round.realizedPnl - round.fee,
+    // The commission charged in the asset the round settles in. A fee charged in
+    // anything else is below, in its own asset, and is deliberately not folded
+    // into this one.
+    fee: settlementFee,
+    // Every asset the round was charged in, the settlement asset included, so a
+    // surface can state a BNB fee as BNB instead of as a number with no unit.
+    feesByAsset: Object.freeze([...round.feeByAsset.entries()]
+      .filter(([, amount]) => amount !== 0)
+      .map(([asset, amount]) => Object.freeze({ asset: asset ?? settlementAsset, amount }))
+      .sort((left, right) => (left.asset < right.asset ? -1 : 1))),
+    // What the round moved in the wallet besides the trade itself: funding paid
+    // or received while it was held, and insurance clearance if it was
+    // part-liquidated. Both come from the exchange's income record, where an
+    // outflow is *already negative* — so they are added, while the commission
+    // above comes from the trade record as an unsigned magnitude and is
+    // subtracted. Mixing the two conventions returns a fee to the operator as
+    // profit, which is why each is named for the record it came from.
+    funding: income.funding,
+    insuranceClear: income.insuranceClear,
+    // Funding is charged against a contract and names no position leg, so where
+    // both legs of one contract were open across a charge the desk states it as
+    // the contract's rather than dividing it by a rule the exchange never
+    // applied.
+    fundingShared: income.shared,
+    // Whether the income read reaches back to this round's open. Where it does
+    // not, the result below is missing funding nobody read, and the row says so
+    // instead of presenting an incomplete total as a complete one.
+    fundingComplete: income.complete,
+    // The exchange reports realized PnL before its own commission and does not
+    // report funding on a fill at all, so realized PnL alone is not what the
+    // round did to the wallet. This is.
+    netPnl: round.realizedPnl
+      - settlementFee
+      + (income.funding ?? 0)
+      + (income.insuranceClear ?? 0),
     fills: round.fills,
     open,
     partial: round.partial,
@@ -409,7 +479,73 @@ const newestFirst = (left, right) => (right.closeTime - left.closeTime)
   || (right.openTime - left.openTime)
   || (left.symbol < right.symbol ? -1 : left.symbol > right.symbol ? 1 : 0)
 
-export const buildFuturesTradeRounds = (trades) => {
+/**
+ * Attaches what the exchange's income record says happened to each round's
+ * contract while that round was held.
+ *
+ * Matched on the contract and the span between the round's open and its close,
+ * and deliberately not on the position leg: an income row states no
+ * `positionSide`, and funding is not a trade so it names no `tradeId` to reach
+ * one through. On a hedge account holding both legs of one contract there is
+ * therefore nothing in the record to divide a funding charge by, and a division
+ * the exchange never made is a number the desk invented. Such a charge is
+ * attached to every round it falls inside and marked `fundingShared`, so each
+ * row can say the funding is the contract's rather than claim a share of it.
+ *
+ * `from` is the earliest moment the income read covers. A round that opened
+ * before it was charged funding nobody read, and saying so is the whole
+ * difference between an incomplete total and a wrong one.
+ */
+export const attachFuturesRoundIncome = (rounds, income, { from = null } = {}) => {
+  const entries = (Array.isArray(income) ? income : []).filter(entry => (
+    (entry?.component === 'funding' || entry?.component === 'insuranceClear')
+    // Only what settles in the contract's own asset reaches the result; a
+    // charge in anything else has no rate to reach it by.
+    && (entry?.asset ?? SETTLEMENT_ASSET) === SETTLEMENT_ASSET
+  ))
+  if (!Array.isArray(rounds) || rounds.length === 0) return rounds
+  const held = rounds.map(round => ({
+    round,
+    funding: null,
+    insuranceClear: null,
+    shared: false,
+  }))
+  for (const entry of entries) {
+    const inside = held.filter(({ round }) => round.symbol === entry.symbol
+      && Number.isFinite(round.openTime)
+      && Number.isFinite(round.closeTime)
+      && entry.time >= round.openTime
+      && entry.time <= round.closeTime)
+    if (inside.length === 0) continue
+    for (const slot of inside) {
+      const component = entry.component
+      slot[component] = (slot[component] ?? 0) + entry.amount
+      // More than one round of this contract was open when the charge landed,
+      // so the charge is the contract's and not any one round's.
+      if (inside.length > 1) slot.shared = true
+    }
+  }
+  return held.map(({ round, funding, insuranceClear, shared }) => {
+    // A round that opened before the read began is missing funding nobody read.
+    // With no window stated at all, nothing can be claimed about coverage.
+    const complete = Number.isFinite(from) && Number.isFinite(round.openTime)
+      ? from <= round.openTime
+      : false
+    // Always rebuilt, never returned untouched: a round with no charge against
+    // it still has coverage to state, and returning the folded object would keep
+    // the "nothing read" default it was built with.
+    return Object.freeze({
+      ...round,
+      funding,
+      insuranceClear,
+      fundingShared: shared,
+      fundingComplete: complete,
+      netPnl: round.realizedPnl - round.fee + (funding ?? 0) + (insuranceClear ?? 0),
+    })
+  })
+}
+
+export const buildFuturesTradeRounds = (trades, { income = null, incomeFrom = null } = {}) => {
   const byContract = new Map()
   for (const fill of Array.isArray(trades) ? trades : []) {
     const atoms = toAtoms(fill?.quantity)
@@ -425,7 +561,10 @@ export const buildFuturesTradeRounds = (trades) => {
       || (toNumber(left.fill.id) - toNumber(right.fill.id)))
     rounds.push(...foldContractFills(fills))
   }
-  return rounds.sort(newestFirst)
+  const folded = rounds.sort(newestFirst)
+  return income === null
+    ? folded
+    : attachFuturesRoundIncome(folded, income, { from: incomeFrom })
 }
 
 export default buildFuturesTradeRounds

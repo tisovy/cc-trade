@@ -134,6 +134,9 @@ export const FuturesPortfolioDock = ({
   // not an account that has settled nothing.
   settledMoney = null,
   settledWindow = null,
+  // The raw income rows, for the closed-round review below: a round's result
+  // needs the charges themselves, not the per-contract totals the rows above use.
+  settledIncome = null,
   onClosePosition,
   onCancelOrder,
   onOrderEdit,
@@ -566,6 +569,7 @@ export const FuturesPortfolioDock = ({
             view={ordersTab}
             symbol={selectedSymbol}
             history={history}
+            settledIncome={settledIncome}
             tickSizes={tickSizes}
             onSymbolChange={onSymbolChange}
           />

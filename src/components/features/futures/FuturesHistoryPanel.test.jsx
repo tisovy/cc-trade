@@ -66,13 +66,15 @@ describe('FuturesHistoryPanel', () => {
     expect(table).toHaveTextContent('2.632')
     // 3 000 contracts entered at 2.554 is 7 662 USDT — the size the desk sizes in.
     expect(table).toHaveTextContent('7662')
-    // The whole round's PnL, not a fill's slice of it.
-    expect(table).toHaveTextContent('+234.00')
+    // The whole round's result, not a fill's slice of it — and what reached the
+    // wallet, not the +234.00 the exchange settled before its own commission.
+    expect(table).toHaveTextContent('+233.94')
     // The fee is a component of the result, not a column of its own: it was
     // crowding the only reading this panel exists for off the right edge.
     expect(table).not.toHaveTextContent('0.0621')
-    // Realized PnL is reported before commission, so the net is stated apart.
-    expect(within(table).getByTitle(/\+234\.00 realized less 0\.0621 in fees is \+233\.94 net/))
+    // Every component that was applied, so the row can be reconciled against
+    // Binance instead of taken on the desk's word.
+    expect(within(table).getByTitle(/\+234\.00 realized · less 0\.0621 commission · is \+233\.94 in the wallet/))
       .toBeInTheDocument()
   })
 
@@ -105,10 +107,11 @@ describe('FuturesHistoryPanel', () => {
       'Opened before this window of trades — entry recovered from the realized PnL',
     )
     expect(cells[5]).toHaveTextContent('113.333')
-    expect(cells[6]).toHaveTextContent('+190.00')
+    expect(cells[6]).toHaveTextContent('+184.00')
     expect(cells[6]).toHaveAttribute(
       'title',
-      '+190.00 realized less 6.0000 in fees is +184.00 net',
+      '+190.00 realized · less 6.0000 commission · is +184.00 in the wallet '
+      + '· missing funding the income read did not cover',
     )
     expect(screen.queryByText('SHORT')).not.toBeInTheDocument()
   })
@@ -132,7 +135,101 @@ describe('FuturesHistoryPanel', () => {
       'Opened before this window of trades — entry recovered from the realized PnL',
     )
     expect(cells[5]).toHaveTextContent('58500.0')
-    expect(cells[6]).toHaveTextContent('−96.74')
+    // −96.74 realized, less the 0.02 commission on the fill.
+    expect(cells[6]).toHaveTextContent('−96.76')
+  })
+
+  // Binance reports realized PnL before its own commission and reports funding on
+  // no fill at all, so a round held across a funding boundary settled for a
+  // different amount than its realized PnL states. That difference is why the
+  // desk and the Binance app disagreed.
+  it('reports what the round put into the wallet, funding included', () => {
+    render(
+      <FuturesHistoryPanel
+        view="tradeHistory"
+        symbol="BICOUSDT"
+        tickSizes={ticks}
+        history={{
+          ...history,
+          symbol: 'BICOUSDT',
+          trades: [
+            { id: 1, symbol: 'BICOUSDT', side: 'BUY', price: '100', quantity: '10', commission: '2', realizedPnl: '0', commissionAsset: 'USDT', time: 1_000 },
+            { id: 2, symbol: 'BICOUSDT', side: 'SELL', price: '112', quantity: '10', commission: '2', realizedPnl: '120', commissionAsset: 'USDT', time: 5_000 },
+          ],
+        }}
+        settledIncome={{
+          from: 500,
+          readAt: 9_000,
+          complete: true,
+          rows: [
+            { symbol: 'BICOUSDT', component: 'funding', amount: -7.1, asset: 'USDT', time: 3_000 },
+            // After the round closed: not this round's charge.
+            { symbol: 'BICOUSDT', component: 'funding', amount: -9.9, asset: 'USDT', time: 8_000 },
+          ],
+        }}
+      />,
+    )
+    const cells = within(screen.getAllByRole('row')[1]).getAllByRole('cell')
+    // 120 realized, less 4 commission, less 7.1 funding.
+    expect(cells[6]).toHaveTextContent('+108.90')
+    expect(cells[6]).toHaveAttribute(
+      'title',
+      '+120.00 realized · less 4.0000 commission · −7.10 funding · is +108.90 in the wallet',
+    )
+    expect(cells[6]).not.toHaveClass('is-partial')
+  })
+
+  // Binance charges commission in BNB whenever the account holds it — the
+  // default, since it discounts the fee for doing so. Summed as one number a BNB
+  // quantity was subtracted from a USDT result: 0.0085 BNB read as 0.0085 USDT
+  // on a round that actually paid about five.
+  it('states a commission charged in BNB in BNB, and keeps it out of the result', () => {
+    render(
+      <FuturesHistoryPanel
+        view="tradeHistory"
+        symbol="BICOUSDT"
+        tickSizes={ticks}
+        history={{
+          ...history,
+          symbol: 'BICOUSDT',
+          trades: [
+            { id: 1, symbol: 'BICOUSDT', side: 'BUY', price: '100', quantity: '10', commission: '0.004', commissionAsset: 'BNB', realizedPnl: '0', time: 1_000 },
+            { id: 2, symbol: 'BICOUSDT', side: 'SELL', price: '112', quantity: '10', commission: '0.0045', commissionAsset: 'BNB', realizedPnl: '120', time: 5_000 },
+          ],
+        }}
+        settledIncome={{ from: 500, readAt: 9_000, complete: true, rows: [] }}
+      />,
+    )
+    const cells = within(screen.getAllByRole('row')[1]).getAllByRole('cell')
+    // The BNB fee is not subtracted from a USDT result — there is no rate here
+    // to subtract it by.
+    expect(cells[6]).toHaveTextContent('+120.00')
+    expect(cells[6].getAttribute('title')).toContain('0.00850000 BNB commission, not included')
+  })
+
+  // A total silently missing eight hours of funding is worse than one that names
+  // its own edge.
+  it('says when the income read does not reach back to the round', () => {
+    render(
+      <FuturesHistoryPanel
+        view="tradeHistory"
+        symbol="BICOUSDT"
+        tickSizes={ticks}
+        history={{
+          ...history,
+          symbol: 'BICOUSDT',
+          trades: [
+            { id: 1, symbol: 'BICOUSDT', side: 'BUY', price: '100', quantity: '10', commission: '2', realizedPnl: '0', commissionAsset: 'USDT', time: 1_000 },
+            { id: 2, symbol: 'BICOUSDT', side: 'SELL', price: '112', quantity: '10', commission: '2', realizedPnl: '120', commissionAsset: 'USDT', time: 5_000 },
+          ],
+        }}
+        settledIncome={{ from: 3_000, readAt: 9_000, complete: true, rows: [] }}
+      />,
+    )
+    const cells = within(screen.getAllByRole('row')[1]).getAllByRole('cell')
+    expect(cells[6]).toHaveClass('is-partial')
+    expect(cells[6].getAttribute('title'))
+      .toContain('missing funding the income read did not cover')
   })
 
   // A position still running has no exit and no result. It belongs to the live

@@ -28,13 +28,18 @@ desk holds no rate at which to convert it, and a converted guess would be printe
 beside money.
 
 Funding SHALL be attributed to a round from the exchange's income record, on the
-round's own contract, over the span between its open and its close. It SHALL NOT
-be attributed to a position leg: an income row states no leg and names no trade
-for funding, so on a hedge account holding both legs of one contract there is
-nothing in the record to divide the charge by, and a division the exchange never
-made is a number the desk invented. Where both legs of one contract were open
-across a funding charge, the round SHALL state the funding as the contract's
-rather than claim a share of it.
+round's own contract, over the span between its open and its close, both bounds
+inclusive — a charge has to land somewhere, and the exchange's own bounds are
+inclusive. It SHALL NOT be attributed to a position leg: an income row states no
+leg and names no trade for funding to reach one through, so there is nothing in
+the record to divide a charge by, and a division the exchange never made is a
+number the desk invented.
+
+Exposure is folded per contract, so a contract's rounds are consecutive and a
+charge falls inside exactly one of them — except at the edge two rounds share,
+where one closes in the same instant the next opens. A charge stamped there is
+inside both and belongs to neither more than the other: it SHALL be stated on
+each as the contract's rather than divided between them or assigned to one.
 
 The components SHALL be combined in the sign each record states them in. The
 exchange's realized PnL and a fill's commission come from the trade record, where
@@ -94,9 +99,17 @@ element that the entry was recovered rather than read.
 - **WHEN** a round opened before the earliest income row the desk has read
 - **THEN** the row states that its result is missing funding the read did not cover, rather than reporting the total as complete
 
-#### Scenario: Both legs of one contract were open across a funding charge
-- **WHEN** a hedge account held a long and a short on the same contract across a funding charge and one of them has since closed
-- **THEN** the closed round states the funding as the contract's rather than claiming a share of it
+#### Scenario: A charge lands on the edge two rounds share
+- **WHEN** a funding charge is stamped at the instant one round closed and the next opened on the same contract
+- **THEN** both rounds state the charge as the contract's, and neither presents a divided share of it
+
+#### Scenario: A charge lands inside one round
+- **WHEN** a funding charge is stamped between a round's open and its close, with no other round of that contract touching that instant
+- **THEN** that round states the charge as its own
+
+#### Scenario: A charge lands at a round's own open or close
+- **WHEN** a funding charge is stamped at exactly the moment a round opened, or at exactly the moment it closed
+- **THEN** the charge is counted in that round rather than falling between two rounds uncounted
 
 #### Scenario: An income row is already signed
 - **WHEN** a round's funding arrives from the income record as `-7` and its commission from the trade record as `4`

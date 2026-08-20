@@ -830,7 +830,8 @@ describe('FuturesPortfolioDock', () => {
     // The tab lists positions now, not executions: fills are folded into the
     // round trips they belong to before anything is drawn.
     fireEvent.click(screen.getByRole('tab', { name: 'Closed positions' }))
-    expect(screen.getByRole('table', { name: 'Position history' })).toHaveTextContent('+12.50')
+    // The result, not the +12.50 the exchange settled before its own commission.
+    expect(screen.getByRole('table', { name: 'Position history' })).toHaveTextContent('+12.48')
     expect(screen.queryByRole('table', { name: 'Working orders' })).not.toBeInTheDocument()
 
     fireEvent.click(screen.getByRole('tab', { name: /Working/ }))
@@ -1032,7 +1033,8 @@ describe('FuturesPortfolioDock', () => {
       <FuturesPortfolioDock selectedSymbol="ETHUSDT" onLoadHistory={onLoadHistory} history={history} />,
     )
 
-    expect(screen.getByRole('table', { name: 'Position history' })).toHaveTextContent('+12.50')
+    // The result, not the +12.50 the exchange settled before its own commission.
+    expect(screen.getByRole('table', { name: 'Position history' })).toHaveTextContent('+12.48')
     expect(onLoadHistory).not.toHaveBeenCalled()
   })
 

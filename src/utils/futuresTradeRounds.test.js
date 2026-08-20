@@ -697,3 +697,134 @@ describe('buildFuturesTradeRounds', () => {
     expect(rounds[0]).toMatchObject({ entryPrice: 2, exitPrice: 3, open: false })
   })
 })
+
+
+// Two records with opposite sign conventions meet in a round's result, and only
+// one of them is negated. Getting it backwards hands a fee to the operator as
+// profit.
+describe('attachFuturesRoundIncome', () => {
+  const fill = (overrides = {}) => ({
+    symbol: 'BEATUSDT', side: 'BUY', positionSide: 'BOTH',
+    price: '100', quantity: '1', realizedPnl: '0',
+    commission: '0', commissionAsset: 'USDT', time: 1_000, id: 1, ...overrides,
+  })
+  const roundTrip = [
+    fill({ id: 1, side: 'BUY', quantity: '10', price: '100', commission: '2', time: 1_000 }),
+    fill({ id: 2, side: 'SELL', quantity: '10', price: '112', realizedPnl: '120', commission: '2', time: 5_000 }),
+  ]
+
+  it('adds an already-negative income row rather than subtracting it', () => {
+    const [round] = buildFuturesTradeRounds(roundTrip, {
+      income: [{ symbol: 'BEATUSDT', component: 'funding', amount: -7.1, asset: 'USDT', time: 3_000 }],
+      incomeFrom: 500,
+    })
+    expect(round.realizedPnl).toBeCloseTo(120, 6)
+    expect(round.fee).toBeCloseTo(4, 6)
+    expect(round.funding).toBeCloseTo(-7.1, 6)
+    // 120 − 4 + (−7.1). Subtracting the funding would give 116 + 7.1.
+    expect(round.netPnl).toBeCloseTo(108.9, 6)
+  })
+
+  it('counts only the charges that landed while the round was held', () => {
+    const [round] = buildFuturesTradeRounds(roundTrip, {
+      income: [
+        { symbol: 'BEATUSDT', component: 'funding', amount: -1, asset: 'USDT', time: 500 },
+        { symbol: 'BEATUSDT', component: 'funding', amount: -2, asset: 'USDT', time: 3_000 },
+        { symbol: 'BEATUSDT', component: 'funding', amount: -4, asset: 'USDT', time: 8_000 },
+      ],
+      incomeFrom: 100,
+    })
+    expect(round.funding).toBeCloseTo(-2, 6)
+  })
+
+  // A charge stamped exactly at the open or the close belongs to the round: the
+  // exchange's bounds are inclusive and a charge has to land somewhere.
+  it('keeps a charge stamped exactly at the round’s edges', () => {
+    const [round] = buildFuturesTradeRounds(roundTrip, {
+      income: [
+        { symbol: 'BEATUSDT', component: 'funding', amount: -1, asset: 'USDT', time: 1_000 },
+        { symbol: 'BEATUSDT', component: 'funding', amount: -2, asset: 'USDT', time: 5_000 },
+      ],
+      incomeFrom: 100,
+    })
+    expect(round.funding).toBeCloseTo(-3, 6)
+  })
+
+  it('carries insurance clearance apart from funding', () => {
+    const [round] = buildFuturesTradeRounds(roundTrip, {
+      income: [{ symbol: 'BEATUSDT', component: 'insuranceClear', amount: -1.5, asset: 'USDT', time: 3_000 }],
+      incomeFrom: 100,
+    })
+    expect(round.insuranceClear).toBeCloseTo(-1.5, 6)
+    expect(round.funding).toBeNull()
+    expect(round.netPnl).toBeCloseTo(114.5, 6)
+  })
+
+  it('says so when the income read begins after the round opened', () => {
+    const [covered] = buildFuturesTradeRounds(roundTrip, { income: [], incomeFrom: 100 })
+    const [uncovered] = buildFuturesTradeRounds(roundTrip, { income: [], incomeFrom: 3_000 })
+    expect(covered.fundingComplete).toBe(true)
+    expect(uncovered.fundingComplete).toBe(false)
+  })
+
+  // Nothing read is not the same as nothing charged.
+  it('reports a round built without the income record as uncovered', () => {
+    const [round] = buildFuturesTradeRounds(roundTrip)
+    expect(round.fundingComplete).toBe(false)
+    expect(round.funding).toBeNull()
+  })
+
+  // An income row states no position leg, and funding names no trade to reach one
+  // through, so a charge is the contract's. Exposure is folded per contract, so
+  // rounds on one contract do not overlap — except at a shared edge, where one
+  // closes in the same millisecond the next opens. A charge stamped there is
+  // inside both, and belongs to neither more than the other.
+  it('marks a charge shared when it lands on the edge two rounds share', () => {
+    const rounds = buildFuturesTradeRounds([
+      fill({ id: 1, side: 'BUY', quantity: '5', price: '100', time: 1_000 }),
+      fill({ id: 2, side: 'SELL', quantity: '5', price: '110', realizedPnl: '50', time: 4_000 }),
+      fill({ id: 3, side: 'BUY', quantity: '5', price: '110', time: 4_000 }),
+      fill({ id: 4, side: 'SELL', quantity: '5', price: '120', realizedPnl: '50', time: 9_000 }),
+    ], {
+      income: [{ symbol: 'BEATUSDT', component: 'funding', amount: -3, asset: 'USDT', time: 4_000 }],
+      incomeFrom: 100,
+    })
+    const touching = rounds.filter(round => round.funding !== null)
+    expect(touching).toHaveLength(2)
+    for (const round of touching) {
+      expect(round.fundingShared).toBe(true)
+      expect(round.funding).toBeCloseTo(-3, 6)
+    }
+    // And a charge inside exactly one round is that round's alone.
+    const [alone] = buildFuturesTradeRounds([
+      fill({ id: 1, side: 'BUY', quantity: '5', price: '100', time: 1_000 }),
+      fill({ id: 2, side: 'SELL', quantity: '5', price: '110', realizedPnl: '50', time: 4_000 }),
+    ], {
+      income: [{ symbol: 'BEATUSDT', component: 'funding', amount: -3, asset: 'USDT', time: 2_000 }],
+      incomeFrom: 100,
+    })
+    expect(alone.fundingShared).toBe(false)
+  })
+
+  // A BNB fee added into a USDT result is not a quantity of anything.
+  it('keeps a commission charged in another asset out of the result', () => {
+    const [round] = buildFuturesTradeRounds([
+      fill({ id: 1, side: 'BUY', quantity: '10', price: '100', commission: '0.004', commissionAsset: 'BNB', time: 1_000 }),
+      fill({ id: 2, side: 'SELL', quantity: '10', price: '112', realizedPnl: '120', commission: '0.0045', commissionAsset: 'BNB', time: 5_000 }),
+    ])
+    expect(round.fee).toBe(0)
+    expect(round.netPnl).toBeCloseTo(120, 6)
+    expect(round.feesByAsset).toEqual([{ asset: 'BNB', amount: expect.closeTo(0.0085, 8) }])
+  })
+
+  // A fill that names no commission asset paid in the asset the contract settles
+  // in, which is what a USDⓈ-M contract does unless the account opted into BNB.
+  it('treats an unnamed commission asset as the settlement asset', () => {
+    const [round] = buildFuturesTradeRounds([
+      fill({ id: 1, side: 'BUY', quantity: '10', price: '100', commission: '2', commissionAsset: undefined, time: 1_000 }),
+      fill({ id: 2, side: 'SELL', quantity: '10', price: '112', realizedPnl: '120', commission: '2', commissionAsset: undefined, time: 5_000 }),
+    ])
+    expect(round.fee).toBeCloseTo(4, 6)
+    expect(round.netPnl).toBeCloseTo(116, 6)
+  })
+})
