@@ -152,6 +152,18 @@ guard.
 
 ## 7. Carried forward
 
+- **`round.fee` narrowed, and an external checker will weaken silently rather
+  than fail.** It used to be every commission summed regardless of currency; it
+  is now only the commission charged in the settlement asset, with the full
+  picture in `round.feesByAsset` (`[{asset, amount}]`). The session auditing the
+  2026-08-19 series flagged that its round fuzzer
+  (`scratchpad audit2/rounds/fuzz*.mjs`, not in the repo) checks fee conservation
+  by summing `round.fee`. That check still passes on USDT-only fixtures and
+  quietly stops covering anything the moment a fixture pays in BNB — it will not
+  go red, it will go blind. Whoever picks that tool up should sum `feesByAsset`.
+  Recorded here rather than sent, because that session had already closed by the
+  time this was found.
+
 - Funding is attributed on the contract and the span, which is all the income
   record supports. The `tradeId` → fill join that would attribute realized PnL
   and commission per leg is written into
