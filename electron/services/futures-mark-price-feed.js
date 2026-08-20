@@ -134,6 +134,30 @@ export const createFuturesMarkPriceFeed = ({
         if (hadMarks) publish();
     };
 
+    // Rebuilding the socket because the tracked set changed is not the feed
+    // going quiet. The contracts that stayed in the set are still being marked
+    // and their last mark is at most a second old; throwing it away blanked the
+    // live value of every open position each time any one of them was opened or
+    // closed, and every one of those rows then valued itself off an account
+    // snapshot from an earlier read. Only the symbols that left are dropped.
+    // Every other path here — a close, an error, a stall, a stop — still clears
+    // everything, so a feed that has actually stopped delivering still falls the
+    // desk back to the snapshot.
+    const retainMarks = (kept) => {
+        let dropped = false;
+        for (const symbol of [...marks.keys()]) {
+            if (kept.includes(symbol)) continue;
+            marks.delete(symbol);
+            dropped = true;
+        }
+        if (!dropped) return;
+        if (flushTimer !== null) {
+            clock.clearTimeout(flushTimer);
+            flushTimer = null;
+        }
+        publish();
+    };
+
     const scheduleFlush = () => {
         if (flushTimer !== null) return;
         flushTimer = clock.setTimeout(() => {
@@ -160,7 +184,14 @@ export const createFuturesMarkPriceFeed = ({
         if (stallTimer !== null || stopped || symbols.length === 0) return;
         stallTimer = clock.setTimeout(() => {
             stallTimer = null;
-            if (socket === null || symbols.length === 0) return;
+            if (symbols.length === 0) return;
+            // A socket that never came back is as silent as one that came back
+            // and said nothing. Marks retained across a rebuild do not outlive
+            // the window on the strength of the rebuild having failed to open.
+            if (socket === null) {
+                clearMarks();
+                return;
+            }
             if (markSeenSinceCheck) {
                 if (stallReported) {
                     logger.info?.(
@@ -186,7 +217,7 @@ export const createFuturesMarkPriceFeed = ({
         }, stallTimeoutMs);
     };
 
-    const disconnect = () => {
+    const disconnect = ({ retain = null } = {}) => {
         generation += 1;
         clearStallCheck();
         if (reconnectTimer !== null) {
@@ -202,7 +233,8 @@ export const createFuturesMarkPriceFeed = ({
                 logger.warn?.('Failed to close futures mark price stream:', error?.message);
             }
         }
-        clearMarks();
+        if (retain === null) clearMarks();
+        else retainMarks(retain);
     };
 
     const connect = () => {
@@ -237,10 +269,19 @@ export const createFuturesMarkPriceFeed = ({
                 // Liveness is the mark's alone: a contract can go minutes
                 // without a print and the feed is not stalled for it.
                 markSeenSinceCheck = true;
+                const held = marks.get(mark.symbol);
                 marks.set(mark.symbol, {
-                    ...marks.get(mark.symbol),
+                    ...held,
                     markPrice: mark.markPrice,
                     updatedAt: mark.updatedAt,
+                    // The traded price this mark was taken beside. A consumer
+                    // valuing the position between two marks carries the mark
+                    // forward by what the tape has done since — from here — so
+                    // that its estimate extends the mark instead of replacing
+                    // it with a different series. Without this the two were
+                    // swapped for one another as the sockets interleaved, and
+                    // on a fast move that reversed the sign of a live PnL.
+                    anchorPrice: held?.lastPrice ?? null,
                 });
                 scheduleFlush();
                 return;
@@ -303,9 +344,14 @@ export const createFuturesMarkPriceFeed = ({
             if (stopped) return;
             const next = readFuturesPositionSymbols(positions);
             if (sameSymbols(next, symbols)) return;
-            disconnect();
+            disconnect({ retain: next });
             symbols = next;
             connect();
+            // The rebuilt socket arms this itself when it opens, but a socket
+            // that never opens would leave the retained marks alive with nothing
+            // measuring their age. Arming here puts them under the same window
+            // as any other mark; a second call once the socket opens is a no-op.
+            armStallCheck();
         },
         // A diagnostic reader sees only marks the feed still considers live.
         // Disconnect and stall handling already clear this map, so the snapshot

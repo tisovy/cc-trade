@@ -271,6 +271,36 @@ describe('describeFuturesOrderIntent', () => {
 })
 
 describe('describeFuturesPosition', () => {
+  // The mark and the tape part company on a fast move, and the operator reads
+  // their entry line against the tape because that is what the chart draws.
+  it('states the tape\u2019s own reading and whether it disagrees with the mark', () => {
+    const short = {
+      symbol: 'BTCUSDT',
+      quantity: '-0.5',
+      entryPrice: '61000',
+      markPrice: '61200',
+      markUnrealizedPnl: '-100',
+      unrealizedPnl: '-100',
+      initialMargin: '3050',
+    }
+    // Tape below the entry, mark above it: profit there, loss here.
+    const straddling = describeFuturesPosition({ ...short, tapePrice: '60800' })
+    expect(straddling.tapeUnrealizedPnl).toBeCloseTo(100, 6)
+    expect(straddling.tapeDisagreesWithMark).toBe(true)
+
+    // Both on the same side of the entry: nothing to explain.
+    const agreeing = describeFuturesPosition({ ...short, tapePrice: '61150' })
+    expect(agreeing.tapeUnrealizedPnl).toBeCloseTo(-75, 6)
+    expect(agreeing.tapeDisagreesWithMark).toBe(false)
+
+    // No tape reading at all, and a tape sitting exactly on the entry, are both
+    // silence rather than a disagreement: zero has no side.
+    expect(describeFuturesPosition(short).tapeUnrealizedPnl).toBeNull()
+    expect(describeFuturesPosition(short).tapeDisagreesWithMark).toBe(false)
+    expect(describeFuturesPosition({ ...short, tapePrice: '61000' }).tapeDisagreesWithMark)
+      .toBe(false)
+  })
+
   it('derives the leg from the signed quantity and reports ROE against margin', () => {
     expect(describeFuturesPosition({
       symbol: 'BTCUSDT',

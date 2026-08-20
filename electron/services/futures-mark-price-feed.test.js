@@ -160,8 +160,10 @@ describe('createFuturesMarkPriceFeed', () => {
             type: 'futures_position_marks',
             version: 1,
             marks: {
-                BMTUSDT: { markPrice: '0.03523', updatedAt: 1_700_000_000_000 },
-                BEATUSDT: { markPrice: '3.523', updatedAt: 1_700_000_000_000 },
+                // No print has been seen for either contract yet, so neither
+                // mark has a traded price to be carried forward from.
+                BMTUSDT: { markPrice: '0.03523', updatedAt: 1_700_000_000_000, anchorPrice: null },
+                BEATUSDT: { markPrice: '3.523', updatedAt: 1_700_000_000_000, anchorPrice: null },
             },
         }]);
     });
@@ -202,11 +204,36 @@ describe('createFuturesMarkPriceFeed', () => {
                 BMTUSDT: {
                     markPrice: '0.03523',
                     updatedAt: 1_700_000_000_000,
+                    anchorPrice: null,
                     lastPrice: '0.03531',
                     lastPriceAt: 1_700_000_000_500,
                 },
             },
         }]);
+    });
+
+    // The print a mark was taken beside is what makes the reading between two
+    // marks an extension of the mark rather than a different series in its
+    // place. Without it a consumer can only substitute the tape for the mark,
+    // and on a fast move that reverses the sign of a live position's PnL.
+    it('records the print each mark was taken beside', () => {
+        harness.feed.track([{ symbol: 'BMTUSDT', quantity: '-446082' }]);
+        harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03523', 1_000));
+        harness.sockets[0].emit('message', tradeFrame('BMTUSDT', '0.03531', 1_400));
+        harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03528', 2_000));
+        harness.sockets[0].emit('message', tradeFrame('BMTUSDT', '0.03540', 2_400));
+        harness.runTimers();
+        expect(harness.broadcasts.at(-1).marks).toEqual({
+            BMTUSDT: {
+                markPrice: '0.03528',
+                updatedAt: 2_000,
+                // The print in hand when the 0.03528 mark arrived, not the one
+                // that came after it.
+                anchorPrice: '0.03531',
+                lastPrice: '0.03540',
+                lastPriceAt: 2_400,
+            },
+        });
     });
 
     // The mark is what a position is confirmed at, so an entry with no mark is
@@ -251,6 +278,66 @@ describe('createFuturesMarkPriceFeed', () => {
         expect(harness.sockets).toHaveLength(2);
         expect(harness.sockets[0].closed).toBe(true);
         expect(harness.sockets[1].url).toContain('ethusdt@markPrice@1s');
+    });
+
+    // Opening or closing one position used to blank the live value of every
+    // other one: the rebuild went through the same teardown a dead socket does,
+    // which clears every mark. Each surviving row then valued itself off an
+    // account snapshot from an earlier read until the new socket delivered.
+    it('keeps the marks of the contracts that stayed in the set', () => {
+        harness.feed.track([{ symbol: 'BMTUSDT', quantity: '-1' }]);
+        harness.sockets[0].emit('open');
+        harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03523'));
+        harness.runTimers();
+        harness.broadcasts.length = 0;
+
+        harness.feed.track([
+            { symbol: 'BMTUSDT', quantity: '-1' },
+            { symbol: 'ETHUSDT', quantity: '3' },
+        ]);
+        expect(harness.feed.snapshot()).toEqual({ BMTUSDT: '0.03523' });
+        // Nothing was dropped, so nothing had to be republished.
+        expect(harness.broadcasts).toEqual([]);
+    });
+
+    it('drops the marks of the contracts that left it', () => {
+        harness.feed.track([
+            { symbol: 'BMTUSDT', quantity: '-1' },
+            { symbol: 'ETHUSDT', quantity: '3' },
+        ]);
+        harness.sockets[0].emit('open');
+        harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03523'));
+        harness.sockets[0].emit('message', markFrame('ETHUSDT', '2500'));
+        harness.runTimers();
+        harness.broadcasts.length = 0;
+
+        harness.feed.track([{ symbol: 'ETHUSDT', quantity: '3' }]);
+        expect(harness.broadcasts.at(-1).marks).toEqual({
+            ETHUSDT: { markPrice: '2500', updatedAt: 1_700_000_000_000, anchorPrice: null },
+        });
+    });
+
+    // Retention is not an exemption from the stall window. A rebuild whose
+    // socket never opens leaves marks with nothing measuring their age, and a
+    // mark nobody is refreshing is exactly what the clearing rule exists for.
+    it('clears retained marks when the rebuilt socket never delivers', () => {
+        harness.feed.track([{ symbol: 'BMTUSDT', quantity: '-1' }]);
+        harness.sockets[0].emit('open');
+        harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03523'));
+        harness.runTimers();
+        harness.broadcasts.length = 0;
+
+        harness.feed.track([
+            { symbol: 'BMTUSDT', quantity: '-1' },
+            { symbol: 'ETHUSDT', quantity: '3' },
+        ]);
+        expect(harness.feed.snapshot()).toEqual({ BMTUSDT: '0.03523' });
+
+        // The rebuilt socket never opens and never delivers.
+        harness.runTimers();
+        harness.runTimers();
+        expect(harness.feed.snapshot()).toEqual({});
+        expect(harness.broadcasts.at(-1).marks).toEqual({});
     });
 
     it('clears published marks when the last position is closed', () => {

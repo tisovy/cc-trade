@@ -93,10 +93,10 @@ describe('FuturesPortfolioDock', () => {
       .toHaveTextContent('Size (USDT)')
   })
 
-  // Between two marks the figure is the desk's arithmetic on the last traded
-  // price, not the exchange's on its own mark. The operator never has to wonder
-  // which of the two they are reading — and the liquidation price, which is the
-  // mark's by definition, is not marked and does not move with it.
+  // Between two marks the figure is the mark carried forward by the tape, not
+  // the exchange's own mark. The operator never has to wonder which of the two
+  // they are reading — and the liquidation price, which is the mark's by
+  // definition, is not marked and does not move with it.
   it('says when the PnL is the last trade rather than the confirmed mark', () => {
     const { rerender } = render(
       <FuturesPortfolioDock
@@ -113,7 +113,7 @@ describe('FuturesPortfolioDock', () => {
     const pnl = () => screen.getByRole('table', { name: 'Open positions' })
       .querySelector('.futures-workstation-dock-pnl')
     expect(pnl()).toHaveClass('is-estimated')
-    expect(pnl().getAttribute('title')).toContain('last traded price')
+    expect(pnl().getAttribute('title')).toContain('carried forward from the last print')
     expect(pnl()).toHaveTextContent('−450.00')
     // What it is an estimate of, exactly, without leaving the row: the number
     // Binance itself is showing at the same moment.
@@ -127,7 +127,61 @@ describe('FuturesPortfolioDock', () => {
       />,
     )
     expect(pnl()).not.toHaveClass('is-estimated')
-    expect(pnl().getAttribute('title')).not.toContain('last traded price')
+    expect(pnl().getAttribute('title')).not.toContain('carried forward')
+  })
+
+  // The row is valued on the mark and the chart is drawn from the tape, and on
+  // a fast move the two sit on opposite sides of the entry: the operator sees
+  // price past their own ENTRY line while the row states a loss. Both figures
+  // are right, and a row that says the opposite of the chart without saying why
+  // reads as broken arithmetic — which is exactly how it was reported.
+  it('says when the tape has crossed the entry and the mark has not', () => {
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        tickSizes={{ BTCUSDT: '0.1' }}
+        positions={[{
+          ...position,
+          // Short, so a price below the entry is a profit.
+          quantity: '-0.5',
+          entryPrice: '61000',
+          markPrice: '61200',
+          markUnrealizedPnl: '-100',
+          unrealizedPnl: '-100',
+          tapePrice: '60800',
+        }]}
+      />,
+    )
+    const title = screen.getByRole('table', { name: 'Open positions' })
+      .querySelector('.futures-workstation-dock-pnl')
+      .getAttribute('title')
+    expect(title).toContain('the contract last traded at 60800.0')
+    expect(title).toContain('the other side of your entry')
+    // What the position would be worth there, so the operator can see the size
+    // of the disagreement rather than only that there is one.
+    expect(title).toContain('+100.00 USDT there')
+    expect(title).toContain('the mark is what settles')
+  })
+
+  it('says nothing about the tape when it agrees with the mark', () => {
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        tickSizes={{ BTCUSDT: '0.1' }}
+        positions={[{
+          ...position,
+          quantity: '-0.5',
+          entryPrice: '61000',
+          markPrice: '61200',
+          markUnrealizedPnl: '-100',
+          unrealizedPnl: '-100',
+          tapePrice: '61150',
+        }]}
+      />,
+    )
+    expect(screen.getByRole('table', { name: 'Open positions' })
+      .querySelector('.futures-workstation-dock-pnl')
+      .getAttribute('title')).not.toContain('the other side of your entry')
   })
 
   // The estimate ticks five times a second. What it may cost is the position

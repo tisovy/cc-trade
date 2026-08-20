@@ -20,6 +20,7 @@ import {
   totalOrderNotionalUsdt,
   formatSignedPercent,
   formatSignedUsdt,
+  futuresPnlReadingNote,
   formatUsdt,
 } from '../../../utils/futuresOrderPresentation.js'
 import { describeFuturesOrderConfirmation } from '../../../utils/futuresOrderConfirmation.js'
@@ -977,9 +978,10 @@ const FuturesTradingTicket = ({
                   </header>
                   <div
                     className={`futures-production-position-pnl is-${presentation.pnlTone}${presentation.pnlEstimated ? ' is-estimated' : ''}`}
-                    title={presentation.pnlEstimated
-                      ? `From the last traded price; on the exchange’s mark ${formatSignedUsdt(presentation.confirmedUnrealizedPnl)} USDT`
-                      : 'On the exchange’s own mark'}
+                    title={`On the exchange’s own mark${futuresPnlReadingNote(
+                      presentation,
+                      price => formatExchangePrice(price, tickOf(position.symbol)),
+                    )}`}
                   >
                     <strong>{formatSignedUsdt(presentation.unrealizedPnl)} USDT</strong>
                     <em>{formatSignedPercent(presentation.roePercent)}</em>
