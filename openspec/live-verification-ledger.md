@@ -167,6 +167,24 @@ One sitting covers all of them.
 | `close-a-round-at-what-reached-the-wallet` | 4.6 | `OUTSTANDING` | A round held across a funding boundary must show its funding component. |
 | `read-only-the-income-the-desk-cannot-derive` | 8.1 | `OUTSTANDING` | **The figures must not move.** This change is about what the settled read spends, not about what it says: the same column, the same closed rounds, the same numbers as the sitting above. Realized PnL and commission now come from the fills rather than from the income record, so any difference is a defect in it — and `scripts/probe-futures-settled.mjs` prints both records side by side with their difference, which answers it without a screenshot. |
 | `read-only-the-income-the-desk-cannot-derive` | 7.3 | `OUTSTANDING` | **What it now costs, from the journal.** The `settled` line carries `reads` and `types` beside `pages`; weight is `reads × 30`. Expect a cold start of about 12 reads / 360 weight reaching `complete` on the **first** pass, against 67 pages and 2 010 weight over nine, and roughly 3.75 weight a minute after it against 60. |
+| `hold-the-position-value-to-one-price` | 5.6–5.8 | `CONFIRMED BY OPERATOR` | 2026-08-20 evening | Production | — | "Вроде стала работать гораздо лучше, пока кейс можно закрывать." The popup recalculates the unrealized PnL correctly too. Reopen rather than reinterpret if the row starts jumping again. |
+| `stop-waiting-on-the-spot-account-read` | 4.2 | `CONFIRMED BY DIAGNOSTIC RECORD` | 2026-08-20 19:56 UTC | Production | — | Two spot placements and two cancellations: `answer` lines of **361, 361, 360, 360 ms**, all `ok`, against futures at 365–410 ms in the same session. Both markets now measure the exchange round trip and nothing else. |
+| `add-futures-weekly-interval` | 3.4 | `CONFIRMED BY OPERATOR` | 2026-08-20 evening | Production | — | "Недельные свечи работают, все вроде ок." The archive gate is closed. |
+| `time-the-fill-to-the-screen` | 5.5 | `CONFIRMED BY OPERATOR` | 2026-08-20 evening | Production | — | The resting order the price kept hitting now updates, and its Total in USDT updates with it — runbook step 41 and the step-30 follow-up, both reported working by the operator without prompting. |
+| `read-only-the-income-the-desk-cannot-derive` | 10.2 | `OUTSTANDING` | **What a session costs now that the timer no longer reads.** Expect `settled` lines only on a stream opening, a settlement and its confirming pass two minutes later, a person pressing refresh, and once an hour. No line every thirty seconds while an order rests. |
+| `keep-the-settled-reading-across-restarts` | 4.1–4.2 | `OUTSTANDING` | **The store.** After a restart the `settled` line for the first pass should read `restored` greater than zero with one page rather than two, and the column should be complete from the first frame. The hour's verification should read `missing: 0, differing: 0` — anything else means the file disagreed with the exchange and the exchange won, which is worth seeing. |
+
+**Still open after the 2026-08-20 evening sitting**, both reported by the
+operator and neither closed: an open BEATUSDT position reading **9169.88** in the
+desk against **9182** in the Binance app before the 20:00 funding, and
+**9169.88** against **9201.09** after it; and Closed Positions "так же
+неправильно всё считает". The second of those had a cause found and fixed the
+same evening — the settlement's row is written into `/fapi/v1/income` after the
+sockets announce the charge, and the desk moved its own cursor past the instant
+before the row existed — but the 12.12 that stood *before* the settlement is a
+separate disagreement and is not explained by it. Which column each number is
+has to be named before the arithmetic can be closed: see
+`name-the-quantity-not-the-column`.
 
 **One thing to check before that sitting.** At 21:59 on 2026-08-20 the desk was
 running with `dist-electron/main.js` built at 21:27 — the narrowed read and the

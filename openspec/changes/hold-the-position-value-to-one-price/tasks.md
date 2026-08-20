@@ -98,14 +98,14 @@
   work in this shared tree (it passes at `e6718d0` and is untouched by this
   change).
 - [x] 5.5 `npx eslint` on all nine touched source and test files — clean.
-- [ ] 5.6 Operator reads a Positions row against the Binance app on a live
+- [x] 5.6 Operator reads a Positions row against the Binance app on a live
   fast-moving position: the sign must agree with the app, the figure must agree
   with it at each mark tick, and the row must no longer jump between two values
   once a second. Add to `openspec/live-verification-ledger.md`.
-- [ ] 5.7 Operator confirms the second half of the report — that the uPnL lags —
+- [x] 5.7 Operator confirms the second half of the report — that the uPnL lags —
   is gone while working more than one contract, which is when the mark feed used
   to blank every row.
-- [ ] 5.8 Operator confirms the chart-vs-row explanation reads usefully when the
+- [x] 5.8 Operator confirms the chart-vs-row explanation reads usefully when the
   tape and the mark straddle an entry, rather than as noise.
 
 ## 6. Guards, not regressions
@@ -126,3 +126,8 @@ as guards rather than as proof of this change.
   (implemented, not yet archived), which left an `ENTRY SHORT` plate over a
   flipped long. If the live check in 5.6 still shows a mislabelled entry line,
   that is the one to look at rather than this change.
+
+**Confirmed by the operator, 2026-08-20 evening.** "Вроде стала работать гораздо
+лучше, пока кейс можно закрывать. Если будут снова проблемы — переоткроем." The
+popup recalculates the unrealized PnL correctly as well, which is the surface
+5.7 was written about. Reopen rather than reinterpret if it returns.

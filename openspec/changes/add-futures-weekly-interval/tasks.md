@@ -23,3 +23,8 @@
 - [x] 3.2 Stage only this change's production, test, and OpenSpec files; run GitNexus `detect_changes` with `staged` scope and confirm only the expected interval selection, validation, transport, and history flows are affected.
 - [x] 3.3 Commit the completed implementation directly to `main`, preserving unrelated worktree changes.
 - [x] 3.4 Leave the change active and unarchived; report that operator confirmation of live weekly candles and weekly history remains the archive gate.
+
+## 4. Operator confirmation
+
+- [x] 4.1 **Confirmed 2026-08-20**: "недельные свечи работают, все вроде ок."
+  That was the archive gate named in 3.4, and it is now closed.

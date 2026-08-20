@@ -63,7 +63,7 @@
 ## 4. Verification
 
 - [x] 4.1 `npm run lint`, `npm test`. Clean; 2072 tests in 114 files pass.
-- [ ] 4.2 Operator places and cancels a few spot orders and reads what they cost:
+- [x] 4.2 Operator places and cancels a few spot orders and reads what they cost:
 
   ```
   node scripts/read-desk-record.mjs | sed -n '/How long commands took/,/^$/p'
@@ -85,3 +85,10 @@ working — the time is not the handshake.
 The 335 ms is the control. `refreshAccountState` returns immediately when a pass
 is already in flight, so that one command skipped the wait and measured the round
 trip alone. Every other one measured the round trip plus an account pass.
+
+**Answered from the operator's own journal, 2026-08-20.** They placed and
+cancelled two spot orders at 19:56 UTC; the four `answer` lines read **361, 361,
+360, 360 ms**, all `ok`. Futures commands in the same session read 365–410 ms.
+The two markets now measure the same thing — the exchange round trip — and
+answer alike, which is the whole claim. The expectation of "around 330 ms" was
+the estimate; 360 is the measurement, and the desk's own share of it is gone.
