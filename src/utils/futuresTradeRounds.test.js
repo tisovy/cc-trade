@@ -507,7 +507,39 @@ describe('buildFuturesTradeRounds', () => {
       partial: true,
       open: true,
     })
+    // The live row is what is held, at what it was bought for. The implied
+    // entry recovers 100 — the exited pre-window units — which is the wrong
+    // figure for the six still held at 110.
+    expect(rounds[0].entryPrice).toBe(110)
+    expect(rounds[0].entryImplied).toBe(false)
+    expect(rounds[0].notional).toBe(660)
     expect(rounds.filter(round => !round.open)).toHaveLength(0)
+  })
+
+  // An open restarted round that has re-closed part of its add holds neither
+  // everything it added nor everything it ever entered. Published from
+  // entryAtoms, the row claimed six held when four were.
+  it('values an open restarted round at what it still holds', () => {
+    const rounds = buildFuturesTradeRounds([
+      // A pre-window long: four close at break-even, six are added at 110,
+      // two of the add close at 115, and the window ends with four live.
+      fill({ id: 1, side: 'SELL', price: '100', quantity: '4', commission: '0', realizedPnl: '0', time: 1000 }),
+      fill({ id: 2, side: 'BUY', price: '110', quantity: '6', commission: '0', realizedPnl: '0', time: 2000 }),
+      fill({ id: 3, side: 'SELL', price: '115', quantity: '2', commission: '0', realizedPnl: '10', time: 3000 }),
+    ])
+
+    expect(rounds).toHaveLength(1)
+    expect(rounds[0]).toMatchObject({
+      positionSide: 'LONG',
+      quantity: '4',
+      entryPrice: 110,
+      entryImplied: false,
+      notional: 440,
+      realizedPnl: 10,
+      fills: 3,
+      partial: true,
+      open: true,
+    })
   })
 
   // Once the re-close has taken back everything the restarted round added, a
@@ -551,6 +583,72 @@ describe('buildFuturesTradeRounds', () => {
       partial: false,
       open: false,
     })
+  })
+
+  // Only a reduction realizes anything. An increase that arrives carrying
+  // realized PnL is therefore proof the round's direction reading is wrong —
+  // absorbed as entry anyway, its PnL was silently destroyed and the whole
+  // window collapsed into one open round the review then filtered out.
+  it('ends a round whose add realizes profit instead of absorbing it', () => {
+    const rounds = buildFuturesTradeRounds([
+      // A pre-window short: two cover at 90, eight more short at 99, six of
+      // those cover at 100, and the nine-lot sell that follows realizes 66 —
+      // it is closing an older long, not adding to the short.
+      fill({ id: 1, side: 'BUY', price: '90', quantity: '2', commission: '0', realizedPnl: '0', time: 1000 }),
+      fill({ id: 2, side: 'SELL', price: '99', quantity: '8', commission: '0', realizedPnl: '0', time: 2000 }),
+      fill({ id: 3, side: 'BUY', price: '100', quantity: '6', commission: '0', realizedPnl: '0', time: 3000 }),
+      fill({ id: 4, side: 'SELL', price: '107', quantity: '9', commission: '0', realizedPnl: '66', time: 4000 }),
+    ])
+
+    expect(rounds).toHaveLength(2)
+    expect(rounds.filter(round => round.open)).toHaveLength(0)
+    const long = rounds.find(round => round.positionSide === 'LONG')
+    expect(long).toMatchObject({
+      quantity: '9',
+      realizedPnl: 66,
+      fills: 1,
+      partial: true,
+      open: false,
+    })
+    // Recovered from what the nine lots realized: 107 − 66/9.
+    expect(long.entryPrice).toBeCloseTo(107 - 66 / 9, 6)
+    const short = rounds.find(round => round.positionSide === 'SHORT')
+    expect(short).toMatchObject({
+      quantity: '8',
+      realizedPnl: 0,
+      fills: 3,
+      partial: true,
+      open: false,
+    })
+  })
+
+  // The mirror rule for reductions: a new position's opener realizes nothing,
+  // so a reducing fill that goes on realizing after the re-close has drained
+  // can only be more of the old close. Split on faith, one staged close was
+  // filed as two closed trades.
+  it('keeps a staged close in one round while its fills go on realizing', () => {
+    const rounds = buildFuturesTradeRounds([
+      // A pre-window long of ten at 100: four close at break-even, six are
+      // added at 110, then the whole thirteen leave in two stages — six at
+      // 115 for 60 and three at 116 for 33.
+      fill({ id: 1, side: 'SELL', price: '100', quantity: '4', commission: '0', realizedPnl: '0', time: 1000 }),
+      fill({ id: 2, side: 'BUY', price: '110', quantity: '6', commission: '0', realizedPnl: '0', time: 2000 }),
+      fill({ id: 3, side: 'SELL', price: '115', quantity: '6', commission: '0', realizedPnl: '60', time: 3000 }),
+      fill({ id: 4, side: 'SELL', price: '116', quantity: '3', commission: '0', realizedPnl: '33', time: 4000 }),
+    ])
+
+    expect(rounds).toHaveLength(1)
+    expect(rounds[0]).toMatchObject({
+      positionSide: 'LONG',
+      quantity: '13',
+      realizedPnl: 93,
+      fills: 4,
+      partial: true,
+      open: false,
+    })
+    // The true aggregate of everything the long exited:
+    // (400 + 690 + 348 − 93) / 13.
+    expect(rounds[0].entryPrice).toBeCloseTo(1345 / 13, 6)
   })
 
   // The other half of the same rule, and the one that catches it firing where it

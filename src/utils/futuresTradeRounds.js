@@ -210,19 +210,30 @@ const impliedEntryPrice = ({ positionSide, exitPrice, realizedPnl, quantity }) =
 const finishRound = (round, open) => {
   const entryQuantity = Number(fromAtoms(round.entryAtoms))
   const exitQuantity = Number(fromAtoms(round.exitAtoms))
+  // An open restarted edge round is the position it is holding: the size still
+  // held of what it added, at those adds' own average, both read straight from
+  // the fills. The implied entry below recovers the exited pre-window units —
+  // the wrong units for a live row — and entryAtoms counts adds already taken
+  // back by the re-close.
+  const holdingRestartedAdds = open && round.edgePhase !== null && round.heldAtoms > 0n
   // An open round is the size it is holding; a closed one is the size it closed.
-  const quantityAtoms = open || round.exitAtoms === 0n ? round.entryAtoms : round.exitAtoms
+  const quantityAtoms = holdingRestartedAdds
+    ? round.heldAtoms
+    : open || round.exitAtoms === 0n ? round.entryAtoms : round.exitAtoms
   const quantity = Number(fromAtoms(quantityAtoms))
   const exitPrice = exitQuantity > 0 ? round.exitNotional / exitQuantity : null
   const enteredHere = entryQuantity > 0
-  const entryPrice = round.aggregateEntryImplied || !enteredHere
-    ? impliedEntryPrice({
-      positionSide: round.positionSide,
-      exitPrice,
-      realizedPnl: round.realizedPnl,
-      quantity: exitQuantity,
-    })
-    : round.entryNotional / entryQuantity
+  const entryImplied = !holdingRestartedAdds && (round.aggregateEntryImplied || !enteredHere)
+  const entryPrice = holdingRestartedAdds
+    ? round.heldEntry
+    : entryImplied
+      ? impliedEntryPrice({
+        positionSide: round.positionSide,
+        exitPrice,
+        realizedPnl: round.realizedPnl,
+        quantity: exitQuantity,
+      })
+      : round.entryNotional / entryQuantity
   return Object.freeze({
     key: round.key,
     symbol: round.symbol,
@@ -239,7 +250,7 @@ const finishRound = (round, open) => {
     entryPrice,
     // Stated so the surface can say where the entry came from: read from the
     // fills, or recovered from what the position realized.
-    entryImplied: round.aggregateEntryImplied || !enteredHere,
+    entryImplied,
     exitPrice,
     realizedPnl: round.realizedPnl,
     fee: round.fee,
@@ -307,21 +318,35 @@ const foldContractFills = (fills) => {
       // size of its own to run down, so it ends where its run of closing fills
       // ends rather than swallowing the next position that opens. Unless it is
       // a restarted edge round still holding some of what it added: that
-      // position is live, and more entry is more of it.
-      if (round.partial && increasing && round.edgePhase !== 'adding-after-edge-close'
-        && round.heldAtoms === 0n) {
+      // position is live, and more entry is more of it. An increase carrying
+      // realized PnL overrules the holding — only a reduction realizes
+      // anything, so the fill is proof this round's direction reading is
+      // wrong, and it is read on its own evidence instead. Absorbed anyway, it
+      // was counted as entry, its PnL was destroyed, and the whole window
+      // could collapse into one open round the review then filtered out.
+      if (round.partial && increasing
+        && (toNumber(entry.fill.realizedPnl) !== 0
+          || (round.edgePhase !== 'adding-after-edge-close' && round.heldAtoms === 0n))) {
         rounds.push(finishRound(round, false))
         round = null
         continue
       }
       // The re-close exists to take back what the restarted round added, and
       // whatever of the older position the window can still see. Once nothing
-      // it added is held, a further reducing fill is indistinguishable from a
-      // new position opening, so it is not absorbed on faith: the round ends
-      // and the fill is read on its own evidence. Absorbed anyway, a genuinely
-      // new short was folded into a closed long as extra exited contracts, and
-      // the short's own round was left holding only its closing fill.
-      if (!increasing && round.edgePhase === 'reclosing' && round.heldAtoms === 0n) {
+      // it added is held, a further reducing fill that realizes nothing is
+      // indistinguishable from a new position opening, so it is not absorbed
+      // on faith: the round ends and the fill is read on its own evidence.
+      // Absorbed anyway, a genuinely new short was folded into a closed long
+      // as extra exited contracts. A reducing fill that realizes anything is
+      // the opposite proof — a new position's opener realizes nothing — so it
+      // can only be more of the old close, and it stays in the round. The cost
+      // of this split is deliberate and known: a continuation close at exactly
+      // break-even still reads as a new position opening, and when nothing
+      // later disproves it, the review carries an open round over a position
+      // that is in fact flat. The data cannot tell those two apart; the fills
+      // that follow usually can.
+      if (!increasing && round.edgePhase === 'reclosing' && round.heldAtoms === 0n
+        && toNumber(entry.fill.realizedPnl) === 0) {
         rounds.push(finishRound(round, false))
         round = null
         continue
