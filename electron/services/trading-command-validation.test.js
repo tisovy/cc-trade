@@ -931,7 +931,39 @@ describe('backend trading command validation', () => {
                 accountId: 'default',
                 clientOrderId: 'refresh-1',
                 symbol: 'BTCUSDT',
+                // Unmarked means a person asked. The desk reads everything it
+                // can find out for one of those, and only the orders and
+                // positions a timer polls for when the timer says so.
+                periodic: false,
             },
         });
+    });
+
+    // The distinction the backend cannot make for itself. Both asks arrive as
+    // the same command, and on 2026-08-20 treating them alike cost the desk
+    // both ways: the operator's press deferred at a figure that would not move,
+    // then six requests every thirty seconds once it was not.
+    it('carries whether a timer asked for the account or a person did', () => {
+        expect(validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.ACCOUNT_REFRESH,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'futures',
+            accountId: 'default',
+            clientOrderId: 'refresh-tick',
+            symbol: 'BTCUSDT',
+            periodic: true,
+        }).command.periodic).toBe(true);
+        // Never inferred from anything else, and never true by accident.
+        for (const claimed of ['true', 1, {}, null]) {
+            expect(validateTypedTradingCommand({
+                action: TRADING_COMMAND_ACTIONS.ACCOUNT_REFRESH,
+                version: TRADE_COMMAND_VERSION,
+                marketType: 'futures',
+                accountId: 'default',
+                clientOrderId: 'refresh-odd',
+                symbol: 'BTCUSDT',
+                periodic: claimed,
+            }).command.periodic).toBe(false);
+        }
     });
 });

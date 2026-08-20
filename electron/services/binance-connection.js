@@ -4743,7 +4743,13 @@ export function setupBinanceConnection({
                         await refreshFuturesAccountState({ reason: 'refresh' });
                         // The operator asking for the account is asking for all
                         // of it. This is the one read they can reach directly.
-                        scheduleFuturesSettledRead('refresh');
+                        // A person asking gets everything the desk can find
+                        // out; the thirty-second reconcile beside them gets the
+                        // orders and positions it polls for and no more. Read on
+                        // both and the reconcile is six requests every thirty
+                        // seconds — which is exactly what this desk did between
+                        // 20:20 and 20:23 on 2026-08-20, in its own journal.
+                        scheduleFuturesSettledRead(command.periodic === true ? 'tick' : 'refresh');
                         break;
                     case TRADING_COMMAND_ACTIONS.ACCOUNT_HISTORY:
                         await handleFuturesHistory(command);

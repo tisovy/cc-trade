@@ -149,3 +149,26 @@
   carries `INSURANCE_CLEAR`, `MAX_REQUESTS: 4` and the settlement wiring. The
   edits above rebuilt it again; the desk restarts itself on each, which is what
   the operator will have seen.
+
+## 10. What the operator's journal said, 2026-08-20 evening
+
+- [x] 10.1 **The cost, measured on their desk rather than through the walk.**
+  Before: 295 passes in 248 minutes, 29 040 weight — **117.2 weight a minute**,
+  and 125 of those 295 came back `partial`, never having reached the window's
+  start at all. After: 15 passes in 93 minutes, 4 500 weight — **45.3 a minute**,
+  every one `complete` with the full 604 800 000 ms covered. The residual is
+  restarts, not polling: seven of the fifteen are `stream`, one per relaunch, and
+  this session relaunched the desk a dozen times.
+- [x] 10.2 **`refresh` is not only the operator.** The renderer's
+  thirty-second reconcile sends the same command, and the journal shows it
+  firing exactly on the thirty from 20:20:58 while an order rested. Making the
+  refresh always-due therefore made the reconcile six requests every thirty
+  seconds — 360 weight a minute, worse than the number this whole change set out
+  to reduce. The command now says which it is, and the desk reads on a person
+  and not on a timer. Found in the operator's journal forty minutes after the
+  commit that caused it; no test could have found it, because no test knew the
+  two asks shared a command.
+- [x] 10.3 The spot round trip, from the same journal: four commands at 19:56
+  UTC, **360–361 ms**, all `ok` — beside futures at 365–410 ms in the same
+  session. The two markets now measure the same thing and answer alike, which
+  is what `stop-waiting-on-the-spot-account-read` 4.2 asked for.

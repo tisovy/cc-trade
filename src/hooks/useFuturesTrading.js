@@ -1219,7 +1219,12 @@ const useFuturesTrading = ({
   useEffect(() => {
     if (!enabled || !isUsableSocket(wsConnection) || !hasWorkingOrders) return undefined
     const reconcile = setInterval(() => {
-      sendCommand(createFuturesAccountRefreshCommand({ symbol: symbolRef.current }))
+      sendCommand(createFuturesAccountRefreshCommand({
+        symbol: symbolRef.current,
+        // A timer, not a person. It polls for resting orders going stale; it is
+        // not somebody looking at a figure and asking why it has not moved.
+        periodic: true,
+      }))
     }, ACCOUNT_RECONCILE_INTERVAL_MS)
     return () => clearInterval(reconcile)
   }, [enabled, hasWorkingOrders, sendCommand, wsConnection])

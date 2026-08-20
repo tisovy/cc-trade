@@ -737,6 +737,10 @@ export const validateTypedTradingCommand = (payload, { selectedSymbol } = {}) =>
                 command: {
                     ...baseCommand,
                     symbol: normalizeTextField(payload.symbol) || normalizeTextField(selectedSymbol),
+                    // Whether a timer asked or a person did. Only ever true when
+                    // the caller says so: an ask that lost the marking is read
+                    // as a person, which costs a read rather than a stale figure.
+                    periodic: payload.periodic === true,
                 },
             };
         case TRADING_COMMAND_ACTIONS.CANCEL_ALL: {

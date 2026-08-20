@@ -187,11 +187,24 @@ export const createSpotCancelAllCommand = ({
     symbol,
 });
 
+// `periodic` says a timer asked, not a person.
+//
+// The desk cannot otherwise tell them apart, and on 2026-08-20 that cost it
+// both ways at once: deferring the operator's press left them pressing at a
+// number that would not move, and then reading on every ask turned the
+// thirty-second reconcile into six requests every thirty seconds. The two asks
+// want different things — the timer wants the orders and positions it polls
+// for, the person wants everything the desk can find out — and only the caller
+// knows which one it is.
+//
+// Absent means a person. An ask that lost its marking should read too much
+// rather than leave somebody looking at a figure that will not move.
 export const createAccountRefreshCommand = ({
     accountId,
     clientOrderId,
     marketType = SPOT_MARKET_TYPE,
     symbol,
+    periodic = false,
 } = {}) => ({
     ...buildBaseCommand({
         action: TRADING_COMMAND_ACTIONS.ACCOUNT_REFRESH,
@@ -201,6 +214,7 @@ export const createAccountRefreshCommand = ({
         symbol,
     }),
     ...compactObject({ symbol }),
+    ...(periodic === true ? { periodic: true } : {}),
 });
 
 export const createFuturesPlaceOrderCommand = ({
@@ -302,11 +316,13 @@ export const createFuturesAccountRefreshCommand = ({
     accountId,
     clientOrderId,
     symbol,
+    periodic = false,
 } = {}) => createAccountRefreshCommand({
     accountId,
     clientOrderId,
     marketType: FUTURES_MARKET_TYPE,
     symbol,
+    periodic,
 });
 
 // History is a read: it never touches the book. The renderer carries the

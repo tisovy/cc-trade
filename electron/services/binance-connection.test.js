@@ -3707,6 +3707,16 @@ describe('setupBinanceConnection user-data orchestration', () => {
             await deliverRealizingFill(socket, orderId);
         }
 
+        // And the thirty-second reconcile, which is the clock that actually
+        // fires. It arrives as the same command a person sends and says so.
+        for (const clientOrderId of ['tick-1', 'tick-2', 'tick-3']) {
+            await runFuturesCommand({
+                action: 'account.refresh', clientOrderId, symbol: 'BTCUSDT', periodic: true,
+            });
+            await vi.advanceTimersByTimeAsync(30_000);
+            await flushMicrotasks();
+        }
+
         expect(moduleMocks.futuresAdapter.getIncomePage.mock.calls.length).toBe(afterFirst);
     });
 
