@@ -219,7 +219,23 @@ all three were real defects. None of them was the one the operator kept seeing.
 ## 9. Still open
 
 - [ ] 9.1 Operator sees the four closed rows agree with the Binance app.
-- [ ] 9.2 Two rows differ by exactly 0.01 with the desk high in both. Consistent
-  with the app truncating the second decimal where the desk rounds, but two
-  points is not a rule — a third crossing would settle it.
-- [ ] 9.3 §8.4: the backward fills walk.
+- [x] 9.2 Settled, and not by a third crossing. The ledger's own table closes it:
+  both one-cent rows are rounds that crossed **no** funding settlement, so there
+  was no funding to be missing from either, and the two figures are two
+  independent roundings of the same number. `close-a-round-at-what-reached-the-wallet`
+  §7.3 records the same reading. Not a defect and nothing to chase.
+- [ ] 9.3 §8.4: the backward fills walk. Deliberately not done, and here is the
+  cost of doing it. The desk reads the most recent thousand fills per contract,
+  so on a contract traded harder than that within the window an open position's
+  opening is out of reach and the settled column states no figure rather than
+  the contract's. That is the correct answer to give, and it is not the wrong
+  number the operator reported — on their own account BEATUSDT's opening is 296
+  fills back and well inside the read. A backward walk would cost another read
+  per contract per pass at weight 5, against a settled read that already costs
+  weight 30 a pass, and it would buy coverage only on contracts this account does
+  not currently trade that hard. Worth doing when a position's column actually
+  goes blank; not worth the weight before then.
+- [ ] 9.4 The row key's second collision is fixed but not yet measured on the
+  wire. The probe counts, inside single pages, how many rows each candidate key
+  collapses; one run says whether commission rows on this account were colliding
+  at all. See §12.
