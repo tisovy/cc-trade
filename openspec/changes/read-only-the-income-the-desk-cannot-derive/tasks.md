@@ -64,8 +64,9 @@
   request. The account tick, a fill and the operator's refresh no longer read a
   complete reading.
 - [x] 4.3 A reconciliation remains at one hour, for the case where both sockets
-  missed a settlement. A reading that is not yet complete is never deferred,
-  whatever asked for it.
+  missed a settlement. A reading that is not yet complete is deferred by a
+  minute rather than an hour — see 9.2, which is where the first version of this
+  said "never deferred" and was wrong about the cost of saying so.
 
 ## 5. Code — keep what was read
 
@@ -114,3 +115,37 @@
 - [ ] 8.1 The settled column and the closed rounds show the same figures after
   the change as before it. This change is about what the desk spends, not about
   what it says, and any difference in a number is a defect in it.
+
+## 9. Audit of this change
+
+- [x] 9.1 **The six kinds were written out twice.** The read had its own literal
+  list in `binance-connection.js` while the fold's table in
+  `futuresSettledMoney.js` decides which kinds the fills can state — and the
+  import right above it says "one list, one place". Two copies drift silently in
+  both directions: a kind marked underivable in the table but missing from the
+  read is money the column never sees, and a kind read but absent from the table
+  is 30 weight a pass for rows the fold discards. Neither fails anything. The
+  list is now derived from the table and exported as
+  `FUTURES_UNDERIVABLE_INCOME_TYPES`; the wire test asserts against it rather
+  than against a third copy.
+- [x] 9.2 **The extending phase had no bound.** A reading short of its window's
+  start was due for whatever reason asked, which was right when a pass was one
+  request and is not now that a page is six: a pass that spends its budget is
+  four pages by six kinds by weight 30 — **720 weight**, against a limiter of 800
+  a minute — and a desk filling orders asks on every fill. That is the cost this
+  change removes, reappearing in the one state where the desk can least afford
+  it. A pass may now start once a minute while the reading is incomplete; the
+  settlement itself still bypasses it. On this account's shape the bound is never
+  reached, because the first pass covers the window.
+  - It is also the arithmetic behind 3.3's page budget: at six reads a page,
+    eight pages would no longer fit inside the minute.
+- [x] 9.3 The walk's `complete` comment still said "spent all eight". Four.
+- [x] 9.4 Checked and **not** changed: two comments reading "up to eight pages at
+  weight 30" describe the contract-discovery walk, which is four pages called
+  twice. They are correct; the resemblance to this change's numbers is a
+  coincidence.
+- [x] 9.5 The stale bundle recorded in the ledger has cleared —
+  `dist-electron/main.js` rebuilt at 22:09 with no source newer than it, and it
+  carries `INSURANCE_CLEAR`, `MAX_REQUESTS: 4` and the settlement wiring. The
+  edits above rebuilt it again; the desk restarts itself on each, which is what
+  the operator will have seen.

@@ -168,12 +168,15 @@ One sitting covers all of them.
 | `read-only-the-income-the-desk-cannot-derive` | 8.1 | `OUTSTANDING` | **The figures must not move.** This change is about what the settled read spends, not about what it says: the same column, the same closed rounds, the same numbers as the sitting above. Realized PnL and commission now come from the fills rather than from the income record, so any difference is a defect in it — and `scripts/probe-futures-settled.mjs` prints both records side by side with their difference, which answers it without a screenshot. |
 | `read-only-the-income-the-desk-cannot-derive` | 7.3 | `OUTSTANDING` | **What it now costs, from the journal.** The `settled` line carries `reads` and `types` beside `pages`; weight is `reads × 30`. Expect a cold start of about 12 reads / 360 weight reaching `complete` on the **first** pass, against 67 pages and 2 010 weight over nine, and roughly 3.75 weight a minute after it against 60. |
 
-**One thing to do before that sitting.** At 21:59 on 2026-08-20 the desk was
+**One thing to check before that sitting.** At 21:59 on 2026-08-20 the desk was
 running with `dist-electron/main.js` built at 21:27 — the narrowed read and the
 new schedule were in it, the resized walk was not, and two further edits after it
-produced no rebuild. The bundle is what runs, not the tree, so **restart
-`npm run e`** before reading any of the numbers above; a mixed build measures
-neither state.
+produced no rebuild. That has since cleared: the bundle rebuilt at 22:09 with no
+source newer than it, carrying `INSURANCE_CLEAR`, `MAX_REQUESTS: 4` and the
+settlement wiring, and the audit's own edits rebuilt it again after that. The
+bundle is what runs, not the tree, so if the desk has been left open across all
+of this, **restart `npm run e`** anyway before reading any of the numbers above;
+a mixed build measures neither state.
 
 ### The four rows, settled — 2026-08-20, from the operator's screenshots
 

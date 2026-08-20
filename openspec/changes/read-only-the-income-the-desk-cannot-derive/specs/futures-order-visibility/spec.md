@@ -53,9 +53,21 @@ A clock-driven reconciliation MAY remain, at a cadence matched to the cost of
 being wrong rather than to the cost of asking, so that a missed announcement is
 eventually corrected rather than carried forever.
 
+A reading that has not yet reached the start of its window MAY be asked for more
+often than that, since it has something to learn — but it SHALL still be bounded,
+and the bound SHALL be derived from what a pass costs against the budget it
+spends from. Exempting the incomplete case entirely is how a cost removed from
+the steady state returns in the state where the desk can least afford it: the
+narrower the read, the more requests a single pass is, and every fill is a caller
+asking for one.
+
 #### Scenario: The exchange announces the event
 - **WHEN** the private stream reports that funding has settled
 - **THEN** the read runs, and no read runs in the interval between settlements merely because time passed
+
+#### Scenario: A reading is still being built
+- **WHEN** the walk has not reached the window's start and a fill asks for another pass moments after the last one finished
+- **THEN** the pass is deferred to the bound rather than started, and the reading still extends without waiting for the reconciliation
 
 #### Scenario: An announcement is missed
 - **WHEN** the stream was down across a settlement
