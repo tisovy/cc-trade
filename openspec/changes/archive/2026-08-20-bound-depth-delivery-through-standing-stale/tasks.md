@@ -19,7 +19,11 @@
 ## 4. Change completion
 
 - [ ] 4.1 Operator review of the delivery cadence on a contract whose book stands stale (journal shows depth deliveries at the 200 ms bound, not per diff).
-- [ ] 4.2 Commit the completed change and archive it against the canonical spec.
+- [x] 4.2 Commit the completed change and archive it against the canonical
+  spec. *(Done 2026-08-20 by the archive sweep commit that carries this
+  checkmark: the delta's requirement replaced its canon section verbatim,
+  grep-verified to appear exactly once, and the change moved to
+  `archive/2026-08-20-bound-depth-delivery-through-standing-stale`.)*
 
 ## 5. Self-Audit Corrections (2026-08-20)
 

@@ -538,6 +538,11 @@ routine market, readiness, `READY`, or `SYNC` badge. A non-routine disconnected,
 stale, or unavailable market state and its reason SHALL remain disclosed, and
 this consolidation SHALL NOT suppress an actionable account or command failure.
 
+A disclosed reason SHALL be readable in full: at desktop widths the market-mode
+switch overlay SHALL NOT cover any part of the reason code, and the identity bar
+SHALL give the reason room below the switch's extent rather than flowing it
+through the centre span the switch hangs over.
+
 #### Scenario: Funding is negative
 - **WHEN** the funding rate is negative
 - **THEN** it is rendered in the negative colour, and positive funding in the positive colour
@@ -561,6 +566,10 @@ this consolidation SHALL NOT suppress an actionable account or command failure.
 #### Scenario: Market state is not routine
 - **WHEN** the workstation becomes disconnected, stale, or unavailable
 - **THEN** the identity bar discloses that non-routine market state and its reason rather than replacing it with `LIVE`
+
+#### Scenario: The desk degrades at a mid-width window
+- **WHEN** the workspace is 1366px wide and a degradation reason is shown
+- **THEN** the mode switch does not cover any part of the reason code, which sits fully visible below the switch's extent
 
 ### Requirement: The last traded price has a source the tape cannot filter
 The last-print row between the two book sides, the market header's `Last`, the
@@ -2520,7 +2529,7 @@ While the Futures workspace is active, its blue `USDⓈ-M FUTURES` identity stri
 - **THEN** its top strip may wrap or increase in height while the identity, state, market switch, and scale controls remain usable
 
 ### Requirement: The active workspace keeps local time in sight
-While a Spot or Futures workspace is active, the application SHALL present a centered local clock as part of the active interface. In Spot the clock SHALL remain immediately beneath the market-mode switch. In Futures the clock SHALL occupy a dedicated centered row immediately beneath the blue identity strip and its overlaid market switch. The Futures row SHALL reserve its own layout space so the clock does not cover the market header, instrument rail, or another workspace control. The clock SHALL use the host system's local time, SHALL show an English abbreviated weekday and month with day, hour, minute, and second in the form `Sat 15 Aug 15:00:56`, and SHALL advance through seconds without requiring market data or operator interaction. Its fixed-width numeric presentation SHALL not displace the mode switch or adjacent workspace controls as the value changes.
+While a Spot or Futures workspace is active, the application SHALL present a centered local clock as part of the active interface. In Spot the clock SHALL remain immediately beneath the market-mode switch. In Futures the clock SHALL occupy a dedicated centered row immediately beneath the blue identity strip and its overlaid market switch. The Futures row SHALL reserve its own layout space so the clock does not cover the market header, instrument rail, or another workspace control. Reserving that row SHALL NOT displace the desktop layout it sits in: at desktop widths the chart and tape rows keep their proportional window-shared sizing, the portfolio dock remains fully inside the desk, and the desk's height budget subtracts only the page chrome that actually surrounds it. The clock SHALL use the host system's local time, SHALL show an English abbreviated weekday and month with day, hour, minute, and second in the form `Sat 15 Aug 15:00:56`, and SHALL advance through seconds without requiring market data or operator interaction. Its fixed-width numeric presentation SHALL not displace the mode switch or adjacent workspace controls as the value changes.
 
 #### Scenario: An active workspace is mounted
 - **WHEN** credential preflight has completed and either Spot or Futures is the active workspace
@@ -2541,6 +2550,14 @@ While a Spot or Futures workspace is active, the application SHALL present a cen
 #### Scenario: The clock crosses a calendar boundary
 - **WHEN** local time advances into a new day or month
 - **THEN** the weekday, day, month, and time are all recomputed from the host system clock rather than incrementing only the displayed seconds
+
+#### Scenario: The clock row and the desktop grid share one window
+- **WHEN** the Futures workspace renders at or above the desktop breakpoint with the clock row present
+- **THEN** the chart and tape rows keep their proportional shares of the window, the tape does not collapse to its content's height, and the portfolio dock ends at or above the desk's bottom edge rather than being clipped below it
+
+#### Scenario: The desk fills the window it was given
+- **WHEN** the Futures workspace renders at or above the desktop breakpoint
+- **THEN** the desk's height equals the window minus the page's own padding, with no dead band between the dock and the bottom of the window
 
 ### Requirement: Futures chart time agrees with the host-local workspace clock
 The Futures chart SHALL format every visible time-axis tick and crosshair time label in the host system's current local time zone. The chart SHALL preserve the exchange candle timestamp as the plotted instant and SHALL NOT shift candle ordering, interval boundaries, history paging, or the data shared by price and volume series merely to change its displayed time zone.
@@ -2761,7 +2778,7 @@ A completed candle-history response SHALL be applied from the workstation event 
 ### Requirement: Routine depth delivery is bounded and latest-wins
 Consecutive routine order-book deliveries for the shown contract SHALL be separated by at least 200 milliseconds. The first eligible update MAY be delivered immediately; updates arriving before the next eligible instant SHALL occupy one replaceable pending slot, and the newest complete book SHALL be delivered at that trailing instant. The pending queue SHALL therefore remain bounded to one book and SHALL NOT lose the last state received during the spacing period.
 
-Depth state transitions that tell the operator the book is stale, unavailable or resynchronizing, and the first live depth after recovery, SHALL bypass the routine delay. Releasing, replacing or hiding the owning session SHALL cancel its pending timer and payload so no late book can be delivered under another owner.
+Depth state transitions that tell the operator the book is stale, unavailable or resynchronizing, the first live depth after recovery, and the first delivery of a session SHALL bypass the routine delay. Immediacy belongs to the change of delivery state, not to its value: a delivery whose state matches the state last delivered — stale included — SHALL remain a routine delivery under the bound above. A book whose staleness stands across consecutive diffs SHALL therefore be delivered at the routine cadence, latest-wins, for as long as the state does not change, and the delivery that states the change itself SHALL NOT be delayed. Releasing, replacing or hiding the owning session SHALL cancel its pending timer and payload so no late book can be delivered under another owner.
 
 #### Scenario: Several diffs arrive in one delivery window
 - **WHEN** multiple valid depth diffs update the shown book within 200 milliseconds
@@ -2770,6 +2787,10 @@ Depth state transitions that tell the operator the book is stale, unavailable or
 #### Scenario: A book failure occurs while a routine update is pending
 - **WHEN** the book becomes stale or unavailable before a pending routine delivery fires
 - **THEN** the non-live state is delivered immediately and is not delayed behind the routine book
+
+#### Scenario: The book stays stale across consecutive diffs
+- **WHEN** the shown book remains stale — for example a standing range shortfall at the deepest published page — while valid depth diffs keep arriving within one delivery window
+- **THEN** the delivery that stated the transition into stale was immediate, and the deliveries that follow while the staleness persists remain bounded and latest-wins: one newest stale book at the trailing instant, no delivery per diff
 
 #### Scenario: Book recovery completes while routine delivery is bounded
 - **WHEN** a recovery rebuilds a live book
@@ -2780,7 +2801,7 @@ Depth state transitions that tell the operator the book is stale, unavailable or
 - **THEN** its pending timer and book are discarded and nothing from that session is emitted later
 
 ### Requirement: Position labels are independent from price-scale typography
-The `ENTRY` and `LIQ` annotations SHALL be drawn independently from the chart library's standard price-line titles and price-scale tick typography. Changing either annotation's font size SHALL NOT require reducing the price-scale font size. Their entry and liquidation lines and numeric scale prices SHALL remain visible, and each custom label SHALL stay aligned with the line it names as the chart resizes, scrolls or changes price range.
+The `ENTRY` and `LIQ` annotations SHALL be drawn independently from the chart library's standard price-line titles and price-scale tick typography. Changing either annotation's font size SHALL NOT require reducing the price-scale font size. Their entry and liquidation lines and numeric scale prices SHALL remain visible, and each custom label SHALL stay aligned with the line it names as the chart resizes, scrolls or changes price range. An annotation SHALL be repainted whenever anything it states changes — its side wording and tone included — not only when its price or coordinate moves.
 
 #### Scenario: Annotation text is made smaller
 - **WHEN** the entry and liquidation annotation font is configured below the price-scale font
@@ -2793,3 +2814,7 @@ The `ENTRY` and `LIQ` annotations SHALL be drawn independently from the chart li
 #### Scenario: A position lacks a usable liquidation price
 - **WHEN** an open position has an entry price but no positive liquidation price
 - **THEN** the entry annotation is drawn and no liquidation label or invented liquidation price is shown
+
+#### Scenario: The position flips at an unchanged entry price
+- **WHEN** a one-way position changes side at the same entry price under an unmoved viewport
+- **THEN** the entry annotation states the new side and tone without waiting for a price or viewport change

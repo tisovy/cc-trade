@@ -63,10 +63,13 @@
   **Correction 2026-08-20:** the last sentence cited a record that never
   existed — the series ended at e6718d0 with no batch-verification record.
   The focused-run half of this box is evidenced; the full-suite claim was
-  testimony. The full-suite run for the whole self-audit series is recorded
-  in the archive sweep's ledger row, dated, with counts. (The "707 tests in
-  7 files" figure also cannot come from the single-file command as written;
-  it was a glob run, and the wording now says so.)
+  testimony. The record now exists: on 2026-08-20, with every self-audit fix
+  landed, `npx vitest run` — 116 files, 2215 passed (2215); `npx eslint .`
+  exit 0; `check:circular`, `check:runtime-mock`, `check:futures-production`,
+  `check:command-path` all pass. Independently reproduced the same day by
+  the parallel session from a clean `git archive` of HEAD: 2215/2215. (The
+  "707 tests in 7 files" figure also cannot come from the single-file
+  command as written; it was a glob run, and the wording now says so.)
 
 ## 5. Self-Audit Corrections (2026-08-20)
 

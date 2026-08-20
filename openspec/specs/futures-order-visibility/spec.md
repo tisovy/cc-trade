@@ -71,6 +71,10 @@ The sidebar and chart SHALL display every supported open regular and algorithmic
 ### Requirement: Chart interactions respect order source semantics
 The chart SHALL distinguish regular and algorithmic orders visually and accessibly. An order SHALL be draggable or cancellable only when the corresponding authenticated exchange operation and identity mapping are supported; otherwise it SHALL remain visible with an explicit display-only indication.
 
+A price-moving affordance — the chart's drag grip, and the ticket and dock rows' editor doorway alike — SHALL be offered only on an order whose price is the desk's to move: a regular order resting at a positive price and guarding no trigger. A regular order resting at no price — a stop-market order rests with `price: '0'` while its trigger lives in `triggerPrice` — has nothing the desk could re-price; a regular order guarding a trigger — a stop-limit — could only be "moved" by discarding the trigger and leaving a naked limit where a guard stood, and Binance's amend endpoint re-states LIMIT orders only. Where the pane shows such an order, it SHALL be drawn without the drag affordance, SHALL state accessibly — naming its own price — that it cannot be moved, and SHALL keep its cancel control. No drag SHALL begin on such an order and no pending drag mark SHALL be drawn for it — not at the y-coordinate of price zero, not anywhere. An order with no presentable price at all SHALL not be drawn as a handle. The lift path's own refusal SHALL remain, unchanged, for lifts that are genuinely broken in other ways.
+
+What a handle states — its price, its worth, its trigger state — SHALL be what the exchange last said about the order, even while the viewport stands still; a drag begun from a handle SHALL read the order as it is, not as it was drawn.
+
 #### Scenario: Supported regular limit order is amended
 - **WHEN** the operator drags an amendable regular limit order to a valid exchange-filtered price and confirms the action
 - **THEN** the system sends the source-appropriate operation and reconciles the exchange response
@@ -78,6 +82,18 @@ The chart SHALL distinguish regular and algorithmic orders visually and accessib
 #### Scenario: Algorithmic order amendment is not supported
 - **WHEN** an algorithmic order is displayed but source-aware amendment is unavailable
 - **THEN** the chart does not offer drag amendment and identifies the order as display-only
+
+#### Scenario: An order resting at no price offers no drag
+- **WHEN** a stop-market order rests with no positive resting price
+- **THEN** no drag grip is offered and no pending mark is drawn for it, and where the pane shows the order it stays visible and cancellable
+
+#### Scenario: An order guarding a trigger offers no move
+- **WHEN** a stop-limit order rests at its own price with a trigger it guards
+- **THEN** no drag grip and no editor doorway are offered on it anywhere an order can be edited, its handle names the trigger it guards, and it stays cancellable
+
+#### Scenario: A partial fill redraws the handle under a still viewport
+- **WHEN** part of a resting order fills while the price scale and the order's price do not move
+- **THEN** the handle restates the order's remaining worth, and a drag begun from it reads the remaining quantity, not the drawn one
 
 ### Requirement: Order reconciliation remains current after startup
 After the first snapshot, the system SHALL combine authenticated user-data
@@ -961,9 +977,13 @@ profit or loss on that fill but the exchange reports zero, the tentative round
 SHALL be restarted as a partial close of a position older than the window. The
 opposite-side zero-PnL fill SHALL then be treated as adding to that original
 position, and later closing fills SHALL carry the complete closed size and
-realized PnL. This reconsideration SHALL remain within one contract and position
-leg and SHALL NOT rewrite a reversal whose reported PnL is consistent with the
-tentative position.
+realized PnL. While any of what the restarted round added is still held, the
+round is a live position and SHALL be read as open — it SHALL NOT appear among
+closed positions. Once everything it added has been closed again, a further
+same-side fill SHALL NOT be absorbed on faith: it SHALL open a new round read
+on its own evidence. This reconsideration SHALL remain within one contract and
+position leg and SHALL NOT rewrite a reversal whose reported PnL is consistent
+with the tentative position.
 
 #### Scenario: The window of fills opens while a position is already held
 - **WHEN** the operator adds to a position opened before the read's window and then closes all of it
@@ -988,6 +1008,14 @@ tentative position.
 #### Scenario: A short is added after a break-even partial close
 - **WHEN** a pre-window short is bought partly at its average entry for zero realized PnL, the operator sells more at a different price for zero realized PnL, and a later buy closes the remaining position with non-zero realized PnL
 - **THEN** the review shows one real short round with the complete closed size, fees and reported realized PnL, and shows no open or closed long round from those fills
+
+#### Scenario: The add after a break-even close is still held when the window ends
+- **WHEN** a pre-window long is sold partly at its average entry for zero realized PnL, the operator buys more at a different price for zero realized PnL, and no later fill closes the position before the window ends
+- **THEN** the review shows that round as open, and the closed-position review does not contain it
+
+#### Scenario: A new position opens after the re-close
+- **WHEN** the restarted round's added size has been fully closed again and a further same-side fill realizes nothing
+- **THEN** that fill opens a new round of its own, carrying both its opening and its closing fills, and the earlier round's closed size does not include it
 
 #### Scenario: The window opens on a position being built
 - **WHEN** the first fills of a contract in the read's window open a position and none of them realizes anything
@@ -1321,14 +1349,22 @@ the burst that produces the backlog.
 - **THEN** the delay from execution report to applied state is recorded for both, rather than being inferred from the absence of complaints
 
 ### Requirement: A working order's filled portion is stated in USDT
-The working-orders table SHALL state the filled portion as a USDT value under a header naming USDT, using the same order-price selection rules as the order's stated size. The exact executed contract quantity SHALL remain available as secondary detail. A zero filled quantity SHALL be presented as zero USDT rather than as an absent reading.
+The working-orders table SHALL state the filled portion as a USDT value under a header naming USDT. The filled portion SHALL be valued at the exchange's stated average fill price when the payload carries a positive one, because that is the price the fill actually happened at; only when no positive average fill price is stated SHALL the value fall back to the same order-price selection rules as the order's stated size. The exact executed contract quantity SHALL remain available as secondary detail. A zero filled quantity SHALL be presented as zero USDT rather than as an absent reading.
+
+#### Scenario: A stop-limit fills through a gap
+- **WHEN** a working stop-limit resting at `58000` has executed `0.1` contracts at an average fill price of `58120`
+- **THEN** its Filled column states `5812` USDT — the executed quantity at the average fill price — not `5800` from the price the order rested at
+
+#### Scenario: Nothing has filled yet
+- **WHEN** a working limit order at `100` for `10` contracts reports an executed quantity of `0` and the exchange's average fill price of `0`
+- **THEN** its Filled column falls back to the resting price and states zero USDT, rather than reading as absent
 
 #### Scenario: A limit order is partly filled
-- **WHEN** a working limit order at `100` has executed `2` contracts
-- **THEN** its Filled column states `200` USDT and its secondary detail states exactly `2 contracts`
+- **WHEN** a working limit order at `100` has executed `2` contracts at an average fill price of `99.5`
+- **THEN** its Filled column states `199` USDT and its secondary detail states exactly `2 contracts`
 
-#### Scenario: A market-triggered stop is partly filled
-- **WHEN** a working stop has no positive limit price, a trigger of `58000` and an executed quantity of `0.1` contracts
+#### Scenario: A market-triggered stop is partly filled without a stated average
+- **WHEN** a working stop has no positive limit price, a trigger of `58000`, an executed quantity of `0.1` contracts and no stated average fill price
 - **THEN** its Filled column states `5800` USDT from the trigger and retains `0.1 contracts` as secondary detail
 
 ### Requirement: A market-triggered stop has a chart price

@@ -57,8 +57,11 @@
   **Correction 2026-08-20:** the last sentence cited a record that never
   existed — the series ended at e6718d0 with no batch-verification record.
   The focused-run half of this box is evidenced above; the full-suite claim
-  was testimony. The full-suite run for this change's fixes is recorded in
-  the archive sweep's ledger row, dated, with counts.
+  was testimony. The record now exists: on 2026-08-20, with every self-audit
+  fix landed, `npx vitest run` — 116 files, 2215 passed (2215); `npx eslint .`
+  exit 0; `check:circular`, `check:runtime-mock`, `check:futures-production`,
+  `check:command-path` all pass. Independently reproduced the same day by
+  the parallel session from a clean `git archive` of HEAD: 2215/2215.
 
 ## 5. Self-Audit Corrections (2026-08-20)
 

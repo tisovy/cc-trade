@@ -36,6 +36,11 @@
 
 - [ ] 2.1 Restart the desk a few times and read which reason it is. One start is enough if it is the once-per-start shape; 2026-08-15 had nearly three per start, so read a day rather than a start before concluding.
 
+  *(Note 2026-08-20: the substance of this box is satisfied by 2.2's
+  post-landing reading of a full day's record — the answer is written into
+  the proposal. Left unchecked because the restart-and-watch act it names
+  was not performed as written.)*
+
   Waiting on a desk start — the operator stopped the desk on 2026-08-16 at 20:56
   local. Read it with:
 
@@ -100,6 +105,13 @@
   the Futures workstation boundary check passed. `git diff --check` is clean.
 - [ ] 4.2 Operator confirms across a few starts that the line is either gone or now says what it is.
 
+  *(Note 2026-08-20: the diagnostic record already answers it — the
+  2026-08-19 day shows six `exchange-info` lines with `outcome: "aborted"`,
+  `code: "REQUEST_ABORTED"` at 1–5 ms, and genuine failures separately named
+  `REQUEST_DEADLINE_EXCEEDED` at the 10 s deadline. Recorded in the ledger
+  as CONFIRMED BY DIAGNOSTIC RECORD; the box stays for the operator's own
+  eyes.)*
+
 ### The evidence this starts from
 
 Counted 2026-08-16 across all six days the record keeps: roughly one
@@ -111,7 +123,7 @@ something refusing before the request goes out.
 
 ## 5. Archive Note
 
-- [ ] 5.1 **Before archiving, read this.** The delta in
+- [x] 5.1 **Before archiving, read this.** The delta in
   `specs/futures-workstation-presentation/spec.md` was synced into the
   canonical spec ahead of archive (commit `00b3a88`, while this change was
   still open) and sits there verbatim — `### Requirement: A failed read
@@ -120,3 +132,8 @@ something refusing before the request goes out.
   previously said so while writing lines anyway. Verify by grep that the
   requirement title appears exactly once in the canonical spec after the
   sweep. *(Noted by the 2026-08-19 audit.)*
+
+  **Done 2026-08-20, at the sweep:** this change moved to the archive with
+  zero canon edits; after every section of the sweep was merged,
+  `grep -cF '### Requirement: A failed read states why it failed'
+  openspec/specs/futures-workstation-presentation/spec.md` printed `1`.
