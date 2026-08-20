@@ -20,3 +20,33 @@
 
 - [ ] 4.1 Operator review of the delivery cadence on a contract whose book stands stale (journal shows depth deliveries at the 200 ms bound, not per diff).
 - [ ] 4.2 Commit the completed change and archive it against the canonical spec.
+
+## 5. Self-Audit Corrections (2026-08-20)
+
+- [x] 5.1 The 3.1 case pins the bypass in only one direction: its
+  transition diff arrives at exactly the 200 ms bound, where the routine
+  path would also emit — so deleting the state-difference bypass outright
+  (`if (immediate)` alone) left the entire 103-test suite green while a
+  shortfall-driven stale landing mid-window would wait out the bound,
+  against this change's own "stale marking is never delayed". A new case
+  — *states a mid-window stale transition on its own instant, not the
+  bound* — arms the bound, flips the regime 50 ms in, and asserts the
+  stale emit at 1_784_000_001_250 with an empty slot and no trailing
+  duplicate. Bite, by transient mutation (bypass deleted via sed, run,
+  file restored byte-identical, `git diff --exit-code` clean; the desk was
+  down): only the new case fails — `expected observedAt 1784000001250,
+  received 1784000001200` — 103/104. With the real code: 104/104.
+- [x] 5.2 Audit findings recorded open, no code change:
+  (a) an oscillating delivery state (a level flickering at the proven-band
+  edge flips shortfall 0↔n per diff) makes every diff a transition and
+  re-opens the unbounded regime — spec-compliant, since the delta grants
+  immediacy to every change of state; whether flapping deserves hysteresis
+  is a spec decision waiting on 4.1's journal reading;
+  (b) latent: the bypass clears the pending slot before an emit that can
+  still return false (null depth view) — unreachable today only by three
+  guards in three places;
+  (c) `pendingDepthDelivery` stores no payload and the trailing emit
+  recomputes the view — correct latest-wins today, silently replaces any
+  future caller's explicit queued payload;
+  (d) the timer re-entry pins `state: pending.state`, an invariant held by
+  call-site adjacency, not enforced.

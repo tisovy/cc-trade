@@ -1816,6 +1816,72 @@ describe('production Futures workstation service', () => {
         expect(session.pendingDepthTimer).toBeNull();
     });
 
+    // The other half of the same rule, pinned in the direction the test above
+    // cannot see: a transition that lands INSIDE the bound window must not
+    // wait for it. The test above states its transition at exactly the bound,
+    // where the routine path would also have emitted — so the bypass could be
+    // deleted outright and every assertion there would still hold.
+    it('states a mid-window stale transition on its own instant, not the bound', async () => {
+        const manual = createManualClock();
+        const base = createFuturesProductionWorkstationFakeTransport({ clock: manual.clock });
+        let subscriber;
+        const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+            clock: manual.clock,
+            transport: {
+                ...base,
+                connect: (options) => {
+                    subscriber = options;
+                    return base.connect(options);
+                },
+            },
+        }));
+        const events = [];
+        await runtime.service.handleRequest(productionRequest('depth-midwindow-stale'), {
+            emit: event => events.push(event),
+        });
+        const session = runtime.service.shown;
+        const settled = events.length;
+
+        // A routine live delivery arms the bound.
+        manual.advance(200);
+        subscriber.onMessage(
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.streams.makeCycle(1)[0],
+        );
+        expect(events.at(-1)).toMatchObject({
+            resource: 'depth',
+            state: 'live',
+            observedAt: 1_784_000_001_200,
+        });
+
+        // Fifty milliseconds later — deep inside the window — the shortfall
+        // regime sets in and the next diff finds the book stale. That is a
+        // change of delivery state: operational news, delivered now.
+        manual.advance(50);
+        session.depthPage = 3;
+        session.orderBook.rangeShortfall = () => 4;
+        subscriber.onMessage(
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.streams.makeCycle(2)[0],
+        );
+        expect(events.at(-1)).toMatchObject({
+            resource: 'depth',
+            state: 'stale',
+            observedAt: 1_784_000_001_250,
+        });
+        expect(events.at(-1).payload.lastUpdateId).toBe('1003');
+        expect(session.pendingDepthDelivery).toBeNull();
+        expect(session.pendingDepthTimer).toBeNull();
+
+        // And nothing rides behind it: the bypass emptied the slot, so the
+        // bound instant delivers no second copy.
+        manual.advance(150);
+        manual.runTimeouts();
+        const depth = events.slice(settled).filter(event => event.resource === 'depth');
+        expect(depth.map(event => event.observedAt)).toEqual([
+            1_784_000_001_200,
+            1_784_000_001_250,
+        ]);
+    });
+
     it('discards a pending routine depth delivery when its owner is released', async () => {
         const manual = createManualClock();
         const base = createFuturesProductionWorkstationFakeTransport({ clock: manual.clock });
