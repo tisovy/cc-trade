@@ -165,6 +165,15 @@ One sitting covers all of them.
 | `state-what-an-open-position-has-already-paid` | 5.8 | `OUTSTANDING` | Hold a position across a funding boundary and confirm the funding component appears. The read is triggered by the `FUNDING_FEE` cause and that path cannot be exercised offline. |
 | `close-a-round-at-what-reached-the-wallet` | 4.5 | `CAUSE PROVEN AND FIXED 2026-08-20, AWAITING RECHECK` | Four rows disagreed. The operator's two screenshots close the arithmetic exactly — see "The four rows, settled" below. The desk is short by precisely the funding of each round, and only on the rounds that crossed a settlement. No longer a prediction to re-check but a measured cause: the income rows were not reaching the rounds, same root as 5.7 above and fixed with it. Two things to check now. The rounds that crossed a settlement should have moved by their funding (BTWUSDT 2nd **+56.76**, CYSUSDT 2nd **+1.64**). And the table now has **two** money columns — *Realized*, which is Binance's own figure and is what the app's column of that name holds, and *Net*, which is that less commission plus funding. The one-cent rows were never a defect; they are two independent roundings of the same number. |
 | `close-a-round-at-what-reached-the-wallet` | 4.6 | `OUTSTANDING` | A round held across a funding boundary must show its funding component. |
+| `read-only-the-income-the-desk-cannot-derive` | 8.1 | `OUTSTANDING` | **The figures must not move.** This change is about what the settled read spends, not about what it says: the same column, the same closed rounds, the same numbers as the sitting above. Realized PnL and commission now come from the fills rather than from the income record, so any difference is a defect in it — and `scripts/probe-futures-settled.mjs` prints both records side by side with their difference, which answers it without a screenshot. |
+| `read-only-the-income-the-desk-cannot-derive` | 7.3 | `OUTSTANDING` | **What it now costs, from the journal.** The `settled` line carries `reads` and `types` beside `pages`; weight is `reads × 30`. Expect a cold start of about 12 reads / 360 weight reaching `complete` on the **first** pass, against 67 pages and 2 010 weight over nine, and roughly 3.75 weight a minute after it against 60. |
+
+**One thing to do before that sitting.** At 21:59 on 2026-08-20 the desk was
+running with `dist-electron/main.js` built at 21:27 — the narrowed read and the
+new schedule were in it, the resized walk was not, and two further edits after it
+produced no rebuild. The bundle is what runs, not the tree, so **restart
+`npm run e`** before reading any of the numbers above; a mixed build measures
+neither state.
 
 ### The four rows, settled — 2026-08-20, from the operator's screenshots
 
