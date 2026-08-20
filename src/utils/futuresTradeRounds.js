@@ -528,9 +528,19 @@ export const attachFuturesRoundIncome = (rounds, income, { from = null } = {}) =
   return held.map(({ round, funding, insuranceClear, shared }) => {
     // A round that opened before the read began is missing funding nobody read.
     // With no window stated at all, nothing can be claimed about coverage.
-    const complete = Number.isFinite(from) && Number.isFinite(round.openTime)
-      ? from <= round.openTime
-      : false
+    //
+    // `partial` disqualifies a round outright, whatever the window says. Such a
+    // round began by reducing a position opened before this window of fills, so
+    // its `openTime` is the edge the window happened to start at and not the
+    // moment the position was entered — the charges it carried before that edge
+    // are real, uncounted, and cannot be reached from here. Comparing the read's
+    // start against that edge answers a question about the window and reports it
+    // as an answer about the position: exactly the confusion that put the wrong
+    // flag in `readFuturesOpenPositionStarts`, in a second place.
+    const complete = round.partial !== true
+      && Number.isFinite(from)
+      && Number.isFinite(round.openTime)
+      && from <= round.openTime
     // Always rebuilt, never returned untouched: a round with no charge against
     // it still has coverage to state, and returning the folded object would keep
     // the "nothing read" default it was built with.

@@ -121,6 +121,35 @@ guard.
   charge and full coverage, which left it carrying the "nothing read" default and
   reported a covered round as uncovered. Caught by its own test.
 
+## 6b. Third instance of the same confusion, caught by review
+
+- [x] 6b.1 The peer auditing the 2026-08-19 series asked me to *confirm* that a
+  `partial` round reports `fundingComplete: false`. Ran it instead of answering,
+  and it did not: coverage was `from <= round.openTime` alone, so a round whose
+  first fill reduced a position older than the window reported itself covered
+  whenever the income read began before that fill. Measured, one round, three
+  windows:
+
+  ```
+  incomeFrom= 500 | partial=true openTime=1000 fundingComplete=true   <- wrong
+  incomeFrom= 100 | partial=true openTime=1000 fundingComplete=true   <- wrong
+  incomeFrom=3000 | partial=true openTime=1000 fundingComplete=false
+  ```
+
+  Same mistake as reading `entryImplied` for coverage in
+  `readFuturesOpenPositionStarts`, made a second time in a second file: a
+  `partial` round's `openTime` is the window's edge, not the position's entry, so
+  comparing a read's reach against it answers a question about the window.
+- [x] 6b.2 Fixed — `partial` disqualifies a round from coverage outright,
+  whatever the window says. The charges *inside* the window are still counted:
+  dropping them would understate the round as surely as claiming coverage
+  overstates it. Test fails against the previous commit.
+- **Worth carrying:** two of the three defects in this series were the same
+  confusion between "what the window covers" and "what the position did", and
+  neither was caught by a test I wrote for it — one by a peer's message, one by a
+  peer's question. Any new flag on a round wants the question asked explicitly:
+  is this about the data in hand, or about the position?
+
 ## 7. Carried forward
 
 - Funding is attributed on the contract and the span, which is all the income

@@ -52,6 +52,14 @@ Where the income the desk has read does not reach back to a round's open, the
 round SHALL state that its result is missing funding the read did not cover,
 rather than presenting an incomplete total as a complete one.
 
+A round that began by reducing a position opened before this window of fills
+SHALL never be stated as covered, however far back the income read reaches. Its
+open is the edge the window happened to start at rather than the moment the
+position was entered, so measuring the read's reach against it answers a question
+about the window and reports the answer as though it were about the position. The
+charges such a round took before that edge are real and are not reachable from
+the data in hand.
+
 The size SHALL be stated in USDT, valued at the price the round was entered at,
 because that is what every other size on this desk is stated in and a contract
 count cannot be compared across contracts. The count of contracts SHALL remain
@@ -114,6 +122,10 @@ element that the entry was recovered rather than read.
 #### Scenario: An income row is already signed
 - **WHEN** a round's funding arrives from the income record as `-7` and its commission from the trade record as `4`
 - **THEN** the result is realized PnL `- 4 + (-7)`, and the funding is not subtracted a second time
+
+#### Scenario: The round began before the window of fills
+- **WHEN** a round's first fill reduces a position opened before the window, and the income read reaches back further than that fill
+- **THEN** the round still states that its result is missing funding, because the read reaching past the window's edge says nothing about reaching past the position's open
 
 #### Scenario: A round was never charged funding
 - **WHEN** a round opened and closed between two funding boundaries and the income record has no funding row for it

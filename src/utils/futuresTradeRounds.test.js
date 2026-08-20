@@ -760,6 +760,31 @@ describe('attachFuturesRoundIncome', () => {
     expect(round.netPnl).toBeCloseTo(114.5, 6)
   })
 
+  // A round that began by reducing a position older than this window of fills
+  // carries an `openTime` that is the window's edge, not the position's entry.
+  // Measuring the read's reach against that edge answers a question about the
+  // window and reports it as an answer about the position, so such a round is
+  // never covered however far back the income read goes — the charges it took
+  // before the edge are real and cannot be reached from here.
+  it('never reports a round older than the window as covered', () => {
+    const olderThanWindow = [
+      fill({ id: 1, side: 'SELL', quantity: '2', price: '110', realizedPnl: '20', commission: '1', time: 1_000 }),
+      fill({ id: 2, side: 'SELL', quantity: '3', price: '112', realizedPnl: '36', commission: '1', time: 5_000 }),
+    ]
+    for (const incomeFrom of [100, 500, 3_000]) {
+      const [round] = buildFuturesTradeRounds(olderThanWindow, {
+        income: [{ symbol: 'BEATUSDT', component: 'funding', amount: -2, asset: 'USDT', time: 2_000 }],
+        incomeFrom,
+      })
+      expect(round.partial).toBe(true)
+      // The charge inside the window is still counted — it happened, and
+      // dropping it would understate the round as surely as claiming coverage
+      // overstates it.
+      expect(round.funding).toBeCloseTo(-2, 6)
+      expect(round.fundingComplete).toBe(false)
+    }
+  })
+
   it('says so when the income read begins after the round opened', () => {
     const [covered] = buildFuturesTradeRounds(roundTrip, { income: [], incomeFrom: 100 })
     const [uncovered] = buildFuturesTradeRounds(roundTrip, { income: [], incomeFrom: 3_000 })
