@@ -2461,6 +2461,12 @@ export function setupBinanceConnection({
                 logger.info('Futures user data stream connected.');
                 void refreshFuturesAccountState({ reason: 'stream' })
                     .catch(error => reportDetachedFuturesAccountRefreshFailure('stream', error));
+                // The desk has just come up on an account that may already hold
+                // positions with a history behind them. Without this the settled
+                // figures stay absent until the operator happens to trade, and a
+                // column that is empty on a desk that has been running all day
+                // reads as broken rather than as unread.
+                scheduleFuturesSettledRead('stream');
             });
 
             // The exchange's own keep-alive: the one traffic that proves the
@@ -4307,6 +4313,9 @@ export function setupBinanceConnection({
                         // pays no extra round-trips.
                         void futuresTradingAdapter?.getPositionMode().catch(() => {});
                         await refreshFuturesAccountState({ reason: 'refresh' });
+                        // The operator asking for the account is asking for all
+                        // of it. This is the one read they can reach directly.
+                        scheduleFuturesSettledRead('refresh');
                         break;
                     case TRADING_COMMAND_ACTIONS.ACCOUNT_HISTORY:
                         await handleFuturesHistory(command);

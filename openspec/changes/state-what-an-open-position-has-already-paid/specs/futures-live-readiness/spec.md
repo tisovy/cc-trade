@@ -19,8 +19,12 @@ per contract and SHALL ask for every kind of flow in one request rather than one
 request per kind — the endpoint answers without a symbol and, given no income
 type, returns them all — so one read covers every open position and every
 component for the weight a single contract would otherwise cost. It SHALL be
-issued when a fold reports a realizing fill or a funding cause, and not on a
-timer.
+issued when a fold reports a realizing fill or a funding cause, when the private
+stream connects, and when the operator asks for the account — and not on a timer.
+The stream case is not redundant with the first two: a desk coming up on an
+account that already holds positions has a history behind them that no fold will
+report, and a settled column that stays empty until the operator happens to trade
+reads as broken rather than as unread.
 
 This read SHALL NOT be served from the contract-discovery walk's cache. That walk
 answers which contracts the account has traded, which changes when a trade is
@@ -73,3 +77,11 @@ read is in flight.
 #### Scenario: A fill realizes PnL
 - **WHEN** a fold reports a fill that realized profit or loss
 - **THEN** the income history is read back so the position's settled money reflects it
+
+#### Scenario: The desk comes up on an account that already holds positions
+- **WHEN** the private stream connects and the account holds positions opened before this session
+- **THEN** the income history is read once, so their settled money is stated rather than left absent until the operator trades
+
+#### Scenario: The operator asks for the account
+- **WHEN** the operator requests an account refresh
+- **THEN** the income history is read with it

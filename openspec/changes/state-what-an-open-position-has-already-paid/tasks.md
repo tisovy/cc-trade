@@ -191,6 +191,18 @@
   invents them proves only that the file agrees with itself. All fail against the
   shipped version. 2215/2215 green after the fix.
 
+## 5c. The column was empty until the operator traded
+
+- [x] 5c.1 The read fired only on a realizing fill or a funding cause, so a desk
+  coming up on an account that already held positions showed `—` in the new
+  column until the operator happened to trade. Correct by the letter of the spec
+  as first written, and useless: a column that is blank on a desk which has been
+  running all day reads as broken, not as unread.
+- [x] 5c.2 The read is now also issued when the private stream connects and when
+  the operator asks for the account — the one read they can reach directly.
+  Neither is a timer, which is the thing the requirement exists to forbid. Spec
+  and scenarios updated to match rather than left describing the narrower rule.
+
 ## 6. Carried forward
 
 - Task 1.3 is unresolved by choice: whether `ACCOUNT_UPDATE` carries an
