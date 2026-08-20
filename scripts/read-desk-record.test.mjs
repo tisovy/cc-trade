@@ -83,14 +83,28 @@ describe('summarizeDeskDiagnosticRecord', () => {
   // what the record said before the exchange's own word was kept.
   it('counts refusals by the code the exchange gave', () => {
     expect(summary.refusals).toEqual([
-      { key: '-2019', count: 2 },
-      { key: '(the exchange stated none)', count: 1 },
-      { key: '-4164', count: 1 },
+      { key: '-2019[futures]', count: 2 },
+      { key: '(the exchange stated none)[futures]', count: 1 },
+      { key: '-4164[futures]', count: 1 },
     ])
     const report = formatDeskDiagnosticSummary(summary)
     expect(report).toContain('Refusals by the code the exchange gave (4)')
     // The command that ended well is a warning being withdrawn, not a refusal.
     expect(summary.kinds.find(entry => entry.key === 'outcome').count).toBe(5)
+  })
+
+  it('counts the same code apart per market', () => {
+    // The markets do not share a code namespace: -1013 names a spot filter and
+    // a futures filter that are configured apart. One merged count reads as one
+    // problem when there are two.
+    const twoMarkets = summarizeDeskDiagnosticRecord([
+      line({ at: '2026-08-10T15:00:00.000Z', kind: 'outcome', action: 'trade.placeOrder', result: 'rejected', code: 'SPOT_API_ERROR', market: 'spot', symbol: 'BTCUSDT', identity: 's-1', exchangeCode: '-1013' }),
+      line({ at: '2026-08-10T15:01:00.000Z', kind: 'outcome', action: 'trade.placeOrder', result: 'rejected', code: 'FUTURES_API_ERROR', market: 'futures', symbol: 'BTCUSDT', identity: 'f-1', exchangeCode: '-1013' }),
+    ].join(''))
+    expect(twoMarkets.refusals).toEqual([
+      { key: '-1013[futures]', count: 1 },
+      { key: '-1013[spot]', count: 1 },
+    ])
   })
 
   it('says nothing about refusals on a day that had none', () => {
@@ -179,6 +193,22 @@ describe('summarizeDeskDiagnosticRecord', () => {
     const printed = formatDeskDiagnosticSummary(futuresOnly)
     expect(printed).toContain('trade.cancelOrder[futures]')
     expect(printed).not.toContain('[spot]')
+  })
+
+  it('aligns the answers table to its longest command', () => {
+    // The real record already holds trade.adjustPositionMargin[futures] — 35
+    // characters. A fixed pad narrower than the widest key bends the table at
+    // exactly the row an operator is squinting at.
+    const answered = summarizeDeskDiagnosticRecord([
+      line({ at: '2026-08-16T07:23:32.604Z', kind: 'answer', action: 'trade.placeOrder', market: 'futures', durationMs: 739, outcome: 'ok', symbol: 'ACEUSDT', identity: 'f-1' }),
+      line({ at: '2026-08-16T07:29:28.908Z', kind: 'answer', action: 'trade.adjustPositionMargin', market: 'futures', durationMs: 337, outcome: 'ok', symbol: 'ACEUSDT', identity: 'f-2' }),
+    ].join(''))
+    const columns = formatDeskDiagnosticSummary(answered)
+      .split('\n')
+      .filter(row => row.includes('  median '))
+      .map(row => row.indexOf('median'))
+    expect(columns).toHaveLength(2)
+    expect(new Set(columns).size).toBe(1)
   })
 
   // The one question this whole design turns on: is the desk reading the signed
@@ -622,6 +652,44 @@ describe('the summary as the operator runs it', () => {
     expect(runDeskRecordSummary(['--dya', '2026-08-09', '--dir', directory])).toBe(false)
     expect(errored.join('\n')).toContain('--dya')
     expect(printed).toEqual([])
+  })
+
+  // `--day` with the day forgotten used to be indistinguishable from `--day`
+  // never given: the flag fell off the end, and a call that named a file AND a
+  // day-selection flag was half-obeyed — the file's summary printed, exit 0,
+  // nothing on the page saying a flag was dropped.
+  it('refuses a flag whose value is missing rather than dropping it', async () => {
+    const file = path.join(directory, 'desk-2026-08-10-000.jsonl')
+    await writeFile(file, DAY, 'utf8')
+    expect(runDeskRecordSummary([file, '--day'])).toBe(false)
+    expect(errored.join('\n')).toContain('--day')
+    expect(printed).toEqual([])
+  })
+
+  it('refuses a flag that swallowed another flag as its value', async () => {
+    await writeFile(path.join(directory, 'desk-2026-08-10-000.jsonl'), DAY, 'utf8')
+    expect(runDeskRecordSummary(['--dir', '--list'])).toBe(false)
+    expect(errored.join('\n')).toContain('--dir')
+    expect(printed).toEqual([])
+  })
+
+  // A hand-cut excerpt often ends mid-line, without the newline the writer
+  // always leaves. Concatenating the next file straight onto it fused the cut
+  // line with the next file's first — both destroyed, counted unreadable,
+  // exit 0.
+  it('reads named files whole when the first ends without a newline', async () => {
+    const first = path.join(directory, 'desk-2026-08-10-000.jsonl')
+    const second = path.join(directory, 'desk-2026-08-10-001.jsonl')
+    await writeFile(first, DAY.slice(0, -1), 'utf8')
+    await writeFile(
+      second,
+      line({ at: '2026-08-10T16:00:00.000Z', kind: 'fault', phase: 'freshness', code: 'CLOCK_REGRESSION' }),
+      'utf8',
+    )
+    expect(runDeskRecordSummary([first, second])).toBe(true)
+    const report = printed.join('\n')
+    expect(report).toContain('Desk record for 2026-08-10 — 18 events')
+    expect(report).toContain('CLOCK_REGRESSION')
   })
 
   it('ignores whatever else is in the directory', async () => {

@@ -10,8 +10,13 @@ The command SHALL read the record file named on its command line. A named file
 it cannot read SHALL be refused with an error naming that file and a nonzero
 exit, and no summary SHALL be printed in its place — the reader SHALL never
 substitute another day's record for the one that was asked for. An argument the
-reader does not understand, and a call that names a file while also selecting
-from a directory, SHALL be refused the same way rather than partly obeyed.
+reader does not understand, a flag whose value is missing, and a call that
+names a file while also selecting from a directory, SHALL be refused the same
+way rather than partly obeyed.
+
+Counts keyed by a code the exchange gave SHALL name the market beside the code
+and SHALL NOT be merged across markets: the two markets do not share a code
+namespace, and one merged count reads as one problem when there may be two.
 
 #### Scenario: The operator asks what happened yesterday
 - **WHEN** the summary is run against a day of the record
@@ -20,6 +25,10 @@ from a directory, SHALL be refused the same way rather than partly obeyed.
 #### Scenario: A named record file is read or refused, never substituted
 - **WHEN** the summary is invoked with the path of a record file
 - **THEN** it summarizes that file when the file can be read, and otherwise reports the path it could not read and exits nonzero, printing no other day's summary in its place
+
+#### Scenario: The same exchange code from both markets stays two counts
+- **WHEN** the summary is run against a day in which a spot command and a futures command were both refused with the same exchange code
+- **THEN** the refusals are reported as two counts, each named with its market
 
 ### Requirement: A command's answer is recorded beside it
 The record SHALL state, for every command it keeps, when the desk finished with

@@ -114,3 +114,42 @@
   substituted**) and *A command's answer is recorded beside it* (scenario
   **Answer spans are summarized per market**). Both carry the full updated
   requirement text.
+
+## 6. Self-Audit Corrections (2026-08-20)
+
+A same-day adversarial audit of this change found the refusal rule it states
+already violated by its own reader, plus three smaller defects. Each fix was
+bitten first: the new test ran against the pre-fix reader and its failure was
+recorded before the code moved.
+
+- [x] 6.1 A known flag with its value missing was silently swallowed —
+  `FILE --day` printed the file's summary with the dangling flag dropped
+  (exit 0, a file+day-selection call partly obeyed), and a bare `--dir` read
+  the default directory. `readArguments` now refuses a `--dir`/`--day` whose
+  value is missing or is itself a flag (this also stops `--dir --list`
+  consuming `--list` as a path). Bite: *refuses a flag whose value is missing
+  rather than dropping it* — `expected true to be false` pre-fix.
+- [x] 6.2 Named files were butted together with no separator, so a hand-cut
+  excerpt ending mid-line fused with the next file's first line — both
+  destroyed, counted unreadable, exit 0. Files (and same-day segments) now
+  join with `'\n'`; blank lines are already skipped. Bite: *reads named files
+  whole when the first ends without a newline* — `expected … to contain
+  'Desk record for 2026-08-10 — 18 events'` (16 counted) pre-fix.
+- [x] 6.3 Refusal counts merged markets: `refusals` was keyed by
+  `exchangeCode` alone while the change's own rule says the markets do not
+  share a namespace. Keyed `code[market]` now, `[-]` only for a line missing
+  one. Bite: *counts refusals by the code the exchange gave* — expected
+  `-2019[futures]`, got `-2019` pre-fix; plus the new cross-market case.
+  The delta's *The record can be read back* gained the sentence and scenario.
+- [x] 6.4 The answers table padded keys to 30 while the real record already
+  holds the 35-character `trade.adjustPositionMargin[futures]`; the column is
+  now padded to the day's widest key. Bite: *aligns the answers table to its
+  longest command* — two different `median` columns pre-fix. Verified against
+  the real 2026-08-19 record: the wide row aligns.
+- [x] 6.5 `npx vitest run scripts/read-desk-record.test.mjs` — 32 passed (32);
+  `--day` without a value against the real directory prints
+  `--day needs a value (like --day 2026-08-10).` and exits 1.
+
+Known and accepted, not fixed: `--day=…` equals-syntax is refused loudly as
+an unknown option; the repo-path main-guard quirk and the pre-existing
+`z: ''` shadowing in the valuation util are outside this change.

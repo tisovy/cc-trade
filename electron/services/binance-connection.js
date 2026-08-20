@@ -54,6 +54,11 @@ import {
     stampFrameMarks,
 } from '../../src/utils/frameMarks.js';
 import { FUTURES_WORKSTATION_EVENT_MAX_BYTES } from '../../src/utils/futuresWorkstationProtocolShared.js';
+// Shared with the renderer on purpose: the fold that turns these rows into a
+// position's settled money runs there, beside the fills that say when each
+// position opened, and both sides must agree on which flows are a position's at
+// all. One list, one place.
+import { readFuturesSettledIncome } from '../../src/utils/futuresSettledMoney.js';
 import {
     SPOT_REST_CONNECTION_POOL,
     createPooledSpotRestAgent,
@@ -61,6 +66,7 @@ import {
 } from './spot-rest-pool.js';
 import {
     FUTURES_HISTORY_LIMIT,
+    FUTURES_INCOME_HISTORY_REACH_MS,
     FUTURES_REST_CONNECTION_POOL,
     FUTURES_TRADE_HISTORY_LIMIT,
     FUTURES_STREAM_ORIGIN,
@@ -1971,6 +1977,108 @@ export function setupBinanceConnection({
         _futuresUnstatedReadResources = new Set();
     };
 
+    // What each open position has already settled — the realized PnL of the
+    // parts closed out of it, the funding it has paid or received, the
+    // commission it has been charged, the insurance clearance if it was ever
+    // part-liquidated.
+    //
+    // No authenticated stream carries any of it against a contract. An
+    // `ACCOUNT_UPDATE` caused by funding reports the wallet moving and names no
+    // position for it, so a fold can tell that funding was charged and not
+    // against what. The income history is the only record that says.
+    //
+    // One read, not one per contract and not one per kind of flow: Binance
+    // answers `/fapi/v1/income` without a symbol, and given no `incomeType`
+    // returns every kind at once. A desk holding five positions pays weight 30
+    // for all five and all four components together.
+    //
+    // Deliberately not the contract-discovery walk beside it. That walk answers
+    // which contracts were traded, which moves when a trade is made, and it is
+    // cached and page-budgeted for exactly that. This moves on every fill.
+    const FUTURES_SETTLED_READ_DELAY_MS = 1200;
+    const FUTURES_SETTLED_MAX_PAGES = 4;
+    let _futuresSettledReadTimer = null;
+    let _futuresSettledReadPending = false;
+
+    const readFuturesSettledMoney = async (reason) => {
+        if (futuresTradingAdapter === null) return;
+        const activation = futuresActivationGeneration;
+        // The desk's own history window, floored by how far Binance keeps income
+        // at all. Asking past the exchange's reach is not answered with older
+        // rows — it is answered with silence, which reads exactly like a
+        // position that was never charged anything.
+        const now = Date.now();
+        const from = Math.max(
+            now - FUTURES_HISTORY_WINDOW_MS,
+            now - FUTURES_INCOME_HISTORY_REACH_MS,
+        );
+        const rows = [];
+        let complete = true;
+        for (let page = 0; page < FUTURES_SETTLED_MAX_PAGES; page += 1) {
+            if (activation !== futuresActivationGeneration) return;
+            let answered = null;
+            try {
+                answered = await futuresRestLimiter.execute(
+                    () => (activation === futuresActivationGeneration
+                        ? futuresTradingAdapter.getIncomePage({
+                            startTime: from,
+                            endTime: now,
+                            page: page + 1,
+                        })
+                        : null),
+                    FUTURES_INCOME_READ_WEIGHT,
+                );
+            } catch (error) {
+                // The rows already in hand are money the desk can account for.
+                // Throwing them away because the third page timed out would
+                // replace a partial reading that says so with no reading at all.
+                logger.warn('[futures-settled] income read failed:', error?.code || error?.message);
+                complete = false;
+                break;
+            }
+            if (answered === null) return;
+            rows.push(...answered.rows);
+            if (!answered.full) break;
+            if (page === FUTURES_SETTLED_MAX_PAGES - 1) complete = false;
+        }
+        if (activation !== futuresActivationGeneration) return;
+        broadcastToRenderers({
+            type: 'futures_settled_income',
+            version: 1,
+            // Only the flows a position can be charged or credited with, and
+            // only those the exchange named a contract on. A transfer into the
+            // futures wallet is the operator moving money, not a position
+            // earning it.
+            rows: readFuturesSettledIncome(rows),
+            // What the reading covers, so a surface can say whether it reaches
+            // back to when a position was opened. Never implied from the rows:
+            // a contract with no row inside the window is indistinguishable from
+            // one the read never reached.
+            from,
+            readAt: now,
+            complete,
+            reason,
+        });
+    };
+
+    const scheduleFuturesSettledRead = (reason) => {
+        _futuresSettledReadPending = true;
+        if (_futuresSettledReadTimer !== null) return;
+        _futuresSettledReadTimer = setTimeout(() => {
+            _futuresSettledReadTimer = null;
+            if (!_futuresSettledReadPending) return;
+            _futuresSettledReadPending = false;
+            void readFuturesSettledMoney(reason);
+        }, FUTURES_SETTLED_READ_DELAY_MS);
+        _futuresSettledReadTimer.unref?.();
+    };
+
+    const cancelFuturesSettledRead = () => {
+        if (_futuresSettledReadTimer !== null) clearTimeout(_futuresSettledReadTimer);
+        _futuresSettledReadTimer = null;
+        _futuresSettledReadPending = false;
+    };
+
     // How long the private socket may say nothing at all before the desk stops
     // presenting it as carrying.
     //
@@ -2123,6 +2231,7 @@ export function setupBinanceConnection({
         futuresStreamedOrders.forget();
         // A read owed to a frame from an account nobody is on any more.
         cancelFuturesUnstatedRead();
+        cancelFuturesSettledRead();
         // The bound belongs to a socket that is going. Left armed, it would
         // judge the next account's stream by when this one last spoke.
         clearFuturesUserDataSilenceWatch();
@@ -2394,6 +2503,16 @@ export function setupBinanceConnection({
                     // nothing here: the ACCOUNT_UPDATE for the same fill carries
                     // the wallet and the position, and asks for its own read.
                     scheduleFuturesUnstatedRead(['balances']);
+                    // A fill that realized something moved money the position
+                    // has now settled, and the report is the only frame that
+                    // says so — the `ACCOUNT_UPDATE` beside it carries the new
+                    // size and entry and never what the close realized. Read on
+                    // the fact, not on every fill: an opening fill realizes
+                    // nothing and has nothing to account for.
+                    if (Number(report?.realizedPnl) !== 0
+                        && Number.isFinite(Number(report?.realizedPnl))) {
+                        scheduleFuturesSettledRead('fill');
+                    }
                 }
                 if (streamEvent.type === 'accountUpdate' && streamEvent.accountUpdate) {
                     // The exchange has just stated the change. Reading it back
@@ -2425,6 +2544,13 @@ export function setupBinanceConnection({
                         }
                     }
                     scheduleFuturesUnstatedRead(unstated);
+                    // Funding reaches the desk as a wallet movement with a cause
+                    // and no contract on it. The income record is the only place
+                    // that says which position was charged, so the cause is what
+                    // sends the desk to read it.
+                    if (streamEvent.accountUpdate.cause === 'FUNDING_FEE') {
+                        scheduleFuturesSettledRead('funding');
+                    }
                 }
                 if (streamEvent.type === 'marginCall') {
                     // The exchange raising its hand, not the desk's own

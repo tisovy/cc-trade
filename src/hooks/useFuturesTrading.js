@@ -25,6 +25,11 @@ import {
   createFuturesSymbolConfigCommand,
 } from '../utils/tradingCommands.js'
 import { describeFuturesAlgoTrigger } from '../utils/futuresOrderPresentation.js'
+import {
+  foldFuturesSettledMoney,
+  readFuturesSettledIncomeFrame,
+} from '../utils/futuresSettledMoney.js'
+import buildFuturesTradeRounds from '../utils/futuresTradeRounds.js'
 import { DESK_FRAME_KINDS, ensureDeskFrameRouter } from '../utils/deskFrameRouter.js'
 import { measureFrameMarks } from '../utils/frameMarks.js'
 import { createUnsentCommandStore } from '../utils/unsentTradingCommand.js'
@@ -124,6 +129,13 @@ const createInitialState = ({ enabled, connection, historyStoreReady = false }) 
   // Live mark prices, keyed by symbol. Kept beside the snapshot rather than
   // folded into it, so a dropped feed loses only the overlay.
   positionMarks: {},
+  // What the account has already settled — realized PnL, funding, commission,
+  // insurance clearance — as the exchange's own income rows, with the window
+  // they were read over. Held raw rather than folded: the fold needs to know
+  // when each open position began, and that comes from the fills, which the
+  // history store holds. Null until a read has answered, which is a different
+  // thing from an account that has settled nothing.
+  settledIncome: null,
   // Leverage and margin mode, keyed by symbol: the two things the position read
   // stopped reporting. Held beside the snapshot for the same reason as the marks.
   symbolConfigs: {},
@@ -629,6 +641,12 @@ const useFuturesTrading = ({
         const positionMarks = readFuturesPositionMarks(payload.marks)
         if (positionMarks !== null) {
           setState(previous => ({ ...previous, positionMarks }))
+        }
+      }
+      if (payload.type === 'futures_settled_income') {
+        const settledIncome = readFuturesSettledIncomeFrame(payload)
+        if (settledIncome !== null) {
+          setState(previous => ({ ...previous, settledIncome }))
         }
       }
       if (payload.futures_symbol_configs) {
@@ -1242,9 +1260,53 @@ const useFuturesTrading = ({
     [state.positions, state.positionMarks, state.symbolConfigs],
   )
 
+  // When each open position began, from the same fold of fills the closed
+  // review is built from. One walk defines when a position started for every
+  // surface that asks, so the settled money on a row and the round in the
+  // history can never disagree about which fills belong to it.
+  //
+  // A contract the fills do not reach back far enough to have seen opened has no
+  // start here, and the reading built from it says so rather than presenting the
+  // window's total as the position's.
+  const openPositionStarts = useMemo(() => {
+    const starts = {}
+    const open = new Set(positions
+      .filter(position => Number(position?.quantity) !== 0)
+      .map(position => String(position?.symbol ?? '').toUpperCase()))
+    if (open.size === 0) return starts
+    for (const round of buildFuturesTradeRounds(state.history.trades)) {
+      if (!round.open || !open.has(round.symbol)) continue
+      // A contract can only carry one open round per leg; the earliest of them
+      // is when the exposure the row shows began.
+      if (round.entryImplied) continue
+      const held = starts[round.symbol]
+      if (held === undefined || round.openTime < held) starts[round.symbol] = round.openTime
+    }
+    return starts
+  }, [positions, state.history.trades])
+
+  // What each open position has already settled. Folded here rather than in the
+  // main process because it takes both halves — the exchange's income rows and
+  // the fills that say when each position opened — and only the renderer holds
+  // the second.
+  const settledMoney = useMemo(() => {
+    if (state.settledIncome === null) return null
+    return foldFuturesSettledMoney(state.settledIncome.rows, {
+      starts: openPositionStarts,
+    })
+  }, [state.settledIncome, openPositionStarts])
+
   return useMemo(() => ({
     ...state,
     positions,
+    settledMoney,
+    // The window the settled figures were read over, so a surface can say what
+    // its reading covers rather than implying it covers everything.
+    settledIncomeWindow: state.settledIncome === null ? null : Object.freeze({
+      from: state.settledIncome.from,
+      readAt: state.settledIncome.readAt,
+      complete: state.settledIncome.complete,
+    }),
     placeOrder,
     placeOrderAndConfirm,
     modifyOrder,
@@ -1277,6 +1339,7 @@ const useFuturesTrading = ({
     setLeverage,
     setMarginType,
     setTradingPaused,
+    settledMoney,
     state,
   ])
 }

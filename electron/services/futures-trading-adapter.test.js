@@ -685,6 +685,56 @@ describe('futures contract configuration', () => {
         expect(readFuturesTradedSymbols(null)).toEqual([]);
     });
 
+    // Settled money is read with no `incomeType` at all. Binance's own note on
+    // the endpoint — "if incomeType is not sent, all kinds of flow will be
+    // returned" — is what makes one weight-30 read answer for realized PnL,
+    // funding, commission, insurance clearance and the rebates together. Naming
+    // them would have cost one read each, and the query is therefore the thing
+    // this asserts, not only the shape of the reply.
+    it('reads every kind of flow in one request, for every contract', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestResponse = [
+            {
+                symbol: 'BEATUSDT', incomeType: 'REALIZED_PNL', income: '120.5',
+                asset: 'USDT', time: 2_000, tranId: 77, tradeId: '4001',
+            },
+            {
+                symbol: 'BEATUSDT', incomeType: 'COMMISSION', income: '-4.2',
+                asset: 'USDT', time: 2_000, tranId: 77, tradeId: '4001',
+            },
+            {
+                symbol: 'BEATUSDT', incomeType: 'FUNDING_FEE', income: '-7.1',
+                asset: 'USDT', time: 2_500, tranId: 78,
+            },
+        ];
+        const page = await adapter.getIncomePage({ startTime: 1_000, endTime: 9_000 });
+        const params = new URLSearchParams(requests[0].url.split('?')[1]);
+        expect(requests[0].url).toContain('/fapi/v1/income');
+        expect(params.has('incomeType')).toBe(false);
+        // No symbol either: a desk holding five positions pays for one read.
+        expect(params.has('symbol')).toBe(false);
+        expect(params.get('startTime')).toBe('1000');
+        expect(params.get('endTime')).toBe('9000');
+        expect(params.get('page')).toBe('1');
+        expect(params.get('limit')).toBe('1000');
+        expect(page.full).toBe(false);
+        // The sign is the exchange's and is carried through untouched: an
+        // outflow is already negative here, and normalizing it to a magnitude
+        // would leave a fold no way to tell a charge from a credit.
+        expect(page.rows[1]).toMatchObject({
+            symbol: 'BEATUSDT',
+            incomeType: 'COMMISSION',
+            income: '-4.2',
+            asset: 'USDT',
+            tranId: '77',
+            tradeId: '4001',
+        });
+        // Funding is not a trade, so it names none. The absence is what decides
+        // whether a row can be attributed to a position leg at all.
+        expect(page.rows[2].tradeId).toBeNull();
+    });
+
     // The endpoint answers a start time with the *oldest* rows after it, so a page
     // that comes back full is a page with newer rows behind it. The numbered page
     // keeps the timestamp boundary inclusive while the caller walks forward.

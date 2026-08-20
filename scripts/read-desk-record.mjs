@@ -168,7 +168,14 @@ export const summarizeDeskDiagnosticRecord = (text) => {
     // A command the exchange resolved is a warning being withdrawn, not a
     // refusal. Only the two that ended badly are counted here.
     if (line.kind === 'outcome' && (line.result === 'rejected' || line.result === 'unresolved')) {
-      bump(refusals, line.exchangeCode ?? '(the exchange stated none)')
+      // Named with the market for the same reason answers are: the markets do
+      // not share a code namespace, so one merged count reads as one problem
+      // when there may be two.
+      bump(
+        refusals,
+        `${line.exchangeCode ?? '(the exchange stated none)'}`
+        + `[${typeof line.market === 'string' ? line.market : '-'}]`,
+      )
     }
     if (line.kind === 'answer' && typeof line.action === 'string') {
       // Keyed by market as well as by action, because the same action does not
@@ -431,9 +438,13 @@ export const formatDeskDiagnosticSummary = (summary, { day = null } = {}) => {
     // market's wait to the other. A day that held one market prints only it.
     out.push('', 'How long commands took to answer')
     out.push('  each market is its own distribution; the two do not measure the same span')
+    // Padded to the widest key the day actually held — the record already
+    // carries a 35-character command, and a fixed pad bends the table at it.
+    const width = summary.answers
+      .reduce((widest, entry) => Math.max(widest, entry.key.length), 30)
     for (const answer of summary.answers) {
       out.push(
-        `  ${answer.key.padEnd(30)} n=${String(answer.count).padStart(5)}`
+        `  ${answer.key.padEnd(width)} n=${String(answer.count).padStart(5)}`
         + `  median ${String(answer.medianMs).padStart(6)}ms`
         + `  slowest ${String(answer.slowestMs).padStart(6)}ms`
         + (answer.slowestAt === null ? '' : ` at ${answer.slowestAt}`)
@@ -561,10 +572,23 @@ export const formatDeskDiagnosticSummary = (summary, { day = null } = {}) => {
 }
 
 const readArguments = (argv) => {
-  const options = { directory: null, day: null, list: false, files: [], unknown: null }
+  const options = { directory: null, day: null, list: false, files: [], unknown: null, dangling: null }
   for (let index = 0; index < argv.length; index += 1) {
-    if (argv[index] === '--dir') options.directory = argv[index += 1] ?? null
-    else if (argv[index] === '--day') options.day = argv[index += 1] ?? null
+    if (argv[index] === '--dir' || argv[index] === '--day') {
+      // A flag whose value was forgotten used to read exactly like the flag
+      // never given: it fell off the end and the reader answered a narrower
+      // question than it was asked — `FILE --day` printed the file's summary
+      // with the dangling flag dropped on the floor. A value that is itself a
+      // flag is the same forgetting, one keystroke later.
+      const value = argv[index + 1]
+      if (value === undefined || value.startsWith('--')) {
+        options.dangling = options.dangling ?? argv[index]
+        continue
+      }
+      if (argv[index] === '--dir') options.directory = value
+      else options.day = value
+      index += 1
+    }
     else if (argv[index] === '--list') options.list = true
     // Anything else dashed is a misspelling, and anything else is a file. Both
     // used to be dropped on the floor, and what that printed was the latest
@@ -596,6 +620,13 @@ export const runDeskRecordSummary = (argv = process.argv.slice(2)) => {
     )
     return false
   }
+  if (options.dangling !== null) {
+    console.error(
+      `${options.dangling} needs a value`
+      + `${options.dangling === '--day' ? ' (like --day 2026-08-10)' : ' (a directory path)'}.`,
+    )
+    return false
+  }
   if (options.files.length > 0) {
     // A named file already answers everything the flags ask — where to look
     // and which day. A call that names both is contradicting itself, and
@@ -604,10 +635,10 @@ export const runDeskRecordSummary = (argv = process.argv.slice(2)) => {
       console.error('Name a record file or ask a directory (--dir, --day, --list) — not both.')
       return false
     }
-    let text = ''
+    const parts = []
     for (const file of options.files) {
       try {
-        text += readFileSync(file, 'utf8')
+        parts.push(readFileSync(file, 'utf8'))
       } catch (error) {
         // Never the latest day instead. A summary of the wrong day reads
         // exactly like a summary of the right one.
@@ -615,8 +646,12 @@ export const runDeskRecordSummary = (argv = process.argv.slice(2)) => {
         return false
       }
     }
+    // Joined with a newline, never butted together: a hand-cut excerpt often
+    // ends mid-line, and butting the next file straight onto it fused the cut
+    // line with the next file's first — both counted unreadable. Blank lines
+    // are skipped by the parser, so the seam costs nothing on whole files.
     console.log(formatDeskDiagnosticSummary(
-      summarizeDeskDiagnosticRecord(text),
+      summarizeDeskDiagnosticRecord(parts.join('\n')),
       { day: dayOfSegmentFiles(options.files) },
     ))
     return true
@@ -644,7 +679,7 @@ export const runDeskRecordSummary = (argv = process.argv.slice(2)) => {
   }
   const text = chosen
     .map(entry => readFileSync(path.join(directory, entry.name), 'utf8'))
-    .join('')
+    .join('\n')
   console.log(formatDeskDiagnosticSummary(summarizeDeskDiagnosticRecord(text), { day }))
   return true
 }

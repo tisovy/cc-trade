@@ -184,6 +184,122 @@ describe('FuturesPortfolioDock', () => {
       .getAttribute('title')).not.toContain('the other side of your entry')
   })
 
+  // Unrealized PnL says what the position would produce if it were closed now.
+  // This says what it has produced already — and the two are never added
+  // together, because only one of them is in the wallet.
+  it('states the money a position has already settled beside what it has not', () => {
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[position]}
+        settledMoney={{
+          BTCUSDT: {
+            symbol: 'BTCUSDT',
+            realizedPnl: 120.5,
+            funding: -7.1,
+            commission: -4.2,
+            insuranceClear: null,
+            total: 109.2,
+            settlementAsset: 'USDT',
+            otherAssets: [],
+            from: 1_000,
+            complete: true,
+          },
+        }}
+      />,
+    )
+    const settled = screen.getByRole('table', { name: 'Open positions' })
+      .querySelector('.futures-workstation-dock-settled')
+    expect(settled).toHaveTextContent('+109.20')
+    expect(settled).toHaveClass('is-positive')
+    expect(settled).not.toHaveClass('is-partial')
+    // Decomposable, because a single net number cannot be checked against the
+    // exchange and checking it against the exchange is what it is for.
+    const title = settled.getAttribute('title')
+    expect(title).toContain('+120.50 realized')
+    expect(title).toContain('−7.10 funding')
+    expect(title).toContain('−4.20 commission')
+    // Never stated as a zero: this position has never been part-liquidated.
+    expect(title).not.toContain('insurance')
+  })
+
+  it('says a settled figure is missing what the read did not reach', () => {
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[position]}
+        settledMoney={{
+          BTCUSDT: {
+            symbol: 'BTCUSDT',
+            realizedPnl: 40,
+            funding: null,
+            commission: null,
+            insuranceClear: null,
+            total: 40,
+            settlementAsset: 'USDT',
+            otherAssets: [],
+            from: null,
+            complete: false,
+          },
+        }}
+        settledWindow={{ from: 1_700_000_000_000, readAt: 1_700_000_600_000, complete: true }}
+      />,
+    )
+    const settled = screen.getByRole('table', { name: 'Open positions' })
+      .querySelector('.futures-workstation-dock-settled')
+    expect(settled).toHaveClass('is-partial')
+    expect(settled.getAttribute('title')).toContain('not the whole life of the position')
+  })
+
+  // A BNB fee added into a USDT total is not a quantity of anything, and the
+  // desk holds no rate to convert it at.
+  it('states a fee charged in another asset apart from the total', () => {
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[position]}
+        settledMoney={{
+          BTCUSDT: {
+            symbol: 'BTCUSDT',
+            realizedPnl: 10,
+            funding: null,
+            commission: null,
+            insuranceClear: null,
+            total: 10,
+            settlementAsset: 'USDT',
+            otherAssets: [{
+              asset: 'BNB',
+              realizedPnl: null,
+              funding: null,
+              commission: -0.003,
+              insuranceClear: null,
+              total: -0.003,
+            }],
+            from: 1_000,
+            complete: true,
+          },
+        }}
+      />,
+    )
+    const settled = screen.getByRole('table', { name: 'Open positions' })
+      .querySelector('.futures-workstation-dock-settled')
+    expect(settled).toHaveTextContent('+10.00')
+    expect(settled.getAttribute('title')).toContain('in BNB, not included')
+  })
+
+  // An income read that has not answered and an account that has settled nothing
+  // are different states, and a zero would state the wrong one.
+  it('does not report a position as having settled nothing before the read answers', () => {
+    render(
+      <FuturesPortfolioDock selectedSymbol="BTCUSDT" positions={[position]} />,
+    )
+    const settled = screen.getByRole('table', { name: 'Open positions' })
+      .querySelector('.futures-workstation-dock-settled')
+    expect(settled).toHaveTextContent('—')
+    expect(settled).toHaveClass('is-absent')
+    expect(settled.getAttribute('title')).toContain('not read yet')
+  })
+
   // The estimate ticks five times a second. What it may cost is the position
   // rows: a tick that changes nothing about the positions must not re-describe
   // them, and one that does must describe only them.

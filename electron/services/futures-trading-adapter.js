@@ -330,6 +330,31 @@ export const FUTURES_TRADE_HISTORY_LIMIT = 1000;
 // Binance answers a `startTime` with the *oldest* rows after it.
 export const FUTURES_INCOME_PAGE_LIMIT = 1000;
 
+// The settled-money read asks for every kind of flow in one request. Binance's
+// own note on the endpoint: "If incomeType is not sent, all kinds of flow will be
+// returned" — so one read at weight 30 answers for realized PnL, funding,
+// commission, insurance clearance and the rebates together, where naming them
+// would have cost one read each. The kinds this desk actually sums are chosen
+// after the read, here, so a kind the desk does not recognize is carried rather
+// than silently dropped by the query.
+export const FUTURES_SETTLED_INCOME_TYPES = Object.freeze([
+    'REALIZED_PNL',
+    'FUNDING_FEE',
+    'COMMISSION',
+    'INSURANCE_CLEAR',
+    // Rebates offset commission. An account trading on one that counted only
+    // what it was charged would overstate what the position cost it.
+    'COMMISSION_REBATE',
+    'REFERRAL_KICKBACK',
+    'API_REBATE',
+    'FEE_RETURN',
+]);
+
+// Binance keeps income history for the last three months and nothing before it.
+// A window asking past this is not answered with older rows; it is answered with
+// silence that reads exactly like a position that was never charged anything.
+export const FUTURES_INCOME_HISTORY_REACH_MS = 90 * 24 * 60 * 60 * 1000;
+
 const historyNumber = (value) => {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : null;
@@ -503,6 +528,34 @@ export const readFuturesLeverageBracketTable = (payload, symbol = null) => {
 // USDⓈ-M read that answers that without being told a symbol first — every trade
 // and order history endpoint requires one — so it is what a review of the whole
 // session has to start from.
+// One movement of the account's money, as the exchange records it.
+//
+// `income` is signed the exchange's way: positive is an inflow, so funding paid,
+// commission and insurance clearance all arrive negative and a fold sums them.
+// It is the opposite convention to a fill's `commission`, which is an unsigned
+// magnitude to be subtracted, and both records reach this desk — so the sign is
+// carried exactly as read and never normalized here into "an amount".
+//
+// `symbol` and `tradeId` are documented "if existing": a transfer names no
+// contract, and funding is not a trade. The absence is what decides whether a
+// row can be attributed to a position leg at all, so it is preserved as null
+// rather than defaulted.
+export const normalizeFuturesIncomeRow = (row = {}) => Object.freeze({
+    symbol: typeof row.symbol === 'string' && row.symbol.length > 0
+        ? row.symbol.toUpperCase()
+        : null,
+    incomeType: typeof row.incomeType === 'string' && row.incomeType.length > 0
+        ? row.incomeType
+        : null,
+    income: typeof row.income === 'string' ? row.income : String(row.income ?? '0'),
+    asset: typeof row.asset === 'string' && row.asset.length > 0 ? row.asset : null,
+    time: historyNumber(row.time) ?? 0,
+    // `tranId` is unique only within one income type — Binance says so on the
+    // endpoint — so neither field identifies a row on its own.
+    tranId: historyIdentity(row.tranId),
+    tradeId: historyIdentity(row.tradeId),
+});
+
 export const readFuturesTradedSymbols = (income) => {
     const rows = (Array.isArray(income) ? income : [])
         .filter(row => typeof row?.symbol === 'string' && row.symbol !== '')
@@ -1318,6 +1371,43 @@ export class FuturesTradingAdapter {
             symbols: readFuturesTradedSymbols(rows),
             full: rows.length >= bounded,
             lastTime,
+        });
+    }
+
+    // What the account has actually settled, over a window, for every contract at
+    // once.
+    //
+    // Deliberately not `getTradedSymbolPage`. That read exists to answer which
+    // contracts were traded and throws every amount away; it is paged, cached and
+    // budgeted for an answer that moves when a trade is made. This one is the
+    // amounts, and they move on every fill and every funding boundary.
+    //
+    // No `incomeType` is sent, so one weight-30 read answers for every kind of
+    // flow rather than one read per kind. No `symbol` either: the endpoint
+    // answers without one, so a desk holding five positions pays once.
+    //
+    // Paged by the endpoint's own page number against fixed time bounds. Walking
+    // `startTime` forward past a page's last row would skip every other row
+    // recorded in that same millisecond, which on a market close is several.
+    async getIncomePage({
+        startTime,
+        endTime = null,
+        page = 1,
+        limit = FUTURES_INCOME_PAGE_LIMIT,
+    }) {
+        const bounded = Math.min(Math.max(Number(limit) || FUTURES_INCOME_PAGE_LIMIT, 1), 1000);
+        const selectedPage = Math.max(Math.floor(Number(page) || 1), 1);
+        const data = await this.#signedRequest('GET', '/fapi/v1/income', {
+            startTime,
+            ...(Number.isFinite(Number(endTime)) ? { endTime: Number(endTime) } : {}),
+            page: selectedPage,
+            limit: bounded,
+        });
+        const rows = Array.isArray(data) ? data : [];
+        return Object.freeze({
+            rows: Object.freeze(rows.map(row => normalizeFuturesIncomeRow(row))),
+            // A full page means there is another one behind it.
+            full: rows.length >= bounded,
         });
     }
 

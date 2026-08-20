@@ -2044,7 +2044,7 @@
   grid-template-columns:
     minmax(96px, 1.1fr) 48px minmax(84px, 0.9fr) minmax(64px, 0.9fr)
     minmax(64px, 0.9fr) minmax(64px, 0.9fr) minmax(88px, 1fr)
-    minmax(148px, 1.3fr) 56px;
+    minmax(148px, 1.3fr) minmax(84px, 0.9fr) 56px;
   gap: 6px;
   align-items: center;
   padding: 5px 7px;
@@ -2070,6 +2070,32 @@
    including a ten-digit price, and the head and every row resolve to one set of
    tracks. One clip remains and it is older than this change — a fourteen-
    character contract, whose whole name is now on the element. */
+/* Settled money, beside the unrealized figure it must never be added to. The
+   uPnL beside it carries two readings and gets the widest track; this carries
+   one, so it is cut for the same five figures and two decimals every other money
+   track on this row is. Absent reads as a dash rather than as a zero: a position
+   whose income read has not answered has not settled nothing. */
+.futures-workstation-dock-settled.is-positive {
+  color: #2bc48a;
+}
+
+.futures-workstation-dock-settled.is-negative {
+  color: #ef5b69;
+}
+
+.futures-workstation-dock-settled.is-absent {
+  color: #5d6b7c;
+}
+
+/* The reading does not reach back to when the position was opened, so it is
+   missing funding the read never covered. Marked the same way an estimated uPnL
+   is — the operator already reads that underline as "this number has a
+   qualification on it". */
+.futures-workstation-dock-settled.is-partial {
+  text-decoration: underline dotted currentColor 1px;
+  text-underline-offset: 3px;
+}
+
 .futures-workstation-dock-row.is-orders {
   grid-template-columns:
     minmax(72px, 1fr) 48px minmax(128px, 1.2fr) minmax(78px, 1fr)

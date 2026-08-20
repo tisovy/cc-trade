@@ -35,6 +35,57 @@ const HISTORY_VIEW_OF_TAB = Object.freeze({
   tradeHistory: 'trades',
 })
 
+// The settled figure's own tone. Absent is not flat: a reading that has not
+// arrived and a position that has settled exactly nothing are different states,
+// and the tone is the only thing distinguishing them at a glance.
+const settledToneOf = (settled) => {
+  if (settled === null || settled.total === null) return 'absent'
+  if (settled.total > 0) return 'positive'
+  return settled.total < 0 ? 'negative' : 'flat'
+}
+
+const SETTLED_COMPONENT_LABELS = Object.freeze({
+  realizedPnl: 'realized',
+  funding: 'funding',
+  commission: 'commission',
+  insuranceClear: 'insurance',
+})
+
+// Every component the exchange charged or credited, named. A single net figure
+// the operator cannot decompose cannot be checked against Binance, and checking
+// it against Binance is what this column is for.
+const settledBreakdown = totals => Object.entries(SETTLED_COMPONENT_LABELS)
+  .filter(([name]) => totals?.[name] !== null && totals?.[name] !== undefined)
+  .map(([name, label]) => `${formatSignedUsdt(totals[name])} ${label}`)
+
+const settledTitle = (settled, window) => {
+  if (settled === null) {
+    return 'What this position has already settled — not read yet'
+  }
+  if (settled.total === null && settled.otherAssets.length === 0) {
+    return 'Nothing settled on this position yet — no realized PnL, funding or commission against it'
+  }
+  const parts = []
+  if (settled.total !== null) {
+    parts.push(`${formatSignedUsdt(settled.total)} ${settled.settlementAsset} settled`)
+    const breakdown = settledBreakdown(settled)
+    if (breakdown.length > 0) parts.push(breakdown.join(' · '))
+  }
+  // Charged in something the desk holds no rate for. Stated in its own asset
+  // rather than converted into the total by a guess.
+  for (const other of settled.otherAssets) {
+    parts.push(`${settledBreakdown(other).join(' · ')} in ${other.asset}, not included`)
+  }
+  // What the figure covers. A total silently missing eight hours of funding is
+  // worse than one that names its own edge.
+  if (!settled.complete) {
+    parts.push(window?.from
+      ? `covers the read from ${exactFuturesDeskTime(window.from)}, not the whole life of the position`
+      : 'covers the read’s window, not the whole life of the position')
+  }
+  return parts.join(' · ')
+}
+
 const exactText = value => (
   typeof value === 'string' && value.length > 0 ? value : (value ?? '—')
 )
@@ -77,6 +128,11 @@ export const FuturesPortfolioDock = ({
   tickSizes = EMPTY_TICKS,
   marginCalls = EMPTY_MARGIN_CALLS,
   history = null,
+  // What each open contract has already settled, keyed by symbol, and the window
+  // it was read over. Both may be null: an account read that has not answered is
+  // not an account that has settled nothing.
+  settledMoney = null,
+  settledWindow = null,
   onClosePosition,
   onCancelOrder,
   onOrderEdit,
@@ -97,7 +153,11 @@ export const FuturesPortfolioDock = ({
     // apart from the liquidation price beside it: that number is the desk's
     // reckoning, this is Binance saying the risk ratio is too high.
     marginCall: marginCalls[futuresMarginCallKey(position)] ?? null,
-  })), [positions, marginCalls])
+    // What this contract has already settled. Null until an income read has
+    // answered, which is a different reading from an account that has settled
+    // nothing — and the cell says so rather than showing a zero.
+    settled: settledMoney?.[position?.symbol] ?? null,
+  })), [positions, marginCalls, settledMoney])
   const totalUnrealizedPnl = useMemo(() => describedPositions.reduce((total, entry) => (
     entry.presentation.unrealizedPnl === null ? total : total + entry.presentation.unrealizedPnl
   ), 0), [describedPositions])
@@ -260,9 +320,20 @@ export const FuturesPortfolioDock = ({
               >
                 uPnL (ROE)
               </span>
+              {/* What the position has already settled, beside what it would
+                  settle if closed now. The two are never added together: one is
+                  in the wallet and the other is not. */}
+              <span
+                role="columnheader"
+                title={'What this position has already settled \u2014 realized PnL on the '
+                  + 'parts closed out of it, funding, commission, and insurance clearance '
+                  + 'if any. Already in the wallet, unlike the uPnL beside it.'}
+              >
+                PnL
+              </span>
               <span role="columnheader" />
             </div>
-            {describedPositions.map(({ position, presentation, margin, marginCall }) => (
+            {describedPositions.map(({ position, presentation, margin, marginCall, settled }) => (
               <div
                 className={`futures-workstation-dock-row is-${presentation.tone}${position.symbol === selectedSymbol ? ' is-current-symbol' : ''}`}
                 role="row"
@@ -382,6 +453,16 @@ export const FuturesPortfolioDock = ({
                 >
                   <strong>{formatSignedUsdt(presentation.unrealizedPnl)}</strong>
                   <em>{formatSignedPercent(presentation.roePercent)}</em>
+                </span>
+                <span
+                  role="cell"
+                  className={`futures-workstation-dock-settled is-${settledToneOf(settled)}${
+                    settled !== null && settled.complete === false ? ' is-partial' : ''}`}
+                  title={settledTitle(settled, settledWindow)}
+                >
+                  {settled === null || settled.total === null
+                    ? '—'
+                    : <strong>{formatSignedUsdt(settled.total)}</strong>}
                 </span>
                 <span role="cell">
                   <button
