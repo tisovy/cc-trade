@@ -1261,10 +1261,20 @@ const useFuturesTrading = ({
     [state.positions, state.positionMarks, state.symbolConfigs],
   )
 
-  // When each open position began, from the same fold of fills the closed
-  // review is built from. One walk defines when a position started for every
-  // surface that asks, so the settled money on a row and the round in the
-  // history can never disagree about which fills belong to it.
+  // One fold of the fills, read twice: it says when each open position began,
+  // and for the same rounds what they have realized and been charged. Both
+  // answers must come from one walk — a position whose start is taken from one
+  // fold and whose costs are taken from another can be charged for what happened
+  // before it opened.
+  const openRounds = useMemo(
+    () => buildFuturesTradeRounds(state.history.trades).filter(round => round?.open === true),
+    [state.history.trades],
+  )
+
+  // When each open position began, from that fold. One walk defines when a
+  // position started for every surface that asks, so the settled money on a row
+  // and the round in the history can never disagree about which fills belong to
+  // it.
   //
   // A contract the fills do not reach back far enough to have seen opened has no
   // start here, and the reading built from it says so rather than presenting the
@@ -1274,11 +1284,8 @@ const useFuturesTrading = ({
       .filter(position => Number(position?.quantity) !== 0)
       .map(position => String(position?.symbol ?? '').toUpperCase()))
     if (open.size === 0) return {}
-    return readFuturesOpenPositionStarts(
-      buildFuturesTradeRounds(state.history.trades),
-      open,
-    )
-  }, [positions, state.history.trades])
+    return readFuturesOpenPositionStarts(openRounds, open)
+  }, [positions, openRounds])
 
   // What each open position has already settled. Folded here rather than in the
   // main process because it takes both halves — the exchange's income rows and
@@ -1288,12 +1295,19 @@ const useFuturesTrading = ({
     if (state.settledIncome === null) return null
     return foldFuturesSettledMoney(state.settledIncome.rows, {
       starts: openPositionStarts,
+      // What the fills already state: the realized PnL of the parts closed out
+      // of each open position and the commission its fills were charged. Read
+      // from the trade record rather than from the income record, which states
+      // the same two things again one row per fill — thirteen thousand rows a
+      // week on this account, against the forty-five funding charges that are
+      // the only reason the income record is read at all.
+      rounds: openRounds,
       // How far back the read actually reached. Without it a contract is
       // reported complete on the strength of knowing when its position began,
       // which says nothing about whether the charges since then were read.
       from: state.settledIncome.from,
     })
-  }, [state.settledIncome, openPositionStarts])
+  }, [state.settledIncome, openPositionStarts, openRounds])
 
   return useMemo(() => ({
     ...state,

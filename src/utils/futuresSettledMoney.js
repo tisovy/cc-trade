@@ -16,21 +16,35 @@
 // magnitude that has to be subtracted — and nothing on this path may mix the
 // two, because doing so returns a fee to the operator as profit.
 
-// Which kinds of flow are the position's own. A transfer in or out of the
-// futures wallet is the operator moving money, not a position earning or costing
-// it, and counting it would make a deposit read as a winning trade.
+// Which kinds of flow are the position's own, and which of them the desk could
+// have worked out for itself.
+//
+// A transfer in or out of the futures wallet is the operator moving money, not a
+// position earning or costing it, and counting it would make a deposit read as a
+// winning trade — so it is absent here entirely.
+//
+// `derivable` is the second question, and it is about *records* rather than
+// about money. The trade record the desk reads anyway for its history panel
+// states, per fill, what that fill realized and what it was charged for it; the
+// income record states the same two things again, one row per fill, thirteen
+// thousand of them in a week on the operator's account. A figure available from
+// a record already in hand is not read a second time from a metered one — and
+// where both are held, they are not added to each other either, which is what
+// this flag prevents. Funding, insurance clearance and the rebates are marked
+// underivable because nothing else states them: no fill names a funding charge,
+// and no fill names a credit that came back after it.
 const COMPONENT_OF_INCOME_TYPE = Object.freeze({
-  REALIZED_PNL: 'realizedPnl',
-  FUNDING_FEE: 'funding',
-  COMMISSION: 'commission',
-  INSURANCE_CLEAR: 'insuranceClear',
+  REALIZED_PNL: Object.freeze({ component: 'realizedPnl', derivable: true }),
+  FUNDING_FEE: Object.freeze({ component: 'funding', derivable: false }),
+  COMMISSION: Object.freeze({ component: 'commission', derivable: true }),
+  INSURANCE_CLEAR: Object.freeze({ component: 'insuranceClear', derivable: false }),
   // Rebates are commission coming back. They belong with the charge rather than
   // in a line of their own: what the operator wants to know is what the position
   // cost them to trade, and on a rebated account the gross charge is not it.
-  COMMISSION_REBATE: 'commission',
-  REFERRAL_KICKBACK: 'commission',
-  API_REBATE: 'commission',
-  FEE_RETURN: 'commission',
+  COMMISSION_REBATE: Object.freeze({ component: 'commission', derivable: false }),
+  REFERRAL_KICKBACK: Object.freeze({ component: 'commission', derivable: false }),
+  API_REBATE: Object.freeze({ component: 'commission', derivable: false }),
+  FEE_RETURN: Object.freeze({ component: 'commission', derivable: false }),
 })
 
 export const FUTURES_SETTLED_COMPONENTS = Object.freeze([
@@ -39,6 +53,11 @@ export const FUTURES_SETTLED_COMPONENTS = Object.freeze([
   'commission',
   'insuranceClear',
 ])
+
+// The components a fill states on its own. Named once, here, because two places
+// have to agree about it and a list that disagrees with the table above is a
+// charge counted twice or not at all.
+const DERIVABLE_COMPONENTS = Object.freeze(['realizedPnl', 'commission'])
 
 const toFiniteNumber = (value) => {
   const parsed = Number(value)
@@ -106,11 +125,19 @@ export const readFuturesSettledIncome = (rows) => {
       && Number.isFinite(row?.amount)
       && typeof row?.symbol === 'string'
       && row.symbol.length > 0) {
-      kept.push(row)
+      // An entry that predates the flag is treated as derivable when it is a
+      // commission or a realized PnL. Both readings are safe in the direction
+      // that matters: a charge the trade record also states is dropped rather
+      // than counted twice, and nothing the trade record cannot state is a
+      // charge of that shape.
+      kept.push(row.derivable === undefined
+        ? Object.freeze({ ...row, derivable: DERIVABLE_COMPONENTS.includes(row.component) })
+        : row)
       continue
     }
-    const component = COMPONENT_OF_INCOME_TYPE[row?.incomeType]
-    if (component === undefined) continue
+    const flow = COMPONENT_OF_INCOME_TYPE[row?.incomeType]
+    if (flow === undefined) continue
+    const { component, derivable } = flow
     const amount = toFiniteNumber(row?.income)
     const symbol = typeof row?.symbol === 'string' && row.symbol.length > 0
       ? row.symbol.toUpperCase()
@@ -131,6 +158,10 @@ export const readFuturesSettledIncome = (rows) => {
     kept.push(Object.freeze({
       symbol,
       component,
+      // Whether the desk holds this same charge in the trade record it reads
+      // anyway. The fold drops these where it has the fills, so that one charge
+      // stated by two records is counted once.
+      derivable,
       amount,
       asset: typeof row?.asset === 'string' && row.asset.length > 0 ? row.asset : null,
       time: Number.isFinite(row?.time) ? row.time : 0,
@@ -198,6 +229,62 @@ export const readFuturesOpenPositionStarts = (rounds, symbols) => {
   return starts
 }
 
+/**
+ * What the fills say an open position has realized and been charged.
+ *
+ * The same fold the closed rounds are built from, stating the same two numbers
+ * the same way. Until 2026-08-20 they did not: a round in the history took its
+ * realized PnL and its commission from the trade record while the figure beside
+ * the live position took them from the income record, and one number stated by
+ * two records is two numbers that can disagree. It also cost thirteen thousand
+ * rows a week to read the second copy.
+ *
+ * The signs are the whole hazard here. A round's `realizedPnl` is signed the way
+ * money is, and its `fee` is an unsigned magnitude that has to be subtracted —
+ * while every amount from the income record is already signed. That is why the
+ * commission below is negated exactly once, in one place, rather than at each
+ * of the sites that add it up.
+ *
+ * A round that began by reducing a position opened before this window of fills
+ * is excluded, the same way `readFuturesOpenPositionStarts` excludes it: its
+ * fills do not reach the position's entry, so what it realized and was charged
+ * before that edge is real, uncounted and unreachable from here.
+ *
+ * Nothing is contributed for a component that is zero. A position that has
+ * closed nothing has not realized 0.00 — it has realized nothing, which is the
+ * same rule the rest of this file keeps for an absent charge.
+ */
+const settledFromOpenRounds = (rounds, starts, settlementAsset) => {
+  const entries = []
+  for (const round of Array.isArray(rounds) ? rounds : []) {
+    if (round?.open !== true || round.partial === true) continue
+    const symbol = String(round.symbol ?? '').toUpperCase()
+    if (!Number.isFinite(starts[symbol])) continue
+    const time = Number(round.openTime)
+    if (!Number.isFinite(time)) continue
+    const realizedPnl = Number(round.realizedPnl)
+    if (Number.isFinite(realizedPnl) && realizedPnl !== 0) {
+      entries.push({ symbol, component: 'realizedPnl', amount: realizedPnl, asset: settlementAsset, time })
+    }
+    const fee = Number(round.fee)
+    if (Number.isFinite(fee) && fee !== 0) {
+      entries.push({ symbol, component: 'commission', amount: -fee, asset: settlementAsset, time })
+    }
+    // A fee charged in BNB is a quantity of BNB. It is stated in its own asset
+    // rather than added to a USDT total, exactly as an income row in another
+    // asset is; `fee` above is the settlement asset's share and is already out
+    // of this list's way.
+    for (const charged of Array.isArray(round.feesByAsset) ? round.feesByAsset : []) {
+      const asset = charged?.asset
+      const amount = Number(charged?.amount)
+      if (typeof asset !== 'string' || asset === settlementAsset) continue
+      if (!Number.isFinite(amount) || amount === 0) continue
+      entries.push({ symbol, component: 'commission', amount: -amount, asset, time })
+    }
+  }
+  return entries
+}
+
 const emptyTotals = () => ({
   realizedPnl: null,
   funding: null,
@@ -238,7 +325,7 @@ const addAmount = (totals, component, amount) => {
  */
 export const foldFuturesSettledMoney = (
   income,
-  { starts = {}, from = null, settlementAsset = 'USDT' } = {},
+  { starts = {}, from = null, rounds = null, settlementAsset = 'USDT' } = {},
 ) => {
   // Not `toFiniteNumber` on its own: `Number(null)` is 0, and a coverage of zero
   // is the epoch — every position that ever opened would read as covered by a
@@ -252,7 +339,18 @@ export const foldFuturesSettledMoney = (
   // and the read must reach it.
   const reaches = start => covered !== null && covered <= start
   const byContract = new Map()
-  for (const entry of readFuturesSettledIncome(income)) {
+  // With the fills in hand, the two components they state are taken from them
+  // and the income record's copies of the same charges are dropped. Without
+  // them, every component comes from the income record as before — a caller that
+  // has not read the fills yet still gets a reading rather than nothing.
+  const stated = readFuturesSettledIncome(income)
+  const entries = rounds === null
+    ? stated
+    : [
+      ...stated.filter(entry => entry.derivable !== true),
+      ...settledFromOpenRounds(rounds, starts, settlementAsset),
+    ]
+  for (const entry of entries) {
     const start = starts[entry.symbol]
     const known = Number.isFinite(start)
     if (known && entry.time < start) continue

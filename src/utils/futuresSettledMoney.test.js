@@ -61,6 +61,139 @@ describe('readFuturesSettledIncome', () => {
   })
 })
 
+// The two components the trade record already states, taken from it instead of
+// from a metered endpoint that states them again one row per fill.
+describe('foldFuturesSettledMoney, with the fills in hand', () => {
+  const fill = (overrides = {}) => ({
+    symbol: 'BEATUSDT', side: 'BUY', positionSide: 'BOTH',
+    price: '100', quantity: '1', realizedPnl: '0', commission: '0',
+    time: 1_000, id: 1, ...overrides,
+  })
+
+  // A long scaled into and partly closed, still open. The fills say what it
+  // realized and what it was charged; the income record is asked only for the
+  // funding, which no fill names.
+  const openRounds = () => buildFuturesTradeRounds([
+    fill({ id: 1, side: 'BUY', quantity: '3', price: '100', commission: '0.30', time: 1_000 }),
+    fill({ id: 2, side: 'SELL', quantity: '1', price: '110', realizedPnl: '10', commission: '0.11', time: 2_000 }),
+  ]).filter(round => round.open === true)
+
+  // The sign convention is the whole hazard on this path. A fill's commission is
+  // an unsigned magnitude that has to be subtracted; every amount from the income
+  // record is already signed. Mixing them returns a fee to the operator as
+  // profit.
+  it('takes the realized PnL and the commission from the fills, signed the exchange’s way', () => {
+    const [reading] = Object.values(foldFuturesSettledMoney([
+      row({ incomeType: 'FUNDING_FEE', income: '-7.10', tranId: '2', time: 1_500 }),
+    ], { starts: { BEATUSDT: 1_000 }, from: 900, rounds: openRounds() }))
+
+    expect(reading.realizedPnl).toBeCloseTo(10, 6)
+    expect(reading.commission).toBeCloseTo(-0.41, 6)
+    expect(reading.funding).toBeCloseTo(-7.1, 6)
+    expect(reading.total).toBeCloseTo(2.49, 6)
+  })
+
+  // One charge stated by two records must be counted once, and by the record
+  // already in hand.
+  //
+  // The two agree on a live account, which is exactly why this fixture makes
+  // them disagree: with identical numbers, counting the income copy and counting
+  // the fill are indistinguishable at the output, and the test would pass
+  // against a fold that had never heard of the fills. Here the income record
+  // claims figures the fills contradict, so the reading names which record it
+  // came from — and the sum of the two, which is the failure being guarded
+  // against, is neither.
+  it('does not add the income record’s copy of a charge the fills already state', () => {
+    const [reading] = Object.values(foldFuturesSettledMoney([
+      row({ incomeType: 'REALIZED_PNL', income: '999', tranId: '1', time: 2_000, tradeId: 2 }),
+      row({ incomeType: 'COMMISSION', income: '-9.00', tranId: '3', time: 2_000, tradeId: 2 }),
+      row({ incomeType: 'FUNDING_FEE', income: '-7.10', tranId: '2', time: 1_500 }),
+    ], { starts: { BEATUSDT: 1_000 }, from: 900, rounds: openRounds() }))
+
+    expect(reading.realizedPnl).toBeCloseTo(10, 6)
+    expect(reading.commission).toBeCloseTo(-0.41, 6)
+    expect(reading.total).toBeCloseTo(2.49, 6)
+  })
+
+  // A credit no fill names. Whether the exchange's own `COMMISSION` rows are
+  // gross or already net of it, gross-from-the-fills plus this credit is what
+  // the position cost — which is why the rebate types are still read and the
+  // charge types are not.
+  it('still nets a rebate against the commission the fills were charged', () => {
+    const [reading] = Object.values(foldFuturesSettledMoney([
+      row({ incomeType: 'COMMISSION_REBATE', income: '0.04', tranId: '5', time: 2_100 }),
+    ], { starts: { BEATUSDT: 1_000 }, from: 900, rounds: openRounds() }))
+    expect(reading.commission).toBeCloseTo(-0.37, 6)
+  })
+
+  // A guard, and named as one: it passes against the fold before this change,
+  // which never looked at a round at all. It is here because the disqualification
+  // has to hold in two places now — a round that began by reducing a position
+  // opened before this window of fills does not reach that position's entry, so
+  // what it realized and was charged before the edge is real, uncounted and
+  // unreachable. `readFuturesOpenPositionStarts` refuses such a round a start;
+  // this says the fold refuses it a figure, and the two must not drift apart.
+  it('states nothing from a round that does not reach the position’s open', () => {
+    const rounds = buildFuturesTradeRounds([
+      fill({ id: 1, side: 'SELL', quantity: '2', price: '100', realizedPnl: '0', commission: '0.20', time: 1_000 }),
+      fill({ id: 2, side: 'BUY', quantity: '3', price: '105', realizedPnl: '0', commission: '0.31', time: 2_000 }),
+    ]).filter(round => round.open === true)
+    expect(rounds[0].partial).toBe(true)
+
+    const readings = foldFuturesSettledMoney([], {
+      starts: readFuturesOpenPositionStarts(rounds, ['BEATUSDT']),
+      from: 900,
+      rounds,
+    })
+    expect(readings).toEqual({})
+  })
+
+  // A position that has closed nothing has not realized 0.00 — it has realized
+  // nothing. The same rule the rest of this file keeps for a charge that was
+  // never made.
+  it('invents no zero for a position that has realized nothing', () => {
+    const rounds = buildFuturesTradeRounds([
+      fill({ id: 1, side: 'BUY', quantity: '3', price: '100', commission: '0.30', time: 1_000 }),
+    ]).filter(round => round.open === true)
+    const [reading] = Object.values(foldFuturesSettledMoney([], {
+      starts: { BEATUSDT: 1_000 }, from: 900, rounds,
+    }))
+    expect(reading.realizedPnl).toBeNull()
+    expect(reading.commission).toBeCloseTo(-0.3, 6)
+  })
+
+  // A fee charged in BNB is a quantity of BNB. Added into a USDT total it is a
+  // number with no unit.
+  it('keeps a fill’s fee charged in another asset out of the settlement total', () => {
+    const rounds = buildFuturesTradeRounds([
+      fill({
+        id: 1, side: 'BUY', quantity: '3', price: '100', time: 1_000,
+        commission: '0.002', commissionAsset: 'BNB',
+      }),
+    ]).filter(round => round.open === true)
+    const [reading] = Object.values(foldFuturesSettledMoney([], {
+      starts: { BEATUSDT: 1_000 }, from: 900, rounds,
+    }))
+    expect(reading.commission).toBeNull()
+    expect(reading.otherAssets).toEqual([
+      expect.objectContaining({ asset: 'BNB', commission: -0.002 }),
+    ])
+  })
+
+  // A guard: this is the reading as it was before the change, and it passes
+  // against that code by construction. It is here so that narrowing what the
+  // income record is asked for cannot quietly become the only way to get a
+  // figure at all — a desk whose history has not loaded yet still has an answer.
+  it('reads every component from the income record when there are no fills', () => {
+    const [reading] = Object.values(foldFuturesSettledMoney([
+      row({ incomeType: 'REALIZED_PNL', income: '10', tranId: '1' }),
+      row({ incomeType: 'COMMISSION', income: '-0.41', tranId: '3' }),
+    ], { starts: { BEATUSDT: 1_000 }, from: 900 }))
+    expect(reading.realizedPnl).toBeCloseTo(10, 6)
+    expect(reading.commission).toBeCloseTo(-0.41, 6)
+  })
+})
+
 describe('foldFuturesSettledMoney', () => {
   // The exchange signs an income row its own way: positive is an inflow, so
   // commission and funding arrive negative and the total is their sum. Subtracting
@@ -235,8 +368,28 @@ describe('the settled-money path, end to end', () => {
       { symbol: 'BTWUSDT', component: 'nonsense', amount: -3, asset: 'USDT', time: 3 },
       { symbol: 'BTWUSDT', component: 'funding', amount: Number.NaN, asset: 'USDT', time: 4 },
     ])).toEqual([
-      { symbol: 'BTWUSDT', component: 'funding', amount: -1, asset: 'USDT', time: 1 },
+      {
+        symbol: 'BTWUSDT',
+        component: 'funding',
+        amount: -1,
+        asset: 'USDT',
+        time: 1,
+        // An entry read before this flag existed is classified by what it is.
+        // Funding is stated by no other record, so it stays.
+        derivable: false,
+      },
     ])
+  })
+
+  // An already-read commission entry is a charge the trade record states too,
+  // and the fold drops it where it holds the fills. Reading one back must not
+  // quietly turn it into a charge nothing else knows about, because that is the
+  // shape that gets counted twice.
+  it('classifies an already-read entry the fills could have stated', () => {
+    expect(readFuturesSettledIncome([
+      { symbol: 'BTWUSDT', component: 'commission', amount: -0.5, asset: 'USDT', time: 1 },
+      { symbol: 'BTWUSDT', component: 'realizedPnl', amount: 12, asset: 'USDT', time: 2 },
+    ]).map(entry => entry.derivable)).toEqual([true, true])
   })
 })
 
