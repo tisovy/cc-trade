@@ -14,6 +14,7 @@ import {
   orderPresentationPrice,
   orderWorkingQuantity,
 } from '../../../utils/futuresOrderPresentation.js'
+import { futuresOrderPriceIsMovable } from '../../../utils/futuresOrderDrag.js'
 import { formatExchangePrice } from '../../../utils/futuresPriceFormat.js'
 import { futuresMarginCallKey } from '../../../utils/futuresMarginCall.js'
 import {
@@ -595,7 +596,11 @@ export const FuturesPortfolioDock = ({
             {openOrders.map((order) => {
               const intent = describeFuturesOrderIntent(order)
               const trigger = describeFuturesAlgoTrigger(order)
-              const editable = order.orderKind !== 'ALGO' && typeof onOrderEdit === 'function'
+              // The editor submits to Binance's amend endpoint, which
+              // re-states LIMIT orders only — the same promise rule the
+              // chart's grip follows. A doorway on a stop read "Edit … order
+              // at 0" and the refusal arrived after the form was filled in.
+              const editable = futuresOrderPriceIsMovable(order) && typeof onOrderEdit === 'function'
               const restingPrice = priceOf(order.symbol, orderPresentationPrice(order))
               const presentationPrice = trigger.spawnedPrice === null
                 ? restingPrice

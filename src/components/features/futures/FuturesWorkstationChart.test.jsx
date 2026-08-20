@@ -747,7 +747,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     // ever refuse it, and the editor edits the resting price it does not
     // have. Cancelling stays, named at the price the order is drawn at.
     const plate = screen.getByRole('note', {
-      name: 'SELL LONG order resting at no price; it cannot be moved by dragging',
+      name: 'SELL LONG order at 59850; resting at no price, it cannot be moved by dragging',
     })
     fireEvent.doubleClick(plate, { clientX: 120, clientY: 220 })
     expect(props.onOrderEdit).not.toHaveBeenCalled()
@@ -759,12 +759,108 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     fireEvent.pointerDown(plate, { pointerId: 31, button: 0, altKey: true })
     await settle()
     expect(props.onOrderLift).not.toHaveBeenCalled()
-    // The stop-limit rests at its limit price and keeps its grip.
-    expect(screen.getByRole('button', {
+    // The stop-limit rests at a price of its own, but the move a grip promises
+    // is a cancellation followed by a plain LIMIT placement — kept, it would
+    // discard the trigger and leave a naked limit where a guard stood. So the
+    // promise is not made: the same plate, cancellable, not draggable.
+    expect(screen.queryByRole('button', {
       name: 'Move SELL LONG order at 59910 with Ctrl or Alt drag',
-    })).toBeInTheDocument()
+    })).not.toBeInTheDocument()
+    const guarded = screen.getByRole('note', {
+      name: 'SELL LONG order at 59910; it guards a trigger at 59800 and cannot be moved by dragging',
+    })
+    fireEvent.pointerDown(guarded, { pointerId: 32, button: 0, altKey: true })
+    await settle()
+    expect(props.onOrderLift).not.toHaveBeenCalled()
+    fireEvent.doubleClick(guarded, { clientX: 130, clientY: 230 })
+    expect(props.onOrderEdit).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Cancel SELL LONG order at 59910' })).toBeInTheDocument()
     expect(regularStop).toEqual(expect.objectContaining({ price: '0', triggerPrice: '59850' }))
     expect(algoStop).toEqual(expect.objectContaining({ price: '0', triggerPrice: '59750' }))
+  })
+
+  // The coordinate gate keeps the previous entries when nothing it compares
+  // moved — and it used to compare only identity and geometry, so an order
+  // whose CONTENT changed under a still viewport kept its stale plate, and a
+  // drag begun from it read stale quantities.
+  it('redraws an order plate when its fill state changes under a still viewport', async () => {
+    const props = {
+      ...properties([candle(1_784_000_000_000)]),
+      ownedOrders: [workingOrder()],
+    }
+    const { rerender } = render(<FuturesWorkstationChart {...props} />)
+    const grip = await screen.findByRole('button', {
+      name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
+    })
+    expect(grip).toHaveTextContent('29950 USDT')
+
+    // A partial fill: 0.2 executed of 0.5, price and viewport unmoved.
+    rerender(<FuturesWorkstationChart
+      {...props}
+      ownedOrders={[workingOrder({ executedQty: '0.2' })]}
+    />)
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', {
+        name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
+      })).toHaveTextContent('17970 USDT')
+    })
+  })
+
+  it('says an algo order triggered even before its fill price is stated', async () => {
+    const algo = workingOrder({
+      orderKind: 'ALGO',
+      algoType: 'CONDITIONAL',
+      orderId: 'algo-1',
+      clientOrderId: 'algo-1',
+      price: '0',
+      triggerPrice: '59750',
+    })
+    const props = { ...properties([candle(1_784_000_000_000)]), ownedOrders: [algo] }
+    const { rerender } = render(<FuturesWorkstationChart {...props} />)
+    await screen.findByRole('note', {
+      name: 'ALGO SELL LONG order at 59750; price is managed by Binance and is not draggable',
+    })
+
+    // Fired: the spawned order exists but is still working, so no actualPrice
+    // yet — the plate is still drawn at the trigger, and must say so.
+    rerender(<FuturesWorkstationChart
+      {...props}
+      ownedOrders={[{ ...algo, actualOrderId: '900', actualPrice: '' }]}
+    />)
+
+    expect(await screen.findByRole('note', { name: /triggered at 59750/ })).toBeInTheDocument()
+  })
+
+  // An order with neither a resting price nor a trigger has nowhere to be
+  // drawn. `toNumber(null)` is 0, not null, so it used to slip past the
+  // no-price filter and land at the y-coordinate of price zero, named
+  // "at null".
+  it('draws nothing for an order with no presentable price', async () => {
+    const props = {
+      ...properties([candle(1_784_000_000_000)]),
+      ownedOrders: [workingOrder()],
+      onOrderCancel: vi.fn(),
+    }
+    const { rerender } = render(<FuturesWorkstationChart {...props} />)
+    await screen.findByRole('button', {
+      name: 'Move SELL LONG order at 59900 with Ctrl or Alt drag',
+    })
+    // A scale dragged far enough down maps price zero onto the pane.
+    const chart = chartMock.charts[0]
+    chart.series[0].priceToCoordinate.mockImplementation(price => (price === 0 ? 300 : 60_000 - price))
+    rerender(<FuturesWorkstationChart
+      {...props}
+      ownedOrders={[workingOrder({ orderId: 'priceless', clientOrderId: 'priceless', price: '0' })]}
+    />)
+    act(() => chart.timeScale().emitVisibleLogicalRangeChange())
+
+    // The priced order is gone from the book, and nothing replaced it: no
+    // handle at price zero, nothing named "at null".
+    await waitFor(() => {
+      expect(document.querySelector('.futures-workstation-owned-order')).toBeNull()
+    })
+    expect(screen.queryByLabelText(/at null/)).not.toBeInTheDocument()
   })
 
   // The drag is a cancellation followed by a placement, and the operator asked
@@ -1684,7 +1780,7 @@ describe('FuturesWorkstationChart viewport ownership', () => {
     expect(screen.queryByRole('button', { name: /with Ctrl or Alt drag/ }))
       .not.toBeInTheDocument()
     const note = within(handleOf(cancel)).getByRole('note', {
-      name: 'SELL LONG order resting at no price; it cannot be moved by dragging',
+      name: 'SELL LONG order at 57000; resting at no price, it cannot be moved by dragging',
     })
     // The plate still states what the order is worth — valued at its trigger,
     // the way the order-values change reads a stop-market: 0.5 × 57000.

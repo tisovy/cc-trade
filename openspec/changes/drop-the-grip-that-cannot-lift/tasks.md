@@ -119,9 +119,12 @@
   until 0 is on the pane and confirm the order shows a plate with a cancel
   control and no grip, and that Ctrl/Alt-drag on it starts nothing.
 
-## 5. Applied To The Moved Base
+## 6. Applied To The Moved Base
 
-- [x] 5.1 The fix was built against `a859766` and landed on a tree that had
+*(Renumbered from a second "## 5." on 2026-08-20 — two sections shared the
+number and made task ids like 5.1 ambiguous.)*
+
+- [x] 6.1 The fix was built against `a859766` and landed on a tree that had
   since taken the display-price change: the grip and cancel labels name
   `displayPrice` (the trigger for a stop-market), and the order's worth is
   valued at the trigger. Three test expectations were aligned at apply time —
@@ -130,3 +133,47 @@
   `triggerPrice` the way the normalized order does, and the plate's value
   reads 28500 USDT rather than the base's dash. Full chart suite after the
   merge: 380/380, eslint clean.
+
+## 7. Self-Audit Corrections (2026-08-20)
+
+A same-day adversarial audit found the fix incomplete in the one direction
+it existed to close — gestures whose promise cannot be kept — and one of
+its own test expectations codifying a dangerous one. Each repair was bitten
+first; the recorded pre-fix failures are quoted.
+
+- [x] 7.1 The stop-limit kept its grip (asserted by 6.1's aligned test),
+  but the lift is a cancellation followed by a plain LIMIT placement:
+  dragging a protective stop-limit one tick cancelled the stop and left a
+  naked limit — for a SELL stop under the market, an immediate taker fill.
+  The predicate is now "the move promise can be kept": a regular order
+  resting at its own price with no trigger, exported as
+  `futuresOrderPriceIsMovable` from `futuresOrderDrag.js` and asked by the
+  grip render, the drag guard, the lift path's replacement (which now
+  refuses trigger-carrying orders as NOT_DRAGGABLE before cancelling
+  anything), and the ticket/dock editor doorways — the editor submits to
+  Binance's amend endpoint, which re-states LIMIT orders only, so a doorway
+  on a stop read "Edit … order at 0" and failed after the form was filled.
+  Bites: *refuses to replace an order that guards a trigger* — `expected
+  { ok: true, … } to match { ok: false, reason: 'NOT_DRAGGABLE' }` pre-fix;
+  the stop test's stop-limit grip expectation flipped to a plate; *offers
+  no editor doorway on an order the amend endpoint would refuse* failed
+  pre-fix in both the dock and the ticket. This also retires 5.3's worry
+  about an unwitnessed guard: the guard now shares the witnessed predicate.
+- [x] 7.2 The "no presentable price" filter was dead code — `toNumber(null)`
+  is 0, so an order with neither price nor trigger drew at the y of price
+  zero, named "at null". A null presentation price now skips the handle.
+  Bite: *draws nothing for an order with no presentable price* — the handle
+  rendered pre-fix.
+- [x] 7.3 The plate's accessible name carried no price, so two stop-markets
+  at different triggers were byte-identical to a screen reader. Plates now
+  name their price like their siblings, and a trigger-guarding plate names
+  its trigger. Test expectations updated with the wording.
+- [x] 7.4 `npx vitest run` over the chart, drag-module (new
+  `futuresOrderDrag.test.js`), drag-hook, dock and ticket test files —
+  203 passed (203).
+- [x] 7.5 Known and accepted: the commit d6a1d25 message says the trigger
+  "lives in stopPrice" — the desk field is `triggerPrice` (the adapter maps
+  `stopPrice→triggerPrice`); the history is not rewritten for prose.
+- [ ] 7.6 Operator: drag-check a resting stop-limit shows the plate with
+  its trigger named, cancel works, and no drag begins; a plain limit still
+  drags.

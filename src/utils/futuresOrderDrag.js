@@ -51,6 +51,23 @@ const isPositiveDecimal = text => (
 const refuse = (reason, extra = {}) => Object.freeze({ ok: false, reason, ...extra })
 
 /**
+ * Whether this order's price is the desk's to move: a regular order resting
+ * at its own price, guarding no trigger. Every mover makes the same promise —
+ * the drag lifts by cancelling and placing a plain LIMIT, the editor submits
+ * to Binance's amend endpoint, which re-states LIMIT orders only. For an
+ * order resting at no price there is nothing to re-price, and for one
+ * guarding a trigger the plain-LIMIT replacement would discard the trigger
+ * and leave a naked limit where a guard stood. One predicate, asked by the
+ * grip and editor doorways that offer the gesture, the guard that begins it,
+ * and the replacement that would send it.
+ */
+export const futuresOrderPriceIsMovable = order => (
+  (order?.orderKind ?? 'REGULAR') === 'REGULAR'
+  && Number(order?.price) > 0
+  && !(Number(order?.triggerPrice) > 0)
+)
+
+/**
  * What a drag would place, and why it could not.
  *
  * `positionSide` is the exchange's own leg for the order, never a derived one:
@@ -64,7 +81,7 @@ export const describeFuturesDragReplacement = ({
   minNotionalUsdt = null,
   maxOrderNotionalUsdt = null,
 } = {}) => {
-  if (!order || (order.orderKind ?? 'REGULAR') !== 'REGULAR') {
+  if (!order || !futuresOrderPriceIsMovable(order)) {
     return refuse(FUTURES_DRAG_REASONS.NOT_DRAGGABLE)
   }
   const originalQuantity = decimalText(order.origQty)
@@ -134,7 +151,7 @@ export const describeFuturesDragReplacement = ({
 export const describeFuturesDragRefusal = (replacement) => {
   switch (replacement?.reason) {
     case FUTURES_DRAG_REASONS.NOT_DRAGGABLE:
-      return 'Only a regular working order can be moved by dragging.'
+      return 'Only a regular order resting at its own price, with no trigger, can be moved by dragging.'
     case FUTURES_DRAG_REASONS.NO_REMAINING_QUANTITY:
       return 'The order has no remaining quantity to place.'
     case FUTURES_DRAG_REASONS.UNUSABLE_PRICE:

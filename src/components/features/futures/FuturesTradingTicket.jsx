@@ -23,6 +23,7 @@ import {
   futuresPnlReadingNote,
   formatUsdt,
 } from '../../../utils/futuresOrderPresentation.js'
+import { futuresOrderPriceIsMovable } from '../../../utils/futuresOrderDrag.js'
 import { describeFuturesOrderConfirmation } from '../../../utils/futuresOrderConfirmation.js'
 import { formatFuturesReadingAge } from '../../../utils/futuresPriceReading.js'
 import {
@@ -821,7 +822,12 @@ const FuturesTradingTicket = ({
                     const intent = describeFuturesOrderIntent(order)
                     const isAlgo = order.orderKind === 'ALGO'
                     const trigger = describeFuturesAlgoTrigger(order)
-                    const editable = !isAlgo && typeof onOrderEdit === 'function'
+                    // The editor submits to Binance's amend endpoint, which
+                    // re-states LIMIT orders only — the same promise rule the
+                    // chart's grip follows. A doorway on a stop read "Edit …
+                    // order at 0" and the refusal arrived after the form was
+                    // filled in.
+                    const editable = futuresOrderPriceIsMovable(order) && typeof onOrderEdit === 'function'
                     const displayedPrice = formatPriceOrAbsent(
                       trigger.spawnedPrice ?? orderPresentationPrice(order),
                       tickOf(order.symbol),
@@ -847,10 +853,12 @@ const FuturesTradingTicket = ({
                         onKeyDown={editable
                           ? event => openOrderEditorFromKeyboard(event, order, onOrderEdit)
                           : undefined}
-                        onDoubleClick={event => (isAlgo ? undefined : onOrderEdit?.(order, {
-                          x: event.clientX,
-                          y: event.clientY,
-                        }))}
+                        onDoubleClick={editable
+                          ? event => onOrderEdit(order, {
+                            x: event.clientX,
+                            y: event.clientY,
+                          })
+                          : undefined}
                       >
                         <span role="cell">
                           <button

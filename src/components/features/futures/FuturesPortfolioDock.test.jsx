@@ -684,6 +684,42 @@ describe('FuturesPortfolioDock', () => {
     expect(onOrderEdit).not.toHaveBeenCalled()
   })
 
+  // The editor's submit is Binance's amend endpoint, which re-states a LIMIT
+  // order. A stop-market resting at price 0 and a stop-limit guarding a
+  // trigger are orders that endpoint always refuses — offered anyway, the
+  // doorway read "Edit … order at 0" and the refusal arrived only after the
+  // operator had filled the form in. The chart's grip follows the same rule.
+  it('offers no editor doorway on an order the amend endpoint would refuse', () => {
+    const onOrderEdit = vi.fn()
+    const stopMarket = {
+      ...order, orderId: 12, side: 'SELL', type: 'STOP_MARKET', price: '0', triggerPrice: '59000.00',
+    }
+    const stopLimit = {
+      ...order, orderId: 13, side: 'SELL', type: 'STOP', price: '59900.00', triggerPrice: '59800.00',
+    }
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        openOrders={[stopMarket, stopLimit]}
+        onOrderEdit={onOrderEdit}
+        onCancelOrder={vi.fn()}
+        onSymbolChange={vi.fn()}
+      />,
+    )
+    const rows = screen.getAllByRole('row').filter(row => (
+      row.classList.contains('is-orders') && !row.classList.contains('is-head')
+    ))
+    expect(rows).toHaveLength(2)
+    for (const row of rows) {
+      expect(row).not.toHaveClass('is-editable')
+      expect(row).not.toHaveAttribute('tabindex')
+      expect(row).not.toHaveAttribute('aria-label')
+      fireEvent.click(row)
+      fireEvent.keyDown(row, { key: 'Enter' })
+    }
+    expect(onOrderEdit).not.toHaveBeenCalled()
+  })
+
   it('preserves click coordinates and isolates nested controls and ALGO rows', () => {
     const onOrderEdit = vi.fn()
     const onCancelOrder = vi.fn()

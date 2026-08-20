@@ -1541,6 +1541,45 @@ describe('FuturesTradingTicket', () => {
     )
   })
 
+  // The editor's submit is Binance's amend endpoint, which re-states a LIMIT
+  // order. A stop-market resting at price 0 and a stop-limit guarding a
+  // trigger are orders that endpoint always refuses — offered anyway, the
+  // doorway read "Edit … order at 0" and the refusal arrived only after the
+  // operator had filled the form in. No doorway: not by row, not by keyboard,
+  // not by double-click. The chart's grip follows the same rule.
+  it('offers no editor doorway on an order the amend endpoint would refuse', () => {
+    const onOrderEdit = vi.fn()
+    const stopMarket = {
+      symbol: 'BTCUSDT', orderId: 21, side: 'SELL', positionSide: 'BOTH',
+      type: 'STOP_MARKET', status: 'NEW', price: '0', triggerPrice: '59000.00', origQty: '0.004', z: '0',
+    }
+    const stopLimit = {
+      symbol: 'BTCUSDT', orderId: 22, side: 'SELL', positionSide: 'BOTH',
+      type: 'STOP', status: 'NEW', price: '59900.00', triggerPrice: '59800.00', origQty: '0.004', z: '0',
+    }
+    const state = createState({ openOrders: [stopMarket, stopLimit] })
+    render(
+      <FuturesTradingTicket
+        state={state}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+        onOrderEdit={onOrderEdit}
+      />,
+    )
+    fireEvent.click(screen.getByRole('tab', { name: /Orders/ }))
+    const rows = screen.getAllByRole('row').filter(row => (
+      row.classList.contains('futures-production-order-row')
+    ))
+    expect(rows).toHaveLength(2)
+    for (const row of rows) {
+      expect(row).not.toHaveClass('is-editable')
+      expect(row).not.toHaveAttribute('tabindex')
+      fireEvent.keyDown(row, { key: 'Enter' })
+      fireEvent.doubleClick(row, { clientX: 100, clientY: 100 })
+    }
+    expect(onOrderEdit).not.toHaveBeenCalled()
+  })
+
   it('lists positions and opens the close panel', () => {
     const position = {
       symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '0.010', entryPrice: '57000',

@@ -17,6 +17,7 @@ import {
   orderPresentationPrice,
   orderNotionalUsdt,
 } from '../../../utils/futuresOrderPresentation.js'
+import { futuresOrderPriceIsMovable } from '../../../utils/futuresOrderDrag.js'
 import {
   isFuturesTradingGestureTarget,
   resolveFuturesTradingGesture,
@@ -80,6 +81,22 @@ const chartOrderPresentationPrice = (order) => {
   return spawnedPrice === null
     ? orderPresentationPrice(order)
     : orderPresentationPrice({ price: spawnedPrice, triggerPrice: orderPresentationPrice(order) })
+}
+
+// Two rows describe the same resting order only when every field agrees. The
+// store replaces a row wholesale on any exchange update, so field-by-field
+// equality over flat records is exactly "nothing the exchange said about this
+// order changed". Enumerating only the fields the handles happened to read was
+// how the coordinate gate went stale: a partial fill moved the notional, an
+// algo firing moved the trigger state, and both were read off objects the
+// comparison had already decided to keep.
+const sameOrderRecord = (left, right) => {
+  if (left === right) return true
+  const keys = new Set([...Object.keys(left ?? {}), ...Object.keys(right ?? {})])
+  for (const key of keys) {
+    if ((left?.[key] ?? null) !== (right?.[key] ?? null)) return false
+  }
+  return true
 }
 
 // The candles and their volume must cover exactly the same times. The library
@@ -942,7 +959,10 @@ export const FuturesWorkstationChart = ({
         ? []
         : restingOrders.flatMap((order) => {
           const displayPrice = chartOrderPresentationPrice(order)
-          const price = toNumber(displayPrice)
+          // `toNumber(null)` is 0, not null: an order with no presentable
+          // price at all must be skipped here, not drawn at the y-coordinate
+          // of price zero and named "at null".
+          const price = displayPrice === null ? null : toNumber(displayPrice)
           const y = price === null ? null : series.priceToCoordinate(price)
           return typeof y === 'number'
             && Number.isFinite(y)
@@ -953,8 +973,14 @@ export const FuturesWorkstationChart = ({
         })
       const next = layoutOrderCoordinates(coordinates, containerSize.height)
       setOrderCoordinates((previous) => {
+        // Everything the handles render — and everything a drag begun from
+        // one reads — takes part in the comparison, the same rule the
+        // annotation gate below states. Identity and geometry alone let a
+        // partial fill or an algo firing keep a stale plate under a still
+        // viewport, and handed the drag a stale quantity.
         const unchanged = previous.length === next.length && previous.every((entry, index) => (
           futuresOrderIdentity(entry.order) === futuresOrderIdentity(next[index].order)
+          && sameOrderRecord(entry.order, next[index].order)
           && entry.displayPrice === next[index].displayPrice
           && entry.anchorY === next[index].anchorY
           && entry.y === next[index].y
@@ -1201,13 +1227,11 @@ export const FuturesWorkstationChart = ({
   // modifier's part: from here the gesture is held by the button, and what the
   // keyboard does while it is held is not the desk's business.
   const beginOrderDrag = useCallback((event, order) => {
-    if (order?.orderKind !== 'REGULAR'
-      // An order resting at no price cannot be lifted: a stop-market order
-      // rests with `price: '0'` — its trigger lives in stopPrice — and the lift
-      // path refuses a replacement it cannot price before anything is
-      // cancelled. Refused here too, so no drag ever begins on one and no
-      // pending mark is ever drawn at the y-coordinate of price zero.
-      || !(toNumber(order?.price) > 0)
+    // The same predicate the grip renders by and the lift path refuses by: an
+    // order the move promise cannot be kept for — resting at no price, or
+    // guarding a trigger the plain-LIMIT replacement would discard — begins no
+    // drag, and no pending mark is ever drawn for one.
+    if (!futuresOrderPriceIsMovable(order)
       || event.button !== 0
       || event.metaKey
       || event.shiftKey
@@ -1528,14 +1552,13 @@ export const FuturesWorkstationChart = ({
               </div>
             )
           }
-          // A grip is a promise: "Move … with Ctrl or Alt drag". An order
-          // resting at no price is one the lift path always refuses — a
-          // stop-market order rests with `price: '0'`, the trigger lives in
-          // stopPrice, and there is no resting price to put it back at — so the
-          // promise cannot be kept and none is made. The order stays drawn and
-          // stays cancellable, on the bare plate an exchange-managed order is
-          // drawn on.
-          const draggable = toNumber(order.price) > 0
+          // A grip is a promise: "Move … with Ctrl or Alt drag". An order the
+          // lift path always refuses — resting at no price like a stop-market,
+          // or guarding a trigger like a stop-limit, which the plain-LIMIT
+          // replacement would discard — gets no promise. The order stays drawn
+          // and stays cancellable, on the bare plate an exchange-managed order
+          // is drawn on.
+          const draggable = futuresOrderPriceIsMovable(order)
           return (
             <div
               className={`futures-workstation-owned-order is-${intent.tone}${displaced ? ' is-displaced' : ''}${lifting ? ' is-lifting' : ''}`}
@@ -1560,7 +1583,11 @@ export const FuturesWorkstationChart = ({
                 <span
                   className="futures-workstation-owned-order-plate"
                   role="note"
-                  aria-label={`${intent.side} ${intent.label} order resting at no price; it cannot be moved by dragging`}
+                  // Named like its siblings, price included: two plates at two
+                  // triggers must not share one accessible name.
+                  aria-label={toNumber(order.price) > 0
+                    ? `${intent.side} ${intent.label} order at ${displayPrice}; it guards a trigger at ${order.triggerPrice} and cannot be moved by dragging`
+                    : `${intent.side} ${intent.label} order at ${displayPrice}; resting at no price, it cannot be moved by dragging`}
                 >
                   {content}
                 </span>
