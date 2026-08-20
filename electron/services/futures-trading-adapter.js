@@ -1,5 +1,6 @@
 import { createHmac } from 'node:crypto';
 import https from 'node:https';
+import { futuresAccountFingerprint } from './futures-settled-income-store.js';
 import { isIndeterminateTradingFailure } from './trading-command-outcome.js';
 
 export const FUTURES_REST_ORIGIN = 'https://fapi.binance.com';
@@ -962,6 +963,10 @@ export class FuturesTradingAdapter {
         restOrigin = FUTURES_REST_ORIGIN,
     }) {
         this.apiKey = apiKey;
+        // A digest of the key, so a reading kept on disk can name the account it
+        // was read from without the account's credential being anywhere near the
+        // file. Computed once; the key itself never leaves this object.
+        this.credentialFingerprint = futuresAccountFingerprint(apiKey);
         this.apiSecret = apiSecret;
         this.recvWindow = recvWindow;
         this.proxyAgent = proxyAgent;

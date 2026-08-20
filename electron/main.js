@@ -3,6 +3,7 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import { shouldOpenDevTools } from './devtools.js'
 import { installRendererZoomControls } from './renderer-zoom.js'
+import { createFuturesSettledIncomeStore } from './services/futures-settled-income-store.js'
 import { setupBinanceConnection } from './services/binance-connection.js'
 import { createDeskDiagnosticRecord } from './services/desk-diagnostic-record.js'
 import {
@@ -249,9 +250,17 @@ app.whenReady().then(async () => {
   console.log('[Electron] Desk record:', deskDiagnosticRecord.directory)
   deskDiagnosticRecord.record('session', { event: 'started', version: app.getVersion() })
 
+  // What the desk already read of the income record, kept between runs. Stated
+  // here beside the diagnostics path for the same reason: a store the operator
+  // cannot find is a store they cannot delete when it is wrong.
+  const settledIncomeStore = createFuturesSettledIncomeStore({
+    directory: path.join(app.getPath('userData'), 'state'),
+  })
+
   binanceController = setupBinanceConnection({
     localWebSocketAccess,
     diagnosticRecord: deskDiagnosticRecord,
+    settledIncomeStore,
   })
 
   installRendererAppProtocol({

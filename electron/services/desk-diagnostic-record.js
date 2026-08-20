@@ -300,6 +300,12 @@ const RECORDED_FIELDS = Object.freeze({
         // `reads` while every kind answers; where it is not, a kind filled its
         // page and the walk went round again for it alone.
         ['types', count],
+        // How much of this pass came off disk rather than the wire, and what the
+        // exchange said about it when it was checked. A kept reading is only
+        // safe while somebody can see whether it has ever been wrong.
+        ['restored', count],
+        ['missing', count],
+        ['differing', count],
         ['rows', count],
         ['kept', count],
         ['contracts', count],

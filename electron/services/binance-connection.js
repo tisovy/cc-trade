@@ -64,6 +64,9 @@ import {
     readFuturesSettledIncome,
 } from '../../src/utils/futuresSettledMoney.js';
 import {
+    compareFuturesSettledReadings,
+} from './futures-settled-income-store.js';
+import {
     emptyFuturesSettledState,
     walkFuturesSettledIncome,
 } from './futures-settled-income-walk.js';
@@ -927,6 +930,10 @@ export function setupBinanceConnection({
     // Where the desk's own diagnostics are kept. Absent, the desk behaves
     // exactly as it did before there was a record at all.
     diagnosticRecord = DESK_DIAGNOSTICS_UNRECORDED,
+    // Where the settled reading is kept between runs. Absent, every start reads
+    // the window again — which is what the desk did before there was a store,
+    // and is still exactly correct, only dearer.
+    settledIncomeStore = null,
 } = {}) {
     const credentialPreflight = evaluateBinanceCredentialPreflight(process.env);
     const startupEnvelope = createBinanceStartupEnvelope(credentialPreflight);
@@ -2098,6 +2105,11 @@ export function setupBinanceConnection({
     // ones that arm the confirming pass, and they outrank every other reason a
     // pass can be given.
     const FUTURES_SETTLED_CONFIRM_REASONS = new Set(['funding', 'settlement']);
+    // How often a kept reading is checked against the exchange rather than
+    // extended. A whole window is one request per kind, so the honest thing is
+    // affordable: read it from nothing, compare, and let the exchange win. This
+    // replaces the tail read the hour used to spend, at the same cost.
+    const FUTURES_SETTLED_VERIFY_MS = FUTURES_SETTLED_RECONCILE_MS;
     let _futuresSettledReadTimer = null;
     let _futuresSettledReadPending = false;
     // What the desk holds, and the contiguous span it holds it for. Rows are
@@ -2123,11 +2135,20 @@ export function setupBinanceConnection({
     // because the reason is not a label — it decides whether the desk goes back
     // for the row once the exchange has written it.
     let _futuresSettledReadReason = null;
+    // Whether the kept reading has been looked for yet this activation, and when
+    // the held rows were last checked against the exchange rather than extended.
+    let _futuresSettledLoaded = false;
+    let _futuresSettledVerifiedAt = null;
 
     const clearFuturesSettledMoney = () => {
         _futuresSettled = emptyFuturesSettledState();
         _futuresSettledSent = null;
         _futuresSettledReadAt = null;
+        // The next activation looks for its own account's reading. The file is
+        // keyed by credential, so this is about not carrying a *loaded* flag
+        // across an account change, never about the file itself.
+        _futuresSettledLoaded = false;
+        _futuresSettledVerifiedAt = null;
     };
 
     // Which of two reasons a pass should run under. A settlement outranks
@@ -2185,6 +2206,11 @@ export function setupBinanceConnection({
         // endpoint's documentation states it nowhere. Read off the wire instead of
         // assumed: the first page of the pass that carries two rows answers it.
         let pageOrder = 'none';
+        // How many rows came off disk rather than off the wire, and what the
+        // exchange said about them when they were checked.
+        let restored = 0;
+        let missing = 0;
+        let differing = 0;
         // Every way out of this read states itself. The read that says nothing is
         // the one that cost the operator an afternoon: an empty column could not
         // be told from a read that never fired, one the exchange refused, one a
@@ -2200,6 +2226,13 @@ export function setupBinanceConnection({
                 // endpoint's 30, and it is the number the whole change is about.
                 reads,
                 types: FUTURES_SETTLED_INCOME_TYPES.length,
+                // How many rows this pass started from a kept reading rather
+                // than the wire, and what checking them against the exchange
+                // found. A store that is never wrong should read zero here
+                // forever; a store that is ever wrong must not do so quietly.
+                restored,
+                missing,
+                differing,
                 rows: held.length,
                 kept: held.length,
                 contracts: new Set(held.map(row => row.symbol)).size,
@@ -2223,10 +2256,40 @@ export function setupBinanceConnection({
             return;
         }
         const current = () => activation === futuresActivationGeneration;
+        const fingerprint = futuresTradingAdapter.credentialFingerprint ?? null;
+        // The reading this desk already had, once per activation. Looked for
+        // here rather than on a lifecycle hook because this is the one place
+        // that knows the window it has to be bounded to.
+        if (!_futuresSettledLoaded) {
+            _futuresSettledLoaded = true;
+            const kept = settledIncomeStore?.load({ fingerprint, windowFrom, now }) ?? null;
+            // Nothing kept means nothing to check: this pass reads the window
+            // off the wire, and a reading that came from the exchange a moment
+            // ago does not need the exchange asked about it. Getting this wrong
+            // made the *second* pass of every session a cold walk — the store
+            // paying for itself twice over, in the direction it exists to
+            // remove. A kept reading that never recorded a verification is
+            // checked on sight, which is the one case worth a cold walk.
+            _futuresSettledVerifiedAt = kept === null ? now : kept.verifiedAt;
+            if (kept !== null) {
+                restored = kept.rows.size;
+                _futuresSettled = {
+                    rows: kept.rows, from: kept.from, to: kept.to, slice: kept.slice, gap: kept.gap,
+                };
+            }
+        }
+        // Every hour the held rows are checked rather than extended: the window
+        // is read from nothing and compared. That is what makes keeping a
+        // reading safe instead of storing a guess — and at one request per kind
+        // of flow it costs what the tail read of the same hour used to.
+        const verifying = _futuresSettled.from !== null
+            && (_futuresSettledVerifiedAt === null
+                || now - _futuresSettledVerifiedAt >= FUTURES_SETTLED_VERIFY_MS);
+        const before = _futuresSettled.rows;
         const walked = await walkFuturesSettledIncome({
             now,
             windowFrom,
-            held: _futuresSettled,
+            held: verifying ? emptyFuturesSettledState() : _futuresSettled,
             isCurrent: current,
             keepRow: isFuturesSettledIncomeRow,
             readPage: async ({ startTime, endTime }) => {
@@ -2296,7 +2359,28 @@ export function setupBinanceConnection({
             recordSettled('abandoned', failureCode);
             return;
         }
+        if (verifying && !walked.failed) {
+            // Only inside the span this pass actually covered. A held row older
+            // than that was never asked about, and counting it as missing would
+            // report the walk's own budget as the exchange contradicting itself.
+            const answered = compareFuturesSettledReadings(before, walked.rows, walked.from);
+            missing = answered.missing;
+            differing = answered.differing;
+            if (missing > 0 || differing > 0) {
+                logger.warn('[futures-settled] kept reading corrected by the exchange:',
+                    `${missing} absent, ${differing} restated`);
+            }
+            _futuresSettledVerifiedAt = now;
+        }
         _futuresSettled = walked;
+        // Written after the exchange has had the last word, never before it.
+        if (!walked.failed) {
+            settledIncomeStore?.save({
+                fingerprint,
+                held: walked,
+                verifiedAt: _futuresSettledVerifiedAt,
+            });
+        }
 
         const kept = readFuturesSettledIncome([...walked.rows.values()]);
         const from = walked.from ?? now;

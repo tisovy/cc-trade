@@ -7,6 +7,7 @@ import {
 } from '../../src/utils/futuresProductionWorkstationProtocol.js';
 import { FUTURES_UNDERIVABLE_INCOME_TYPES } from '../../src/utils/futuresSettledMoney.js';
 import {
+    DESK_DIAGNOSTICS_UNRECORDED,
     describeDeskDiagnosticEvent,
     readDeskDiagnosticCommandEvent,
     readDeskDiagnosticOutboundEvent,
@@ -1472,7 +1473,10 @@ describe('setupBinanceConnection user-data orchestration', () => {
         await flushMicrotasks();
 
         releaseBalances();
-        await vi.advanceTimersByTimeAsync(2_000);
+        // Long enough for the whole queue: the operator's refresh now asks for
+        // the settled reading as well, and those admissions are spaced behind
+        // the account read rather than instead of it.
+        await vi.advanceTimersByTimeAsync(5_000);
         await flushMicrotasks();
 
         expect(heldPositions()).toEqual([]);
@@ -3599,9 +3603,14 @@ describe('setupBinanceConnection user-data orchestration', () => {
         .filter(payload => payload.futures_history)
         .map(payload => payload.futures_history);
 
-    const startFuturesDeskForSettled = async () => {
+    const startFuturesDeskForSettled = async ({
+        settledIncomeStore = null,
+        diagnosticRecord = undefined,
+    } = {}) => {
         setupBinanceConnection({
             localWebSocketAccess: { host: '127.0.0.1' },
+            ...(settledIncomeStore === null ? {} : { settledIncomeStore }),
+            ...(diagnosticRecord === undefined ? {} : { diagnosticRecord }),
         });
         moduleMocks.websocketServerHandlers.request({
             origin: 'http://localhost:5174',
@@ -3842,6 +3851,89 @@ describe('setupBinanceConnection user-data orchestration', () => {
         await deliverRealizingFill(socket, 82);
         expect(moduleMocks.futuresAdapter.getIncomePage.mock.calls.length)
             .toBeGreaterThan(afterFirst);
+    });
+
+    // The cold start the store exists to remove. Every save under `electron/**`
+    // relaunches the desk, and the operator's journal for 2026-08-20 carries
+    // twelve bootstraps and seven stream reads in ninety minutes — each buying
+    // the identical week again.
+    const keptReading = (rows = []) => ({
+        load: vi.fn(({ windowFrom, now }) => ({
+            rows: new Map(rows.map(row => [`${row.incomeType}:${row.tranId}`, row])),
+            from: windowFrom,
+            to: now - 60_000,
+            slice: null,
+            gap: null,
+            verifiedAt: now - 60_000,
+        })),
+        save: vi.fn(() => true),
+    });
+
+    it('reads only the tail when the last run left a reading', async () => {
+        const settledIncomeStore = keptReading([{
+            symbol: 'BEATUSDT', incomeType: 'FUNDING_FEE', income: '-1.5',
+            asset: 'USDT', time: Date.now() - 3_600_000, tranId: 'kept-row',
+        }]);
+        await startFuturesDeskForSettled({ settledIncomeStore });
+
+        await runFuturesCommand({
+            action: 'account.refresh', clientOrderId: 'kept-tail', symbol: 'BTCUSDT',
+        });
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+
+        expect(settledIncomeStore.load).toHaveBeenCalled();
+        // One page — six reads, one per kind — where a cold start is two pages.
+        const asked = moduleMocks.futuresAdapter.getIncomePage.mock.calls;
+        expect(asked.length).toBe(6);
+        // And it resumes near the kept edge rather than at the window's start.
+        expect(asked[0][0].startTime).toBeGreaterThan(Date.now() - 7 * 24 * 60 * 60 * 1000);
+        // What it ends up holding goes back to disk.
+        expect(settledIncomeStore.save).toHaveBeenCalled();
+    });
+
+    // A kept reading is only safe while it is checked. This is the check: the
+    // window read from nothing, compared, and the exchange winning — because a
+    // recomputed reading that is wrong is wrong until the next pass, while a
+    // stored one is wrong until somebody notices.
+    it('drops a kept row the exchange no longer states, and says how many', async () => {
+        const settledIncomeStore = keptReading([{
+            symbol: 'BEATUSDT', incomeType: 'FUNDING_FEE', income: '-1.5',
+            asset: 'USDT', time: Date.now() - 3_600_000, tranId: 'never-happened',
+        }]);
+        // Never verified, so it is checked on sight.
+        settledIncomeStore.load = vi.fn(({ windowFrom, now }) => ({
+            rows: new Map([['FUNDING_FEE:never-happened', {
+                symbol: 'BEATUSDT', incomeType: 'FUNDING_FEE', income: '-1.5',
+                asset: 'USDT', time: now - 3_600_000, tranId: 'never-happened',
+            }]]),
+            from: windowFrom,
+            to: now - 60_000,
+            slice: null,
+            gap: null,
+            verifiedAt: null,
+        }));
+        const kept = [];
+        const diagnosticRecord = {
+            ...DESK_DIAGNOSTICS_UNRECORDED,
+            record: (kind, payload) => { kept.push({ kind, ...payload }); return true; },
+        };
+        await startFuturesDeskForSettled({ settledIncomeStore, diagnosticRecord });
+
+        await runFuturesCommand({
+            action: 'account.refresh', clientOrderId: 'kept-verify', symbol: 'BTCUSDT',
+        });
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+
+        const settled = kept.filter(entry => entry.kind === 'settled');
+        expect(settled.length).toBeGreaterThan(0);
+        // The exchange answers with nothing, so the kept row is gone and the
+        // desk says so rather than keeping it because it was once read.
+        expect(settled.some(entry => entry.restored === 1)).toBe(true);
+        expect(settled.some(entry => entry.missing === 1)).toBe(true);
+        const saved = settledIncomeStore.save.mock.calls.at(-1)?.[0];
+        expect(saved?.held.rows.has('FUNDING_FEE:never-happened')).toBe(false);
     });
 
     it('answers a futures history command without touching account resources', async () => {
