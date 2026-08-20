@@ -281,3 +281,44 @@ for (const round of closed) {
     say(`    income rows inside the round's span: ${span.length} — `
         + (Object.entries(byComponent).map(([k, v]) => `${k} ${usdt(v)}`).join(' | ') || 'none'));
 }
+
+// ---------------------------------------------------------------------------
+// What the read would cost if it asked only for what the desk cannot derive.
+//
+// `/fapi/v1/income` takes an `incomeType` and returns every kind when none is
+// sent — which is how a read looking for forty-five funding rows pages through
+// thirteen thousand. This asks the narrow question once and checks that it gets
+// the same answer: a filter that changes the answer is not a saving.
+say('\n--- WHAT THE NARROW READ WOULD COST ---');
+{
+    const wide = rows.filter(r => r.incomeType === 'FUNDING_FEE');
+    const wideTotal = wide.reduce((sum, r) => sum + Number(r.income), 0);
+    const narrow = await call('/fapi/v1/income', {
+        incomeType: 'FUNDING_FEE',
+        startTime: windowFrom,
+        endTime: now,
+        limit: 1000,
+    });
+    const list = Array.isArray(narrow) ? narrow : [];
+    const narrowTotal = list.reduce((sum, r) => sum + Number(r.income), 0);
+    say(`  unfiltered walk: ${income.length} rows read over ${Math.ceil(income.length / 1000)} page(s),`
+        + ` of which ${wide.length} are funding, totalling ${usdt(wideTotal)}`);
+    say(`  incomeType=FUNDING_FEE: ${list.length} rows in ONE request (weight 30),`
+        + ` totalling ${usdt(narrowTotal)}${list.length >= 1000 ? ' — FULL PAGE, more behind it' : ''}`);
+    say(`  same answer: ${list.length === wide.length && Math.abs(narrowTotal - wideTotal) < 1e-6 ? 'YES' : 'NO — do not narrow the read'}`);
+}
+// Whether commission may be taken from the fills instead of the income record.
+// Income states commission net of rebates and a fill states it gross, so this
+// count decides it and nothing else does.
+{
+    const REBATES = ['COMMISSION_REBATE', 'REFERRAL_KICKBACK', 'API_REBATE', 'FEE_RETURN'];
+    const rebates = rows.filter(r => REBATES.includes(r.incomeType));
+    const total = rebates.reduce((sum, r) => sum + Number(r.income), 0);
+    say(`  rebate rows in the window: ${rebates.length}`
+        + (rebates.length === 0
+            ? ' — none, so a fill\'s gross commission is the account\'s real cost'
+            : ` totalling ${usdt(total)} — commission must stay on the income read`));
+}
+// The one thing the private stream cannot tell the desk on a crossed position.
+say(`  positions: ${positions.map(p => `${p.symbol}=${p.marginType ?? (p.isolated === true ? 'isolated' : 'cross')}`).join(' ') || 'none open'}`);
+
