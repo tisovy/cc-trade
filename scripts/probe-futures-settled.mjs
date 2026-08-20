@@ -171,6 +171,24 @@ for (const position of positions) {
     const insurance = sum('INSURANCE_CLEAR');
     say(`    since open -> realized ${usdt(realized)} | funding ${usdt(funding)} | commission ${usdt(commission)} | insurance ${usdt(insurance)}`);
     say(`    SETTLED TOTAL: ${usdt(realized + funding + commission + insurance)}`);
+    // The same two figures from the trade record, which is where the desk takes
+    // them from since 2026-08-20. Printed side by side because this is the one
+    // comparison that says whether narrowing the income read changed a number on
+    // the operator's screen — and because a difference here is the answer to
+    // whether Binance's own `COMMISSION` rows are gross or already net of the
+    // rebates it reports separately.
+    const ownFills = fills.filter(f => since === null || Number(f.time) >= since);
+    const realizedOnFills = ownFills.reduce((total, f) => total + Number(f.realizedPnl ?? 0), 0);
+    const chargedOnFills = ownFills.reduce((total, f) => (
+        (f.commissionAsset ?? 'USDT') === 'USDT' ? total + Number(f.commission ?? 0) : total
+    ), 0);
+    say(`    from the fills -> realized ${usdt(realizedOnFills)} | commission ${usdt(-chargedOnFills)}`
+        + `  (fills counted: ${ownFills.length})`);
+    say(`    difference     -> realized ${usdt(realizedOnFills - realized)}`
+        + ` | commission ${usdt(-chargedOnFills - commission)}`
+        + `${Math.abs(realizedOnFills - realized) < 0.01 && Math.abs(-chargedOnFills - commission) < 0.01
+            ? '  — the two records agree'
+            : '  — THEY DISAGREE, the screen will move'}`);
     const fundingRows = scoped.filter(r => r.incomeType === 'FUNDING_FEE');
     say(`    funding charges since open: ${fundingRows.length}`);
     for (const row of fundingRows) say(`      ${at(Number(row.time))}  ${usdt(row.income)} ${row.asset}`);
@@ -307,9 +325,11 @@ say('\n--- WHAT THE NARROW READ WOULD COST ---');
         + ` totalling ${usdt(narrowTotal)}${list.length >= 1000 ? ' — FULL PAGE, more behind it' : ''}`);
     say(`  same answer: ${list.length === wide.length && Math.abs(narrowTotal - wideTotal) < 1e-6 ? 'YES' : 'NO — do not narrow the read'}`);
 }
-// Whether commission may be taken from the fills instead of the income record.
-// Income states commission net of rebates and a fill states it gross, so this
-// count decides it and nothing else does.
+// Whether this account is rebated at all. It no longer decides where commission
+// comes from — the desk takes the charge from the fills and keeps reading these
+// credits, which is correct whether an income `COMMISSION` row is gross or
+// already net of them — but a non-zero count here is what would explain any
+// difference printed above.
 {
     const REBATES = ['COMMISSION_REBATE', 'REFERRAL_KICKBACK', 'API_REBATE', 'FEE_RETURN'];
     const rebates = rows.filter(r => REBATES.includes(r.incomeType));

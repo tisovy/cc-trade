@@ -13,12 +13,19 @@ second time from another. Two records stating one number is not redundancy, it i
 two numbers that can disagree, and the cheaper of the two is the one already paid
 for.
 
-Where a component genuinely differs between the two records — the income record
-states commission net of rebates, a fill states it gross — the difference SHALL
-be established by measurement against the live account before the cheaper record
-is adopted, and the component that differs SHALL keep whichever source states
-what the operator is owed. A cost stated gross where the account was rebated is
-not a rounding difference; it is the wrong number, quietly.
+Where the two records may state a component differently — the income record's
+commission may or may not already be net of the rebates it reports as rows of
+their own — the desk SHALL construct the figure so that it is right under either
+reading, rather than adopt the cheaper record and assume one. It takes the part
+the trade record states, and it keeps reading whatever that record cannot state:
+gross charge from the fill, credits from the income record, and their sum is the
+cost whether the metered record's own charge row was gross or net.
+
+Measurement against the live account SHALL be required only where no such
+construction exists — where the desk must pick one record and be wrong if it
+picks the other. A cost stated gross on a rebated account is not a rounding
+difference; it is the wrong number, quietly, and neither an assumption nor a
+default is an acceptable way to arrive at it.
 
 #### Scenario: The endpoint offers a filter for the rows that are wanted
 - **WHEN** the desk needs one kind of flow from a record that carries many
@@ -28,9 +35,9 @@ not a rounding difference; it is the wrong number, quietly.
 - **WHEN** an open position's realized PnL and commission are already folded out of the fills the desk reads for its history
 - **THEN** the settled figure takes them from that fold rather than reading them again from the income record
 
-#### Scenario: The two records state a component differently
-- **WHEN** the income record nets a rebate into a component and the trade record does not
-- **THEN** the component is taken from whichever record states what the account actually paid, and the choice is recorded against a measurement of this account rather than assumed
+#### Scenario: The two records may state a component differently
+- **WHEN** it is not established whether the income record's commission is already net of the rebates it reports separately
+- **THEN** the charge is taken from the fill and the credits are still read from the income record, so that the cost is correct under either reading rather than under an assumed one
 
 ### Requirement: A read is scheduled by the event it observes
 A read that exists to observe an event SHALL be scheduled by that event where the

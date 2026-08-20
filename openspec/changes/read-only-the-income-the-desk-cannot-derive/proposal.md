@@ -44,41 +44,53 @@ Three things the desk already has and does not use:
 
 ## What Changes
 
-- **The settled read asks for `FUNDING_FEE` and nothing else.** Forty-five rows a
-  week is one page, so the read reaches `complete` on its **first** request
-  instead of its ninth pass. `INSURANCE_CLEAR` is read on its own only when
-  something the desk already sees — a margin call, an ADL, a liquidation-shaped
-  position change — says a clearance could exist.
+- **The settled read asks for the kinds no other record states, one at a time.**
+  `FUNDING_FEE`, `INSURANCE_CLEAR`, and the four rebate kinds — six reads a page.
+  Forty-five funding rows a week fit one page, so the reading reaches `complete`
+  on its **first pass** instead of its ninth.
 - **Realized PnL and commission for an open position come from the fills**, from
   the same fold that already states them for every closed round. One record, one
-  number, no second opinion to disagree with.
-- **The read is scheduled by funding, not by a clock.** The stream says when a
-  settlement landed; the mark frame says when the next one is due. A thirty-second
-  tick against a number that moves six times a day is 2 880 requests to observe
-  six events.
-- **What has been read is kept on disk** and extended rather than rebuilt, under
-  `app.getPath('userData')` beside the diagnostic journal.
+  number, no second opinion to disagree with — and the stream's execution report
+  is folded straight into the held trade record, so the figure now moves on the
+  frame itself rather than a debounce and a round trip after it.
+- **The read is scheduled by funding, not by a clock.** The private stream says
+  when a settlement landed; the public mark frame's countdown steps forward when
+  one has been made. Two independent witnesses, neither costing a request. A
+  thirty-second tick against a number that moves six times a day is 2 880
+  requests to observe six events.
 
-Projected cost, on the same account:
+Cost, measured through the walk itself against a week shaped like this account
+rather than projected:
 
-| | now | after |
+| | before | after |
 |---|---|---|
-| cold start | ~2010 weight, 3.5 min | **30 weight, one request** |
-| steady state | 60 weight/min | **~0.25 weight/min** (6 settlements/day) |
-| with the ledger on disk | — | a restart costs the tail, not the week |
+| cold start | ~2 010 weight, 67 pages, 3.5 min, nine passes | **360 weight, 12 reads, one pass** |
+| a pass in the steady state | 30 weight × the account tick | **180 weight, 6 reads** |
+| what that comes to | **60 weight/min** | **~3.75 weight/min** (6 settlements + hourly reconciliation) |
 
-## The one thing that must be measured before it lands
+## The rebate question, and why it is no longer a gate
 
-Income `COMMISSION` is the **net** charge: `COMMISSION_REBATE`,
-`REFERRAL_KICKBACK`, `API_REBATE` and `FEE_RETURN` are separate rows the desk
-already folds into the same component. A fill's `commission` is the **gross**.
-On an account that receives any rebate the two differ, and moving commission to
-the fills would quietly overstate what the position cost.
+Income `COMMISSION` may be the **gross** charge a fill also states, or it may be
+**net** of `COMMISSION_REBATE`, `REFERRAL_KICKBACK`, `API_REBATE` and
+`FEE_RETURN`, which arrive as rows of their own. The documentation does not say
+and this account has not been measured for it.
 
-This is not a judgement call to make from here: one probe run says whether this
-account has a single rebate row in seven days. If it does, the rebate types stay
-on the income read — they are rare rows, one page, weight 30, read at the same
-cadence as funding — and the gross still comes from the fills.
+It does not need to be, because the rebate kinds are read either way. Commission
+comes from the fills, gross; the credits come from the income record; and the sum
+is what the position cost under **both** readings — if the income row was gross,
+nothing changed, and if it was already net, the old reading was adding the credit
+twice and this one stops. The measurement would settle a question about the
+exchange's bookkeeping, not about what the desk should do.
+
+## What is deliberately not built
+
+**The ledger on disk.** It was proposed against a cold start of 2 010 weight and
+three and a half minutes. That start is now 360 weight and one pass — complete
+before the operator could read the first frame. A file would save that, and would
+hold a total that is wrong forever if anything about it is wrong once. The
+requirement it was filed under says the desk *may* keep a reading and lists five
+conditions for keeping one; those conditions stand, unbuilt against, for whoever
+finds a reading worth keeping.
 
 ## Ready-made solutions: there is no drop-in, and here is what was checked
 
@@ -100,8 +112,8 @@ What the ecosystem is worth here is the two facts above, not code.
 
 ## Impact
 
-- `electron/services/binance-connection.js` — the read's `incomeType`, its
-  schedule, and the ledger's persistence.
+- `electron/services/binance-connection.js` — the read's `incomeType` and its
+  schedule.
 - `electron/services/futures-settled-income-walk.js` — a walk over forty-five
   rows is a different shape from a walk over thirteen thousand.
 - `electron/services/futures-mark-price-feed.js` — carry `T`.

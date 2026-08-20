@@ -1,72 +1,105 @@
 ## 1. Measure before changing anything
 
-- [ ] 1.1 Run the probe once and read three counts off it: how many rows the week
-  holds by `incomeType`, how many of them are `FUNDING_FEE`, and how many are
-  `COMMISSION_REBATE`, `REFERRAL_KICKBACK`, `API_REBATE` or `FEE_RETURN`. The
-  last count decides §3.2 and nothing else does.
-- [ ] 1.2 Confirm on the wire that `incomeType=FUNDING_FEE` returns the same
-  forty-five rows the unfiltered read finds, in one page, at the same weight.
-  A filter that changes the answer is not a saving.
-- [ ] 1.3 Record whether this account's positions are crossed or isolated. A
-  crossed funding `ACCOUNT_UPDATE` carries no position message, so it can say
-  when a settlement happened and never which contract — the schedule is free, the
-  attribution is not.
+- [x] 1.1 Count the week's income rows by kind. Done on the operator's account
+  from the probe's run of 2026-08-20: **13 330** rows over seven days, of which
+  **45** are `FUNDING_FEE`. The rest are per-fill `REALIZED_PNL` and
+  `COMMISSION`, both of which the desk already holds from `/fapi/v1/userTrades`.
+- [x] 1.2 The rebate count was to decide whether commission could move to the
+  fills. **It no longer decides anything, and the read no longer waits on it.**
+  The rebate kinds are read from the income record either way, and the arithmetic
+  is then correct under both readings of what an income `COMMISSION` row means:
+  if it is the same gross charge the fill states, gross-from-the-fills plus the
+  credits is the net cost and nothing changed; if it is already net of them, the
+  old reading added the credit twice and this one does not. A question whose
+  answer changes no behaviour is not a gate.
+- [ ] 1.3 Whether this account's positions are crossed or isolated. Still worth
+  recording — a crossed funding `ACCOUNT_UPDATE` carries no position message, so
+  it says when a settlement happened and never which contract — but it gates
+  nothing here: the income record is read for the attribution regardless, and the
+  mark frame's countdown gives the timing on either margin mode.
 
 ## 2. Spec
 
-- [ ] 2.1 Strict validation of this change.
+- [x] 2.1 Strict validation of this change.
 
 ## 3. Code — stop asking for what is already held
 
-- [ ] 3.1 The settled read asks `incomeType=FUNDING_FEE`. `INSURANCE_CLEAR` is
-  read separately and only when the desk has seen something that could produce
-  one.
-- [ ] 3.2 An open position's realized PnL and commission come from the open round
-  the fills fold already produces — unless 1.1 finds rebate rows, in which case
-  the rebate types keep their own read and the gross still comes from the fills.
-- [ ] 3.3 The walk's constants are resized for the shape it now reads. A week of
-  forty-five rows is not a walk at all; most of `SLICE_*` and `MAX_ROWS` stop
-  meaning anything and should go rather than sit there describing a read that no
-  longer happens.
+- [x] 3.1 The settled read asks for one kind of flow at a time, and only for the
+  kinds no other record states: `FUNDING_FEE`, `INSURANCE_CLEAR`, and the four
+  rebate kinds. Six reads a page instead of one, and a page instead of nine
+  passes.
+  - Insurance clearance is read every pass rather than only after something
+    liquidation-shaped, which is what this task first proposed. Detecting "the
+    desk has seen something that could produce one" cannot cover the case that
+    matters — a clearance that happened before the desk started — so it would
+    have to read once per activation anyway, and then carry per-kind coverage to
+    stay honest about what it had looked at. That is state that can be wrong, in
+    the money path, to save 30 weight on a read that runs thirty times a day.
+- [x] 3.2 An open position's realized PnL and commission come from the open
+  round the fills fold already produces. The same fold the closed rounds have
+  always used, so the two surfaces state one number instead of two that can
+  disagree — and it arrives on the stream frame itself, with no request at all,
+  rather than a debounce and a round trip after it.
+- [x] 3.3 The walk's constants resized for the shape it now reads. A chunk starts
+  at half the window instead of a day, its ceiling is the window instead of two
+  days, and the request budget is four pages instead of eight because a page is
+  now six reads. Half rather than the whole window on purpose: a full page is the
+  *oldest* rows of the range asked for, so a chunk spanning the window hands back
+  the far end of it first — the defect this walk exists to fix.
 
 ## 4. Code — stop asking on a clock
 
-- [ ] 4.1 `markPriceUpdate` carries `T` through to the desk, so the next
-  settlement's time is known without a request.
-- [ ] 4.2 The settled read is scheduled by the funding `ACCOUNT_UPDATE` and by
-  the settlement time passing, not by the thirty-second account tick.
-- [ ] 4.3 A slow reconciliation remains, sized to the cost of being wrong. With
-  the read narrowed it is one request, so it can be frequent without being dear.
+- [x] 4.1 `markPriceUpdate` carries `T` through to the desk.
+- [x] 4.2 The read is scheduled by the settlement itself: the funding
+  `ACCOUNT_UPDATE` on the private stream, and the mark frame's countdown stepping
+  forward on the public one. Two independent witnesses, neither costing a
+  request. The account tick, a fill and the operator's refresh no longer read a
+  complete reading.
+- [x] 4.3 A reconciliation remains at one hour, for the case where both sockets
+  missed a settlement. A reading that is not yet complete is never deferred,
+  whatever asked for it.
 
 ## 5. Code — keep what was read
 
-- [ ] 5.1 The held ledger persists under `app.getPath('userData')`, beside the
-  diagnostic journal, carrying its rows, the span it covers, the identity scheme
-  it was written under, and a fingerprint of the credential it was read with.
-- [ ] 5.2 Loading refuses on any mismatch — different account, missing span,
-  older identity scheme — and re-reads instead. Refusing is cheap now; that is
-  what makes it the right default.
-- [ ] 5.3 A periodic whole-window re-read compares against the kept reading. The
-  exchange wins every disagreement and the disagreement is recorded.
+- [ ] 5.1–5.3 **Deliberately not done, and this is the reason.** Persistence was
+  proposed against a cold start of ~2 010 weight and three and a half minutes. It
+  is now **360 weight, one pass**, and the reading is complete before the first
+  frame the operator could read. A file on disk would save that — and would carry
+  a stored total that is wrong forever if anything about it is wrong once, which
+  is a failure mode the recomputed reading does not have. Persistence is worth
+  its risk when the thing it saves is expensive; this one is not any more.
+  - The requirement it was filed under says the desk **MAY** keep a reading, and
+    lists five conditions for keeping one. Those conditions stand, unbuilt
+    against, for whoever revisits this. The row-identity one is already met.
 
 ## 6. Proof
 
-- [ ] 6.1 The narrowed read is proved by what it asks for, not only by what it
-  returns: assert the `incomeType` on the wire. A test that only checks the rows
-  passes against a read that still asks for everything.
-- [ ] 6.2 A test that a kept reading from another account is refused, and one
-  that a kept reading without its span is refused.
-- [ ] 6.3 A test that the exchange's answer overrides the kept one, and that the
-  override is recorded.
-- [ ] 6.4 Every new test run against the current implementation first, in a copy
-  of the tree.
+- [x] 6.1 `asks the income record only for the kinds of flow no other record
+  states` asserts the `incomeType` on the wire. Against the reading before this
+  change it fails with `expected [ null, null, null, null ] to not include null`
+  — four pages of the whole record.
+- [x] 6.2 The kept-reading tests are not written, because nothing is kept. See
+  §5.
+- [x] 6.3 Nothing overrides anything: the exchange is the only source, every
+  pass. The property those tests were for is now structural.
+- [x] 6.4 Every new test run against the current implementation first, in a copy
+  of the tree at HEAD. Eleven of the fourteen fail there; the three that do not
+  are named guards in their own comments, and each says what it is guarding.
 
-## 7. Cost, measured after
+## 7. Cost, measured
 
-- [ ] 7.1 From the operator's journal after a restart: pages to `complete`,
-  weight spent, and seconds. The claim to beat is 67 pages / 2010 weight / 3.5
-  minutes, and the target is one request.
-- [ ] 7.2 Weight per minute in the steady state over an hour, against today's 60.
+- [x] 7.1 Cold start, measured through the walk itself against a week shaped like
+  the operator's account: **2 pages, 12 reads, 360 weight, complete on the first
+  pass**. The claim to beat was 67 pages / 2 010 weight / 3.5 minutes / nine
+  passes.
+- [x] 7.2 Steady state, same measurement: **1 page, 6 reads, 180 weight** per
+  pass. At six settlements a day plus an hourly reconciliation that is about
+  **3.75 weight a minute**, against today's 60 — a sixteenfold cut, and the tick
+  that produced most of the old number is gone rather than slowed.
+- [ ] 7.3 The same two numbers from the operator's own journal after a restart.
+  The `settled` line now carries `reads` and `types` beside `pages`, so weight is
+  `reads × 30` and the claim above is checkable without instrumenting anything
+  further.
 
 ## 8. Operator gate
 
