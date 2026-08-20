@@ -148,6 +148,31 @@ that archival implied verification.
 | `hear-the-exchange-out` | 5.3 silent-market half | `COVERED BY TEST ONLY` | `futures-workstation-transport.test.js` — `treats a market stream that stops delivering as a disconnection`, `keeps a quiet stream alive on the exchange ping and ends one that stops pinging`, `ends a book that says nothing while its own tape prints`, `reports nothing from the watchdogs of a released connection`. |
 | `say-which-readings-are-stale` | 1.4 | `COVERED BY TEST ONLY` | `useFuturesTrading.test.js` — `marks the held account unconfirmed when the transport drops` (and releases it on the first ready answer); `FuturesTradingTicket.test.jsx` — `states the age of a balance nothing has confirmed since the reconnect, and will not size against it`. |
 
+## Awaiting The Operator — 2026-08-20 PnL Series
+
+Three changes landed on 2026-08-20 from the operator's own report (uPnL wrong and
+lagging; no settled PnL on a position; Closed Positions disagreeing with the
+Binance app). All three are implemented, tested and committed; none can be closed
+from a worktree, because each turns on numbers only the live account produces.
+One sitting covers all of them.
+
+| Change | Task | Status | What to look at |
+|---|---:|---|---|
+| `hold-the-position-value-to-one-price` | 5.6 | `OUTSTANDING` | On a fast-moving position, the Positions row's sign must agree with the Binance app and must stop flipping between two values once a second. Before this, a short with the mark above the entry and the tape below it read `+129.28` and `−43.10` in the same second. |
+| `hold-the-position-value-to-one-price` | 5.7 | `OUTSTANDING` | Work **more than one contract**. Opening or closing any position used to blank every other row's live mark until a rebuilt socket delivered — that is the "uPnL lags" half of the report, and one contract will not show it. |
+| `hold-the-position-value-to-one-price` | 5.8 | `OUTSTANDING` | When the tape crosses an entry and the mark has not, the row now explains itself in its title. Does that read as useful or as noise? |
+| `state-what-an-open-position-has-already-paid` | 5.7 | `OUTSTANDING` | The new `PnL` column against the app's own figures for the same contract; the breakdown in the cell's title must decompose to what the app shows. |
+| `state-what-an-open-position-has-already-paid` | 5.8 | `OUTSTANDING` | Hold a position across a funding boundary and confirm the funding component appears. The read is triggered by the `FUNDING_FEE` cause and that path cannot be exercised offline. |
+| `close-a-round-at-what-reached-the-wallet` | 4.5 | `OUTSTANDING` | One closed position against the app — **and name the screen** (Position History / Trade History / wallet record). That answer also settles this change's open task 1.4: the screens do not all net the same components. |
+| `close-a-round-at-what-reached-the-wallet` | 4.6 | `OUTSTANDING` | A round held across a funding boundary must show its funding component. |
+
+Two things worth knowing before the sitting. An account that pays fees in **BNB**
+exercises the sharpest defect fixed here — a BNB fee was being subtracted from a
+USDT result — so if BNB fee discount is on, a closed round is the fastest check.
+And a position or round **older than the read's window** is expected to say so
+rather than show a complete-looking total; that qualification is the fix
+working, not a gap.
+
 ## Defects And Contradictions
 
 - `runbook.md` result 19 is the only literal `FAIL`. It has the separate
