@@ -1,3 +1,12 @@
+## 0. The base has moved
+
+- [ ] 0.1 `src/utils/futuresTradeRounds.js` was changed on 2026-08-20 by the
+  session auditing the 2026-08-19 fix series (b6581c77): the edge-round gates
+  moved — an increasing fill with `realizedPnl \u2260 0` now finishes a round,
+  the reclosing split applies only at `pnl = 0`, and a restarted open round is
+  published from `heldAtoms`/`heldEntry`. Re-read the fold and re-run 1.1 against
+  it before changing anything; the reproduction below predates that edit.
+
 ## 1. Establish the ground truth
 
 - [ ] 1.1 Re-run the mismatch rather than reading about it: take one closed
