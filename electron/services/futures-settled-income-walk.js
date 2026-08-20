@@ -87,6 +87,22 @@ export const FUTURES_SETTLED_WALK = Object.freeze({
     // backward walk — and because coverage is stated rather than implied, the
     // figures built from it say what they reach.
     MAX_ROWS: 24000,
+    // How far behind the last pass's edge the next one starts reading.
+    //
+    // The exchange announces a funding charge on two sockets at the instant it
+    // makes it, and writes the row into `/fapi/v1/income` some time after that.
+    // A pass triggered by the announcement therefore reads a record that does
+    // not have it yet — and, worse, moves its own edge past the charge's
+    // instant, so every later pass starts after the row and the charge is
+    // missed for good. Measured on the operator's account 2026-08-20: the
+    // 20:00:00 settlement was read at 20:00:04 with no row for it, the edge
+    // moved to 20:00:04, and the column stood still through every pass after.
+    //
+    // Re-reading the tail end costs nothing — the range still ends at `now`, so
+    // it is the same page — and the row key absorbs everything already held. It
+    // is the difference between a reading that heals itself and one that needs
+    // the desk restarted.
+    TAIL_OVERLAP_MS: 30 * 60 * 1000,
 });
 
 export const emptyFuturesSettledState = () => Object.freeze({
@@ -210,7 +226,14 @@ export const walkFuturesSettledIncome = async ({
     // re-asked rather than stepped past: a row sharing that millisecond would
     // otherwise be skipped, and the key above absorbs the repeat.
     if (to !== null) {
-        let cursor = to;
+        const covered = to;
+        // Behind the edge, not at it. A row the exchange wrote after this walk
+        // last passed its instant is otherwise behind the cursor for good.
+        let cursor = Math.max(
+            windowFrom,
+            Number.isFinite(from) ? Math.min(from, covered) : covered,
+            covered - limits.TAIL_OVERLAP_MS,
+        );
         while (requests < limits.MAX_REQUESTS && cursor < now) {
             const answered = await ask(cursor, now);
             if (answered === null) break;
@@ -225,7 +248,9 @@ export const walkFuturesSettledIncome = async ({
             if (newest <= cursor) break;
             cursor = newest;
         }
-        to = cursor;
+        // Never backwards: the overlap re-reads what was already covered, it
+        // does not un-cover it.
+        to = Math.max(covered, cursor);
     } else if (isCurrent()) {
         // Nothing held at all. The newest instant is now, and the walk below
         // works backwards from it.

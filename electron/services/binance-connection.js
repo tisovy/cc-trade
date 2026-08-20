@@ -2073,7 +2073,31 @@ export function setupBinanceConnection({
     const FUTURES_SETTLED_EXTEND_MS = 60 * 1000;
     // Reasons that are the event itself. Everything else is somebody asking on a
     // clock and waits for the reconciliation window.
-    const FUTURES_SETTLED_EVENT_REASONS = new Set(['funding', 'settlement', 'stream']);
+    // Reasons that are never deferred.
+    //
+    // The three events funding actually makes, plus the two asks that exist to
+    // defeat a stale reading. `refresh` is the operator pressing for the
+    // account: it is the one read they can reach directly, and on 2026-08-20 it
+    // was deferred like a clock — they watched a settlement land in the Binance
+    // app, pressed refresh, and the desk answered with the reading it already
+    // had. An hourly reconciliation is not something a person can be asked to
+    // wait for while looking at a wrong number.
+    const FUTURES_SETTLED_ALWAYS_READ_REASONS = new Set([
+        'funding', 'settlement', 'stream', 'refresh', 'confirm',
+    ]);
+    // How long after a settlement the desk asks again.
+    //
+    // Both witnesses fire at the instant of the charge, and the income record
+    // does not carry it yet: measured on the operator's account 2026-08-20, the
+    // read four seconds after the 20:00 `ACCOUNT_UPDATE` came back with no row
+    // for it. The announcement says a charge happened; only the record says what
+    // it was, and it is written afterwards. So the settlement is read twice —
+    // once for the timing, once for the row.
+    const FUTURES_SETTLED_CONFIRM_MS = 2 * 60 * 1000;
+    // The reasons that mean "a charge has just been made". They are the only
+    // ones that arm the confirming pass, and they outrank every other reason a
+    // pass can be given.
+    const FUTURES_SETTLED_CONFIRM_REASONS = new Set(['funding', 'settlement']);
     let _futuresSettledReadTimer = null;
     let _futuresSettledReadPending = false;
     // What the desk holds, and the contiguous span it holds it for. Rows are
@@ -2093,10 +2117,25 @@ export function setupBinanceConnection({
     let _futuresSettledInFlight = null;
     let _futuresSettledAgain = null;
 
+    // Armed by a settlement, disarmed by anything that ends the activation.
+    let _futuresSettledConfirmTimer = null;
+    // The reason the debounced pass will run under. Held rather than captured,
+    // because the reason is not a label — it decides whether the desk goes back
+    // for the row once the exchange has written it.
+    let _futuresSettledReadReason = null;
+
     const clearFuturesSettledMoney = () => {
         _futuresSettled = emptyFuturesSettledState();
         _futuresSettledSent = null;
         _futuresSettledReadAt = null;
+    };
+
+    // Which of two reasons a pass should run under. A settlement outranks
+    // anything else; otherwise the one already held stands.
+    const upgradeFuturesSettledReason = (held, reason) => {
+        if (held === null) return reason;
+        if (FUTURES_SETTLED_CONFIRM_REASONS.has(held)) return held;
+        return FUTURES_SETTLED_CONFIRM_REASONS.has(reason) ? reason : held;
     };
 
     // Whether this reason has earned a read.
@@ -2115,7 +2154,7 @@ export function setupBinanceConnection({
     // twenty-four reads when it spends its budget, and every fill asking for one
     // is how the cost this change removed would come back somewhere else.
     const futuresSettledReadIsDue = (reason) => {
-        if (FUTURES_SETTLED_EVENT_REASONS.has(reason)) return true;
+        if (FUTURES_SETTLED_ALWAYS_READ_REASONS.has(reason)) return true;
         if (_futuresSettledReadAt === null) return true;
         const since = Date.now() - _futuresSettledReadAt;
         // Still short of the window's start: due sooner, but not on every fill.
@@ -2297,6 +2336,18 @@ export function setupBinanceConnection({
         // Stamped on the way out rather than on the way in, so a pass that took
         // a minute does not make the next one due a minute early.
         _futuresSettledReadAt = Date.now();
+        // A settlement is read twice: now, for the fact that it happened, and
+        // again once the record has caught up with it. Only the two witnesses
+        // arm this — the confirming pass carries its own reason and does not
+        // arm another, so a settlement costs one extra read and never a chain.
+        if (FUTURES_SETTLED_CONFIRM_REASONS.has(reason)
+            && _futuresSettledConfirmTimer === null) {
+            _futuresSettledConfirmTimer = setTimeout(() => {
+                _futuresSettledConfirmTimer = null;
+                scheduleFuturesSettledRead('confirm');
+            }, FUTURES_SETTLED_CONFIRM_MS);
+            _futuresSettledConfirmTimer.unref?.();
+        }
         recordSettled(
             failureCode !== null ? 'failed' : (walked.complete ? 'complete' : 'partial'),
             failureCode,
@@ -2315,7 +2366,9 @@ export function setupBinanceConnection({
     // 130692102 ms across three seconds, while both passes spent a full budget.
     const runFuturesSettledRead = (reason) => {
         if (_futuresSettledInFlight !== null) {
-            _futuresSettledAgain = reason;
+            // Same rule as the debounce: a settlement asking during a pass is
+            // not overwritten by the next fill to come along.
+            _futuresSettledAgain = upgradeFuturesSettledReason(_futuresSettledAgain, reason);
             return;
         }
         _futuresSettledInFlight = readFuturesSettledMoney(reason).finally(() => {
@@ -2329,12 +2382,24 @@ export function setupBinanceConnection({
     const scheduleFuturesSettledRead = (reason) => {
         if (!futuresSettledReadIsDue(reason)) return;
         _futuresSettledReadPending = true;
+        // A settlement landing inside another ask's debounce takes the pass
+        // over. The desk used to keep whichever reason arrived first, so a
+        // funding charge announced a second after a stream opened ran as a
+        // stream read — the pass happened, and nothing went back for the row
+        // the exchange had not written yet. One second of overlap, and a charge
+        // missing from the column until a restart.
+        _futuresSettledReadReason = upgradeFuturesSettledReason(
+            _futuresSettledReadReason,
+            reason,
+        );
         if (_futuresSettledReadTimer !== null) return;
         _futuresSettledReadTimer = setTimeout(() => {
             _futuresSettledReadTimer = null;
             if (!_futuresSettledReadPending) return;
             _futuresSettledReadPending = false;
-            runFuturesSettledRead(reason);
+            const next = _futuresSettledReadReason ?? reason;
+            _futuresSettledReadReason = null;
+            runFuturesSettledRead(next);
         }, FUTURES_SETTLED_READ_DELAY_MS);
         _futuresSettledReadTimer.unref?.();
     };
@@ -2342,6 +2407,11 @@ export function setupBinanceConnection({
     const cancelFuturesSettledRead = () => {
         if (_futuresSettledReadTimer !== null) clearTimeout(_futuresSettledReadTimer);
         _futuresSettledReadTimer = null;
+        _futuresSettledReadReason = null;
+        // The settlement it was confirming belongs to the activation being
+        // cancelled, and its row belongs to that account's positions.
+        if (_futuresSettledConfirmTimer !== null) clearTimeout(_futuresSettledConfirmTimer);
+        _futuresSettledConfirmTimer = null;
         _futuresSettledReadPending = false;
         // A pass asked for during the one in flight belonged to the activation
         // being cancelled, and running it afterwards would read for an account

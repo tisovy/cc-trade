@@ -3615,6 +3615,23 @@ describe('setupBinanceConnection user-data orchestration', () => {
     const incomeKindsAsked = () => moduleMocks.futuresAdapter.getIncomePage.mock.calls
         .map(([request]) => request?.incomeType ?? null);
 
+    // The one reason left that a clock can produce. A fill that realized
+    // something asks for a settled read, and a busy afternoon is thousands of
+    // them — where the operator's own refresh is a person looking at a number
+    // and is never deferred.
+    const deliverRealizingFill = async (socket, orderId) => {
+        socket.handlers.message(JSON.stringify({
+            e: 'ORDER_TRADE_UPDATE',
+            E: 4_000 + orderId,
+            o: {
+                s: 'BTCUSDT', i: orderId, X: 'FILLED', S: 'SELL', o: 'LIMIT',
+                p: '100', q: '1', z: '1', rp: '12.5', T: 4_000 + orderId,
+            },
+        }));
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+    };
+
     // The read that cost the operator 60 weight a minute asked for nothing in
     // particular, and `/fapi/v1/income` says what that means: *"If incomeType is
     // not sent, all kinds of flow will be returned."* Thirteen thousand rows a
@@ -3667,6 +3684,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
     // read cost.
     it('does not re-read a complete reading because a clock asked', async () => {
         await startFuturesDeskForSettled();
+        const socket = await openFuturesHistoryStream();
 
         await runFuturesCommand({
             action: 'account.refresh', clientOrderId: 'settled-first', symbol: 'BTCUSDT',
@@ -3676,15 +3694,71 @@ describe('setupBinanceConnection user-data orchestration', () => {
         const afterFirst = moduleMocks.futuresAdapter.getIncomePage.mock.calls.length;
         expect(afterFirst).toBeGreaterThan(0);
 
-        for (const clientOrderId of ['tick-1', 'tick-2', 'tick-3']) {
-            await runFuturesCommand({
-                action: 'account.refresh', clientOrderId, symbol: 'BTCUSDT',
-            });
-            await vi.advanceTimersByTimeAsync(30_000);
-            await flushMicrotasks();
+        for (const orderId of [71, 72, 73]) {
+            await deliverRealizingFill(socket, orderId);
         }
 
         expect(moduleMocks.futuresAdapter.getIncomePage.mock.calls.length).toBe(afterFirst);
+    });
+
+    // The operator pressing for the account is not a clock, and on 2026-08-20
+    // this desk treated it as one. They watched the 20:00 settlement land in the
+    // Binance app, pressed refresh, and the desk answered with the reading it
+    // already had — the journal has no `settled` line for the press at all,
+    // because the ask never became a read. An hourly reconciliation is not
+    // something a person can be told to wait for while looking at a wrong
+    // number, and the refresh is the one read they can reach directly.
+    it('reads on the operator asking, however lately it last read', async () => {
+        await startFuturesDeskForSettled();
+
+        await runFuturesCommand({
+            action: 'account.refresh', clientOrderId: 'settled-first', symbol: 'BTCUSDT',
+        });
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        const afterFirst = moduleMocks.futuresAdapter.getIncomePage.mock.calls.length;
+        expect(afterFirst).toBeGreaterThan(0);
+
+        await runFuturesCommand({
+            action: 'account.refresh', clientOrderId: 'operator-asked', symbol: 'BTCUSDT',
+        });
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+
+        expect(moduleMocks.futuresAdapter.getIncomePage.mock.calls.length)
+            .toBeGreaterThan(afterFirst);
+    });
+
+    // Both witnesses fire at the instant of the charge, and the record is
+    // written after it. Measured on the operator's account: the pass four
+    // seconds after the 20:00 `ACCOUNT_UPDATE` came back with no row for it. So
+    // the settlement is read twice — once for the timing, once for the row.
+    it('asks again once the record has caught up with a settlement', async () => {
+        await startFuturesDeskForSettled();
+        const socket = await openFuturesHistoryStream();
+
+        socket.handlers.message(JSON.stringify({
+            e: 'ACCOUNT_UPDATE', E: 9_000, T: 9_000,
+            a: {
+                m: 'FUNDING_FEE',
+                B: [{ a: 'USDT', wb: '990.5', cw: '990.5', bc: '-9.5' }],
+                P: [],
+            },
+        }));
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        const afterCharge = moduleMocks.futuresAdapter.getIncomePage.mock.calls.length;
+        expect(afterCharge).toBeGreaterThan(0);
+
+        // Nothing asks in between: the confirming pass is one read, not a poll.
+        await vi.advanceTimersByTimeAsync(60_000);
+        await flushMicrotasks();
+        expect(moduleMocks.futuresAdapter.getIncomePage.mock.calls.length).toBe(afterCharge);
+
+        await vi.advanceTimersByTimeAsync(90_000);
+        await flushMicrotasks();
+        expect(moduleMocks.futuresAdapter.getIncomePage.mock.calls.length)
+            .toBeGreaterThan(afterCharge);
     });
 
     // A guard, and named as one: it cannot fail on the reading before this
@@ -3748,6 +3822,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
             full: true,
         }));
         await startFuturesDeskForSettled();
+        const socket = await openFuturesHistoryStream();
 
         await runFuturesCommand({
             action: 'account.refresh', clientOrderId: 'unfinished-first', symbol: 'BTCUSDT',
@@ -3758,20 +3833,13 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(afterFirst).toBeGreaterThan(0);
 
         // Well inside the minute: the reading has something to learn and is
-        // still not read again for it.
-        await runFuturesCommand({
-            action: 'account.refresh', clientOrderId: 'unfinished-soon', symbol: 'BTCUSDT',
-        });
-        await flushMicrotasks();
+        // still not read again on a fill.
+        await deliverRealizingFill(socket, 81);
         expect(moduleMocks.futuresAdapter.getIncomePage.mock.calls.length).toBe(afterFirst);
 
         // Past it: an incomplete reading is deferred, never abandoned.
         await vi.advanceTimersByTimeAsync(90_000);
-        await runFuturesCommand({
-            action: 'account.refresh', clientOrderId: 'unfinished-later', symbol: 'BTCUSDT',
-        });
-        await vi.advanceTimersByTimeAsync(30_000);
-        await flushMicrotasks();
+        await deliverRealizingFill(socket, 82);
         expect(moduleMocks.futuresAdapter.getIncomePage.mock.calls.length)
             .toBeGreaterThan(afterFirst);
     });

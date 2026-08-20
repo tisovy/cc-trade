@@ -94,7 +94,7 @@ const READ_REASON = new RegExp(`^(?:${FUTURES_ACCOUNT_READ_REASONS.join('|')})$`
 // funding charge, the stream coming up — are not reasons to read the signed
 // account at all. Sharing one list would have dropped every line whose reason
 // was `fill` or `funding`, which is most of them.
-const SETTLED_REASON = /^(?:stream|fill|funding|settlement|refresh)$/;
+const SETTLED_REASON = /^(?:stream|fill|funding|settlement|refresh|confirm)$/;
 // Which way round the exchange hands back a page of the income record. The whole
 // backward walk rests on it being oldest-first — a full page is then the *oldest*
 // thousand rows of the range asked for — and the endpoint's documentation does

@@ -278,7 +278,7 @@ describe('walkFuturesSettledIncome', () => {
     // Re-reading a held span on every pass is what spends the budget that should
     // be extending coverage. It is why a busy account stayed permanently short of
     // the rows on its own screen.
-    it('reads only the tail it does not already hold', async () => {
+    it('reads the tail and a run-up behind it, and nothing further back', async () => {
         const exchange = createExchange({ spacingMs: 6 * HOUR });
         const first = await walkFuturesSettledIncome({
             readPage: exchange.readPage,
@@ -293,12 +293,64 @@ describe('walkFuturesSettledIncome', () => {
             windowFrom: later - 7 * DAY,
             held: first,
         });
-        // One request for the tail, and nothing re-asked behind it.
+        // Still one request: the range ends at `now` either way, so starting it
+        // behind the edge is the same page.
         expect(exchange.asked.length - spent).toBe(1);
-        expect(exchange.asked.at(-1).startTime).toBe(NOW);
+        // Behind the edge by the overlap, not at it. A charge the exchange
+        // writes into its record after this walk has passed the charge's own
+        // instant is otherwise behind the cursor for good.
+        expect(exchange.asked.at(-1).startTime)
+            .toBe(NOW - FUTURES_SETTLED_WALK.TAIL_OVERLAP_MS);
+        // And no further back than that: the overlap is a run-up, not a re-walk.
+        expect(exchange.asked.at(-1).startTime).toBeGreaterThan(first.from);
         expect(second.to).toBe(later);
         // Everything held before is still held, plus whatever the tail added.
         expect(second.rows.size).toBeGreaterThanOrEqual(first.rows.size);
+    });
+
+    // The defect this overlap exists for, driven end to end.
+    //
+    // On the operator's account on 2026-08-20 the funding charge of 20:00:00 was
+    // read at 20:00:04 — four seconds after the exchange announced it on two
+    // sockets — and the record did not carry it yet. The edge moved to 20:00:04,
+    // every later pass started after the charge, and the column stood still
+    // through all of them. The money was never coming back without a restart.
+    it('finds a row the exchange wrote after the walk had passed its instant', async () => {
+        const settledAt = NOW - 30 * 1000;
+        let published = false;
+        const asked = [];
+        const readPage = async ({ startTime, endTime }) => {
+            asked.push({ startTime, endTime });
+            const rows = published && settledAt >= startTime && settledAt <= endTime
+                ? [{
+                    symbol: 'BEATUSDT',
+                    incomeType: 'FUNDING_FEE',
+                    income: '19.09',
+                    time: settledAt,
+                    tranId: 'late-row',
+                }]
+                : [];
+            return { rows, full: false };
+        };
+        // The pass the announcement triggers: the charge has happened, the
+        // record does not state it yet.
+        const first = await walkFuturesSettledIncome({
+            readPage,
+            now: NOW,
+            windowFrom: WINDOW_FROM,
+        });
+        expect(first.rows.size).toBe(0);
+        expect(first.to).toBeGreaterThan(settledAt);
+
+        // The record catches up, and the next pass asks again.
+        published = true;
+        const second = await walkFuturesSettledIncome({
+            readPage,
+            now: NOW + 2 * 60 * 1000,
+            windowFrom: WINDOW_FROM + 2 * 60 * 1000,
+            held: first,
+        });
+        expect([...second.rows.values()].map(row => row.tranId)).toEqual(['late-row']);
     });
 
     // Rows in hand are money the desk can account for. Dropping them because one
