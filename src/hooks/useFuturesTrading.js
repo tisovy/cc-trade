@@ -27,6 +27,7 @@ import {
 import { describeFuturesAlgoTrigger } from '../utils/futuresOrderPresentation.js'
 import {
   foldFuturesSettledMoney,
+  readFuturesOpenPositionStarts,
   readFuturesSettledIncomeFrame,
 } from '../utils/futuresSettledMoney.js'
 import buildFuturesTradeRounds from '../utils/futuresTradeRounds.js'
@@ -1269,20 +1270,14 @@ const useFuturesTrading = ({
   // start here, and the reading built from it says so rather than presenting the
   // window's total as the position's.
   const openPositionStarts = useMemo(() => {
-    const starts = {}
     const open = new Set(positions
       .filter(position => Number(position?.quantity) !== 0)
       .map(position => String(position?.symbol ?? '').toUpperCase()))
-    if (open.size === 0) return starts
-    for (const round of buildFuturesTradeRounds(state.history.trades)) {
-      if (!round.open || !open.has(round.symbol)) continue
-      // A contract can only carry one open round per leg; the earliest of them
-      // is when the exposure the row shows began.
-      if (round.entryImplied) continue
-      const held = starts[round.symbol]
-      if (held === undefined || round.openTime < held) starts[round.symbol] = round.openTime
-    }
-    return starts
+    if (open.size === 0) return {}
+    return readFuturesOpenPositionStarts(
+      buildFuturesTradeRounds(state.history.trades),
+      open,
+    )
   }, [positions, state.history.trades])
 
   // What each open position has already settled. Folded here rather than in the

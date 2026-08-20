@@ -108,6 +108,43 @@ export const readFuturesSettledIncomeFrame = (payload) => {
   })
 }
 
+/**
+ * When each open position began, from the fold of fills.
+ *
+ * The flag that matters here is `partial`, not `entryImplied`. They answer
+ * different questions and only one of them is about time: `entryImplied` says
+ * the entry *price* was recovered from what the round realized rather than read
+ * from its own fills, while `partial` says the round began by reducing a
+ * position that was opened before this window of fills. A round can carry either
+ * without the other — a reducing fill larger than the round holds sets `partial`
+ * on its own, with no implied entry anywhere — so reading provenance as coverage
+ * accepts an `openTime` that is the moment the window happened to start, and
+ * reports the settled money of a position older than the read as though it were
+ * the whole of it.
+ *
+ * A contract with no trustworthy start is simply absent from the result, and the
+ * fold below reports it as window-bounded rather than complete.
+ */
+export const readFuturesOpenPositionStarts = (rounds, symbols) => {
+  const wanted = symbols instanceof Set
+    ? symbols
+    : new Set((Array.isArray(symbols) ? symbols : [])
+      .map(symbol => String(symbol ?? '').toUpperCase()))
+  const starts = {}
+  for (const round of Array.isArray(rounds) ? rounds : []) {
+    if (round?.open !== true) continue
+    if (round.partial === true) continue
+    if (!wanted.has(round.symbol)) continue
+    const openTime = Number(round.openTime)
+    if (!Number.isFinite(openTime)) continue
+    // One contract can carry two open rounds on a hedged account. The earliest
+    // is when the exposure the row shows began.
+    const held = starts[round.symbol]
+    if (held === undefined || openTime < held) starts[round.symbol] = openTime
+  }
+  return starts
+}
+
 const emptyTotals = () => ({
   realizedPnl: null,
   funding: null,

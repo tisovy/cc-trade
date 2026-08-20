@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
   foldFuturesSettledMoney,
+  readFuturesOpenPositionStarts,
   readFuturesSettledIncome,
   readFuturesSettledIncomeFrame,
 } from './futuresSettledMoney.js'
+import buildFuturesTradeRounds from './futuresTradeRounds.js'
 
 const row = (overrides = {}) => ({
   symbol: 'BEATUSDT',
@@ -141,6 +143,115 @@ describe('foldFuturesSettledMoney', () => {
     ], { starts: { BEATUSDT: 1_000 } }))
     expect(reading.insuranceClear).toBeCloseTo(-12, 6)
     expect(reading.funding).toBeNull()
+  })
+})
+
+describe('readFuturesOpenPositionStarts', () => {
+  // The two flags answer different questions and only one is about time.
+  // `entryImplied` says the entry *price* was recovered from what the round
+  // realized; `partial` says the round began by reducing a position opened
+  // before this window of fills. Reading provenance as coverage takes the
+  // moment the window happened to start for the moment the position opened, and
+  // then reports a partial settled total as a complete one.
+  it('refuses a start from a round that began before the window', () => {
+    expect(readFuturesOpenPositionStarts([
+      {
+        symbol: 'BEATUSDT', open: true, openTime: 5_000,
+        partial: true, entryImplied: false,
+      },
+    ], ['BEATUSDT'])).toEqual({})
+  })
+
+  it('takes a start from a round the walk saw open', () => {
+    expect(readFuturesOpenPositionStarts([
+      {
+        symbol: 'BEATUSDT', open: true, openTime: 5_000,
+        partial: false, entryImplied: false,
+      },
+    ], ['BEATUSDT'])).toEqual({ BEATUSDT: 5_000 })
+  })
+
+  // A recovered entry price is not by itself a reason to distrust the time: the
+  // question is whether the round began by closing something older.
+  it('does not refuse a start merely because the entry price was recovered', () => {
+    expect(readFuturesOpenPositionStarts([
+      {
+        symbol: 'BEATUSDT', open: true, openTime: 5_000,
+        partial: false, entryImplied: true,
+      },
+    ], ['BEATUSDT'])).toEqual({ BEATUSDT: 5_000 })
+  })
+
+  it('ignores closed rounds and contracts with no open position', () => {
+    expect(readFuturesOpenPositionStarts([
+      { symbol: 'BEATUSDT', open: false, openTime: 1_000, partial: false },
+      { symbol: 'BMTUSDT', open: true, openTime: 2_000, partial: false },
+    ], ['BEATUSDT'])).toEqual({})
+  })
+
+  // A hedged account carries two open rounds on one contract; the exposure the
+  // row shows began at the earlier of them.
+  it('takes the earliest open round on a contract', () => {
+    expect(readFuturesOpenPositionStarts([
+      { symbol: 'BEATUSDT', open: true, openTime: 9_000, partial: false },
+      { symbol: 'BEATUSDT', open: true, openTime: 3_000, partial: false },
+    ], ['BEATUSDT'])).toEqual({ BEATUSDT: 3_000 })
+  })
+})
+
+// Driven through the real fold rather than hand-made rounds: the flags are the
+// fold's to set, and a test that invents them proves only that this file agrees
+// with itself.
+describe('readFuturesOpenPositionStarts, against the fold', () => {
+  const fill = (overrides = {}) => ({
+    symbol: 'BEATUSDT', side: 'BUY', positionSide: 'BOTH',
+    price: '100', quantity: '1', realizedPnl: '0', commission: '0',
+    time: 1_000, id: 1, ...overrides,
+  })
+
+  // The case the wrong flag let through. A long opened before this window is
+  // sold partly at exactly its average entry — zero realized PnL — and the
+  // operator then adds to it, leaving it open. The fold reads the whole of that
+  // as one round on the original, pre-window position, so it is `partial`; but
+  // its entry price is honestly averaged from the fills that are here, so
+  // `entryImplied` is *false*. A filter reading provenance as coverage accepts
+  // it, takes `openTime` — the moment the window happened to start — for the
+  // moment the position opened, and reports settled money missing everything the
+  // position earned or paid before that as though it were complete.
+  it('gives no start for a position the window opens in the middle of', () => {
+    const rounds = buildFuturesTradeRounds([
+      fill({ id: 1, side: 'SELL', quantity: '2', price: '100', realizedPnl: '0', time: 1_000 }),
+      fill({ id: 2, side: 'BUY', quantity: '3', price: '105', realizedPnl: '0', time: 2_000 }),
+    ])
+    const open = rounds.filter(round => round.open)
+    expect(open).toHaveLength(1)
+    expect(open[0]).toMatchObject({ partial: true, entryImplied: false, openTime: 1_000 })
+    expect(readFuturesOpenPositionStarts(rounds, ['BEATUSDT'])).toEqual({})
+  })
+
+  // And the reading built on it says so, rather than presenting the window's
+  // total as the position's.
+  it('reports a position older than the window as window-bounded', () => {
+    const rounds = buildFuturesTradeRounds([
+      fill({ id: 1, side: 'SELL', quantity: '2', price: '100', realizedPnl: '0', time: 1_000 }),
+      fill({ id: 2, side: 'BUY', quantity: '3', price: '105', realizedPnl: '0', time: 2_000 }),
+    ])
+    const [reading] = Object.values(foldFuturesSettledMoney([
+      {
+        symbol: 'BEATUSDT', incomeType: 'REALIZED_PNL', income: '40',
+        asset: 'USDT', time: 2_500, tranId: '1', tradeId: null,
+      },
+    ], { starts: readFuturesOpenPositionStarts(rounds, ['BEATUSDT']) }))
+    expect(reading.complete).toBe(false)
+    expect(reading.from).toBeNull()
+  })
+
+  it('gives a start for a position the window saw opened', () => {
+    const rounds = buildFuturesTradeRounds([
+      fill({ id: 1, side: 'BUY', quantity: '1', price: '100', time: 4_000 }),
+      fill({ id: 2, side: 'BUY', quantity: '1', price: '102', time: 5_000 }),
+    ])
+    expect(readFuturesOpenPositionStarts(rounds, ['BEATUSDT'])).toEqual({ BEATUSDT: 4_000 })
   })
 })
 

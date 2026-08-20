@@ -158,6 +158,39 @@
   boundary passes with a position open — the read is triggered by the
   `FUNDING_FEE` cause, and that path cannot be exercised from this tree.
 
+## 5b. Defect found after the first commit
+
+- [x] 5b.1 The open-position start used the wrong flag. `openPositionStarts`
+  skipped rounds with `entryImplied`, which states that the entry *price* was
+  recovered from what the round realized — a statement about provenance. The
+  flag that answers "does this position predate the window" is `partial`, which
+  `futuresTradeRounds` sets in three places, all of them meaning the round began
+  by reducing something opened before these fills. The two come apart: a
+  pre-window long sold partly at exactly its average entry and then added to is
+  `partial: true` with `entryImplied: false`, because its entry is honestly
+  averaged from the fills that *are* there. Raised by the session auditing the
+  2026-08-19 series (b6581c77) and verified here rather than taken on trust.
+
+  Reproduced against the real fold, same fills, both rules:
+
+  ```
+  shipped rule starts : {"BEATUSDT":1000} -> {total:40, from:1000, complete:true}
+  fixed   rule starts : {}                -> {total:40, from:null, complete:false}
+  ```
+
+  The shipped rule takes `openTime: 1000` — the moment the window happened to
+  start — for the moment the position opened, and reports a settled total
+  missing everything before it as complete. That is precisely what "A
+  settled-money reading names its own window" forbids, so the defect was against
+  this change's own spec.
+- [x] 5b.2 Fixed by filtering on `partial`, and the rule moved out of the hook
+  into `readFuturesOpenPositionStarts` so it can be tested at all — inline in a
+  `useMemo` it could only be reached through a rendered component.
+- [x] 5b.3 Eight new tests, driven through `buildFuturesTradeRounds` rather than
+  hand-made round objects: the flags are the fold's to set, and a test that
+  invents them proves only that the file agrees with itself. All fail against the
+  shipped version. 2215/2215 green after the fix.
+
 ## 6. Carried forward
 
 - Task 1.3 is unresolved by choice: whether `ACCOUNT_UPDATE` carries an
