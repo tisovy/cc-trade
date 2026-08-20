@@ -84,3 +84,28 @@ tree), never in jsdom — jsdom has no layout.
   `elementFromPoint` at the reason's centre hits the reason code, dock inside
   the desk, no page scroll; 1920×993 reason [49..67] vs switch [−1..34] —
   clear. View and dock suites 149/149, eslint clean.
+
+## 8. Self-Audit Corrections (2026-08-20)
+
+- [x] 8.1 The guard was scope-blind: `[\s\S]*?` crossed media-block
+  boundaries, so the whole identity block moved into
+  `@media (max-width: 844px)` — desktop back to inline flow, the covered
+  reason restored — kept all five assertions green (recorded NOT CAUGHT in
+  the audit harness). The guard now reads the exact
+  `@media (min-width: 845px)` blocks brace-balanced and asserts inside
+  them; the relocation mutant is caught.
+- [x] 8.2 The 16px row gap — the clearance itself — was unguarded:
+  `gap: 0 12px` kept every guard green while the reason re-entered the
+  switch's box by a measured 3.5px at 1366×768. The guard now pins
+  `gap: 16px 12px;` and the mutant is caught.
+- [x] 8.3 The CSS comment's arithmetic was false: it claimed a 26px badge
+  floor and a reason top ≥ 49px "clear of the switch and its shadow" at
+  every ui-scale. Measured: the badge renders 23.5px, the reason tops out
+  at ≈ 46.5px clocked / 47.5px unclocked at scale 1.0 — inside the ≈ 47px
+  shadow reach the same comment states, though 12.5px clear of the switch's
+  box. The comment now states the measured numbers and names the gap as
+  the whole of the clearance; the ≥ 49px figure survives only at
+  ui-scale ≥ 1.2, where it was measured.
+- [x] 8.4 `npx vitest run src/components/features/futures/FuturesWorkstationView.test.jsx`
+  — 105 passed (105); mutant matrix (audit2/layout/mutate2.mjs): baseline
+  PASS, all eight mutants CAUGHT.

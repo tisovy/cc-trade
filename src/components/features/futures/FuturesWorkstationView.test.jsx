@@ -34,6 +34,34 @@ const bookRow = (price, quantity, side = 'bid', whole = true) => {
   })
 }
 
+// The exact text governed by one media query, brace-balanced. The style
+// guards used to reach for a rule with `[\s\S]*?` from the first matching
+// header, which crosses block boundaries: a rule moved whole into another
+// query — where it governs the wrong widths and the original bug is back —
+// still satisfied the guard. Every block carrying exactly this header is
+// returned, and nothing outside one; a header that is a prefix of a longer
+// one (min-width: 845px vs. min-width: 845px and …) does not match it.
+const escapeForPattern = text => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+const mediaBlocks = (stylesheet, header) => {
+  const blocks = []
+  const opening = new RegExp(`${escapeForPattern(header)}\\s*\\{`, 'g')
+  for (let match = opening.exec(stylesheet); match !== null; match = opening.exec(stylesheet)) {
+    const from = match.index + match[0].length
+    let depth = 1
+    let index = from
+    while (index < stylesheet.length && depth > 0) {
+      if (stylesheet[index] === '{') depth += 1
+      else if (stylesheet[index] === '}') depth -= 1
+      index += 1
+    }
+    blocks.push(stylesheet.slice(from, index - 1))
+  }
+  return blocks.join('\n')
+}
+const ruleIn = (block, selector) => block.match(
+  new RegExp(`${escapeForPattern(selector)}\\s*\\{(?<declarations>[^}]*)\\}`),
+)?.groups?.declarations ?? ''
+
 const workstationViewMocks = vi.hoisted(() => ({
   chartRender: vi.fn(),
   ticketRender: vi.fn(),
@@ -355,20 +383,25 @@ describe('pure Futures workstation presentation', () => {
       'src/components/features/futures/FuturesWorkstation.css',
       'utf8',
     )
-    const desktopIdentityRule = stylesheet.match(
-      /@media \(min-width: 845px\)[\s\S]*?\.futures-workstation-identity\s*\{(?<declarations>[^}]*)\}/,
-    )?.groups?.declarations
-    const degradedIdentityRule = stylesheet.match(
-      /@media \(min-width: 845px\)[\s\S]*?\.futures-workstation-identity:has\(\.futures-workstation-reason\)\s*\{(?<declarations>[^}]*)\}/,
-    )?.groups?.declarations
-    const desktopReasonRule = stylesheet.match(
-      /@media \(min-width: 845px\)[\s\S]*?\.futures-workstation-identity \.futures-workstation-reason\s*\{(?<declarations>[^}]*)\}/,
-    )?.groups?.declarations
+    const desktop = mediaBlocks(stylesheet, '@media (min-width: 845px)')
+    const desktopIdentityRule = ruleIn(desktop, '.futures-workstation-identity')
+    const degradedIdentityRule = ruleIn(
+      desktop,
+      '.futures-workstation-identity:has(.futures-workstation-reason)',
+    )
+    const desktopReasonRule = ruleIn(
+      desktop,
+      '.futures-workstation-identity .futures-workstation-reason',
+    )
 
     expect(desktopIdentityRule).toContain('display: grid;')
     expect(desktopIdentityRule).toContain(
       'grid-template-columns: max-content max-content minmax(0, 1fr);',
     )
+    // The 16px row gap is the clearance itself: it is what holds the reason
+    // row below the switch's reach, and with it at 0 the two intersect again
+    // — measured 3.5px deep at 1366×768.
+    expect(desktopIdentityRule).toContain('gap: 16px 12px;')
     // The desk grid is window-bound, so its auto rows collapse to an item's
     // specified min-height; only min-height: auto lets the content-based
     // minimum carry the reason row into the track.
@@ -1752,9 +1785,8 @@ describe('instrument recency and interface scale', () => {
       'src/components/features/futures/FuturesWorkstation.css',
       'utf8',
     )
-    const desktopRule = stylesheet.match(
-      /@media \(min-width: 845px\) \{[\s\S]*?\.futures-workstation\s*\{(?<declarations>[^}]*)\}/,
-    )?.groups?.declarations
+    const desktop = mediaBlocks(stylesheet, '@media (min-width: 845px)')
+    const desktopRule = ruleIn(desktop, '.futures-workstation')
 
     expect(desktopRule).toContain(
       'grid-template-rows: auto auto minmax(0, 65fr) minmax(0, 35fr) auto;',
@@ -1771,9 +1803,7 @@ describe('instrument recency and interface scale', () => {
     // content-sized tape on every desktop width. Measured before this guard
     // existed: a 16px tape at 1920×993, and at 1366×681 the dock clipped
     // entirely below the desk's bottom edge.
-    const desktopClockRule = stylesheet.match(
-      /@media \(min-width: 845px\) \{[\s\S]*?\.futures-workstation\.has-market-clock\s*\{(?<declarations>[^}]*)\}/,
-    )?.groups?.declarations
+    const desktopClockRule = ruleIn(desktop, '.futures-workstation.has-market-clock')
 
     expect(desktopClockRule).toContain(
       'grid-template-rows: auto auto auto minmax(0, 65fr) minmax(0, 35fr) auto;',

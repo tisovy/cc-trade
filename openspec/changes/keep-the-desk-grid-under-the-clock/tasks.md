@@ -59,3 +59,31 @@
   lint before commit. View glob: 707 tests in 7 files green; eslint clean on
   the touched test. Full suite and lint recorded in the batch verification at
   the end of the audit-fix series.
+
+  **Correction 2026-08-20:** the last sentence cited a record that never
+  existed — the series ended at e6718d0 with no batch-verification record.
+  The focused-run half of this box is evidenced; the full-suite claim was
+  testimony. The full-suite run for the whole self-audit series is recorded
+  in the archive sweep's ledger row, dated, with counts. (The "707 tests in
+  7 files" figure also cannot come from the single-file command as written;
+  it was a glob run, and the wording now says so.)
+
+## 5. Self-Audit Corrections (2026-08-20)
+
+- [x] 5.1 The breakpoint guard was scope-blind: its `[\s\S]*?` reach
+  crossed media-block boundaries, so the desktop clock restatement moved
+  whole into `@media (min-width: 845px) and (max-width: 984px)` — where
+  every width above 984px resurrects the mobile clocked rows, the original
+  16px-tape bug — kept every assertion green. The guards now extract the
+  exact `@media (min-width: 845px)` blocks brace-balanced (`mediaBlocks`/
+  `ruleIn` in the View test) and assert inside them only. Bite: the
+  relocation mutants ran against the old guard logic and passed (recorded
+  NOT CAUGHT in the audit harness); against the new guards every mutant in
+  the matrix is caught — both relocations, `18px→90px`, `box-sizing`
+  removed, clock restatement deleted — with the baseline CSS passing.
+- [x] 5.2 The `box-sizing: border-box` comment claimed the page would
+  scroll without it; bootstrap's universal border-box reset was already in
+  force, so that state could not occur. The comment now says why the
+  declaration is stated locally instead of claiming a counterfactual.
+- [x] 5.3 `npx vitest run src/components/features/futures/FuturesWorkstationView.test.jsx`
+  — 105 passed (105) on the merged tree.

@@ -110,10 +110,15 @@
    switch [604..762] sat on the reason [317..790] across y 17..34 — covered
    exactly when the operator must read why the desk is degraded. On desktop
    the reason therefore takes its own full-width row below the switch. Row
-   one keeps title, state and scale (floors: badge 26px, scale buttons
-   24px), so with the 16px row gap the reason's top lands at ≥ 49px at
-   every ui-scale — clear of the switch and its shadow at every desktop
-   width with no viewport-centre arithmetic. Two measured traps shaped the
+   one keeps title, state and scale; the state badge renders 23.5px
+   (12.5px font × 1.4 line-height + 4px padding + 2px border, so it does
+   not move with the page font), and with the 16px row gap the reason's
+   top lands at ≈ 46.5px with the clock row up, ≈ 47.5px without it, at
+   scale 1.0 — rising with ui-scale (≈ 50 at 1.2, ≈ 54 at 1.45). That
+   clears the switch's own box by ≥ 12px at every desktop width with no
+   viewport-centre arithmetic; the shadow's last pixel can still brush the
+   row at scale 1.0, and the 16px gap is the whole of that clearance,
+   which is why the breakpoint guard pins the gap itself. Two measured traps shaped the
    form this takes. A wrapped flex row cannot deliver it: the strip's
    intrinsic height is measured as a single line (the second line's
    percentage width never resolves during track sizing), so the identity
@@ -308,7 +313,9 @@
        bottom padding. This number once also carried 72px of top padding; the
        header recompose removed that padding but not the subtraction, and the
        desk sat over a 72px dead band it could have used. The border belongs
-       inside the budget too, or the page scrolls by exactly its width. */
+       inside the budget; the universal border-box reset already puts it
+       there, and it is stated here so the budget does not silently depend
+       on that reset staying loaded. */
     height: calc(100vh - 18px);
     box-sizing: border-box;
     /* Told to fill the window, it may not also demand more than the window has:
