@@ -330,3 +330,147 @@ describe('FuturesProductionWorkstation order drags', () => {
       .toEqual([['58500', '0.004'], ['58300', '0.007']])
   })
 })
+
+// What the contract is set to and what stands behind it: two fields, one read,
+// and under the operator's rule — nothing retuned in Binance's own app while
+// the desk runs — that read is the only reading of them the session gets.
+describe('FuturesProductionWorkstation contract configuration', () => {
+  const config = (overrides = {}) => ({
+    BTCUSDT: {
+      symbol: 'BTCUSDT',
+      leverage: 20,
+      maxLeverage: 125,
+      marginType: 'CROSSED',
+      maxNotionalValue: '5000000',
+      ...overrides,
+    },
+  })
+
+  // The desk can mount before the local backend socket is open. A command sent
+  // then never leaves — it is remembered as unsent, and nothing automatic sends
+  // it again. It used to land anyway, by accident: `sendCommand` is rebuilt when
+  // the socket changes, which rebuilt `loadSymbolConfig`, which re-ran the
+  // effect. Here the identity is deliberately held still, so only the connection
+  // opening can produce the second read.
+  it('reads the contract configuration again when the backend connection opens', () => {
+    const loadSymbolConfig = vi.fn(() => false)
+    const closed = executionState({ connected: false, loadSymbolConfig })
+    const { rerender } = render(
+      <FuturesProductionWorkstation enabled executionState={closed} />,
+    )
+    expect(loadSymbolConfig).toHaveBeenCalledTimes(1)
+    expect(loadSymbolConfig).toHaveBeenCalledWith('BTCUSDT')
+
+    // Same function, same contract: nothing about the read changed except that
+    // there is now somewhere to send it.
+    loadSymbolConfig.mockReturnValue(true)
+    rerender(
+      <FuturesProductionWorkstation
+        enabled
+        executionState={{ ...closed, connected: true }}
+      />,
+    )
+    expect(loadSymbolConfig).toHaveBeenCalledTimes(2)
+    expect(loadSymbolConfig).toHaveBeenLastCalledWith('BTCUSDT')
+  })
+
+  // The operator's own case: cross ×1 set in Binance's app, and the desk wrote
+  // ISOLATED back over it on the next start. Nothing automatic may reach that
+  // command any more — the multiple is still brought down.
+  it('lowers an inherited multiple to 1x and sends no margin mode at all', () => {
+    const setLeverage = vi.fn(() => true)
+    const setMarginType = vi.fn(() => true)
+    render(
+      <FuturesProductionWorkstation
+        enabled
+        executionState={executionState({
+          symbolConfigs: config(),
+          accountResources: { positions: { status: 'ready', data: [], lastSuccessfulAt: 1 } },
+          setLeverage,
+          setMarginType,
+        })}
+      />,
+    )
+
+    expect(setLeverage).toHaveBeenCalledWith({ symbol: 'BTCUSDT', leverage: 1 })
+    expect(setMarginType).not.toHaveBeenCalled()
+  })
+
+  it('sends nothing for a contract already at the default, in either mode', () => {
+    for (const marginType of ['CROSSED', 'ISOLATED']) {
+      const setLeverage = vi.fn(() => true)
+      const setMarginType = vi.fn(() => true)
+      const { unmount } = render(
+        <FuturesProductionWorkstation
+          enabled
+          executionState={executionState({
+            symbolConfigs: config({ leverage: 1, marginType }),
+            accountResources: { positions: { status: 'ready', data: [], lastSuccessfulAt: 1 } },
+            setLeverage,
+            setMarginType,
+          })}
+        />,
+      )
+      expect(setLeverage, marginType).not.toHaveBeenCalled()
+      expect(setMarginType, marginType).not.toHaveBeenCalled()
+      unmount()
+    }
+  })
+
+  // Stated where the size is chosen, and it is the control that changes it —
+  // the desk had no way to switch the mode at all, on either surface.
+  it('gives the ticket the contract mode and the command that changes it', () => {
+    const setMarginType = vi.fn(() => true)
+    render(
+      <FuturesProductionWorkstation
+        enabled
+        executionState={executionState({ symbolConfigs: config(), setMarginType })}
+      />,
+    )
+    const { props } = productionWorkstationMocks.viewRender.mock.lastCall[0].tradingRail
+    expect(props.marginMode).toBe('CROSSED')
+    expect(props.leverage).toBe(20)
+    expect(props.onMarginModeChange).toBe(setMarginType)
+  })
+
+  // The mode decides which leverage changes the exchange will take at all, so
+  // the panel that offers them has to be given it. Without it the desk offered
+  // the operator a 1× it knew Binance would refuse, and spent a signed request
+  // finding out — which is what happened on 2026-08-21.
+  it('gives the leverage panel the mode, so it refuses what the exchange would', () => {
+    const setLeverage = vi.fn(() => true)
+    render(
+      <FuturesProductionWorkstation
+        enabled
+        executionState={executionState({
+          symbolConfigs: config({ leverage: 2, marginType: 'ISOLATED' }),
+          positions: [{ symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '0.5' }],
+          accountResources: { positions: { status: 'ready', data: [], lastSuccessfulAt: 1 } },
+          setLeverage,
+        })}
+      />,
+    )
+    const { props } = productionWorkstationMocks.viewRender.mock.lastCall[0].tradingRail
+    act(() => props.onLeverageEdit('BTCUSDT', { x: 400, y: 300 }))
+
+    fireEvent.click(screen.getByRole('button', { name: '1×' }))
+    expect(screen.getByRole('status'))
+      .toHaveTextContent('Binance will not lower the multiple while a position is open')
+    expect(screen.getByRole('button', { name: 'Held at 2×' })).toBeDisabled()
+    expect(setLeverage).not.toHaveBeenCalled()
+  })
+
+  // A contract nothing has been read for states no mode, rather than the mode
+  // of whichever contract was on screen before it.
+  it('states no mode for a contract the desk holds no configuration for', () => {
+    render(
+      <FuturesProductionWorkstation
+        enabled
+        executionState={executionState({ symbolConfigs: {} })}
+      />,
+    )
+    const { props } = productionWorkstationMocks.viewRender.mock.lastCall[0].tradingRail
+    expect(props.marginMode).toBeNull()
+    expect(props.leverage).toBeNull()
+  })
+})

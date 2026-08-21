@@ -196,6 +196,16 @@
   font-size: calc(var(--fx-ui-scale, 1) * 18px);
 }
 
+/* The multiple and the mode as one group: on a rail narrow enough to wrap a
+   fourteen-character symbol they move to the next line together, which costs one
+   row instead of two and never leaves the multiple stated without what stands
+   behind it. */
+.futures-production-ticket-terms {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
 /* The same badge as the dock's position rows, so the multiple reads the same
    wherever it appears and is set from either place. */
 .futures-production-ticket-leverage {
@@ -213,6 +223,51 @@
 .futures-production-ticket-leverage:hover {
   border-color: rgba(244, 202, 67, 0.75);
   background: rgba(244, 202, 67, 0.22);
+}
+
+/* Beside the multiple and deliberately not in its colour: they are two
+   different facts about the same contract, and an operator glancing at a row of
+   yellow chips reads one number. Blue is what the position card already says
+   the margin mode in. */
+.futures-production-ticket-margin-mode {
+  padding: 1px 6px;
+  border: 1px solid rgba(124, 192, 245, 0.4);
+  border-radius: 3px;
+  background: rgba(124, 192, 245, 0.12);
+  color: #7cc0f5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: calc(var(--fx-ui-scale, 1) * 12px);
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+
+.futures-production-ticket-margin-mode:hover {
+  border-color: rgba(124, 192, 245, 0.75);
+  background: rgba(124, 192, 245, 0.22);
+}
+
+/* A mode nobody has reported is not a mode. Muted rather than coloured, so it
+   cannot be read as "isolated" out of the corner of an eye. */
+.futures-production-ticket-margin-mode.is-unknown {
+  border-color: rgba(148, 163, 184, 0.35);
+  background: rgba(148, 163, 184, 0.1);
+  color: var(--production-muted);
+}
+
+/* The exchange will refuse this one while the contract is held. The chip still
+   answers — clicking it states why — but it must not look like a control that
+   will work. */
+.futures-production-ticket-margin-mode.is-held {
+  border-color: rgba(148, 163, 184, 0.3);
+  background: transparent;
+  color: var(--production-muted);
+  cursor: not-allowed;
+}
+
+.futures-production-ticket-margin-mode.is-held:hover {
+  border-color: rgba(148, 163, 184, 0.5);
+  background: transparent;
 }
 
 .futures-production-action.is-order > label,
@@ -1174,8 +1229,9 @@
   grid-template-columns: repeat(auto-fit, minmax(46px, 1fr));
 }
 
-/* Raising leverage on a position that is already open moves its liquidation
-   price. The line says so in the same red the projected price uses. */
+/* A change the exchange will refuse — a lower multiple while an isolated
+   position is open. The line says so in the same red the projected price uses,
+   because the operator is about to act on the belief that it went. */
 .futures-order-editor p[role='status'].is-riskier,
 /* A command that never left the renderer changed nothing on the exchange. The
    panel stays open and says so in the same red, because the operator is about
@@ -1388,6 +1444,18 @@
   font-weight: 900;
   letter-spacing: 0.04em;
   line-height: 1.2;
+}
+
+/* The same yellow, at the weight of a qualifier rather than a headline: the
+   multiple is the number, the mode is what stands behind it. Both are readings
+   here and neither is a control. */
+.futures-order-confirm-margin-mode {
+  margin-left: 8px;
+  font-size: calc(var(--fx-ui-scale, 1) * 13px);
+  font-style: normal;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  opacity: 0.85;
 }
 
 /* Reserved for the one thing the operator is about to get wrong. */

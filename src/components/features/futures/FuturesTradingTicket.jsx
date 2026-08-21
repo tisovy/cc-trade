@@ -216,7 +216,9 @@ const FuturesTradingTicket = ({
   selectedContract = null,
   tickSizes = EMPTY_TICKS,
   leverage = null,
+  marginMode = null,
   onLeverageEdit,
+  onMarginModeChange,
   draftPrice = null,
   draftPriceReading = null,
   gestureRequest = null,
@@ -333,6 +335,15 @@ const FuturesTradingTicket = ({
   // 1×, which overstates the cost — never understates it — and the reading says
   // so by showing no multiple beside it.
   const entryLeverage = Number.isSafeInteger(leverage) && leverage >= 1 ? leverage : null
+  // Which mode the contract is in, as the exchange last reported it — never a
+  // requested one, and never a default. Isolated caps a losing position at the
+  // margin behind it; cross stands the whole wallet behind it. An operator
+  // reading ISO on a contract the account carries in cross has the wrong idea
+  // of what the next entry can cost them, and the exchange announces this
+  // field on no stream: the only place it can come from is a read.
+  const contractMarginMode = marginMode === 'ISOLATED' || marginMode === 'CROSSED'
+    ? marginMode
+    : null
   const deriveDraft = candidatePrice => deriveFuturesLimitOrderDraft({
     notionalUsdt,
     price: candidatePrice,
@@ -661,6 +672,7 @@ const FuturesTradingTicket = ({
       // the position will actually be carried at, and a leverage change that
       // lands while the confirmation is open changes them.
       leverage: entryLeverage,
+      marginMode: contractMarginMode,
       positions,
       priceReading: pendingOrder.priceReading,
     })
@@ -712,6 +724,50 @@ const FuturesTradingTicket = ({
   // resting and reads as zero.
   const workingOrdersUsdt = orderSyncUnavailable ? null : totalOrderNotionalUsdt(openOrders)
 
+  // What Binance would refuse anyway, refused here instead — with the desk's own
+  // words rather than a code the operator has to look up, and without spending a
+  // signed request to be told what the desk already knows. `-4048` while the
+  // contract carries a position, `-4047` while an order rests on it.
+  const marginModeHeldBy = positions.some(position => (
+    position?.symbol === selectedSymbol && Number(position?.quantity) !== 0
+  ))
+    ? {
+      code: 'MARGIN_MODE_HELD_BY_POSITION',
+      message: `${selectedSymbol} carries an open position — Binance refuses a margin-mode change while it is open. Nothing was sent.`,
+    }
+    : selectedOpenOrders.length > 0
+      ? {
+        code: 'MARGIN_MODE_HELD_BY_ORDER',
+        message: `${selectedSymbol} has a working order — Binance refuses a margin-mode change while one rests. Nothing was sent.`,
+      }
+      : null
+  const marginModeReason = marginModeHeldBy !== null
+    ? marginModeHeldBy.message
+    : contractMarginMode === null
+      ? 'The margin mode of this contract has not been reported yet'
+      : `${selectedSymbol} is carried in ${
+        contractMarginMode === 'CROSSED' ? 'cross' : 'isolated'
+      } margin — click to switch it to ${
+        contractMarginMode === 'CROSSED' ? 'isolated' : 'cross'
+      }`
+  // One click, one contract, the other mode. The chip goes on showing what the
+  // exchange last reported until a read says otherwise: what was asked for is
+  // not what is held, and this is the field an operator would size against.
+  const changeMarginMode = () => {
+    if (marginModeHeldBy !== null) {
+      setHeldRejection(marginModeHeldBy)
+      return
+    }
+    if (contractMarginMode === null) return
+    const requested = contractMarginMode === 'CROSSED' ? 'ISOLATED' : 'CROSSED'
+    if (onMarginModeChange?.({ symbol: selectedSymbol, marginType: requested }) === false) {
+      setHeldRejection({
+        code: 'LOCAL_CONNECTION_UNAVAILABLE',
+        message: 'Local backend connection unavailable — the margin mode was not changed.',
+      })
+    }
+  }
+
   return (
     <aside className="futures-production-execution-ticket" aria-label="Futures trading ticket">
       {feedback ? (
@@ -745,25 +801,54 @@ const FuturesTradingTicket = ({
           <section className="futures-production-action is-order" aria-label="Futures order size">
             <div className="futures-production-ticket-symbol">
               <strong>{selectedSymbol}</strong>
-              {/* The multiple every entry on this contract is taken at, stated
-                  where the size is chosen rather than nowhere — and it is the
-                  control that changes it. */}
-              {typeof onLeverageEdit === 'function' ? (
-                <button
-                  type="button"
-                  className="futures-production-ticket-leverage"
-                  aria-label={`Set ${selectedSymbol} leverage`}
-                  title={entryLeverage === null
-                    ? 'Leverage not reported yet — click to set it'
-                    : `${entryLeverage}× leverage on ${selectedSymbol} — click to change it`}
-                  onClick={event => onLeverageEdit(selectedSymbol, {
-                    x: event.clientX,
-                    y: event.clientY,
-                  })}
-                >
-                  {entryLeverage === null ? 'Lev' : `${entryLeverage}×`}
-                </button>
-              ) : null}
+              {/* The two together are the terms of every entry on this
+                  contract, so they are kept together: a rail narrow enough to
+                  wrap a long symbol used to put the mode on a line of its own,
+                  which cost the ticket a whole row and separated the multiple
+                  from what stands behind it. */}
+              <div className="futures-production-ticket-terms">
+                {/* The multiple every entry on this contract is taken at, stated
+                    where the size is chosen rather than nowhere — and it is the
+                    control that changes it. */}
+                {typeof onLeverageEdit === 'function' ? (
+                  <button
+                    type="button"
+                    className="futures-production-ticket-leverage"
+                    aria-label={`Set ${selectedSymbol} leverage`}
+                    title={entryLeverage === null
+                      ? 'Leverage not reported yet — click to set it'
+                      : `${entryLeverage}× leverage on ${selectedSymbol} — click to change it`}
+                    onClick={event => onLeverageEdit(selectedSymbol, {
+                      x: event.clientX,
+                      y: event.clientY,
+                    })}
+                  >
+                    {entryLeverage === null ? 'Lev' : `${entryLeverage}×`}
+                  </button>
+                ) : null}
+                {/* And what stands behind it: isolated caps a losing position
+                    at its own margin, cross stands the wallet behind it. The
+                    exchange announces this field on no stream, so what is shown
+                    here is what the desk last read — and acting on it is the
+                    only way the mode changes from this desk. */}
+                {typeof onMarginModeChange === 'function' ? (
+                  <button
+                    type="button"
+                    className={`futures-production-ticket-margin-mode is-${
+                      marginModeHeldBy !== null
+                        ? 'held'
+                        : contractMarginMode === null ? 'unknown' : contractMarginMode.toLowerCase()
+                    }`}
+                    aria-label={`Set ${selectedSymbol} margin mode`}
+                    title={marginModeReason}
+                    onClick={changeMarginMode}
+                  >
+                    {contractMarginMode === null
+                      ? 'Mode'
+                      : contractMarginMode === 'CROSSED' ? 'CROSS' : 'ISO'}
+                  </button>
+                ) : null}
+              </div>
             </div>
             <label className="futures-production-price-field">
               <span>Selected price</span>

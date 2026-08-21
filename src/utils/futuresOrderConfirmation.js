@@ -60,6 +60,7 @@ export const describeFuturesOrderConfirmation = ({
   quantity,
   notionalUsdt = null,
   leverage = null,
+  marginMode = null,
   positions = [],
   priceReading = null,
 } = {}) => {
@@ -131,6 +132,11 @@ export const describeFuturesOrderConfirmation = ({
     // of all places, and an operator reading "1×" where the contract is at 20×
     // is worse off than one reading nothing.
     leverage: Number.isSafeInteger(leverage) && leverage >= 1 ? leverage : null,
+    // And what stands behind the multiple. Read on the same terms: the mode the
+    // exchange last reported, or null. The two answer one question between them
+    // — what a losing entry can cost — and a mode assumed here would answer it
+    // wrongly in the direction that costs the whole wallet.
+    marginMode: marginMode === 'ISOLATED' || marginMode === 'CROSSED' ? marginMode : null,
     positionBefore: before,
     positionAfter: after,
     positionBeforeUsdt: valueUsdt(before),

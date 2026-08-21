@@ -451,6 +451,22 @@ const useFuturesTrading = ({
     positionMarkStore.clear({ retireEpoch: true })
   }, [marketGeneration, positionMarkStore])
 
+  // A leverage and a margin mode held for an activation that is over are a
+  // memory, not a reading. The backend forgets its own the moment the market is
+  // left or the credentials change — every activation tears the other market
+  // down before starting its own — and a renderer that kept them would go on
+  // stating a contract's mode from an account nobody is on, on the one surface
+  // where being wrong costs money. Dropped rather than merged over: the next
+  // activation reads its own.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setState(previous => (
+      Object.keys(previous.symbolConfigs).length === 0
+        ? previous
+        : { ...previous, symbolConfigs: {} }
+    ))
+  }, [marketGeneration])
+
   // Which listed algorithmic parent each spawned regular order belongs to.
   // Mirrored into a ref because it is consulted on the stream's own path, which
   // must not re-subscribe every time the account list changes.

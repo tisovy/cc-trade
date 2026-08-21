@@ -2160,3 +2160,162 @@ describe('FuturesTradingTicket', () => {
     expect(screen.getByRole('slider', { name: 'Order size percent' })).not.toBeDisabled()
   })
 })
+
+// The margin mode decides what a losing position can cost — isolated caps it at
+// the margin behind that position, cross stands the whole wallet behind it —
+// and the desk stated it nowhere for the contract in hand. Worse, it used to
+// decide it: a contract set to cross in Binance's own app was written back to
+// isolated on the next start, and the exchange announces the field on no stream,
+// so the desk could not show what it had overwritten. It is a reading and a
+// control now, and never a default.
+describe('the margin mode on the futures ticket', () => {
+  const ticketProps = (overrides = {}) => ({
+    state: createState(),
+    selectedSymbol: 'BTCUSDT',
+    selectedContract: contract,
+    draftPrice: '58445.0',
+    onLeverageEdit: vi.fn(),
+    onMarginModeChange: vi.fn(() => true),
+    ...overrides,
+  })
+
+  it('states the mode of the contract beside its multiple', () => {
+    const props = ticketProps({ leverage: 20, marginMode: 'CROSSED' })
+    const { rerender } = render(<FuturesTradingTicket {...props} />)
+    const chip = screen.getByRole('button', { name: 'Set BTCUSDT margin mode' })
+    expect(chip).toHaveTextContent('CROSS')
+    expect(screen.getByRole('button', { name: 'Set BTCUSDT leverage' })).toHaveTextContent('20×')
+
+    rerender(<FuturesTradingTicket {...props} marginMode="ISOLATED" />)
+    expect(screen.getByRole('button', { name: 'Set BTCUSDT margin mode' })).toHaveTextContent('ISO')
+  })
+
+  // A mode nobody reported is not isolated. The desk's whole complaint was a
+  // screen that said ISO about a contract the account carried in cross.
+  it('states a mode the exchange has not reported as unknown, never as isolated', () => {
+    render(<FuturesTradingTicket {...ticketProps({ marginMode: null })} />)
+    const chip = screen.getByRole('button', { name: 'Set BTCUSDT margin mode' })
+    expect(chip).toHaveTextContent('Mode')
+    expect(chip).not.toHaveTextContent('ISO')
+    expect(chip).toHaveClass('is-unknown')
+    expect(chip).toHaveAttribute(
+      'title',
+      'The margin mode of this contract has not been reported yet',
+    )
+  })
+
+  it('sends the other mode for the named contract when it is acted on', () => {
+    const onMarginModeChange = vi.fn(() => true)
+    const { rerender } = render(<FuturesTradingTicket
+      {...ticketProps({ marginMode: 'CROSSED', onMarginModeChange })}
+    />)
+    fireEvent.click(screen.getByRole('button', { name: 'Set BTCUSDT margin mode' }))
+    expect(onMarginModeChange).toHaveBeenCalledWith({ symbol: 'BTCUSDT', marginType: 'ISOLATED' })
+
+    rerender(<FuturesTradingTicket
+      {...ticketProps({ marginMode: 'ISOLATED', onMarginModeChange })}
+    />)
+    fireEvent.click(screen.getByRole('button', { name: 'Set BTCUSDT margin mode' }))
+    expect(onMarginModeChange).toHaveBeenLastCalledWith({ symbol: 'BTCUSDT', marginType: 'CROSSED' })
+    // Never the mode that was asked for: what is shown is what the exchange
+    // last reported, and the read behind the command is what moves it.
+    expect(screen.getByRole('button', { name: 'Set BTCUSDT margin mode' })).toHaveTextContent('ISO')
+  })
+
+  // A mode the desk does not know is not a mode it can toggle: the "other" mode
+  // of an unknown one is a guess, and a guess here changes what stands behind
+  // real money.
+  it('sends nothing while the mode is unknown', () => {
+    const onMarginModeChange = vi.fn(() => true)
+    render(<FuturesTradingTicket {...ticketProps({ marginMode: null, onMarginModeChange })} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Set BTCUSDT margin mode' }))
+    expect(onMarginModeChange).not.toHaveBeenCalled()
+  })
+
+  // Binance answers -4048 to this one. The desk holds the position list already,
+  // so it can say so in its own words instead of spending a signed request to be
+  // told what it knows.
+  it('refuses the change on a contract carrying a position, and sends nothing', () => {
+    const onMarginModeChange = vi.fn(() => true)
+    render(<FuturesTradingTicket {...ticketProps({
+      marginMode: 'ISOLATED',
+      onMarginModeChange,
+      state: createState({
+        positions: [{ symbol: 'BTCUSDT', quantity: '0.5', positionSide: 'LONG', entryPrice: '58000' }],
+      }),
+    })} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Set BTCUSDT margin mode' }))
+    expect(onMarginModeChange).not.toHaveBeenCalled()
+    const card = screen.getByLabelText('Futures command rejection')
+    expect(card).toHaveTextContent('MARGIN_MODE_HELD_BY_POSITION')
+    expect(card).toHaveTextContent('Nothing was sent.')
+  })
+
+  // And -4047 to this one.
+  it('refuses the change while an order rests on the contract, and sends nothing', () => {
+    const onMarginModeChange = vi.fn(() => true)
+    render(<FuturesTradingTicket {...ticketProps({
+      marginMode: 'ISOLATED',
+      onMarginModeChange,
+      state: createState({
+        openOrders: [{
+          symbol: 'BTCUSDT', orderId: 7, status: 'NEW', side: 'BUY',
+          type: 'LIMIT', price: '57000', origQty: '0.01',
+        }],
+      }),
+    })} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Set BTCUSDT margin mode' }))
+    expect(onMarginModeChange).not.toHaveBeenCalled()
+    expect(screen.getByLabelText('Futures command rejection'))
+      .toHaveTextContent('MARGIN_MODE_HELD_BY_ORDER')
+  })
+
+  // A command the renderer could not hand to the backend never reached Binance.
+  // The mode is unchanged, and a desk that said nothing here would leave the
+  // operator believing they had switched it.
+  it('says the mode was not changed when the send did not leave the desk', () => {
+    const onMarginModeChange = vi.fn(() => false)
+    render(<FuturesTradingTicket {...ticketProps({ marginMode: 'CROSSED', onMarginModeChange })} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Set BTCUSDT margin mode' }))
+    expect(onMarginModeChange).toHaveBeenCalledTimes(1)
+    const card = screen.getByLabelText('Futures command rejection')
+    expect(card).toHaveTextContent('LOCAL_CONNECTION_UNAVAILABLE')
+    expect(card).toHaveTextContent('the margin mode was not changed')
+    expect(screen.getByRole('button', { name: 'Set BTCUSDT margin mode' })).toHaveTextContent('CROSS')
+  })
+
+  // The last second before the order goes is the last place either term can be
+  // read — and the mode is a reading there, not a control.
+  it('states the mode beside the multiple on the confirmation', () => {
+    const props = ticketProps({ leverage: 20, marginMode: 'CROSSED' })
+    const { rerender } = render(<FuturesTradingTicket {...props} />)
+    sizeTo(25)
+
+    rerender(<FuturesTradingTicket
+      {...props}
+      gestureRequest={{
+        id: 1, side: 'BUY', positionSide: 'LONG', positionEffect: 'ENTRY', price: '58445.0',
+      }}
+    />)
+    const panel = screen.getByRole('alertdialog')
+    expect(within(panel).getByTitle('Cross margin — the whole wallet stands behind this position'))
+      .toHaveTextContent('CROSS')
+    expect(within(panel).queryByRole('button', { name: /margin mode/ })).not.toBeInTheDocument()
+  })
+
+  it('states an unreported mode as unknown on the confirmation', () => {
+    const props = ticketProps({ leverage: 20, marginMode: null })
+    const { rerender } = render(<FuturesTradingTicket {...props} />)
+    sizeTo(25)
+
+    rerender(<FuturesTradingTicket
+      {...props}
+      gestureRequest={{
+        id: 1, side: 'BUY', positionSide: 'LONG', positionEffect: 'ENTRY', price: '58445.0',
+      }}
+    />)
+    const panel = screen.getByRole('alertdialog')
+    expect(panel).toHaveTextContent('MODE ?')
+    expect(panel).not.toHaveTextContent('ISO')
+  })
+})

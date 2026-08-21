@@ -1358,6 +1358,14 @@ export function setupBinanceConnection({
     // passes can therefore meet while the same symbol is still in flight; they
     // share that promise instead of spending the pair of reads twice.
     const futuresSymbolConfigReads = new Map();
+    // The contract the desk was last asked about through `account.symbolConfig`
+    // — the one on screen. Its read is the only reading of that contract the
+    // session will get: the operator does not retune a contract while the desk
+    // runs, so nothing behind that read will correct it. Held here so a read
+    // that failed, or that was superseded by a market switch or a mutation, is
+    // asked for again on the next account pass rather than abandoned. A held
+    // configuration costs the pass nothing — it is re-broadcast, not re-read.
+    let futuresSelectedSymbol = null;
     const futuresAccountPayloadKeys = Object.freeze({
         balances: 'futures_balances',
         positions: 'futures_positions',
@@ -1387,9 +1395,10 @@ export function setupBinanceConnection({
         const key = String(symbol).toUpperCase();
         const held = futuresSymbolConfigs.get(key) ?? null;
         if (held === null) return;
-        // The desk's own leverage change is echoed back here. Nothing moved, but
-        // the exchange has just confirmed what is held, so the hold restarts.
-        futuresSymbolConfigReadAt.set(key, Date.now());
+        // The multiple, and nothing else. The hold measures time since the desk
+        // last asked the exchange for the whole configuration, and this frame
+        // carries one field of it: restarting the hold here would date the
+        // margin mode beside it to a moment nothing read it.
         if (held.leverage === leverage) return;
         const entry = { ...held, leverage };
         futuresSymbolConfigs.set(key, entry);
@@ -1424,6 +1433,10 @@ export function setupBinanceConnection({
     };
 
     const forgetFuturesSymbolConfigs = () => {
+        // Including which contract was on screen: it belongs to an activation
+        // that is over, and reading it again would spend weight on an account
+        // nobody is on.
+        futuresSelectedSymbol = null;
         futuresSymbolConfigs.clear();
         futuresLeverageBrackets.clear();
         futuresSymbolConfigReadAt.clear();
@@ -1722,6 +1735,11 @@ export function setupBinanceConnection({
                 .map(position => String(position?.symbol ?? '').toUpperCase()),
             ...(Array.isArray(workingOrders) ? workingOrders : [])
                 .map(order => String(order?.symbol ?? '').toUpperCase()),
+            // Last, so the bound never drops a contract the account has money
+            // or an order on in order to make room for it. It is here at all
+            // because its own read is the one the desk starts on: if that read
+            // failed, this is what asks again.
+            futuresSelectedSymbol ?? '',
         ].filter(Boolean))];
         if (symbols.length === 0) return;
         // Asked once per symbol: the hold is measured against the clock, so
@@ -4324,6 +4342,9 @@ export function setupBinanceConnection({
         // contract, and again after a leverage change, so what is on screen is what
         // the exchange holds rather than what was asked for.
         const handleFuturesSymbolConfig = async (command) => {
+            // Recorded before the read, not after it: a read that fails is
+            // exactly the one that has to be asked again.
+            futuresSelectedSymbol = String(command.symbol ?? '').toUpperCase() || null;
             const config = await readFuturesSymbolConfig(command.symbol, { withCeiling: true });
             broadcastFuturesSymbolConfigs([config]);
         };
@@ -4370,7 +4391,12 @@ export function setupBinanceConnection({
                 // Margin requirements and the liquidation price both moved.
                 await refreshFuturesAccountState({ reason: 'setting' });
             } catch (error) {
-                emitFuturesApiRejection(TRADING_COMMAND_ACTIONS.SET_LEVERAGE, error);
+                // Named, because the contract *is* the identity of this command
+                // — there is no order id to carry it. Unnamed, the record shows
+                // a leverage refusal with a `symbol` of null, and the operator
+                // checking whether the desk touched a contract cannot tell which
+                // one it was refused on.
+                emitFuturesApiRejection(TRADING_COMMAND_ACTIONS.SET_LEVERAGE, error, { symbol });
             }
         };
 
@@ -4405,7 +4431,12 @@ export function setupBinanceConnection({
                 noteFuturesMutation();
             } catch (error) {
                 if (Number(error?.code) !== FUTURES_MARGIN_TYPE_UNCHANGED_CODE) {
-                    emitFuturesApiRejection(TRADING_COMMAND_ACTIONS.SET_MARGIN_TYPE, error);
+                    // Named for the same reason the leverage refusal above is.
+                    emitFuturesApiRejection(
+                        TRADING_COMMAND_ACTIONS.SET_MARGIN_TYPE,
+                        error,
+                        { symbol },
+                    );
                     return;
                 }
                 logger.info(`[futures-margin-type] ${symbol} already ${marginType}`);

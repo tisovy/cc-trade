@@ -16,20 +16,23 @@ import { planFuturesContractDefaults } from '../utils/futuresContractDefaults.js
 // recorded only when the command actually left the desk: a send refused by a
 // closed socket has to be attempted again, not remembered as done.
 //
-// A paused desk sends nothing at all. Pausing stops leverage and margin changes
-// at the backend, so an automatic default would arrive as a pair of refusals the
-// operator never asked for — on the one surface where a red card is supposed to
-// mean something. The default waits for the resume instead.
+// The multiple, and nothing else. The margin mode used to be held to a default
+// here too, and the rule above was not enough to keep that honest: a restart
+// re-arms the guard, so a contract the operator had set to cross was written
+// back to isolated on the next session, without a word on any surface.
+//
+// A paused desk sends nothing at all. Pausing stops leverage changes at the
+// backend, so an automatic default would arrive as a refusal the operator never
+// asked for — on the one surface where a red card is supposed to mean
+// something. The default waits for the resume instead.
 export const useFuturesContractDefaults = ({
   enabled = false,
   paused = false,
   symbol = null,
   config = null,
   positions = null,
-  openOrders = null,
   positionsRead = false,
   setLeverage = null,
-  setMarginType = null,
 } = {}) => {
   const appliedRef = useRef(new Map())
 
@@ -39,32 +42,23 @@ export const useFuturesContractDefaults = ({
       symbol,
       config,
       positions,
-      openOrders,
       positionsRead,
     })
-    if (plan.leverage === null && plan.marginType === null) return
+    if (plan.leverage === null) return
 
     const applied = appliedRef.current.get(symbol) ?? new Set()
-    if (plan.leverage !== null
-      && !applied.has('leverage')
+    if (!applied.has('leverage')
       && setLeverage?.({ symbol, leverage: plan.leverage })) {
       applied.add('leverage')
-    }
-    if (plan.marginType !== null
-      && !applied.has('marginType')
-      && setMarginType?.({ symbol, marginType: plan.marginType })) {
-      applied.add('marginType')
     }
     if (applied.size > 0) appliedRef.current.set(symbol, applied)
   }, [
     config,
     enabled,
-    openOrders,
     paused,
     positions,
     positionsRead,
     setLeverage,
-    setMarginType,
     symbol,
   ])
 }

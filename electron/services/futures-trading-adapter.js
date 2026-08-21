@@ -73,6 +73,7 @@ const FUTURES_API_ERROR_HINTS = new Map([
     [-1021, 'local clock drifted outside recvWindow — sync system time.'],
     [-1111, 'price or quantity has more precision than the symbol filters allow.'],
     [-1013, 'price or quantity violates a symbol filter (tick size, step size, or minimum notional).'],
+    [-4161, 'Binance does not lower the multiple of an isolated contract while a position is open — close the position, or raise it instead.'],
     [-4164, 'notional is below the exchange minimum (5 USDT) — increase the size.'],
     [-4400, 'futures trading is restricted for this account or region.'],
 ]);

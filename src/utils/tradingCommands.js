@@ -31,8 +31,12 @@ export const FUTURES_MARGIN_TYPES = Object.freeze(['ISOLATED', 'CROSSED']);
 // contract the desk has never traded carries whatever the exchange's
 // account-wide setting left on it — 20× on a contract sized in USDT liquidates
 // on a 5% move — so the desk states its own default rather than inheriting one.
-export const FUTURES_DEFAULT_LEVERAGE = 2;
-export const FUTURES_DEFAULT_MARGIN_TYPE = 'ISOLATED';
+//
+// There is no default margin mode beside it, and the absence is the decision:
+// the desk states which mode a contract is in and offers the control to change
+// it, but the mode is the operator's to choose. A default here would overwrite
+// that choice on the next restart, which is exactly what it used to do.
+export const FUTURES_DEFAULT_LEVERAGE = 1;
 
 export const POSITION_MARGIN_DIRECTIONS = Object.freeze({
     ADD: 'ADD',

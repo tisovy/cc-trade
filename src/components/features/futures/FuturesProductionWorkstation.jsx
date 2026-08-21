@@ -313,15 +313,28 @@ export const FuturesProductionWorkstation = ({
   // The leverage of the contract in hand, asked for whenever the contract
   // changes: the position read reports neither the multiple nor the mode any more,
   // and a desk that cannot state the leverage cannot state what an entry costs.
+  //
+  // And again when the backend connection opens. The desk can mount before the
+  // local socket is open, and a command sent then never leaves — it is
+  // remembered as unsent, and nothing automatic sends it again. Until now the
+  // read landed anyway, by accident: `sendCommand` is rebuilt when the socket
+  // changes, which rebuilds `loadSymbolConfig`, which re-ran this effect. An
+  // accident is not a guarantee, and under the desk's rule — nothing is retuned
+  // in Binance's own app while this runs — this read is the only reading of the
+  // contract the session gets. A read that fails on the exchange is asked for
+  // again by the backend, on the account pass behind it.
   const loadSymbolConfig = executionState?.loadSymbolConfig
+  const executionConnected = executionState?.connected === true
   useEffect(() => {
     if (!enabled || typeof loadSymbolConfig !== 'function') return
     loadSymbolConfig(symbol)
-  }, [enabled, loadSymbolConfig, symbol])
+  }, [enabled, executionConnected, loadSymbolConfig, symbol])
 
   // And then held at the desk's own default rather than at whatever the account
-  // was left on: a flat contract above 2× is brought down to 2× isolated, once
-  // per contract per session.
+  // was left on: a flat contract above 1× is brought down to 1×, once per
+  // contract per session. The multiple only — the margin mode is the operator's
+  // choice, and `setMarginType` is deliberately not wired here: nothing
+  // automatic may reach that command.
   const executionPositions = executionState?.positions
   useFuturesContractDefaults({
     enabled,
@@ -329,13 +342,11 @@ export const FuturesProductionWorkstation = ({
     symbol,
     config: executionState?.symbolConfigs?.[symbol] ?? null,
     positions: executionPositions,
-    openOrders: executionState?.openOrders,
     // `ready`, not "succeeded once": a snapshot held from before a dropped
     // connection is a reading, not a confirmation, and a contract that went
     // into a position while the desk was disconnected would read as flat.
     positionsRead: executionState?.accountResources?.positions?.status === 'ready',
     setLeverage: executionState?.setLeverage,
-    setMarginType: executionState?.setMarginType,
   })
 
   const editorBalanceResource = executionState?.accountResources?.balances ?? {
@@ -482,7 +493,9 @@ export const FuturesProductionWorkstation = ({
       selectedContract={selectedContract}
       tickSizes={tickSizes}
       leverage={executionState?.symbolConfigs?.[symbol]?.leverage ?? null}
+      marginMode={executionState?.symbolConfigs?.[symbol]?.marginType ?? null}
       onLeverageEdit={handleLeverageEdit}
+      onMarginModeChange={executionState?.setMarginType}
       draftPrice={draftPrice}
       draftPriceReading={draftPriceReading}
       gestureRequest={gestureRequest}
@@ -625,6 +638,9 @@ export const FuturesProductionWorkstation = ({
           leverage={leverageConfig?.leverage ?? null}
           maxLeverage={leverageConfig?.maxLeverage ?? null}
           maxNotionalValue={leverageConfig?.maxNotionalValue ?? null}
+          // The mode decides which changes the exchange will take at all: it
+          // refuses a lower multiple while an isolated position is open.
+          marginMode={leverageConfig?.marginType ?? null}
           availableUsdt={executionState?.balances?.USDT?.available ?? null}
           openPosition={leveragePosition}
           anchor={leverageEditor.anchor}

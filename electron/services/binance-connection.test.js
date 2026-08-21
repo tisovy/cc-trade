@@ -5271,6 +5271,114 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(configuredSymbols().filter(symbol => symbol === 'BMTUSDT')).toHaveLength(2);
     });
 
+    // The hold measures time since the desk last asked the exchange for the
+    // whole configuration. A leverage frame carries one field of it, and used to
+    // restart the hold anyway — which dated the margin mode beside it to a
+    // moment nothing read it, and postponed the read that would have found a
+    // mode changed in Binance's own app by up to another ten minutes.
+    it('does not date a contract configuration by a frame that carries only its multiple', async () => {
+        moduleMocks.futuresAdapter.getSymbolConfig
+            .mockImplementation(async symbol => ({
+                symbol, leverage: 20, marginType: 'CROSSED', maxNotionalValue: '5000000',
+            }));
+        moduleMocks.futuresAdapter.getAccountRefreshOperations
+            .mockReturnValue([positionsRefreshOperation(['BMTUSDT'])]);
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+
+        await runFuturesCommand({
+            action: 'account.refresh', clientOrderId: 'refresh-1', symbol: 'BTCUSDT',
+        });
+        await flushMicrotasks();
+        expect(configuredSymbols().filter(symbol => symbol === 'BMTUSDT')).toHaveLength(1);
+
+        const socket = moduleMocks.futuresUserDataSockets[0];
+        socket.handlers.open();
+        // Nine minutes in: inside the hold, so nothing would be re-read yet.
+        await vi.advanceTimersByTimeAsync(9 * 60 * 1000);
+        await flushMicrotasks();
+        socket.handlers.message(JSON.stringify({
+            e: 'ACCOUNT_CONFIG_UPDATE',
+            E: 1611646737479,
+            T: 1611646737476,
+            ac: { s: 'BMTUSDT', l: 25 },
+        }));
+        await flushMicrotasks();
+
+        // The multiple still moves on the frame, without a read behind it.
+        expect(moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.futures_symbol_configs?.BMTUSDT)
+            .at(-1).futures_symbol_configs.BMTUSDT.leverage).toBe(25);
+        expect(configuredSymbols().filter(symbol => symbol === 'BMTUSDT')).toHaveLength(1);
+
+        // Past ten minutes counted from the read, not from the frame.
+        await vi.advanceTimersByTimeAsync(60 * 1000 + 1);
+        await runFuturesCommand({
+            action: 'account.refresh', clientOrderId: 'refresh-2', symbol: 'BTCUSDT',
+        });
+        await flushMicrotasks();
+        expect(configuredSymbols().filter(symbol => symbol === 'BMTUSDT')).toHaveLength(2);
+    });
+
+    // The contract the desk starts on is read once, on selection, and under the
+    // operator's own rule — nothing is retuned in Binance's app while the desk
+    // runs — that read is the only reading of it the session gets. A read that
+    // failed used to be the end of it: the desk went on trading a contract whose
+    // leverage and margin mode it had never learned, and stated both as unknown
+    // for as long as it stayed on that contract.
+    it('asks again for a selected contract whose configuration read failed', async () => {
+        moduleMocks.futuresAdapter.getSymbolConfig
+            .mockRejectedValueOnce(new Error('symbolConfig read failed'))
+            .mockImplementation(async symbol => ({
+                symbol, leverage: 20, marginType: 'ISOLATED', maxNotionalValue: '5000000',
+            }));
+        moduleMocks.futuresAdapter.getAccountRefreshOperations
+            .mockReturnValue([positionsRefreshOperation([])]);
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+
+        const statedConfigs = () => moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.futures_symbol_configs?.BTCUSDT);
+
+        await runFuturesCommand({
+            action: 'account.symbolConfig', clientOrderId: 'config-1', symbol: 'BTCUSDT',
+        });
+        await flushMicrotasks();
+        expect(configuredSymbols().filter(symbol => symbol === 'BTCUSDT')).toHaveLength(1);
+        // A failed read states nothing. It must not state a default either.
+        expect(statedConfigs()).toEqual([]);
+
+        await runFuturesCommand({
+            action: 'account.refresh', clientOrderId: 'refresh-1', symbol: 'BTCUSDT',
+        });
+        await flushMicrotasks();
+        expect(configuredSymbols().filter(symbol => symbol === 'BTCUSDT')).toHaveLength(2);
+        expect(statedConfigs().at(-1).futures_symbol_configs.BTCUSDT).toMatchObject({
+            symbol: 'BTCUSDT',
+            leverage: 20,
+            marginType: 'ISOLATED',
+        });
+
+        // And once it is read, the pass behind it re-states the reading rather
+        // than buying it again: this is a retry, not a beat.
+        await runFuturesCommand({
+            action: 'account.refresh', clientOrderId: 'refresh-2', symbol: 'BTCUSDT',
+        });
+        await flushMicrotasks();
+        expect(configuredSymbols().filter(symbol => symbol === 'BTCUSDT')).toHaveLength(2);
+        expect(statedConfigs().at(-1).futures_symbol_configs.BTCUSDT.leverage).toBe(20);
+    });
+
     // A resting order commits margin exactly as a position does, and the desk
     // cannot say what is spendable without knowing what every one of them
     // commits. The contract configuration was read for positions alone, so an
@@ -5662,6 +5770,56 @@ describe('setupBinanceConnection user-data orchestration', () => {
             code: 'FUTURES_TRADING_PAUSED',
             request: 'trade.setLeverage',
         });
+    });
+
+    // The contract is the whole identity of these two commands — they carry no
+    // order id — so a refusal that does not name it leaves the record saying
+    // that a leverage change was refused somewhere. On the operator's own desk
+    // on 2026-08-21 that is exactly what it said: `symbol: null` beside
+    // `exchangeCode: -4161`, on a day the desk had touched three contracts.
+    it('names the contract on a refused leverage or margin-mode change', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        moduleMocks.futuresAdapter.setLeverage.mockRejectedValueOnce(Object.assign(
+            new Error('Leverage reduction is not supported in Isolated Margin Mode with open positions'),
+            { code: -4161 },
+        ));
+        moduleMocks.futuresAdapter.setMarginType.mockRejectedValueOnce(Object.assign(
+            new Error('Margin type cannot be changed if there exists position.'),
+            { code: -4048 },
+        ));
+
+        await runFuturesCommand({
+            action: 'trade.setLeverage',
+            clientOrderId: 'leverage-4161',
+            symbol: 'ONGUSDT',
+            leverage: 1,
+        });
+        await runFuturesCommand({
+            action: 'trade.setMarginType',
+            clientOrderId: 'margin-type-4048',
+            symbol: 'BEATUSDT',
+            marginType: 'CROSSED',
+        });
+
+        const rejections = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.command_rejected?.code === 'FUTURES_API_ERROR')
+            .map(payload => payload.command_rejected);
+        expect(rejections.map(rejection => [
+            rejection.request,
+            rejection.details.symbol,
+            rejection.details.binanceCode,
+        ])).toEqual([
+            ['trade.setLeverage', 'ONGUSDT', -4161],
+            ['trade.setMarginType', 'BEATUSDT', -4048],
+        ]);
+        // And the exchange's bare code says nothing about what to do with it.
+        expect(rejections[0].message).toContain('close the position, or raise it instead');
     });
 
     it('reports a failed futures history read inside the history payload', async () => {

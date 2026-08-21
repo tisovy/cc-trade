@@ -13,6 +13,9 @@ const config = (overrides = {}) => ({
 
 const renderDefaults = (overrides = {}) => {
   const setLeverage = vi.fn(() => true)
+  // Handed in on purpose, though the hook no longer takes it: a hook that has
+  // stopped deciding the margin mode cannot send one even when the means to is
+  // put in front of it.
   const setMarginType = vi.fn(() => true)
   const props = {
     enabled: true,
@@ -31,55 +34,79 @@ const renderDefaults = (overrides = {}) => {
 }
 
 describe('holding a contract at the desk default', () => {
-  it('sets a flat contract to 2x isolated when its configuration arrives', () => {
+  it('sets a flat contract to 1x when its configuration arrives', () => {
     const { setLeverage, setMarginType } = renderDefaults()
-    expect(setLeverage).toHaveBeenCalledWith({ symbol: 'EPICUSDT', leverage: 2 })
-    expect(setMarginType).toHaveBeenCalledWith({ symbol: 'EPICUSDT', marginType: 'ISOLATED' })
+    expect(setLeverage).toHaveBeenCalledWith({ symbol: 'EPICUSDT', leverage: 1 })
+    expect(setMarginType).not.toHaveBeenCalled()
   })
 
+  // The operator's own case, and the reason "once per contract per session" was
+  // never enough to make it safe: a restart re-arms the guard, so a contract set
+  // to cross in Binance's own app was written back to isolated the next morning
+  // — and the exchange announces no margin mode on any stream, so the desk could
+  // not even show what it had overwritten.
+  it('leaves a contract the operator set to cross in cross, restart after restart', () => {
+    for (const session of [1, 2, 3]) {
+      const { setLeverage, setMarginType, unmount } = renderDefaults({
+        config: config({ leverage: 1, marginType: 'CROSSED' }),
+      })
+      expect(setMarginType, `session ${session}`).not.toHaveBeenCalled()
+      expect(setLeverage, `session ${session}`).not.toHaveBeenCalled()
+      unmount()
+    }
+  })
+
+  // Lowering an inherited 20x is still the desk's business. What stands behind
+  // that multiple is not.
+  it('lowers the multiple of a cross contract without touching its mode', () => {
+    const { setLeverage, setMarginType } = renderDefaults({
+      config: config({ leverage: 20, marginType: 'CROSSED' }),
+    })
+    expect(setLeverage).toHaveBeenCalledWith({ symbol: 'EPICUSDT', leverage: 1 })
+    expect(setMarginType).not.toHaveBeenCalled()
+  })
+
+  // The five below guard rules this change did not touch: they pass against the
+  // code as it was, and are kept as guards rather than presented as evidence
+  // that anything here now works differently.
   it('sends nothing while the workspace is inactive', () => {
     const { setLeverage, setMarginType } = renderDefaults({ enabled: false })
     expect(setLeverage).not.toHaveBeenCalled()
     expect(setMarginType).not.toHaveBeenCalled()
   })
 
-  // A paused desk refuses both changes at the backend, so an automatic default
-  // would land as a pair of red cards the operator never asked for — on the one
-  // surface where a refusal is supposed to mean something. It waits.
+  // A paused desk refuses the change at the backend, so an automatic default
+  // would land as a red card the operator never asked for — on the one surface
+  // where a refusal is supposed to mean something. It waits.
   it('waits for the resume while trading is paused', () => {
-    const { rerender, props, setLeverage, setMarginType } = renderDefaults({ paused: true })
+    const { rerender, props, setLeverage } = renderDefaults({ paused: true })
     expect(setLeverage).not.toHaveBeenCalled()
-    expect(setMarginType).not.toHaveBeenCalled()
 
     rerender({ ...props, paused: false })
-    expect(setLeverage).toHaveBeenCalledWith({ symbol: 'EPICUSDT', leverage: 2 })
-    expect(setMarginType).toHaveBeenCalledWith({ symbol: 'EPICUSDT', marginType: 'ISOLATED' })
+    expect(setLeverage).toHaveBeenCalledWith({ symbol: 'EPICUSDT', leverage: 1 })
   })
 
-  // The mode is refused while an order rests; the multiple is not. Once the
-  // order is gone the mode follows, without the contract having to be reopened.
-  it('applies the mode once the working order that blocked it is gone', () => {
-    const { rerender, props, setLeverage, setMarginType } = renderDefaults({
+  // Binance refuses a margin-mode change while an order rests; it allows a
+  // leverage change. The desk sends only the second, so a resting order is no
+  // longer a reason to hold anything back.
+  it('lowers the multiple of a contract with a working order', () => {
+    const { setLeverage, setMarginType } = renderDefaults({
       openOrders: [{ symbol: 'EPICUSDT', orderId: 7 }],
     })
+    expect(setLeverage).toHaveBeenCalledWith({ symbol: 'EPICUSDT', leverage: 1 })
     expect(setLeverage).toHaveBeenCalledTimes(1)
     expect(setMarginType).not.toHaveBeenCalled()
-
-    rerender({ ...props, openOrders: [] })
-    expect(setLeverage).toHaveBeenCalledTimes(1)
-    expect(setMarginType).toHaveBeenCalledWith({ symbol: 'EPICUSDT', marginType: 'ISOLATED' })
   })
 
   // The account refresh that follows the change re-broadcasts the contract, and
   // the marks re-render the desk several times a second. One contract, one
   // attempt: anything else is a stream of writes to the exchange.
   it('acts once per contract however often the account is re-read', () => {
-    const { rerender, props, setLeverage, setMarginType } = renderDefaults()
+    const { rerender, props, setLeverage } = renderDefaults()
     rerender({ ...props, positions: [] })
-    rerender({ ...props, config: config({ leverage: 2, marginType: 'ISOLATED' }) })
+    rerender({ ...props, config: config({ leverage: 1, marginType: 'ISOLATED' }) })
     rerender({ ...props, config: config() })
     expect(setLeverage).toHaveBeenCalledTimes(1)
-    expect(setMarginType).toHaveBeenCalledTimes(1)
   })
 
   // Raising it back is a decision. A desk that undid it on the next contract
@@ -88,7 +115,7 @@ describe('holding a contract at the desk default', () => {
     const { rerender, props, setLeverage } = renderDefaults()
     expect(setLeverage).toHaveBeenCalledTimes(1)
 
-    rerender({ ...props, symbol: 'BTCUSDT', config: config({ symbol: 'BTCUSDT', leverage: 2, marginType: 'ISOLATED' }) })
+    rerender({ ...props, symbol: 'BTCUSDT', config: config({ symbol: 'BTCUSDT', leverage: 1, marginType: 'ISOLATED' }) })
     rerender({ ...props, config: config({ leverage: 10, marginType: 'ISOLATED' }) })
     expect(setLeverage).toHaveBeenCalledTimes(1)
   })
@@ -104,7 +131,6 @@ describe('holding a contract at the desk default', () => {
       positions: [],
       positionsRead: true,
       setLeverage,
-      setMarginType: vi.fn(() => true),
     }
     const { rerender } = renderHook(next => useFuturesContractDefaults(next), { initialProps: props })
     rerender({ ...props, positions: [] })
@@ -129,6 +155,6 @@ describe('holding a contract at the desk default', () => {
     expect(setLeverage).not.toHaveBeenCalled()
 
     rerender({ ...props, positionsRead: true })
-    expect(setLeverage).toHaveBeenCalledWith({ symbol: 'EPICUSDT', leverage: 2 })
+    expect(setLeverage).toHaveBeenCalledWith({ symbol: 'EPICUSDT', leverage: 1 })
   })
 })

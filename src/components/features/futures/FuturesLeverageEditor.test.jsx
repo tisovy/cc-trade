@@ -54,22 +54,149 @@ describe('FuturesLeverageEditor', () => {
     expect(screen.getByTitle('5000000.00 USDT at this leverage')).toHaveTextContent('5.0M')
   })
 
-  // Raising leverage on a position already open moves the price the exchange closes
-  // it at, and the operator is looking at that price on the chart.
-  it('warns that an open position’s liquidation price moves with the change', () => {
-    render(
+  // What this panel used to promise, and what the desk's own arithmetic says.
+  // The liquidation price the desk draws — and reconciles against the exchange's
+  // own figure, to 0 bps on this operator's contract on 2026-08-21 — is computed
+  // from the margin behind the position, the contract's maintenance rate and, in
+  // cross, the whole wallet. The multiple is in none of those terms. The panel
+  // said "its liquidation price moves closer to the mark", the operator raised
+  // 1× to 2× on a position they were holding, and nothing moved.
+  it('does not promise that the multiple moves an open position’s liquidation', () => {
+    const { rerender } = render(
       <FuturesLeverageEditor
         symbol="BTCUSDT"
         leverage={10}
         maxLeverage={125}
+        marginMode="ISOLATED"
         openPosition={{ symbol: 'BTCUSDT', quantity: '-0.5' }}
         anchor={anchor}
       />,
     )
-    expect(screen.getByRole('status')).toHaveTextContent('changing leverage moves the liquidation price')
+    expect(screen.getByRole('status')).toHaveTextContent('its liquidation price stays where it is')
+
     fireEvent.click(screen.getByRole('button', { name: '50×' }))
-    expect(screen.getByRole('status')).toHaveTextContent('at 50× the same position stands behind less margin')
-    expect(screen.getByRole('status').className).toContain('is-riskier')
+    expect(screen.getByRole('status')).toHaveTextContent('does not move with it')
+    expect(screen.getByRole('status').textContent).not.toMatch(/moves closer|stands behind less margin/)
+
+    // The whole wallet stands behind a cross position, so its liquidation is not
+    // the multiple's to move either.
+    rerender(
+      <FuturesLeverageEditor
+        symbol="BTCUSDT"
+        leverage={10}
+        maxLeverage={125}
+        marginMode="CROSSED"
+        openPosition={{ symbol: 'BTCUSDT', quantity: '-0.5' }}
+        anchor={anchor}
+      />,
+    )
+    expect(screen.getByRole('status')).toHaveTextContent('frees or commits wallet margin')
+    expect(screen.getByRole('status')).toHaveTextContent('does not move with it')
+
+    // And a mode the exchange has not reported is not a mode to reason from.
+    rerender(
+      <FuturesLeverageEditor
+        symbol="BTCUSDT"
+        leverage={10}
+        maxLeverage={125}
+        marginMode={null}
+        openPosition={{ symbol: 'BTCUSDT', quantity: '-0.5' }}
+        anchor={anchor}
+      />,
+    )
+    expect(screen.getByRole('status'))
+      .toHaveTextContent('does not move the liquidation price of a position already open')
+  })
+
+  // The operator's own case, 2026-08-21: 2× lowered to 1× on an isolated contract
+  // they were holding, answered by a signed request with `-4161
+  // ISOLATED_LEVERAGE_REJECT_WITH_POSITION`. Every input that rule names was on
+  // the desk before the request went out.
+  it('refuses a lower multiple on an open isolated contract, and sends nothing', () => {
+    const onSubmit = vi.fn()
+    const onClose = vi.fn()
+    render(
+      <FuturesLeverageEditor
+        symbol="ONGUSDT"
+        leverage={2}
+        maxLeverage={75}
+        marginMode="ISOLATED"
+        openPosition={{ symbol: 'ONGUSDT', quantity: '1200' }}
+        anchor={anchor}
+        onSubmit={onSubmit}
+        onClose={onClose}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: '1×' }))
+    expect(screen.getByRole('status'))
+      .toHaveTextContent('Binance will not lower the multiple while a position is open')
+
+    const apply = screen.getByRole('button', { name: 'Held at 2×' })
+    expect(apply).toBeDisabled()
+    fireEvent.click(apply)
+    fireEvent.submit(apply)
+    expect(onSubmit).not.toHaveBeenCalled()
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
+  // The rule is a reduction on an isolated contract, and nothing wider: raising
+  // it there is allowed, and so is either direction in cross.
+  //
+  // This and the one below it are guards, not evidence: they pass against the
+  // code as it was, because code that refuses nothing locally cannot over-refuse.
+  // What they hold is the width of the rule, against the version of it that
+  // would stop the desk lowering a contract it is allowed to lower.
+  it('sends every change the exchange does take on an open contract', () => {
+    const onSubmit = vi.fn(() => true)
+    const { rerender } = render(
+      <FuturesLeverageEditor
+        symbol="ONGUSDT"
+        leverage={2}
+        maxLeverage={75}
+        marginMode="ISOLATED"
+        openPosition={{ symbol: 'ONGUSDT', quantity: '1200' }}
+        anchor={anchor}
+        onSubmit={onSubmit}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: '5×' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Set 5×' }))
+    expect(onSubmit).toHaveBeenCalledWith({ symbol: 'ONGUSDT', leverage: 5 })
+
+    rerender(
+      <FuturesLeverageEditor
+        symbol="ONGUSDT"
+        leverage={2}
+        maxLeverage={75}
+        marginMode="CROSSED"
+        openPosition={{ symbol: 'ONGUSDT', quantity: '1200' }}
+        anchor={anchor}
+        onSubmit={onSubmit}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: '1×' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Set 1×' }))
+    expect(onSubmit).toHaveBeenLastCalledWith({ symbol: 'ONGUSDT', leverage: 1 })
+  })
+
+  // A contract holding nothing is the one the desk lowers to 1× by itself, so a
+  // refusal that reached this case would refuse the desk's own default.
+  it('lowers a flat isolated contract', () => {
+    const onSubmit = vi.fn(() => true)
+    render(
+      <FuturesLeverageEditor
+        symbol="ONGUSDT"
+        leverage={2}
+        maxLeverage={75}
+        marginMode="ISOLATED"
+        openPosition={null}
+        anchor={anchor}
+        onSubmit={onSubmit}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: '1×' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Set 1×' }))
+    expect(onSubmit).toHaveBeenCalledWith({ symbol: 'ONGUSDT', leverage: 1 })
   })
 
   // The panel closing is the only confirmation this control has, so a command that

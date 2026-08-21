@@ -941,6 +941,45 @@ describe('useFuturesTrading', () => {
     expect(result.current.symbolConfigs.BICOUSDT.leverage).toBe(10)
   })
 
+  // A leverage and a margin mode held for an activation that is over are a
+  // memory, not a reading. The backend forgets its own when the market is left
+  // or the credentials change; the renderer merged for ever, so a contract's
+  // mode from a previous account could still be on screen — the one field the
+  // exchange announces on no stream, and the one an operator sizes against.
+  it('drops the configurations it holds when the market activation changes', () => {
+    const socket = createSocket()
+    const { result, rerender } = renderHook(
+      ({ generation }) => useFuturesTrading({
+        enabled: true,
+        symbol: 'BTCUSDT',
+        wsConnection: socket,
+        marketGeneration: generation,
+      }),
+      { initialProps: { generation: 7 } },
+    )
+
+    act(() => socket.receive({
+      futures_symbol_configs: {
+        BTCUSDT: { symbol: 'BTCUSDT', leverage: 20, maxLeverage: 125, marginType: 'CROSSED' },
+      },
+    }))
+    expect(result.current.symbolConfigs.BTCUSDT.marginType).toBe('CROSSED')
+
+    rerender({ generation: 8 })
+    expect(result.current.symbolConfigs).toEqual({})
+
+    // And the next activation's own reading lands normally.
+    act(() => socket.receive({
+      futures_symbol_configs: {
+        BTCUSDT: { symbol: 'BTCUSDT', leverage: 3, maxLeverage: 125, marginType: 'ISOLATED' },
+      },
+    }))
+    expect(result.current.symbolConfigs.BTCUSDT).toMatchObject({
+      leverage: 3,
+      marginType: 'ISOLATED',
+    })
+  })
+
   it('sends a leverage change for the named contract and nothing without one', () => {
     const socket = createSocket()
     const { result } = renderHook(() => useFuturesTrading({

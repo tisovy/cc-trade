@@ -75,6 +75,22 @@ export const FuturesOrderConfirmation = ({
           : `This position will be carried at ${confirmation.leverage}× leverage`}
       >
         {confirmation.leverage === null ? 'LEV ?' : `${confirmation.leverage}×`}
+        {/* And what stands behind it. A reading, not a control: the last second
+            before an order goes is not where the terms of the account get
+            changed. Isolated caps this position's loss at the margin behind it;
+            cross stands the whole wallet behind it. */}
+        <em
+          className="futures-order-confirm-margin-mode"
+          title={confirmation.marginMode === null
+            ? 'The exchange has not reported the margin mode of this contract'
+            : confirmation.marginMode === 'CROSSED'
+              ? 'Cross margin — the whole wallet stands behind this position'
+              : 'Isolated margin — the loss is capped at the margin behind this position'}
+        >
+          {confirmation.marginMode === null
+            ? 'MODE ?'
+            : confirmation.marginMode === 'CROSSED' ? 'CROSS' : 'ISO'}
+        </em>
       </strong>
 
       <dl className="futures-order-editor-summary">

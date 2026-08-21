@@ -770,6 +770,13 @@ describe('futures API error descriptions', () => {
             code: -2015,
             message: 'Invalid API-key, IP, or permissions for action',
         })).toContain('enable "Futures" on the key');
+        // -4161 is the one an operator meets by doing the ordinary thing: putting
+        // the multiple back down on a contract they are holding. Its bare wording
+        // states the rule and not the way out of it.
+        expect(describeFuturesApiError({
+            code: -4161,
+            message: 'Leverage reduction is not supported in Isolated Margin Mode with open positions',
+        })).toContain('close the position, or raise it instead');
         expect(describeFuturesApiError({ code: -9999, message: 'Unknown failure' }))
             .toBe('Unknown failure');
         expect(describeFuturesApiError(undefined)).toBe('Binance futures request failed');
