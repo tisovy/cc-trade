@@ -403,6 +403,20 @@ describe('describeFuturesPositionMargin', () => {
     })).toMatchObject({ marginBalance: 1200, liquidationBuffer: 1160 })
   })
 
+  it('does not turn an explicitly incomplete valuation into removable zero-PnL margin', () => {
+    expect(describeFuturesPositionMargin({
+      isolatedWallet: '1200',
+      maintenanceMargin: '40',
+      valuationMarginComplete: false,
+    })).toMatchObject({
+      margin: 1200,
+      marginBalance: null,
+      liquidationBuffer: null,
+      removable: null,
+      adjustable: false,
+    })
+  })
+
   // Between two marks the visible uPnL is the desk's arithmetic on the last
   // traded price. Everything here is a statement about liquidation, which is the
   // mark's by definition — measuring the buffer from an estimate would put a

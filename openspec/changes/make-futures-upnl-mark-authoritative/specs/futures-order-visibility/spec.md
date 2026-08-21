@@ -13,6 +13,18 @@ The last traded price MAY explain why the chart and the mark-based position disa
 - **WHEN** a new valid mark arrives for an open position
 - **THEN** every primary position valuation changes from that mark in one consistent direction and the aggregate is recomputed from the same readings
 
+#### Scenario: A delayed mark arrives after a newer mark
+- **WHEN** an older or untimed mark frame arrives after a newer timed frame for the same contract
+- **THEN** the accepted mark, other newer symbol readings, and the funding-settlement observation baseline do not rewind, and the next current frame does not create a false settlement event
+
+#### Scenario: The exchange reschedules funding earlier
+- **WHEN** a newer mark frame moves the next funding time earlier and a later frame advances it
+- **THEN** the earlier time becomes the baseline without reporting a settlement, and the later advance triggers one reconciliation
+
+#### Scenario: A replacement feed restarts revisions after delayed teardown
+- **WHEN** the market generation clears old live marks, delayed non-empty or terminal traffic from the retired feed arrives, and the replacement feed publishes revision one
+- **THEN** the retired epoch cannot resurrect a live mark or own the replacement namespace, revision one from the newer epoch is accepted, and later frames from the retired epoch are rejected
+
 #### Scenario: The tape and mark straddle entry
 - **WHEN** a short entered at `3.3450` has a mark of `3.36` and last trade of `3.30`
 - **THEN** primary uPnL reports the loss implied by the mark, while any tape-based profit is explicitly secondary and non-additive
@@ -23,7 +35,7 @@ The last traded price MAY explain why the chart and the mark-based position disa
 
 #### Scenario: Neither mark nor snapshot can value the position
 - **WHEN** an open position lacks both a usable current mark and a confirmed snapshot uPnL
-- **THEN** its primary valuation and any aggregate that requires it are reported as incomplete rather than zero
+- **THEN** its primary valuation, any aggregate that requires it, and margin/removal calculations that depend on its uPnL are reported as incomplete rather than zero
 
 ## REMOVED Requirements
 

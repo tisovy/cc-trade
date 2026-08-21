@@ -1,4 +1,4 @@
-import { memo, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { formatSignedUsdt } from '../../../utils/futuresOrderPresentation.js'
 import { buildFuturesTradeRounds } from '../../../utils/futuresTradeRounds.js'
 import {
@@ -12,6 +12,8 @@ import { exactFuturesDeskTime, formatFuturesDeskTime } from '../../../utils/futu
 const EMPTY_ROWS = Object.freeze([])
 const EMPTY_TICKS = Object.freeze({})
 const HIDDEN_ORDER_HISTORY_STATUSES = new Set(['CANCELED', 'CANCELLED'])
+export const FUTURES_CLOSED_POSITION_WINDOW_SIZE = 100
+export const FUTURES_CLOSED_POSITION_WINDOW_STEP = 80
 
 const sideTone = side => (String(side).toUpperCase() === 'SELL' ? 'sell' : 'buy')
 
@@ -152,6 +154,13 @@ const rowTimeOf = (timestamp) => {
     : '—'
 }
 
+const oldestRowTime = (rows) => rows.reduce((earliest, row) => {
+  const time = Number(row?.time)
+  return Number.isFinite(time) && time > 0 && (earliest === null || time < earliest)
+    ? time
+    : earliest
+}, null)
+
 // Rows in the order they are read, cut into one group per day. Newest first is
 // the only order a session review is read in, and the reading arrives that way,
 // so this only cuts — it never re-sorts.
@@ -229,6 +238,7 @@ export const FuturesHistoryPanel = ({
   // round's result is not what reached the wallet without them: Binance reports
   // realized PnL before its own commission and reports funding on no fill at all.
   settledIncome = null,
+  tradeRoundIndex = null,
   tickSizes = EMPTY_TICKS,
   onSymbolChange,
 }) => {
@@ -237,6 +247,10 @@ export const FuturesHistoryPanel = ({
   // is left of it after a filter.
   const [outcomeFilter, setOutcomeFilter] = useState('all')
   const [contractOnly, setContractOnly] = useState(false)
+  const [roundWindowStart, setRoundWindowStart] = useState(0)
+  const roundWindowFocusRef = useRef(null)
+  const newerRoundsRef = useRef(null)
+  const olderRoundsRef = useRef(null)
   const status = history?.status ?? 'idle'
   const heldOrders = Array.isArray(history?.orders) ? history.orders : EMPTY_ROWS
   // Cancellation still belongs to the held reading: retaining it keeps the
@@ -268,8 +282,11 @@ export const FuturesHistoryPanel = ({
   // Folded once per set of fills rather than once per render. The read is now a
   // thousand fills per contract across twelve contracts, and this panel
   // re-renders whenever a contract config arrives.
-  const rounds = useMemo(() => (
-    view === 'tradeHistory'
+  const sharedRounds = view === 'tradeHistory' && Array.isArray(tradeRoundIndex?.closed)
+    ? tradeRoundIndex.closed
+    : null
+  const fallbackRounds = useMemo(() => (
+    view === 'tradeHistory' && sharedRounds === null
       ? buildFuturesTradeRounds(trades, {
         // What the exchange charged the contract while each round was held.
         // Without it a round's result is the trade's own arithmetic and nothing
@@ -278,15 +295,52 @@ export const FuturesHistoryPanel = ({
         incomeFrom: settledIncome?.from ?? null,
       }).filter(round => !round.open && round.exitPrice !== null)
       : EMPTY_ROWS
-  ), [trades, view, settledIncome])
+  ), [sharedRounds, trades, view, settledIncome])
+  const rounds = sharedRounds ?? fallbackRounds
+  const maximumRoundWindowStart = Math.max(
+    0,
+    rounds.length - FUTURES_CLOSED_POSITION_WINDOW_SIZE,
+  )
+  const visibleRoundStart = Math.min(roundWindowStart, maximumRoundWindowStart)
+  const visibleRoundEnd = Math.min(
+    rounds.length,
+    visibleRoundStart + FUTURES_CLOSED_POSITION_WINDOW_SIZE,
+  )
+  const visibleRounds = useMemo(
+    () => rounds.slice(visibleRoundStart, visibleRoundEnd),
+    [rounds, visibleRoundEnd, visibleRoundStart],
+  )
+  const hasNewerRounds = visibleRoundStart > 0
+  const hasOlderRounds = visibleRoundEnd < rounds.length
+  const moveRoundWindow = (direction) => {
+    roundWindowFocusRef.current = direction
+    setRoundWindowStart((current) => {
+      const clamped = Math.min(current, maximumRoundWindowStart)
+      return direction === 'older'
+        ? Math.min(maximumRoundWindowStart, clamped + FUTURES_CLOSED_POSITION_WINDOW_STEP)
+        : Math.max(0, clamped - FUTURES_CLOSED_POSITION_WINDOW_STEP)
+    })
+  }
+  useEffect(() => {
+    const requested = roundWindowFocusRef.current
+    if (requested === null) return
+    roundWindowFocusRef.current = null
+    const preferred = requested === 'older' ? olderRoundsRef.current : newerRoundsRef.current
+    const fallback = requested === 'older' ? newerRoundsRef.current : olderRoundsRef.current
+    if (!preferred?.disabled) preferred?.focus()
+    else if (!fallback?.disabled) fallback?.focus()
+  }, [visibleRoundStart])
   const groupedOrders = useMemo(
     () => groupRowsByDay(narrowedOrders, order => order?.time),
     [narrowedOrders],
   )
   const groupedRounds = useMemo(
-    () => groupRowsByDay(rounds, round => round?.closeTime),
-    [rounds],
+    () => groupRowsByDay(visibleRounds, round => round?.closeTime),
+    [visibleRounds],
   )
+  const roundRowIndexes = useMemo(() => new Map(
+    visibleRounds.map((round, index) => [round.key, visibleRoundStart + index + 2]),
+  ), [visibleRounds, visibleRoundStart])
   // A reading exists *for this view*, whatever the read is doing now. Everything
   // below renders from it: a refresh in flight and a refresh that failed both
   // leave the rows the operator was reading exactly where they were.
@@ -305,6 +359,8 @@ export const FuturesHistoryPanel = ({
     : (history?.foldedOrders?.length ?? 0)
   const read = Array.isArray(history?.symbols) ? history.symbols.length : 0
   const traded = Number.isSafeInteger(history?.discovered) ? history.discovered : 0
+  const oldestTradeAt = useMemo(() => oldestRowTime(trades), [trades])
+  const oldestOrderAt = useMemo(() => oldestRowTime(orders), [orders])
   const scope = read > 0
     ? ` across the ${read} contract${read === 1 ? '' : 's'} read`
     : ' in this window'
@@ -315,14 +371,8 @@ export const FuturesHistoryPanel = ({
   //
   // It describes the read, so it is given the whole reading rather than what a
   // filter left of it: narrowing to one contract does not narrow what was read.
-  const reach = (rows) => {
-    const oldest = rows.reduce((earliest, row) => {
-      const time = Number(row?.time)
-      return Number.isFinite(time) && time > 0 && (earliest === null || time < earliest)
-        ? time
-        : earliest
-    }, null)
-    if (rows.length === 0) return null
+  const reach = (rowCount, oldest) => {
+    if (rowCount === 0) return null
     const contracts = traded > read
       ? `${read} of ${traded} contracts read`
       : `${read} contract${read === 1 ? '' : 's'} read`
@@ -423,7 +473,41 @@ export const FuturesHistoryPanel = ({
     return (
       <>
         {notice}
-        <div className="futures-workstation-dock-table" role="table" aria-label="Position history">
+        {rounds.length > FUTURES_CLOSED_POSITION_WINDOW_SIZE ? (
+          <div
+            className="futures-workstation-history-window"
+            role="group"
+            aria-label="Move through closed positions already held by the desk"
+          >
+            <button
+              ref={newerRoundsRef}
+              type="button"
+              className="futures-workstation-history-filter"
+              disabled={!hasNewerRounds}
+              onClick={() => moveRoundWindow('newer')}
+            >
+              Newer
+            </button>
+            <p role="status" aria-live="polite">
+              {`Showing ${visibleRoundStart + 1}–${visibleRoundEnd} of ${rounds.length}`}
+            </p>
+            <button
+              ref={olderRoundsRef}
+              type="button"
+              className="futures-workstation-history-filter"
+              disabled={!hasOlderRounds}
+              onClick={() => moveRoundWindow('older')}
+            >
+              Older
+            </button>
+          </div>
+        ) : null}
+        <div
+          className="futures-workstation-dock-table"
+          role="table"
+          aria-label="Position history"
+          aria-rowcount={rounds.length + 1}
+        >
           {/* Two money columns, because they are two different figures and the
               operator reconciles the desk against Binance with both. "Realized"
               is the exchange's own: the sum of the realized PnL it reported on
@@ -461,7 +545,13 @@ export const FuturesHistoryPanel = ({
               : round.realizedPnl > 0 ? 'positive' : 'negative'
             const leg = round.positionSide === 'LONG' ? 'buy' : 'sell'
             return (
-              <div className={rowClass('is-rounds', leg, round.symbol)} role="row" key={round.key}>
+              <div
+                className={rowClass('is-rounds', leg, round.symbol)}
+                role="row"
+                aria-rowindex={roundRowIndexes.get(round.key)}
+                data-round-key={round.key}
+                key={round.key}
+              >
                 {symbolCell(round.symbol)}
                 {/* A closed position is filed under the day it closed on, which the
                     heading above states; the row shows the time of day, and the whole
@@ -526,7 +616,7 @@ export const FuturesHistoryPanel = ({
             )
           }))}
         </div>
-        {reach(trades)}
+        {reach(trades.length, oldestTradeAt)}
       </>
     )
   }
@@ -706,7 +796,7 @@ export const FuturesHistoryPanel = ({
         }))}
       </div>
       )}
-      {reach(orders)}
+      {reach(orders.length, oldestOrderAt)}
     </>
   )
 }

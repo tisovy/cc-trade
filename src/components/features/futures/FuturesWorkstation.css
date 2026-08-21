@@ -1961,6 +1961,17 @@
   font-variant-numeric: tabular-nums;
 }
 
+.futures-workstation-dock-total > em {
+  color: #8fa2b6;
+  font-size: calc(var(--fx-ui-scale, 1) * 10px);
+  font-style: normal;
+  font-weight: 700;
+}
+
+.futures-workstation-dock-total.is-incomplete {
+  border-style: dashed;
+}
+
 .futures-workstation-dock-total.is-positive {
   border-color: rgba(43, 196, 138, 0.45);
   background: rgba(43, 196, 138, 0.08);
@@ -2832,6 +2843,21 @@
   align-items: center;
   gap: 5px;
   padding: 0 2px 6px;
+}
+
+.futures-workstation-history-window {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 0 2px 6px;
+}
+
+.futures-workstation-history-window > p {
+  margin: 0;
+  color: #8fa2b6;
+  font-size: calc(var(--fx-ui-scale, 1) * 11px);
+  text-align: center;
 }
 
 .futures-workstation-history-filter {

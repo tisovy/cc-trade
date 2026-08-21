@@ -34,7 +34,7 @@ const tradeFrame = (symbol, price, tradeTime = 1_700_000_000_500) => JSON.string
     data: { e: 'aggTrade', E: tradeTime, s: symbol, p: price, T: tradeTime },
 });
 
-const createHarness = () => {
+const createHarness = ({ feedEpoch = 1 } = {}) => {
     const sockets = [];
     const broadcasts = [];
     const timers = [];
@@ -77,6 +77,7 @@ const createHarness = () => {
         broadcast: payload => broadcasts.push(payload),
         logger,
         clock,
+        feedEpoch,
     });
     return { feed, sockets, broadcasts, logger, settlements, timers, runTimers };
 };
@@ -156,12 +157,11 @@ describe('readFuturesLastTradeEvent', () => {
 });
 
 describe('futuresMarkPriceStreamUrl', () => {
-    // The mark for what the exchange says the position is worth, the prints for
-    // what it is worth between two marks.
-    it('subscribes to the mark and the prints of every symbol on the routed market path', () => {
-        expect(futuresMarkPriceStreamUrl(STREAM_ORIGIN, ['BTCUSDT', 'ETHUSDT']))
-            .toBe(`${STREAM_ORIGIN}/market/stream?streams=btcusdt@markPrice@1s/btcusdt@aggTrade`
-                + '/ethusdt@markPrice@1s/ethusdt@aggTrade');
+    it('subscribes only to each symbol mark on the routed market path', () => {
+        const url = futuresMarkPriceStreamUrl(STREAM_ORIGIN, ['BTCUSDT', 'ETHUSDT']);
+        expect(url).toBe(`${STREAM_ORIGIN}/market/stream?streams=btcusdt@markPrice@1s`
+            + '/ethusdt@markPrice@1s');
+        expect(url).not.toContain('@aggTrade');
     });
 
     // The decommissioned path is not a connection error: it opens, stays open
@@ -260,11 +260,11 @@ describe('createFuturesMarkPriceFeed', () => {
         expect(harness.broadcasts).toEqual([{
             type: 'futures_position_marks',
             version: 1,
+            feedEpoch: 1,
+            revision: 1,
             marks: {
-                // No print has been seen for either contract yet, so neither
-                // mark has a traded price to be carried forward from.
-                BMTUSDT: { markPrice: '0.03523', updatedAt: 1_700_000_000_000, anchorPrice: null },
-                BEATUSDT: { markPrice: '3.523', updatedAt: 1_700_000_000_000, anchorPrice: null },
+                BMTUSDT: { markPrice: '0.03523', updatedAt: 1_700_000_000_000 },
+                BEATUSDT: { markPrice: '3.523', updatedAt: 1_700_000_000_000 },
             },
         }]);
     });
@@ -293,62 +293,107 @@ describe('createFuturesMarkPriceFeed', () => {
         expect(harness.broadcasts).toHaveLength(0);
     });
 
-    it('carries the prints between two marks beside the mark', () => {
+    it('does not publish or mutate valuation when an aggregate trade arrives', () => {
         harness.feed.track([{ symbol: 'BMTUSDT', quantity: '-446082' }]);
         harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03523'));
-        harness.sockets[0].emit('message', tradeFrame('BMTUSDT', '0.03531'));
         harness.runTimers();
         expect(harness.broadcasts).toEqual([{
             type: 'futures_position_marks',
             version: 1,
+            feedEpoch: 1,
+            revision: 1,
             marks: {
                 BMTUSDT: {
                     markPrice: '0.03523',
                     updatedAt: 1_700_000_000_000,
-                    anchorPrice: null,
-                    lastPrice: '0.03531',
-                    lastPriceAt: 1_700_000_000_500,
                 },
             },
         }]);
+
+        harness.sockets[0].emit('message', tradeFrame('BMTUSDT', '0.03531'));
+        expect(harness.timers.filter(timer => timer?.delay === 200)).toHaveLength(0);
+        expect(harness.feed.snapshot()).toEqual({ BMTUSDT: '0.03523' });
+        expect(harness.broadcasts).toHaveLength(1);
     });
 
-    // The print a mark was taken beside is what makes the reading between two
-    // marks an extension of the mark rather than a different series in its
-    // place. Without it a consumer can only substitute the tape for the mark,
-    // and on a fast move that reverses the sign of a live position's PnL.
-    it('records the print each mark was taken beside', () => {
+    it('ignores older and duplicate marks without scheduling another publication', () => {
         harness.feed.track([{ symbol: 'BMTUSDT', quantity: '-446082' }]);
-        harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03523', 1_000));
-        harness.sockets[0].emit('message', tradeFrame('BMTUSDT', '0.03531', 1_400));
         harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03528', 2_000));
-        harness.sockets[0].emit('message', tradeFrame('BMTUSDT', '0.03540', 2_400));
+        harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03523', 1_000));
+        harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03528', 2_000));
         harness.runTimers();
+
+        expect(harness.broadcasts).toEqual([{
+            type: 'futures_position_marks',
+            version: 1,
+            feedEpoch: 1,
+            revision: 1,
+            marks: { BMTUSDT: { markPrice: '0.03528', updatedAt: 2_000 } },
+        }]);
+        harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03528', 2_000));
+        expect(harness.timers.filter(timer => timer?.delay === 200)).toHaveLength(0);
+        expect(harness.broadcasts).toHaveLength(1);
+    });
+
+    it('does not let an older mark rewind the funding schedule baseline', () => {
+        harness.feed.track([{ symbol: 'BMTUSDT', quantity: '-446082' }]);
+        const socket = harness.sockets[0];
+
+        // The current frame establishes the unchanged next settlement.
+        socket.emit('message', markFrame('BMTUSDT', '0.03528', 2_000, 30_000));
+        // This delayed frame names the preceding schedule. Applying it would
+        // rewind the baseline from 30_000 to 20_000.
+        socket.emit('message', markFrame('BMTUSDT', '0.03523', 1_000, 20_000));
+        // The next current frame still names 30_000. It must not be mistaken
+        // for a settlement merely because the stale frame arrived between them.
+        socket.emit('message', markFrame('BMTUSDT', '0.03529', 3_000, 30_000));
+        harness.runTimers();
+
+        expect(harness.settlements).toEqual([]);
         expect(harness.broadcasts.at(-1).marks).toEqual({
-            BMTUSDT: {
-                markPrice: '0.03528',
-                updatedAt: 2_000,
-                // The print in hand when the 0.03528 mark arrived, not the one
-                // that came after it.
-                anchorPrice: '0.03531',
-                lastPrice: '0.03540',
-                lastPriceAt: 2_400,
-            },
+            BMTUSDT: { markPrice: '0.03529', updatedAt: 3_000 },
         });
     });
 
-    // The mark is what a position is confirmed at, so an entry with no mark is
-    // an estimate of nothing.
-    it('holds a print until the symbol has a mark to sit beside', () => {
+    it('keeps funding schedule event time across reconnects', () => {
+        harness.feed.track([{ symbol: 'BMTUSDT', quantity: '-446082' }]);
+        harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03528', 2_000, 30_000));
+
+        // Price liveness is deliberately forgotten on a disconnect, but the
+        // schedule provenance is not. The delayed first frame on the new socket
+        // must not turn the unchanged 30_000 schedule into a fake settlement.
+        harness.sockets[0].emit('close');
+        harness.runTimers();
+        expect(harness.sockets).toHaveLength(2);
+        harness.sockets[1].emit('message', markFrame('BMTUSDT', '0.03523', 1_000, 20_000));
+        harness.sockets[1].emit('message', markFrame('BMTUSDT', '0.03529', 3_000, 30_000));
+
+        expect(harness.settlements).toEqual([]);
+    });
+
+    it('adopts a fresh earlier funding schedule before reporting its advance', () => {
+        harness.feed.track([{ symbol: 'BMTUSDT', quantity: '-446082' }]);
+        const socket = harness.sockets[0];
+
+        socket.emit('message', markFrame('BMTUSDT', '0.03528', 1_000, 30_000));
+        // Binance can reschedule a coming funding charge. A newer frame moving
+        // it earlier is a new baseline, not a settlement and not a stale frame.
+        socket.emit('message', markFrame('BMTUSDT', '0.03529', 2_000, 20_000));
+        expect(harness.settlements).toEqual([]);
+
+        socket.emit('message', markFrame('BMTUSDT', '0.03530', 3_000, 30_000));
+        expect(harness.settlements).toEqual(['BMTUSDT']);
+    });
+
+    it('ignores an aggregate trade before the first mark', () => {
         harness.feed.track([{ symbol: 'BMTUSDT', quantity: '-1' }]);
         harness.sockets[0].emit('message', tradeFrame('BMTUSDT', '0.03531'));
         harness.runTimers();
         expect(harness.broadcasts).toHaveLength(0);
     });
 
-    // A contract can go a minute without a print and be perfectly alive. Only
-    // the mark, which is contracted at one a second, proves the feed delivers.
-    it('does not let prints stand in for the mark the stall check watches', () => {
+    // Only the contracted one-per-second mark proves this feed is delivering.
+    it('does not let ignored trade frames stand in for the mark liveness check', () => {
         harness.feed.track([{ symbol: 'BMTUSDT', quantity: '-1' }]);
         harness.sockets[0].emit('open');
         harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03523'));
@@ -414,7 +459,7 @@ describe('createFuturesMarkPriceFeed', () => {
 
         harness.feed.track([{ symbol: 'ETHUSDT', quantity: '3' }]);
         expect(harness.broadcasts.at(-1).marks).toEqual({
-            ETHUSDT: { markPrice: '2500', updatedAt: 1_700_000_000_000, anchorPrice: null },
+            ETHUSDT: { markPrice: '2500', updatedAt: 1_700_000_000_000 },
         });
     });
 
@@ -452,6 +497,8 @@ describe('createFuturesMarkPriceFeed', () => {
         expect(harness.broadcasts).toEqual([{
             type: 'futures_position_marks',
             version: 1,
+            feedEpoch: 1,
+            revision: 2,
             marks: {},
         }]);
     });
@@ -466,6 +513,8 @@ describe('createFuturesMarkPriceFeed', () => {
         expect(harness.broadcasts).toEqual([{
             type: 'futures_position_marks',
             version: 1,
+            feedEpoch: 1,
+            revision: 2,
             marks: {},
         }]);
 

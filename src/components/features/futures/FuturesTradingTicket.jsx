@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import {
   calculateFuturesExitBudget,
   calculateFuturesNotionalForPercent,
@@ -26,6 +26,9 @@ import {
 import { futuresOrderPriceIsMovable } from '../../../utils/futuresOrderDrag.js'
 import { describeFuturesOrderConfirmation } from '../../../utils/futuresOrderConfirmation.js'
 import { formatFuturesReadingAge } from '../../../utils/futuresPriceReading.js'
+import { exactFuturesDeskTime } from '../../../utils/futuresDeskTime.js'
+import { applyFuturesPositionValuation } from '../../../utils/futuresPositionMarks.js'
+import { useFuturesPositionValuation } from '../../../hooks/useFuturesPositionValuation.js'
 import {
   formatExchangePrice,
   formatPriceOrAbsent,
@@ -126,6 +129,87 @@ const openOrderEditorFromKeyboard = (event, order, onOrderEdit) => {
   })
 }
 
+const FuturesTradingPositionCard = memo(({
+  onPositionClose,
+  position,
+  snapshotAt,
+  snapshotCoherent,
+  snapshotConfirmed,
+  store,
+  tickSize,
+}) => {
+  const valuation = useFuturesPositionValuation(position, store, {
+    snapshotAt,
+    snapshotCoherent,
+    snapshotConfirmed,
+  })
+  const valuedPosition = useMemo(
+    () => applyFuturesPositionValuation(position, valuation),
+    [position, valuation],
+  )
+  const presentation = describeFuturesPosition(valuedPosition)
+  const marginState = describeFuturesPositionMargin(valuedPosition)
+  const priceOf = value => formatExchangePrice(value, tickSize)
+  const hasPnl = valuation.unrealizedPnl !== null
+  const hasRoe = valuation.roeComplete && valuation.roe !== null
+  const source = valuation.source === 'live-mark'
+    ? 'Live exchange mark'
+    : valuation.source === 'account-snapshot'
+      ? `Account snapshot fallback${valuation.sourceAt === null
+        ? ''
+        : ` from ${exactFuturesDeskTime(valuation.sourceAt)}`}; live mark unavailable`
+      : 'Valuation unavailable'
+  return (
+    <article
+      className={`is-${presentation.tone}`}
+      data-position-key={`${position.symbol}:${position.positionSide}`}
+      data-valuation-source={valuation.source}
+    >
+      <header>
+        <strong>{position.symbol}</strong>
+        <span className={`futures-production-side is-${presentation.tone}`}>
+          {presentation.positionSide}
+        </span>
+      </header>
+      <div
+        className={`futures-production-position-pnl is-${hasPnl ? presentation.pnlTone : 'absent'}`}
+        title={`${source}${futuresPnlReadingNote(presentation, priceOf)}`}
+      >
+        <strong>{hasPnl ? `${formatSignedUsdt(valuation.unrealizedPnl)} USDT` : '— USDT'}</strong>
+        <em>{hasRoe ? formatSignedPercent(valuation.roe) : '—'}</em>
+      </div>
+      <dl>
+        <div><dt>Qty</dt><dd>{exactText(position.quantity)}</dd></div>
+        <div><dt>Entry</dt><dd>{priceOf(position.entryPrice)}</dd></div>
+        <div><dt>Mark</dt><dd>{priceOf(valuation.markPrice)}</dd></div>
+        <div><dt>Liq.</dt><dd>{priceOf(position.liquidationPrice)}</dd></div>
+        <div>
+          <dt>Margin</dt>
+          <dd>
+            {marginState.marginMode ? (
+              <em className="futures-production-margin-mode">
+                {marginState.marginMode === 'CROSS' ? 'CROSS' : 'ISO'}
+              </em>
+            ) : null}
+            {formatUsdt(marginState.margin)}
+          </dd>
+        </div>
+      </dl>
+      <div>
+        <button
+          type="button"
+          onClick={event => onPositionClose?.(valuedPosition, {
+            x: event.clientX,
+            y: event.clientY,
+          })}
+        >
+          Close position
+        </button>
+      </div>
+    </article>
+  )
+})
+
 const FuturesTradingTicket = ({
   state,
   selectedSymbol = 'BTCUSDT',
@@ -158,6 +242,20 @@ const FuturesTradingTicket = ({
     : positionsResource.status === 'ready'
       || (positionsResource.status === 'loading'
         && Number.isFinite(positionsResource.lastSuccessfulAt))
+  const positionSnapshotUpdatedAt = Number.isSafeInteger(positionsResource?.updatedAt)
+    ? positionsResource.updatedAt
+    : null
+  const positionSnapshotSuccessfulAt = Number.isSafeInteger(positionsResource?.lastSuccessfulAt)
+    ? positionsResource.lastSuccessfulAt
+    : null
+  const positionSnapshotAt = positionSnapshotUpdatedAt ?? positionSnapshotSuccessfulAt
+  const positionSnapshotCoherent = positionsResource === null && positions.length > 0
+    ? true
+    : positionSnapshotUpdatedAt !== null
+      && positionSnapshotUpdatedAt === positionSnapshotSuccessfulAt
+  const positionSnapshotConfirmed = positionSizingReady
+    || positions.length > 0
+    || positionSnapshotSuccessfulAt !== null
   const [tab, setTab] = useState('trade')
   // Sizing starts at zero, never at a share of the balance: a size the operator
   // never chose is a size they will not read on the confirmation either.
@@ -970,73 +1068,18 @@ const FuturesTradingTicket = ({
             </header>
             {positions.length === 0
               ? <p>No open positions.</p>
-              : positions.map((position) => {
-                const presentation = describeFuturesPosition(position)
-                const marginState = describeFuturesPositionMargin(position)
-                return (
-                <article
-                  className={`is-${presentation.tone}`}
+              : positions.map(position => (
+                <FuturesTradingPositionCard
                   key={`${position.symbol}:${position.positionSide}`}
-                >
-                  <header>
-                    <strong>{position.symbol}</strong>
-                    <span className={`futures-production-side is-${presentation.tone}`}>
-                      {presentation.positionSide}
-                    </span>
-                  </header>
-                  <div
-                    className={`futures-production-position-pnl is-${presentation.pnlTone}${presentation.pnlEstimated ? ' is-estimated' : ''}`}
-                    title={`On the exchange’s own mark${futuresPnlReadingNote(
-                      presentation,
-                      price => formatExchangePrice(price, tickOf(position.symbol)),
-                    )}`}
-                  >
-                    <strong>{formatSignedUsdt(presentation.unrealizedPnl)} USDT</strong>
-                    <em>{formatSignedPercent(presentation.roePercent)}</em>
-                  </div>
-                  <dl>
-                    <div><dt>Qty</dt><dd>{exactText(position.quantity)}</dd></div>
-                    <div>
-                      <dt>Entry</dt>
-                      <dd>{formatExchangePrice(position.entryPrice, tickOf(position.symbol))}</dd>
-                    </div>
-                    <div>
-                      <dt>Mark</dt>
-                      <dd>{formatExchangePrice(position.markPrice, tickOf(position.symbol))}</dd>
-                    </div>
-                    <div>
-                      <dt>Liq.</dt>
-                      <dd>{formatExchangePrice(position.liquidationPrice, tickOf(position.symbol))}</dd>
-                    </div>
-                    {/* The liquidation price is a function of this number, so
-                        the card that states one states the other — and names
-                        the mode, since only an isolated margin can be moved. */}
-                    <div>
-                      <dt>Margin</dt>
-                      <dd>
-                        {marginState.marginMode ? (
-                          <em className="futures-production-margin-mode">
-                            {marginState.marginMode === 'CROSS' ? 'CROSS' : 'ISO'}
-                          </em>
-                        ) : null}
-                        {formatUsdt(marginState.margin)}
-                      </dd>
-                    </div>
-                  </dl>
-                  <div>
-                    <button
-                      type="button"
-                      onClick={event => onPositionClose?.(position, {
-                        x: event.clientX,
-                        y: event.clientY,
-                      })}
-                    >
-                      Close position
-                    </button>
-                  </div>
-                </article>
-                )
-              })}
+                  position={position}
+                  store={safeState.positionMarkStore}
+                  snapshotAt={positionSnapshotAt}
+                  snapshotCoherent={positionSnapshotCoherent}
+                  snapshotConfirmed={positionSnapshotConfirmed}
+                  tickSize={tickOf(position.symbol)}
+                  onPositionClose={onPositionClose}
+                />
+              ))}
           </section>
         )}
 

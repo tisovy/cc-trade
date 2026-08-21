@@ -2,6 +2,8 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import useFuturesProductionWorkstation from '../../../hooks/useFuturesProductionWorkstation.js'
 import useFuturesOrderDrag from '../../../hooks/useFuturesOrderDrag.js'
 import useFuturesContractDefaults from '../../../hooks/useFuturesContractDefaults.js'
+import { useFuturesPositionValuation } from '../../../hooks/useFuturesPositionValuation.js'
+import { applyFuturesPositionValuation } from '../../../utils/futuresPositionMarks.js'
 import {
   describeFuturesOrderIntent,
   describeFuturesPosition,
@@ -32,6 +34,44 @@ import FuturesWorkstationView from './FuturesWorkstationView.jsx'
 
 const DEFAULT_FUTURES_SYMBOL = 'BTCUSDT'
 const DEFAULT_FUTURES_INTERVAL = '15m'
+
+const useLiveFuturesPosition = (position, store, resource) => {
+  const updatedAt = Number.isSafeInteger(resource?.updatedAt) ? resource.updatedAt : null
+  const lastSuccessfulAt = Number.isSafeInteger(resource?.lastSuccessfulAt)
+    ? resource.lastSuccessfulAt
+    : null
+  const valuation = useFuturesPositionValuation(position, store, {
+    snapshotAt: updatedAt ?? lastSuccessfulAt,
+    snapshotConfirmed: position !== null || lastSuccessfulAt !== null,
+    snapshotCoherent: resource === null || resource === undefined
+      ? position !== null
+      : updatedAt !== null && updatedAt === lastSuccessfulAt,
+  })
+  return useMemo(
+    () => applyFuturesPositionValuation(position, valuation),
+    [position, valuation],
+  )
+}
+
+const LiveFuturesPositionCloser = memo(({
+  position,
+  positionMarkStore,
+  positionResource,
+  ...props
+}) => {
+  const valuedPosition = useLiveFuturesPosition(position, positionMarkStore, positionResource)
+  return <FuturesPositionCloser {...props} position={valuedPosition} />
+})
+
+const LiveFuturesPositionMarginEditor = memo(({
+  position,
+  positionMarkStore,
+  positionResource,
+  ...props
+}) => {
+  const valuedPosition = useLiveFuturesPosition(position, positionMarkStore, positionResource)
+  return <FuturesPositionMarginEditor {...props} position={valuedPosition} />
+})
 
 export const FuturesProductionWorkstation = ({
   enabled,
@@ -458,6 +498,7 @@ export const FuturesProductionWorkstation = ({
     <FuturesPortfolioDock
       selectedSymbol={symbol}
       positions={executionState?.positions}
+      positionMarkStore={executionState?.positionMarkStore}
       openOrders={executionState?.openOrders}
       accountResources={executionState?.accountResources}
       tickSizes={tickSizes}
@@ -466,6 +507,7 @@ export const FuturesProductionWorkstation = ({
       settledMoney={executionState?.settledMoney}
       settledWindow={executionState?.settledIncomeWindow}
       settledIncome={executionState?.settledIncome}
+      tradeRoundIndex={executionState?.tradeRoundIndex}
       onClosePosition={handlePositionClose}
       onCancelOrder={executionState?.cancelOrder}
       onOrderEdit={handleOrderEdit}
@@ -544,9 +586,11 @@ export const FuturesProductionWorkstation = ({
         />
       ) : null}
       {positionCloser && closePosition ? (
-        <FuturesPositionCloser
+        <LiveFuturesPositionCloser
           key={`${positionCloser.position.symbol}:${positionCloser.position.positionSide}`}
           position={closePosition}
+          positionMarkStore={executionState?.positionMarkStore}
+          positionResource={executionState?.accountResources?.positions}
           contract={closePosition.symbol === symbol ? selectedContract : null}
           anchor={positionCloser.anchor}
           onCloseMarket={(position, options) => executionState?.closePosition?.(position, options)}
@@ -562,9 +606,11 @@ export const FuturesProductionWorkstation = ({
         />
       ) : null}
       {marginEditor && marginPosition ? (
-        <FuturesPositionMarginEditor
+        <LiveFuturesPositionMarginEditor
           key={`${marginPosition.symbol}:${marginPosition.positionSide}`}
           position={marginPosition}
+          positionMarkStore={executionState?.positionMarkStore}
+          positionResource={executionState?.accountResources?.positions}
           contract={marginPosition.symbol === symbol ? selectedContract : null}
           availableUsdt={executionState?.balances?.USDT?.available ?? null}
           anchor={marginEditor.anchor}

@@ -286,12 +286,21 @@ export const describeFuturesPositionMargin = (position) => {
   // is a statement about liquidation, and liquidation is the mark's by
   // definition — an estimate here would put a wrong distance under a real one,
   // and would tell the operator they may withdraw margin they may not.
-  const unrealizedPnl = toFiniteNumber(position?.markUnrealizedPnl)
-    ?? toFiniteNumber(position?.unrealizedPnl)
-    ?? 0
+  // Raw account positions predate valuation provenance and retain their prior
+  // behavior. A valued position explicitly states whether its PnL/margin pair
+  // is coherent; `false` must remain unknown instead of falling through to the
+  // historical zero default used by unannotated callers.
+  const valuationSupportsMargin = position?.valuationMarginComplete !== false
+  const unrealizedPnl = valuationSupportsMargin
+    ? (toFiniteNumber(position?.markUnrealizedPnl)
+      ?? toFiniteNumber(position?.unrealizedPnl)
+      ?? 0)
+    : null
   // Unrealized profit is not counted: it is not in the wallet and cannot be
   // withdrawn. Unrealized loss is, because it has already been taken out.
-  const marginBalance = margin === null ? null : margin + Math.min(0, unrealizedPnl)
+  const marginBalance = margin === null || unrealizedPnl === null
+    ? null
+    : margin + Math.min(0, unrealizedPnl)
   // The distance to liquidation measured in money rather than in price — and
   // only for an isolated position, because a cross position's buffer is the
   // whole account's and cannot be attributed to one row.
@@ -315,7 +324,7 @@ export const describeFuturesPositionMargin = (position) => {
     removable: liquidationBuffer === null ? null : Math.max(0, liquidationBuffer),
     // Binance moves margin on isolated positions only; a cross position's
     // margin is the whole account's and cannot be assigned to one row.
-    adjustable: marginMode === 'ISOLATED' && margin !== null,
+    adjustable: marginMode === 'ISOLATED' && margin !== null && valuationSupportsMargin,
   })
 }
 

@@ -30,6 +30,10 @@ This is preferred to retaining the carried-price formula because every displayed
 
 The existing chart-disagreement explanation may calculate a last-trade what-if from the same position inputs, but stores it under a separate optional `tapeScenario`. It is never assigned to `unrealizedPnl`, never enters an aggregate, and never affects margin/risk.
 
+Mark admission is monotonic per symbol. A frame with an older exchange timestamp, or no timestamp after a timed frame, cannot replace the accepted mark. The funding schedule carries its own accepted event time across reconnects: a delayed frame cannot rewind its baseline and make the next current frame look like a new settlement, while a newer frame may legitimately reschedule funding earlier without being reported as a settlement.
+
+Each full publication carries a monotonic feed-instance epoch and a revision scoped to that epoch. The renderer admits the whole frame before applying per-symbol changes, because symbol timestamps alone cannot distinguish “this contract closed” from “this older frame predates that contract.” Renderer transport loss clears the admitted frame and every live mark immediately; a market-generation change also retires the currently admitted epoch through a retained floor, so neither a delayed non-empty frame nor teardown frame can resurrect the retired feed before the replacement speaks.
+
 ### 3. Make aggregate completeness explicit
 
 The total selector returns `{value, complete, missingCount, sourceAt}`. `value` may support a qualified partial tooltip, but the headline is not formatted as a complete number when `complete` is false. Known-empty and not-yet-read remain distinct.
@@ -37,6 +41,8 @@ The total selector returns `{value, complete, missingCount, sourceAt}`. `value` 
 ### 4. Subscribe React consumers at the smallest useful boundary
 
 Keep mark data in a small external store with per-symbol snapshots and `useSyncExternalStore` subscriptions at memoized position rows. The dock aggregate subscribes to the set of currently open position keys. Held history props use stable identities and a memoized review component; marks are not a history dependency.
+
+The store separates primary mark notifications from optional tape-detail notifications. A row may repaint its explanation on a tape-only change; the aggregate is subscribed only to primary mark revisions and therefore does not recompute.
 
 This avoids moving every market tick through the monolithic hook state. A plain top-level `useState` plus `React.memo` was considered, but it still invalidates parent render work and is fragile when aggregate objects are recreated.
 

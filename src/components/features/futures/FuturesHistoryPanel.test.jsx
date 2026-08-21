@@ -1,6 +1,10 @@
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import FuturesHistoryPanel from './FuturesHistoryPanel.jsx'
+import FuturesHistoryPanel, {
+  FUTURES_CLOSED_POSITION_WINDOW_SIZE,
+  FUTURES_CLOSED_POSITION_WINDOW_STEP,
+} from './FuturesHistoryPanel.jsx'
+import FuturesPortfolioDock from './FuturesPortfolioDock.jsx'
 
 const ticks = Object.freeze({ BTCUSDT: '0.1', BICOUSDT: '0.001', ETHUSDT: '0.01' })
 
@@ -567,6 +571,7 @@ describe('FuturesHistoryPanel', () => {
   // undivided list with nothing saying they were different kinds of stamp. The
   // day is a heading now, and every row shows the time within it.
   it('groups rows under the day they belong to and times every row', () => {
+    const olderAt = 1_784_000_000_000
     render(
       <FuturesHistoryPanel
         view="orderHistory"
@@ -578,7 +583,7 @@ describe('FuturesHistoryPanel', () => {
             // Now, not a minute ago: in the first minute after midnight a
             // minute ago is yesterday.
             { ...history.orders[0], orderId: 7, time: Date.now() },
-            { ...history.orders[0], orderId: 8, time: 1_784_000_000_000 },
+            { ...history.orders[0], orderId: 8, time: olderAt },
           ],
         }}
       />,
@@ -586,7 +591,9 @@ describe('FuturesHistoryPanel', () => {
     const days = screen.getAllByRole('rowgroup')
     expect(days).toHaveLength(2)
     expect(days[0]).toHaveAccessibleName('Today')
-    expect(days[1]).toHaveAccessibleName(/^\d{2}\.\d{2}$/)
+    expect(days[1]).toHaveAccessibleName(
+      new Date(olderAt).toLocaleDateString([], { day: '2-digit', month: '2-digit' }),
+    )
 
     const rows = screen.getAllByRole('row')
     const today = within(rows[1]).getAllByRole('cell')[2]
@@ -595,6 +602,131 @@ describe('FuturesHistoryPanel', () => {
     expect(older).toHaveTextContent(/\d{1,2}:\d{2}:\d{2}/)
     expect(today.getAttribute('title')).toBeTruthy()
     expect(older.getAttribute('title')).toBeTruthy()
+  })
+
+  it('keeps two thousand closed positions in a bounded local window and reaches both edges', () => {
+    const roundCount = 2_000
+    const newestClose = Date.UTC(2026, 6, 14, 12, 0, 0)
+    const noFees = Object.freeze([])
+    const closed = Object.freeze(Array.from({ length: roundCount }, (_, index) => {
+      const closeTime = newestClose - index * 1_000
+      return Object.freeze({
+        key: `round-${index}`,
+        symbol: 'BTCUSDT',
+        positionSide: 'LONG',
+        quantity: '1',
+        fills: 2,
+        notional: 60_000,
+        entryPrice: 60_000,
+        exitPrice: 60_001,
+        realizedPnl: 1,
+        netPnl: 1,
+        feesByAsset: noFees,
+        funding: null,
+        fundingComplete: true,
+        insuranceClear: null,
+        openTime: closeTime - 500,
+        closeTime,
+        open: false,
+      })
+    }))
+    const tradeRoundIndex = Object.freeze({
+      open: Object.freeze([]),
+      closed,
+    })
+    const onLoadHistory = vi.fn()
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        tickSizes={ticks}
+        history={{
+          ...history,
+          trades: [],
+          readViews: { orders: null, trades: history.readAt },
+        }}
+        tradeRoundIndex={tradeRoundIndex}
+        onLoadHistory={onLoadHistory}
+      />,
+    )
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Closed positions' }))
+    expect(onLoadHistory).not.toHaveBeenCalled()
+
+    const table = screen.getByRole('table', { name: 'Position history' })
+    const roundRows = () => within(table).getAllByRole('row')
+      .filter(row => row.hasAttribute('data-round-key'))
+    const firstRound = () => roundRows()[0]
+    const lastRound = () => roundRows().at(-1)
+
+    expect(FUTURES_CLOSED_POSITION_WINDOW_SIZE).toBe(100)
+    expect(table).toHaveAttribute('aria-rowcount', String(roundCount + 1))
+    expect(roundRows()).toHaveLength(FUTURES_CLOSED_POSITION_WINDOW_SIZE)
+    expect(screen.getByText(`Showing 1–${FUTURES_CLOSED_POSITION_WINDOW_SIZE} of ${roundCount}`))
+      .toBeInTheDocument()
+    expect(firstRound()).toHaveAttribute('data-round-key', 'round-0')
+    expect(firstRound()).toHaveAttribute('aria-rowindex', '2')
+    expect(lastRound()).toHaveAttribute(
+      'data-round-key',
+      `round-${FUTURES_CLOSED_POSITION_WINDOW_SIZE - 1}`,
+    )
+
+    const overlapKey = `round-${FUTURES_CLOSED_POSITION_WINDOW_SIZE - 1}`
+    const overlap = table.querySelector(`[data-round-key="${overlapKey}"]`)
+    const older = screen.getByRole('button', { name: 'Older' })
+    const newer = screen.getByRole('button', { name: 'Newer' })
+    older.focus()
+    fireEvent.click(older)
+
+    expect(older).toHaveFocus()
+    expect(screen.getByText(
+      `Showing ${FUTURES_CLOSED_POSITION_WINDOW_STEP + 1}–${
+        FUTURES_CLOSED_POSITION_WINDOW_STEP + FUTURES_CLOSED_POSITION_WINDOW_SIZE
+      } of ${roundCount}`,
+    )).toBeInTheDocument()
+    expect(firstRound()).toHaveAttribute(
+      'data-round-key',
+      `round-${FUTURES_CLOSED_POSITION_WINDOW_STEP}`,
+    )
+    expect(table.querySelector(`[data-round-key="${overlapKey}"]`)).toBe(overlap)
+    expect(roundRows()).toHaveLength(FUTURES_CLOSED_POSITION_WINDOW_SIZE)
+
+    let olderMoves = 1
+    while (!older.disabled) {
+      fireEvent.click(older)
+      olderMoves += 1
+    }
+    expect(olderMoves).toBe(Math.ceil(
+      (roundCount - FUTURES_CLOSED_POSITION_WINDOW_SIZE)
+        / FUTURES_CLOSED_POSITION_WINDOW_STEP,
+    ))
+    expect(screen.getByText(
+      `Showing ${roundCount - FUTURES_CLOSED_POSITION_WINDOW_SIZE + 1}–${roundCount} of ${roundCount}`,
+    )).toBeInTheDocument()
+    expect(firstRound()).toHaveAttribute(
+      'data-round-key',
+      `round-${roundCount - FUTURES_CLOSED_POSITION_WINDOW_SIZE}`,
+    )
+    expect(lastRound()).toHaveAttribute('data-round-key', `round-${roundCount - 1}`)
+    expect(roundRows()).toHaveLength(FUTURES_CLOSED_POSITION_WINDOW_SIZE)
+    expect(older).toBeDisabled()
+    expect(newer).toHaveFocus()
+
+    let newerMoves = 0
+    while (!newer.disabled) {
+      fireEvent.click(newer)
+      newerMoves += 1
+    }
+    expect(newerMoves).toBe(olderMoves)
+    expect(screen.getByText(`Showing 1–${FUTURES_CLOSED_POSITION_WINDOW_SIZE} of ${roundCount}`))
+      .toBeInTheDocument()
+    expect(firstRound()).toHaveAttribute('data-round-key', 'round-0')
+    expect(lastRound()).toHaveAttribute(
+      'data-round-key',
+      `round-${FUTURES_CLOSED_POSITION_WINDOW_SIZE - 1}`,
+    )
+    expect(newer).toBeDisabled()
+    expect(older).toHaveFocus()
+    expect(onLoadHistory).not.toHaveBeenCalled()
   })
 
   // Narrowing reads the reading already held. The panel issues no read of its

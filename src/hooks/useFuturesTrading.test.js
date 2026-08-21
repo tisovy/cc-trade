@@ -82,13 +82,17 @@ describe('useFuturesTrading', () => {
     expect(result.current.positions).toHaveLength(1)
   })
 
-  it('re-values open positions from the mark feed and falls back when it clears', () => {
+  it('routes mark frames through the external store without rewriting account positions', () => {
     const socket = createSocket()
-    const { result } = renderHook(() => useFuturesTrading({
-      enabled: true,
-      symbol: 'BMTUSDT',
-      wsConnection: socket,
-    }))
+    let renderCount = 0
+    const { result } = renderHook(() => {
+      renderCount += 1
+      return useFuturesTrading({
+        enabled: true,
+        symbol: 'BMTUSDT',
+        wsConnection: socket,
+      })
+    })
 
     act(() => socket.receive({
       version: 1,
@@ -109,20 +113,106 @@ describe('useFuturesTrading', () => {
       },
     }))
     expect(result.current.positions[0].unrealizedPnl).toBe('-1708.49')
+    const snapshotPositions = result.current.positions
+    const store = result.current.positionMarkStore
+    const listener = vi.fn()
+    const unsubscribe = store.subscribe('BMTUSDT', listener)
+    const rendersAfterSnapshot = renderCount
 
     act(() => socket.receive({
       type: 'futures_position_marks',
       version: 1,
       marks: { BMTUSDT: { markPrice: '0.03600', updatedAt: 200 } },
     }))
-    expect(result.current.positions[0].markPrice).toBe('0.03600')
-    expect(Number(result.current.positions[0].unrealizedPnl)).toBeCloseTo(-2051.98, 2)
+    expect(result.current.positions).toBe(snapshotPositions)
+    expect(result.current.positions[0]).toMatchObject({
+      markPrice: '0.03523',
+      unrealizedPnl: '-1708.49',
+    })
+    expect(store.get('bmtusdt')).toEqual({
+      markPrice: '0.03600',
+      updatedAt: 200,
+      lastPrice: null,
+      lastPriceAt: null,
+    })
+    expect(listener).toHaveBeenCalledTimes(1)
+    expect(renderCount).toBe(rendersAfterSnapshot)
 
-    // A dropped feed clears its marks: the row returns to the account snapshot
-    // rather than holding a mark that stopped moving.
+    // A dropped feed clears only the high-frequency lane. Consumers then read
+    // the untouched account position as their qualified fallback.
     act(() => socket.receive({ type: 'futures_position_marks', version: 1, marks: {} }))
+    expect(store.get('BMTUSDT')).toBeNull()
     expect(result.current.positions[0].markPrice).toBe('0.03523')
     expect(result.current.positions[0].unrealizedPnl).toBe('-1708.49')
+    expect(listener).toHaveBeenCalledTimes(2)
+    expect(renderCount).toBe(rendersAfterSnapshot)
+    unsubscribe()
+  })
+
+  it('admits a new feed revision namespace when the market generation changes', () => {
+    const socket = createSocket()
+    const { result, rerender } = renderHook(
+      ({ generation }) => useFuturesTrading({
+        enabled: true,
+        symbol: 'BTCUSDT',
+        wsConnection: socket,
+        marketGeneration: generation,
+      }),
+      { initialProps: { generation: 7 } },
+    )
+
+    act(() => socket.receive({
+      type: 'futures_position_marks',
+      version: 1,
+      feedEpoch: 3,
+      revision: 12,
+      marks: { BTCUSDT: { markPrice: '60000', updatedAt: 100 } },
+    }))
+    expect(result.current.positionMarkStore.get('BTCUSDT')?.markPrice).toBe('60000')
+
+    rerender({ generation: 8 })
+    expect(result.current.positionMarkStore.get('BTCUSDT')).toBeNull()
+
+    // Retired-feed traffic can cross the React generation effect. It must not
+    // resurrect an old live price even before the replacement feed has spoken.
+    act(() => socket.receive({
+      type: 'futures_position_marks',
+      version: 1,
+      feedEpoch: 3,
+      revision: 13,
+      marks: { BTCUSDT: { markPrice: '59000', updatedAt: 50 } },
+    }))
+    expect(result.current.positionMarkStore.get('BTCUSDT')).toBeNull()
+
+    act(() => socket.receive({
+      type: 'futures_position_marks',
+      version: 1,
+      feedEpoch: 3,
+      revision: 14,
+      marks: {},
+    }))
+
+    // The backend feed is new and starts its own publication sequence at one.
+    // The long-lived renderer store must not reject it behind revision twelve.
+    act(() => socket.receive({
+      type: 'futures_position_marks',
+      version: 1,
+      feedEpoch: 4,
+      revision: 1,
+      marks: { BTCUSDT: { markPrice: '60100', updatedAt: 200 } },
+    }))
+    expect(result.current.positionMarkStore.get('BTCUSDT')?.markPrice).toBe('60100')
+
+    act(() => socket.receive({
+      type: 'futures_position_marks',
+      version: 1,
+      feedEpoch: 3,
+      revision: 15,
+      marks: { BTCUSDT: { markPrice: '59000', updatedAt: 50 } },
+    }))
+    expect(result.current.positionMarkStore.get('BTCUSDT')?.markPrice).toBe('60100')
+    // Changing only activation generation does not resubscribe the account lane.
+    expect(socket.sent).toHaveLength(1)
   })
 
   it('exposes the backend order-notional cap through the shared readiness state', () => {
@@ -1460,10 +1550,19 @@ describe('useFuturesTrading', () => {
       wsConnection: socket,
     }))
 
+    act(() => socket.receive({
+      type: 'futures_position_marks',
+      version: 1,
+      revision: 1,
+      marks: { BTCUSDT: { markPrice: '60000', updatedAt: 100 } },
+    }))
+    expect(result.current.positionMarkStore.get('BTCUSDT')?.markPrice).toBe('60000')
+
     act(() => {
       socket.dropConnection()
     })
     expect(result.current.connected).toBe(false)
+    expect(result.current.positionMarkStore.get('BTCUSDT')).toBeNull()
 
     socket.readyState = 3
     let accepted

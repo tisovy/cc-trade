@@ -1,8 +1,9 @@
 import { readFileSync } from 'node:fs'
-import { createEvent, fireEvent, render, screen, within } from '@testing-library/react'
+import { act, createEvent, fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import FuturesPortfolioDock from './FuturesPortfolioDock.jsx'
 import { describeFuturesPosition } from '../../../utils/futuresOrderPresentation.js'
+import { createFuturesPositionMarkStore } from '../../../utils/futuresPositionMarks.js'
 
 vi.mock('../../../utils/futuresOrderPresentation.js', async (importOriginal) => {
   const actual = await importOriginal()
@@ -93,40 +94,43 @@ describe('FuturesPortfolioDock', () => {
       .toHaveTextContent('Size (USDT)')
   })
 
-  // Between two marks the figure is the mark carried forward by the tape, not
-  // the exchange's own mark. The operator never has to wonder which of the two
-  // they are reading — and the liquidation price, which is the mark's by
-  // definition, is not marked and does not move with it.
-  it('says when the PnL is the last trade rather than the confirmed mark', () => {
-    const { rerender } = render(
+  // Tape is useful context, but it is not an exchange valuation. A print between
+  // marks may update that context without moving the primary row or its total.
+  it('keeps primary PnL on the exchange mark when only the tape changes', () => {
+    const positionMarkStore = createFuturesPositionMarkStore()
+    positionMarkStore.replace({
+      BTCUSDT: {
+        markPrice: '60600',
+        updatedAt: 1_784_000_000_000,
+        lastPrice: '60900',
+        lastPriceAt: 1_784_000_000_100,
+      },
+    })
+    render(
       <FuturesPortfolioDock
         selectedSymbol="BTCUSDT"
-        positions={[{
-          ...position,
-          unrealizedPnl: '-450',
-          markUnrealizedPnl: '-300',
-          valuationPrice: '60900',
-          valuationEstimated: true,
-        }]}
+        positions={[{ ...position, unrealizedPnl: '-999' }]}
+        positionMarkStore={positionMarkStore}
       />,
     )
     const pnl = () => screen.getByRole('table', { name: 'Open positions' })
       .querySelector('.futures-workstation-dock-pnl')
-    expect(pnl()).toHaveClass('is-estimated')
-    expect(pnl().getAttribute('title')).toContain('carried forward from the last print')
-    expect(pnl()).toHaveTextContent('−450.00')
-    // What it is an estimate of, exactly, without leaving the row: the number
-    // Binance itself is showing at the same moment.
-    expect(pnl().getAttribute('title')).toContain('mark −300.00 USDT')
+    expect(pnl().closest('[data-position-key]')).toHaveAttribute('data-valuation-source', 'live-mark')
+    expect(pnl()).toHaveTextContent('−300.00')
+    expect(pnl().getAttribute('title')).toContain('live exchange mark')
+    expect(screen.getByTestId('futures-upnl-total')).toHaveTextContent('−300.00 USDT')
     expect(screen.getByRole('table', { name: 'Open positions' })).toHaveTextContent('71000')
 
-    rerender(
-      <FuturesPortfolioDock
-        selectedSymbol="BTCUSDT"
-        positions={[{ ...position, valuationPrice: '60600', valuationEstimated: false }]}
-      />,
-    )
-    expect(pnl()).not.toHaveClass('is-estimated')
+    act(() => positionMarkStore.replace({
+      BTCUSDT: {
+        markPrice: '60600',
+        updatedAt: 1_784_000_000_000,
+        lastPrice: '61200',
+        lastPriceAt: 1_784_000_000_200,
+      },
+    }))
+    expect(pnl()).toHaveTextContent('−300.00')
+    expect(screen.getByTestId('futures-upnl-total')).toHaveTextContent('−300.00 USDT')
     expect(pnl().getAttribute('title')).not.toContain('carried forward')
   })
 
@@ -136,25 +140,34 @@ describe('FuturesPortfolioDock', () => {
   // are right, and a row that says the opposite of the chart without saying why
   // reads as broken arithmetic — which is exactly how it was reported.
   it('says when the tape has crossed the entry and the mark has not', () => {
+    const positionMarkStore = createFuturesPositionMarkStore()
+    positionMarkStore.replace({
+      BTCUSDT: {
+        markPrice: '61200',
+        updatedAt: 1_784_000_000_000,
+        lastPrice: '60800',
+        lastPriceAt: 1_784_000_000_100,
+      },
+    })
     render(
       <FuturesPortfolioDock
         selectedSymbol="BTCUSDT"
         tickSizes={{ BTCUSDT: '0.1' }}
+        positionMarkStore={positionMarkStore}
         positions={[{
           ...position,
           // Short, so a price below the entry is a profit.
           quantity: '-0.5',
           entryPrice: '61000',
-          markPrice: '61200',
-          markUnrealizedPnl: '-100',
-          unrealizedPnl: '-100',
-          tapePrice: '60800',
+          unrealizedPnl: '-999',
         }]}
       />,
     )
-    const title = screen.getByRole('table', { name: 'Open positions' })
-      .querySelector('.futures-workstation-dock-pnl')
-      .getAttribute('title')
+    const row = screen.getByRole('table', { name: 'Open positions' })
+      .querySelector('[data-position-key="BTCUSDT:BOTH"]')
+    const title = row.querySelector('.futures-workstation-dock-pnl').getAttribute('title')
+    expect(row).toHaveAttribute('data-valuation-source', 'live-mark')
+    expect(row).toHaveTextContent('−100.00')
     expect(title).toContain('the contract last traded at 60800.0')
     expect(title).toContain('the other side of your entry')
     // What the position would be worth there, so the operator can see the size
@@ -164,24 +177,72 @@ describe('FuturesPortfolioDock', () => {
   })
 
   it('says nothing about the tape when it agrees with the mark', () => {
+    const positionMarkStore = createFuturesPositionMarkStore()
+    positionMarkStore.replace({
+      BTCUSDT: {
+        markPrice: '61200',
+        updatedAt: 1_784_000_000_000,
+        lastPrice: '61150',
+        lastPriceAt: 1_784_000_000_100,
+      },
+    })
     render(
       <FuturesPortfolioDock
         selectedSymbol="BTCUSDT"
         tickSizes={{ BTCUSDT: '0.1' }}
+        positionMarkStore={positionMarkStore}
         positions={[{
           ...position,
           quantity: '-0.5',
           entryPrice: '61000',
-          markPrice: '61200',
-          markUnrealizedPnl: '-100',
-          unrealizedPnl: '-100',
-          tapePrice: '61150',
+          unrealizedPnl: '-999',
         }]}
       />,
     )
     expect(screen.getByRole('table', { name: 'Open positions' })
       .querySelector('.futures-workstation-dock-pnl')
       .getAttribute('title')).not.toContain('the other side of your entry')
+  })
+
+  it('marks the aggregate incomplete instead of summing only rows it can value', () => {
+    const positionMarkStore = createFuturesPositionMarkStore()
+    positionMarkStore.replace({
+      BTCUSDT: { markPrice: '60600', updatedAt: 1_784_000_000_000 },
+    })
+    const unknown = {
+      ...position,
+      symbol: 'ETHUSDT',
+      positionSide: 'LONG',
+      quantity: '1',
+      entryPrice: '3000',
+      markPrice: undefined,
+      unrealizedPnl: undefined,
+    }
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[position, unknown]}
+        positionMarkStore={positionMarkStore}
+        accountResources={{
+          positions: {
+            status: 'ready',
+            data: [position, unknown],
+            updatedAt: 1_784_000_000_000,
+            lastSuccessfulAt: 1_784_000_000_000,
+            error: null,
+          },
+        }}
+      />,
+    )
+
+    const total = screen.getByTestId('futures-upnl-total')
+    expect(total).toHaveAttribute('data-complete', 'false')
+    expect(total).toHaveTextContent('— USDT')
+    expect(total).toHaveTextContent('1 position missing')
+    expect(total).toHaveAttribute('title', expect.stringContaining('known rows sum to −300.00 USDT'))
+    expect(screen.getByRole('table', { name: 'Open positions' })
+      .querySelector('[data-position-key="ETHUSDT:LONG"]'))
+      .toHaveAttribute('data-valuation-source', 'unknown')
   })
 
   // Unrealized PnL says what the position would produce if it were closed now.
@@ -375,43 +436,151 @@ describe('FuturesPortfolioDock', () => {
     expect(title).not.toContain('not read yet')
   })
 
-  // The estimate ticks five times a second. What it may cost is the position
-  // rows: a tick that changes nothing about the positions must not re-describe
-  // them, and one that does must describe only them.
-  it('re-describes the position rows a tick moves, and nothing when none moved', () => {
-    const positions = [position]
-    const { rerender } = render(
-      <FuturesPortfolioDock selectedSymbol="BTCUSDT" positions={positions} />,
-    )
-    describeFuturesPosition.mockClear()
-    // The same positions, a different unrelated prop.
-    rerender(
-      <FuturesPortfolioDock selectedSymbol="ETHUSDT" positions={positions} />,
-    )
-    expect(describeFuturesPosition).not.toHaveBeenCalled()
-
-    rerender(
+  // Mark notifications stay below the dock boundary. The aggregate subscribes
+  // to both open symbols, while each memoized row subscribes only to its own.
+  it('updates the BTC row and aggregate on a BTC mark without rendering ETH or history', () => {
+    const positionMarkStore = createFuturesPositionMarkStore()
+    positionMarkStore.replace({
+      BTCUSDT: { markPrice: '60600', updatedAt: 1_784_000_000_000 },
+      ETHUSDT: { markPrice: '3100', updatedAt: 1_784_000_000_000 },
+    })
+    const ethPosition = {
+      ...position,
+      symbol: 'ETHUSDT',
+      positionSide: 'LONG',
+      quantity: '1',
+      entryPrice: '3000',
+      markPrice: '3100',
+      unrealizedPnl: '100',
+    }
+    const historySymbolRead = vi.fn(() => 'SOLUSDT')
+    const closedRound = {
+      key: 'SOLUSDT:LONG:1',
+      get symbol() { return historySymbolRead() },
+      positionSide: 'LONG',
+      quantity: '1',
+      fills: 2,
+      notional: 100,
+      entryPrice: 90,
+      exitPrice: 100,
+      openTime: 1_783_999_900_000,
+      closeTime: 1_784_000_000_000,
+      realizedPnl: 10,
+      netPnl: 9.9,
+      feesByAsset: [{ asset: 'USDT', amount: 0.1 }],
+      funding: null,
+      insuranceClear: null,
+      fundingComplete: true,
+      partial: false,
+      entryImplied: false,
+      open: false,
+    }
+    render(
       <FuturesPortfolioDock
-        selectedSymbol="ETHUSDT"
-        positions={[{ ...position, unrealizedPnl: '-450', valuationEstimated: true }]}
+        selectedSymbol="BTCUSDT"
+        positions={[position, ethPosition]}
+        positionMarkStore={positionMarkStore}
+        history={{
+          status: 'ready',
+          readAt: 1_784_000_000_000,
+          readViews: { trades: 1_784_000_000_000 },
+          trades: [],
+          orders: [],
+          symbols: ['SOLUSDT'],
+          discovered: 1,
+          error: null,
+        }}
+        tradeRoundIndex={{ closed: [closedRound] }}
       />,
     )
-    expect(describeFuturesPosition).toHaveBeenCalledTimes(1)
+    fireEvent.click(screen.getByRole('tab', { name: 'Closed positions' }))
+    const openPositions = screen.getByRole('table', { name: 'Open positions' })
+    const btcRow = openPositions.querySelector('[data-position-key="BTCUSDT:BOTH"]')
+    const ethRow = openPositions.querySelector('[data-position-key="ETHUSDT:LONG"]')
+    const historyTable = screen.getByRole('table', { name: 'Position history' })
+    describeFuturesPosition.mockClear()
+    historySymbolRead.mockClear()
+
+    act(() => positionMarkStore.replace({
+      BTCUSDT: { markPrice: '60800', updatedAt: 1_784_000_000_100 },
+      ETHUSDT: { markPrice: '3100', updatedAt: 1_784_000_000_000 },
+    }))
+
+    expect(describeFuturesPosition.mock.calls.map(([row]) => row.symbol)).toEqual(['BTCUSDT'])
+    expect(historySymbolRead).not.toHaveBeenCalled()
+    expect(screen.getByTestId('futures-upnl-total')).toHaveTextContent('−300.00 USDT')
+    expect(openPositions.querySelector('[data-position-key="BTCUSDT:BOTH"]')).toBe(btcRow)
+    expect(btcRow).toHaveTextContent('−400.00')
+    expect(openPositions.querySelector('[data-position-key="ETHUSDT:LONG"]')).toBe(ethRow)
+    expect(ethRow).toHaveTextContent('+100.00')
+    expect(screen.getByRole('table', { name: 'Position history' })).toBe(historyTable)
   })
 
-  it('re-values the row when a fresher mark arrives without an account event', () => {
-    const { rerender } = render(
-      <FuturesPortfolioDock selectedSymbol="ETHUSDT" positions={[position]} />,
-    )
-    rerender(
+  it('updates both hedge legs when their shared symbol mark changes', () => {
+    const positionMarkStore = createFuturesPositionMarkStore()
+    positionMarkStore.replace({
+      BTCUSDT: { markPrice: '60500', updatedAt: 1_784_000_000_000 },
+    })
+    const longPosition = {
+      ...position,
+      positionSide: 'LONG',
+      quantity: '0.1',
+      entryPrice: '60000',
+      unrealizedPnl: '999',
+    }
+    const shortPosition = {
+      ...position,
+      positionSide: 'SHORT',
+      quantity: '0.2',
+      entryPrice: '61000',
+      unrealizedPnl: '999',
+    }
+    render(
       <FuturesPortfolioDock
-        selectedSymbol="ETHUSDT"
-        positions={[{ ...position, markPrice: '61200', unrealizedPnl: '-600' }]}
+        selectedSymbol="BTCUSDT"
+        positions={[longPosition, shortPosition]}
+        positionMarkStore={positionMarkStore}
       />,
     )
     const table = screen.getByRole('table', { name: 'Open positions' })
+    const longRow = table.querySelector('[data-position-key="BTCUSDT:LONG"]')
+    const shortRow = table.querySelector('[data-position-key="BTCUSDT:SHORT"]')
+    expect(screen.getByTestId('futures-upnl-total')).toHaveTextContent('+150.00 USDT')
+    describeFuturesPosition.mockClear()
+
+    act(() => positionMarkStore.replace({
+      BTCUSDT: { markPrice: '60800', updatedAt: 1_784_000_000_100 },
+    }))
+
+    expect(describeFuturesPosition.mock.calls.map(([row]) => row.positionSide).sort())
+      .toEqual(['LONG', 'SHORT'])
+    expect(table.querySelector('[data-position-key="BTCUSDT:LONG"]')).toBe(longRow)
+    expect(longRow).toHaveTextContent('+80.00')
+    expect(table.querySelector('[data-position-key="BTCUSDT:SHORT"]')).toBe(shortRow)
+    expect(shortRow).toHaveTextContent('+40.00')
+    expect(screen.getByTestId('futures-upnl-total')).toHaveTextContent('+120.00 USDT')
+  })
+
+  it('re-values the row when a fresher mark arrives without an account event', () => {
+    const positionMarkStore = createFuturesPositionMarkStore()
+    positionMarkStore.replace({
+      BTCUSDT: { markPrice: '60600', updatedAt: 1_784_000_000_000 },
+    })
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="ETHUSDT"
+        positions={[position]}
+        positionMarkStore={positionMarkStore}
+      />,
+    )
+    act(() => positionMarkStore.replace({
+      BTCUSDT: { markPrice: '61200', updatedAt: 1_784_000_000_100 },
+    }))
+    const table = screen.getByRole('table', { name: 'Open positions' })
     expect(table).toHaveTextContent('30600.00')
     expect(table).toHaveTextContent('−600.00')
+    expect(table.querySelector('[data-position-key="BTCUSDT:BOTH"]'))
+      .toHaveAttribute('data-valuation-source', 'live-mark')
     expect(screen.getByLabelText('Futures positions and working orders'))
       .toHaveTextContent('−600.00 USDT')
   })
@@ -447,10 +616,15 @@ describe('FuturesPortfolioDock', () => {
   // ROE had no visible denominator: the dock divided by the committed margin
   // and then showed only the quotient.
   it('states the margin behind each position beside the ROE measured against it', () => {
+    const positionMarkStore = createFuturesPositionMarkStore()
+    positionMarkStore.replace({
+      BTCUSDT: { markPrice: '60600', updatedAt: 1_784_000_000_000 },
+    })
     render(
       <FuturesPortfolioDock
         selectedSymbol="BTCUSDT"
         positions={[{ ...position, isolatedWallet: '3000', unrealizedPnl: '-300' }]}
+        positionMarkStore={positionMarkStore}
       />,
     )
     const table = screen.getByRole('table', { name: 'Open positions' })
@@ -460,7 +634,7 @@ describe('FuturesPortfolioDock', () => {
     // The amount and the percentage together outgrew the column, which clips its
     // overflow: the percent sign was being sliced off. Both readings stay exact in
     // the cell's title whatever the dock's width does to the text.
-    expect(within(table).getByTitle('−300.00 USDT · −10.00% on margin'))
+    expect(within(table).getByTitle(/−300\.00 USDT · −10\.00% on margin · live exchange mark/))
       .toHaveTextContent('−300.00')
   })
 
@@ -673,10 +847,15 @@ describe('FuturesPortfolioDock', () => {
     const onClosePosition = vi.fn()
     const onCancelOrder = vi.fn()
     const onSymbolChange = vi.fn()
+    const positionMarkStore = createFuturesPositionMarkStore()
+    positionMarkStore.replace({
+      BTCUSDT: { markPrice: '60600', updatedAt: 1_784_000_000_000 },
+    })
     render(
       <FuturesPortfolioDock
         selectedSymbol="ETHUSDT"
         positions={[position]}
+        positionMarkStore={positionMarkStore}
         openOrders={[order]}
         onClosePosition={onClosePosition}
         onCancelOrder={onCancelOrder}
@@ -684,7 +863,13 @@ describe('FuturesPortfolioDock', () => {
       />,
     )
     fireEvent.click(screen.getByRole('button', { name: 'Close BTCUSDT position' }))
-    expect(onClosePosition).toHaveBeenCalledWith(position, expect.any(Object))
+    expect(onClosePosition).toHaveBeenCalledWith(expect.objectContaining({
+      symbol: 'BTCUSDT',
+      markPrice: '60600',
+      unrealizedPnl: '-300',
+      valuationSource: 'live-mark',
+      valuationComplete: true,
+    }), expect.any(Object))
 
     fireEvent.click(screen.getByRole('button', {
       name: 'Cancel BTCUSDT BUY order at 58445.00',
@@ -1026,12 +1211,17 @@ describe('FuturesPortfolioDock', () => {
   it('collapses to a live truthful summary and expands back to the full dock', () => {
     const read = { status: 'ready', data: [], lastSuccessfulAt: 1000, error: null }
     const accountResources = { positions: read, regularOrders: read, algoOrders: read }
+    const positionMarkStore = createFuturesPositionMarkStore()
+    positionMarkStore.replace({
+      BTCUSDT: { markPrice: '60600', updatedAt: 1_784_000_000_000 },
+    })
     const { rerender } = render(
       <FuturesPortfolioDock
         selectedSymbol="BTCUSDT"
         positions={[position]}
         openOrders={[order]}
         accountResources={accountResources}
+        positionMarkStore={positionMarkStore}
       />,
     )
 
@@ -1047,12 +1237,16 @@ describe('FuturesPortfolioDock', () => {
     expect(screen.queryByRole('table', { name: 'Open positions' })).toBeNull()
     expect(screen.queryByRole('table', { name: 'Working orders' })).toBeNull()
 
+    act(() => positionMarkStore.replace({
+      BTCUSDT: { markPrice: '60900', updatedAt: 1_784_000_000_100 },
+    }))
     rerender(
       <FuturesPortfolioDock
         selectedSymbol="BTCUSDT"
-        positions={[{ ...position, unrealizedPnl: '-450' }]}
+        positions={[position]}
         openOrders={[]}
         accountResources={accountResources}
+        positionMarkStore={positionMarkStore}
       />,
     )
     summary = screen.getByLabelText('Collapsed portfolio dock summary')
@@ -1133,6 +1327,15 @@ describe('FuturesPortfolioDock', () => {
     expect(screen.getAllByText('Not read yet.')).toHaveLength(2)
     expect(screen.queryByText('No open positions.')).toBeNull()
     expect(screen.queryByText('No working orders.')).toBeNull()
+    const expandedTotal = screen.getByTestId('futures-upnl-total')
+    expect(expandedTotal).toHaveAttribute('data-complete', 'false')
+    expect(expandedTotal).toHaveTextContent('— USDT')
+    expect(expandedTotal).toHaveTextContent('positions not read')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse portfolio dock' }))
+    const collapsedTotal = screen.getByTestId('futures-upnl-total')
+    expect(collapsedTotal).toHaveAttribute('data-complete', 'false')
+    expect(collapsedTotal).toHaveTextContent('— USDT')
   })
 
   // An unstyled control does not fail loudly: it renders as a browser button
@@ -1405,6 +1608,8 @@ describe('FuturesPortfolioDock', () => {
 
     expect(screen.getByText('No open positions.')).toBeInTheDocument()
     expect(screen.getByText('0 open')).toBeInTheDocument()
+    expect(screen.getByTestId('futures-upnl-total')).toHaveAttribute('data-complete', 'true')
+    expect(screen.getByTestId('futures-upnl-total')).toHaveTextContent('0.00 USDT')
   })
 
 })

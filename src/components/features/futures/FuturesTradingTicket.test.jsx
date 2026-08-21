@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { act, createEvent, fireEvent, render, screen, within } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import FuturesTradingTicket from './FuturesTradingTicket.jsx'
+import { createFuturesPositionMarkStore } from '../../../utils/futuresPositionMarks.js'
 
 const contract = Object.freeze({
   symbol: 'BTCUSDT',
@@ -1586,7 +1587,11 @@ describe('FuturesTradingTicket', () => {
       markPrice: '58445', unrealizedPnl: '14.45', liquidationPrice: '29000',
       leverage: '2', marginType: 'ISOLATED',
     }
-    const state = createState({ positions: [position] })
+    const positionMarkStore = createFuturesPositionMarkStore()
+    positionMarkStore.replace({
+      BTCUSDT: { markPrice: '58445', updatedAt: 1_784_000_000_000 },
+    })
+    const state = createState({ positions: [position], positionMarkStore })
     const onPositionClose = vi.fn()
     render(
       <FuturesTradingTicket
@@ -1599,6 +1604,11 @@ describe('FuturesTradingTicket', () => {
     fireEvent.click(screen.getByRole('tab', { name: /Positions/ }))
     const panel = screen.getByLabelText('Open positions')
     expect(panel).toHaveTextContent('LONG')
+    expect(panel.querySelector('[data-position-key="BTCUSDT:LONG"]'))
+      .toHaveAttribute('data-valuation-source', 'live-mark')
+    expect(panel).toHaveTextContent('+14.45 USDT')
+    expect(panel.querySelector('.futures-production-position-pnl'))
+      .toHaveAttribute('title', expect.stringContaining('Live exchange mark'))
     // The liquidation price is a function of the margin, so the card that
     // states one states the other — and names the mode, since only an isolated
     // margin can be moved at all.
@@ -1610,7 +1620,47 @@ describe('FuturesTradingTicket', () => {
     expect(panel).not.toHaveTextContent('2×')
 
     fireEvent.click(within(panel).getByRole('button', { name: 'Close position' }))
-    expect(onPositionClose).toHaveBeenCalledWith(position, expect.any(Object))
+    const [valuedPosition, anchor] = onPositionClose.mock.lastCall
+    expect(valuedPosition).toEqual(expect.objectContaining({
+      symbol: 'BTCUSDT',
+      markPrice: '58445',
+      unrealizedPnl: '14.45',
+      valuationSource: 'live-mark',
+      valuationComplete: true,
+    }))
+    expect(Number(valuedPosition.unrealizedPnl)).toBeCloseTo(14.45)
+    expect(anchor).toEqual(expect.any(Object))
+  })
+
+  it('states when an account-snapshot position fallback was read', () => {
+    const position = {
+      symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '0.010', entryPrice: '57000',
+      markPrice: '58445', unrealizedPnl: '14.45', isolatedWallet: '285',
+    }
+    render(
+      <FuturesTradingTicket
+        state={createState({
+          positions: [position],
+          accountResources: {
+            positions: {
+              status: 'ready',
+              data: [position],
+              updatedAt: 1_784_000_000_000,
+              lastSuccessfulAt: 1_784_000_000_000,
+            },
+          },
+        })}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+      />,
+    )
+    fireEvent.click(screen.getByRole('tab', { name: /Positions/ }))
+    expect(screen.getByLabelText('Open positions').querySelector(
+      '.futures-production-position-pnl',
+    )).toHaveAttribute(
+      'title',
+      expect.stringMatching(/^Account snapshot fallback from .+; live mark unavailable/),
+    )
   })
 
   it('keeps backend pause enforcement without rendering a pause control', () => {

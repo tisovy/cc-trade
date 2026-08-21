@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
-  mergeFuturesPositionMarks,
-  readFuturesPositionMarks,
+  createFuturesPositionMarkStore,
 } from '../utils/futuresPositionMarks.js'
 import {
   pruneFuturesMarginCalls,
@@ -127,9 +126,6 @@ const createInitialState = ({ enabled, connection, historyStoreReady = false }) 
   // the settlement cannot put an order back into the list after it.
   settledOrders: new Map(),
   positions: [],
-  // Live mark prices, keyed by symbol. Kept beside the snapshot rather than
-  // folded into it, so a dropped feed loses only the overlay.
-  positionMarks: {},
   // What the account has already settled — realized PnL, funding, commission,
   // insurance clearance — as the exchange's own income rows, with the window
   // they were read over. Held raw rather than folded: the fold needs to know
@@ -431,6 +427,7 @@ const useFuturesTrading = ({
     connection: wsConnection,
     historyStoreReady: historyStoreUnavailable,
   }))
+  const [positionMarkStore] = useState(() => createFuturesPositionMarkStore())
   const symbolRef = useRef(symbol)
   // Read inside the connection effect, which must not re-run when only the
   // generation changes: re-running it would resend the account refresh.
@@ -447,7 +444,12 @@ const useFuturesTrading = ({
 
   useEffect(() => {
     generationRef.current = marketGeneration
-  }, [marketGeneration])
+    // Feed publication revisions are scoped to one backend activation, while
+    // this external store deliberately survives React renders. Reset both its
+    // readings and revision admission when the activation changes so revision
+    // 1 from the new feed cannot be rejected behind a larger old revision.
+    positionMarkStore.clear({ retireEpoch: true })
+  }, [marketGeneration, positionMarkStore])
 
   // Which listed algorithmic parent each spawned regular order belongs to.
   // Mirrored into a ref because it is consulted on the stream's own path, which
@@ -564,6 +566,7 @@ const useFuturesTrading = ({
 
   useEffect(() => {
     if (!enabled || !isUsableSocket(wsConnection)) {
+      positionMarkStore.clear()
       // Keep the last-known account snapshot so re-entering Futures mode is
       // usable immediately; the refresh sent on re-enable reconciles it. The
       // early return has to answer for the whole update, not only the two fields
@@ -639,10 +642,7 @@ const useFuturesTrading = ({
         })
       }
       if (payload.type === 'futures_position_marks') {
-        const positionMarks = readFuturesPositionMarks(payload.marks)
-        if (positionMarks !== null) {
-          setState(previous => ({ ...previous, positionMarks }))
-        }
+        positionMarkStore.replace(payload.marks, payload.revision, payload.feedEpoch)
       }
       if (payload.type === 'futures_settled_income') {
         const settledIncome = readFuturesSettledIncomeFrame(payload)
@@ -877,6 +877,10 @@ const useFuturesTrading = ({
 
     const handleDisconnect = () => {
       if (!active) return
+      // Account state may remain as an explicitly stale reading; a public mark
+      // may not. Once this transport is gone there is nobody left to clear a
+      // feed that stopped, so retaining it would label an aged price `live`.
+      positionMarkStore.clear()
       abandonCommandWatchers(
         'TRANSPORT_LOST',
         'The connection dropped before Binance answered this command.',
@@ -906,11 +910,12 @@ const useFuturesTrading = ({
 
     return () => {
       active = false
+      positionMarkStore.clear()
       unsubscribe()
       wsConnection.removeEventListener('close', handleDisconnect)
       wsConnection.removeEventListener('error', handleDisconnect)
     }
-  }, [abandonCommandWatchers, answerCommandWatchers, enabled, wsConnection])
+  }, [abandonCommandWatchers, answerCommandWatchers, enabled, positionMarkStore, wsConnection])
 
   // What these surfaces last drew. Updated before the effect below reads it —
   // effects run in the order they are written, and that order is what lets the
@@ -1255,15 +1260,12 @@ const useFuturesTrading = ({
     createFuturesSetTradingPausedCommand({ paused }),
   ), [sendCommand])
 
-  // Every position surface reads the same re-valued list, so the ticket and the
-  // dock can never disagree about what a position is worth — or about the
-  // leverage it is carried at, which the position read no longer reports.
+  // Account positions stay stable between account/config events. Live market
+  // valuation lives in the per-symbol external store, so a mark tick does not
+  // invalidate command state or the held-history tree.
   const positions = useMemo(
-    () => mergeFuturesPositionMarks(
-      mergeFuturesPositionConfigs(state.positions, state.symbolConfigs),
-      state.positionMarks,
-    ),
-    [state.positions, state.positionMarks, state.symbolConfigs],
+    () => mergeFuturesPositionConfigs(state.positions, state.symbolConfigs),
+    [state.positions, state.symbolConfigs],
   )
 
   // One fold of the fills, read twice: it says when each open position began,
@@ -1271,10 +1273,18 @@ const useFuturesTrading = ({
   // answers must come from one walk — a position whose start is taken from one
   // fold and whose costs are taken from another can be charged for what happened
   // before it opened.
-  const openRounds = useMemo(
-    () => buildFuturesTradeRounds(state.history.trades).filter(round => round?.open === true),
-    [state.history.trades],
-  )
+  const tradeRoundIndex = useMemo(() => {
+    const all = buildFuturesTradeRounds(state.history.trades, {
+      income: state.settledIncome?.rows ?? null,
+      incomeFrom: state.settledIncome?.from ?? null,
+    })
+    return Object.freeze({
+      all,
+      open: Object.freeze(all.filter(round => round?.open === true)),
+      closed: Object.freeze(all.filter(round => !round?.open && round?.exitPrice !== null)),
+    })
+  }, [state.history.trades, state.settledIncome])
+  const openRounds = tradeRoundIndex.open
 
   // When each open position began, from that fold. One walk defines when a
   // position started for every surface that asks, so the settled money on a row
@@ -1317,7 +1327,9 @@ const useFuturesTrading = ({
   return useMemo(() => ({
     ...state,
     positions,
+    positionMarkStore,
     settledMoney,
+    tradeRoundIndex,
     // The window the settled figures were read over, so a surface can say what
     // its reading covers rather than implying it covers everything.
     settledIncomeWindow: state.settledIncome === null ? null : Object.freeze({
@@ -1352,6 +1364,7 @@ const useFuturesTrading = ({
     placeOrder,
     placeOrderAndConfirm,
     positions,
+    positionMarkStore,
     refresh,
     retryUnsentCommand,
     setLeverage,
@@ -1359,6 +1372,7 @@ const useFuturesTrading = ({
     setTradingPaused,
     settledMoney,
     state,
+    tradeRoundIndex,
   ])
 }
 

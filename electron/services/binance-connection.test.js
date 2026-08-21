@@ -729,7 +729,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
         // socket that never delivers a frame.
         expect(MockWebSocket.mock.calls[streamIndex][0])
             .toBe('wss://fstream.binance.com/market/stream?streams='
-                + 'bmtusdt@markPrice@1s/bmtusdt@aggTrade');
+                + 'bmtusdt@markPrice@1s');
 
         const markSocket = MockWebSocket.mock.results[streamIndex].value;
         markSocket.handlers.message(JSON.stringify({

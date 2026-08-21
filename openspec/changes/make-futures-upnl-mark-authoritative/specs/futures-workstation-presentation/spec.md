@@ -13,7 +13,7 @@ The mark column SHALL state the same confirmed mark used by the row arithmetic. 
 
 #### Scenario: The mark feed is not connected
 - **WHEN** the feed reports no mark for a symbol and the account snapshot has a confirmed unrealized PnL
-- **THEN** the row retains the snapshot reading with its source and age, and no aged mark is presented as live
+- **THEN** the row and Ticket retain the snapshot reading with its source and age, and no aged mark is presented as live
 
 #### Scenario: A mark arrives for a symbol with no open position
 - **WHEN** a mark arrives for a symbol that is not in the position list
@@ -39,6 +39,10 @@ An incoming market valuation SHALL update the affected open-position presentatio
 #### Scenario: A mark ticks while Closed Positions is open
 - **WHEN** a mark update changes one open position and the held history inputs have not changed
 - **THEN** the Closed Positions review does not render again and its derived rounds are not folded again
+
+#### Scenario: Only explanatory tape detail changes
+- **WHEN** a tape-only update changes no accepted mark
+- **THEN** the position aggregate does not recompute and the held review does not render
 
 #### Scenario: The review holds thousands of rounds
 - **WHEN** the operator opens a Closed Positions review larger than the render window

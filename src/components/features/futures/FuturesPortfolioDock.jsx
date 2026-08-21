@@ -17,6 +17,11 @@ import {
 import { futuresOrderPriceIsMovable } from '../../../utils/futuresOrderDrag.js'
 import { formatExchangePrice } from '../../../utils/futuresPriceFormat.js'
 import { futuresMarginCallKey } from '../../../utils/futuresMarginCall.js'
+import { applyFuturesPositionValuation } from '../../../utils/futuresPositionMarks.js'
+import {
+  useFuturesPositionValuation,
+  useFuturesPositionValuationAggregate,
+} from '../../../hooks/useFuturesPositionValuation.js'
 import {
   describeFuturesOrderAvailability,
   describeFuturesResourceAvailability,
@@ -143,6 +148,241 @@ const openOrderEditorFromKeyboard = (event, order, onOrderEdit) => {
 // reading of nothing is "not read", not "nothing there".
 const EMPTY_RESOURCES = Object.freeze({})
 
+const positionSnapshotMeta = (resource, positionsKnown, hasHeldRows) => {
+  const updatedAt = Number.isSafeInteger(resource?.updatedAt) ? resource.updatedAt : null
+  const lastSuccessfulAt = Number.isSafeInteger(resource?.lastSuccessfulAt)
+    ? resource.lastSuccessfulAt
+    : null
+  return Object.freeze({
+    at: updatedAt ?? lastSuccessfulAt,
+    confirmed: positionsKnown || hasHeldRows || lastSuccessfulAt !== null,
+    // A private ACCOUNT_UPDATE may replace quantity/entry/uPnL while retaining
+    // the older REST mark. Only equal read stamps prove the full snapshot fields
+    // belong to one generation; otherwise fallback is the exchange uPnL scalar.
+    coherent: (resource === null || resource === undefined) && hasHeldRows
+      ? true
+      : updatedAt !== null && updatedAt === lastSuccessfulAt,
+  })
+}
+
+const valuationSourceNote = (valuation) => {
+  if (valuation?.source === 'live-mark') {
+    return ` · live exchange mark${valuation.sourceAt === null
+      ? ''
+      : ` at ${exactFuturesDeskTime(valuation.sourceAt)}`}`
+  }
+  if (valuation?.source === 'account-snapshot') {
+    return ` · account snapshot fallback${valuation.sourceAt === null
+      ? ''
+      : ` from ${exactFuturesDeskTime(valuation.sourceAt)}`}; live mark unavailable`
+  }
+  return ' · unavailable: neither a live mark nor a confirmed account uPnL can value this position'
+}
+
+const FuturesPortfolioUnrealizedTotal = memo(({
+  positions,
+  positionsKnown,
+  snapshot,
+  store,
+}) => {
+  const aggregate = useFuturesPositionValuationAggregate({
+    positions,
+    positionsKnown,
+    snapshotAt: snapshot.at,
+    snapshotCoherent: snapshot.coherent,
+    store,
+  })
+  const tone = aggregate.complete && aggregate.value > 0
+    ? 'positive'
+    : aggregate.complete && aggregate.value < 0 ? 'negative' : 'flat'
+  const qualification = aggregate.missingCount === null
+    ? 'positions not read'
+    : aggregate.missingCount > 0
+      ? `${aggregate.missingCount} position${aggregate.missingCount === 1 ? '' : 's'} missing`
+      : aggregate.fallbackCount > 0
+        ? `${aggregate.fallbackCount} account snapshot fallback${aggregate.fallbackCount === 1 ? '' : 's'}`
+        : null
+  const title = aggregate.missingCount === null
+    ? 'Total uPnL is unknown until the positions resource has been read.'
+    : aggregate.missingCount > 0
+      ? `Incomplete total: ${aggregate.missingCount} open position${aggregate.missingCount === 1 ? '' : 's'} cannot be valued. The known rows sum to ${formatSignedUsdt(aggregate.value)} USDT.`
+      : aggregate.fallbackCount > 0
+        ? `Complete total using ${aggregate.fallbackCount} qualified account snapshot fallback${aggregate.fallbackCount === 1 ? '' : 's'} while live marks are unavailable.`
+        : 'Complete total from the exchange mark used by every open-position row.'
+  return (
+    <div
+      className={`futures-workstation-dock-total is-${tone}${aggregate.complete ? '' : ' is-incomplete'}`}
+      title={title}
+      data-testid="futures-upnl-total"
+      data-complete={aggregate.complete ? 'true' : 'false'}
+    >
+      <span>Total uPnL</span>
+      <strong>{aggregate.complete ? `${formatSignedUsdt(aggregate.value)} USDT` : '— USDT'}</strong>
+      {qualification === null ? null : <em>{qualification}</em>}
+    </div>
+  )
+})
+
+const FuturesPortfolioPositionRow = memo(({
+  marginCall,
+  onClosePosition,
+  onLeverageEdit,
+  onMarginEdit,
+  onSizePick,
+  onSymbolChange,
+  position,
+  selected,
+  settled,
+  settledRead,
+  settledWindow,
+  snapshot,
+  store,
+  tickSize,
+}) => {
+  const valuation = useFuturesPositionValuation(position, store, {
+    snapshotAt: snapshot.at,
+    snapshotConfirmed: snapshot.confirmed,
+    snapshotCoherent: snapshot.coherent,
+  })
+  const valuedPosition = useMemo(
+    () => applyFuturesPositionValuation(position, valuation),
+    [position, valuation],
+  )
+  const presentation = describeFuturesPosition(valuedPosition)
+  const margin = describeFuturesPositionMargin(valuedPosition)
+  const priceOf = value => formatExchangePrice(value, tickSize)
+  const hasPnl = valuation.unrealizedPnl !== null
+  const hasRoe = valuation.roeComplete && valuation.roe !== null
+  return (
+    <div
+      className={`futures-workstation-dock-row is-${presentation.tone}${selected ? ' is-current-symbol' : ''}`}
+      role="row"
+      data-position-key={`${position.symbol}:${position.positionSide}`}
+      data-valuation-source={valuation.source}
+    >
+      <span role="cell" className="futures-workstation-dock-instrument">
+        <button
+          type="button"
+          className="futures-workstation-dock-symbol"
+          aria-label={`Show ${position.symbol}`}
+          onClick={() => onSymbolChange?.(position.symbol)}
+        >
+          {position.symbol}
+        </button>
+        {typeof onLeverageEdit === 'function' ? (
+          <button
+            type="button"
+            className="futures-workstation-dock-leverage"
+            aria-label={`Set ${position.symbol} leverage`}
+            title={position.leverage
+              ? `${position.leverage}× leverage — click to change it`
+              : 'Leverage not reported yet — click to set it'}
+            onClick={event => onLeverageEdit(position.symbol, {
+              x: event.clientX,
+              y: event.clientY,
+            })}
+          >
+            {position.leverage ? `${position.leverage}×` : 'Lev'}
+          </button>
+        ) : null}
+      </span>
+      <span role="cell" className={`futures-workstation-dock-side is-${presentation.tone}`}>
+        {presentation.positionSide}
+      </span>
+      <span role="cell">
+        {selected && presentation.absoluteQuantity !== null && typeof onSizePick === 'function' ? (
+          <button
+            type="button"
+            className="futures-workstation-dock-size"
+            aria-label={`Size the ticket for the whole ${position.symbol} position`}
+            title={`${exactText(position.quantity)} contracts — size the ticket for the whole position`}
+            onClick={() => onSizePick(presentation.absoluteQuantity)}
+          >
+            {formatUsdt(valuation.notional)}
+          </button>
+        ) : (
+          <span title={`${exactText(position.quantity)} contracts`}>
+            {formatUsdt(valuation.notional)}
+          </span>
+        )}
+      </span>
+      <span role="cell">{priceOf(position.entryPrice)}</span>
+      <span role="cell">{priceOf(valuation.markPrice)}</span>
+      <span
+        role="cell"
+        className={`futures-workstation-dock-liquidation${marginCall === null ? '' : ' is-margin-call'}`}
+        title={marginCall === null ? undefined : `Margin call from the exchange at ${
+          exactFuturesDeskTime(marginCall.at)
+        }${marginCall.maintenanceMargin === null ? '' : ` — maintenance margin required ${
+          marginCall.maintenanceMargin}`}`}
+      >
+        {marginCall === null ? null : (
+          <span aria-label={`${position.symbol} margin call`} role="img">⚠ </span>
+        )}
+        {priceOf(position.liquidationPrice)}
+      </span>
+      <span role="cell">
+        {margin.margin !== null && typeof onMarginEdit === 'function' ? (
+          <button
+            type="button"
+            className={`futures-workstation-dock-margin is-${margin.marginMode === 'CROSS' ? 'cross' : 'isolated'}`}
+            aria-label={`Adjust margin on the ${position.symbol} ${presentation.positionSide} position`}
+            title={margin.marginMode === 'CROSS'
+              ? 'Cross margin — backed by the whole account'
+              : 'Isolated margin — click to add or remove'}
+            onClick={event => onMarginEdit(valuedPosition, {
+              x: event.clientX,
+              y: event.clientY,
+            })}
+          >
+            <em>{marginModeLabel(margin.marginMode)}</em>
+            {formatUsdt(margin.margin)}
+          </button>
+        ) : (
+          <span className="futures-workstation-dock-margin is-static">
+            <em>{marginModeLabel(margin.marginMode)}</em>
+            {margin.margin === null ? '—' : formatUsdt(margin.margin)}
+          </span>
+        )}
+      </span>
+      <span
+        role="cell"
+        className={`futures-workstation-dock-pnl is-${hasPnl ? presentation.pnlTone : 'absent'}`}
+        title={`${hasPnl ? `${formatSignedUsdt(valuation.unrealizedPnl)} USDT${
+          hasRoe ? ` · ${formatSignedPercent(valuation.roe)} on margin` : ' · ROE unavailable'
+        }` : 'uPnL and ROE unavailable'}${valuationSourceNote(valuation)}${futuresPnlReadingNote(presentation, priceOf)}`}
+      >
+        <strong>{hasPnl ? formatSignedUsdt(valuation.unrealizedPnl) : '—'}</strong>
+        <em>{hasRoe ? formatSignedPercent(valuation.roe) : '—'}</em>
+      </span>
+      <span
+        role="cell"
+        className={`futures-workstation-dock-settled is-${settledToneOf(settled)}${
+          settled !== null && settled.complete === false ? ' is-partial' : ''}`}
+        title={settledTitle(settled, settledWindow, settledRead)}
+      >
+        {settled === null || settled.total === null
+          ? '—'
+          : <strong>{formatSignedUsdt(settled.total)}</strong>}
+      </span>
+      <span role="cell">
+        <button
+          type="button"
+          className="futures-workstation-dock-close"
+          aria-label={`Close ${position.symbol} position`}
+          disabled={typeof onClosePosition !== 'function'}
+          onClick={event => onClosePosition?.(valuedPosition, {
+            x: event.clientX,
+            y: event.clientY,
+          })}
+        >
+          Close
+        </button>
+      </span>
+    </div>
+  )
+})
+
 export const FuturesPortfolioDock = ({
   selectedSymbol,
   positions = EMPTY_ROWS,
@@ -151,6 +391,8 @@ export const FuturesPortfolioDock = ({
   tickSizes = EMPTY_TICKS,
   marginCalls = EMPTY_MARGIN_CALLS,
   history = null,
+  positionMarkStore = null,
+  tradeRoundIndex = null,
   // What each open contract has already settled, keyed by symbol, and the window
   // it was read over. Both may be null: an account read that has not answered is
   // not an account that has settled nothing.
@@ -178,30 +420,17 @@ export const FuturesPortfolioDock = ({
   const settledRead = useMemo(() => (settledMoney === null
     ? null
     : Object.freeze({ contracts: Object.keys(settledMoney).length })), [settledMoney])
-  const describedPositions = useMemo(() => positions.map(position => ({
-    position,
-    presentation: describeFuturesPosition(position),
-    margin: describeFuturesPositionMargin(position),
-    // The exchange's own warning about this position, if it sent one. Kept
-    // apart from the liquidation price beside it: that number is the desk's
-    // reckoning, this is Binance saying the risk ratio is too high.
-    marginCall: marginCalls[futuresMarginCallKey(position)] ?? null,
-    // What this contract has already settled. Null until an income read has
-    // answered, which is a different reading from an account that has settled
-    // nothing — and the cell says so rather than showing a zero.
-    settled: settledMoney?.[position?.symbol] ?? null,
-  })), [positions, marginCalls, settledMoney])
-  const totalUnrealizedPnl = useMemo(() => describedPositions.reduce((total, entry) => (
-    entry.presentation.unrealizedPnl === null ? total : total + entry.presentation.unrealizedPnl
-  ), 0), [describedPositions])
-  const totalTone = totalUnrealizedPnl > 0
-    ? 'positive'
-    : totalUnrealizedPnl < 0 ? 'negative' : 'flat'
   const priceOf = (symbol, value) => formatExchangePrice(value, tickSizes[symbol] ?? null)
   // A caller that passes the account state through may pass null for it.
   const resources = accountResources ?? EMPTY_RESOURCES
   const positionsAvailability = describeFuturesResourceAvailability([resources.positions])
+  const valuationPositionsKnown = positionsAvailability.known || positions.length > 0
   const ordersAvailability = describeFuturesOrderAvailability(resources)
+  const snapshot = useMemo(() => positionSnapshotMeta(
+    resources.positions,
+    positionsAvailability.known,
+    positions.length > 0,
+  ), [positions.length, positionsAvailability.known, resources.positions])
   // The reason and the way back, stated where the rows are read rather than only
   // on the trading rail. An operator looking at a list of orders is not looking
   // at the ticket, and "these are stale" is not a fact the ticket can carry for
@@ -279,14 +508,12 @@ export const FuturesPortfolioDock = ({
             <span>Working</span>
             <strong>{ordersAvailability.known ? openOrders.length : '—'}</strong>
           </div>
-          <div className={`futures-workstation-dock-total is-${totalTone}`}>
-            <span>Total uPnL</span>
-            <strong>
-              {positionsAvailability.known
-                ? `${formatSignedUsdt(totalUnrealizedPnl)} USDT`
-                : '— USDT'}
-            </strong>
-          </div>
+          <FuturesPortfolioUnrealizedTotal
+            positions={positions}
+            positionsKnown={valuationPositionsKnown}
+            snapshot={snapshot}
+            store={positionMarkStore}
+          />
           <button
             type="button"
             className="futures-workstation-dock-toggle"
@@ -312,10 +539,12 @@ export const FuturesPortfolioDock = ({
             <span>Positions</span>
             <strong>{positionsAvailability.known ? `${positions.length} open` : '— open'}</strong>
           </div>
-          <div className={`futures-workstation-dock-total is-${totalTone}`}>
-            <span>Total uPnL</span>
-            <strong>{formatSignedUsdt(totalUnrealizedPnl)} USDT</strong>
-          </div>
+          <FuturesPortfolioUnrealizedTotal
+            positions={positions}
+            positionsKnown={valuationPositionsKnown}
+            snapshot={snapshot}
+            store={positionMarkStore}
+          />
           <button
             type="button"
             className="futures-workstation-dock-toggle"
@@ -330,7 +559,7 @@ export const FuturesPortfolioDock = ({
           </button>
         </header>
         {syncState(positionsAvailability, 'Positions synchronization')}
-        {describedPositions.length === 0 ? (
+        {positions.length === 0 ? (
           positionsAvailability.known
             ? <p className="futures-workstation-empty">No open positions.</p>
             : null
@@ -347,9 +576,9 @@ export const FuturesPortfolioDock = ({
               {/* The rule, stated once where the number it governs is read. */}
               <span
                 role="columnheader"
-                title={'Between two marks the uPnL is the desk\u2019s arithmetic on the last '
-                  + 'traded price and is underlined; on a mark it is the exchange\u2019s own '
-                  + 'figure. Liquidation is always the mark.'}
+                title={'uPnL, ROE and size use the exchange mark. A qualified account '
+                  + 'snapshot is shown only while a live mark is unavailable; trades '
+                  + 'between marks do not alter these readings.'}
               >
                 uPnL (ROE)
               </span>
@@ -366,152 +595,24 @@ export const FuturesPortfolioDock = ({
               </span>
               <span role="columnheader" />
             </div>
-            {describedPositions.map(({ position, presentation, margin, marginCall, settled }) => (
-              <div
-                className={`futures-workstation-dock-row is-${presentation.tone}${position.symbol === selectedSymbol ? ' is-current-symbol' : ''}`}
-                role="row"
+            {positions.map(position => (
+              <FuturesPortfolioPositionRow
                 key={`${position.symbol}:${position.positionSide}`}
-              >
-                {/* The contract and the leverage it is carried at, the way the
-                    exchange's own position list reads them: the multiple is a
-                    property of the instrument, not of the money, and it is the
-                    control that sets it. */}
-                <span role="cell" className="futures-workstation-dock-instrument">
-                  <button
-                    type="button"
-                    className="futures-workstation-dock-symbol"
-                    aria-label={`Show ${position.symbol}`}
-                    onClick={() => onSymbolChange?.(position.symbol)}
-                  >
-                    {position.symbol}
-                  </button>
-                  {typeof onLeverageEdit === 'function' ? (
-                    <button
-                      type="button"
-                      className="futures-workstation-dock-leverage"
-                      aria-label={`Set ${position.symbol} leverage`}
-                      title={position.leverage
-                        ? `${position.leverage}× leverage — click to change it`
-                        : 'Leverage not reported yet — click to set it'}
-                      onClick={event => onLeverageEdit(position.symbol, {
-                        x: event.clientX,
-                        y: event.clientY,
-                      })}
-                    >
-                      {position.leverage ? `${position.leverage}×` : 'Lev'}
-                    </button>
-                  ) : null}
-                </span>
-                <span role="cell" className={`futures-workstation-dock-side is-${presentation.tone}`}>
-                  {presentation.positionSide}
-                </span>
-                <span role="cell">
-                  {position.symbol === selectedSymbol
-                    && presentation.absoluteQuantity !== null
-                    && typeof onSizePick === 'function' ? (
-                      <button
-                        type="button"
-                        className="futures-workstation-dock-size"
-                        aria-label={`Size the ticket for the whole ${position.symbol} position`}
-                        title={`${exactText(position.quantity)} contracts — size the ticket for the whole position`}
-                        onClick={() => onSizePick(presentation.absoluteQuantity)}
-                      >
-                        {formatUsdt(presentation.markNotional)}
-                      </button>
-                    ) : (
-                      <span title={`${exactText(position.quantity)} contracts`}>
-                        {formatUsdt(presentation.markNotional)}
-                      </span>
-                    )}
-                </span>
-                <span role="cell">{priceOf(position.symbol, position.entryPrice)}</span>
-                <span role="cell">{priceOf(position.symbol, position.markPrice)}</span>
-                {/* The exchange raising its hand, stated where the desk's own
-                    liquidation reckoning already is. It carries when it was
-                    sent, because Binance sends nothing when the risk passes and
-                    a warning with no age behind it reads as current forever. */}
-                <span
-                  role="cell"
-                  className={`futures-workstation-dock-liquidation${
-                    marginCall === null ? '' : ' is-margin-call'}`}
-                  title={marginCall === null ? undefined : `Margin call from the exchange at ${
-                    exactFuturesDeskTime(marginCall.at)
-                  }${marginCall.maintenanceMargin === null ? '' : ` — maintenance margin required ${
-                    marginCall.maintenanceMargin}`}`}
-                >
-                  {marginCall === null ? null : (
-                    <span aria-label={`${position.symbol} margin call`} role="img">⚠ </span>
-                  )}
-                  {priceOf(position.symbol, position.liquidationPrice)}
-                </span>
-                {/* The denominator of the ROE beside it, and the only property
-                    of a live position the operator can change without trading.
-                    Cross rows open the panel too — it is where the reason they
-                    cannot be adjusted is stated. The mode is spelled out rather
-                    than left to the underline: the two are not two styles of
-                    one thing, only one of them can be moved at all. It leads the
-                    amount rather than trailing it — after the digits it read as
-                    part of the number, like a stray fraction of a cent. */}
-                <span role="cell">
-                  {margin.margin !== null && typeof onMarginEdit === 'function' ? (
-                    <button
-                      type="button"
-                      className={`futures-workstation-dock-margin is-${margin.marginMode === 'CROSS' ? 'cross' : 'isolated'}`}
-                      aria-label={`Adjust margin on the ${position.symbol} ${presentation.positionSide} position`}
-                      title={margin.marginMode === 'CROSS'
-                        ? 'Cross margin — backed by the whole account'
-                        : 'Isolated margin — click to add or remove'}
-                      onClick={event => onMarginEdit(position, {
-                        x: event.clientX,
-                        y: event.clientY,
-                      })}
-                    >
-                      <em>{marginModeLabel(margin.marginMode)}</em>
-                      {formatUsdt(margin.margin)}
-                    </button>
-                  ) : (
-                    <span className="futures-workstation-dock-margin is-static">
-                      <em>{marginModeLabel(margin.marginMode)}</em>
-                      {margin.margin === null ? '—' : formatUsdt(margin.margin)}
-                    </span>
-                  )}
-                </span>
-                {/* Both figures in the title as well as on screen: the column is
-                    the narrowest thing carrying the widest number, and a uPnL that
-                    outgrows it must still be readable exactly. */}
-                <span
-                  role="cell"
-                  className={`futures-workstation-dock-pnl is-${presentation.pnlTone}${presentation.pnlEstimated ? ' is-estimated' : ''}`}
-                  title={`${formatSignedUsdt(presentation.unrealizedPnl)} USDT · ${formatSignedPercent(presentation.roePercent)} on margin${futuresPnlReadingNote(presentation, price => priceOf(position.symbol, price))}`}
-                >
-                  <strong>{formatSignedUsdt(presentation.unrealizedPnl)}</strong>
-                  <em>{formatSignedPercent(presentation.roePercent)}</em>
-                </span>
-                <span
-                  role="cell"
-                  className={`futures-workstation-dock-settled is-${settledToneOf(settled)}${
-                    settled !== null && settled.complete === false ? ' is-partial' : ''}`}
-                  title={settledTitle(settled, settledWindow, settledRead)}
-                >
-                  {settled === null || settled.total === null
-                    ? '—'
-                    : <strong>{formatSignedUsdt(settled.total)}</strong>}
-                </span>
-                <span role="cell">
-                  <button
-                    type="button"
-                    className="futures-workstation-dock-close"
-                    aria-label={`Close ${position.symbol} position`}
-                    disabled={typeof onClosePosition !== 'function'}
-                    onClick={event => onClosePosition?.(position, {
-                      x: event.clientX,
-                      y: event.clientY,
-                    })}
-                  >
-                    Close
-                  </button>
-                </span>
-              </div>
+                position={position}
+                selected={position.symbol === selectedSymbol}
+                tickSize={tickSizes[position.symbol] ?? null}
+                marginCall={marginCalls[futuresMarginCallKey(position)] ?? null}
+                settled={settledMoney?.[position.symbol] ?? null}
+                settledRead={settledRead}
+                settledWindow={settledWindow}
+                snapshot={snapshot}
+                store={positionMarkStore}
+                onClosePosition={onClosePosition}
+                onLeverageEdit={onLeverageEdit}
+                onMarginEdit={onMarginEdit}
+                onSizePick={onSizePick}
+                onSymbolChange={onSymbolChange}
+              />
             ))}
           </div>
         )}
@@ -599,6 +700,7 @@ export const FuturesPortfolioDock = ({
             symbol={selectedSymbol}
             history={history}
             settledIncome={settledIncome}
+            tradeRoundIndex={tradeRoundIndex}
             tickSizes={tickSizes}
             onSymbolChange={onSymbolChange}
           />

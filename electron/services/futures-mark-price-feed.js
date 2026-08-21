@@ -8,14 +8,23 @@
 
 export const FUTURES_MARK_PRICE_TYPE = 'futures_position_marks';
 export const FUTURES_MARK_PRICE_VERSION = 1;
-// One batch per repaint window. The mark arrives once a second, but the prints
-// between two marks are what carries a position's value through a fast move, so
-// the window is the rate the operator can actually read rather than the mark's.
+// Coalesce marks that arrive together for several open contracts. The source
+// itself is one frame per second; aggregate trades no longer publish position
+// valuations.
 export const FUTURES_MARK_PRICE_BATCH_MS = 200;
 export const FUTURES_MARK_PRICE_RECONNECT_MS = 5000;
 // One mark per symbol per second is the contract, so silence this long is not a
 // quiet market — it is a feed that stopped delivering without closing.
 export const FUTURES_MARK_PRICE_STALL_MS = 15000;
+
+// A feed instance owns one revision namespace. Renderer connections can outlive
+// a feed rebuild inside this process, so a revision alone cannot tell revision
+// 1 of the replacement from a delayed revision 13 of the retired instance.
+let futuresMarkPriceFeedEpoch = 0;
+const nextFuturesMarkPriceFeedEpoch = () => {
+    futuresMarkPriceFeedEpoch += 1;
+    return futuresMarkPriceFeedEpoch;
+};
 
 // One mark per symbol per second is what the desk reads; the stream is public,
 // so the symbol set is the only thing that ever leaves the process.
@@ -39,15 +48,12 @@ export const readFuturesPositionSymbols = (positions) => {
 // snapshot gave it while the chart moves on.
 export const FUTURES_MARK_PRICE_ROUTED_PREFIX = '/market/stream?streams=';
 
-// Two streams per symbol: the mark the exchange values and liquidates the
-// position at, and the prints that happen between two marks. Binance publishes
-// no mark faster than one a second, so the second stream is the only way a
-// position's value can move with a fast market — and it is the price the
-// contract actually traded at, not a display of it, so nothing the operator sets
-// on the tape can hold it still.
+// One stream per symbol: the same mark the exchange uses for unrealized PnL and
+// liquidation. The chart already owns trade/tape data; subscribing to aggTrade a
+// second time here spent socket and CPU work to manufacture a non-exchange PnL.
 export const futuresMarkPriceStreamUrl = (streamOrigin, symbols) => {
     const streams = symbols
-        .flatMap(symbol => [`${symbol.toLowerCase()}@markPrice@1s`, `${symbol.toLowerCase()}@aggTrade`])
+        .map(symbol => `${symbol.toLowerCase()}@markPrice@1s`)
         .join('/');
     return `${streamOrigin}${FUTURES_MARK_PRICE_ROUTED_PREFIX}${streams}`;
 };
@@ -116,6 +122,7 @@ export const createFuturesMarkPriceFeed = ({
     batchIntervalMs = FUTURES_MARK_PRICE_BATCH_MS,
     reconnectDelayMs = FUTURES_MARK_PRICE_RECONNECT_MS,
     stallTimeoutMs = FUTURES_MARK_PRICE_STALL_MS,
+    feedEpoch = null,
 }) => {
     let symbols = [];
     let socket = null;
@@ -127,6 +134,10 @@ export const createFuturesMarkPriceFeed = ({
     let markSeenSinceCheck = false;
     let stallReported = false;
     let published = false;
+    let publicationRevision = 0;
+    const publicationEpoch = Number.isSafeInteger(feedEpoch) && feedEpoch > 0
+        ? feedEpoch
+        : nextFuturesMarkPriceFeedEpoch();
     const marks = new Map();
     // The settlement each tracked contract is counting down to. Kept apart from
     // `marks` on purpose: marks are cleared whenever the feed stops being able
@@ -144,11 +155,31 @@ export const createFuturesMarkPriceFeed = ({
     // rather than waited for, on a socket the desk is already paying nothing
     // for. A contract seen for the first time only sets the baseline: it has
     // announced its next charge, not made one.
-    const noteSettlementSchedule = (symbol, nextSettlementAt) => {
-        if (nextSettlementAt === null) return;
+    const noteSettlementSchedule = (symbol, nextSettlementAt, updatedAt) => {
         const held = settlements.get(symbol);
-        settlements.set(symbol, nextSettlementAt);
-        if (held === undefined || nextSettlementAt <= held) return;
+        // Marks are cleared on disconnect because their prices stop being live,
+        // but this schedule survives the gap. Keep its event-time provenance as
+        // well, otherwise the first delayed frame after reconnect could rewind
+        // the baseline even though the ordinary mark admission guard no longer
+        // has a held price with which to reject it.
+        if (Number.isSafeInteger(held?.updatedAt)
+            && (!Number.isSafeInteger(updatedAt) || updatedAt < held.updatedAt)) return;
+        if (nextSettlementAt === null) {
+            if (held !== undefined && Number.isSafeInteger(updatedAt)) {
+                settlements.set(symbol, { ...held, updatedAt });
+            }
+            return;
+        }
+        if (held === undefined) {
+            settlements.set(symbol, { nextSettlementAt, updatedAt });
+            return;
+        }
+        const advanced = nextSettlementAt > held.nextSettlementAt;
+        // A fresh exchange frame may legitimately move the next funding time
+        // earlier. Adopt that schedule without claiming funding happened; only
+        // a later step forward from the adopted baseline is a settlement.
+        settlements.set(symbol, { nextSettlementAt, updatedAt });
+        if (!advanced) return;
         try {
             onSettlement?.(symbol);
         } catch (error) {
@@ -157,9 +188,12 @@ export const createFuturesMarkPriceFeed = ({
     };
 
     const publish = () => {
+        publicationRevision += 1;
         broadcast({
             type: FUTURES_MARK_PRICE_TYPE,
             version: FUTURES_MARK_PRICE_VERSION,
+            feedEpoch: publicationEpoch,
+            revision: publicationRevision,
             marks: Object.fromEntries(marks),
         });
         published = marks.size > 0;
@@ -305,40 +339,22 @@ export const createFuturesMarkPriceFeed = ({
             if (socket !== opened) return;
             const frame = parseFrame(raw);
             const mark = readFuturesMarkPriceEvent(frame);
-            if (mark !== null) {
-                if (!symbols.includes(mark.symbol)) return;
-                // Liveness is the mark's alone: a contract can go minutes
-                // without a print and the feed is not stalled for it.
-                markSeenSinceCheck = true;
-                noteSettlementSchedule(mark.symbol, mark.nextSettlementAt);
-                const held = marks.get(mark.symbol);
-                marks.set(mark.symbol, {
-                    ...held,
-                    markPrice: mark.markPrice,
-                    updatedAt: mark.updatedAt,
-                    // The traded price this mark was taken beside. A consumer
-                    // valuing the position between two marks carries the mark
-                    // forward by what the tape has done since — from here — so
-                    // that its estimate extends the mark instead of replacing
-                    // it with a different series. Without this the two were
-                    // swapped for one another as the sockets interleaved, and
-                    // on a fast move that reversed the sign of a live PnL.
-                    anchorPrice: held?.lastPrice ?? null,
-                });
-                scheduleFlush();
-                return;
-            }
-            const trade = readFuturesLastTradeEvent(frame);
-            if (trade === null || !symbols.includes(trade.symbol)) return;
-            const held = marks.get(trade.symbol);
-            // Nothing to attach it to yet. The first mark is a second away, and
-            // a price with no mark beside it has no confirmed reading to be an
-            // estimate of.
-            if (held === undefined) return;
-            marks.set(trade.symbol, {
-                ...held,
-                lastPrice: trade.lastPrice,
-                lastPriceAt: trade.tradedAt,
+            if (mark === null || !symbols.includes(mark.symbol)) return;
+            const held = marks.get(mark.symbol);
+            // A delayed frame must not rewind a row that already rendered a
+            // newer exchange mark. Null event times remain admissible because
+            // the price is still a valid mark, but cannot displace a timed one.
+            if (Number.isSafeInteger(held?.updatedAt)
+                && (!Number.isSafeInteger(mark.updatedAt) || mark.updatedAt < held.updatedAt)) return;
+            // Liveness is the mark's alone: a contract can go minutes without a
+            // print and the feed is still healthy. A rejected old frame does not
+            // keep a stale connection alive or rewind its settlement schedule.
+            markSeenSinceCheck = true;
+            noteSettlementSchedule(mark.symbol, mark.nextSettlementAt, mark.updatedAt);
+            if (held?.markPrice === mark.markPrice && held?.updatedAt === mark.updatedAt) return;
+            marks.set(mark.symbol, {
+                markPrice: mark.markPrice,
+                updatedAt: mark.updatedAt,
             });
             scheduleFlush();
         });

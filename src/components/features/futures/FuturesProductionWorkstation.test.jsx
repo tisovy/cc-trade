@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { readFuturesSymbolHistory } from '../../../utils/futuresSymbolHistory.js'
 import { FUTURES_COMMAND_OUTCOME } from '../../../utils/futuresCommandOutcome.js'
+import { createFuturesPositionMarkStore } from '../../../utils/futuresPositionMarks.js'
 import FuturesProductionWorkstation from './FuturesProductionWorkstation.jsx'
 
 const productionWorkstationMocks = vi.hoisted(() => ({
@@ -214,18 +215,26 @@ describe('FuturesProductionWorkstation account review', () => {
 
   it('keeps an open close panel bound to the latest matching position row', () => {
     const closePosition = vi.fn()
+    const positionMarkStore = createFuturesPositionMarkStore()
+    positionMarkStore.replace({
+      BTCUSDT: { markPrice: '58000', updatedAt: 1_784_000_000_000 },
+    })
     const openingPosition = {
       symbol: 'BTCUSDT',
       positionSide: 'BOTH',
       quantity: '0.5',
       entryPrice: '57000',
       markPrice: '58000',
-      valuationPrice: '58100',
+      unrealizedPnl: '500',
     }
     const { rerender } = render(
       <FuturesProductionWorkstation
         enabled
-        executionState={executionState({ positions: [openingPosition], closePosition })}
+        executionState={executionState({
+          positions: [openingPosition],
+          closePosition,
+          positionMarkStore,
+        })}
       />,
     )
 
@@ -237,19 +246,28 @@ describe('FuturesProductionWorkstation account review', () => {
     const livePosition = {
       ...openingPosition,
       markPrice: '58900',
-      valuationPrice: '59000',
+      unrealizedPnl: '950',
     }
+    act(() => positionMarkStore.replace({
+      BTCUSDT: { markPrice: '58900', updatedAt: 1_784_000_000_100 },
+    }))
     rerender(
       <FuturesProductionWorkstation
         enabled
-        executionState={executionState({ positions: [livePosition], closePosition })}
+        executionState={executionState({ positions: [livePosition], closePosition, positionMarkStore })}
       />,
     )
 
-    expect(screen.getByLabelText('Close BTCUSDT LONG position')).toHaveTextContent('29500.00')
+    expect(screen.getByLabelText('Close BTCUSDT LONG position')).toHaveTextContent('29450.00')
     fireEvent.click(screen.getByRole('button', { name: 'Close at market' }))
     expect(closePosition).toHaveBeenCalledExactlyOnceWith(
-      livePosition,
+      expect.objectContaining({
+        symbol: 'BTCUSDT',
+        markPrice: '58900',
+        unrealizedPnl: '950',
+        valuationSource: 'live-mark',
+        valuationComplete: true,
+      }),
       { quantity: '0.5' },
     )
   })
