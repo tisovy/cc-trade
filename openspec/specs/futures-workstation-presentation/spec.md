@@ -3,7 +3,9 @@
 ## Purpose
 
 Defines Futures workspace startup and switching, market availability presentation, chart overlay composition, and bounded-tape throttling and filtering.
+
 ## Requirements
+
 ### Requirement: The last selected market workspace is restored before mount
 After credential preflight resolves, the application SHALL read the last explicitly activated market workspace from durable local storage before mounting Spot or Futures. A valid stored Spot or Futures value SHALL become the initial workspace without first mounting, subscribing, or briefly displaying the other market, provided that market's credential pair is complete. When the stored market's credentials are incomplete, the application SHALL show the neutral selector, mount neither market, and retain the stored value so a later start recovers it once the environment is fixed.
 
@@ -1119,9 +1121,16 @@ Between account snapshots, position rows SHALL be re-valued from the live mark
 price feed: mark price, USDT size, unrealized PnL and return on margin SHALL
 all follow the incoming mark, and the dock total SHALL be the sum of the
 re-valued rows. Unrealized PnL SHALL be derived as
-`(mark price − entry price) × signed quantity`. A position whose entry price,
-quantity or mark is unusable SHALL be left exactly as the account snapshot
+`(valuation price − entry price) × signed quantity`, where the valuation price
+is the confirmed mark, or — between two marks — that mark carried forward by the
+change in the contract's traded price since it was taken. A position whose entry
+price, quantity or mark is unusable SHALL be left exactly as the account snapshot
 reported it, rather than partially re-valued.
+
+The mark column SHALL state the confirmed mark, not the carried-forward
+valuation: it names the price the exchange settles and liquidates on, and a
+column that quietly showed an extrapolation would make the row's own arithmetic
+unreproducible.
 
 #### Scenario: The market moves with no account event
 - **WHEN** a mark of `0.03600` arrives for a `-446082` contract position entered at `0.03140`
@@ -1134,6 +1143,10 @@ reported it, rather than partially re-valued.
 #### Scenario: A mark arrives for a symbol with no open position
 - **WHEN** a mark arrives for a symbol that is not in the position list
 - **THEN** no row is created or changed
+
+#### Scenario: The row is valued between two marks
+- **WHEN** the tape has moved since the last mark was taken
+- **THEN** the unrealized PnL follows the tape while the mark column still states the last confirmed mark
 
 ### Requirement: The chart opens on enough history to read the market
 Opening a contract or interval SHALL present substantially more than the live
@@ -2818,3 +2831,36 @@ The `ENTRY` and `LIQ` annotations SHALL be drawn independently from the chart li
 #### Scenario: The position flips at an unchanged entry price
 - **WHEN** a one-way position changes side at the same entry price under an unmoved viewport
 - **THEN** the entry annotation states the new side and tone without waiting for a price or viewport change
+
+### Requirement: The Futures chart offers a complete weekly interval
+The Futures interval choices SHALL include `1w` immediately after `1d` in the chart toolbar and in the keyboard interval picker. Selecting `1w` SHALL replace the current interval through the same typed workstation path as every existing choice and SHALL deliver Binance weekly live candles and older weekly history as one isolated series. Weekly history SHALL remain keyed separately by contract and interval and SHALL treat consecutive weekly candles as seven days apart for continuity and local cache reuse.
+
+The `15m` default, the behavior and order of all existing Futures intervals, unsupported-interval rejection, and Spot interval behavior SHALL remain unchanged. At supported workstation widths the added control SHALL remain visible and operable without introducing a toolbar scrollbar or hiding another interval.
+
+#### Scenario: Weekly interval is visible
+- **WHEN** the Futures chart toolbar is rendered
+- **THEN** it shows a `1w` interval control immediately after `1d` and identifies it as an unselected or selected chart interval like the existing controls
+
+#### Scenario: Weekly interval is selected from the toolbar
+- **WHEN** the operator activates `1w`
+- **THEN** the workstation accepts `1w`, replaces the previous interval subscription, and draws weekly live candles and weekly history without rows from the previous interval
+
+#### Scenario: Weekly interval is selected from the keyboard picker
+- **WHEN** the interval picker is opened with a query that matches `1w` and the operator selects it
+- **THEN** the picker closes and the chart changes to the same `1w` reading as the toolbar control
+
+#### Scenario: Weekly history is reused
+- **WHEN** closed `1w` candles have been cached for a contract and the same contract and interval are reopened
+- **THEN** contiguous weekly rows seven days apart are reused under the `1w` cache key and no daily or other interval row is mixed into them
+
+#### Scenario: A previous interval answers late
+- **WHEN** the operator switches to `1w` and a candle or history answer from the abandoned interval arrives afterwards
+- **THEN** the late answer is ignored and the weekly series remains owned by the `1w` selection
+
+#### Scenario: Existing defaults and validation remain in force
+- **WHEN** the workstation opens without an explicit interval selection or receives an unsupported interval
+- **THEN** it still opens at `15m`, rejects the unsupported value, and does not treat adding `1w` as permission for any other interval
+
+#### Scenario: The toolbar is width constrained
+- **WHEN** the Futures chart renders at a supported narrow workstation width
+- **THEN** `1w` and every existing interval remain visible and operable without a horizontal toolbar scrollbar

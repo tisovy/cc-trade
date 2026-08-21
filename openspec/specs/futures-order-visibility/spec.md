@@ -3,7 +3,9 @@
 ## Purpose
 
 Defines account-wide synchronization of regular and algorithmic Futures orders and their consistent presentation across the chart and sidebar.
+
 ## Requirements
+
 ### Requirement: The account order model includes regular and algorithmic orders
 The system SHALL synchronize both regular open orders and currently open algorithmic orders from the authenticated USDⓈ-M account. Each normalized order SHALL retain its source kind, exchange identity, symbol, side, type, status, quantity, prices relevant to that type, reduce-only or close-position intent when supplied, and exchange update time.
 
@@ -1023,17 +1025,38 @@ with the tentative position.
 
 ### Requirement: An open position's value moves with the market between marks
 Between two mark-price updates, an open position's unrealized PnL and its
-percentage SHALL be re-priced against the most recent traded price for that
-contract, at a bounded repaint rate. When a mark arrives, the confirmed
-mark-based figure SHALL replace the estimate.
+percentage SHALL be re-priced at a bounded repaint rate against the last
+confirmed mark carried forward by the tape: the valuation price SHALL be that
+mark plus the change in the contract's traded price since the mark was taken.
+
+The last traded price SHALL NOT be substituted for the mark. The two are
+different series — the mark is an index average carried on a smoothing basis,
+the traded price is what printed — and on a fast move they sit on opposite sides
+of a position's entry. Substituting one for the other therefore reverses the sign
+of the unrealized PnL according to which of two streams delivered last, without
+the market having moved at all.
+
+The estimate SHALL be continuous with the mark it extends: while no trade prints,
+the estimated valuation SHALL equal the confirmed mark exactly, so that the
+arrival of a mark alone SHALL NOT change the reading. Where no traded price is
+known from the moment the mark was taken, there is nothing to carry the mark
+forward by, and the position SHALL be valued at the mark itself.
 
 #### Scenario: The market moves between two marks
 - **WHEN** trades print for a contract holding an open position and no new mark has arrived
 - **THEN** the position's value and PnL follow those prints rather than standing still
 
 #### Scenario: A mark arrives
-- **WHEN** a mark price arrives for that contract
-- **THEN** the position's PnL is the exchange's own arithmetic on that mark
+- **WHEN** a mark price arrives for that contract and no trade has printed since the previous mark was taken
+- **THEN** the position's PnL is unchanged by the arrival, because the estimate it replaces was that same mark carried forward by nothing
+
+#### Scenario: The tape and the mark straddle the entry
+- **WHEN** a short of `-2873` contracts entered at `3.3450` is valued while the exchange's mark is `3.36` and the contract last traded at `3.30`
+- **THEN** the position reads as a profit from the traded price being below its entry, and it reads as that same profit whether the newest reading in hand is the mark or the trade
+
+#### Scenario: No trade has printed since the mark was taken
+- **WHEN** a mark arrives for a contract on which no trade has printed since the previous mark
+- **THEN** the position is valued at that mark, and no estimate is presented
 
 ### Requirement: An estimated reading says that it is estimated
 A PnL re-priced from the last traded price SHALL be presented as an estimate,
@@ -1377,3 +1400,85 @@ A working order drawn on the chart SHALL use its positive limit price where it h
 #### Scenario: A stop-limit reports both prices
 - **WHEN** a working stop-limit reports a positive limit price and a different trigger price
 - **THEN** the chart draws its working order line at the limit price and keeps the trigger as activation information
+
+### Requirement: A position row that disagrees with the chart says why
+The chart is drawn from the price the contract traded at; a position row is
+valued on the exchange's mark. On a fast move the two sit on opposite sides of a
+position's entry, so the operator sees price past their own entry line while the
+row states a loss — or the reverse. Both figures are correct, and the desk SHALL
+NOT resolve the disagreement by valuing the row on the tape, because the mark is
+what the exchange settles and liquidates on.
+
+Where the tape and the mark place a position on opposite sides of its entry, the
+row SHALL state that this is what has happened: the price the contract last
+traded at, what the position would be worth there, and that the mark has not
+crossed the entry and is what settles. Where they agree, the row SHALL say
+nothing about the tape, because there is nothing to explain.
+
+Every surface that states a position's unrealized PnL SHALL say it the same way,
+from one shared reading, so that the dock and the trading ticket cannot give the
+operator two different accounts of the same disagreement.
+
+This SHALL NOT be satisfied by drawing the mark on the chart. "The chart does not
+draw a MARK overlay" holds, and the explanation belongs on the row whose number
+is being questioned.
+
+#### Scenario: The tape has crossed the entry and the mark has not
+- **WHEN** a short entered at `61000` is valued at a mark of `61200` while the contract last traded at `60800`
+- **THEN** the row states the loss on the mark, and states that the contract last traded at `60800` — the other side of the entry — what the position would be worth there, and that the mark is what settles
+
+#### Scenario: The tape and the mark agree
+- **WHEN** the last traded price and the mark are on the same side of the position's entry
+- **THEN** the row says nothing about the tape
+
+#### Scenario: The tape sits exactly on the entry
+- **WHEN** the contract last traded at exactly the position's entry price
+- **THEN** the row says nothing about the tape, because a reading of zero has no side to disagree from
+
+#### Scenario: The dock and the ticket state the same position
+- **WHEN** both the portfolio dock and the trading ticket show the same position while the tape and the mark disagree
+- **THEN** both state the disagreement in the same words, from the same reading
+
+### Requirement: A kept reading is verified against the exchange, not trusted
+A reading kept on disk SHALL be re-read whole from the exchange on a cadence the
+desk can afford, and what is held SHALL be replaced by what the exchange
+answers wherever the two disagree. The disagreement SHALL be recorded.
+
+This is the condition that makes keeping anything safe. A recomputed reading
+that is wrong is wrong until the next pass; a kept one is wrong until someone
+notices. Where the read has been narrowed enough that a whole window costs one
+request per kind of flow, there is no reason to hold a total the desk has not
+checked, and the check SHALL therefore not be deferred to a cadence chosen for
+cost when cost is no longer the constraint.
+
+A kept reading SHALL never be preferred to the exchange, and SHALL never be the
+answer to a question the exchange was not asked.
+
+#### Scenario: The kept reading is verified
+- **WHEN** the verification interval passes with a reading loaded from disk
+- **THEN** the window is read again from nothing and compared, and the exchange's answer stands wherever they differ
+
+#### Scenario: The kept reading holds a row the exchange no longer states
+- **WHEN** a whole-window re-read does not return a row the file holds, inside the span the re-read covered
+- **THEN** the row is dropped and the disagreement is recorded, rather than kept because it was once read
+
+### Requirement: A kept reading names the account it was read from
+A reading kept across restarts SHALL be stored under a fingerprint of the
+credential it was read with, derived so that the credential cannot be recovered
+from it, and SHALL be used only when the desk starts against a credential with
+the same fingerprint.
+
+The credential itself SHALL NOT be written to the store, to the desk's record, or
+to any log.
+
+#### Scenario: The desk restarts against the same account
+- **WHEN** the fingerprint of the running credential matches the stored one
+- **THEN** the kept reading is loaded and only the span since it ends is read
+
+#### Scenario: The desk starts against another account
+- **WHEN** the fingerprints differ
+- **THEN** the kept reading is discarded and the window is read from nothing
+
+#### Scenario: The store is read by anyone
+- **WHEN** the stored file is inspected
+- **THEN** it contains no API key and no secret, in whole or in part
