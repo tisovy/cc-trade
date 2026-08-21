@@ -8,6 +8,7 @@ import {
     compareFuturesSettledReadings,
     createFuturesSettledIncomeStore,
     futuresAccountFingerprint,
+    mergeVerifiedFuturesSettledReading,
 } from './futures-settled-income-store.js';
 import { futuresIncomeRowKey } from './futures-settled-income-walk.js';
 
@@ -111,6 +112,108 @@ describe('the settled income store', () => {
 
     it('is absent, not empty, before anything has been kept', () => {
         expect(store.load({ fingerprint, windowFrom: WINDOW_FROM, now: NOW })).toBeNull();
+    });
+});
+
+describe('what the desk holds after a verification', () => {
+    const heldReading = {
+        rows: new Map([
+            ['FUNDING_FEE:old', row(WINDOW_FROM + 3_600_000, 'old')],
+            ['FUNDING_FEE:recent', row(NOW - 3_600_000, 'recent')],
+        ]),
+        from: WINDOW_FROM,
+        to: NOW - 60_000,
+        slice: 4_000,
+    };
+
+    // The walk keeps its own rows through a refusal because rows already held
+    // are money the desk can account for. Starting it from nothing to verify is
+    // the one path that defeats that, so the refusal has to be caught here.
+    it('keeps the whole reading when the verification was refused', () => {
+        const refused = {
+            rows: new Map([['FUNDING_FEE:recent', row(NOW - 3_600_000, 'recent')]]),
+            from: NOW - 7_200_000,
+            to: NOW,
+            failed: true,
+            slice: 60_000,
+        };
+        const after = mergeVerifiedFuturesSettledReading(heldReading, refused, WINDOW_FROM);
+        expect([...after.rows.keys()].sort()).toEqual(['FUNDING_FEE:old', 'FUNDING_FEE:recent']);
+        // And the coverage it could still vouch for, unshrunk.
+        expect(after.from).toBe(WINDOW_FROM);
+        expect(after.to).toBe(NOW);
+    });
+
+    // A verification that spends its page budget short of the window's start has
+    // not contradicted what lies behind it. Adopting it wholesale turns a
+    // complete reading into a partial one — and then writes the partial one to
+    // disk for the next restart to inherit.
+    it('keeps what the verification never reached, and claims the union', () => {
+        const short = {
+            rows: new Map([['FUNDING_FEE:recent', row(NOW - 3_600_000, 'recent')]]),
+            from: NOW - 2 * 24 * 60 * 60 * 1000,
+            to: NOW,
+            failed: false,
+            complete: false,
+        };
+        const after = mergeVerifiedFuturesSettledReading(heldReading, short, WINDOW_FROM);
+        expect(after.rows.has('FUNDING_FEE:old')).toBe(true);
+        expect(after.from).toBe(WINDOW_FROM);
+        expect(after.to).toBe(NOW);
+    });
+
+    // Inside the span it did cover, the exchange has spoken — including by
+    // saying nothing. That is the whole point of verifying.
+    it('drops a held row the verification covered and did not return', () => {
+        const fresh = {
+            rows: new Map(),
+            from: WINDOW_FROM,
+            to: NOW,
+            failed: false,
+            complete: true,
+        };
+        const after = mergeVerifiedFuturesSettledReading(heldReading, fresh, WINDOW_FROM);
+        expect(after.rows.size).toBe(0);
+        expect(after.from).toBe(WINDOW_FROM);
+    });
+
+    // `complete` is a statement about `from`, and the merge is what moves
+    // `from`. Carrying the fresh walk's flag over the merged coverage says
+    // "partial" over a reading that reaches the window's start — the same lie as
+    // the other direction, and the one every figure downstream tests.
+    it('restates completeness against the coverage it ends up with', () => {
+        const short = {
+            rows: new Map(),
+            from: NOW - 2 * 24 * 60 * 60 * 1000,
+            to: NOW,
+            failed: false,
+            complete: false,
+        };
+        expect(mergeVerifiedFuturesSettledReading(heldReading, short, WINDOW_FROM).complete)
+            .toBe(true);
+        // And a refusal does not make a complete reading partial either.
+        expect(mergeVerifiedFuturesSettledReading(heldReading, { ...short, failed: true }, WINDOW_FROM)
+            .complete).toBe(true);
+        // But a reading that genuinely does not reach the window says so.
+        const narrow = { ...heldReading, from: WINDOW_FROM + 60_000 };
+        expect(mergeVerifiedFuturesSettledReading(narrow, short, WINDOW_FROM).complete)
+            .toBe(false);
+    });
+
+    // Coverage is a claim about what was read end to end. A union across a hole
+    // is the one thing a reading may never state.
+    it('will not claim a span with a hole in it', () => {
+        const disjoint = {
+            rows: new Map([['FUNDING_FEE:recent', row(NOW - 3_600_000, 'recent')]]),
+            from: NOW - 7_200_000,
+            to: NOW,
+            failed: false,
+            complete: false,
+        };
+        const stale = { ...heldReading, to: NOW - 9 * 3_600_000 };
+        const after = mergeVerifiedFuturesSettledReading(stale, disjoint, WINDOW_FROM);
+        expect(after.from).toBe(disjoint.from);
+        expect(after.rows.has('FUNDING_FEE:old')).toBe(false);
     });
 });
 

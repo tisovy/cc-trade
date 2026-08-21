@@ -65,6 +65,7 @@ import {
 } from '../../src/utils/futuresSettledMoney.js';
 import {
     compareFuturesSettledReadings,
+    mergeVerifiedFuturesSettledReading,
 } from './futures-settled-income-store.js';
 import {
     emptyFuturesSettledState,
@@ -2285,7 +2286,12 @@ export function setupBinanceConnection({
         const verifying = _futuresSettled.from !== null
             && (_futuresSettledVerifiedAt === null
                 || now - _futuresSettledVerifiedAt >= FUTURES_SETTLED_VERIFY_MS);
+        // What the desk held going in, kept whole rather than as a reference to
+        // state the walk is about to replace.
         const before = _futuresSettled.rows;
+        const heldFrom = _futuresSettled.from;
+        const heldTo = _futuresSettled.to;
+        const heldSlice = _futuresSettled.slice;
         const walked = await walkFuturesSettledIncome({
             now,
             windowFrom,
@@ -2372,23 +2378,38 @@ export function setupBinanceConnection({
             }
             _futuresSettledVerifiedAt = now;
         }
-        _futuresSettled = walked;
-        // Written after the exchange has had the last word, never before it.
-        if (!walked.failed) {
+        // A verification starts from nothing so the exchange can contradict what
+        // is held. What it did not reach, it did not contradict — and a refusal
+        // is not a verdict at all. Adopting the fresh walk wholesale would let
+        // one timed-out request replace a complete week with whatever came back
+        // before it failed, and then write that to disk.
+        _futuresSettled = verifying
+            ? mergeVerifiedFuturesSettledReading(before === null ? null : {
+                rows: before, from: heldFrom, to: heldTo, slice: heldSlice, gap: null,
+            }, walked, windowFrom)
+            : walked;
+        // Written after the exchange has had the last word, never before it —
+        // and what is written is what the desk holds, not what the last walk
+        // happened to return.
+        if (_futuresSettled.from !== null) {
             settledIncomeStore?.save({
                 fingerprint,
-                held: walked,
+                held: _futuresSettled,
                 verifiedAt: _futuresSettledVerifiedAt,
             });
         }
 
-        const kept = readFuturesSettledIncome([...walked.rows.values()]);
-        const from = walked.from ?? now;
+        // What the desk holds, not what the last walk returned. A verification
+        // that was refused holds more than its walk brought back, and the screen
+        // is the reason any of this exists.
+        const holding = _futuresSettled;
+        const kept = readFuturesSettledIncome([...holding.rows.values()]);
+        const from = holding.from ?? now;
         // Broadcast only what moved. In the steady state the tail is empty and
         // the coverage is unchanged, and a frame every thirty seconds saying
         // exactly what the last one said is how a record of the account becomes
         // a load on the socket carrying it.
-        const revision = `${kept.length}:${from}:${walked.to}:${walked.complete}`;
+        const revision = `${kept.length}:${from}:${holding.to}:${holding.complete}`;
         if (revision !== _futuresSettledSent) {
             _futuresSettledSent = revision;
             broadcastToRenderers({
@@ -2413,7 +2434,7 @@ export function setupBinanceConnection({
                 // qualified.
                 from,
                 readAt: now,
-                complete: walked.complete,
+                complete: holding.complete,
                 reason,
             });
         }
@@ -2433,7 +2454,7 @@ export function setupBinanceConnection({
             _futuresSettledConfirmTimer.unref?.();
         }
         recordSettled(
-            failureCode !== null ? 'failed' : (walked.complete ? 'complete' : 'partial'),
+            failureCode !== null ? 'failed' : (_futuresSettled.complete ? 'complete' : 'partial'),
             failureCode,
         );
     };

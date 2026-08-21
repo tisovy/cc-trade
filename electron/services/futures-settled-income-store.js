@@ -33,6 +33,12 @@ export const futuresAccountFingerprint = (credential) => {
 
 const isFiniteNumber = value => Number.isFinite(value);
 
+// The walk's own definition of a complete reading, restated where the merge can
+// reach it: coverage that reaches the start of the window asked for.
+const coversWindow = (from, windowFrom) => (
+    isFiniteNumber(from) && isFiniteNumber(windowFrom) && from <= windowFrom
+);
+
 export const createFuturesSettledIncomeStore = ({ directory, logger = console } = {}) => {
     const file = directory ? path.join(directory, FUTURES_SETTLED_STORE_FILE) : null;
 
@@ -130,6 +136,68 @@ export const createFuturesSettledIncomeStore = ({ directory, logger = console } 
             if (file === null) return;
             try { fs.unlinkSync(file); } catch { /* nothing to forget */ }
         },
+    };
+};
+
+/**
+ * What the desk holds after a verification pass.
+ *
+ * A verification walks from nothing so that the exchange can contradict what is
+ * held — and that is the whole hazard. What the fresh walk does not reach, it
+ * has not contradicted, and adopting it wholesale throws away rows nobody
+ * disagreed with. Two ways that bites, and the second is the one that matters:
+ *
+ * - a walk that spends its page budget without reaching the window's start
+ *   would shrink a complete reading to a partial one, and the shrunken version
+ *   would then be written to disk and inherited by the next restart;
+ * - a walk whose first request is **refused** would replace the whole reading
+ *   with almost nothing. The walk keeps its own rows through a refusal for
+ *   exactly this reason — "rows already held are money the desk can account
+ *   for" — and starting it from nothing defeats that on the one path that
+ *   starts it from nothing.
+ *
+ * So the exchange's answer stands only across the span it actually covered, the
+ * held rows stand below it, and the coverage claimed is the union of the two —
+ * but only where the two spans touch. Where they do not, the fresh reading
+ * stands alone rather than claim a contiguous span across a hole in it.
+ */
+export const mergeVerifiedFuturesSettledReading = (held, fresh, windowFrom) => {
+    if (!held || held.from === null || !(held.rows instanceof Map)) return fresh;
+    if (!fresh || !(fresh.rows instanceof Map)) return held;
+    // Refused part-way: not a verdict on anything. Keep what was held and take
+    // whatever the attempt did bring back, since a row is a row.
+    if (fresh.failed) {
+        const rows = new Map(held.rows);
+        for (const [key, row] of fresh.rows) rows.set(key, row);
+        return {
+            ...held,
+            rows,
+            to: Math.max(held.to, isFiniteNumber(fresh.to) ? fresh.to : held.to),
+            slice: isFiniteNumber(fresh.slice) ? fresh.slice : held.slice,
+            complete: coversWindow(held.from, windowFrom),
+        };
+    }
+    if (!isFiniteNumber(fresh.from)) return held;
+    // A hole between what was held and what was just read. Claiming the union
+    // would claim the hole, which is the one thing a reading may never do.
+    if (fresh.from > held.to) return fresh;
+    const rows = new Map(fresh.rows);
+    for (const [key, row] of held.rows) {
+        // Inside the fresh span the exchange has spoken, including by silence.
+        if (isFiniteNumber(row?.time) && row.time >= fresh.from) continue;
+        rows.set(key, row);
+    }
+    const from = Math.min(held.from, fresh.from);
+    return {
+        ...fresh,
+        rows,
+        from,
+        to: Math.max(held.to, fresh.to),
+        // Recomputed, never carried over. `complete` is a statement about
+        // `from`, and the merge is what moves `from` — a flag inherited from the
+        // fresh walk would say "partial" over a reading that reaches the
+        // window's start, which is the same lie in the other direction.
+        complete: coversWindow(from, windowFrom),
     };
 };
 

@@ -3946,6 +3946,57 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(saved?.held.rows.has('FUNDING_FEE:never-happened')).toBe(false);
     });
 
+    // The verification is the one pass that walks from nothing, so it is the one
+    // pass where a refusal can cost the desk everything it holds. The walk keeps
+    // its own rows through a refusal precisely because rows already held are
+    // money the desk can account for; starting it from nothing defeats that
+    // unless the refusal is caught on the way back out.
+    it('keeps the kept reading when the hour\'s verification is refused', async () => {
+        const keptRow = {
+            symbol: 'BEATUSDT', incomeType: 'FUNDING_FEE', income: '-1.5',
+            asset: 'USDT', time: Date.now() - 3_600_000, tranId: 'still-real',
+        };
+        const settledIncomeStore = {
+            load: vi.fn(({ windowFrom, now }) => ({
+                rows: new Map([['FUNDING_FEE:still-real', { ...keptRow, time: now - 3_600_000 }]]),
+                from: windowFrom,
+                to: now - 60_000,
+                slice: null,
+                gap: null,
+                // Never verified, so this pass checks it — and the check refuses.
+                verifiedAt: null,
+            })),
+            save: vi.fn(() => true),
+        };
+        moduleMocks.futuresAdapter.getIncomePage.mockRejectedValue(
+            Object.assign(new Error('gateway'), { code: 'ETIMEDOUT' }),
+        );
+        await startFuturesDeskForSettled({ settledIncomeStore });
+
+        await runFuturesCommand({
+            action: 'account.refresh', clientOrderId: 'verify-refused', symbol: 'BTCUSDT',
+        });
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+
+        // What reached the screen, first: this is the property, and the file is
+        // only how it survives a restart.
+        const frames = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.type === 'futures_settled_income');
+        expect(frames.length).toBeGreaterThan(0);
+        expect(frames.at(-1).rows.some(entry => entry.symbol === 'BEATUSDT')).toBe(true);
+
+        const saved = settledIncomeStore.save.mock.calls.at(-1)?.[0];
+        expect(saved).toBeDefined();
+        // The row is still money the desk can account for, and the coverage it
+        // could vouch for is not narrowed by a request that never answered.
+        expect(saved.held.rows.has('FUNDING_FEE:still-real')).toBe(true);
+        expect(saved.held.from).toBeLessThanOrEqual(Date.now() - 7 * 24 * 60 * 60 * 1000);
+        // A refusal is not a verdict, so nothing is recorded as contradicted.
+        expect(saved.verifiedAt).toBeNull();
+    });
+
     it('answers a futures history command without touching account resources', async () => {
         setupBinanceConnection({
             localWebSocketAccess: { host: '127.0.0.1' },
