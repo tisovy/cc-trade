@@ -33,9 +33,9 @@
 
 ## 4. Operator gate
 
-- [ ] 4.1 After a restart the settled column is complete from the first frame,
+- [x] 4.1 After a restart the settled column is complete from the first frame,
   and the `settled` line for that start shows a tail read rather than a cold one.
-- [ ] 4.2 The first verification of the session records no disagreements.
+- [x] 4.2 The first verification of the session records no disagreements.
 
 ## 5. What building it found
 
@@ -58,3 +58,24 @@
   because it asks for the settled reading as well. They land behind the account
   read rather than instead of it, and one test had to be given the clock to say
   so out loud.
+
+**Both closed by the operator's own record**, `desk-2026-08-21-000.jsonl`, the
+first session to run with the store:
+
+| at | reason | pages | reads | restored | missing | differing | outcome |
+|---|---|---|---|---|---|---|---|
+| 04:24:08 | refresh | 2 | 12 | **42** | 0 | 0 | complete |
+| 08:00:07 | settlement | 2 | 12 | 0 | 0 | 0 | complete |
+| 08:02:11 | confirm | 1 | 6 | 0 | 0 | 0 | complete |
+| 08:59:21 | refresh | 1 | 6 | **46** | 0 | 0 | complete |
+
+4.1 is the 08:59 line: a start that loaded forty-six rows off disk and spent one
+page. The 04:24 line spent two, and that is not a failed gate — a start whose
+kept reading is due for its hourly check walks the window from nothing on
+purpose, and two pages is what that costs. Worth writing down because the number
+reads like a cold start and is not one.
+
+4.2 is the `missing: 0, differing: 0` on both: the file has never once disagreed
+with the exchange. The `verified` field that tells "checked and agreed" from
+"never looked" was added after this session — these two are identifiable by
+`restored` and the page count instead, and the next session will say it plainly.

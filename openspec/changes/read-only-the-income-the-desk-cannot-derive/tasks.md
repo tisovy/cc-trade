@@ -105,7 +105,7 @@
   pass. At six settlements a day plus an hourly reconciliation that is about
   **3.75 weight a minute**, against today's 60 — a sixteenfold cut, and the tick
   that produced most of the old number is gone rather than slowed.
-- [ ] 7.3 The same two numbers from the operator's own journal after a restart.
+- [x] 7.3 The same two numbers from the operator's own journal after a restart.
   The `settled` line now carries `reads` and `types` beside `pages`, so weight is
   `reads × 30` and the claim above is checkable without instrumenting anything
   further.
@@ -172,3 +172,22 @@
   UTC, **360–361 ms**, all `ok` — beside futures at 365–410 ms in the same
   session. The two markets now measure the same thing and answer alike, which
   is what `stop-waiting-on-the-spot-account-read` 4.2 asked for.
+
+## 11. The claim, from the operator's desk, 2026-08-21
+
+Task 7.3, closed. One ordinary session, `desk-2026-08-21-000.jsonl`, 04:24 to
+08:59 UTC — 275 minutes, **8 passes, 1 800 weight, 6.54 weight a minute**, every
+one `complete` with the full 604 800 000 ms covered.
+
+The claim to beat was the same desk's own 117.2 a minute across 295 passes, 125
+of which never reached the window's start at all. That is an **eighteenfold**
+cut, measured on the same account across the same endpoint.
+
+What the eight passes were: three `stream` (one per start), three `refresh` (a
+person), one `settlement`, one `confirm`. **No `tick` at any point** — the
+thirty-second reconcile ran all session and read nothing, which is 10.2's fix
+holding.
+
+And the settlement path, end to end, in two lines: `08:00:07 settlement rows:45`
+then `08:02:11 confirm rows:46`. The charge announced, the record catching up two
+minutes later, and the row landing — the defect of 2026-08-20 not reproducing.
