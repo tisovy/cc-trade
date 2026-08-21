@@ -262,6 +262,14 @@ export const describeFuturesPositionMargin = (position) => {
   const leverage = toFiniteNumber(position?.leverage)
   const notional = entryNotionalOf(position)
   const sharedAmount = firstPositiveNumber([
+    // A valued row carries the exact denominator used for its adjacent ROE.
+    // Live CROSS margin follows current notional and therefore wins over the
+    // older account snapshot fields retained on the raw position.
+    position?.valuationMargin,
+    // Position V3 exposes the position requirement separately from the broader
+    // initial margin that may also reserve funds for working orders. A position
+    // ROE denominator must not absorb another order's reserve.
+    position?.positionInitialMargin,
     position?.initialMargin,
     // Only for sources that still carry leverage; the v3 read does not, and a
     // margin invented from a leverage nobody reported would be a guess.
@@ -281,7 +289,7 @@ export const describeFuturesPositionMargin = (position) => {
 
   // What the exchange requires the position to keep. Liquidation is the moment
   // the margin balance reaches it, so it is the floor under everything below.
-  const maintenanceMargin = toFiniteNumber(position?.maintenanceMargin)
+  const maintenanceMargin = firstPositiveNumber([position?.maintenanceMargin])
   // The mark's figure, never the estimate beside it. Everything below this line
   // is a statement about liquidation, and liquidation is the mark's by
   // definition — an estimate here would put a wrong distance under a real one,
@@ -332,6 +340,9 @@ export const describeFuturesPosition = (position) => {
   const quantity = toFiniteNumber(position?.quantity)
   const positionSide = normalizePositionSide(position?.positionSide)
     ?? (quantity !== null && quantity < 0 ? 'SHORT' : 'LONG')
+  const signedQuantity = quantity === null
+    ? null
+    : positionSide === 'SHORT' ? -Math.abs(quantity) : Math.abs(quantity)
   const unrealizedPnl = toFiniteNumber(position?.unrealizedPnl)
   const notional = entryNotionalOf(position)
   // What the position is worth right now — an amount, never a negative one.
@@ -345,19 +356,27 @@ export const describeFuturesPosition = (position) => {
   // ROE the way Binance shows it: PnL against the margin actually committed.
   // Without a margin figure ROE is unavailable — never 0.
   const { margin } = describeFuturesPositionMargin(position)
-  const roePercent = unrealizedPnl !== null && margin !== null
+  const roePercent = position?.valuationMarginComplete !== false
+    && unrealizedPnl !== null
+    && margin !== null
     ? (unrealizedPnl / margin) * 100
     : null
   const confirmedPnl = toFiniteNumber(position?.markUnrealizedPnl) ?? unrealizedPnl
   // The tape's own reckoning, computed here rather than carried: the merge
   // states the price, and the same arithmetic every other figure on this row
   // uses turns it into money.
-  const tapePrice = toFiniteNumber(position?.tapePrice)
-  const tapeUnrealizedPnl = tapePrice !== null
+  const tapeScenario = position?.tapeScenario
+  const tapePrice = toFiniteNumber(tapeScenario?.price ?? position?.tapePrice)
+  const carriedTapePnl = toFiniteNumber(tapeScenario?.unrealizedPnl)
+  const tapeUnrealizedPnl = carriedTapePnl ?? (tapePrice !== null
     && tapePrice > 0
-    && quantity !== null
+    && signedQuantity !== null
     && toFiniteNumber(position?.entryPrice) !== null
-    ? (tapePrice - toFiniteNumber(position.entryPrice)) * quantity
+    ? (tapePrice - toFiniteNumber(position.entryPrice)) * signedQuantity
+    : null)
+  const carriedTapeDisagreement = carriedTapePnl !== null
+    && typeof tapeScenario?.disagreesWithMark === 'boolean'
+    ? tapeScenario.disagreesWithMark
     : null
   return Object.freeze({
     positionSide,
@@ -389,11 +408,11 @@ export const describeFuturesPosition = (position) => {
     // printed, and on a fast move they part company — but a row that says the
     // opposite of the chart without saying why reads as broken arithmetic. This
     // is what lets the surface say why.
-    tapeDisagreesWithMark: tapeUnrealizedPnl !== null
+    tapeDisagreesWithMark: carriedTapeDisagreement ?? (tapeUnrealizedPnl !== null
       && confirmedPnl !== null
       && tapeUnrealizedPnl !== 0
       && confirmedPnl !== 0
-      && (tapeUnrealizedPnl > 0) !== (confirmedPnl > 0),
+      && (tapeUnrealizedPnl > 0) !== (confirmedPnl > 0)),
   })
 }
 

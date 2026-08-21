@@ -316,11 +316,14 @@ describe('createFuturesMarkPriceFeed', () => {
         expect(harness.broadcasts).toHaveLength(1);
     });
 
-    it('ignores older and duplicate marks without scheduling another publication', () => {
+    it('ignores older, duplicate, and equal-time conflicting marks', () => {
         harness.feed.track([{ symbol: 'BMTUSDT', quantity: '-446082' }]);
-        harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03528', 2_000));
+        harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03528', 2_000, 30_000));
         harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03523', 1_000));
-        harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03528', 2_000));
+        harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03528', 2_000, 30_000));
+        // Same exchange time is not a correction channel. Neither the price nor
+        // the funding schedule from this conflicting replay may take authority.
+        harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.99999', 2_000, 20_000));
         harness.runTimers();
 
         expect(harness.broadcasts).toEqual([{
@@ -333,6 +336,16 @@ describe('createFuturesMarkPriceFeed', () => {
         harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03528', 2_000));
         expect(harness.timers.filter(timer => timer?.delay === 200)).toHaveLength(0);
         expect(harness.broadcasts).toHaveLength(1);
+
+        // If the equal-time conflict had rewound the baseline to 20_000, this
+        // fresh frame would look like a completed settlement. It is only the
+        // unchanged 30_000 schedule carried by the next accepted price.
+        harness.sockets[0].emit('message', markFrame('BMTUSDT', '0.03529', 25_000, 30_000));
+        expect(harness.settlements).toEqual([]);
+        harness.runTimers();
+        expect(harness.broadcasts.at(-1).marks).toEqual({
+            BMTUSDT: { markPrice: '0.03529', updatedAt: 25_000 },
+        });
     });
 
     it('does not let an older mark rewind the funding schedule baseline', () => {
@@ -371,7 +384,7 @@ describe('createFuturesMarkPriceFeed', () => {
         expect(harness.settlements).toEqual([]);
     });
 
-    it('adopts a fresh earlier funding schedule before reporting its advance', () => {
+    it('treats fresh earlier and later pre-boundary funding changes as reschedules', () => {
         harness.feed.track([{ symbol: 'BMTUSDT', quantity: '-446082' }]);
         const socket = harness.sockets[0];
 
@@ -381,7 +394,14 @@ describe('createFuturesMarkPriceFeed', () => {
         socket.emit('message', markFrame('BMTUSDT', '0.03529', 2_000, 20_000));
         expect(harness.settlements).toEqual([]);
 
-        socket.emit('message', markFrame('BMTUSDT', '0.03530', 3_000, 30_000));
+        // It can move later again before the newly held boundary. That is still
+        // scheduling news, not proof that funding was charged.
+        socket.emit('message', markFrame('BMTUSDT', '0.03530', 3_000, 25_000));
+        expect(harness.settlements).toEqual([]);
+
+        // Only exchange event time reaching the held boundary turns the next
+        // schedule advance into one settlement observation.
+        socket.emit('message', markFrame('BMTUSDT', '0.03531', 25_000, 40_000));
         expect(harness.settlements).toEqual(['BMTUSDT']);
     });
 
@@ -570,6 +590,80 @@ describe('createFuturesMarkPriceFeed', () => {
         expect(harness.logger.info).toHaveBeenCalledWith(
             expect.stringContaining('connected: BICOUSDT'),
         );
+    });
+
+    it('rebuilds the combined stream when one tracked symbol makes no progress', () => {
+        harness.feed.track([
+            { symbol: 'BMTUSDT', quantity: '-1' },
+            { symbol: 'ETHUSDT', quantity: '2' },
+        ]);
+        const socket = harness.sockets[0];
+        socket.emit('open');
+        socket.emit('message', markFrame('BMTUSDT', '0.03523', 1_000));
+        socket.emit('message', markFrame('ETHUSDT', '2500', 1_000));
+        harness.runTimers();
+        harness.logger.warn.mockClear();
+
+        // ETH keeps the combined socket busy, but BMT is silent. Socket-level
+        // traffic is therefore not liveness proof for every valued position.
+        socket.emit('message', markFrame('ETHUSDT', '2501', 2_000));
+        harness.runTimers();
+
+        expect(harness.logger.warn).toHaveBeenCalledWith(
+            expect.stringContaining('(BMTUSDT)'),
+        );
+        expect(socket.closed).toBe(true);
+        expect(harness.feed.snapshot()).toEqual({});
+        harness.runTimers();
+        expect(harness.sockets).toHaveLength(2);
+    });
+
+    it('does not count an equal-time replay as per-symbol liveness', () => {
+        harness.feed.track([
+            { symbol: 'BMTUSDT', quantity: '-1' },
+            { symbol: 'ETHUSDT', quantity: '2' },
+        ]);
+        const socket = harness.sockets[0];
+        socket.emit('open');
+        socket.emit('message', markFrame('BMTUSDT', '0.03523', 1_000));
+        socket.emit('message', markFrame('ETHUSDT', '2500', 1_000));
+        harness.runTimers();
+        harness.logger.warn.mockClear();
+
+        socket.emit('message', markFrame('BMTUSDT', '0.99999', 1_000, 1_700_000_000_000));
+        socket.emit('message', markFrame('ETHUSDT', '2501', 2_000));
+        harness.runTimers();
+
+        expect(harness.logger.warn).toHaveBeenCalledWith(
+            expect.stringContaining('(BMTUSDT)'),
+        );
+        expect(harness.feed.snapshot()).toEqual({});
+        expect(socket.closed).toBe(true);
+    });
+
+    it('keeps one combined socket while every tracked symbol advances', () => {
+        harness.feed.track([
+            { symbol: 'BMTUSDT', quantity: '-1' },
+            { symbol: 'ETHUSDT', quantity: '2' },
+        ]);
+        const socket = harness.sockets[0];
+        socket.emit('open');
+        socket.emit('message', markFrame('BMTUSDT', '0.03523', 1_000));
+        socket.emit('message', markFrame('ETHUSDT', '2500', 1_000));
+        harness.runTimers();
+        harness.logger.warn.mockClear();
+
+        socket.emit('message', markFrame('BMTUSDT', '0.03524', 2_000));
+        socket.emit('message', markFrame('ETHUSDT', '2501', 2_000));
+        harness.runTimers();
+
+        expect(harness.logger.warn).not.toHaveBeenCalled();
+        expect(socket.closed).toBe(false);
+        expect(harness.sockets).toHaveLength(1);
+        expect(harness.feed.snapshot()).toEqual({
+            BMTUSDT: '0.03524',
+            ETHUSDT: '2501',
+        });
     });
 
     it('says nothing about silence while marks keep arriving', () => {

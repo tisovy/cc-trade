@@ -32,6 +32,7 @@ const renderEditor = (overrides = {}) => {
       position={isolatedPosition}
       contract={contract}
       availableUsdt="5000"
+      riskSnapshotCoherent
       anchor={{ x: 200, y: 150 }}
       {...handlers}
       {...overrides}
@@ -227,11 +228,74 @@ describe('FuturesPositionMarginEditor', () => {
     expect(onSubmit).not.toHaveBeenCalled()
   })
 
+  it.each([
+    ['unknown', null],
+    ['negative', '-1'],
+  ])('fails ADD closed when the available balance is %s', (_label, availableUsdt) => {
+    const { onSubmit } = renderEditor({ availableUsdt })
+    fireEvent.change(screen.getByLabelText('Margin amount in USDT'), { target: { value: '1' } })
+
+    expect(screen.getByRole('status'))
+      .toHaveTextContent('Available USDT has not been confirmed')
+    expect(screen.getByRole('button', { name: 'Add margin' })).toBeDisabled()
+    expect(onSubmit).not.toHaveBeenCalled()
+  })
+
+  it('treats zero available as a known zero bound, never as permission to add', () => {
+    const { onSubmit } = renderEditor({ availableUsdt: '0' })
+    fireEvent.change(screen.getByLabelText('Margin amount in USDT'), { target: { value: '1' } })
+
+    expect(screen.getByRole('status')).toHaveTextContent('Only 0.00 USDT is available')
+    expect(screen.getByRole('button', { name: 'Add margin' })).toBeDisabled()
+    expect(onSubmit).not.toHaveBeenCalled()
+  })
+
   it('refuses to remove more than the position holds', () => {
     const { onSubmit } = renderEditor()
     fireEvent.click(screen.getByRole('button', { name: 'Remove' }))
     fireEvent.change(screen.getByLabelText('Margin amount in USDT'), { target: { value: '1500' } })
     expect(screen.getByRole('status')).toHaveTextContent('Only 1200.00 USDT is committed')
+    expect(screen.getByRole('button', { name: 'Remove margin' })).toBeDisabled()
+    expect(onSubmit).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['omitted', undefined],
+    ['incoherent', false],
+  ])('fails REMOVE closed when risk coherence is %s', (_label, riskSnapshotCoherent) => {
+    const { onSubmit } = renderEditor({ riskSnapshotCoherent })
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }))
+    fireEvent.change(screen.getByLabelText('Margin amount in USDT'), { target: { value: '1' } })
+
+    expect(screen.getByRole('status')).toHaveTextContent('risk reading is incomplete or mixes generations')
+    expect(screen.getByRole('button', { name: 'Remove margin' })).toBeDisabled()
+    expect(onSubmit).not.toHaveBeenCalled()
+  })
+
+  it.each(['0', '-1', undefined])(
+    'fails REMOVE closed when maintenance margin is %s',
+    (maintenanceMargin) => {
+      const { onSubmit } = renderEditor({
+        position: { ...isolatedPosition, maintenanceMargin },
+      })
+      fireEvent.click(screen.getByRole('button', { name: 'Remove' }))
+      fireEvent.change(screen.getByLabelText('Margin amount in USDT'), { target: { value: '1' } })
+
+      expect(screen.getByRole('status'))
+        .toHaveTextContent('risk reading is incomplete or mixes generations')
+      expect(screen.getByRole('button', { name: 'Remove margin' })).toBeDisabled()
+      expect(onSubmit).not.toHaveBeenCalled()
+    },
+  )
+
+  it('fails REMOVE closed when no account uPnL can establish the removable bound', () => {
+    const { onSubmit } = renderEditor({
+      position: { ...isolatedPosition, unrealizedPnl: undefined },
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Remove' }))
+    fireEvent.change(screen.getByLabelText('Margin amount in USDT'), { target: { value: '1' } })
+
+    expect(screen.getByRole('status')).toHaveTextContent('risk reading is incomplete')
     expect(screen.getByRole('button', { name: 'Remove margin' })).toBeDisabled()
     expect(onSubmit).not.toHaveBeenCalled()
   })

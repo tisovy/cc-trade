@@ -149,7 +149,7 @@ describe('useFuturesTrading', () => {
     unsubscribe()
   })
 
-  it('admits a new feed revision namespace when the market generation changes', () => {
+  it('clears visible marks without retiring a feed that survives a market generation change', () => {
     const socket = createSocket()
     const { result, rerender } = renderHook(
       ({ generation }) => useFuturesTrading({
@@ -173,32 +173,14 @@ describe('useFuturesTrading', () => {
     rerender({ generation: 8 })
     expect(result.current.positionMarkStore.get('BTCUSDT')).toBeNull()
 
-    // Retired-feed traffic can cross the React generation effect. It must not
-    // resurrect an old live price even before the replacement feed has spoken.
+    // Market activation and feed lifetime are independent on the backend. The
+    // next revision from the same feed is therefore current and must repopulate
+    // the cleared reading without reopening the old revision window.
     act(() => socket.receive({
       type: 'futures_position_marks',
       version: 1,
       feedEpoch: 3,
       revision: 13,
-      marks: { BTCUSDT: { markPrice: '59000', updatedAt: 50 } },
-    }))
-    expect(result.current.positionMarkStore.get('BTCUSDT')).toBeNull()
-
-    act(() => socket.receive({
-      type: 'futures_position_marks',
-      version: 1,
-      feedEpoch: 3,
-      revision: 14,
-      marks: {},
-    }))
-
-    // The backend feed is new and starts its own publication sequence at one.
-    // The long-lived renderer store must not reject it behind revision twelve.
-    act(() => socket.receive({
-      type: 'futures_position_marks',
-      version: 1,
-      feedEpoch: 4,
-      revision: 1,
       marks: { BTCUSDT: { markPrice: '60100', updatedAt: 200 } },
     }))
     expect(result.current.positionMarkStore.get('BTCUSDT')?.markPrice).toBe('60100')
@@ -207,10 +189,29 @@ describe('useFuturesTrading', () => {
       type: 'futures_position_marks',
       version: 1,
       feedEpoch: 3,
-      revision: 15,
+      revision: 12,
       marks: { BTCUSDT: { markPrice: '59000', updatedAt: 50 } },
     }))
     expect(result.current.positionMarkStore.get('BTCUSDT')?.markPrice).toBe('60100')
+
+    // A real feed replacement still opens a fresh revision namespace.
+    act(() => socket.receive({
+      type: 'futures_position_marks',
+      version: 1,
+      feedEpoch: 4,
+      revision: 1,
+      marks: { BTCUSDT: { markPrice: '60200', updatedAt: 300 } },
+    }))
+    expect(result.current.positionMarkStore.get('BTCUSDT')?.markPrice).toBe('60200')
+
+    act(() => socket.receive({
+      type: 'futures_position_marks',
+      version: 1,
+      feedEpoch: 3,
+      revision: 15,
+      marks: { BTCUSDT: { markPrice: '59000', updatedAt: 50 } },
+    }))
+    expect(result.current.positionMarkStore.get('BTCUSDT')?.markPrice).toBe('60200')
     // Changing only activation generation does not resubscribe the account lane.
     expect(socket.sent).toHaveLength(1)
   })
@@ -1548,6 +1549,37 @@ describe('useFuturesTrading', () => {
       quantity: '0.01',
     })
     expect(closed.price).toBeUndefined()
+  })
+
+  it('derives close direction from an explicit hedge leg before quantity sign', () => {
+    const socket = createSocket()
+    const { result } = renderHook(() => useFuturesTrading({
+      enabled: true,
+      symbol: 'BTCUSDT',
+      wsConnection: socket,
+    }))
+
+    act(() => {
+      result.current.closePosition({
+        symbol: 'BTCUSDT', positionSide: 'SHORT', quantity: '0.02',
+      })
+      result.current.closePosition({
+        symbol: 'ETHUSDT', positionSide: 'LONG', quantity: '-0.03',
+      })
+      result.current.closePosition({
+        symbol: 'SOLUSDT', positionSide: 'BOTH', quantity: '-2',
+      })
+      result.current.closePosition({
+        symbol: 'BNBUSDT', positionSide: 'BOTH', quantity: '3',
+      })
+    })
+
+    expect(socket.sent.slice(1)).toEqual([
+      expect.objectContaining({ symbol: 'BTCUSDT', positionSide: 'SHORT', side: 'BUY', quantity: '0.02' }),
+      expect.objectContaining({ symbol: 'ETHUSDT', positionSide: 'LONG', side: 'SELL', quantity: '0.03' }),
+      expect.objectContaining({ symbol: 'SOLUSDT', positionSide: 'BOTH', side: 'BUY', quantity: '2' }),
+      expect.objectContaining({ symbol: 'BNBUSDT', positionSide: 'BOTH', side: 'SELL', quantity: '3' }),
+    ])
   })
 
   // Margin belongs to one position, so the command is addressed by symbol and

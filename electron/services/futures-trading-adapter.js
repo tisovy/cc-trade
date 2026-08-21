@@ -1245,12 +1245,17 @@ export class FuturesTradingAdapter {
 
     // Closes (part of) a position with a MARKET order on the opposite side.
     async closePosition({ symbol, positionSide = 'BOTH', quantity }) {
-        const side = parseFloat(quantity) > 0 ? 'SELL' : 'BUY';
+        const normalizedLeg = String(positionSide).toUpperCase();
+        const side = normalizedLeg === 'SHORT'
+            ? 'BUY'
+            : normalizedLeg === 'LONG'
+                ? 'SELL'
+                : parseFloat(quantity) > 0 ? 'SELL' : 'BUY';
         const { hedgeMode } = await this.getPositionMode();
         const params = {
             symbol,
             side,
-            positionSide: hedgeMode ? positionSide : 'BOTH',
+            positionSide: hedgeMode ? normalizedLeg : 'BOTH',
             type: 'MARKET',
             quantity: String(Math.abs(parseFloat(quantity))),
             newOrderRespType: 'RESULT',

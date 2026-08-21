@@ -561,6 +561,42 @@ describe('FuturesPortfolioDock', () => {
     expect(screen.getByTestId('futures-upnl-total')).toHaveTextContent('+120.00 USDT')
   })
 
+  it('does not recompute the collapsed numeric aggregate when only mark time advances', () => {
+    const positionMarkStore = createFuturesPositionMarkStore()
+    positionMarkStore.replace({
+      BTCUSDT: { markPrice: '60600', updatedAt: 1_784_000_000_000 },
+    })
+    const entryRead = vi.fn(() => '60000')
+    const trackedPosition = { ...position }
+    Object.defineProperty(trackedPosition, 'entryPrice', {
+      configurable: true,
+      enumerable: true,
+      get: entryRead,
+    })
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[trackedPosition]}
+        positionMarkStore={positionMarkStore}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Collapse portfolio dock' }))
+    expect(screen.getByTestId('futures-upnl-total')).toHaveTextContent('−300.00 USDT')
+    entryRead.mockClear()
+
+    act(() => positionMarkStore.replace({
+      BTCUSDT: { markPrice: '60600', updatedAt: 1_784_000_000_100 },
+    }))
+    expect(entryRead).not.toHaveBeenCalled()
+    expect(screen.getByTestId('futures-upnl-total')).toHaveTextContent('−300.00 USDT')
+
+    act(() => positionMarkStore.replace({
+      BTCUSDT: { markPrice: '61200', updatedAt: 1_784_000_000_200 },
+    }))
+    expect(entryRead).toHaveBeenCalled()
+    expect(screen.getByTestId('futures-upnl-total')).toHaveTextContent('−600.00 USDT')
+  })
+
   it('re-values the row when a fresher mark arrives without an account event', () => {
     const positionMarkStore = createFuturesPositionMarkStore()
     positionMarkStore.replace({
@@ -629,21 +665,29 @@ describe('FuturesPortfolioDock', () => {
     )
     const table = screen.getByRole('table', { name: 'Open positions' })
     expect(table).toHaveTextContent('Margin')
-    expect(table).toHaveTextContent('3000.00')
-    expect(table).toHaveTextContent('−10.00%')
+    // Cross margin follows the same live valuation generation as uPnL: the
+    // live +30 move turns the account snapshot's 3000 into a 3030 denominator.
+    expect(table).toHaveTextContent('3030.00')
+    expect(table).toHaveTextContent('−9.90%')
     // The amount and the percentage together outgrew the column, which clips its
     // overflow: the percent sign was being sliced off. Both readings stay exact in
     // the cell's title whatever the dock's width does to the text.
-    expect(within(table).getByTitle(/−300\.00 USDT · −10\.00% on margin · live exchange mark/))
+    expect(within(table).getByTitle(/−300\.00 USDT · −9\.90% on margin · live exchange mark/))
       .toHaveTextContent('−300.00')
   })
 
   it('opens the margin panel at the cursor for the position that was clicked', () => {
     const onMarginEdit = vi.fn()
+    const rawPosition = { ...position, isolatedWallet: '3000' }
+    const positionMarkStore = createFuturesPositionMarkStore()
+    positionMarkStore.replace({
+      BTCUSDT: { markPrice: '61200', updatedAt: 1_784_000_000_000 },
+    })
     render(
       <FuturesPortfolioDock
         selectedSymbol="ETHUSDT"
-        positions={[{ ...position, isolatedWallet: '3000' }]}
+        positions={[rawPosition]}
+        positionMarkStore={positionMarkStore}
         onMarginEdit={onMarginEdit}
       />,
     )
@@ -651,10 +695,13 @@ describe('FuturesPortfolioDock', () => {
       screen.getByRole('button', { name: 'Adjust margin on the BTCUSDT SHORT position' }),
       { clientX: 240, clientY: 310 },
     )
-    expect(onMarginEdit).toHaveBeenCalledWith(
-      expect.objectContaining({ symbol: 'BTCUSDT', positionSide: 'BOTH' }),
-      { x: 240, y: 310 },
-    )
+    const [clickedPosition, anchor] = onMarginEdit.mock.lastCall
+    expect(clickedPosition).toBe(rawPosition)
+    expect(clickedPosition).toMatchObject({
+      symbol: 'BTCUSDT', positionSide: 'BOTH', markPrice: '60600', unrealizedPnl: '-300',
+    })
+    expect(clickedPosition).not.toHaveProperty('valuationSource')
+    expect(anchor).toEqual({ x: 240, y: 310 })
   })
 
   // A cross row still opens the panel: that is where the reason it cannot be
@@ -849,7 +896,7 @@ describe('FuturesPortfolioDock', () => {
     const onSymbolChange = vi.fn()
     const positionMarkStore = createFuturesPositionMarkStore()
     positionMarkStore.replace({
-      BTCUSDT: { markPrice: '60600', updatedAt: 1_784_000_000_000 },
+      BTCUSDT: { markPrice: '61200', updatedAt: 1_784_000_000_000 },
     })
     render(
       <FuturesPortfolioDock
@@ -863,13 +910,13 @@ describe('FuturesPortfolioDock', () => {
       />,
     )
     fireEvent.click(screen.getByRole('button', { name: 'Close BTCUSDT position' }))
-    expect(onClosePosition).toHaveBeenCalledWith(expect.objectContaining({
-      symbol: 'BTCUSDT',
-      markPrice: '60600',
-      unrealizedPnl: '-300',
-      valuationSource: 'live-mark',
-      valuationComplete: true,
-    }), expect.any(Object))
+    const [clickedPosition, anchor] = onClosePosition.mock.lastCall
+    expect(clickedPosition).toBe(position)
+    expect(clickedPosition).toMatchObject({
+      symbol: 'BTCUSDT', markPrice: '60600', unrealizedPnl: '-300',
+    })
+    expect(clickedPosition).not.toHaveProperty('valuationSource')
+    expect(anchor).toEqual(expect.any(Object))
 
     fireEvent.click(screen.getByRole('button', {
       name: 'Cancel BTCUSDT BUY order at 58445.00',

@@ -8,8 +8,11 @@ The primary Futures unrealized PnL is currently valued at a synthetic price deri
 - Use the account snapshot's `unRealizedProfit` only as a qualified fallback when no current mark exists.
 - Remove aggregate trades from the authoritative valuation path; any tape what-if is explicitly secondary and non-additive.
 - Reject delayed mark frames by exchange event time so neither the displayed valuation nor the feed's funding-settlement baseline can be rewound by stale data, while accepting a fresh earlier funding reschedule.
+- Require forward progress from every tracked contract, stop the shared mark/funding lifecycle when its last Futures consumer leaves, and coalesce full mark publications on the Futures market lane.
 - Represent aggregate uPnL as unknown or partial when any required position reading is unknown instead of silently summing a subset or showing zero.
 - Isolate live mark updates from the held history subtree and bound the number of Closed Positions DOM rows rendered at once.
+- Keep presentation valuations out of close/margin command state, verify reduction direction against the live account leg, and fail closed when a financial action's balance, maintenance, or current-position proof is unavailable.
+- Keep Ticket counts and empty states unknown until the corresponding account resource has completed a successful read.
 - Reconcile the two existing, contradictory requirements that alternately require synthetic tape-carried uPnL and mark-only uPnL.
 
 ## Capabilities
@@ -25,4 +28,4 @@ None.
 
 ## Impact
 
-Affected areas include `futuresPositionMarks`, the mark-price feed, `useFuturesTrading`, `FuturesPortfolioDock`, `FuturesHistoryPanel`, and their tests. GitNexus reports the leaf utilities as LOW risk, but the effective UI blast radius includes every open-position row and the portfolio total.
+Affected areas include `futuresPositionMarks`, `futuresOrderConfirmation`, the mark-price feed, the shared Futures connection/outbox lifecycle, `useFuturesTrading`, close/margin commands, `FuturesPortfolioDock`, `FuturesTradingTicket`, `FuturesProductionWorkstation`, `FuturesHistoryPanel`, and their tests. GitNexus reports several leaf utilities as LOW risk, while the mark watchdog, funding schedule, and renderer broadcaster reach CRITICAL execution-flow fan-out; changes to those paths stay narrowly scoped and require connection-level regressions.

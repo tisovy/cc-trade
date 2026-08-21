@@ -327,6 +327,63 @@ describe('setupBinanceConnection user-data orchestration', () => {
         await firstClose;
     });
 
+    it('retires an in-flight settled read and public mark feed on service close', async () => {
+        let resolveIncomePage;
+        moduleMocks.futuresAdapter.getIncomePage.mockImplementationOnce(() => (
+            new Promise((resolve) => { resolveIncomePage = resolve; })
+        ));
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([{
+            type: 'positions', weight: 5, errorLabel: 'positions',
+            loadPayload: vi.fn().mockResolvedValue({
+                futures_positions: [{
+                    symbol: 'BMTUSDT', positionSide: 'BOTH', quantity: '-2',
+                    entryPrice: '0.03', markPrice: '0.034', unrealizedPnl: '-0.008',
+                }],
+            }),
+        }]);
+        moduleMocks.httpServer.close.mockImplementation(callback => callback?.());
+        const controller = setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1' },
+        });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({ action: 'activate_market', marketMode: 'futures-live' }),
+        });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+        const privateSocket = moduleMocks.futuresUserDataSockets
+            .find(socket => socket.handlers.ping);
+        privateSocket.handlers.open();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+        expect(resolveIncomePage).toBeTypeOf('function');
+        expect(moduleMocks.futuresAdapter.getIncomePage).toHaveBeenCalledOnce();
+
+        const { default: MockWebSocket } = await import('ws');
+        const openedSockets = MockWebSocket.mock.calls.length;
+        const markSocketIndex = MockWebSocket.mock.calls
+            .findIndex(([url]) => String(url).includes('@markPrice@1s'));
+        const markSocket = MockWebSocket.mock.results[markSocketIndex].value;
+        moduleMocks.rendererConnection.sendUTF.mockClear();
+        await controller.close();
+        expect(privateSocket.disconnect).toHaveBeenCalled();
+        expect(markSocket.close).toHaveBeenCalled();
+
+        // The already admitted HTTP request may answer, but its retired
+        // activation cannot publish, continue the multi-kind walk, or arm a
+        // confirmation/reconnect timer after shutdown.
+        resolveIncomePage({ rows: [], full: false });
+        await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+        await flushMicrotasks();
+        expect(moduleMocks.futuresAdapter.getIncomePage).toHaveBeenCalledOnce();
+        expect(MockWebSocket.mock.calls).toHaveLength(openedSockets);
+        expect(moduleMocks.rendererConnection.sendUTF).not.toHaveBeenCalled();
+    });
+
     // A rejected handshake reaches the browser as an anonymous 1006, which is
     // why a renderer holding a token this process never issued retried it every
     // 500 ms for the whole session and filled the log with `invalid token`.
@@ -745,6 +802,391 @@ describe('setupBinanceConnection user-data orchestration', () => {
             version: 1,
             marks: { BMTUSDT: { markPrice: '0.03500', updatedAt: 1_784_000_000_000 } },
         });
+    });
+
+    it('sends position marks only to renderers whose current market is Futures', async () => {
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([{
+            type: 'positions',
+            weight: 5,
+            errorLabel: 'positions',
+            loadPayload: vi.fn().mockResolvedValue({
+                futures_positions: [{
+                    symbol: 'BMTUSDT', positionSide: 'BOTH', quantity: '-2',
+                    entryPrice: '0.03', markPrice: '0.034', unrealizedPnl: '-0.008',
+                }],
+            }),
+        }]);
+        await connectRenderer('futures-live');
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+
+        const spotHandlers = {};
+        const spotConnection = {
+            connected: true,
+            remoteAddress: '127.0.0.2',
+            outputBufferFull: false,
+            sendUTF: vi.fn(),
+            close: vi.fn(),
+            drop: vi.fn(),
+            on: vi.fn((event, handler) => { spotHandlers[event] = handler; }),
+        };
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => spotConnection),
+        });
+        await spotHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({ action: 'activate_market', marketMode: 'spot' }),
+        });
+        await flushMicrotasks();
+        moduleMocks.rendererConnection.sendUTF.mockClear();
+        spotConnection.sendUTF.mockClear();
+
+        const { default: MockWebSocket } = await import('ws');
+        const markSocketIndex = MockWebSocket.mock.calls
+            .findIndex(([url]) => String(url).includes('@markPrice@1s'));
+        const markSocket = MockWebSocket.mock.results[markSocketIndex].value;
+        markSocket.handlers.message(JSON.stringify({
+            stream: 'bmtusdt@markPrice@1s',
+            data: { e: 'markPriceUpdate', E: 2_000, s: 'BMTUSDT', p: '0.03500', T: 30_000 },
+        }));
+        await vi.advanceTimersByTimeAsync(200);
+
+        expect(moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.type === 'futures_position_marks')).toHaveLength(1);
+        expect(spotConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.type === 'futures_position_marks')).toEqual([]);
+    });
+
+    it('supersedes queued marks and drains account truth before the newest mark', async () => {
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([{
+            type: 'positions',
+            weight: 5,
+            errorLabel: 'positions',
+            loadPayload: vi.fn().mockResolvedValue({
+                futures_positions: [{
+                    symbol: 'BMTUSDT', positionSide: 'BOTH', quantity: '-2',
+                    entryPrice: '0.03', markPrice: '0.034', unrealizedPnl: '-0.008',
+                }],
+            }),
+        }]);
+        await connectRenderer('futures-live');
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+        const privateSocket = moduleMocks.futuresUserDataSockets
+            .find(socket => socket.handlers.ping);
+        privateSocket.handlers.open();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+
+        const { default: MockWebSocket } = await import('ws');
+        const markSocketIndex = MockWebSocket.mock.calls
+            .findIndex(([url]) => String(url).includes('@markPrice@1s'));
+        const markSocket = MockWebSocket.mock.results[markSocketIndex].value;
+        moduleMocks.rendererConnection.sendUTF.mockClear();
+        moduleMocks.rendererConnection.outputBufferFull = true;
+
+        const sendMark = async (eventTime, price) => {
+            markSocket.handlers.message(JSON.stringify({
+                stream: 'bmtusdt@markPrice@1s',
+                data: { e: 'markPriceUpdate', E: eventTime, s: 'BMTUSDT', p: price, T: 30_000 },
+            }));
+            await vi.advanceTimersByTimeAsync(200);
+        };
+        // Revision 1 fills the socket buffer. Revisions 2 and 3 are held by the
+        // outbox, where the complete newer map replaces the older one.
+        await sendMark(2_000, '0.03500');
+        await sendMark(3_000, '0.03510');
+        await sendMark(4_000, '0.03520');
+
+        privateSocket.handlers.message(JSON.stringify({
+            e: 'ORDER_TRADE_UPDATE', E: 4_100,
+            o: {
+                s: 'BMTUSDT', i: 44, X: 'NEW', S: 'BUY', o: 'LIMIT',
+                p: '0.03', q: '1', z: '0', rp: '0', T: 4_100,
+            },
+        }));
+        await flushMicrotasks();
+        expect(moduleMocks.rendererConnection.sendUTF).toHaveBeenCalledTimes(1);
+
+        moduleMocks.rendererConnection.outputBufferFull = false;
+        moduleMocks.rendererHandlers.drain();
+        await flushMicrotasks();
+
+        const drained = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message));
+        const marks = drained.filter(payload => payload.type === 'futures_position_marks');
+        expect(marks).toHaveLength(2);
+        expect(marks.map(payload => payload.marks.BMTUSDT.markPrice)).toEqual([
+            '0.03500',
+            '0.03520',
+        ]);
+        const accountIndex = drained.findIndex(payload => payload.futures_execution_update);
+        const newestMarkIndex = drained.findIndex(payload => (
+            payload.type === 'futures_position_marks'
+            && payload.marks.BMTUSDT.markPrice === '0.03520'
+        ));
+        expect(accountIndex).toBeGreaterThan(0);
+        expect(accountIndex).toBeLessThan(newestMarkIndex);
+    });
+
+    it('discards a queued position mark before acknowledging a switch away from Futures', async () => {
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([{
+            type: 'positions', weight: 5, errorLabel: 'positions',
+            loadPayload: vi.fn().mockResolvedValue({
+                futures_positions: [{
+                    symbol: 'BMTUSDT', positionSide: 'BOTH', quantity: '-2',
+                    entryPrice: '0.03', markPrice: '0.034', unrealizedPnl: '-0.008',
+                }],
+            }),
+        }]);
+        await connectRenderer('futures-live');
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+        const { default: MockWebSocket } = await import('ws');
+        const markSocketIndex = MockWebSocket.mock.calls
+            .findIndex(([url]) => String(url).includes('@markPrice@1s'));
+        const markSocket = MockWebSocket.mock.results[markSocketIndex].value;
+        moduleMocks.rendererConnection.sendUTF.mockClear();
+        moduleMocks.rendererConnection.outputBufferFull = true;
+
+        markSocket.handlers.message(JSON.stringify({
+            stream: 'bmtusdt@markPrice@1s',
+            data: { e: 'markPriceUpdate', E: 2_000, s: 'BMTUSDT', p: '0.03500', T: 30_000 },
+        }));
+        await vi.advanceTimersByTimeAsync(200);
+        markSocket.handlers.message(JSON.stringify({
+            stream: 'bmtusdt@markPrice@1s',
+            data: { e: 'markPriceUpdate', E: 3_000, s: 'BMTUSDT', p: '0.03510', T: 30_000 },
+        }));
+        await vi.advanceTimersByTimeAsync(200);
+        expect(moduleMocks.rendererConnection.sendUTF).toHaveBeenCalledTimes(1);
+
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({ action: 'activate_market', marketMode: 'spot' }),
+        });
+        moduleMocks.rendererConnection.outputBufferFull = false;
+        moduleMocks.rendererHandlers.drain();
+        await flushMicrotasks();
+
+        const delivered = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message));
+        expect(delivered.filter(payload => payload.type === 'futures_position_marks'))
+            .toHaveLength(1);
+        expect(delivered.at(-1)).toMatchObject({
+            type: 'market_activation', marketMode: 'spot',
+        });
+    });
+
+    it('ignores buffered message and error callbacks from a retired Futures private socket', async () => {
+        const balances = vi.fn().mockResolvedValue({
+            futures_balances: { USDT: { available: '100', total: '100' } },
+        });
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([{
+            type: 'balances', weight: 5, errorLabel: 'balances', loadPayload: balances,
+        }]);
+        await connectRenderer('futures-live');
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+        const firstSocket = moduleMocks.futuresUserDataSockets
+            .find(socket => socket.handlers.ping);
+        firstSocket.handlers.open();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+
+        await activateMarket('spot');
+        await activateMarket('futures-live');
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+        const secondSocket = moduleMocks.futuresUserDataSockets
+            .filter(socket => socket.handlers.ping)
+            .at(-1);
+        expect(secondSocket).not.toBe(firstSocket);
+        expect(firstSocket.disconnect).toHaveBeenCalled();
+
+        const balanceReads = balances.mock.calls.length;
+        const incomeReads = moduleMocks.futuresAdapter.getIncomePage.mock.calls.length;
+        moduleMocks.rendererConnection.sendUTF.mockClear();
+        console.warn.mockClear();
+        firstSocket.handlers.message(JSON.stringify({
+            e: 'ORDER_TRADE_UPDATE', E: 5_000,
+            o: {
+                s: 'BTCUSDT', i: 77, X: 'FILLED', S: 'SELL', o: 'MARKET',
+                p: '50000', q: '1', z: '1', rp: '12.5', T: 5_000,
+            },
+        }));
+        firstSocket.handlers.error(Object.assign(new Error('late retired error'), {
+            code: 'ECONNRESET',
+        }));
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+
+        expect(moduleMocks.rendererConnection.sendUTF).not.toHaveBeenCalled();
+        expect(balances).toHaveBeenCalledTimes(balanceReads);
+        expect(moduleMocks.futuresAdapter.getIncomePage).toHaveBeenCalledTimes(incomeReads);
+        expect(console.warn).not.toHaveBeenCalled();
+    });
+
+    it('retires queued and in-flight Futures listen-key renewals across reactivation', async () => {
+        const keepAliveDelay = 30 * 60 * 1000;
+        const diagnosticRecord = {
+            directory: '/desk/diagnostics',
+            record: vi.fn(() => true),
+            observeOutbound: vi.fn(() => false),
+            observeCommand: vi.fn(() => false),
+            close: vi.fn(),
+        };
+        const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+        const keepAliveCallbacks = () => setIntervalSpy.mock.calls.flatMap(
+            ([callback, delay]) => (delay === keepAliveDelay ? [callback] : []),
+        );
+
+        try {
+            setupBinanceConnection({
+                localWebSocketAccess: { host: '127.0.0.1' },
+                diagnosticRecord,
+            });
+            moduleMocks.websocketServerHandlers.request({
+                origin: 'http://localhost:5174',
+                accept: vi.fn(() => moduleMocks.rendererConnection),
+            });
+            await activateMarket('futures-live');
+            await flushMicrotasks();
+
+            const [retiredQueuedKeepAlive] = keepAliveCallbacks();
+            expect(retiredQueuedKeepAlive).toBeTypeOf('function');
+
+            // The listen-key POST has just occupied the limiter admission slot,
+            // so this renewal is waiting on its spacing timer rather than having
+            // reached the adapter yet.
+            retiredQueuedKeepAlive();
+            await flushMicrotasks();
+            expect(moduleMocks.futuresAdapter.renewUserDataStreamListenKey)
+                .not.toHaveBeenCalled();
+
+            await activateMarket('spot');
+            await activateMarket('futures-live');
+            await vi.advanceTimersByTimeAsync(2_000);
+            await flushMicrotasks();
+
+            expect(moduleMocks.futuresAdapter.renewUserDataStreamListenKey)
+                .not.toHaveBeenCalled();
+            expect(keepAliveCallbacks()).toHaveLength(2);
+
+            let rejectRetiredRenewal;
+            moduleMocks.futuresAdapter.renewUserDataStreamListenKey.mockReturnValueOnce(
+                new Promise((resolve, reject) => {
+                    rejectRetiredRenewal = reject;
+                }),
+            );
+            keepAliveCallbacks()[1]();
+            await flushMicrotasks();
+            expect(moduleMocks.futuresAdapter.renewUserDataStreamListenKey)
+                .toHaveBeenCalledOnce();
+
+            await activateMarket('spot');
+            await activateMarket('futures-live');
+            await vi.advanceTimersByTimeAsync(2_000);
+            await flushMicrotasks();
+
+            const currentSocket = moduleMocks.futuresUserDataSockets
+                .filter(socket => socket.handlers.ping)
+                .at(-1);
+            currentSocket.handlers.open();
+            await flushMicrotasks();
+            expect(keepAliveCallbacks()).toHaveLength(3);
+
+            diagnosticRecord.record.mockClear();
+            moduleMocks.rendererConnection.sendUTF.mockClear();
+            console.warn.mockClear();
+            rejectRetiredRenewal(new Error('late retired renewal failure'));
+            await flushMicrotasks();
+
+            expect(diagnosticRecord.record.mock.calls.filter(
+                ([kind]) => kind === 'fault',
+            )).toEqual([]);
+            expect(console.warn).not.toHaveBeenCalled();
+            expect(moduleMocks.rendererConnection.sendUTF.mock.calls
+                .map(([message]) => JSON.parse(message))
+                .filter(payload => (
+                    payload.type === 'futures_account_state'
+                    && payload.resources?.userDataStream?.status === 'error'
+                ))).toEqual([]);
+
+            // A failure belonging to the current stream still takes the normal
+            // error path; retirement guards must not hide live-stream faults.
+            moduleMocks.futuresAdapter.renewUserDataStreamListenKey.mockRejectedValueOnce(
+                new Error('active renewal failure'),
+            );
+            keepAliveCallbacks()[2]();
+            await flushMicrotasks();
+
+            expect(diagnosticRecord.record).toHaveBeenCalledWith('fault', {
+                phase: 'futures-user-data',
+                code: 'LISTEN_KEY_RENEWAL_FAILED',
+            });
+            expect(console.warn).toHaveBeenCalledWith(
+                'Failed to renew futures listenKey:',
+                'active renewal failure',
+            );
+        } finally {
+            setIntervalSpy.mockRestore();
+        }
+    });
+
+    it('cancels feed, settlement, and reconnect work when the final renderer closes', async () => {
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([{
+            type: 'positions', weight: 5, errorLabel: 'positions',
+            loadPayload: vi.fn().mockResolvedValue({
+                futures_positions: [{
+                    symbol: 'BMTUSDT', positionSide: 'BOTH', quantity: '-2',
+                    entryPrice: '0.03', markPrice: '0.034', unrealizedPnl: '-0.008',
+                }],
+            }),
+        }]);
+        await connectRenderer('futures-live');
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+        const privateSocket = moduleMocks.futuresUserDataSockets
+            .find(socket => socket.handlers.ping);
+        privateSocket.handlers.open();
+
+        const { default: MockWebSocket } = await import('ws');
+        const markSocketIndex = MockWebSocket.mock.calls
+            .findIndex(([url]) => String(url).includes('@markPrice@1s'));
+        const markSocket = MockWebSocket.mock.results[markSocketIndex].value;
+        markSocket.handlers.open();
+        markSocket.handlers.message(JSON.stringify({
+            stream: 'bmtusdt@markPrice@1s',
+            data: { e: 'markPriceUpdate', E: 2_000, s: 'BMTUSDT', p: '0.03500', T: 30_000 },
+        }));
+        const openedSockets = MockWebSocket.mock.calls.length;
+        const incomeReads = moduleMocks.futuresAdapter.getIncomePage.mock.calls.length;
+        moduleMocks.rendererConnection.sendUTF.mockClear();
+
+        // Close before either the mark batch or the stream-open settlement
+        // debounce fires. Both timers belong to this final Futures consumer.
+        moduleMocks.rendererConnection.close();
+        await flushMicrotasks();
+        expect(privateSocket.disconnect).toHaveBeenCalled();
+        expect(markSocket.close).toHaveBeenCalled();
+
+        // Late callbacks on the retired sockets are harmless, and no watchdog
+        // or reconnect may rebuild either service for an empty consumer set.
+        privateSocket.handlers.message(JSON.stringify({
+            e: 'ACCOUNT_UPDATE', E: 3_000, T: 3_000,
+            a: { m: 'FUNDING_FEE', B: [], P: [] },
+        }));
+        markSocket.handlers.close();
+        await vi.advanceTimersByTimeAsync(10 * 60 * 1000);
+        await flushMicrotasks();
+
+        expect(moduleMocks.rendererConnection.sendUTF).not.toHaveBeenCalled();
+        expect(moduleMocks.futuresAdapter.getIncomePage).toHaveBeenCalledTimes(incomeReads);
+        expect(MockWebSocket.mock.calls).toHaveLength(openedSockets);
     });
 
     it('opens the Futures user-data stream on the routed private path', async () => {
@@ -5299,8 +5741,14 @@ describe('setupBinanceConnection user-data orchestration', () => {
         const socket = moduleMocks.futuresUserDataSockets[0];
         socket.handlers.open();
         // Nine minutes in: inside the hold, so nothing would be re-read yet.
-        await vi.advanceTimersByTimeAsync(9 * 60 * 1000);
-        await flushMicrotasks();
+        // Keep this exact private socket carrying while the clock advances; a
+        // frame from the instance retired by the silence watchdog is correctly
+        // ignored before it can mutate the held configuration.
+        for (let beat = 0; beat < 3; beat += 1) {
+            await vi.advanceTimersByTimeAsync(3 * 60 * 1000);
+            socket.handlers.ping();
+            await flushMicrotasks();
+        }
         socket.handlers.message(JSON.stringify({
             e: 'ACCOUNT_CONFIG_UPDATE',
             E: 1611646737479,
@@ -6379,8 +6827,27 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(moduleMocks.futuresAdapter.placeOrder).toHaveBeenCalledOnce();
     });
 
-    it('enforces FUTURES_MAX_ORDER_USDT on entries but never on reduce-only orders', async () => {
+    it('enforces the cap on entries and exempts only current backend-proven reductions', async () => {
         vi.stubEnv('FUTURES_MAX_ORDER_USDT', '100');
+        const positions = [{
+            symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '10',
+            entryPrice: '50000', markPrice: '50000', unrealizedPnl: '0',
+        }, {
+            symbol: 'ETHUSDT', positionSide: 'SHORT', quantity: '-8',
+            entryPrice: '2500', markPrice: '2500', unrealizedPnl: '0',
+        }, {
+            symbol: 'BNBUSDT', positionSide: 'BOTH', quantity: '6',
+            entryPrice: '600', markPrice: '600', unrealizedPnl: '0',
+        }, {
+            symbol: 'XRPUSDT', positionSide: 'BOTH', quantity: '-7',
+            entryPrice: '1', markPrice: '1', unrealizedPnl: '0',
+        }];
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([{
+            type: 'positions',
+            weight: 5,
+            errorLabel: 'positions',
+            loadPayload: vi.fn().mockResolvedValue({ futures_positions: positions }),
+        }]);
         setupBinanceConnection({
             localWebSocketAccess: { host: '127.0.0.1', port: 14477 },
         });
@@ -6395,14 +6862,22 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 marketMode: 'futures-live',
             }),
         });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+        const privateSocket = moduleMocks.futuresUserDataSockets
+            .find(socket => socket.handlers.ping);
+        expect(privateSocket).toBeDefined();
+        privateSocket.handlers.open();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+
         const sendOrder = payload => moduleMocks.rendererHandlers.message({
             type: 'utf8',
             utf8Data: JSON.stringify({
                 action: 'trade.placeOrder',
                 version: 1,
                 marketType: 'futures',
-                symbol: 'BTCUSDT',
-                side: 'BUY',
+                symbol: 'BTCUSDT', side: 'BUY',
                 ...payload,
             }),
         });
@@ -6422,9 +6897,117 @@ describe('setupBinanceConnection user-data orchestration', () => {
         await sendOrder({ orderType: 'LIMIT', timeInForce: 'GTC', price: '50000', quantity: '0.001' });
         expect(moduleMocks.futuresAdapter.placeOrder).toHaveBeenCalledOnce();
 
-        // Reduce-only market close is exempt regardless of size.
-        await sendOrder({ side: 'SELL', orderType: 'MARKET', quantity: '10', positionSide: 'LONG', reduceOnly: true });
-        expect(moduleMocks.futuresAdapter.placeOrder).toHaveBeenCalledTimes(2);
+        // Each explicit leg is accepted only in its actual closing direction.
+        // MARKET carries no price, so passing the active cap proves the backend
+        // position snapshot — not a renderer flag — supplied the exemption.
+        await sendOrder({
+            symbol: 'BTCUSDT', side: 'SELL', orderType: 'MARKET', quantity: '10',
+            positionSide: 'LONG', reduceOnly: true,
+        });
+        await sendOrder({
+            symbol: 'ETHUSDT', side: 'BUY', orderType: 'MARKET', quantity: '8',
+            positionSide: 'SHORT', reduceOnly: true,
+        });
+        await sendOrder({
+            symbol: 'BNBUSDT', side: 'SELL', orderType: 'MARKET', quantity: '6',
+            positionSide: 'BOTH', reduceOnly: true,
+        });
+        await sendOrder({
+            symbol: 'XRPUSDT', side: 'BUY', orderType: 'MARKET', quantity: '7',
+            positionSide: 'BOTH', reduceOnly: true,
+        });
+        expect(moduleMocks.futuresAdapter.placeOrder).toHaveBeenCalledTimes(5);
+        expect(moduleMocks.futuresAdapter.placeOrder.mock.calls.slice(1).map(([order]) => ({
+            symbol: order.symbol,
+            side: order.side,
+            positionSide: order.positionSide,
+            reduceOnly: order.reduceOnly,
+        }))).toEqual([
+            { symbol: 'BTCUSDT', side: 'SELL', positionSide: 'LONG', reduceOnly: true },
+            { symbol: 'ETHUSDT', side: 'BUY', positionSide: 'SHORT', reduceOnly: true },
+            { symbol: 'BNBUSDT', side: 'SELL', positionSide: 'BOTH', reduceOnly: true },
+            { symbol: 'XRPUSDT', side: 'BUY', positionSide: 'BOTH', reduceOnly: true },
+        ]);
+
+        moduleMocks.futuresAdapter.placeOrder.mockClear();
+        moduleMocks.rendererConnection.sendUTF.mockClear();
+        // None of these claims is a reduction: the first omits the leg, the
+        // second opens the held LONG, the third names a different leg, and the
+        // fourth is larger than the position it claims to close.
+        await sendOrder({
+            symbol: 'BTCUSDT', side: 'SELL', orderType: 'MARKET', quantity: '1',
+            reduceOnly: true,
+        });
+        await sendOrder({
+            symbol: 'BTCUSDT', side: 'BUY', orderType: 'MARKET', quantity: '1',
+            positionSide: 'LONG', reduceOnly: true,
+        });
+        await sendOrder({
+            symbol: 'BTCUSDT', side: 'SELL', orderType: 'MARKET', quantity: '1',
+            positionSide: 'SHORT', reduceOnly: true,
+        });
+        await sendOrder({
+            symbol: 'BTCUSDT', side: 'SELL', orderType: 'MARKET', quantity: '11',
+            positionSide: 'LONG', reduceOnly: true,
+        });
+        await sendOrder({
+            symbol: 'XRPUSDT', side: 'SELL', orderType: 'MARKET', quantity: '1',
+            positionSide: 'BOTH', reduceOnly: true,
+        });
+        expect(moduleMocks.futuresAdapter.placeOrder).not.toHaveBeenCalled();
+        const unproved = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.command_rejected?.code === 'FUTURES_REDUCTION_NOT_CONFIRMED');
+        expect(unproved).toHaveLength(5);
+        expect(unproved[0].command_rejected.details.positionSide).toBeNull();
+    });
+
+    it('rejects a retained position while the current activation snapshot is loading', async () => {
+        vi.stubEnv('FUTURES_MAX_ORDER_USDT', '100');
+        let resolveReplacement;
+        const replacement = new Promise((resolve) => { resolveReplacement = resolve; });
+        const loadPositions = vi.fn()
+            .mockResolvedValueOnce({
+                futures_positions: [{
+                    symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '2',
+                    entryPrice: '50000', markPrice: '50000', unrealizedPnl: '0',
+                }],
+            })
+            .mockImplementation(() => replacement);
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([{
+            type: 'positions', weight: 5, errorLabel: 'positions', loadPayload: loadPositions,
+        }]);
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+
+        await activateMarket('futures-live');
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+        await activateMarket('spot');
+        await activateMarket('futures-live');
+        await flushMicrotasks();
+
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'trade.placeOrder', version: 1, marketType: 'futures',
+                symbol: 'BTCUSDT', side: 'SELL', orderType: 'MARKET', quantity: '1',
+                positionSide: 'LONG', reduceOnly: true,
+            }),
+        });
+
+        expect(moduleMocks.futuresAdapter.placeOrder).not.toHaveBeenCalled();
+        expect(moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .some(payload => (
+                payload.command_rejected?.code === 'FUTURES_REDUCTION_NOT_CONFIRMED'
+            ))).toBe(true);
+        resolveReplacement({ futures_positions: [] });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
     });
 
     // A record wired to nothing is the same failure the fault reporter already

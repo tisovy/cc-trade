@@ -131,14 +131,19 @@ export const createFuturesMarkPriceFeed = ({
     let flushTimer = null;
     let reconnectTimer = null;
     let stallTimer = null;
-    let markSeenSinceCheck = false;
-    let stallReported = false;
     let published = false;
     let publicationRevision = 0;
     const publicationEpoch = Number.isSafeInteger(feedEpoch) && feedEpoch > 0
         ? feedEpoch
         : nextFuturesMarkPriceFeedEpoch();
     const marks = new Map();
+    // Exchange event time is the proof that one contract, rather than merely
+    // the combined socket, is still moving forward. Keep it across reconnects:
+    // marks are withdrawn there because their prices stop being live, but a
+    // delayed first frame on the replacement socket is not newer for having
+    // crossed a new connection.
+    const markEventTimes = new Map();
+    const progressedSymbols = new Set();
     // The settlement each tracked contract is counting down to. Kept apart from
     // `marks` on purpose: marks are cleared whenever the feed stops being able
     // to vouch for a price — a close, a stall, a rebuild — and the countdown is
@@ -163,7 +168,7 @@ export const createFuturesMarkPriceFeed = ({
         // the baseline even though the ordinary mark admission guard no longer
         // has a held price with which to reject it.
         if (Number.isSafeInteger(held?.updatedAt)
-            && (!Number.isSafeInteger(updatedAt) || updatedAt < held.updatedAt)) return;
+            && (!Number.isSafeInteger(updatedAt) || updatedAt <= held.updatedAt)) return;
         if (nextSettlementAt === null) {
             if (held !== undefined && Number.isSafeInteger(updatedAt)) {
                 settlements.set(symbol, { ...held, updatedAt });
@@ -175,11 +180,14 @@ export const createFuturesMarkPriceFeed = ({
             return;
         }
         const advanced = nextSettlementAt > held.nextSettlementAt;
-        // A fresh exchange frame may legitimately move the next funding time
-        // earlier. Adopt that schedule without claiming funding happened; only
-        // a later step forward from the adopted baseline is a settlement.
+        // A fresh exchange frame may legitimately move the next funding time in
+        // either direction. Before the held boundary that is a reschedule, not a
+        // charge. Adopt it as the new baseline, and report an advance only when
+        // exchange event time proves the boundary being observed was reached.
+        const boundaryReached = Number.isSafeInteger(updatedAt)
+            && updatedAt >= held.nextSettlementAt;
         settlements.set(symbol, { nextSettlementAt, updatedAt });
-        if (!advanced) return;
+        if (!advanced || !boundaryReached) return;
         try {
             onSettlement?.(symbol);
         } catch (error) {
@@ -246,15 +254,14 @@ export const createFuturesMarkPriceFeed = ({
             clock.clearTimeout(stallTimer);
             stallTimer = null;
         }
-        markSeenSinceCheck = false;
-        stallReported = false;
+        progressedSymbols.clear();
     };
 
     // A socket that opens and then goes quiet is the one failure this feed kept
     // to itself: 'open' was logged, no 'close' ever followed, and the desk went
     // on presenting an unrealized PnL from an earlier account read as the
-    // market's own. Silence against a one-per-second contract is reported as
-    // what it is, and so is its end.
+    // market's own. Silence against a one-per-second contract is reported and
+    // the combined stream is rebuilt before any retained mark can stay live.
     const armStallCheck = () => {
         if (stallTimer !== null || stopped || symbols.length === 0) return;
         stallTimer = clock.setTimeout(() => {
@@ -267,17 +274,11 @@ export const createFuturesMarkPriceFeed = ({
                 clearMarks();
                 return;
             }
-            if (markSeenSinceCheck) {
-                if (stallReported) {
-                    logger.info?.(
-                        `Futures mark price stream is delivering again: ${symbols.join(', ')}.`,
-                    );
-                }
-                stallReported = false;
-            } else {
+            const stalled = symbols.filter(symbol => !progressedSymbols.has(symbol));
+            if (stalled.length > 0) {
                 logger.warn?.(
                     `Futures mark price stream delivered nothing for ${Math.round(stallTimeoutMs / 1000)}s `
-                    + `(${symbols.join(', ')}); position values are the account snapshot, not the market.`,
+                    + `(${stalled.join(', ')}); position values are the account snapshot, not the market.`,
                 );
                 // Saying so was all this did, and the desk went on presenting the
                 // last mark as the market's own price. A socket that is open and
@@ -287,7 +288,7 @@ export const createFuturesMarkPriceFeed = ({
                 restart();
                 return;
             }
-            markSeenSinceCheck = false;
+            progressedSymbols.clear();
             armStallCheck();
         }, stallTimeoutMs);
     };
@@ -341,15 +342,21 @@ export const createFuturesMarkPriceFeed = ({
             const mark = readFuturesMarkPriceEvent(frame);
             if (mark === null || !symbols.includes(mark.symbol)) return;
             const held = marks.get(mark.symbol);
-            // A delayed frame must not rewind a row that already rendered a
-            // newer exchange mark. Null event times remain admissible because
-            // the price is still a valid mark, but cannot displace a timed one.
-            if (Number.isSafeInteger(held?.updatedAt)
-                && (!Number.isSafeInteger(mark.updatedAt) || mark.updatedAt < held.updatedAt)) return;
-            // Liveness is the mark's alone: a contract can go minutes without a
-            // print and the feed is still healthy. A rejected old frame does not
-            // keep a stale connection alive or rewind its settlement schedule.
-            markSeenSinceCheck = true;
+            const acceptedAt = markEventTimes.get(mark.symbol);
+            const timed = Number.isSafeInteger(mark.updatedAt);
+            // Only strict exchange-time progress may change a timed reading.
+            // The separate timestamp memory survives mark withdrawal, so an
+            // equal replay or conflict cannot regain authority after reconnect.
+            if (Number.isSafeInteger(acceptedAt)
+                && (!timed || mark.updatedAt <= acceptedAt)) return;
+            // Before the first timed frame, retain the legacy ability to display
+            // one valid untimed mark. It is not a liveness proof, and another
+            // untimed frame cannot replace it with an unordered conflict.
+            if (!timed && held !== undefined) return;
+            if (timed) {
+                markEventTimes.set(mark.symbol, mark.updatedAt);
+                progressedSymbols.add(mark.symbol);
+            }
             noteSettlementSchedule(mark.symbol, mark.nextSettlementAt, mark.updatedAt);
             if (held?.markPrice === mark.markPrice && held?.updatedAt === mark.updatedAt) return;
             marks.set(mark.symbol, {
@@ -402,11 +409,18 @@ export const createFuturesMarkPriceFeed = ({
             if (stopped) return;
             const next = readFuturesPositionSymbols(positions);
             if (sameSymbols(next, symbols)) return;
+            const nextSymbols = new Set(next);
             // A contract with no position left is charged no funding, and its
             // countdown would be stale if it is opened again days later — a
             // stale baseline reads as a settlement on the first frame back.
             for (const symbol of [...settlements.keys()]) {
-                if (!next.includes(symbol)) settlements.delete(symbol);
+                if (!nextSymbols.has(symbol)) settlements.delete(symbol);
+            }
+            // Event-time admission belongs to the same tracked lifetime. Once a
+            // contract leaves, a later position in it starts from its own first
+            // exchange frame rather than a timestamp remembered for the old one.
+            for (const symbol of [...markEventTimes.keys()]) {
+                if (!nextSymbols.has(symbol)) markEventTimes.delete(symbol);
             }
             disconnect({ retain: next });
             symbols = next;
@@ -431,6 +445,7 @@ export const createFuturesMarkPriceFeed = ({
             stopped = true;
             symbols = [];
             settlements.clear();
+            markEventTimes.clear();
             disconnect();
         },
         // Test and diagnostic surface: what the feed believes it is watching.

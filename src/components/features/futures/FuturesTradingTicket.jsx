@@ -35,6 +35,8 @@ import {
   formatUsdtAmount,
 } from '../../../utils/futuresPriceFormat.js'
 import {
+  describeFuturesOrderAvailability,
+  describeFuturesResourceAvailability,
   deriveFuturesReadiness,
   FUTURES_READINESS_CODES,
   isFuturesBalanceConfirmed,
@@ -70,6 +72,18 @@ export const FuturesBalanceAge = ({ at }) => {
   )
 }
 
+const FuturesResourceAvailabilityNotice = ({ availability, label }) => {
+  const message = availability.notice ?? availability.label
+  if (message === null) return null
+  const failed = availability.state === 'failed'
+  return (
+    <p role={failed ? 'alert' : 'status'} aria-label={label}>
+      {message}
+      {availability.reason === null ? null : <em> {availability.reason}</em>}
+    </p>
+  )
+}
+
 const ORDER_ACTIONS = Object.freeze([
   Object.freeze({
     key: 'LONG_ENTRY', side: 'BUY', positionSide: 'LONG', positionEffect: 'ENTRY', label: 'LONG entry',
@@ -94,11 +108,22 @@ const DRAFT_REASON_MESSAGES = Object.freeze({
 
 const SEND_FAILED_MESSAGE = 'Local backend connection unavailable — reconnect.'
 const EMPTY_TICKS = Object.freeze({})
+const RAW_POSITION_SIDES = new Set(['BOTH', 'LONG', 'SHORT'])
 
 const isExactPositiveDecimal = value => (
   typeof value === 'string' && value.length <= 42 && EXACT_POSITIVE_DECIMAL.test(value)
 )
 const exactText = value => (typeof value === 'string' && value.length > 0 ? value : '—')
+
+const findCurrentExitPosition = (positions, symbol, semanticSide) => (
+  positions.find((position) => {
+    if (position.symbol !== symbol || !RAW_POSITION_SIDES.has(position.positionSide)) return false
+    const description = describeFuturesPosition(position)
+    return description.positionSide === semanticSide
+      && description.absoluteQuantity !== null
+      && description.absoluteQuantity > 0
+  }) ?? null
+)
 
 // Every contract on this desk settles in USDT, so the quote half of the name is
 // the same four characters on every row of a column that has none to spare. The
@@ -142,6 +167,9 @@ const FuturesTradingPositionCard = memo(({
     snapshotAt,
     snapshotCoherent,
     snapshotConfirmed,
+    // The card explains tape/mark disagreement, so it needs price changes from
+    // both sources but not a render for clock-only freshness advances.
+    presentationOnly: true,
   })
   const valuedPosition = useMemo(
     () => applyFuturesPositionValuation(position, valuation),
@@ -198,7 +226,7 @@ const FuturesTradingPositionCard = memo(({
       <div>
         <button
           type="button"
-          onClick={event => onPositionClose?.(valuedPosition, {
+          onClick={event => onPositionClose?.(position, {
             x: event.clientX,
             y: event.clientY,
           })}
@@ -239,11 +267,16 @@ const FuturesTradingTicket = ({
   const openOrders = Array.isArray(safeState.openOrders) ? safeState.openOrders : []
   const positions = Array.isArray(safeState.positions) ? safeState.positions : []
   const positionsResource = safeState.accountResources?.positions ?? null
+  const positionsAvailability = describeFuturesResourceAvailability([positionsResource])
+  const ordersAvailability = describeFuturesOrderAvailability(safeState.accountResources)
   const positionSizingReady = positionsResource === null
     ? Array.isArray(safeState.positions)
     : positionsResource.status === 'ready'
       || (positionsResource.status === 'loading'
         && Number.isFinite(positionsResource.lastSuccessfulAt))
+  const positionCommandReady = positionsResource === null
+    ? Array.isArray(safeState.positions)
+    : positionsResource.status === 'ready'
   const positionSnapshotUpdatedAt = Number.isSafeInteger(positionsResource?.updatedAt)
     ? positionsResource.updatedAt
     : null
@@ -390,7 +423,12 @@ const FuturesTradingTicket = ({
   })
   const canSubmitAction = action => deriveSubmissionReadiness(action, orderDraft).ready
 
-  const resolveSubmitBlockReason = (action, draft, sizeUsdt = notionalUsdt) => {
+  const resolveSubmitBlockReason = (
+    action,
+    draft,
+    sizeUsdt = notionalUsdt,
+    orderSymbol = selectedSymbol,
+  ) => {
     if (!readiness.ready) return readiness.reason
     if (!sizingReady) return 'No confirmed available USDT balance to size the order.'
     // Sizing starts at zero, so an unsized draft is the ordinary case, not a
@@ -399,16 +437,34 @@ const FuturesTradingTicket = ({
     if (!draft.ok) return DRAFT_REASON_MESSAGES[draft.reason] ?? 'Order draft is invalid.'
     const submissionReadiness = deriveSubmissionReadiness(action, draft, sizeUsdt)
     if (!submissionReadiness.ready) return submissionReadiness.reason
+    if (action.positionEffect === 'EXIT' && (
+      !positionCommandReady
+      || findCurrentExitPosition(positions, orderSymbol, action.positionSide) === null
+    )) {
+      return `No current confirmed ${action.positionSide} position is available to close.`
+    }
     return SEND_FAILED_MESSAGE
   }
 
   // Takes the draft to send rather than a price to derive one from. A caller
   // that staged an order hands back the object it staged, so the quantity that
   // reaches the exchange is the quantity that was read on the way in.
-  const submitLimitOrder = (action, draft, { sizeUsdt = notionalUsdt, staged = false } = {}) => {
+  const submitLimitOrder = (action, draft, {
+    sizeUsdt = notionalUsdt,
+    staged = false,
+    symbol: orderSymbol = selectedSymbol,
+  } = {}) => {
     const submissionReadiness = deriveSubmissionReadiness(action, draft, sizeUsdt)
-    if (!submissionReadiness.ready || !draft.ok || typeof safeState.placeOrder !== 'function') {
-      const reason = resolveSubmitBlockReason(action, draft, sizeUsdt)
+    const currentExitPosition = action.positionEffect === 'EXIT' && positionCommandReady
+      ? findCurrentExitPosition(positions, orderSymbol, action.positionSide)
+      : null
+    if (
+      !submissionReadiness.ready
+      || !draft.ok
+      || typeof safeState.placeOrder !== 'function'
+      || (action.positionEffect === 'EXIT' && currentExitPosition === null)
+    ) {
+      const reason = resolveSubmitBlockReason(action, draft, sizeUsdt, orderSymbol)
       setFeedback({
         tone: 'ignored',
         title: `${action.label} NOT sent`,
@@ -424,12 +480,14 @@ const FuturesTradingTicket = ({
     // acted on, whether or not it was dismissed.
     setHeldRejection(null)
     const accepted = safeState.placeOrder({
-      symbol: selectedSymbol,
+      symbol: orderSymbol,
       side: action.side,
       orderType: 'LIMIT',
       price: draft.price,
       quantity: draft.quantity,
-      ...(action.positionEffect === 'EXIT' ? { reduceOnly: true } : {}),
+      ...(action.positionEffect === 'EXIT'
+        ? { positionSide: currentExitPosition.positionSide, reduceOnly: true }
+        : {}),
     })
     setFeedback(accepted
       ? null
@@ -451,15 +509,27 @@ const FuturesTradingTicket = ({
   // on the surface that sends the most orders.
   const confirmPendingOrder = () => {
     if (!pendingOrder) return
+    if (pendingOrder.symbol !== selectedSymbol) {
+      setPendingOrder(null)
+      setUnsentConfirmation(null)
+      setFeedback({
+        tone: 'ignored',
+        title: `${pendingOrder.action.label} NOT sent`,
+        detail: 'The selected contract changed, so the staged order was withdrawn.',
+      })
+      return
+    }
     const sent = submitLimitOrder(pendingOrder.action, pendingOrder.draft, {
       sizeUsdt: pendingOrder.notionalUsdt,
       staged: true,
+      symbol: pendingOrder.symbol,
     })
     if (sent === false) {
       setUnsentConfirmation(resolveSubmitBlockReason(
         pendingOrder.action,
         pendingOrder.draft,
         pendingOrder.notionalUsdt,
+        pendingOrder.symbol,
       ))
       return
     }
@@ -476,13 +546,11 @@ const FuturesTradingTicket = ({
 
   const pendingExitPosition = pendingOrder?.action.positionEffect === 'EXIT'
     && positionSizingReady
-    ? positions.find((position) => {
-      if (position.symbol !== pendingOrder.symbol) return false
-      const description = describeFuturesPosition(position)
-      return description.positionSide === pendingOrder.action.positionSide
-        && description.absoluteQuantity !== null
-        && description.absoluteQuantity > 0
-    }) ?? null
+    ? findCurrentExitPosition(
+      positions,
+      pendingOrder.symbol,
+      pendingOrder.action.positionSide,
+    )
     : null
   const pendingExitQuantity = typeof pendingExitPosition?.quantity === 'string'
     ? pendingExitPosition.quantity.replace(/^[+-]/, '')
@@ -704,15 +772,6 @@ const FuturesTradingTicket = ({
   const unresolvedCommand = safeState.unresolvedCommand ?? null
   const accountFailures = Object.entries(safeState.accountResources ?? {})
     .filter(([, resource]) => resource?.status === 'error' || resource?.status === 'stale')
-  const orderResourceStates = ['regularOrders', 'algoOrders']
-    .map(resource => safeState.accountResources?.[resource])
-    .filter(Boolean)
-  const orderSyncUnavailable = orderResourceStates.some(resource => (
-    resource.status === 'error' && resource.lastSuccessfulAt == null
-  ))
-  const orderSyncPartial = orderResourceStates.some(resource => (
-    resource.status === 'error' || resource.status === 'stale'
-  ))
   // What the resting orders come to, summed from the same list the operator
   // reads them in and priced by the same helper as every row of it.
   //
@@ -722,7 +781,9 @@ const FuturesTradingTicket = ({
   // orders. Until the orders have synchronized once there is no total to state,
   // on the same terms as the balance beside it — an empty list means nothing is
   // resting and reads as zero.
-  const workingOrdersUsdt = orderSyncUnavailable ? null : totalOrderNotionalUsdt(openOrders)
+  const workingOrdersUsdt = ordersAvailability.known
+    ? totalOrderNotionalUsdt(openOrders)
+    : null
 
   // What Binance would refuse anyway, refused here instead — with the desk's own
   // words rather than a code the operator has to look up, and without spending a
@@ -789,10 +850,10 @@ const FuturesTradingTicket = ({
       <div className="futures-production-tabs" role="tablist" aria-label="Futures trading rail tabs">
         <button type="button" role="tab" aria-selected={tab === 'trade'} onClick={() => setTab('trade')}>Trade</button>
         <button type="button" role="tab" aria-selected={tab === 'orders'} onClick={() => setTab('orders')}>
-          Orders <span>{openOrders.length}</span>
+          Orders <span>{ordersAvailability.known ? openOrders.length : '—'}</span>
         </button>
         <button type="button" role="tab" aria-selected={tab === 'positions'} onClick={() => setTab('positions')}>
-          Positions <span>{positions.length}</span>
+          Positions <span>{positionsAvailability.known ? positions.length : '—'}</span>
         </button>
       </div>
 
@@ -969,7 +1030,11 @@ const FuturesTradingTicket = ({
             <header className="futures-production-portfolio-heading">
               <div>
                 <strong>Open orders</strong>
-                <span>{openOrders.length} account-wide · {selectedOpenOrders.length} {selectedSymbol}</span>
+                <span>
+                  {ordersAvailability.known
+                    ? `${openOrders.length} account-wide · ${selectedOpenOrders.length} ${selectedSymbol}`
+                    : `— account-wide · — ${selectedSymbol}`}
+                </span>
               </div>
               <button
                 type="button"
@@ -981,13 +1046,12 @@ const FuturesTradingTicket = ({
                 ↻
               </button>
             </header>
-            {orderSyncUnavailable ? (
-              <p role="alert">Open orders unavailable — synchronization has not completed successfully.</p>
-            ) : orderSyncPartial ? (
-              <p role="status">Open orders are partially synchronized; last confirmed data remains visible.</p>
-            ) : null}
-            {openOrders.length === 0 && !orderSyncUnavailable
-              ? <p>No active Futures orders.</p>
+            <FuturesResourceAvailabilityNotice
+              availability={ordersAvailability}
+              label="Open orders synchronization"
+            />
+            {openOrders.length === 0
+              ? (ordersAvailability.known ? <p>No active Futures orders.</p> : null)
               : (
                 <div className="futures-production-order-rows" role="table" aria-label="Working orders">
                   {/* The columns are named once at the head instead of every row
@@ -1140,7 +1204,10 @@ const FuturesTradingTicket = ({
         ) : (
           <section className="futures-production-positions" role="tabpanel" aria-label="Open positions">
             <header className="futures-production-portfolio-heading">
-              <div><strong>Positions</strong><span>{positions.length} open</span></div>
+              <div>
+                <strong>Positions</strong>
+                <span>{positionsAvailability.known ? `${positions.length} open` : '— open'}</span>
+              </div>
               <button
                 type="button"
                 aria-label="Refresh positions and orders"
@@ -1151,8 +1218,12 @@ const FuturesTradingTicket = ({
                 ↻
               </button>
             </header>
+            <FuturesResourceAvailabilityNotice
+              availability={positionsAvailability}
+              label="Positions synchronization"
+            />
             {positions.length === 0
-              ? <p>No open positions.</p>
+              ? (positionsAvailability.known ? <p>No open positions.</p> : null)
               : positions.map(position => (
                 <FuturesTradingPositionCard
                   key={`${position.symbol}:${position.positionSide}`}

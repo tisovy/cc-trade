@@ -32,7 +32,11 @@ The existing chart-disagreement explanation may calculate a last-trade what-if f
 
 Mark admission is monotonic per symbol. A frame with an older exchange timestamp, or no timestamp after a timed frame, cannot replace the accepted mark. The funding schedule carries its own accepted event time across reconnects: a delayed frame cannot rewind its baseline and make the next current frame look like a new settlement, while a newer frame may legitimately reschedule funding earlier without being reported as a settlement.
 
-Each full publication carries a monotonic feed-instance epoch and a revision scoped to that epoch. The renderer admits the whole frame before applying per-symbol changes, because symbol timestamps alone cannot distinguish “this contract closed” from “this older frame predates that contract.” Renderer transport loss clears the admitted frame and every live mark immediately; a market-generation change also retires the currently admitted epoch through a retained floor, so neither a delayed non-empty frame nor teardown frame can resurrect the retired feed before the replacement speaks.
+Each full publication carries a monotonic feed-instance epoch and a revision scoped to that epoch. The renderer admits the whole frame before applying per-symbol changes, because symbol timestamps alone cannot distinguish “this contract closed” from “this older frame predates that contract.” Renderer transport loss clears admission and every live mark when the old source can no longer speak. A renderer market-generation change only clears visible readings while preserving admission: the shared backend feed normally survives that activation and must continue with the next revision in the same epoch. An actual newer feed epoch opens a fresh revision namespace and then excludes late frames from older epochs.
+
+Feed health is per tracked contract. Only a strictly newer, timed exchange event proves progress for that symbol; duplicates, equal-time conflicts, older frames, and untimed frames after a timed baseline do not touch value, funding, or liveness. Missing progress for any symbol withdraws the full map before reconnect, because a combined stream cannot truthfully keep one stale contract labelled live merely because another contract is moving.
+
+Funding schedule movement is not itself proof that funding settled. A newer frame may reschedule the baseline in either direction without reconciliation before the held boundary; an advance is reported only once exchange event time has reached the boundary that was being observed.
 
 ### 3. Make aggregate completeness explicit
 
@@ -50,12 +54,28 @@ This avoids moving every market tick through the monolithic hook state. A plain 
 
 When fills/income change, derive one immutable round index shared by open-settlement selectors and Closed Positions. Render a bounded page/window with overscan and an accessible “older/newer” control. Date headings participate in the window model so accessibility order remains correct. No extra exchange read is caused by moving inside held rows.
 
+### 6. Bound shared delivery by real Futures consumers
+
+The mark feed publishes complete, revisioned frames through a Futures-only broadcaster using the superseding market lane. A slow renderer therefore retains the newest full truth rather than a FIFO of obsolete snapshots, and a Spot renderer receives none of this work. The same idempotent shared Futures teardown is used when the last Futures renderer leaves and during service shutdown; it stops mark/reconnect/watchdog work, cancels settlement debounce/confirmation, and advances the settled-read activation guard before pending work can continue.
+
+Private-stream callbacks and rate-limited keep-alive jobs prove socket identity, generation, and active consumers immediately before every side effect and again before a late failure can change resource state. Teardown nulls that identity before closing the socket, so a frame already buffered by a graceful WebSocket close or a keep-alive already queued behind the limiter cannot recreate work or fault a replacement activation. A renderer leaving Futures also loses any queued position-mark frame from that activation; Futures-only broadcast membership prevents new traffic, while the outbox boundary prevents already queued traffic from crossing the market activation.
+
+### 7. Keep presentation DTOs out of financial actions
+
+Rows may merge a live valuation for display, but callbacks pass raw account identity/position. The workstation resolves that identity only against the current positions resource and dismisses action state once a successful reading confirms absence. Margin actions use the coherent raw account risk snapshot, not a mark-enriched presentation object; ADD and REMOVE each require their own known bound. Ticket entry intent remains semantic and lets the adapter resolve the account's position mode, while Ticket exits resolve the current raw account leg so one-way positions retain `BOTH` and hedge positions retain `LONG` or `SHORT`. Exit confirmation is bounded by the named leg rather than net exposure, so a balanced hedge book is not mistaken for an empty one. A staged order is synchronously withdrawn when the selected contract changes and carries its frozen symbol defensively through submission instead of relying on passive-effect timing. The main process independently proves any claimed reduction against the current leg before allowing it to bypass exposure controls.
+
+That backend proof is activation-scoped and fail-closed: only a READY positions snapshot admitted for the current Futures activation may authorize the exemption. A held row while the next snapshot is loading, or a successful row retained from a retired activation, is presentation history rather than command authority.
+
+For live ROE, isolated wallet is a stable committed denominator. CROSS position margin moves with notional, so it is derived from the current live notional and confirmed leverage when possible; otherwise ROE is unknown. The valuation DTO carries that denominator so a row showing Margin cannot retain a snapshot dollar amount beside a percentage derived from the current one. Snapshot ROE prefers `positionInitialMargin`, excluding working-order reserve.
+
 ## Risks / Trade-offs
 
 - **[Snapshot and live formula differ briefly]** → Prefer live mark as soon as all row inputs share a coherent generation; retain source labels and seam tests around transition.
 - **[Fine-grained subscriptions complicate lifecycle]** → Key subscriptions by activation generation and clear the store on market/account teardown.
 - **[Windowed history can disrupt focus]** → Keep stable round keys, explicit focus restoration, and keyboard tests for moving between windows.
 - **[Removing aggTrade valuation reduces apparent update frequency]** → This is intentional; explanatory tape data may remain, while financial state follows the exchange mark cadence.
+- **[Per-symbol watchdog reconnects the combined socket for one silent contract]** → Clearing all readings is safer than retaining a stale live label; the reconnect is bounded by the existing delay and happens only after the liveness window.
+- **[Fail-closed actions may temporarily disable a control]** → State why the bound or current-position proof is unavailable; never replace missing financial authority with zero or a stale presentation value.
 
 ## Migration Plan
 

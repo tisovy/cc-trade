@@ -75,6 +75,80 @@ describe('futures order confirmation', () => {
     expect(confirmation.warning.code).toBe('LARGER_THAN_POSITION')
   })
 
+  it.each([
+    { action: LONG_EXIT, expectedAfter: -0.5 },
+    { action: SHORT_EXIT, expectedAfter: 0.5 },
+  ])('projects a $action.positionSide exit from its named hedge leg, not net flat', ({
+    action,
+    expectedAfter,
+  }) => {
+    const confirmation = describeFuturesOrderConfirmation({
+      action,
+      symbol: 'BTCUSDT',
+      price: '100',
+      quantity: '0.5',
+      positions: [
+        { symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '1' },
+        { symbol: 'BTCUSDT', positionSide: 'SHORT', quantity: '1' },
+      ],
+    })
+
+    expect(confirmation.positionBefore).toBe(0)
+    expect(confirmation.positionAfter).toBe(expectedAfter)
+    expect(confirmation.warning).toBeNull()
+  })
+
+  it('bounds an oversized hedge exit by the named leg while leaving the opposite leg open', () => {
+    const confirmation = describeFuturesOrderConfirmation({
+      action: LONG_EXIT,
+      symbol: 'BTCUSDT',
+      price: '100',
+      quantity: '2',
+      positions: [
+        { symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '1' },
+        { symbol: 'BTCUSDT', positionSide: 'SHORT', quantity: '1' },
+      ],
+    })
+
+    expect(confirmation.positionBefore).toBe(0)
+    expect(confirmation.positionAfter).toBe(-1)
+    expect(confirmation.warning.code).toBe('LARGER_THAN_POSITION')
+  })
+
+  it('reports no matching leg even when the opposite hedge leg makes net exposure nonzero', () => {
+    const confirmation = describeFuturesOrderConfirmation({
+      action: LONG_EXIT,
+      symbol: 'BTCUSDT',
+      price: '100',
+      quantity: '0.5',
+      positions: [{ symbol: 'BTCUSDT', positionSide: 'SHORT', quantity: '1' }],
+    })
+
+    expect(confirmation.positionBefore).toBe(-1)
+    expect(confirmation.positionAfter).toBe(-1)
+    expect(confirmation.warning.code).toBe('NOTHING_TO_CLOSE')
+  })
+
+  it.each([
+    { action: LONG_EXIT, held: '0.5', expectedAfter: 0.3 },
+    { action: SHORT_EXIT, held: '-0.5', expectedAfter: -0.3 },
+  ])('projects a signed one-way $action.positionSide exit from its BOTH row', ({
+    action,
+    held,
+    expectedAfter,
+  }) => {
+    const confirmation = describeFuturesOrderConfirmation({
+      action,
+      symbol: 'BTCUSDT',
+      price: '100',
+      quantity: '0.2',
+      positions: [{ symbol: 'BTCUSDT', positionSide: 'BOTH', quantity: held }],
+    })
+
+    expect(confirmation.positionAfter).toBeCloseTo(expectedAfter, 10)
+    expect(confirmation.warning).toBeNull()
+  })
+
   it('warns when there is nothing to close', () => {
     const confirmation = describeFuturesOrderConfirmation({
       action: SHORT_EXIT,

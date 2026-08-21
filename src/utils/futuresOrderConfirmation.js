@@ -27,13 +27,29 @@ const HEADLINE_BY_ACTION = Object.freeze({
   SHORT_EXIT: 'CLOSE SHORT',
 })
 
-// Reduce-only orders cannot cross zero: the exchange trims them to whatever the
-// position still holds, so the projection must trim them too rather than show a
-// flip that can never happen.
-const applyExitDelta = (before, delta) => {
-  const after = before + delta
-  if (before === 0) return 0
-  return (before > 0) === (after > 0) ? after : 0
+// A hedge book can be net flat while both named legs are open. An exit is
+// therefore bounded by the leg it names, never by the net exposure shown on the
+// confirmation. BOTH rows use their signed one-way quantity to recover that
+// semantic leg.
+const futuresPositionLegQuantity = (positions, symbol, semanticSide) => {
+  if (!Array.isArray(positions)) return null
+  let total = 0
+  for (const position of positions) {
+    if (position?.symbol !== symbol) continue
+    const declaredSide = String(position?.positionSide ?? '').toUpperCase()
+    const quantity = toFiniteNumber(position?.quantity)
+    if (quantity === null) {
+      if (declaredSide === semanticSide || !['LONG', 'SHORT'].includes(declaredSide)) {
+        return null
+      }
+      continue
+    }
+    const heldSide = declaredSide === 'LONG' || declaredSide === 'SHORT'
+      ? declaredSide
+      : quantity > 0 ? 'LONG' : quantity < 0 ? 'SHORT' : null
+    if (heldSide === semanticSide) total += Math.abs(quantity)
+  }
+  return total
 }
 
 export const netFuturesPositionQuantity = (positions, symbol) => {
@@ -72,9 +88,17 @@ export const describeFuturesOrderConfirmation = ({
   const delta = orderQuantity === null
     ? null
     : (action.side === 'BUY' ? orderQuantity : -orderQuantity)
-  const after = before === null || delta === null
+  const targetQuantity = isExit
+    ? futuresPositionLegQuantity(positions, symbol, action.positionSide)
+    : null
+  const appliedDelta = !isExit
+    ? delta
+    : delta === null || targetQuantity === null
+      ? null
+      : Math.sign(delta) * Math.min(Math.abs(delta), targetQuantity)
+  const after = before === null || appliedDelta === null
     ? null
-    : isExit ? applyExitDelta(before, delta) : before + delta
+    : before + appliedDelta
 
   // Only the cases an operator can actually be wrong about, stated as what the
   // order will do — not as advice about what they should have meant.
@@ -94,12 +118,12 @@ export const describeFuturesOrderConfirmation = ({
           code: 'OPPOSITE_ENTRY',
           message: `This does NOT close your ${held} — it opens an opposite position.`,
         }
-    } else if (isExit && before === 0) {
+    } else if (isExit && targetQuantity === 0) {
       warning = {
         code: 'NOTHING_TO_CLOSE',
         message: 'There is no position to close — the exchange will reject a reduce-only order.',
       }
-    } else if (isExit && Math.abs(delta) > Math.abs(before)) {
+    } else if (isExit && targetQuantity !== null && Math.abs(delta) > targetQuantity) {
       warning = {
         code: 'LARGER_THAN_POSITION',
         message: 'Larger than the position — only what is open will be closed.',

@@ -256,6 +256,24 @@ export const createRendererOutbox = (connection, {
             queue(market, frame);
             return true;
         },
+        // A market activation can retire one resource while the renderer keeps
+        // using this same transport for another market. Frames already handed
+        // to the kernel preserve socket order and necessarily precede the
+        // activation answer; only frames still held here can cross that answer,
+        // and only complete/replaceable frames are safe to withdraw.
+        discardMarket: (resource, symbol = null, variant = null) => {
+            const key = keyOf(resource, symbol, variant);
+            let removed = 0;
+            for (let index = market.length - 1; index >= 0; index -= 1) {
+                const queued = market[index];
+                if (!queued.replaceable || queued.key !== key) continue;
+                left(queued);
+                market.splice(index, 1);
+                removed += 1;
+            }
+            if (!blocked && account.length === 0 && market.length === 0) report(false);
+            return removed;
+        },
         // What is being held right now, for the tests and for anything that wants
         // to know whether this renderer is behind.
         pending: () => Object.freeze({

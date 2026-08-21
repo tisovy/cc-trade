@@ -29,6 +29,21 @@ const createState = (overrides = {}) => ({
   balances: { USDT: { available: '1000', total: '1000' } },
   openOrders: [],
   positions: [],
+  accountResources: {
+    balances: {
+      status: 'ready', data: { USDT: { available: '1000', total: '1000' } },
+      updatedAt: 100, lastSuccessfulAt: 100, error: null,
+    },
+    positions: {
+      status: 'ready', data: [], updatedAt: 100, lastSuccessfulAt: 100, error: null,
+    },
+    regularOrders: {
+      status: 'ready', data: [], updatedAt: 100, lastSuccessfulAt: 100, error: null,
+    },
+    algoOrders: {
+      status: 'ready', data: [], updatedAt: 100, lastSuccessfulAt: 100, error: null,
+    },
+  },
   lastExecution: null,
   lastError: null,
   placeOrder: vi.fn(() => true),
@@ -364,6 +379,105 @@ describe('FuturesTradingTicket', () => {
     expect(within(screen.getByText('On order').closest('div')).getByText('—')).toBeInTheDocument()
   })
 
+  it.each([
+    ['idle', 'Not read yet.'],
+    ['loading', 'Reading the account…'],
+    ['error', 'Not read — the account read failed.'],
+  ])('keeps unread %s order and position lists unknown', (status, message) => {
+    const resource = {
+      status,
+      data: null,
+      updatedAt: null,
+      lastSuccessfulAt: null,
+      error: status === 'error' ? { message: 'account unavailable' } : null,
+    }
+    render(
+      <FuturesTradingTicket
+        state={createState({
+          accountResources: {
+            balances: createState().accountResources.balances,
+            positions: resource,
+            regularOrders: resource,
+            algoOrders: resource,
+          },
+        })}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+        draftPrice="58445.0"
+      />,
+    )
+
+    expect(screen.getByRole('tab', { name: 'Orders —' })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'Positions —' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Orders —' }))
+    expect(screen.getByLabelText('Open orders synchronization')).toHaveTextContent(message)
+    expect(screen.queryByText('No active Futures orders.')).not.toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Positions —' }))
+    expect(screen.getByLabelText('Positions synchronization')).toHaveTextContent(message)
+    expect(screen.queryByText('No open positions.')).not.toBeInTheDocument()
+  })
+
+  it('distinguishes a ready empty account from stale successful rows', () => {
+    const order = {
+      symbol: 'BTCUSDT', orderId: 17, side: 'BUY', positionSide: 'LONG',
+      price: '100', origQty: '1', executedQty: '0',
+    }
+    const position = {
+      symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '1', entryPrice: '100',
+      markPrice: '101', unrealizedPnl: '1', isolatedWallet: '20',
+    }
+    const { rerender } = render(
+      <FuturesTradingTicket
+        state={createState()}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+        draftPrice="100"
+      />,
+    )
+
+    expect(screen.getByRole('tab', { name: 'Orders 0' })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'Positions 0' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: 'Orders 0' }))
+    expect(screen.getByText('No active Futures orders.')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: 'Positions 0' }))
+    expect(screen.getByText('No open positions.')).toBeInTheDocument()
+
+    const staleResource = {
+      status: 'stale', updatedAt: 100, lastSuccessfulAt: 100,
+      error: { message: 'connection dropped' },
+    }
+    rerender(
+      <FuturesTradingTicket
+        state={createState({
+          openOrders: [order],
+          positions: [position],
+          accountResources: {
+            balances: createState().accountResources.balances,
+            positions: { ...staleResource, data: [position] },
+            regularOrders: { ...staleResource, data: [order] },
+            algoOrders: { ...staleResource, data: [] },
+          },
+        })}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+        draftPrice="100"
+      />,
+    )
+
+    expect(screen.getByRole('tab', { name: 'Orders 1' })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'Positions 1' })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: 'Orders 1' }))
+    expect(screen.getByLabelText('Open orders synchronization'))
+      .toHaveTextContent('showing the last reading')
+    expect(screen.getByLabelText('Working orders')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('tab', { name: 'Positions 1' }))
+    expect(screen.getByLabelText('Positions synchronization'))
+      .toHaveTextContent('showing the last reading')
+    expect(screen.getByLabelText('Open positions')).toHaveTextContent('BTCUSDT')
+  })
+
   it('totals orders the exchange prices at a trigger rather than a limit', () => {
     render(
       <FuturesTradingTicket
@@ -555,7 +669,10 @@ describe('FuturesTradingTicket', () => {
     confirmStagedOrder()
     expect(state.placeOrder).toHaveBeenCalledOnce()
     const order = state.placeOrder.mock.calls[0][0]
-    expect(order).toMatchObject({ symbol: 'BTCUSDT', side: 'BUY', orderType: 'LIMIT' })
+    expect(order).toMatchObject({
+      symbol: 'BTCUSDT', side: 'BUY', orderType: 'LIMIT',
+    })
+    expect(order).not.toHaveProperty('positionSide')
     expect(order.price).toBe('58445')
     expect(Number(order.quantity)).toBeGreaterThan(0)
     expect(order.reduceOnly).toBeUndefined()
@@ -687,6 +804,7 @@ describe('FuturesTradingTicket', () => {
     expect(state.placeOrder).toHaveBeenCalledExactlyOnceWith({
       symbol: 'BTCUSDT',
       side: 'SELL',
+      positionSide: 'LONG',
       orderType: 'LIMIT',
       price: '100',
       quantity: '5',
@@ -912,6 +1030,20 @@ describe('FuturesTradingTicket', () => {
     )
     expect(screen.queryByRole('alertdialog')).toBeNull()
     expect(state.placeOrder).not.toHaveBeenCalled()
+
+    // Switching back cannot revive the staged BTC payload after the contract
+    // boundary has withdrawn it.
+    rerender(
+      <FuturesTradingTicket
+        state={state}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+        draftPrice="58445.0"
+        gestureRequest={gesture}
+      />,
+    )
+    expect(screen.queryByRole('alertdialog')).toBeNull()
+    expect(state.placeOrder).not.toHaveBeenCalled()
   })
 
   it('refuses a staged order the balance no longer covers instead of re-sizing it', () => {
@@ -986,7 +1118,12 @@ describe('FuturesTradingTicket', () => {
   })
 
   it('marks exit gestures reduce-only and handles the same gesture only once', () => {
-    const state = createState()
+    const state = createState({
+      positions: [{
+        symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '0.5',
+        entryPrice: '58000', markPrice: '58445',
+      }],
+    })
     const gesture = {
       id: 7, side: 'SELL', positionSide: 'LONG', positionEffect: 'EXIT', price: '58445.0',
     }
@@ -1019,7 +1156,71 @@ describe('FuturesTradingTicket', () => {
     )
     confirmStagedOrder()
     expect(state.placeOrder).toHaveBeenCalledOnce()
-    expect(state.placeOrder.mock.calls[0][0]).toMatchObject({ reduceOnly: true, side: 'SELL' })
+    expect(state.placeOrder.mock.calls[0][0]).toMatchObject({
+      reduceOnly: true, side: 'SELL', positionSide: 'LONG',
+    })
+  })
+
+  it.each([
+    { quantity: '0.5', semanticSide: 'LONG', orderSide: 'SELL' },
+    { quantity: '-0.5', semanticSide: 'SHORT', orderSide: 'BUY' },
+  ])(
+    'preserves the raw BOTH leg when exiting a signed one-way $semanticSide position',
+    ({ quantity, semanticSide, orderSide }) => {
+      const state = createState({
+        positions: [{
+          symbol: 'BTCUSDT', positionSide: 'BOTH', quantity,
+          entryPrice: '58000', markPrice: '58445',
+        }],
+      })
+      const props = {
+        state, selectedSymbol: 'BTCUSDT', selectedContract: contract, draftPrice: '58445.0',
+      }
+      const { rerender } = render(<FuturesTradingTicket {...props} />)
+      sizeTo(25)
+      rerender(<FuturesTradingTicket
+        {...props}
+        gestureRequest={{
+          id: semanticSide,
+          side: orderSide,
+          positionSide: semanticSide,
+          positionEffect: 'EXIT',
+          price: '58445.0',
+        }}
+      />)
+
+      confirmStagedOrder()
+      expect(state.placeOrder).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        symbol: 'BTCUSDT',
+        side: orderSide,
+        positionSide: 'BOTH',
+        reduceOnly: true,
+      }))
+    },
+  )
+
+  it('fails closed when an exit has no current confirmed raw position leg', () => {
+    const state = createState()
+    const props = {
+      state, selectedSymbol: 'BTCUSDT', selectedContract: contract, draftPrice: '58445.0',
+    }
+    const { rerender } = render(<FuturesTradingTicket {...props} />)
+    sizeTo(25)
+    rerender(<FuturesTradingTicket
+      {...props}
+      gestureRequest={{
+        id: 701,
+        side: 'SELL',
+        positionSide: 'LONG',
+        positionEffect: 'EXIT',
+        price: '58445.0',
+      }}
+    />)
+
+    confirmStagedOrder()
+    expect(state.placeOrder).not.toHaveBeenCalled()
+    expect(screen.getByLabelText('Futures gesture feedback'))
+      .toHaveTextContent('No current confirmed LONG position is available to close.')
   })
 
   // Alt+right ("exit LONG") and Ctrl+right ("enter SHORT") are the same SELL, at
@@ -1056,7 +1257,12 @@ describe('FuturesTradingTicket', () => {
     const entryPanel = screen.getByRole('alertdialog')
     expect(entryPanel).toHaveTextContent('OPEN SHORT')
     expect(within(entryPanel).getByRole('alert')).toHaveTextContent('does NOT close your LONG')
-    expect(state.placeOrder).not.toHaveBeenCalled()
+    confirmStagedOrder()
+    expect(state.placeOrder).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      side: 'SELL',
+    }))
+    expect(state.placeOrder.mock.calls[0][0]).not.toHaveProperty('positionSide')
+    expect(state.placeOrder.mock.calls[0][0].reduceOnly).toBeUndefined()
   })
 
   // The terms an entry is carried at were on no surface the operator's eye
@@ -1233,7 +1439,9 @@ describe('FuturesTradingTicket', () => {
     />)
     expect(screen.getByRole('alertdialog')).toHaveTextContent('CLOSE LONG')
     confirmStagedOrder()
-    expect(state.placeOrder.mock.calls[0][0]).toMatchObject({ reduceOnly: true, side: 'SELL' })
+    expect(state.placeOrder.mock.calls[0][0]).toMatchObject({
+      reduceOnly: true, side: 'SELL', positionSide: 'LONG',
+    })
 
     rerender(<FuturesTradingTicket
       {...props}
@@ -1620,16 +1828,67 @@ describe('FuturesTradingTicket', () => {
     expect(panel).not.toHaveTextContent('2×')
 
     fireEvent.click(within(panel).getByRole('button', { name: 'Close position' }))
-    const [valuedPosition, anchor] = onPositionClose.mock.lastCall
-    expect(valuedPosition).toEqual(expect.objectContaining({
-      symbol: 'BTCUSDT',
-      markPrice: '58445',
-      unrealizedPnl: '14.45',
-      valuationSource: 'live-mark',
-      valuationComplete: true,
-    }))
-    expect(Number(valuedPosition.unrealizedPnl)).toBeCloseTo(14.45)
+    const [clickedPosition, anchor] = onPositionClose.mock.lastCall
+    expect(clickedPosition).toBe(position)
+    expect(clickedPosition).toMatchObject({
+      symbol: 'BTCUSDT', markPrice: '58445', unrealizedPnl: '14.45',
+    })
+    expect(clickedPosition).not.toHaveProperty('valuationSource')
     expect(anchor).toEqual(expect.any(Object))
+  })
+
+  it('rerenders a position card for presentation prices but not source clocks', () => {
+    const entryPriceRead = vi.fn(() => '100')
+    const position = {
+      symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '1',
+      get entryPrice() { return entryPriceRead() },
+      markPrice: '90', unrealizedPnl: '-10', isolatedWallet: '20',
+    }
+    const positionMarkStore = createFuturesPositionMarkStore()
+    positionMarkStore.replace({
+      BTCUSDT: {
+        markPrice: '90', updatedAt: 100, lastPrice: '110', lastPriceAt: 100,
+      },
+    })
+    render(
+      <FuturesTradingTicket
+        state={createState({ positions: [position], positionMarkStore })}
+        selectedSymbol="BTCUSDT"
+        selectedContract={contract}
+      />,
+    )
+    fireEvent.click(screen.getByRole('tab', { name: 'Positions 1' }))
+    const pnl = screen.getByLabelText('Open positions')
+      .querySelector('.futures-production-position-pnl')
+    expect(pnl).toHaveTextContent('−10.00 USDT')
+    expect(pnl).toHaveAttribute('title', expect.stringContaining('last traded at 110'))
+
+    entryPriceRead.mockClear()
+    act(() => positionMarkStore.replace({
+      BTCUSDT: {
+        markPrice: '90.0', updatedAt: 200, lastPrice: '110.0', lastPriceAt: 200,
+      },
+    }))
+    expect(entryPriceRead).not.toHaveBeenCalled()
+    expect(pnl).toHaveTextContent('−10.00 USDT')
+    expect(pnl).toHaveAttribute('title', expect.stringContaining('last traded at 110'))
+
+    act(() => positionMarkStore.replace({
+      BTCUSDT: {
+        markPrice: '90', updatedAt: 300, lastPrice: '80', lastPriceAt: 300,
+      },
+    }))
+    expect(entryPriceRead).toHaveBeenCalled()
+    expect(pnl).not.toHaveAttribute('title', expect.stringContaining('last traded at'))
+
+    entryPriceRead.mockClear()
+    act(() => positionMarkStore.replace({
+      BTCUSDT: {
+        markPrice: '95', updatedAt: 400, lastPrice: '80', lastPriceAt: 400,
+      },
+    }))
+    expect(entryPriceRead).toHaveBeenCalled()
+    expect(pnl).toHaveTextContent('−5.00 USDT')
   })
 
   it('states when an account-snapshot position fallback was read', () => {
@@ -1732,7 +1991,16 @@ describe('FuturesTradingTicket', () => {
   })
 
   it('explains why a gesture was ignored instead of dropping it silently', () => {
-    const state = createState({ balances: null })
+    const state = createState({
+      balances: null,
+      accountResources: {
+        ...createState().accountResources,
+        balances: {
+          status: 'loading', data: null, updatedAt: null,
+          lastSuccessfulAt: null, error: null,
+        },
+      },
+    })
     render(
       <FuturesTradingTicket
         state={state}

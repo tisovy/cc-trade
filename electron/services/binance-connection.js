@@ -1218,6 +1218,18 @@ export function setupBinanceConnection({
         }
     };
 
+    // A position mark is a complete Futures market snapshot, not an account
+    // event. Send it only to renderers that activated Futures and let a newer
+    // revision replace an undelivered older one; otherwise a slow renderer
+    // queues one full map per second ahead of account facts it needs first.
+    const broadcastFuturesPositionMarks = (payload) => {
+        const message = JSON.stringify(payload);
+        const delivery = marketFrame('position-marks', null, { supersede: true });
+        for (const conn of futuresRendererConnections) {
+            sendFrameText(conn, message, delivery);
+        }
+    };
+
     const stopSharedSpotConnections = async () => {
         globalSocketsInitialized = false;
         if (tickerStallInterval) {
@@ -1515,7 +1527,7 @@ export function setupBinanceConnection({
                 agent: sharedProxyAgent ?? undefined,
                 handshakeTimeout: 10_000,
             }),
-            broadcast: broadcastToRenderers,
+            broadcast: broadcastFuturesPositionMarks,
             // The one event that moves an open position's settled money, seen on
             // a public socket the desk already runs. The private stream reports
             // the same settlement and is the better witness — it says the wallet
@@ -1581,6 +1593,10 @@ export function setupBinanceConnection({
     // Bumped whenever the Futures market is deactivated, so a read that began
     // under an earlier activation cannot land on a desk that has moved on.
     let futuresActivationGeneration = 0;
+    // The activation that supplied the READY position set. Position rows may be
+    // retained for presentation while a replacement read is loading, but that
+    // retained set is not authority for bypassing an execution safety bound.
+    let futuresPositionsActivationGeneration = null;
     // The contracts the last income walk found, and when it found them.
     let futuresHistoryDiscovery = null;
     // A contract can be skipped only when one uninterrupted authenticated
@@ -1861,6 +1877,9 @@ export function setupBinanceConnection({
                     unstated: reason === 'unstated',
                 }),
             );
+            if (operation.type === 'positions') {
+                futuresPositionsActivationGeneration = activation;
+            }
             if (operation.type === 'positions' || operation.type === 'balances') {
                 recordFuturesMarginEstimates(operation.type);
             }
@@ -2952,6 +2971,12 @@ export function setupBinanceConnection({
             socket.on('pong', () => noteFuturesUserDataTraffic(socket, generation));
 
             socket.on('message', (data) => {
+                // A graceful close may still deliver bytes already buffered by
+                // the peer. Identity and generation are retired before close(),
+                // so reject them before timing, folding, publication, or any
+                // deferred account/settled read can be recreated.
+                if (generation !== futuresUserDataGeneration
+                    || futuresUserDataWs !== socket) return;
                 // Taken before the frame is read, so reading it counts as the
                 // desk's own work and not as time on the wire.
                 const receivedAt = Date.now();
@@ -3083,6 +3108,8 @@ export function setupBinanceConnection({
                 }
             });
             socket.on('error', (err) => {
+                if (generation !== futuresUserDataGeneration
+                    || futuresUserDataWs !== socket) return;
                 markFuturesUserDataFailed(err);
                 recordFuturesUserDataFault(futuresUserDataFaultCode(err, 'SOCKET_ERROR'));
                 logger.warn('Futures user data stream error:', err?.code || err?.message);
@@ -3126,9 +3153,17 @@ export function setupBinanceConnection({
                 // can build will expire it — and the urgency above is a bounded
                 // thing that should be spent on the case that needs it.
                 void futuresRestLimiter.execute(
-                    () => futuresTradingAdapter.renewUserDataStreamListenKey(),
+                    () => {
+                        if (generation !== futuresUserDataGeneration
+                            || futuresUserDataWs !== socket
+                            || futuresRendererConnections.size === 0) return null;
+                        return futuresTradingAdapter.renewUserDataStreamListenKey();
+                    },
                     1,
                 ).catch((err) => {
+                    if (generation !== futuresUserDataGeneration
+                        || futuresUserDataWs !== socket
+                        || futuresRendererConnections.size === 0) return;
                     markFuturesUserDataFailed(err);
                     recordFuturesUserDataFault(
                         futuresUserDataFaultCode(err, 'LISTEN_KEY_RENEWAL_FAILED'),
@@ -3916,6 +3951,40 @@ export function setupBinanceConnection({
             return match?.reduceOnly === true;
         };
 
+        // `reduceOnly` crosses a trust boundary: in hedge mode Binance refuses
+        // the flag itself and relies on side + positionSide, so blindly trusting
+        // it here would exempt a contradictory order from the exposure cap and
+        // the adapter would then submit an ordinary exposure-increasing order.
+        // Prove the claim against a current successful positions reading.
+        const isConfirmedFuturesReduction = (order) => {
+            const resource = futuresAccountResources.positions;
+            const resourceCurrent = resource?.status === 'ready'
+                && resource?.lastSuccessfulAt !== null
+                && resource?.lastSuccessfulAt !== undefined
+                && futuresPositionsActivationGeneration === futuresActivationGeneration;
+            if (!resourceCurrent || !Array.isArray(resource?.data)) return false;
+            const requested = Number(order?.numericQuantity);
+            if (!Number.isFinite(requested) || requested <= 0) return false;
+            const orderSide = String(order?.side ?? '').toUpperCase();
+            const requestedLeg = String(order?.positionSide ?? '').toUpperCase();
+            if (!['LONG', 'SHORT', 'BOTH'].includes(requestedLeg)) return false;
+            return resource.data.some((position) => {
+                if (String(position?.symbol ?? '').toUpperCase()
+                    !== String(order?.symbol ?? '').toUpperCase()) return false;
+                const openQuantity = Number(position?.quantity);
+                if (!Number.isFinite(openQuantity) || openQuantity === 0
+                    || requested > Math.abs(openQuantity)) return false;
+                const heldLeg = String(position?.positionSide ?? 'BOTH').toUpperCase();
+                if (heldLeg !== requestedLeg) return false;
+                const closeSide = heldLeg === 'SHORT'
+                    ? 'BUY'
+                    : heldLeg === 'LONG'
+                        ? 'SELL'
+                        : openQuantity > 0 ? 'SELL' : 'BUY';
+                return orderSide === closeSide;
+            });
+        };
+
         // FUTURES_MAX_ORDER_USDT, applied here to every exposure-increasing
         // command the main process receives — placement and amendment alike.
         // Returns true when the command was refused.
@@ -3953,14 +4022,28 @@ export function setupBinanceConnection({
                 ));
                 return;
             }
+            const reductionConfirmed = order.reduceOnly === true
+                && isConfirmedFuturesReduction(order);
+            if (order.reduceOnly === true && !reductionConfirmed) {
+                emit(createCommandRejection(
+                    TRADING_COMMAND_ACTIONS.PLACE_ORDER,
+                    'FUTURES_REDUCTION_NOT_CONFIRMED',
+                    'The requested reduce-only order does not match a current position leg and was not sent.',
+                    {
+                        marketType: FUTURES_MARKET_TYPE,
+                        symbol: order.symbol,
+                        positionSide: order.positionSide ?? null,
+                    },
+                ));
+                return;
+            }
             // The cap guards new exposure only; reduce-only orders always pass
-            // so a position can be closed regardless of the cap. A limit close
-            // sent without reduce-only is new exposure as far as the exchange is
-            // concerned, and is capped like any other entry.
+            // so a proved position can be closed regardless of the cap. A
+            // renderer flag is not proof; the current account leg above is.
             if (refuseOverCapFuturesCommand(TRADING_COMMAND_ACTIONS.PLACE_ORDER, {
                 quantity: order.numericQuantity,
                 price: order.numericPrice,
-                exposureIncreasing: order.reduceOnly !== true,
+                exposureIncreasing: !reductionConfirmed,
             })) return;
             ensureFuturesUserDataStream();
             if (!futuresTradingAdapter) {
@@ -5367,6 +5450,10 @@ export function setupBinanceConnection({
             const wasInitialized = futuresDataInitialized
                 || futuresRendererConnections.has(connection);
             futuresDataInitialized = false;
+            // This connection may stay open for Spot. A complete mark frame that
+            // is still in its market queue belongs to the retiring Futures
+            // activation and must not drain after the activation acknowledgement.
+            rendererOutboxes.get(connection)?.discardMarket('position-marks');
             futuresRendererConnections.delete(connection);
             if (wasInitialized && futuresRendererConnections.size === 0) {
                 await stopSharedFuturesConnections();
@@ -5864,52 +5951,16 @@ export function setupBinanceConnection({
             // Cleanup this renderer's channels (market socket per-renderer)
             void channelManager.cleanup(safeDisconnect);
 
-            // Only cleanup shared global sockets when ALL renderers disconnect
+            // Shared transports are owned by their consumer sets. Use the same
+            // idempotent teardown whether the final renderer happened to be
+            // Spot, Futures, or both; the former inline branch omitted the mark
+            // feed and settled timers and kept doing work for nobody.
             if (rendererConnections.size === 0) {
                 logger.info("All renderers disconnected, cleaning up shared sockets...");
-                globalSocketsInitialized = false;
-
-                // Stop the ticker watchdog so it can't keep resurrecting the global
-                // socket after teardown. The sockets' close handlers no-op here
-                // because we null the refs before their close events fire (identity
-                // guard) and because rendererConnections is empty.
-                if (tickerStallInterval) {
-                    clearInterval(tickerStallInterval);
-                    tickerStallInterval = null;
-                }
-                if (globalWsConnection) {
-                    const staleGlobal = globalWsConnection;
-                    globalWsConnection = null;
-                    void safeDisconnect(staleGlobal, 'global stream');
-                }
-                if (userDataWsConnection) {
-                    const staleUserData = userDataWsConnection;
-                    userDataWsConnection = null;
-                    void safeDisconnect(staleUserData, 'user data stream');
-                }
-                if (keepAliveInterval) {
-                    clearInterval(keepAliveInterval);
-                    keepAliveInterval = null;
-                }
-                if (futuresUserDataWs) {
-                    const staleFutures = futuresUserDataWs;
-                    futuresUserDataWs = null;
-                    void safeDisconnect(staleFutures, 'futures user data stream');
-                }
-                if (futuresKeepAliveInterval) {
-                    clearInterval(futuresKeepAliveInterval);
-                    futuresKeepAliveInterval = null;
-                }
-                futuresUserDataRequested = false;
-                // This branch performs the shared teardown inline instead of
-                // calling stopSharedFuturesConnections. Advance the same activation
-                // guard before any in-flight account/history read can settle.
-                futuresActivationGeneration += 1;
-                futuresUserDataGeneration += 1;
-                // Nulling the socket before disconnecting makes its close handler
-                // intentionally ignore the stale instance. End history trust here
-                // explicitly as part of the same physical disconnect.
-                forgetFuturesHistoryState();
+                void Promise.all([
+                    stopSharedSpotConnections(),
+                    stopSharedFuturesConnections(),
+                ]);
             } else {
                 if (spotRendererConnections.size === 0) {
                     void stopSharedSpotConnections();
@@ -5926,18 +5977,6 @@ export function setupBinanceConnection({
         if (closePromise) return closePromise;
         closePromise = (async () => {
             globalSocketsInitialized = false;
-            if (tickerStallInterval) {
-                clearInterval(tickerStallInterval);
-                tickerStallInterval = null;
-            }
-            if (keepAliveInterval) {
-                clearInterval(keepAliveInterval);
-                keepAliveInterval = null;
-            }
-            if (futuresKeepAliveInterval) {
-                clearInterval(futuresKeepAliveInterval);
-                futuresKeepAliveInterval = null;
-            }
             for (const connection of [...rendererConnections]) {
                 try {
                     connection.drop?.(1001, 'main process shutdown');
@@ -5948,19 +5987,15 @@ export function setupBinanceConnection({
             rendererConnections.clear();
             spotRendererConnections.clear();
             futuresRendererConnections.clear();
-            futuresMarkPriceFeed?.stop();
-            futuresUserDataGeneration += 1;
-            const staleGlobal = globalWsConnection;
-            const staleUserData = userDataWsConnection;
-            const staleFuturesUserData = futuresUserDataWs;
-            globalWsConnection = null;
-            userDataWsConnection = null;
-            futuresUserDataWs = null;
+            // Advance both activation guards and cancel every deferred read
+            // before waiting on sockets. A queued limiter callback consults the
+            // guard immediately before touching Binance and therefore becomes a
+            // no-op after this point.
             await Promise.all([
-                safeDisconnect(staleGlobal, 'global stream'),
-                safeDisconnect(staleUserData, 'user data stream'),
-                safeDisconnect(staleFuturesUserData, 'futures user data stream'),
+                stopSharedSpotConnections(),
+                stopSharedFuturesConnections(),
             ]);
+            futuresMarkPriceFeed?.stop();
             wsServer.shutDown?.();
             await new Promise((resolve) => {
                 let settled = false;

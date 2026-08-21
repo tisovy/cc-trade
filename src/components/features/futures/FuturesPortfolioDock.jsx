@@ -330,7 +330,7 @@ const FuturesPortfolioPositionRow = memo(({
             title={margin.marginMode === 'CROSS'
               ? 'Cross margin — backed by the whole account'
               : 'Isolated margin — click to add or remove'}
-            onClick={event => onMarginEdit(valuedPosition, {
+            onClick={event => onMarginEdit(position, {
               x: event.clientX,
               y: event.clientY,
             })}
@@ -371,7 +371,7 @@ const FuturesPortfolioPositionRow = memo(({
           className="futures-workstation-dock-close"
           aria-label={`Close ${position.symbol} position`}
           disabled={typeof onClosePosition !== 'function'}
-          onClick={event => onClosePosition?.(valuedPosition, {
+          onClick={event => onClosePosition?.(position, {
             x: event.clientX,
             y: event.clientY,
           })}

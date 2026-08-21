@@ -301,6 +301,31 @@ describe('describeFuturesPosition', () => {
       .toBe(false)
   })
 
+  it('preserves a carried tape scenario for a positive-quantity SHORT leg', () => {
+    const presentation = describeFuturesPosition({
+      symbol: 'BEATUSDT',
+      positionSide: 'SHORT',
+      quantity: '2873',
+      entryPrice: '3.3450',
+      markPrice: '3.36',
+      markUnrealizedPnl: '-43.095',
+      unrealizedPnl: '-43.095',
+      tapeScenario: {
+        price: '3.30',
+        sourceAt: 3,
+        unrealizedPnl: 129.285,
+        disagreesWithMark: true,
+      },
+    })
+
+    expect(presentation).toMatchObject({
+      positionSide: 'SHORT',
+      tapePrice: 3.3,
+      tapeUnrealizedPnl: 129.285,
+      tapeDisagreesWithMark: true,
+    })
+  })
+
   it('derives the leg from the signed quantity and reports ROE against margin', () => {
     expect(describeFuturesPosition({
       symbol: 'BTCUSDT',
@@ -361,6 +386,21 @@ describe('describeFuturesPositionMargin', () => {
     })).toMatchObject({ marginMode: 'CROSS', margin: 3000, adjustable: false })
   })
 
+  it('prefers position-only initial margin over working-order reserve', () => {
+    const rawPosition = {
+      marginType: 'CROSS',
+      quantity: '2',
+      entryPrice: '100',
+      positionInitialMargin: '20',
+      initialMargin: '80',
+      unrealizedPnl: '10',
+    }
+
+    expect(describeFuturesPositionMargin(rawPosition))
+      .toMatchObject({ marginMode: 'CROSS', margin: 20 })
+    expect(describeFuturesPosition(rawPosition).roePercent).toBe(50)
+  })
+
   it('believes a source that states the mode outright', () => {
     expect(describeFuturesPositionMargin({
       marginType: 'CROSSED', quantity: '0.5', entryPrice: '60000', leverage: '10',
@@ -417,6 +457,16 @@ describe('describeFuturesPositionMargin', () => {
     })
   })
 
+  it('does not derive presentation ROE from an explicitly incomplete valuation', () => {
+    expect(describeFuturesPosition({
+      quantity: '1',
+      entryPrice: '100',
+      unrealizedPnl: '10',
+      positionInitialMargin: '20',
+      valuationMarginComplete: false,
+    }).roePercent).toBeNull()
+  })
+
   // Between two marks the visible uPnL is the desk's arithmetic on the last
   // traded price. Everything here is a statement about liquidation, which is the
   // mark's by definition — measuring the buffer from an estimate would put a
@@ -447,6 +497,19 @@ describe('describeFuturesPositionMargin', () => {
   it('draws no floor when the read carries no maintenance requirement', () => {
     expect(describeFuturesPositionMargin({ isolatedWallet: '1200' }))
       .toMatchObject({ maintenanceMargin: null, liquidationBuffer: null, removable: null })
+  })
+
+  it('treats zero and negative maintenance requirements as unknown', () => {
+    for (const maintenanceMargin of ['0', 0, '-1', -1]) {
+      expect(describeFuturesPositionMargin({
+        isolatedWallet: '1200',
+        maintenanceMargin,
+      })).toMatchObject({
+        maintenanceMargin: null,
+        liquidationBuffer: null,
+        removable: null,
+      })
+    }
   })
 
   // The row shows the percentage and the amount it was divided by. Computing

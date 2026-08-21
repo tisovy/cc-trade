@@ -444,11 +444,12 @@ const useFuturesTrading = ({
 
   useEffect(() => {
     generationRef.current = marketGeneration
-    // Feed publication revisions are scoped to one backend activation, while
-    // this external store deliberately survives React renders. Reset both its
-    // readings and revision admission when the activation changes so revision
-    // 1 from the new feed cannot be rejected behind a larger old revision.
-    positionMarkStore.clear({ retireEpoch: true })
+    // A renderer activation and the shared public feed are different
+    // lifecycles. Repeating the same market activation clears what the renderer
+    // may call live, but the backend feed normally survives and publishes the
+    // next revision in the same epoch. Keep that admission point so a delayed
+    // revision cannot repopulate the store and the next advancing revision can.
+    positionMarkStore.clear({ preserveAdmission: true })
   }, [marketGeneration, positionMarkStore])
 
   // A leverage and a margin mode held for an activation that is over are a
@@ -1158,8 +1159,10 @@ const useFuturesTrading = ({
     symbol: targetSymbol ?? symbolRef.current,
   })), [sendCommand])
 
-  // A partial close is still a close: the side always comes from the open
-  // position's sign, never from the requested size.
+  // A partial close is still a close. Hedge-mode rows state their leg outright
+  // and that statement wins over quantity sign: some normalized/test sources
+  // carry a positive size for SHORT, which must be bought back, never sold into.
+  // One-way BOTH rows retain the exchange's signed-quantity convention.
   const closePosition = useCallback((position, { quantity: requestedQuantity } = {}) => {
     const openQuantity = Math.abs(Number(position?.quantity))
     const quantity = requestedQuantity === undefined || requestedQuantity === null
@@ -1167,9 +1170,15 @@ const useFuturesTrading = ({
       : Math.abs(Number(requestedQuantity))
     if (!Number.isFinite(openQuantity) || openQuantity <= 0) return false
     if (!Number.isFinite(quantity) || quantity <= 0 || quantity > openQuantity) return false
+    const positionSide = String(position?.positionSide ?? '').toUpperCase()
+    const closeSide = positionSide === 'SHORT'
+      ? 'BUY'
+      : positionSide === 'LONG'
+        ? 'SELL'
+        : Number(position.quantity) > 0 ? 'SELL' : 'BUY'
     return sendCommand(createFuturesPlaceOrderCommand({
       symbol: position.symbol,
-      side: Number(position.quantity) > 0 ? 'SELL' : 'BUY',
+      side: closeSide,
       orderType: 'MARKET',
       quantity,
       positionSide: position.positionSide,

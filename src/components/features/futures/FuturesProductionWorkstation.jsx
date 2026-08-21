@@ -35,6 +35,13 @@ import FuturesWorkstationView from './FuturesWorkstationView.jsx'
 const DEFAULT_FUTURES_SYMBOL = 'BTCUSDT'
 const DEFAULT_FUTURES_INTERVAL = '15m'
 
+const currentRawPosition = (positions, target) => {
+  if (!Array.isArray(positions) || !target) return null
+  const targetSide = describeFuturesPosition(target).positionSide
+  return positions.find(position => position.symbol === target.symbol
+    && describeFuturesPosition(position).positionSide === targetSide) ?? null
+}
+
 const useLiveFuturesPosition = (position, store, resource) => {
   const updatedAt = Number.isSafeInteger(resource?.updatedAt) ? resource.updatedAt : null
   const lastSuccessfulAt = Number.isSafeInteger(resource?.lastSuccessfulAt)
@@ -46,6 +53,7 @@ const useLiveFuturesPosition = (position, store, resource) => {
     snapshotCoherent: resource === null || resource === undefined
       ? position !== null
       : updatedAt !== null && updatedAt === lastSuccessfulAt,
+    valueOnly: true,
   })
   return useMemo(
     () => applyFuturesPositionValuation(position, valuation),
@@ -61,16 +69,6 @@ const LiveFuturesPositionCloser = memo(({
 }) => {
   const valuedPosition = useLiveFuturesPosition(position, positionMarkStore, positionResource)
   return <FuturesPositionCloser {...props} position={valuedPosition} />
-})
-
-const LiveFuturesPositionMarginEditor = memo(({
-  position,
-  positionMarkStore,
-  positionResource,
-  ...props
-}) => {
-  const valuedPosition = useLiveFuturesPosition(position, positionMarkStore, positionResource)
-  return <FuturesPositionMarginEditor {...props} position={valuedPosition} />
 })
 
 export const FuturesProductionWorkstation = ({
@@ -358,11 +356,26 @@ export const FuturesProductionWorkstation = ({
     ? executionState.balances.USDT.available
     : null
   const editorPositionsResource = executionState?.accountResources?.positions ?? null
+  const positionsSnapshotUpdatedAt = Number.isSafeInteger(editorPositionsResource?.updatedAt)
+    ? editorPositionsResource.updatedAt
+    : null
+  const positionsSnapshotSuccessfulAt = Number.isSafeInteger(
+    editorPositionsResource?.lastSuccessfulAt,
+  )
+    ? editorPositionsResource.lastSuccessfulAt
+    : null
   const editorPositionsConfirmed = editorPositionsResource === null
     ? Array.isArray(executionPositions)
     : editorPositionsResource.status === 'ready'
       || (editorPositionsResource.status === 'loading'
         && Number.isFinite(editorPositionsResource.lastSuccessfulAt))
+  const positionsHaveAuthoritativeReading = editorPositionsResource !== null
+    && editorPositionsConfirmed
+  const marginRiskSnapshotCoherent = editorPositionsResource === null
+    ? editorPositionsConfirmed
+    : editorPositionsConfirmed
+      && positionsSnapshotUpdatedAt !== null
+      && positionsSnapshotUpdatedAt === positionsSnapshotSuccessfulAt
 
   const handleTradingGesture = useCallback((gesture) => {
     gestureSequenceRef.current += 1
@@ -439,27 +452,43 @@ export const FuturesProductionWorkstation = ({
   // read; the identity-based panel key below keeps its operator-owned drafts
   // mounted while valuation and quantity props change.
   const positionCloserTarget = positionCloser?.position
-  const closePosition = useMemo(() => {
-    if (!positionCloserTarget) return null
-    const live = Array.isArray(executionPositions)
-      ? executionPositions.find(position => position.symbol === positionCloserTarget.symbol
-        && position.positionSide === positionCloserTarget.positionSide)
-      : null
-    return live ?? positionCloserTarget
-  }, [executionPositions, positionCloserTarget])
+  const currentClosePosition = useMemo(
+    () => currentRawPosition(executionPositions, positionCloserTarget),
+    [executionPositions, positionCloserTarget],
+  )
+  const closePosition = currentClosePosition
+    ?? (positionsHaveAuthoritativeReading ? null : positionCloserTarget)
 
   // The panel is opened from a row, but it stays open while the account keeps
   // refreshing. It reads the live position rather than the snapshot it was
   // opened with, so the margin it shows is never one adjustment behind.
   const marginEditorTarget = marginEditor?.position
-  const marginPosition = useMemo(() => {
-    if (!marginEditorTarget) return null
-    const live = Array.isArray(executionPositions)
-      ? executionPositions.find(position => position.symbol === marginEditorTarget.symbol
-        && position.positionSide === marginEditorTarget.positionSide)
-      : null
-    return live ?? marginEditorTarget
-  }, [executionPositions, marginEditorTarget])
+  const currentMarginPosition = useMemo(
+    () => currentRawPosition(executionPositions, marginEditorTarget),
+    [executionPositions, marginEditorTarget],
+  )
+  const marginPosition = currentMarginPosition
+    ?? (positionsHaveAuthoritativeReading ? null : marginEditorTarget)
+
+  // A successful account reading is the authority on whether a leg still
+  // exists. Clear the action state as well as hiding its panel, otherwise a
+  // later position with the same symbol and side would revive the old draft.
+  useEffect(() => {
+    if (!positionsHaveAuthoritativeReading) return
+    if (positionCloserTarget && currentClosePosition === null) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setPositionCloser(null)
+    }
+    if (marginEditorTarget && currentMarginPosition === null) {
+      setMarginEditor(null)
+    }
+  }, [
+    currentClosePosition,
+    currentMarginPosition,
+    marginEditorTarget,
+    positionCloserTarget,
+    positionsHaveAuthoritativeReading,
+  ])
 
   // The leverage panel reads the live config and the live position for the
   // contract it was opened on, so a leverage set from the exchange's own site
@@ -606,10 +635,13 @@ export const FuturesProductionWorkstation = ({
           positionResource={executionState?.accountResources?.positions}
           contract={closePosition.symbol === symbol ? selectedContract : null}
           anchor={positionCloser.anchor}
-          onCloseMarket={(position, options) => executionState?.closePosition?.(position, options)}
+          onCloseMarket={(_valuedPosition, options) => (
+            executionState?.closePosition?.(closePosition, options)
+          )}
           onCloseLimit={close => executionState?.placeOrder?.({
             symbol: close.symbol,
             side: close.side,
+            positionSide: closePosition.positionSide,
             orderType: 'LIMIT',
             price: close.price,
             quantity: close.quantity,
@@ -619,13 +651,12 @@ export const FuturesProductionWorkstation = ({
         />
       ) : null}
       {marginEditor && marginPosition ? (
-        <LiveFuturesPositionMarginEditor
+        <FuturesPositionMarginEditor
           key={`${marginPosition.symbol}:${marginPosition.positionSide}`}
           position={marginPosition}
-          positionMarkStore={executionState?.positionMarkStore}
-          positionResource={executionState?.accountResources?.positions}
+          riskSnapshotCoherent={marginRiskSnapshotCoherent}
           contract={marginPosition.symbol === symbol ? selectedContract : null}
-          availableUsdt={executionState?.balances?.USDT?.available ?? null}
+          availableUsdt={editorAvailableUsdt}
           anchor={marginEditor.anchor}
           onSubmit={executionState?.adjustPositionMargin}
           onClose={closeMarginEditor}

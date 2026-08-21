@@ -232,6 +232,67 @@ describe('createRendererOutbox', () => {
         expect(connection.sent.slice(1)).toEqual(['spot-book', 'workstation-book']);
     });
 
+    it('discards only a queued replaceable frame with the exact retired market key', () => {
+        const connection = createConnection();
+        const backlog = vi.fn();
+        const outbox = createRendererOutbox(connection, { onBacklog: backlog });
+        const positionMarks = (overrides = {}) => ({
+            lane: RENDERER_OUTBOX_LANES.MARKET,
+            resource: 'position-marks',
+            symbol: null,
+            supersede: true,
+            ...overrides,
+        });
+
+        connection.stall();
+        outbox.send('filled-the-buffer', book('BTCUSDT'));
+        outbox.send('retired-futures-mark', positionMarks());
+        outbox.send('same-resource-other-key', positionMarks({ symbol: 'BTCUSDT' }));
+        outbox.send('same-key-not-replaceable', positionMarks({ supersede: false }));
+        outbox.send('unrelated-book', book('ETHUSDT'));
+        outbox.send('account-fact', account);
+
+        const before = outbox.pending();
+        expect(before).toMatchObject({ account: 1, market: 4 });
+        expect(before.bytes).toBe(
+            'retired-futures-mark'.length
+            + 'same-resource-other-key'.length
+            + 'same-key-not-replaceable'.length
+            + 'unrelated-book'.length
+            + 'account-fact'.length,
+        );
+
+        expect(outbox.discardMarket('position-marks')).toBe(1);
+        const after = outbox.pending();
+        expect(after).toMatchObject({ account: 1, market: 3 });
+        expect(after.bytes).toBe(before.bytes - 'retired-futures-mark'.length);
+        expect(after.resources['position-marks|null']).toMatchObject({
+            frames: 1,
+            peakFrames: 2,
+        });
+
+        connection.drain();
+        expect(connection.sent).toEqual([
+            'filled-the-buffer',
+            'account-fact',
+            'same-resource-other-key',
+            'same-key-not-replaceable',
+            'unrelated-book',
+        ]);
+        expect(outbox.pending()).toMatchObject({
+            account: 0, market: 0, bytes: 0, blocked: false,
+        });
+        // The backlog line keeps the true peak even though one safe complete
+        // frame was retired before drain; current frame/byte accounting ends at
+        // zero and the unrelated/nonreplaceable traffic is still delivered.
+        expect(backlog).toHaveBeenCalledWith(expect.objectContaining({
+            resource: 'position-marks',
+            symbol: null,
+            frames: 2,
+            bytes: 'retired-futures-mark'.length + 'same-key-not-replaceable'.length,
+        }));
+    });
+
     // The alternative is a renderer quietly served a hole in its own account
     // state. It reconnects and reads it again.
     it('closes a renderer that stops draining its account traffic', () => {

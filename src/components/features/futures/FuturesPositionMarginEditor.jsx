@@ -31,6 +31,7 @@ export const FuturesPositionMarginEditor = ({
   position,
   contract = null,
   availableUsdt = null,
+  riskSnapshotCoherent = false,
   anchor,
   onSubmit,
   onClose,
@@ -50,6 +51,16 @@ export const FuturesPositionMarginEditor = ({
   const available = toFiniteNumber(availableUsdt)
   const typed = toFiniteNumber(amount)
   const requestedAmount = typed !== null && typed > 0 ? typed : null
+  const accountUnrealizedPnl = toFiniteNumber(position?.markUnrealizedPnl)
+    ?? toFiniteNumber(position?.unrealizedPnl)
+    ?? toFiniteNumber(position?.unRealizedProfit)
+  const removalRiskKnown = riskSnapshotCoherent === true
+    && accountUnrealizedPnl !== null
+    && marginState.maintenanceMargin !== null
+    && marginState.maintenanceMargin > 0
+    && marginState.marginBalance !== null
+    && marginState.marginBalance > 0
+    && marginState.liquidationBuffer !== null
 
   const draft = useMemo(() => {
     if (!marginState.adjustable) {
@@ -58,8 +69,18 @@ export const FuturesPositionMarginEditor = ({
         reason: marginState.marginMode === 'CROSS' ? 'CROSS_MARGIN' : 'MARGIN_UNKNOWN',
       }
     }
+    if (direction === 'ADD' && (available === null || available < 0)) {
+      return { ok: false, reason: 'AVAILABLE_UNKNOWN' }
+    }
+    if (direction === 'REMOVE' && !removalRiskKnown) {
+      return { ok: false, reason: 'RISK_UNKNOWN' }
+    }
+    if (direction === 'REMOVE'
+      && (marginState.removable === null || marginState.removable < 0)) {
+      return { ok: false, reason: 'REMOVABLE_UNKNOWN' }
+    }
     if (requestedAmount === null) return { ok: false, reason: 'NO_AMOUNT' }
-    if (direction === 'ADD' && available !== null && requestedAmount > available) {
+    if (direction === 'ADD' && requestedAmount > available) {
       return { ok: false, reason: 'ABOVE_AVAILABLE', requested: requestedAmount }
     }
     if (direction === 'REMOVE' && requestedAmount > marginState.margin) {
@@ -68,17 +89,18 @@ export const FuturesPositionMarginEditor = ({
     // The one bound that is about liquidation rather than arithmetic: below the
     // maintenance requirement the position is closed by the exchange, so an
     // amount that reaches it is not a transfer, it is a liquidation.
-    if (direction === 'REMOVE'
-      && marginState.removable !== null
-      && requestedAmount > marginState.removable) {
+    if (direction === 'REMOVE' && requestedAmount > marginState.removable) {
       return { ok: false, reason: 'ABOVE_REMOVABLE', requested: requestedAmount }
     }
     return { ok: true, requested: requestedAmount }
-  }, [available, direction, marginState, requestedAmount])
+  }, [available, direction, marginState, removalRiskKnown, requestedAmount])
 
   const refusal = draft.ok ? null : {
     CROSS_MARGIN: 'Cross margin — this position is backed by the whole account, so margin cannot be moved into or out of it.',
     MARGIN_UNKNOWN: 'The account read carries no margin for this position, so it cannot be adjusted.',
+    AVAILABLE_UNKNOWN: 'Available USDT has not been confirmed, so margin cannot be added.',
+    RISK_UNKNOWN: 'The current account risk reading is incomplete or mixes generations, so margin cannot be removed.',
+    REMOVABLE_UNKNOWN: 'The account read does not establish a removable amount, so margin cannot be removed.',
     NO_AMOUNT: 'Enter an amount in USDT.',
     ABOVE_AVAILABLE: `Only ${formatUsdt(available)} USDT is available to add.`,
     ABOVE_COMMITTED: `Only ${formatUsdt(marginState.margin)} USDT is committed to this position.`,

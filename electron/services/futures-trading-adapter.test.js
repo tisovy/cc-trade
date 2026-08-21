@@ -252,6 +252,34 @@ describe('FuturesTradingAdapter signing', () => {
         expect(params.get('reduceOnly')).toBe('true');
     });
 
+    it('closes an explicit hedge leg from its identity rather than a forged quantity sign', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        adapter.getPositionMode = vi.fn().mockResolvedValue({ hedgeMode: true });
+
+        // Quantity is an unsigned close amount at this boundary. Deliberately
+        // give each leg the misleading sign to prove it cannot reverse the side.
+        await adapter.closePosition({
+            symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '-0.4',
+        });
+        await adapter.closePosition({
+            symbol: 'ETHUSDT', positionSide: 'short', quantity: '0.3',
+        });
+
+        const [longClose, shortClose] = requests
+            .filter(request => request.url.endsWith('/fapi/v1/order'))
+            .map(request => new URLSearchParams(request.body));
+        expect(longClose.get('side')).toBe('SELL');
+        expect(longClose.get('positionSide')).toBe('LONG');
+        expect(longClose.get('quantity')).toBe('0.4');
+        expect(shortClose.get('side')).toBe('BUY');
+        expect(shortClose.get('positionSide')).toBe('SHORT');
+        expect(shortClose.get('quantity')).toBe('0.3');
+        // Hedge mode scopes the close by leg and forbids reduceOnly itself.
+        expect(longClose.get('reduceOnly')).toBeNull();
+        expect(shortClose.get('reduceOnly')).toBeNull();
+    });
+
     // Two books, two cancellations: `/fapi/v1/allOpenOrders` does not touch the
     // conditional one.
     it('cancels each open-order book on its own route', async () => {

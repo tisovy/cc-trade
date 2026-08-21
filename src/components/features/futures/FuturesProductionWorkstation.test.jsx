@@ -260,16 +260,269 @@ describe('FuturesProductionWorkstation account review', () => {
 
     expect(screen.getByLabelText('Close BTCUSDT LONG position')).toHaveTextContent('29450.00')
     fireEvent.click(screen.getByRole('button', { name: 'Close at market' }))
-    expect(closePosition).toHaveBeenCalledExactlyOnceWith(
-      expect.objectContaining({
-        symbol: 'BTCUSDT',
-        markPrice: '58900',
-        unrealizedPnl: '950',
-        valuationSource: 'live-mark',
-        valuationComplete: true,
-      }),
-      { quantity: '0.5' },
+    expect(closePosition).toHaveBeenCalledExactlyOnceWith(livePosition, { quantity: '0.5' })
+    expect(closePosition.mock.calls[0][0]).not.toHaveProperty('valuationSource')
+  })
+
+  it('discards a close draft after a confirmed empty read and does not revive it on reopen', () => {
+    const closePosition = vi.fn(() => true)
+    const positionMarkStore = createFuturesPositionMarkStore()
+    positionMarkStore.replace({
+      BTCUSDT: { markPrice: '62000', updatedAt: 100 },
+    })
+    const openingPosition = {
+      symbol: 'BTCUSDT', positionSide: 'BOTH', quantity: '0.5', entryPrice: '57000',
+      markPrice: '58000', unrealizedPnl: '500',
+    }
+    const ready = (data, at) => ({
+      status: 'ready', data, updatedAt: at, lastSuccessfulAt: at, error: null,
+    })
+    const { rerender } = render(
+      <FuturesProductionWorkstation
+        enabled
+        executionState={executionState({
+          positions: [openingPosition], closePosition, positionMarkStore,
+          accountResources: { positions: ready([openingPosition], 100) },
+        })}
+      />,
     )
+
+    act(() => {
+      productionWorkstationMocks.viewRender.mock.lastCall[0].tradingRail.props
+        .onPositionClose(openingPosition, { x: 200, y: 150 })
+    })
+    fireEvent.change(screen.getByLabelText('Close size'), { target: { value: '0.25' } })
+
+    rerender(
+      <FuturesProductionWorkstation
+        enabled
+        executionState={executionState({
+          positions: [], closePosition, positionMarkStore,
+          accountResources: { positions: ready([], 200) },
+        })}
+      />,
+    )
+    expect(screen.queryByLabelText('Close BTCUSDT LONG position')).not.toBeInTheDocument()
+    expect(closePosition).not.toHaveBeenCalled()
+
+    const reopenedPosition = { ...openingPosition, quantity: '0.8' }
+    rerender(
+      <FuturesProductionWorkstation
+        enabled
+        executionState={executionState({
+          positions: [reopenedPosition], closePosition, positionMarkStore,
+          accountResources: { positions: ready([reopenedPosition], 300) },
+        })}
+      />,
+    )
+    expect(screen.queryByLabelText('Close BTCUSDT LONG position')).not.toBeInTheDocument()
+
+    act(() => {
+      productionWorkstationMocks.viewRender.mock.lastCall[0].tradingRail.props
+        .onPositionClose(reopenedPosition, { x: 200, y: 150 })
+    })
+    expect(screen.getByLabelText('Close size')).toHaveValue('0.8')
+  })
+
+  it('treats a one-way BOTH reversal as a different semantic leg', () => {
+    const longPosition = {
+      symbol: 'BTCUSDT', positionSide: 'BOTH', quantity: '0.5', entryPrice: '57000',
+      markPrice: '58000', unrealizedPnl: '500',
+    }
+    const resource = (data, at) => ({
+      status: 'ready', data, updatedAt: at, lastSuccessfulAt: at, error: null,
+    })
+    const { rerender } = render(
+      <FuturesProductionWorkstation
+        enabled
+        executionState={executionState({
+          positions: [longPosition],
+          accountResources: { positions: resource([longPosition], 100) },
+        })}
+      />,
+    )
+    act(() => {
+      productionWorkstationMocks.viewRender.mock.lastCall[0].tradingRail.props
+        .onPositionClose(longPosition, { x: 200, y: 150 })
+    })
+    expect(screen.getByLabelText('Close BTCUSDT LONG position')).toBeInTheDocument()
+
+    const shortPosition = {
+      ...longPosition, quantity: '-0.7', unrealizedPnl: '-700',
+    }
+    rerender(
+      <FuturesProductionWorkstation
+        enabled
+        executionState={executionState({
+          positions: [shortPosition],
+          accountResources: { positions: resource([shortPosition], 200) },
+        })}
+      />,
+    )
+    expect(screen.queryByLabelText('Close BTCUSDT LONG position')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Close BTCUSDT SHORT position')).not.toBeInTheDocument()
+  })
+
+  it.each([
+    ['LONG', '0.5', 'SELL', 'LONG'],
+    ['SHORT', '0.5', 'BUY', 'SHORT'],
+    ['BOTH', '-0.5', 'BUY', 'BOTH'],
+  ])('carries the raw %s leg on a LIMIT close', (
+    positionSide, quantity, side, expectedPositionSide,
+  ) => {
+    const placeOrder = vi.fn(() => true)
+    const position = {
+      symbol: 'BTCUSDT', positionSide, quantity, entryPrice: '57000',
+      markPrice: '58000', unrealizedPnl: '500',
+    }
+    const { unmount } = render(
+      <FuturesProductionWorkstation
+        enabled
+        executionState={executionState({
+          positions: [position], placeOrder,
+          accountResources: {
+            positions: {
+              status: 'ready', data: [position], updatedAt: 100,
+              lastSuccessfulAt: 100, error: null,
+            },
+          },
+        })}
+      />,
+    )
+    act(() => {
+      productionWorkstationMocks.viewRender.mock.lastCall[0].tradingRail.props
+        .onPositionClose(position, { x: 200, y: 150 })
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Limit' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Place close limit' }))
+
+    expect(placeOrder).toHaveBeenCalledExactlyOnceWith({
+      symbol: 'BTCUSDT', side, positionSide: expectedPositionSide,
+      orderType: 'LIMIT', price: '58000', quantity: '0.5', reduceOnly: true,
+    })
+    unmount()
+  })
+
+  it('updates the live close preview only when the mark value changes', () => {
+    const entryPriceRead = vi.fn(() => '100')
+    const position = {
+      symbol: 'BTCUSDT', positionSide: 'BOTH', quantity: '1',
+      get entryPrice() { return entryPriceRead() },
+      markPrice: '105', unrealizedPnl: '5',
+    }
+    const positionMarkStore = createFuturesPositionMarkStore()
+    positionMarkStore.replace({
+      BTCUSDT: {
+        markPrice: '110', updatedAt: 100, lastPrice: '90', lastPriceAt: 100,
+      },
+    })
+    render(
+      <FuturesProductionWorkstation
+        enabled
+        executionState={executionState({ positions: [position], positionMarkStore })}
+      />,
+    )
+    act(() => {
+      productionWorkstationMocks.viewRender.mock.lastCall[0].tradingRail.props
+        .onPositionClose(position, { x: 200, y: 150 })
+    })
+    const panel = screen.getByLabelText('Close BTCUSDT LONG position')
+    expect(panel).toHaveTextContent('+10.00')
+
+    entryPriceRead.mockClear()
+    act(() => positionMarkStore.replace({
+      BTCUSDT: {
+        markPrice: '110.0', updatedAt: 200, lastPrice: '90.0', lastPriceAt: 200,
+      },
+    }))
+    expect(entryPriceRead).not.toHaveBeenCalled()
+    expect(panel).toHaveTextContent('+10.00')
+
+    act(() => positionMarkStore.replace({
+      BTCUSDT: {
+        markPrice: '110', updatedAt: 300, lastPrice: '95', lastPriceAt: 300,
+      },
+    }))
+    expect(entryPriceRead).not.toHaveBeenCalled()
+
+    act(() => positionMarkStore.replace({
+      BTCUSDT: {
+        markPrice: '120', updatedAt: 400, lastPrice: '95', lastPriceAt: 400,
+      },
+    }))
+    expect(entryPriceRead).toHaveBeenCalled()
+    expect(panel).toHaveTextContent('+20.00')
+  })
+
+  it('opens margin actions on the coherent raw risk snapshot and clears their draft on absence', () => {
+    const adjustPositionMargin = vi.fn(() => true)
+    const positionMarkStore = createFuturesPositionMarkStore()
+    positionMarkStore.replace({
+      BTCUSDT: { markPrice: '59000', updatedAt: 100 },
+    })
+    const position = {
+      symbol: 'BTCUSDT', positionSide: 'BOTH', quantity: '0.5', entryPrice: '57000',
+      markPrice: '58445', unrealizedPnl: '-300', isolatedWallet: '1200',
+      maintenanceMargin: '40', liquidationPrice: '54680', marginType: 'ISOLATED',
+    }
+    const balances = { USDT: { available: '5000', total: '5000' } }
+    const resources = (positions, at) => ({
+      balances: {
+        status: 'ready', data: balances, updatedAt: at, lastSuccessfulAt: at, error: null,
+      },
+      positions: {
+        status: 'ready', data: positions, updatedAt: at, lastSuccessfulAt: at, error: null,
+      },
+    })
+    const { rerender } = render(
+      <FuturesProductionWorkstation
+        enabled
+        executionState={executionState({
+          balances, positions: [position], positionMarkStore, adjustPositionMargin,
+          accountResources: resources([position], 100),
+        })}
+      />,
+    )
+    act(() => {
+      productionWorkstationMocks.viewRender.mock.lastCall[0].portfolioDock.props
+        .onMarginEdit(position, { x: 200, y: 150 })
+    })
+    expect(screen.getByRole('img', {
+      name: 'Margin 900.00 USDT: 40.00 held as maintenance, 860.00 spare above liquidation',
+    })).toBeInTheDocument()
+    fireEvent.change(screen.getByLabelText('Margin amount in USDT'), { target: { value: '250' } })
+    expect(screen.getByRole('button', { name: 'Add margin' })).toBeEnabled()
+
+    rerender(
+      <FuturesProductionWorkstation
+        enabled
+        executionState={executionState({
+          balances, positions: [], positionMarkStore, adjustPositionMargin,
+          accountResources: resources([], 200),
+        })}
+      />,
+    )
+    expect(screen.queryByLabelText('Adjust BTCUSDT LONG position margin'))
+      .not.toBeInTheDocument()
+    expect(adjustPositionMargin).not.toHaveBeenCalled()
+
+    const reopened = { ...position, quantity: '0.8' }
+    rerender(
+      <FuturesProductionWorkstation
+        enabled
+        executionState={executionState({
+          balances, positions: [reopened], positionMarkStore, adjustPositionMargin,
+          accountResources: resources([reopened], 300),
+        })}
+      />,
+    )
+    expect(screen.queryByLabelText('Adjust BTCUSDT LONG position margin'))
+      .not.toBeInTheDocument()
+    act(() => {
+      productionWorkstationMocks.viewRender.mock.lastCall[0].portfolioDock.props
+        .onMarginEdit(reopened, { x: 200, y: 150 })
+    })
+    expect(screen.getByLabelText('Margin amount in USDT')).toHaveValue('')
   })
 })
 

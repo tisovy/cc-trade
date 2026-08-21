@@ -71,6 +71,29 @@ const samePrimaryMark = (left, right) => left === right || (
   && left?.updatedAt === right?.updatedAt
 )
 
+// A timestamp refresh is a new reading, but not a new valuation. Keep that
+// distinction available to consumers that only render price-derived money so
+// they can avoid recomputing it without forcing freshness-aware consumers to
+// hold an old source time.
+const sameMarkValue = (left, right) => left === right || (
+  left !== null
+  && left !== undefined
+  && right !== null
+  && right !== undefined
+  && Number(left.markPrice) === Number(right.markPrice)
+)
+
+// Rows that explain mark/tape disagreement need both prices, but neither source
+// clock changes their arithmetic. Give those surfaces a middle channel: richer
+// than the aggregate's primary-mark value and cheaper than the full freshness
+// reading.
+const samePresentationValue = (left, right) => sameMarkValue(left, right) && (
+  left.lastPrice === right.lastPrice
+  || (left.lastPrice !== null
+    && right.lastPrice !== null
+    && Number(left.lastPrice) === Number(right.lastPrice))
+)
+
 // A full feed frame may arrive after a newer renderer frame when IPC work is
 // interleaved. Preserve each source's newest timestamp independently: a late
 // tape print cannot regress the mark and a late mark cannot regress tape detail.
@@ -98,8 +121,12 @@ export const createFuturesPositionMarkStore = () => {
   let acceptedFrameRevision = null
   let retiredThroughEpoch = null
   const revisions = new Map()
+  const valueRevisions = new Map()
+  const presentationRevisions = new Map()
   const listeners = new Map()
   const valuationListeners = new Map()
+  const valueListeners = new Map()
+  const presentationListeners = new Map()
 
   const notify = (heldListeners, symbols) => {
     const callbacks = new Set()
@@ -126,6 +153,10 @@ export const createFuturesPositionMarkStore = () => {
     // new namespace; an older epoch is rejected even if its final empty frame
     // arrives after the new feed. Unscoped callers remain supported until the
     // store has seen a real scoped publication, but cannot bypass one later.
+    // An epoch without its revision is a malformed scoped publication: letting
+    // it through would bypass the accepted revision while still looking like it
+    // came from the current feed.
+    if (timedEpoch !== null && timedRevision === null) return false
     if (timedEpoch !== null
       && retiredThroughEpoch !== null
       && timedEpoch <= retiredThroughEpoch) return false
@@ -147,11 +178,15 @@ export const createFuturesPositionMarkStore = () => {
     const next = {}
     const changed = []
     const valuationChanged = []
+    const valueChanged = []
+    const presentationChanged = []
     for (const symbol of keys) {
       if (!(symbol in read)) {
         if (symbol in marks) {
           changed.push(symbol)
           valuationChanged.push(symbol)
+          valueChanged.push(symbol)
+          presentationChanged.push(symbol)
         }
         continue
       }
@@ -160,6 +195,10 @@ export const createFuturesPositionMarkStore = () => {
       if (!sameMark(marks[symbol], next[symbol])) {
         changed.push(symbol)
         if (!samePrimaryMark(marks[symbol], next[symbol])) valuationChanged.push(symbol)
+        if (!sameMarkValue(marks[symbol], next[symbol])) valueChanged.push(symbol)
+        if (!samePresentationValue(marks[symbol], next[symbol])) {
+          presentationChanged.push(symbol)
+        }
       }
     }
     if (changed.length === 0) return false
@@ -167,32 +206,51 @@ export const createFuturesPositionMarkStore = () => {
     for (const symbol of valuationChanged) {
       revisions.set(symbol, (revisions.get(symbol) ?? 0) + 1)
     }
+    for (const symbol of valueChanged) {
+      valueRevisions.set(symbol, (valueRevisions.get(symbol) ?? 0) + 1)
+    }
+    for (const symbol of presentationChanged) {
+      presentationRevisions.set(symbol, (presentationRevisions.get(symbol) ?? 0) + 1)
+    }
     notify(listeners, changed)
     notify(valuationListeners, valuationChanged)
+    notify(valueListeners, valueChanged)
+    notify(presentationListeners, presentationChanged)
     return true
   }
 
-  const clear = ({ retireEpoch = false } = {}) => {
-    if (retireEpoch && acceptedFrameEpoch !== null) {
-      retiredThroughEpoch = retiredThroughEpoch === null
-        ? acceptedFrameEpoch
-        : Math.max(retiredThroughEpoch, acceptedFrameEpoch)
-    } else if (!retireEpoch) {
-      // A transport/process reset has no surviving source from which an older
-      // frame can arrive. Forget its epoch floor so a restarted process whose
-      // module counter begins at one can publish normally.
-      retiredThroughEpoch = null
+  const clear = ({ retireEpoch = false, preserveAdmission = false } = {}) => {
+    // A renderer market generation can change while the shared backend feed
+    // continues speaking in the same epoch. In that mode only the visible
+    // readings are withdrawn: the last admitted revision and retirement floor
+    // remain authoritative, so delayed frames cannot refill the cleared store
+    // and the next higher same-feed revision can.
+    if (!preserveAdmission) {
+      if (retireEpoch && acceptedFrameEpoch !== null) {
+        retiredThroughEpoch = retiredThroughEpoch === null
+          ? acceptedFrameEpoch
+          : Math.max(retiredThroughEpoch, acceptedFrameEpoch)
+      } else if (!retireEpoch) {
+        // A transport/process reset has no surviving source from which an older
+        // frame can arrive. Forget its epoch floor so a restarted process whose
+        // module counter begins at one can publish normally.
+        retiredThroughEpoch = null
+      }
+      acceptedFrameEpoch = null
+      acceptedFrameRevision = null
     }
-    acceptedFrameEpoch = null
-    acceptedFrameRevision = null
     const changed = Object.keys(marks)
     if (changed.length === 0) return false
     marks = Object.freeze({})
     for (const symbol of changed) {
       revisions.set(symbol, (revisions.get(symbol) ?? 0) + 1)
+      valueRevisions.set(symbol, (valueRevisions.get(symbol) ?? 0) + 1)
+      presentationRevisions.set(symbol, (presentationRevisions.get(symbol) ?? 0) + 1)
     }
     notify(listeners, changed)
     notify(valuationListeners, changed)
+    notify(valueListeners, changed)
+    notify(presentationListeners, changed)
     return true
   }
 
@@ -208,6 +266,15 @@ export const createFuturesPositionMarkStore = () => {
     }
   }
 
+  const versionOf = (heldRevisions, symbols) => [...new Set(
+    (Array.isArray(symbols) ? symbols : [])
+      .map(normalizedSymbol)
+      .filter(Boolean),
+  )]
+    .sort()
+    .map(symbol => `${symbol}:${heldRevisions.get(symbol) ?? 0}`)
+    .join('|')
+
   return Object.freeze({
     replace,
     clear,
@@ -218,16 +285,18 @@ export const createFuturesPositionMarkStore = () => {
       symbol,
       callback,
     ),
+    // Price-derived PnL/notional consumers do not need to rerun when only the
+    // source timestamp advances. Freshness-aware consumers keep using the full
+    // or primary-reading subscriptions above.
+    subscribeValue: (symbol, callback) => subscribeTo(valueListeners, symbol, callback),
+    subscribePresentation: (symbol, callback) => (
+      subscribeTo(presentationListeners, symbol, callback)
+    ),
     // A primitive snapshot stays referentially stable for useSyncExternalStore
     // and changes only when one of the requested symbols changes.
-    version(symbols) {
-      return [...new Set((Array.isArray(symbols) ? symbols : [])
-        .map(normalizedSymbol)
-        .filter(Boolean))]
-        .sort()
-        .map(symbol => `${symbol}:${revisions.get(symbol) ?? 0}`)
-        .join('|')
-    },
+    version: symbols => versionOf(revisions, symbols),
+    valueVersion: symbols => versionOf(valueRevisions, symbols),
+    presentationVersion: symbols => versionOf(presentationRevisions, symbols),
   })
 }
 
@@ -260,22 +329,36 @@ export const readFuturesPositionValuation = (position, mark, {
   // Reuse the desk's one committed-margin ladder. Duplicating it here let a
   // stale isolated-wallet field win over initial margin on a CROSS position,
   // so the same live PnL could produce two different ROE readings.
-  const margin = describeFuturesPositionMargin(position).margin
+  const marginState = describeFuturesPositionMargin(position)
+  const snapshotMargin = marginState.margin
   const liveMark = positiveNumber(mark?.markPrice)
 
   if (quantity !== null && entryPrice !== null && liveMark !== null) {
     const unrealizedPnl = stableDerivedNumber((liveMark - entryPrice) * quantity)
+    const notional = stableDerivedNumber(Math.abs(quantity * liveMark))
+    const leverage = positiveNumber(position?.leverage)
+    // An isolated wallet is committed money and remains a coherent denominator
+    // between marks. CROSS initial margin is mark-dependent, so a snapshot dollar
+    // amount cannot be reused after the mark moves; derive it from the same live
+    // notional and a confirmed leverage or leave ROE unknown.
+    const liveMargin = marginState.marginMode === 'ISOLATED'
+      ? (positiveNumber(position?.isolatedWallet)
+        ?? positiveNumber(position?.isolatedMargin))
+      : marginState.marginMode === 'CROSS' && leverage !== null
+        ? positiveNumber(notional / leverage)
+        : null
     return Object.freeze({
       source: 'live-mark',
       sourceAt: safeTime(mark?.updatedAt),
       markPrice: String(mark.markPrice),
       unrealizedPnl,
-      notional: stableDerivedNumber(Math.abs(quantity * liveMark)),
-      roe: margin === null
+      notional,
+      margin: liveMargin === null ? null : stableDerivedNumber(liveMargin),
+      roe: liveMargin === null
         ? null
-        : stableDerivedNumber((unrealizedPnl / margin) * 100),
+        : stableDerivedNumber((unrealizedPnl / liveMargin) * 100),
       complete: true,
-      roeComplete: margin !== null,
+      roeComplete: liveMargin !== null,
       missingReason: null,
       tapeScenario: tapeScenarioOf(position, mark, unrealizedPnl),
     })
@@ -296,11 +379,12 @@ export const readFuturesPositionValuation = (position, mark, {
       notional: !snapshotCoherent || snapshotMark === null || quantity === null
         ? null
         : stableDerivedNumber(Math.abs(quantity * snapshotMark)),
-      roe: snapshotCoherent && margin !== null
-        ? stableDerivedNumber((snapshotPnl / margin) * 100)
+      margin: snapshotCoherent && snapshotMargin !== null ? snapshotMargin : null,
+      roe: snapshotCoherent && snapshotMargin !== null
+        ? stableDerivedNumber((snapshotPnl / snapshotMargin) * 100)
         : null,
       complete: true,
-      roeComplete: snapshotCoherent && margin !== null,
+      roeComplete: snapshotCoherent && snapshotMargin !== null,
       missingReason: null,
       tapeScenario: null,
     })
@@ -312,6 +396,7 @@ export const readFuturesPositionValuation = (position, mark, {
     markPrice: null,
     unrealizedPnl: null,
     notional: null,
+    margin: null,
     roe: null,
     complete: false,
     roeComplete: false,
@@ -337,6 +422,11 @@ export const applyFuturesPositionValuation = (position, valuation) => ({
   // complete reading. Scalar-only snapshot fallback remains useful as uPnL,
   // but cannot silently become zero or mix with an older margin generation.
   valuationMarginComplete: valuation?.roeComplete === true,
+  // Presentation must show the denominator its adjacent ROE actually used.
+  // In particular, live CROSS margin moves with current notional; retaining the
+  // account snapshot amount here made two neighboring figures contradict one
+  // another even though the percentage itself was correct.
+  valuationMargin: valuation?.margin ?? undefined,
   unrealizedPnl: valuation?.unrealizedPnl === null || valuation?.unrealizedPnl === undefined
     ? undefined
     : String(valuation.unrealizedPnl),
@@ -345,6 +435,10 @@ export const applyFuturesPositionValuation = (position, valuation) => ({
     : String(valuation.unrealizedPnl),
   tapePrice: valuation?.tapeScenario?.price ?? undefined,
   tapePriceAt: valuation?.tapeScenario?.sourceAt ?? null,
+  // Preserve the already signed secondary arithmetic. Recomputing it from a
+  // raw positive hedge SHORT quantity would silently turn the what-if into a
+  // long even though the primary valuation correctly applied the explicit leg.
+  tapeScenario: valuation?.tapeScenario ?? undefined,
 })
 
 export const readFuturesPositionValuationAggregate = (positions, marks, {
@@ -366,6 +460,7 @@ export const readFuturesPositionValuationAggregate = (positions, marks, {
   let missingCount = 0
   let fallbackCount = 0
   let sourceAt = null
+  let sourceTimeComplete = true
   for (const position of rows) {
     const valuation = readFuturesPositionValuation(
       position,
@@ -373,18 +468,21 @@ export const readFuturesPositionValuationAggregate = (positions, marks, {
       { snapshotAt, snapshotConfirmed: true, snapshotCoherent },
     )
     if (!valuation.complete || valuation.unrealizedPnl === null) missingCount += 1
-    else value += valuation.unrealizedPnl
-    if (valuation.source === 'account-snapshot') fallbackCount += 1
-    if (valuation.sourceAt !== null) {
-      sourceAt = sourceAt === null ? valuation.sourceAt : Math.min(sourceAt, valuation.sourceAt)
+    else {
+      value += valuation.unrealizedPnl
+      if (valuation.sourceAt === null) sourceTimeComplete = false
+      else sourceAt = sourceAt === null
+        ? valuation.sourceAt
+        : Math.min(sourceAt, valuation.sourceAt)
     }
+    if (valuation.source === 'account-snapshot') fallbackCount += 1
   }
   return Object.freeze({
     value: stableDerivedNumber(value),
     complete: missingCount === 0,
     missingCount,
     fallbackCount,
-    sourceAt,
+    sourceAt: sourceTimeComplete ? sourceAt : null,
   })
 }
 

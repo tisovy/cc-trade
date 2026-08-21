@@ -31,3 +31,25 @@
 - [x] 4.2 Run GitNexus `detect_changes` against `main`, confirm only valuation/feed/dock/history flows are affected, and resolve unexpected symbols before commit
 - [ ] 4.3 Compare live row uPnL/ROE/total with Binance mark/position readings through at least one mark change and one tape-only change; keep this unchecked until the operator confirms
 - [ ] 4.4 Archive only after the operator confirms live behavior; otherwise add the observed gap as a tracked task or follow-up change
+
+## 5. Post-implementation audit
+
+- [x] 5.1 Audit the exact committed valuation change independently across domain math, feed/funding lifecycle, and React presentation/resource boundaries
+- [x] 5.2 Implement every confirmed in-scope production fix before changing its regression tests, and update the design/spec scenarios when the finding exposes a missing contract
+- [x] 5.3 Add focused regressions for the confirmed fixes, then run all affected Futures suites on an isolated candidate snapshot
+- [x] 5.4 Run the full repository verification, strict OpenSpec validation, and final GitNexus change detection before committing the audit fixes to `main`
+
+### Confirmed audit scope
+
+- [x] 5.5 Make mark liveness per-symbol and strictly advancing; make settlement detection boundary-aware and remove dead watchdog state
+- [x] 5.6 Preserve same-feed revision admission across market generations while still clearing visible readings and admitting a genuinely newer feed epoch
+- [x] 5.7 Stop/invalidate all shared mark and settled-income work with the final Futures consumer; send coalesced mark frames only to Futures renderers
+- [x] 5.8 Keep valued DTOs out of action state, dismiss confirmed-absent position actions, and prove close direction/reduction on both renderer and backend paths
+- [x] 5.9 Make margin adjustment bounds and risk provenance fail closed; make live/snapshot ROE denominators coherent
+- [x] 5.10 Preserve signed tape explanation and honest aggregate provenance; make Ticket unknown/empty resource states consistent with the Dock
+- [x] 5.11 Separate mark-reading freshness notifications from price/value notifications so timestamp-only frames do not recompute unchanged financial views
+- [x] 5.12 Guard retired private-stream message/error callbacks before side effects and prevent a departing Futures renderer from draining queued position marks across its activation boundary
+- [x] 5.13 Require backend reduction proof to come from a READY positions snapshot admitted for the current Futures activation
+- [x] 5.14 Keep Ticket entry intent mode-neutral, resolve exits to the current raw `BOTH`/hedge leg, and prove both one-way signs plus hedge behavior
+- [x] 5.15 Revalidate queued private-stream keep-alives at limiter execution and failure boundaries so retired jobs cannot renew or fault a replacement activation
+- [x] 5.16 Project hedge exits from the named leg and lock every staged confirmation to its original contract without relying on passive-effect timing

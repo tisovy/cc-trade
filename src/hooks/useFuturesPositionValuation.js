@@ -11,23 +11,53 @@ const normalizedSymbol = value => (
 export const useFuturesPositionValuation = (
   position,
   store,
-  { snapshotAt = null, snapshotConfirmed = true, snapshotCoherent = false } = {},
+  {
+    snapshotAt = null,
+    snapshotConfirmed = true,
+    snapshotCoherent = false,
+    valueOnly = false,
+    presentationOnly = false,
+  } = {},
 ) => {
   const symbol = normalizedSymbol(position?.symbol)
+  const hasPresentationChannel = presentationOnly
+    && typeof store?.subscribePresentation === 'function'
+    && typeof store?.presentationVersion === 'function'
+    && typeof store?.get === 'function'
+  const hasValueChannel = !hasPresentationChannel && valueOnly
+    && typeof store?.subscribeValue === 'function'
+    && typeof store?.valueVersion === 'function'
+    && typeof store?.get === 'function'
   const subscribe = useCallback(
-    callback => store?.subscribe?.(symbol, callback) ?? (() => {}),
-    [store, symbol],
+    callback => (
+      hasPresentationChannel
+        ? store.subscribePresentation(symbol, callback)
+        : hasValueChannel
+        ? store.subscribeValue(symbol, callback)
+        : store?.subscribe?.(symbol, callback) ?? (() => {})
+    ),
+    [hasPresentationChannel, hasValueChannel, store, symbol],
   )
   const getSnapshot = useCallback(
-    () => store?.get?.(symbol) ?? null,
-    [store, symbol],
+    () => (hasPresentationChannel
+      ? store.presentationVersion([symbol])
+      : hasValueChannel
+        ? store.valueVersion([symbol])
+        : store?.get?.(symbol) ?? null),
+    [hasPresentationChannel, hasValueChannel, store, symbol],
   )
-  const mark = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
-  return useMemo(() => readFuturesPositionValuation(position, mark, {
-    snapshotAt,
-    snapshotConfirmed,
-    snapshotCoherent,
-  }), [mark, position, snapshotAt, snapshotCoherent, snapshotConfirmed])
+  const subscriptionSnapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)
+  return useMemo(() => {
+    const mark = hasPresentationChannel || hasValueChannel
+      ? store.get(symbol)
+      : subscriptionSnapshot
+    return readFuturesPositionValuation(position, mark, {
+      snapshotAt,
+      snapshotConfirmed,
+      snapshotCoherent,
+    })
+  }, [hasPresentationChannel, hasValueChannel, position, snapshotAt, snapshotCoherent,
+    snapshotConfirmed, store, subscriptionSnapshot, symbol])
 }
 
 export const useFuturesPositionValuationAggregate = ({
@@ -43,13 +73,15 @@ export const useFuturesPositionValuationAggregate = ({
       .filter(Boolean),
   )].sort(), [positions])
   const subscribe = useCallback((callback) => {
-    const subscribeValuation = store?.subscribeValuation ?? store?.subscribe
+    const subscribeValuation = store?.subscribeValue
+      ?? store?.subscribeValuation
+      ?? store?.subscribe
     if (typeof subscribeValuation !== 'function') return () => {}
     const releases = symbols.map(symbol => subscribeValuation.call(store, symbol, callback))
     return () => releases.forEach(release => release())
   }, [store, symbols])
   const getSnapshot = useCallback(
-    () => store?.version?.(symbols) ?? '',
+    () => store?.valueVersion?.(symbols) ?? store?.version?.(symbols) ?? '',
     [store, symbols],
   )
   const version = useSyncExternalStore(subscribe, getSnapshot, getSnapshot)

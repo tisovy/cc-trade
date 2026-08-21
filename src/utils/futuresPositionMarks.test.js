@@ -1,11 +1,16 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
+  applyFuturesPositionValuation,
   createFuturesPositionMarkStore,
   mergeFuturesPositionMarks,
   readFuturesPositionMarks,
   readFuturesPositionValuation,
   readFuturesPositionValuationAggregate,
 } from './futuresPositionMarks.js'
+import {
+  describeFuturesPosition,
+  describeFuturesPositionMargin,
+} from './futuresOrderPresentation.js'
 
 const position = Object.freeze({
   symbol: 'BMTUSDT',
@@ -109,6 +114,7 @@ describe('readFuturesPositionValuation', () => {
       markPrice: null,
       unrealizedPnl: -1708.49,
       notional: null,
+      margin: null,
       roe: null,
       complete: true,
       roeComplete: false,
@@ -130,6 +136,7 @@ describe('readFuturesPositionValuation', () => {
       markPrice: null,
       unrealizedPnl: null,
       notional: null,
+      margin: null,
       roe: null,
       complete: false,
       roeComplete: false,
@@ -189,6 +196,135 @@ describe('readFuturesPositionValuation', () => {
       disagreesWithMark: true,
     })
     expect(after.tapeScenario.price).toBe('3.34')
+  })
+
+  it('derives live CROSS ROE from the current mark notional and confirmed leverage', () => {
+    const rawPosition = {
+      symbol: 'BTCUSDT',
+      positionSide: 'LONG',
+      quantity: '2',
+      entryPrice: '100',
+      marginType: 'CROSS',
+      leverage: '10',
+      positionInitialMargin: '20',
+      initialMargin: '80',
+    }
+    const valuation = readFuturesPositionValuation(rawPosition, {
+      markPrice: '120',
+      updatedAt: 20,
+    })
+
+    expect(valuation).toMatchObject({
+      source: 'live-mark',
+      unrealizedPnl: 40,
+      notional: 240,
+      margin: 24,
+      roeComplete: true,
+    })
+    // Current margin is 240 / 10 = 24, rather than either snapshot dollar
+    // field carried beside the position.
+    expect(valuation.roe).toBeCloseTo((40 / 24) * 100, 10)
+    const applied = applyFuturesPositionValuation(rawPosition, valuation)
+    const displayedMargin = describeFuturesPositionMargin(applied).margin
+    expect(applied.valuationMargin).toBe(24)
+    expect(displayedMargin).toBe(24)
+    expect(describeFuturesPosition(applied).roePercent).toBeCloseTo(valuation.roe, 10)
+    expect(valuation.roe).toBeCloseTo((valuation.unrealizedPnl / displayedMargin) * 100, 10)
+  })
+
+  it('keeps live CROSS ROE unknown without confirmed leverage', () => {
+    const rawPosition = {
+      symbol: 'BTCUSDT',
+      positionSide: 'LONG',
+      quantity: '2',
+      entryPrice: '100',
+      marginType: 'CROSS',
+      positionInitialMargin: '20',
+      initialMargin: '80',
+    }
+    const valuation = readFuturesPositionValuation(rawPosition, {
+      markPrice: '120',
+      updatedAt: 20,
+    })
+
+    expect(valuation).toMatchObject({
+      source: 'live-mark',
+      unrealizedPnl: 40,
+      notional: 240,
+      margin: null,
+      roe: null,
+      complete: true,
+      roeComplete: false,
+    })
+    expect(applyFuturesPositionValuation(rawPosition, valuation).valuationMargin)
+      .toBeUndefined()
+  })
+
+  it('uses committed isolated margin for live isolated ROE', () => {
+    const valuation = readFuturesPositionValuation({
+      symbol: 'BTCUSDT',
+      positionSide: 'LONG',
+      quantity: '2',
+      entryPrice: '100',
+      marginType: 'ISOLATED',
+      isolatedWallet: '50',
+      positionInitialMargin: '20',
+      initialMargin: '80',
+    }, {
+      markPrice: '120',
+      updatedAt: 20,
+    })
+
+    expect(valuation).toMatchObject({ roe: 80, roeComplete: true })
+  })
+
+  it('uses position-only margin for a coherent snapshot ROE', () => {
+    const valuation = readFuturesPositionValuation({
+      symbol: 'BTCUSDT',
+      positionSide: 'LONG',
+      quantity: '2',
+      entryPrice: '100',
+      markPrice: '105',
+      unrealizedPnl: '10',
+      marginType: 'CROSS',
+      positionInitialMargin: '20',
+      initialMargin: '80',
+    }, null, {
+      snapshotAt: 30,
+      snapshotConfirmed: true,
+      snapshotCoherent: true,
+    })
+
+    expect(valuation).toMatchObject({
+      source: 'account-snapshot',
+      margin: 20,
+      roe: 50,
+      roeComplete: true,
+    })
+  })
+
+  it('carries the signed tape scenario through the compatibility DTO', () => {
+    const rawPosition = {
+      symbol: 'BEATUSDT',
+      positionSide: 'SHORT',
+      quantity: '2873',
+      entryPrice: '3.3450',
+      isolatedWallet: '100',
+    }
+    const valuation = readFuturesPositionValuation(rawPosition, {
+      markPrice: '3.36',
+      updatedAt: 2,
+      lastPrice: '3.30',
+      lastPriceAt: 3,
+    })
+    const applied = applyFuturesPositionValuation(rawPosition, valuation)
+
+    expect(valuation.tapeScenario).toMatchObject({
+      price: '3.30',
+      disagreesWithMark: true,
+    })
+    expect(valuation.tapeScenario.unrealizedPnl).toBeCloseTo(129.285, 9)
+    expect(applied.tapeScenario).toBe(valuation.tapeScenario)
   })
 })
 
@@ -307,6 +443,109 @@ describe('createFuturesPositionMarkStore', () => {
     expect(store.get('BTCUSDT')?.markPrice).toBe('60100')
   })
 
+  it('clears visible readings while preserving same-feed revision admission', () => {
+    const store = createFuturesPositionMarkStore()
+    expect(store.replace({
+      BTCUSDT: { markPrice: '60000', updatedAt: 100 },
+    }, 12, 3)).toBe(true)
+
+    expect(store.clear({ preserveAdmission: true })).toBe(true)
+    expect(store.get('BTCUSDT')).toBeNull()
+    expect(store.replace({
+      BTCUSDT: { markPrice: '59000', updatedAt: 90 },
+    }, 11, 3)).toBe(false)
+    expect(store.replace({
+      BTCUSDT: { markPrice: '59100', updatedAt: 91 },
+    }, 12, 3)).toBe(false)
+    expect(store.replace({
+      BTCUSDT: { markPrice: '60100', updatedAt: 200 },
+    }, 13, 3)).toBe(true)
+
+    // A replacement feed restarts its own revision namespace at one, and the
+    // old namespace cannot regain authority after that epoch has been accepted.
+    expect(store.replace({
+      BTCUSDT: { markPrice: '60200', updatedAt: 300 },
+    }, 1, 4)).toBe(true)
+    expect(store.replace({
+      BTCUSDT: { markPrice: '58000', updatedAt: 400 },
+    }, 14, 3)).toBe(false)
+    expect(store.get('BTCUSDT')?.markPrice).toBe('60200')
+  })
+
+  it('rejects a scoped feed frame that has no valid positive revision', () => {
+    const store = createFuturesPositionMarkStore()
+    const readingListener = vi.fn()
+    store.subscribe('BTCUSDT', readingListener)
+    expect(store.replace({
+      BTCUSDT: { markPrice: '60000', updatedAt: 100 },
+    }, 12, 3)).toBe(true)
+
+    for (const malformedRevision of [null, undefined, 0, -1, 1.5]) {
+      expect(store.replace({
+        BTCUSDT: { markPrice: '59000', updatedAt: 200 },
+      }, malformedRevision, 3)).toBe(false)
+    }
+    expect(store.get('BTCUSDT')?.markPrice).toBe('60000')
+    expect(readingListener).toHaveBeenCalledTimes(1)
+  })
+
+  it('separates reading, presentation, and numeric valuation notifications', () => {
+    const store = createFuturesPositionMarkStore()
+    const readingListener = vi.fn()
+    const presentationListener = vi.fn()
+    const valueListener = vi.fn()
+    store.subscribe('BTCUSDT', readingListener)
+    store.subscribePresentation('BTCUSDT', presentationListener)
+    store.subscribeValue('BTCUSDT', valueListener)
+
+    expect(store.replace({
+      BTCUSDT: {
+        markPrice: '60000.0', updatedAt: 100, lastPrice: '59900.0', lastPriceAt: 100,
+      },
+    })).toBe(true)
+    const readingVersion = store.version(['BTCUSDT'])
+    const presentationVersion = store.presentationVersion(['BTCUSDT'])
+    const valueVersion = store.valueVersion(['BTCUSDT'])
+
+    // New source times remain observable on the full reading, but numerically
+    // identical prices do not invalidate presentation or financial arithmetic.
+    expect(store.replace({
+      BTCUSDT: {
+        markPrice: '60000.00', updatedAt: 200, lastPrice: '59900.00', lastPriceAt: 200,
+      },
+    })).toBe(true)
+    expect(store.get('BTCUSDT')).toMatchObject({ updatedAt: 200, lastPriceAt: 200 })
+    expect(readingListener).toHaveBeenCalledTimes(2)
+    expect(presentationListener).toHaveBeenCalledTimes(1)
+    expect(valueListener).toHaveBeenCalledTimes(1)
+    expect(store.version(['BTCUSDT'])).not.toBe(readingVersion)
+    expect(store.presentationVersion(['BTCUSDT'])).toBe(presentationVersion)
+    expect(store.valueVersion(['BTCUSDT'])).toBe(valueVersion)
+
+    // Tape movement changes explanatory presentation only.
+    expect(store.replace({
+      BTCUSDT: {
+        markPrice: '60000.00', updatedAt: 200, lastPrice: '59950', lastPriceAt: 300,
+      },
+    })).toBe(true)
+    expect(readingListener).toHaveBeenCalledTimes(3)
+    expect(presentationListener).toHaveBeenCalledTimes(2)
+    expect(valueListener).toHaveBeenCalledTimes(1)
+    expect(store.presentationVersion(['BTCUSDT'])).not.toBe(presentationVersion)
+    expect(store.valueVersion(['BTCUSDT'])).toBe(valueVersion)
+
+    // Mark movement changes both derived financial value and presentation.
+    expect(store.replace({
+      BTCUSDT: {
+        markPrice: '60100', updatedAt: 400, lastPrice: '59950', lastPriceAt: 300,
+      },
+    })).toBe(true)
+    expect(readingListener).toHaveBeenCalledTimes(4)
+    expect(presentationListener).toHaveBeenCalledTimes(3)
+    expect(valueListener).toHaveBeenCalledTimes(2)
+    expect(store.valueVersion(['BTCUSDT'])).not.toBe(valueVersion)
+  })
+
   it('can notify explanatory tape movement without changing primary PnL', () => {
     const store = createFuturesPositionMarkStore()
     const listener = vi.fn()
@@ -379,6 +618,34 @@ describe('valuation compatibility and aggregate helpers', () => {
       missingCount: 1,
       fallbackCount: 0,
       sourceAt: 10,
+    })
+  })
+
+  it('keeps a complete aggregate timestamp unknown when an included source is undated', () => {
+    const store = createFuturesPositionMarkStore()
+    store.replace({ BTCUSDT: { markPrice: '110', updatedAt: 50 } })
+    const aggregate = readFuturesPositionValuationAggregate([
+      {
+        symbol: 'BTCUSDT',
+        positionSide: 'LONG',
+        quantity: '1',
+        entryPrice: '100',
+      },
+      {
+        symbol: 'ETHUSDT',
+        positionSide: 'LONG',
+        quantity: '1',
+        entryPrice: '10',
+        unrealizedPnl: '3',
+      },
+    ], store, { positionsKnown: true, snapshotAt: null })
+
+    expect(aggregate).toEqual({
+      value: 13,
+      complete: true,
+      missingCount: 0,
+      fallbackCount: 1,
+      sourceAt: null,
     })
   })
 })
