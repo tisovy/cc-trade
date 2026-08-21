@@ -304,6 +304,9 @@ const RECORDED_FIELDS = Object.freeze({
         // exchange said about it when it was checked. A kept reading is only
         // safe while somebody can see whether it has ever been wrong.
         ['restored', count],
+        // Whether the held rows were checked against the exchange this pass or
+        // merely extended. `missing: 0` means nothing without it.
+        ['verified', count],
         ['missing', count],
         ['differing', count],
         ['rows', count],

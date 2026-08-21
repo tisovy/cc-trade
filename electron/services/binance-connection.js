@@ -2210,6 +2210,7 @@ export function setupBinanceConnection({
         // How many rows came off disk rather than off the wire, and what the
         // exchange said about them when they were checked.
         let restored = 0;
+        let verified = 0;
         let missing = 0;
         let differing = 0;
         // Every way out of this read states itself. The read that says nothing is
@@ -2232,6 +2233,13 @@ export function setupBinanceConnection({
                 // found. A store that is never wrong should read zero here
                 // forever; a store that is ever wrong must not do so quietly.
                 restored,
+                // Whether this pass actually checked the held rows against the
+                // exchange, rather than extended them. Without it `missing: 0`
+                // reads the same on a pass that verified and agreed as on one
+                // that never looked — and the operator's gate is "the first
+                // verification of the session records no disagreements", which
+                // needs the verification to be findable in the first place.
+                verified,
                 missing,
                 differing,
                 rows: held.length,
@@ -2376,6 +2384,7 @@ export function setupBinanceConnection({
                 logger.warn('[futures-settled] kept reading corrected by the exchange:',
                     `${missing} absent, ${differing} restated`);
             }
+            verified = 1;
             _futuresSettledVerifiedAt = now;
         }
         // A verification starts from nothing so the exchange can contradict what

@@ -3941,7 +3941,9 @@ describe('setupBinanceConnection user-data orchestration', () => {
         // The exchange answers with nothing, so the kept row is gone and the
         // desk says so rather than keeping it because it was once read.
         expect(settled.some(entry => entry.restored === 1)).toBe(true);
-        expect(settled.some(entry => entry.missing === 1)).toBe(true);
+        // Checked, and said so. `missing: 0` on a pass that never looked reads
+        // exactly like `missing: 0` on a pass that looked and agreed.
+        expect(settled.some(entry => entry.verified === 1 && entry.missing === 1)).toBe(true);
         const saved = settledIncomeStore.save.mock.calls.at(-1)?.[0];
         expect(saved?.held.rows.has('FUNDING_FEE:never-happened')).toBe(false);
     });
@@ -3993,7 +3995,8 @@ describe('setupBinanceConnection user-data orchestration', () => {
         // could vouch for is not narrowed by a request that never answered.
         expect(saved.held.rows.has('FUNDING_FEE:still-real')).toBe(true);
         expect(saved.held.from).toBeLessThanOrEqual(Date.now() - 7 * 24 * 60 * 60 * 1000);
-        // A refusal is not a verdict, so nothing is recorded as contradicted.
+        // A refusal is not a verdict, so nothing is recorded as contradicted —
+        // and the record must not claim the check happened.
         expect(saved.verifiedAt).toBeNull();
     });
 

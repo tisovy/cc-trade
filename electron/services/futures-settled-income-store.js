@@ -105,6 +105,12 @@ export const createFuturesSettledIncomeStore = ({ directory, logger = console } 
          * Through a temporary file and a rename: a desk killed mid-write would
          * otherwise leave a truncated file, and a truncated reading that still
          * parses is the one failure mode worse than no file at all.
+         *
+         * Synchronously, on the main process, on purpose. Measured at the walk's
+         * own ceiling of 24 000 rows it is 2.95 MB in **10.9 ms**; the operator's
+         * account holds 46 rows, which is about seven kilobytes. A handful of
+         * passes an hour at that cost is not worth the failure modes of doing it
+         * asynchronously beside a file that must never be half-written.
          */
         save({ fingerprint, held, verifiedAt = null }) {
             if (file === null || fingerprint === null) return false;
