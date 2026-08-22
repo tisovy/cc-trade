@@ -263,6 +263,73 @@ describe('production RateLimiter cancellation', () => {
         ]);
     });
 
+    // The bound on urgent overtaking is counted against whoever has waited
+    // longest. A request the window turned away and sent round again has waited
+    // longer than anything that arrived while it slept, so it may not come back
+    // as if it had just arrived — that would give urgent work another eight
+    // passes for every window it waits, which is not a bound.
+    it('gives a request that waited the passes it had already been given', async () => {
+        vi.setSystemTime(1_000);
+        const limiter = new RateLimiter(100, 60_000, 0);
+        const taken = [];
+        const takeAdmission = limiter.takeAdmission.bind(limiter);
+        limiter.takeAdmission = async (signal, urgent, passes) => {
+            taken.push(passes);
+            const entry = await takeAdmission(signal, urgent, passes);
+            // Stand in for whatever urgent work passed it while it queued.
+            entry.passes += 3;
+            return entry;
+        };
+
+        await limiter.execute(async () => 'fill', 100, 0);
+        const held = limiter.execute(async () => 'held', 90, 0);
+        await vi.advanceTimersByTimeAsync(60_100);
+        await expect(held).resolves.toBe('held');
+
+        // The fill, then the turn the window refused, then the turn after the
+        // wait — which carries what the refused one had been given.
+        expect(taken).toEqual([0, 0, 3]);
+    });
+
+    // The record opens and rolls a file of its own. A request that has already
+    // booked its weight has no business holding the queue while it does that.
+    it('writes the line with the queue already moving', async () => {
+        vi.setSystemTime(1_000);
+        let admittingWhenWritten = null;
+        const limiter = new RateLimiter(100, 60_000, 0, {
+            onDeferred: () => { admittingWhenWritten = limiter.admitting; },
+        });
+
+        await limiter.execute(async () => 'fill', 100, 0);
+        const held = limiter.execute(async () => 'held', 90, 0);
+        await vi.advanceTimersByTimeAsync(60_100);
+        await expect(held).resolves.toBe('held');
+
+        expect(admittingWhenWritten).toBe(false);
+    });
+
+    // Zero is a reading this desk's own clock really hands out — every test in
+    // this file starts there — so it cannot also stand for "never waited".
+    it('records a wait that began at zero on the clock', async () => {
+        const deferrals = [];
+        const limiter = new RateLimiter(100, 60_000, 0, {
+            onDeferred: entry => deferrals.push(entry),
+        });
+
+        await limiter.execute(async () => 'fill', 100, 0);
+        const held = limiter.execute(async () => 'held', 90, 0);
+        await vi.advanceTimersByTimeAsync(60_100);
+        await expect(held).resolves.toBe('held');
+
+        expect(deferrals).toEqual([{
+            standing: 'ordinary',
+            waitedMs: 60_100,
+            weight: 90,
+            spent: 100,
+            ceiling: 100,
+        }]);
+    });
+
     // A guard, not a biter: before the reporter existed this passed by having
     // nothing to throw. It is here because the reporter is the desk's
     // diagnostics file, which is allowed to fail — a disk that refuses a line

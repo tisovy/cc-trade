@@ -36,9 +36,9 @@
 - [x] 5.3 The deferral line was written while still holding the admission slot. The record opens and rolls a file of its own; a request that has already booked its weight has no business holding the queue while it does that. Moved after the slot is given back.
 - [x] 5.4 `deferredFrom` used `0` for "never deferred", which is a reading the desk's own clock hands out — every test in this file starts at zero. It would have lost the line and re-sampled the spend on each pass. Sentinel is `null`.
 - [x] 5.5 Three tests, all three failing against `724be7c`: `gives a request that waited the passes it had already been given`, `writes the line with the queue already moving`, `records a wait that began at zero on the clock`.
-- [x] 5.6 The implementation of this section landed in commit `20a55e8`, not in a commit of its own:
-  a peer session committed from the shared index while these files were staged for verification,
-  and its commit took them. Nothing is missing; the subject line names other work.
+- [x] 5.6 This section was swept into a peer's commit twice on the way in — the index is shared, and
+  staging is not a safe place to wait while a suite runs. Verified against the index rather than the
+  working tree each time (`git archive $(git write-tree)`), and nothing was lost.
 
 ## 6. Operator verification
 

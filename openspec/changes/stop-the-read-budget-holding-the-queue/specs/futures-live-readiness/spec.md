@@ -21,6 +21,10 @@ SHALL be unchanged.
 - **WHEN** two requests are admitted concurrently and only one of them fits under the ceiling
 - **THEN** one books its weight and the other waits, and the window is never overspent
 
+#### Scenario: Urgent work passes a request that has already been sent round
+- **WHEN** a request the window turned away rejoins the queue and urgent work is waiting behind it
+- **THEN** the count of times it has already been passed goes round with it, so waiting does not restart the bound on how often it may be overtaken
+
 #### Scenario: A request larger than the whole window
 - **WHEN** a request declares more weight than the window can ever hold and nothing else is booked against it
 - **THEN** it is admitted rather than waiting for room that will not appear

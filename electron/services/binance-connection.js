@@ -450,9 +450,12 @@ export class RateLimiter {
      * the one at the head has been passed `MAX_ADMISSION_PASSES` times nothing
      * may pass it again.
      *
-     * Reading the head is enough to know that: a pass is counted against every
-     * request it skipped, so nothing in the queue can have been passed more
-     * often than the one that has been waiting longest.
+     * Reading the head is enough while each request reaches this queue once: a
+     * pass is counted against every request it skipped, so nothing can have been
+     * passed more often than the one that has waited longest. A request the
+     * window turned away rejoins carrying what it had already been passed, so it
+     * may sit behind the head holding a higher count — which makes the bound
+     * bite sooner than the head says, never later.
      */
     nextAdmission() {
         const head = this.waiting[0];
@@ -487,8 +490,8 @@ export class RateLimiter {
      * reservation: a request the window has no room for gives it back and asks
      * again rather than sleeping on it.
      */
-    async takeAdmission(signal, urgent) {
-        const entry = { urgent: urgent === true, passes: 0, admit: null };
+    async takeAdmission(signal, urgent, passes = 0) {
+        const entry = { urgent: urgent === true, passes, admit: null };
         const turn = new Promise(resolve => {
             entry.admit = resolve;
         });
@@ -507,6 +510,7 @@ export class RateLimiter {
             else this.releaseAdmission();
             throw error;
         }
+        return entry;
     }
 
     /**
@@ -535,11 +539,18 @@ export class RateLimiter {
      * longest any more.
      */
     async reserve(weight, signal, { urgent = false } = {}) {
-        let deferredFrom = 0;
+        let deferredFrom = null;
         let spentWhenHeld = 0;
+        // Carried across the re-queue rather than restarted with it. The bound on
+        // urgent overtaking is counted against whoever has waited longest, and a
+        // request the window turned away has waited longer than anything that
+        // arrived while it slept. Restarted at zero, urgent work could pass it
+        // another eight times for every window it waits, which is not a bound.
+        let passes = 0;
         for (;;) {
-            await this.takeAdmission(signal, urgent);
+            const entry = await this.takeAdmission(signal, urgent, passes);
             let sleepFor = 0;
+            let booked = false;
             try {
                 throwIfAborted(signal);
                 const spent = this.getCurrentWeight();
@@ -549,28 +560,36 @@ export class RateLimiter {
                     await this.enforceDelay(signal);
                     throwIfAborted(signal);
                     this.requests.push({ timestamp: Date.now(), weight });
-                    if (deferredFrom !== 0) {
-                        this.noteDeferred({
-                            standing: urgent === true ? 'urgent' : 'ordinary',
-                            waitedMs: Date.now() - deferredFrom,
-                            weight,
-                            spent: spentWhenHeld,
-                            ceiling: this.maxWeight,
-                        });
+                    booked = true;
+                } else {
+                    if (deferredFrom === null) {
+                        deferredFrom = Date.now();
+                        spentWhenHeld = spent;
                     }
-                    return;
+                    // +100ms so the window has actually rolled by the time this
+                    // asks again, rather than a millisecond before it.
+                    sleepFor = this.windowMs - (Date.now() - this.requests[0].timestamp) + 100;
+                    logger.debug(`Rate limiter: waiting ${sleepFor}ms (current weight: ${spent}/${this.maxWeight})`);
                 }
-                if (deferredFrom === 0) {
-                    deferredFrom = Date.now();
-                    spentWhenHeld = spent;
-                }
-                // +100ms so the window has actually rolled by the time this asks
-                // again, rather than a millisecond before it.
-                sleepFor = this.windowMs - (Date.now() - this.requests[0].timestamp) + 100;
-                logger.debug(`Rate limiter: waiting ${sleepFor}ms (current weight: ${spent}/${this.maxWeight})`);
             } finally {
                 this.releaseAdmission();
             }
+            if (booked) {
+                // Written after the slot is given back. The record opens and
+                // rolls its own file, and a request that has already booked its
+                // weight has no business holding the queue while it does.
+                if (deferredFrom !== null) {
+                    this.noteDeferred({
+                        standing: urgent === true ? 'urgent' : 'ordinary',
+                        waitedMs: Date.now() - deferredFrom,
+                        weight,
+                        spent: spentWhenHeld,
+                        ceiling: this.maxWeight,
+                    });
+                }
+                return;
+            }
+            passes = entry.passes;
             // Never negative, and never a tight loop: a zero wait still yields,
             // and `cleanup` has dropped what expired by the time it comes back.
             await waitForDelay(Math.max(sleepFor, 0), signal);
