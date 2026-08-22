@@ -292,6 +292,22 @@ the next bad morning closes both.
 
 ## Defects And Contradictions
 
+- **Open, unowned as of 2026-08-22 19:31 UTC — the history read is refused on
+  every start.** `account.history` comes back `rejected` with
+  `INVALID_TYPED_HISTORY_SYMBOL` once per session start: 18:43:04, 18:49:51,
+  18:54:34, 18:56:00, 19:18:50, 19:19:43 and 19:23:58 UTC. The code appears
+  **zero** times in the journals for 18, 19, 20 and 21 August, so it began that
+  evening. The refusal is at `trading-command-validation.js:806` — neither
+  `payload.symbol` nor `selectedSymbol` is set — and that validation is old; what
+  is new is the caller. The uncommitted diff of `src/hooks/useFuturesTrading.js`
+  adds `historyReconcileGeneration`, described in its own comment as *"a request
+  to close the REST history gap spanning offline time"*, which fits the profile
+  exactly: once per start, before a contract has been chosen, so the symbol is
+  empty. Written here rather than sent, because the session holding that work is
+  live (its transcript was being written at 19:31:35 UTC) but is not listed by
+  `ListAgents`, and the desk runs the working tree — so this is live on the
+  operator's desk now and has been failing silently for the better part of an
+  hour. Not diagnosed further and not touched: it is somebody's active work.
 - `runbook.md` result 19 is the only literal `FAIL`. It has the separate
   `let-the-chart-ask-again` change; because no post-fix repeat exists, its live
   tasks remain open.
