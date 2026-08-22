@@ -14,9 +14,13 @@ import {
   TERMINAL_FUTURES_ORDER_STATUSES,
   createHeldFuturesHistory,
 } from './futuresHeldHistory.js'
+import { futuresTradeHistoryEvidenceError } from './futuresTradeHistoryEvidence.js'
 
 const DATABASE_NAME = 'FuturesAccountHistory'
-const DATABASE_VERSION = 1
+// Version one keyed records by symbol alone. Those rows cannot prove which
+// authenticated account (or settlement-asset schema) they belong to, and they
+// would otherwise survive forever beside the fingerprinted v2 records.
+const DATABASE_VERSION = 2
 const STORE_NAME = 'contracts'
 
 // Per contract, the read's own depth: `allOrders` answers a hundred at a time
@@ -31,6 +35,17 @@ export const FUTURES_HISTORY_STORE_MAX_CONTRACTS = 24
 
 export const futuresHistoryContractKey = symbol => String(symbol ?? '').toUpperCase()
 
+const futuresHistoryFingerprint = value => {
+  const normalized = String(value ?? '').trim().toLowerCase()
+  return /^[a-f0-9]{16}$/.test(normalized) ? normalized : null
+}
+
+export const futuresHistoryStorageKey = (fingerprint, symbol) => {
+  const account = futuresHistoryFingerprint(fingerprint)
+  const contract = futuresHistoryContractKey(symbol)
+  return account === null || contract === '' ? null : `${account}:${contract}`
+}
+
 const isTerminalOrder = order => TERMINAL_FUTURES_ORDER_STATUSES.has(
   String(order?.status ?? '').toUpperCase(),
 )
@@ -40,6 +55,8 @@ const newestFirst = (left, right) => (Number(right?.time) || 0) - (Number(left?.
 const identityOf = value => (
   value === null || value === undefined || value === '' ? null : String(value)
 )
+
+const compareText = (left, right) => (left < right ? -1 : left > right ? 1 : 0)
 
 // Exchange identities are integers that outgrow a double, and they are compared
 // here to decide what has already been read — so they are compared as integers
@@ -53,17 +70,42 @@ const higherIdentity = (left, right) => {
   return left
 }
 
-const boundedRows = (rows, keyOf, limit) => {
-  const byIdentity = new Map()
+const boundedRows = (rows, keyOf, limit, variantOf = keyOf) => {
+  const byVariant = new Map()
   for (const row of rows) {
     const key = keyOf(row)
-    if (key === null) continue
+    const variant = variantOf(row)
+    if (key === null || variant === null) continue
     // A row read from the exchange wins over the one already stored: it is the
     // exchange's own record, and the stored one may have been folded in from a
-    // stream report that knew less.
-    byIdentity.set(key, row)
+    // stream report that knew less. Distinct immutable trade evidence uses a
+    // distinct variant key below, so this replacement cannot erase a conflict.
+    byVariant.set(variant, row)
   }
-  return Object.freeze([...byIdentity.values()].sort(newestFirst).slice(0, limit))
+  return Object.freeze([...byVariant.entries()]
+    .sort((left, right) => newestFirst(left[1], right[1]) || compareText(left[0], right[0]))
+    .slice(0, limit)
+    .map(([, row]) => row))
+}
+
+const uniqueRowCount = (rows, keyOf) => new Set(
+  rows.map(keyOf).filter(key => key !== null),
+).size
+
+const retentionLimitedTradeCoverage = (coverage, rows) => {
+  if (coverage?.version !== 2) return coverage ?? null
+  const oldestRetained = rows
+    .map(row => Number.isSafeInteger(row?.time) ? row.time : null)
+    .filter(time => time !== null)
+    .reduce((oldest, time) => oldest === null ? time : Math.min(oldest, time), null)
+  return Object.freeze({
+    ...coverage,
+    coveredFrom: oldestRetained === null
+      ? coverage.coveredFrom
+      : Math.max(coverage.coveredFrom ?? oldestRetained, oldestRetained),
+    complete: false,
+    retentionLimited: true,
+  })
 }
 
 const cursorOf = (rows, keyOf) => rows.reduce(
@@ -74,6 +116,73 @@ const cursorOf = (rows, keyOf) => rows.reduce(
 const orderIdentity = order => identityOf(order?.orderId)
 const tradeIdentity = trade => identityOf(trade?.id)
 
+const TRADE_EVIDENCE_FIELDS = Object.freeze([
+  'id',
+  'orderId',
+  'symbol',
+  'side',
+  'positionSide',
+  'price',
+  'quantity',
+  'quoteQty',
+  'realizedPnl',
+  'commission',
+  'commissionAsset',
+  'marginAsset',
+  'maker',
+  'buyer',
+  'time',
+])
+const TRADE_EVIDENCE_SIGNATURE_TEXT_LIMIT = 512
+
+const boundedEvidenceValue = (value) => {
+  if (value === null) return Object.freeze(['null'])
+  const kind = typeof value
+  if (kind === 'string') {
+    return value.length <= TRADE_EVIDENCE_SIGNATURE_TEXT_LIMIT
+      ? Object.freeze([kind, value])
+      : Object.freeze([kind, 'oversized', value.length])
+  }
+  if (kind === 'number' || kind === 'bigint' || kind === 'boolean') {
+    return Object.freeze([kind, String(value)])
+  }
+  if (kind === 'undefined') return Object.freeze([kind])
+  // Non-scalar exchange evidence is already invalid. One bounded marker keeps
+  // it as a continuity barrier without serializing attacker-controlled graphs.
+  return Object.freeze([kind, 'non-scalar'])
+}
+
+const tradeEvidenceVariant = (trade) => {
+  const identity = tradeIdentity(trade)
+  if (identity === null) return null
+  const source = trade !== null && typeof trade === 'object' ? trade : {}
+  return JSON.stringify([
+    identity,
+    ...TRADE_EVIDENCE_FIELDS.map((field) => {
+      const present = Object.hasOwn(source, field)
+      return Object.freeze([
+        field,
+        present,
+        boundedEvidenceValue(present ? source[field] : undefined),
+      ])
+    }),
+  ])
+}
+
+const tradeSettlementEvidenceIsCurrent = (trades, expectedSymbol) => {
+  const variantsByIdentity = new Map()
+  for (const trade of asArray(trades)) {
+    if (futuresTradeHistoryEvidenceError(trade, { expectedSymbol }) !== null) return false
+    const identity = tradeIdentity(trade)
+    const variant = tradeEvidenceVariant(trade)
+    if (identity === null || variant === null) return false
+    const previous = variantsByIdentity.get(identity)
+    if (previous !== undefined && previous !== variant) return false
+    variantsByIdentity.set(identity, variant)
+  }
+  return true
+}
+
 /**
  * What one contract is known to hold, after a read that covered it.
  *
@@ -82,9 +191,11 @@ const tradeIdentity = trade => identityOf(trade?.id)
  * or cancelled it while the desk was closed.
  */
 export const mergeFuturesHistoryContract = (stored, {
+  fingerprint = null,
   symbol,
   orders = [],
   trades = [],
+  tradeCoverage = null,
   readAt = null,
 } = {}, {
   maxOrders = FUTURES_HISTORY_STORE_MAX_ORDERS,
@@ -98,37 +209,63 @@ export const mergeFuturesHistoryContract = (stored, {
   readsOrders = true,
   readsTrades = true,
 } = {}) => {
-  const key = futuresHistoryContractKey(symbol ?? stored?.symbol)
+  const account = futuresHistoryFingerprint(fingerprint ?? stored?.fingerprint)
+  const symbolKey = futuresHistoryContractKey(symbol ?? stored?.symbol)
+  const key = futuresHistoryStorageKey(account, symbolKey) ?? symbolKey
+  const storedStamp = Number.isSafeInteger(stored?.readAt) ? stored.readAt : null
+  // A record written before reads were per endpoint has no per-view stamp, and
+  // every read behind it covered both — so its own stamp stands for both.
+  const heldStamp = name => (Object.hasOwn(stored ?? {}, name) ? stored[name] : storedStamp)
+  const stamp = Number.isSafeInteger(readAt) ? readAt : null
+  const accepts = name => {
+    const held = Number.isSafeInteger(heldStamp(name)) ? heldStamp(name) : null
+    return stamp === null || held === null || stamp >= held
+  }
+  const acceptsOrders = readsOrders && accepts('orderReadAt')
+  const acceptsTrades = readsTrades && accepts('tradeReadAt')
   const mergedOrders = boundedRows(
     [
-      ...(replaceOrders ? [] : asArray(stored?.orders)),
-      ...asArray(orders).filter(isTerminalOrder),
+      ...(replaceOrders && acceptsOrders ? [] : asArray(stored?.orders)),
+      ...(acceptsOrders ? asArray(orders).filter(isTerminalOrder) : []),
     ],
     orderIdentity,
     maxOrders,
   )
+  const tradeCandidates = [
+    ...(replaceTrades && acceptsTrades ? [] : asArray(stored?.trades)),
+    ...(acceptsTrades ? asArray(trades) : []),
+  ]
   const mergedTrades = boundedRows(
-    [...(replaceTrades ? [] : asArray(stored?.trades)), ...asArray(trades)],
+    tradeCandidates,
     tradeIdentity,
     maxTrades,
+    tradeEvidenceVariant,
   )
-  const storedStamp = Number.isSafeInteger(stored?.readAt) ? stored.readAt : null
-  // A record written before reads were per endpoint has no per-view stamp, and
-  // every read behind it covered both — so its own stamp stands for both.
-  const heldStamp = key => (Object.hasOwn(stored ?? {}, key) ? stored[key] : storedStamp)
-  const stamp = Number.isSafeInteger(readAt) ? readAt : null
+  const tradesTruncated = uniqueRowCount(tradeCandidates, tradeEvidenceVariant) > maxTrades
   return Object.freeze({
+    version: 2,
     key,
-    symbol: key,
+    fingerprint: account,
+    symbol: symbolKey,
     orders: mergedOrders,
     trades: mergedTrades,
     // What the contract is covered up to: the identities the next read pages
     // forward from, and when the reading was taken.
     orderCursor: cursorOf(mergedOrders, orderIdentity),
     tradeCursor: cursorOf(mergedTrades, tradeIdentity),
-    orderReadAt: readsOrders ? (stamp ?? heldStamp('orderReadAt')) : heldStamp('orderReadAt'),
-    tradeReadAt: readsTrades ? (stamp ?? heldStamp('tradeReadAt')) : heldStamp('tradeReadAt'),
-    readAt: stamp ?? storedStamp,
+    tradeCoverage: (() => {
+      const selected = acceptsTrades
+        ? (tradeCoverage?.version === 2 ? Object.freeze({ ...tradeCoverage }) : null)
+        : stored?.tradeCoverage ?? null
+      return tradesTruncated
+        ? retentionLimitedTradeCoverage(selected, mergedTrades)
+        : selected
+    })(),
+    orderReadAt: acceptsOrders ? (stamp ?? heldStamp('orderReadAt')) : heldStamp('orderReadAt'),
+    tradeReadAt: acceptsTrades ? (stamp ?? heldStamp('tradeReadAt')) : heldStamp('tradeReadAt'),
+    readAt: storedStamp === null
+      ? stamp
+      : stamp === null ? storedStamp : Math.max(storedStamp, stamp),
   })
 }
 
@@ -187,10 +324,12 @@ const viewStampOf = (records, key) => {
   return stamps.some(stamp => stamp === null) ? null : Math.min(...stamps)
 }
 
-export const restoreFuturesHistoryFromStore = (records) => {
+export const restoreFuturesHistoryFromStore = (records, { fingerprint = null } = {}) => {
+  const account = futuresHistoryFingerprint(fingerprint)
   const usable = asArray(records).filter(record => (
     futuresHistoryContractKey(record?.symbol) !== ''
     && Number.isSafeInteger(record?.readAt)
+    && (account === null || futuresHistoryFingerprint(record?.fingerprint) === account)
   ))
   if (usable.length === 0) return null
   const orders = usable.flatMap(record => asArray(record.orders)).sort(newestFirst)
@@ -198,6 +337,9 @@ export const restoreFuturesHistoryFromStore = (records) => {
   const symbols = [...new Set(usable.map(record => futuresHistoryContractKey(record.symbol)))]
   return Object.freeze({
     ...createHeldFuturesHistory(),
+    version: 2,
+    generation: 1,
+    accountFingerprint: account,
     status: 'ready',
     orders: Object.freeze(orders),
     trades: Object.freeze(trades),
@@ -211,6 +353,7 @@ export const restoreFuturesHistoryFromStore = (records) => {
     // the desk prints beside ↻. An empty-but-covered contract participates too:
     // "there were no rows" is a reading, not an absence of one.
     readAt: Math.min(...usable.map(record => record.readAt)),
+    lastResponseAt: Math.max(...usable.map(record => record.readAt)),
     // A view counts as read only where every restored contract was read for it.
     // One contract read for its fills alone is enough to make the order log
     // worth asking for again, and the desk only re-reads the contracts that
@@ -221,13 +364,41 @@ export const restoreFuturesHistoryFromStore = (records) => {
     }),
     coverage: Object.freeze(Object.fromEntries(usable.map(record => [
       futuresHistoryContractKey(record.symbol),
-      Object.freeze({
+      Object.freeze((() => {
+        // History saved before Binance's `marginAsset` field was carried into
+        // the store still has useful fill identities, but it cannot denominate
+        // realized PnL. Do not let its old cursor vouch for exact money: a cold
+        // bounded read replaces the contract with asset-bearing REST rows.
+        const settlementEvidenceCurrent = tradeSettlementEvidenceIsCurrent(
+          record.trades,
+          futuresHistoryContractKey(record.symbol),
+        )
+        return {
         readAt: record.readAt,
+        orderReadAt: Number.isSafeInteger(record.orderReadAt)
+          ? record.orderReadAt
+          : record.readAt,
+        tradeReadAt: Number.isSafeInteger(record.tradeReadAt)
+          ? record.tradeReadAt
+          : record.readAt,
         orderCursor: identityOf(record.orderCursor),
-        tradeCursor: identityOf(record.tradeCursor),
-      }),
+        tradeCursor: settlementEvidenceCurrent ? identityOf(record.tradeCursor) : null,
+        tradeCoverage: settlementEvidenceCurrent && record?.tradeCoverage?.version === 2
+          ? Object.freeze({ ...record.tradeCoverage })
+          : null,
+        generation: 1,
+        }
+      })()),
     ]))),
   })
+}
+
+const closeDatabase = (database) => {
+  try {
+    database?.close()
+  } catch {
+    // Closing is best-effort. The transaction result is still authoritative.
+  }
 }
 
 const openDatabase = () => new Promise((resolve) => {
@@ -243,15 +414,25 @@ const openDatabase = () => new Promise((resolve) => {
     resolve(null)
     return
   }
+  let settled = false
+  const finish = (database) => {
+    if (settled) {
+      // `blocked` deliberately degrades to no store. If the blocker disappears
+      // later, close that late connection rather than leaking an unused handle.
+      closeDatabase(database)
+      return
+    }
+    settled = true
+    resolve(database)
+  }
   request.onupgradeneeded = () => {
     const database = request.result
-    if (!database.objectStoreNames.contains(STORE_NAME)) {
-      database.createObjectStore(STORE_NAME, { keyPath: 'key' })
-    }
+    if (database.objectStoreNames.contains(STORE_NAME)) database.deleteObjectStore(STORE_NAME)
+    database.createObjectStore(STORE_NAME, { keyPath: 'key' })
   }
-  request.onsuccess = () => resolve(request.result)
-  request.onerror = () => resolve(null)
-  request.onblocked = () => resolve(null)
+  request.onsuccess = () => finish(request.result)
+  request.onerror = () => finish(null)
+  request.onblocked = () => finish(null)
 })
 
 const withStore = async (mode, run) => {
@@ -265,14 +446,66 @@ const withStore = async (mode, run) => {
       transaction.oncomplete = () => resolve(result)
       transaction.onerror = () => resolve(null)
       transaction.onabort = () => resolve(null)
-      run(store, (value) => { result = value })
+      const abort = () => {
+        try {
+          transaction.abort()
+        } catch {
+          resolve(null)
+        }
+      }
+      try {
+        run(store, (value) => { result = value }, abort)
+      } catch {
+        abort()
+      }
     })
   } catch {
     // Unavailable, corrupted, or refused: the review is read from the exchange
     // exactly as it is without a store.
     return null
+  } finally {
+    closeDatabase(database)
   }
 }
+
+const readAllStoredContracts = () => withStore('readonly', (store, deliver) => {
+  const request = store.getAll()
+  request.onsuccess = () => deliver(Array.isArray(request.result) ? request.result : [])
+})
+
+const writeStoredContract = record => withStore('readwrite', (store, deliver) => {
+  store.put(record)
+  deliver(true)
+})
+
+const removeStoredContract = key => withStore('readwrite', (store, deliver) => {
+  store.delete(key)
+  deliver(true)
+})
+
+// A single read/write transaction is both the atomic commit and the lock shared
+// by separate renderer globals. IndexedDB runs overlapping transactions for the
+// same object store serially, so the planner always sees the latest committed
+// contracts before it queues the matching prune and writes.
+const mutateStoredContracts = plan => withStore('readwrite', (store, deliver, abort) => {
+  const request = store.getAll()
+  request.onerror = abort
+  request.onsuccess = () => {
+    let mutation
+    try {
+      mutation = plan(Array.isArray(request.result) ? request.result : [])
+      if (mutation === null || typeof mutation !== 'object') {
+        abort()
+        return
+      }
+      for (const key of asArray(mutation.removeKeys)) store.delete(key)
+      for (const record of asArray(mutation.writeRecords)) store.put(record)
+      deliver(true)
+    } catch {
+      abort()
+    }
+  }
+})
 
 /**
  * A store the review can call without ever having to handle its failure.
@@ -281,32 +514,47 @@ const withStore = async (mode, run) => {
  * cannot happen is reported as `false` rather than as an error the panel would
  * have to explain.
  */
-export const createFuturesHistoryStore = ({
-  readAll = () => withStore('readonly', (store, deliver) => {
-    const request = store.getAll()
-    request.onsuccess = () => deliver(Array.isArray(request.result) ? request.result : [])
-  }),
-  write = record => withStore('readwrite', (store, deliver) => {
-    store.put(record)
-    deliver(true)
-  }),
-  remove = key => withStore('readwrite', (store, deliver) => {
-    store.delete(key)
-    deliver(true)
-  }),
-} = {}) => ({
-  async readContracts() {
+export const createFuturesHistoryStore = (options = {}) => {
+  const readAll = typeof options.readAll === 'function'
+    ? options.readAll
+    : readAllStoredContracts
+  const write = typeof options.write === 'function'
+    ? options.write
+    : writeStoredContract
+  const remove = typeof options.remove === 'function'
+    ? options.remove
+    : removeStoredContract
+  const hasInjectedLegacyAdapter = ['readAll', 'write', 'remove']
+    .some(name => Object.hasOwn(options, name))
+  const mutate = typeof options.mutate === 'function'
+    ? options.mutate
+    : hasInjectedLegacyAdapter ? null : mutateStoredContracts
+  // IndexedDB's individual transactions are atomic, but the old read/merge/write
+  // sequence spanned several of them. Two history answers finishing together
+  // could both read the same old record and the later write would erase the
+  // first answer. Serialize that composite operation per store instance.
+  let writeQueue = Promise.resolve()
+
+  const readContracts = async (fingerprint = null) => {
+    const account = futuresHistoryFingerprint(fingerprint)
+    if (account === null) return []
     try {
       const records = await readAll()
       if (!Array.isArray(records) || records.length === 0) return []
       return boundFuturesHistoryContracts(
-        records.filter(record => futuresHistoryContractKey(record?.symbol) !== ''),
+        records.filter(record => (
+          futuresHistoryContractKey(record?.symbol) !== ''
+          && futuresHistoryFingerprint(record?.fingerprint) === account
+        )),
       )
     } catch {
       return []
     }
-  },
-  async writeReading(reading) {
+  }
+
+  const writeReadingNow = async (reading) => {
+    const fingerprint = futuresHistoryFingerprint(reading?.accountFingerprint)
+    if (fingerprint === null) return false
     const readAt = Number.isSafeInteger(reading?.readAt) ? reading.readAt : null
     // Which endpoints this reading covered. A reading that does not say covered
     // both, which is what every reading meant before they were split by view.
@@ -321,12 +569,24 @@ export const createFuturesHistoryStore = ({
       && !Array.isArray(reading.readFrom)
       ? reading.readFrom
       : null
+    const tradeCoverage = reading?.tradeCoverage !== null
+      && typeof reading?.tradeCoverage === 'object'
+      && !Array.isArray(reading.tradeCoverage)
+      ? reading.tradeCoverage
+      : {}
+    const merge = reading?.merge !== null
+      && typeof reading?.merge === 'object'
+      && !Array.isArray(reading.merge)
+      ? reading.merge
+      : {}
     if (contracts.length === 0) return false
-    try {
-      const stored = await readAll()
-      if (!Array.isArray(stored)) return false
+    const planMutation = (stored) => {
+      if (!Array.isArray(stored)) return null
       const byKey = new Map(stored
-        .filter(record => futuresHistoryContractKey(record?.symbol) !== '')
+        .filter(record => (
+          futuresHistoryContractKey(record?.symbol) !== ''
+          && futuresHistoryFingerprint(record?.fingerprint) === fingerprint
+        ))
         .map(record => [futuresHistoryContractKey(record.symbol), record]))
       for (const contract of contracts) {
         const hasOrigins = readFrom !== null
@@ -335,11 +595,21 @@ export const createFuturesHistoryStore = ({
           && typeof readFrom[contract.symbol] === 'object'
           && !Array.isArray(readFrom[contract.symbol])
         const origins = hasOrigins ? readFrom[contract.symbol] : {}
+        const mergeMode = merge[contract.symbol] !== null
+          && typeof merge[contract.symbol] === 'object'
+          && !Array.isArray(merge[contract.symbol])
+          ? merge[contract.symbol]
+          : {}
         byKey.set(
           contract.symbol,
           mergeFuturesHistoryContract(
             byKey.get(contract.symbol),
-            { ...contract, readAt },
+            {
+              ...contract,
+              fingerprint,
+              readAt,
+              tradeCoverage: tradeCoverage[contract.symbol] ?? null,
+            },
             {
               // A cursor-origin page is a gap and joins the stored rows. A null
               // origin (and an old payload with no origins) is a full endpoint
@@ -349,35 +619,62 @@ export const createFuturesHistoryStore = ({
               readsOrders,
               readsTrades,
               replaceOrders: readsOrders
+                && mergeMode.orders !== true
                 && (!hasOrigins || identityOf(origins.orderCursor) === null),
               replaceTrades: readsTrades
+                && mergeMode.trades !== true
                 && (!hasOrigins || identityOf(origins.tradeCursor) === null),
             },
           ),
         )
       }
       const kept = boundFuturesHistoryContracts([...byKey.values()])
-      const keptKeys = new Set(kept.map(record => record.key ?? record.symbol))
-      for (const record of byKey.values()) {
-        const key = record.key ?? record.symbol
-        if (!keptKeys.has(key)) {
-          const removed = await remove(key)
-          if (removed === null || removed === false) return false
-        }
+      const keptKeys = new Set(kept.map(record => record.key))
+      // The physical store is one active account cache, not 24 records per API
+      // key ever used by this profile. Reading with `getAll` clones every record
+      // before the fingerprint filter can run, so foreign and legacy namespaces
+      // must be removed too rather than merely hidden from the current account.
+      return Object.freeze({
+        removeKeys: Object.freeze(stored
+          .map(record => identityOf(record?.key))
+          .filter(key => key !== null && !keptKeys.has(key))),
+        writeRecords: Object.freeze(contracts
+          .map(contract => kept.find(entry => entry.symbol === contract.symbol))
+          .filter(record => record !== undefined)),
+      })
+    }
+    try {
+      if (mutate !== null) {
+        const persisted = await mutate(planMutation)
+        return persisted !== null && persisted !== false
       }
-      for (const contract of contracts) {
-        const record = kept.find(entry => (entry.key ?? entry.symbol) === contract.symbol)
-        if (record) {
-          const written = await write(record)
-          if (written === null || written === false) return false
-        }
+      const mutation = planMutation(await readAll())
+      if (mutation === null) return false
+      for (const key of mutation.removeKeys) {
+        const removed = await remove(key)
+        if (removed === null || removed === false) return false
+      }
+      for (const record of mutation.writeRecords) {
+        const written = await write(record)
+        if (written === null || written === false) return false
       }
       return true
     } catch {
       // A review that could not be stored is still a review that was read.
       return false
     }
-  },
-})
+  }
+
+  const writeReading = (reading) => {
+    const pending = writeQueue.then(
+      () => writeReadingNow(reading),
+      () => writeReadingNow(reading),
+    )
+    writeQueue = pending.then(() => undefined, () => undefined)
+    return pending
+  }
+
+  return { readContracts, writeReading }
+}
 
 export const futuresHistoryStore = createFuturesHistoryStore()

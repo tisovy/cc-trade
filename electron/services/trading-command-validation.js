@@ -78,6 +78,35 @@ const normalizeFuturesHistoryCursor = (value) => {
     return /^\d{1,20}$/.test(cursor) ? cursor : null;
 };
 
+const normalizeFuturesHistoryTime = (value) => (
+    Number.isSafeInteger(value) && value >= 0 ? value : null
+);
+
+const normalizeFuturesTradeCoverage = (value) => {
+    if (!isCommandPayloadObject(value) || value.version !== 2) return null;
+    const targetFrom = normalizeFuturesHistoryTime(value.targetFrom);
+    const targetTo = normalizeFuturesHistoryTime(value.targetTo);
+    const coveredFrom = normalizeFuturesHistoryTime(value.coveredFrom);
+    const coveredTo = normalizeFuturesHistoryTime(value.coveredTo);
+    return Object.freeze({
+        version: 2,
+        targetFrom,
+        targetTo,
+        coveredFrom,
+        coveredTo,
+        complete: value.complete === true
+            && targetFrom !== null
+            && targetTo !== null
+            && coveredFrom !== null
+            && coveredTo !== null
+            && coveredFrom <= targetFrom
+            && coveredTo >= targetTo,
+        pageLimited: value.pageLimited === true,
+        retentionLimited: value.retentionLimited === true,
+        continuityComplete: value.continuityComplete === true,
+    });
+};
+
 const normalizeFuturesHistoryCoverage = (value) => {
     if (!isCommandPayloadObject(value)) return Object.freeze({});
     const entries = [];
@@ -87,10 +116,12 @@ const normalizeFuturesHistoryCoverage = (value) => {
         if (!symbol || !/^[A-Z0-9]{2,24}$/.test(symbol)) continue;
         if (!isCommandPayloadObject(rawCoverage)) continue;
         if (!Number.isSafeInteger(rawCoverage.readAt) || rawCoverage.readAt < 0) continue;
+        const tradeCoverage = normalizeFuturesTradeCoverage(rawCoverage.tradeCoverage);
         entries.push([symbol, Object.freeze({
             readAt: rawCoverage.readAt,
             orderCursor: normalizeFuturesHistoryCursor(rawCoverage.orderCursor),
             tradeCursor: normalizeFuturesHistoryCursor(rawCoverage.tradeCursor),
+            ...(tradeCoverage === null ? {} : { tradeCoverage }),
         })]);
     }
     return Object.freeze(Object.fromEntries(entries));
@@ -741,6 +772,13 @@ export const validateTypedTradingCommand = (payload, { selectedSymbol } = {}) =>
                     // the caller says so: an ask that lost the marking is read
                     // as a person, which costs a read rather than a stale figure.
                     periodic: payload.periodic === true,
+                    // Only the renderer's operator-facing Futures button may
+                    // request the compound receipt. Startup and background
+                    // account reads deliberately omit this intent bit.
+                    ...(baseCommand.marketType === FUTURES_MARKET_TYPE
+                        && payload.manual === true
+                        ? { manual: true }
+                        : {}),
                 },
             };
         case TRADING_COMMAND_ACTIONS.CANCEL_ALL: {
@@ -784,6 +822,7 @@ export const validateTypedTradingCommand = (payload, { selectedSymbol } = {}) =>
                 command: {
                     ...baseCommand,
                     symbol,
+                    ...(payload.basisOnly === true ? { basisOnly: true } : {}),
                     ...(Object.keys(coverage).length > 0 ? { coverage } : {}),
                     ...(payload.full === true ? { full: true } : {}),
                     ...(views === null ? {} : { views }),

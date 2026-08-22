@@ -80,14 +80,54 @@ describe('futuresHeldHistory', () => {
   })
 
   it('folds a settled order and its fill into the held reading', () => {
-    const next = foldExecutionIntoFuturesHistory(held(), fill())
+    const next = foldExecutionIntoFuturesHistory(held(), fill({ marginAsset: ' usdc ' }))
     expect(next.orders).toHaveLength(2)
     expect(next.trades).toHaveLength(2)
     // Newest first, like every other history table on the desk.
     expect(next.orders[0]).toMatchObject({ orderId: 2, status: 'FILLED' })
-    expect(next.trades[0]).toMatchObject({ id: 8, realizedPnl: '31.2', price: '58500' })
+    expect(next.trades[0]).toMatchObject({
+      id: 8, realizedPnl: '31.2', price: '58500', marginAsset: 'USDC',
+    })
     expect(next.foldedOrders).toEqual(['BTCUSDT:2'])
     expect(next.foldedTrades).toEqual(['BTCUSDT:8'])
+  })
+
+  it('advances trade evidence independently from order-only history', () => {
+    const initial = held()
+    expect(initial).toMatchObject({ generation: 1, tradeGeneration: 1 })
+
+    const orderOnly = applyFuturesHistoryReading(initial, {
+      symbol: 'BTCUSDT',
+      symbols: ['BTCUSDT'],
+      views: ['orders'],
+      orders: [{ symbol: 'BTCUSDT', orderId: 2, status: 'FILLED', time: 6_000 }],
+      // A row outside the named endpoint is not trade evidence.
+      trades: [{ symbol: 'BTCUSDT', id: 99, realizedPnl: '99', time: 6_000 }],
+      error: null,
+    }, 6_000)
+    expect(orderOnly).toMatchObject({ generation: 2, tradeGeneration: 1 })
+    expect(orderOnly.orders.map(order => order.orderId)).toEqual([2])
+    expect(orderOnly.trades.map(trade => trade.id)).toEqual([7])
+    expect(orderOnly.trades).toBe(initial.trades)
+    expect(orderOnly.foldedTrades).toBe(initial.foldedTrades)
+
+    const tradeRead = applyFuturesHistoryReading(orderOnly, {
+      symbol: 'BTCUSDT',
+      symbols: ['BTCUSDT'],
+      views: ['trades'],
+      orders: [],
+      trades: [{ symbol: 'BTCUSDT', id: 8, realizedPnl: '2', time: 7_000 }],
+      error: null,
+    }, 7_000)
+    expect(tradeRead).toMatchObject({ generation: 3, tradeGeneration: 2 })
+    expect(tradeRead.orders).toBe(orderOnly.orders)
+    expect(tradeRead.foldedOrders).toBe(orderOnly.foldedOrders)
+
+    const orderEvent = foldExecutionIntoFuturesHistory(tradeRead, fill({
+      status: 'CANCELED', tradeId: null, lastFilledQty: '0',
+    }))
+    expect(orderEvent.tradeGeneration).toBe(2)
+    expect(foldExecutionIntoFuturesHistory(orderEvent, fill()).tradeGeneration).toBe(3)
   })
 
   it('folds nothing from an order that is still working', () => {
@@ -165,11 +205,88 @@ describe('futuresHeldHistory', () => {
     expect(gap.trades.map(row => row.id)).toEqual(['9'])
     expect(gap.coverage.BTCUSDT).toEqual({
       readAt: 12_000,
+      orderReadAt: 12_000,
+      tradeReadAt: 12_000,
       orderCursor: '9007199254740995',
       tradeCursor: '9',
+      generation: 2,
+      tradeCoverage: {
+        version: 2,
+        targetFrom: null,
+        targetTo: 12_000,
+        coveredFrom: null,
+        coveredTo: 12_000,
+        complete: false,
+        pageLimited: false,
+        retentionLimited: false,
+        continuityComplete: false,
+      },
     })
     expect(gap.coverage.ETHUSDT.readAt).toBe(5_000)
     expect(gap.readAt).toBe(5_000)
+  })
+
+  it('admits crossed responses independently for orders and trades', () => {
+    const newerTrades = applyFuturesHistoryReading(createHeldFuturesHistory(), {
+      symbol: 'BTCUSDT',
+      symbols: ['BTCUSDT'],
+      orders: [],
+      trades: [{ symbol: 'BTCUSDT', id: '30', realizedPnl: '3', time: 30_000 }],
+      views: ['trades'],
+      readAt: 30_000,
+      error: null,
+    }, 99_000)
+    const crossed = applyFuturesHistoryReading(newerTrades, {
+      symbol: 'BTCUSDT',
+      symbols: ['BTCUSDT'],
+      orders: [{ symbol: 'BTCUSDT', orderId: '20', status: 'FILLED', time: 20_000 }],
+      trades: [{ symbol: 'BTCUSDT', id: '20', realizedPnl: '2', time: 20_000 }],
+      views: ['orders', 'trades'],
+      readAt: 20_000,
+      error: null,
+    }, 99_000)
+
+    // The older response is still the first answer for orders, but it cannot
+    // replace the trade endpoint that already landed from the newer request.
+    expect(crossed.orders.map(row => row.orderId)).toEqual(['20'])
+    expect(crossed.trades.map(row => row.id)).toEqual(['30'])
+    expect(crossed.coverage.BTCUSDT).toMatchObject({
+      readAt: 30_000,
+      orderReadAt: 20_000,
+      tradeReadAt: 30_000,
+      orderCursor: '20',
+      tradeCursor: '30',
+    })
+    expect(crossed.readViews).toEqual({ orders: 20_000, trades: 30_000 })
+  })
+
+  it('keeps the held suffix for an explicitly merged cursorless backfill', () => {
+    const suffix = applyFuturesHistoryReading(createHeldFuturesHistory(), {
+      symbol: 'BTCUSDT',
+      symbols: ['BTCUSDT'],
+      orders: [],
+      trades: [{ symbol: 'BTCUSDT', id: '9', realizedPnl: '9', time: 9_000 }],
+      views: ['trades'],
+      readAt: 10_000,
+      error: null,
+    }, 10_000)
+    const backfilled = applyFuturesHistoryReading(suffix, {
+      symbol: 'BTCUSDT',
+      symbols: ['BTCUSDT'],
+      orders: [],
+      trades: [{ symbol: 'BTCUSDT', id: '1', realizedPnl: '1', time: 1_000 }],
+      views: ['trades'],
+      readFrom: { BTCUSDT: { tradeCursor: null } },
+      merge: { BTCUSDT: { trades: true } },
+      readAt: 11_000,
+      error: null,
+    }, 11_000)
+
+    expect(backfilled.trades.map(row => row.id)).toEqual(['9', '1'])
+    expect(backfilled.coverage.BTCUSDT).toMatchObject({
+      tradeCursor: '9',
+      tradeReadAt: 11_000,
+    })
   })
 
   it('bounds REST rows and stream folds per contract for the whole session', () => {
@@ -199,7 +316,7 @@ describe('futuresHeldHistory', () => {
     expect(next.orders.at(-1).orderId).toBe(2)
     expect(next.trades.at(-1).id).toBe(2)
     expect(next.foldedOrders).toContain('BTCUSDT:201')
-    expect(next.foldedTrades).toContain('BTCUSDT:1001')
+    expect(next.foldedTrades).toContain('BTCUSDT:8001')
   })
 
   it('keeps a folded entry the next read did not cover, and counts it apart', () => {

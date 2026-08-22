@@ -7,6 +7,10 @@ import {
 } from '../../src/utils/futuresProductionWorkstationProtocol.js';
 import { FUTURES_UNDERIVABLE_INCOME_TYPES } from '../../src/utils/futuresSettledMoney.js';
 import {
+    createFuturesSettledIncomeLane,
+    createFuturesSettledIncomeResource,
+} from '../../src/utils/futuresSettledIncomeResource.js';
+import {
     DESK_DIAGNOSTICS_UNRECORDED,
     describeDeskDiagnosticEvent,
     readDeskDiagnosticCommandEvent,
@@ -14,8 +18,82 @@ import {
 } from './desk-diagnostic-record.js';
 import { FUTURES_ACCOUNT_READ_REASONS } from './futures-account-state.js';
 
+const ACCOUNT_FINGERPRINT = '0123456789abcdef';
+
 const moduleMocks = vi.hoisted(() => {
     const state = {};
+    const physicalMethodWeights = new Map([
+        ['syncServerTime', 1],
+        ['getPositionMode', 30],
+        ['placeOrder', null],
+        ['cancelOrder', null],
+        ['cancelAllOrders', null],
+        ['cancelAllAlgoOrders', null],
+        ['adjustPositionMargin', null],
+        ['modifyOrder', null],
+        ['findOrder', null],
+        ['getOrderHistory', null],
+        ['getTradeHistory', null],
+        ['getTradedSymbolPage', null],
+        ['getSymbolConfig', null],
+        ['getMaxLeverage', null],
+        ['getLeverageBracketTable', null],
+        ['setLeverage', null],
+        ['setMarginType', null],
+        ['getIncomePage', null],
+        ['createUserDataStreamListenKey', null],
+        ['renewUserDataStreamListenKey', null],
+    ]);
+    const directCommandMethods = new Set([
+        'placeOrder',
+        'cancelOrder',
+        'cancelAllOrders',
+        'cancelAllAlgoOrders',
+        'adjustPositionMargin',
+        'modifyOrder',
+    ]);
+
+    const createFuturesAdapterRuntime = (target) => {
+        const wrapped = new Map();
+        return new Proxy(target, {
+            get(current, property, receiver) {
+                if (property === 'getAccountRefreshOperations') {
+                    if (!wrapped.has(property)) {
+                        wrapped.set(property, (...args) => {
+                            const operations = Reflect.apply(current[property], current, args);
+                            return operations.map((operation) => {
+                                const loadPayload = async (...loadArgs) => {
+                                    await globalThis.__binanceConnectionTestAdmitPhysicalAttempt?.();
+                                    return operation.loadPayload(...loadArgs);
+                                };
+                                return new Proxy(operation, {
+                                    get(value, name, operationReceiver) {
+                                        return name === 'loadPayload'
+                                            ? loadPayload
+                                            : Reflect.get(value, name, operationReceiver);
+                                    },
+                                });
+                            });
+                        });
+                    }
+                    return wrapped.get(property);
+                }
+                if (!physicalMethodWeights.has(property)) {
+                    return Reflect.get(current, property, receiver);
+                }
+                if (!wrapped.has(property)) {
+                    wrapped.set(property, async (...args) => {
+                        await globalThis.__binanceConnectionTestAdmitPhysicalAttempt?.(
+                            physicalMethodWeights.get(property),
+                            { advanceClock: directCommandMethods.has(property) },
+                        );
+                        return Reflect.apply(current[property], current, args);
+                    });
+                }
+                return wrapped.get(property);
+            },
+        });
+    };
 
     const makeSocket = () => {
         const handlers = {};
@@ -63,7 +141,11 @@ const moduleMocks = vi.hoisted(() => {
             }),
             findOrder: vi.fn().mockResolvedValue({ exists: false, report: null }),
             getOrderHistory: vi.fn().mockResolvedValue([{ orderId: 1, status: 'FILLED' }]),
-            getTradeHistory: vi.fn().mockResolvedValue([{ id: 2, realizedPnl: '-96.74' }]),
+            getTradeHistory: vi.fn().mockResolvedValue([{
+                id: '2', orderId: '2', symbol: 'BTCUSDT', side: 'SELL', positionSide: 'BOTH',
+                price: '1', quantity: '1', realizedPnl: '-96.74', commission: '0',
+                commissionAsset: null, marginAsset: 'USDT', time: 1,
+            }]),
             // Every USDⓈ-M history endpoint takes a symbol, so a review of the
             // account starts by asking which contracts it was traded on. The read
             // is paged: a full page means newer rows are still behind it.
@@ -97,6 +179,7 @@ const moduleMocks = vi.hoisted(() => {
             createUserDataStreamListenKey: vi.fn().mockResolvedValue('futures-listen-key'),
             renewUserDataStreamListenKey: vi.fn().mockResolvedValue({}),
         };
+        state.futuresAdapterRuntime = createFuturesAdapterRuntime(state.futuresAdapter);
         state.sendRequest = vi.fn(async (path, method) => ({
             data: vi.fn().mockResolvedValue(
                 path === '/api/v3/time' && method === 'GET'
@@ -168,7 +251,7 @@ const moduleMocks = vi.hoisted(() => {
         return state.spotClient;
     });
     const FuturesTradingAdapter = vi.fn(function MockFuturesTradingAdapter() {
-        return state.futuresAdapter;
+        return state.futuresAdapterRuntime;
     });
 
     reset();
@@ -237,6 +320,36 @@ vi.mock('ws', () => ({
     }),
 }));
 
+const futuresHistoryTrade = ({
+    id = '2',
+    orderId = id,
+    symbol = 'BTCUSDT',
+    side = 'BUY',
+    positionSide = 'BOTH',
+    price = '1',
+    quantity = '1',
+    realizedPnl = '0',
+    commission = '0',
+    commissionAsset = null,
+    marginAsset = 'USDT',
+    time = 1,
+    ...rest
+} = {}) => ({
+    id: String(id),
+    orderId: String(orderId),
+    symbol,
+    side,
+    positionSide,
+    price,
+    quantity,
+    realizedPnl,
+    commission,
+    commissionAsset,
+    marginAsset,
+    time,
+    ...rest,
+});
+
 const flushMicrotasks = async () => {
     for (let index = 0; index < 10; index += 1) {
         await Promise.resolve();
@@ -295,6 +408,22 @@ describe('setupBinanceConnection user-data orchestration', () => {
         vi.spyOn(console, 'warn').mockImplementation(() => {});
         vi.spyOn(console, 'error').mockImplementation(() => {});
 
+        const { admitBinancePhysicalAttempt } = await import(
+            './binance-physical-attempt-context.js'
+        );
+        globalThis.__binanceConnectionTestAdmitPhysicalAttempt = async (weight, {
+            advanceClock = false,
+        } = {}) => {
+            // Queue the urgent physical send before releasing an older spacing
+            // timer. Advancing first lets another ordinary request take the
+            // serialized slot and leaves the command waiting on a fake clock
+            // its behavior test intentionally does not manage.
+            const admission = admitBinancePhysicalAttempt(weight);
+            // One spacing can finish the holder; the urgent command then needs
+            // at most one spacing of its own.
+            if (advanceClock) await vi.advanceTimersByTimeAsync(300);
+            return admission;
+        };
         ({
             setupBinanceConnection,
             LOCAL_RENDERER_WS_MAX_FRAME_BYTES,
@@ -309,6 +438,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
         await flushMicrotasks();
         vi.clearAllTimers();
         vi.useRealTimers();
+        delete globalThis.__binanceConnectionTestAdmitPhysicalAttempt;
         vi.unstubAllEnvs();
         vi.restoreAllMocks();
         console.log = originalConsoleLog;
@@ -1083,6 +1213,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 }),
             );
             keepAliveCallbacks()[1]();
+            await vi.advanceTimersByTimeAsync(FUTURES_REST_ADMISSION_SPACING_MS);
             await flushMicrotasks();
             expect(moduleMocks.futuresAdapter.renewUserDataStreamListenKey)
                 .toHaveBeenCalledOnce();
@@ -1122,6 +1253,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 new Error('active renewal failure'),
             );
             keepAliveCallbacks()[2]();
+            await vi.advanceTimersByTimeAsync(FUTURES_REST_ADMISSION_SPACING_MS);
             await flushMicrotasks();
 
             expect(diagnosticRecord.record).toHaveBeenCalledWith('fault', {
@@ -1384,7 +1516,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
             },
         }));
         await flushMicrotasks();
-        expect(workingOrders().map(order => order.orderId)).toEqual([11, 12]);
+        expect(workingOrders().map(order => order.orderId)).toEqual([11, '12']);
 
         // And fills.
         socket.handlers.message(JSON.stringify({
@@ -1465,7 +1597,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
             o: { s: 'TUTUSDT', aid: 77, X: 'TRIGGERED', ai: 4242, tp: '9' },
         }));
         await flushMicrotasks();
-        expect(algoOrders()).toMatchObject([{ status: 'TRIGGERED', actualOrderId: 4242 }]);
+        expect(algoOrders()).toMatchObject([{ status: 'TRIGGERED', actualOrderId: '4242' }]);
 
         // And the exchange says it is finished.
         socket.handlers.message(JSON.stringify({
@@ -1537,7 +1669,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
             .filter(payload => payload.futures_conditional_trigger_reject);
         expect(refusal.futures_conditional_trigger_reject).toEqual({
             symbol: 'TUTUSDT',
-            orderId: 155618472834,
+            orderId: '155618472834',
             reason: 'Margin is insufficient.',
         });
     });
@@ -2008,7 +2140,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
             },
         }));
         await flushMicrotasks();
-        expect(workingOrders().map(order => order.orderId)).toEqual([31, 32]);
+        expect(workingOrders().map(order => order.orderId)).toEqual([31, '32']);
 
         // The read answers without it, because it left before the order existed.
         answerOrdersRead({
@@ -2018,7 +2150,99 @@ describe('setupBinanceConnection user-data orchestration', () => {
         });
         await vi.advanceTimersByTimeAsync(2_000);
         await flushMicrotasks();
-        expect(workingOrders().map(order => order.orderId)).toEqual([31, 32]);
+        expect(workingOrders().map(order => order.orderId)).toEqual([31, '32']);
+    });
+
+    // A logical account read can physically leave more than once: clock recovery
+    // and safe transport retries both admit a new request. Reconciliation must
+    // date the payload from the attempt that actually produced it. Dating it
+    // from the first attempt would preserve an order the final, much newer REST
+    // answer authoritatively omitted.
+    it('dates a retried account snapshot from its latest physical admission', async () => {
+        const loads = {
+            regularOrders: vi.fn().mockResolvedValue({
+                futures_regular_orders: [{
+                    symbol: 'TUTUSDT', orderId: 31, orderKind: 'REGULAR',
+                    status: 'NEW', transactTime: 1_000,
+                }],
+            }),
+        };
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([{
+            type: 'regularOrders',
+            weight: 5,
+            errorLabel: 'regular orders',
+            loadPayload: loads.regularOrders,
+        }]);
+
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({ action: 'activate_market', marketMode: 'futures-live' }),
+        });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+        const socket = moduleMocks.futuresUserDataSockets[0];
+        socket.handlers.open();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+
+        const workingOrders = () => moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.type === 'futures_account_state')
+            .at(-1).resources.regularOrders.data;
+        expect(workingOrders().map(order => order.orderId)).toEqual([31]);
+
+        let admitRetry = null;
+        let markFirstAttempt = null;
+        const firstAttempt = new Promise((resolve) => { markFirstAttempt = resolve; });
+        const retryGate = new Promise((resolve) => { admitRetry = resolve; });
+        loads.regularOrders.mockImplementationOnce(async () => {
+            // The adapter seam has already admitted the first physical request
+            // before entering this mock.
+            markFirstAttempt();
+            await retryGate;
+            await globalThis.__binanceConnectionTestAdmitPhysicalAttempt?.();
+            return { futures_regular_orders: [] };
+        });
+
+        const refresh = moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'account.refresh',
+                version: 1,
+                marketType: 'futures',
+                accountId: 'default',
+                clientOrderId: 'retried-account-snapshot',
+                symbol: 'TUTUSDT',
+            }),
+        });
+        await vi.advanceTimersByTimeAsync(500);
+        await firstAttempt;
+
+        // The stream speaks after attempt one. Once the eventual retry is more
+        // than the consistency allowance newer, an empty answer may remove it.
+        socket.handlers.message(JSON.stringify({
+            e: 'ORDER_TRADE_UPDATE',
+            E: 5_000,
+            o: {
+                s: 'TUTUSDT', i: 32, X: 'NEW', S: 'BUY', o: 'LIMIT',
+                p: '1', q: '5', T: 5_000,
+            },
+        }));
+        await flushMicrotasks();
+        expect(workingOrders().map(order => order.orderId)).toEqual([31, '32']);
+
+        await vi.advanceTimersByTimeAsync(3_001);
+        admitRetry();
+        await vi.advanceTimersByTimeAsync(500);
+        await refresh;
+        await flushMicrotasks();
+
+        expect(workingOrders()).toEqual([]);
     });
 
     // The market lane has been timed since `time-the-frame-from-exchange-to-screen`
@@ -2105,7 +2329,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
         // The stamp belongs to the envelope: what the report says about the
         // order is untouched by having been measured.
         expect(report.futures_execution_update).toMatchObject({
-            symbol: 'TUTUSDT', orderId: 41, status: 'PARTIALLY_FILLED', z: '2',
+            symbol: 'TUTUSDT', orderId: '41', status: 'PARTIALLY_FILLED', z: '2',
         });
 
         // The other frame the same socket folds. A fired stop is drawn on this
@@ -4021,6 +4245,18 @@ describe('setupBinanceConnection user-data orchestration', () => {
         await pending;
     };
 
+    const startFuturesCommandWithoutAdvancing = command => (
+        moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                version: 1,
+                marketType: 'futures',
+                accountId: 'default',
+                ...command,
+            }),
+        })
+    );
+
     const openFuturesHistoryStream = async () => {
         await vi.advanceTimersByTimeAsync(2_000);
         await flushMicrotasks();
@@ -4032,13 +4268,34 @@ describe('setupBinanceConnection user-data orchestration', () => {
         return socket;
     };
 
-    const futuresHistoryCoverage = (symbols) => Object.fromEntries(
-        symbols.map((symbol, index) => [symbol, {
-            readAt: Date.now(),
+    const futuresHistoryCoverage = (symbols) => {
+        const readAt = Date.now();
+        const targetFrom = readAt - (7 * 24 * 60 * 60 * 1000);
+        return Object.fromEntries(symbols.map((symbol, index) => [symbol, {
+            readAt,
+            orderReadAt: readAt,
+            tradeReadAt: readAt,
             orderCursor: String(100 + index),
             tradeCursor: String(200 + index),
-        }]),
-    );
+            // The store exposes v2 evidence only after every retained trade has
+            // marginAsset. Model that current, contiguous contract here; legacy
+            // coverage deliberately belongs in the migration-specific cases.
+            tradeCoverage: {
+                version: 2,
+                targetFrom,
+                targetTo: readAt,
+                coveredFrom: targetFrom,
+                coveredTo: readAt,
+                complete: true,
+                pageLimited: false,
+                retentionLimited: false,
+                continuityComplete: true,
+                aborted: false,
+                requests: 1,
+            },
+            generation: 1,
+        }]));
+    };
 
     const futuresHistoryAnswers = () => moduleMocks.rendererConnection.sendUTF.mock.calls
         .map(([message]) => JSON.parse(message))
@@ -4066,22 +4323,654 @@ describe('setupBinanceConnection user-data orchestration', () => {
     const incomeKindsAsked = () => moduleMocks.futuresAdapter.getIncomePage.mock.calls
         .map(([request]) => request?.incomeType ?? null);
 
+    const settledFrames = () => moduleMocks.rendererConnection.sendUTF.mock.calls
+        .map(([message]) => JSON.parse(message))
+        .filter(payload => payload.type === 'futures_settled_income');
+
+    const SETTLED_CREDIT_INCOME_TYPES = Object.freeze([
+        'COMMISSION_REBATE',
+        'API_REBATE',
+        'REFERRAL_KICKBACK',
+        'FEE_RETURN',
+    ]);
+    const SETTLED_ALL_INCOME_TYPES = FUTURES_UNDERIVABLE_INCOME_TYPES;
+    const terminalSettledIncomeRefusal = () => Object.assign(
+        new Error('IP banned'),
+        { code: '-1003', response: { status: 418 } },
+    );
+
     // The one reason left that a clock can produce. A fill that realized
     // something asks for a settled read, and a busy afternoon is thousands of
     // them — where the operator's own refresh is a person looking at a number
     // and is never deferred.
-    const deliverRealizingFill = async (socket, orderId) => {
+    const sendExecutionFill = (socket, orderId, realizedPnl = '12.5') => {
         socket.handlers.message(JSON.stringify({
             e: 'ORDER_TRADE_UPDATE',
             E: 4_000 + orderId,
             o: {
-                s: 'BTCUSDT', i: orderId, X: 'FILLED', S: 'SELL', o: 'LIMIT',
-                p: '100', q: '1', z: '1', rp: '12.5', T: 4_000 + orderId,
+                s: 'BTCUSDT', i: orderId, X: 'FILLED', x: 'TRADE', S: 'SELL', o: 'LIMIT',
+                p: '100', q: '1', z: '1', l: '1', t: orderId + 10_000,
+                rp: realizedPnl, T: 4_000 + orderId,
             },
         }));
+    };
+
+    const deliverRealizingFill = async (socket, orderId, realizedPnl = '12.5') => {
+        sendExecutionFill(socket, orderId, realizedPnl);
         await vi.advanceTimersByTimeAsync(30_000);
         await flushMicrotasks();
     };
+
+    const sendFundingEvent = (socket, eventTime = 9_000) => {
+        socket.handlers.message(JSON.stringify({
+            e: 'ACCOUNT_UPDATE', E: eventTime, T: eventTime,
+            a: {
+                m: 'FUNDING_FEE',
+                B: [{ a: 'USDT', wb: '990.5', cw: '990.5', bc: '-9.5' }],
+                P: [],
+            },
+        }));
+    };
+
+    it('bootstraps settled income on first Futures activation without a private stream open', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+
+        await activateMarket('futures-live');
+        await vi.advanceTimersByTimeAsync(5_000);
+        await flushMicrotasks();
+        const unopenedSocket = moduleMocks.futuresUserDataSockets.at(-1);
+        expect(unopenedSocket).toBeDefined();
+        // Deliberately never call `unopenedSocket.handlers.open()`.
+
+        expect(new Set(incomeKindsAsked())).toEqual(new Set(SETTLED_ALL_INCOME_TYPES));
+        const bootstraps = settledFrames().filter(frame => frame.reason === 'bootstrap');
+        expect(bootstraps).toHaveLength(1);
+        const bootstrap = bootstraps[0];
+        expect(bootstrap).toMatchObject({ reason: 'bootstrap', status: 'ready', complete: true });
+    });
+
+    it('does not repeat the all-lane bootstrap when the private stream opens later', async () => {
+        const loadBalances = vi.fn().mockResolvedValue({
+            futures_balances: { USDT: { available: '1000', total: '1000' } },
+        });
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([{
+            type: 'balances',
+            weight: 5,
+            errorLabel: 'balances',
+            loadPayload: loadBalances,
+        }]);
+
+        await startFuturesDeskForSettled();
+        const privateSocket = moduleMocks.futuresUserDataSockets.at(-1);
+        const bootstrapReads = moduleMocks.futuresAdapter.getIncomePage.mock.calls.length;
+        const accountReadsBeforeOpen = loadBalances.mock.calls.length;
+        expect(bootstrapReads).toBe(SETTLED_ALL_INCOME_TYPES.length);
+
+        // Finish the handshake well after the 1.2-second bootstrap debounce.
+        // Before the fix this armed another six-lane pass solely because the
+        // socket opened, despite carrying no new settlement evidence.
+        privateSocket.handlers.open();
+        await vi.advanceTimersByTimeAsync(5_000);
+        await flushMicrotasks();
+
+        expect(loadBalances).toHaveBeenCalledTimes(accountReadsBeforeOpen + 1);
+        expect(moduleMocks.futuresAdapter.getIncomePage).toHaveBeenCalledTimes(bootstrapReads);
+
+        // Stream readiness still leaves event-specific reconciliation alive.
+        sendFundingEvent(privateSocket);
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        expect(moduleMocks.futuresAdapter.getIncomePage).toHaveBeenCalledTimes(
+            bootstrapReads + 1,
+        );
+        expect(incomeKindsAsked().at(-1)).toBe('FUNDING_FEE');
+    });
+
+    it('retires a settled-income page queued at physical admission across account switch', async () => {
+        const settledIncomeStore = {
+            loadResource: vi.fn(() => null),
+            saveResource: vi.fn(),
+        };
+        await startFuturesDeskForSettled({ settledIncomeStore });
+        const privateSocket = await openFuturesHistoryStream();
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
+
+        const admitPhysicalAttempt = globalThis.__binanceConnectionTestAdmitPhysicalAttempt;
+        let admissionHeld = false;
+        let releaseAdmission = null;
+        globalThis.__binanceConnectionTestAdmitPhysicalAttempt = async (weight, options) => {
+            if (!admissionHeld && weight === null) {
+                admissionHeld = true;
+                await new Promise((resolve) => { releaseAdmission = resolve; });
+            }
+            return admitPhysicalAttempt(weight, options);
+        };
+
+        sendFundingEvent(privateSocket);
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        expect(releaseAdmission).toBeTypeOf('function');
+        expect(moduleMocks.futuresAdapter.getIncomePage).not.toHaveBeenCalled();
+
+        await activateMarket('spot');
+        settledIncomeStore.saveResource.mockClear();
+        console.warn.mockClear();
+        releaseAdmission();
+        await vi.advanceTimersByTimeAsync(FUTURES_REST_ADMISSION_SPACING_MS * 2);
+        await flushMicrotasks();
+
+        expect(moduleMocks.futuresAdapter.getIncomePage).not.toHaveBeenCalled();
+        expect(settledIncomeStore.saveResource).not.toHaveBeenCalled();
+        expect(settledFrames()).toEqual([]);
+        expect(console.warn.mock.calls.some(([message]) => (
+            String(message).startsWith('[futures-settled]')
+        ))).toBe(false);
+
+        await activateMarket('futures-live');
+        await vi.advanceTimersByTimeAsync(5_000);
+        await flushMicrotasks();
+
+        expect(moduleMocks.futuresAdapter.getIncomePage)
+            .toHaveBeenCalledTimes(SETTLED_ALL_INCOME_TYPES.length);
+        expect(settledFrames().at(-1)).toMatchObject({
+            reason: 'bootstrap', status: 'ready', complete: true,
+        });
+    });
+
+    it('sends a current settled snapshot to a later renderer despite global revision dedup', async () => {
+        moduleMocks.futuresAdapter.credentialFingerprint = ACCOUNT_FINGERPRINT;
+        await startFuturesDeskForSettled();
+        const current = settledFrames().at(-1);
+        expect(current).toMatchObject({
+            reason: 'bootstrap',
+            status: 'ready',
+            accountFingerprint: ACCOUNT_FINGERPRINT,
+        });
+        const incomeReads = moduleMocks.futuresAdapter.getIncomePage.mock.calls.length;
+        moduleMocks.rendererConnection.sendUTF.mockClear();
+
+        const handlers = {};
+        const laterRenderer = {
+            connected: true,
+            remoteAddress: '127.0.0.1',
+            sendUTF: vi.fn(),
+            drop: vi.fn(),
+            on: vi.fn((event, handler) => { handlers[event] = handler; }),
+        };
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => laterRenderer),
+        });
+        await handlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({ action: 'activate_market', marketMode: 'futures-live' }),
+        });
+        await vi.advanceTimersByTimeAsync(5_000);
+        await flushMicrotasks();
+
+        const laterFrames = laterRenderer.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message));
+        const activationIndex = laterFrames.findIndex(payload => (
+            payload.type === 'market_activation'
+            && payload.marketMode === 'futures-live'
+        ));
+        const accountIndex = laterFrames.findIndex(payload => (
+            payload.type === 'futures_account_state'
+        ));
+        const snapshotIndex = laterFrames.findIndex(payload => (
+            payload.type === 'futures_settled_income'
+            && payload.reason === 'snapshot'
+        ));
+        expect([activationIndex, accountIndex, snapshotIndex]).toEqual([
+            activationIndex,
+            activationIndex + 1,
+            activationIndex + 2,
+        ]);
+        expect(laterFrames[accountIndex]).toMatchObject({
+            accountFingerprint: current.accountFingerprint,
+        });
+        const laterSettled = laterFrames
+            .filter(payload => payload.type === 'futures_settled_income');
+        expect(laterSettled).toHaveLength(1);
+        expect(laterSettled[0]).toMatchObject({
+            reason: 'snapshot',
+            status: current.status,
+            generation: current.generation,
+            digest: current.digest,
+            accountFingerprint: current.accountFingerprint,
+        });
+        expect(settledFrames()).toEqual([]);
+        const originalAccountFrames = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.type === 'futures_account_state');
+        expect(originalAccountFrames).toEqual([]);
+        expect(moduleMocks.futuresAdapter.getIncomePage).toHaveBeenCalledTimes(incomeReads);
+
+        laterRenderer.connected = false;
+        await handlers.close?.();
+    });
+
+    it('blocks automatic tick and event reads after HTTP 418', async () => {
+        moduleMocks.futuresAdapter.getIncomePage.mockRejectedValue(
+            terminalSettledIncomeRefusal(),
+        );
+        await startFuturesDeskForSettled();
+        const afterTerminal = moduleMocks.futuresAdapter.getIncomePage.mock.calls.length;
+        expect(afterTerminal).toBe(SETTLED_ALL_INCOME_TYPES.length);
+        moduleMocks.futuresAdapter.getIncomePage.mockResolvedValue({ rows: [], full: false });
+
+        await runFuturesCommand({
+            action: 'account.refresh',
+            clientOrderId: 'terminal-tick-blocked',
+            symbol: 'BTCUSDT',
+            periodic: true,
+        });
+        const socket = await openFuturesHistoryStream();
+        sendFundingEvent(socket);
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+
+        expect(moduleMocks.futuresAdapter.getIncomePage).toHaveBeenCalledTimes(afterTerminal);
+        expect(settledFrames().at(-1)).toMatchObject({
+            reason: 'confirm',
+            complete: false,
+            lanes: {
+                FUNDING_FEE: {
+                    status: 'stale',
+                    complete: false,
+                    confirmationNotBefore: expect.any(Number),
+                },
+            },
+        });
+        expect(moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.type === 'futures_manual_refresh_outcome'))
+            .toEqual([]);
+    });
+
+    it('lets hourly verification recover settled income after HTTP 418', async () => {
+        moduleMocks.futuresAdapter.getIncomePage.mockRejectedValue(
+            terminalSettledIncomeRefusal(),
+        );
+        await startFuturesDeskForSettled();
+        const afterTerminal = moduleMocks.futuresAdapter.getIncomePage.mock.calls.length;
+        moduleMocks.futuresAdapter.getIncomePage.mockResolvedValue({ rows: [], full: false });
+
+        await vi.advanceTimersByTimeAsync(60 * 60_000);
+        await flushMicrotasks();
+
+        expect(moduleMocks.futuresAdapter.getIncomePage.mock.calls.length - afterTerminal)
+            .toBe(SETTLED_ALL_INCOME_TYPES.length);
+        expect(settledFrames().at(-1)).toMatchObject({
+            reason: 'verification', status: 'ready', complete: true,
+        });
+    });
+
+    it('keeps the HTTP 418 floor when a full recovery probe has an empty lane', async () => {
+        moduleMocks.futuresAdapter.getIncomePage.mockRejectedValue(
+            terminalSettledIncomeRefusal(),
+        );
+        await startFuturesDeskForSettled();
+        const afterTerminal = moduleMocks.futuresAdapter.getIncomePage.mock.calls.length;
+        let probeCall = 0;
+        moduleMocks.futuresAdapter.getIncomePage.mockImplementation(() => {
+            probeCall += 1;
+            return Promise.resolve(probeCall === 1 ? null : { rows: [], full: false });
+        });
+
+        await vi.advanceTimersByTimeAsync(60 * 60_000);
+        await flushMicrotasks();
+        const afterFailedProbe = moduleMocks.futuresAdapter.getIncomePage.mock.calls.length;
+        expect(afterFailedProbe - afterTerminal).toBe(SETTLED_ALL_INCOME_TYPES.length);
+        expect(settledFrames().at(-1)).toMatchObject({
+            reason: 'verification', complete: false,
+        });
+
+        const socket = await openFuturesHistoryStream();
+        sendFundingEvent(socket);
+        await runFuturesCommand({
+            action: 'account.refresh',
+            clientOrderId: 'terminal-floor-still-active',
+            symbol: 'BTCUSDT',
+            periodic: true,
+        });
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+
+        expect(moduleMocks.futuresAdapter.getIncomePage)
+            .toHaveBeenCalledTimes(afterFailedProbe);
+    });
+
+    it('publishes the newer successful observation time after healthy verification', async () => {
+        await startFuturesDeskForSettled();
+        const before = settledFrames().at(-1);
+        expect(before).toMatchObject({ status: 'ready', complete: true });
+        moduleMocks.rendererConnection.sendUTF.mockClear();
+
+        await vi.advanceTimersByTimeAsync(60 * 60_000);
+        await flushMicrotasks();
+
+        const verifications = settledFrames().filter(frame => frame.reason === 'verification');
+        expect(verifications).toHaveLength(1);
+        const verified = verifications[0];
+        expect(verified).toMatchObject({ status: 'ready', complete: true });
+        expect(verified.attemptedAt).toBeGreaterThan(before.attemptedAt);
+        expect(verified.successfulAt).toBeGreaterThan(before.successfulAt);
+    });
+
+    it('lets manual Refresh recover settled income before HTTP 418 backoff expires', async () => {
+        moduleMocks.futuresAdapter.getIncomePage.mockRejectedValue(
+            terminalSettledIncomeRefusal(),
+        );
+        await startFuturesDeskForSettled();
+        const afterTerminal = moduleMocks.futuresAdapter.getIncomePage.mock.calls.length;
+        moduleMocks.futuresAdapter.getIncomePage.mockResolvedValue({ rows: [], full: false });
+
+        await runFuturesCommand({
+            action: 'account.refresh',
+            clientOrderId: 'terminal-manual-recovery',
+            symbol: 'BTCUSDT',
+        });
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+
+        expect(moduleMocks.futuresAdapter.getIncomePage.mock.calls.length - afterTerminal)
+            .toBe(SETTLED_ALL_INCOME_TYPES.length);
+        expect(settledFrames().at(-1)).toMatchObject({
+            reason: 'refresh', status: 'ready', complete: true,
+        });
+    });
+
+    it('keeps one terminal rebate cooldown local while events and deliberate reads continue', async () => {
+        const diagnostics = [];
+        const diagnosticRecord = {
+            ...DESK_DIAGNOSTICS_UNRECORDED,
+            record: (kind, payload) => {
+                diagnostics.push({ kind, ...payload });
+                return true;
+            },
+        };
+        moduleMocks.futuresAdapter.getIncomePage.mockImplementation(({ incomeType }) => (
+            incomeType === 'API_REBATE'
+                ? Promise.reject(Object.assign(new Error('rebate permission refused'), {
+                    code: '-1002',
+                    response: { status: 403 },
+                }))
+                : Promise.resolve({ rows: [], full: false })
+        ));
+
+        await startFuturesDeskForSettled({ diagnosticRecord });
+        expect(settledFrames().at(-1).lanes.API_REBATE).toMatchObject({
+            status: 'error',
+            complete: false,
+            error: { code: '-1002', status: 403 },
+        });
+        const socket = await openFuturesHistoryStream();
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
+        diagnostics.length = 0;
+        sendFundingEvent(socket, Date.now());
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        expect(incomeKindsAsked()).toEqual(['FUNDING_FEE']);
+        expect(diagnostics.filter(entry => entry.kind === 'settled').at(-1))
+            .toMatchObject({ reason: 'funding', types: 1, attempts: 1, chargedWeight: 30 });
+
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
+        socket.handlers.message(JSON.stringify({
+            e: 'MARGIN_CALL',
+            E: Date.now(),
+            cw: '3.16812045',
+            p: [{
+                s: 'TUTUSDT', ps: 'LONG', pa: '1.327', mt: 'crossed', iw: '0',
+                mp: '187.17127', up: '-1.166074', mm: '1.614445',
+            }],
+        }));
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        expect(incomeKindsAsked()).toEqual(['INSURANCE_CLEAR']);
+        expect(diagnostics.filter(entry => entry.kind === 'settled').at(-1))
+            .toMatchObject({ reason: 'insurance', types: 1, attempts: 1, chargedWeight: 30 });
+
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
+        await runFuturesCommand({
+            action: 'account.refresh',
+            clientOrderId: 'rebate-cooldown-manual-bypass',
+            symbol: 'BTCUSDT',
+        });
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        expect(new Set(incomeKindsAsked())).toEqual(new Set(SETTLED_ALL_INCOME_TYPES));
+        expect(diagnostics.filter(entry => (
+            entry.kind === 'settled' && entry.reason === 'refresh'
+        )).at(-1)).toMatchObject({
+            types: SETTLED_ALL_INCOME_TYPES.length,
+            attempts: SETTLED_ALL_INCOME_TYPES.length,
+            chargedWeight: SETTLED_ALL_INCOME_TYPES.length * 30,
+        });
+
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
+        const diagnosticBoundary = diagnostics.length;
+        await vi.advanceTimersByTimeAsync(60 * 60_000 + 30_000);
+        await flushMicrotasks();
+        const verification = diagnostics.slice(diagnosticBoundary).filter(entry => (
+            entry.kind === 'settled' && entry.reason === 'verification'
+        )).at(-1);
+        expect(verification).toMatchObject({
+            incomeTypes: SETTLED_ALL_INCOME_TYPES,
+            types: SETTLED_ALL_INCOME_TYPES.length,
+            attempts: SETTLED_ALL_INCOME_TYPES.length,
+            chargedWeight: SETTLED_ALL_INCOME_TYPES.length * 30,
+            outcome: 'failed',
+            code: '-1002',
+        });
+        expect(incomeKindsAsked()).toContain('API_REBATE');
+    });
+
+    it('records cold-start and one-retry verification physical-weight budgets', async () => {
+        const diagnostics = [];
+        const diagnosticRecord = {
+            ...DESK_DIAGNOSTICS_UNRECORDED,
+            record: (kind, payload) => {
+                diagnostics.push({ kind, ...payload });
+                return true;
+            },
+        };
+
+        await startFuturesDeskForSettled({ diagnosticRecord });
+        expect(diagnostics.filter(entry => (
+            entry.kind === 'settled' && entry.reason === 'bootstrap'
+        )).at(-1)).toMatchObject({
+            pages: SETTLED_ALL_INCOME_TYPES.length,
+            reads: SETTLED_ALL_INCOME_TYPES.length,
+            attempts: SETTLED_ALL_INCOME_TYPES.length,
+            chargedWeight: SETTLED_ALL_INCOME_TYPES.length * 30,
+            types: SETTLED_ALL_INCOME_TYPES.length,
+            outcome: 'complete',
+        });
+
+        diagnostics.length = 0;
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
+        let fundingRetried = false;
+        moduleMocks.futuresAdapter.getIncomePage.mockImplementation(({ incomeType }) => {
+            if (incomeType === 'FUNDING_FEE' && !fundingRetried) {
+                fundingRetried = true;
+                return Promise.reject(Object.assign(new Error('pooled socket reset'), {
+                    code: 'ECONNRESET',
+                }));
+            }
+            return Promise.resolve({ rows: [], full: false });
+        });
+
+        await vi.advanceTimersByTimeAsync(60 * 60_000 + 30_000);
+        await flushMicrotasks();
+
+        expect(moduleMocks.futuresAdapter.getIncomePage)
+            .toHaveBeenCalledTimes(SETTLED_ALL_INCOME_TYPES.length + 1);
+        expect(diagnostics.filter(entry => (
+            entry.kind === 'settled' && entry.reason === 'verification'
+        )).at(-1)).toMatchObject({
+            pages: SETTLED_ALL_INCOME_TYPES.length,
+            reads: SETTLED_ALL_INCOME_TYPES.length,
+            attempts: SETTLED_ALL_INCOME_TYPES.length + 1,
+            chargedWeight: (SETTLED_ALL_INCOME_TYPES.length + 1) * 30,
+            types: SETTLED_ALL_INCOME_TYPES.length,
+            verified: 1,
+            outcome: 'complete',
+        });
+    });
+
+    it('records the immediate funding physical-weight budget', async () => {
+        const diagnostics = [];
+        const diagnosticRecord = {
+            ...DESK_DIAGNOSTICS_UNRECORDED,
+            record: (kind, payload) => {
+                diagnostics.push({ kind, ...payload });
+                return true;
+            },
+        };
+        await startFuturesDeskForSettled({ diagnosticRecord });
+        const socket = await openFuturesHistoryStream();
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        diagnostics.length = 0;
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
+
+        sendFundingEvent(socket, Date.now());
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+
+        expect(incomeKindsAsked()).toEqual(['FUNDING_FEE']);
+        expect(diagnostics.filter(entry => (
+            entry.kind === 'settled' && entry.reason === 'funding'
+        )).at(-1)).toMatchObject({
+            pages: 1,
+            reads: 1,
+            attempts: 1,
+            chargedWeight: 30,
+            types: 1,
+            outcome: 'partial',
+        });
+    });
+
+    it('charges a pooled fallback inside one credit-confirmation budget', async () => {
+        const diagnostics = [];
+        const diagnosticRecord = {
+            ...DESK_DIAGNOSTICS_UNRECORDED,
+            record: (kind, payload) => {
+                diagnostics.push({ kind, ...payload });
+                return true;
+            },
+        };
+        await startFuturesDeskForSettled({ diagnosticRecord });
+        const socket = await openFuturesHistoryStream();
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        diagnostics.length = 0;
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
+
+        let fallbackInjected = false;
+        moduleMocks.futuresAdapter.getIncomePage.mockImplementation(async ({ incomeType }) => {
+            if (incomeType === 'API_REBATE' && !fallbackInjected) {
+                fallbackInjected = true;
+                // The runtime wrapper admitted the pooled send. Model the
+                // adapter's replay-safe fresh-connection send in the same
+                // physical context without adding another logical page.
+                await globalThis.__binanceConnectionTestAdmitPhysicalAttempt?.();
+            }
+            return { rows: [], full: false };
+        });
+
+        sendExecutionFill(socket, 8_091);
+        await vi.advanceTimersByTimeAsync(2 * 60_000 + 30_000);
+        await flushMicrotasks();
+
+        expect(incomeKindsAsked()).toHaveLength(SETTLED_CREDIT_INCOME_TYPES.length);
+        expect(diagnostics.filter(entry => (
+            entry.kind === 'settled' && entry.reason === 'credit-confirm'
+        )).at(-1)).toMatchObject({
+            pages: SETTLED_CREDIT_INCOME_TYPES.length,
+            reads: SETTLED_CREDIT_INCOME_TYPES.length,
+            attempts: SETTLED_CREDIT_INCOME_TYPES.length + 1,
+            chargedWeight: (SETTLED_CREDIT_INCOME_TYPES.length + 1) * 30,
+            types: SETTLED_CREDIT_INCOME_TYPES.length,
+            outcome: 'partial',
+        });
+    });
+
+    it('charges time sync and retry inside one insurance-confirmation budget', async () => {
+        const diagnostics = [];
+        const diagnosticRecord = {
+            ...DESK_DIAGNOSTICS_UNRECORDED,
+            record: (kind, payload) => {
+                diagnostics.push({ kind, ...payload });
+                return true;
+            },
+        };
+        await startFuturesDeskForSettled({ diagnosticRecord });
+        const socket = await openFuturesHistoryStream();
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        diagnostics.length = 0;
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
+
+        let insuranceReads = 0;
+        moduleMocks.futuresAdapter.getIncomePage.mockImplementation(async ({ incomeType }) => {
+            if (incomeType === 'INSURANCE_CLEAR') {
+                insuranceReads += 1;
+                if (insuranceReads === 2) {
+                    // One public adapter call can perform three low-level sends
+                    // after -1021: rejected income, weight-1 time sync, then the
+                    // fresh signed weight-30 retry.
+                    await globalThis.__binanceConnectionTestAdmitPhysicalAttempt?.(1);
+                    await globalThis.__binanceConnectionTestAdmitPhysicalAttempt?.(30);
+                }
+            }
+            return { rows: [], full: false };
+        });
+
+        socket.handlers.message(JSON.stringify({
+            e: 'MARGIN_CALL',
+            E: Date.now(),
+            cw: '3.16812045',
+            p: [{
+                s: 'TUTUSDT', ps: 'LONG', pa: '1.327', mt: 'crossed', iw: '0',
+                mp: '187.17127', up: '-1.166074', mm: '1.614445',
+            }],
+        }));
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        expect(diagnostics.filter(entry => (
+            entry.kind === 'settled' && entry.reason === 'insurance'
+        )).at(-1)).toMatchObject({ attempts: 1, chargedWeight: 30 });
+
+        diagnostics.length = 0;
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
+        await vi.advanceTimersByTimeAsync(90_000);
+        await flushMicrotasks();
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+
+        expect(incomeKindsAsked()).toEqual(['INSURANCE_CLEAR']);
+        expect(diagnostics.filter(entry => (
+            entry.kind === 'settled' && entry.reason === 'insurance-confirm'
+        )).at(-1)).toMatchObject({
+            pages: 1,
+            reads: 1,
+            attempts: 3,
+            chargedWeight: 61,
+            types: 1,
+            outcome: 'partial',
+        });
+    });
 
     // The read that cost the operator 60 weight a minute asked for nothing in
     // particular, and `/fapi/v1/income` says what that means: *"If incomeType is
@@ -4093,7 +4982,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
     // Asserted on what goes onto the wire, not on what comes back. A test that
     // only checks the rows passes unchanged against a read that still asks for
     // everything — which is exactly the test this file did not have.
-    it('asks the income record only for the kinds of flow no other record states', async () => {
+    it('reads every required lane on refresh and publishes a plain v2 resource frame', async () => {
         await startFuturesDeskForSettled();
 
         await runFuturesCommand({
@@ -4107,11 +4996,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
         // Never the whole record.
         expect(kinds).not.toContain(null);
         expect(kinds).not.toContain(undefined);
-        // Against the fold's own table, not against a copy of it. Which kinds
-        // the fills can state is decided in one place, and a kind marked
-        // underivable there but not asked for here is money the column never
-        // sees with nothing failing anywhere.
-        expect(new Set(kinds)).toEqual(new Set(FUTURES_UNDERIVABLE_INCOME_TYPES));
+        expect(new Set(kinds)).toEqual(new Set(SETTLED_ALL_INCOME_TYPES));
         // And what that table currently holds, written out. A guard, not a
         // measure of anything: it cannot fail against the reading before this
         // change. Its job is that adding a metered kind to the table is a
@@ -4124,9 +5009,30 @@ describe('setupBinanceConnection user-data orchestration', () => {
             'API_REBATE',
             'FEE_RETURN',
         ]));
-        // And never the two the fills already state.
-        expect(kinds).not.toContain('REALIZED_PNL');
+        // Gross commission and realized PnL both remain fill-derived.
         expect(kinds).not.toContain('COMMISSION');
+        expect(kinds).not.toContain('REALIZED_PNL');
+
+        const frames = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.type === 'futures_settled_income');
+        const frame = frames.at(-1);
+        expect(frame).toMatchObject({
+            version: 2,
+            status: 'ready',
+            complete: true,
+            reason: 'refresh',
+        });
+        expect(frame.generation).toBeGreaterThan(0);
+        expect(frame.digest).toMatch(/^[a-f0-9]{16}$/);
+        expect(frame).not.toHaveProperty('rows');
+        expect(new Set(Object.keys(frame.lanes))).toEqual(new Set(SETTLED_ALL_INCOME_TYPES));
+        for (const lane of Object.values(frame.lanes)) {
+            expect(Array.isArray(lane.rows)).toBe(true);
+            expect(lane).toHaveProperty('coveredFrom');
+            expect(lane).toHaveProperty('coveredTo');
+            expect(lane).toHaveProperty('targetTo');
+        }
     });
 
     // Funding settles six times a day on this account and the account tick fires
@@ -4135,7 +5041,6 @@ describe('setupBinanceConnection user-data orchestration', () => {
     // read cost.
     it('does not re-read a complete reading because a clock asked', async () => {
         await startFuturesDeskForSettled();
-        const socket = await openFuturesHistoryStream();
 
         await runFuturesCommand({
             action: 'account.refresh', clientOrderId: 'settled-first', symbol: 'BTCUSDT',
@@ -4144,10 +5049,6 @@ describe('setupBinanceConnection user-data orchestration', () => {
         await flushMicrotasks();
         const afterFirst = moduleMocks.futuresAdapter.getIncomePage.mock.calls.length;
         expect(afterFirst).toBeGreaterThan(0);
-
-        for (const orderId of [71, 72, 73]) {
-            await deliverRealizingFill(socket, orderId);
-        }
 
         // And the thirty-second reconcile, which is the clock that actually
         // fires. It arrives as the same command a person sends and says so.
@@ -4160,6 +5061,127 @@ describe('setupBinanceConnection user-data orchestration', () => {
         }
 
         expect(moduleMocks.futuresAdapter.getIncomePage.mock.calls.length).toBe(afterFirst);
+    });
+
+    it('publishes a zero-realized fill as non-exact and reads credit lanes only once later', async () => {
+        await startFuturesDeskForSettled();
+        const socket = await openFuturesHistoryStream();
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
+        moduleMocks.rendererConnection.sendUTF.mockClear();
+
+        await deliverRealizingFill(socket, 74, '0');
+
+        // The fill already carries gross commission. It invalidates the four
+        // late-credit lanes synchronously, without spending one REST request.
+        expect(incomeKindsAsked()).toEqual([]);
+        const pending = settledFrames().at(-1);
+        expect(pending.reason).toBe('credit-confirm');
+        expect(pending.complete).toBe(false);
+        for (const incomeType of SETTLED_CREDIT_INCOME_TYPES) {
+            expect(pending.lanes[incomeType].status).toBe('stale');
+            expect(pending.completeByType[incomeType]).toBe(false);
+        }
+
+        await vi.advanceTimersByTimeAsync(89_999);
+        await flushMicrotasks();
+        expect(incomeKindsAsked()).toEqual([]);
+        await vi.advanceTimersByTimeAsync(1);
+        await flushMicrotasks();
+        // The confirmation timer only schedules the pass; the ordinary read
+        // debounce and admission still stand between the timer and Binance.
+        expect(incomeKindsAsked()).toEqual([]);
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        expect(incomeKindsAsked()).toHaveLength(SETTLED_CREDIT_INCOME_TYPES.length);
+        expect(new Set(incomeKindsAsked())).toEqual(new Set(SETTLED_CREDIT_INCOME_TYPES));
+        const confirmed = settledFrames().at(-1);
+        for (const incomeType of SETTLED_CREDIT_INCOME_TYPES) {
+            expect(confirmed.lanes[incomeType].status).toBe('ready');
+            expect(confirmed.completeByType[incomeType]).toBe(true);
+        }
+
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
+        await vi.advanceTimersByTimeAsync(3 * 60_000);
+        await flushMicrotasks();
+        expect(moduleMocks.futuresAdapter.getIncomePage).not.toHaveBeenCalled();
+    });
+
+    it('does not spend a periodic tick on lanes waiting for confirmation', async () => {
+        await startFuturesDeskForSettled();
+        const socket = await openFuturesHistoryStream();
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
+        moduleMocks.rendererConnection.sendUTF.mockClear();
+
+        sendExecutionFill(socket, 75, '0');
+        await vi.advanceTimersByTimeAsync(60_000);
+        await flushMicrotasks();
+        expect(incomeKindsAsked()).toEqual([]);
+
+        await runFuturesCommand({
+            action: 'account.refresh',
+            clientOrderId: 'confirmation-debt-tick',
+            symbol: 'BTCUSDT',
+            periodic: true,
+        });
+        await flushMicrotasks();
+
+        // The four credit lanes have a known two-minute write-lag debt and the
+        // other two lanes are already complete. A tick has nothing truthful to
+        // learn yet, so it must not buy a six-lane pass before the narrow timer.
+        expect(incomeKindsAsked()).toEqual([]);
+        for (const incomeType of SETTLED_CREDIT_INCOME_TYPES) {
+            expect(settledFrames().at(-1).lanes[incomeType]).toMatchObject({
+                status: 'stale',
+                complete: false,
+                confirmationNotBefore: expect.any(Number),
+            });
+        }
+    });
+
+    it('uses a periodic tick only for the distinct incomplete lane', async () => {
+        await startFuturesDeskForSettled();
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
+        let refuseFeeReturn = true;
+        moduleMocks.futuresAdapter.getIncomePage.mockImplementation(({ incomeType }) => {
+            if (incomeType === 'FEE_RETURN' && refuseFeeReturn) {
+                return Promise.reject(Object.assign(new Error('temporary gateway'), {
+                    code: 'ETIMEDOUT',
+                }));
+            }
+            return Promise.resolve({ rows: [], full: false });
+        });
+
+        await runFuturesCommand({
+            action: 'account.refresh',
+            clientOrderId: 'one-incomplete-lane',
+            symbol: 'BTCUSDT',
+        });
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        expect(settledFrames().at(-1).lanes.FEE_RETURN).toMatchObject({
+            status: 'stale',
+            complete: false,
+        });
+
+        refuseFeeReturn = false;
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
+        await vi.advanceTimersByTimeAsync(60_000);
+        await runFuturesCommand({
+            action: 'account.refresh',
+            clientOrderId: 'one-incomplete-lane-tick',
+            symbol: 'BTCUSDT',
+            periodic: true,
+        });
+        await vi.advanceTimersByTimeAsync(5_000);
+        await flushMicrotasks();
+
+        expect(incomeKindsAsked()).toEqual(['FEE_RETURN']);
+        expect(settledFrames().at(-1).lanes.FEE_RETURN).toMatchObject({
+            status: 'ready',
+            complete: true,
+        });
     });
 
     // The operator pressing for the account is not a clock, and on 2026-08-20
@@ -4197,19 +5219,26 @@ describe('setupBinanceConnection user-data orchestration', () => {
     it('asks again once the record has caught up with a settlement', async () => {
         await startFuturesDeskForSettled();
         const socket = await openFuturesHistoryStream();
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
+        moduleMocks.rendererConnection.sendUTF.mockClear();
 
-        socket.handlers.message(JSON.stringify({
-            e: 'ACCOUNT_UPDATE', E: 9_000, T: 9_000,
-            a: {
-                m: 'FUNDING_FEE',
-                B: [{ a: 'USDT', wb: '990.5', cw: '990.5', bc: '-9.5' }],
-                P: [],
-            },
-        }));
+        sendFundingEvent(socket);
+        expect(settledFrames()).toHaveLength(1);
+        const invalidated = settledFrames().at(-1);
+        expect(invalidated.reason).toBe('confirm');
+        expect(invalidated.lanes.FUNDING_FEE.status).toBe('stale');
+        expect(invalidated.completeByType.FUNDING_FEE).toBe(false);
         await vi.advanceTimersByTimeAsync(30_000);
         await flushMicrotasks();
         const afterCharge = moduleMocks.futuresAdapter.getIncomePage.mock.calls.length;
-        expect(afterCharge).toBeGreaterThan(0);
+        expect(incomeKindsAsked()).toEqual(['FUNDING_FEE']);
+        expect(afterCharge).toBe(1);
+        // A successful immediate answer may still predate the row Binance is
+        // about to post, so it cannot restore exactness before confirmation.
+        expect(settledFrames().at(-1).lanes.FUNDING_FEE.status).toBe('stale');
+        expect(settledFrames().at(-1).completeByType.FUNDING_FEE).toBe(false);
 
         // Nothing asks in between: the confirming pass is one read, not a poll.
         await vi.advanceTimersByTimeAsync(60_000);
@@ -4218,9 +5247,311 @@ describe('setupBinanceConnection user-data orchestration', () => {
 
         await vi.advanceTimersByTimeAsync(90_000);
         await flushMicrotasks();
-        expect(moduleMocks.futuresAdapter.getIncomePage.mock.calls.length)
-            .toBeGreaterThan(afterCharge);
+        expect(moduleMocks.futuresAdapter.getIncomePage.mock.calls.length).toBe(afterCharge + 1);
+        expect(incomeKindsAsked().at(-1)).toBe('FUNDING_FEE');
+        const confirmed = settledFrames().at(-1);
+        expect(confirmed.reason).toBe('confirm');
+        expect(confirmed.lanes.FUNDING_FEE.status).toBe('ready');
+        expect(confirmed.completeByType.FUNDING_FEE).toBe(true);
     });
+
+    it('keeps event debt and re-arms confirmation when a lane is cooling down', async () => {
+        const settledIncomeStore = keptReading();
+        await startFuturesDeskForSettled({ settledIncomeStore });
+        const socket = await openFuturesHistoryStream();
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
+        moduleMocks.rendererConnection.sendUTF.mockClear();
+        settledIncomeStore.saveResource.mockClear();
+
+        moduleMocks.futuresAdapter.getIncomePage.mockImplementation(({ incomeType }) => (
+            incomeType === 'FUNDING_FEE'
+                ? Promise.reject(Object.assign(new Error('terminal request'), {
+                    code: '-1100',
+                    response: { status: 400 },
+                }))
+                : Promise.resolve({ rows: [], full: false })
+        ));
+
+        sendFundingEvent(socket, 12_000);
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        expect(incomeKindsAsked()).toEqual(['FUNDING_FEE']);
+        const firstDeadline = settledIncomeStore.saveResource.mock.calls
+            .map(([{ resource }]) => resource.lanes.FUNDING_FEE.confirmationNotBefore)
+            .filter(Number.isSafeInteger)
+            .at(-1);
+        expect(firstDeadline).toBeTypeOf('number');
+
+        await vi.advanceTimersByTimeAsync(10_000);
+        sendFundingEvent(socket, 13_000);
+        await flushMicrotasks();
+        const secondDeadline = settledIncomeStore.saveResource.mock.calls
+            .map(([{ resource }]) => resource.lanes.FUNDING_FEE.confirmationNotBefore)
+            .filter(Number.isSafeInteger)
+            .at(-1);
+        expect(secondDeadline).toBeGreaterThan(firstDeadline);
+        expect(incomeKindsAsked()).toEqual(['FUNDING_FEE']);
+
+        const timersBeforeDeadline = vi.getTimerCount();
+        await vi.advanceTimersByTimeAsync(secondDeadline - Date.now() + 1);
+        await flushMicrotasks();
+
+        // The due timer cannot read through the terminal lane cooldown, but it
+        // must replace itself for the eligibility boundary instead of silently
+        // dropping the exchange event until an hourly/manual audit.
+        expect(incomeKindsAsked()).toEqual(['FUNDING_FEE']);
+        expect(vi.getTimerCount()).toBeGreaterThanOrEqual(timersBeforeDeadline);
+        expect(settledFrames().at(-1).lanes.FUNDING_FEE).toMatchObject({
+            status: 'stale',
+            complete: false,
+            confirmationNotBefore: expect.any(Number),
+        });
+        expect(settledIncomeStore.saveResource.mock.calls.at(-1)[0]
+            .resource.lanes.FUNDING_FEE.confirmationNotBefore).toBe(secondDeadline);
+    });
+
+    it('drops a single-flight confirmation repaid by a newer manual pass', async () => {
+        await startFuturesDeskForSettled();
+        const socket = await openFuturesHistoryStream();
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
+
+        let fundingCalls = 0;
+        let holdManualFunding = false;
+        let resolveManualFunding;
+        moduleMocks.futuresAdapter.getIncomePage.mockImplementation(({ incomeType }) => {
+            if (incomeType !== 'FUNDING_FEE') {
+                return Promise.resolve({ rows: [], full: false });
+            }
+            fundingCalls += 1;
+            if (fundingCalls === 1) {
+                return Promise.reject(Object.assign(new Error('funding lane refused'), {
+                    code: '-1002',
+                    response: { status: 403 },
+                }));
+            }
+            if (holdManualFunding && resolveManualFunding === undefined) {
+                return new Promise((resolve) => { resolveManualFunding = resolve; });
+            }
+            return Promise.resolve({ rows: [], full: false });
+        });
+
+        sendFundingEvent(socket, Date.now());
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        const failedAt = settledFrames().at(-1).lanes.FUNDING_FEE.attemptedAt;
+        expect(settledFrames().at(-1).lanes.FUNDING_FEE.error).toMatchObject({
+            status: 403,
+        });
+
+        // Let the ordinary two-minute timer discover the lane cooldown and
+        // re-arm itself at that cooldown's one-hour boundary.
+        await vi.advanceTimersByTimeAsync(2 * 60_000);
+        await flushMicrotasks();
+        expect(incomeKindsAsked()).toEqual(['FUNDING_FEE']);
+
+        const cooldownAt = failedAt + 60 * 60_000;
+        await vi.advanceTimersByTimeAsync(Math.max(0, cooldownAt - Date.now() - 10_000));
+        await flushMicrotasks();
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
+        holdManualFunding = true;
+        const command = moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                version: 1,
+                marketType: 'futures',
+                accountId: 'default',
+                action: 'account.refresh',
+                clientOrderId: 'manual-repays-queued-confirmation',
+                manual: true,
+                symbol: 'BTCUSDT',
+            }),
+        });
+        await vi.advanceTimersByTimeAsync(5_000);
+        await flushMicrotasks();
+        expect(resolveManualFunding).toBeTypeOf('function');
+
+        // The re-armed confirmation now fires, leaves its debounce, and queues
+        // behind the held manual walk with the old captured funding lane.
+        await vi.advanceTimersByTimeAsync(15_000);
+        await flushMicrotasks();
+        resolveManualFunding({ rows: [], full: false });
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        await command;
+
+        // The manual pass itself reads all six lanes. Its successful funding
+        // answer repays the debt, so the queued confirmation contributes no
+        // seventh request after single-flight handoff.
+        expect(incomeKindsAsked()).toHaveLength(SETTLED_ALL_INCOME_TYPES.length);
+        expect(new Set(incomeKindsAsked())).toEqual(new Set(SETTLED_ALL_INCOME_TYPES));
+        expect(settledFrames().at(-1).lanes.FUNDING_FEE.confirmationNotBefore).toBeNull();
+    });
+
+    it('keeps a newer funding event pending when an older confirmation finishes', async () => {
+        await startFuturesDeskForSettled();
+        const socket = await openFuturesHistoryStream();
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
+        moduleMocks.rendererConnection.sendUTF.mockClear();
+
+        let fundingReads = 0;
+        let resolveOldConfirmation;
+        moduleMocks.futuresAdapter.getIncomePage.mockImplementation(({ incomeType }) => {
+            if (incomeType !== 'FUNDING_FEE') return Promise.resolve({ rows: [], full: false });
+            fundingReads += 1;
+            if (fundingReads === 2) {
+                return new Promise((resolve) => { resolveOldConfirmation = resolve; });
+            }
+            return Promise.resolve({ rows: [], full: false });
+        });
+
+        sendFundingEvent(socket, 9_000);
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        expect(fundingReads).toBe(1);
+
+        await vi.advanceTimersByTimeAsync(90_000);
+        await flushMicrotasks();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await flushMicrotasks();
+        expect(fundingReads).toBe(2);
+        expect(resolveOldConfirmation).toBeTypeOf('function');
+
+        // This event is newer than the confirmation currently in flight. Its
+        // own two-minute deadline must survive that older answer.
+        sendFundingEvent(socket, 10_000);
+        resolveOldConfirmation({ rows: [], full: false });
+        await flushMicrotasks();
+        expect(settledFrames().at(-1).lanes.FUNDING_FEE.status).toBe('stale');
+        expect(settledFrames().at(-1).completeByType.FUNDING_FEE).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        expect(fundingReads).toBe(3);
+        expect(settledFrames().at(-1).lanes.FUNDING_FEE.status).toBe('stale');
+
+        await vi.advanceTimersByTimeAsync(90_000);
+        await flushMicrotasks();
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        expect(fundingReads).toBe(4);
+        expect(settledFrames().at(-1).lanes.FUNDING_FEE.status).toBe('ready');
+        expect(settledFrames().at(-1).completeByType.FUNDING_FEE).toBe(true);
+    });
+
+    it('retains confirmed rows and stays stale when delayed confirmation fails', async () => {
+        const retainedId = '700000000000000777';
+        const retainedRow = {
+            symbol: 'BTCUSDT', incomeType: 'FUNDING_FEE', income: '-1.25',
+            asset: 'USDT', time: Date.now() - 60_000, tranId: retainedId,
+        };
+        moduleMocks.futuresAdapter.getIncomePage.mockImplementation(({ incomeType }) => (
+            Promise.resolve({
+                rows: incomeType === 'FUNDING_FEE' ? [retainedRow] : [],
+                full: false,
+            })
+        ));
+        await startFuturesDeskForSettled();
+        const socket = await openFuturesHistoryStream();
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        expect(Object.values(settledFrames().at(-1).lanes)
+            .some(lane => lane.rows.some(row => row.tranId === retainedId))).toBe(true);
+
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
+        moduleMocks.rendererConnection.sendUTF.mockClear();
+        let fundingReads = 0;
+        moduleMocks.futuresAdapter.getIncomePage.mockImplementation(({ incomeType }) => {
+            if (incomeType !== 'FUNDING_FEE') return Promise.resolve({ rows: [], full: false });
+            fundingReads += 1;
+            return fundingReads >= 2
+                ? Promise.reject(Object.assign(new Error('gateway'), { code: 'ETIMEDOUT' }))
+                : Promise.resolve({ rows: [retainedRow], full: false });
+        });
+
+        sendFundingEvent(socket);
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        expect(fundingReads).toBe(1);
+        await vi.advanceTimersByTimeAsync(90_000);
+        await flushMicrotasks();
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+
+        expect(fundingReads).toBeGreaterThan(1);
+        const failed = settledFrames().at(-1);
+        expect(failed.reason).toBe('confirm');
+        expect(Object.values(failed.lanes).some(
+            lane => lane.rows.some(row => row.tranId === retainedId),
+        )).toBe(true);
+        expect(failed.lanes.FUNDING_FEE).toMatchObject({
+            status: 'stale',
+            complete: false,
+        });
+        expect(failed.completeByType.FUNDING_FEE).toBe(false);
+        expect(failed.lanes.FUNDING_FEE.error).not.toBeNull();
+    });
+
+    it.each([
+        { status: 408, disposition: 'transient', expectedReads: 5 },
+        { status: 429, disposition: 'transient', expectedReads: 5 },
+        { status: 503, disposition: 'transient', expectedReads: 5 },
+        { status: 418, disposition: 'terminal', expectedReads: 2 },
+        { status: 400, disposition: 'terminal', expectedReads: 2 },
+    ])(
+        'treats HTTP $status as $disposition and keeps confirmation retries bounded',
+        async ({ status, expectedReads }) => {
+            await startFuturesDeskForSettled();
+            const socket = await openFuturesHistoryStream();
+            await vi.advanceTimersByTimeAsync(30_000);
+            await flushMicrotasks();
+            moduleMocks.futuresAdapter.getIncomePage.mockClear();
+            moduleMocks.rendererConnection.sendUTF.mockClear();
+
+            let fundingReads = 0;
+            moduleMocks.futuresAdapter.getIncomePage.mockImplementation(({ incomeType }) => {
+                if (incomeType !== 'FUNDING_FEE') {
+                    return Promise.resolve({ rows: [], full: false });
+                }
+                fundingReads += 1;
+                // Isolate the delayed confirmation policy: the event-triggered
+                // read succeeds, then only confirmation attempts are refused.
+                if (fundingReads === 1) return Promise.resolve({ rows: [], full: false });
+                return Promise.reject(Object.assign(new Error('income refusal'), {
+                    // -1003 is normally retryable. The HTTP status must win:
+                    // 418/other 4xx stop, while 408/429/5xx retry.
+                    code: '-1003',
+                    response: { status },
+                }));
+            });
+
+            sendFundingEvent(socket);
+            // Covers the immediate read, the delayed confirmation and every
+            // possible exponential retry. Transient failures get exactly the
+            // configured three retries; terminal failures get none.
+            for (const elapsed of [
+                30_000,
+                90_000, 30_000,
+                60_000, 30_000,
+                120_000, 30_000,
+                240_000, 30_000,
+                10 * 60_000,
+            ]) {
+                await vi.advanceTimersByTimeAsync(elapsed);
+                await flushMicrotasks();
+            }
+
+            expect(incomeKindsAsked()).toHaveLength(expectedReads);
+            expect(new Set(incomeKindsAsked())).toEqual(new Set(['FUNDING_FEE']));
+            expect(settledFrames().at(-1).lanes.FUNDING_FEE.error).toMatchObject({
+                code: '-1003',
+                status,
+            });
+        },
+    );
 
     // A guard, and named as one: it cannot fail on the reading before this
     // change, because that one read on everything. Its job is the other
@@ -4241,9 +5572,10 @@ describe('setupBinanceConnection user-data orchestration', () => {
         const socket = moduleMocks.futuresUserDataSockets.at(-1);
         expect(socket).toBeDefined();
         socket.handlers.open();
-        await vi.advanceTimersByTimeAsync(5_000);
+        await vi.advanceTimersByTimeAsync(30_000);
         await flushMicrotasks();
         const beforeCharge = moduleMocks.futuresAdapter.getIncomePage.mock.calls.length;
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
 
         socket.handlers.message(JSON.stringify({
             e: 'ACCOUNT_UPDATE', E: 9_000, T: 9_000,
@@ -4257,76 +5589,572 @@ describe('setupBinanceConnection user-data orchestration', () => {
         await flushMicrotasks();
 
         expect(beforeCharge).toBeGreaterThanOrEqual(beforeFunding);
-        expect(moduleMocks.futuresAdapter.getIncomePage.mock.calls.length)
-            .toBeGreaterThan(beforeCharge);
+        expect(incomeKindsAsked()).toEqual(['FUNDING_FEE']);
     });
 
-    // A reading that has not reached its window's start is due sooner than a
-    // complete one — but not on every ask. A page is six reads now, so a pass
-    // that spends its budget is twenty-four requests at weight 30 against a
-    // limiter of 800 a minute, and a desk filling orders asks on every fill.
-    // Unbounded, the extending phase starves every other account read: the cost
-    // this change removed, moved rather than removed.
-    it('does not restart an unfinished reading on every ask', async () => {
-        // A page the reader calls full that advances the walk by three
-        // milliseconds. The window's start is a week away, so the reading stays
-        // short of it however many passes it is given.
-        moduleMocks.futuresAdapter.getIncomePage.mockImplementation(async ({ startTime }) => ({
-            rows: Array.from({ length: 3 }, (unused, index) => ({
-                symbol: 'BTCUSDT',
-                incomeType: 'FUNDING_FEE',
-                income: '-0.5',
-                asset: 'USDT',
-                time: startTime + index + 1,
-                tranId: `${startTime}-${index}`,
-            })),
-            full: true,
-        }));
+    it('coalesces a burst of fills into one confirmation after its newest fill', async () => {
         await startFuturesDeskForSettled();
         const socket = await openFuturesHistoryStream();
-
-        await runFuturesCommand({
-            action: 'account.refresh', clientOrderId: 'unfinished-first', symbol: 'BTCUSDT',
-        });
         await vi.advanceTimersByTimeAsync(30_000);
         await flushMicrotasks();
-        const afterFirst = moduleMocks.futuresAdapter.getIncomePage.mock.calls.length;
-        expect(afterFirst).toBeGreaterThan(0);
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
+        moduleMocks.rendererConnection.sendUTF.mockClear();
 
-        // Well inside the minute: the reading has something to learn and is
-        // still not read again on a fill.
-        await deliverRealizingFill(socket, 81);
-        expect(moduleMocks.futuresAdapter.getIncomePage.mock.calls.length).toBe(afterFirst);
+        sendExecutionFill(socket, 81);
+        await vi.advanceTimersByTimeAsync(60_000);
+        sendExecutionFill(socket, 82);
+        sendExecutionFill(socket, 83);
+        await vi.advanceTimersByTimeAsync(119_999);
+        await flushMicrotasks();
+        expect(incomeKindsAsked()).toEqual([]);
+        // Repeated fills keep one pending resource frame while resetting the
+        // deadline to the newest event.
+        expect(settledFrames()).toHaveLength(1);
 
-        // Past it: an incomplete reading is deferred, never abandoned.
+        await vi.advanceTimersByTimeAsync(1);
+        await flushMicrotasks();
+        expect(incomeKindsAsked()).toEqual([]);
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+
+        expect(incomeKindsAsked()).toHaveLength(SETTLED_CREDIT_INCOME_TYPES.length);
+        expect(new Set(incomeKindsAsked())).toEqual(new Set(SETTLED_CREDIT_INCOME_TYPES));
+    });
+
+    it('narrows a credit confirmation retry to the one lane still in debt', async () => {
+        await startFuturesDeskForSettled();
+        const socket = await openFuturesHistoryStream();
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
+
+        let apiRebateFailed = false;
+        moduleMocks.futuresAdapter.getIncomePage.mockImplementation(({ incomeType }) => {
+            if (incomeType === 'API_REBATE' && !apiRebateFailed) {
+                apiRebateFailed = true;
+                return Promise.resolve(null);
+            }
+            return Promise.resolve({ rows: [], full: false });
+        });
+        sendExecutionFill(socket, 8_081);
+        await vi.advanceTimersByTimeAsync(2 * 60_000 + 30_000);
+        await flushMicrotasks();
+
+        expect(new Set(incomeKindsAsked())).toEqual(new Set(SETTLED_CREDIT_INCOME_TYPES));
+        expect(settledFrames().at(-1).lanes.API_REBATE).toMatchObject({
+            status: 'stale',
+            complete: false,
+            confirmationNotBefore: expect.any(Number),
+            error: { code: 'EMPTY_ANSWER' },
+        });
+        for (const incomeType of SETTLED_CREDIT_INCOME_TYPES) {
+            if (incomeType === 'API_REBATE') continue;
+            expect(settledFrames().at(-1).lanes[incomeType].confirmationNotBefore).toBeNull();
+        }
+
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
+        await vi.advanceTimersByTimeAsync(60_000 + 30_000);
+        await flushMicrotasks();
+
+        expect(incomeKindsAsked()).toEqual(['API_REBATE']);
+    });
+
+    it('reads only insurance clearance after a margin call', async () => {
+        await startFuturesDeskForSettled();
+        const socket = await openFuturesHistoryStream();
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
+        moduleMocks.rendererConnection.sendUTF.mockClear();
+
+        socket.handlers.message(JSON.stringify({
+            e: 'MARGIN_CALL',
+            E: 4_000,
+            cw: '3.16812045',
+            p: [{
+                s: 'TUTUSDT', ps: 'LONG', pa: '1.327', mt: 'crossed', iw: '0',
+                mp: '187.17127', up: '-1.166074', mm: '1.614445',
+            }],
+        }));
+        const invalidated = settledFrames().at(-1);
+        expect(invalidated.reason).toBe('insurance-confirm');
+        expect(invalidated.lanes.INSURANCE_CLEAR.status).toBe('stale');
+        expect(invalidated.completeByType.INSURANCE_CLEAR).toBe(false);
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+
+        expect(incomeKindsAsked()).toEqual(['INSURANCE_CLEAR']);
+        expect(settledFrames().at(-1).lanes.INSURANCE_CLEAR.status).toBe('stale');
+        expect(settledFrames().at(-1).completeByType.INSURANCE_CLEAR).toBe(false);
+
         await vi.advanceTimersByTimeAsync(90_000);
-        await deliverRealizingFill(socket, 82);
-        expect(moduleMocks.futuresAdapter.getIncomePage.mock.calls.length)
-            .toBeGreaterThan(afterFirst);
+        await flushMicrotasks();
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        expect(incomeKindsAsked()).toEqual(['INSURANCE_CLEAR', 'INSURANCE_CLEAR']);
+        const confirmed = settledFrames().at(-1);
+        expect(confirmed.reason).toBe('insurance-confirm');
+        expect(confirmed.lanes.INSURANCE_CLEAR.status).toBe('ready');
+        expect(confirmed.completeByType.INSURANCE_CLEAR).toBe(true);
+    });
+
+    it('publishes manual income loading and starts it before account reads finish', async () => {
+        await startFuturesDeskForSettled();
+        moduleMocks.rendererConnection.sendUTF.mockClear();
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
+
+        let resolveAccount;
+        let accountFinished = false;
+        let incomeStartedWhileAccountPending = false;
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([{
+            type: 'balances',
+            weight: 5,
+            errorLabel: 'balances',
+            loadPayload: vi.fn(() => new Promise((resolve) => { resolveAccount = resolve; })),
+        }]);
+        moduleMocks.futuresAdapter.getIncomePage.mockImplementation(() => {
+            if (!accountFinished) incomeStartedWhileAccountPending = true;
+            return Promise.resolve({ rows: [], full: false });
+        });
+
+        let commandFinished = false;
+        const command = moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                version: 1,
+                marketType: 'futures',
+                accountId: 'default',
+                action: 'account.refresh',
+                clientOrderId: 'manual-concurrent-income',
+                manual: true,
+                symbol: 'BTCUSDT',
+            }),
+        });
+        command.then(() => { commandFinished = true; });
+        await flushMicrotasks();
+
+        const loading = settledFrames()[0];
+        expect(settledFrames()).toHaveLength(1);
+        expect(loading.reason).toBe('refresh');
+        expect(loading.status).toBe('loading');
+        expect(loading.complete).toBe(false);
+        expect(Object.values(loading.lanes).every(lane => lane.status === 'loading')).toBe(true);
+        expect(commandFinished).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(1_000);
+        await flushMicrotasks();
+        expect(resolveAccount).toBeTypeOf('function');
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        expect(new Set(incomeKindsAsked())).toEqual(new Set(SETTLED_ALL_INCOME_TYPES));
+        expect(incomeStartedWhileAccountPending).toBe(true);
+        expect(commandFinished).toBe(false);
+
+        accountFinished = true;
+        resolveAccount({
+            futures_balances: { USDT: { available: '100', total: '100' } },
+        });
+        await command;
+        expect(commandFinished).toBe(true);
+        const receipts = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.type === 'futures_manual_refresh_outcome');
+        expect(receipts).toEqual([expect.objectContaining({
+            version: 1,
+            status: 'accepted',
+            request: 'manual-concurrent-income',
+            requestedAt: expect.any(Number),
+            accountFingerprint: null,
+            account: { disposition: 'resource' },
+            settledIncome: { disposition: 'resource' },
+        })]);
+        expect(receipts[0].settledIncome).not.toHaveProperty('status');
     });
 
     // The cold start the store exists to remove. Every save under `electron/**`
     // relaunches the desk, and the operator's journal for 2026-08-20 carries
     // twelve bootstraps and seven stream reads in ninety minutes — each buying
     // the identical week again.
+    const settledResource = (rows, { windowFrom, now }) => {
+        const coveredTo = now - 60_000;
+        const lanes = Object.fromEntries(SETTLED_ALL_INCOME_TYPES.map(incomeType => [
+            incomeType,
+            createFuturesSettledIncomeLane(incomeType, {
+                rows: rows.filter(row => row.incomeType === incomeType),
+                coveredFrom: windowFrom,
+                coveredTo,
+                targetTo: coveredTo,
+                status: 'ready',
+                attemptedAt: coveredTo,
+                successfulAt: coveredTo,
+                complete: true,
+            }),
+        ]));
+        return createFuturesSettledIncomeResource({ lanes, generation: 7 });
+    };
+
     const keptReading = (rows = []) => ({
-        load: vi.fn(({ windowFrom, now }) => ({
-            rows: new Map(rows.map(row => [`${row.incomeType}:${row.tranId}`, row])),
-            from: windowFrom,
-            to: now - 60_000,
-            slice: null,
-            gap: null,
-            verifiedAt: now - 60_000,
-        })),
-        save: vi.fn(() => true),
+        loadResource: vi.fn(options => settledResource(rows, options)),
+        saveResource: vi.fn(() => true),
+    });
+
+    it('keeps newer manual loading authoritative over an older single-flight walk', async () => {
+        const settledIncomeStore = keptReading();
+        let incomeCall = 0;
+        let resolveOldWalk;
+        let resolveManualWalk;
+        moduleMocks.futuresAdapter.getIncomePage.mockImplementation(() => {
+            incomeCall += 1;
+            if (incomeCall === 1) {
+                return new Promise((resolve) => { resolveOldWalk = resolve; });
+            }
+            if (incomeCall === SETTLED_ALL_INCOME_TYPES.length + 1) {
+                return new Promise((resolve) => { resolveManualWalk = resolve; });
+            }
+            return Promise.resolve({ rows: [], full: false });
+        });
+
+        await startFuturesDeskForSettled({ settledIncomeStore });
+        expect(resolveOldWalk).toBeTypeOf('function');
+        moduleMocks.rendererConnection.sendUTF.mockClear();
+        settledIncomeStore.saveResource.mockClear();
+
+        const command = moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                version: 1,
+                marketType: 'futures',
+                accountId: 'default',
+                action: 'account.refresh',
+                clientOrderId: 'manual-over-old-walk',
+                manual: true,
+                symbol: 'BTCUSDT',
+            }),
+        });
+        await flushMicrotasks();
+        const loadingFrame = settledFrames().at(-1);
+        expect(loadingFrame).toMatchObject({ reason: 'refresh', status: 'loading' });
+        expect(Object.values(loadingFrame.lanes).every(
+            lane => lane.status === 'loading',
+        )).toBe(true);
+
+        resolveOldWalk({ rows: [], full: false });
+        await vi.advanceTimersByTimeAsync(10_000);
+        await flushMicrotasks();
+        expect(resolveManualWalk).toBeTypeOf('function');
+        // Finishing the old bootstrap cannot flash ready/stale/error or persist
+        // process-local loading while the requested pass waits at its first row.
+        expect(settledFrames().at(-1).status).toBe('loading');
+        expect(settledFrames().slice(1).every(frame => frame.status === 'loading')).toBe(true);
+        expect(settledIncomeStore.saveResource).not.toHaveBeenCalled();
+
+        resolveManualWalk({ rows: [], full: false });
+        await vi.advanceTimersByTimeAsync(10_000);
+        await flushMicrotasks();
+        await command;
+
+        expect(settledFrames().at(-1)).toMatchObject({
+            reason: 'refresh',
+            status: 'ready',
+            complete: true,
+        });
+        expect(settledIncomeStore.saveResource).toHaveBeenCalled();
+        expect(settledIncomeStore.saveResource.mock.calls.at(-1)[0].resource.status)
+            .toBe('ready');
+    });
+
+    it('persists event debt without persisting process-local manual loading', async () => {
+        const settledIncomeStore = keptReading();
+        await startFuturesDeskForSettled({ settledIncomeStore });
+        const socket = await openFuturesHistoryStream();
+        moduleMocks.rendererConnection.sendUTF.mockClear();
+        settledIncomeStore.saveResource.mockClear();
+
+        let resolveManualLane;
+        let heldManualLane = false;
+        moduleMocks.futuresAdapter.getIncomePage.mockImplementation(() => {
+            if (!heldManualLane) {
+                heldManualLane = true;
+                return new Promise((resolve) => { resolveManualLane = resolve; });
+            }
+            return Promise.resolve({ rows: [], full: false });
+        });
+        const command = moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                version: 1,
+                marketType: 'futures',
+                accountId: 'default',
+                action: 'account.refresh',
+                clientOrderId: 'manual-loading-event-debt',
+                manual: true,
+                symbol: 'BTCUSDT',
+            }),
+        });
+        await flushMicrotasks();
+        expect(settledFrames().at(-1).status).toBe('loading');
+
+        sendFundingEvent(socket, Date.now());
+        expect(settledIncomeStore.saveResource).toHaveBeenCalledTimes(1);
+        const durable = settledIncomeStore.saveResource.mock.calls[0][0].resource;
+        expect(durable.lanes.FUNDING_FEE).toMatchObject({
+            status: 'stale',
+            complete: false,
+            confirmationNotBefore: expect.any(Number),
+        });
+        expect(Object.values(durable.lanes).every(lane => lane.status !== 'loading')).toBe(true);
+
+        await vi.advanceTimersByTimeAsync(5_000);
+        await flushMicrotasks();
+        expect(resolveManualLane).toBeTypeOf('function');
+        resolveManualLane({ rows: [], full: false });
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        await command;
+    });
+
+    it('does not extend an event-derived confirmation deadline when bootstrap advances target', async () => {
+        let eventTarget = null;
+        let eventDeadline = null;
+        const settledIncomeStore = {
+            loadResource: vi.fn((options) => {
+                const kept = settledResource([], options);
+                eventTarget = Math.ceil((options.now - 90_000) / 1_000) * 1_000;
+                eventDeadline = eventTarget + 2 * 60_000;
+                const lanes = {
+                    ...kept.lanes,
+                    FUNDING_FEE: createFuturesSettledIncomeLane('FUNDING_FEE', {
+                        ...kept.lanes.FUNDING_FEE,
+                        targetTo: eventTarget,
+                        status: 'stale',
+                        complete: false,
+                        confirmationNotBefore: eventDeadline,
+                    }),
+                };
+                return createFuturesSettledIncomeResource({ lanes, generation: 8 });
+            }),
+            saveResource: vi.fn(() => true),
+        };
+
+        await startFuturesDeskForSettled({ settledIncomeStore });
+
+        const written = settledIncomeStore.saveResource.mock.calls.at(-1)?.[0]
+            ?.resource.lanes.FUNDING_FEE;
+        expect(written).toBeDefined();
+        expect(written.targetTo).toBeGreaterThan(eventTarget);
+        expect(written.confirmationNotBefore).toBe(eventDeadline);
+        expect(written.status).toBe('stale');
+        expect(written.complete).toBe(false);
+    });
+
+    it('restores confirmation debt and waits for its deadline before confirming', async () => {
+        let confirmationNotBefore = null;
+        const settledIncomeStore = {
+            loadResource: vi.fn((options) => {
+                const kept = settledResource([], options);
+                confirmationNotBefore = options.now + 2 * 60_000;
+                const lanes = {
+                    ...kept.lanes,
+                    FUNDING_FEE: createFuturesSettledIncomeLane('FUNDING_FEE', {
+                        ...kept.lanes.FUNDING_FEE,
+                        status: 'stale',
+                        complete: false,
+                        confirmationNotBefore,
+                    }),
+                };
+                return createFuturesSettledIncomeResource({ lanes, generation: 8 });
+            }),
+            saveResource: vi.fn(() => true),
+        };
+
+        await startFuturesDeskForSettled({ settledIncomeStore });
+
+        expect(settledFrames().at(-1).lanes.FUNDING_FEE).toMatchObject({
+            status: 'stale',
+            complete: false,
+        });
+        const durableConfirmationNotBefore = settledIncomeStore.saveResource.mock.calls.at(-1)
+            ?.[0]?.resource.lanes.FUNDING_FEE.confirmationNotBefore;
+        // The live timer keeps the exact restored deadline. The durable copy is
+        // rounded only upward, so a crash after another event in the same bucket
+        // cannot restart early and miss that event's late exchange row.
+        expect(durableConfirmationNotBefore).toBeGreaterThanOrEqual(confirmationNotBefore);
+        expect(durableConfirmationNotBefore).toBeLessThan(confirmationNotBefore + 1_000);
+
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
+        const remaining = confirmationNotBefore - Date.now();
+        expect(remaining).toBeGreaterThan(0);
+        await vi.advanceTimersByTimeAsync(remaining - 1);
+        await flushMicrotasks();
+        expect(moduleMocks.futuresAdapter.getIncomePage).not.toHaveBeenCalled();
+
+        await vi.advanceTimersByTimeAsync(1);
+        await flushMicrotasks();
+        // The restored deadline re-arms the confirmation scheduler; its ordinary
+        // read debounce still applies after that deadline expires.
+        expect(moduleMocks.futuresAdapter.getIncomePage).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+
+        expect(incomeKindsAsked()).toEqual(['FUNDING_FEE']);
+        expect(settledFrames().at(-1).lanes.FUNDING_FEE.status).toBe('ready');
+        expect(settledIncomeStore.saveResource.mock.calls.at(-1)?.[0]
+            ?.resource.lanes.FUNDING_FEE.confirmationNotBefore)
+            .toBeNull();
+    });
+
+    it('does not rewrite the full resource for a duplicate same-deadline witness', async () => {
+        const settledIncomeStore = keptReading();
+        await startFuturesDeskForSettled({ settledIncomeStore });
+        const socket = await openFuturesHistoryStream();
+        settledIncomeStore.saveResource.mockClear();
+        moduleMocks.rendererConnection.sendUTF.mockClear();
+
+        // Fake time is unchanged between these two messages. The first one makes
+        // credit confirmation durable; the second carries no newer deadline and
+        // must not synchronously serialize the complete lane ledger again.
+        sendExecutionFill(socket, 901);
+        sendExecutionFill(socket, 902);
+
+        expect(settledIncomeStore.saveResource).toHaveBeenCalledTimes(1);
+        expect(settledFrames()).toHaveLength(1);
+    });
+
+    it('does not revisit dense retained rows for a same-bucket fill witness', async () => {
+        const denseRows = SETTLED_CREDIT_INCOME_TYPES.flatMap((incomeType, typeIndex) => (
+            Array.from({ length: 256 }, (_, index) => ({
+                symbol: '',
+                incomeType,
+                income: '0.01',
+                asset: 'USDT',
+                time: Date.now() - 60 * 60_000 - index,
+                tranId: String(10_000_000 + typeIndex * 1_000 + index),
+            }))
+        ));
+        const settledIncomeStore = keptReading(denseRows);
+        await startFuturesDeskForSettled({ settledIncomeStore });
+        const socket = await openFuturesHistoryStream();
+        settledIncomeStore.saveResource.mockClear();
+
+        sendExecutionFill(socket, 9_001);
+        expect(settledIncomeStore.saveResource).toHaveBeenCalledTimes(1);
+        const persisted = settledIncomeStore.saveResource.mock.calls[0][0].resource;
+        let retainedRowReads = 0;
+        for (const incomeType of SETTLED_CREDIT_INCOME_TYPES) {
+            const rows = persisted.lanes[incomeType].rows;
+            expect(rows.size).toBe(256);
+            for (const [identity, row] of rows) {
+                rows.set(identity, new Proxy(row, {
+                    get(target, property, receiver) {
+                        retainedRowReads += 1;
+                        return Reflect.get(target, property, receiver);
+                    },
+                }));
+            }
+        }
+
+        // Same fake wall time means the durable target/deadline scalars are
+        // already covered. The scheduler must return before lane construction,
+        // which would read and canonicalize every proxied row again.
+        sendExecutionFill(socket, 9_002);
+
+        expect(retainedRowReads).toBe(0);
+        expect(settledIncomeStore.saveResource).toHaveBeenCalledTimes(1);
+    });
+
+    it('coalesces one hundred distinct-millisecond fills into one restart-safe write', async () => {
+        const settledIncomeStore = keptReading();
+        await startFuturesDeskForSettled({ settledIncomeStore });
+        const socket = await openFuturesHistoryStream();
+        settledIncomeStore.saveResource.mockClear();
+
+        // Keep every fill inside one durable second while preserving a distinct
+        // wall-clock millisecond for each witness. The first write covers the
+        // whole bucket; the following 99 only move the exact in-memory timer.
+        const firstAt = Math.ceil(Date.now() / 1_000) * 1_000 + 100;
+        for (let index = 0; index < 100; index += 1) {
+            vi.setSystemTime(firstAt + index);
+            sendExecutionFill(socket, 1_000 + index);
+        }
+
+        expect(settledIncomeStore.saveResource).toHaveBeenCalledTimes(1);
+        const written = settledIncomeStore.saveResource.mock.calls[0][0].resource;
+        const latestAt = firstAt + 99;
+        const durableTarget = Math.ceil(firstAt / 1_000) * 1_000;
+        for (const incomeType of SETTLED_CREDIT_INCOME_TYPES) {
+            expect(written.lanes[incomeType]).toMatchObject({
+                targetTo: durableTarget,
+                confirmationNotBefore: durableTarget + 2 * 60_000,
+                status: 'stale',
+                complete: false,
+            });
+            expect(written.lanes[incomeType].confirmationNotBefore)
+                .toBeGreaterThanOrEqual(latestAt + 2 * 60_000);
+        }
+
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
+        await vi.advanceTimersByTimeAsync(2 * 60_000 - 1);
+        await flushMicrotasks();
+        expect(moduleMocks.futuresAdapter.getIncomePage).not.toHaveBeenCalled();
+    });
+
+    it('finalizes an in-flight generation seven walk after newer event generations', async () => {
+        const settledIncomeStore = keptReading();
+        let resolveFirstLane;
+        let heldFirstLane = true;
+        moduleMocks.futuresAdapter.getIncomePage.mockImplementation(() => {
+            if (!heldFirstLane) return Promise.resolve({ rows: [], full: false });
+            heldFirstLane = false;
+            return new Promise((resolve) => { resolveFirstLane = resolve; });
+        });
+
+        await startFuturesDeskForSettled({ settledIncomeStore });
+        const socket = await openFuturesHistoryStream();
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        expect(resolveFirstLane).toBeTypeOf('function');
+        settledIncomeStore.saveResource.mockClear();
+
+        const firstAt = Math.ceil(Date.now() / 1_000) * 1_000 + 100;
+        vi.setSystemTime(firstAt);
+        sendExecutionFill(socket, 2_001);
+        vi.setSystemTime(firstAt + 1_000);
+        sendExecutionFill(socket, 2_002);
+
+        expect(settledIncomeStore.saveResource.mock.calls.map(
+            ([{ resource }]) => resource.generation,
+        )).toEqual([8, 9]);
+
+        resolveFirstLane({ rows: [], full: false });
+        await vi.advanceTimersByTimeAsync(5_000);
+        await flushMicrotasks();
+
+        const saved = settledIncomeStore.saveResource.mock.calls.map(
+            ([{ resource }]) => ({ generation: resource.generation, digest: resource.digest }),
+        );
+        expect(saved.at(-1).generation).toBeGreaterThan(9);
+        expect(saved.every((entry, index) => (
+            index === 0 || entry.generation >= saved[index - 1].generation
+        ))).toBe(true);
+        const digestsByGeneration = new Map();
+        for (const { generation, digest } of saved) {
+            const held = digestsByGeneration.get(generation);
+            expect(held === undefined || held === digest).toBe(true);
+            digestsByGeneration.set(generation, digest);
+        }
+        for (const incomeType of SETTLED_CREDIT_INCOME_TYPES) {
+            expect(settledIncomeStore.saveResource.mock.calls.at(-1)[0]
+                .resource.lanes[incomeType].confirmationNotBefore).not.toBeNull();
+        }
     });
 
     it('reads only the tail when the last run left a reading', async () => {
         const settledIncomeStore = keptReading([{
             symbol: 'BEATUSDT', incomeType: 'FUNDING_FEE', income: '-1.5',
-            asset: 'USDT', time: Date.now() - 3_600_000, tranId: 'kept-row',
+            asset: 'USDT', time: Date.now() - 3_600_000, tranId: '700000000000000010',
         }]);
         await startFuturesDeskForSettled({ settledIncomeStore });
+        const beforeRefresh = moduleMocks.futuresAdapter.getIncomePage.mock.calls.length;
 
         await runFuturesCommand({
             action: 'account.refresh', clientOrderId: 'kept-tail', symbol: 'BTCUSDT',
@@ -4334,14 +6162,84 @@ describe('setupBinanceConnection user-data orchestration', () => {
         await vi.advanceTimersByTimeAsync(30_000);
         await flushMicrotasks();
 
-        expect(settledIncomeStore.load).toHaveBeenCalled();
-        // One page — six reads, one per kind — where a cold start is two pages.
-        const asked = moduleMocks.futuresAdapter.getIncomePage.mock.calls;
-        expect(asked.length).toBe(6);
+        expect(settledIncomeStore.loadResource).toHaveBeenCalled();
+        // One page — six new reads, one per kind. The activation bootstrap has
+        // already made its independent baseline pass.
+        const asked = moduleMocks.futuresAdapter.getIncomePage.mock.calls.slice(beforeRefresh);
+        expect(asked.length).toBe(SETTLED_ALL_INCOME_TYPES.length);
         // And it resumes near the kept edge rather than at the window's start.
         expect(asked[0][0].startTime).toBeGreaterThan(Date.now() - 7 * 24 * 60 * 60 * 1000);
         // What it ends up holding goes back to disk.
-        expect(settledIncomeStore.save).toHaveBeenCalled();
+        expect(settledIncomeStore.saveResource).toHaveBeenCalled();
+    });
+
+    it('stores and broadcasts one same-count correction with exact unsafe identities', async () => {
+        const observedAt = Date.now();
+        const retainedRows = [
+            {
+                symbol: 'BEATUSDT', incomeType: 'FUNDING_FEE', income: '-1.5',
+                asset: 'USDT', time: observedAt - 60 * 60_000,
+                tranId: '90071992547409931234',
+            },
+            {
+                symbol: 'BEATUSDT', incomeType: 'FUNDING_FEE', income: '-2.5',
+                asset: 'USDT', time: observedAt - 61 * 60_000,
+                tranId: '90071992547409931235',
+            },
+        ];
+        const correctedRows = [
+            { ...retainedRows[0], income: '-9.75' },
+            { ...retainedRows[1], tranId: '90071992547409931236' },
+        ];
+        const settledIncomeStore = keptReading(retainedRows);
+        moduleMocks.futuresAdapter.credentialFingerprint = ACCOUNT_FINGERPRINT;
+
+        await startFuturesDeskForSettled({ settledIncomeStore });
+        const before = settledFrames().at(-1);
+        expect(before.lanes.FUNDING_FEE.rows).toHaveLength(2);
+        settledIncomeStore.saveResource.mockClear();
+        moduleMocks.rendererConnection.sendUTF.mockClear();
+        moduleMocks.futuresAdapter.getIncomePage.mockImplementation(({ incomeType }) => (
+            Promise.resolve({
+                rows: incomeType === 'FUNDING_FEE'
+                    ? [correctedRows[1], correctedRows[0], correctedRows[0]]
+                    : [],
+                full: false,
+            })
+        ));
+
+        await vi.advanceTimersByTimeAsync(60 * 60_000);
+        await flushMicrotasks();
+
+        const verifications = settledFrames().filter(frame => frame.reason === 'verification');
+        expect(verifications).toHaveLength(1);
+        const corrected = verifications[0];
+        expect(corrected).toMatchObject({
+            accountFingerprint: ACCOUNT_FINGERPRINT,
+            status: 'ready',
+            complete: true,
+        });
+        expect(corrected.generation).toBeGreaterThan(before.generation);
+        expect(corrected.digest).not.toBe(before.digest);
+        expect(corrected.lanes.FUNDING_FEE.rows.map(row => ({
+            tranId: row.tranId,
+            income: row.income,
+        }))).toEqual([
+            { tranId: '90071992547409931236', income: '-2.5' },
+            { tranId: '90071992547409931234', income: '-9.75' },
+        ]);
+
+        expect(settledIncomeStore.loadResource).toHaveBeenCalledWith(expect.objectContaining({
+            fingerprint: ACCOUNT_FINGERPRINT,
+        }));
+        const saved = settledIncomeStore.saveResource.mock.calls.at(-1)?.[0];
+        expect(saved?.fingerprint).toBe(ACCOUNT_FINGERPRINT);
+        expect(saved?.resource).toMatchObject({
+            generation: corrected.generation,
+            digest: corrected.digest,
+        });
+        expect([...saved.resource.lanes.FUNDING_FEE.rows.values()].map(row => row.tranId))
+            .toEqual(['90071992547409931236', '90071992547409931234']);
     });
 
     // A kept reading is only safe while it is checked. This is the check: the
@@ -4351,20 +6249,8 @@ describe('setupBinanceConnection user-data orchestration', () => {
     it('drops a kept row the exchange no longer states, and says how many', async () => {
         const settledIncomeStore = keptReading([{
             symbol: 'BEATUSDT', incomeType: 'FUNDING_FEE', income: '-1.5',
-            asset: 'USDT', time: Date.now() - 3_600_000, tranId: 'never-happened',
+            asset: 'USDT', time: Date.now() - 5 * 60_000, tranId: '700000000000000001',
         }]);
-        // Never verified, so it is checked on sight.
-        settledIncomeStore.load = vi.fn(({ windowFrom, now }) => ({
-            rows: new Map([['FUNDING_FEE:never-happened', {
-                symbol: 'BEATUSDT', incomeType: 'FUNDING_FEE', income: '-1.5',
-                asset: 'USDT', time: now - 3_600_000, tranId: 'never-happened',
-            }]]),
-            from: windowFrom,
-            to: now - 60_000,
-            slice: null,
-            gap: null,
-            verifiedAt: null,
-        }));
         const kept = [];
         const diagnosticRecord = {
             ...DESK_DIAGNOSTICS_UNRECORDED,
@@ -4383,11 +6269,9 @@ describe('setupBinanceConnection user-data orchestration', () => {
         // The exchange answers with nothing, so the kept row is gone and the
         // desk says so rather than keeping it because it was once read.
         expect(settled.some(entry => entry.restored === 1)).toBe(true);
-        // Checked, and said so. `missing: 0` on a pass that never looked reads
-        // exactly like `missing: 0` on a pass that looked and agreed.
-        expect(settled.some(entry => entry.verified === 1 && entry.missing === 1)).toBe(true);
-        const saved = settledIncomeStore.save.mock.calls.at(-1)?.[0];
-        expect(saved?.held.rows.has('FUNDING_FEE:never-happened')).toBe(false);
+        const saved = settledIncomeStore.saveResource.mock.calls.at(-1)?.[0];
+        expect([...saved.resource.rows.values()]
+            .some(row => row.tranId === '700000000000000001')).toBe(false);
     });
 
     // The verification is the one pass that walks from nothing, so it is the one
@@ -4398,20 +6282,9 @@ describe('setupBinanceConnection user-data orchestration', () => {
     it('keeps the kept reading when the hour\'s verification is refused', async () => {
         const keptRow = {
             symbol: 'BEATUSDT', incomeType: 'FUNDING_FEE', income: '-1.5',
-            asset: 'USDT', time: Date.now() - 3_600_000, tranId: 'still-real',
+            asset: 'USDT', time: Date.now() - 3_600_000, tranId: '700000000000000011',
         };
-        const settledIncomeStore = {
-            load: vi.fn(({ windowFrom, now }) => ({
-                rows: new Map([['FUNDING_FEE:still-real', { ...keptRow, time: now - 3_600_000 }]]),
-                from: windowFrom,
-                to: now - 60_000,
-                slice: null,
-                gap: null,
-                // Never verified, so this pass checks it — and the check refuses.
-                verifiedAt: null,
-            })),
-            save: vi.fn(() => true),
-        };
+        const settledIncomeStore = keptReading([keptRow]);
         moduleMocks.futuresAdapter.getIncomePage.mockRejectedValue(
             Object.assign(new Error('gateway'), { code: 'ETIMEDOUT' }),
         );
@@ -4421,6 +6294,11 @@ describe('setupBinanceConnection user-data orchestration', () => {
             action: 'account.refresh', clientOrderId: 'verify-refused', symbol: 'BTCUSDT',
         });
         await vi.advanceTimersByTimeAsync(30_000);
+        // The failed bootstrap is still spending physical retry weight when the
+        // manual request arrives. Wait through the limiter window so the pass
+        // authorized for that manual intent, rather than the older completion,
+        // owns the terminal stale commit.
+        await vi.advanceTimersByTimeAsync(90_000);
         await flushMicrotasks();
 
         // What reached the screen, first: this is the property, and the file is
@@ -4429,17 +6307,130 @@ describe('setupBinanceConnection user-data orchestration', () => {
             .map(([message]) => JSON.parse(message))
             .filter(payload => payload.type === 'futures_settled_income');
         expect(frames.length).toBeGreaterThan(0);
-        expect(frames.at(-1).rows.some(entry => entry.symbol === 'BEATUSDT')).toBe(true);
+        expect(Object.values(frames.at(-1).lanes)
+            .some(lane => lane.rows.some(entry => entry.symbol === 'BEATUSDT'))).toBe(true);
 
-        const saved = settledIncomeStore.save.mock.calls.at(-1)?.[0];
+        const saved = settledIncomeStore.saveResource.mock.calls.at(-1)?.[0];
         expect(saved).toBeDefined();
         // The row is still money the desk can account for, and the coverage it
         // could vouch for is not narrowed by a request that never answered.
-        expect(saved.held.rows.has('FUNDING_FEE:still-real')).toBe(true);
-        expect(saved.held.from).toBeLessThanOrEqual(Date.now() - 7 * 24 * 60 * 60 * 1000);
-        // A refusal is not a verdict, so nothing is recorded as contradicted —
-        // and the record must not claim the check happened.
-        expect(saved.verifiedAt).toBeNull();
+        expect([...saved.resource.rows.values()]
+            .some(row => row.symbol === 'BEATUSDT')).toBe(true);
+        expect(saved.resource.coveredFrom)
+            .toBeLessThanOrEqual(Date.now() - 7 * 24 * 60 * 60 * 1000);
+        expect(saved.resource.status).toBe('stale');
+    });
+
+    it('retains a confirmed lane when only that lane refresh is refused', async () => {
+        const retainedId = '700000000000000099';
+        const settledIncomeStore = keptReading([{
+            symbol: 'BEATUSDT', incomeType: 'FEE_RETURN', income: '0.75',
+            asset: 'USDT', time: Date.now() - 5 * 60_000, tranId: retainedId,
+        }]);
+        moduleMocks.futuresAdapter.getIncomePage.mockImplementation(({ incomeType }) => (
+            incomeType === 'FEE_RETURN'
+                ? Promise.reject(Object.assign(new Error('gateway'), { code: 'ETIMEDOUT' }))
+                : Promise.resolve({ rows: [] })
+        ));
+        await startFuturesDeskForSettled({ settledIncomeStore });
+
+        await runFuturesCommand({
+            action: 'account.refresh', clientOrderId: 'one-lane-refused', symbol: 'BTCUSDT',
+        });
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+
+        const frame = moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.type === 'futures_settled_income')
+            .at(-1);
+        expect(frame.status).toBe('stale');
+        expect(Object.values(frame.lanes)
+            .some(lane => lane.rows.some(row => row.tranId === retainedId))).toBe(true);
+        expect(frame.lanes.FEE_RETURN).toMatchObject({ status: 'stale', complete: false });
+        expect(frame.completeByType.FEE_RETURN).toBe(false);
+        expect(frame.lanes.FUNDING_FEE.status).toBe('ready');
+
+        const saved = settledIncomeStore.saveResource.mock.calls.at(-1)?.[0]?.resource;
+        expect([...saved.rows.values()].some(row => row.tranId === retainedId)).toBe(true);
+        expect(saved.lanes.FEE_RETURN.successfulAt).not.toBeNull();
+    });
+
+    it('rejects a non-array income page without replacing retained evidence', async () => {
+        const retainedId = '700000000000000199';
+        const settledIncomeStore = keptReading([{
+            symbol: 'BEATUSDT', incomeType: 'FEE_RETURN', income: '0.75',
+            asset: 'USDT', time: Date.now() - 5 * 60_000, tranId: retainedId,
+        }]);
+        moduleMocks.futuresAdapter.getIncomePage.mockImplementation(({ incomeType }) => (
+            incomeType === 'FEE_RETURN'
+                ? Promise.resolve({ rows: 'not-an-array' })
+                : Promise.resolve({ rows: [] })
+        ));
+        await startFuturesDeskForSettled({ settledIncomeStore });
+
+        await runFuturesCommand({
+            action: 'account.refresh', clientOrderId: 'non-array-income', symbol: 'BTCUSDT',
+        });
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+
+        const frame = settledFrames().at(-1);
+        expect(frame.lanes.FEE_RETURN).toMatchObject({
+            status: 'stale',
+            complete: false,
+            error: { code: 'INVALID_INCOME_PAGE' },
+        });
+        expect(frame.lanes.FEE_RETURN.rows
+            .some(row => row.tranId === retainedId)).toBe(true);
+
+        const saved = settledIncomeStore.saveResource.mock.calls.at(-1)?.[0]?.resource;
+        expect([...saved.rows.values()].some(row => row.tranId === retainedId)).toBe(true);
+        expect(saved.completeByType.FEE_RETURN).toBe(false);
+    });
+
+    it('never writes quoted request credentials from an income failure to logs', async () => {
+        const refusal = Object.assign(new Error(
+            'network headers={"Authorization":"Basic BASIC_SECRET",'
+            + '"Proxy-Authorization":"Bearer PROXY_SECRET",'
+            + '"X-MBX-APIKEY":"KEY_SECRET","signature":"SIGNATURE_SECRET"}',
+        ), { code: 'ETIMEDOUT' });
+        moduleMocks.futuresAdapter.getIncomePage.mockRejectedValue(refusal);
+        const settledIncomeStore = keptReading();
+        await startFuturesDeskForSettled({ settledIncomeStore });
+
+        await vi.advanceTimersByTimeAsync(120_000);
+        await flushMicrotasks();
+
+        const frame = settledFrames().at(-1);
+        const saved = settledIncomeStore.saveResource.mock.calls.at(-1)?.[0]?.resource;
+        const exposed = JSON.stringify({
+            warnings: console.warn.mock.calls,
+            frame,
+            saved: saved === undefined ? null : {
+                ...saved,
+                rows: [...saved.rows.values()],
+                lanes: Object.fromEntries(Object.entries(saved.lanes).map(([type, lane]) => [
+                    type,
+                    { ...lane, rows: [...lane.rows.values()] },
+                ])),
+            },
+        });
+        for (const secret of [
+            'BASIC_SECRET',
+            'PROXY_SECRET',
+            'KEY_SECRET',
+            'SIGNATURE_SECRET',
+            'Authorization',
+            'Proxy-Authorization',
+            'X-MBX-APIKEY',
+            'signature',
+        ]) expect(exposed).not.toContain(secret);
+        expect(frame.error).toMatchObject({
+            code: 'ETIMEDOUT',
+            message: 'Income history read failed [credentials redacted]',
+        });
+        expect(saved.error).toEqual(frame.error);
     });
 
     it('answers a futures history command without touching account resources', async () => {
@@ -4451,25 +6442,47 @@ describe('setupBinanceConnection user-data orchestration', () => {
             accept: vi.fn(() => moduleMocks.rendererConnection),
         });
         await activateMarket('futures-live');
+        moduleMocks.futuresAdapter.credentialFingerprint = ACCOUNT_FINGERPRINT;
+        moduleMocks.futuresAdapter.getTradeHistory.mockResolvedValue([futuresHistoryTrade({
+            id: '2',
+            symbol: 'BTCUSDT',
+            realizedPnl: '-96.74',
+            time: Date.now() - 1,
+        })]);
 
         await runFuturesCommand({
             action: 'account.history',
             clientOrderId: 'history-1',
             symbol: 'BTCUSDT',
+            basisOnly: true,
         });
 
         expect(moduleMocks.futuresAdapter.getOrderHistory).toHaveBeenCalledWith({ symbol: 'BTCUSDT' });
-        expect(moduleMocks.futuresAdapter.getTradeHistory).toHaveBeenCalledWith({ symbol: 'BTCUSDT' });
+        expect(moduleMocks.futuresAdapter.getTradeHistory).toHaveBeenCalledWith(
+            expect.objectContaining({
+                symbol: 'BTCUSDT',
+                startTime: expect.any(Number),
+                endTime: expect.any(Number),
+                limit: 1000,
+            }),
+        );
         const [history] = moduleMocks.rendererConnection.sendUTF.mock.calls
             .map(([message]) => JSON.parse(message))
             .filter(payload => payload.futures_history);
         expect(history.futures_history).toMatchObject({
+            accountFingerprint: ACCOUNT_FINGERPRINT,
             symbol: 'BTCUSDT',
             symbols: ['BTCUSDT'],
+            readAt: expect.any(Number),
+            basisOnly: true,
+            merge: {
+                BTCUSDT: { orders: false, trades: false },
+            },
             orders: [{ orderId: 1, status: 'FILLED' }],
-            trades: [{ id: 2, realizedPnl: '-96.74' }],
+            trades: [{ id: '2', realizedPnl: '-96.74' }],
             error: null,
         });
+        expect(Number.isSafeInteger(history.futures_history.readAt)).toBe(true);
     });
 
     // A session spans the contracts it was traded on, not the one on screen. The
@@ -4487,8 +6500,13 @@ describe('setupBinanceConnection user-data orchestration', () => {
         moduleMocks.futuresAdapter.getTradedSymbolPage.mockResolvedValueOnce({
             symbols: ['BICOUSDT', 'BTCUSDT', 'BEATUSDT'], full: false, lastTime: 9,
         });
-        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({ symbol }) => (
-            Promise.resolve([{ id: 2, symbol, realizedPnl: '1', time: symbol === 'BICOUSDT' ? 9 : 1 }])
+        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({ symbol, endTime }) => (
+            Promise.resolve([futuresHistoryTrade({
+                id: '2',
+                symbol,
+                realizedPnl: '1',
+                time: endTime - (symbol === 'BICOUSDT' ? 1 : 2),
+            })])
         ));
         // One contract refusing must not blank the rest of the review.
         moduleMocks.futuresAdapter.getOrderHistory.mockImplementation(({ symbol }) => (
@@ -4545,9 +6563,9 @@ describe('setupBinanceConnection user-data orchestration', () => {
 
         const day = 24 * 60 * 60 * 1000;
         const [[recentPage], [olderPage]] = moduleMocks.futuresAdapter.getTradedSymbolPage.mock.calls;
-        // The first read covers the last day and is bounded at neither end above it.
+        // The first read freezes the newest day at the command's own instant.
         expect(recentPage.startTime).toBeGreaterThanOrEqual(before - day);
-        expect(recentPage.endTime).toBeNull();
+        expect(recentPage.endTime).toBe(before);
         // The second covers the rest of the week and stops where the first began.
         expect(olderPage.startTime).toBeLessThanOrEqual(before - (7 * day) + 5);
         expect(olderPage.endTime).toBe(recentPage.startTime - 1);
@@ -4618,7 +6636,10 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(admitted.length - key - 1).toBeGreaterThanOrEqual(10);
         // And the review is not starved for it — every contract still read.
         expect(admitted.filter(entry => entry.startsWith('orders:'))).toHaveLength(11);
-        expect(admitted.filter(entry => entry.startsWith('trades:'))).toHaveLength(11);
+        // These are legacy, cursor-only callers. Their eleven forward reads are
+        // followed by the ten contracts still in flight when reconnect changed
+        // the authenticated stream proof; those need an explicit post-gap read.
+        expect(admitted.filter(entry => entry.startsWith('trades:'))).toHaveLength(21);
     });
 
     it('keeps identical-timestamp income rows across a page boundary', async () => {
@@ -4628,10 +6649,11 @@ describe('setupBinanceConnection user-data orchestration', () => {
             accept: vi.fn(() => moduleMocks.rendererConnection),
         });
         await activateMarket('futures-live');
+        const recentEnd = Date.now();
         moduleMocks.futuresAdapter.getTradedSymbolPage.mockImplementation(({
             endTime, page,
         }) => {
-            if (endTime !== null) {
+            if (endTime !== recentEnd) {
                 return Promise.resolve({ symbols: [], full: false, lastTime: null });
             }
             return Promise.resolve(page === 1
@@ -4647,7 +6669,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
 
         const recentCalls = moduleMocks.futuresAdapter.getTradedSymbolPage.mock.calls
             .map(([request]) => request)
-            .filter(request => request.endTime === null);
+            .filter(request => request.endTime === recentEnd);
         expect(recentCalls.map(request => request.page)).toEqual([1, 2]);
         expect(new Set(recentCalls.map(request => request.startTime)).size).toBe(1);
         const [history] = moduleMocks.rendererConnection.sendUTF.mock.calls
@@ -4744,22 +6766,15 @@ describe('setupBinanceConnection user-data orchestration', () => {
         });
         moduleMocks.futuresAdapter.getTradeHistory.mockReset();
         moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({ symbol, fromTradeId }) => (
-            Promise.resolve([{
+            Promise.resolve([futuresHistoryTrade({
                 symbol,
                 id: String(Number(fromTradeId) + 1),
                 realizedPnl: '1',
                 time: 1,
-            }])
+            })])
         ));
 
-        stream.handlers.message(JSON.stringify({
-            e: 'ORDER_TRADE_UPDATE',
-            E: Date.now(),
-            o: {
-                s: 'BTCUSDT', i: 501, X: 'NEW', S: 'BUY', o: 'LIMIT',
-                p: '1', q: '1', z: '0', T: Date.now(),
-            },
-        }));
+        sendExecutionFill(stream, 501, '0');
         await flushMicrotasks();
         await runFuturesCommand({
             action: 'account.history', clientOrderId: 'history-gap-2', symbol: symbols[0], coverage,
@@ -4777,9 +6792,155 @@ describe('setupBinanceConnection user-data orchestration', () => {
             ETHUSDT: { orderCursor: '101', tradeCursor: '201' },
         });
         const btcOrders = answer.orders.filter(({ symbol }) => symbol === 'BTCUSDT');
-        expect(btcOrders).toHaveLength(100);
-        expect(new Set(btcOrders.map(({ orderId }) => orderId)).size).toBe(100);
-        expect(btcOrders.map(({ orderId }) => orderId)).not.toContain('100');
+        expect(btcOrders).toHaveLength(101);
+        expect(new Set(btcOrders.map(({ orderId }) => orderId)).size).toBe(101);
+        // The endpoint repeats the held cursor inclusively. Keeping it here is
+        // safe because the renderer merges by identity, and avoids silently
+        // trimming a bounded multi-page gap before that merge.
+        expect(btcOrders.map(({ orderId }) => orderId)).toContain('100');
+    });
+
+    it('keeps a frozen trade proof through zero-fill lifecycle reports and dirties it for a fill', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        const stream = await openFuturesHistoryStream();
+        const coverage = futuresHistoryCoverage(['BTCUSDT']);
+        moduleMocks.futuresAdapter.getTradeHistory.mockResolvedValue([]);
+
+        await runFuturesCommand({
+            action: 'account.history',
+            clientOrderId: 'history-lifecycle-proof',
+            symbol: 'BTCUSDT',
+            basisOnly: true,
+            coverage,
+            views: ['trades'],
+        });
+        expect(moduleMocks.futuresAdapter.getTradeHistory).toHaveBeenCalledOnce();
+        moduleMocks.futuresAdapter.getTradeHistory.mockClear();
+
+        for (const [index, status] of ['NEW', 'CANCELED', 'EXPIRED'].entries()) {
+            stream.handlers.message(JSON.stringify({
+                e: 'ORDER_TRADE_UPDATE',
+                E: Date.now() + index,
+                o: {
+                    s: 'BTCUSDT', i: 600 + index, X: status, x: status,
+                    S: 'BUY', o: 'LIMIT', p: '1', q: '1',
+                    z: '0', l: '0', T: Date.now() + index,
+                },
+            }));
+        }
+        await flushMicrotasks();
+        await runFuturesCommand({
+            action: 'account.history',
+            clientOrderId: 'history-lifecycle-proof-held',
+            symbol: 'BTCUSDT',
+            basisOnly: true,
+            coverage,
+            views: ['trades'],
+        });
+        expect(moduleMocks.futuresAdapter.getTradeHistory).not.toHaveBeenCalled();
+
+        moduleMocks.futuresAdapter.getTradeHistory.mockResolvedValue([futuresHistoryTrade({
+            id: '10677',
+            symbol: 'BTCUSDT',
+            side: 'SELL',
+            positionSide: 'BOTH',
+            price: '100',
+            quantity: '1',
+            realizedPnl: '0',
+            commission: '0',
+            commissionAsset: 'USDT',
+            marginAsset: 'USDT',
+            time: Date.now(),
+        })]);
+        sendExecutionFill(stream, 677, '0');
+        await flushMicrotasks();
+        await runFuturesCommand({
+            action: 'account.history',
+            clientOrderId: 'history-lifecycle-fill-dirty',
+            symbol: 'BTCUSDT',
+            basisOnly: true,
+            coverage,
+            views: ['trades'],
+        });
+        expect(moduleMocks.futuresAdapter.getTradeHistory).toHaveBeenCalledOnce();
+        expect(moduleMocks.futuresAdapter.getTradeHistory.mock.calls[0][0])
+            .toMatchObject({ symbol: 'BTCUSDT', fromTradeId: '200' });
+    });
+
+    it('bounds a multi-page order gap to its earliest contiguous chunk and resumes after it', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        await openFuturesHistoryStream();
+        const symbol = 'BTCUSDT';
+        const coverage = {
+            [symbol]: {
+                readAt: Date.now(),
+                orderCursor: '100',
+                tradeCursor: '200',
+            },
+        };
+
+        moduleMocks.futuresAdapter.getOrderHistory.mockImplementation(({ fromOrderId }) => {
+            const first = Number(fromOrderId);
+            return Promise.resolve(Array.from({ length: 100 }, (_, index) => ({
+                symbol,
+                orderId: String(first + index),
+                status: 'FILLED',
+                time: 1,
+            })));
+        });
+        await runFuturesCommand({
+            action: 'account.history',
+            clientOrderId: 'history-bounded-gap-1',
+            symbol,
+            coverage,
+            views: ['orders'],
+        });
+
+        expect(moduleMocks.futuresAdapter.getOrderHistory.mock.calls
+            .map(([request]) => request.fromOrderId)).toEqual(['100', '199', '298']);
+        const bounded = futuresHistoryAnswers().at(-1);
+        const identities = bounded.orders.map(order => order.orderId);
+        expect(identities).toHaveLength(200);
+        expect(identities[0]).toBe('100');
+        expect(identities.at(-1)).toBe('299');
+        expect(identities).not.toContain('300');
+        expect(identities).not.toContain('397');
+
+        // The renderer can advance only through the contiguous chunk it was
+        // actually given. Its next coverage cursor therefore resumes at 299,
+        // rather than skipping the withheld 300..397 tail.
+        moduleMocks.futuresAdapter.getOrderHistory.mockClear();
+        moduleMocks.futuresAdapter.getOrderHistory.mockResolvedValue([
+            { symbol, orderId: '299', status: 'FILLED', time: 1 },
+            { symbol, orderId: '300', status: 'FILLED', time: 1 },
+        ]);
+        await runFuturesCommand({
+            action: 'account.history',
+            clientOrderId: 'history-bounded-gap-2',
+            symbol,
+            coverage: {
+                [symbol]: { ...coverage[symbol], orderCursor: '299' },
+            },
+            views: ['orders'],
+        });
+
+        expect(moduleMocks.futuresAdapter.getOrderHistory).toHaveBeenCalledTimes(1);
+        expect(moduleMocks.futuresAdapter.getOrderHistory).toHaveBeenCalledWith({
+            symbol,
+            fromOrderId: '299',
+        });
+        expect(futuresHistoryAnswers().at(-1).orders.map(order => order.orderId))
+            .toEqual(['299', '300']);
     });
 
     it('does not let one renderer proof skip another renderer older cursor', async () => {
@@ -4826,6 +6987,196 @@ describe('setupBinanceConnection user-data orchestration', () => {
             .toMatchObject({ fromOrderId: '99' });
     });
 
+    it('keeps an in-flight history session owned by its renderer when another activates', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        await openFuturesHistoryStream();
+        const firstCoverage = futuresHistoryCoverage(['BTCUSDT']);
+        let resolveFirstTradeRead;
+        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({ symbol }) => (
+            symbol === 'BTCUSDT'
+                ? new Promise((resolve) => { resolveFirstTradeRead = resolve; })
+                : Promise.resolve([])
+        ));
+
+        const firstRead = startFuturesCommandWithoutAdvancing({
+            action: 'account.history',
+            clientOrderId: 'history-renderer-session-a',
+            symbol: 'BTCUSDT',
+            basisOnly: true,
+            coverage: firstCoverage,
+            views: ['trades'],
+        });
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(resolveFirstTradeRead).toBeTypeOf('function');
+
+        const secondHandlers = {};
+        const secondRenderer = {
+            connected: true,
+            remoteAddress: '127.0.0.1',
+            sendUTF: vi.fn(),
+            drop: vi.fn(),
+            on: vi.fn((event, handler) => { secondHandlers[event] = handler; }),
+        };
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => secondRenderer),
+        });
+        await secondHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'activate_market',
+                marketMode: 'futures-live',
+            }),
+        });
+        secondRenderer.sendUTF.mockClear();
+        const secondRead = secondHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'account.history',
+                version: 1,
+                marketType: 'futures',
+                accountId: 'default',
+                clientOrderId: 'history-renderer-session-b',
+                symbol: 'ETHUSDT',
+                basisOnly: true,
+                coverage: futuresHistoryCoverage(['ETHUSDT']),
+                views: ['trades'],
+            }),
+        });
+
+        resolveFirstTradeRead([futuresHistoryTrade({
+            id: '201',
+            symbol: 'BTCUSDT',
+            realizedPnl: '1',
+            commission: '0',
+            commissionAsset: 'USDT',
+            marginAsset: 'USDT',
+            time: Date.now(),
+        })]);
+        await vi.advanceTimersByTimeAsync(5_000);
+        await Promise.all([firstRead, secondRead]);
+
+        const firstAnswers = futuresHistoryAnswers();
+        const secondAnswers = secondRenderer.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.futures_history)
+            .map(payload => payload.futures_history);
+        expect(firstAnswers.some(answer => answer.symbol === 'BTCUSDT')).toBe(true);
+        expect(secondAnswers.some(answer => answer.symbol === 'ETHUSDT')).toBe(true);
+        expect(firstAnswers.some(answer => answer.symbol === 'ETHUSDT')).toBe(false);
+        expect(secondAnswers.some(answer => answer.symbol === 'BTCUSDT')).toBe(false);
+
+        secondRenderer.connected = false;
+        await secondHandlers.close?.();
+    });
+
+    it('keeps the later shared discovery when two renderer answers cross', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        moduleMocks.futuresAdapter.credentialFingerprint = ACCOUNT_FINGERPRINT;
+
+        const secondHandlers = {};
+        const secondRenderer = {
+            connected: true,
+            remoteAddress: '127.0.0.1',
+            sendUTF: vi.fn(),
+            drop: vi.fn(),
+            on: vi.fn((event, handler) => { secondHandlers[event] = handler; }),
+        };
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => secondRenderer),
+        });
+        await secondHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({ action: 'activate_market', marketMode: 'futures-live' }),
+        });
+        secondRenderer.sendUTF.mockClear();
+
+        const discoveryResolvers = [];
+        moduleMocks.futuresAdapter.getTradedSymbolPage.mockImplementation(() => (
+            new Promise((resolve) => { discoveryResolvers.push(resolve); })
+        ));
+        moduleMocks.futuresAdapter.getOrderHistory.mockResolvedValue([]);
+        const historyCommand = (clientOrderId, symbol) => ({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'account.history',
+                version: 1,
+                marketType: 'futures',
+                accountId: 'default',
+                clientOrderId,
+                symbol,
+                views: ['orders'],
+            }),
+        });
+        const olderSymbols = Array.from({ length: 11 }, (_, index) => (
+            `OLD${String(index + 1).padStart(2, '0')}USDT`
+        ));
+        const newerSymbols = Array.from({ length: 11 }, (_, index) => (
+            `NEW${String(index + 1).padStart(2, '0')}USDT`
+        ));
+
+        const olderRead = moduleMocks.rendererHandlers.message(
+            historyCommand('history-crossed-discovery-old', 'AUSDT'),
+        );
+        for (let step = 0; step < 10 && discoveryResolvers.length < 1; step += 1) {
+            await vi.advanceTimersByTimeAsync(FUTURES_REST_ADMISSION_SPACING_MS);
+        }
+        expect(discoveryResolvers).toHaveLength(1);
+        const newerRead = secondHandlers.message(
+            historyCommand('history-crossed-discovery-new', 'BUSDT'),
+        );
+        for (let step = 0; step < 10 && discoveryResolvers.length < 2; step += 1) {
+            await vi.advanceTimersByTimeAsync(FUTURES_REST_ADMISSION_SPACING_MS);
+        }
+        expect(discoveryResolvers).toHaveLength(2);
+
+        // The later-issued renderer finishes and commits first. Eleven discovered
+        // contracts plus its selected seed fill the fan-out, so no older income
+        // page obscures which request owns each deferred answer.
+        discoveryResolvers[1]({ symbols: newerSymbols, full: false, lastTime: 2_000 });
+        await vi.advanceTimersByTimeAsync(10_000);
+        await newerRead;
+        discoveryResolvers[0]({ symbols: olderSymbols, full: false, lastTime: 1_000 });
+        await vi.advanceTimersByTimeAsync(10_000);
+        await olderRead;
+
+        const firstRendererAnswer = futuresHistoryAnswers().find(answer => (
+            answer.symbol === 'AUSDT'
+        ));
+        const secondRendererAnswer = secondRenderer.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .find(payload => payload.futures_history?.symbol === 'BUSDT')
+            ?.futures_history;
+        expect(firstRendererAnswer?.symbols).toEqual(['AUSDT', ...olderSymbols]);
+        expect(secondRendererAnswer?.symbols).toEqual(['BUSDT', ...newerSymbols]);
+
+        moduleMocks.futuresAdapter.getTradedSymbolPage.mockClear();
+        await runFuturesCommand({
+            action: 'account.history',
+            clientOrderId: 'history-crossed-discovery-probe',
+            symbol: 'PROBEUSDT',
+            views: ['orders'],
+        });
+        expect(moduleMocks.futuresAdapter.getTradedSymbolPage).not.toHaveBeenCalled();
+        expect(futuresHistoryAnswers().at(-1).symbols).toEqual([
+            'PROBEUSDT', ...newerSymbols,
+        ]);
+
+        secondRenderer.connected = false;
+        await secondHandlers.close?.();
+    });
+
     it('invalidates every history proof when the authenticated stream disconnects', async () => {
         setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
         moduleMocks.websocketServerHandlers.request({
@@ -4852,6 +7203,45 @@ describe('setupBinanceConnection user-data orchestration', () => {
             .map(([{ symbol }]) => symbol))).toEqual(new Set(symbols));
         expect(new Set(moduleMocks.futuresAdapter.getTradeHistory.mock.calls
             .map(([{ symbol }]) => symbol))).toEqual(new Set(symbols));
+    });
+
+    it('announces every authenticated stream reopen as a renderer reconcile generation', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        moduleMocks.futuresAdapter.credentialFingerprint = ACCOUNT_FINGERPRINT;
+        moduleMocks.rendererConnection.sendUTF.mockClear();
+        const firstStream = await openFuturesHistoryStream();
+        const reconciles = () => moduleMocks.rendererConnection.sendUTF.mock.calls
+            .map(([message]) => JSON.parse(message))
+            .filter(payload => payload.type === 'futures_history_reconcile');
+        expect(reconciles()).toEqual([
+            expect.objectContaining({
+                version: 1,
+                generation: 1,
+                accountFingerprint: ACCOUNT_FINGERPRINT,
+            }),
+        ]);
+
+        moduleMocks.rendererConnection.sendUTF.mockClear();
+        firstStream.handlers.close();
+        await vi.advanceTimersByTimeAsync(6_000);
+        await flushMicrotasks();
+        const secondStream = moduleMocks.futuresUserDataSockets.at(-1);
+        expect(secondStream).not.toBe(firstStream);
+        secondStream.handlers.open();
+        await flushMicrotasks();
+
+        expect(reconciles()).toEqual([
+            expect.objectContaining({
+                version: 1,
+                generation: 2,
+                accountFingerprint: ACCOUNT_FINGERPRINT,
+            }),
+        ]);
     });
 
     it('drops held history discovery when the last renderer disconnects', async () => {
@@ -5003,6 +7393,21 @@ describe('setupBinanceConnection user-data orchestration', () => {
         await activateMarket('futures-live');
         const stream = await openFuturesHistoryStream();
         const initialCoverage = futuresHistoryCoverage(['BTCUSDT']);
+        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({
+            symbol, endTime,
+        }) => Promise.resolve([futuresHistoryTrade({
+            id: '10601',
+            symbol,
+            side: 'BUY',
+            positionSide: 'BOTH',
+            price: '1',
+            quantity: '1',
+            realizedPnl: '0',
+            commission: '0',
+            commissionAsset: 'USDT',
+            marginAsset: 'USDT',
+            time: Number.isSafeInteger(endTime) ? endTime : Date.now(),
+        })]));
         await runFuturesCommand({
             action: 'account.history',
             clientOrderId: 'history-late-coverage-1',
@@ -5011,14 +7416,15 @@ describe('setupBinanceConnection user-data orchestration', () => {
         });
 
         // This contract did not exist when the ten-minute in-memory discovery
-        // answer above was built. The stream names it and the resulting read is
-        // what lets the renderer add it to persisted coverage.
+        // answer above was built. An actual fill names it and the resulting read
+        // is what lets the renderer add it to persisted coverage; a zero-fill
+        // order lifecycle event intentionally does not dirty trade history.
         stream.handlers.message(JSON.stringify({
             e: 'ORDER_TRADE_UPDATE',
             E: Date.now(),
             o: {
-                s: 'LATEUSDT', i: 601, X: 'NEW', S: 'BUY', o: 'LIMIT',
-                p: '1', q: '1', z: '0', T: Date.now(),
+                s: 'LATEUSDT', i: 601, X: 'FILLED', x: 'TRADE', S: 'BUY', o: 'LIMIT',
+                p: '1', q: '1', z: '1', l: '1', t: 10_601, rp: '0', T: Date.now(),
             },
         }));
         await flushMicrotasks();
@@ -5040,6 +7446,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
         };
         moduleMocks.futuresAdapter.getOrderHistory.mockClear();
         moduleMocks.futuresAdapter.getTradeHistory.mockClear();
+        moduleMocks.futuresAdapter.getTradeHistory.mockResolvedValue([]);
         stream.handlers.close();
         await flushMicrotasks();
         await runFuturesCommand({
@@ -5109,6 +7516,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
             .mockResolvedValueOnce({ symbols: ['ETHUSDT'], full: false, lastTime: 100 });
         moduleMocks.futuresAdapter.getOrderHistory.mockClear();
         moduleMocks.futuresAdapter.getTradeHistory.mockClear();
+        moduleMocks.futuresAdapter.getTradeHistory.mockResolvedValue([]);
 
         await runFuturesCommand({
             action: 'account.history',
@@ -5136,6 +7544,1215 @@ describe('setupBinanceConnection user-data orchestration', () => {
         ]);
     });
 
+    it('keeps a dense Full reacquisition additive until one complete replacement lands', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        moduleMocks.futuresAdapter.credentialFingerprint = ACCOUNT_FINGERPRINT;
+        let request = 0;
+        const fullRequests = new Set([1, 2, 3, 6]);
+        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({
+            symbol, startTime, endTime,
+        }) => {
+            request += 1;
+            const size = fullRequests.has(request) ? 1_000 : request <= 8 ? 1 : 0;
+            return Promise.resolve(Array.from({ length: size }, (_, index) => ({
+                id: `${request}${String(index).padStart(4, '0')}`,
+                orderId: `${request}${String(index).padStart(4, '0')}`,
+                symbol,
+                side: 'BUY',
+                positionSide: 'BOTH',
+                price: '1',
+                quantity: '1',
+                realizedPnl: '0',
+                commission: '0',
+                commissionAsset: 'USDT',
+                marginAsset: 'USDT',
+                time: Math.min(endTime, startTime + index),
+            })));
+        });
+
+        await runFuturesCommand({
+            action: 'account.history',
+            clientOrderId: 'history-full-dense',
+            symbol: 'BTCUSDT',
+            basisOnly: true,
+            coverage: {},
+            full: true,
+            views: ['trades'],
+        });
+
+        const partial = futuresHistoryAnswers().at(-1);
+        expect(partial.merge.BTCUSDT.trades).toBe(true);
+        expect(partial.tradeCoverage.BTCUSDT).toMatchObject({
+            complete: false,
+            pageLimited: true,
+            continuityComplete: true,
+        });
+        const acquiredIds = partial.trades.map(trade => trade.id);
+        expect(acquiredIds.length).toBeGreaterThan(0);
+
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+
+        const answers = futuresHistoryAnswers();
+        const completed = answers.find(answer => (
+            answer.readAt > partial.readAt && answer.merge.BTCUSDT?.trades === false
+        ));
+        expect(answers.length).toBeGreaterThanOrEqual(2);
+        expect(completed).toBeDefined();
+        expect(completed.readFrom.BTCUSDT.tradeCursor).toBeNull();
+        expect(completed.tradeCoverage.BTCUSDT.complete).toBe(true);
+        expect(completed.trades.map(trade => trade.id)).toEqual(
+            expect.arrayContaining(acquiredIds),
+        );
+        // The successful post-gap is folded into the one atomic replacement;
+        // the final frame must not leave the renderer in additive repair mode.
+        expect(answers.at(-1).merge.BTCUSDT.trades).toBe(false);
+    });
+
+    it('stops older reacquisition at one exact reverse-flat suffix boundary', async () => {
+        moduleMocks.futuresAdapter.credentialFingerprint = ACCOUNT_FINGERPRINT;
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        const stream = await openFuturesHistoryStream();
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([{
+            type: 'positions', weight: 5, errorLabel: 'positions',
+            loadPayload: vi.fn().mockResolvedValue({
+                futures_positions: [{
+                    symbol: 'BTCUSDT', positionSide: 'BOTH', quantity: '1',
+                    entryPrice: '1', markPrice: '1', unrealizedPnl: '0',
+                }],
+            }),
+        }]);
+        await runFuturesCommand({
+            action: 'account.refresh',
+            clientOrderId: 'history-reverse-flat-position',
+            symbol: 'BTCUSDT',
+        });
+        stream.handlers.ping();
+        let request = 0;
+        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({
+            symbol, startTime, endTime,
+        }) => {
+            request += 1;
+            if (request === 2) {
+                return Promise.resolve([futuresHistoryTrade({
+                    id: '9000001',
+                    symbol,
+                    side: 'BUY',
+                    quantity: '1',
+                    time: startTime,
+                })]);
+            }
+            return Promise.resolve(Array.from({ length: 1_000 }, (_, index) => (
+                futuresHistoryTrade({
+                    id: String((request * 10_000) + index),
+                    symbol,
+                    side: 'BUY',
+                    quantity: '1',
+                    time: Math.min(endTime, startTime),
+                })
+            )));
+        });
+
+        await runFuturesCommand({
+            action: 'account.history',
+            clientOrderId: 'history-reverse-flat-stop',
+            symbol: 'BTCUSDT',
+            basisOnly: true,
+            coverage: {},
+            full: true,
+            views: ['trades'],
+        });
+
+        const answer = futuresHistoryAnswers().at(-1);
+        const evidence = answer.tradeCoverage.BTCUSDT;
+        expect(answer.merge.BTCUSDT.trades).toBe(false);
+        expect(answer.trades).toHaveLength(1);
+        expect(evidence).toMatchObject({
+            version: 2,
+            complete: false,
+            pageLimited: true,
+            retentionLimited: false,
+            continuityComplete: true,
+            flatBoundary: expect.any(Number),
+        });
+        expect(evidence.flatBoundary).toBe(evidence.coveredFrom);
+        expect(evidence.flatBoundary).toBeGreaterThan(evidence.targetFrom);
+        const callsAtBoundary = moduleMocks.futuresAdapter.getTradeHistory.mock.calls.length;
+
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        expect(moduleMocks.futuresAdapter.getTradeHistory).toHaveBeenCalledTimes(
+            callsAtBoundary,
+        );
+    });
+
+    it('clears a candidate reverse-flat edge and resumes the frozen target after reconnect', async () => {
+        moduleMocks.futuresAdapter.credentialFingerprint = ACCOUNT_FINGERPRINT;
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        const stream = await openFuturesHistoryStream();
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([{
+            type: 'positions', weight: 5, errorLabel: 'positions',
+            loadPayload: vi.fn().mockResolvedValue({
+                futures_positions: [{
+                    symbol: 'BTCUSDT', positionSide: 'BOTH', quantity: '1',
+                    entryPrice: '1', markPrice: '1', unrealizedPnl: '0',
+                }],
+            }),
+        }]);
+        await runFuturesCommand({
+            action: 'account.refresh',
+            clientOrderId: 'history-reverse-flat-race-position',
+            symbol: 'BTCUSDT',
+        });
+        stream.handlers.ping();
+        let request = 0;
+        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({
+            symbol, startTime, endTime,
+        }) => {
+            request += 1;
+            if (request === 2) {
+                stream.handlers.close();
+                return Promise.resolve([futuresHistoryTrade({
+                    id: '9000002', symbol, side: 'BUY', quantity: '1', time: startTime,
+                })]);
+            }
+            return Promise.resolve(Array.from({ length: 1_000 }, (_, index) => (
+                futuresHistoryTrade({
+                    id: String((request * 10_000) + index),
+                    symbol,
+                    side: 'BUY',
+                    quantity: '1',
+                    time: Math.min(endTime, startTime),
+                })
+            )));
+        });
+
+        await runFuturesCommand({
+            action: 'account.history',
+            clientOrderId: 'history-reverse-flat-race',
+            symbol: 'BTCUSDT',
+            basisOnly: true,
+            coverage: {},
+            full: true,
+            views: ['trades'],
+        });
+
+        const answer = futuresHistoryAnswers().at(-1);
+        const frozenRequest = moduleMocks.futuresAdapter.getTradeHistory.mock.calls[0][0];
+        expect(answer.merge.BTCUSDT.trades).toBe(true);
+        expect(answer.tradeCoverage.BTCUSDT).toMatchObject({
+            complete: false,
+            flatBoundary: false,
+            retentionLimited: false,
+            targetFrom: frozenRequest.startTime,
+            targetTo: frozenRequest.endTime,
+        });
+    });
+
+    it.each([
+        {
+            name: 'a changed terminal snapshot',
+            trigger: (stream) => stream.handlers.message(JSON.stringify({
+                e: 'ACCOUNT_UPDATE',
+                E: 20_001,
+                T: 20_001,
+                a: {
+                    m: 'ORDER',
+                    B: [],
+                    P: [{
+                        s: 'BTCUSDT', pa: '2', ep: '1', up: '0',
+                        mt: 'cross', iw: '0', ps: 'BOTH',
+                    }],
+                },
+            })),
+        },
+        {
+            name: 'a streamed fill',
+            trigger: (stream) => stream.handlers.message(JSON.stringify({
+                e: 'ORDER_TRADE_UPDATE',
+                E: 20_002,
+                o: {
+                    s: 'BTCUSDT', i: 900_003, X: 'FILLED', x: 'TRADE',
+                    S: 'BUY', o: 'LIMIT', p: '1', q: '1', z: '1', l: '1',
+                    t: 9_000_003, rp: '0', n: '0', N: null,
+                    T: 20_002, ps: 'BOTH', ma: 'USDT',
+                },
+            })),
+        },
+    ])('rejects a candidate reverse-flat edge raced by $name without moving its frozen target', async ({ trigger }) => {
+        moduleMocks.futuresAdapter.credentialFingerprint = ACCOUNT_FINGERPRINT;
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        const stream = await openFuturesHistoryStream();
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([{
+            type: 'positions', weight: 5, errorLabel: 'positions',
+            loadPayload: vi.fn().mockResolvedValue({
+                futures_positions: [{
+                    symbol: 'BTCUSDT', positionSide: 'BOTH', quantity: '1',
+                    entryPrice: '1', markPrice: '1', unrealizedPnl: '0',
+                }],
+            }),
+        }]);
+        await runFuturesCommand({
+            action: 'account.refresh',
+            clientOrderId: 'history-reverse-flat-terminal-race-position',
+            symbol: 'BTCUSDT',
+        });
+        stream.handlers.ping();
+        moduleMocks.rendererConnection.sendUTF.mockClear();
+
+        let request = 0;
+        let resolveCandidate;
+        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({
+            symbol, startTime, endTime, fromTradeId,
+        }) => {
+            if (fromTradeId !== undefined) return Promise.resolve([]);
+            request += 1;
+            if (request === 2) {
+                return new Promise((resolve) => {
+                    resolveCandidate = () => resolve([futuresHistoryTrade({
+                        id: '9000003', symbol, side: 'BUY', quantity: '1', time: startTime,
+                    })]);
+                });
+            }
+            return Promise.resolve(Array.from({ length: 1_000 }, (_, index) => (
+                futuresHistoryTrade({
+                    id: String((request * 10_000) + index),
+                    symbol,
+                    side: 'BUY',
+                    quantity: '1',
+                    time: Math.min(endTime, startTime),
+                })
+            )));
+        });
+
+        const pending = startFuturesCommandWithoutAdvancing({
+            action: 'account.history',
+            clientOrderId: 'history-reverse-flat-terminal-race',
+            symbol: 'BTCUSDT',
+            basisOnly: true,
+            coverage: {},
+            full: true,
+            views: ['trades'],
+        });
+        for (let step = 0; step < 20 && resolveCandidate === undefined; step += 1) {
+            await vi.advanceTimersByTimeAsync(250);
+        }
+        expect(resolveCandidate).toBeTypeOf('function');
+        const frozenRequest = moduleMocks.futuresAdapter.getTradeHistory.mock.calls[0][0];
+
+        trigger(stream);
+        await flushMicrotasks();
+        resolveCandidate();
+        let settled = false;
+        pending.finally(() => { settled = true; });
+        for (let step = 0; step < 20 && !settled; step += 1) {
+            await vi.advanceTimersByTimeAsync(250);
+        }
+        await pending;
+
+        const answer = futuresHistoryAnswers().at(-1);
+        expect(answer.merge.BTCUSDT.trades).toBe(true);
+        expect(answer.tradeCoverage.BTCUSDT).toMatchObject({
+            complete: false,
+            flatBoundary: false,
+            retentionLimited: false,
+            targetFrom: frozenRequest.startTime,
+            targetTo: frozenRequest.endTime,
+        });
+    });
+
+    it.each(['activation change', 'renderer cancellation'])(
+        'publishes no candidate reverse-flat edge after %s',
+        async (race) => {
+            moduleMocks.futuresAdapter.credentialFingerprint = ACCOUNT_FINGERPRINT;
+            setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+            moduleMocks.websocketServerHandlers.request({
+                origin: 'http://localhost:5174',
+                accept: vi.fn(() => moduleMocks.rendererConnection),
+            });
+            await activateMarket('futures-live');
+            const stream = await openFuturesHistoryStream();
+            moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([{
+                type: 'positions', weight: 5, errorLabel: 'positions',
+                loadPayload: vi.fn().mockResolvedValue({
+                    futures_positions: [{
+                        symbol: 'BTCUSDT', positionSide: 'BOTH', quantity: '1',
+                        entryPrice: '1', markPrice: '1', unrealizedPnl: '0',
+                    }],
+                }),
+            }]);
+            await runFuturesCommand({
+                action: 'account.refresh',
+                clientOrderId: 'history-reverse-flat-cancel-position',
+                symbol: 'BTCUSDT',
+            });
+            stream.handlers.ping();
+            moduleMocks.rendererConnection.sendUTF.mockClear();
+
+            let request = 0;
+            let resolveCandidate;
+            moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({
+                symbol, startTime, endTime,
+            }) => {
+                request += 1;
+                if (request === 2) {
+                    return new Promise((resolve) => {
+                        resolveCandidate = () => resolve([futuresHistoryTrade({
+                            id: '9000004', symbol, side: 'BUY', quantity: '1', time: startTime,
+                        })]);
+                    });
+                }
+                return Promise.resolve(Array.from({ length: 1_000 }, (_, index) => (
+                    futuresHistoryTrade({
+                        id: String((request * 10_000) + index),
+                        symbol,
+                        side: 'BUY',
+                        quantity: '1',
+                        time: Math.min(endTime, startTime),
+                    })
+                )));
+            });
+
+            const pending = startFuturesCommandWithoutAdvancing({
+                action: 'account.history',
+                clientOrderId: 'history-reverse-flat-cancel',
+                symbol: 'BTCUSDT',
+                basisOnly: true,
+                coverage: {},
+                full: true,
+                views: ['trades'],
+            });
+            for (let step = 0; step < 20 && resolveCandidate === undefined; step += 1) {
+                await vi.advanceTimersByTimeAsync(250);
+            }
+            expect(resolveCandidate).toBeTypeOf('function');
+
+            if (race === 'activation change') {
+                await moduleMocks.rendererHandlers.message({
+                    type: 'utf8',
+                    utf8Data: JSON.stringify({
+                        action: 'activate_market',
+                        marketMode: 'spot',
+                    }),
+                });
+            } else {
+                moduleMocks.rendererConnection.close();
+            }
+            resolveCandidate();
+            let settled = false;
+            pending.finally(() => { settled = true; });
+            for (let step = 0; step < 20 && !settled; step += 1) {
+                await vi.advanceTimersByTimeAsync(250);
+            }
+            await pending;
+
+            expect(futuresHistoryAnswers()).toEqual([]);
+            expect(moduleMocks.futuresAdapter.getTradeHistory).toHaveBeenCalledTimes(2);
+        },
+    );
+
+    it('retries a failed Full continuation without spending its progress budget', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        moduleMocks.futuresAdapter.credentialFingerprint = ACCOUNT_FINGERPRINT;
+        let request = 0;
+        const denseTrade = {
+            id: '9007199254740993',
+            orderId: '9007199254740993',
+            symbol: 'BTCUSDT',
+            side: 'BUY',
+            positionSide: 'BOTH',
+            price: '1',
+            quantity: '1',
+            realizedPnl: '0',
+            commission: '0',
+            commissionAsset: 'USDT',
+            marginAsset: 'USDT',
+        };
+        const densePageAt = endTime => Array.from({ length: 1_000 }, (_, index) => ({
+            ...denseTrade,
+            id: String((BigInt(endTime) * 1_000n) + BigInt(index)),
+            time: endTime,
+        }));
+        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({
+            symbol, endTime,
+        }) => {
+            request += 1;
+            if (request === 2) {
+                return Promise.resolve([{
+                    ...denseTrade, id: '7', symbol, time: endTime,
+                }]);
+            }
+            return Promise.resolve(densePageAt(endTime));
+        });
+
+        const initial = startFuturesCommandWithoutAdvancing({
+            action: 'account.history',
+            clientOrderId: 'history-full-continuation-retry',
+            symbol: 'BTCUSDT',
+            basisOnly: true,
+            coverage: {},
+            full: true,
+            views: ['trades'],
+        });
+        // Stop before the five-second continuation timer: runFuturesCommand
+        // intentionally advances in five-second chunks and would let the
+        // continuation race ahead of the test's replacement adapter.
+        await vi.advanceTimersByTimeAsync(2_000);
+        await initial;
+        const partial = futuresHistoryAnswers().at(-1);
+        expect(partial.tradeCoverage.BTCUSDT).toMatchObject({
+            passes: 1,
+            stalledPasses: 0,
+            complete: false,
+            retentionLimited: false,
+        });
+        let continuationCalls = 0;
+        let transientAttempts = 0;
+        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(() => {
+            continuationCalls += 1;
+            if (transientAttempts < 3) {
+                transientAttempts += 1;
+                return Promise.reject(Object.assign(new Error('transient gap'), {
+                    code: 'ETIMEDOUT',
+                }));
+            }
+            return Promise.resolve([]);
+        });
+
+        let completed;
+        for (let step = 0; step < 6 && completed === undefined; step += 1) {
+            await vi.advanceTimersByTimeAsync(5_000);
+            await flushMicrotasks();
+            completed = futuresHistoryAnswers().find(answer => (
+                answer.readAt > partial.readAt
+                && answer.merge.BTCUSDT?.trades === false
+            ));
+        }
+
+        // The shared limiter absorbs this transient burst inside the same
+        // continuation. It must not spend a history failure/retry attempt or
+        // publish a false error frame when its own retry ultimately succeeds.
+        expect(futuresHistoryAnswers().some(answer => answer.error)).toBe(false);
+        expect(transientAttempts).toBe(3);
+        expect(continuationCalls).toBeGreaterThanOrEqual(5);
+        expect(completed).toBeDefined();
+        expect(completed.tradeCoverage.BTCUSDT).toMatchObject({
+            passes: 2,
+            stalledPasses: 0,
+            complete: true,
+            retentionLimited: false,
+        });
+    });
+
+    it('bounds a failed cold trade-history reacquisition to three attempts', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        moduleMocks.futuresAdapter.credentialFingerprint = ACCOUNT_FINGERPRINT;
+        moduleMocks.futuresAdapter.getTradeHistory.mockRejectedValue(
+            Object.assign(new Error('cold history unavailable'), {
+                code: 'COLD_HISTORY_TERMINAL',
+                status: 400,
+            }),
+        );
+        const legacyCoverage = {
+            BTCUSDT: {
+                readAt: Date.now(),
+                tradeReadAt: Date.now(),
+                tradeCursor: '20',
+            },
+        };
+
+        const initial = startFuturesCommandWithoutAdvancing({
+            action: 'account.history',
+            clientOrderId: 'history-cold-reacquisition-bounded',
+            symbol: 'BTCUSDT',
+            basisOnly: true,
+            // Cursor-only coverage is intentionally legacy: it must enter the
+            // transactional migration path instead of paging forward from 20.
+            coverage: legacyCoverage,
+            views: ['trades'],
+        });
+        await vi.advanceTimersByTimeAsync(1_000);
+        await initial;
+        for (let step = 0; step < 8; step += 1) {
+            await vi.advanceTimersByTimeAsync(5_000);
+            await flushMicrotasks();
+        }
+
+        expect(moduleMocks.futuresAdapter.getTradeHistory).toHaveBeenCalledTimes(3);
+        expect(moduleMocks.futuresAdapter.getTradeHistory.mock.calls
+            .every(([request]) => !Object.hasOwn(request, 'fromTradeId'))).toBe(true);
+        expect(futuresHistoryAnswers().filter(answer => (
+            answer.error?.binanceCode === 'COLD_HISTORY_TERMINAL'
+        ))).toHaveLength(3);
+        const exhaustedTargetTo = moduleMocks.futuresAdapter.getTradeHistory.mock.calls[0][0]
+            .endTime;
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        expect(moduleMocks.futuresAdapter.getTradeHistory).toHaveBeenCalledTimes(3);
+
+        moduleMocks.futuresAdapter.getTradeHistory.mockClear();
+        moduleMocks.futuresAdapter.getTradeHistory.mockResolvedValue([]);
+        const explicitRetry = startFuturesCommandWithoutAdvancing({
+            action: 'account.history',
+            clientOrderId: 'history-cold-reacquisition-fresh',
+            symbol: 'BTCUSDT',
+            basisOnly: true,
+            coverage: legacyCoverage,
+            full: true,
+            views: ['trades'],
+        });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await explicitRetry;
+
+        expect(moduleMocks.futuresAdapter.getTradeHistory).toHaveBeenCalledOnce();
+        expect(moduleMocks.futuresAdapter.getTradeHistory.mock.calls[0][0]).toMatchObject({
+            symbol: 'BTCUSDT',
+            startTime: expect.any(Number),
+            endTime: expect.any(Number),
+        });
+        expect(moduleMocks.futuresAdapter.getTradeHistory.mock.calls[0][0].endTime)
+            .toBeGreaterThan(exhaustedTargetTo);
+    });
+
+    it('vouches a frozen Full cursor only after its post-gap succeeds', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        moduleMocks.futuresAdapter.credentialFingerprint = ACCOUNT_FINGERPRINT;
+        const stream = await openFuturesHistoryStream();
+        let initialRead = true;
+        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({
+            symbol, endTime,
+        }) => {
+            if (!initialRead) return Promise.resolve([]);
+            initialRead = false;
+            // The fill lands after the Full proof was captured but before the
+            // frozen REST answer returns, forcing an explicit forward gap.
+            sendExecutionFill(stream, 77, '0');
+            return Promise.resolve([{
+                id: '10077',
+                orderId: '10077',
+                symbol,
+                side: 'SELL',
+                positionSide: 'BOTH',
+                price: '1',
+                quantity: '1',
+                realizedPnl: '0',
+                commission: '0',
+                commissionAsset: 'USDT',
+                marginAsset: 'USDT',
+                time: endTime,
+            }]);
+        });
+
+        const initial = startFuturesCommandWithoutAdvancing({
+            action: 'account.history',
+            clientOrderId: 'history-full-post-gap-proof',
+            symbol: 'BTCUSDT',
+            basisOnly: true,
+            coverage: {},
+            full: true,
+            views: ['trades'],
+        });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await initial;
+        const frozen = futuresHistoryAnswers().at(-1);
+        expect(frozen.merge.BTCUSDT.trades).toBe(true);
+        expect(frozen.tradeCoverage.BTCUSDT).toMatchObject({
+            complete: false,
+            postGapPending: true,
+        });
+
+        const claimedCompleteCoverage = {
+            BTCUSDT: {
+                readAt: frozen.readAt,
+                orderReadAt: null,
+                tradeReadAt: frozen.readAt,
+                orderCursor: null,
+                tradeCursor: '10077',
+                tradeCoverage: {
+                    ...frozen.tradeCoverage.BTCUSDT,
+                    complete: true,
+                    postGapPending: false,
+                },
+            },
+        };
+        const callsBeforeProbe = moduleMocks.futuresAdapter.getTradeHistory.mock.calls.length;
+        moduleMocks.futuresAdapter.getTradeHistory.mockRejectedValue(
+            Object.assign(new Error('post-gap unavailable'), {
+                code: 'POST_GAP_UNAVAILABLE',
+                status: 400,
+            }),
+        );
+        const probe = startFuturesCommandWithoutAdvancing({
+            action: 'account.history',
+            clientOrderId: 'history-full-post-gap-unvouched',
+            symbol: 'BTCUSDT',
+            basisOnly: true,
+            coverage: claimedCompleteCoverage,
+            views: ['trades'],
+        });
+        await vi.advanceTimersByTimeAsync(1_000);
+        await probe;
+        expect(moduleMocks.futuresAdapter.getTradeHistory.mock.calls.length)
+            .toBe(callsBeforeProbe + 1);
+        expect(futuresHistoryAnswers().at(-1).error).toMatchObject({
+            code: 'FUTURES_API_ERROR',
+            binanceCode: 'POST_GAP_UNAVAILABLE',
+        });
+
+        moduleMocks.futuresAdapter.getTradeHistory.mockResolvedValue([]);
+        let replacement;
+        for (let step = 0; step < 4 && replacement === undefined; step += 1) {
+            await vi.advanceTimersByTimeAsync(5_000);
+            await flushMicrotasks();
+            replacement = futuresHistoryAnswers().find(answer => (
+                answer.readAt > frozen.readAt
+                && answer.merge.BTCUSDT?.trades === false
+                && answer.tradeCoverage.BTCUSDT?.postGapPending === false
+            ));
+        }
+        expect(replacement).toBeDefined();
+        expect(replacement.tradeCoverage.BTCUSDT.complete).toBe(true);
+        expect(replacement.trades.map(trade => trade.id)).toContain('10077');
+
+        moduleMocks.futuresAdapter.getTradeHistory.mockClear();
+        const vouched = startFuturesCommandWithoutAdvancing({
+            action: 'account.history',
+            clientOrderId: 'history-full-post-gap-vouched',
+            symbol: 'BTCUSDT',
+            basisOnly: true,
+            coverage: {
+                BTCUSDT: {
+                    readAt: replacement.readAt,
+                    orderReadAt: null,
+                    tradeReadAt: replacement.readAt,
+                    orderCursor: null,
+                    tradeCursor: '10077',
+                    tradeCoverage: replacement.tradeCoverage.BTCUSDT,
+                },
+            },
+            views: ['trades'],
+        });
+        await vouched;
+        expect(moduleMocks.futuresAdapter.getTradeHistory).not.toHaveBeenCalled();
+    });
+
+    it('does not replace frozen trades before REST reaches the fill identity seen on stream', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        moduleMocks.futuresAdapter.credentialFingerprint = ACCOUNT_FINGERPRINT;
+        const stream = await openFuturesHistoryStream();
+        let initialRead = true;
+        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({
+            symbol, endTime,
+        }) => {
+            if (!initialRead) return Promise.resolve([]);
+            initialRead = false;
+            // Binance can deliver trade 10077 on the stream before /userTrades
+            // indexes it. The frozen window currently reaches only 10070.
+            sendExecutionFill(stream, 77, '0');
+            return Promise.resolve([{
+                id: '10070',
+                orderId: '10070',
+                symbol,
+                side: 'SELL',
+                positionSide: 'BOTH',
+                price: '1',
+                quantity: '1',
+                realizedPnl: '0',
+                commission: '0',
+                commissionAsset: 'USDT',
+                marginAsset: 'USDT',
+                time: endTime,
+            }]);
+        });
+
+        const initial = startFuturesCommandWithoutAdvancing({
+            action: 'account.history',
+            clientOrderId: 'history-post-gap-stream-identity',
+            symbol: 'BTCUSDT',
+            basisOnly: true,
+            coverage: {},
+            full: true,
+            views: ['trades'],
+        });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await initial;
+        const frozen = futuresHistoryAnswers().at(-1);
+        expect(frozen).toMatchObject({
+            merge: { BTCUSDT: { trades: true } },
+            tradeCoverage: {
+                BTCUSDT: { complete: false, postGapPending: true },
+            },
+        });
+
+        // A successful but not-yet-indexed gap answer is still additive and
+        // incomplete. In particular, it cannot delete the streamed 10077 row.
+        await vi.advanceTimersByTimeAsync(5_000);
+        await flushMicrotasks();
+        const beforeObservedFill = futuresHistoryAnswers().filter(answer => (
+            answer.readAt > frozen.readAt
+        ));
+        expect(beforeObservedFill).toHaveLength(1);
+        expect(beforeObservedFill[0]).toMatchObject({
+            merge: { BTCUSDT: { trades: true } },
+            tradeCoverage: {
+                BTCUSDT: { complete: false, postGapPending: true },
+            },
+        });
+
+        moduleMocks.futuresAdapter.getTradeHistory.mockResolvedValue([{
+            id: '10077',
+            orderId: '10077',
+            symbol: 'BTCUSDT',
+            side: 'SELL',
+            positionSide: 'BOTH',
+            price: '1',
+            quantity: '1',
+            realizedPnl: '0',
+            commission: '0',
+            commissionAsset: 'USDT',
+            marginAsset: 'USDT',
+            time: Date.now(),
+        }]);
+        let replacement;
+        for (let step = 0; step < 4 && replacement === undefined; step += 1) {
+            await vi.advanceTimersByTimeAsync(5_000);
+            await flushMicrotasks();
+            replacement = futuresHistoryAnswers().find(answer => (
+                answer.readAt > beforeObservedFill[0].readAt
+                && answer.merge.BTCUSDT?.trades === false
+            ));
+        }
+
+        expect(replacement).toBeDefined();
+        expect(replacement.tradeCoverage.BTCUSDT).toMatchObject({
+            complete: true,
+            postGapPending: false,
+        });
+        expect(replacement.trades.map(trade => trade.id))
+            .toEqual(expect.arrayContaining(['10070', '10077']));
+    });
+
+    it('stops retrying a failed frozen Full post-gap after three attempts', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        moduleMocks.futuresAdapter.credentialFingerprint = ACCOUNT_FINGERPRINT;
+        const stream = await openFuturesHistoryStream();
+        let initialRead = true;
+        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({
+            symbol, endTime,
+        }) => {
+            if (initialRead) {
+                initialRead = false;
+                // A post-gap exists only when the stream topology/activity
+                // actually changes while the frozen window is being read.
+                sendExecutionFill(stream, 31, '0');
+            }
+            return Promise.resolve([{
+                id: '10031',
+                orderId: '10031',
+                symbol,
+                side: 'SELL',
+                positionSide: 'BOTH',
+                price: '1',
+                quantity: '1',
+                realizedPnl: '0',
+                commission: '0',
+                commissionAsset: 'USDT',
+                marginAsset: 'USDT',
+                time: endTime,
+            }]);
+        });
+
+        const initial = startFuturesCommandWithoutAdvancing({
+            action: 'account.history',
+            clientOrderId: 'history-full-post-gap-bounded',
+            symbol: 'BTCUSDT',
+            basisOnly: true,
+            coverage: {},
+            full: true,
+            views: ['trades'],
+        });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await initial;
+        expect(futuresHistoryAnswers().at(-1).tradeCoverage.BTCUSDT).toMatchObject({
+            complete: false,
+            postGapPending: true,
+        });
+
+        moduleMocks.futuresAdapter.getTradeHistory.mockClear();
+        moduleMocks.futuresAdapter.getTradeHistory.mockRejectedValue(
+            Object.assign(new Error('terminal post-gap failure'), {
+                code: 'POST_GAP_TERMINAL',
+                status: 400,
+            }),
+        );
+        for (let step = 0; step < 8; step += 1) {
+            await vi.advanceTimersByTimeAsync(5_000);
+            await flushMicrotasks();
+        }
+
+        expect(moduleMocks.futuresAdapter.getTradeHistory).toHaveBeenCalledTimes(3);
+        expect(futuresHistoryAnswers().filter(answer => (
+            answer.error?.binanceCode === 'POST_GAP_TERMINAL'
+        ))).toHaveLength(3);
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        expect(moduleMocks.futuresAdapter.getTradeHistory).toHaveBeenCalledTimes(3);
+
+        const exhaustedTargetTo = futuresHistoryAnswers()
+            .find(answer => answer.tradeCoverage.BTCUSDT?.targetTo !== undefined)
+            .tradeCoverage.BTCUSDT.targetTo;
+        moduleMocks.futuresAdapter.getTradeHistory.mockClear();
+        moduleMocks.futuresAdapter.getTradeHistory.mockResolvedValue([]);
+        const explicitRetry = startFuturesCommandWithoutAdvancing({
+            action: 'account.history',
+            clientOrderId: 'history-full-post-gap-fresh',
+            symbol: 'BTCUSDT',
+            basisOnly: true,
+            coverage: {},
+            full: true,
+            views: ['trades'],
+        });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await explicitRetry;
+
+        expect(moduleMocks.futuresAdapter.getTradeHistory).toHaveBeenCalledOnce();
+        expect(moduleMocks.futuresAdapter.getTradeHistory.mock.calls[0][0]).toMatchObject({
+            symbol: 'BTCUSDT',
+            startTime: expect.any(Number),
+            endTime: expect.any(Number),
+        });
+        expect(moduleMocks.futuresAdapter.getTradeHistory.mock.calls[0][0])
+            .not.toHaveProperty('fromTradeId');
+        expect(moduleMocks.futuresAdapter.getTradeHistory.mock.calls[0][0].endTime)
+            .toBeGreaterThan(exhaustedTargetTo);
+    });
+
+    it('evicts a post-gap checkpoint when successful REST never reaches the stream fill', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        moduleMocks.futuresAdapter.credentialFingerprint = ACCOUNT_FINGERPRINT;
+        const stream = await openFuturesHistoryStream();
+        let frozenRead = true;
+        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({ symbol, endTime }) => {
+            if (!frozenRead) return Promise.resolve([]);
+            frozenRead = false;
+            sendExecutionFill(stream, 77, '0');
+            return Promise.resolve([{
+                id: '10070',
+                orderId: '10070',
+                symbol,
+                side: 'SELL',
+                positionSide: 'BOTH',
+                price: '1',
+                quantity: '1',
+                realizedPnl: '0',
+                commission: '0',
+                commissionAsset: 'USDT',
+                marginAsset: 'USDT',
+                time: endTime,
+            }]);
+        });
+
+        const initial = startFuturesCommandWithoutAdvancing({
+            action: 'account.history',
+            clientOrderId: 'history-post-gap-success-terminal',
+            symbol: 'BTCUSDT',
+            basisOnly: true,
+            coverage: {},
+            full: true,
+            views: ['trades'],
+        });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await initial;
+        const frozen = futuresHistoryAnswers().at(-1);
+        expect(frozen.tradeCoverage.BTCUSDT).toMatchObject({
+            complete: false,
+            postGapPending: true,
+        });
+
+        moduleMocks.futuresAdapter.getTradeHistory.mockClear();
+        for (let step = 0; step < 8; step += 1) {
+            await vi.advanceTimersByTimeAsync(5_000);
+            await flushMicrotasks();
+        }
+        expect(moduleMocks.futuresAdapter.getTradeHistory).toHaveBeenCalledTimes(3);
+        const terminal = futuresHistoryAnswers().find(answer => (
+            answer.readAt > frozen.readAt
+            && answer.tradeCoverage.BTCUSDT?.postGapPending === false
+        ));
+        expect(terminal).toBeDefined();
+        expect(terminal.tradeCoverage.BTCUSDT.complete).toBe(false);
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        expect(moduleMocks.futuresAdapter.getTradeHistory).toHaveBeenCalledTimes(3);
+
+        moduleMocks.futuresAdapter.getTradeHistory.mockClear();
+        moduleMocks.futuresAdapter.getTradeHistory.mockResolvedValue([]);
+        const explicitRetry = startFuturesCommandWithoutAdvancing({
+            action: 'account.history',
+            clientOrderId: 'history-post-gap-success-fresh',
+            symbol: 'BTCUSDT',
+            basisOnly: true,
+            coverage: {},
+            full: true,
+            views: ['trades'],
+        });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await explicitRetry;
+        expect(moduleMocks.futuresAdapter.getTradeHistory).toHaveBeenCalledOnce();
+        expect(moduleMocks.futuresAdapter.getTradeHistory.mock.calls[0][0])
+            .not.toHaveProperty('fromTradeId');
+    });
+
+    it('persists stalled Full evidence and stops at the cumulative request bound', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        moduleMocks.futuresAdapter.credentialFingerprint = ACCOUNT_FINGERPRINT;
+        const denseTrade = {
+            id: '9007199254740993',
+            orderId: '9007199254740993',
+            symbol: 'BTCUSDT',
+            side: 'BUY',
+            positionSide: 'BOTH',
+            price: '1',
+            quantity: '1',
+            realizedPnl: '0',
+            commission: '0',
+            commissionAsset: 'USDT',
+            marginAsset: 'USDT',
+        };
+        const densePageAt = endTime => Array.from({ length: 1_000 }, (_, index) => ({
+            ...denseTrade,
+            id: String((BigInt(endTime) * 1_000n) + BigInt(index)),
+            time: endTime,
+        }));
+        let request = 0;
+        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({
+            symbol, endTime,
+        }) => {
+            request += 1;
+            return request === 2
+                ? Promise.resolve([{
+                    ...denseTrade, id: '41', symbol, time: endTime,
+                }])
+                : Promise.resolve(densePageAt(endTime));
+        });
+
+        const initial = startFuturesCommandWithoutAdvancing({
+            action: 'account.history',
+            clientOrderId: 'history-full-stalled-cap',
+            symbol: 'BTCUSDT',
+            basisOnly: true,
+            coverage: {},
+            full: true,
+            views: ['trades'],
+        });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await initial;
+        const partial = futuresHistoryAnswers().at(-1);
+        expect(partial.error).toBeNull();
+        expect(partial.tradeCoverage.BTCUSDT).toMatchObject({
+            passes: 1,
+            stalledPasses: 0,
+            retentionLimited: false,
+            requests: 8,
+        });
+
+        moduleMocks.futuresAdapter.getTradeHistory.mockClear();
+        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({ endTime }) => (
+            Promise.resolve(densePageAt(endTime))
+        ));
+        for (let step = 0; step < 8; step += 1) {
+            await vi.advanceTimersByTimeAsync(5_000);
+            await flushMicrotasks();
+        }
+        const coverages = futuresHistoryAnswers()
+            .map(answer => answer.tradeCoverage.BTCUSDT)
+            .filter(Boolean);
+        expect(coverages).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+                passes: 2,
+                stalledPasses: 1,
+                complete: false,
+                retentionLimited: true,
+                requests: 16,
+            }),
+        ]));
+        const callsAtCap = moduleMocks.futuresAdapter.getTradeHistory.mock.calls.length;
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        expect(moduleMocks.futuresAdapter.getTradeHistory).toHaveBeenCalledTimes(callsAtCap);
+    });
+
+    it('caps advancing Full acquisition at sixteen cumulative pages and starts fresh later', async () => {
+        setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        moduleMocks.futuresAdapter.credentialFingerprint = ACCOUNT_FINGERPRINT;
+        const denseTrade = {
+            id: '9007199254740993',
+            orderId: '9007199254740993',
+            symbol: 'BTCUSDT',
+            side: 'BUY',
+            positionSide: 'BOTH',
+            price: '1',
+            quantity: '1',
+            realizedPnl: '0',
+            commission: '0',
+            commissionAsset: 'USDT',
+            marginAsset: 'USDT',
+        };
+        const densePageAt = endTime => Array.from({ length: 1_000 }, (_, index) => ({
+            ...denseTrade,
+            id: String((BigInt(endTime) * 1_000n) + BigInt(index)),
+            time: endTime,
+        }));
+        let request = 0;
+        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({
+            symbol, endTime,
+        }) => {
+            request += 1;
+            return request === 2
+                ? Promise.resolve([{
+                    ...denseTrade, id: '51', symbol, time: endTime,
+                }])
+                : Promise.resolve(densePageAt(endTime));
+        });
+
+        const initial = startFuturesCommandWithoutAdvancing({
+            action: 'account.history',
+            clientOrderId: 'history-full-pass-cap',
+            symbol: 'BTCUSDT',
+            basisOnly: true,
+            coverage: {},
+            full: true,
+            views: ['trades'],
+        });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await initial;
+        const partial = futuresHistoryAnswers().at(-1).tradeCoverage.BTCUSDT;
+        const frozenTargetTo = partial.targetTo;
+        expect(partial).toMatchObject({
+            passes: 1,
+            stalledPasses: 0,
+            complete: false,
+            retentionLimited: false,
+            requests: 8,
+        });
+
+        moduleMocks.futuresAdapter.getTradeHistory.mockClear();
+        let olderCalls = 0;
+        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({
+            symbol, startTime, endTime,
+        }) => {
+            if (startTime === frozenTargetTo && endTime === frozenTargetTo) {
+                return Promise.resolve([{
+                    ...denseTrade, id: '52', symbol, time: endTime,
+                }]);
+            }
+            olderCalls += 1;
+            return olderCalls === 2
+                ? Promise.resolve([{
+                    ...denseTrade, id: '53', symbol, time: endTime,
+                }])
+                : Promise.resolve(densePageAt(endTime));
+        });
+        const answersBefore = futuresHistoryAnswers().length;
+        for (let step = 0;
+            step < 20 && futuresHistoryAnswers().length === answersBefore;
+            step += 1) {
+            await vi.advanceTimersByTimeAsync(500);
+            await flushMicrotasks();
+        }
+
+        expect(futuresHistoryAnswers()).toHaveLength(answersBefore + 1);
+        expect(moduleMocks.futuresAdapter.getTradeHistory).toHaveBeenCalledTimes(8);
+        expect(futuresHistoryAnswers().at(-1).tradeCoverage.BTCUSDT).toMatchObject({
+            passes: 2,
+            stalledPasses: 0,
+            complete: false,
+            retentionLimited: true,
+            requests: 16,
+        });
+        const callsAtCap = moduleMocks.futuresAdapter.getTradeHistory.mock.calls.length;
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        expect(moduleMocks.futuresAdapter.getTradeHistory).toHaveBeenCalledTimes(callsAtCap);
+
+        moduleMocks.futuresAdapter.getTradeHistory.mockClear();
+        moduleMocks.futuresAdapter.getTradeHistory.mockResolvedValue([]);
+        const explicitRetry = startFuturesCommandWithoutAdvancing({
+            action: 'account.history',
+            clientOrderId: 'history-full-request-budget-fresh',
+            symbol: 'BTCUSDT',
+            basisOnly: true,
+            coverage: {},
+            full: true,
+            views: ['trades'],
+        });
+        await vi.advanceTimersByTimeAsync(2_000);
+        await explicitRetry;
+        expect(moduleMocks.futuresAdapter.getTradeHistory).toHaveBeenCalledOnce();
+        expect(moduleMocks.futuresAdapter.getTradeHistory.mock.calls[0][0].endTime)
+            .toBeGreaterThan(frozenTargetTo);
+    });
+
     it('states the idle refresh weight as one thirty-sixth of the bounded full read', async () => {
         setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
         moduleMocks.websocketServerHandlers.request({
@@ -5156,13 +8773,13 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 time: 1,
             }])
         ));
-        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({ symbol }) => (
-            Promise.resolve([{
+        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({ symbol, endTime }) => (
+            Promise.resolve([futuresHistoryTrade({
                 symbol,
                 id: coverage[symbol].tradeCursor,
                 realizedPnl: '0',
-                time: 1,
-            }])
+                time: Number.isSafeInteger(endTime) ? endTime - 1 : Date.now() - 1,
+            })])
         ));
         let incomePage = 0;
         moduleMocks.futuresAdapter.getTradedSymbolPage.mockImplementation(({ startTime }) => {
@@ -5227,8 +8844,13 @@ describe('setupBinanceConnection user-data orchestration', () => {
         moduleMocks.futuresAdapter.getOrderHistory.mockImplementation(({ symbol }) => (
             Promise.resolve([{ symbol, orderId: 7, status: 'FILLED', time: 1 }])
         ));
-        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({ symbol }) => (
-            Promise.resolve([{ symbol, id: 9, realizedPnl: '0', time: 1 }])
+        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({ symbol, endTime }) => (
+            Promise.resolve([futuresHistoryTrade({
+                symbol,
+                id: '9',
+                realizedPnl: '0',
+                time: Number.isSafeInteger(endTime) ? endTime - 1 : Date.now() - 1,
+            })])
         ));
 
         await runFuturesCommand({
@@ -5324,9 +8946,19 @@ describe('setupBinanceConnection user-data orchestration', () => {
             admitted.push({ label: 'history', at: Date.now() });
             return Promise.resolve([{ symbol, orderId: 1, status: 'FILLED', time: 1 }]);
         });
-        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({ symbol }) => {
+        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({ symbol, endTime }) => {
             admitted.push({ label: 'history', at: Date.now() });
-            return Promise.resolve([{ symbol, id: 2, realizedPnl: '0', time: 1 }]);
+            return Promise.resolve([futuresHistoryTrade({
+                symbol,
+                id: '2',
+                price: '1',
+                quantity: '1',
+                realizedPnl: '0',
+                commission: '0',
+                commissionAsset: 'USDT',
+                marginAsset: 'USDT',
+                time: Number.isSafeInteger(endTime) ? endTime : Date.now(),
+            })]);
         });
         // Anything the desk read while it was starting up is not this test's.
         await vi.advanceTimersByTimeAsync(5_000);
@@ -5421,9 +9053,19 @@ describe('setupBinanceConnection user-data orchestration', () => {
             admitted.push({ label: 'history', at: Date.now() });
             return Promise.resolve([{ symbol, orderId: 1, status: 'FILLED', time: 1 }]);
         });
-        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({ symbol }) => {
+        moduleMocks.futuresAdapter.getTradeHistory.mockImplementation(({ symbol, endTime }) => {
             admitted.push({ label: 'history', at: Date.now() });
-            return Promise.resolve([{ symbol, id: 2, realizedPnl: '0', time: 1 }]);
+            return Promise.resolve([futuresHistoryTrade({
+                symbol,
+                id: '2',
+                price: '1',
+                quantity: '1',
+                realizedPnl: '0',
+                commission: '0',
+                commissionAsset: 'USDT',
+                marginAsset: 'USDT',
+                time: Number.isSafeInteger(endTime) ? endTime : Date.now(),
+            })]);
         });
         moduleMocks.futuresAdapter.getSymbolConfig.mockImplementation(async (symbol) => {
             admitted.push({ label: `config:${symbol}`, at: Date.now() });
@@ -5514,6 +9156,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
         moduleMocks.futuresAdapter.getTradedSymbolPage
             .mockResolvedValueOnce({ symbols: ['BICOUSDT'], full: true, lastTime: 100 })
             .mockRejectedValueOnce(Object.assign(new Error('gone'), { code: -1003 }));
+        moduleMocks.futuresAdapter.getTradeHistory.mockResolvedValue([]);
 
         await runFuturesCommand({
             action: 'account.history',
@@ -6355,7 +9998,9 @@ describe('setupBinanceConnection user-data orchestration', () => {
             report: { e: 'executionReport', symbol: 'BTCUSDT', status: 'NEW', orderId: 77 },
         });
 
-        await placeFuturesOrder();
+        const pending = placeFuturesOrder();
+        await vi.advanceTimersByTimeAsync(1_000);
+        await pending;
 
         expect(moduleMocks.futuresAdapter.placeOrder).toHaveBeenCalledTimes(1);
         expect(moduleMocks.futuresAdapter.findOrder).toHaveBeenCalledWith({
@@ -6369,6 +10014,59 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(payloads.some(payload => payload.command_unresolved?.code === 'FUTURES_OUTCOME_PENDING')).toBe(true);
         // …and then told the truth: the order is live.
         expect(payloads.some(payload => payload.futures_execution_update?.orderId === 77)).toBe(true);
+    });
+
+    it('charges an ambiguous mutation once and its reconciliation read separately', async () => {
+        const diagnostics = [];
+        const diagnosticRecord = {
+            ...DESK_DIAGNOSTICS_UNRECORDED,
+            record: (kind, payload) => {
+                diagnostics.push({ kind, ...payload });
+                return true;
+            },
+        };
+        setupBinanceConnection({
+            localWebSocketAccess: { host: '127.0.0.1' },
+            diagnosticRecord,
+        });
+        moduleMocks.websocketServerHandlers.request({
+            origin: 'http://localhost:5174',
+            accept: vi.fn(() => moduleMocks.rendererConnection),
+        });
+        await activateMarket('futures-live');
+        await vi.advanceTimersByTimeAsync(5_000);
+        await flushMicrotasks();
+        diagnostics.length = 0;
+        moduleMocks.futuresAdapter.placeOrder.mockRejectedValueOnce(
+            Object.assign(new Error('Unknown error'), { status: 503, indeterminate: true }),
+        );
+        moduleMocks.futuresAdapter.findOrder.mockResolvedValueOnce({
+            exists: true,
+            report: { e: 'executionReport', symbol: 'BTCUSDT', status: 'NEW', orderId: 78 },
+        });
+
+        const pending = placeFuturesOrder('ambiguous-physical-accounting');
+        await vi.advanceTimersByTimeAsync(1_000);
+        await pending;
+
+        expect(moduleMocks.futuresAdapter.placeOrder).toHaveBeenCalledOnce();
+        expect(moduleMocks.futuresAdapter.findOrder).toHaveBeenCalledOnce();
+        expect(diagnostics.filter(entry => entry.kind === 'request')).toEqual([
+            expect.objectContaining({
+                standing: 'urgent',
+                attempts: 1,
+                chargedWeight: 1,
+                networkRetries: 0,
+                outcome: 'error',
+                status: 503,
+            }),
+            expect.objectContaining({
+                standing: 'urgent',
+                attempts: 1,
+                chargedWeight: 1,
+                outcome: 'ok',
+            }),
+        ]);
     });
 
     // Binance's order state is eventually consistent after an ambiguous
@@ -6634,11 +10332,12 @@ describe('setupBinanceConnection user-data orchestration', () => {
         await flushMicrotasks();
 
         const placement = placeFuturesOrder('epoch-1');
-        await flushMicrotasks();
+        await vi.advanceTimersByTimeAsync(1_000);
+        await placement;
+        expect(moduleMocks.futuresAdapter.placeOrder).toHaveBeenCalledOnce();
         releaseSnapshot();
         await vi.advanceTimersByTimeAsync(2_000);
         await flushMicrotasks();
-        await placement;
         await staleRead;
 
         const orderSnapshots = moduleMocks.rendererConnection.sendUTF.mock.calls
@@ -7764,7 +11463,9 @@ describe('setupBinanceConnection user-data orchestration', () => {
                     vi.setSystemTime(new Date(Date.now() + SILENCE_MS + 1_000));
                     expect(userDataStreamState().status).toBe('ready');
 
-                    await placeFuturesOrder('not-carrying-1');
+                    const placement = placeFuturesOrder('not-carrying-1');
+                    await vi.advanceTimersByTimeAsync(5_000);
+                    await placement;
                     await flushMicrotasks();
 
                     expect(held('read').map(entry => entry.reason)).toContain('command');
@@ -8179,7 +11880,9 @@ describe('setupBinanceConnection user-data orchestration', () => {
             await connectRenderer();
 
             // 0.004 × 2 500 000 = 10 000 USDT against a 200 USDT ceiling.
-            await amend({ price: '2500000' });
+            const amendment = amend({ price: '2500000' });
+            await vi.advanceTimersByTimeAsync(1_000);
+            await amendment;
 
             expect(moduleMocks.futuresAdapter.modifyOrder).not.toHaveBeenCalled();
             const rejection = emitted()
@@ -8215,7 +11918,9 @@ describe('setupBinanceConnection user-data orchestration', () => {
                 reduceOnly: true,
             }]);
 
-            await amend({ price: '2500000' });
+            const amendment = amend({ price: '2500000' });
+            await vi.advanceTimersByTimeAsync(1_000);
+            await amendment;
 
             expect(moduleMocks.futuresAdapter.modifyOrder).toHaveBeenCalledOnce();
         });
@@ -8486,6 +12191,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
 
             const amend = amendFuturesOrder('amend-1');
             const cancel = cancelFuturesOrder('cancel-1');
+            await vi.advanceTimersByTimeAsync(1_000);
             await flushMicrotasks();
 
             // The cancellation was accepted and has not reached Binance: the
@@ -8520,6 +12226,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
                     quantity: '0.1',
                 }),
             });
+            await vi.advanceTimersByTimeAsync(1_000);
             await flushMicrotasks();
 
             // Two contracts have nothing to say to each other; only one book is

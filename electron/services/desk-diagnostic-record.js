@@ -94,7 +94,7 @@ const READ_REASON = new RegExp(`^(?:${FUTURES_ACCOUNT_READ_REASONS.join('|')})$`
 // funding charge, the stream coming up — are not reasons to read the signed
 // account at all. Sharing one list would have dropped every line whose reason
 // was `fill` or `funding`, which is most of them.
-const SETTLED_REASON = /^(?:stream|fill|funding|settlement|refresh|confirm|tick)$/;
+const SETTLED_REASON = /^(?:bootstrap|stream|fill|funding|settlement|refresh|confirm|credit-confirm|insurance|insurance-confirm|verification|extension|tick)$/;
 // Which way round the exchange hands back a page of the income record. The whole
 // backward walk rests on it being oldest-first — a full page is then the *oldest*
 // thousand rows of the range asked for — and the endpoint's documentation does
@@ -116,6 +116,9 @@ const text = pattern => value => (
     typeof value === 'string' && pattern.test(value) ? value : undefined
 );
 const count = value => (Number.isSafeInteger(value) && value >= 0 ? value : undefined);
+const httpStatus = value => (
+    Number.isSafeInteger(value) && value >= 100 && value <= 599 ? value : undefined
+);
 const basisPoints = value => (
     Number.isSafeInteger(value)
         && value >= 0
@@ -296,6 +299,26 @@ const RECORDED_FIELDS = Object.freeze({
         ['spent', count],
         ['ceiling', count],
     ]),
+    // One line per logical Futures REST operation. The adapter may have made
+    // more than one physical request for it — a connection fallback, clock
+    // synchronization, or retry — and these counts are the only material from
+    // that transport allowed into the record. There is deliberately no field
+    // capable of carrying a URL, query, body, header, signature, exchange
+    // message, credential or amount.
+    request: Object.freeze([
+        ['standing', text(DEFERRED_STANDING)],
+        ['attempts', count],
+        ['chargedWeight', count],
+        ['observedWeight', optional(count)],
+        ['backpressureMs', count],
+        ['connectionRetries', count],
+        ['networkRetries', count],
+        ['timestampRetries', count],
+        ['rateLimitResponses', count],
+        ['outcome', text(OUTCOME)],
+        ['status', optional(httpStatus)],
+        ['code', tolerated(exchangeCode)],
+    ]),
     // One line per pass over the income record — what the open positions have
     // already been charged or paid. Counts only, never the money itself: how
     // many pages were walked, how many rows the exchange answered with, how many
@@ -320,10 +343,15 @@ const RECORDED_FIELDS = Object.freeze({
         // point of narrowing the read is a number, and a change that cannot be
         // read off the operator's own journal is a claim rather than a result.
         ['reads', count],
+        // `reads` counts logical page operations. These two state what those
+        // operations really cost after transport/time recovery.
+        ['attempts', count],
+        ['chargedWeight', count],
         // How many kinds of flow this pass asked for. `pages * types` is
         // `reads` while every kind answers; where it is not, a kind filled its
         // page and the walk went round again for it alone.
         ['types', count],
+        ['lanes', count],
         // How much of this pass came off disk rather than the wire, and what the
         // exchange said about it when it was checked. A kept reading is only
         // safe while somebody can see whether it has ever been wrong.
@@ -342,6 +370,11 @@ const RECORDED_FIELDS = Object.freeze({
         // rows held cannot tell "the read never got them" from "they were
         // dropped on the way to the screen".
         ['fundingRows', count],
+        // Only presence counts for underivable credits. Raw identities and
+        // amounts are intentionally not accepted anywhere in this kind.
+        ['rebateRows', count],
+        ['rebateSymbolRows', count],
+        ['rebateTradeRows', count],
         // Zero recipients is the failure that reads exactly like a read which
         // never happened: the answer was correct and went nowhere.
         ['recipients', count],
@@ -350,6 +383,7 @@ const RECORDED_FIELDS = Object.freeze({
         // of this file, and the number that would have named the defect on the
         // first line: a reading covering one day of a seven-day window.
         ['coveredMs', count],
+        ['coverageGainedMs', count],
         // `complete` reaches the window's start, `partial` stopped at the request
         // budget or the row ceiling, `failed` was refused, `abandoned` was
         // overtaken by a newer activation before it could answer.

@@ -1,3 +1,10 @@
+import {
+  FUTURES_SETTLED_INCOME_RESOURCE_VERSION,
+  MAX_FUTURES_SETTLED_INCOME_ROWS_PER_LANE,
+  canonicalFuturesIncomeRow,
+  sanitizeFuturesSettledIncomeError,
+} from './futuresSettledIncomeResource.js'
+
 // What an open position has already put into or taken out of the wallet.
 //
 // The unrealized PnL beside it says what the position would produce if it were
@@ -72,9 +79,78 @@ export const FUTURES_UNDERIVABLE_INCOME_TYPES = Object.freeze(
 )
 
 const toFiniteNumber = (value) => {
+  if (value === null || value === undefined) return null
+  if (typeof value !== 'number' && typeof value !== 'string') return null
+  if (typeof value === 'string' && value.trim() === '') return null
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : null
 }
+
+const toSafeSettledTime = (value) => {
+  if (value === null || value === undefined) return null
+  if (typeof value !== 'number' && typeof value !== 'string') return null
+  if (typeof value === 'string' && value.trim() === '') return null
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null
+}
+
+const FUTURES_SETTLED_RESOURCE_STATUSES = new Set([
+  'idle', 'loading', 'ready', 'stale', 'error',
+])
+
+const settledAccountFingerprint = value => {
+  const normalized = String(value ?? '').trim().toLowerCase()
+  return /^[a-f0-9]{16}$/.test(normalized) ? normalized : null
+}
+
+const settledIncomeType = value => (
+  typeof value === 'string' ? value.trim().toUpperCase() : ''
+)
+
+const canonicalIncomeRowOrder = (left, right) => (
+  left.time - right.time
+  || left.incomeType.localeCompare(right.incomeType)
+  || left.identity.localeCompare(right.identity)
+)
+
+// Canonical constructors intentionally discard malformed rows and collapse
+// repeated identities. That is useful while assembling exchange pages, but at
+// the IPC trust boundary it would turn a complete lane into a shorter complete
+// lane. Validate without loss before accepting any part of the candidate frame.
+const canonicalIncomeRowsWithoutLoss = (
+  rows,
+  expectedIncomeType = null,
+  maximumRows = MAX_FUTURES_SETTLED_INCOME_ROWS_PER_LANE,
+) => {
+  if (!Array.isArray(rows) || rows.length > maximumRows) return null
+  const byIdentity = new Map()
+  for (const raw of rows) {
+    const row = canonicalFuturesIncomeRow(raw)
+    if (row === null || (expectedIncomeType !== null && row.incomeType !== expectedIncomeType)) {
+      return null
+    }
+    // Reject both byte-equivalent repeats and contradictory values under one
+    // identity. IPC frames are canonical snapshots, not exchange page input.
+    if (byIdentity.has(row.identity)) return null
+    byIdentity.set(row.identity, row)
+  }
+  return [...byIdentity.values()].sort(canonicalIncomeRowOrder)
+}
+
+const sameCanonicalIncomeRows = (left, right) => (
+  left.length === right.length
+  && left.every((row, index) => {
+    const other = right[index]
+    return row.identity === other.identity
+      && row.symbol === other.symbol
+      && row.incomeType === other.incomeType
+      && row.income === other.income
+      && row.asset === other.asset
+      && row.time === other.time
+      && row.tranId === other.tranId
+      && row.tradeId === other.tradeId
+  })
+)
 
 // A row is identified by its type and its transaction together. Binance states
 // that `tranId` is unique only within one `incomeType`, so the id alone would
@@ -113,8 +189,9 @@ export const isFuturesSettledIncomeRow = row => (
  * Reads a page of income into the entries a position's money is made of.
  *
  * **Idempotent, and that is load-bearing rather than tidy.** This runs at three
- * points on one path — the main process narrowing what it broadcasts, the
- * renderer validating the frame, and the fold below — and on 2026-08-20 it
+ * points on one path — the main process narrowing what it broadcasts and the
+ * renderer validating a compatibility frame that may already contain parsed
+ * entries — and on 2026-08-20 it
  * silently emptied the operator's column because it did not. The main process
  * sent rows already read into `{component, amount}`; every later call looked for
  * the `incomeType` and `income` that the first had consumed, matched nothing,
@@ -170,9 +247,9 @@ export const readFuturesSettledIncome = (rows) => {
     kept.push(Object.freeze({
       symbol,
       component,
-      // Whether the desk holds this same charge in the trade record it reads
-      // anyway. The fold drops these where it has the fills, so that one charge
-      // stated by two records is counted once.
+      // Whether the desk can derive this same charge from the trade record it
+      // reads anyway. Downstream reconciliation uses the classification so one
+      // charge stated by two records is not treated as two movements.
       derivable,
       amount,
       asset: typeof row?.asset === 'string' && row.asset.length > 0 ? row.asset : null,
@@ -189,6 +266,247 @@ export const readFuturesSettledIncome = (rows) => {
 // `from` tells the two apart.
 export const readFuturesSettledIncomeFrame = (payload) => {
   if (payload === null || typeof payload !== 'object') return null
+  if (payload.version === FUTURES_SETTLED_INCOME_RESOURCE_VERSION) {
+    const accountFingerprint = settledAccountFingerprint(payload.accountFingerprint)
+    if (accountFingerprint === null) return null
+    if (payload.lanes === null || typeof payload.lanes !== 'object') {
+      return null
+    }
+    const lanesAreArray = Array.isArray(payload.lanes)
+    if (lanesAreArray
+      && payload.lanes.length !== FUTURES_UNDERIVABLE_INCOME_TYPES.length) return null
+    const laneEntries = lanesAreArray
+      ? payload.lanes.map(raw => [null, raw])
+      : Object.entries(payload.lanes)
+    if (laneEntries.length !== FUTURES_UNDERIVABLE_INCOME_TYPES.length) return null
+    const parsedLanes = {}
+    const laneRows = []
+    for (const [key, raw] of laneEntries) {
+      if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return null
+      const keyedIncomeType = key === null ? '' : settledIncomeType(key)
+      const hasStatedIncomeType = raw.incomeType !== null && raw.incomeType !== undefined
+      const statedIncomeType = hasStatedIncomeType ? settledIncomeType(raw.incomeType) : ''
+      const incomeType = statedIncomeType || keyedIncomeType
+      if (incomeType === ''
+        || !FUTURES_UNDERIVABLE_INCOME_TYPES.includes(incomeType)
+        || (key !== null && statedIncomeType !== '' && statedIncomeType !== keyedIncomeType)
+        || Object.hasOwn(parsedLanes, incomeType)) return null
+      const coveredFrom = raw.coveredFrom === null
+        ? null
+        : toSafeSettledTime(raw.coveredFrom)
+      const coveredTo = raw.coveredTo === null
+        ? null
+        : toSafeSettledTime(raw.coveredTo)
+      if ((coveredFrom === null) !== (coveredTo === null)
+        || (coveredFrom !== null && coveredFrom > coveredTo)) return null
+      const canonicalRows = canonicalIncomeRowsWithoutLoss(raw.rows, incomeType)
+      if (canonicalRows === null) return null
+      const rows = Object.freeze(canonicalRows)
+      if (!FUTURES_SETTLED_RESOURCE_STATUSES.has(raw.status)) return null
+      const status = raw.status
+      const targetTo = raw.targetTo === null ? null : toSafeSettledTime(raw.targetTo)
+      const attemptedAt = raw.attemptedAt === null
+        ? null
+        : toSafeSettledTime(raw.attemptedAt)
+      const successfulAt = raw.successfulAt === null
+        ? null
+        : toSafeSettledTime(raw.successfulAt)
+      const confirmationNotBefore = raw.confirmationNotBefore === null
+        || raw.confirmationNotBefore === undefined
+        ? null
+        : toSafeSettledTime(raw.confirmationNotBefore)
+      if ((raw.coveredFrom !== null && coveredFrom === null)
+        || (raw.coveredTo !== null && coveredTo === null)
+        || (raw.targetTo !== null && targetTo === null)
+        || (raw.attemptedAt !== null && attemptedAt === null)
+        || (raw.successfulAt !== null && successfulAt === null)
+        || (raw.confirmationNotBefore !== null
+          && raw.confirmationNotBefore !== undefined
+          && confirmationNotBefore === null)
+        || (attemptedAt !== null && successfulAt !== null && attemptedAt < successfulAt)
+        || (raw.pending !== null && raw.pending !== undefined)
+        || (status === 'ready' && (
+          coveredFrom === null
+          || coveredTo === null
+          || targetTo === null
+          || attemptedAt === null
+          || successfulAt === null
+          || confirmationNotBefore !== null
+        ))
+        || (confirmationNotBefore !== null && status !== 'stale')
+        || (status !== 'ready' && raw.complete === true)) return null
+      const error = raw.error === null
+        ? null
+        : sanitizeFuturesSettledIncomeError(raw.error)
+      laneRows.push(...rows)
+      parsedLanes[incomeType] = {
+        incomeType,
+        rows,
+        coveredFrom,
+        coveredTo,
+        targetTo,
+        status,
+        attemptedAt,
+        successfulAt,
+        confirmationNotBefore,
+        claimedComplete: raw.complete === true,
+        error,
+      }
+    }
+    const parsedIncomeTypes = Object.keys(parsedLanes)
+    if (parsedIncomeTypes.length !== FUTURES_UNDERIVABLE_INCOME_TYPES.length
+      || FUTURES_UNDERIVABLE_INCOME_TYPES.some(
+        incomeType => !Object.hasOwn(parsedLanes, incomeType),
+      )) return null
+    const orderedParsedLanes = Object.values(parsedLanes).sort(
+      (left, right) => left.incomeType.localeCompare(right.incomeType),
+    )
+    const targets = orderedParsedLanes
+      .map(lane => lane.targetTo)
+      .filter(value => value !== null)
+    const targetTo = targets.length > 0 ? Math.max(...targets) : null
+    const lanes = Object.freeze(Object.fromEntries(orderedParsedLanes.map(lane => {
+      const complete = lane.claimedComplete
+        && lane.status === 'ready'
+        && lane.coveredFrom !== null
+        && lane.coveredTo !== null
+        && targetTo !== null
+        && lane.coveredTo >= targetTo
+      return [lane.incomeType, Object.freeze({
+        incomeType: lane.incomeType,
+        rows: lane.rows,
+        coveredFrom: lane.coveredFrom,
+        coveredTo: lane.coveredTo,
+        targetTo: lane.targetTo,
+        status: lane.status,
+        attemptedAt: lane.attemptedAt,
+        successfulAt: lane.successfulAt,
+        confirmationNotBefore: lane.confirmationNotBefore,
+        complete,
+        error: lane.error,
+      })]
+    })))
+    const normalizedLanes = Object.values(lanes)
+    const generation = Number.isSafeInteger(payload.generation) && payload.generation >= 0
+      ? payload.generation
+      : null
+    const digest = typeof payload.digest === 'string'
+      && payload.digest.length > 0
+      && payload.digest.length <= 128
+      ? payload.digest
+      : null
+    if (generation === null || digest === null) return null
+    const aggregateRows = Object.freeze([...laneRows].sort(canonicalIncomeRowOrder))
+    if (Object.hasOwn(payload, 'rows')) {
+      const suppliedRows = canonicalIncomeRowsWithoutLoss(
+        payload.rows,
+        null,
+        MAX_FUTURES_SETTLED_INCOME_ROWS_PER_LANE * normalizedLanes.length,
+      )
+      if (suppliedRows === null || !sameCanonicalIncomeRows(suppliedRows, aggregateRows)) {
+        return null
+      }
+    }
+    const status = normalizedLanes.some(lane => lane.status === 'error')
+      ? normalizedLanes.some(lane => lane.successfulAt !== null || lane.rows.length > 0)
+        ? 'stale'
+        : 'error'
+      : normalizedLanes.some(lane => lane.status === 'stale')
+        ? 'stale'
+        : normalizedLanes.some(lane => lane.status === 'loading')
+          ? 'loading'
+          : normalizedLanes.length > 0
+            && normalizedLanes.every(lane => lane.status === 'ready')
+            ? 'ready'
+            : 'idle'
+    const coverageIsPresent = normalizedLanes.length > 0 && normalizedLanes.every(
+      lane => lane.coveredFrom !== null && lane.coveredTo !== null,
+    )
+    const candidateCoveredFrom = coverageIsPresent
+      ? Math.max(...normalizedLanes.map(lane => lane.coveredFrom))
+      : null
+    const candidateCoveredTo = coverageIsPresent
+      ? Math.min(...normalizedLanes.map(lane => lane.coveredTo))
+      : null
+    const coveredFrom = candidateCoveredFrom !== null
+      && candidateCoveredTo !== null
+      && candidateCoveredFrom <= candidateCoveredTo
+      ? candidateCoveredFrom
+      : null
+    const coveredTo = coveredFrom === null ? null : candidateCoveredTo
+    const attempted = normalizedLanes
+      .map(lane => lane.attemptedAt)
+      .filter(value => value !== null)
+    const successful = normalizedLanes
+      .map(lane => lane.successfulAt)
+      .filter(value => value !== null)
+    const attemptedAt = attempted.length > 0 ? Math.max(...attempted) : null
+    const successfulAt = successful.length === normalizedLanes.length
+      && successful.length > 0
+      ? Math.min(...successful)
+      : null
+    const completeByType = Object.freeze(Object.fromEntries(
+      normalizedLanes.map(lane => [lane.incomeType, lane.complete]),
+    ))
+    const complete = normalizedLanes.length > 0
+      && normalizedLanes.every(lane => lane.complete)
+    const error = normalizedLanes.find(lane => lane.error !== null)?.error ?? null
+    const suppliedTimeMatches = (key, derived) => {
+      if (!Object.hasOwn(payload, key)) return true
+      const supplied = payload[key] === null ? null : toSafeSettledTime(payload[key])
+      return !(payload[key] !== null && supplied === null) && supplied === derived
+    }
+    if ((Object.hasOwn(payload, 'status') && payload.status !== status)
+      || !suppliedTimeMatches('coveredFrom', coveredFrom)
+      || !suppliedTimeMatches('coveredTo', coveredTo)
+      || !suppliedTimeMatches('targetTo', targetTo)
+      || !suppliedTimeMatches('attemptedAt', attemptedAt)
+      || !suppliedTimeMatches('successfulAt', successfulAt)
+      || (Object.hasOwn(payload, 'complete') && payload.complete !== complete)) return null
+    if (Object.hasOwn(payload, 'completeByType')) {
+      if (payload.completeByType === null
+        || typeof payload.completeByType !== 'object'
+        || Array.isArray(payload.completeByType)) return null
+      const suppliedTypes = Object.keys(payload.completeByType).sort()
+      const derivedTypes = Object.keys(completeByType).sort()
+      if (suppliedTypes.length !== derivedTypes.length
+        || suppliedTypes.some((type, index) => type !== derivedTypes[index])
+        || derivedTypes.some(type => payload.completeByType[type] !== completeByType[type])) {
+        return null
+      }
+    }
+    if (Object.hasOwn(payload, 'error')) {
+      const suppliedError = payload.error === null
+        ? null
+        : sanitizeFuturesSettledIncomeError(payload.error)
+      const sameError = suppliedError?.code === error?.code
+        && suppliedError?.message === error?.message
+        && (suppliedError?.status ?? null) === (error?.status ?? null)
+      if ((suppliedError === null) !== (error === null)
+        || (suppliedError !== null && !sameError)) return null
+    }
+    const readAt = toSafeSettledTime(payload.readAt)
+    if (readAt === null) return null
+    return Object.freeze({
+      version: FUTURES_SETTLED_INCOME_RESOURCE_VERSION,
+      accountFingerprint,
+      rows: aggregateRows,
+      lanes,
+      coveredFrom,
+      coveredTo,
+      from: coveredFrom,
+      readAt,
+      targetTo,
+      status,
+      completeByType,
+      complete,
+      attemptedAt,
+      successfulAt,
+      error,
+      generation,
+      digest,
+    })
+  }
   if (!Array.isArray(payload.rows)) return null
   const from = toFiniteNumber(payload.from)
   const readAt = toFiniteNumber(payload.readAt)
@@ -204,240 +522,69 @@ export const readFuturesSettledIncomeFrame = (payload) => {
   })
 }
 
-/**
- * When each open position began, from the fold of fills.
- *
- * The flag that matters here is `partial`, not `entryImplied`. They answer
- * different questions and only one of them is about time: `entryImplied` says
- * the entry *price* was recovered from what the round realized rather than read
- * from its own fills, while `partial` says the round began by reducing a
- * position that was opened before this window of fills. A round can carry either
- * without the other — a reducing fill larger than the round holds sets `partial`
- * on its own, with no implied entry anywhere — so reading provenance as coverage
- * accepts an `openTime` that is the moment the window happened to start, and
- * reports the settled money of a position older than the read as though it were
- * the whole of it.
- *
- * A contract with no trustworthy start is simply absent from the result, and the
- * fold below reports it as window-bounded rather than complete.
- */
-export const readFuturesOpenPositionStarts = (rounds, symbols) => {
-  const wanted = symbols instanceof Set
-    ? symbols
-    : new Set((Array.isArray(symbols) ? symbols : [])
-      .map(symbol => String(symbol ?? '').toUpperCase()))
-  const starts = {}
-  for (const round of Array.isArray(rounds) ? rounds : []) {
-    if (round?.open !== true) continue
-    if (round.partial === true) continue
-    if (!wanted.has(round.symbol)) continue
-    const openTime = Number(round.openTime)
-    if (!Number.isFinite(openTime)) continue
-    // One contract can carry two open rounds on a hedged account. The earliest
-    // is when the exposure the row shows began.
-    const held = starts[round.symbol]
-    if (held === undefined || openTime < held) starts[round.symbol] = openTime
-  }
-  return starts
+const sameSettledIncomeError = (left, right) => (
+  (left === null && right === null)
+  || (left !== null && right !== null
+    && left?.code === right?.code
+    && left?.message === right?.message
+    && (left?.status ?? null) === (right?.status ?? null))
+)
+
+const sameFuturesSettledIncomeContent = (left, right) => {
+  if (left.status !== right.status
+    || left.coveredFrom !== right.coveredFrom
+    || left.coveredTo !== right.coveredTo
+    || left.targetTo !== right.targetTo
+    || left.complete !== right.complete
+    || !sameSettledIncomeError(left.error, right.error)) return false
+  const leftTypes = Object.keys(left.lanes ?? {}).sort()
+  const rightTypes = Object.keys(right.lanes ?? {}).sort()
+  if (leftTypes.length !== rightTypes.length
+    || leftTypes.some((type, index) => type !== rightTypes[index])) return false
+  return leftTypes.every((incomeType) => {
+    const held = left.lanes[incomeType]
+    const candidate = right.lanes[incomeType]
+    return held.status === candidate.status
+      && held.coveredFrom === candidate.coveredFrom
+      && held.coveredTo === candidate.coveredTo
+      && held.targetTo === candidate.targetTo
+      && held.confirmationNotBefore === candidate.confirmationNotBefore
+      && held.complete === candidate.complete
+      && sameSettledIncomeError(held.error, candidate.error)
+      && sameCanonicalIncomeRows(held.rows, candidate.rows)
+  })
 }
 
-/**
- * What the fills say an open position has realized and been charged.
- *
- * The same fold the closed rounds are built from, stating the same two numbers
- * the same way. Until 2026-08-20 they did not: a round in the history took its
- * realized PnL and its commission from the trade record while the figure beside
- * the live position took them from the income record, and one number stated by
- * two records is two numbers that can disagree. It also cost thirteen thousand
- * rows a week to read the second copy.
- *
- * The signs are the whole hazard here. A round's `realizedPnl` is signed the way
- * money is, and its `fee` is an unsigned magnitude that has to be subtracted —
- * while every amount from the income record is already signed. That is why the
- * commission below is negated exactly once, in one place, rather than at each
- * of the sites that add it up.
- *
- * A round that began by reducing a position opened before this window of fills
- * is excluded, the same way `readFuturesOpenPositionStarts` excludes it: its
- * fills do not reach the position's entry, so what it realized and was charged
- * before that edge is real, uncounted and unreachable from here.
- *
- * Nothing is contributed for a component that is zero. A position that has
- * closed nothing has not realized 0.00 — it has realized nothing, which is the
- * same rule the rest of this file keeps for an absent charge.
- */
-const settledFromOpenRounds = (rounds, starts, settlementAsset) => {
-  const entries = []
-  for (const round of Array.isArray(rounds) ? rounds : []) {
-    if (round?.open !== true || round.partial === true) continue
-    const symbol = String(round.symbol ?? '').toUpperCase()
-    if (!Number.isFinite(starts[symbol])) continue
-    const time = Number(round.openTime)
-    if (!Number.isFinite(time)) continue
-    const realizedPnl = Number(round.realizedPnl)
-    if (Number.isFinite(realizedPnl) && realizedPnl !== 0) {
-      entries.push({ symbol, component: 'realizedPnl', amount: realizedPnl, asset: settlementAsset, time })
-    }
-    const fee = Number(round.fee)
-    if (Number.isFinite(fee) && fee !== 0) {
-      entries.push({ symbol, component: 'commission', amount: -fee, asset: settlementAsset, time })
-    }
-    // A fee charged in BNB is a quantity of BNB. It is stated in its own asset
-    // rather than added to a USDT total, exactly as an income row in another
-    // asset is; `fee` above is the settlement asset's share and is already out
-    // of this list's way.
-    for (const charged of Array.isArray(round.feesByAsset) ? round.feesByAsset : []) {
-      const asset = charged?.asset
-      const amount = Number(charged?.amount)
-      if (typeof asset !== 'string' || asset === settlementAsset) continue
-      if (!Number.isFinite(amount) || amount === 0) continue
-      entries.push({ symbol, component: 'commission', amount: -amount, asset, time })
-    }
-  }
-  return entries
-}
-
-const emptyTotals = () => ({
-  realizedPnl: null,
-  funding: null,
-  commission: null,
-  insuranceClear: null,
-})
-
-// Never a confident zero. A component the account has none of is absent, because
-// `0.00` beside "insurance clearance" reads as a liquidation that cost nothing
-// rather than as a position that was never liquidated.
-const addAmount = (totals, component, amount) => {
-  const held = totals[component]
-  totals[component] = held === null ? amount : held + amount
-}
-
-/**
- * Folds settled income into one reading per contract.
- *
- * `starts` bounds each contract's window at the moment its open position began,
- * so that what is stated is the position's own settled money rather than the
- * account's history on that contract.
- *
- * A contract with **no** known start states no total at all. Until 2026-08-20 it
- * stated one anyway — the sum of everything the contract settled anywhere in the
- * read's window — and that is not a partial answer to the question the column
- * asks, it is a whole answer to a different one: a round closed three days ago
- * for +900 and one closed two days ago for -900 both land in the figure beside a
- * position opened this morning. The operator read -34.7 against a position that
- * had settled -34.7 of its own and called it a lie, and it was. `from` is null
- * for such a contract, which is what a surface tests to say why the figure is
- * absent.
- *
- * A partial total that says so is useful; a total of the wrong thing is not.
- *
- * Assets are kept apart. Binance charges commission in BNB whenever the account
- * holds it, and a BNB amount added into a USDT total is not a quantity of
- * anything. The settlement asset leads; anything else is stated in its own.
- */
-export const foldFuturesSettledMoney = (
-  income,
-  { starts = {}, from = null, rounds = null, settlementAsset = 'USDT' } = {},
-) => {
-  // Not `toFiniteNumber` on its own: `Number(null)` is 0, and a coverage of zero
-  // is the epoch — every position that ever opened would read as covered by a
-  // read that stated nothing at all. The absence has to be kept as an absence.
-  const covered = from === null || from === undefined ? null : toFiniteNumber(from)
-  // Knowing when a position began is not the same as having read back to it.
-  // Until 2026-08-20 this asked only the first question, so a read that had
-  // covered a single day of its window reported every contract in it as
-  // completely accounted for — and the desk believed its own truncated reading
-  // rather than marking it. Both halves are required: the start must be known,
-  // and the read must reach it.
-  const reaches = start => covered !== null && covered <= start
-  const byContract = new Map()
-  // With the fills in hand, the two components they state are taken from them
-  // and the income record's copies of the same charges are dropped. Without
-  // them, every component comes from the income record as before — a caller that
-  // has not read the fills yet still gets a reading rather than nothing.
-  const stated = readFuturesSettledIncome(income)
-  const entries = rounds === null
-    ? stated
-    : [
-      ...stated.filter(entry => entry.derivable !== true),
-      ...settledFromOpenRounds(rounds, starts, settlementAsset),
-    ]
-  for (const entry of entries) {
-    const start = starts[entry.symbol]
-    const known = Number.isFinite(start)
-    if (known && entry.time < start) continue
-    if (!byContract.has(entry.symbol)) {
-      byContract.set(entry.symbol, {
-        symbol: entry.symbol,
-        settled: emptyTotals(),
-        byAsset: new Map(),
-        from: known ? start : null,
-        complete: known && reaches(start),
-      })
-    }
-    // Nothing is attributed to a contract whose position start is unknown. The
-    // contract is still recorded, so a surface can tell "the read answered
-    // nothing about this one" from "the read cannot say which of this contract's
-    // money is this position's" — but no amount is accumulated, because every
-    // amount here would be the contract's rather than the position's.
-    if (!known) continue
-    const held = byContract.get(entry.symbol)
-    const asset = entry.asset ?? settlementAsset
-    if (asset === settlementAsset) {
-      addAmount(held.settled, entry.component, entry.amount)
-    } else {
-      if (!held.byAsset.has(asset)) held.byAsset.set(asset, emptyTotals())
-      addAmount(held.byAsset.get(asset), entry.component, entry.amount)
-    }
-  }
-  // A contract whose position start is known but which settled nothing still has
-  // a reading: "nothing settled yet" is an answer, and it is a different answer
-  // from "not read".
-  for (const [symbol, start] of Object.entries(starts)) {
-    if (byContract.has(symbol) || !Number.isFinite(start)) continue
-    byContract.set(symbol, {
-      symbol,
-      settled: emptyTotals(),
-      byAsset: new Map(),
-      from: start,
-      complete: reaches(start),
+// Frames can cross on the socket when an expensive read finishes after a newer
+// resource state was already published. Once v2 has been seen, neither a legacy
+// frame nor a lower generation may move the renderer backwards. A same-generation
+// frame is allowed only for newer observation metadata over the exact same
+// content digest; a disagreement is rejected as a contradictory frame, not
+// guessed at.
+export const newerFuturesSettledIncomeFrame = (held, candidate) => {
+  if (candidate === null) return held
+  if (held?.accountFingerprint !== undefined
+    && candidate?.accountFingerprint !== undefined
+    && held.accountFingerprint !== candidate.accountFingerprint) return held
+  if (held?.version !== FUTURES_SETTLED_INCOME_RESOURCE_VERSION) return candidate
+  if (candidate.version !== FUTURES_SETTLED_INCOME_RESOURCE_VERSION) return held
+  if (candidate.generation < held.generation) return held
+  if (candidate.generation === held.generation) {
+    if (candidate.digest !== held.digest
+      || candidate.readAt <= held.readAt
+      || !sameFuturesSettledIncomeContent(held, candidate)) return held
+    const heldLanes = held.lanes ?? {}
+    const candidateLanes = candidate.lanes ?? {}
+    const doesNotRegress = (previous, next) => previous === null
+      || previous === undefined
+      || (Number.isFinite(next) && next >= previous)
+    const observationIsMonotonic = Object.entries(heldLanes).every(([incomeType, lane]) => {
+      const next = candidateLanes[incomeType]
+      return next !== undefined
+        && doesNotRegress(lane.attemptedAt, next.attemptedAt)
+        && doesNotRegress(lane.successfulAt, next.successfulAt)
     })
+    return observationIsMonotonic ? candidate : held
   }
-  const readings = {}
-  for (const [symbol, held] of byContract) {
-    const settled = held.settled
-    const stated = FUTURES_SETTLED_COMPONENTS.filter(name => settled[name] !== null)
-    readings[symbol] = Object.freeze({
-      symbol,
-      ...settled,
-      // The sum of everything settled in the contract's own settlement asset.
-      // Absent rather than zero when nothing has settled at all: a position that
-      // has produced nothing yet has not broken even, it has not started.
-      total: stated.length === 0
-        ? null
-        : stated.reduce((sum, name) => sum + settled[name], 0),
-      settlementAsset,
-      // What was charged in something other than the settlement asset, in the
-      // asset it was charged in. The desk holds no rate to convert it at and
-      // will not print a guess beside money.
-      otherAssets: Object.freeze([...held.byAsset.entries()]
-        .map(([asset, totals]) => Object.freeze({
-          asset,
-          ...totals,
-          total: FUTURES_SETTLED_COMPONENTS
-            .filter(name => totals[name] !== null)
-            .reduce((sum, name) => sum + totals[name], 0),
-        }))
-        .sort((left, right) => (left.asset < right.asset ? -1 : 1))),
-      // When this reading starts: the moment the position began. Null when the
-      // desk could not establish that — and then every amount above is null too,
-      // because a figure bounded by nothing is the contract's history, not the
-      // position's.
-      from: held.from,
-      complete: held.complete,
-    })
-  }
-  return Object.freeze(readings)
+  return candidate
 }
-
-export default foldFuturesSettledMoney

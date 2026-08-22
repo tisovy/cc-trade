@@ -652,6 +652,72 @@ describe('backend trading command validation', () => {
         })).toMatchObject({ ok: false });
     });
 
+    it('preserves only an explicit basis-only history read', () => {
+        const base = {
+            action: TRADING_COMMAND_ACTIONS.ACCOUNT_HISTORY,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'futures',
+            accountId: 'default',
+            clientOrderId: 'history-basis',
+            symbol: 'BTCUSDT',
+            views: ['trades'],
+        };
+
+        expect(validateTypedTradingCommand({ ...base, basisOnly: true })).toMatchObject({
+            ok: true,
+            command: { symbol: 'BTCUSDT', basisOnly: true, views: ['trades'] },
+        });
+        const unmarked = validateTypedTradingCommand({ ...base, basisOnly: 'true' });
+        expect(unmarked.ok).toBe(true);
+        expect(unmarked.command).not.toHaveProperty('basisOnly');
+    });
+
+    it('preserves explicit v2 trade-history continuity evidence', () => {
+        const tradeCoverage = (continuityComplete) => ({
+            version: 2,
+            targetFrom: 100,
+            targetTo: 200,
+            coveredFrom: 100,
+            coveredTo: 200,
+            complete: true,
+            pageLimited: false,
+            retentionLimited: false,
+            continuityComplete,
+        });
+        const result = validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.ACCOUNT_HISTORY,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'futures',
+            accountId: 'default',
+            clientOrderId: 'history-continuity',
+            symbol: 'BTCUSDT',
+            coverage: {
+                BTCUSDT: {
+                    readAt: 201,
+                    orderCursor: '10',
+                    tradeCursor: '20',
+                    tradeCoverage: tradeCoverage(false),
+                },
+                ETHUSDT: {
+                    readAt: 201,
+                    orderCursor: '30',
+                    tradeCursor: '40',
+                    tradeCoverage: tradeCoverage(true),
+                },
+            },
+        });
+
+        expect(result.ok).toBe(true);
+        expect(result.command.coverage.BTCUSDT.tradeCoverage).toMatchObject({
+            complete: true,
+            continuityComplete: false,
+        });
+        expect(result.command.coverage.ETHUSDT.tradeCoverage).toMatchObject({
+            complete: true,
+            continuityComplete: true,
+        });
+    });
+
     it('bounds and normalizes futures history coverage without rounding identities', () => {
         const coverage = Object.fromEntries([
             ['btcusdt', {
@@ -964,6 +1030,34 @@ describe('backend trading command validation', () => {
                 symbol: 'BTCUSDT',
                 periodic: claimed,
             }).command.periodic).toBe(false);
+        }
+    });
+
+    it('preserves explicit manual intent only for a Futures account refresh', () => {
+        expect(validateTypedTradingCommand({
+            action: TRADING_COMMAND_ACTIONS.ACCOUNT_REFRESH,
+            version: TRADE_COMMAND_VERSION,
+            marketType: 'futures',
+            accountId: 'default',
+            clientOrderId: 'refresh-manual',
+            symbol: 'BTCUSDT',
+            manual: true,
+        }).command).toMatchObject({ manual: true, periodic: false });
+
+        for (const [marketType, manual] of [
+            ['futures', false],
+            ['futures', 'true'],
+            ['spot', true],
+        ]) {
+            expect(validateTypedTradingCommand({
+                action: TRADING_COMMAND_ACTIONS.ACCOUNT_REFRESH,
+                version: TRADE_COMMAND_VERSION,
+                marketType,
+                accountId: 'default',
+                clientOrderId: `refresh-${marketType}-${String(manual)}`,
+                symbol: 'BTCUSDT',
+                manual,
+            }).command).not.toHaveProperty('manual');
         }
     });
 });

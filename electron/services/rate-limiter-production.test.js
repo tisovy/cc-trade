@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RateLimiter } from './binance-connection.js';
+import { admitBinancePhysicalAttempt } from './binance-physical-attempt-context.js';
 
 const deferred = () => {
     let resolve;
@@ -58,6 +59,297 @@ describe('production RateLimiter cancellation', () => {
         expect(operation).toHaveBeenCalledOnce();
         expect(limiter.getCurrentWeight()).toBe(7);
         expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('charges one successful legacy logical operation exactly once', async () => {
+        const limiter = new RateLimiter(100, 60_000, 0);
+        const operation = vi.fn().mockResolvedValue('ok');
+
+        await expect(limiter.execute(operation, 30, 2)).resolves.toBe('ok');
+
+        expect(operation).toHaveBeenCalledOnce();
+        expect(limiter.getCurrentWeight()).toBe(30);
+    });
+
+    it('keeps a retried legacy Spot operation on its one logical reservation', async () => {
+        const limiter = new RateLimiter(100, 60_000, 0);
+        const networkError = Object.assign(new Error('reset'), { code: 'ECONNRESET' });
+        const operation = vi.fn()
+            .mockRejectedValueOnce(networkError)
+            .mockResolvedValueOnce('recovered');
+
+        const pending = limiter.execute(operation, 30, 2);
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        await expect(pending).resolves.toBe('recovered');
+        expect(operation).toHaveBeenCalledTimes(2);
+        expect(limiter.getCurrentWeight()).toBe(30);
+    });
+
+    it('cancels while a retry awaits capacity without starting or charging that attempt', async () => {
+        vi.setSystemTime(1_000);
+        const limiter = new RateLimiter(30, 60_000, 0, { physicalAttempts: true });
+        const controller = new AbortController();
+        const networkError = Object.assign(new Error('reset'), { code: 'ECONNRESET' });
+        let physicalSends = 0;
+        const operation = vi.fn(async () => {
+            await admitBinancePhysicalAttempt();
+            physicalSends += 1;
+            throw networkError;
+        });
+
+        const pending = limiter.execute(operation, 30, 2, {
+            signal: controller.signal,
+        });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(operation).toHaveBeenCalledOnce();
+        expect(physicalSends).toBe(1);
+        expect(limiter.getCurrentWeight()).toBe(30);
+
+        // The one-second network backoff ends, but the first attempt still owns
+        // the entire window. The second physical attempt is now waiting inside
+        // reserve(), before either its operation or its weight can be admitted.
+        await vi.advanceTimersByTimeAsync(1_000);
+        expect(operation).toHaveBeenCalledTimes(2);
+        expect(physicalSends).toBe(1);
+        expect(limiter.getCurrentWeight()).toBe(30);
+        controller.abort();
+
+        await expect(pending).rejects.toMatchObject({
+            name: 'AbortError',
+            code: 'ABORT_ERR',
+        });
+        expect(operation).toHaveBeenCalledTimes(2);
+        expect(physicalSends).toBe(1);
+        expect(limiter.getCurrentWeight()).toBe(30);
+        expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('admits and charges every physical attempt of a retried operation', async () => {
+        const limiter = new RateLimiter(100, 60_000, 100, { physicalAttempts: true });
+        const networkError = Object.assign(new Error('reset'), { code: 'ECONNRESET' });
+        const startedAt = [];
+        const operation = vi.fn()
+            .mockImplementationOnce(async () => {
+                await admitBinancePhysicalAttempt();
+                startedAt.push(Date.now());
+                throw networkError;
+            })
+            .mockImplementationOnce(async () => {
+                await admitBinancePhysicalAttempt();
+                startedAt.push(Date.now());
+                return 'recovered';
+            });
+
+        const pending = limiter.execute(operation, 30, 2);
+        await vi.advanceTimersByTimeAsync(2_000);
+
+        await expect(pending).resolves.toBe('recovered');
+        expect(operation).toHaveBeenCalledTimes(2);
+        expect(startedAt[1] - startedAt[0]).toBeGreaterThanOrEqual(100);
+        expect(limiter.getCurrentWeight()).toBe(60);
+    });
+
+    it('admits and charges a successful retry after a physical timeout', async () => {
+        const limiter = new RateLimiter(100, 60_000, 0, { physicalAttempts: true });
+        const timeout = Object.assign(new Error('timed out'), { code: 'ETIMEDOUT' });
+        const operation = vi.fn()
+            .mockImplementationOnce(async () => {
+                await admitBinancePhysicalAttempt();
+                throw timeout;
+            })
+            .mockImplementationOnce(async () => {
+                await admitBinancePhysicalAttempt();
+                return 'recovered';
+            });
+
+        const pending = limiter.execute(operation, 30, 2);
+        await vi.advanceTimersByTimeAsync(1_000);
+
+        await expect(pending).resolves.toBe('recovered');
+        expect(operation).toHaveBeenCalledTimes(2);
+        expect(limiter.getCurrentWeight()).toBe(60);
+    });
+
+    it('charges all three failed physical attempts before returning the final error', async () => {
+        const limiter = new RateLimiter(100, 60_000, 0, { physicalAttempts: true });
+        const networkError = Object.assign(new Error('reset'), { code: 'ECONNRESET' });
+        const operation = vi.fn(async () => {
+            await admitBinancePhysicalAttempt();
+            throw networkError;
+        });
+
+        const pending = limiter.execute(operation, 30, 2);
+        const rejection = expect(pending).rejects.toBe(networkError);
+        await vi.advanceTimersByTimeAsync(3_000);
+
+        await rejection;
+        expect(operation).toHaveBeenCalledTimes(3);
+        expect(limiter.getCurrentWeight()).toBe(90);
+    });
+
+    it('raises its conservative window floor from authoritative used-weight without refunding', async () => {
+        const summaries = [];
+        const limiter = new RateLimiter(200, 60_000, 0, {
+            physicalAttempts: true,
+            onOperation: summary => summaries.push(summary),
+        });
+
+        await limiter.execute(async () => {
+            const attempt = await admitBinancePhysicalAttempt();
+            attempt.observeResponse({ status: 200, usedWeight: 120 });
+            return 'first';
+        }, 30, 0);
+        expect(limiter.getCurrentWeight()).toBe(120);
+
+        await limiter.execute(async () => {
+            const attempt = await admitBinancePhysicalAttempt();
+            attempt.observeResponse({ status: 200, usedWeight: 5 });
+            return 'second';
+        }, 10, 0);
+
+        expect(limiter.getCurrentWeight()).toBe(130);
+        expect(summaries).toEqual([
+            expect.objectContaining({
+                attempts: 1,
+                chargedWeight: 30,
+                observedWeight: 120,
+                status: 200,
+            }),
+            expect.objectContaining({
+                attempts: 1,
+                chargedWeight: 10,
+                observedWeight: 5,
+                status: 200,
+            }),
+        ]);
+    });
+
+    it('preserves a newer concurrent reservation above an older observed baseline', async () => {
+        const limiter = new RateLimiter(2_000, 60_000, 0, { physicalAttempts: true });
+        const [attemptA] = await Promise.all([
+            limiter.execute(() => admitBinancePhysicalAttempt(), 30, 0),
+            limiter.execute(() => admitBinancePhysicalAttempt(), 30, 0),
+        ]);
+
+        expect(limiter.getCurrentWeight()).toBe(60);
+        attemptA.observeResponse({ status: 200, usedWeight: 950 });
+        expect(limiter.getCurrentWeight()).toBe(980);
+
+        await limiter.execute(() => admitBinancePhysicalAttempt(), 30, 0);
+        expect(limiter.getCurrentWeight()).toBe(1_010);
+    });
+
+    it('keeps every other unresolved token across reverse response ordering', async () => {
+        const limiter = new RateLimiter(2_000, 60_000, 0, { physicalAttempts: true });
+        const [attemptA, attemptB] = await Promise.all([
+            limiter.execute(() => admitBinancePhysicalAttempt(), 30, 0),
+            limiter.execute(() => admitBinancePhysicalAttempt(), 30, 0),
+        ]);
+
+        // B answered first, so A may not yet be represented by B's exchange
+        // sample even though A received the earlier local sequence number.
+        attemptB.observeResponse({ status: 200, usedWeight: 1_200 });
+        expect(limiter.getCurrentWeight()).toBe(1_230);
+
+        attemptA.observeResponse({ status: 200, usedWeight: 1_250 });
+        expect(limiter.getCurrentWeight()).toBe(1_250);
+
+        await limiter.execute(() => admitBinancePhysicalAttempt(), 30, 0);
+        expect(limiter.getCurrentWeight()).toBe(1_280);
+
+        attemptB.observeResponse({ status: 200, usedWeight: 1_000 });
+        attemptA.observeResponse({ status: 200, usedWeight: 1_250 });
+        expect(limiter.getCurrentWeight()).toBe(1_280);
+    });
+
+    it('does not invent an exchange meter when a response omits used-weight', async () => {
+        const summaries = [];
+        const limiter = new RateLimiter(100, 60_000, 0, {
+            physicalAttempts: true,
+            onOperation: summary => summaries.push(summary),
+        });
+
+        await limiter.execute(async () => {
+            const attempt = await admitBinancePhysicalAttempt();
+            attempt.observeResponse({ status: 200 });
+        }, 30, 0);
+
+        expect(limiter.getCurrentWeight()).toBe(30);
+        expect(summaries).toEqual([
+            expect.objectContaining({ observedWeight: null, status: 200 }),
+        ]);
+    });
+
+    it('resolves a physical token even when its answer omits used-weight', async () => {
+        const limiter = new RateLimiter(2_000, 60_000, 0, { physicalAttempts: true });
+        const [attemptA, attemptB] = await Promise.all([
+            limiter.execute(() => admitBinancePhysicalAttempt(), 30, 0),
+            limiter.execute(() => admitBinancePhysicalAttempt(), 30, 0),
+        ]);
+
+        attemptB.observeResponse({ status: 200 });
+        attemptA.observeResponse({ status: 200, usedWeight: 100 });
+
+        // B's local charge is still retained until its normal window expiry,
+        // but it is no longer added again as unresolved uncertainty.
+        expect(limiter.getCurrentWeight()).toBe(100);
+    });
+
+    it('drops stale lifecycle work after spacing without booking physical weight', async () => {
+        vi.setSystemTime(1_000);
+        const summaries = [];
+        const limiter = new RateLimiter(100, 60_000, 500, {
+            physicalAttempts: true,
+        });
+        await limiter.execute(() => admitBinancePhysicalAttempt(), 30, 0);
+
+        let current = true;
+        let physicalSends = 0;
+        const pending = limiter.execute(async () => {
+            await admitBinancePhysicalAttempt();
+            physicalSends += 1;
+        }, 30, 0, {
+            isCurrent: () => current,
+            onAccounting: summary => summaries.push(summary),
+        });
+        const rejection = expect(pending).rejects.toMatchObject({
+            name: 'AbortError',
+            code: 'ABORT_ERR',
+        });
+        await vi.advanceTimersByTimeAsync(100);
+        current = false;
+        await vi.advanceTimersByTimeAsync(400);
+
+        await rejection;
+        expect(physicalSends).toBe(0);
+        expect(limiter.getCurrentWeight()).toBe(30);
+        expect(summaries).toEqual([
+            expect.objectContaining({
+                attempts: 0,
+                chargedWeight: 0,
+                outcome: 'aborted',
+            }),
+        ]);
+    });
+
+    it('holds later physical sends until Retry-After backpressure expires', async () => {
+        const limiter = new RateLimiter(100, 60_000, 0, { physicalAttempts: true });
+        await limiter.execute(async () => {
+            const attempt = await admitBinancePhysicalAttempt();
+            attempt.observeResponse({ status: 429, retryAfterMs: 2_500 });
+        }, 1, 0);
+
+        const sentAt = [];
+        const pending = limiter.execute(async () => {
+            await admitBinancePhysicalAttempt();
+            sentAt.push(Date.now());
+        }, 1, 0);
+        await vi.advanceTimersByTimeAsync(2_499);
+        expect(sentAt).toEqual([]);
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(pending).resolves.toBeUndefined();
+        expect(sentAt).toEqual([2_500]);
     });
 
     it('preserves the existing non-cancellable execution signature and spacing', async () => {
@@ -184,6 +476,60 @@ describe('production RateLimiter cancellation', () => {
             'contract',
         ]);
         expect(admitted).toHaveLength(14);
+    });
+
+    it('keeps combined history and income fan-outs fair behind urgent physical work', async () => {
+        vi.setSystemTime(1_000);
+        const summaries = [];
+        const limiter = new RateLimiter(10_000, 60_000, 10, {
+            physicalAttempts: true,
+            onOperation: summary => summaries.push(summary),
+        });
+        const admitted = [];
+        const send = (label, weight, options) => limiter.execute(async () => {
+            await admitBinancePhysicalAttempt();
+            admitted.push(label);
+        }, weight, 0, options);
+        const fanOut = async (prefix, count, weight) => {
+            for (let index = 0; index < count; index += 1) {
+                await send(`${prefix}:${index}`, weight);
+            }
+        };
+
+        const history = fanOut('history', 24, 5);
+        const income = fanOut('income', 16, 30);
+        await vi.advanceTimersByTimeAsync(25);
+        const priorityBoundary = admitted.length;
+        const listenKey = send('listen-key', 1, { urgent: true });
+        const command = send('trading-command', 1, { urgent: true });
+
+        await vi.advanceTimersByTimeAsync(2_000);
+        await Promise.all([history, income, listenKey, command]);
+
+        const priorityWindow = admitted.slice(priorityBoundary, priorityBoundary + 3);
+        // An ordinary attempt already holding the serialized admission slot is
+        // not preempted, but nothing else queued ahead of the urgent work is.
+        expect(priorityWindow.filter(label => (
+            label === 'listen-key' || label === 'trading-command'
+        ))).toEqual(['listen-key', 'trading-command']);
+        expect(priorityWindow.filter(label => (
+            label.startsWith('history:') || label.startsWith('income:')
+        )).length).toBeLessThanOrEqual(1);
+        const ordinary = admitted.filter(label => (
+            label.startsWith('history:') || label.startsWith('income:')
+        ));
+        expect(ordinary.filter(label => label.startsWith('history:'))).toHaveLength(24);
+        expect(ordinary.filter(label => label.startsWith('income:'))).toHaveLength(16);
+        // While both walks still have pages, neither can monopolize admission.
+        expect(ordinary.slice(0, 32).filter(label => label.startsWith('history:')).length)
+            .toBeGreaterThanOrEqual(15);
+        expect(ordinary.slice(0, 32).filter(label => label.startsWith('income:')).length)
+            .toBeGreaterThanOrEqual(15);
+        expect(summaries).toHaveLength(42);
+        expect(summaries.every(summary => summary.attempts === 1)).toBe(true);
+        expect(summaries.reduce((total, summary) => total + summary.chargedWeight, 0))
+            .toBe((24 * 5) + (16 * 30) + 2);
+        expect(summaries.filter(summary => summary.standing === 'urgent')).toHaveLength(2);
     });
 
     // The stall the operator felt on 2026-08-22: a leverage change that answered

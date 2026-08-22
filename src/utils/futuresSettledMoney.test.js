@@ -1,11 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
-  foldFuturesSettledMoney,
-  readFuturesOpenPositionStarts,
+  FUTURES_UNDERIVABLE_INCOME_TYPES,
+  newerFuturesSettledIncomeFrame,
   readFuturesSettledIncome,
   readFuturesSettledIncomeFrame,
 } from './futuresSettledMoney.js'
-import buildFuturesTradeRounds from './futuresTradeRounds.js'
+import { MAX_FUTURES_SETTLED_INCOME_ROWS_PER_LANE } from './futuresSettledIncomeResource.js'
 
 const row = (overrides = {}) => ({
   symbol: 'BEATUSDT',
@@ -21,14 +21,25 @@ const row = (overrides = {}) => ({
 describe('readFuturesSettledIncome', () => {
   // A transfer into the futures wallet is the operator moving their own money.
   // Counted as a position's settled income it would read as a winning trade.
-  it('keeps only the flows a position can be charged or credited with', () => {
+  it('keeps only supported flows and preserves their signed component evidence', () => {
     const kept = readFuturesSettledIncome([
-      row({ incomeType: 'REALIZED_PNL' }),
+      row({ incomeType: 'REALIZED_PNL', income: '10', tranId: '1' }),
       row({ incomeType: 'TRANSFER', tranId: '2' }),
       row({ incomeType: 'WELCOME_BONUS', tranId: '3' }),
-      row({ incomeType: 'FUNDING_FEE', tranId: '4' }),
+      row({ incomeType: 'FUNDING_FEE', income: '-2', tranId: '4' }),
+      row({ incomeType: 'COMMISSION', income: '-0.4', asset: 'BNB', tranId: '5' }),
+      row({ incomeType: 'INSURANCE_CLEAR', income: '-3', tranId: '6' }),
+      row({ incomeType: 'COMMISSION_REBATE', income: '0.1', tranId: '7' }),
     ])
-    expect(kept.map(entry => entry.component)).toEqual(['realizedPnl', 'funding'])
+    expect(kept.map(({ component, derivable, amount, asset }) => ({
+      component, derivable, amount, asset,
+    }))).toEqual([
+      { component: 'realizedPnl', derivable: true, amount: 10, asset: 'USDT' },
+      { component: 'funding', derivable: false, amount: -2, asset: 'USDT' },
+      { component: 'commission', derivable: true, amount: -0.4, asset: 'BNB' },
+      { component: 'insuranceClear', derivable: false, amount: -3, asset: 'USDT' },
+      { component: 'commission', derivable: false, amount: 0.1, asset: 'USDT' },
+    ])
   })
 
   // Binance states that `tranId` is unique only within one `incomeType`. Keyed
@@ -61,270 +72,9 @@ describe('readFuturesSettledIncome', () => {
   })
 })
 
-// The two components the trade record already states, taken from it instead of
-// from a metered endpoint that states them again one row per fill.
-describe('foldFuturesSettledMoney, with the fills in hand', () => {
-  const fill = (overrides = {}) => ({
-    symbol: 'BEATUSDT', side: 'BUY', positionSide: 'BOTH',
-    price: '100', quantity: '1', realizedPnl: '0', commission: '0',
-    time: 1_000, id: 1, ...overrides,
-  })
-
-  // A long scaled into and partly closed, still open. The fills say what it
-  // realized and what it was charged; the income record is asked only for the
-  // funding, which no fill names.
-  const openRounds = () => buildFuturesTradeRounds([
-    fill({ id: 1, side: 'BUY', quantity: '3', price: '100', commission: '0.30', time: 1_000 }),
-    fill({ id: 2, side: 'SELL', quantity: '1', price: '110', realizedPnl: '10', commission: '0.11', time: 2_000 }),
-  ]).filter(round => round.open === true)
-
-  // The sign convention is the whole hazard on this path. A fill's commission is
-  // an unsigned magnitude that has to be subtracted; every amount from the income
-  // record is already signed. Mixing them returns a fee to the operator as
-  // profit.
-  it('takes the realized PnL and the commission from the fills, signed the exchange’s way', () => {
-    const [reading] = Object.values(foldFuturesSettledMoney([
-      row({ incomeType: 'FUNDING_FEE', income: '-7.10', tranId: '2', time: 1_500 }),
-    ], { starts: { BEATUSDT: 1_000 }, from: 900, rounds: openRounds() }))
-
-    expect(reading.realizedPnl).toBeCloseTo(10, 6)
-    expect(reading.commission).toBeCloseTo(-0.41, 6)
-    expect(reading.funding).toBeCloseTo(-7.1, 6)
-    expect(reading.total).toBeCloseTo(2.49, 6)
-  })
-
-  // One charge stated by two records must be counted once, and by the record
-  // already in hand.
-  //
-  // The two agree on a live account, which is exactly why this fixture makes
-  // them disagree: with identical numbers, counting the income copy and counting
-  // the fill are indistinguishable at the output, and the test would pass
-  // against a fold that had never heard of the fills. Here the income record
-  // claims figures the fills contradict, so the reading names which record it
-  // came from — and the sum of the two, which is the failure being guarded
-  // against, is neither.
-  it('does not add the income record’s copy of a charge the fills already state', () => {
-    const [reading] = Object.values(foldFuturesSettledMoney([
-      row({ incomeType: 'REALIZED_PNL', income: '999', tranId: '1', time: 2_000, tradeId: 2 }),
-      row({ incomeType: 'COMMISSION', income: '-9.00', tranId: '3', time: 2_000, tradeId: 2 }),
-      row({ incomeType: 'FUNDING_FEE', income: '-7.10', tranId: '2', time: 1_500 }),
-    ], { starts: { BEATUSDT: 1_000 }, from: 900, rounds: openRounds() }))
-
-    expect(reading.realizedPnl).toBeCloseTo(10, 6)
-    expect(reading.commission).toBeCloseTo(-0.41, 6)
-    expect(reading.total).toBeCloseTo(2.49, 6)
-  })
-
-  // A credit no fill names. Whether the exchange's own `COMMISSION` rows are
-  // gross or already net of it, gross-from-the-fills plus this credit is what
-  // the position cost — which is why the rebate types are still read and the
-  // charge types are not.
-  it('still nets a rebate against the commission the fills were charged', () => {
-    const [reading] = Object.values(foldFuturesSettledMoney([
-      row({ incomeType: 'COMMISSION_REBATE', income: '0.04', tranId: '5', time: 2_100 }),
-    ], { starts: { BEATUSDT: 1_000 }, from: 900, rounds: openRounds() }))
-    expect(reading.commission).toBeCloseTo(-0.37, 6)
-  })
-
-  // A guard, and named as one: it passes against the fold before this change,
-  // which never looked at a round at all. It is here because the disqualification
-  // has to hold in two places now — a round that began by reducing a position
-  // opened before this window of fills does not reach that position's entry, so
-  // what it realized and was charged before the edge is real, uncounted and
-  // unreachable. `readFuturesOpenPositionStarts` refuses such a round a start;
-  // this says the fold refuses it a figure, and the two must not drift apart.
-  it('states nothing from a round that does not reach the position’s open', () => {
-    const rounds = buildFuturesTradeRounds([
-      fill({ id: 1, side: 'SELL', quantity: '2', price: '100', realizedPnl: '0', commission: '0.20', time: 1_000 }),
-      fill({ id: 2, side: 'BUY', quantity: '3', price: '105', realizedPnl: '0', commission: '0.31', time: 2_000 }),
-    ]).filter(round => round.open === true)
-    expect(rounds[0].partial).toBe(true)
-
-    const readings = foldFuturesSettledMoney([], {
-      starts: readFuturesOpenPositionStarts(rounds, ['BEATUSDT']),
-      from: 900,
-      rounds,
-    })
-    expect(readings).toEqual({})
-  })
-
-  // A position that has closed nothing has not realized 0.00 — it has realized
-  // nothing. The same rule the rest of this file keeps for a charge that was
-  // never made.
-  it('invents no zero for a position that has realized nothing', () => {
-    const rounds = buildFuturesTradeRounds([
-      fill({ id: 1, side: 'BUY', quantity: '3', price: '100', commission: '0.30', time: 1_000 }),
-    ]).filter(round => round.open === true)
-    const [reading] = Object.values(foldFuturesSettledMoney([], {
-      starts: { BEATUSDT: 1_000 }, from: 900, rounds,
-    }))
-    expect(reading.realizedPnl).toBeNull()
-    expect(reading.commission).toBeCloseTo(-0.3, 6)
-  })
-
-  // A fee charged in BNB is a quantity of BNB. Added into a USDT total it is a
-  // number with no unit.
-  it('keeps a fill’s fee charged in another asset out of the settlement total', () => {
-    const rounds = buildFuturesTradeRounds([
-      fill({
-        id: 1, side: 'BUY', quantity: '3', price: '100', time: 1_000,
-        commission: '0.002', commissionAsset: 'BNB',
-      }),
-    ]).filter(round => round.open === true)
-    const [reading] = Object.values(foldFuturesSettledMoney([], {
-      starts: { BEATUSDT: 1_000 }, from: 900, rounds,
-    }))
-    expect(reading.commission).toBeNull()
-    expect(reading.otherAssets).toEqual([
-      expect.objectContaining({ asset: 'BNB', commission: -0.002 }),
-    ])
-  })
-
-  // A guard: this is the reading as it was before the change, and it passes
-  // against that code by construction. It is here so that narrowing what the
-  // income record is asked for cannot quietly become the only way to get a
-  // figure at all — a desk whose history has not loaded yet still has an answer.
-  it('reads every component from the income record when there are no fills', () => {
-    const [reading] = Object.values(foldFuturesSettledMoney([
-      row({ incomeType: 'REALIZED_PNL', income: '10', tranId: '1' }),
-      row({ incomeType: 'COMMISSION', income: '-0.41', tranId: '3' }),
-    ], { starts: { BEATUSDT: 1_000 }, from: 900 }))
-    expect(reading.realizedPnl).toBeCloseTo(10, 6)
-    expect(reading.commission).toBeCloseTo(-0.41, 6)
-  })
-})
-
-describe('foldFuturesSettledMoney', () => {
-  // The exchange signs an income row its own way: positive is an inflow, so
-  // commission and funding arrive negative and the total is their sum. Subtracting
-  // them would hand the fee back to the operator as profit.
-  it('sums the exchange’s signed amounts rather than subtracting them', () => {
-    const [reading] = Object.values(foldFuturesSettledMoney([
-      row({ incomeType: 'REALIZED_PNL', income: '120.5', tranId: '1' }),
-      row({ incomeType: 'COMMISSION', income: '-4.2', tranId: '1' }),
-      row({ incomeType: 'FUNDING_FEE', income: '-7.1', tranId: '2', time: 2_500 }),
-    ], { starts: { BEATUSDT: 1_000 } }))
-    expect(reading.realizedPnl).toBeCloseTo(120.5, 6)
-    expect(reading.commission).toBeCloseTo(-4.2, 6)
-    expect(reading.funding).toBeCloseTo(-7.1, 6)
-    expect(reading.total).toBeCloseTo(109.2, 6)
-  })
-
-  // An account on a rebate that counted only what it was charged would overstate
-  // what the position cost it to trade.
-  it('nets a commission rebate against the commission', () => {
-    const [reading] = Object.values(foldFuturesSettledMoney([
-      row({ incomeType: 'COMMISSION', income: '-4.2', tranId: '1' }),
-      row({ incomeType: 'COMMISSION_REBATE', income: '0.4', tranId: '2' }),
-    ], { starts: { BEATUSDT: 1_000 } }))
-    expect(reading.commission).toBeCloseTo(-3.8, 6)
-  })
-
-  // The row states the position's settled money, not the account's history on
-  // that contract. A contract traded, closed and re-entered would otherwise
-  // carry the old trade's profit into the new position.
-  it('counts only what settled after the position opened', () => {
-    const [reading] = Object.values(foldFuturesSettledMoney([
-      row({ income: '999', time: 500, tranId: '1' }),
-      row({ income: '10', time: 2_000, tranId: '2' }),
-    ], { starts: { BEATUSDT: 1_000 }, from: 900 }))
-    expect(reading.realizedPnl).toBeCloseTo(10, 6)
-    expect(reading.complete).toBe(true)
-    expect(reading.from).toBe(1_000)
-  })
-
-  // A total silently missing eight hours of funding is worse than one that names
-  // its own edge.
-  it('says so when it does not know when the position opened', () => {
-    const [reading] = Object.values(foldFuturesSettledMoney([
-      row({ income: '10', tranId: '1' }),
-    ], { starts: {} }))
-    expect(reading.complete).toBe(false)
-    expect(reading.from).toBeNull()
-  })
-
-  // Knowing when a position began is not the same as having read back to it. On
-  // 2026-08-20 the read covered one day of a seven-day window and every contract
-  // in it was reported completely accounted for, so the desk presented a total
-  // missing days of funding as though it were the whole of what the position had
-  // settled — and marked nothing.
-  it('is incomplete when the read does not reach back to the position', () => {
-    const [reading] = Object.values(foldFuturesSettledMoney([
-      row({ income: '10', time: 5_000, tranId: '1' }),
-    ], { starts: { BEATUSDT: 1_000 }, from: 4_000 }))
-    expect(reading.complete).toBe(false)
-    expect(reading.from).toBe(1_000)
-  })
-
-  // The absence of a stated coverage is not a coverage of zero. `Number(null)`
-  // is 0, and 0 is the epoch: every position that ever opened would read as
-  // covered by a read that stated nothing at all.
-  it('treats an unstated coverage as unknown rather than as the epoch', () => {
-    const [reading] = Object.values(foldFuturesSettledMoney([
-      row({ income: '10', time: 5_000, tranId: '1' }),
-    ], { starts: { BEATUSDT: 1_000 } }))
-    expect(reading.complete).toBe(false)
-  })
-
-  // A contract the read reached and found nothing against is a different answer
-  // from one it never reached far enough to look at.
-  it('separates nothing settled from not read back far enough', () => {
-    const reached = Object.values(foldFuturesSettledMoney([], {
-      starts: { BEATUSDT: 1_000 }, from: 900,
-    }))[0]
-    const short = Object.values(foldFuturesSettledMoney([], {
-      starts: { BEATUSDT: 1_000 }, from: 4_000,
-    }))[0]
-    expect(reached.total).toBeNull()
-    expect(reached.complete).toBe(true)
-    expect(short.total).toBeNull()
-    expect(short.complete).toBe(false)
-  })
-
-  // Binance charges commission in BNB whenever the account holds it. A BNB
-  // amount added into a USDT total is not a quantity of anything.
-  it('keeps a commission charged in another asset out of the settlement total', () => {
-    const [reading] = Object.values(foldFuturesSettledMoney([
-      row({ incomeType: 'REALIZED_PNL', income: '10', tranId: '1' }),
-      row({ incomeType: 'COMMISSION', income: '-0.003', asset: 'BNB', tranId: '2' }),
-    ], { starts: { BEATUSDT: 1_000 } }))
-    expect(reading.total).toBeCloseTo(10, 6)
-    expect(reading.commission).toBeNull()
-    expect(reading.otherAssets).toHaveLength(1)
-    expect(reading.otherAssets[0]).toMatchObject({ asset: 'BNB' })
-    expect(reading.otherAssets[0].commission).toBeCloseTo(-0.003, 6)
-  })
-
-  // Nothing settled is an answer. It is a different answer from not read, and a
-  // component the account has none of must not read as a zero — `0.00` beside
-  // insurance clearance reads as a liquidation that cost nothing.
-  it('reports a position that has settled nothing without inventing zeros', () => {
-    const [reading] = Object.values(foldFuturesSettledMoney([], {
-      starts: { BEATUSDT: 1_000 },
-      from: 900,
-    }))
-    expect(reading.total).toBeNull()
-    expect(reading.realizedPnl).toBeNull()
-    expect(reading.insuranceClear).toBeNull()
-    expect(reading.complete).toBe(true)
-  })
-
-  it('states insurance clearance only where the position incurred some', () => {
-    const [reading] = Object.values(foldFuturesSettledMoney([
-      row({ incomeType: 'INSURANCE_CLEAR', income: '-12', tranId: '1' }),
-    ], { starts: { BEATUSDT: 1_000 } }))
-    expect(reading.insuranceClear).toBeCloseTo(-12, 6)
-    expect(reading.funding).toBeNull()
-  })
-})
-
-// The test that was missing. Both halves of this path had tests and the path
-// did not, so a transform applied twice emptied the operator's column without a
-// single failure: the main process read the rows, the renderer read them again
-// looking for exchange fields the first read had consumed, and every row was
-// dropped. Drive the whole seam, with the numbers the operator read off the
-// Binance app for the position that showed `—`.
-describe('the settled-money path, end to end', () => {
+// The parser runs on both sides of the renderer boundary. It must accept its own
+// output or the second read silently empties an otherwise valid resource frame.
+describe('the settled-income parser boundary', () => {
   const exchangeRows = [
     { symbol: 'BTWUSDT', incomeType: 'FUNDING_FEE', income: '-229.43', asset: 'USDT', time: 2_000, tranId: '1', tradeId: null },
     { symbol: 'BTWUSDT', incomeType: 'COMMISSION', income: '-34.95', asset: 'USDT', time: 2_000, tranId: '2', tradeId: '9' },
@@ -332,18 +82,18 @@ describe('the settled-money path, end to end', () => {
     { symbol: null, incomeType: 'TRANSFER', income: '5000', asset: 'USDT', time: 2_100, tranId: '4', tradeId: null },
   ]
 
-  it('carries the exchange’s charges from the read to the column', () => {
-    // Main process → wire → renderer boundary → hook.
+  it('carries signed charges through a repeated renderer-boundary read', () => {
     const broadcast = readFuturesSettledIncome(exchangeRows)
     const frame = readFuturesSettledIncomeFrame({
       rows: broadcast, from: 1_000, readAt: 3_000, complete: true,
     })
-    const reading = foldFuturesSettledMoney(frame.rows, { starts: { BTWUSDT: 1_000 } }).BTWUSDT
-    expect(reading.funding).toBeCloseTo(-229.43, 6)
-    expect(reading.commission).toBeCloseTo(-34.95, 6)
-    // Nothing was ever cleared against insurance, so it is absent rather than 0.
-    expect(reading.insuranceClear).toBeNull()
-    expect(reading.total).toBeCloseTo(-264.38, 6)
+    expect(frame?.rows).toEqual(broadcast)
+    expect(frame?.rows.map(({ component, amount }) => ({ component, amount }))).toEqual([
+      { component: 'funding', amount: -229.43 },
+      { component: 'commission', amount: -34.95 },
+    ])
+    expect(frame?.rows.reduce((sum, entry) => sum + entry.amount, 0))
+      .toBeCloseTo(-264.38, 6)
   })
 
   // The property that makes the seam safe. Three points on this path read the
@@ -355,7 +105,7 @@ describe('the settled-money path, end to end', () => {
     const thrice = readFuturesSettledIncome(twice)
     expect(twice).toEqual(once)
     expect(thrice).toEqual(once)
-    expect(foldFuturesSettledMoney(thrice, { starts: { BTWUSDT: 1_000 } }).BTWUSDT.total)
+    expect(thrice.reduce((sum, entry) => sum + entry.amount, 0))
       .toBeCloseTo(-264.38, 6)
   })
 
@@ -381,10 +131,9 @@ describe('the settled-money path, end to end', () => {
     ])
   })
 
-  // An already-read commission entry is a charge the trade record states too,
-  // and the fold drops it where it holds the fills. Reading one back must not
-  // quietly turn it into a charge nothing else knows about, because that is the
-  // shape that gets counted twice.
+  // An already-read commission entry is a charge the trade record states too.
+  // Reading one back must preserve that classification so reconciliation can
+  // exclude the duplicate evidence rather than count it twice.
   it('classifies an already-read entry the fills could have stated', () => {
     expect(readFuturesSettledIncome([
       { symbol: 'BTWUSDT', component: 'commission', amount: -0.5, asset: 'USDT', time: 1 },
@@ -393,116 +142,61 @@ describe('the settled-money path, end to end', () => {
   })
 })
 
-describe('readFuturesOpenPositionStarts', () => {
-  // The two flags answer different questions and only one is about time.
-  // `entryImplied` says the entry *price* was recovered from what the round
-  // realized; `partial` says the round began by reducing a position opened
-  // before this window of fills. Reading provenance as coverage takes the
-  // moment the window happened to start for the moment the position opened, and
-  // then reports a partial settled total as a complete one.
-  it('refuses a start from a round that began before the window', () => {
-    expect(readFuturesOpenPositionStarts([
-      {
-        symbol: 'BEATUSDT', open: true, openTime: 5_000,
-        partial: true, entryImplied: false,
-      },
-    ], ['BEATUSDT'])).toEqual({})
-  })
-
-  it('takes a start from a round the walk saw open', () => {
-    expect(readFuturesOpenPositionStarts([
-      {
-        symbol: 'BEATUSDT', open: true, openTime: 5_000,
-        partial: false, entryImplied: false,
-      },
-    ], ['BEATUSDT'])).toEqual({ BEATUSDT: 5_000 })
-  })
-
-  // A recovered entry price is not by itself a reason to distrust the time: the
-  // question is whether the round began by closing something older.
-  it('does not refuse a start merely because the entry price was recovered', () => {
-    expect(readFuturesOpenPositionStarts([
-      {
-        symbol: 'BEATUSDT', open: true, openTime: 5_000,
-        partial: false, entryImplied: true,
-      },
-    ], ['BEATUSDT'])).toEqual({ BEATUSDT: 5_000 })
-  })
-
-  it('ignores closed rounds and contracts with no open position', () => {
-    expect(readFuturesOpenPositionStarts([
-      { symbol: 'BEATUSDT', open: false, openTime: 1_000, partial: false },
-      { symbol: 'BMTUSDT', open: true, openTime: 2_000, partial: false },
-    ], ['BEATUSDT'])).toEqual({})
-  })
-
-  // A hedged account carries two open rounds on one contract; the exposure the
-  // row shows began at the earlier of them.
-  it('takes the earliest open round on a contract', () => {
-    expect(readFuturesOpenPositionStarts([
-      { symbol: 'BEATUSDT', open: true, openTime: 9_000, partial: false },
-      { symbol: 'BEATUSDT', open: true, openTime: 3_000, partial: false },
-    ], ['BEATUSDT'])).toEqual({ BEATUSDT: 3_000 })
-  })
-})
-
-// Driven through the real fold rather than hand-made rounds: the flags are the
-// fold's to set, and a test that invents them proves only that this file agrees
-// with itself.
-describe('readFuturesOpenPositionStarts, against the fold', () => {
-  const fill = (overrides = {}) => ({
-    symbol: 'BEATUSDT', side: 'BUY', positionSide: 'BOTH',
-    price: '100', quantity: '1', realizedPnl: '0', commission: '0',
-    time: 1_000, id: 1, ...overrides,
-  })
-
-  // The case the wrong flag let through. A long opened before this window is
-  // sold partly at exactly its average entry — zero realized PnL — and the
-  // operator then adds to it, leaving it open. The fold reads the whole of that
-  // as one round on the original, pre-window position, so it is `partial`; but
-  // its entry price is honestly averaged from the fills that are here, so
-  // `entryImplied` is *false*. A filter reading provenance as coverage accepts
-  // it, takes `openTime` — the moment the window happened to start — for the
-  // moment the position opened, and reports settled money missing everything the
-  // position earned or paid before that as though it were complete.
-  it('gives no start for a position the window opens in the middle of', () => {
-    const rounds = buildFuturesTradeRounds([
-      fill({ id: 1, side: 'SELL', quantity: '2', price: '100', realizedPnl: '0', time: 1_000 }),
-      fill({ id: 2, side: 'BUY', quantity: '3', price: '105', realizedPnl: '0', time: 2_000 }),
-    ])
-    const open = rounds.filter(round => round.open)
-    expect(open).toHaveLength(1)
-    expect(open[0]).toMatchObject({ partial: true, entryImplied: false, openTime: 1_000 })
-    expect(readFuturesOpenPositionStarts(rounds, ['BEATUSDT'])).toEqual({})
-  })
-
-  // And the reading built on it says so, rather than presenting the window's
-  // total as the position's.
-  it('reports a position older than the window as window-bounded', () => {
-    const rounds = buildFuturesTradeRounds([
-      fill({ id: 1, side: 'SELL', quantity: '2', price: '100', realizedPnl: '0', time: 1_000 }),
-      fill({ id: 2, side: 'BUY', quantity: '3', price: '105', realizedPnl: '0', time: 2_000 }),
-    ])
-    const [reading] = Object.values(foldFuturesSettledMoney([
-      {
-        symbol: 'BEATUSDT', incomeType: 'REALIZED_PNL', income: '40',
-        asset: 'USDT', time: 2_500, tranId: '1', tradeId: null,
-      },
-    ], { starts: readFuturesOpenPositionStarts(rounds, ['BEATUSDT']) }))
-    expect(reading.complete).toBe(false)
-    expect(reading.from).toBeNull()
-  })
-
-  it('gives a start for a position the window saw opened', () => {
-    const rounds = buildFuturesTradeRounds([
-      fill({ id: 1, side: 'BUY', quantity: '1', price: '100', time: 4_000 }),
-      fill({ id: 2, side: 'BUY', quantity: '1', price: '102', time: 5_000 }),
-    ])
-    expect(readFuturesOpenPositionStarts(rounds, ['BEATUSDT'])).toEqual({ BEATUSDT: 4_000 })
-  })
-})
-
 describe('readFuturesSettledIncomeFrame', () => {
+  const fundingRow = (overrides = {}) => row({
+    incomeType: 'FUNDING_FEE',
+    income: '-1.25',
+    tranId: '101',
+    ...overrides,
+  })
+  const v2Frame = (overrides = {}) => {
+    const lanes = Object.fromEntries(FUTURES_UNDERIVABLE_INCOME_TYPES.map(incomeType => [
+      incomeType,
+      {
+        incomeType,
+        rows: incomeType === 'FUNDING_FEE' ? [fundingRow()] : [],
+        coveredFrom: 1_000,
+        coveredTo: 5_000,
+        targetTo: 5_000,
+        status: 'ready',
+        attemptedAt: 5_000,
+        successfulAt: 5_000,
+        complete: true,
+        error: null,
+      },
+    ]))
+    return {
+      version: 2,
+      accountFingerprint: '0123456789abcdef',
+      lanes,
+      rows: lanes.FUNDING_FEE.rows,
+      coveredFrom: 1_000,
+      coveredTo: 5_000,
+      targetTo: 5_000,
+      readAt: 5_000,
+      attemptedAt: 5_000,
+      successfulAt: 5_000,
+      status: 'ready',
+      completeByType: Object.fromEntries(
+        FUTURES_UNDERIVABLE_INCOME_TYPES.map(incomeType => [incomeType, true]),
+      ),
+      complete: true,
+      generation: 7,
+      digest: 'canonical-digest',
+      ...overrides,
+    }
+  }
+  const setLaneClocks = (payload, attemptedAt, successfulAt = attemptedAt) => {
+    for (const incomeType of FUTURES_UNDERIVABLE_INCOME_TYPES) {
+      payload.lanes[incomeType] = {
+        ...payload.lanes[incomeType],
+        attemptedAt,
+        successfulAt,
+      }
+    }
+    return payload
+  }
+
   it('carries the window the rows were read over', () => {
     expect(readFuturesSettledIncomeFrame({
       rows: [row()],
@@ -526,46 +220,287 @@ describe('readFuturesSettledIncomeFrame', () => {
       rows: [], from: 1, readAt: 2, complete: false,
     }).complete).toBe(false)
   })
-})
 
-// The failure of 2026-08-20. `starts` is what scopes a contract's income to the
-// position holding it; without it the fold summed the contract's whole covered
-// window — realized PnL of rounds closed days before the position was opened
-// included — and the column presented that as what the position had settled.
-describe('a contract whose position start is unknown', () => {
-  const T = Date.parse('2026-08-20T12:00:00.000Z')
-  const income = [
-    { symbol: 'BTCUSDT', incomeType: 'REALIZED_PNL', income: '900', asset: 'USDT', time: T - 3 * 86400000, tranId: '1' },
-    { symbol: 'BTCUSDT', incomeType: 'COMMISSION', income: '-40', asset: 'USDT', time: T - 3 * 86400000, tranId: '2' },
-    { symbol: 'BTCUSDT', incomeType: 'FUNDING_FEE', income: '-4.7', asset: 'USDT', time: T - 3600000, tranId: '3' },
-  ]
+  it('does not restore epoch time or complete coverage from a contradictory v2 frame', () => {
+    const lane = {
+      incomeType: 'FUNDING_FEE',
+      rows: [row({ incomeType: 'FUNDING_FEE' })],
+      coveredFrom: 1_000,
+      coveredTo: 5_000,
+      targetTo: 5_000,
+      status: 'loading',
+      attemptedAt: 5_000,
+      successfulAt: 4_000,
+      complete: true,
+      error: null,
+    }
+    const payload = {
+      version: 2,
+      accountFingerprint: '0123456789abcdef',
+      lanes: [lane],
+      rows: lane.rows,
+      coveredFrom: 1_000,
+      coveredTo: 5_000,
+      readAt: 5_000,
+      status: 'loading',
+      complete: true,
+      generation: 1,
+      digest: 'canonical-digest',
+    }
 
-  it('states no amount at all rather than the contract\u2019s own history', () => {
-    const folded = foldFuturesSettledMoney(income, { starts: {}, from: T - 7 * 86400000 })
-    const reading = folded.BTCUSDT
-    expect(reading).toBeDefined()
-    expect(reading.total).toBeNull()
-    // Not one component either: each of them would be the contract's.
-    expect(reading.realizedPnl).toBeNull()
-    expect(reading.funding).toBeNull()
-    expect(reading.commission).toBeNull()
-    // And `from` stays absent, which is what a surface reads to say why.
-    expect(reading.from).toBeNull()
-    expect(reading.complete).toBe(false)
+    expect(readFuturesSettledIncomeFrame(payload)).toBeNull()
+    expect(readFuturesSettledIncomeFrame({ ...payload, readAt: null })).toBeNull()
+    expect(readFuturesSettledIncomeFrame({ ...payload, readAt: ' ' })).toBeNull()
   })
 
-  it('still states the position\u2019s own money once the start is known', () => {
-    const folded = foldFuturesSettledMoney(income, {
-      starts: { BTCUSDT: T - 6 * 3600000 },
-      from: T - 7 * 86400000,
+  it('derives accepted aggregate rows from canonical lane authority', () => {
+    const payload = v2Frame()
+    delete payload.rows
+
+    expect(readFuturesSettledIncomeFrame(payload)).toMatchObject({
+      accountFingerprint: '0123456789abcdef',
+      generation: 7,
+      digest: 'canonical-digest',
+      complete: true,
+      rows: [{
+        symbol: 'BEATUSDT',
+        incomeType: 'FUNDING_FEE',
+        income: '-1.25',
+        asset: 'USDT',
+        tranId: '101',
+      }],
     })
-    const reading = folded.BTCUSDT
-    // Only the funding charged since the position opened; the closed round's
-    // +900 and its commission belong to a position that no longer exists.
-    expect(reading.funding).toBe(-4.7)
-    expect(reading.realizedPnl).toBeNull()
-    expect(reading.total).toBe(-4.7)
-    expect(reading.complete).toBe(true)
+  })
+
+  it('carries confirmation debt and rejects it beside a ready lane', () => {
+    const pending = v2Frame()
+    pending.lanes.FUNDING_FEE = {
+      ...pending.lanes.FUNDING_FEE,
+      status: 'stale',
+      complete: false,
+      confirmationNotBefore: 7_000,
+    }
+    pending.status = 'stale'
+    pending.completeByType.FUNDING_FEE = false
+    pending.complete = false
+
+    const accepted = readFuturesSettledIncomeFrame(pending)
+    expect(accepted?.lanes.FUNDING_FEE).toMatchObject({
+      status: 'stale',
+      complete: false,
+      confirmationNotBefore: 7_000,
+    })
+
+    const contradictory = v2Frame()
+    contradictory.lanes.FUNDING_FEE.confirmationNotBefore = 7_000
+    expect(readFuturesSettledIncomeFrame(contradictory)).toBeNull()
+
+    const loadingDebt = structuredClone(pending)
+    loadingDebt.lanes.FUNDING_FEE.status = 'loading'
+    loadingDebt.status = 'loading'
+    expect(readFuturesSettledIncomeFrame(loadingDebt)).toBeNull()
+
+    const changedDeadline = structuredClone(pending)
+    changedDeadline.readAt = 6_000
+    changedDeadline.lanes.FUNDING_FEE.confirmationNotBefore = 8_000
+    const changed = readFuturesSettledIncomeFrame(changedDeadline)
+    expect(newerFuturesSettledIncomeFrame(accepted, changed)).toBe(accepted)
+  })
+
+  it('accepts stale confirmation debt without rows or earlier coverage', () => {
+    const pending = v2Frame()
+    pending.lanes.FUNDING_FEE = {
+      ...pending.lanes.FUNDING_FEE,
+      rows: [],
+      coveredFrom: null,
+      coveredTo: null,
+      status: 'stale',
+      attemptedAt: null,
+      successfulAt: null,
+      confirmationNotBefore: 7_000,
+      complete: false,
+    }
+    pending.rows = []
+    pending.coveredFrom = null
+    pending.coveredTo = null
+    pending.status = 'stale'
+    pending.successfulAt = null
+    pending.completeByType.FUNDING_FEE = false
+    pending.complete = false
+
+    expect(readFuturesSettledIncomeFrame(pending)?.lanes.FUNDING_FEE).toMatchObject({
+      rows: [],
+      coveredFrom: null,
+      coveredTo: null,
+      status: 'stale',
+      confirmationNotBefore: 7_000,
+      complete: false,
+    })
+  })
+
+  it('rejects empty, partial, and extra lane sets before they become authority', () => {
+    const empty = v2Frame({ lanes: {}, rows: [], completeByType: {} })
+    const partial = v2Frame()
+    delete partial.lanes.FEE_RETURN
+    delete partial.completeByType.FEE_RETURN
+    const extra = v2Frame()
+    extra.lanes.TRANSFER = {
+      ...extra.lanes.FUNDING_FEE,
+      incomeType: 'TRANSFER',
+      rows: [],
+    }
+    extra.completeByType.TRANSFER = true
+
+    expect(readFuturesSettledIncomeFrame(empty)).toBeNull()
+    expect(readFuturesSettledIncomeFrame(partial)).toBeNull()
+    expect(readFuturesSettledIncomeFrame(extra)).toBeNull()
+  })
+
+  it('does not let a newer incomplete frame replace held lane authority', () => {
+    const held = readFuturesSettledIncomeFrame(v2Frame())
+    const partialPayload = v2Frame({
+      generation: held.generation + 1,
+      digest: 'newer-but-incomplete',
+      readAt: held.readAt + 1,
+    })
+    delete partialPayload.lanes.API_REBATE
+    delete partialPayload.completeByType.API_REBATE
+    const partial = readFuturesSettledIncomeFrame(partialPayload)
+
+    expect(partial).toBeNull()
+    expect(newerFuturesSettledIncomeFrame(held, partial)).toBe(held)
+  })
+
+  it.each([
+    ['malformed', [fundingRow({ asset: '' })]],
+    ['wrong-lane', [fundingRow({ incomeType: 'INSURANCE_CLEAR' })]],
+    ['duplicate', [fundingRow(), fundingRow()]],
+    ['conflicting', [fundingRow(), fundingRow({ income: '-9.99' })]],
+  ])('rejects a complete lane containing %s row evidence', (unusedCase, rows) => {
+    const payload = v2Frame()
+    payload.lanes.FUNDING_FEE.rows = rows
+    payload.rows = rows
+
+    expect(readFuturesSettledIncomeFrame(payload)).toBeNull()
+  })
+
+  it('rejects duplicate canonical lane names before either can overwrite the other', () => {
+    const payload = v2Frame()
+    payload.lanes = FUTURES_UNDERIVABLE_INCOME_TYPES.map(incomeType => ({
+      ...payload.lanes[incomeType],
+      incomeType,
+    }))
+    payload.lanes[payload.lanes.length - 1] = {
+      ...payload.lanes.FUNDING_FEE,
+      incomeType: 'funding_fee',
+      rows: [],
+    }
+
+    expect(readFuturesSettledIncomeFrame(payload)).toBeNull()
+  })
+
+  it.each([
+    ['missing', []],
+    ['extra', [fundingRow(), fundingRow({ tranId: '102' })]],
+    ['duplicate', [fundingRow(), fundingRow()]],
+    ['conflicting', [fundingRow({ income: '-9.99' })]],
+  ])('rejects %s aggregate rows rather than overriding lane authority', (unusedCase, rows) => {
+    expect(readFuturesSettledIncomeFrame(v2Frame({ rows }))).toBeNull()
+  })
+
+  it('admits only monotonic observation time over the same content revision', () => {
+    const held = readFuturesSettledIncomeFrame(v2Frame())
+    const laterPayload = setLaneClocks(v2Frame({
+      readAt: 6_000,
+      attemptedAt: 6_000,
+      successfulAt: 6_000,
+    }), 6_000)
+    const later = readFuturesSettledIncomeFrame(laterPayload)
+
+    expect(newerFuturesSettledIncomeFrame(held, later)).toBe(later)
+    const exactReplay = readFuturesSettledIncomeFrame(structuredClone(laterPayload))
+    expect(newerFuturesSettledIncomeFrame(later, exactReplay)).toBe(later)
+    expect(newerFuturesSettledIncomeFrame(later, exactReplay)).not.toBe(exactReplay)
+
+    const conflicting = readFuturesSettledIncomeFrame({
+      ...laterPayload,
+      readAt: 7_000,
+      digest: 'different-content',
+    })
+    expect(newerFuturesSettledIncomeFrame(later, conflicting)).toBe(later)
+
+    const regressedPayload = setLaneClocks(v2Frame({
+      readAt: 7_000,
+      attemptedAt: 4_000,
+      successfulAt: 4_000,
+    }), 4_000)
+    const regressed = readFuturesSettledIncomeFrame(regressedPayload)
+    expect(newerFuturesSettledIncomeFrame(later, regressed)).toBe(later)
+  })
+
+  it('rejects ready clock, aggregate-state, and unsafe-time contradictions', () => {
+    const missingSuccess = v2Frame()
+    missingSuccess.lanes.FUNDING_FEE.successfulAt = null
+    expect(readFuturesSettledIncomeFrame(missingSuccess)).toBeNull()
+
+    const regressedAttempt = v2Frame()
+    regressedAttempt.lanes.FUNDING_FEE.attemptedAt = 4_000
+    expect(readFuturesSettledIncomeFrame(regressedAttempt)).toBeNull()
+
+    const pendingReady = v2Frame()
+    pendingReady.lanes.FUNDING_FEE.pending = {
+      targetFrom: 1_000, targetTo: 5_000, nextPage: 2, rows: [],
+    }
+    expect(readFuturesSettledIncomeFrame(pendingReady)).toBeNull()
+
+    for (const overrides of [
+      { status: 'stale' },
+      { coveredTo: 4_999 },
+      { targetTo: 6_000 },
+      { attemptedAt: 4_999 },
+      { successfulAt: 4_999 },
+      { complete: false },
+      { completeByType: { FUNDING_FEE: false } },
+      { readAt: -1 },
+      { readAt: 1e100 },
+      { readAt: 5_000.5 },
+    ]) {
+      expect(readFuturesSettledIncomeFrame(v2Frame(overrides))).toBeNull()
+    }
+  })
+
+  it('does not accept changed money behind the same generation and digest label', () => {
+    const held = readFuturesSettledIncomeFrame(v2Frame())
+    const changedPayload = setLaneClocks(v2Frame({
+      readAt: 6_000,
+      attemptedAt: 6_000,
+      successfulAt: 6_000,
+    }), 6_000)
+    changedPayload.lanes.FUNDING_FEE = {
+      ...changedPayload.lanes.FUNDING_FEE,
+      rows: [fundingRow({ income: '-99.00' })],
+    }
+    delete changedPayload.rows
+    const changed = readFuturesSettledIncomeFrame(changedPayload)
+
+    expect(changed).not.toBeNull()
+    expect(newerFuturesSettledIncomeFrame(held, changed)).toBe(held)
+  })
+
+  it('rejects over-ceiling lane and compatibility row arrays before canonicalization', () => {
+    const oversizedLane = v2Frame()
+    oversizedLane.lanes.FUNDING_FEE.rows = new Array(
+      MAX_FUTURES_SETTLED_INCOME_ROWS_PER_LANE + 1,
+    )
+    delete oversizedLane.rows
+    expect(readFuturesSettledIncomeFrame(oversizedLane)).toBeNull()
+
+    const oversizedAggregate = v2Frame()
+    oversizedAggregate.rows = new Array(
+      MAX_FUTURES_SETTLED_INCOME_ROWS_PER_LANE
+        * FUTURES_UNDERIVABLE_INCOME_TYPES.length + 1,
+    )
+    expect(readFuturesSettledIncomeFrame(oversizedAggregate)).toBeNull()
   })
 })
 

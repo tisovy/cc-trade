@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { buildFuturesTradeRounds } from './futuresTradeRounds.js'
+import {
+  auditFuturesFillAllocation,
+  buildFuturesTradeRoundIndex,
+  buildFuturesTradeRounds,
+  futuresTradePositionKey,
+} from './futuresTradeRounds.js'
 
 const fill = (overrides = {}) => ({
   id: 1,
@@ -9,9 +14,106 @@ const fill = (overrides = {}) => ({
   price: '2.554',
   quantity: '1000',
   commission: '0.0102',
+  marginAsset: 'USDT',
   realizedPnl: '0',
   time: 1_784_000_000_000,
   ...overrides,
+})
+
+describe('auditFuturesFillAllocation', () => {
+  it('conserves one reversal fill split into exact 4 + 2 quantity atoms', () => {
+    const audit = auditFuturesFillAllocation({
+      canonicalFills: [{ identity: 'fill:2', quantityAtoms: '600000000' }],
+      contributions: [
+        { identity: 'fill:2', quantityAtoms: '400000000', roundKey: 'round:closed' },
+        { identity: 'fill:2', quantityAtoms: '200000000', roundKey: 'round:open' },
+      ],
+      roundKeys: ['round:closed', 'round:open'],
+    })
+
+    expect(audit).toMatchObject({
+      conserved: true,
+      canonicalFillCount: 1,
+      assignedFillCount: 1,
+      contributionCount: 2,
+      canonicalQuantityAtoms: '600000000',
+      assignedQuantityAtoms: '600000000',
+      affectedFillIds: [],
+      affectedRoundKeys: [],
+      affectedAtomsByFill: [],
+    })
+  })
+
+  it.each([
+    {
+      failure: 'under-allocation',
+      contributions: [
+        { identity: 'fill:2', quantityAtoms: '400000000', roundKey: 'round:closed' },
+      ],
+      expected: {
+        missingFillIds: [], underallocatedFillIds: ['fill:2'],
+        overallocatedFillIds: [], unknownFillIds: [],
+      },
+    },
+    {
+      failure: 'omitted assignment',
+      contributions: [],
+      expected: {
+        missingFillIds: ['fill:2'], underallocatedFillIds: ['fill:2'],
+        overallocatedFillIds: [], unknownFillIds: [],
+      },
+    },
+    {
+      failure: 'over-allocation',
+      contributions: [
+        { identity: 'fill:2', quantityAtoms: '400000000', roundKey: 'round:closed' },
+        { identity: 'fill:2', quantityAtoms: '400000000', roundKey: 'round:open' },
+      ],
+      expected: {
+        missingFillIds: [], underallocatedFillIds: [],
+        overallocatedFillIds: ['fill:2'], unknownFillIds: [],
+      },
+    },
+    {
+      failure: 'unknown assignment',
+      contributions: [
+        { identity: 'fill:other', quantityAtoms: '600000000', roundKey: 'round:closed' },
+      ],
+      expected: {
+        missingFillIds: ['fill:2'], underallocatedFillIds: ['fill:2'],
+        overallocatedFillIds: [], unknownFillIds: ['fill:other'],
+      },
+    },
+  ])('fails closed for $failure', ({ contributions, expected }) => {
+    const audit = auditFuturesFillAllocation({
+      canonicalFills: [{ identity: 'fill:2', quantityAtoms: '600000000' }],
+      contributions,
+      roundKeys: ['round:closed', 'round:open'],
+    })
+
+    expect(audit).toMatchObject({
+      conserved: false,
+      affectedRoundKeys: ['round:closed', 'round:open'],
+      ...expected,
+    })
+    expect(audit.affectedFillIds).not.toHaveLength(0)
+  })
+
+  it('rejects an oversized atom coefficient before BigInt parsing', () => {
+    const audit = auditFuturesFillAllocation({
+      canonicalFills: [{ identity: 'fill:huge', quantityAtoms: '9'.repeat(137) }],
+      contributions: [],
+      roundKeys: ['round:affected'],
+    })
+
+    expect(audit).toMatchObject({
+      conserved: false,
+      canonicalFillCount: 0,
+      invalidCanonicalFills: [{ identity: 'fill:huge', quantityAtoms: null }],
+      affectedFillIds: ['fill:huge'],
+      affectedRoundKeys: ['round:affected'],
+    })
+  })
 })
 
 describe('buildFuturesTradeRounds', () => {
@@ -61,7 +163,8 @@ describe('buildFuturesTradeRounds', () => {
     ])
     expect(round).toMatchObject({
       positionSide: 'SHORT',
-      quantity: '1000',
+      // What remains after the 400-contract reduction, not cumulative entry.
+      quantity: '600',
       exitPrice: 2.5,
       realizedPnl: 40,
       open: true,
@@ -454,18 +557,18 @@ describe('buildFuturesTradeRounds', () => {
     })
   })
 
-  it('does not use an opposite fill from another hedge leg to restart a round', () => {
+  it('does not use an opposite hedge leg to restart or consume a round', () => {
     const rounds = buildFuturesTradeRounds([
       fill({ id: 1, side: 'SELL', positionSide: 'SHORT', price: '100', quantity: '4', commission: '0', realizedPnl: '0', time: 1000 }),
       fill({ id: 2, side: 'BUY', positionSide: 'LONG', price: '90', quantity: '2', commission: '0', realizedPnl: '0', time: 2000 }),
     ])
 
-    expect(rounds).toHaveLength(1)
-    expect(rounds[0]).toMatchObject({
-      positionSide: 'SHORT',
-      entryImplied: false,
-      partial: false,
-      open: true,
+    expect(rounds).toHaveLength(2)
+    expect(rounds.find(round => round.leg === 'SHORT')).toMatchObject({
+      positionSide: 'SHORT', quantity: '4', entryImplied: false, partial: false, open: true,
+    })
+    expect(rounds.find(round => round.leg === 'LONG')).toMatchObject({
+      positionSide: 'LONG', quantity: '2', entryImplied: false, partial: false, open: true,
     })
   })
 
@@ -674,18 +777,21 @@ describe('buildFuturesTradeRounds', () => {
     })
   })
 
-  // A hedge account names the leg each fill belongs to, and two sells in a row
-  // can be one position opening beside another closing. The run stops at the leg
-  // boundary rather than reading the second sell as evidence about the first.
-  it('does not read one position leg as evidence about the other', () => {
+  // A hedge account names two independent positions on one contract. The short
+  // opener cannot be consumed by the long close merely because both are sells.
+  it('folds opposite hedge legs into independent position states', () => {
     const rounds = buildFuturesTradeRounds([
       fill({ id: 1, side: 'SELL', price: '100', quantity: '4', commission: '0', realizedPnl: '0', time: 1000, positionSide: 'SHORT' }),
       fill({ id: 2, side: 'SELL', price: '120', quantity: '6', commission: '0', realizedPnl: '120', time: 2000, positionSide: 'LONG' }),
     ])
-    // The walk still folds both legs into one contract's exposure, which is its
-    // own limitation — what this asserts is only that the first fill was not
-    // re-read as a close on the strength of the second.
-    expect(rounds[0].entryImplied).toBe(false)
+
+    expect(rounds).toHaveLength(2)
+    expect(rounds.find(round => round.positionKey === 'BICOUSDT:SHORT')).toMatchObject({
+      positionSide: 'SHORT', quantity: '4', entryImplied: false, partial: false, open: true,
+    })
+    expect(rounds.find(round => round.positionKey === 'BICOUSDT:LONG')).toMatchObject({
+      positionSide: 'LONG', quantity: '6', realizedPnl: 120, partial: true, open: false,
+    })
   })
 
   it('orders the fills itself rather than trusting the order they arrive in', () => {
@@ -698,139 +804,893 @@ describe('buildFuturesTradeRounds', () => {
   })
 })
 
+describe('buildFuturesTradeRoundIndex', () => {
+  const generation = 'position-generation-2'
+  const indexedFill = (overrides = {}) => fill({
+    symbol: 'BTCUSDT',
+    positionSide: 'BOTH',
+    side: 'BUY',
+    price: '100',
+    quantity: '1',
+    commission: '0',
+    commissionAsset: 'USDT',
+    realizedPnl: '0',
+    time: 1_000,
+    ...overrides,
+  })
+  const coverageFor = (...positionKeys) => Object.fromEntries(positionKeys.map(positionKey => [
+    positionKey,
+    {
+      version: 2,
+      generation,
+      flatBoundary: true,
+      pageLimited: false,
+      retentionLimited: false,
+      continuityComplete: true,
+    },
+  ]))
 
-// Two records with opposite sign conventions meet in a round's result, and only
-// one of them is negated. Getting it backwards hands a fee to the operator as
-// profit.
-describe('attachFuturesRoundIncome', () => {
+  it('keeps simultaneous LONG and SHORT positions independent', () => {
+    expect(futuresTradePositionKey(' btcusdt ', 'long')).toBe('BTCUSDT:LONG')
+    const index = buildFuturesTradeRoundIndex([
+      indexedFill({ id: '1', positionSide: 'LONG', side: 'BUY', quantity: '2', price: '100' }),
+      indexedFill({ id: '2', positionSide: 'SHORT', side: 'SELL', quantity: '3', price: '120' }),
+    ], {
+      coverage: coverageFor('BTCUSDT:LONG', 'BTCUSDT:SHORT'),
+      generation,
+      positions: [
+        { symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '2', entryPrice: '100' },
+        { symbol: 'BTCUSDT', positionSide: 'SHORT', quantity: '-3', entryPrice: '120' },
+      ],
+    })
+
+    expect(index.unresolved).toEqual([])
+    expect(index.open).toHaveLength(2)
+    expect(index.open.map(round => round.positionKey).sort()).toEqual([
+      'BTCUSDT:LONG',
+      'BTCUSDT:SHORT',
+    ])
+    for (const round of index.open) {
+      expect(round.resolved).toBe(true)
+      expect(round.fillIds).toBe(round.tradeIds)
+      expect(round.key).toContain(round.positionKey)
+    }
+  })
+
+  it('preserves retention-limited coverage for a snapshot-only current key', () => {
+    const coverage = coverageFor('BTCUSDT:LONG')
+    coverage['BTCUSDT:LONG'] = {
+      ...coverage['BTCUSDT:LONG'],
+      coveredFrom: 10_000,
+      coveredTo: 20_000,
+      flatBoundary: false,
+      retentionLimited: true,
+    }
+    const index = buildFuturesTradeRoundIndex([], {
+      coverage,
+      generation,
+      positions: [{
+        symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '1', entryPrice: '100',
+      }],
+    })
+
+    expect(index.rounds).toEqual([])
+    expect(index.byPosition['BTCUSDT:LONG'].coverage).toMatchObject({
+      coveredFrom: 10_000,
+      coveredTo: 20_000,
+      retentionLimited: true,
+      sourceVersionCompatible: true,
+      sourceGenerationCompatible: true,
+      terminalReconciled: false,
+    })
+    expect(index.unresolved).toHaveLength(1)
+    expect(index.unresolved[0].reasons).toEqual(expect.arrayContaining([
+      'fill-basis-missing',
+      'terminal-snapshot-mismatch',
+      'history-retention-limited',
+    ]))
+    for (const field of ['realizedPnl', 'fee', 'netPnl', 'fillNetPnl']) {
+      expect(index.unresolved[0]).not.toHaveProperty(field)
+    }
+  })
+
+  it('reconciles independent partial closes against each hedge snapshot', () => {
+    const index = buildFuturesTradeRoundIndex([
+      indexedFill({ id: '1', positionSide: 'LONG', side: 'BUY', quantity: '2', price: '100', time: 1_000 }),
+      indexedFill({ id: '2', positionSide: 'SHORT', side: 'SELL', quantity: '3', price: '120', time: 1_000 }),
+      indexedFill({ id: '3', positionSide: 'LONG', side: 'SELL', quantity: '1', price: '110', realizedPnl: '10', time: 2_000 }),
+      indexedFill({ id: '4', positionSide: 'SHORT', side: 'BUY', quantity: '1', price: '110', realizedPnl: '10', time: 2_000 }),
+    ], {
+      coverage: coverageFor('BTCUSDT:LONG', 'BTCUSDT:SHORT'),
+      generation,
+      positions: [
+        { symbol: 'BTCUSDT', positionSide: 'LONG', quantity: '1', entryPrice: '100' },
+        { symbol: 'BTCUSDT', positionSide: 'SHORT', quantity: '-2', entryPrice: '120' },
+      ],
+    })
+
+    expect(index.unresolved).toEqual([])
+    expect(index.open).toHaveLength(2)
+    expect(index.open.find(round => round.leg === 'LONG')).toMatchObject({
+      quantity: '1', realizedPnl: 10, open: true, resolved: true,
+    })
+    expect(index.open.find(round => round.leg === 'SHORT')).toMatchObject({
+      quantity: '2', realizedPnl: 10, open: true, resolved: true,
+    })
+  })
+
+  it('closes both hedge legs without either leg consuming the other', () => {
+    const index = buildFuturesTradeRoundIndex([
+      indexedFill({ id: '1', positionSide: 'LONG', side: 'BUY', quantity: '2', price: '100', time: 1_000 }),
+      indexedFill({ id: '2', positionSide: 'SHORT', side: 'SELL', quantity: '3', price: '120', time: 1_000 }),
+      indexedFill({ id: '3', positionSide: 'LONG', side: 'SELL', quantity: '2', price: '110', realizedPnl: '20', time: 2_000 }),
+      indexedFill({ id: '4', positionSide: 'SHORT', side: 'BUY', quantity: '3', price: '110', realizedPnl: '30', time: 2_000 }),
+    ], {
+      coverage: coverageFor('BTCUSDT:LONG', 'BTCUSDT:SHORT'),
+      generation,
+      positions: [],
+    })
+
+    expect(index.unresolved).toEqual([])
+    expect(index.closed).toHaveLength(2)
+    expect(index.closed.map(round => [round.positionKey, round.realizedPnl]).sort()).toEqual([
+      ['BTCUSDT:LONG', 20],
+      ['BTCUSDT:SHORT', 30],
+    ])
+  })
+
+  it('orders same-millisecond fills by integer trade ids above Number precision', () => {
+    const index = buildFuturesTradeRoundIndex([
+      indexedFill({ id: '9007199254740993', side: 'SELL', price: '110', realizedPnl: '10', time: 2_000 }),
+      indexedFill({ id: '9007199254740992', side: 'BUY', price: '100', time: 2_000 }),
+    ], {
+      coverage: coverageFor('BTCUSDT:BOTH'),
+      generation,
+      positions: [],
+    })
+
+    expect(index.closed).toHaveLength(1)
+    expect(index.closed[0]).toMatchObject({ entryPrice: 100, exitPrice: 110, realizedPnl: 10 })
+    expect(index.closed[0].fillIds).toEqual([
+      '9007199254740992',
+      '9007199254740993',
+    ])
+  })
+
+  it('folds duplicate REST and stream delivery of one reliable trade identity once', () => {
+    const opening = indexedFill({
+      id: '1', side: 'BUY', price: '100', commission: '1', time: 1_000,
+    })
+    const closing = indexedFill({
+      id: '2', side: 'SELL', price: '110', commission: '1',
+      realizedPnl: '10', time: 2_000,
+    })
+    const deliveries = [
+      opening,
+      { ...opening },
+      closing,
+      { ...closing },
+    ]
+    const options = {
+      coverage: coverageFor('BTCUSDT:BOTH'),
+      generation,
+      positions: [],
+    }
+    const index = buildFuturesTradeRoundIndex(deliveries, options)
+    const reversed = buildFuturesTradeRoundIndex([...deliveries].reverse(), options)
+
+    expect(index.unresolved).toEqual([])
+    expect(index.closed).toHaveLength(1)
+    expect(index.closed[0]).toMatchObject({
+      quantity: '1',
+      realizedPnlExact: '10',
+      feeExact: '2',
+      fills: 2,
+      fillIds: ['1', '2'],
+      tradeCoverage: { complete: true, fills: 2, identified: 2 },
+      commissionCoverage: { complete: true, fills: 2 },
+    })
+    expect(index.closed[0].fillContributions).toEqual([
+      {
+        identity: 'BTCUSDT:BOTH:trade:1', tradeId: '1', reliable: true, share: 1,
+        quantityAtoms: '100000000',
+      },
+      {
+        identity: 'BTCUSDT:BOTH:trade:2', tradeId: '2', reliable: true, share: 1,
+        quantityAtoms: '100000000',
+      },
+    ])
+    expect(index.fillConservation).toEqual(reversed.fillConservation)
+    expect(index.fillConservation).toMatchObject({
+      conserved: true,
+      affectedPositionKeys: [],
+      byPosition: {
+        'BTCUSDT:BOTH': {
+          conserved: true,
+          canonicalFillCount: 2,
+          assignedFillCount: 2,
+          canonicalQuantityAtoms: '200000000',
+          assignedQuantityAtoms: '200000000',
+        },
+      },
+    })
+  })
+
+  it('monotonically preserves rich evidence when a sparse duplicate arrives later', () => {
+    const opening = indexedFill({
+      id: '1', side: 'BUY', price: '100', commission: '1', time: 1_000,
+    })
+    const index = buildFuturesTradeRoundIndex([
+      opening,
+      { ...opening, realizedPnl: null, commission: null, commissionAsset: null, marginAsset: null },
+      indexedFill({
+        id: '2', side: 'SELL', price: '110', commission: '1',
+        realizedPnl: '10', time: 2_000,
+      }),
+    ], {
+      coverage: coverageFor('BTCUSDT:BOTH'),
+      generation,
+      positions: [],
+    })
+
+    expect(index.unresolved).toEqual([])
+    expect(index.closed).toHaveLength(1)
+    expect(index.closed[0]).toMatchObject({
+      realizedPnlExact: '10',
+      feeExact: '2',
+      tradeCoverage: { complete: true },
+      commissionCoverage: { complete: true },
+    })
+  })
+
+  it.each([
+    ['realized PnL', { realizedPnl: 'garbage' }],
+    ['commission', { commission: 'garbage' }],
+    ['commission asset', { commission: '1', commissionAsset: 123 }],
+    ['settlement asset', { marginAsset: 123 }],
+  ])('does not enrich away malformed duplicate %s evidence', (_field, malformed) => {
+    const opening = indexedFill({
+      id: '1', side: 'BUY', quantity: '1', price: '100', commission: '1', time: 1_000,
+    })
+    const closing = indexedFill({
+      id: '2', side: 'SELL', quantity: '1', price: '110', commission: '1',
+      realizedPnl: '10', time: 2_000,
+    })
+    const options = {
+      coverage: coverageFor('BTCUSDT:BOTH'),
+      generation,
+      positions: [],
+    }
+    const deliveries = [opening, { ...opening, ...malformed }, closing]
+
+    for (const index of [
+      buildFuturesTradeRoundIndex(deliveries, options),
+      buildFuturesTradeRoundIndex([...deliveries].reverse(), options),
+    ]) {
+      expect(index.closed).toEqual([])
+      expect(index.rounds).toEqual([])
+      expect(index.unresolved.flatMap(segment => segment.reasons)).toEqual(
+        expect.arrayContaining(['conflicting-fill-identity', 'history-continuity-unproven']),
+      )
+    }
+  })
+
+  it.each([
+    ['malformed settlement asset', { marginAsset: '@@@' }, 'trade-coverage-incomplete'],
+    ['oversized settlement asset', { marginAsset: 'A'.repeat(33) }, 'trade-coverage-incomplete'],
+    ['wrong-type settlement asset', { marginAsset: 123 }, 'trade-coverage-incomplete'],
+    ['malformed commission asset', { commission: '1', commissionAsset: '@@@' }, 'commission-coverage-incomplete'],
+    ['oversized commission asset', { commission: '1', commissionAsset: 'A'.repeat(33) }, 'commission-coverage-incomplete'],
+  ])('keeps direct-fold %s evidence out of exact NET', (_field, malformed, reason) => {
+    const index = buildFuturesTradeRoundIndex([
+      indexedFill({
+        id: '1', side: 'BUY', quantity: '1', price: '100', commission: '1',
+        time: 1_000, ...malformed,
+      }),
+      indexedFill({
+        id: '2', side: 'SELL', quantity: '1', price: '110', commission: '1',
+        realizedPnl: '10', time: 2_000,
+      }),
+    ], {
+      coverage: coverageFor('BTCUSDT:BOTH'),
+      generation,
+      positions: [],
+    })
+
+    expect(index.closed).toEqual([])
+    expect(index.rounds).toEqual([])
+    expect(index.unresolved.flatMap(segment => segment.reasons)).toContain(reason)
+  })
+
+  it.each([
+    ['realized PnL', { realizedPnl: '999' }],
+    ['quantity', { quantity: '2' }],
+  ])('fails conflicting duplicate %s evidence closed', (_field, conflict) => {
+    const closing = indexedFill({
+      id: '2', side: 'SELL', quantity: '1', price: '110',
+      realizedPnl: '10', time: 2_000,
+    })
+    const index = buildFuturesTradeRoundIndex([
+      indexedFill({ id: '1', side: 'BUY', quantity: '1', price: '100', time: 1_000 }),
+      closing,
+      { ...closing, ...conflict },
+    ], {
+      coverage: coverageFor('BTCUSDT:BOTH'),
+      generation,
+      positions: [],
+    })
+
+    expect(index.closed).toEqual([])
+    expect(index.rounds).toEqual([])
+    expect(index.unresolved.flatMap(segment => segment.reasons)).toEqual(
+      expect.arrayContaining(['conflicting-fill-identity', 'history-continuity-unproven']),
+    )
+  })
+
+  it('keeps a malformed retained fill from being skipped around an exact NET', () => {
+    const index = buildFuturesTradeRoundIndex([
+      indexedFill({ id: '1', side: 'BUY', quantity: '1', price: '100', time: 1_000 }),
+      indexedFill({ id: '2', side: 'BUY', quantity: '1', price: null, time: 1_500 }),
+      indexedFill({
+        id: '3', side: 'SELL', quantity: '1', price: '110',
+        realizedPnl: '10', time: 2_000,
+      }),
+    ], {
+      coverage: coverageFor('BTCUSDT:BOTH'),
+      generation,
+      positions: [],
+    })
+
+    expect(index.closed).toEqual([])
+    expect(index.rounds).toEqual([])
+    expect(index.unresolved.flatMap(segment => segment.reasons)).toEqual(
+      expect.arrayContaining(['invalid-fill', 'history-continuity-unproven']),
+    )
+  })
+
+  it('lets one valid canonical identity replace its malformed projection', () => {
+    const index = buildFuturesTradeRoundIndex([
+      indexedFill({ id: '1', side: 'BUY', quantity: '1', price: '100', time: 1_000 }),
+      indexedFill({
+        id: '2', side: 'SELL', quantity: '1', price: null,
+        realizedPnl: '10', time: 2_000,
+      }),
+      indexedFill({
+        id: '2', side: 'SELL', quantity: '1', price: '110',
+        realizedPnl: '10', time: 2_000,
+      }),
+    ], {
+      coverage: coverageFor('BTCUSDT:BOTH'),
+      generation,
+      positions: [],
+    })
+
+    expect(index.unresolved).toEqual([])
+    expect(index.closed).toHaveLength(1)
+    expect(index.closed[0]).toMatchObject({ fillIds: ['1', '2'], realizedPnlExact: '10' })
+  })
+
+  it('keeps a conflicting present field from hiding inside an incomplete duplicate', () => {
+    const closing = indexedFill({
+      id: '2', side: 'SELL', quantity: '1', price: '110',
+      realizedPnl: '10', time: 2_000,
+    })
+    const index = buildFuturesTradeRoundIndex([
+      indexedFill({ id: '1', side: 'BUY', quantity: '1', price: '100', time: 1_000 }),
+      closing,
+      { ...closing, quantity: null, price: '999' },
+    ], {
+      coverage: coverageFor('BTCUSDT:BOTH'),
+      generation,
+      positions: [],
+    })
+
+    expect(index.closed).toEqual([])
+    expect(index.rounds).toEqual([])
+    expect(index.unresolved.flatMap(segment => segment.reasons)).toEqual(
+      expect.arrayContaining(['conflicting-fill-identity', 'history-continuity-unproven']),
+    )
+  })
+
+  it('does not prove a later round by truncating unsupported quantity scale', () => {
+    const index = buildFuturesTradeRoundIndex([
+      indexedFill({ id: '1', side: 'BUY', quantity: '1.000000009', price: '100', time: 1_000 }),
+      indexedFill({
+        id: '2', side: 'SELL', quantity: '1.000000001', price: '110',
+        realizedPnl: '10', time: 2_000,
+      }),
+      indexedFill({ id: '3', side: 'BUY', quantity: '1', price: '120', time: 3_000 }),
+      indexedFill({
+        id: '4', side: 'SELL', quantity: '1', price: '130',
+        realizedPnl: '10', time: 4_000,
+      }),
+    ], {
+      coverage: coverageFor('BTCUSDT:BOTH'),
+      generation,
+      positions: [],
+    })
+
+    expect(index.rounds).toEqual([])
+    expect(index.unresolved.flatMap(segment => segment.reasons)).toEqual(
+      expect.arrayContaining(['invalid-fill', 'history-continuity-unproven']),
+    )
+  })
+
+  it('keeps an unknown-owner malformed fill from qualifying any supplied contract', () => {
+    const index = buildFuturesTradeRoundIndex([
+      indexedFill({ id: '1', symbol: 'BTCUSDT', side: 'BUY', time: 1_000 }),
+      indexedFill({
+        id: '2', symbol: 'BTCUSDT', side: 'SELL', price: '110',
+        realizedPnl: '10', time: 2_000,
+      }),
+      indexedFill({ id: '3', symbol: null, side: 'BUY', time: 2_500 }),
+      indexedFill({ id: '4', symbol: 'ETHUSDT', side: 'BUY', time: 3_000 }),
+      indexedFill({
+        id: '5', symbol: 'ETHUSDT', side: 'SELL', price: '110',
+        realizedPnl: '10', time: 4_000,
+      }),
+    ], {
+      coverage: coverageFor('BTCUSDT:BOTH', 'ETHUSDT:BOTH'),
+      generation,
+      positions: [],
+    })
+
+    expect(index.rounds).toEqual([])
+    expect(index.unresolved.flatMap(segment => segment.reasons)).toEqual(
+      expect.arrayContaining(['invalid-fill', 'history-continuity-unproven']),
+    )
+  })
+
+  it('fails oversized and lossy scientific fill decimals closed', () => {
+    const exactCoverage = coverageFor('BTCUSDT:BOTH')
+    const oversized = '1'.repeat(129)
+    const oversizedQuantity = buildFuturesTradeRoundIndex([
+      indexedFill({ id: '1', side: 'BUY', quantity: oversized, time: 1_000 }),
+    ], { coverage: exactCoverage, generation, positions: [] })
+    const oversizedMoney = buildFuturesTradeRoundIndex([
+      indexedFill({ id: '1', side: 'BUY', quantity: '1', price: '100', time: 1_000 }),
+      indexedFill({
+        id: '2', side: 'SELL', quantity: '1', price: '110',
+        realizedPnl: oversized, time: 2_000,
+      }),
+    ], { coverage: exactCoverage, generation, positions: [] })
+    const oversizedCommission = buildFuturesTradeRoundIndex([
+      indexedFill({ id: '1', side: 'BUY', quantity: '1', price: '100', time: 1_000 }),
+      indexedFill({
+        id: '2', side: 'SELL', quantity: '1', price: '110',
+        realizedPnl: '10', commission: oversized, time: 2_000,
+      }),
+    ], { coverage: exactCoverage, generation, positions: [] })
+    const scientificMoney = buildFuturesTradeRoundIndex([
+      indexedFill({ id: '1', side: 'BUY', quantity: '1', price: '100', time: 1_000 }),
+      indexedFill({
+        id: '2', side: 'SELL', quantity: '1', price: '110',
+        realizedPnl: 1e-9, commission: 1e-9, time: 2_000,
+      }),
+    ], { coverage: exactCoverage, generation, positions: [] })
+    const scientificQuantity = buildFuturesTradeRoundIndex([
+      indexedFill({ id: '1', side: 'BUY', quantity: 1e-9, price: '100', time: 1_000 }),
+    ], { coverage: exactCoverage, generation, positions: [] })
+
+    expect(oversizedQuantity.rounds).toEqual([])
+    expect(oversizedQuantity.unresolved.flatMap(segment => segment.reasons))
+      .toContain('invalid-fill')
+    expect(oversizedMoney.rounds).toEqual([])
+    expect(oversizedMoney.unresolved.flatMap(segment => segment.reasons))
+      .toContain('trade-coverage-incomplete')
+    expect(oversizedCommission.rounds).toEqual([])
+    expect(oversizedCommission.unresolved.flatMap(segment => segment.reasons))
+      .toContain('commission-coverage-incomplete')
+    expect(scientificMoney.rounds).toEqual([])
+    expect(scientificMoney.unresolved.flatMap(segment => segment.reasons))
+      .toEqual(expect.arrayContaining([
+        'trade-coverage-incomplete',
+        'commission-coverage-incomplete',
+      ]))
+    expect(scientificQuantity.rounds).toEqual([])
+    expect(scientificQuantity.unresolved.flatMap(segment => segment.reasons))
+      .toContain('invalid-fill')
+  })
+
+  it.each([
+    ['realized PnL', { realizedPnl: null }, 'trade-coverage-incomplete'],
+    ['commission', { commission: null }, 'commission-coverage-incomplete'],
+    ['price', { price: null }, 'invalid-fill'],
+    ['quantity', { quantity: null }, 'invalid-fill'],
+    ['time', { time: null }, 'invalid-fill'],
+  ])('keeps a REST fill with missing %s evidence unresolved', (
+    _field,
+    missing,
+    reason,
+  ) => {
+    const index = buildFuturesTradeRoundIndex([
+      indexedFill({ id: '1', side: 'BUY', time: 1_000 }),
+      indexedFill({
+        id: '2', side: 'SELL', price: '110', realizedPnl: '10', time: 2_000,
+        ...missing,
+      }),
+    ], {
+      coverage: coverageFor('BTCUSDT:BOTH'),
+      generation,
+      positions: [],
+    })
+
+    expect(index.rounds).toEqual([])
+    expect(index.unresolved.flatMap(segment => segment.reasons)).toContain(reason)
+  })
+
+  it('carries one proven USDC settlement asset through the resolved round', () => {
+    const index = buildFuturesTradeRoundIndex([
+      indexedFill({
+        id: '1', symbol: 'BTCUSDC', side: 'BUY', price: '100',
+        commissionAsset: 'USDC', marginAsset: 'USDC', time: 1_000,
+      }),
+      indexedFill({
+        id: '2', symbol: 'BTCUSDC', side: 'SELL', price: '110',
+        commission: '1', commissionAsset: 'USDC', marginAsset: 'USDC',
+        realizedPnl: '10', time: 2_000,
+      }),
+    ], {
+      coverage: coverageFor('BTCUSDC:BOTH'),
+      generation,
+      positions: [],
+    })
+
+    expect(index.unresolved).toEqual([])
+    expect(index.closed).toHaveLength(1)
+    expect(index.closed[0]).toMatchObject({
+      symbol: 'BTCUSDC',
+      settlementAsset: 'USDC',
+      realizedPnlExact: '10',
+      feeExact: '1',
+      netPnl: 9,
+      resolved: true,
+      tradeCoverage: { complete: true },
+    })
+  })
+
+  it('uses one canonical commission asset for completeness and settlement NET', () => {
+    const index = buildFuturesTradeRoundIndex([
+      indexedFill({
+        id: '1', side: 'BUY', commission: '0.5', commissionAsset: ' usdt ', time: 1_000,
+      }),
+      indexedFill({
+        id: '2', side: 'SELL', price: '110', commission: '0.5',
+        commissionAsset: 'usdt', realizedPnl: '10', time: 2_000,
+      }),
+    ], {
+      coverage: coverageFor('BTCUSDT:BOTH'),
+      generation,
+      positions: [],
+    })
+
+    expect(index.unresolved).toEqual([])
+    expect(index.closed).toHaveLength(1)
+    expect(index.closed[0]).toMatchObject({
+      realizedPnlExact: '10',
+      feeExact: '1',
+      netPnl: 9,
+      commissionCoverage: { complete: true },
+      feesByAsset: [{ asset: 'USDT', amount: 1, amountExact: '1' }],
+    })
+  })
+
+  it.each([
+    {
+      evidence: 'missing',
+      openingAsset: null,
+      closingAsset: null,
+    },
+    {
+      evidence: 'conflicting',
+      openingAsset: 'USDC',
+      closingAsset: 'USDT',
+    },
+  ])('keeps $evidence settlement-asset evidence unresolved', ({
+    openingAsset,
+    closingAsset,
+  }) => {
+    const index = buildFuturesTradeRoundIndex([
+      indexedFill({
+        id: '1', symbol: 'BTCUSDC', side: 'BUY', marginAsset: openingAsset, time: 1_000,
+      }),
+      indexedFill({
+        id: '2', symbol: 'BTCUSDC', side: 'SELL', price: '110',
+        realizedPnl: '10', marginAsset: closingAsset, time: 2_000,
+      }),
+    ], {
+      coverage: coverageFor('BTCUSDC:BOTH'),
+      generation,
+      positions: [],
+    })
+
+    expect(index.closed).toEqual([])
+    expect(index.rounds).toEqual([])
+    expect(index.unresolved).toHaveLength(1)
+    expect(index.unresolved[0]).toMatchObject({
+      symbol: 'BTCUSDC',
+      reasons: expect.arrayContaining(['trade-coverage-incomplete']),
+      tradeCoverage: { complete: false },
+    })
+    for (const moneyField of ['settlementAsset', 'realizedPnl', 'fee', 'netPnl']) {
+      expect(index.unresolved[0]).not.toHaveProperty(moneyField)
+    }
+  })
+
+  it('splits a one-way reversal into a closed round and a live remainder', () => {
+    const index = buildFuturesTradeRoundIndex([
+      indexedFill({ id: '1', side: 'BUY', quantity: '4', price: '100', time: 1_000 }),
+      indexedFill({ id: '2', side: 'SELL', quantity: '6', price: '110', realizedPnl: '40', time: 2_000 }),
+    ], {
+      coverage: coverageFor('BTCUSDT:BOTH'),
+      generation,
+      positions: [
+        { symbol: 'BTCUSDT', positionSide: 'BOTH', quantity: '-2', entryPrice: '110' },
+      ],
+    })
+
+    expect(index.unresolved).toEqual([])
+    expect(index.closed).toHaveLength(1)
+    expect(index.closed[0]).toMatchObject({
+      positionKey: 'BTCUSDT:BOTH', positionSide: 'LONG', quantity: '4', realizedPnl: 40,
+    })
+    expect(index.open).toHaveLength(1)
+    expect(index.open[0]).toMatchObject({
+      positionKey: 'BTCUSDT:BOTH', positionSide: 'SHORT', quantity: '2', entryPrice: 110,
+    })
+    expect(index.closed[0].fillIds).toContain('2')
+    expect(index.open[0].fillIds).toEqual(['2'])
+    expect(index.fillConservation).toMatchObject({
+      conserved: true,
+      affectedPositionKeys: [],
+      byPosition: {
+        'BTCUSDT:BOTH': {
+          conserved: true,
+          canonicalFillCount: 2,
+          assignedFillCount: 2,
+          canonicalQuantityAtoms: '1000000000',
+          assignedQuantityAtoms: '1000000000',
+        },
+      },
+    })
+    expect(index.closed[0].fillContributions).toContainEqual(expect.objectContaining({
+      identity: 'BTCUSDT:BOTH:trade:2', quantityAtoms: '400000000', share: 4 / 6,
+    }))
+    expect(index.open[0].fillContributions).toContainEqual(expect.objectContaining({
+      identity: 'BTCUSDT:BOTH:trade:2', quantityAtoms: '200000000', share: 2 / 6,
+    }))
+  })
+
+  it('does not accept a 0.5 PnL disagreement as one-percent rounding', () => {
+    const index = buildFuturesTradeRoundIndex([
+      indexedFill({ id: '1', side: 'BUY', quantity: '1', price: '100', time: 1_000 }),
+      indexedFill({ id: '2', side: 'SELL', quantity: '2', price: '100.5', realizedPnl: '0', time: 2_000 }),
+    ], { positions: [] })
+
+    expect(index.rounds).toEqual([])
+    expect(index.open).toEqual([])
+    expect(index.unresolved).not.toHaveLength(0)
+    expect(index.unresolved.flatMap(segment => segment.reasons)).toContain('left-boundary-unproven')
+  })
+
+  it('marks an exact endpoint page unresolved until its opener is proved', () => {
+    const trades = Array.from({ length: 1_000 }, (_, offset) => indexedFill({
+      id: String(offset + 1),
+      side: 'BUY',
+      quantity: '1',
+      price: '100',
+      time: 10_000 + offset,
+    }))
+    const index = buildFuturesTradeRoundIndex(trades, {
+      generation,
+      positions: [
+        { symbol: 'BTCUSDT', positionSide: 'BOTH', quantity: '1000', entryPrice: '100' },
+      ],
+    })
+
+    expect(index.rounds).toEqual([])
+    expect(index.byPosition['BTCUSDT:BOTH'].coverage.pageLimited).toBe(true)
+    expect(index.unresolved[0].reasons).toEqual(expect.arrayContaining([
+      'left-boundary-unproven',
+      'history-page-limited',
+    ]))
+  })
+
+  it('keeps a break-even first close unresolved instead of inventing an opener', () => {
+    const index = buildFuturesTradeRoundIndex([
+      indexedFill({ id: '1', side: 'SELL', quantity: '1', price: '100', realizedPnl: '0', time: 1_000 }),
+      indexedFill({ id: '2', side: 'SELL', quantity: '1', price: '110', realizedPnl: '10', time: 2_000 }),
+    ], { positions: [] })
+
+    expect(index.rounds).toEqual([])
+    expect(index.unresolved).toHaveLength(1)
+    expect(index.unresolved[0]).toMatchObject({ open: false, reasons: expect.arrayContaining(['left-boundary-unproven']) })
+  })
+
+  it('keeps exact held basis through scale-out and re-entry', () => {
+    const index = buildFuturesTradeRoundIndex([
+      indexedFill({ id: '1', side: 'BUY', quantity: '10', price: '100', time: 1_000 }),
+      indexedFill({ id: '2', side: 'SELL', quantity: '9', price: '100', realizedPnl: '0', time: 2_000 }),
+      indexedFill({ id: '3', side: 'BUY', quantity: '9', price: '200', time: 3_000 }),
+      indexedFill({ id: '4', side: 'SELL', quantity: '10', price: '200', realizedPnl: '100', time: 4_000 }),
+    ], {
+      coverage: coverageFor('BTCUSDT:BOTH'),
+      generation,
+      positions: [],
+    })
+
+    expect(index.unresolved).toEqual([])
+    expect(index.closed).toHaveLength(1)
+    expect(index.closed[0]).toMatchObject({ quantity: '19', realizedPnl: 100, resolved: true })
+    expect(index.closed[0].entryPrice).toBeCloseTo(147.368421, 6)
+    expect(index.closed[0].exitPrice).toBeCloseTo(152.631579, 6)
+  })
+
+  it('rejects a terminal exposure that disagrees with the current snapshot', () => {
+    const index = buildFuturesTradeRoundIndex([
+      indexedFill({ id: '1', side: 'BUY', quantity: '1', price: '100' }),
+    ], {
+      coverage: coverageFor('BTCUSDT:BOTH'),
+      generation,
+      positions: [
+        { symbol: 'BTCUSDT', positionSide: 'BOTH', quantity: '2', entryPrice: '100' },
+      ],
+    })
+
+    expect(index.rounds).toEqual([])
+    expect(index.unresolved[0].reasons).toContain('terminal-snapshot-mismatch')
+    expect(index.byPosition['BTCUSDT:BOTH'].terminal.reconciled).toBe(false)
+  })
+
+  it('fails duplicate or malformed authoritative snapshot keys closed independent of order', () => {
+    const trades = [
+      indexedFill({ id: '1', side: 'BUY', quantity: '1', price: '100' }),
+    ]
+    const matching = {
+      symbol: 'BTCUSDT', positionSide: 'BOTH', quantity: '1', entryPrice: '100',
+    }
+    const conflicting = {
+      symbol: 'BTCUSDT', positionSide: 'BOTH', quantity: '2', entryPrice: '100',
+    }
+    const fold = positions => buildFuturesTradeRoundIndex(trades, {
+      coverage: coverageFor('BTCUSDT:BOTH'),
+      generation,
+      positions,
+    })
+
+    for (const positions of [
+      [matching, conflicting],
+      [conflicting, matching],
+      [matching, { ...matching }],
+      [{ ...matching, quantity: 'not-a-decimal' }],
+    ]) {
+      const index = fold(positions)
+      expect(index.rounds).toEqual([])
+      expect(index.unresolved[0].reasons).toContain('terminal-snapshot-mismatch')
+      expect(index.byPosition['BTCUSDT:BOTH'].terminal.reconciled).toBe(false)
+    }
+  })
+
+  it('reconciles an exact sub-micro entry whose numeric view uses exponent notation', () => {
+    const index = buildFuturesTradeRoundIndex([
+      indexedFill({
+        id: '1', symbol: 'PEPEUSDT', side: 'BUY',
+        quantity: '1', price: '0.0000001', time: 1_000,
+      }),
+    ], {
+      coverage: coverageFor('PEPEUSDT:BOTH'),
+      generation,
+      positions: [
+        {
+          symbol: 'PEPEUSDT', positionSide: 'BOTH',
+          quantity: '1', entryPrice: '0.0000001',
+        },
+      ],
+    })
+
+    expect(index.unresolved).toEqual([])
+    expect(index.open).toHaveLength(1)
+    expect(index.open[0]).toMatchObject({ entryPrice: 1e-7, resolved: true })
+    expect(index.byPosition['PEPEUSDT:BOTH'].terminal).toMatchObject({
+      entryPrice: 1e-7,
+      reconciled: true,
+    })
+  })
+
+  it('invalidates stale-generation and symbol-only coverage records', () => {
+    const trades = [
+      indexedFill({ id: '1', side: 'BUY', quantity: '1', price: '100', time: 1_000 }),
+      indexedFill({ id: '2', side: 'SELL', quantity: '1', price: '110', realizedPnl: '10', time: 2_000 }),
+    ]
+    const symbolOnly = buildFuturesTradeRoundIndex(trades, {
+      coverage: {
+        BTCUSDT: { version: 2, generation, flatBoundary: true, pageLimited: false },
+      },
+      generation,
+      positions: [],
+    })
+    const staleGeneration = buildFuturesTradeRoundIndex(trades, {
+      coverage: {
+        'BTCUSDT:BOTH': {
+          version: 2,
+          generation: 'position-generation-1',
+          flatBoundary: true,
+          pageLimited: false,
+        },
+      },
+      generation,
+      positions: [],
+    })
+
+    expect(symbolOnly.rounds).toEqual([])
+    expect(symbolOnly.byPosition['BTCUSDT:BOTH'].coverage.sourceVersionCompatible).toBe(false)
+    expect(staleGeneration.rounds).toEqual([])
+    expect(staleGeneration.byPosition['BTCUSDT:BOTH'].coverage.sourceGenerationCompatible).toBe(false)
+    expect(staleGeneration.unresolved[0].reasons).toContain('coverage-generation-unproven')
+  })
+
+  it('withholds resolved money when the history suffix is not contiguous', () => {
+    const exact = coverageFor('BTCUSDT:BOTH')
+    const index = buildFuturesTradeRoundIndex([
+      indexedFill({ id: '1', side: 'BUY', quantity: '1', price: '100', time: 1_000 }),
+      indexedFill({ id: '2', side: 'SELL', quantity: '1', price: '110', realizedPnl: '10', time: 2_000 }),
+    ], {
+      coverage: {
+        'BTCUSDT:BOTH': {
+          ...exact['BTCUSDT:BOTH'],
+          continuityComplete: false,
+        },
+      },
+      generation,
+      positions: [],
+    })
+
+    expect(index.rounds).toEqual([])
+    expect(index.unresolved).toHaveLength(1)
+    expect(index.unresolved[0].reasons).toContain('history-continuity-unproven')
+    for (const moneyField of ['realizedPnl', 'fee', 'netPnl', 'fillNetPnl']) {
+      expect(index.unresolved[0]).not.toHaveProperty(moneyField)
+    }
+  })
+
+  it('resolves rounds only after an observed flat boundary and strips money from unresolved output', () => {
+    const exact = coverageFor('BTCUSDT:BOTH')
+    const index = buildFuturesTradeRoundIndex([
+      indexedFill({ id: '1', side: 'BUY', quantity: '1', price: '100', time: 1_000 }),
+      indexedFill({ id: '2', side: 'SELL', quantity: '1', price: '110', realizedPnl: '10', time: 2_000 }),
+      indexedFill({ id: '3', side: 'BUY', quantity: '1', price: '120', time: 3_000 }),
+      indexedFill({ id: '4', side: 'SELL', quantity: '1', price: '130', realizedPnl: '10', time: 4_000 }),
+    ], {
+      coverage: {
+        'BTCUSDT:BOTH': {
+          ...exact['BTCUSDT:BOTH'],
+          flatBoundary: false,
+        },
+      },
+      generation,
+      positions: [],
+    })
+
+    expect(index.closed).toHaveLength(1)
+    expect(index.closed[0]).toMatchObject({
+      key: expect.stringContaining('trade:3'), resolved: true, realizedPnl: 10,
+    })
+    expect(index.unresolved).toHaveLength(1)
+    expect(index.unresolved[0].fillIds).toEqual(['1', '2'])
+    for (const moneyField of ['realizedPnl', 'fee', 'netPnl', 'fillNetPnl']) {
+      expect(index.unresolved[0]).not.toHaveProperty(moneyField)
+    }
+  })
+
+})
+
+describe('buildFuturesTradeRounds fill money', () => {
   const fill = (overrides = {}) => ({
     symbol: 'BEATUSDT', side: 'BUY', positionSide: 'BOTH',
     price: '100', quantity: '1', realizedPnl: '0',
-    commission: '0', commissionAsset: 'USDT', time: 1_000, id: 1, ...overrides,
+    commission: '0', commissionAsset: 'USDT', marginAsset: 'USDT',
+    time: 1_000, id: 1, ...overrides,
   })
-  const roundTrip = [
-    fill({ id: 1, side: 'BUY', quantity: '10', price: '100', commission: '2', time: 1_000 }),
-    fill({ id: 2, side: 'SELL', quantity: '10', price: '112', realizedPnl: '120', commission: '2', time: 5_000 }),
-  ]
-
-  it('adds an already-negative income row rather than subtracting it', () => {
-    const [round] = buildFuturesTradeRounds(roundTrip, {
-      income: [{ symbol: 'BEATUSDT', component: 'funding', amount: -7.1, asset: 'USDT', time: 3_000 }],
-      incomeFrom: 500,
-    })
-    expect(round.realizedPnl).toBeCloseTo(120, 6)
-    expect(round.fee).toBeCloseTo(4, 6)
-    expect(round.funding).toBeCloseTo(-7.1, 6)
-    // 120 − 4 + (−7.1). Subtracting the funding would give 116 + 7.1.
-    expect(round.netPnl).toBeCloseTo(108.9, 6)
-  })
-
-  it('counts only the charges that landed while the round was held', () => {
-    const [round] = buildFuturesTradeRounds(roundTrip, {
-      income: [
-        { symbol: 'BEATUSDT', component: 'funding', amount: -1, asset: 'USDT', time: 500 },
-        { symbol: 'BEATUSDT', component: 'funding', amount: -2, asset: 'USDT', time: 3_000 },
-        { symbol: 'BEATUSDT', component: 'funding', amount: -4, asset: 'USDT', time: 8_000 },
-      ],
-      incomeFrom: 100,
-    })
-    expect(round.funding).toBeCloseTo(-2, 6)
-  })
-
-  // A charge stamped exactly at the open or the close belongs to the round: the
-  // exchange's bounds are inclusive and a charge has to land somewhere.
-  it('keeps a charge stamped exactly at the round’s edges', () => {
-    const [round] = buildFuturesTradeRounds(roundTrip, {
-      income: [
-        { symbol: 'BEATUSDT', component: 'funding', amount: -1, asset: 'USDT', time: 1_000 },
-        { symbol: 'BEATUSDT', component: 'funding', amount: -2, asset: 'USDT', time: 5_000 },
-      ],
-      incomeFrom: 100,
-    })
-    expect(round.funding).toBeCloseTo(-3, 6)
-  })
-
-  it('carries insurance clearance apart from funding', () => {
-    const [round] = buildFuturesTradeRounds(roundTrip, {
-      income: [{ symbol: 'BEATUSDT', component: 'insuranceClear', amount: -1.5, asset: 'USDT', time: 3_000 }],
-      incomeFrom: 100,
-    })
-    expect(round.insuranceClear).toBeCloseTo(-1.5, 6)
-    expect(round.funding).toBeNull()
-    expect(round.netPnl).toBeCloseTo(114.5, 6)
-  })
-
-  // A round that began by reducing a position older than this window of fills
-  // carries an `openTime` that is the window's edge, not the position's entry.
-  // Measuring the read's reach against that edge answers a question about the
-  // window and reports it as an answer about the position, so such a round is
-  // never covered however far back the income read goes — the charges it took
-  // before the edge are real and cannot be reached from here.
-  it('never reports a round older than the window as covered', () => {
-    const olderThanWindow = [
-      fill({ id: 1, side: 'SELL', quantity: '2', price: '110', realizedPnl: '20', commission: '1', time: 1_000 }),
-      fill({ id: 2, side: 'SELL', quantity: '3', price: '112', realizedPnl: '36', commission: '1', time: 5_000 }),
-    ]
-    for (const incomeFrom of [100, 500, 3_000]) {
-      const [round] = buildFuturesTradeRounds(olderThanWindow, {
-        income: [{ symbol: 'BEATUSDT', component: 'funding', amount: -2, asset: 'USDT', time: 2_000 }],
-        incomeFrom,
-      })
-      expect(round.partial).toBe(true)
-      // The charge inside the window is still counted — it happened, and
-      // dropping it would understate the round as surely as claiming coverage
-      // overstates it.
-      expect(round.funding).toBeCloseTo(-2, 6)
-      expect(round.fundingComplete).toBe(false)
-    }
-  })
-
-  it('says so when the income read begins after the round opened', () => {
-    const [covered] = buildFuturesTradeRounds(roundTrip, { income: [], incomeFrom: 100 })
-    const [uncovered] = buildFuturesTradeRounds(roundTrip, { income: [], incomeFrom: 3_000 })
-    expect(covered.fundingComplete).toBe(true)
-    expect(uncovered.fundingComplete).toBe(false)
-  })
-
-  // Nothing read is not the same as nothing charged.
-  it('reports a round built without the income record as uncovered', () => {
-    const [round] = buildFuturesTradeRounds(roundTrip)
-    expect(round.fundingComplete).toBe(false)
-    expect(round.funding).toBeNull()
-  })
-
-  // An income row states no position leg, and funding names no trade to reach one
-  // through, so a charge is the contract's. Exposure is folded per contract, so
-  // rounds on one contract do not overlap — except at a shared edge, where one
-  // closes in the same millisecond the next opens. A charge stamped there is
-  // inside both, and belongs to neither more than the other.
-  it('marks a charge shared when it lands on the edge two rounds share', () => {
-    const rounds = buildFuturesTradeRounds([
-      fill({ id: 1, side: 'BUY', quantity: '5', price: '100', time: 1_000 }),
-      fill({ id: 2, side: 'SELL', quantity: '5', price: '110', realizedPnl: '50', time: 4_000 }),
-      fill({ id: 3, side: 'BUY', quantity: '5', price: '110', time: 4_000 }),
-      fill({ id: 4, side: 'SELL', quantity: '5', price: '120', realizedPnl: '50', time: 9_000 }),
-    ], {
-      income: [{ symbol: 'BEATUSDT', component: 'funding', amount: -3, asset: 'USDT', time: 4_000 }],
-      incomeFrom: 100,
-    })
-    const touching = rounds.filter(round => round.funding !== null)
-    expect(touching).toHaveLength(2)
-    for (const round of touching) {
-      expect(round.fundingShared).toBe(true)
-      expect(round.funding).toBeCloseTo(-3, 6)
-    }
-    // And a charge inside exactly one round is that round's alone.
-    const [alone] = buildFuturesTradeRounds([
-      fill({ id: 1, side: 'BUY', quantity: '5', price: '100', time: 1_000 }),
-      fill({ id: 2, side: 'SELL', quantity: '5', price: '110', realizedPnl: '50', time: 4_000 }),
-    ], {
-      income: [{ symbol: 'BEATUSDT', component: 'funding', amount: -3, asset: 'USDT', time: 2_000 }],
-      incomeFrom: 100,
-    })
-    expect(alone.fundingShared).toBe(false)
-  })
-
   // A BNB fee added into a USDT result is not a quantity of anything.
   it('keeps a commission charged in another asset out of the result', () => {
     const [round] = buildFuturesTradeRounds([
@@ -839,7 +1699,9 @@ describe('attachFuturesRoundIncome', () => {
     ])
     expect(round.fee).toBe(0)
     expect(round.netPnl).toBeCloseTo(120, 6)
-    expect(round.feesByAsset).toEqual([{ asset: 'BNB', amount: expect.closeTo(0.0085, 8) }])
+    expect(round.feesByAsset).toEqual([expect.objectContaining({
+      asset: 'BNB', amount: expect.closeTo(0.0085, 8), amountExact: '0.0085',
+    })])
   })
 
   // A fill that names no commission asset paid in the asset the contract settles

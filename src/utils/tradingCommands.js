@@ -319,14 +319,18 @@ export const createFuturesCancelAllCommand = ({
 export const createFuturesAccountRefreshCommand = ({
     accountId,
     clientOrderId,
+    manual = false,
     symbol,
     periodic = false,
-} = {}) => createAccountRefreshCommand({
-    accountId,
-    clientOrderId,
-    marketType: FUTURES_MARKET_TYPE,
-    symbol,
-    periodic,
+} = {}) => ({
+    ...createAccountRefreshCommand({
+        accountId,
+        clientOrderId,
+        marketType: FUTURES_MARKET_TYPE,
+        symbol,
+        periodic,
+    }),
+    ...(manual === true ? { manual: true } : {}),
 });
 
 // History is a read: it never touches the book. The renderer carries the
@@ -336,6 +340,7 @@ export const createFuturesAccountRefreshCommand = ({
 // what a caller that does not know what is on screen is asking for.
 export const createFuturesAccountHistoryCommand = ({
     accountId,
+    basisOnly = false,
     clientOrderId,
     coverage = {},
     full = false,
@@ -350,6 +355,7 @@ export const createFuturesAccountHistoryCommand = ({
         symbol,
     }),
     coverage,
+    ...(basisOnly === true ? { basisOnly: true } : {}),
     full: full === true,
     symbol,
     ...(Array.isArray(views) && views.length > 0 ? { views: [...views] } : {}),

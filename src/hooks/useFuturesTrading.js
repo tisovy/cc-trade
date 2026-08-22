@@ -25,11 +25,14 @@ import {
 } from '../utils/tradingCommands.js'
 import { describeFuturesAlgoTrigger } from '../utils/futuresOrderPresentation.js'
 import {
-  foldFuturesSettledMoney,
-  readFuturesOpenPositionStarts,
+  newerFuturesSettledIncomeFrame,
   readFuturesSettledIncomeFrame,
 } from '../utils/futuresSettledMoney.js'
-import buildFuturesTradeRounds from '../utils/futuresTradeRounds.js'
+import {
+  buildFuturesTradeRoundIndex,
+  futuresTradePositionKey,
+} from '../utils/futuresTradeRounds.js'
+import { reconcileFuturesWalletLedger } from '../utils/futuresWalletLedger.js'
 import { DESK_FRAME_KINDS, ensureDeskFrameRouter } from '../utils/deskFrameRouter.js'
 import { measureFrameMarks } from '../utils/frameMarks.js'
 import { createUnsentCommandStore } from '../utils/unsentTradingCommand.js'
@@ -45,6 +48,7 @@ import {
   beginFuturesHistoryRead,
   createHeldFuturesHistory,
   foldExecutionIntoFuturesHistory,
+  futuresHistoryTradeKey,
 } from '../utils/futuresHeldHistory.js'
 import {
   futuresHistoryStore,
@@ -63,6 +67,7 @@ const ACCOUNT_RECONCILE_INTERVAL_MS = 30_000
 // reconciles it over a few seconds, so this only bounds total silence — a
 // caller that waited forever would hold a drag open on a dead connection.
 const COMMAND_ANSWER_TIMEOUT_MS = 15_000
+const HISTORY_GAP_READ_DELAY_MS = 1_200
 
 const ACCOUNT_RESOURCE_NAMES = [
   'balances',
@@ -71,6 +76,292 @@ const ACCOUNT_RESOURCE_NAMES = [
   'algoOrders',
   'userDataStream',
 ]
+const MANUAL_REFRESH_ACCOUNT_RESOURCE_NAMES = Object.freeze([
+  'balances',
+  'positions',
+  'regularOrders',
+  'algoOrders',
+])
+const MANUAL_REFRESH_REQUEST_PATTERN = /^[.A-Za-z0-9:/_-]{1,36}$/
+
+const SETTLED_CREDIT_LANES = Object.freeze([
+  'COMMISSION_REBATE',
+  'REFERRAL_KICKBACK',
+  'API_REBATE',
+  'FEE_RETURN',
+])
+
+const futuresRoundPositionSignature = positions => `[${(
+  Array.isArray(positions) ? positions : []
+).map(position => JSON.stringify([
+  position?.symbol ?? null,
+  position?.positionSide ?? 'BOTH',
+  position?.quantity ?? position?.positionAmt ?? null,
+  position?.entryPrice ?? null,
+])).sort().join(',')}]`
+
+const futuresRoundPositionBasis = signature => Object.freeze(
+  JSON.parse(signature).map(([symbol, positionSide, quantity, entryPrice]) => Object.freeze({
+    symbol,
+    positionSide,
+    quantity,
+    entryPrice,
+  })),
+)
+
+const finiteCoverageTime = value => (
+  Number.isSafeInteger(value) && value >= 0 ? value : null
+)
+
+const futuresAccountFingerprint = value => {
+  const normalized = String(value ?? '').trim().toLowerCase()
+  return /^[a-f0-9]{16}$/.test(normalized) ? normalized : null
+}
+
+// A v2 frame's content tuple is validated before it enters state. Observation
+// clocks can then advance without changing any canonical money. Keep legacy
+// frames on object identity so an unversioned caller never receives a stronger
+// cache promise than its payload can prove.
+const futuresSettledIncomeContentRevision = (settledIncome) => {
+  const accountFingerprint = futuresAccountFingerprint(settledIncome?.accountFingerprint)
+  const generation = settledIncome?.generation
+  const digest = settledIncome?.digest
+  if (settledIncome?.version !== 2
+    || accountFingerprint === null
+    || !Number.isSafeInteger(generation)
+    || generation < 0
+    || typeof digest !== 'string'
+    || digest.length === 0
+    || digest.length > 128) return settledIncome
+  return JSON.stringify([accountFingerprint, generation, digest])
+}
+
+const readFuturesManualRefreshReceipt = (payload) => {
+  const request = typeof payload?.request === 'string' ? payload.request : ''
+  const requestedAt = finiteCoverageTime(payload?.requestedAt)
+  const accountFingerprint = futuresAccountFingerprint(payload?.accountFingerprint)
+  if (payload?.type !== 'futures_manual_refresh_outcome'
+    || payload?.version !== 1
+    || payload?.status !== 'accepted'
+    || !MANUAL_REFRESH_REQUEST_PATTERN.test(request)
+    || requestedAt === null
+    || accountFingerprint === null
+    || payload?.account?.disposition !== 'resource'
+    || payload?.settledIncome?.disposition !== 'resource') return null
+  return Object.freeze({
+    version: 1,
+    status: 'accepted',
+    request,
+    requestedAt,
+    accountFingerprint,
+    accountDisposition: 'resource',
+    settledIncomeDisposition: 'resource',
+  })
+}
+
+const manualRefreshAccountOutcome = (accountResources, requestedAt) => {
+  const resources = Object.fromEntries(MANUAL_REFRESH_ACCOUNT_RESOURCE_NAMES.map((name) => {
+    const resource = accountResources?.[name] ?? null
+    const lastAttemptAt = finiteCoverageTime(resource?.lastAttemptAt)
+    const attempted = lastAttemptAt !== null && lastAttemptAt >= requestedAt
+    return [name, Object.freeze({
+      status: attempted ? resource?.status ?? 'error' : 'loading',
+      lastAttemptAt,
+      lastSuccessfulAt: finiteCoverageTime(resource?.lastSuccessfulAt),
+      error: attempted ? resource?.error ?? null : null,
+    })]
+  }))
+  const states = Object.values(resources).map(resource => resource.status)
+  const terminal = states.every(status => status !== 'idle' && status !== 'loading')
+  const status = !terminal
+    ? 'loading'
+    : states.every(state => state === 'ready')
+      ? 'ready'
+      : states.some(state => state === 'ready' || state === 'stale')
+        ? 'partial'
+        : 'error'
+  return Object.freeze({
+    terminal,
+    status,
+    resources: Object.freeze(resources),
+  })
+}
+
+const combinedIncomeLaneCoverage = (settledIncome, incomeTypes) => {
+  const lanes = incomeTypes
+    .map(type => settledIncome?.lanes?.[type])
+    .filter(Boolean)
+  if (lanes.length !== incomeTypes.length) {
+    return Object.freeze({
+      coveredFrom: null,
+      coveredTo: null,
+      complete: false,
+      status: 'incomplete',
+    })
+  }
+  const coveredFrom = lanes
+    .map(lane => finiteCoverageTime(lane.coveredFrom))
+    .filter(value => value !== null)
+  const coveredTo = lanes
+    .map(lane => finiteCoverageTime(lane.coveredTo))
+    .filter(value => value !== null)
+  return Object.freeze({
+    coveredFrom: coveredFrom.length === lanes.length ? Math.max(...coveredFrom) : null,
+    coveredTo: coveredTo.length === lanes.length ? Math.min(...coveredTo) : null,
+    complete: lanes.every(lane => lane.complete === true),
+    status: lanes.some(lane => lane.status === 'error' || lane.status === 'stale')
+      ? 'stale'
+      : lanes.some(lane => lane.status === 'loading') ? 'loading' : 'ready',
+  })
+}
+
+const walletIncomeCoverage = (settledIncome) => {
+  if (settledIncome?.version !== 2 || settledIncome?.lanes === null
+    || typeof settledIncome?.lanes !== 'object') return settledIncome
+  return Object.freeze({
+    lanes: Object.freeze({
+      funding: combinedIncomeLaneCoverage(settledIncome, ['FUNDING_FEE']),
+      insurance: combinedIncomeLaneCoverage(settledIncome, ['INSURANCE_CLEAR']),
+      commissionCredit: combinedIncomeLaneCoverage(settledIncome, SETTLED_CREDIT_LANES),
+    }),
+  })
+}
+
+const roundCoverageByPosition = (
+  trades,
+  coverageBySymbol,
+  historyGeneration,
+  foldedTradeKeys = [],
+) => {
+  const generation = Number.isSafeInteger(historyGeneration) ? historyGeneration : null
+  const folded = new Set(Array.isArray(foldedTradeKeys) ? foldedTradeKeys : [])
+  const positions = new Map()
+  // `/userTrades` proves one contract interval. Project it to every legal leg
+  // up front so an authoritative snapshot can still receive the real page /
+  // retention outcome when the bounded store retained no fill for that key.
+  // Unused projections are ignored by the round fold.
+  for (const contract of Object.keys(coverageBySymbol ?? {})) {
+    const symbol = String(contract ?? '').toUpperCase()
+    for (const leg of ['BOTH', 'LONG', 'SHORT']) {
+      const key = futuresTradePositionKey(symbol, leg)
+      if (key !== null) positions.set(key, { symbol, earliestFoldedAt: null })
+    }
+  }
+  for (const trade of Array.isArray(trades) ? trades : []) {
+    const symbol = String(trade?.symbol ?? '').toUpperCase()
+    const key = futuresTradePositionKey(symbol, trade?.positionSide ?? 'BOTH')
+    if (key === null) continue
+    const held = positions.get(key) ?? { symbol, earliestFoldedAt: null }
+    if (folded.has(futuresHistoryTradeKey(trade))) {
+      const time = finiteCoverageTime(trade?.time)
+      if (time !== null && (held.earliestFoldedAt === null || time < held.earliestFoldedAt)) {
+        held.earliestFoldedAt = time
+      }
+    }
+    positions.set(key, held)
+  }
+  const coverage = {}
+  for (const [key, { symbol, earliestFoldedAt }] of positions) {
+    const source = coverageBySymbol?.[symbol]?.tradeCoverage
+    const sourceCoveredTo = finiteCoverageTime(source?.coveredTo)
+    const confirmedCoveredTo = earliestFoldedAt === null
+      ? sourceCoveredTo
+      : earliestFoldedAt === 0 || sourceCoveredTo === null
+        ? null
+        : Math.min(sourceCoveredTo, earliestFoldedAt - 1)
+    coverage[key] = Object.freeze({
+      version: 2,
+      coveredFrom: finiteCoverageTime(source?.coveredFrom),
+      coveredTo: confirmedCoveredTo,
+      // Preserve the exact acquisition edge. `true` remains accepted for
+      // legacy coverage, while a v2 producer's safe timestamp is the single
+      // source of truth for which contiguous suffix starts from flat.
+      flatBoundary: source?.flatBoundary === true
+        ? true
+        : finiteCoverageTime(source?.flatBoundary) ?? false,
+      pageLimited: source?.pageLimited === true,
+      retentionLimited: source?.retentionLimited === true,
+      continuityComplete: source?.continuityComplete === true,
+      terminalReconciled: null,
+      generation,
+    })
+  }
+  return Object.freeze(coverage)
+}
+
+const visibleAmount = (bucket, asset = 'USDT') => (
+  bucket?.visibleNet?.find(total => total.asset === asset)?.amount ?? null
+)
+
+const enrichRoundWithWallet = (round, wallet) => {
+  // `walletNet` already proves that canonical ownership is complete and that
+  // exactly one non-zero asset remains. That asset need not be the round's trade
+  // settlement asset: a zero-USDT round can move only BNB commission. Keep the
+  // ledger's denomination instead of lowering that truthful single-asset result
+  // to partial or relabelling it as settlement money.
+  const exactWallet = wallet?.walletNet ?? null
+  const display = exactWallet?.amount
+    ?? visibleAmount(wallet, round.settlementAsset)
+  const numeric = display === null ? Number.NaN : Number(display)
+  return Object.freeze({
+    ...round,
+    wallet,
+    netExact: exactWallet !== null,
+    netPnlText: display,
+    // Transitional presentation value. Exact arithmetic remains the decimal
+    // text on `wallet`; Number is used only by colour/formatting at the boundary.
+    netPnl: Number.isFinite(numeric) ? numeric : round.netPnl,
+  })
+}
+
+const settledReadingFromWallet = (round, wallet, settlementAsset = round?.settlementAsset) => {
+  if (!wallet || typeof settlementAsset !== 'string' || settlementAsset === '') return null
+  const components = {
+    realizedPnl: null,
+    funding: null,
+    commission: null,
+    insuranceClear: null,
+  }
+  const otherAssets = new Map()
+  const add = (target, key, amount) => {
+    const numeric = Number(amount)
+    if (!Number.isFinite(numeric)) return
+    target[key] = target[key] === null ? numeric : target[key] + numeric
+  }
+  for (const entry of wallet.entries ?? []) {
+    const target = entry.asset === settlementAsset
+      ? components
+      : (() => {
+        if (!otherAssets.has(entry.asset)) otherAssets.set(entry.asset, {
+          realizedPnl: null, funding: null, commission: null, insuranceClear: null,
+        })
+        return otherAssets.get(entry.asset)
+      })()
+    const component = entry.component === 'realized' ? 'realizedPnl'
+      : entry.component === 'funding' ? 'funding'
+        : entry.component === 'insurance' ? 'insuranceClear'
+          : 'commission'
+    add(target, component, entry.amount)
+  }
+  return Object.freeze({
+    symbol: round.symbol,
+    positionKey: round.positionKey,
+    ...components,
+    total: visibleAmount(wallet, settlementAsset) === null
+      ? null
+      : Number(visibleAmount(wallet, settlementAsset)),
+    settlementAsset,
+    otherAssets: Object.freeze([...otherAssets.entries()].map(([asset, totals]) => Object.freeze({
+      asset,
+      ...totals,
+      amount: visibleAmount(wallet, asset),
+      total: Object.values(totals).filter(Number.isFinite).reduce((sum, value) => sum + value, 0),
+    }))),
+    from: round.openTime,
+    complete: wallet.walletNet !== null,
+    qualifications: wallet.qualifications,
+  })
+}
 
 const createInitialAccountResources = () => Object.fromEntries(
   ACCOUNT_RESOURCE_NAMES.map(resource => [resource, {
@@ -120,6 +411,10 @@ const isUsableSocket = (connection) => isOpenSocket(connection)
 
 const createInitialState = ({ enabled, connection, historyStoreReady = false }) => ({
   connected: Boolean(enabled && isUsableSocket(connection)),
+  // All persistent and settled readings are admitted inside this account
+  // namespace. It is learned from an authenticated account envelope; until
+  // then no history cache or income frame is allowed onto the screen.
+  accountFingerprint: null,
   balances: null,
   openOrders: [],
   // Identities the exchange has reported settled, so a message that left before
@@ -153,10 +448,40 @@ const createInitialState = ({ enabled, connection, historyStoreReady = false }) 
   // gate the workstation can send a full discovery command while the persisted
   // coverage that would have answered it is still opening.
   historyStoreReady,
+  // Incremented by the backend whenever the authenticated private stream
+  // opens. It is a request to close the REST history gap spanning offline time,
+  // including a position that opened and closed entirely while the stream was
+  // absent and therefore no longer appears in the positions basis.
+  historyReconcileGeneration: 0,
   // Which marked frame this state was produced by. Only frames the exchange
   // caused move it, so the commit effect below runs on those and on nothing
   // else — a state set for any other reason leaves it where it was.
   frameRevision: 0,
+})
+
+const resetFuturesAccountState = (
+  previous,
+  accountFingerprint,
+  { historyStoreReady = false } = {},
+) => ({
+  ...previous,
+  accountFingerprint,
+  balances: null,
+  openOrders: [],
+  settledOrders: new Map(),
+  positions: [],
+  settledIncome: null,
+  symbolConfigs: {},
+  marginCalls: {},
+  accountResources: createInitialAccountResources(),
+  lastExecution: null,
+  lastError: null,
+  unresolvedCommand: null,
+  tradingPaused: false,
+  maxOrderNotionalUsdt: null,
+  history: createHeldFuturesHistory(),
+  historyStoreReady,
+  historyReconcileGeneration: 0,
 })
 
 // What one drawn frame is recorded as. Kept beside the marks rather than in the
@@ -360,14 +685,27 @@ const mergeOrderUpdate = (openOrders, report, settledOrders) => {
   return withoutOrder
 }
 
-const applyAccountEnvelope = (previous, payload) => {
+const applyAccountEnvelope = (
+  previous,
+  payload,
+  { historyStoreReady = false } = {},
+) => {
   if (payload?.type !== 'futures_account_state'
     || payload.version !== 1
     || !payload.resources
     || typeof payload.resources !== 'object') return previous
 
+  const fingerprint = futuresAccountFingerprint(payload.accountFingerprint)
+  // Once the account has been named, an unscoped account frame cannot be
+  // allowed to mutate it. Initial unscoped frames remain display-compatible
+  // with an older backend, but they never unlock persistent/settled data.
+  if (previous.accountFingerprint !== null && fingerprint === null) return previous
+  const base = fingerprint !== null && fingerprint !== previous.accountFingerprint
+    ? resetFuturesAccountState(previous, fingerprint, { historyStoreReady })
+    : previous
+
   const accountResources = {
-    ...previous.accountResources,
+    ...base.accountResources,
     ...Object.fromEntries(ACCOUNT_RESOURCE_NAMES.flatMap(resource => (
       payload.resources[resource] && typeof payload.resources[resource] === 'object'
         ? [[resource, payload.resources[resource]]]
@@ -377,8 +715,8 @@ const applyAccountEnvelope = (previous, payload) => {
   const balances = accountResources.balances?.data ?? null
   const positions = Array.isArray(accountResources.positions?.data)
     ? accountResources.positions.data
-    : previous.positions
-  const knownOrders = new Map(previous.openOrders.map(order => [orderIdentity(order), order]))
+    : base.positions
+  const knownOrders = new Map(base.openOrders.map(order => [orderIdentity(order), order]))
   const regularOrders = Array.isArray(accountResources.regularOrders?.data)
     ? accountResources.regularOrders.data.map(order => normalizeOrderSource(order, 'REGULAR'))
     : []
@@ -387,18 +725,19 @@ const applyAccountEnvelope = (previous, payload) => {
     : []
 
   return {
-    ...previous,
+    ...base,
     connected: true,
+    accountFingerprint: fingerprint ?? base.accountFingerprint,
     accountResources,
     balances,
     positions,
     // The exchange's warning stands until the position it names says it should
     // not: closed, smaller, or with more margin behind it. Nothing else takes it
     // down, because nothing else is the exchange talking about that position.
-    marginCalls: pruneFuturesMarginCalls(previous.marginCalls, positions),
+    marginCalls: pruneFuturesMarginCalls(base.marginCalls, positions),
     openOrders: [...regularOrders, ...algoOrders]
       .filter(isOpenSnapshotOrder)
-      .filter(order => !previous.settledOrders.has(orderIdentity(order)))
+      .filter(order => !base.settledOrders.has(orderIdentity(order)))
       .map(order => preferNewerOrder(order, knownOrders)),
   }
 }
@@ -427,11 +766,13 @@ const useFuturesTrading = ({
     connection: wsConnection,
     historyStoreReady: historyStoreUnavailable,
   }))
+  const [manualRefreshReceipt, setManualRefreshReceipt] = useState(null)
   const [positionMarkStore] = useState(() => createFuturesPositionMarkStore())
   const symbolRef = useRef(symbol)
   // Read inside the connection effect, which must not re-run when only the
   // generation changes: re-running it would resend the account refresh.
   const generationRef = useRef(marketGeneration)
+  const accountFingerprintRef = useRef(null)
   const unsentCommandsRef = useRef(null)
   if (unsentCommandsRef.current === null) {
     unsentCommandsRef.current = createUnsentCommandStore()
@@ -452,21 +793,18 @@ const useFuturesTrading = ({
     positionMarkStore.clear({ preserveAdmission: true })
   }, [marketGeneration, positionMarkStore])
 
-  // A leverage and a margin mode held for an activation that is over are a
-  // memory, not a reading. The backend forgets its own the moment the market is
-  // left or the credentials change — every activation tears the other market
-  // down before starting its own — and a renderer that kept them would go on
-  // stating a contract's mode from an account nobody is on, on the one surface
-  // where being wrong costs money. Dropped rather than merged over: the next
-  // activation reads its own.
+  // Every authenticated reading belongs to one market activation and one
+  // credential fingerprint. A superseded activation may still have frames in
+  // flight, so close admission before those frames can repopulate state. The
+  // next account envelope opens the new namespace and the cache is restored
+  // only inside it.
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setState(previous => (
-      Object.keys(previous.symbolConfigs).length === 0
-        ? previous
-        : { ...previous, symbolConfigs: {} }
-    ))
-  }, [marketGeneration])
+    accountFingerprintRef.current = null
+    setState(previous => resetFuturesAccountState(previous, null, {
+      historyStoreReady: historyStoreUnavailable,
+    }))
+    setManualRefreshReceipt(null)
+  }, [historyStoreUnavailable, marketGeneration])
 
   // Which listed algorithmic parent each spawned regular order belongs to.
   // Mirrored into a ref because it is consulted on the stream's own path, which
@@ -509,6 +847,19 @@ const useFuturesTrading = ({
   useEffect(() => {
     historyStoreRef.current = historyStore
   }, [historyStore])
+  const historyCoverageRef = useRef(state.history.coverage)
+  useEffect(() => {
+    historyCoverageRef.current = state.history.coverage
+  }, [state.history.coverage])
+  const historyGapReadTimersRef = useRef(new Map())
+
+  useEffect(() => {
+    const timers = historyGapReadTimersRef.current
+    for (const timer of timers.values()) globalThis.clearTimeout(timer)
+    timers.clear()
+    historyCoverageRef.current = {}
+    resolvedParentsRef.current.clear()
+  }, [marketGeneration, state.accountFingerprint])
 
   // The review is on screen before anything is asked of the exchange. A settled
   // order and an executed trade do not change while the desk is closed, so what
@@ -516,17 +867,29 @@ const useFuturesTrading = ({
   // was read, so nobody mistakes it for a reading taken now. A store that will
   // not open leaves the review exactly as it is without one.
   useEffect(() => {
-    if (!enabled || historyStoreUnavailable) return undefined
+    const fingerprint = state.accountFingerprint
+    if (!enabled || fingerprint === null) return undefined
+    if (historyStoreUnavailable) {
+      setState(previous => previous.accountFingerprint === fingerprint
+        && previous.historyStoreReady !== true
+        ? { ...previous, historyStoreReady: true }
+        : previous)
+      return undefined
+    }
     let abandoned = false
     void (async () => {
       let restored = null
       try {
-        restored = restoreFuturesHistoryFromStore(await historyStore?.readContracts?.())
+        restored = restoreFuturesHistoryFromStore(
+          await historyStore?.readContracts?.(fingerprint),
+          { fingerprint },
+        )
       } catch {
         restored = null
       }
       if (abandoned) return
       setState((previous) => {
+        if (previous.accountFingerprint !== fingerprint) return previous
         // A read answered while the store was opening. The exchange's own answer
         // is the newer of the two and wins outright.
         const history = restored !== null && previous.history.readAt === null
@@ -536,7 +899,7 @@ const useFuturesTrading = ({
       })
     })()
     return () => { abandoned = true }
-  }, [enabled, historyStore, historyStoreUnavailable])
+  }, [enabled, historyStore, historyStoreUnavailable, state.accountFingerprint])
 
   // Commands whose answer somebody is waiting on. Held in a ref rather than in
   // state: nothing renders from them, and a pending answer must survive every
@@ -589,7 +952,6 @@ const useFuturesTrading = ({
       // early return has to answer for the whole update, not only the two fields
       // it started with: a held resource still marked ready is a reading nothing
       // has confirmed on this connection.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setState((previous) => {
         const accountResources = markAccountResourcesUnconfirmed(previous.accountResources)
         return previous.connected === false
@@ -602,6 +964,24 @@ const useFuturesTrading = ({
     }
 
     let active = true
+    const historyGapReadTimers = historyGapReadTimersRef.current
+
+    const scheduleHistoryGapRead = (report) => {
+      const symbol = String(report?.symbol ?? '').toUpperCase()
+      if (symbol === '' || !(Number(report?.lastFilledQty ?? report?.l) > 0)) return
+      if (historyGapReadTimers.has(symbol)) return
+      const timer = globalThis.setTimeout(() => {
+        historyGapReadTimers.delete(symbol)
+        if (!active) return
+        sendCommandRef.current?.(createFuturesAccountHistoryCommand({
+          basisOnly: true,
+          coverage: historyCoverageRef.current,
+          symbol,
+          views: ['trades'],
+        }))
+      }, HISTORY_GAP_READ_DELAY_MS)
+      historyGapReadTimers.set(symbol, timer)
+    }
 
     // Account frames only. This used to read every frame the desk delivered —
     // parsing a hundred-and-eighteen-kilobyte book ten times a second in order
@@ -652,19 +1032,55 @@ const useFuturesTrading = ({
       }
 
       if (payload.type === 'futures_account_state') {
+        const fingerprint = futuresAccountFingerprint(payload.accountFingerprint)
+        if (fingerprint !== null) accountFingerprintRef.current = fingerprint
         const revision = armFrameMarks({ resource: 'account' })
         setState((previous) => {
-          const next = applyAccountEnvelope(previous, payload)
+          const next = applyAccountEnvelope(previous, payload, {
+            historyStoreReady: historyStoreUnavailable,
+          })
           return revision === 0 ? next : { ...next, frameRevision: revision }
         })
+      }
+      if (payload.type === 'futures_manual_refresh_outcome') {
+        const receipt = readFuturesManualRefreshReceipt(payload)
+        if (receipt !== null && receipt.accountFingerprint === accountFingerprintRef.current) {
+          setManualRefreshReceipt(previous => previous !== null
+            && previous.requestedAt > receipt.requestedAt
+            ? previous
+            : receipt)
+        }
+      }
+      if (payload.type === 'futures_history_reconcile' && payload.version === 1) {
+        const fingerprint = futuresAccountFingerprint(payload.accountFingerprint)
+        const generation = Number(payload.generation)
+        if (fingerprint !== null
+          && fingerprint === accountFingerprintRef.current
+          && Number.isSafeInteger(generation)
+          && generation > 0) {
+          setState(previous => (
+            previous.accountFingerprint !== fingerprint
+              || generation <= previous.historyReconcileGeneration
+              ? previous
+              : { ...previous, historyReconcileGeneration: generation }
+          ))
+        }
       }
       if (payload.type === 'futures_position_marks') {
         positionMarkStore.replace(payload.marks, payload.revision, payload.feedEpoch)
       }
       if (payload.type === 'futures_settled_income') {
+        const fingerprint = futuresAccountFingerprint(payload.accountFingerprint)
+        if (fingerprint === null || fingerprint !== accountFingerprintRef.current) return
         const settledIncome = readFuturesSettledIncomeFrame(payload)
         if (settledIncome !== null) {
-          setState(previous => ({ ...previous, settledIncome }))
+          setState((previous) => {
+            if (previous.accountFingerprint !== fingerprint) return previous
+            const next = newerFuturesSettledIncomeFrame(previous.settledIncome, settledIncome)
+            return next === previous.settledIncome
+              ? previous
+              : { ...previous, settledIncome: next }
+          })
         }
       }
       if (payload.futures_symbol_configs) {
@@ -780,6 +1196,12 @@ const useFuturesTrading = ({
           }
         })
         answerCommandWatchers({ kind: 'execution', report })
+        // The stream updates the visible fill immediately. One delayed REST gap
+        // read per affected contract then proves that no sibling execution was
+        // missed and replaces the stream projection with Binance's canonical
+        // trade row. A fill burst shares this timer instead of buying one page
+        // per partial execution.
+        scheduleHistoryGapRead(report)
         // One read for the match, and only for the match. The parent is already
         // off the screen by the line above; this confirms it against the list
         // the stream cannot report, and picks up whatever the same trigger left
@@ -797,12 +1219,17 @@ const useFuturesTrading = ({
       }
       if (payload.futures_history && typeof payload.futures_history === 'object') {
         const history = payload.futures_history
-        const readAt = Date.now()
-        setState(previous => ({
-          ...previous,
-          connected: true,
-          history: applyFuturesHistoryReading(previous.history, history, readAt),
-        }))
+        const fingerprint = futuresAccountFingerprint(history.accountFingerprint)
+        const readAt = finiteCoverageTime(history.readAt)
+        if (fingerprint === null || fingerprint !== accountFingerprintRef.current
+          || readAt === null) return
+        setState(previous => previous.accountFingerprint !== fingerprint
+          ? previous
+          : ({
+            ...previous,
+            connected: true,
+            history: applyFuturesHistoryReading(previous.history, history, readAt),
+          }))
         // What the exchange just proved settled outlives this run. A failed read
         // proves nothing, and a store that will not write is not a failed read.
         if (!history.error) {
@@ -813,10 +1240,13 @@ const useFuturesTrading = ({
                 orders: history.orders,
                 trades: history.trades,
                 readFrom: history.readFrom,
+                merge: history.merge,
+                tradeCoverage: history.tradeCoverage,
                 // Which endpoints this answer covered, so the store replaces
                 // only those and the view it did not read keeps what it holds.
                 views: history.views,
                 readAt,
+                accountFingerprint: fingerprint,
               })
             } catch {
               // A review that cannot be stored is still a review that was read.
@@ -927,12 +1357,23 @@ const useFuturesTrading = ({
 
     return () => {
       active = false
+      for (const timer of historyGapReadTimers.values()) {
+        globalThis.clearTimeout(timer)
+      }
+      historyGapReadTimers.clear()
       positionMarkStore.clear()
       unsubscribe()
       wsConnection.removeEventListener('close', handleDisconnect)
       wsConnection.removeEventListener('error', handleDisconnect)
     }
-  }, [abandonCommandWatchers, answerCommandWatchers, enabled, positionMarkStore, wsConnection])
+  }, [
+    abandonCommandWatchers,
+    answerCommandWatchers,
+    enabled,
+    historyStoreUnavailable,
+    positionMarkStore,
+    wsConnection,
+  ])
 
   // What these surfaces last drew. Updated before the effect below reads it —
   // effects run in the order they are written, and that order is what lets the
@@ -1207,11 +1648,16 @@ const useFuturesTrading = ({
   // open. Reading both costs a second fan-out answering a panel nobody is
   // looking at: twelve contracts, one request each, through a queue that spaces
   // every request 150ms from the last.
-  const loadHistory = useCallback((targetSymbol, { full = false, views = null } = {}) => {
+  const loadHistory = useCallback((targetSymbol, {
+    basisOnly = false,
+    full = false,
+    views = null,
+  } = {}) => {
     if (!state.historyStoreReady) return false
     const symbolToLoad = targetSymbol ?? symbolRef.current
     const sent = sendCommand(createFuturesAccountHistoryCommand({
       coverage: state.history.coverage,
+      basisOnly,
       full,
       symbol: symbolToLoad,
       views,
@@ -1225,15 +1671,33 @@ const useFuturesTrading = ({
     return sent
   }, [sendCommand, state.history.coverage, state.historyStoreReady])
 
-  // The opening read is not issued here. This hook is mounted by the workspace,
-  // which is not told which contract is on screen — `symbolRef` is undefined for
-  // its whole life — and a history command without a symbol is completed by the
-  // backend from the *panel's* selection or refused outright. The workstation
-  // issues it, because the workstation is what knows the contract.
+  // View-driven reads still come through this command. The independent basis
+  // effect below uses the same path with `basisOnly`, so current position money
+  // no longer depends on which history tab the operator happened to open.
 
-  const refresh = useCallback((targetSymbol) => sendCommand(createFuturesAccountRefreshCommand({
-    symbol: targetSymbol ?? symbolRef.current,
-  })), [sendCommand])
+  const refresh = useCallback((targetSymbol) => {
+    const command = createFuturesAccountRefreshCommand({
+      manual: true,
+      symbol: targetSymbol ?? symbolRef.current,
+    })
+    const accepted = sendCommand(command)
+    if (accepted) {
+      setManualRefreshReceipt(previous => {
+        const requestedAt = Date.now()
+        if (previous !== null && previous.requestedAt > requestedAt) return previous
+        return Object.freeze({
+          version: 1,
+          status: 'sending',
+          request: command.clientOrderId,
+          requestedAt,
+          accountFingerprint: state.accountFingerprint,
+          accountDisposition: 'resource',
+          settledIncomeDisposition: 'resource',
+        })
+      })
+    }
+    return accepted
+  }, [sendCommand, state.accountFingerprint])
 
   // Everything above learns that an order is gone from a message: the stream's
   // report, or the snapshot a mutation asks for. If no message arrives — a
@@ -1292,23 +1756,217 @@ const useFuturesTrading = ({
     () => mergeFuturesPositionConfigs(state.positions, state.symbolConfigs),
     [state.positions, state.symbolConfigs],
   )
+  const roundPositionSignature = useMemo(
+    () => futuresRoundPositionSignature(positions),
+    [positions],
+  )
+  const roundPositionBasis = useMemo(
+    () => futuresRoundPositionBasis(roundPositionSignature),
+    [roundPositionSignature],
+  )
+
+  const historyReconcileRef = useRef(null)
+  useEffect(() => {
+    if (!enabled || !isUsableSocket(wsConnection) || !state.historyStoreReady
+      || state.accountFingerprint === null
+      || state.accountResources.positions?.status !== 'ready') return
+    const missingSettlementEvidence = state.history.trades.some(trade => (
+      typeof trade?.marginAsset !== 'string' || trade.marginAsset.trim() === ''
+    ))
+    const generation = state.historyReconcileGeneration
+    if (!missingSettlementEvidence && generation <= 0) return
+    const key = [
+      state.accountFingerprint,
+      generation,
+      missingSettlementEvidence ? 'asset-migration' : 'stream-gap',
+    ].join(':')
+    if (historyReconcileRef.current === key) return
+    const sent = sendCommand(createFuturesAccountHistoryCommand({
+      basisOnly: false,
+      // Old rows without marginAsset cannot be repaired by paging forward from
+      // their identity. Re-enumerate the bounded window once; ordinary stream
+      // reconnects need only the cheaper cursor gaps.
+      full: missingSettlementEvidence,
+      coverage: state.history.coverage,
+      symbol: symbolRef.current,
+      views: ['trades'],
+    }))
+    if (sent) historyReconcileRef.current = key
+  }, [
+    enabled,
+    sendCommand,
+    state.accountFingerprint,
+    state.accountResources.positions?.status,
+    state.history.coverage,
+    state.history.trades,
+    state.historyReconcileGeneration,
+    state.historyStoreReady,
+    wsConnection,
+  ])
+
+  const basisReadRef = useRef({
+    connection: null,
+    accountFingerprint: null,
+    positions: null,
+    progress: null,
+    timer: null,
+  })
+  useEffect(() => {
+    const clearPending = () => {
+      if (basisReadRef.current.timer !== null) {
+        globalThis.clearTimeout(basisReadRef.current.timer)
+      }
+      basisReadRef.current.timer = null
+    }
+    if (!enabled || !isUsableSocket(wsConnection) || !state.historyStoreReady
+      || state.accountFingerprint === null
+      || state.accountResources.positions?.status !== 'ready') {
+      clearPending()
+      basisReadRef.current = {
+        connection: wsConnection,
+        accountFingerprint: state.accountFingerprint,
+        positions: null,
+        progress: null,
+        timer: null,
+      }
+      return
+    }
+    if (basisReadRef.current.connection !== wsConnection
+      || basisReadRef.current.accountFingerprint !== state.accountFingerprint) {
+      clearPending()
+      basisReadRef.current = {
+        connection: wsConnection,
+        accountFingerprint: state.accountFingerprint,
+        positions: null,
+        progress: null,
+        timer: null,
+      }
+    }
+    const keys = positions
+      .map(position => futuresTradePositionKey(
+        position?.symbol,
+        position?.positionSide ?? 'BOTH',
+      ))
+      .filter(Boolean)
+      .sort()
+    if (keys.length === 0) {
+      clearPending()
+      basisReadRef.current.positions = null
+      basisReadRef.current.progress = null
+      return
+    }
+    const positionSignature = keys.join('|')
+    const sendBasisRead = () => sendCommand(createFuturesAccountHistoryCommand({
+      basisOnly: true,
+      coverage: state.history.coverage,
+      symbol: positions[0]?.symbol,
+      views: ['trades'],
+    }))
+    // Even complete persisted coverage predates this authenticated activation.
+    // One command lets the backend vouch the cursor against stream activity and
+    // closes any fills that happened while the desk was offline.
+    if (basisReadRef.current.positions !== positionSignature) {
+      clearPending()
+      basisReadRef.current.positions = positionSignature
+      basisReadRef.current.progress = 'activation'
+      if (!sendBasisRead()) basisReadRef.current.progress = null
+      return
+    }
+    // The backend owns every continuation from here: cold/legacy acquisition,
+    // older backfill, forward gap and post-gap all share one bounded checkpoint.
+    // A second five-second React timer used to double the REST fan-out and could
+    // arrive as an ordinary command that bypassed the post-gap commit path.
+    clearPending()
+    basisReadRef.current.progress = 'server-managed'
+  }, [
+    enabled,
+    positions,
+    state.accountFingerprint,
+    state.accountResources.positions?.status,
+    state.history.coverage,
+    state.historyStoreReady,
+    sendCommand,
+    wsConnection,
+  ])
+  useEffect(() => () => {
+    if (basisReadRef.current.timer !== null) {
+      globalThis.clearTimeout(basisReadRef.current.timer)
+    }
+  }, [])
+
+  // The held review also contains orders and observation clocks. Snapshot only
+  // its trade-owned fields on the producer's trade revision so an orders-only
+  // answer cannot refold thousands of fills and rebuild every wallet result.
+  const roundTradeHistory = useMemo(
+    () => Object.freeze({
+      trades: state.history.trades,
+      coverage: state.history.coverage,
+      foldedTrades: state.history.foldedTrades,
+      generation: Number.isSafeInteger(state.history.tradeGeneration)
+        ? state.history.tradeGeneration
+        : 0,
+    }),
+    // The revision is the explicit content authority for all captured fields.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [state.accountFingerprint, state.history.tradeGeneration],
+  )
 
   // One fold of the fills, read twice: it says when each open position began,
   // and for the same rounds what they have realized and been charged. Both
   // answers must come from one walk — a position whose start is taken from one
   // fold and whose costs are taken from another can be charged for what happened
   // before it opened.
+  const baseTradeRoundIndex = useMemo(() => (
+    buildFuturesTradeRoundIndex(roundTradeHistory.trades, {
+      coverage: roundCoverageByPosition(
+        roundTradeHistory.trades,
+        roundTradeHistory.coverage,
+        roundTradeHistory.generation,
+        roundTradeHistory.foldedTrades,
+      ),
+      positions: roundPositionBasis,
+      generation: roundTradeHistory.generation,
+    })
+  ), [
+    roundPositionBasis,
+    roundTradeHistory,
+  ])
+  const settledIncomeContentRevision = futuresSettledIncomeContentRevision(
+    state.settledIncome,
+  )
+  const walletSettledIncome = useMemo(
+    () => state.settledIncome,
+    // The validated revision deliberately excludes observation-only clocks.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [settledIncomeContentRevision],
+  )
   const tradeRoundIndex = useMemo(() => {
-    const all = buildFuturesTradeRounds(state.history.trades, {
-      income: state.settledIncome?.rows ?? null,
-      incomeFrom: state.settledIncome?.from ?? null,
+    const base = baseTradeRoundIndex
+    const walletLedger = reconcileFuturesWalletLedger({
+      // Unresolved intervals are ownership barriers too. Feeding only resolved
+      // rounds would let funding inside an unresolved older position fall back
+      // onto an unrelated later round of the same contract. Their wallet bucket
+      // stays partial and is never promoted to a numeric history row.
+      rounds: base.legacyRounds,
+      income: walletSettledIncome?.rows ?? [],
+      incomeCoverage: walletIncomeCoverage(walletSettledIncome),
     })
+    const walletByRound = new Map(walletLedger.ownership.roundOwned.map(wallet => (
+      [wallet.roundId, wallet]
+    )))
+    const enrich = round => enrichRoundWithWallet(round, walletByRound.get(round.key) ?? null)
+    const rounds = Object.freeze(base.rounds.map(enrich))
     return Object.freeze({
-      all,
-      open: Object.freeze(all.filter(round => round?.open === true)),
-      closed: Object.freeze(all.filter(round => !round?.open && round?.exitPrice !== null)),
+      ...base,
+      rounds,
+      all: rounds,
+      open: Object.freeze(rounds.filter(round => round?.open === true)),
+      closed: Object.freeze(rounds.filter(round => !round?.open && round?.exitPrice !== null)),
+      walletLedger,
+      sharedAdjustments: walletLedger.ownership.closedShared,
+      openSharedAdjustments: walletLedger.ownership.openShared,
     })
-  }, [state.history.trades, state.settledIncome])
+  }, [baseTradeRoundIndex, walletSettledIncome])
   const openRounds = tradeRoundIndex.open
 
   // When each open position began, from that fold. One walk defines when a
@@ -1319,49 +1977,64 @@ const useFuturesTrading = ({
   // A contract the fills do not reach back far enough to have seen opened has no
   // start here, and the reading built from it says so rather than presenting the
   // window's total as the position's.
-  const openPositionStarts = useMemo(() => {
-    const open = new Set(positions
-      .filter(position => Number(position?.quantity) !== 0)
-      .map(position => String(position?.symbol ?? '').toUpperCase()))
-    if (open.size === 0) return {}
-    return readFuturesOpenPositionStarts(openRounds, open)
-  }, [positions, openRounds])
-
-  // What each open position has already settled. Folded here rather than in the
-  // main process because it takes both halves — the exchange's income rows and
-  // the fills that say when each position opened — and only the renderer holds
-  // the second.
+  // Legacy position-row presentation consumes a lookup object. It is now keyed
+  // by canonical position key so simultaneous LONG and SHORT legs never receive
+  // the same symbol-wide settled total; the values themselves come from the
+  // same canonical ledger as Closed Positions.
   const settledMoney = useMemo(() => {
-    if (state.settledIncome === null) return null
-    return foldFuturesSettledMoney(state.settledIncome.rows, {
-      starts: openPositionStarts,
-      // What the fills already state: the realized PnL of the parts closed out
-      // of each open position and the commission its fills were charged. Read
-      // from the trade record rather than from the income record, which states
-      // the same two things again one row per fill — thirteen thousand rows a
-      // week on this account, against the forty-five funding charges that are
-      // the only reason the income record is read at all.
-      rounds: openRounds,
-      // How far back the read actually reached. Without it a contract is
-      // reported complete on the strength of knowing when its position began,
-      // which says nothing about whether the charges since then were read.
-      from: state.settledIncome.from,
+    if (settledIncomeContentRevision === null) return null
+    const entries = openRounds.map((round) => {
+      const reading = settledReadingFromWallet(round, round.wallet)
+      return reading === null ? null : [round.positionKey, reading]
+    }).filter(Boolean)
+    return Object.freeze(Object.fromEntries(entries))
+  }, [openRounds, settledIncomeContentRevision])
+  const manualRefresh = useMemo(() => {
+    const receipt = manualRefreshReceipt
+    if (receipt === null || receipt.accountFingerprint !== state.accountFingerprint) return null
+    const settledIncome = state.settledIncome
+    return Object.freeze({
+      version: receipt.version,
+      status: receipt.status,
+      request: receipt.request,
+      requestedAt: receipt.requestedAt,
+      account: manualRefreshAccountOutcome(state.accountResources, receipt.requestedAt),
+      settledIncome: Object.freeze({
+        disposition: receipt.settledIncomeDisposition,
+        status: settledIncome?.status ?? 'idle',
+        attemptedAt: finiteCoverageTime(settledIncome?.attemptedAt),
+        successfulAt: finiteCoverageTime(settledIncome?.successfulAt),
+        error: settledIncome?.error ?? null,
+      }),
     })
-  }, [state.settledIncome, openPositionStarts, openRounds])
+  }, [manualRefreshReceipt, state.accountFingerprint, state.accountResources, state.settledIncome])
+  const settledIncomeWindow = useMemo(() => (
+    state.settledIncome === null ? null : Object.freeze({
+      from: state.settledIncome.from,
+      coveredFrom: state.settledIncome.coveredFrom ?? state.settledIncome.from ?? null,
+      coveredTo: state.settledIncome.coveredTo ?? null,
+      targetTo: state.settledIncome.targetTo ?? null,
+      readAt: state.settledIncome.readAt,
+      attemptedAt: state.settledIncome.attemptedAt ?? null,
+      successfulAt: state.settledIncome.successfulAt ?? null,
+      status: state.settledIncome.status ?? null,
+      error: state.settledIncome.error ?? null,
+      generation: state.settledIncome.generation ?? null,
+      digest: state.settledIncome.digest ?? null,
+      complete: state.settledIncome.complete,
+    })
+  ), [state.settledIncome])
 
   return useMemo(() => ({
     ...state,
     positions,
     positionMarkStore,
     settledMoney,
+    manualRefresh,
     tradeRoundIndex,
     // The window the settled figures were read over, so a surface can say what
     // its reading covers rather than implying it covers everything.
-    settledIncomeWindow: state.settledIncome === null ? null : Object.freeze({
-      from: state.settledIncome.from,
-      readAt: state.settledIncome.readAt,
-      complete: state.settledIncome.complete,
-    }),
+    settledIncomeWindow,
     placeOrder,
     placeOrderAndConfirm,
     modifyOrder,
@@ -1396,6 +2069,8 @@ const useFuturesTrading = ({
     setMarginType,
     setTradingPaused,
     settledMoney,
+    settledIncomeWindow,
+    manualRefresh,
     state,
     tradeRoundIndex,
   ])

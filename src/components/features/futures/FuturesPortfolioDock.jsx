@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   describeFuturesAlgoTrigger,
   describeFuturesOrderIntent,
@@ -27,6 +27,8 @@ import {
   describeFuturesResourceAvailability,
 } from '../../../utils/futuresReadiness.js'
 import { exactFuturesDeskTime, formatFuturesDeskTime } from '../../../utils/futuresDeskTime.js'
+import { futuresTradePositionKey } from '../../../utils/futuresTradeRounds.js'
+import { futuresSharedAdjustmentKey } from '../../../utils/futuresWalletPresentation.js'
 import FuturesHistoryPanel from './FuturesHistoryPanel.jsx'
 
 const EMPTY_ROWS = Object.freeze([])
@@ -45,7 +47,16 @@ const HISTORY_VIEW_OF_TAB = Object.freeze({
 // arrived and a position that has settled exactly nothing are different states,
 // and the tone is the only thing distinguishing them at a glance.
 const settledToneOf = (settled) => {
-  if (settled === null || settled.total === null) return 'absent'
+  if (settled === null) return 'absent'
+  if (settled.total === null) {
+    const totals = (Array.isArray(settled.otherAssets) ? settled.otherAssets : [])
+      .map(reading => Number(reading?.total))
+      .filter(Number.isFinite)
+    if (totals.length === 0) return 'absent'
+    if (totals.every(total => total >= 0) && totals.some(total => total > 0)) return 'positive'
+    if (totals.every(total => total <= 0) && totals.some(total => total < 0)) return 'negative'
+    return 'flat'
+  }
   if (settled.total > 0) return 'positive'
   return settled.total < 0 ? 'negative' : 'flat'
 }
@@ -64,6 +75,86 @@ const settledBreakdown = totals => Object.entries(SETTLED_COMPONENT_LABELS)
   .filter(([name]) => totals?.[name] !== null && totals?.[name] !== undefined)
   .map(([name, label]) => `${formatSignedUsdt(totals[name])} ${label}`)
 
+const signedAssetAmount = (reading) => {
+  const asset = String(reading?.asset ?? '').trim().toUpperCase()
+  const amount = String(reading?.amount ?? '').trim()
+  if (asset === '' || amount === '') return null
+  const signed = amount.startsWith('-')
+    ? `−${amount.slice(1)}`
+    : /^[+]?0+(?:\.0+)?$/.test(amount)
+      ? amount.replace(/^\+/, '')
+      : amount.startsWith('+') ? amount : `+${amount}`
+  return `${signed} ${asset}`
+}
+
+const OPEN_SETTLED_QUALIFICATION_LABELS = Object.freeze({
+  TRADE_COVERAGE_INCOMPLETE: 'Trade history is incomplete',
+  COMMISSION_COVERAGE_INCOMPLETE: 'Commission history is incomplete',
+  FUNDING_COVERAGE_INCOMPLETE: 'Funding history is incomplete',
+  INSURANCE_COVERAGE_INCOMPLETE: 'Insurance history is incomplete',
+  COMMISSION_CREDIT_COVERAGE_INCOMPLETE: 'Commission-credit history is incomplete',
+  MULTI_ASSET: 'Amounts settle in multiple assets',
+  OWNERSHIP_NOT_ADDITIVE: 'Exact ownership is not established',
+  IDENTITY_UNRELIABLE: 'An income identity is not reliable',
+  IDENTITY_CONFLICT: 'Conflicting payloads reuse one income identity',
+})
+
+const OPEN_SHARED_COMPONENT_LABELS = Object.freeze({
+  funding: 'funding',
+  insurance: 'insurance',
+  commissionCredit: 'commission credit',
+})
+
+const openSharedComponents = adjustment => (
+  Array.isArray(adjustment?.components)
+    ? adjustment.components.map(component => (
+      OPEN_SHARED_COMPONENT_LABELS[component] ?? String(component)
+    ))
+    : EMPTY_ROWS
+)
+
+const openSharedQualifications = adjustment => (
+  Array.isArray(adjustment?.qualifications)
+    ? adjustment.qualifications.map(code => (
+      OPEN_SETTLED_QUALIFICATION_LABELS[code]
+        ?? String(code).toLowerCase().replaceAll('_', ' ')
+    ))
+    : EMPTY_ROWS
+)
+
+const settledVisibleAmounts = (settled) => {
+  if (settled === null || typeof settled !== 'object') return EMPTY_ROWS
+  const amounts = []
+  const settlementAsset = String(settled.settlementAsset ?? '').trim().toUpperCase()
+  const total = Number(settled.total)
+  if (settled.total !== null && settled.total !== undefined && Number.isFinite(total)) {
+    amounts.push({
+      key: `settlement:${settlementAsset || 'unknown'}`,
+      text: `${formatSignedUsdt(total)}${settlementAsset === '' ? '' : ` ${settlementAsset}`}`,
+    })
+  }
+  for (const reading of Array.isArray(settled.otherAssets) ? settled.otherAssets : []) {
+    const text = signedAssetAmount(reading)
+    if (text === null) continue
+    const asset = String(reading?.asset ?? '').trim().toUpperCase()
+    amounts.push({ key: `other:${asset}`, text })
+  }
+  return amounts
+}
+
+const settledQualificationLabels = (settled) => {
+  const labels = [...new Set(
+    (Array.isArray(settled?.qualifications) ? settled.qualifications : [])
+      .map(code => String(code ?? '').trim().toUpperCase())
+      .filter(Boolean)
+      .map(code => OPEN_SETTLED_QUALIFICATION_LABELS[code]
+        ?? code.toLowerCase().replaceAll('_', ' ')),
+  )]
+  if (labels.length > 0) return labels
+  if (settled?.from === null) return ['The fill basis does not reach the position opening']
+  return ['Exact wallet coverage is incomplete']
+}
+
 // Three different absences wear the same `—`, and until 2026-08-20 they wore the
 // same sentence too: a read that never arrived, a read that arrived and named
 // other contracts, and a contract the read reached with nothing charged against
@@ -71,10 +162,17 @@ const settledBreakdown = totals => Object.entries(SETTLED_COMPONENT_LABELS)
 // the three it was, so the whole path had to be read by hand. They are named
 // apart here for the same reason the journal now counts the read: an absence
 // that explains itself is a fault with a trail.
-const settledTitle = (settled, window, read) => {
+const settledTitle = (settled, window, read, position) => {
   if (settled === null) {
     if (read === null) {
       return 'What this position has already settled — not read yet'
+    }
+    const symbol = String(position?.symbol ?? '').trim().toUpperCase()
+    if (symbol !== '' && read.symbols.includes(symbol)) {
+      const leg = String(position?.positionSide ?? '').trim().toUpperCase()
+      return 'What this position has already settled — the income read reached this contract, '
+        + `but no amount was assigned to${leg === '' || leg === 'BOTH' ? ' this position leg' : ` the ${leg} leg`}`
+        + `${window?.readAt ? `, read ${exactFuturesDeskTime(window.readAt)}` : ''}`
     }
     return 'What this position has already settled — the income read answered '
       + `${read.contracts === 0 ? 'no contracts' : `${read.contracts} other contract${read.contracts === 1 ? '' : 's'}`}`
@@ -102,7 +200,8 @@ const settledTitle = (settled, window, read) => {
   // Charged in something the desk holds no rate for. Stated in its own asset
   // rather than converted into the total by a guess.
   for (const other of settled.otherAssets) {
-    parts.push(`${settledBreakdown(other).join(' · ')} in ${other.asset}, not included`)
+    parts.push(`${signedAssetAmount(other) ?? `${other.total} ${other.asset}`} settled; ${
+      settledBreakdown(other).join(' · ')} not converted`)
   }
   // What the figure covers. A total silently missing eight hours of funding is
   // worse than one that names its own edge.
@@ -253,6 +352,10 @@ const FuturesPortfolioPositionRow = memo(({
   const priceOf = value => formatExchangePrice(value, tickSize)
   const hasPnl = valuation.unrealizedPnl !== null
   const hasRoe = valuation.roeComplete && valuation.roe !== null
+  const settledAmounts = settledVisibleAmounts(settled)
+  const settledQualifications = settled !== null && settled.complete === false
+    ? settledQualificationLabels(settled)
+    : EMPTY_ROWS
   return (
     <div
       className={`futures-workstation-dock-row is-${presentation.tone}${selected ? ' is-current-symbol' : ''}`}
@@ -294,7 +397,7 @@ const FuturesPortfolioPositionRow = memo(({
           <button
             type="button"
             className="futures-workstation-dock-size"
-            aria-label={`Size the ticket for the whole ${position.symbol} position`}
+            aria-label={`Size the ticket for the whole ${position.symbol} ${presentation.positionSide} position`}
             title={`${exactText(position.quantity)} contracts — size the ticket for the whole position`}
             onClick={() => onSizePick(presentation.absoluteQuantity)}
           >
@@ -359,17 +462,34 @@ const FuturesPortfolioPositionRow = memo(({
         role="cell"
         className={`futures-workstation-dock-settled is-${settledToneOf(settled)}${
           settled !== null && settled.complete === false ? ' is-partial' : ''}`}
-        title={settledTitle(settled, settledWindow, settledRead)}
+        title={settledTitle(settled, settledWindow, settledRead, position)}
       >
-        {settled === null || settled.total === null
-          ? '—'
-          : <strong>{formatSignedUsdt(settled.total)}</strong>}
+        {settledAmounts.length === 0 ? '—' : (
+          <span className="futures-workstation-dock-asset-amounts">
+            {settledAmounts.map(amount => <strong key={amount.key}>{amount.text}</strong>)}
+          </span>
+        )}
+        {/* One word in the row, the sentences on the badge itself. This is a
+            live row, not a review: printed in full, the qualifications stood
+            taller than the row that holds them and overflowed the dock. The
+            review rows below wrap, so they keep the full block. */}
+        {settledQualifications.length === 0 ? null : (
+          <span
+            className="futures-workstation-history-qualification"
+            role="note"
+            tabIndex={0}
+            title={settledQualifications.join(' · ')}
+            aria-label={`Partial. ${settledQualifications.join('. ')}`}
+          >
+            <em>Partial</em>
+          </span>
+        )}
       </span>
       <span role="cell">
         <button
           type="button"
           className="futures-workstation-dock-close"
-          aria-label={`Close ${position.symbol} position`}
+          aria-label={`Close ${position.symbol} ${presentation.positionSide} position`}
           disabled={typeof onClosePosition !== 'function'}
           onClick={event => onClosePosition?.(position, {
             x: event.clientX,
@@ -393,13 +513,13 @@ export const FuturesPortfolioDock = ({
   history = null,
   positionMarkStore = null,
   tradeRoundIndex = null,
-  // What each open contract has already settled, keyed by symbol, and the window
-  // it was read over. Both may be null: an account read that has not answered is
-  // not an account that has settled nothing.
+  // What each open position leg has already settled, keyed by canonical
+  // symbol-plus-leg identity, and the window it was read over. Both may be null:
+  // an account read that has not answered is not an account that settled nothing.
   settledMoney = null,
   settledWindow = null,
-  // The raw income rows, for the closed-round review below: a round's result
-  // needs the charges themselves, not the per-contract totals the rows above use.
+  // The settled-income resource state explains the canonical closed-round
+  // wallet index below, including a stale/failed refresh and its last proof.
   settledIncome = null,
   onClosePosition,
   onCancelOrder,
@@ -413,13 +533,24 @@ export const FuturesPortfolioDock = ({
 }) => {
   const [ordersTab, setOrdersTab] = useState('working')
   const [isCollapsed, setIsCollapsed] = useState(false)
+  const retryAccount = useCallback(() => {
+    onRefreshAccount?.(selectedSymbol)
+  }, [onRefreshAccount, selectedSymbol])
   // Whether an income read has answered at all, and what it named. A row with no
   // reading of its own is a different fault depending on this: null here means
   // nothing ever arrived, and a contract count means something did and this
   // contract was not in it.
-  const settledRead = useMemo(() => (settledMoney === null
-    ? null
-    : Object.freeze({ contracts: Object.keys(settledMoney).length })), [settledMoney])
+  const settledRead = useMemo(() => {
+    if (settledMoney === null) return null
+    const symbols = new Set()
+    for (const [positionKey, reading] of Object.entries(settledMoney)) {
+      const symbol = String(reading?.symbol ?? positionKey.split(':', 1)[0] ?? '')
+        .trim().toUpperCase()
+      if (symbol !== '') symbols.add(symbol)
+    }
+    const orderedSymbols = Object.freeze([...symbols].sort())
+    return Object.freeze({ contracts: orderedSymbols.length, symbols: orderedSymbols })
+  }, [settledMoney])
   const priceOf = (symbol, value) => formatExchangePrice(value, tickSizes[symbol] ?? null)
   // A caller that passes the account state through may pass null for it.
   const resources = accountResources ?? EMPTY_RESOURCES
@@ -440,12 +571,15 @@ export const FuturesPortfolioDock = ({
       <button
         type="button"
         className="futures-workstation-dock-close"
-        onClick={() => onRefreshAccount(selectedSymbol)}
+        onClick={retryAccount}
       >
         Retry
       </button>
     )
     : null
+  const openSharedAdjustments = Array.isArray(tradeRoundIndex?.openSharedAdjustments)
+    ? tradeRoundIndex.openSharedAdjustments
+    : EMPTY_ROWS
   const syncState = (availability, label) => {
     if (availability.notice === null && availability.label === null) return null
     const failed = availability.state === 'failed'
@@ -482,7 +616,14 @@ export const FuturesPortfolioDock = ({
   if (requestedViewsRef.current === null) requestedViewsRef.current = new Set()
   useEffect(() => {
     if (historyView === null || typeof onLoadHistory !== 'function') return
-    if (historyViewRead !== null || historyReading) return
+    if (historyViewRead !== null) {
+      // A successful answer completes this request generation. If account
+      // rotation or a history reset later clears the read identity while the
+      // tab stays selected, that new generation must be allowed to read once.
+      requestedViewsRef.current.delete(historyView)
+      return
+    }
+    if (historyReading) return
     if (requestedViewsRef.current.has(historyView)) return
     if (onLoadHistory(selectedSymbol, { views: [historyView] })) {
       requestedViewsRef.current.add(historyView)
@@ -595,26 +736,89 @@ export const FuturesPortfolioDock = ({
               </span>
               <span role="columnheader" />
             </div>
-            {positions.map(position => (
-              <FuturesPortfolioPositionRow
-                key={`${position.symbol}:${position.positionSide}`}
-                position={position}
-                selected={position.symbol === selectedSymbol}
-                tickSize={tickSizes[position.symbol] ?? null}
-                marginCall={marginCalls[futuresMarginCallKey(position)] ?? null}
-                settled={settledMoney?.[position.symbol] ?? null}
-                settledRead={settledRead}
-                settledWindow={settledWindow}
-                snapshot={snapshot}
-                store={positionMarkStore}
-                onClosePosition={onClosePosition}
-                onLeverageEdit={onLeverageEdit}
-                onMarginEdit={onMarginEdit}
-                onSizePick={onSizePick}
-                onSymbolChange={onSymbolChange}
-              />
-            ))}
+            {positions.map((position) => {
+              const positionKey = futuresTradePositionKey(
+                position.symbol,
+                position.positionSide ?? 'BOTH',
+              ) ?? `${position.symbol}:${position.positionSide ?? 'BOTH'}`
+              return (
+                <FuturesPortfolioPositionRow
+                  key={positionKey}
+                  position={position}
+                  selected={position.symbol === selectedSymbol}
+                  tickSize={tickSizes[position.symbol] ?? null}
+                  marginCall={marginCalls[futuresMarginCallKey(position)] ?? null}
+                  settled={settledMoney?.[positionKey] ?? null}
+                  settledRead={settledRead}
+                  settledWindow={settledWindow}
+                  snapshot={snapshot}
+                  store={positionMarkStore}
+                  onClosePosition={onClosePosition}
+                  onLeverageEdit={onLeverageEdit}
+                  onMarginEdit={onMarginEdit}
+                  onSizePick={onSizePick}
+                  onSymbolChange={onSymbolChange}
+                />
+              )
+            })}
           </div>
+        )}
+        {openSharedAdjustments.length === 0 ? null : (
+          <section
+            className="futures-workstation-dock-shared"
+            aria-label="Shared open-position wallet adjustments"
+          >
+            <header>
+              <strong>Shared PnL adjustments</strong>
+              <span>Counted once outside position rows</span>
+            </header>
+            <div role="list">
+              {openSharedAdjustments.map((adjustment) => {
+                const amounts = (Array.isArray(adjustment?.visibleNet)
+                  ? adjustment.visibleNet
+                  : []).map(reading => ({ reading, text: signedAssetAmount(reading) }))
+                  .filter(item => item.text !== null)
+                const scope = adjustment?.symbol
+                  ? `${adjustment.symbol}${adjustment.leg ? ` ${adjustment.leg}` : ''}`
+                  : 'Account'
+                const components = openSharedComponents(adjustment)
+                const qualifications = openSharedQualifications(adjustment)
+                const identityConflict = (Array.isArray(adjustment?.qualifications)
+                  ? adjustment.qualifications
+                  : []).some(code => String(code ?? '').trim().toUpperCase() === 'IDENTITY_CONFLICT')
+                const ownership = identityConflict
+                  ? 'Conflict'
+                  : adjustment?.kind === 'unattributedShared'
+                    ? 'Unattributed'
+                    : 'Shared'
+                const ownershipDetail = identityConflict
+                  ? 'selected representative is not exact'
+                  : ownership === 'Unattributed'
+                    ? 'not assigned to a known position scope'
+                    : 'not assigned to a single position leg'
+                return (
+                  <div
+                    role="listitem"
+                    tabIndex={0}
+                    key={futuresSharedAdjustmentKey(adjustment)}
+                    aria-label={`${scope} ${ownership.toLowerCase()} adjustment. ${
+                      amounts.map(item => item.text).join('. ') || 'Amount unavailable'
+                    }. Movement types: ${components.join(', ') || 'unavailable'}. ${
+                      qualifications.join('. ')
+                    }${qualifications.length > 0 ? '. ' : ''}Counted once outside position rows.`}
+                  >
+                    <span>{scope}</span>
+                    <strong>{amounts.map(item => item.text).join(' · ') || 'Unknown amount'}</strong>
+                    <em>{ownership} · {ownershipDetail}</em>
+                    <em>Movements: {components.join(' · ') || 'unavailable'}</em>
+                    {qualifications.length === 0 ? null : (
+                      <em>Qualifications: {qualifications.join(' · ')}</em>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          </section>
         )}
       </div>
 
@@ -703,6 +907,9 @@ export const FuturesPortfolioDock = ({
             tradeRoundIndex={tradeRoundIndex}
             tickSizes={tickSizes}
             onSymbolChange={onSymbolChange}
+            onRetrySettledIncome={typeof onRefreshAccount === 'function'
+              ? retryAccount
+              : undefined}
           />
         ) : openOrders.length === 0 ? (
           <>

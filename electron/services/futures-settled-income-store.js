@@ -16,9 +16,21 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
+import {
+    DEFAULT_FUTURES_SETTLED_INCOME_TYPES,
+    FUTURES_SETTLED_INCOME_RESOURCE_VERSION,
+    canonicalFuturesIncomeRow,
+    createFuturesSettledIncomeLane,
+    createFuturesSettledIncomeResource,
+    restoreFuturesSettledIncomeResource,
+    serializeFuturesSettledIncomeResource,
+} from '../../src/utils/futuresSettledIncomeResource.js';
 import { futuresIncomeRowKey } from './futures-settled-income-walk.js';
 
+// Version one is retained for the legacy load/save API. New integrations use
+// loadResource/saveResource and persist the canonical resource version.
 export const FUTURES_SETTLED_STORE_VERSION = 1;
+export const FUTURES_SETTLED_RESOURCE_STORE_VERSION = FUTURES_SETTLED_INCOME_RESOURCE_VERSION;
 export const FUTURES_SETTLED_STORE_FILE = 'futures-settled-income.json';
 
 // Which account this reading belongs to, stated so that the credential cannot be
@@ -38,6 +50,49 @@ const isFiniteNumber = value => Number.isFinite(value);
 const coversWindow = (from, windowFrom) => (
     isFiniteNumber(from) && isFiniteNumber(windowFrom) && from <= windowFrom
 );
+
+const migrateLegacyFuturesSettledPayload = (payload, {
+    incomeTypes,
+    windowFrom,
+    now,
+}) => {
+    if (!Array.isArray(payload?.rows)) return null;
+    if (!isFiniteNumber(payload.from) || !isFiniteNumber(payload.to)) return null;
+    if (payload.from > payload.to || payload.to > now) return null;
+
+    const types = incomeTypes.map(value => String(value).toUpperCase());
+    const laneRows = Object.fromEntries(types.map(type => [type, new Map()]));
+    for (const raw of payload.rows) {
+        const row = canonicalFuturesIncomeRow(raw);
+        if (row === null || laneRows[row.incomeType] === undefined) continue;
+        if (row.time < windowFrom || row.time > now) continue;
+        laneRows[row.incomeType].set(row.identity, row);
+    }
+
+    const lanes = Object.fromEntries(types.map(type => [
+        type,
+        createFuturesSettledIncomeLane(type, {
+            rows: laneRows[type],
+            // A v1 file stated one union span. It cannot prove that every type
+            // enumerated every page in that span, so migration deliberately
+            // carries rows but no per-type coverage or successful timestamp.
+            coveredFrom: null,
+            coveredTo: null,
+            targetTo: payload.to,
+            status: 'stale',
+            attemptedAt: isFiniteNumber(payload.verifiedAt) ? payload.verifiedAt : null,
+            successfulAt: null,
+            complete: false,
+            error: {
+                code: 'LEGACY_UNVERIFIED',
+                message: 'Stored v1 union requires a per-income-type verification pass',
+            },
+        }),
+    ]));
+    const resource = createFuturesSettledIncomeResource({ lanes, generation: 0 });
+    resource.migration = 'legacy-unverified';
+    return resource;
+};
 
 export const createFuturesSettledIncomeStore = ({ directory, logger = console } = {}) => {
     const file = directory ? path.join(directory, FUTURES_SETTLED_STORE_FILE) : null;
@@ -133,6 +188,73 @@ export const createFuturesSettledIncomeStore = ({ directory, logger = console } 
                 return true;
             } catch (error) {
                 logger.warn?.('[futures-settled] kept reading not written:', error?.message);
+                try { fs.unlinkSync(temporary); } catch { /* nothing to clean up */ }
+                return false;
+            }
+        },
+
+        /**
+         * Loads the canonical v2 resource. A v1 union is accepted only as stale,
+         * unverified migration input: its rows survive, but none of its shared
+         * coverage or success claims are promoted into a per-type lane.
+         */
+        loadResource({
+            fingerprint,
+            windowFrom,
+            now,
+            incomeTypes = DEFAULT_FUTURES_SETTLED_INCOME_TYPES,
+        }) {
+            if (file === null || fingerprint === null) return null;
+            if (!Number.isSafeInteger(windowFrom)
+                || !Number.isSafeInteger(now)
+                || windowFrom > now) return null;
+            let parsed = null;
+            try {
+                parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+            } catch (error) {
+                if (error?.code !== 'ENOENT') {
+                    logger.warn?.('[futures-settled] kept resource unreadable:', error?.message);
+                }
+                return null;
+            }
+            if (parsed?.fingerprint !== fingerprint) return null;
+            if (parsed.version === FUTURES_SETTLED_STORE_VERSION) {
+                return migrateLegacyFuturesSettledPayload(parsed, {
+                    incomeTypes,
+                    windowFrom,
+                    now,
+                });
+            }
+            if (parsed.version !== FUTURES_SETTLED_RESOURCE_STORE_VERSION) return null;
+            return restoreFuturesSettledIncomeResource(parsed, {
+                incomeTypes,
+                windowFrom,
+                now,
+            });
+        },
+
+        /**
+         * Atomically writes a canonical resource. Its digest is checked before
+         * touching disk so a caller cannot persist a mutated Map under the old
+         * generation and make an amount correction invisible after restart.
+         */
+        saveResource({ fingerprint, resource }) {
+            if (file === null || fingerprint === null) return false;
+            if (resource?.version !== FUTURES_SETTLED_RESOURCE_STORE_VERSION) return false;
+            const serialized = serializeFuturesSettledIncomeResource(resource);
+            if (resource.digest !== serialized.digest) return false;
+            const payload = {
+                ...serialized,
+                fingerprint,
+            };
+            const temporary = `${file}.writing`;
+            try {
+                fs.mkdirSync(path.dirname(file), { recursive: true });
+                fs.writeFileSync(temporary, JSON.stringify(payload));
+                fs.renameSync(temporary, file);
+                return true;
+            } catch (error) {
+                logger.warn?.('[futures-settled] kept resource not written:', error?.message);
                 try { fs.unlinkSync(temporary); } catch { /* nothing to clean up */ }
                 return false;
             }

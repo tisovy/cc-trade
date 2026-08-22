@@ -4,11 +4,23 @@
 //
 //     node scripts/probe-futures-settled.mjs
 //
-// Reads only. Prints numbers and times; never the key, never the secret.
+// Reads only. The explicit wallet-comparison section prints per-asset amounts;
+// acquisition diagnostics print counts only. Neither prints credentials,
+// signed material, raw rows, raw identities, headers, or exchange messages.
 import fs from 'fs';
 import https from 'https';
 import crypto from 'crypto';
 import { HttpsProxyAgent } from 'https-proxy-agent';
+import {
+    normalizeFuturesIncomeRow,
+    parseFuturesJson,
+} from '../electron/services/futures-trading-adapter.js';
+import { readFuturesTradeHistoryWindow } from '../electron/services/futures-trade-history-window.js';
+import { normalizeFuturesTradeHistoryEvidence } from '../src/utils/futuresTradeHistoryEvidence.js';
+import {
+    acquireCanonicalFuturesProbeIncome,
+    buildCanonicalFuturesProbeReport,
+} from './futures-settled-probe-report.mjs';
 
 // Everything printed is also written here, so the result survives the terminal.
 // Override with PROBE_OUT=/some/path.
@@ -37,6 +49,7 @@ if (!KEY || !SECRET) {
 }
 const proxy = process.env.https_proxy || process.env.HTTPS_PROXY || null;
 const agent = proxy ? new HttpsProxyAgent(proxy) : undefined;
+const MAX_PROBE_RESPONSE_BYTES = 8 * 1024 * 1024;
 
 const call = (path, params = {}) => new Promise((resolve, reject) => {
     const query = new URLSearchParams({ ...params, timestamp: Date.now(), recvWindow: 10000 }).toString();
@@ -48,314 +61,249 @@ const call = (path, params = {}) => new Promise((resolve, reject) => {
         headers: { 'X-MBX-APIKEY': KEY },
         agent,
     }, response => {
-        let body = '';
-        response.on('data', chunk => { body += chunk; });
+        const chunks = [];
+        let bytes = 0;
+        let refused = false;
+        response.on('data', chunk => {
+            if (refused) return;
+            const held = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            bytes += held.length;
+            if (bytes > MAX_PROBE_RESPONSE_BYTES) {
+                refused = true;
+                response.destroy();
+                reject(new Error('Probe response exceeded the byte ceiling'));
+                return;
+            }
+            chunks.push(held);
+        });
         response.on('end', () => {
+            if (refused) return;
+            const body = Buffer.concat(chunks, bytes).toString('utf8');
             let parsed = null;
-            try { parsed = JSON.parse(body); } catch { /* keep null */ }
+            try {
+                parsed = parseFuturesJson(body);
+            } catch {
+                reject(new Error('Probe response was not valid JSON'));
+                return;
+            }
             if (response.statusCode !== 200) {
-                reject(new Error(`${path} ${response.statusCode} ${body.slice(0, 200)}`));
+                reject(new Error(`Probe request failed with HTTP ${response.statusCode}`));
                 return;
             }
             resolve(parsed);
         });
     });
-    request.on('error', reject);
+    request.on('error', () => reject(new Error('Probe transport failed')));
     request.end();
 });
 
 const DAY = 24 * 60 * 60 * 1000;
 const now = Date.now();
 const windowFrom = now - 7 * DAY;
-const usdt = value => Number(value).toFixed(4);
-const at = ms => new Date(ms).toISOString().replace('T', ' ').slice(0, 19) + 'Z';
+const at = (ms) => {
+    const value = Number(ms);
+    return Number.isFinite(value)
+        ? new Date(value).toISOString().replace('T', ' ').slice(0, 19) + 'Z'
+        : '—';
+};
 
-// The income record, walked the way the desk walks it, so the walk itself is
-// under test here too: ascending pages, forward from the window's start.
-const income = [];
-// How many rows a key would collapse *within a single page*. Pages overlap by
-// design — the walk re-asks the edge instant so a row sharing it is not skipped
-// — so counting collisions across pages measures the overlap and nothing else.
-// Inside one page every row is a distinct charge the exchange made, and a key
-// that maps two of them to one string is losing money the account really paid.
-const collisions = { safeTranId: 0, natural: 0, naturalWithTrade: 0, rows: 0 };
-const safeId = (value) => {
-    const parsed = Number(value);
-    return Number.isSafeInteger(parsed) && parsed >= 0 ? String(parsed) : null;
-};
-const measurePage = (page) => {
-    const keys = {
-        // What the desk keyed by before 2026-08-20: type and transaction, with
-        // an unusable transaction refused and left empty.
-        safeTranId: row => `${row.incomeType}:${safeId(row.tranId) ?? ''}`,
-        // The first fallback: what the row is.
-        natural: row => (safeId(row.tranId) !== null
-            ? `${row.incomeType}:${safeId(row.tranId)}`
-            : `${row.incomeType}:${row.symbol}:${row.time}:${row.income}`),
-        // The same, plus the fill the charge was made on.
-        naturalWithTrade: row => (safeId(row.tranId) !== null
-            ? `${row.incomeType}:${safeId(row.tranId)}`
-            : `${row.incomeType}:${row.symbol}:${row.time}:${row.income}:${safeId(row.tradeId) ?? ''}`),
+const readProbeIncomePage = async ({ incomeType, startTime, endTime, page, limit }) => {
+    const answered = await call('/fapi/v1/income', {
+        incomeType,
+        startTime,
+        endTime,
+        page,
+        limit,
+    });
+    return {
+        rows: Array.isArray(answered)
+            ? answered.map(normalizeFuturesIncomeRow)
+            : answered,
     };
-    collisions.rows += page.length;
-    for (const [name, keyOf] of Object.entries(keys)) {
-        const seen = new Set();
-        for (const row of page) {
-            const key = keyOf(row);
-            if (seen.has(key)) collisions[name] += 1;
-            seen.add(key);
-        }
-    }
 };
-{
-    let cursor = windowFrom;
-    let guard = 0;
-    while (guard < 60) {
-        guard += 1;
-        const page = await call('/fapi/v1/income', { startTime: cursor, endTime: now, limit: 1000 });
-        if (!Array.isArray(page) || page.length === 0) break;
-        measurePage(page);
-        income.push(...page);
-        if (page.length < 1000) break;
-        const newest = page.reduce((latest, row) => Math.max(latest, Number(row.time)), cursor);
-        if (newest <= cursor) break;
-        cursor = newest;
-    }
-}
-const byId = new Map();
-for (const row of income) byId.set(`${row.incomeType}:${row.tranId}`, row);
-const rows = [...byId.values()].sort((a, b) => Number(a.time) - Number(b.time));
-say(`INCOME: ${rows.length} rows over 7 days`);
+
+// The comparison consumes exactly the underivable production lanes. Explicit
+// page numbers and continuation checkpoints are owned by the same walker the
+// desk runs; this script supplies only its read-only HTTP transport.
+const incomeWalk = await acquireCanonicalFuturesProbeIncome({
+    readPage: readProbeIncomePage,
+    now,
+    windowFrom,
+});
+const rows = incomeWalk.rows;
+say(`INCOME LANES: ${rows.length} canonical rows over 7 days`);
 say(`  oldest ${at(Number(rows[0]?.time))}  newest ${at(Number(rows.at(-1)?.time))}`);
-say(`  first page ordering: ${Number(income[0]?.time) < Number(income[Math.min(999, income.length - 1)]?.time) ? 'ASCENDING' : 'DESCENDING'}`);
-const kinds = {};
-for (const row of rows) kinds[row.incomeType] = (kinds[row.incomeType] ?? 0) + 1;
-say('  by type:', Object.entries(kinds).map(([k, n]) => `${k}=${n}`).join(' '));
-say(`  rows the exchange gave no usable tranId: ${income.filter(r => safeId(r.tranId) === null).length} of ${income.length}`);
-say('  ROWS LOST TO A KEY COLLISION, counted inside single pages'
-    + ` (${collisions.rows} rows read):`);
-say(`    type:tranId only ......... ${collisions.safeTranId}`);
-say(`    + natural fallback ....... ${collisions.natural}`);
-say(`    + the fill it was on ..... ${collisions.naturalWithTrade}`);
+say(`  resource: status=${incomeWalk.resource.status}`
+    + ` complete=${incomeWalk.resource.complete}`
+    + ` requests=${incomeWalk.requests} passes=${incomeWalk.passes}`
+    + `${incomeWalk.exhausted ? ' continuation-limit-reached' : ''}`);
+const completedIncomeLanes = Object.values(incomeWalk.resource.lanes)
+    .filter(lane => lane.status === 'ready' && lane.complete).length;
+say(`  acquisition: reason=operator-probe lanes=${Object.keys(incomeWalk.resource.lanes).length}`
+    + ` pages=${incomeWalk.requests} reads=${incomeWalk.requests}`
+    + ` physical-attempts=${incomeWalk.requests}`
+    + ` charged-weight=${incomeWalk.requests * 30}`
+    + ` coverage-gained=${completedIncomeLanes}`);
+for (const lane of Object.values(incomeWalk.resource.lanes)) {
+    say(`  ${lane.incomeType}: rows=${lane.rows.size}`
+        + ` status=${lane.status} complete=${lane.complete}`
+        + ` requests=${incomeWalk.attemptsByType[lane.incomeType] ?? 0}`
+        + `${lane.error === null ? '' : ` error=${lane.error.code}`}`);
+}
+
+// Contract discovery is a distinct production concern: REALIZED_PNL is read
+// only for the symbols it names and never enters the wallet ledger. It uses the
+// same fixed-window walker so dense timestamp peers remain visible and bounded.
+const discoveryWalk = await acquireCanonicalFuturesProbeIncome({
+    readPage: readProbeIncomePage,
+    now,
+    windowFrom,
+    incomeTypes: ['REALIZED_PNL'],
+});
+say(`TRADED-SYMBOL DISCOVERY: rows=${discoveryWalk.rows.length}`
+    + ` status=${discoveryWalk.resource.status}`
+    + ` complete=${discoveryWalk.resource.complete}`
+    + ` requests=${discoveryWalk.requests}`);
 
 const positions = (await call('/fapi/v2/positionRisk')).filter(p => Number(p.positionAmt) !== 0);
-say(`\nOPEN POSITIONS: ${positions.length}`);
-
-for (const position of positions) {
-    const symbol = position.symbol;
-    // When this position opened, from the fills themselves: walk the account's
-    // trades on this contract backwards, undoing each fill, until the running
-    // position reaches zero. That instant is the opening.
-    const fills = (await call('/fapi/v1/userTrades', { symbol, limit: 1000 }))
-        .sort((a, b) => Number(a.time) - Number(b.time));
-    let running = 0;
-    let openedAt = null;
-    let reached = false;
-    for (let i = fills.length - 1; i >= 0; i -= 1) {
-        const fill = fills[i];
-        const signed = fill.side === 'BUY' ? Number(fill.qty) : -Number(fill.qty);
-        running -= signed;
-        openedAt = Number(fill.time);
-        if (Math.abs(running + Number(position.positionAmt)) < 1e-12) { reached = true; break; }
-    }
-    say(`\n  ${symbol} ${position.positionSide} amt=${position.positionAmt} entry=${position.entryPrice}`);
-    say(`    uPnL (exchange): ${usdt(position.unRealizedProfit)}`);
-    say(`    opened at: ${reached ? at(openedAt) : 'NOT REACHED within 1000 fills'}  (fills read: ${fills.length}, oldest ${at(Number(fills[0]?.time))})`);
-    const since = reached ? openedAt : null;
-    const scoped = rows.filter(r => r.symbol === symbol && (since === null || Number(r.time) >= since));
-    const sum = type => scoped.filter(r => r.incomeType === type)
-        .reduce((total, r) => total + Number(r.income), 0);
-    const realized = sum('REALIZED_PNL');
-    const funding = sum('FUNDING_FEE');
-    const commission = sum('COMMISSION') + sum('COMMISSION_REBATE') + sum('REFERRAL_KICKBACK');
-    const insurance = sum('INSURANCE_CLEAR');
-    say(`    since open -> realized ${usdt(realized)} | funding ${usdt(funding)} | commission ${usdt(commission)} | insurance ${usdt(insurance)}`);
-    say(`    SETTLED TOTAL: ${usdt(realized + funding + commission + insurance)}`);
-    // The same two figures from the trade record, which is where the desk takes
-    // them from since 2026-08-20. Printed side by side because this is the one
-    // comparison that says whether narrowing the income read changed a number on
-    // the operator's screen — and because a difference here is the answer to
-    // whether Binance's own `COMMISSION` rows are gross or already net of the
-    // rebates it reports separately.
-    const ownFills = fills.filter(f => since === null || Number(f.time) >= since);
-    const realizedOnFills = ownFills.reduce((total, f) => total + Number(f.realizedPnl ?? 0), 0);
-    const chargedOnFills = ownFills.reduce((total, f) => (
-        (f.commissionAsset ?? 'USDT') === 'USDT' ? total + Number(f.commission ?? 0) : total
-    ), 0);
-    say(`    from the fills -> realized ${usdt(realizedOnFills)} | commission ${usdt(-chargedOnFills)}`
-        + `  (fills counted: ${ownFills.length})`);
-    say(`    difference     -> realized ${usdt(realizedOnFills - realized)}`
-        + ` | commission ${usdt(-chargedOnFills - commission)}`
-        + `${Math.abs(realizedOnFills - realized) < 0.01 && Math.abs(-chargedOnFills - commission) < 0.01
-            ? '  — the two records agree'
-            : '  — THEY DISAGREE, the screen will move'}`);
-    const fundingRows = scoped.filter(r => r.incomeType === 'FUNDING_FEE');
-    say(`    funding charges since open: ${fundingRows.length}`);
-    for (const row of fundingRows) say(`      ${at(Number(row.time))}  ${usdt(row.income)} ${row.asset}`);
-    // And the whole contract's week, which is what the desk prints when it does
-    // not know the opening.
-    const all = rows.filter(r => r.symbol === symbol);
-    const allSum = all.reduce((total, r) => total + Number(r.income), 0);
-    say(`    (whole contract over 7 days, all types: ${usdt(allSum)} across ${all.length} rows)`);
-}
+say(`\nOPEN POSITION SNAPSHOT: ${positions.length} non-zero position(s)`);
 
 // ---------------------------------------------------------------------------
-// The closed rounds, folded by the desk's own code against the exchange's own
-// records. Nothing here is a re-implementation: `buildFuturesTradeRounds` and
-// `readFuturesSettledIncome` are the modules the desk runs, imported directly,
-// so a number printed below and a number on the screen differ only where the
-// data reaching them differs. That is the whole point — the operator compares
-// these rows against the Binance app, and whatever disagrees is either the
-// fold or the data, and this says which.
-const { default: buildFuturesTradeRounds } = await import('../src/utils/futuresTradeRounds.js');
-const { readFuturesSettledIncome } = await import('../src/utils/futuresSettledMoney.js');
-
-// The adapter refuses an identity it cannot carry — a JSON integer past 2^53
-// has already lost digits — and the walk keys such a row by what it is instead.
-// Reproduced here so the probe holds exactly what the desk holds.
-const identity = (value) => {
-    const parsed = Number(value);
-    return Number.isSafeInteger(parsed) && parsed >= 0 ? String(parsed) : null;
-};
-
-const deskIncome = rows.map(row => ({
-    symbol: typeof row.symbol === 'string' && row.symbol.length > 0 ? row.symbol.toUpperCase() : null,
-    incomeType: row.incomeType ?? null,
-    income: String(row.income ?? '0'),
-    asset: row.asset ?? null,
-    time: Number(row.time) || 0,
-    tranId: identity(row.tranId),
-    tradeId: identity(row.tradeId),
-}));
-const deskEntries = readFuturesSettledIncome(deskIncome);
-say(`\nINCOME READ INTO COMPONENTS: ${deskEntries.length} of ${deskIncome.length} rows`);
-{
-    const per = {};
-    for (const entry of deskEntries) per[entry.component] = (per[entry.component] ?? 0) + 1;
-    say('  ', Object.entries(per).map(([k, n]) => `${k}=${n}`).join(' '));
-}
-
-// Every contract the account touched in the window, newest activity first —
-// the same set the desk discovers, from the same rows.
+// Closed rounds through the same canonical ownership boundary as the desk.
+// `/userTrades` is read as a bounded frozen window, preserving exact IDs and
+// `marginAsset`. The fill fold receives no income. Funding, insurance and
+// credits enter exactly once afterwards through `reconcileFuturesWalletLedger`.
 const traded = [];
-for (const row of [...rows].sort((a, b) => Number(b.time) - Number(a.time))) {
-    const contract = typeof row.symbol === 'string' ? row.symbol.toUpperCase() : '';
+const rememberContract = (value) => {
+    const contract = typeof value === 'string' ? value.trim().toUpperCase() : '';
     if (contract !== '' && !traded.includes(contract)) traded.push(contract);
+};
+for (const row of [...rows, ...discoveryWalk.rows]
+    .sort((a, b) => Number(b.time) - Number(a.time))) {
+    rememberContract(row.symbol);
 }
+for (const position of positions) rememberContract(position.symbol);
 say(`\nCONTRACTS TRADED IN WINDOW: ${traded.length} — ${traded.join(' ')}`);
 
 const fills = [];
+const coverageBySymbol = {};
 for (const contract of traded) {
-    // Exactly what the desk asks for: the most recent thousand fills, no
-    // startTime. What that does or does not reach is part of what is measured.
-    const answered = await call('/fapi/v1/userTrades', { symbol: contract, limit: 1000 });
-    for (const fill of Array.isArray(answered) ? answered : []) {
-        fills.push({
-            id: identity(fill.id),
-            orderId: identity(fill.orderId),
-            symbol: fill.symbol ?? null,
-            side: fill.side ?? null,
-            positionSide: fill.positionSide ?? 'BOTH',
-            price: fill.price ?? '0',
-            quantity: fill.qty ?? '0',
-            quoteQty: fill.quoteQty ?? '0',
-            realizedPnl: fill.realizedPnl ?? '0',
-            commission: fill.commission ?? '0',
-            commissionAsset: fill.commissionAsset ?? null,
-            maker: fill.maker === true,
-            time: Number(fill.time) || 0,
-        });
-    }
-    say(`  ${contract}: ${Array.isArray(answered) ? answered.length : 0} fills`
-        + (Array.isArray(answered) && answered.length > 0
-            ? `, oldest ${at(Math.min(...answered.map(f => Number(f.time))))}` : ''));
-}
-
-const coveredFrom = rows.length > 0 ? Number(rows[0].time) : windowFrom;
-const folded = buildFuturesTradeRounds(fills, { income: deskEntries, incomeFrom: coveredFrom });
-const closed = folded.filter(round => !round.open && round.exitPrice !== null);
-say(`\nCLOSED ROUNDS: ${closed.length} (of ${folded.length} folded)`);
-say('  income coverage starts', at(coveredFrom));
-
-for (const round of closed) {
-    const fee = (round.feesByAsset ?? []).map(f => `${usdt(f.amount)} ${f.asset}`).join(' + ') || '0';
-    say(`\n  ${round.symbol} ${round.positionSide} qty=${round.quantity}`);
-    say(`    opened ${at(round.openTime)}  closed ${at(round.closeTime)}  fills=${round.fills}`);
-    say(`    entry ${round.entryPrice === null ? '—' : round.entryPrice}${round.entryImplied ? ' (implied)' : ''}`
-        + `  exit ${round.exitPrice}`);
-    say(`    realized ${usdt(round.realizedPnl)}`);
-    say(`    commission ${fee}  (counted against the result: ${usdt(round.fee)} USDT)`);
-    say(`    funding ${round.funding === null ? 'NOT READ' : usdt(round.funding)}`
-        + `${round.fundingShared ? ' (shared — both legs open)' : ''}`);
-    say(`    insurance ${round.insuranceClear === null ? 'NOT READ' : usdt(round.insuranceClear)}`);
-    say(`    NET: ${usdt(round.netPnl)}`
-        + `   [partial=${round.partial === true} fundingComplete=${round.fundingComplete}]`);
-    // What the income record itself holds against this contract across the
-    // round's own span, independent of how the fold attached it.
-    const span = deskEntries.filter(e => e.symbol === round.symbol
-        && e.time >= round.openTime && e.time <= round.closeTime);
-    const byComponent = {};
-    for (const entry of span) byComponent[entry.component] = (byComponent[entry.component] ?? 0) + entry.amount;
-    say(`    income rows inside the round's span: ${span.length} — `
-        + (Object.entries(byComponent).map(([k, v]) => `${k} ${usdt(v)}`).join(' | ') || 'none'));
-}
-
-// ---------------------------------------------------------------------------
-// What the read would cost if it asked only for what the desk cannot derive.
-//
-// `/fapi/v1/income` takes an `incomeType` and returns every kind when none is
-// sent — which is how a read looking for forty-five funding rows pages through
-// thirteen thousand. This asks the narrow question once and checks that it gets
-// the same answer: a filter that changes the answer is not a saving.
-say('\n--- WHAT THE NARROW READ WOULD COST ---');
-{
-    const wide = rows.filter(r => r.incomeType === 'FUNDING_FEE');
-    const wideTotal = wide.reduce((sum, r) => sum + Number(r.income), 0);
-    const narrow = await call('/fapi/v1/income', {
-        incomeType: 'FUNDING_FEE',
+    const reading = await readFuturesTradeHistoryWindow({
         startTime: windowFrom,
         endTime: now,
-        limit: 1000,
+        expectedSymbol: contract,
+        readWindow: async ({ startTime, endTime, limit }) => {
+            const answered = await call('/fapi/v1/userTrades', {
+                symbol: contract,
+                startTime,
+                endTime,
+                limit,
+            });
+            return Array.isArray(answered)
+                ? answered.map(normalizeFuturesTradeHistoryEvidence)
+                : answered;
+        },
     });
-    const list = Array.isArray(narrow) ? narrow : [];
-    const narrowTotal = list.reduce((sum, r) => sum + Number(r.income), 0);
-    say(`  unfiltered walk: ${income.length} rows read over ${Math.ceil(income.length / 1000)} page(s),`
-        + ` of which ${wide.length} are funding, totalling ${usdt(wideTotal)}`);
-    say(`  incomeType=FUNDING_FEE: ${list.length} rows in ONE request (weight 30),`
-        + ` totalling ${usdt(narrowTotal)}${list.length >= 1000 ? ' — FULL PAGE, more behind it' : ''}`);
-    say(`  same answer: ${list.length === wide.length && Math.abs(narrowTotal - wideTotal) < 1e-6 ? 'YES' : 'NO — do not narrow the read'}`);
+    fills.push(...reading.rows);
+    coverageBySymbol[contract] = reading.coverage;
+    say(`  ${contract}: ${reading.rows.length} contiguous fills,`
+        + ` ${reading.unresolvedRows.length} held behind an unread gap,`
+        + ` ${reading.coverage.requests} request(s),`
+        + ` coverage=${reading.coverage.complete ? 'complete' : 'PARTIAL'}`
+        + (reading.rows.length > 0
+            ? `, oldest ${at(Math.min(...reading.rows.map(fill => Number(fill.time))))}`
+            : ''));
 }
-// Whether this account is rebated at all. It no longer decides where commission
-// comes from — the desk takes the charge from the fills and keeps reading these
-// credits, which is correct whether an income `COMMISSION` row is gross or
-// already net of them — but a non-zero count here is what would explain any
-// difference printed above.
+
+const report = buildCanonicalFuturesProbeReport({
+    fills,
+    income: rows,
+    coverageBySymbol,
+    // The complete account snapshot names non-zero positions; absence from
+    // that successfully read snapshot is the authoritative terminal zero.
+    positions,
+    generation: `probe:${now}`,
+    incomeCoverage: incomeWalk.resource.complete,
+});
+const amounts = totals => (totals ?? [])
+    .map(total => `${total.amount} ${total.asset}`)
+    .join(' + ') || '0';
+const componentAmounts = entries => (entries ?? [])
+    .map(entry => `${entry.component}=${entry.amount} ${entry.asset}`)
+    .join(' | ') || 'none';
+
+say(`\nOPEN ROUNDS: ${report.open.length}`);
+for (const { round, wallet } of report.open) {
+    say(`\n  ${round.symbol} ${round.positionSide} qty=${round.quantity}`);
+    say(`    owned components: ${componentAmounts(wallet?.entries)}`);
+    say(`    visible NET: ${amounts(wallet?.visibleNet)}`);
+    say(`    canonical NET: ${wallet?.walletNet === null || wallet?.walletNet === undefined
+        ? 'NOT EXACT'
+        : `${wallet.walletNet.amount} ${wallet.walletNet.asset}`}`);
+    if ((wallet?.qualifications ?? []).length > 0) {
+        say(`    qualifications: ${wallet.qualifications.join(', ')}`);
+    }
+}
+
+say(`\nCLOSED ROUNDS: ${report.closed.length}`
+    + ` (${report.roundIndex.unresolved.length} unresolved segment(s))`);
+for (const { round, wallet } of report.closed) {
+    say(`\n  ${round.symbol} ${round.positionSide} qty=${round.quantity}`);
+    say(`    opened ${at(round.openTime)}  closed ${at(round.closeTime)}`
+        + `  fills=${round.fillIds.length}`);
+    say(`    entry ${round.entryPrice === null ? '—' : round.entryPrice}`
+        + `${round.entryImplied ? ' (implied)' : ''}  exit ${round.exitPrice}`);
+    say(`    owned components: ${componentAmounts(wallet?.entries)}`);
+    say(`    visible NET: ${amounts(wallet?.visibleNet)}`);
+    say(`    canonical NET: ${wallet?.walletNet === null || wallet?.walletNet === undefined
+        ? 'NOT EXACT'
+        : `${wallet.walletNet.amount} ${wallet.walletNet.asset}`}`);
+    if ((wallet?.qualifications ?? []).length > 0) {
+        say(`    qualifications: ${wallet.qualifications.join(', ')}`);
+    }
+}
+
+say(`\nACCOUNT SHARED ADJUSTMENTS: ${report.shared.length}`);
+for (const bucket of report.shared) {
+    say(`  ${bucket.kind}:${bucket.ownerId}`
+        + `  components=${bucket.components.join(',') || 'none'}`
+        + `  NET=${amounts(bucket.visibleNet)}`
+        + (bucket.qualifications.length > 0
+            ? `  [${bucket.qualifications.join(', ')}]`
+            : ''));
+}
+say(`\nWALLET AUDIT: conserved=${report.walletLedger.audit.conserved}`
+    + ` disjoint=${report.walletLedger.audit.disjoint}`
+    + ` presentationDisjoint=${report.walletLedger.audit.presentationDisjoint}`
+    + ` additive=${report.walletLedger.audit.additive}`);
+say(`  canonical totals: ${amounts(report.walletLedger.audit.canonicalTotals)}`);
+say(`  assigned totals:  ${amounts(report.walletLedger.audit.assignedTotals)}`);
+say(`  skipped derivable/unsupported income rows: ${report.walletLedger.audit.skippedIncome.length}`);
+say(`  identity conflicts: ${report.walletLedger.audit.identityConflicts.length}`
+    + `  invalid inputs: ${report.walletLedger.audit.invalidInputs.length}`);
+
+// ---------------------------------------------------------------------------
+say('\n--- ACQUISITION SHAPE (COUNTS ONLY) ---');
+// Aggregate shape only. Money is printed in the explicit canonical wallet
+// comparison above, while this acquisition diagnostic answers whether each
+// credit lane carries evidence that can support position ownership.
 {
     const REBATES = ['COMMISSION_REBATE', 'REFERRAL_KICKBACK', 'API_REBATE', 'FEE_RETURN'];
     const rebates = rows.filter(r => REBATES.includes(r.incomeType));
-    const total = rebates.reduce((sum, r) => sum + Number(r.income), 0);
-    say(`  rebate rows in the window: ${rebates.length}`
-        + (rebates.length === 0
-            ? ' — none, so a fill\'s gross commission is the account\'s real cost'
-            : ` totalling ${usdt(total)}`));
-    // And whether the exchange names a contract on them. A credit with no symbol
-    // cannot be attributed to a position and the desk drops it — correctly, since
-    // there is nothing to attribute it to — but then reading these four kinds
-    // costs 120 weight a pass for rows that never reach a column, and the
-    // commission the column states is the gross charge whatever the income
-    // record's own commission rows meant.
+    say(`  rebate rows in the window: ${rebates.length}`);
     if (rebates.length > 0) {
         const named = rebates.filter(r => typeof r.symbol === 'string' && r.symbol.length > 0);
-        say(`    of those, ${named.length} name a contract and ${rebates.length - named.length} do not`
-            + `${named.length === 0
-                ? ' — none reach a position, so the settled column states the gross charge'
-                : ''}`);
+        const tradeNamed = rebates.filter(r => r.tradeId !== null);
+        say(`    contract evidence present: ${named.length}; absent: ${rebates.length - named.length}`);
+        say(`    trade identity present: ${tradeNamed.length}; absent: ${rebates.length - tradeNamed.length}`);
         for (const type of REBATES) {
             const of = rebates.filter(r => r.incomeType === type);
-            if (of.length > 0) say(`    ${type}: ${of.length} rows, ${usdt(of.reduce((t, r) => t + Number(r.income), 0))}`);
+            if (of.length > 0) say(`    ${type}: ${of.length} row(s)`);
         }
     }
 }
-// The one thing the private stream cannot tell the desk on a crossed position.
-say(`  positions: ${positions.map(p => `${p.symbol}=${p.marginType ?? (p.isolated === true ? 'isolated' : 'cross')}`).join(' ') || 'none open'}`);
-
+const isolatedPositions = positions.filter(position => (
+    position.marginType === 'isolated' || position.isolated === true
+)).length;
+say(`  open-position shape: total=${positions.length}`
+    + ` isolated=${isolatedPositions} cross-or-unknown=${positions.length - isolatedPositions}`);

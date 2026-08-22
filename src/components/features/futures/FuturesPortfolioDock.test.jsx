@@ -254,8 +254,9 @@ describe('FuturesPortfolioDock', () => {
         selectedSymbol="BTCUSDT"
         positions={[position]}
         settledMoney={{
-          BTCUSDT: {
+          'BTCUSDT:BOTH': {
             symbol: 'BTCUSDT',
+            positionKey: 'BTCUSDT:BOTH',
             realizedPnl: 120.5,
             funding: -7.1,
             commission: -4.2,
@@ -284,14 +285,55 @@ describe('FuturesPortfolioDock', () => {
     expect(title).not.toContain('insurance')
   })
 
+  it('looks up settled money by contract leg and ignores a legacy symbol payload', () => {
+    const reading = (positionSide, total) => ({
+      symbol: 'BTCUSDT',
+      positionKey: `BTCUSDT:${positionSide}`,
+      realizedPnl: total,
+      funding: null,
+      commission: null,
+      insuranceClear: null,
+      total,
+      settlementAsset: 'USDT',
+      otherAssets: [],
+      from: 1_000,
+      complete: true,
+    })
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[
+          { ...position, positionSide: 'LONG', quantity: '0.1' },
+          { ...position, positionSide: 'SHORT', quantity: '0.2' },
+        ]}
+        settledMoney={{
+          'BTCUSDT:LONG': reading('LONG', 11),
+          'BTCUSDT:SHORT': reading('SHORT', -7),
+          // A legacy contract-wide amount must not leak into either hedge leg.
+          BTCUSDT: reading('BOTH', 999),
+        }}
+      />,
+    )
+
+    const table = screen.getByRole('table', { name: 'Open positions' })
+    const longSettled = table.querySelector('[data-position-key="BTCUSDT:LONG"]')
+      .querySelector('.futures-workstation-dock-settled')
+    const shortSettled = table.querySelector('[data-position-key="BTCUSDT:SHORT"]')
+      .querySelector('.futures-workstation-dock-settled')
+    expect(longSettled).toHaveTextContent('+11.00')
+    expect(shortSettled).toHaveTextContent('−7.00')
+    expect(table).not.toHaveTextContent('999.00')
+  })
+
   it('says a settled figure is missing what the read did not reach', () => {
     render(
       <FuturesPortfolioDock
         selectedSymbol="BTCUSDT"
         positions={[position]}
         settledMoney={{
-          BTCUSDT: {
+          'BTCUSDT:BOTH': {
             symbol: 'BTCUSDT',
+            positionKey: 'BTCUSDT:BOTH',
             realizedPnl: 40,
             funding: null,
             commission: null,
@@ -312,6 +354,16 @@ describe('FuturesPortfolioDock', () => {
       .querySelector('.futures-workstation-dock-settled')
     expect(settled).toHaveClass('is-partial')
     expect(settled.getAttribute('title')).toContain('not the whole life of the position')
+    const qualification = within(settled).getByRole('note', {
+      name: 'Partial. Exact wallet coverage is incomplete',
+    })
+    expect(qualification).toHaveAttribute('tabindex', '0')
+    expect(qualification).toHaveTextContent('Partial')
+    // The sentences ride on the badge (hover, focus, reader), not in the row: a
+    // live row is one line, and on 2026-08-22 the printed block overflowed the
+    // dock past the panel edge.
+    expect(qualification).not.toHaveTextContent('Exact wallet coverage is incomplete')
+    expect(qualification.getAttribute('title')).toBe('Exact wallet coverage is incomplete')
   })
 
   // The failure of 2026-08-20. With no start for the position, every amount the
@@ -325,8 +377,9 @@ describe('FuturesPortfolioDock', () => {
         selectedSymbol="BTCUSDT"
         positions={[position]}
         settledMoney={{
-          BTCUSDT: {
+          'BTCUSDT:BOTH': {
             symbol: 'BTCUSDT',
+            positionKey: 'BTCUSDT:BOTH',
             realizedPnl: null,
             funding: null,
             commission: null,
@@ -360,8 +413,9 @@ describe('FuturesPortfolioDock', () => {
         selectedSymbol="BTCUSDT"
         positions={[position]}
         settledMoney={{
-          BTCUSDT: {
+          'BTCUSDT:BOTH': {
             symbol: 'BTCUSDT',
+            positionKey: 'BTCUSDT:BOTH',
             realizedPnl: 10,
             funding: null,
             commission: null,
@@ -370,6 +424,7 @@ describe('FuturesPortfolioDock', () => {
             settlementAsset: 'USDT',
             otherAssets: [{
               asset: 'BNB',
+              amount: '-0.003',
               realizedPnl: null,
               funding: null,
               commission: -0.003,
@@ -384,8 +439,254 @@ describe('FuturesPortfolioDock', () => {
     )
     const settled = screen.getByRole('table', { name: 'Open positions' })
       .querySelector('.futures-workstation-dock-settled')
-    expect(settled).toHaveTextContent('+10.00')
-    expect(settled.getAttribute('title')).toContain('in BNB, not included')
+    expect(settled).toHaveTextContent('+10.00 USDT')
+    expect(settled).toHaveTextContent('−0.003 BNB')
+    expect(settled.getAttribute('title')).toContain('−0.003 BNB settled')
+    expect(settled.getAttribute('title')).toContain('not converted')
+  })
+
+  it('renders a BNB-only open-position reading with its asset instead of a bare dash', () => {
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[position]}
+        settledMoney={{
+          'BTCUSDT:BOTH': {
+            symbol: 'BTCUSDT',
+            positionKey: 'BTCUSDT:BOTH',
+            realizedPnl: null,
+            funding: null,
+            commission: null,
+            insuranceClear: null,
+            total: null,
+            settlementAsset: 'USDT',
+            otherAssets: [{
+              asset: 'BNB',
+              amount: '-0.003',
+              realizedPnl: null,
+              funding: null,
+              commission: -0.003,
+              insuranceClear: null,
+              total: -0.003,
+            }],
+            from: 1_000,
+            complete: true,
+          },
+        }}
+      />,
+    )
+
+    const settled = screen.getByRole('table', { name: 'Open positions' })
+      .querySelector('.futures-workstation-dock-settled')
+    expect(settled).toHaveTextContent('−0.003 BNB')
+    expect(settled.getAttribute('title')).toContain('−0.003 BNB settled')
+    expect(settled.getAttribute('title')).toContain('not converted')
+  })
+
+  it('renders open contract and account adjustments once outside leg rows', () => {
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[
+          { ...position, positionSide: 'LONG', quantity: '0.1' },
+          { ...position, positionSide: 'SHORT', quantity: '-0.2' },
+        ]}
+        tradeRoundIndex={{
+          openSharedAdjustments: [
+            {
+              ownerId: 'BTCUSDT',
+              kind: 'contractShared',
+              symbol: 'BTCUSDT',
+              leg: null,
+              components: ['funding'],
+              visibleNet: [{ asset: 'USDT', amount: '-3' }],
+            },
+            {
+              ownerId: 'account',
+              kind: 'accountShared',
+              symbol: null,
+              leg: null,
+              components: ['commissionCredit'],
+              visibleNet: [{ asset: 'BNB', amount: '0.4' }],
+            },
+          ],
+        }}
+      />,
+    )
+
+    const table = screen.getByRole('table', { name: 'Open positions' })
+    const shared = screen.getByRole('region', {
+      name: 'Shared open-position wallet adjustments',
+    })
+    const adjustments = within(shared).getAllByRole('listitem')
+
+    expect(adjustments).toHaveLength(2)
+    for (const adjustment of adjustments) {
+      expect(adjustment).toHaveAttribute('tabindex', '0')
+      expect(adjustment).toHaveTextContent('Shared · not assigned to a single position leg')
+      expect(adjustment).toHaveAccessibleName(expect.stringContaining('Counted once'))
+    }
+    expect(within(shared).getAllByText('−3 USDT')).toHaveLength(1)
+    expect(within(shared).getAllByText('+0.4 BNB')).toHaveLength(1)
+    expect(within(shared).getByText('Movements: funding')).toBeInTheDocument()
+    expect(within(shared).getByText('Movements: commission credit')).toBeInTheDocument()
+    expect(within(table).queryByText('−3 USDT')).not.toBeInTheDocument()
+    expect(within(table).queryByText('+0.4 BNB')).not.toBeInTheDocument()
+  })
+
+  it('shows unattributed component and identity qualification without scanning members', () => {
+    const forbiddenMemberEntries = new Proxy(new Array(24_000), {
+      get() {
+        throw new Error('shared member entries were scanned during render')
+      },
+    })
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        tradeRoundIndex={{
+          openSharedAdjustments: [{
+            ownerId: 'BTCUSDT',
+            kind: 'unattributedShared',
+            symbol: 'BTCUSDT',
+            leg: null,
+            components: ['commissionCredit'],
+            entries: forbiddenMemberEntries,
+            entryIds: Array.from({ length: 24_000 }, (unused, index) => `credit-${index}`),
+            visibleNet: [{ asset: 'USDT', amount: '0.4' }],
+            qualifications: ['IDENTITY_UNRELIABLE'],
+          }],
+        }}
+      />,
+    )
+
+    const adjustment = screen.getByRole('listitem', {
+      name: /BTCUSDT unattributed adjustment/,
+    })
+    expect(adjustment).toHaveTextContent('Unattributed · not assigned to a known position scope')
+    expect(adjustment).toHaveTextContent('Movements: commission credit')
+    expect(adjustment).toHaveTextContent(
+      'Qualifications: An income identity is not reliable',
+    )
+    expect(adjustment).toHaveAccessibleName(
+      expect.stringContaining('An income identity is not reliable'),
+    )
+  })
+
+  it('presents a reliable-identity shared representative as conflicted, not ordinary Shared', () => {
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        tradeRoundIndex={{
+          openSharedAdjustments: [{
+            ownerId: 'BTCUSDT',
+            kind: 'contractShared',
+            symbol: 'BTCUSDT',
+            leg: null,
+            components: ['funding'],
+            visibleNet: [{ asset: 'USDT', amount: '-3' }],
+            identityConflict: true,
+            qualifications: ['IDENTITY_CONFLICT'],
+          }],
+        }}
+      />,
+    )
+
+    const adjustment = screen.getByRole('listitem', {
+      name: /BTCUSDT conflict adjustment/,
+    })
+    expect(adjustment).toHaveTextContent('Conflict · selected representative is not exact')
+    expect(adjustment).toHaveTextContent(
+      'Qualifications: Conflicting payloads reuse one income identity',
+    )
+    expect(adjustment).not.toHaveTextContent('Shared ·')
+    expect(adjustment).toHaveAccessibleName(
+      expect.stringContaining('Conflicting payloads reuse one income identity'),
+    )
+  })
+
+  it('keeps open shared-adjustment DOM identity when reconciliation reorders and extends it', () => {
+    const laneSizedEntryIds = Array.from({ length: 24_000 }, (unused, index) => (
+      `income:btc-funding-${index}`
+    ))
+    const forbiddenMemberEntries = new Proxy(new Array(24_000), {
+      get() {
+        throw new Error('shared member entries were scanned during rerender')
+      },
+    })
+    const contract = {
+      kind: 'contractShared',
+      ownerId: 'BTCUSDT',
+      symbol: 'BTCUSDT',
+      leg: null,
+      components: ['funding'],
+      entries: forbiddenMemberEntries,
+      entryIds: laneSizedEntryIds,
+      visibleNet: [{ asset: 'USDT', amount: '-3' }],
+    }
+    const account = {
+      kind: 'accountShared',
+      ownerId: 'account',
+      symbol: null,
+      leg: null,
+      components: ['commissionCredit'],
+      entries: forbiddenMemberEntries,
+      entryIds: ['income:account-credit'],
+      visibleNet: [{ asset: 'BNB', amount: '0.4' }],
+    }
+    const dock = adjustments => (
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        tradeRoundIndex={{ openSharedAdjustments: adjustments }}
+      />
+    )
+    const { rerender } = render(dock([contract, account]))
+    const contractRow = screen.getByRole('listitem', {
+      name: /BTCUSDT shared adjustment/,
+    })
+    const accountRow = screen.getByRole('listitem', {
+      name: /Account shared adjustment/,
+    })
+    accountRow.focus()
+
+    rerender(dock([account, {
+      ...contract,
+      entryIds: [...laneSizedEntryIds, 'income:btc-funding-new'],
+    }]))
+
+    expect(screen.getByRole('listitem', { name: /BTCUSDT shared adjustment/ }))
+      .toBe(contractRow)
+    expect(screen.getByRole('listitem', { name: /Account shared adjustment/ }))
+      .toBe(accountRow)
+    expect(accountRow).toHaveFocus()
+  })
+
+  it('names hedge-row actions with the position leg', () => {
+    const onClosePosition = vi.fn()
+    const onSizePick = vi.fn()
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[
+          { ...position, positionSide: 'LONG', quantity: '0.1' },
+          { ...position, positionSide: 'SHORT', quantity: '-0.2' },
+        ]}
+        onClosePosition={onClosePosition}
+        onSizePick={onSizePick}
+      />,
+    )
+
+    expect(screen.getByRole('button', { name: 'Close BTCUSDT LONG position' }))
+      .toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Close BTCUSDT SHORT position' }))
+      .toBeInTheDocument()
+    expect(screen.getByRole('button', {
+      name: 'Size the ticket for the whole BTCUSDT LONG position',
+    })).toBeInTheDocument()
+    expect(screen.getByRole('button', {
+      name: 'Size the ticket for the whole BTCUSDT SHORT position',
+    })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Close BTCUSDT position' }))
+      .not.toBeInTheDocument()
   })
 
   // An income read that has not answered and an account that has settled nothing
@@ -411,8 +712,9 @@ describe('FuturesPortfolioDock', () => {
         selectedSymbol="BTCUSDT"
         positions={[position]}
         settledMoney={{
-          ETHUSDT: {
+          'ETHUSDT:BOTH': {
             symbol: 'ETHUSDT',
+            positionKey: 'ETHUSDT:BOTH',
             realizedPnl: null,
             funding: -1.5,
             commission: null,
@@ -434,6 +736,47 @@ describe('FuturesPortfolioDock', () => {
     expect(title).toContain('1 other contract')
     expect(title).toContain('nothing against this one')
     expect(title).not.toContain('not read yet')
+  })
+
+  it('counts hedge readings as one contract and explains an unassigned same-contract leg', () => {
+    const contractReading = positionKey => ({
+      symbol: 'BTCUSDT',
+      positionKey,
+      realizedPnl: null,
+      funding: -1,
+      commission: null,
+      insuranceClear: null,
+      total: -1,
+      settlementAsset: 'USDT',
+      otherAssets: [],
+      from: 1,
+      complete: true,
+    })
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[
+          { ...position, positionSide: 'SHORT' },
+          { ...position, symbol: 'ETHUSDT', positionSide: 'LONG' },
+        ]}
+        settledMoney={{
+          'BTCUSDT:LONG': contractReading('BTCUSDT:LONG'),
+          'BTCUSDT:BOTH': contractReading('BTCUSDT:BOTH'),
+        }}
+        settledWindow={{ from: 1, readAt: Date.parse('2026-08-20T14:20:31.482Z'), complete: true }}
+      />,
+    )
+
+    const table = screen.getByRole('table', { name: 'Open positions' })
+    const shortTitle = table.querySelector('[data-position-key="BTCUSDT:SHORT"]')
+      .querySelector('.futures-workstation-dock-settled').getAttribute('title')
+    const ethTitle = table.querySelector('[data-position-key="ETHUSDT:LONG"]')
+      .querySelector('.futures-workstation-dock-settled').getAttribute('title')
+    expect(shortTitle).toContain('income read reached this contract')
+    expect(shortTitle).toContain('no amount was assigned to the SHORT leg')
+    expect(shortTitle).not.toContain('other contract')
+    expect(ethTitle).toContain('1 other contract')
+    expect(ethTitle).not.toContain('2 other contracts')
   })
 
   // Mark notifications stay below the dock boundary. The aggregate subscribes
@@ -631,7 +974,7 @@ describe('FuturesPortfolioDock', () => {
       />,
     )
     fireEvent.click(screen.getByRole('button', {
-      name: 'Size the ticket for the whole BTCUSDT position',
+      name: 'Size the ticket for the whole BTCUSDT SHORT position',
     }))
     expect(onSizePick).toHaveBeenCalledWith(0.5)
   })
@@ -645,7 +988,7 @@ describe('FuturesPortfolioDock', () => {
       />,
     )
     expect(screen.queryByRole('button', {
-      name: 'Size the ticket for the whole BTCUSDT position',
+      name: 'Size the ticket for the whole BTCUSDT SHORT position',
     })).not.toBeInTheDocument()
   })
 
@@ -909,7 +1252,7 @@ describe('FuturesPortfolioDock', () => {
         onSymbolChange={onSymbolChange}
       />,
     )
-    fireEvent.click(screen.getByRole('button', { name: 'Close BTCUSDT position' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Close BTCUSDT SHORT position' }))
     const [clickedPosition, anchor] = onClosePosition.mock.lastCall
     expect(clickedPosition).toBe(position)
     expect(clickedPosition).toMatchObject({
@@ -1128,9 +1471,34 @@ describe('FuturesPortfolioDock', () => {
           status: 'ready',
           readAt: 1_784_000_100_000,
           orders: [],
-          trades: [{ id: 4, side: 'SELL', price: '58500', quantity: '0.004', commission: '0.02', realizedPnl: '12.5', time: 1 }],
+          trades: [{ id: 4, symbol: 'BTCUSDT', side: 'SELL', price: '58500', quantity: '0.004', commission: '0.02', realizedPnl: '12.5', time: 1 }],
           error: null,
           readViews: { orders: 1_784_000_100_000, trades: 1_784_000_100_000 },
+        }}
+        tradeRoundIndex={{
+          closed: [{
+            key: 'BTCUSDT:BOTH:round-1',
+            symbol: 'BTCUSDT',
+            positionSide: 'SHORT',
+            openTime: 1,
+            closeTime: 2,
+            quantity: '0.004',
+            fills: 1,
+            notional: 234,
+            entryPrice: 61620,
+            entryImplied: false,
+            exitPrice: 58500,
+            realizedPnl: 12.5,
+            netPnl: 12.48,
+            partial: false,
+            wallet: {
+              walletNet: { asset: 'USDT', amount: '12.48' },
+              visibleNet: [{ asset: 'USDT', amount: '12.48' }],
+              qualifications: [],
+            },
+          }],
+          unresolved: [],
+          sharedAdjustments: [],
         }}
       />,
     )
@@ -1195,6 +1563,51 @@ describe('FuturesPortfolioDock', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Closed positions' }))
     fireEvent.click(screen.getByRole('tab', { name: 'Order history' }))
     expect(onLoadHistory).toHaveBeenCalledTimes(2)
+  })
+
+  it('re-arms the selected history view after its successful read identity is cleared', () => {
+    const onLoadHistory = vi.fn(() => true)
+    const unread = {
+      symbol: 'BTCUSDT',
+      status: 'idle',
+      readAt: null,
+      orders: [],
+      trades: [],
+      error: null,
+      readViews: { orders: null, trades: null },
+    }
+    const { rerender } = render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        onLoadHistory={onLoadHistory}
+        history={unread}
+      />,
+    )
+    fireEvent.click(screen.getByRole('tab', { name: 'Closed positions' }))
+    expect(onLoadHistory).toHaveBeenCalledExactlyOnceWith('BTCUSDT', { views: ['trades'] })
+
+    rerender(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        onLoadHistory={onLoadHistory}
+        history={{
+          ...unread,
+          status: 'ready',
+          readAt: 1_784_000_100_000,
+          readViews: { orders: null, trades: 1_784_000_100_000 },
+        }}
+      />,
+    )
+    rerender(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        onLoadHistory={onLoadHistory}
+        history={unread}
+      />,
+    )
+
+    expect(onLoadHistory).toHaveBeenCalledTimes(2)
+    expect(onLoadHistory).toHaveBeenNthCalledWith(2, 'BTCUSDT', { views: ['trades'] })
   })
 
   // A frame that never left is not a read. The attempt stays armed so the next
@@ -1337,16 +1750,51 @@ describe('FuturesPortfolioDock', () => {
       status: 'ready',
       readAt: 1_784_000_100_000,
       orders: [],
-      trades: [{ id: 4, side: 'SELL', price: '58500', quantity: '0.004', commission: '0.02', realizedPnl: '12.5', time: 1 }],
+      trades: [{ id: 4, symbol: 'BTCUSDT', side: 'SELL', price: '58500', quantity: '0.004', commission: '0.02', realizedPnl: '12.5', time: 1 }],
       error: null,
       readViews: { orders: 1_784_000_100_000, trades: 1_784_000_100_000 },
     }
+    const tradeRoundIndex = {
+      closed: [{
+        key: 'BTCUSDT:BOTH:round-1',
+        symbol: 'BTCUSDT',
+        positionSide: 'SHORT',
+        openTime: 1,
+        closeTime: 2,
+        quantity: '0.004',
+        fills: 1,
+        notional: 234,
+        entryPrice: 61620,
+        entryImplied: false,
+        exitPrice: 58500,
+        realizedPnl: 12.5,
+        netPnl: 12.48,
+        partial: false,
+        wallet: {
+          walletNet: { asset: 'USDT', amount: '12.48' },
+          visibleNet: [{ asset: 'USDT', amount: '12.48' }],
+          qualifications: [],
+        },
+      }],
+      unresolved: [],
+      sharedAdjustments: [],
+    }
     const { rerender } = render(
-      <FuturesPortfolioDock selectedSymbol="BTCUSDT" onLoadHistory={onLoadHistory} history={history} />,
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        onLoadHistory={onLoadHistory}
+        history={history}
+        tradeRoundIndex={tradeRoundIndex}
+      />,
     )
     fireEvent.click(screen.getByRole('tab', { name: 'Closed positions' }))
     rerender(
-      <FuturesPortfolioDock selectedSymbol="ETHUSDT" onLoadHistory={onLoadHistory} history={history} />,
+      <FuturesPortfolioDock
+        selectedSymbol="ETHUSDT"
+        onLoadHistory={onLoadHistory}
+        history={history}
+        tradeRoundIndex={tradeRoundIndex}
+      />,
     )
 
     // The result, not the +12.50 the exchange settled before its own commission.

@@ -1,3 +1,5 @@
+import { normalizeFuturesTradeHistoryAsset } from './futuresTradeHistoryEvidence.js'
+
 // Binance reports executions, not positions. One market close of a 136 439-unit
 // position arrives as five fills in the same second, each with its own price, fee
 // and slice of the realized PnL, and a session's worth of that is a wall of rows
@@ -10,17 +12,186 @@
 const ATOM_DIGITS = 8
 const ATOM_SCALE = 10n ** BigInt(ATOM_DIGITS)
 const DECIMAL_PATTERN = /^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/
+const SIGNED_DECIMAL_PATTERN = /^-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/
+const INTEGER_IDENTITY_PATTERN = /^\d{1,20}$/
+const POSITION_LEGS = new Set(['BOTH', 'LONG', 'SHORT'])
+const DEFAULT_SETTLEMENT_DIGITS = 8
+const DEFAULT_HISTORY_PAGE_LIMIT = 1_000
+const MAX_EXCHANGE_DECIMAL_TEXT_LENGTH = 256
+const MAX_EXCHANGE_DECIMAL_DIGITS = 128
+const MAX_EXCHANGE_DECIMAL_SCALE = 64
+
+// Versioned separately from the persisted history store. Consumers can reject a
+// symbol-only coverage record without throwing away the canonical fills it was
+// built from, then rebuild this derived index under the current schema.
+export const FUTURES_TRADE_ROUND_INDEX_VERSION = 2
+
+const absoluteBigInt = value => (value < 0n ? -value : value)
+
+const greatestCommonDivisor = (left, right) => {
+  let a = absoluteBigInt(left)
+  let b = absoluteBigInt(right)
+  while (b !== 0n) {
+    const remainder = a % b
+    a = b
+    b = remainder
+  }
+  return a === 0n ? 1n : a
+}
+
+// Prices and realized PnL are exchange decimals, not floating-point
+// measurements. Fractions keep their exact text through the one decision where
+// a sub-cent difference used to be compared with one percent of notional.
+const ratio = (numerator, denominator = 1n) => {
+  if (denominator === 0n) return null
+  const sign = denominator < 0n ? -1n : 1n
+  const signedNumerator = numerator * sign
+  const positiveDenominator = denominator * sign
+  const divisor = greatestCommonDivisor(signedNumerator, positiveDenominator)
+  return Object.freeze({
+    numerator: signedNumerator / divisor,
+    denominator: positiveDenominator / divisor,
+  })
+}
+
+const decimalRatio = (value) => {
+  const text = typeof value === 'number' && Number.isFinite(value) ? String(value) : value
+  if (typeof text !== 'string'
+    || text.length > MAX_EXCHANGE_DECIMAL_TEXT_LENGTH
+    || !SIGNED_DECIMAL_PATTERN.test(text)) return null
+  const negative = text.startsWith('-')
+  const unsigned = negative ? text.slice(1) : text
+  const [integer, fraction = ''] = unsigned.split('.')
+  if (integer.length + fraction.length > MAX_EXCHANGE_DECIMAL_DIGITS
+    || fraction.length > MAX_EXCHANGE_DECIMAL_SCALE) return null
+  const scale = 10n ** BigInt(fraction.length)
+  const numerator = (BigInt(integer) * scale) + BigInt(fraction || '0')
+  return ratio(negative ? -numerator : numerator, scale)
+}
+
+// Raw exchange numbers in exponent notation are rejected above because their
+// original decimal text has already been rounded by JavaScript. A number that
+// this module derived from an exact, bounded ratio is different evidence: only
+// its presentation switched to exponent notation. Expand that bounded view for
+// terminal comparison instead of throwing away the exact fill basis a second
+// time.
+const derivedNumberRatio = (value) => {
+  const direct = decimalRatio(value)
+  if (direct !== null || typeof value !== 'number' || !Number.isFinite(value)) return direct
+  const match = String(value).match(/^(-?)([0-9]+)(?:\.([0-9]+))?e([+-]?[0-9]+)$/i)
+  if (match === null) return null
+  const [, sign, integer, fraction = '', exponentText] = match
+  const exponent = Number(exponentText)
+  const digits = `${integer}${fraction}`
+  const power = exponent - fraction.length
+  if (!Number.isSafeInteger(exponent)
+    || digits.length > MAX_EXCHANGE_DECIMAL_DIGITS
+    || (power >= 0 && digits.length + power > MAX_EXCHANGE_DECIMAL_DIGITS)
+    || (power < 0 && -power > MAX_EXCHANGE_DECIMAL_SCALE)) return null
+  const numerator = BigInt(digits) * (power > 0 ? 10n ** BigInt(power) : 1n)
+  const denominator = power < 0 ? 10n ** BigInt(-power) : 1n
+  return ratio(sign === '-' ? -numerator : numerator, denominator)
+}
+
+const addRatios = (left, right) => ratio(
+  (left.numerator * right.denominator) + (right.numerator * left.denominator),
+  left.denominator * right.denominator,
+)
+
+const subtractRatios = (left, right) => ratio(
+  (left.numerator * right.denominator) - (right.numerator * left.denominator),
+  left.denominator * right.denominator,
+)
+
+const multiplyRatios = (left, right) => ratio(
+  left.numerator * right.numerator,
+  left.denominator * right.denominator,
+)
+
+const divideRatios = (left, right) => (
+  right.numerator === 0n
+    ? null
+    : ratio(left.numerator * right.denominator, left.denominator * right.numerator)
+)
+
+const ratioAsNumber = value => Number(value.numerator) / Number(value.denominator)
+
+// Exact decimal text where a rational terminates in base ten. A proportional
+// split whose denominator contains any other prime is intentionally refused;
+// that round's commission coverage becomes partial instead of rounding a fee
+// and presenting the rounded subtotal as wallet-exact.
+const terminatingDecimalText = (value) => {
+  if (value === null) return null
+  let denominator = value.denominator
+  let twos = 0
+  let fives = 0
+  while (denominator % 2n === 0n) {
+    denominator /= 2n
+    twos += 1
+  }
+  while (denominator % 5n === 0n) {
+    denominator /= 5n
+    fives += 1
+  }
+  if (denominator !== 1n) return null
+  const scale = Math.max(twos, fives)
+  const scaled = value.numerator
+    * (2n ** BigInt(scale - twos))
+    * (5n ** BigInt(scale - fives))
+  const negative = scaled < 0n
+  const digits = String(negative ? -scaled : scaled).padStart(scale + 1, '0')
+  const integer = scale === 0 ? digits : digits.slice(0, -scale)
+  const fraction = scale === 0 ? '' : digits.slice(-scale).replace(/0+$/, '')
+  const result = fraction === '' ? integer : `${integer}.${fraction}`
+  return negative && result !== '0' ? `-${result}` : result
+}
+
+const ratiosWithin = (left, right, tolerance) => {
+  const difference = subtractRatios(left, right)
+  return absoluteBigInt(difference.numerator) * tolerance.denominator
+    <= tolerance.numerator * difference.denominator
+}
+
+const quantityRatio = atoms => ratio(atoms, ATOM_SCALE)
+
+const boundedSettlementDigits = value => (
+  Number.isSafeInteger(value) && value >= 0 && value <= 18
+    ? value
+    : DEFAULT_SETTLEMENT_DIGITS
+)
+
+const settlementQuantum = digits => ratio(1n, 10n ** BigInt(boundedSettlementDigits(digits)))
+
+const decimalPlaces = (value) => {
+  const text = typeof value === 'string' ? value : String(value ?? '')
+  const point = text.indexOf('.')
+  return point === -1 ? 0 : text.length - point - 1
+}
+
+const identityText = (value) => {
+  const text = String(value ?? '').trim()
+  return INTEGER_IDENTITY_PATTERN.test(text) ? text : null
+}
+
+const compareIntegerIdentity = (left, right) => {
+  if (left === right) return 0
+  if (left === null) return 1
+  if (right === null) return -1
+  return BigInt(left) < BigInt(right) ? -1 : 1
+}
 
 // Quantities are compared for equality with zero — that is what "the position is
 // flat" means — so they are held as integers. `0.1 + 0.2 - 0.3` is 5.5e-17 in
 // floating point, and a position that never reaches flat swallows every fill after
 // it into one endless round.
 const toAtoms = (value) => {
-  const text = typeof value === 'number' && Number.isFinite(value)
-    ? (String(value).includes('e') ? value.toFixed(ATOM_DIGITS) : String(value))
-    : value
-  if (typeof text !== 'string' || !DECIMAL_PATTERN.test(text)) return null
+  const text = typeof value === 'number' && Number.isFinite(value) ? String(value) : value
+  if (typeof text !== 'string'
+    || text.length > MAX_EXCHANGE_DECIMAL_TEXT_LENGTH
+    || !DECIMAL_PATTERN.test(text)) return null
   const [integer, fraction = ''] = text.split('.')
+  if (integer.length + fraction.length > MAX_EXCHANGE_DECIMAL_DIGITS
+    || fraction.length > MAX_EXCHANGE_DECIMAL_SCALE) return null
   return (BigInt(integer) * ATOM_SCALE)
     + BigInt((fraction + '0'.repeat(ATOM_DIGITS)).slice(0, ATOM_DIGITS))
 }
@@ -29,6 +200,140 @@ const fromAtoms = (atoms) => {
   const integer = atoms / ATOM_SCALE
   const fraction = String(atoms % ATOM_SCALE).padStart(ATOM_DIGITS, '0').replace(/0+$/, '')
   return fraction ? `${integer}.${fraction}` : String(integer)
+}
+
+const allocationIdentity = (value) => {
+  if (typeof value !== 'string') return null
+  const normalized = value.trim()
+  return normalized === '' ? null : normalized
+}
+
+const positiveAllocationAtoms = (value) => {
+  if (typeof value === 'bigint') return value > 0n ? value : null
+  if (typeof value !== 'string'
+    || value.length > MAX_EXCHANGE_DECIMAL_DIGITS + ATOM_DIGITS
+    || !/^[1-9][0-9]*$/.test(value)) return null
+  return BigInt(value)
+}
+
+const sortedFrozenStrings = values => Object.freeze([...new Set(values)].sort())
+
+// This deliberately audits the finished, serializable round contributions
+// against a separate canonical source set. Re-summing only round aggregates
+// would let an omitted or duplicated fill validate itself. Integer quantity
+// atoms keep reversal splits exact where floating `share` is presentation-only.
+export const auditFuturesFillAllocation = ({
+  canonicalFills = [],
+  contributions = [],
+  roundKeys = [],
+} = {}) => {
+  const normalizedCanonical = []
+  const invalidCanonicalFills = []
+  for (const source of Array.isArray(canonicalFills) ? canonicalFills : []) {
+    const identity = allocationIdentity(source?.identity)
+    const atoms = positiveAllocationAtoms(source?.quantityAtoms)
+    if (identity === null || atoms === null) {
+      invalidCanonicalFills.push(Object.freeze({
+        identity,
+        quantityAtoms: atoms === null ? null : atoms.toString(),
+      }))
+      continue
+    }
+    normalizedCanonical.push({ identity, atoms })
+  }
+  normalizedCanonical.sort((left, right) => left.identity.localeCompare(right.identity)
+    || (left.atoms < right.atoms ? -1 : left.atoms > right.atoms ? 1 : 0))
+
+  const canonicalByIdentity = new Map()
+  const duplicateCanonicalFillIds = new Set()
+  for (const source of normalizedCanonical) {
+    if (canonicalByIdentity.has(source.identity)) {
+      duplicateCanonicalFillIds.add(source.identity)
+      continue
+    }
+    canonicalByIdentity.set(source.identity, source.atoms)
+  }
+
+  const assignedByIdentity = new Map()
+  const contributionRoundKeys = new Set()
+  const invalidAssignments = []
+  for (const contribution of Array.isArray(contributions) ? contributions : []) {
+    const identity = allocationIdentity(contribution?.identity)
+    const atoms = positiveAllocationAtoms(contribution?.quantityAtoms)
+    const roundKey = allocationIdentity(contribution?.roundKey)
+    if (identity === null || atoms === null || roundKey === null) {
+      invalidAssignments.push(Object.freeze({
+        identity,
+        quantityAtoms: atoms === null ? null : atoms.toString(),
+        roundKey,
+      }))
+      if (roundKey !== null) contributionRoundKeys.add(roundKey)
+      continue
+    }
+    assignedByIdentity.set(identity, (assignedByIdentity.get(identity) ?? 0n) + atoms)
+    contributionRoundKeys.add(roundKey)
+  }
+
+  const missingFillIds = []
+  const underallocatedFillIds = []
+  const overallocatedFillIds = []
+  for (const [identity, expected] of canonicalByIdentity) {
+    const assigned = assignedByIdentity.get(identity) ?? 0n
+    if (assigned === 0n) missingFillIds.push(identity)
+    if (assigned < expected) underallocatedFillIds.push(identity)
+    if (assigned > expected) overallocatedFillIds.push(identity)
+  }
+  const unknownFillIds = [...assignedByIdentity.keys()]
+    .filter(identity => !canonicalByIdentity.has(identity))
+  const affectedFillIds = sortedFrozenStrings([
+    ...duplicateCanonicalFillIds,
+    ...missingFillIds,
+    ...underallocatedFillIds,
+    ...overallocatedFillIds,
+    ...unknownFillIds,
+    ...invalidCanonicalFills.map(source => source.identity).filter(Boolean),
+    ...invalidAssignments.map(assignment => assignment.identity).filter(Boolean),
+  ])
+  const conserved = invalidCanonicalFills.length === 0
+    && duplicateCanonicalFillIds.size === 0
+    && invalidAssignments.length === 0
+    && underallocatedFillIds.length === 0
+    && overallocatedFillIds.length === 0
+    && unknownFillIds.length === 0
+  const affectedRoundKeys = conserved
+    ? Object.freeze([])
+    : sortedFrozenStrings([
+      ...(Array.isArray(roundKeys) ? roundKeys.map(allocationIdentity).filter(Boolean) : []),
+      ...contributionRoundKeys,
+    ])
+  const canonicalQuantityAtoms = [...canonicalByIdentity.values()]
+    .reduce((total, atoms) => total + atoms, 0n)
+  const assignedQuantityAtoms = [...assignedByIdentity.values()]
+    .reduce((total, atoms) => total + atoms, 0n)
+
+  return Object.freeze({
+    conserved,
+    canonicalFillCount: canonicalByIdentity.size,
+    assignedFillCount: assignedByIdentity.size,
+    contributionCount: Array.isArray(contributions) ? contributions.length : 0,
+    canonicalQuantityAtoms: canonicalQuantityAtoms.toString(),
+    assignedQuantityAtoms: assignedQuantityAtoms.toString(),
+    duplicateCanonicalFillIds: sortedFrozenStrings(duplicateCanonicalFillIds),
+    missingFillIds: sortedFrozenStrings(missingFillIds),
+    underallocatedFillIds: sortedFrozenStrings(underallocatedFillIds),
+    overallocatedFillIds: sortedFrozenStrings(overallocatedFillIds),
+    unknownFillIds: sortedFrozenStrings(unknownFillIds),
+    affectedFillIds,
+    affectedRoundKeys,
+    // Normal success stays compact; only failures retain per-fill diagnostics.
+    affectedAtomsByFill: Object.freeze(affectedFillIds.map(identity => Object.freeze({
+      identity,
+      canonicalQuantityAtoms: canonicalByIdentity.get(identity)?.toString() ?? null,
+      assignedQuantityAtoms: assignedByIdentity.get(identity)?.toString() ?? null,
+    }))),
+    invalidCanonicalFills: Object.freeze(invalidCanonicalFills),
+    invalidAssignments: Object.freeze(invalidAssignments),
+  })
 }
 
 // Money, not size: a missing fee or PnL is nothing rather than a reason to drop
@@ -42,9 +347,165 @@ const isBuy = fill => String(fill?.side).toUpperCase() === 'BUY'
 
 const symbolOf = fill => (typeof fill?.symbol === 'string' ? fill.symbol.toUpperCase() : '')
 
+const settlementAssetOf = fill => normalizeFuturesTradeHistoryAsset(fill?.marginAsset)
+
 // One-way accounts report `BOTH`; a hedge account names the leg the fill belongs
 // to, and its two legs are two positions on one contract.
-const legOf = fill => String(fill?.positionSide ?? 'BOTH').toUpperCase()
+const legOf = (fill) => {
+  const leg = String(fill?.positionSide ?? 'BOTH').toUpperCase()
+  return POSITION_LEGS.has(leg) ? leg : null
+}
+
+export const futuresTradePositionKey = (symbol, leg = 'BOTH') => {
+  const normalizedSymbol = String(symbol ?? '').trim().toUpperCase()
+  const normalizedLeg = String(leg ?? '').trim().toUpperCase()
+  return normalizedSymbol !== '' && POSITION_LEGS.has(normalizedLeg)
+    ? `${normalizedSymbol}:${normalizedLeg}`
+    : null
+}
+
+const rawFillIdentity = fill => identityText(fill?.id)
+
+const fallbackFillIdentity = (fill, ordinal) => {
+  const order = identityText(fill?.orderId)
+  const time = Number.isSafeInteger(Number(fill?.time)) ? Number(fill.time) : 0
+  return `fallback:${order ?? 'order'}:${time}:${ordinal}`
+}
+
+const describeFillIdentity = (fill, positionKey, ordinal) => {
+  const trade = rawFillIdentity(fill)
+  return Object.freeze({
+    value: `${positionKey}:${trade === null ? fallbackFillIdentity(fill, ordinal) : `trade:${trade}`}`,
+    trade,
+    reliable: trade !== null,
+  })
+}
+
+const canonicalFillEntry = (fill, ordinal) => {
+  const symbol = symbolOf(fill)
+  const leg = legOf(fill)
+  const positionKey = futuresTradePositionKey(symbol, leg)
+  const atoms = toAtoms(fill?.quantity)
+  const priceRatio = decimalRatio(fill?.price)
+  const price = Number(fill?.price)
+  const time = finiteTime(fill?.time)
+  const side = String(fill?.side ?? '').toUpperCase()
+  if (positionKey === null || atoms === null || atoms <= 0n
+    || decimalPlaces(fill?.quantity) > ATOM_DIGITS
+    || priceRatio === null || !Number.isFinite(price) || price <= 0
+    || time === null || !Number.isSafeInteger(time) || time < 0
+    || (side !== 'BUY' && side !== 'SELL')) return null
+  const identity = describeFillIdentity(fill, positionKey, ordinal)
+  const realized = decimalRatio(fill?.realizedPnl)
+  const commission = decimalRatio(fill?.commission)
+  const commissionAmount = Number(fill?.commission)
+  const commissionAsset = normalizeFuturesTradeHistoryAsset(fill?.commissionAsset)
+  const commissionAssetPresent = fill?.commissionAsset !== null
+    && fill?.commissionAsset !== undefined
+    && !(typeof fill.commissionAsset === 'string' && fill.commissionAsset.trim() === '')
+  const commissionAssetMalformed = commissionAssetPresent && commissionAsset === null
+  const settlementAsset = settlementAssetOf(fill)
+  return Object.freeze({
+    fill,
+    ordinal,
+    symbol,
+    leg,
+    positionKey,
+    atoms,
+    price,
+    priceRatio,
+    time,
+    identity,
+    settlementAsset,
+    commissionAsset,
+    tradeComplete: identity.reliable
+      && realized !== null
+      && settlementAsset !== null
+      && decimalPlaces(fill?.quantity) <= ATOM_DIGITS,
+    commissionComplete: commission !== null
+      && commissionAmount >= 0
+      && !commissionAssetMalformed
+      && (commissionAmount === 0 || commissionAsset !== null),
+  })
+}
+
+const ratiosEqual = (left, right) => left.numerator === right.numerator
+  && left.denominator === right.denominator
+
+const presentRatiosConflict = (left, right) => left !== null
+  && right !== null
+  && !ratiosEqual(left, right)
+
+const hasNonBlankDuplicateEvidence = value => value !== null
+  && value !== undefined
+  && !(typeof value === 'string' && value.trim() === '')
+
+const malformedPresentRatio = value => hasNonBlankDuplicateEvidence(value)
+  && decimalRatio(value) === null
+
+const malformedPresentAsset = (value, normalized) => hasNonBlankDuplicateEvidence(value)
+  && normalized === null
+
+const canonicalFillEntriesConflict = (left, right) => (
+  left.positionKey !== right.positionKey
+  || left.atoms !== right.atoms
+  || !ratiosEqual(left.priceRatio, right.priceRatio)
+  || left.time !== right.time
+  || isBuy(left.fill) !== isBuy(right.fill)
+  || presentRatiosConflict(
+    decimalRatio(left.fill?.realizedPnl),
+    decimalRatio(right.fill?.realizedPnl),
+  )
+  || presentRatiosConflict(
+    decimalRatio(left.fill?.commission),
+    decimalRatio(right.fill?.commission),
+  )
+  // Sparse means absent. A present value that failed the bounded canonical
+  // parser is contradictory evidence, not permission to borrow the other
+  // delivery's money and silently restore exact Closed NET.
+  || malformedPresentRatio(left.fill?.realizedPnl)
+  || malformedPresentRatio(right.fill?.realizedPnl)
+  || malformedPresentRatio(left.fill?.commission)
+  || malformedPresentRatio(right.fill?.commission)
+  || malformedPresentAsset(left.fill?.marginAsset, left.settlementAsset)
+  || malformedPresentAsset(right.fill?.marginAsset, right.settlementAsset)
+  || malformedPresentAsset(left.fill?.commissionAsset, left.commissionAsset)
+  || malformedPresentAsset(right.fill?.commissionAsset, right.commissionAsset)
+  || (left.settlementAsset !== null
+    && right.settlementAsset !== null
+    && left.settlementAsset !== right.settlementAsset)
+  || (left.commissionAsset !== null
+    && right.commissionAsset !== null
+    && left.commissionAsset !== right.commissionAsset)
+)
+
+const mergeCanonicalFillEntries = (left, right) => canonicalFillEntry({
+  ...left.fill,
+  ...right.fill,
+  id: right.identity.trade,
+  symbol: right.symbol,
+  positionSide: right.leg,
+  side: isBuy(right.fill) ? 'BUY' : 'SELL',
+  quantity: right.fill.quantity,
+  price: right.fill.price,
+  time: right.time,
+  realizedPnl: decimalRatio(right.fill?.realizedPnl) === null
+    ? left.fill.realizedPnl
+    : right.fill.realizedPnl,
+  commission: decimalRatio(right.fill?.commission) === null
+    ? left.fill.commission
+    : right.fill.commission,
+  commissionAsset: right.commissionAsset ?? left.commissionAsset,
+  marginAsset: right.settlementAsset ?? left.settlementAsset,
+}, Math.min(left.ordinal, right.ordinal))
+
+const compareFillEntries = (left, right) => {
+  const time = left.time - right.time
+  if (time !== 0) return time
+  const trade = compareIntegerIdentity(left.identity.trade, right.identity.trade)
+  if (trade !== 0) return trade
+  return left.ordinal - right.ordinal
+}
 
 // `closing` says this round begins by closing a position opened before this
 // window of fills, whose entry price is therefore not in the data. Its leg is the
@@ -55,14 +516,17 @@ const legOf = fill => String(fill?.positionSide ?? 'BOTH').toUpperCase()
 // begins wherever the read reached, and the operator may already have been in
 // the trade — and neither did one that follows a round closing a position older
 // than the window.
-const openRound = (fill, buy, closing, fromFlat) => ({
-  symbol: symbolOf(fill),
-  // Trade ids are numbered per contract, so two symbols can hand out the same
-  // one: the symbol is part of the identity, not decoration.
-  key: `${symbolOf(fill)}:${fill?.id ?? fill?.orderId ?? 'round'}:${toNumber(fill?.time)}`,
-  positionSide: closing === buy ? 'SHORT' : 'LONG',
-  openTime: toNumber(fill?.time),
-  closeTime: toNumber(fill?.time),
+const openRound = (entry, buy, closing, fromFlat, settlementDigits) => ({
+  symbol: entry.symbol,
+  positionKey: entry.positionKey,
+  // The position leg is part of the identity. A trade id is only unique inside
+  // one contract, and the same contract can carry two independent hedge legs.
+  key: `${entry.identity.value}:round`,
+  positionSide: entry.leg === 'BOTH'
+    ? (closing === buy ? 'SHORT' : 'LONG')
+    : entry.leg,
+  openTime: entry.time,
+  closeTime: entry.time,
   entryAtoms: 0n,
   entryNotional: 0,
   // What the units still held were entered at, kept the way the exchange keeps
@@ -74,9 +538,11 @@ const openRound = (fill, buy, closing, fromFlat) => ({
   // the exchange settled it against.
   heldAtoms: 0n,
   heldEntry: 0,
+  heldEntryRatio: null,
   exitAtoms: 0n,
   exitNotional: 0,
   realizedPnl: 0,
+  realizedPnlRatio: ratio(0n),
   // Per asset, because Binance charges commission in BNB whenever the account
   // holds it — that is the default, since it discounts the fee for doing so.
   // Summed as one number, a BNB quantity was subtracted from a USDT result: on a
@@ -84,14 +550,27 @@ const openRound = (fill, buy, closing, fromFlat) => ({
   // net `0.01` below the gross, when the fee actually cost about five USDT. Not
   // a rounding error — a quantity of the wrong thing.
   feeByAsset: new Map(),
+  feeRatioByAsset: new Map(),
+  // Realized PnL is money only together with the asset Binance says it settled
+  // in. Every fill in one round must agree; a missing/conflicting field keeps
+  // the round unresolved until REST replaces the stream/legacy projection.
+  settlementAsset: entry.settlementAsset,
+  settlementAssetComplete: entry.settlementAsset !== null,
+  fillShares: new Map(),
+  tradeCoverageComplete: true,
+  commissionCoverageComplete: true,
   fills: 0,
   partial: closing,
   fromFlat,
-  leg: legOf(fill),
+  leg: entry.leg,
+  settlementDigits: boundedSettlementDigits(settlementDigits),
   // A zero-PnL first fill can be an opening or a break-even close when the
   // bounded read did not witness flat. Keep that uncertainty only until the
   // first reducing fill supplies evidence; it must never leak across a leg.
-  ambiguousWindowEdge: !closing && !fromFlat && toNumber(fill?.realizedPnl) === 0,
+  ambiguousWindowEdge: entry.leg === 'BOTH'
+    && !closing
+    && !fromFlat
+    && toNumber(entry.fill?.realizedPnl) === 0,
   edgePhase: null,
   aggregateEntryImplied: false,
 })
@@ -137,16 +616,22 @@ const opensByClosing = (fills, from, fromFlat) => {
 // it — realized PnL is reported per fill and against the position's own entry,
 // so a flip realizes exactly what closing the part the walk can see would
 // realize. Anything else means more was closed than the walk knows about.
-const flipIsConsistent = (round, { fill, held, price }) => {
-  const size = Number(fromAtoms(held))
-  const entryPrice = round.heldEntry
-  if (!(size > 0) || !(entryPrice > 0)) return false
-  const flipPnl = (round.positionSide === 'SHORT' ? entryPrice - price : price - entryPrice) * size
-  // One per cent of what the closing part is worth: realized PnL is exact
-  // arithmetic on both sides of this comparison, and the slack is only there so
-  // that a rounded price cannot decide it.
-  const tolerance = Math.abs(price * size) * 0.01
-  return Math.abs(toNumber(fill.realizedPnl) - flipPnl) <= tolerance
+const flipIsConsistent = (round, { fill, held, priceRatio }) => {
+  const entryPrice = round.heldEntryRatio
+  const realizedPnl = decimalRatio(fill?.realizedPnl)
+  if (held <= 0n || entryPrice === null || priceRatio === null || realizedPnl === null) return false
+  const priceMove = round.positionSide === 'SHORT'
+    ? subtractRatios(entryPrice, priceRatio)
+    : subtractRatios(priceRatio, entryPrice)
+  const expectedPnl = multiplyRatios(priceMove, quantityRatio(held))
+  // The bound is one atom of the settlement asset, independent of notional. A
+  // 0.5 USDT disagreement on a 100.5 USDT close is therefore evidence, not
+  // "rounding" merely because it is below one percent of the trade.
+  return ratiosWithin(
+    expectedPnl,
+    realizedPnl,
+    settlementQuantum(round.settlementDigits),
+  )
 }
 
 // The tentative round treated the window-edge sells as a short entry (or buys
@@ -161,13 +646,34 @@ const restartAmbiguousWindowEdgeRound = (round) => {
   round.entryNotional = 0
   round.heldAtoms = 0n
   round.heldEntry = 0
+  round.heldEntryRatio = null
   round.partial = true
   round.ambiguousWindowEdge = false
   round.edgePhase = 'adding-after-edge-close'
   round.aggregateEntryImplied = true
 }
 
-const applyFill = (round, { fill, atoms, price, share, increasing }) => {
+const applyFill = (round, {
+  fill,
+  atoms,
+  price,
+  priceRatio,
+  share,
+  increasing,
+  identity,
+  tradeComplete,
+  commissionComplete,
+  settlementAsset,
+  commissionAsset,
+}) => {
+  if (settlementAsset === null) {
+    round.settlementAssetComplete = false
+  } else if (round.settlementAsset === null) {
+    round.settlementAsset = settlementAsset
+    round.settlementAssetComplete = false
+  } else if (round.settlementAsset !== settlementAsset) {
+    round.settlementAssetComplete = false
+  }
   const size = Number(fromAtoms(atoms))
   if (increasing) {
     round.entryAtoms += atoms
@@ -176,10 +682,18 @@ const applyFill = (round, { fill, atoms, price, share, increasing }) => {
     // A position scaled out of and back into drifts between the two, and the
     // check above compares a single fill's realized PnL — which the exchange
     // settled against this one — so it has to use this one.
-    const heldSize = Number(fromAtoms(round.heldAtoms))
-    round.heldEntry = heldSize + size > 0
-      ? ((round.heldEntry * heldSize) + (price * size)) / (heldSize + size)
-      : price
+    const heldQuantity = quantityRatio(round.heldAtoms)
+    const addedQuantity = quantityRatio(atoms)
+    const heldCost = round.heldAtoms === 0n || round.heldEntryRatio === null
+      ? ratio(0n)
+      : multiplyRatios(round.heldEntryRatio, heldQuantity)
+    const addedCost = multiplyRatios(priceRatio, addedQuantity)
+    const average = divideRatios(
+      addRatios(heldCost, addedCost),
+      quantityRatio(round.heldAtoms + atoms),
+    )
+    round.heldEntryRatio = average
+    round.heldEntry = ratioAsNumber(average)
     round.heldAtoms += atoms
   } else {
     round.exitAtoms += atoms
@@ -188,21 +702,48 @@ const applyFill = (round, { fill, atoms, price, share, increasing }) => {
     // the position; a fill that closes one position and opens the opposite one
     // realized all of it on the way out.
     round.realizedPnl += toNumber(fill.realizedPnl)
+    const realized = decimalRatio(fill.realizedPnl)
+    if (realized !== null) {
+      round.realizedPnlRatio = addRatios(round.realizedPnlRatio, realized)
+    }
     // Only the quantity is given back. `heldEntry` is deliberately left where it
     // was: with nothing held it describes nothing, and the next entry above
     // multiplies it by a `heldSize` of zero, so the stale figure cannot reach an
     // average. Clearing it would read as though something depended on it.
     round.heldAtoms = round.heldAtoms > atoms ? round.heldAtoms - atoms : 0n
   }
+  const priorContribution = round.fillShares.get(identity.value) ?? null
+  const priorShare = priorContribution?.share ?? 0
+  round.fillShares.set(identity.value, Object.freeze({
+    identity: identity.value,
+    tradeId: identity.trade,
+    reliable: identity.reliable,
+    share: priorShare + share,
+    quantityAtoms: (priorContribution?.quantityAtoms ?? 0n) + atoms,
+  }))
+  round.tradeCoverageComplete = round.tradeCoverageComplete
+    && tradeComplete
+    && round.settlementAssetComplete
+  round.commissionCoverageComplete = round.commissionCoverageComplete && commissionComplete
   // A fee is charged on the whole fill, so a split fill splits its fee. Kept
   // under the asset it was charged in: the desk holds no rate to convert BNB at,
   // and a converted guess would be printed beside money.
   const commission = toNumber(fill.commission) * share
   if (commission !== 0) {
-    const asset = typeof fill.commissionAsset === 'string' && fill.commissionAsset.length > 0
-      ? fill.commissionAsset.toUpperCase()
-      : null
-    round.feeByAsset.set(asset, (round.feeByAsset.get(asset) ?? 0) + commission)
+    round.feeByAsset.set(
+      commissionAsset,
+      (round.feeByAsset.get(commissionAsset) ?? 0) + commission,
+    )
+  }
+  const exactCommission = decimalRatio(fill.commission)
+  const fillAtoms = toAtoms(fill.quantity)
+  if (exactCommission !== null && fillAtoms !== null && fillAtoms > 0n) {
+    const exactShare = ratio(atoms, fillAtoms)
+    const portion = multiplyRatios(exactCommission, exactShare)
+    round.feeRatioByAsset.set(
+      commissionAsset,
+      addRatios(round.feeRatioByAsset.get(commissionAsset) ?? ratio(0n), portion),
+    )
   }
   round.closeTime = toNumber(fill.time)
   round.fills += 1
@@ -221,14 +762,9 @@ const impliedEntryPrice = ({ positionSide, exitPrice, realizedPnl, quantity }) =
   return Number.isFinite(entry) && entry > 0 ? entry : null
 }
 
-// What the income record says happened to this round's contract while it was
-// held. Nothing is invented: a component with no row at all stays null, so the
-// surface can tell "charged nothing" apart from "not read".
-// USDⓈ-M settles in USDT. Named rather than inlined because it is the thing a
-// fee in any other asset is measured against, and there are three places that
-// have to agree about it.
-const SETTLEMENT_ASSET = 'USDT'
-
+// The fill fold owns no funding or insurance money. These compatibility fields
+// therefore remain explicitly unproven; the canonical wallet ledger reconciles
+// income once, outside individual round construction.
 const NO_ROUND_INCOME = Object.freeze({
   funding: null,
   insuranceClear: null,
@@ -240,12 +776,27 @@ const NO_ROUND_INCOME = Object.freeze({
   complete: false,
 })
 
-const finishRound = (round, open, settlementAsset = SETTLEMENT_ASSET) => {
+const finishRound = (round, open) => {
+  const settlementAsset = round.settlementAsset
   // A fill that names no commission asset is taken to have paid in the asset the
   // contract settles in, which is what a USDⓈ-M contract does unless the account
   // opted into BNB.
-  const settlementFee = (round.feeByAsset.get(settlementAsset) ?? 0)
-    + (round.feeByAsset.get(null) ?? 0)
+  const settlementFee = settlementAsset === null
+    ? 0
+    : (round.feeByAsset.get(settlementAsset) ?? 0)
+      + (round.feeByAsset.get(null) ?? 0)
+  const realizedPnlExact = terminatingDecimalText(round.realizedPnlRatio)
+  const exactFees = new Map([...round.feeRatioByAsset.entries()].map(([asset, amount]) => [
+    asset,
+    terminatingDecimalText(amount),
+  ]))
+  const commissionExact = [...exactFees.values()].every(amount => amount !== null)
+  const settlementFeeExact = settlementAsset === null
+    ? null
+    : terminatingDecimalText(addRatios(
+      round.feeRatioByAsset.get(settlementAsset) ?? ratio(0n),
+      round.feeRatioByAsset.get(null) ?? ratio(0n),
+    ))
   const income = NO_ROUND_INCOME
   const entryQuantity = Number(fromAtoms(round.entryAtoms))
   const exitQuantity = Number(fromAtoms(round.exitAtoms))
@@ -254,16 +805,16 @@ const finishRound = (round, open, settlementAsset = SETTLEMENT_ASSET) => {
   // the fills. The implied entry below recovers the exited pre-window units —
   // the wrong units for a live row — and entryAtoms counts adds already taken
   // back by the re-close.
-  const holdingRestartedAdds = open && round.edgePhase !== null && round.heldAtoms > 0n
+  const holdingOpenPosition = open && round.heldAtoms > 0n
   // An open round is the size it is holding; a closed one is the size it closed.
-  const quantityAtoms = holdingRestartedAdds
+  const quantityAtoms = holdingOpenPosition
     ? round.heldAtoms
-    : open || round.exitAtoms === 0n ? round.entryAtoms : round.exitAtoms
+    : round.exitAtoms === 0n ? round.entryAtoms : round.exitAtoms
   const quantity = Number(fromAtoms(quantityAtoms))
   const exitPrice = exitQuantity > 0 ? round.exitNotional / exitQuantity : null
   const enteredHere = entryQuantity > 0
-  const entryImplied = !holdingRestartedAdds && (round.aggregateEntryImplied || !enteredHere)
-  const entryPrice = holdingRestartedAdds
+  const entryImplied = !holdingOpenPosition && (round.aggregateEntryImplied || !enteredHere)
+  const entryPrice = holdingOpenPosition
     ? round.heldEntry
     : entryImplied
       ? impliedEntryPrice({
@@ -273,9 +824,33 @@ const finishRound = (round, open, settlementAsset = SETTLEMENT_ASSET) => {
         quantity: exitQuantity,
       })
       : round.entryNotional / entryQuantity
+  const fillContributions = Object.freeze([...round.fillShares.values()]
+    .map(contribution => Object.freeze({
+      ...contribution,
+      quantityAtoms: contribution.quantityAtoms.toString(),
+    })))
+  const fillIdentities = Object.freeze(fillContributions.map(entry => entry.identity))
+  const tradeIds = Object.freeze([...new Set(fillContributions
+    .map(entry => entry.tradeId)
+    .filter(entry => entry !== null))])
+  const identifiedFills = fillContributions.filter(entry => entry.reliable).length
+  const tradeCoverage = Object.freeze({
+    complete: round.tradeCoverageComplete,
+    status: round.tradeCoverageComplete ? 'complete' : 'partial',
+    fills: fillContributions.length,
+    identified: identifiedFills,
+  })
+  const commissionCoverageComplete = round.commissionCoverageComplete && commissionExact
+  const commissionCoverage = Object.freeze({
+    complete: commissionCoverageComplete,
+    status: commissionCoverageComplete ? 'complete' : 'partial',
+    fills: fillContributions.length,
+  })
   return Object.freeze({
     key: round.key,
     symbol: round.symbol,
+    positionKey: round.positionKey,
+    leg: round.leg,
     positionSide: round.positionSide,
     openTime: round.openTime,
     closeTime: round.closeTime,
@@ -292,15 +867,22 @@ const finishRound = (round, open, settlementAsset = SETTLEMENT_ASSET) => {
     entryImplied,
     exitPrice,
     realizedPnl: round.realizedPnl,
+    realizedPnlExact,
+    settlementAsset,
     // The commission charged in the asset the round settles in. A fee charged in
     // anything else is below, in its own asset, and is deliberately not folded
     // into this one.
     fee: settlementFee,
+    feeExact: settlementFeeExact,
     // Every asset the round was charged in, the settlement asset included, so a
     // surface can state a BNB fee as BNB instead of as a number with no unit.
     feesByAsset: Object.freeze([...round.feeByAsset.entries()]
       .filter(([, amount]) => amount !== 0)
-      .map(([asset, amount]) => Object.freeze({ asset: asset ?? settlementAsset, amount }))
+      .map(([asset, amount]) => Object.freeze({
+        asset: asset ?? settlementAsset,
+        amount,
+        amountExact: exactFees.get(asset),
+      }))
       .sort((left, right) => (left.asset < right.asset ? -1 : 1))),
     // What the round moved in the wallet besides the trade itself: funding paid
     // or received while it was held, and insurance clearance if it was
@@ -328,21 +910,33 @@ const finishRound = (round, open, settlementAsset = SETTLEMENT_ASSET) => {
       + (income.funding ?? 0)
       + (income.insuranceClear ?? 0),
     fills: round.fills,
+    fillIdentities,
+    // Raw exchange ids are the bridge to income rows carrying `tradeId`.
+    // `fillIds` is the compatibility name already consumed by the wallet ledger.
+    fillIds: tradeIds,
+    tradeIds,
+    fillContributions,
+    tradeCoverage,
+    commissionCoverage,
+    flatBoundaryProven: round.fromFlat,
     open,
     partial: round.partial,
   })
 }
 
-// One contract's fills, in the order they happened. Exposure is per contract: a
-// BTC sell does not reduce an ETH long, and folding the two together would close
-// rounds that never closed and mark open ones flat.
-const foldContractFills = (fills) => {
+// One canonical position key's fills, in the order they happened. `BOTH` keeps
+// signed one-way exposure; an explicit LONG or SHORT key never sees the other
+// hedge leg and therefore cannot consume it.
+const foldContractFills = (fills, {
+  leftBoundaryProven = false,
+  settlementDigits = DEFAULT_SETTLEMENT_DIGITS,
+} = {}) => {
   const rounds = []
   let round = null
   let running = 0n
   // The walk has not seen a flat position yet: the contract's first round may
   // have been open before these fills begin.
-  let openedFromFlat = false
+  let openedFromFlat = leftBoundaryProven === true
   for (let index = 0; index < fills.length; index += 1) {
     const entry = fills[index]
     const buy = isBuy(entry.fill)
@@ -353,8 +947,13 @@ const foldContractFills = (fills) => {
         // position is known to be opening, and its fill's realized PnL was made
         // on the way out of the position it just closed.
         const whole = remaining === entry.atoms
-        round = openRound(entry.fill, buy,
-          whole && opensByClosing(fills, index, openedFromFlat), openedFromFlat)
+        const explicitHedgeReduction = entry.leg === 'LONG'
+          ? !buy
+          : entry.leg === 'SHORT' ? buy : null
+        round = openRound(entry, buy,
+          whole && (explicitHedgeReduction ?? opensByClosing(fills, index, openedFromFlat)),
+          openedFromFlat,
+          settlementDigits)
         openedFromFlat = false
         running = 0n
       }
@@ -371,7 +970,7 @@ const foldContractFills = (fills) => {
             && !flipIsConsistent(round, {
               fill: entry.fill,
               held: reducing,
-              price: entry.price,
+              priceRatio: entry.priceRatio,
             })
           if (disproved) {
             restartAmbiguousWindowEdgeRound(round)
@@ -428,7 +1027,11 @@ const foldContractFills = (fills) => {
       // flip, this invented a position in the opposite direction, priced at both
       // ends, and filed it in the closed-position review beside real ones.
       if (!increasing && !round.partial && !round.fromFlat && remaining > held
-        && !flipIsConsistent(round, { fill: entry.fill, held, price: entry.price })) {
+        && !flipIsConsistent(round, {
+          fill: entry.fill,
+          held,
+          priceRatio: entry.priceRatio,
+        })) {
         round.partial = true
         round.entryAtoms = 0n
         round.entryNotional = 0
@@ -443,8 +1046,14 @@ const foldContractFills = (fills) => {
         fill: entry.fill,
         atoms: take,
         price: entry.price,
+        priceRatio: entry.priceRatio,
         share: Number(take) / Number(entry.atoms),
         increasing,
+        identity: entry.identity,
+        tradeComplete: entry.tradeComplete,
+        commissionComplete: entry.commissionComplete,
+        settlementAsset: entry.settlementAsset,
+        commissionAsset: entry.commissionAsset,
       })
       remaining -= take
       if (!round.partial) {
@@ -469,7 +1078,22 @@ const foldContractFills = (fills) => {
     const holdingRestartedAdds = round.edgePhase !== null && round.heldAtoms > 0n
     rounds.push(finishRound(round, holdingRestartedAdds || (!round.partial && running !== 0n)))
   }
-  return rounds
+  const fillConservation = auditFuturesFillAllocation({
+    canonicalFills: fills.map(entry => ({
+      identity: entry.identity.value,
+      quantityAtoms: entry.atoms,
+    })),
+    contributions: rounds.flatMap(result => result.fillContributions.map(contribution => ({
+      identity: contribution.identity,
+      quantityAtoms: contribution.quantityAtoms,
+      roundKey: result.key,
+    }))),
+    roundKeys: rounds.map(result => result.key),
+  })
+  return Object.freeze({
+    rounds: Object.freeze(rounds),
+    fillConservation,
+  })
 }
 
 // Newest first, the way every other history table in the desk is read. A round
@@ -477,104 +1101,602 @@ const foldContractFills = (fills) => {
 // the one at the top whichever contract it is on.
 const newestFirst = (left, right) => (right.closeTime - left.closeTime)
   || (right.openTime - left.openTime)
-  || (left.symbol < right.symbol ? -1 : left.symbol > right.symbol ? 1 : 0)
+  || (left.positionKey < right.positionKey ? -1 : left.positionKey > right.positionKey ? 1 : 0)
+  || (left.key < right.key ? -1 : left.key > right.key ? 1 : 0)
 
-/**
- * Attaches what the exchange's income record says happened to each round's
- * contract while that round was held.
- *
- * Matched on the contract and the span between the round's open and its close,
- * and deliberately not on the position leg: an income row states no
- * `positionSide`, and funding is not a trade so it names no `tradeId` to reach
- * one through. On a hedge account holding both legs of one contract there is
- * therefore nothing in the record to divide a funding charge by, and a division
- * the exchange never made is a number the desk invented. Such a charge is
- * attached to every round it falls inside and marked `fundingShared`, so each
- * row can say the funding is the contract's rather than claim a share of it.
- *
- * `from` is the earliest moment the income read covers. A round that opened
- * before it was charged funding nobody read, and saying so is the whole
- * difference between an incomplete total and a wrong one.
- */
-export const attachFuturesRoundIncome = (rounds, income, { from = null } = {}) => {
-  const entries = (Array.isArray(income) ? income : []).filter(entry => (
-    (entry?.component === 'funding' || entry?.component === 'insuranceClear')
-    // Only what settles in the contract's own asset reaches the result; a
-    // charge in anything else has no rate to reach it by.
-    && (entry?.asset ?? SETTLEMENT_ASSET) === SETTLEMENT_ASSET
-  ))
-  if (!Array.isArray(rounds) || rounds.length === 0) return rounds
-  const held = rounds.map(round => ({
-    round,
-    funding: null,
-    insuranceClear: null,
-    shared: false,
-  }))
-  for (const entry of entries) {
-    const inside = held.filter(({ round }) => round.symbol === entry.symbol
-      && Number.isFinite(round.openTime)
-      && Number.isFinite(round.closeTime)
-      && entry.time >= round.openTime
-      && entry.time <= round.closeTime)
-    if (inside.length === 0) continue
-    for (const slot of inside) {
-      const component = entry.component
-      slot[component] = (slot[component] ?? 0) + entry.amount
-      // More than one round of this contract was open when the charge landed,
-      // so the charge is the contract's and not any one round's.
-      if (inside.length > 1) slot.shared = true
-    }
-  }
-  return held.map(({ round, funding, insuranceClear, shared }) => {
-    // A round that opened before the read began is missing funding nobody read.
-    // With no window stated at all, nothing can be claimed about coverage.
-    //
-    // `partial` disqualifies a round outright, whatever the window says. Such a
-    // round began by reducing a position opened before this window of fills, so
-    // its `openTime` is the edge the window happened to start at and not the
-    // moment the position was entered — the charges it carried before that edge
-    // are real, uncounted, and cannot be reached from here. Comparing the read's
-    // start against that edge answers a question about the window and reports it
-    // as an answer about the position: exactly the confusion that put the wrong
-    // flag in `readFuturesOpenPositionStarts`, in a second place.
-    const complete = round.partial !== true
-      && Number.isFinite(from)
-      && Number.isFinite(round.openTime)
-      && from <= round.openTime
-    // Always rebuilt, never returned untouched: a round with no charge against
-    // it still has coverage to state, and returning the folded object would keep
-    // the "nothing read" default it was built with.
-    return Object.freeze({
-      ...round,
-      funding,
-      insuranceClear,
-      fundingShared: shared,
-      fundingComplete: complete,
-      netPnl: round.realizedPnl - round.fee + (funding ?? 0) + (insuranceClear ?? 0),
-    })
+
+const coverageRecordOf = (coverage, positionKey) => {
+  if (coverage instanceof Map) return coverage.get(positionKey) ?? null
+  if (coverage === null || typeof coverage !== 'object' || Array.isArray(coverage)) return null
+  return coverage[positionKey] ?? null
+}
+
+const finiteTime = (value) => {
+  if (value === null || value === undefined || value === '') return null
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+const signedAtoms = (value) => {
+  const text = typeof value === 'number' && Number.isFinite(value)
+    ? (String(value).includes('e') ? value.toFixed(ATOM_DIGITS) : String(value))
+    : value
+  if (typeof text !== 'string') return null
+  const negative = text.startsWith('-')
+  const unsigned = negative ? text.slice(1) : text
+  if (decimalPlaces(unsigned) > ATOM_DIGITS) return null
+  const atoms = toAtoms(unsigned)
+  return atoms === null ? null : negative ? -atoms : atoms
+}
+
+const sourceFlatBoundaryIsProven = (source, coveredFrom) => {
+  if (source?.flatBoundary === true) return true
+  if (typeof source?.flatBoundary !== 'number'
+    && typeof source?.flatBoundary !== 'string') return false
+  const boundary = finiteTime(source?.flatBoundary)
+  return boundary !== null && coveredFrom !== null && boundary <= coveredFrom
+}
+
+const positionCoverageOf = ({
+  coverage,
+  positionKey,
+  entries,
+  symbolFillCount,
+  generation,
+  pageLimit,
+}) => {
+  const source = coverageRecordOf(coverage, positionKey)
+  const versionCompatible = source?.version === FUTURES_TRADE_ROUND_INDEX_VERSION
+  const times = entries.map(entry => finiteTime(entry.fill?.time)).filter(time => time !== null)
+  const observedFrom = times.length === 0 ? null : Math.min(...times)
+  const observedTo = times.length === 0 ? null : Math.max(...times)
+  const sourceFrom = versionCompatible ? finiteTime(source?.coveredFrom) : null
+  const sourceTo = versionCompatible ? finiteTime(source?.coveredTo) : null
+  // A stream fill is evidence for that fill, not for every sibling between the
+  // last REST cursor and it. Compatible source bounds therefore remain the
+  // authority; observed min/max are only a legacy fallback when no v2 bound was
+  // supplied at all.
+  const coveredFrom = sourceFrom ?? observedFrom
+  const coveredTo = sourceTo ?? observedTo
+  const normalizedPageLimit = Number.isSafeInteger(pageLimit) && pageLimit > 0
+    ? pageLimit
+    : DEFAULT_HISTORY_PAGE_LIMIT
+  const statedPageLimited = versionCompatible && typeof source?.pageLimited === 'boolean'
+    ? source.pageLimited
+    : null
+  const generationMatches = generation !== null && generation !== undefined
+    && source?.generation === generation
+  return Object.freeze({
+    version: FUTURES_TRADE_ROUND_INDEX_VERSION,
+    positionKey,
+    coveredFrom,
+    coveredTo,
+    // A boundary belongs to the exact history generation that produced it.
+    // Reusing it after the held fills advanced can qualify a round whose opener
+    // was never actually observed in the current basis.
+    flatBoundary: versionCompatible && generationMatches
+      && sourceFlatBoundaryIsProven(source, coveredFrom),
+    // An accumulated, successfully backfilled store can legitimately contain
+    // far more than one endpoint page. Infer truncation from raw count only
+    // until a compatible coverage record explicitly states the endpoint result.
+    pageLimited: statedPageLimited ?? symbolFillCount >= normalizedPageLimit,
+    retentionLimited: versionCompatible && source?.retentionLimited === true,
+    continuityComplete: versionCompatible && source?.continuityComplete === true,
+    terminalReconciled: generationMatches && typeof source?.terminalReconciled === 'boolean'
+      ? source.terminalReconciled
+      : null,
+    generation: generation ?? null,
+    sourceVersionCompatible: versionCompatible,
+    sourceGenerationCompatible: generationMatches,
   })
 }
 
-export const buildFuturesTradeRounds = (trades, { income = null, incomeFrom = null } = {}) => {
-  const byContract = new Map()
-  for (const fill of Array.isArray(trades) ? trades : []) {
-    const atoms = toAtoms(fill?.quantity)
-    const price = Number(fill?.price)
-    if (atoms === null || atoms <= 0n || !Number.isFinite(price) || price <= 0) continue
-    const symbol = symbolOf(fill)
-    if (!byContract.has(symbol)) byContract.set(symbol, [])
-    byContract.get(symbol).push({ fill, atoms, price })
+const snapshotIndexOf = (positions) => {
+  if (!Array.isArray(positions)) return null
+  const snapshots = new Map()
+  for (const position of positions) {
+    const leg = legOf(position)
+    const positionKey = futuresTradePositionKey(position?.symbol, leg)
+    const quantity = signedAtoms(position?.quantity ?? position?.positionAmt)
+    if (positionKey === null) continue
+    const previous = snapshots.get(positionKey) ?? null
+    // A complete account snapshot has one row per canonical key. Choosing a
+    // duplicate by delivery order (or erasing a malformed present quantity as
+    // though the key were absent) can turn contradictory evidence into an
+    // authoritative terminal zero. Retain one bounded invalid sentinel instead
+    // so both permutations fail closed for this key.
+    if (quantity === null || previous !== null) {
+      snapshots.set(positionKey, Object.freeze({
+        position: previous?.position ?? position,
+        leg,
+        quantity: null,
+        invalid: true,
+      }))
+      continue
+    }
+    snapshots.set(positionKey, Object.freeze({
+      position,
+      leg,
+      quantity,
+      invalid: false,
+    }))
   }
-  const rounds = []
-  for (const fills of byContract.values()) {
-    fills.sort((left, right) => (toNumber(left.fill.time) - toNumber(right.fill.time))
-      || (toNumber(left.fill.id) - toNumber(right.fill.id)))
-    rounds.push(...foldContractFills(fills))
+  return snapshots
+}
+
+const terminalExposureOf = (rounds, leg) => {
+  const open = rounds.find(round => round.open === true) ?? null
+  if (open === null) return Object.freeze({ quantity: 0n, entryPrice: null, round: null })
+  const quantity = signedAtoms(open.quantity)
+  if (quantity === null) return Object.freeze({ quantity: null, entryPrice: null, round: open })
+  const signed = leg === 'BOTH' && open.positionSide === 'SHORT' ? -quantity : quantity
+  return Object.freeze({ quantity: signed, entryPrice: derivedNumberRatio(open.entryPrice), round: open })
+}
+
+const terminalMatchesSnapshot = (terminal, snapshot, leg, settlementDigits) => {
+  if (terminal.quantity === null) return false
+  let expected = 0n
+  if (snapshot !== null) {
+    if (leg === 'BOTH') expected = snapshot.quantity
+    else if (leg === 'LONG' && snapshot.quantity >= 0n) expected = snapshot.quantity
+    else if (leg === 'SHORT' && snapshot.quantity <= 0n) expected = -snapshot.quantity
+    else return false
   }
-  const folded = rounds.sort(newestFirst)
-  return income === null
-    ? folded
-    : attachFuturesRoundIncome(folded, income, { from: incomeFrom })
+  if (terminal.quantity !== expected) return false
+  if (expected === 0n) return true
+  const reportedEntry = decimalRatio(snapshot?.position?.entryPrice)
+  return terminal.entryPrice !== null && reportedEntry !== null
+    && ratiosWithin(terminal.entryPrice, reportedEntry, settlementQuantum(settlementDigits))
+}
+
+const roundReasons = (round, coverage) => {
+  const reasons = []
+  if (coverage.fillConservationComplete !== true) reasons.push('fill-conservation-failed')
+  if (round.flatBoundaryProven !== true || round.partial === true) {
+    reasons.push('left-boundary-unproven')
+    if (coverage.pageLimited === true) reasons.push('history-page-limited')
+    if (coverage.retentionLimited === true) reasons.push('history-retention-limited')
+    if (coverage.sourceVersionCompatible !== true) reasons.push('coverage-version-unproven')
+    else if (coverage.sourceGenerationCompatible !== true) {
+      reasons.push('coverage-generation-unproven')
+    }
+  }
+  if (round.tradeCoverage.complete !== true) reasons.push('trade-coverage-incomplete')
+  if (coverage.continuityComplete !== true) reasons.push('history-continuity-unproven')
+  const roundFrom = finiteTime(round.openTime)
+  const roundTo = finiteTime(round.closeTime)
+  if (coverage.coveredFrom === null || roundFrom === null
+    || coverage.coveredFrom > roundFrom) reasons.push('trade-oldest-edge-unproven')
+  if (coverage.coveredTo === null || roundTo === null
+    || coverage.coveredTo < roundTo) reasons.push('trade-newest-edge-unproven')
+  if (round.commissionCoverage.complete !== true) reasons.push('commission-coverage-incomplete')
+  if (round.open === true && coverage.terminalReconciled !== true) {
+    reasons.push(coverage.terminalReconciled === false
+      ? 'terminal-snapshot-mismatch'
+      : 'terminal-snapshot-unreconciled')
+  }
+  return Object.freeze([...new Set(reasons)])
+}
+
+const qualifyRound = (round, positionCoverage) => {
+  const coverage = Object.freeze({
+    ...positionCoverage,
+    // This boundary is the one immediately before this round, not merely a flat
+    // point found somewhere else in the same bounded window.
+    flatBoundary: round.flatBoundaryProven === true,
+  })
+  const unresolvedReasons = roundReasons(round, coverage)
+  return Object.freeze({
+    ...round,
+    coverage,
+    resolved: unresolvedReasons.length === 0,
+    unresolvedReasons,
+    // This index deliberately owns fills only. Funding and other income are
+    // reconciled by the wallet-ledger change, never copied here by time overlap.
+    incomeCoverage: 'not-attached',
+    fillNetPnl: round.netPnl,
+  })
+}
+
+const unresolvedRoundSegment = round => Object.freeze({
+  key: `unresolved:${round.key}`,
+  positionKey: round.positionKey,
+  symbol: round.symbol,
+  leg: round.leg,
+  coveredFrom: round.openTime,
+  coveredTo: round.closeTime,
+  open: round.open,
+  fillIdentities: round.fillIdentities,
+  fillIds: round.fillIds,
+  tradeIds: round.tradeIds,
+  fillContributions: round.fillContributions,
+  tradeCoverage: round.tradeCoverage,
+  commissionCoverage: round.commissionCoverage,
+  coverage: round.coverage,
+  reasons: round.unresolvedReasons,
+})
+
+const invalidFillSegment = (fill, ordinal) => {
+  const symbol = symbolOf(fill) || null
+  const leg = legOf(fill)
+  const positionKey = futuresTradePositionKey(symbol, leg)
+  const trade = rawFillIdentity(fill)
+  const time = finiteTime(fill?.time)
+  return Object.freeze({
+    key: `unresolved:${positionKey ?? 'INVALID'}:${trade ?? ordinal}`,
+    positionKey,
+    symbol,
+    leg,
+    coveredFrom: time,
+    coveredTo: time,
+    open: null,
+    fillIdentities: Object.freeze(trade === null ? [] : [
+      `${positionKey ?? 'INVALID'}:trade:${trade}`,
+    ]),
+    fillIds: Object.freeze(trade === null ? [] : [trade]),
+    tradeIds: Object.freeze(trade === null ? [] : [trade]),
+    fillContributions: Object.freeze([]),
+    tradeCoverage: Object.freeze({ complete: false, status: 'partial', fills: 1, identified: trade === null ? 0 : 1 }),
+    commissionCoverage: Object.freeze({ complete: false, status: 'partial', fills: 1 }),
+    coverage: null,
+    reasons: Object.freeze(['invalid-fill']),
+  })
+}
+
+const conflictingFillSegment = (fill, ordinal) => Object.freeze({
+  ...invalidFillSegment(fill, ordinal),
+  reasons: Object.freeze(['conflicting-fill-identity']),
+})
+
+const hasPartialEvidence = value => value !== null
+  && value !== undefined
+  && !(typeof value === 'string' && value.trim() === '')
+
+// A rich REST copy may legitimately replace a sparse stream projection, but a
+// malformed projection is not a blank cheque: every field it did carry still
+// has to agree. Otherwise the valid copy would hide contradictory evidence just
+// because another field on the same object was absent or unreadable.
+const partialFillConflictsWithCanonical = (fill, canonical) => {
+  if (hasPartialEvidence(fill?.positionSide) && legOf(fill) !== canonical.leg) return true
+
+  if (hasPartialEvidence(fill?.side)) {
+    const side = String(fill.side).trim().toUpperCase()
+    if ((side !== 'BUY' && side !== 'SELL') || (side === 'BUY') !== isBuy(canonical.fill)) {
+      return true
+    }
+  }
+
+  if (hasPartialEvidence(fill?.quantity)) {
+    const atoms = toAtoms(fill.quantity)
+    if (atoms === null || atoms <= 0n || decimalPlaces(fill.quantity) > ATOM_DIGITS
+      || atoms !== canonical.atoms) return true
+  }
+
+  if (hasPartialEvidence(fill?.price)) {
+    const price = decimalRatio(fill.price)
+    if (price === null || price.numerator <= 0n || !ratiosEqual(price, canonical.priceRatio)) {
+      return true
+    }
+  }
+
+  if (hasPartialEvidence(fill?.time)) {
+    const time = finiteTime(fill.time)
+    if (!Number.isSafeInteger(time) || time < 0 || time !== canonical.time) return true
+  }
+
+  for (const field of ['realizedPnl', 'commission']) {
+    if (!hasPartialEvidence(fill?.[field])) continue
+    const amount = decimalRatio(fill[field])
+    const expected = decimalRatio(canonical.fill?.[field])
+    if (amount === null || expected === null || !ratiosEqual(amount, expected)) return true
+  }
+
+  if (hasPartialEvidence(fill?.marginAsset)
+    && settlementAssetOf(fill) !== canonical.settlementAsset) return true
+
+  if (hasPartialEvidence(fill?.commissionAsset)) {
+    const asset = typeof fill.commissionAsset === 'string'
+      ? fill.commissionAsset.trim().toUpperCase()
+      : null
+    if (asset === null || asset === '' || asset !== canonical.commissionAsset) return true
+  }
+
+  return false
+}
+
+/**
+ * Canonical, coverage-aware derivation of Futures position rounds.
+ *
+ * Income is intentionally absent from this API. It returns fill-owned facts and
+ * an explicit unresolved lane; the canonical wallet ledger owns all income
+ * reconciliation without copying time-overlapping rows into individual rounds.
+ */
+export const buildFuturesTradeRoundIndex = (trades, {
+  coverage = {},
+  positions = null,
+  generation = null,
+  pageLimit = DEFAULT_HISTORY_PAGE_LIMIT,
+  settlementDigits = DEFAULT_SETTLEMENT_DIGITS,
+} = {}) => {
+  const byPosition = new Map()
+  const symbolFillCounts = new Map()
+  const unresolved = []
+  const invalidEvidence = []
+  const canonicalEntries = new Map()
+  const conflictingCanonicalEntries = new Map()
+  const fallbackEntries = []
+  for (const [ordinal, fill] of (Array.isArray(trades) ? trades : []).entries()) {
+    const entry = canonicalFillEntry(fill, ordinal)
+    if (entry === null) {
+      const segment = invalidFillSegment(fill, ordinal)
+      invalidEvidence.push(Object.freeze({
+        segment,
+        fill,
+        ordinal,
+        canonicalIdentity: segment.positionKey !== null && segment.tradeIds.length === 1
+          ? `${segment.symbol}:trade:${segment.tradeIds[0]}`
+          : null,
+      }))
+      continue
+    }
+    if (entry.identity.reliable) {
+      // One Binance trade id is canonical within a contract. Compatible REST
+      // evidence enriches a sparse stream projection; conflicting present
+      // evidence poisons the key instead of making input order choose its PnL.
+      const canonicalIdentity = `${entry.symbol}:trade:${entry.identity.trade}`
+      if (conflictingCanonicalEntries.has(canonicalIdentity)) {
+        const compromised = conflictingCanonicalEntries.get(canonicalIdentity)
+        if (!compromised.has(entry.positionKey)) {
+          compromised.add(entry.positionKey)
+          invalidEvidence.push(Object.freeze({
+            segment: conflictingFillSegment(fill, ordinal),
+            fill,
+            ordinal,
+            canonicalIdentity: null,
+          }))
+        }
+        continue
+      }
+      const previous = canonicalEntries.get(canonicalIdentity) ?? null
+      if (previous === null) {
+        canonicalEntries.set(canonicalIdentity, entry)
+      } else if (canonicalFillEntriesConflict(previous, entry)) {
+        canonicalEntries.delete(canonicalIdentity)
+        const compromised = new Set([previous.positionKey, entry.positionKey])
+        conflictingCanonicalEntries.set(canonicalIdentity, compromised)
+        const conflicting = previous.positionKey === entry.positionKey
+          ? [entry]
+          : [previous, entry]
+        for (const candidate of conflicting) {
+          invalidEvidence.push(Object.freeze({
+            segment: conflictingFillSegment(candidate.fill, candidate.ordinal),
+            fill: candidate.fill,
+            ordinal: candidate.ordinal,
+            canonicalIdentity: null,
+          }))
+        }
+      } else {
+        canonicalEntries.set(canonicalIdentity, mergeCanonicalFillEntries(previous, entry))
+      }
+    } else {
+      // An ordinal is deliberately part of an unreliable fallback identity, so
+      // two fills with no exchange id cannot be guessed to be duplicates.
+      fallbackEntries.push(entry)
+    }
+  }
+  const retainedInvalidEvidence = invalidEvidence.flatMap((evidence) => {
+    if (evidence.canonicalIdentity === null) return [evidence]
+    const canonical = canonicalEntries.get(evidence.canonicalIdentity) ?? null
+    if (canonical === null) return [evidence]
+    if (!partialFillConflictsWithCanonical(evidence.fill, canonical)) return []
+    return [Object.freeze({
+      ...evidence,
+      segment: conflictingFillSegment(evidence.fill, evidence.ordinal),
+      canonicalIdentity: null,
+    })]
+  })
+  unresolved.push(...retainedInvalidEvidence.map(evidence => evidence.segment))
+  const unknownInvalidOwner = retainedInvalidEvidence.some(evidence => (
+    evidence.segment.positionKey === null
+  ))
+  const compromisedPositionKeys = new Set(retainedInvalidEvidence
+    .map(evidence => evidence.segment.positionKey)
+    .filter(positionKey => positionKey !== null))
+  for (const entry of [...canonicalEntries.values(), ...fallbackEntries]) {
+    symbolFillCounts.set(entry.symbol, (symbolFillCounts.get(entry.symbol) ?? 0) + 1)
+    if (!byPosition.has(entry.positionKey)) byPosition.set(entry.positionKey, [])
+    byPosition.get(entry.positionKey).push(entry)
+  }
+
+  const snapshots = snapshotIndexOf(positions)
+  const candidates = []
+  const positionResults = new Map()
+  const fillConservationResults = new Map()
+  const digits = boundedSettlementDigits(settlementDigits)
+  for (const [positionKey, entries] of byPosition) {
+    entries.sort(compareFillEntries)
+    const { symbol, leg } = entries[0]
+    let positionCoverage = positionCoverageOf({
+      coverage,
+      positionKey,
+      entries,
+      symbolFillCount: symbolFillCounts.get(symbol) ?? entries.length,
+      generation,
+      pageLimit,
+    })
+    if (unknownInvalidOwner || compromisedPositionKeys.has(positionKey)) {
+      positionCoverage = Object.freeze({
+        ...positionCoverage,
+        continuityComplete: false,
+      })
+    }
+    const foldResult = foldContractFills(entries, {
+      leftBoundaryProven: positionCoverage.flatBoundary,
+      settlementDigits: digits,
+    })
+    const folded = foldResult.rounds
+    const fillConservation = foldResult.fillConservation
+    fillConservationResults.set(positionKey, fillConservation)
+    positionCoverage = Object.freeze({
+      ...positionCoverage,
+      fillConservationComplete: fillConservation.conserved,
+    })
+    const terminal = terminalExposureOf(folded, leg)
+    const snapshot = snapshots === null ? null : snapshots.get(positionKey) ?? null
+    if (snapshots !== null) {
+      positionCoverage = Object.freeze({
+        ...positionCoverage,
+        terminalReconciled: terminalMatchesSnapshot(terminal, snapshot, leg, digits),
+      })
+    }
+    const qualified = Object.freeze(folded.map(round => qualifyRound(round, positionCoverage)))
+    candidates.push(...qualified)
+    const unresolvedForPosition = qualified
+      .filter(round => !round.resolved)
+      .map(unresolvedRoundSegment)
+    // A fill basis ending flat while the authoritative snapshot is non-flat is
+    // a missing terminal segment, not evidence that the new position has zero
+    // PnL. There is no open round to carry the mismatch, so expose a dedicated
+    // acquisition target and keep exact money absent from it.
+    if (positionCoverage.terminalReconciled === false && terminal.round === null) {
+      unresolvedForPosition.push(Object.freeze({
+        key: `unresolved:${positionKey}:terminal-fill-gap`,
+        positionKey,
+        symbol,
+        leg,
+        coveredFrom: positionCoverage.coveredTo,
+        coveredTo: null,
+        open: snapshot !== null && snapshot.quantity !== 0n,
+        fillIdentities: Object.freeze([]),
+        fillIds: Object.freeze([]),
+        tradeIds: Object.freeze([]),
+        fillContributions: Object.freeze([]),
+        tradeCoverage: Object.freeze({ complete: false, status: 'partial', fills: 0, identified: 0 }),
+        commissionCoverage: Object.freeze({ complete: false, status: 'partial', fills: 0 }),
+        coverage: positionCoverage,
+        reasons: Object.freeze(['terminal-snapshot-mismatch', 'terminal-fill-gap']),
+      }))
+    }
+    unresolved.push(...unresolvedForPosition)
+    positionResults.set(positionKey, Object.freeze({
+      version: FUTURES_TRADE_ROUND_INDEX_VERSION,
+      positionKey,
+      symbol,
+      leg,
+      coverage: positionCoverage,
+      fillConservation,
+      terminal: Object.freeze({
+        quantity: terminal.quantity === null ? null : fromAtoms(absoluteBigInt(terminal.quantity)),
+        side: terminal.quantity === null || terminal.quantity === 0n
+          ? null
+          : leg === 'BOTH' ? (terminal.quantity < 0n ? 'SHORT' : 'LONG') : leg,
+        entryPrice: terminal.entryPrice === null ? null : ratioAsNumber(terminal.entryPrice),
+        reconciled: positionCoverage.terminalReconciled,
+      }),
+      roundKeys: Object.freeze(qualified.filter(round => round.resolved).map(round => round.key)),
+      unresolvedKeys: Object.freeze(unresolvedForPosition.map(segment => segment.key)),
+    }))
+  }
+
+  // An authoritative account snapshot can name an open position for which this
+  // bounded fill basis has no key at all. It is an unresolved acquisition target,
+  // not an empty or zero-PnL round.
+  if (snapshots !== null) {
+    for (const [positionKey, snapshot] of snapshots) {
+      if (byPosition.has(positionKey) || snapshot.quantity === 0n) continue
+      const symbol = symbolOf(snapshot.position)
+      let missingCoverage = positionCoverageOf({
+        coverage,
+        positionKey,
+        entries: [],
+        symbolFillCount: symbolFillCounts.get(symbol) ?? 0,
+        generation,
+        pageLimit,
+      })
+      if (unknownInvalidOwner || compromisedPositionKeys.has(positionKey)) {
+        missingCoverage = Object.freeze({
+          ...missingCoverage,
+          continuityComplete: false,
+        })
+      }
+      missingCoverage = Object.freeze({
+        ...missingCoverage,
+        terminalReconciled: false,
+      })
+      const missingReasons = Object.freeze([
+        'fill-basis-missing',
+        'terminal-snapshot-mismatch',
+        ...(missingCoverage.pageLimited === true ? ['history-page-limited'] : []),
+        ...(missingCoverage.retentionLimited === true ? ['history-retention-limited'] : []),
+        ...(missingCoverage.sourceVersionCompatible !== true
+          ? ['coverage-version-unproven']
+          : missingCoverage.sourceGenerationCompatible !== true
+            ? ['coverage-generation-unproven']
+            : []),
+        ...(missingCoverage.continuityComplete !== true
+          ? ['history-continuity-unproven']
+          : []),
+      ])
+      const segment = Object.freeze({
+        key: `unresolved:${positionKey}:fill-basis-missing`,
+        positionKey,
+        symbol,
+        leg: snapshot.leg,
+        coveredFrom: missingCoverage.coveredFrom,
+        coveredTo: missingCoverage.coveredTo,
+        open: true,
+        fillIdentities: Object.freeze([]),
+        fillIds: Object.freeze([]),
+        tradeIds: Object.freeze([]),
+        fillContributions: Object.freeze([]),
+        tradeCoverage: Object.freeze({ complete: false, status: 'missing', fills: 0, identified: 0 }),
+        commissionCoverage: Object.freeze({ complete: false, status: 'missing', fills: 0 }),
+        coverage: missingCoverage,
+        reasons: missingReasons,
+      })
+      unresolved.push(segment)
+      positionResults.set(positionKey, Object.freeze({
+        version: FUTURES_TRADE_ROUND_INDEX_VERSION,
+        positionKey,
+        symbol,
+        leg: snapshot.leg,
+        coverage: segment.coverage,
+        terminal: Object.freeze({ quantity: null, side: null, entryPrice: null, reconciled: false }),
+        roundKeys: Object.freeze([]),
+        unresolvedKeys: Object.freeze([segment.key]),
+      }))
+    }
+  }
+
+  const legacyRounds = Object.freeze(candidates.sort(newestFirst))
+  const rounds = Object.freeze(legacyRounds.filter(round => round.resolved))
+  const conservationByPosition = [...fillConservationResults.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+  const affectedPositionKeys = Object.freeze(conservationByPosition
+    .filter(([, audit]) => audit.conserved !== true)
+    .map(([positionKey]) => positionKey))
+  return Object.freeze({
+    version: FUTURES_TRADE_ROUND_INDEX_VERSION,
+    rounds,
+    all: rounds,
+    closed: Object.freeze(rounds.filter(round => round.open !== true)),
+    open: Object.freeze(rounds.filter(round => round.open === true)),
+    unresolved: Object.freeze(unresolved),
+    byPosition: Object.freeze(Object.fromEntries(positionResults)),
+    fillConservation: Object.freeze({
+      conserved: affectedPositionKeys.length === 0,
+      affectedPositionKeys,
+      byPosition: Object.freeze(Object.fromEntries(conservationByPosition)),
+    }),
+    // Transitional only: existing callers keep their old candidate rows until
+    // they migrate to `rounds` + `unresolved` in the following production tasks.
+    legacyRounds,
+  })
+}
+
+export const buildFuturesTradeRounds = (trades, options = {}) => {
+  const usable = options !== null && typeof options === 'object' ? options : {}
+  return buildFuturesTradeRoundIndex(trades, usable).legacyRounds
 }
 
 export default buildFuturesTradeRounds

@@ -1,6 +1,16 @@
 import { createHmac } from 'node:crypto';
 import https from 'node:https';
 import { futuresAccountFingerprint } from './futures-settled-income-store.js';
+import {
+    admitBinancePhysicalAttempt,
+    noteBinancePhysicalRetry,
+} from './binance-physical-attempt-context.js';
+import {
+    futuresTradeHistoryEvidenceError,
+    normalizeFuturesTradeHistoryEvidence,
+    normalizeFuturesTradeHistorySymbol,
+    normalizeFuturesTradeHistoryTime,
+} from '../../src/utils/futuresTradeHistoryEvidence.js';
 import { isIndeterminateTradingFailure } from './trading-command-outcome.js';
 
 export const FUTURES_REST_ORIGIN = 'https://fapi.binance.com';
@@ -45,6 +55,61 @@ const DEFAULT_RECV_WINDOW = 5000;
 // queue's admission spacing together decide the most requests that can be in
 // the air at once.
 export const FUTURES_REST_REQUEST_TIMEOUT_MS = 10000;
+export const FUTURES_REST_RESPONSE_MAX_BYTES = 8 * 1024 * 1024;
+const FUTURES_REST_MAX_RETRY_AFTER_MS = 3 * 24 * 60 * 60 * 1000;
+
+const readResponseHeaderValues = (headers, name) => {
+    const value = headers?.[name];
+    if (Array.isArray(value)) return value;
+    return value === null || value === undefined ? [] : [value];
+};
+
+const readFuturesUsedWeight = (headers) => {
+    const samples = [
+        ...readResponseHeaderValues(headers, 'x-mbx-used-weight-1m'),
+        ...readResponseHeaderValues(headers, 'x-mbx-used-weight'),
+    ].map(value => Number(String(value).trim()))
+        .filter(value => Number.isSafeInteger(value) && value >= 0);
+    return samples.length === 0 ? null : Math.max(...samples);
+};
+
+const readFuturesRetryAfterMs = (headers, now = Date.now()) => {
+    const [raw] = readResponseHeaderValues(headers, 'retry-after');
+    if (raw === undefined) return null;
+    const value = String(raw).trim();
+    if (value === '') return null;
+
+    const seconds = Number(value);
+    const requested = Number.isFinite(seconds) && seconds >= 0
+        ? Math.ceil(seconds * 1000)
+        : Math.max(0, Date.parse(value) - now);
+    if (!Number.isSafeInteger(requested) || requested < 0) return null;
+    return Math.min(requested, FUTURES_REST_MAX_RETRY_AFTER_MS);
+};
+
+const describeFuturesResponseAccounting = (response) => {
+    const status = Number.isSafeInteger(response?.statusCode)
+        && response.statusCode >= 100
+        && response.statusCode <= 599
+        ? response.statusCode
+        : null;
+    const usedWeight = readFuturesUsedWeight(response?.headers);
+    const retryAfterMs = status === 418 || status === 429
+        ? readFuturesRetryAfterMs(response?.headers)
+        : null;
+    return {
+        ...(status === null ? {} : { status }),
+        ...(usedWeight === null ? {} : { usedWeight }),
+        ...(retryAfterMs === null ? {} : { retryAfterMs }),
+    };
+};
+
+const readFuturesContentLength = (headers) => {
+    const values = readResponseHeaderValues(headers, 'content-length')
+        .map(value => Number(String(value).trim()))
+        .filter(value => Number.isSafeInteger(value) && value >= 0);
+    return values.length === 0 ? null : Math.max(...values);
+};
 
 export class FuturesApiError extends Error {
     constructor(message, { status, code, body, indeterminate = false } = {}) {
@@ -135,11 +200,10 @@ const FUTURES_REST_FAULT_PHASE = 'futures-rest';
 const FUTURES_REST_UNPOOLED_PHASE = 'futures-rest-unpooled';
 
 // A pooled connection can be closed by the far side while it sits idle and
-// handed to a request in the instant before Node notices. The far side's stack
-// then refuses the bytes, so the exchange never sees the request — which is what
-// makes exactly these two codes, and only before a response has begun, safe to
-// send a second time. Nothing wider is: a request that may have been received is
-// an indeterminate outcome, and this desk already carries it as one.
+// handed to a request in the instant before Node notices. These codes identify
+// the narrow transport failure eligible for a fresh connection, but they do not
+// prove that a mutation's bytes were never applied. The replay decision below
+// therefore also requires an idempotent GET.
 const CONNECTION_LOST_BEFORE_ANSWER = new Set(['ECONNRESET', 'EPIPE']);
 
 // Marks the one failure that reuse introduced and reuse may therefore repair.
@@ -148,8 +212,50 @@ const CONNECTION_LOST_BEFORE_ANSWER = new Set(['ECONNRESET', 'EPIPE']);
 // can widen.
 const RETRY_ON_A_CONNECTION_OF_ITS_OWN = Symbol('pooled connection lost before the exchange answered');
 
-const httpsJsonRequestOnce = ({ url, method, headers, body, agent, recordEvent }) => (
-    new Promise((resolve, reject) => {
+// JSON.parse rounds an integer larger than 2^53 before a normalizer can see it.
+// Binance identities routinely outgrow a JavaScript double. Quote every numeric
+// identifier this adapter consumes before JSON.parse so trade/page cursors and
+// ownership joins receive the original token rather than a rounded neighbour.
+// These fields are identifiers, never arithmetic values.
+const preserveFuturesIdentifierTokens = source => source.replace(
+    /("(?:id|orderId|tradeId|tranId|algoId)"\s*:\s*)(-?\d+)/g,
+    '$1"$2"',
+);
+
+// Private user-data frames use compact field names. Keep this separate from the
+// REST parser because `t` is a timestamp in other Binance payload families;
+// only inside the private-stream envelope does `o.t` mean a trade identity.
+const preserveFuturesCompactIdentifierTokens = source => (
+    preserveFuturesIdentifierTokens(source).replace(
+        /("(?:i|t|aid|ai)"\s*:\s*)(-?\d+)/g,
+        '$1"$2"',
+    )
+);
+
+export const parseFuturesJson = source => JSON.parse(
+    preserveFuturesIdentifierTokens(String(source)),
+);
+
+export const parseFuturesUserStreamJson = source => JSON.parse(
+    preserveFuturesCompactIdentifierTokens(String(source)),
+);
+
+const httpsJsonRequestOnce = async ({
+    materializeRequest,
+    method,
+    headers,
+    agent,
+    recordEvent,
+    weight = null,
+}) => {
+    const physicalAttempt = await admitBinancePhysicalAttempt(weight);
+    // A signed envelope starts ageing against recvWindow as soon as its
+    // timestamp is minted. Physical admission can wait much longer than that,
+    // so compose it only after this attempt owns capacity and immediately before
+    // creating the transport. A replay-safe fallback comes through here again
+    // after its own admission and receives its own current envelope.
+    const { url, body } = materializeRequest();
+    return new Promise((resolve, reject) => {
         const startedAt = Date.now();
         let answering = false;
 
@@ -173,15 +279,47 @@ const httpsJsonRequestOnce = ({ url, method, headers, body, agent, recordEvent }
             headers,
             agent,
             timeout: FUTURES_REST_REQUEST_TIMEOUT_MS,
+            ...(physicalAttempt.signal === null ? {} : { signal: physicalAttempt.signal }),
         }, (response) => {
             answering = true;
+            physicalAttempt.observeResponse(describeFuturesResponseAccounting(response));
             const chunks = [];
-            response.on('data', chunk => chunks.push(chunk));
+            let responseBytes = 0;
+            let responseTooLarge = false;
+            const refuseOversizedResponse = () => {
+                if (responseTooLarge) return;
+                responseTooLarge = true;
+                chunks.length = 0;
+                request.destroy(new FuturesApiError(
+                    'Futures REST response exceeded the byte limit',
+                    {
+                        status: response.statusCode,
+                        code: 'RESPONSE_TOO_LARGE',
+                        indeterminate: method !== 'GET',
+                    },
+                ));
+            };
+            const declaredLength = readFuturesContentLength(response.headers);
+            if (declaredLength !== null && declaredLength > FUTURES_REST_RESPONSE_MAX_BYTES) {
+                refuseOversizedResponse();
+                return;
+            }
+            response.on('data', (chunk) => {
+                if (responseTooLarge) return;
+                const held = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+                responseBytes += held.length;
+                if (responseBytes > FUTURES_REST_RESPONSE_MAX_BYTES) {
+                    refuseOversizedResponse();
+                    return;
+                }
+                chunks.push(held);
+            });
             response.on('end', () => {
+                if (responseTooLarge) return;
                 const text = Buffer.concat(chunks).toString('utf8');
                 let parsed = null;
                 try {
-                    parsed = text.length > 0 ? JSON.parse(text) : null;
+                    parsed = text.length > 0 ? parseFuturesJson(text) : null;
                 } catch {
                     parsed = null;
                 }
@@ -227,21 +365,25 @@ const httpsJsonRequestOnce = ({ url, method, headers, body, agent, recordEvent }
         });
         if (body) request.write(body);
         request.end();
-    })
-);
+    });
+};
 
-// The request as first composed is what goes out again — same body, same
-// signature, same command identity — so a duplicate arising any other way is
-// refused by the exchange rather than filled.
+// A safe GET fallback keeps the same semantic parameters but materializes a
+// current timestamp/signature after its own admission. Mutations never enter
+// this fallback, so their one composed identity is never replayed here.
 const httpsJsonRequest = async ({ freshAgent = null, recordEvent = null, ...attempt }) => {
     try {
         return await httpsJsonRequestOnce({ ...attempt, recordEvent });
     } catch (failure) {
-        if (freshAgent === null || failure?.[RETRY_ON_A_CONNECTION_OF_ITS_OWN] !== true) throw failure;
+        const replaySafe = String(attempt.method ?? '').toUpperCase() === 'GET';
+        if (!replaySafe
+            || freshAgent === null
+            || failure?.[RETRY_ON_A_CONNECTION_OF_ITS_OWN] !== true) throw failure;
         recordEvent?.('fault', {
             phase: FUTURES_REST_FAULT_PHASE,
             code: 'CONNECTION_REUSE_FALLBACK',
         });
+        noteBinancePhysicalRetry('connection-fallback');
         try {
             return await httpsJsonRequestOnce({ ...attempt, agent: freshAgent, recordEvent });
         } catch (fallbackFailure) {
@@ -278,6 +420,10 @@ export const normalizeFuturesExecutionReport = (payload = {}, overrides = {}) =>
     const realizedPnl = order.realizedPnl ?? order.rp;
     const commission = order.commission ?? order.n;
     const commissionAsset = order.commissionAsset ?? order.N;
+    const rawMarginAsset = order.marginAsset ?? order.ma;
+    const marginAsset = typeof rawMarginAsset === 'string' && rawMarginAsset.trim() !== ''
+        ? rawMarginAsset.trim().toUpperCase()
+        : null;
     return {
         e: 'executionReport',
         marketType: 'futures',
@@ -312,6 +458,7 @@ export const normalizeFuturesExecutionReport = (payload = {}, overrides = {}) =>
         ...(realizedPnl === undefined ? {} : { realizedPnl }),
         ...(commission === undefined ? {} : { commission }),
         ...(commissionAsset === undefined ? {} : { commissionAsset }),
+        ...(marginAsset === null ? {} : { marginAsset }),
         T: timestamp,
         transactTime: timestamp,
         time: timestamp,
@@ -332,13 +479,9 @@ export const FUTURES_TRADE_HISTORY_LIMIT = 1000;
 // Binance answers a `startTime` with the *oldest* rows after it.
 export const FUTURES_INCOME_PAGE_LIMIT = 1000;
 
-// The settled-money read asks for every kind of flow in one request. Binance's
-// own note on the endpoint: "If incomeType is not sent, all kinds of flow will be
-// returned" — so one read at weight 30 answers for realized PnL, funding,
-// commission, insurance clearance and the rebates together, where naming them
-// would have cost one read each. The kinds this desk actually sums are chosen
-// after the read, here, so a kind the desk does not recognize is carried rather
-// than silently dropped by the query.
+// Legacy compatibility list only. The v2 settled-income resource now queries
+// one underivable lane at a time; asking for every income kind also downloads
+// per-fill realized PnL and commission already held from `/userTrades`.
 export const FUTURES_SETTLED_INCOME_TYPES = Object.freeze([
     'REALIZED_PNL',
     'FUNDING_FEE',
@@ -370,6 +513,25 @@ const pagingIdentity = (value) => {
     return /^\d{1,20}$/.test(identity) ? identity : null;
 };
 
+const historyTimeBound = (value, field) => {
+    const omitted = value === null
+        || value === undefined
+        || (typeof value === 'string' && value.length <= 16 && value.trim() === '');
+    if (omitted) return null;
+    const time = normalizeFuturesTradeHistoryTime(value);
+    if (time !== null) return time;
+    throw new FuturesApiError(`A valid ${field} is required`, {
+        code: 'INVALID_TRADE_TIME_BOUND',
+    });
+};
+
+const requireFuturesArrayResponse = (value, endpoint) => {
+    if (Array.isArray(value)) return value;
+    throw new FuturesApiError(`Binance ${endpoint} returned an invalid response`, {
+        code: 'INVALID_RESPONSE',
+    });
+};
+
 const historyIdentity = (value) => {
     if (typeof value === 'string') return pagingIdentity(value);
     return Number.isSafeInteger(value) && value >= 0 ? String(value) : null;
@@ -394,21 +556,9 @@ export const normalizeFuturesHistoryOrder = (order = {}) => Object.freeze({
     time: historyNumber(order.updateTime ?? order.time) ?? 0,
 });
 
-export const normalizeFuturesHistoryTrade = (trade = {}) => Object.freeze({
-    id: historyIdentity(trade.id),
-    orderId: historyIdentity(trade.orderId),
-    symbol: trade.symbol ?? null,
-    side: trade.side ?? null,
-    positionSide: trade.positionSide ?? 'BOTH',
-    price: trade.price ?? '0',
-    quantity: trade.qty ?? '0',
-    quoteQty: trade.quoteQty ?? '0',
-    realizedPnl: trade.realizedPnl ?? '0',
-    commission: trade.commission ?? '0',
-    commissionAsset: trade.commissionAsset ?? null,
-    maker: trade.maker === true,
-    time: historyNumber(trade.time) ?? 0,
-});
+export const normalizeFuturesHistoryTrade = (trade = {}) => (
+    normalizeFuturesTradeHistoryEvidence(trade)
+);
 
 // What the account is configured to for one contract. `/fapi/v3/positionRisk`
 // stopped reporting leverage and margin mode, and `/fapi/v1/symbolConfig` is where
@@ -544,18 +694,23 @@ export const readFuturesLeverageBracketTable = (payload, symbol = null) => {
 // rather than defaulted.
 export const normalizeFuturesIncomeRow = (row = {}) => Object.freeze({
     symbol: typeof row.symbol === 'string' && row.symbol.length > 0
-        ? row.symbol.toUpperCase()
+        ? row.symbol
         : null,
     incomeType: typeof row.incomeType === 'string' && row.incomeType.length > 0
         ? row.incomeType
         : null,
-    income: typeof row.income === 'string' ? row.income : String(row.income ?? '0'),
+    // Missing money/time is malformed evidence, not a zero movement at epoch.
+    // Preserve that absence so the lane validator can fail the whole page
+    // before it advances coverage.
+    income: typeof row.income === 'string'
+        ? row.income
+        : (Number.isFinite(row.income) ? String(row.income) : null),
     asset: typeof row.asset === 'string' && row.asset.length > 0 ? row.asset : null,
-    time: historyNumber(row.time) ?? 0,
+    time: normalizeFuturesTradeHistoryTime(row.time),
     // `tranId` is unique only within one income type — Binance says so on the
     // endpoint — so neither field identifies a row on its own.
-    tranId: historyIdentity(row.tranId),
-    tradeId: historyIdentity(row.tradeId),
+    tranId: row.tranId ?? null,
+    tradeId: row.tradeId ?? null,
 });
 
 export const readFuturesTradedSymbols = (income) => {
@@ -978,22 +1133,32 @@ export class FuturesTradingAdapter {
         this.positionModePromise = null;
     }
 
-    #request(method, path, params = {}, { signed = false } = {}) {
-        const query = signed
-            ? toQueryString({
-                ...params,
-                recvWindow: this.recvWindow,
-                timestamp: Date.now() + (this.serverTimeOffsetMs ?? 0),
-            })
-            : toQueryString(params);
-        const signature = signed
-            ? createHmac('sha256', this.apiSecret).update(query).digest('hex')
-            : null;
-        const finalQuery = signed ? `${query}&signature=${signature}` : query;
+    #request(method, path, params = {}, { signed = false, weight = null } = {}) {
+        // Capture what the caller asked for now, but not the signed time
+        // envelope. Admission happens below this method and can legitimately
+        // outlive recvWindow; timestamping here would manufacture -1021 errors
+        // before a request ever reached Binance.
+        const semanticParams = { ...params };
         const useBody = signed && (method === 'POST' || method === 'PUT');
-        const url = `${this.restOrigin}${path}${!useBody && finalQuery ? `?${finalQuery}` : ''}`;
+        const materializeRequest = () => {
+            const query = signed
+                ? toQueryString({
+                    ...semanticParams,
+                    recvWindow: this.recvWindow,
+                    timestamp: Date.now() + (this.serverTimeOffsetMs ?? 0),
+                })
+                : toQueryString(semanticParams);
+            const signature = signed
+                ? createHmac('sha256', this.apiSecret).update(query).digest('hex')
+                : null;
+            const finalQuery = signed ? `${query}&signature=${signature}` : query;
+            return {
+                url: `${this.restOrigin}${path}${!useBody && finalQuery ? `?${finalQuery}` : ''}`,
+                body: useBody ? finalQuery : null,
+            };
+        };
         return httpsJsonRequest({
-            url,
+            materializeRequest,
             method,
             agent: this.proxyAgent ?? pooledDirectAgent,
             freshAgent: this.proxyAgentWithoutReuse ?? freshDirectAgent,
@@ -1002,19 +1167,19 @@ export class FuturesTradingAdapter {
                 ...(this.apiKey ? { 'X-MBX-APIKEY': this.apiKey } : {}),
                 ...(useBody ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}),
             },
-            body: useBody ? finalQuery : null,
+            weight,
         });
     }
 
     async syncServerTime() {
-        const data = await this.#request('GET', '/fapi/v1/time');
+        const data = await this.#request('GET', '/fapi/v1/time', {}, { weight: 1 });
         if (typeof data?.serverTime === 'number') {
             this.serverTimeOffsetMs = data.serverTime - Date.now();
         }
         return data?.serverTime;
     }
 
-    async #signedRequest(method, path, params = {}) {
+    async #signedRequest(method, path, params = {}, { weight = null } = {}) {
         if (this.serverTimeOffsetMs === null) {
             try {
                 await this.syncServerTime();
@@ -1023,12 +1188,13 @@ export class FuturesTradingAdapter {
             }
         }
         try {
-            return await this.#request(method, path, params, { signed: true });
+            return await this.#request(method, path, params, { signed: true, weight });
         } catch (error) {
             // -1021: timestamp outside recvWindow — resync once and retry.
             if (error?.code === -1021) {
+                noteBinancePhysicalRetry('timestamp');
                 await this.syncServerTime();
-                return this.#request(method, path, params, { signed: true });
+                return this.#request(method, path, params, { signed: true, weight });
             }
             throw error;
         }
@@ -1042,7 +1208,12 @@ export class FuturesTradingAdapter {
     // One-way accounts use positionSide BOTH; hedge accounts require LONG/SHORT.
     getPositionMode() {
         if (!this.positionModePromise) {
-            this.positionModePromise = this.#signedRequest('GET', '/fapi/v1/positionSide/dual')
+            this.positionModePromise = this.#signedRequest(
+                'GET',
+                '/fapi/v1/positionSide/dual',
+                {},
+                { weight: 30 },
+            )
                 .then(data => ({ hedgeMode: data?.dualSidePosition === true }))
                 .catch((error) => {
                     this.positionModePromise = null;
@@ -1281,21 +1452,82 @@ export class FuturesTradingAdapter {
             limit: Math.min(Math.max(Number(limit) || FUTURES_HISTORY_LIMIT, 1), 500),
             ...(from === null ? {} : { orderId: from }),
         });
-        return (Array.isArray(data) ? data : [])
+        return requireFuturesArrayResponse(data, 'order history')
             .map(order => normalizeFuturesHistoryOrder(order))
             .sort((left, right) => right.time - left.time);
     }
 
-    async getTradeHistory({ symbol, limit = FUTURES_TRADE_HISTORY_LIMIT, fromTradeId = null }) {
+    async getTradeHistory({
+        symbol,
+        limit = FUTURES_TRADE_HISTORY_LIMIT,
+        fromTradeId = null,
+        startTime = null,
+        endTime = null,
+    }) {
+        const expectedSymbol = normalizeFuturesTradeHistorySymbol(symbol);
+        if (expectedSymbol === null) {
+            throw new FuturesApiError('A valid trade-history symbol is required', {
+                code: 'INVALID_TRADE_SYMBOL',
+            });
+        }
         const from = pagingIdentity(fromTradeId);
+        const fromTime = historyTimeBound(startTime, 'startTime');
+        const toTime = historyTimeBound(endTime, 'endTime');
+        if (fromTime !== null && toTime !== null && fromTime > toTime) {
+            throw new FuturesApiError('A valid inclusive trade-history window is required', {
+                code: 'INVALID_TRADE_TIME_WINDOW',
+            });
+        }
+        const boundedLimit = Math.min(
+            Math.max(Number(limit) || FUTURES_TRADE_HISTORY_LIMIT, 1),
+            1000,
+        );
         const data = await this.#signedRequest('GET', '/fapi/v1/userTrades', {
-            symbol,
-            limit: Math.min(Math.max(Number(limit) || FUTURES_TRADE_HISTORY_LIMIT, 1), 1000),
-            ...(from === null ? {} : { fromId: from }),
+            symbol: expectedSymbol,
+            limit: boundedLimit,
+            // Binance does not accept `fromId` together with time bounds. A gap
+            // read is identity-based; a cold/backfill read freezes an inclusive
+            // time window and lets the caller subdivide full windows.
+            ...(from === null
+                ? {
+                    ...(fromTime === null ? {} : { startTime: fromTime }),
+                    ...(toTime === null ? {} : { endTime: toTime }),
+                }
+                : { fromId: from }),
         });
-        return (Array.isArray(data) ? data : [])
-            .map(trade => normalizeFuturesHistoryTrade(trade))
-            .sort((left, right) => right.time - left.time);
+        const answered = requireFuturesArrayResponse(data, 'trade history');
+        if (answered.length > boundedLimit) {
+            throw new FuturesApiError('Binance trade history exceeded the requested page bound', {
+                code: 'INVALID_TRADE_PAGE_SIZE',
+            });
+        }
+        const rows = [];
+        for (const trade of answered) {
+            const row = normalizeFuturesHistoryTrade(trade);
+            // Absence is allowed for an exact zero commission. A present value
+            // still has to be canonical; otherwise normalization must not erase
+            // malformed endpoint evidence into an apparently valid absence.
+            if (trade?.commissionAsset !== null
+                && trade?.commissionAsset !== undefined
+                && row.commissionAsset === null) {
+                throw new FuturesApiError(
+                    'Trade-history row contains a non-canonical commission asset',
+                    { code: 'INVALID_TRADE_EVIDENCE' },
+                );
+            }
+            const evidenceError = futuresTradeHistoryEvidenceError(row, {
+                expectedSymbol,
+                startTime: from === null ? fromTime : null,
+                endTime: from === null ? toTime : null,
+            });
+            if (evidenceError !== null) {
+                throw new FuturesApiError(evidenceError.message, {
+                    code: evidenceError.code,
+                });
+            }
+            rows.push(row);
+        }
+        return rows.sort((left, right) => right.time - left.time);
     }
 
     // Reads Binance's own record of what this contract is set to, rather than
@@ -1368,11 +1600,13 @@ export class FuturesTradingAdapter {
             // Bounding the far end is what lets the caller read the recent part of
             // the week on its own: without it every walk starts at the oldest row
             // in the whole window and spends its pages getting back to today.
-            ...(Number.isFinite(Number(endTime)) ? { endTime: Number(endTime) } : {}),
+            ...(endTime !== null && endTime !== undefined && Number.isFinite(Number(endTime))
+                ? { endTime: Number(endTime) }
+                : {}),
             page: selectedPage,
             limit: bounded,
         });
-        const rows = Array.isArray(data) ? data : [];
+        const rows = requireFuturesArrayResponse(data, 'traded-symbol history');
         let lastTime = null;
         for (const row of rows) {
             const time = historyNumber(row?.time);
@@ -1424,12 +1658,19 @@ export class FuturesTradingAdapter {
         const kind = typeof incomeType === 'string' && incomeType.length > 0 ? incomeType : null;
         const data = await this.#signedRequest('GET', '/fapi/v1/income', {
             startTime,
-            ...(Number.isFinite(Number(endTime)) ? { endTime: Number(endTime) } : {}),
+            ...(endTime !== null && endTime !== undefined && Number.isFinite(Number(endTime))
+                ? { endTime: Number(endTime) }
+                : {}),
             ...(kind === null ? {} : { incomeType: kind }),
             page: selectedPage,
             limit: bounded,
         });
-        const rows = Array.isArray(data) ? data : [];
+        const rows = requireFuturesArrayResponse(data, 'income history');
+        if (rows.length > bounded) {
+            throw new FuturesApiError('Binance income history exceeded the requested page bound', {
+                code: 'OVERSIZED_INCOME_PAGE',
+            });
+        }
         return Object.freeze({
             rows: Object.freeze(rows.map(row => normalizeFuturesIncomeRow(row))),
             // A full page means there is another one behind it.

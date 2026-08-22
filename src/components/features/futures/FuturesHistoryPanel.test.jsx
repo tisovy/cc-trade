@@ -5,8 +5,11 @@ import FuturesHistoryPanel, {
   FUTURES_CLOSED_POSITION_WINDOW_STEP,
 } from './FuturesHistoryPanel.jsx'
 import FuturesPortfolioDock from './FuturesPortfolioDock.jsx'
+import { buildFuturesTradeRounds } from '../../../utils/futuresTradeRounds.js'
 
-const ticks = Object.freeze({ BTCUSDT: '0.1', BICOUSDT: '0.001', ETHUSDT: '0.01' })
+const ticks = Object.freeze({
+  BTCUSDT: '0.1', BTCUSDC: '0.1', BICOUSDT: '0.001', ETHUSDT: '0.01',
+})
 
 const history = Object.freeze({
   symbol: 'BTCUSDT',
@@ -35,11 +38,80 @@ const history = Object.freeze({
     price: '58500',
     quantity: '0.004',
     commission: '0.0234',
+    marginAsset: 'USDT',
     realizedPnl: '-96.74',
     time: 1_784_000_000_000,
   })]),
   error: null,
 })
+
+const indexedClosedRound = (overrides = {}) => ({
+  key: 'wallet-round-1',
+  symbol: 'BTCUSDT',
+  positionSide: 'LONG',
+  quantity: '1',
+  fills: 2,
+  notional: 60_000,
+  entryPrice: 60_000,
+  exitPrice: 60_100,
+  realizedPnl: 10,
+  settlementAsset: 'USDT',
+  netPnl: 9,
+  netExact: true,
+  wallet: {
+    walletNet: { asset: 'USDT', amount: '9' },
+    visibleNet: [{ asset: 'USDT', amount: '9' }],
+    qualifications: [],
+  },
+  feesByAsset: [],
+  openTime: 1_784_000_000_000,
+  closeTime: 1_784_000_002_000,
+  open: false,
+  ...overrides,
+})
+
+const canonicalFixtureIndex = historyValue => ({
+  closed: buildFuturesTradeRounds(historyValue?.trades?.map(trade => ({
+    marginAsset: 'USDT',
+    ...trade,
+  })))
+    .filter(round => !round.open && round.exitPrice !== null)
+    .map((round) => {
+      const visibleNet = [{
+        asset: round.settlementAsset,
+        amount: Number(round.netPnl).toFixed(2),
+      }]
+      for (const fee of round.feesByAsset ?? []) {
+        if (fee.asset === round.settlementAsset) continue
+        visibleNet.push({
+          asset: fee.asset,
+          amount: `-${fee.amountExact ?? fee.amount}`,
+        })
+      }
+      const qualifications = [visibleNet.length > 1
+        ? 'MULTI_ASSET'
+        : 'OWNERSHIP_NOT_ADDITIVE']
+      return {
+        ...round,
+        netExact: false,
+        wallet: {
+          walletNet: null,
+          visibleNet,
+          qualifications,
+        },
+      }
+    }),
+  unresolved: [],
+  sharedAdjustments: [],
+})
+
+const CanonicalHistoryPanelFixture = props => (
+  <FuturesHistoryPanel
+    {...props}
+    tradeRoundIndex={props.tradeRoundIndex
+      ?? canonicalFixtureIndex(props.history)}
+  />
+)
 
 describe('FuturesHistoryPanel', () => {
   // The exchange reports executions; the operator trades positions. One close of
@@ -47,7 +119,7 @@ describe('FuturesHistoryPanel', () => {
   // a fifth of the PnL each is not the number a session is reviewed with.
   it('reports one row per position rather than one per execution', () => {
     render(
-      <FuturesHistoryPanel
+      <CanonicalHistoryPanelFixture
         view="tradeHistory"
         symbol="BICOUSDT"
         tickSizes={ticks}
@@ -70,21 +142,22 @@ describe('FuturesHistoryPanel', () => {
     expect(table).toHaveTextContent('2.632')
     // 3 000 contracts entered at 2.554 is 7 662 USDT — the size the desk sizes in.
     expect(table).toHaveTextContent('7662')
-    // The whole round's result, not a fill's slice of it — and what reached the
-    // wallet, not the +234.00 the exchange settled before its own commission.
+    // The whole round's visible result, not a fill's slice of it.
     expect(table).toHaveTextContent('+233.94')
     // The fee is a component of the result, not a column of its own: it was
     // crowding the only reading this panel exists for off the right edge.
     expect(table).not.toHaveTextContent('0.0621')
-    // Every component that was applied, so the row can be reconciled against
-    // Binance instead of taken on the desk's word.
-    expect(within(table).getByTitle(/\+234\.00 realized · less 0\.0621 commission · is \+233\.94 in the wallet/))
-      .toBeInTheDocument()
+    // The canonical fixture supplies the visible subtotal and an explicit
+    // ownership qualification; the gross Binance figure remains its own cell.
+    expect(within(table).getByTitle(
+      'Visible net: +233.94 USDT · Exact ownership is not established',
+    )).toBeInTheDocument()
+    expect(table).toHaveTextContent('Exact ownership is not established')
   })
 
   it('shows the complete reconstructed round after a break-even edge close and add', () => {
     render(
-      <FuturesHistoryPanel
+      <CanonicalHistoryPanelFixture
         view="tradeHistory"
         symbol="BICOUSDT"
         tickSizes={ticks}
@@ -104,24 +177,192 @@ describe('FuturesHistoryPanel', () => {
     expect(rows).toHaveLength(2)
     const cells = within(rows[1]).getAllByRole('cell')
     expect(cells[2]).toHaveTextContent('LONG')
-    expect(cells[3]).toHaveAttribute('title', '12 contracts · 3 fills')
+    expect(cells[3]).toHaveAttribute('title', 'Closed volume: 12 contracts · 3 fills')
     expect(cells[4]).toHaveTextContent('97.500')
     expect(cells[4]).toHaveAttribute(
       'title',
       'Opened before this window of trades — entry recovered from the realized PnL',
     )
+    const recovered = within(cells[4]).getByRole('note', {
+      name: 'Recovered entry price from exchange realized PnL',
+    })
+    expect(recovered).toHaveTextContent('Recovered')
+    expect(recovered).toHaveAttribute('tabindex', '0')
+    recovered.focus()
+    expect(recovered).toHaveFocus()
     expect(cells[5]).toHaveTextContent('113.333')
     // The exchange's own figure and the desk's result are two columns, because
     // they are two numbers: the first is what Binance reports and what its app
-    // shows, the second is what the round left in the wallet.
-    expect(cells[6]).toHaveTextContent('+190.00')
+    // shows, the second is the visible fill subtotal until the wallet ledger
+    // proves every component.
+    expect(cells[6]).toHaveTextContent('+190 USDT')
     expect(cells[7]).toHaveTextContent('+184.00')
     expect(cells[7]).toHaveAttribute(
       'title',
-      '+190.00 realized · less 6.0000 commission · is +184.00 in the wallet '
-      + '· missing funding the income read did not cover',
+      'Visible net: +184.00 USDT · Exact ownership is not established',
     )
     expect(screen.queryByText('SHORT')).not.toBeInTheDocument()
+  })
+
+  it('calls a result Wallet Net only when the ledger supplies an exact wallet amount', () => {
+    const exactAmount = '116.4000000000000000001'
+    render(
+      <FuturesHistoryPanel
+        view="tradeHistory"
+        symbol="BTCUSDT"
+        tickSizes={ticks}
+        history={{ ...history, trades: [] }}
+        tradeRoundIndex={{
+          closed: [indexedClosedRound({
+            netPnl: 116.4,
+            wallet: {
+              walletNet: { asset: 'USDT', amount: exactAmount },
+              visibleNet: [{ asset: 'USDT', amount: exactAmount }],
+              qualifications: [],
+            },
+          })],
+          unresolved: [],
+          sharedAdjustments: [],
+        }}
+      />,
+    )
+
+    const result = within(screen.getByRole('row', { name: /BTCUSDT/ }))
+      .getAllByRole('cell')[7]
+    expect(result).toHaveTextContent('Wallet Net')
+    expect(result).toHaveTextContent(`+${exactAmount} USDT`)
+    expect(result).not.toHaveTextContent('Partial')
+    expect(result).toHaveAttribute('title', `Wallet Net: +${exactAmount} USDT`)
+  })
+
+  it('renders bounded exact Gross values without cent rounding or Number precision loss', () => {
+    const exactGross = [
+      {
+        key: 'gross-positive-sub-cent',
+        realizedPnl: 0.0049,
+        realizedPnlExact: '0.0049',
+        expected: '+0.0049 USDT',
+      },
+      {
+        key: 'gross-negative-sub-cent',
+        realizedPnl: -0.0049,
+        realizedPnlExact: '-0.0049',
+        expected: '−0.0049 USDT',
+      },
+      {
+        key: 'gross-beyond-safe-integer',
+        realizedPnl: Number('9007199254740993.12'),
+        realizedPnlExact: '9007199254740993.12',
+        expected: '+9007199254740993.12 USDT',
+      },
+      {
+        key: 'gross-canonical-negative-zero',
+        realizedPnl: -0,
+        realizedPnlExact: '-0.0000',
+        expected: '0.0000 USDT',
+      },
+    ]
+    render(
+      <FuturesHistoryPanel
+        view="tradeHistory"
+        symbol="BTCUSDT"
+        tickSizes={ticks}
+        history={{ ...history, trades: [] }}
+        tradeRoundIndex={{
+          closed: exactGross.map((reading, index) => indexedClosedRound({
+            key: reading.key,
+            closeTime: 1_784_000_002_000 + index,
+            realizedPnl: reading.realizedPnl,
+            realizedPnlExact: reading.realizedPnlExact,
+          })),
+          unresolved: [],
+          sharedAdjustments: [],
+        }}
+      />,
+    )
+
+    const table = screen.getByRole('table', { name: 'Position history' })
+    for (const reading of exactGross) {
+      const gross = within(table.querySelector(`[data-round-key="${reading.key}"]`))
+        .getAllByRole('cell')[6]
+      expect(gross.textContent).toBe(reading.expected)
+    }
+  })
+
+  it('renders a USDC round gross and exact wallet net in USDC', () => {
+    render(
+      <FuturesHistoryPanel
+        view="tradeHistory"
+        symbol="BTCUSDC"
+        tickSizes={ticks}
+        history={{ ...history, symbol: 'BTCUSDC', trades: [] }}
+        tradeRoundIndex={{
+          closed: [indexedClosedRound({
+            key: 'usdc-round',
+            symbol: 'BTCUSDC',
+            settlementAsset: 'USDC',
+            realizedPnl: 10,
+            netPnl: 7,
+            wallet: {
+              walletNet: { asset: 'USDC', amount: '7' },
+              visibleNet: [{ asset: 'USDC', amount: '7' }],
+              qualifications: [],
+            },
+          })],
+          unresolved: [],
+          sharedAdjustments: [],
+        }}
+      />,
+    )
+
+    const cells = within(screen.getByRole('row', { name: /BTCUSDC/ }))
+      .getAllByRole('cell')
+    expect(cells[6]).toHaveTextContent('+10 USDC')
+    expect(cells[6]).not.toHaveTextContent('USDT')
+    expect(cells[7]).toHaveTextContent('Wallet Net')
+    expect(cells[7]).toHaveTextContent('+7 USDC')
+    expect(cells[7]).not.toHaveTextContent('USDT')
+    expect(cells[7]).toHaveAttribute('title', 'Wallet Net: +7 USDC')
+  })
+
+  it('renders partial visible net and its reason for keyboard and touch without relying on hover', () => {
+    render(
+      <FuturesHistoryPanel
+        view="tradeHistory"
+        symbol="BTCUSDT"
+        tickSizes={ticks}
+        history={{ ...history, trades: [] }}
+        tradeRoundIndex={{
+          closed: [indexedClosedRound({
+            netExact: false,
+            wallet: {
+              walletNet: null,
+              visibleNet: [{ asset: 'USDT', amount: '116' }],
+              qualifications: ['COMMISSION_COVERAGE_INCOMPLETE'],
+            },
+          })],
+          unresolved: [],
+          sharedAdjustments: [],
+        }}
+      />,
+    )
+
+    const result = within(screen.getByRole('row', { name: /BTCUSDT/ }))
+      .getAllByRole('cell')[7]
+    expect(result).toHaveTextContent('Visible net')
+    expect(result).toHaveTextContent('+116 USDT')
+    expect(result).not.toHaveTextContent('Wallet Net')
+
+    const qualification = within(result).getByRole('note', {
+      name: 'Partial. Commission history is incomplete',
+    })
+    expect(qualification).toHaveTextContent('Partial')
+    expect(qualification).toHaveTextContent('Commission history is incomplete')
+    expect(qualification).not.toHaveAttribute('title')
+    qualification.focus()
+    expect(qualification).toHaveFocus()
+    fireEvent.touchStart(qualification)
+    expect(qualification).toHaveTextContent('Commission history is incomplete')
   })
 
   // The window of trades the exchange returns is bounded: its oldest rows can be
@@ -130,7 +371,12 @@ describe('FuturesHistoryPanel', () => {
   // it rather than showing a dash where the entry belongs.
   it('recovers the entry price of a position opened before the window', () => {
     render(
-      <FuturesHistoryPanel view="tradeHistory" symbol="BTCUSDT" history={history} tickSizes={ticks} />,
+      <CanonicalHistoryPanelFixture
+        view="tradeHistory"
+        symbol="BTCUSDT"
+        history={history}
+        tickSizes={ticks}
+      />,
     )
     const cells = within(screen.getAllByRole('row')[1]).getAllByRole('cell')
     expect(cells[0]).toHaveTextContent('BTCUSDT')
@@ -149,54 +395,13 @@ describe('FuturesHistoryPanel', () => {
     expect(cells[7]).toHaveTextContent('−96.76')
   })
 
-  // Binance reports realized PnL before its own commission and reports funding on
-  // no fill at all, so a round held across a funding boundary settled for a
-  // different amount than its realized PnL states. That difference is why the
-  // desk and the Binance app disagreed.
-  it('reports what the round put into the wallet, funding included', () => {
-    render(
-      <FuturesHistoryPanel
-        view="tradeHistory"
-        symbol="BICOUSDT"
-        tickSizes={ticks}
-        history={{
-          ...history,
-          symbol: 'BICOUSDT',
-          trades: [
-            { id: 1, symbol: 'BICOUSDT', side: 'BUY', price: '100', quantity: '10', commission: '2', realizedPnl: '0', commissionAsset: 'USDT', time: 1_000 },
-            { id: 2, symbol: 'BICOUSDT', side: 'SELL', price: '112', quantity: '10', commission: '2', realizedPnl: '120', commissionAsset: 'USDT', time: 5_000 },
-          ],
-        }}
-        settledIncome={{
-          from: 500,
-          readAt: 9_000,
-          complete: true,
-          rows: [
-            { symbol: 'BICOUSDT', component: 'funding', amount: -7.1, asset: 'USDT', time: 3_000 },
-            // After the round closed: not this round's charge.
-            { symbol: 'BICOUSDT', component: 'funding', amount: -9.9, asset: 'USDT', time: 8_000 },
-          ],
-        }}
-      />,
-    )
-    const cells = within(screen.getAllByRole('row')[1]).getAllByRole('cell')
-    // 120 realized, less 4 commission, less 7.1 funding.
-    expect(cells[6]).toHaveTextContent('+120.00')
-    expect(cells[7]).toHaveTextContent('+108.90')
-    expect(cells[7]).toHaveAttribute(
-      'title',
-      '+120.00 realized · less 4.0000 commission · −7.10 funding · is +108.90 in the wallet',
-    )
-    expect(cells[7]).not.toHaveClass('is-partial')
-  })
-
   // Binance charges commission in BNB whenever the account holds it — the
   // default, since it discounts the fee for doing so. Summed as one number a BNB
   // quantity was subtracted from a USDT result: 0.0085 BNB read as 0.0085 USDT
   // on a round that actually paid about five.
   it('states a commission charged in BNB in BNB, and keeps it out of the result', () => {
     render(
-      <FuturesHistoryPanel
+      <CanonicalHistoryPanelFixture
         view="tradeHistory"
         symbol="BICOUSDT"
         tickSizes={ticks}
@@ -214,45 +419,73 @@ describe('FuturesHistoryPanel', () => {
     const cells = within(screen.getAllByRole('row')[1]).getAllByRole('cell')
     // The BNB fee is not subtracted from a USDT result — there is no rate here
     // to subtract it by.
-    expect(cells[6]).toHaveTextContent('+120.00')
+    expect(cells[6]).toHaveTextContent('+120 USDT')
     expect(cells[7]).toHaveTextContent('+120.00')
-    expect(cells[7].getAttribute('title')).toContain('0.00850000 BNB commission, not included')
+    expect(cells[7]).toHaveTextContent('−0.0085 BNB')
+    expect(cells[7].getAttribute('title')).toContain('Amounts settle in multiple assets')
   })
 
-  // A total silently missing eight hours of funding is worse than one that names
-  // its own edge.
-  it('says when the income read does not reach back to the round', () => {
+  it('renders BNB-only and multi-asset ledger readings without converting or hiding them', () => {
     render(
       <FuturesHistoryPanel
         view="tradeHistory"
-        symbol="BICOUSDT"
+        symbol="BTCUSDT"
         tickSizes={ticks}
-        history={{
-          ...history,
-          symbol: 'BICOUSDT',
-          trades: [
-            { id: 1, symbol: 'BICOUSDT', side: 'BUY', price: '100', quantity: '10', commission: '2', realizedPnl: '0', commissionAsset: 'USDT', time: 1_000 },
-            { id: 2, symbol: 'BICOUSDT', side: 'SELL', price: '112', quantity: '10', commission: '2', realizedPnl: '120', commissionAsset: 'USDT', time: 5_000 },
+        history={{ ...history, trades: [] }}
+        tradeRoundIndex={{
+          closed: [
+            indexedClosedRound({
+              key: 'bnb-only',
+              netPnl: 0,
+              wallet: {
+                walletNet: { asset: 'BNB', amount: '-0.003' },
+                visibleNet: [{ asset: 'BNB', amount: '-0.003' }],
+                qualifications: [],
+              },
+            }),
+            indexedClosedRound({
+              key: 'multi-asset',
+              closeTime: 1_784_000_001_000,
+              netExact: false,
+              netPnl: 120,
+              wallet: {
+                walletNet: null,
+                visibleNet: [
+                  { asset: 'USDT', amount: '120' },
+                  { asset: 'BNB', amount: '-0.0045' },
+                ],
+                qualifications: ['MULTI_ASSET'],
+              },
+            }),
           ],
+          unresolved: [],
+          sharedAdjustments: [],
         }}
-        settledIncome={{ from: 3_000, readAt: 9_000, complete: true, rows: [] }}
       />,
     )
-    const cells = within(screen.getAllByRole('row')[1]).getAllByRole('cell')
-    // The qualification belongs to the result, not to the exchange's own
-    // figure: what Binance realized is not made incomplete by funding nobody
-    // read, and marking it so would qualify a number that needs none.
-    expect(cells[6]).not.toHaveClass('is-partial')
-    expect(cells[7]).toHaveClass('is-partial')
-    expect(cells[7].getAttribute('title'))
-      .toContain('missing funding the income read did not cover')
+
+    const table = screen.getByRole('table', { name: 'Position history' })
+    const bnbResult = within(table.querySelector('[data-round-key="bnb-only"]'))
+      .getAllByRole('cell')[7]
+    expect(bnbResult).toHaveTextContent('Wallet Net')
+    expect(bnbResult).toHaveTextContent('−0.003 BNB')
+    expect(bnbResult).not.toHaveTextContent('—')
+
+    const multiResult = within(table.querySelector('[data-round-key="multi-asset"]'))
+      .getAllByRole('cell')[7]
+    expect(multiResult).toHaveTextContent('Visible net')
+    expect(multiResult).toHaveTextContent('+120 USDT')
+    expect(multiResult).toHaveTextContent('−0.0045 BNB')
+    expect(within(multiResult).getByRole('note', {
+      name: 'Multi-asset. Amounts settle in multiple assets',
+    })).toBeInTheDocument()
   })
 
   // A position still running has no exit and no result. It belongs to the live
   // positions table, and among closed rows it read as noise.
   it('lists closed positions only, never one that is still open', () => {
     render(
-      <FuturesHistoryPanel
+      <CanonicalHistoryPanelFixture
         view="tradeHistory"
         symbol="BICOUSDT"
         tickSizes={ticks}
@@ -273,11 +506,11 @@ describe('FuturesHistoryPanel', () => {
     expect(screen.getByRole('table')).not.toHaveTextContent('open')
   })
 
-  // A contract count is a size only next to the price of the contract. 237 518 BMT
-  // and 5 210 BEAT are the same column of digits and nothing like the same money.
-  it('sizes a closed position in USDT and keeps the contract count on the row', () => {
+  // This is cumulative turnover, not peak position size, and the name must not
+  // silently turn one into the other.
+  it('names cumulative closed turnover Closed volume and keeps its contract count', () => {
     render(
-      <FuturesHistoryPanel
+      <CanonicalHistoryPanelFixture
         view="tradeHistory"
         symbol="BICOUSDT"
         tickSizes={ticks}
@@ -293,7 +526,13 @@ describe('FuturesHistoryPanel', () => {
     const size = within(screen.getAllByRole('row')[1]).getAllByRole('cell')[3]
     // 4 000 at 2.5 is 10 000 USDT, which the narrow column abbreviates.
     expect(size).toHaveTextContent('10.0k')
-    expect(size).toHaveAttribute('title', '4000 contracts · 2 fills')
+    expect(size).toHaveAttribute('title', 'Closed volume: 4000 contracts · 2 fills')
+    expect(screen.getByRole('columnheader', { name: 'Closed volume' })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'Gross' })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: 'NET' })).toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: 'Realized' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: 'Net result' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('columnheader', { name: 'Size' })).not.toBeInTheDocument()
   })
 
   // The read is bounded on both axes — how many contracts, and how far back the
@@ -301,7 +540,7 @@ describe('FuturesHistoryPanel', () => {
   // tell "there were none" from "this list does not go there".
   it('states how many contracts were read and how far back the fills reach', () => {
     render(
-      <FuturesHistoryPanel
+      <CanonicalHistoryPanelFixture
         view="tradeHistory"
         symbol="BICOUSDT"
         tickSizes={ticks}
@@ -328,7 +567,7 @@ describe('FuturesHistoryPanel', () => {
       { id: 2, symbol: 'BICOUSDT', side: 'SELL', price: '2.600', quantity: '4000', commission: '0.03', realizedPnl: '400', time: 1_784_000_002_000 },
     ]
     const { rerender } = render(
-      <FuturesHistoryPanel
+      <CanonicalHistoryPanelFixture
         view="tradeHistory"
         symbol="BICOUSDT"
         tickSizes={ticks}
@@ -340,7 +579,7 @@ describe('FuturesHistoryPanel', () => {
     expect(screen.getByText(/more may have been traded/)).toBeInTheDocument()
 
     rerender(
-      <FuturesHistoryPanel
+      <CanonicalHistoryPanelFixture
         view="tradeHistory"
         symbol="BICOUSDT"
         tickSizes={ticks}
@@ -354,7 +593,7 @@ describe('FuturesHistoryPanel', () => {
 
   it('says so plainly when the window holds no closed position at all', () => {
     render(
-      <FuturesHistoryPanel
+      <CanonicalHistoryPanelFixture
         view="tradeHistory"
         symbol="BICOUSDT"
         tickSizes={ticks}
@@ -371,6 +610,305 @@ describe('FuturesHistoryPanel', () => {
     // An empty table is only informative if the operator knows how wide the read
     // was: the backend reads a bounded set of contracts.
     expect(screen.getByText('No closed positions across the 2 contracts read.')).toBeInTheDocument()
+  })
+
+  it('renders the closed-scoped shared adjustment once and ignores broader open-only money', () => {
+    const closedShared = {
+      ownerId: 'BTCUSDT',
+      symbol: 'BTCUSDT',
+      components: ['funding'],
+      entryIds: ['income:closed-funding'],
+      walletNet: null,
+      visibleNet: [{ asset: 'USDT', amount: '-3' }],
+      qualifications: [],
+    }
+    const openOnly = {
+      ownerId: 'ETHUSDT',
+      symbol: 'ETHUSDT',
+      components: ['funding'],
+      entryIds: ['income:open-funding'],
+      walletNet: null,
+      visibleNet: [{ asset: 'USDT', amount: '-9' }],
+      qualifications: [],
+    }
+    render(
+      <FuturesHistoryPanel
+        view="tradeHistory"
+        symbol="BTCUSDT"
+        tickSizes={ticks}
+        history={{ ...history, trades: [] }}
+        tradeRoundIndex={{
+          closed: [
+            indexedClosedRound(),
+            indexedClosedRound({
+              key: 'wallet-round-2',
+              openTime: 1_783_999_996_000,
+              closeTime: 1_783_999_998_000,
+            }),
+          ],
+          unresolved: [],
+          // This is the closed-scoped ledger subset consumed by the panel.
+          sharedAdjustments: [closedShared],
+          // Kept deliberately broader to prove the panel does not reach around
+          // its presentation contract and render open-only account money.
+          walletLedger: { ownership: { contractShared: [closedShared, openOnly] } },
+        }}
+      />,
+    )
+
+    const shared = screen.getByRole('region', { name: 'Shared wallet adjustments' })
+    expect(within(shared).getByText('BTCUSDT shared funding')).toBeInTheDocument()
+    expect(within(shared).getAllByText('−3 USDT')).toHaveLength(1)
+    expect(within(shared).getAllByRole('listitem')).toHaveLength(1)
+    expect(screen.queryByText('ETHUSDT shared funding')).not.toBeInTheDocument()
+    expect(screen.queryByText('−9 USDT')).not.toBeInTheDocument()
+  })
+
+  it('labels a delayed global commission credit as unattributed and renders it once', () => {
+    const forbiddenMemberEntries = new Proxy(new Array(24_000), {
+      get() {
+        throw new Error('shared member entries were scanned during render')
+      },
+    })
+    const delayedCredit = {
+      kind: 'unattributedShared',
+      ownerId: 'BTCUSDT',
+      symbol: 'BTCUSDT',
+      components: ['commissionCredit'],
+      entries: forbiddenMemberEntries,
+      entryIds: ['income:post-close-rebate'],
+      walletNet: null,
+      visibleNet: [{ asset: 'USDT', amount: '0.4' }],
+      qualifications: ['IDENTITY_UNRELIABLE'],
+    }
+    render(
+      <FuturesHistoryPanel
+        view="tradeHistory"
+        symbol="BTCUSDT"
+        tickSizes={ticks}
+        history={{ ...history, trades: [] }}
+        tradeRoundIndex={{
+          closed: [indexedClosedRound()],
+          unresolved: [],
+          sharedAdjustments: [delayedCredit],
+        }}
+      />,
+    )
+
+    const shared = screen.getByRole('region', { name: 'Shared wallet adjustments' })
+    expect(within(shared).getByText('BTCUSDT unattributed commission credit'))
+      .toBeInTheDocument()
+    expect(within(shared).getAllByText('+0.4 USDT')).toHaveLength(1)
+    expect(within(shared).getByText('An income identity is not reliable'))
+      .toBeInTheDocument()
+    expect(within(shared).getByRole('listitem')).toHaveAccessibleName(
+      expect.stringContaining('An income identity is not reliable'),
+    )
+    expect(within(shared).getAllByRole('listitem')).toHaveLength(1)
+  })
+
+  it('presents a reliable-identity shared representative as conflicted, not ordinary Shared', () => {
+    render(
+      <FuturesHistoryPanel
+        view="tradeHistory"
+        symbol="BTCUSDT"
+        tickSizes={ticks}
+        history={{ ...history, trades: [] }}
+        tradeRoundIndex={{
+          closed: [indexedClosedRound()],
+          unresolved: [],
+          sharedAdjustments: [{
+            kind: 'contractShared',
+            ownerId: 'BTCUSDT',
+            symbol: 'BTCUSDT',
+            leg: null,
+            components: ['funding'],
+            entryIds: ['income:shared-conflict'],
+            walletNet: null,
+            visibleNet: [{ asset: 'USDT', amount: '-3' }],
+            identityConflict: true,
+            qualifications: ['IDENTITY_CONFLICT'],
+          }],
+        }}
+      />,
+    )
+
+    const adjustment = screen.getByRole('listitem', {
+      name: /BTCUSDT conflicted funding/,
+    })
+    expect(adjustment).toHaveTextContent('Conflict')
+    expect(adjustment).toHaveTextContent('Conflicting payloads reuse one income identity')
+    expect(adjustment).not.toHaveTextContent('Shared')
+    expect(adjustment).toHaveAccessibleName(
+      expect.stringContaining('conflicted representative, counted once and not exact'),
+    )
+  })
+
+  it('keeps Closed values visible through every v2 settled-resource state and exposes retry', () => {
+    const onRetrySettledIncome = vi.fn()
+    const resource = (status, overrides = {}) => ({
+      version: 2,
+      status,
+      successfulAt: null,
+      error: null,
+      ...overrides,
+    })
+    const panel = settledIncome => (
+      <FuturesHistoryPanel
+        view="tradeHistory"
+        symbol="BTCUSDT"
+        tickSizes={ticks}
+        history={history}
+        settledIncome={settledIncome}
+        onRetrySettledIncome={onRetrySettledIncome}
+        tradeRoundIndex={{
+          closed: [indexedClosedRound()],
+          unresolved: [],
+          sharedAdjustments: [],
+        }}
+      />
+    )
+    const walletResult = () => within(screen.getByRole('row', { name: /BTCUSDT/ }))
+      .getAllByRole('cell')[7]
+    const expectQualifiedRetainedValue = () => {
+      const result = walletResult()
+      expect(result).toHaveTextContent('Visible net')
+      expect(result).toHaveTextContent('+9 USDT')
+      expect(result).not.toHaveTextContent('Wallet Net')
+      expect(within(result).getByRole('note', {
+        name: 'Partial. Settled-income verification is not ready',
+      })).toBeInTheDocument()
+    }
+
+    const { rerender } = render(panel(resource('loading')))
+    expect(screen.getByRole('status')).toHaveTextContent(
+      'Wallet adjustments are loading. Confirmed values remain visible but qualified.',
+    )
+    expectQualifiedRetainedValue()
+
+    rerender(panel(resource('ready', { successfulAt: 1_784_000_100_000 })))
+    expect(screen.getByRole('status')).toHaveTextContent('Wallet adjustments ready · verified')
+    expect(screen.queryByRole('button', { name: 'Retry wallet adjustments' }))
+      .not.toBeInTheDocument()
+    expect(walletResult()).toHaveTextContent('Wallet Net')
+    expect(walletResult()).toHaveTextContent('+9 USDT')
+    expect(walletResult()).not.toHaveTextContent('Partial')
+
+    rerender(panel(resource('stale', {
+      successfulAt: 1_784_000_100_000,
+      error: { code: 'FUTURES_API_ERROR', message: 'Funding verification failed.' },
+    })))
+    expect(screen.getByRole('alert')).toHaveTextContent('Funding verification failed.')
+    expect(screen.getByRole('alert')).toHaveTextContent('Showing the confirmed reading from')
+    expectQualifiedRetainedValue()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry wallet adjustments' }))
+
+    rerender(panel(resource('error', {
+      error: { code: 'FUTURES_API_ERROR', message: 'Wallet history is unavailable.' },
+    })))
+    expect(screen.getByRole('alert')).toHaveTextContent('Wallet history is unavailable.')
+    expectQualifiedRetainedValue()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry wallet adjustments' }))
+
+    rerender(panel(resource('idle')))
+    expect(screen.getByRole('status')).toHaveTextContent('Wallet adjustments have not been read.')
+    expectQualifiedRetainedValue()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry wallet adjustments' }))
+    expect(onRetrySettledIncome).toHaveBeenCalledTimes(3)
+  })
+
+  it('keeps closed shared-adjustment DOM identity when reconciliation reorders and extends it', () => {
+    const laneSizedEntryIds = Array.from({ length: 24_000 }, (unused, index) => (
+      `income:btc-funding-${index}`
+    ))
+    const forbiddenMemberEntries = new Proxy(new Array(24_000), {
+      get() {
+        throw new Error('shared member entries were scanned during rerender')
+      },
+    })
+    const btc = {
+      kind: 'contractShared',
+      ownerId: 'BTCUSDT',
+      symbol: 'BTCUSDT',
+      components: ['funding'],
+      entries: forbiddenMemberEntries,
+      entryIds: laneSizedEntryIds,
+      visibleNet: [{ asset: 'USDT', amount: '-3' }],
+      qualifications: [],
+    }
+    const eth = {
+      kind: 'contractShared',
+      ownerId: 'ETHUSDT',
+      symbol: 'ETHUSDT',
+      components: ['insurance'],
+      entries: forbiddenMemberEntries,
+      entryIds: ['income:eth-insurance'],
+      visibleNet: [{ asset: 'USDT', amount: '4' }],
+      qualifications: [],
+    }
+    const panel = adjustments => (
+      <FuturesHistoryPanel
+        view="tradeHistory"
+        symbol="BTCUSDT"
+        history={history}
+        tradeRoundIndex={{
+          closed: [indexedClosedRound()],
+          unresolved: [],
+          sharedAdjustments: adjustments,
+        }}
+      />
+    )
+    const { rerender } = render(panel([btc, eth]))
+    const btcRow = screen.getByRole('listitem', { name: /BTCUSDT shared funding/ })
+    const ethRow = screen.getByRole('listitem', { name: /ETHUSDT shared insurance/ })
+    btcRow.focus()
+
+    rerender(panel([eth, {
+      ...btc,
+      entryIds: [...laneSizedEntryIds, 'income:btc-funding-new'],
+    }]))
+
+    expect(screen.getByRole('listitem', { name: /BTCUSDT shared funding/ })).toBe(btcRow)
+    expect(screen.getByRole('listitem', { name: /ETHUSDT shared insurance/ })).toBe(ethRow)
+    expect(btcRow).toHaveFocus()
+  })
+
+  it('states unresolved empty scope without claiming there were no closed positions', () => {
+    render(
+      <FuturesHistoryPanel
+        view="tradeHistory"
+        symbol="BTCUSDT"
+        tickSizes={ticks}
+        history={{
+          ...history,
+          symbols: ['BTCUSDT'],
+          discoveryComplete: true,
+          trades: [],
+        }}
+        tradeRoundIndex={{
+          closed: [],
+          sharedAdjustments: [],
+          unresolved: [{
+            key: 'unresolved:BTCUSDT:LONG',
+            positionKey: 'BTCUSDT:LONG',
+            symbol: 'BTCUSDT',
+            leg: 'LONG',
+            open: false,
+            reasons: ['trade-coverage-incomplete'],
+          }],
+        }}
+      />,
+    )
+
+    const scopeNotice = screen.getByRole('region', {
+      name: 'Closed-position scope is partial',
+    })
+    expect(scopeNotice).toHaveTextContent('BTCUSDT LONG: trade history incomplete')
+    expect(scopeNotice).toHaveTextContent('No numeric position row was inferred')
+    expect(screen.queryByText(/^No closed positions/)).not.toBeInTheDocument()
+    expect(screen.getByText(/No resolved closed positions/))
+      .toHaveTextContent('This partial review cannot prove that none exist')
+    expect(screen.queryByRole('table', { name: 'Position history' })).not.toBeInTheDocument()
   })
 
   it('lists orders at the contract tick with what became of them', () => {
@@ -604,6 +1142,30 @@ describe('FuturesHistoryPanel', () => {
     expect(older.getAttribute('title')).toBeTruthy()
   })
 
+  it.each(['07/14', '14.07'])(
+    'keeps the localized %s day label as an accessible row-group heading',
+    (localizedDay) => {
+      const dateFormat = vi.spyOn(Date.prototype, 'toLocaleDateString')
+        .mockReturnValue(localizedDay)
+      try {
+        render(
+          <FuturesHistoryPanel
+            view="orderHistory"
+            symbol="BTCUSDT"
+            tickSizes={ticks}
+            history={{
+              ...history,
+              orders: [{ ...history.orders[0], time: 1_784_000_000_000 }],
+            }}
+          />,
+        )
+        expect(screen.getByRole('rowgroup', { name: localizedDay })).toBeInTheDocument()
+      } finally {
+        dateFormat.mockRestore()
+      }
+    },
+  )
+
   it('keeps two thousand closed positions in a bounded local window and reaches both edges', () => {
     const roundCount = 2_000
     const newestClose = Date.UTC(2026, 6, 14, 12, 0, 0)
@@ -729,6 +1291,75 @@ describe('FuturesHistoryPanel', () => {
     expect(onLoadHistory).not.toHaveBeenCalled()
   })
 
+  it('anchors an older closed-position window by surviving round identity', () => {
+    const newestClose = Date.UTC(2026, 6, 14, 12, 0, 0)
+    const makeRound = index => indexedClosedRound({
+      key: `round-${index}`,
+      closeTime: newestClose - index * 1_000,
+      openTime: newestClose - index * 1_000 - 500,
+    })
+    const closed = Array.from({ length: 240 }, (_, index) => makeRound(index))
+    const heldHistory = {
+      ...history,
+      trades: [],
+      readViews: { orders: null, trades: history.readAt },
+    }
+    const { rerender } = render(
+      <FuturesHistoryPanel
+        view="tradeHistory"
+        symbol="BTCUSDT"
+        history={heldHistory}
+        tradeRoundIndex={{ closed, unresolved: [], sharedAdjustments: [] }}
+      />,
+    )
+    const firstRoundKey = () => screen.getByRole('table', { name: 'Position history' })
+      .querySelector('[data-round-key]')
+      ?.getAttribute('data-round-key')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Older' }))
+    expect(firstRoundKey()).toBe(`round-${FUTURES_CLOSED_POSITION_WINDOW_STEP}`)
+
+    const prepended = [indexedClosedRound({
+      key: 'round-new',
+      closeTime: newestClose + 1_000,
+      openTime: newestClose + 500,
+    }), ...closed]
+    rerender(
+      <FuturesHistoryPanel
+        view="tradeHistory"
+        symbol="BTCUSDT"
+        history={heldHistory}
+        tradeRoundIndex={{ closed: prepended, unresolved: [], sharedAdjustments: [] }}
+      />,
+    )
+    expect(firstRoundKey()).toBe(`round-${FUTURES_CLOSED_POSITION_WINDOW_STEP}`)
+
+    const replacement = closed.slice(190)
+    rerender(
+      <FuturesHistoryPanel
+        view="tradeHistory"
+        symbol="BTCUSDT"
+        history={heldHistory}
+        tradeRoundIndex={{ closed: replacement, unresolved: [], sharedAdjustments: [] }}
+      />,
+    )
+    expect(firstRoundKey()).toBe('round-190')
+    expect(screen.queryByRole('button', { name: 'Older' })).not.toBeInTheDocument()
+
+    const regrown = closed.slice(100)
+    rerender(
+      <FuturesHistoryPanel
+        view="tradeHistory"
+        symbol="BTCUSDT"
+        history={heldHistory}
+        tradeRoundIndex={{ closed: regrown, unresolved: [], sharedAdjustments: [] }}
+      />,
+    )
+    expect(firstRoundKey()).toBe('round-100')
+    expect(screen.getByText(`Showing 1–${FUTURES_CLOSED_POSITION_WINDOW_SIZE} of 140`))
+      .toBeInTheDocument()
+  })
+
   // Narrowing reads the reading already held. The panel issues no read of its
   // own, and the line beneath the table describes the read rather than what a
   // filter left of it.
@@ -846,7 +1477,7 @@ describe('FuturesHistoryPanel', () => {
   it('reports every contract the account traded, each at its own tick', () => {
     const onSymbolChange = vi.fn()
     render(
-      <FuturesHistoryPanel
+      <CanonicalHistoryPanelFixture
         view="tradeHistory"
         symbol="BTCUSDT"
         tickSizes={ticks}

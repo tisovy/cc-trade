@@ -1,6 +1,4 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
-import { formatSignedUsdt } from '../../../utils/futuresOrderPresentation.js'
-import { buildFuturesTradeRounds } from '../../../utils/futuresTradeRounds.js'
 import {
   formatCompactUsdt,
   formatExchangePrice,
@@ -8,6 +6,7 @@ import {
   formatUsdtAmount,
 } from '../../../utils/futuresPriceFormat.js'
 import { exactFuturesDeskTime, formatFuturesDeskTime } from '../../../utils/futuresDeskTime.js'
+import { futuresSharedAdjustmentKey } from '../../../utils/futuresWalletPresentation.js'
 
 const EMPTY_ROWS = Object.freeze([])
 const EMPTY_TICKS = Object.freeze({})
@@ -193,6 +192,186 @@ const OUTCOME_FILTERS = Object.freeze([
   { id: 'unfilled', label: 'Unfilled' },
 ])
 
+const WALLET_QUALIFICATION_LABELS = Object.freeze({
+  TRADE_COVERAGE_INCOMPLETE: 'Trade history is incomplete',
+  COMMISSION_COVERAGE_INCOMPLETE: 'Commission history is incomplete',
+  FUNDING_COVERAGE_INCOMPLETE: 'Funding history is incomplete',
+  INSURANCE_COVERAGE_INCOMPLETE: 'Insurance history is incomplete',
+  COMMISSION_CREDIT_COVERAGE_INCOMPLETE: 'Commission-credit history is incomplete',
+  FUNDING_SHARED: 'Funding is shown once under shared adjustments',
+  INSURANCE_SHARED: 'Insurance is shown once under shared adjustments',
+  COMMISSION_CREDIT_SHARED: 'Commission credit is shown once under shared adjustments',
+  MULTI_ASSET: 'Amounts settle in multiple assets',
+  OWNERSHIP_NOT_ADDITIVE: 'Exact ownership is not established',
+  IDENTITY_UNRELIABLE: 'An income identity is not reliable',
+  IDENTITY_CONFLICT: 'Conflicting payloads reuse one income identity',
+  SETTLED_RESOURCE_NOT_READY: 'Settled-income verification is not ready',
+})
+
+const NON_READY_SETTLED_STATUSES = new Set(['idle', 'loading', 'stale', 'error'])
+
+const UNRESOLVED_REASON_LABELS = Object.freeze({
+  'left-boundary-unproven': 'opening boundary not reached',
+  'trade-coverage-incomplete': 'trade history incomplete',
+  'history-continuity-unproven': 'trade-history continuity not proven',
+  'trade-oldest-edge-unproven': 'oldest trade-history edge not reached',
+  'trade-newest-edge-unproven': 'newest trade-history edge not reached',
+  'history-page-limited': 'trade-history request limit reached',
+  'history-retention-limited': 'local trade-history retention limit reached',
+  'commission-coverage-incomplete': 'commission history incomplete',
+  'terminal-snapshot-mismatch': 'position snapshot does not match the fill basis',
+  'terminal-snapshot-unreconciled': 'position snapshot was not reconciled',
+  'fill-basis-missing': 'fill basis missing',
+  'invalid-fill': 'one or more fills could not be identified',
+})
+
+const SHARED_COMPONENT_LABELS = Object.freeze({
+  funding: 'funding',
+  insurance: 'insurance',
+  commissionCredit: 'commission credit',
+})
+
+const ledgerReading = (reading) => {
+  if (reading === null || typeof reading !== 'object') return null
+  const asset = String(reading.asset ?? '').trim().toUpperCase()
+  const amount = String(reading.amount ?? '').trim()
+  return asset === '' || amount === '' ? null : { asset, amount }
+}
+
+const signedLedgerAmount = (reading) => {
+  const held = ledgerReading(reading)
+  if (held === null) return null
+  const amount = /^[+-]?0+(?:\.0+)?$/.test(held.amount)
+    ? held.amount.replace(/^[+-]/, '')
+    : held.amount.startsWith('-')
+      ? `−${held.amount.slice(1)}`
+      : held.amount.startsWith('+') ? held.amount : `+${held.amount}`
+  return `${amount} ${held.asset}`
+}
+
+const ledgerTone = (reading, fallback = 0) => {
+  const held = ledgerReading(reading)
+  if (held !== null) {
+    if (/^[+-]?0+(?:\.0+)?$/.test(held.amount)) return 'flat'
+    return held.amount.startsWith('-') ? 'negative' : 'positive'
+  }
+  const numeric = Number(fallback)
+  return numeric === 0 || !Number.isFinite(numeric)
+    ? 'flat'
+    : numeric > 0 ? 'positive' : 'negative'
+}
+
+const qualificationLabel = code => (
+  WALLET_QUALIFICATION_LABELS[code]
+  ?? String(code ?? '').toLowerCase().replaceAll('_', ' ')
+)
+
+const walletBucket = round => (
+  round?.wallet !== null && typeof round?.wallet === 'object' ? round.wallet : null
+)
+
+const walletAmounts = (wallet) => {
+  const exact = ledgerReading(wallet?.walletNet)
+  if (exact !== null) return [exact]
+  return (Array.isArray(wallet?.visibleNet) ? wallet.visibleNet : [])
+    .map(ledgerReading)
+    .filter(reading => reading !== null)
+}
+
+const walletQualificationCodes = wallet => [...new Set(
+  (Array.isArray(wallet?.qualifications) ? wallet.qualifications : [])
+    .map(code => String(code ?? '').trim().toUpperCase())
+    .filter(Boolean),
+)]
+
+const roundMoneyReading = (round, settledStatus = null) => {
+  const wallet = walletBucket(round)
+  if (wallet !== null) {
+    const walletNet = ledgerReading(wallet.walletNet)
+    const resourceNotReady = NON_READY_SETTLED_STATUSES.has(settledStatus)
+    const qualificationCodes = [...new Set([
+      ...walletQualificationCodes(wallet),
+      ...(resourceNotReady ? ['SETTLED_RESOURCE_NOT_READY'] : []),
+    ])]
+    // `netExact` is a presentation guard supplied by the index. The bucket is
+    // still the authority: the flag can lower a reading, never promote one.
+    const exact = walletNet !== null
+      && round?.netExact !== false
+      && qualificationCodes.length === 0
+      ? walletNet
+      : null
+    return {
+      exact: exact !== null,
+      legacy: false,
+      label: exact === null ? 'Visible net' : 'Wallet Net',
+      amounts: exact === null ? walletAmounts(wallet) : [exact],
+      qualificationCodes,
+      qualifications: qualificationCodes.length > 0
+        ? qualificationCodes.map(qualificationLabel)
+        : exact === null ? ['Exact wallet coverage is unavailable'] : [],
+    }
+  }
+
+  // Transitional rows still render, but the old aggregate cannot prove all
+  // wallet components or their asset ownership. It is therefore visibly
+  // qualified instead of being promoted to an exact wallet result.
+  const qualifications = ['Canonical wallet coverage is unavailable']
+  if (round?.partial === true) qualifications.unshift('Trade history is incomplete')
+  if (round?.fundingComplete === false) qualifications.unshift('Funding history is incomplete')
+  return {
+    exact: false,
+    legacy: true,
+    label: 'Visible net',
+    amounts: [],
+    qualificationCodes: [],
+    qualifications,
+  }
+}
+
+const qualificationBadge = reading => (
+  reading.qualificationCodes.length === 1
+    && reading.qualificationCodes[0] === 'MULTI_ASSET'
+    ? 'Multi-asset'
+    : reading.qualificationCodes.some(code => code.endsWith('_SHARED'))
+      ? 'Shared'
+      : 'Partial'
+)
+
+const sharedAdjustmentName = (adjustment) => {
+  const scope = adjustment?.symbol
+    ? `${adjustment.symbol}${adjustment.leg ? ` ${adjustment.leg}` : ''}`
+    : 'Account'
+  const identityConflict = walletQualificationCodes(adjustment).includes('IDENTITY_CONFLICT')
+  const ownership = identityConflict
+    ? 'conflicted'
+    : adjustment?.kind === 'unattributedShared'
+      ? 'unattributed'
+      : 'shared'
+  const components = (Array.isArray(adjustment?.components) ? adjustment.components : [])
+    .map(component => SHARED_COMPONENT_LABELS[component] ?? component)
+  return components.length === 0
+    ? `${scope} ${ownership} adjustment`
+    : `${scope} ${ownership} ${components.join(' / ')}`
+}
+
+const unresolvedScopesOf = (segments) => {
+  const scopes = new Map()
+  for (const segment of Array.isArray(segments) ? segments : []) {
+    const symbol = String(segment?.symbol ?? '').trim().toUpperCase()
+    const leg = String(segment?.leg ?? '').trim().toUpperCase()
+    const key = String(segment?.positionKey ?? `${symbol || 'Unknown'}:${leg || 'position'}`)
+    if (!scopes.has(key)) scopes.set(key, { key, symbol, leg, reasons: new Set() })
+    const scope = scopes.get(key)
+    for (const reason of Array.isArray(segment?.reasons) ? segment.reasons : []) {
+      scope.reasons.add(UNRESOLVED_REASON_LABELS[reason] ?? String(reason).replaceAll('-', ' '))
+    }
+  }
+  return [...scopes.values()].map(scope => ({
+    ...scope,
+    reasons: scope.reasons.size === 0 ? ['fill scope unresolved'] : [...scope.reasons],
+  }))
+}
+
 // What happened, and what it cost. Realized PnL is the number a trader reviews
 // a session with, so it is the one column that never abbreviates its sign.
 //
@@ -207,27 +386,15 @@ const OUTCOME_FILTERS = Object.freeze([
 // come off the income record already signed and are added. Stating them apart is
 // what lets an operator reconcile the row against Binance instead of taking the
 // desk's word for it.
-const roundResultTitle = (round) => {
-  const parts = [`${formatSignedUsdt(round.realizedPnl)} realized`]
-  for (const fee of round.feesByAsset ?? []) {
-    parts.push(fee.asset === 'USDT'
-      ? `less ${formatUsdtAmount(fee.amount, 4)} commission`
-      // No rate to convert it at, so it is stated in its own asset and is not in
-      // the result beside it.
-      : `less ${formatUsdtAmount(fee.amount, 8)} ${fee.asset} commission, not included`)
+const roundResultTitle = (round, reading = roundMoneyReading(round)) => {
+  if (!reading.legacy) {
+    const amounts = reading.amounts.map(signedLedgerAmount).filter(Boolean)
+    return [
+      `${reading.label}: ${amounts.length > 0 ? amounts.join(' · ') : 'unknown'}`,
+      ...reading.qualifications,
+    ].join(' · ')
   }
-  if (round.funding !== null && round.funding !== undefined) {
-    parts.push(`${formatSignedUsdt(round.funding)} funding${
-      round.fundingShared ? ' (the contract\u2019s \u2014 both legs were open)' : ''}`)
-  }
-  if (round.insuranceClear !== null && round.insuranceClear !== undefined) {
-    parts.push(`${formatSignedUsdt(round.insuranceClear)} insurance`)
-  }
-  parts.push(`is ${formatSignedUsdt(round.netPnl)} in the wallet`)
-  if (round.fundingComplete === false) {
-    parts.push('missing funding the income read did not cover')
-  }
-  return parts.join(' \u00b7 ')
+  return ['Visible net: unknown', ...reading.qualifications].join(' \u00b7 ')
 }
 
 export const FuturesHistoryPanel = ({
@@ -241,13 +408,13 @@ export const FuturesHistoryPanel = ({
   tradeRoundIndex = null,
   tickSizes = EMPTY_TICKS,
   onSymbolChange,
+  onRetrySettledIncome,
 }) => {
   // Narrowing is local to the reading already held: it issues no read, and the
   // scope statement beneath the table keeps describing the read rather than what
   // is left of it after a filter.
   const [outcomeFilter, setOutcomeFilter] = useState('all')
   const [contractOnly, setContractOnly] = useState(false)
-  const [roundWindowStart, setRoundWindowStart] = useState(0)
   const roundWindowFocusRef = useRef(null)
   const newerRoundsRef = useRef(null)
   const olderRoundsRef = useRef(null)
@@ -285,23 +452,55 @@ export const FuturesHistoryPanel = ({
   const sharedRounds = view === 'tradeHistory' && Array.isArray(tradeRoundIndex?.closed)
     ? tradeRoundIndex.closed
     : null
-  const fallbackRounds = useMemo(() => (
-    view === 'tradeHistory' && sharedRounds === null
-      ? buildFuturesTradeRounds(trades, {
-        // What the exchange charged the contract while each round was held.
-        // Without it a round's result is the trade's own arithmetic and nothing
-        // else, which is not what reached the wallet.
-        income: settledIncome?.rows ?? null,
-        incomeFrom: settledIncome?.from ?? null,
-      }).filter(round => !round.open && round.exitPrice !== null)
-      : EMPTY_ROWS
-  ), [sharedRounds, trades, view, settledIncome])
-  const rounds = sharedRounds ?? fallbackRounds
+  // There is deliberately no legacy arithmetic fallback. Deriving a second
+  // model here would collapse hedge legs and copy overlapping funding again.
+  const canonicalModelMissing = view === 'tradeHistory' && sharedRounds === null
+  const rounds = sharedRounds ?? EMPTY_ROWS
+  const unresolvedIndex = view === 'tradeHistory' && Array.isArray(tradeRoundIndex?.unresolved)
+    ? tradeRoundIndex.unresolved
+    : EMPTY_ROWS
+  const unresolvedScopes = useMemo(
+    () => unresolvedScopesOf(unresolvedIndex),
+    [unresolvedIndex],
+  )
+  const sharedAdjustments = view === 'tradeHistory'
+    && Array.isArray(tradeRoundIndex?.sharedAdjustments)
+    ? tradeRoundIndex.sharedAdjustments
+    : EMPTY_ROWS
   const maximumRoundWindowStart = Math.max(
     0,
     rounds.length - FUTURES_CLOSED_POSITION_WINDOW_SIZE,
   )
-  const visibleRoundStart = Math.min(roundWindowStart, maximumRoundWindowStart)
+  const [roundWindow, setRoundWindow] = useState(() => ({
+    rounds,
+    start: 0,
+    anchorKeys: null,
+  }))
+  let heldRoundWindow = roundWindow
+  if (roundWindow.rounds !== rounds) {
+    const anchors = new Set(roundWindow.anchorKeys ?? EMPTY_ROWS)
+    const survivingAnchor = anchors.size === 0
+      ? -1
+      : rounds.findIndex(round => anchors.has(round?.key))
+    const nextStart = Math.min(
+      survivingAnchor >= 0 ? survivingAnchor : roundWindow.start,
+      maximumRoundWindowStart,
+    )
+    heldRoundWindow = {
+      rounds,
+      start: nextStart,
+      anchorKeys: nextStart === 0
+        ? null
+        : rounds.slice(
+          nextStart,
+          nextStart + FUTURES_CLOSED_POSITION_WINDOW_SIZE,
+        ).map(round => round?.key),
+    }
+    // React discards this render and immediately retries with the reconciled
+    // window, so no shifted row set is committed to the DOM.
+    setRoundWindow(heldRoundWindow)
+  }
+  const visibleRoundStart = heldRoundWindow.start
   const visibleRoundEnd = Math.min(
     rounds.length,
     visibleRoundStart + FUTURES_CLOSED_POSITION_WINDOW_SIZE,
@@ -314,11 +513,21 @@ export const FuturesHistoryPanel = ({
   const hasOlderRounds = visibleRoundEnd < rounds.length
   const moveRoundWindow = (direction) => {
     roundWindowFocusRef.current = direction
-    setRoundWindowStart((current) => {
-      const clamped = Math.min(current, maximumRoundWindowStart)
-      return direction === 'older'
-        ? Math.min(maximumRoundWindowStart, clamped + FUTURES_CLOSED_POSITION_WINDOW_STEP)
-        : Math.max(0, clamped - FUTURES_CLOSED_POSITION_WINDOW_STEP)
+    const nextStart = direction === 'older'
+      ? Math.min(
+        maximumRoundWindowStart,
+        visibleRoundStart + FUTURES_CLOSED_POSITION_WINDOW_STEP,
+      )
+      : Math.max(0, visibleRoundStart - FUTURES_CLOSED_POSITION_WINDOW_STEP)
+    setRoundWindow({
+      rounds,
+      start: nextStart,
+      anchorKeys: nextStart === 0
+        ? null
+        : rounds.slice(
+          nextStart,
+          nextStart + FUTURES_CLOSED_POSITION_WINDOW_SIZE,
+        ).map(round => round?.key),
     })
   }
   useEffect(() => {
@@ -409,6 +618,136 @@ export const FuturesHistoryPanel = ({
         </p>
       )
       : null
+  const settledStatus = view === 'tradeHistory' && settledIncome?.version === 2
+    ? settledIncome.status
+    : null
+  const settledSuccessfulAt = Number.isSafeInteger(settledIncome?.successfulAt)
+    ? settledIncome.successfulAt
+    : null
+  const settledNotice = settledStatus === null ? null : (
+    <p
+      className={`futures-workstation-history-notice${
+        settledStatus === 'stale' || settledStatus === 'error' ? ' is-error' : ''}`}
+      role={settledStatus === 'stale' || settledStatus === 'error' ? 'alert' : 'status'}
+    >
+      <span>
+        {settledStatus === 'loading'
+          ? 'Wallet adjustments are loading. Confirmed values remain visible but qualified.'
+          : settledStatus === 'ready'
+            ? `Wallet adjustments ready${settledSuccessfulAt === null
+              ? ''
+              : ` · verified ${formatFuturesDeskTime(settledSuccessfulAt)}`}.`
+            : settledStatus === 'stale' || settledStatus === 'error'
+              ? `${settledIncome?.error?.message ?? 'Wallet-adjustment refresh failed.'}${
+                settledSuccessfulAt === null
+                  ? ''
+                  : ` Showing the confirmed reading from ${formatFuturesDeskTime(settledSuccessfulAt)}.`}`
+              : 'Wallet adjustments have not been read.'}
+      </span>
+      {(settledStatus === 'stale' || settledStatus === 'error' || settledStatus === 'idle')
+        && typeof onRetrySettledIncome === 'function' ? (
+          <button
+            type="button"
+            className="futures-workstation-history-filter"
+            onClick={onRetrySettledIncome}
+          >
+            Retry wallet adjustments
+          </button>
+        ) : null}
+    </p>
+  )
+  const closedScopeIncomplete = view === 'tradeHistory'
+    && (canonicalModelMissing
+      || history?.discoveryComplete === false
+      || unresolvedScopes.length > 0)
+  const unresolvedNotice = !closedScopeIncomplete ? null : (
+    <section
+      className="futures-workstation-history-scope"
+      aria-label="Closed-position scope is partial"
+      tabIndex={0}
+    >
+      <strong>Closed-position scope is partial</strong>
+      {canonicalModelMissing ? (
+        <span>Canonical wallet reconciliation is unavailable; no numeric position row was inferred.</span>
+      ) : null}
+      {history?.discoveryComplete === false ? (
+        <span>Contract discovery did not finish; more positions may exist.</span>
+      ) : null}
+      {unresolvedScopes.length > 0 ? (
+        <ul>
+          {unresolvedScopes.map((scopeItem) => {
+            const scopeName = scopeItem.symbol === ''
+              ? 'Unknown contract'
+              : `${scopeItem.symbol}${scopeItem.leg === '' ? '' : ` ${scopeItem.leg}`}`
+            return (
+              <li key={scopeItem.key}>
+                <strong>{scopeName}</strong>
+                {`: ${scopeItem.reasons.join(', ')}. No numeric position row was inferred.`}
+              </li>
+            )
+          })}
+        </ul>
+      ) : null}
+    </section>
+  )
+  const sharedAdjustmentSection = sharedAdjustments.length === 0 ? null : (
+    <section
+      className="futures-workstation-history-shared"
+      aria-label="Shared wallet adjustments"
+    >
+      <header>
+        <strong>Shared adjustments</strong>
+        <span>Counted once outside position rows</span>
+      </header>
+      <div role="list">
+        {sharedAdjustments.map((adjustment) => {
+          const amounts = walletAmounts(adjustment)
+          const qualificationCodes = walletQualificationCodes(adjustment)
+          const qualifications = qualificationCodes.map(qualificationLabel)
+          const identityConflict = qualificationCodes.includes('IDENTITY_CONFLICT')
+          const name = sharedAdjustmentName(adjustment)
+          return (
+            <div
+              className="futures-workstation-history-adjustment"
+              role="listitem"
+              tabIndex={0}
+              aria-label={[
+                name,
+                ...amounts.map(signedLedgerAmount).filter(Boolean),
+                identityConflict
+                  ? 'conflicted representative, counted once and not exact'
+                  : 'shared and counted once',
+                ...qualifications,
+              ].join('. ')}
+              key={futuresSharedAdjustmentKey(adjustment)}
+            >
+              <span className="futures-workstation-history-adjustment-name">{name}</span>
+              <span className="futures-workstation-history-amounts">
+                {amounts.length === 0 ? (
+                  <strong className="futures-workstation-history-amount is-flat">Unknown amount</strong>
+                ) : amounts.map(amount => (
+                  <strong
+                    className={`futures-workstation-history-amount is-${ledgerTone(amount)}`}
+                    key={`${amount.asset}:${amount.amount}`}
+                  >
+                    {signedLedgerAmount(amount)}
+                  </strong>
+                ))}
+              </span>
+              <span className="futures-workstation-history-qualification">
+                <em>{identityConflict ? 'Conflict' : 'Shared'}</em>
+                <span>
+                  {qualifications.length === 0
+                    ? 'Counted once here; not copied into a position Net.'
+                    : qualifications.join(' · ')}
+                </span>
+              </span>
+            </div>
+          )
+        })}
+      </div>
+    </section>
+  )
   const tickOf = rowSymbol => tickSizes[rowSymbol] ?? null
   const symbolCell = (rowSymbol) => {
     const name = typeof rowSymbol === 'string' && rowSymbol.length > 0 ? rowSymbol : '—'
@@ -466,13 +805,22 @@ export const FuturesHistoryPanel = ({
       return (
         <>
           {notice}
-          <p className="futures-workstation-empty">No closed positions{scope}.</p>
+          {settledNotice}
+          {unresolvedNotice}
+          <p className="futures-workstation-empty">
+            {closedScopeIncomplete
+              ? `No resolved closed positions${scope}. This partial review cannot prove that none exist.`
+              : `No closed positions${scope}.`}
+          </p>
+          {sharedAdjustmentSection}
         </>
       )
     }
     return (
       <>
         {notice}
+        {settledNotice}
+        {unresolvedNotice}
         {rounds.length > FUTURES_CLOSED_POSITION_WINDOW_SIZE ? (
           <div
             className="futures-workstation-history-window"
@@ -509,40 +857,42 @@ export const FuturesHistoryPanel = ({
           aria-rowcount={rounds.length + 1}
         >
           {/* Two money columns, because they are two different figures and the
-              operator reconciles the desk against Binance with both. "Realized"
-              is the exchange's own: the sum of the realized PnL it reported on
-              this round's fills, before its commission and with no funding in it
-              — the number the Binance app prints under that name, so the two can
-              be compared straight across. "Net" is what the round did to the
-              wallet once the commission came off and the funding went on.
-              One column carrying the net under the exchange's name was the whole
-              of the third complaint: the figures differed from the app because
-              they were not the same quantity, and nothing on the row said so. */}
+              operator reconciles the desk against Binance with both. "Gross"
+              is the exchange's fill figure before commission and funding. The
+              final column names itself Wallet Net only when all ledger lanes are
+              complete; otherwise it exposes the visible subtotal and why that
+              subtotal is qualified. */}
           <div className="futures-workstation-dock-row is-head is-rounds" role="row">
             <span role="columnheader">Symbol</span>
             <span role="columnheader">Closed</span>
             <span role="columnheader">Side</span>
-            <span role="columnheader">Size</span>
+            <span role="columnheader">Closed volume</span>
             <span role="columnheader">Entry</span>
             <span role="columnheader">Exit</span>
-            <span role="columnheader" title="What Binance reported realized on this round’s fills, before its own commission and with no funding in it — the figure the Binance app shows under this name">Realized</span>
-            <span role="columnheader" title="What the round left in the wallet: the realized PnL less the commission, plus the funding paid or received while it was held">Net</span>
+            <span role="columnheader" title="What Binance reported realized on this round’s fills, before its own commission and with no funding in it">Gross</span>
+            <span role="columnheader">NET</span>
           </div>
           {groupedRounds.map(group => dayGroup(group, (round) => {
+            const money = roundMoneyReading(round, settledStatus)
+            const primaryAmount = money.amounts.find(
+              amount => amount.asset === round.settlementAsset,
+            )
+              ?? money.amounts[0]
+            const moneyBadge = money.exact ? null : qualificationBadge(money)
             // The tone follows the result the row states, not the gross the
             // exchange settled before its own fees: a round that realized a
             // profit and gave all of it back in funding is not a winner.
-            const tone = round.netPnl === 0
-              ? 'flat'
-              : round.netPnl > 0 ? 'positive' : 'negative'
+            const tone = ledgerTone(primaryAmount, round.netPnl)
             // The gross carries its own tone rather than the result's. A round
             // that realized a profit and gave all of it back in funding is not a
             // winner, and it did still realize the profit: colouring the two
             // cells alike would hide exactly the case the second column exists
             // to show.
-            const grossTone = round.realizedPnl === 0
-              ? 'flat'
-              : round.realizedPnl > 0 ? 'positive' : 'negative'
+            const realizedReading = ledgerReading({
+              amount: round.realizedPnlExact ?? round.realizedPnl,
+              asset: round.settlementAsset,
+            })
+            const grossTone = ledgerTone(realizedReading, round.realizedPnl)
             const leg = round.positionSide === 'LONG' ? 'buy' : 'sell'
             return (
               <div
@@ -560,12 +910,12 @@ export const FuturesHistoryPanel = ({
                 <span role="cell" className={`futures-workstation-dock-side is-${leg}`}>
                   {round.positionSide}
                 </span>
-                {/* Sized in USDT, like every other size on this desk. The contract
-                    count is what the exchange worked in, so it stays exact on the
-                    element rather than taking the column. */}
+                {/* This is cumulative turnover through the closed round, not the
+                    maximum simultaneous position size. The contract count stays
+                    exact on the element while the visible reading remains USDT. */}
                 <span
                   role="cell"
-                  title={`${round.quantity} contracts · ${round.fills} fill${round.fills === 1 ? '' : 's'}`}
+                  title={`Closed volume: ${round.quantity} contracts · ${round.fills} fill${round.fills === 1 ? '' : 's'}`}
                 >
                   {formatCompactUsdt(round.notional)}
                 </span>
@@ -574,11 +924,24 @@ export const FuturesHistoryPanel = ({
                     where the number came from rather than showing a dash. */}
                 <span
                   role="cell"
+                  className={round.entryImplied
+                    ? 'futures-workstation-history-entry is-recovered'
+                    : 'futures-workstation-history-entry'}
                   title={round.entryImplied
                     ? 'Opened before this window of trades — entry recovered from the realized PnL'
                     : undefined}
                 >
-                  {formatPriceOrAbsent(round.entryPrice, tickOf(round.symbol))}
+                  <span>{formatPriceOrAbsent(round.entryPrice, tickOf(round.symbol))}</span>
+                  {round.entryImplied ? (
+                    <em
+                      className="futures-workstation-history-recovered"
+                      role="note"
+                      tabIndex={0}
+                      aria-label="Recovered entry price from exchange realized PnL"
+                    >
+                      Recovered
+                    </em>
+                  ) : null}
                 </span>
                 <span role="cell">{formatPriceOrAbsent(round.exitPrice, tickOf(round.symbol))}</span>
                 {/* The exchange's own figure, stated as the exchange states it.
@@ -595,27 +958,51 @@ export const FuturesHistoryPanel = ({
                     : 'Binance’s own realized PnL on this round’s fills, before '
                       + 'its commission and with no funding in it'}
                 >
-                  {formatSignedUsdt(round.realizedPnl)}
+                  {signedLedgerAmount(realizedReading) ?? 'Unknown'}
                 </span>
-                {/* What the round actually put into or took out of the wallet:
-                    the figure beside it less the commission the exchange charged
-                    on the fills, plus the funding it charged or paid while the
-                    position was held. Every component is on the element, because
-                    a net figure nobody can decompose cannot be checked against
-                    Binance — which is the only check that settles an argument
-                    about it. */}
+                {/* `walletNet` is the only exact wallet claim. Anything else is a
+                    visible, qualified ledger subtotal; every asset and reason is
+                    rendered rather than hidden in this supplementary title. */}
                 <span
                   role="cell"
-                  className={`futures-workstation-dock-pnl is-${tone}${
-                    round.fundingComplete === false ? ' is-partial' : ''}`}
-                  title={roundResultTitle(round)}
+                  className={`futures-workstation-dock-pnl futures-workstation-history-net is-${tone}${
+                    money.exact ? '' : ' is-partial'}`}
+                  title={roundResultTitle(round, money)}
                 >
-                  <strong>{formatSignedUsdt(round.netPnl)}</strong>
+                  <span className="futures-workstation-history-measure">{money.label}</span>
+                  <span className="futures-workstation-history-amounts">
+                    {money.legacy ? (
+                      <strong className="futures-workstation-history-amount is-flat">
+                        Unknown
+                      </strong>
+                    ) : money.amounts.length === 0 ? (
+                      <strong className="futures-workstation-history-amount is-flat">Unknown</strong>
+                    ) : money.amounts.map(amount => (
+                      <strong
+                        className={`futures-workstation-history-amount is-${ledgerTone(amount)}`}
+                        key={`${amount.asset}:${amount.amount}`}
+                      >
+                        {signedLedgerAmount(amount)}
+                      </strong>
+                    ))}
+                  </span>
+                  {money.exact ? null : (
+                    <span
+                      className="futures-workstation-history-qualification"
+                      role="note"
+                      tabIndex={0}
+                      aria-label={`${moneyBadge}. ${money.qualifications.join('. ')}`}
+                    >
+                      <em>{moneyBadge}</em>
+                      <span>{money.qualifications.join(' · ')}</span>
+                    </span>
+                  )}
                 </span>
               </div>
             )
           }))}
         </div>
+        {sharedAdjustmentSection}
         {reach(trades.length, oldestTradeAt)}
       </>
     )

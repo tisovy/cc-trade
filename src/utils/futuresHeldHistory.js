@@ -21,9 +21,17 @@ export const TERMINAL_FUTURES_ORDER_STATUSES = Object.freeze(new Set([
 // Shared by the live held review and its persistent store. Gap pages and stream
 // folds must not turn a bounded review into session-long unbounded memory.
 export const FUTURES_HELD_HISTORY_MAX_ORDERS_PER_CONTRACT = 200
-export const FUTURES_HELD_HISTORY_MAX_TRADES_PER_CONTRACT = 1_000
+// Dense contracts are acquired by bounded time-window subdivision. Keeping the
+// old single-page ceiling here would throw the recovered opening fill away
+// immediately and make the backend backfill pure request waste.
+export const FUTURES_HELD_HISTORY_MAX_TRADES_PER_CONTRACT = 8_000
 
 export const createHeldFuturesHistory = () => Object.freeze({
+  version: 2,
+  generation: 0,
+  // Trade consumers are deliberately isolated from order-only history reads.
+  // This revision advances only when fill rows or their coverage can change.
+  tradeGeneration: 0,
   symbol: null,
   status: 'idle',
   orders: Object.freeze([]),
@@ -36,6 +44,12 @@ export const createHeldFuturesHistory = () => Object.freeze({
   // Whether that count is the whole set. Discovery can fail, or run out of pages
   // on a week busier than the walk is bounded to.
   discoveryComplete: true,
+  // Discovery and endpoint reads can finish out of order. Their request stamps
+  // are kept separately so a newer narrow fill read does not erase an older,
+  // still useful order answer — while an older discovery cannot regress the
+  // account-wide scope statement.
+  discoveryReadAt: null,
+  lastResponseAt: null,
   error: null,
   // When the held rows were read. `null` means nothing has ever been read, which
   // is the one case where an empty panel is honest.
@@ -76,9 +90,102 @@ const boundNewestByContract = (rows, limit) => {
   })
 }
 
+const truncatedContractsOf = (rows, keyOf, limit) => {
+  const counts = new Map()
+  const seen = new Set()
+  const truncated = new Set()
+  for (const row of rows) {
+    const key = keyOf(row)
+    if (seen.has(key)) continue
+    seen.add(key)
+    const contract = contractOf(row)
+    const count = (counts.get(contract) ?? 0) + 1
+    counts.set(contract, count)
+    if (count > limit) truncated.add(contract)
+  }
+  return truncated
+}
+
+const retentionLimitedCoverage = (coverage, rows, symbol) => {
+  const oldestRetained = rows
+    .filter(row => contractOf(row) === symbol)
+    .map(row => coverageTime(row?.time))
+    .filter(time => time !== null)
+    .reduce((oldest, time) => oldest === null ? time : Math.min(oldest, time), null)
+  return Object.freeze({
+    ...coverage,
+    coveredFrom: oldestRetained === null
+      ? coverage.coveredFrom
+      : Math.max(coverage.coveredFrom ?? oldestRetained, oldestRetained),
+    complete: false,
+    retentionLimited: true,
+  })
+}
+
 const identityOf = value => (
   value === null || value === undefined || value === '' ? null : String(value)
 )
+
+const coverageTime = value => (
+  Number.isSafeInteger(value) && value >= 0 ? value : null
+)
+
+const advanceGeneration = value => (
+  Number.isSafeInteger(value) && value >= 0 && value < Number.MAX_SAFE_INTEGER
+    ? value + 1
+    : 1
+)
+
+const readTradeCoverage = (value, rows, now) => {
+  if (value?.version === 2) {
+    const targetFrom = coverageTime(value.targetFrom)
+    const targetTo = coverageTime(value.targetTo)
+    const coveredFrom = coverageTime(value.coveredFrom)
+    const coveredTo = coverageTime(value.coveredTo)
+    const statedFlatBoundary = value.flatBoundary === true
+      ? true
+      : coverageTime(value.flatBoundary)
+    const flatBoundary = statedFlatBoundary === true
+      ? true
+      : statedFlatBoundary !== null
+        && coveredFrom !== null
+        && statedFlatBoundary <= coveredFrom
+        ? statedFlatBoundary
+        : false
+    return Object.freeze({
+      version: 2,
+      targetFrom,
+      targetTo,
+      coveredFrom,
+      coveredTo,
+      complete: value.complete === true
+        && targetFrom !== null
+        && targetTo !== null
+        && coveredFrom !== null
+        && coveredTo !== null
+        && coveredFrom <= targetFrom
+        && coveredTo >= targetTo,
+      pageLimited: value.pageLimited === true,
+      retentionLimited: value.retentionLimited === true,
+      continuityComplete: value.continuityComplete === true,
+      flatBoundary,
+    })
+  }
+  // A v1 reading still contributes its canonical fills, but its one-page shape
+  // cannot prove the opening boundary. Fail closed and let the round fold prove
+  // any later flat boundary from the fills themselves.
+  return Object.freeze({
+    version: 2,
+    targetFrom: null,
+    targetTo: now,
+    coveredFrom: null,
+    coveredTo: now,
+    complete: false,
+    pageLimited: rows.length >= 1_000,
+    retentionLimited: false,
+    continuityComplete: false,
+  })
+}
 
 const higherIdentity = (left, right) => {
   if (left === null) return right
@@ -121,10 +228,9 @@ const mergeRows = (readRows, heldRows, foldedKeys, keyOf, covered, incremental, 
       || !covered.has(contractOf(row))
       || incremental.has(contractOf(row))
   })
-  const rows = boundNewestByContract(
-    [...readRows, ...survivors].sort(newestFirst),
-    limit,
-  )
+  const candidates = [...readRows, ...survivors].sort(newestFirst)
+  const truncatedContracts = truncatedContractsOf(candidates, keyOf, limit)
+  const rows = boundNewestByContract(candidates, limit)
   const retained = new Set(rows.map(keyOf))
   const retainedSurvivors = survivors.filter(row => retained.has(keyOf(row)))
   return {
@@ -141,8 +247,18 @@ const mergeRows = (readRows, heldRows, foldedKeys, keyOf, covered, incremental, 
     carried: retainedSurvivors
       .filter(row => !foldedKeys.has(keyOf(row)))
       .map(contractOf),
+    truncatedContracts,
   }
 }
+
+const retainUntouchedRows = (rows, folded, symbols) => ({
+  rows,
+  folded,
+  // The prior scope already names every endpoint read being retained. Reusing
+  // it avoids an O(rows) scan merely to reconstruct the same carried symbols.
+  carried: asArray(symbols),
+  truncatedContracts: new Set(),
+})
 
 /**
  * A read has been asked for. The rows already held stay on screen: emptying them
@@ -167,65 +283,123 @@ export const beginFuturesHistoryRead = (history, { symbol, sent }) => {
  */
 export const applyFuturesHistoryReading = (history, payload, now) => {
   const held = isHeld(history)
+  const responseAt = coverageTime(payload?.readAt) ?? coverageTime(now)
+  if (responseAt === null) return history
+  const rawOrders = asArray(payload?.orders)
+  const rawTrades = asArray(payload?.trades)
+  const named = asArray(payload?.symbols)
+    .map(entry => String(entry ?? '').toUpperCase())
+    .filter(Boolean)
+  const requested = [...new Set(named.length > 0
+    ? named
+    : [...rawOrders, ...rawTrades].map(contractOf).filter(Boolean))]
+  const answered = asArray(payload?.views).filter(view => (
+    view === 'orders' || view === 'trades'
+  ))
+  const views = answered.length > 0 ? answered : ['orders', 'trades']
+  const endpointStamp = (symbol, view) => {
+    const coverage = history?.coverage?.[symbol] ?? null
+    const key = `${view.slice(0, -1)}ReadAt`
+    // A v2 null means this endpoint has never answered. Only a legacy record
+    // with no endpoint field at all lets the old aggregate stamp stand for it.
+    return Object.hasOwn(coverage ?? {}, key)
+      ? coverageTime(coverage[key])
+      : coverageTime(coverage?.readAt)
+  }
+  const acceptsEndpoint = (symbol, view) => {
+    const previous = endpointStamp(symbol, view)
+    return previous === null || responseAt >= previous
+  }
   if (payload?.error) {
+    // An error carries no rows worth merging. Once a later response has landed,
+    // surfacing an older request's failure only makes the panel move backwards.
+    if (coverageTime(history?.lastResponseAt) > responseAt) return history
+    const relevant = requested.length === 0 || requested.some(symbol => (
+      views.some(view => acceptsEndpoint(symbol, view))
+    ))
+    if (!relevant) return history
     return Object.freeze({
       ...history,
       symbol: typeof payload.symbol === 'string' ? payload.symbol : history.symbol,
       status: held ? 'ready' : 'error',
       error: payload.error,
+      lastResponseAt: Math.max(history?.lastResponseAt ?? responseAt, responseAt),
     })
   }
   // Which contracts this read actually looked at. A payload that does not say —
   // an older backend, or a read that named none — is taken at face value for the
   // contracts its rows mention, which is the behaviour that was there before.
-  const readOrders = asArray(payload?.orders)
-  const readTrades = asArray(payload?.trades)
-  const named = asArray(payload?.symbols)
-    .map(entry => String(entry ?? '').toUpperCase())
-    .filter(Boolean)
-  const read = [...new Set(named.length > 0
-    ? named
-    : [...readOrders, ...readTrades].map(contractOf).filter(Boolean))]
+  const acceptedOrders = new Set(views.includes('orders')
+    ? requested.filter(symbol => acceptsEndpoint(symbol, 'orders'))
+    : [])
+  const acceptedTrades = new Set(views.includes('trades')
+    ? requested.filter(symbol => acceptsEndpoint(symbol, 'trades'))
+    : [])
+  const read = [...new Set([...acceptedOrders, ...acceptedTrades])]
+  const discoveryStamp = coverageTime(history?.discoveryReadAt)
+  const acceptsDiscovery = payload?.basisOnly !== true
+    && (discoveryStamp === null || responseAt >= discoveryStamp)
+  if (read.length === 0 && !acceptsDiscovery) return history
+  const readOrders = rawOrders.filter(row => acceptedOrders.has(contractOf(row)))
+  const readTrades = rawTrades.filter(row => acceptedTrades.has(contractOf(row)))
   // Which endpoints this answer is about. A read of the fills covers a contract's
   // fills and nothing else, so its order log is not "covered and empty" — it is
   // untouched, and the rows already held for it stay exactly where they are.
   // A payload that does not say covers both, which is what it used to mean.
-  const answered = asArray(payload?.views).filter(view => (
-    view === 'orders' || view === 'trades'
-  ))
-  const views = answered.length > 0 ? answered : ['orders', 'trades']
-  const coveredOrders = new Set(views.includes('orders') ? read : [])
-  const coveredTrades = new Set(views.includes('trades') ? read : [])
+  const coveredOrders = acceptedOrders
+  const coveredTrades = acceptedTrades
   const readFrom = payload?.readFrom !== null
     && typeof payload?.readFrom === 'object'
     && !Array.isArray(payload.readFrom)
     ? payload.readFrom
     : {}
+  const merge = payload?.merge !== null
+    && typeof payload?.merge === 'object'
+    && !Array.isArray(payload.merge)
+    ? payload.merge
+    : {}
+  const readTradeCoverageBySymbol = payload?.tradeCoverage !== null
+    && typeof payload?.tradeCoverage === 'object'
+    && !Array.isArray(payload.tradeCoverage)
+    ? payload.tradeCoverage
+    : {}
   const incrementalOrders = new Set(read.filter(symbol => (
     identityOf(readFrom[symbol]?.orderCursor) !== null
+      || merge[symbol]?.orders === true
   )))
   const incrementalTrades = new Set(read.filter(symbol => (
     identityOf(readFrom[symbol]?.tradeCursor) !== null
+      || merge[symbol]?.trades === true
   )))
-  const orders = mergeRows(
-    readOrders,
-    history.orders,
-    new Set(history.foldedOrders),
-    futuresHistoryOrderKey,
-    coveredOrders,
-    incrementalOrders,
-    FUTURES_HELD_HISTORY_MAX_ORDERS_PER_CONTRACT,
-  )
-  const trades = mergeRows(
-    readTrades,
-    history.trades,
-    new Set(history.foldedTrades),
-    futuresHistoryTradeKey,
-    coveredTrades,
-    incrementalTrades,
-    FUTURES_HELD_HISTORY_MAX_TRADES_PER_CONTRACT,
-  )
+  const orders = coveredOrders.size === 0
+    ? retainUntouchedRows(history.orders, history.foldedOrders, history.symbols)
+    : mergeRows(
+      readOrders,
+      history.orders,
+      new Set(history.foldedOrders),
+      futuresHistoryOrderKey,
+      coveredOrders,
+      incrementalOrders,
+      FUTURES_HELD_HISTORY_MAX_ORDERS_PER_CONTRACT,
+    )
+  const trades = coveredTrades.size === 0
+    ? retainUntouchedRows(history.trades, history.foldedTrades, history.symbols)
+    : mergeRows(
+      readTrades,
+      history.trades,
+      new Set(history.foldedTrades),
+      futuresHistoryTradeKey,
+      coveredTrades,
+      incrementalTrades,
+      FUTURES_HELD_HISTORY_MAX_TRADES_PER_CONTRACT,
+    )
   const coverage = { ...(history.coverage ?? {}) }
+  const generation = advanceGeneration(history?.generation)
+  const tradeGeneration = coveredTrades.size > 0
+    ? advanceGeneration(history?.tradeGeneration)
+    : Number.isSafeInteger(history?.tradeGeneration) && history.tradeGeneration >= 0
+      ? history.tradeGeneration
+      : 0
   for (const symbol of read) {
     const previous = coverage[symbol] ?? {}
     const orderCursor = cursorOf(
@@ -236,8 +410,21 @@ export const applyFuturesHistoryReading = (history, payload, now) => {
       readTrades.filter(row => contractOf(row) === symbol),
       tradeIdentity,
     )
+    const nextTradeCoverage = !coveredTrades.has(symbol)
+      ? previous.tradeCoverage ?? null
+      : readTradeCoverage(
+        readTradeCoverageBySymbol[symbol],
+        readTrades.filter(row => contractOf(row) === symbol),
+        responseAt,
+      )
     coverage[symbol] = Object.freeze({
-      readAt: now,
+      readAt: Math.max(coverageTime(previous.readAt) ?? responseAt, responseAt),
+      orderReadAt: coveredOrders.has(symbol)
+        ? responseAt
+        : coverageTime(previous.orderReadAt) ?? coverageTime(previous.readAt),
+      tradeReadAt: coveredTrades.has(symbol)
+        ? responseAt
+        : coverageTime(previous.tradeReadAt) ?? coverageTime(previous.readAt),
       // Only the endpoint this read looked at moves. The other keeps what the
       // read that did look at it left, so the desk still knows where to resume
       // it — and, until one has, that it has never been read at all.
@@ -251,9 +438,20 @@ export const applyFuturesHistoryReading = (history, payload, now) => {
         : incrementalTrades.has(symbol)
           ? higherIdentity(identityOf(previous.tradeCursor), tradeCursor)
           : tradeCursor,
+      tradeCoverage: trades.truncatedContracts.has(symbol) && nextTradeCoverage !== null
+        ? retentionLimitedCoverage(nextTradeCoverage, trades.rows, symbol)
+        : nextTradeCoverage,
     })
   }
-  const frozenCoverage = Object.freeze(coverage)
+  // The generation names this composite held reading, not only contracts touched
+  // by the last response. Re-stamping carried coverage keeps exact per-key
+  // metadata admissible when another contract is refreshed independently.
+  const frozenCoverage = Object.freeze(Object.fromEntries(
+    Object.entries(coverage).map(([symbol, entry]) => [symbol, Object.freeze({
+      ...entry,
+      generation,
+    })]),
+  ))
   // Every contract the review now covers, each of them from a read that happened
   // — this one, or the one that last reached it. Stating only this read's set
   // would undercount a panel that is showing more than this read returned.
@@ -264,7 +462,12 @@ export const applyFuturesHistoryReading = (history, payload, now) => {
     ...trades.carried,
   ])]
     .filter(symbol => symbol !== '')
-  const discovered = Number.isSafeInteger(payload?.discovered) ? payload.discovered : 0
+  const discovered = acceptsDiscovery
+    ? Math.max(
+      Number.isSafeInteger(payload?.discovered) ? payload.discovered : 0,
+      symbols.length,
+    )
+    : Math.max(Number.isSafeInteger(history?.discovered) ? history.discovered : 0, symbols.length)
   const stamps = Object.values(frozenCoverage)
     .map(entry => entry?.readAt)
     .filter(Number.isSafeInteger)
@@ -272,19 +475,34 @@ export const applyFuturesHistoryReading = (history, payload, now) => {
     ...history,
     symbol: typeof payload?.symbol === 'string' ? payload.symbol : history.symbol,
     status: 'ready',
+    version: 2,
+    generation,
+    tradeGeneration,
     orders: orders.rows,
     trades: trades.rows,
     foldedOrders: orders.folded,
     foldedTrades: trades.folded,
     symbols: Object.freeze(symbols),
     discovered: Math.max(discovered, symbols.length),
-    discoveryComplete: payload?.discoveryComplete !== false,
+    discoveryComplete: acceptsDiscovery
+      ? payload?.discoveryComplete !== false
+      : history.discoveryComplete,
+    discoveryReadAt: acceptsDiscovery ? responseAt : history.discoveryReadAt ?? null,
+    lastResponseAt: Math.max(history?.lastResponseAt ?? responseAt, responseAt),
     error: null,
-    readAt: stamps.length > 0 ? Math.min(...stamps) : now,
+    readAt: stamps.length > 0 ? Math.min(...stamps) : responseAt,
     coverage: frozenCoverage,
     readViews: Object.freeze({
-      orders: views.includes('orders') ? now : history.readViews?.orders ?? null,
-      trades: views.includes('trades') ? now : history.readViews?.trades ?? null,
+      orders: coveredOrders.size > 0 || (
+        acceptsDiscovery && requested.length === 0 && payload?.discoveryComplete !== false
+      )
+        ? Math.max(history.readViews?.orders ?? responseAt, responseAt)
+        : history.readViews?.orders ?? null,
+      trades: coveredTrades.size > 0 || (
+        acceptsDiscovery && requested.length === 0 && payload?.discoveryComplete !== false
+      )
+        ? Math.max(history.readViews?.trades ?? responseAt, responseAt)
+        : history.readViews?.trades ?? null,
     }),
   })
 }
@@ -318,6 +536,9 @@ const tradeRowFromReport = report => Object.freeze({
   realizedPnl: report.realizedPnl ?? '0',
   commission: report.commission ?? '0',
   commissionAsset: report.commissionAsset ?? null,
+  marginAsset: typeof report.marginAsset === 'string' && report.marginAsset.trim() !== ''
+    ? report.marginAsset.trim().toUpperCase()
+    : null,
   maker: report.maker === true,
   time: Number(report.time ?? report.T) || 0,
 })
@@ -325,7 +546,9 @@ const tradeRowFromReport = report => Object.freeze({
 const upsert = (rows, folded, row, keyOf, limit) => {
   const key = keyOf(row)
   const without = rows.filter(existing => keyOf(existing) !== key)
-  const bounded = boundNewestByContract([row, ...without].sort(newestFirst), limit)
+  const candidates = [row, ...without].sort(newestFirst)
+  const truncatedContracts = truncatedContractsOf(candidates, keyOf, limit)
+  const bounded = boundNewestByContract(candidates, limit)
   const retained = new Set(bounded.map(keyOf))
   const nextFolded = folded.filter(entry => retained.has(entry))
   return {
@@ -335,6 +558,7 @@ const upsert = (rows, folded, row, keyOf, limit) => {
     folded: Object.freeze(!retained.has(key) || nextFolded.includes(key)
       ? nextFolded
       : [...nextFolded, key]),
+    truncatedContracts,
   }
 }
 
@@ -371,7 +595,24 @@ export const foldExecutionIntoFuturesHistory = (history, report) => {
       futuresHistoryTradeKey,
       FUTURES_HELD_HISTORY_MAX_TRADES_PER_CONTRACT,
     )
-    next = Object.freeze({ ...next, trades: merged.rows, foldedTrades: merged.folded })
+    const symbol = contractOf(report)
+    const previousCoverage = next.coverage?.[symbol]
+    const tradeCoverage = merged.truncatedContracts.has(symbol)
+      && previousCoverage?.tradeCoverage?.version === 2
+      ? retentionLimitedCoverage(previousCoverage.tradeCoverage, merged.rows, symbol)
+      : previousCoverage?.tradeCoverage
+    next = Object.freeze({
+      ...next,
+      tradeGeneration: advanceGeneration(next.tradeGeneration),
+      trades: merged.rows,
+      foldedTrades: merged.folded,
+      ...(tradeCoverage === undefined ? {} : {
+        coverage: Object.freeze({
+          ...next.coverage,
+          [symbol]: Object.freeze({ ...previousCoverage, tradeCoverage }),
+        }),
+      }),
+    })
   }
   return next
 }

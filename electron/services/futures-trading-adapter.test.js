@@ -4,6 +4,7 @@ import { createHmac } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
     FUTURES_REST_CONNECTION_POOL,
+    FUTURES_REST_RESPONSE_MAX_BYTES,
     FUTURES_STREAM_ORIGIN,
     FuturesTradingAdapter,
     describeFuturesApiError,
@@ -13,19 +14,43 @@ import {
     normalizeFuturesExecutionReport,
     normalizeFuturesHistoryOrder,
     normalizeFuturesHistoryTrade,
+    normalizeFuturesIncomeRow,
     normalizeFuturesPositions,
     normalizeFuturesSymbolConfig,
     normalizeFuturesAccountUpdate,
     normalizeFuturesUserDataStreamEvent,
     FUTURES_USER_DATA_EVENTS_IGNORED,
+    parseFuturesJson,
     parseFuturesExchangeFilters,
+    parseFuturesUserStreamJson,
     readFuturesLeverageBracketTable,
     readFuturesMaxLeverage,
     readFuturesTradedSymbols,
     redactFuturesListenKey,
 } from './futures-trading-adapter.js';
+import { runWithBinancePhysicalAttemptContext } from './binance-physical-attempt-context.js';
+import { RateLimiter } from './binance-connection.js';
+import { walkFuturesSettledIncomeLanes } from './futures-settled-income-walk.js';
 
 const requests = [];
+
+const accountTrade = (overrides = {}) => ({
+    id: '9',
+    orderId: '2',
+    symbol: 'BTCUSDT',
+    side: 'SELL',
+    positionSide: 'BOTH',
+    price: '58500',
+    qty: '0.004',
+    quoteQty: '234',
+    realizedPnl: '0',
+    commission: '0',
+    commissionAsset: null,
+    marginAsset: 'USDT',
+    maker: false,
+    time: 7_000,
+    ...overrides,
+});
 
 // Read per attempt, so a first attempt can fail on a connection the pool handed
 // out and a second can be answered on one opened for it.
@@ -55,7 +80,12 @@ vi.mock('node:https', () => ({
                 write: chunk => chunks.push(chunk),
                 end: () => {
                     const attempt = requests.length;
-                    const record = { url: String(url), options, body: chunks.join('') };
+                    const record = {
+                        url: String(url),
+                        options,
+                        body: chunks.join(''),
+                        at: Date.now(),
+                    };
                     requests.push(record);
                     request.reusedSocket = perAttempt(
                         globalThis.__futuresTestReusedSocket,
@@ -66,12 +96,24 @@ vi.mock('node:https', () => ({
                         queueMicrotask(() => listeners.timeout?.());
                         return;
                     }
+                    if (transport === 'in-flight') {
+                        const abort = () => queueMicrotask(() => listeners.error?.(
+                            Object.assign(new Error('The operation was aborted'), {
+                                name: 'AbortError',
+                                code: 'ABORT_ERR',
+                            }),
+                        ));
+                        if (options.signal?.aborted) abort();
+                        else options.signal?.addEventListener('abort', abort, { once: true });
+                        return;
+                    }
                     // The exchange has already said something and the connection
                     // then fails: it acted on the request, so nothing may send it
                     // again.
                     if (transport?.afterAnswerHasBegun) {
                         onResponse({
-                            statusCode: globalThis.__futuresTestStatus ?? 200,
+                            statusCode: perAttempt(globalThis.__futuresTestStatus, attempt) ?? 200,
+                            headers: perAttempt(globalThis.__futuresTestHeaders, attempt) ?? {},
                             on: () => {},
                         });
                         queueMicrotask(() => listeners.error?.(transport.afterAnswerHasBegun));
@@ -83,15 +125,28 @@ vi.mock('node:https', () => ({
                     }
                     const handlers = {};
                     const response = {
-                        statusCode: globalThis.__futuresTestStatus ?? 200,
+                        statusCode: perAttempt(globalThis.__futuresTestStatus, attempt) ?? 200,
+                        headers: perAttempt(globalThis.__futuresTestHeaders, attempt) ?? {},
                         on: (event, handler) => {
                             handlers[event] = handler;
                         },
                     };
                     onResponse(response);
                     queueMicrotask(() => {
-                        const payload = record.respondWith ?? globalThis.__futuresTestResponse ?? {};
-                        handlers.data?.(Buffer.from(JSON.stringify(payload)));
+                        const payload = record.respondWith
+                            ?? perAttempt(globalThis.__futuresTestResponse, attempt)
+                            ?? {};
+                        const raw = globalThis.__futuresTestRawResponse;
+                        const bodyChunks = Array.isArray(raw)
+                            ? raw
+                            : [typeof raw === 'string' || Buffer.isBuffer(raw)
+                                ? raw
+                                : JSON.stringify(payload)];
+                        for (const bodyChunk of bodyChunks) {
+                            handlers.data?.(Buffer.isBuffer(bodyChunk)
+                                ? bodyChunk
+                                : Buffer.from(bodyChunk));
+                        }
                         handlers.end?.();
                     });
                 },
@@ -115,10 +170,187 @@ const createAdapter = () => new FuturesTradingAdapter({
 afterEach(() => {
     requests.length = 0;
     delete globalThis.__futuresTestResponse;
+    delete globalThis.__futuresTestRawResponse;
     delete globalThis.__futuresTestReusedSocket;
     delete globalThis.__futuresTestStatus;
+    delete globalThis.__futuresTestHeaders;
     delete globalThis.__futuresTestTransport;
+    vi.useRealTimers();
     vi.restoreAllMocks();
+});
+
+describe('Futures REST physical response accounting', () => {
+    const readWithObservations = async ({ status = 200, headers = {} } = {}) => {
+        const observations = [];
+        const admitted = [];
+        globalThis.__futuresTestStatus = status;
+        globalThis.__futuresTestHeaders = headers;
+        globalThis.__futuresTestResponse = status >= 200 && status < 300
+            ? []
+            : { code: -1003, msg: 'Too many requests' };
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+
+        const result = await runWithBinancePhysicalAttemptContext({
+            admit: async weight => admitted.push(weight),
+            observeResponse: observation => observations.push(observation),
+        }, () => adapter.getTradeHistory({ symbol: 'BTCUSDT' })).catch(error => error);
+
+        return { admitted, observations, result };
+    };
+
+    it('reports the highest authoritative used-weight header for reconciliation', async () => {
+        const { admitted, observations, result } = await readWithObservations({
+            headers: {
+                'x-mbx-used-weight': '700',
+                'x-mbx-used-weight-1m': ['719', '731'],
+            },
+        });
+
+        expect(result).toEqual([]);
+        expect(admitted).toHaveLength(1);
+        expect(observations).toEqual([{ status: 200, usedWeight: 731 }]);
+    });
+
+    it('keeps a response without accounting headers observable without inventing weight', async () => {
+        const { observations, result } = await readWithObservations();
+
+        expect(result).toEqual([]);
+        expect(observations).toEqual([{ status: 200 }]);
+    });
+
+    it('reports bounded Retry-After backpressure on a 429 response', async () => {
+        const { observations, result } = await readWithObservations({
+            status: 429,
+            headers: {
+                'retry-after': '2.5',
+                'x-mbx-used-weight-1m': '2400',
+            },
+        });
+
+        expect(result).toMatchObject({ name: 'FuturesApiError', status: 429 });
+        expect(observations).toEqual([{
+            status: 429,
+            usedWeight: 2400,
+            retryAfterMs: 2500,
+        }]);
+    });
+
+    it('refuses an oversized declared response before retaining or parsing its body', async () => {
+        const summaries = [];
+        const limiter = new RateLimiter(100, 60_000, 0, {
+            physicalAttempts: true,
+            onOperation: summary => summaries.push(summary),
+        });
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        const parseJson = vi.spyOn(JSON, 'parse');
+        globalThis.__futuresTestHeaders = {
+            'content-length': String(FUTURES_REST_RESPONSE_MAX_BYTES + 1),
+        };
+        globalThis.__futuresTestRawResponse = 'this body must never be parsed';
+
+        const error = await limiter.execute(
+            () => adapter.getTradeHistory({ symbol: 'BTCUSDT' }),
+            5,
+            0,
+        ).catch(caught => caught);
+
+        expect(error).toMatchObject({
+            name: 'FuturesApiError',
+            status: 200,
+            code: 'RESPONSE_TOO_LARGE',
+            indeterminate: false,
+        });
+        expect(requests).toHaveLength(1);
+        expect(parseJson).not.toHaveBeenCalled();
+        expect(summaries).toEqual([expect.objectContaining({
+            attempts: 1,
+            chargedWeight: 5,
+            outcome: 'error',
+            status: 200,
+            code: 'RESPONSE_TOO_LARGE',
+        })]);
+    });
+
+    it('stops a chunked mutation at the byte ceiling without parsing or replaying it', async () => {
+        const summaries = [];
+        const limiter = new RateLimiter(100, 60_000, 0, {
+            physicalAttempts: true,
+            onOperation: summary => summaries.push(summary),
+        });
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        const parseJson = vi.spyOn(JSON, 'parse');
+        globalThis.__futuresTestHeaders = { 'transfer-encoding': 'chunked' };
+        globalThis.__futuresTestRawResponse = [
+            Buffer.alloc(FUTURES_REST_RESPONSE_MAX_BYTES, 0x20),
+            Buffer.from('x'),
+        ];
+
+        const error = await limiter.execute(() => adapter.adjustPositionMargin({
+            symbol: 'BTCUSDT',
+            positionSide: 'BOTH',
+            direction: 'ADD',
+            amount: '25',
+        }), 5, 2).catch(caught => caught);
+
+        expect(error).toMatchObject({
+            name: 'FuturesApiError',
+            status: 200,
+            code: 'RESPONSE_TOO_LARGE',
+            indeterminate: true,
+        });
+        expect(requests).toHaveLength(1);
+        expect(requests[0].options.method).toBe('POST');
+        expect(parseJson).not.toHaveBeenCalled();
+        expect(summaries).toEqual([expect.objectContaining({
+            attempts: 1,
+            chargedWeight: 5,
+            outcome: 'error',
+            status: 200,
+            code: 'RESPONSE_TOO_LARGE',
+        })]);
+    });
+
+    it('aborts one admitted mutation in flight without refunding or retrying it', async () => {
+        const summaries = [];
+        const limiter = new RateLimiter(100, 60_000, 0, {
+            physicalAttempts: true,
+            onOperation: summary => summaries.push(summary),
+        });
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        const controller = new AbortController();
+        globalThis.__futuresTestTransport = 'in-flight';
+
+        const pending = limiter.execute(() => adapter.adjustPositionMargin({
+            symbol: 'BTCUSDT',
+            positionSide: 'BOTH',
+            direction: 'ADD',
+            amount: '25',
+        }), 5, 2, { signal: controller.signal });
+        await vi.waitFor(() => expect(requests).toHaveLength(1));
+        expect(requests[0].options.signal).toBe(controller.signal);
+        expect(requests[0].options.method).toBe('POST');
+
+        const rejection = expect(pending).rejects.toMatchObject({
+            name: 'AbortError',
+            code: 'ABORT_ERR',
+        });
+        controller.abort();
+        await rejection;
+
+        expect(requests).toHaveLength(1);
+        expect(limiter.getCurrentWeight()).toBe(5);
+        expect(summaries).toEqual([expect.objectContaining({
+            attempts: 1,
+            chargedWeight: 5,
+            networkRetries: 0,
+            outcome: 'aborted',
+            code: 'ABORT_ERR',
+        })]);
+    });
 });
 
 describe('FuturesTradingAdapter signing', () => {
@@ -156,6 +388,90 @@ describe('FuturesTradingAdapter signing', () => {
         expect(params.get('positionSide')).toBe('BOTH');
         expect(params.get('recvWindow')).toBe('60000');
         expect(params.get('timestamp')).toMatch(/^\d+$/);
+    });
+
+    it('materializes each signed timestamp after admission through a -1021 recovery', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(0);
+        const summaries = [];
+        const limiter = new RateLimiter(100, 60_000, 6_001, {
+            physicalAttempts: true,
+            onOperation: summary => summaries.push(summary),
+        });
+        const adapter = new FuturesTradingAdapter({
+            apiKey: 'test-key',
+            apiSecret: 'test-secret',
+            recvWindow: 5_000,
+        });
+        globalThis.__futuresTestStatus = attempt => (attempt === 1 ? 400 : 200);
+        globalThis.__futuresTestResponse = attempt => {
+            if (attempt === 0 || attempt === 2) {
+                return { serverTime: requests[attempt].at };
+            }
+            if (attempt === 1) {
+                return { code: -1021, msg: 'Timestamp outside recvWindow' };
+            }
+            return { dualSidePosition: false };
+        };
+
+        const pending = limiter.execute(() => adapter.getPositionMode(), 30, 0);
+        await vi.advanceTimersByTimeAsync(24_004);
+
+        await expect(pending).resolves.toEqual({ hedgeMode: false });
+        expect(requests.map(request => new URL(request.url).pathname)).toEqual([
+            '/fapi/v1/time',
+            '/fapi/v1/positionSide/dual',
+            '/fapi/v1/time',
+            '/fapi/v1/positionSide/dual',
+        ]);
+        const signedRequests = [requests[1], requests[3]];
+        for (const request of signedRequests) {
+            const query = new URL(request.url).search.slice(1);
+            const unsigned = query.slice(0, query.lastIndexOf('&signature='));
+            const params = new URLSearchParams(unsigned);
+            expect(Number(params.get('timestamp'))).toBe(request.at);
+            expect(Number(params.get('recvWindow'))).toBe(5_000);
+            expect(new URLSearchParams(query).get('signature')).toBe(
+                createHmac('sha256', 'test-secret').update(unsigned).digest('hex'),
+            );
+        }
+        expect(signedRequests.map(request => request.at)).toEqual([12_002, 24_004]);
+        expect(summaries).toEqual([
+            expect.objectContaining({
+                attempts: 4,
+                chargedWeight: 62,
+                timestampRetries: 1,
+                outcome: 'ok',
+            }),
+        ]);
+    });
+
+    it('admits initial sync and -1021 recovery at their exact endpoint weights', async () => {
+        const admitted = [];
+        const retryCategories = [];
+        const adapter = createAdapter();
+        globalThis.__futuresTestStatus = attempt => (attempt === 1 ? 400 : 200);
+        globalThis.__futuresTestResponse = attempt => {
+            if (attempt === 0 || attempt === 2) return { serverTime: Date.now() };
+            if (attempt === 1) {
+                return { code: -1021, msg: 'Timestamp outside recvWindow' };
+            }
+            return { dualSidePosition: false };
+        };
+
+        await expect(runWithBinancePhysicalAttemptContext({
+            admit: async weight => admitted.push(weight),
+            noteRetry: category => retryCategories.push(category),
+        }, () => adapter.getPositionMode())).resolves.toEqual({ hedgeMode: false });
+
+        expect(requests.map(request => new URL(request.url).pathname)).toEqual([
+            '/fapi/v1/time',
+            '/fapi/v1/positionSide/dual',
+            '/fapi/v1/time',
+            '/fapi/v1/positionSide/dual',
+        ]);
+        expect(admitted).toEqual([1, 30, 1, 30]);
+        expect(retryCategories).toEqual(['timestamp']);
     });
 
     it('amends a live order in place with a signed PUT instead of cancel and re-place', async () => {
@@ -403,7 +719,7 @@ describe('futures order lookup by identity', () => {
         expect(new URL(requests[0].url).pathname).toBe('/fapi/v1/order');
         expect(new URL(requests[0].url).searchParams.get('origClientOrderId')).toBe('f-1');
         expect(outcome.exists).toBe(true);
-        expect(outcome.report.orderId).toBe(42);
+        expect(outcome.report.orderId).toBe('42');
     });
 
     it('reports the one answer that makes a resubmission safe', async () => {
@@ -465,6 +781,73 @@ describe('futures history reads', () => {
         expect(tradeParams.get('fromId')).toBe('4311');
     });
 
+    it('never combines an identity cursor with account-trade time bounds', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestResponse = [];
+
+        await adapter.getTradeHistory({
+            symbol: 'BTCUSDT',
+            fromTradeId: '9223372036854775807',
+            startTime: 1_000,
+            endTime: 9_000,
+        });
+        await adapter.getTradeHistory({
+            symbol: 'BTCUSDT',
+            fromTradeId: 'not-an-identity',
+            startTime: 1_000,
+            endTime: 9_000,
+        });
+
+        const cursor = new URLSearchParams(requests[0].url.split('?')[1]);
+        expect(cursor.get('fromId')).toBe('9223372036854775807');
+        expect(cursor.has('startTime')).toBe(false);
+        expect(cursor.has('endTime')).toBe(false);
+        const bounded = new URLSearchParams(requests[1].url.split('?')[1]);
+        expect(bounded.has('fromId')).toBe(false);
+        expect(bounded.get('startTime')).toBe('1000');
+        expect(bounded.get('endTime')).toBe('9000');
+    });
+
+    it('omits absent optional trade times and rejects malformed bounds before REST', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestResponse = [];
+
+        for (const value of [undefined, null, '', '   ']) {
+            await adapter.getTradeHistory({
+                symbol: 'BTCUSDT',
+                startTime: value,
+                endTime: value,
+            });
+        }
+        for (const request of requests) {
+            const params = new URLSearchParams(request.url.split('?')[1]);
+            expect(params.has('startTime')).toBe(false);
+            expect(params.has('endTime')).toBe(false);
+        }
+
+        const requestsBeforeFailures = requests.length;
+        for (const bounds of [
+            { startTime: false },
+            { startTime: {} },
+            { startTime: -1 },
+            { startTime: 1.5 },
+            { startTime: Number.MAX_SAFE_INTEGER + 1 },
+            { startTime: ' '.repeat(17) },
+            { startTime: '12345678901234567' },
+            { startTime: 10, endTime: 9 },
+        ]) {
+            await expect(adapter.getTradeHistory({ symbol: 'BTCUSDT', ...bounds }))
+                .rejects.toMatchObject({
+                    code: bounds.endTime === 9
+                        ? 'INVALID_TRADE_TIME_WINDOW'
+                        : 'INVALID_TRADE_TIME_BOUND',
+                });
+        }
+        expect(requests).toHaveLength(requestsBeforeFailures);
+    });
+
     it('reads the newest page when it holds no identity to read from', async () => {
         const adapter = createAdapter();
         adapter.serverTimeOffsetMs = 0;
@@ -481,8 +864,10 @@ describe('futures history reads', () => {
         adapter.serverTimeOffsetMs = 0;
         globalThis.__futuresTestResponse = [
             {
-                id: 9, orderId: 2, symbol: 'BTCUSDT', side: 'SELL', price: '58500', qty: '0.004',
-                realizedPnl: '-96.74', commission: '0.0234', commissionAsset: 'USDT', time: 7_000,
+                id: 9, orderId: 2, symbol: 'BTCUSDT', side: 'SELL', positionSide: 'BOTH',
+                price: '58500', qty: '0.004',
+                realizedPnl: '-96.74', commission: '0.0234', commissionAsset: 'USDT',
+                marginAsset: 'usdt', time: 7_000,
             },
         ];
         const trades = await adapter.getTradeHistory({ symbol: 'BTCUSDT' });
@@ -492,8 +877,66 @@ describe('futures history reads', () => {
             realizedPnl: '-96.74',
             commission: '0.0234',
             commissionAsset: 'USDT',
+            marginAsset: 'USDT',
             time: 7_000,
         })]);
+    });
+
+    it.each([
+        ['non-exact trade id', { id: '9e1' }, 'INVALID_TRADE_IDENTITY'],
+        ['oversized order id', { orderId: '9'.repeat(21) }, 'INVALID_TRADE_IDENTITY'],
+        ['foreign symbol', { symbol: 'ETHUSDT' }, 'FOREIGN_TRADE_SYMBOL'],
+        ['invalid side', { side: 'HOLD' }, 'INVALID_TRADE_EVIDENCE'],
+        ['invalid position side', { positionSide: 'OPEN' }, 'INVALID_TRADE_EVIDENCE'],
+        ['missing price', { price: null }, 'INVALID_TRADE_EVIDENCE'],
+        [
+            'missing endpoint qty hidden by an auxiliary quantity',
+            { qty: null, quantity: '0.004' },
+            'INVALID_TRADE_EVIDENCE',
+        ],
+        ['scientific quantity', { qty: '4e-3' }, 'INVALID_TRADE_EVIDENCE'],
+        ['numeric realized PnL', { realizedPnl: 10 }, 'INVALID_TRADE_EVIDENCE'],
+        ['negative commission', { commission: '-0.1' }, 'INVALID_TRADE_EVIDENCE'],
+        ['missing settlement asset', { marginAsset: null }, 'INVALID_TRADE_EVIDENCE'],
+        [
+            'missing nonzero-commission asset',
+            { commission: '0.1', commissionAsset: null },
+            'INVALID_TRADE_EVIDENCE',
+        ],
+        ['malformed present zero-commission asset', { commissionAsset: '' }, 'INVALID_TRADE_EVIDENCE'],
+        ['missing time', { time: null }, 'INVALID_TRADE_TIME'],
+    ])('rejects a whole user-trade page with %s', async (_case, malformed, code) => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestResponse = [
+            accountTrade({ id: '8', orderId: '1' }),
+            accountTrade(malformed),
+        ];
+
+        await expect(adapter.getTradeHistory({
+            symbol: 'BTCUSDT',
+            startTime: 1_000,
+            endTime: 9_000,
+        })).rejects.toMatchObject({ code });
+        expect(requests).toHaveLength(1);
+    });
+
+    it('accepts exact zero commission without an asset and enforces the requested page size', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestResponse = [accountTrade({
+            commission: '0.00000000',
+            commissionAsset: null,
+        })];
+        await expect(adapter.getTradeHistory({ symbol: 'BTCUSDT', limit: 1 }))
+            .resolves.toEqual([expect.objectContaining({ commissionAsset: null })]);
+
+        globalThis.__futuresTestResponse = [
+            accountTrade({ id: '10', orderId: '10' }),
+            accountTrade({ id: '11', orderId: '11' }),
+        ];
+        await expect(adapter.getTradeHistory({ symbol: 'BTCUSDT', limit: 1 }))
+            .rejects.toMatchObject({ code: 'INVALID_TRADE_PAGE_SIZE' });
     });
 
     it('projects history rows to display fields only', () => {
@@ -517,18 +960,90 @@ describe('futures history reads', () => {
             reduceOnly: true,
             time: 4_000,
         });
-        expect(normalizeFuturesHistoryTrade({}).realizedPnl).toBe('0');
+        expect(normalizeFuturesHistoryTrade({})).toMatchObject({
+            price: null,
+            quantity: null,
+            quoteQty: null,
+            realizedPnl: null,
+            commission: null,
+            marginAsset: null,
+            time: null,
+        });
     });
 
-    it('keeps safe and string exchange identities exact and drops rounded numbers', () => {
+    it('preserves the settlement asset reported by account trades', () => {
+        expect(normalizeFuturesHistoryTrade({
+            symbol: 'BTCUSDC',
+            marginAsset: ' usdc ',
+        })).toMatchObject({
+            symbol: 'BTCUSDC',
+            marginAsset: 'USDC',
+        });
+        expect(normalizeFuturesHistoryTrade({ marginAsset: '  ' }).marginAsset).toBeNull();
+    });
+
+    it('keeps absent trade times missing and bounds a huge money field before scanning it', () => {
+        for (const time of [undefined, null, '', ' ', false, []]) {
+            expect(normalizeFuturesHistoryTrade({ time }).time).toBeNull();
+        }
+        const huge = '9'.repeat(1_000_000);
+        const startedAt = performance.now();
+        expect(normalizeFuturesHistoryTrade({ price: huge }).price).toBeNull();
+        expect(performance.now() - startedAt).toBeLessThan(100);
+    });
+
+    it('keeps string exchange identities exact and rejects numeric trade identities', () => {
         expect(normalizeFuturesHistoryOrder({ orderId: 42 }).orderId).toBe('42');
         expect(normalizeFuturesHistoryOrder({ orderId: '9223372036854775807' }).orderId)
             .toBe('9223372036854775807');
         expect(normalizeFuturesHistoryOrder({ orderId: Number.MAX_SAFE_INTEGER + 1 }).orderId)
             .toBeNull();
         expect(normalizeFuturesHistoryTrade({ id: 9, orderId: 42 })).toMatchObject({
-            id: '9', orderId: '42',
+            id: null, orderId: null,
         });
+    });
+
+    it('preserves numeric identifier tokens above 2^53 through REST and exported parsers', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestRawResponse = '[{"id":9223372036854775807,'
+            + '"orderId":9223372036854775806,"symbol":"BTCUSDT",'
+            + '"side":"BUY","positionSide":"BOTH","price":"100",'
+            + '"qty":"1","realizedPnl":"0","commission":"0",'
+            + '"marginAsset":"USDT","time":7000}]';
+
+        const [fromRest] = await adapter.getTradeHistory({ symbol: 'BTCUSDT' });
+        expect(fromRest).toMatchObject({
+            id: '9223372036854775807',
+            orderId: '9223372036854775806',
+        });
+        expect(parseFuturesJson(
+            '{"id":9223372036854775807,"orderId":9223372036854775806,"time":7000}',
+        )).toMatchObject({
+            id: '9223372036854775807',
+            orderId: '9223372036854775806',
+            time: 7_000,
+        });
+        expect(parseFuturesUserStreamJson(
+            '{"e":"ORDER_TRADE_UPDATE","E":7000,'
+                + '"o":{"i":9223372036854775807,"t":9223372036854775806,'
+                + '"aid":9223372036854775805,"ai":9223372036854775804,'
+                + '"q":"1.25","T":6999}}',
+        )).toMatchObject({
+            E: 7_000,
+            o: {
+                i: '9223372036854775807',
+                t: '9223372036854775806',
+                aid: '9223372036854775805',
+                ai: '9223372036854775804',
+                q: '1.25',
+                T: 6_999,
+            },
+        });
+        expect(normalizeFuturesHistoryTrade({
+            id: Number.MAX_SAFE_INTEGER + 1,
+            orderId: Number.MAX_SAFE_INTEGER + 2,
+        })).toMatchObject({ id: null, orderId: null });
     });
 });
 
@@ -763,6 +1278,112 @@ describe('futures contract configuration', () => {
         expect(page.rows[2].tradeId).toBeNull();
     });
 
+    it('rejects an over-requested income page before reading or normalizing a row', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        let rowReads = 0;
+        const unreadableRow = {};
+        Object.defineProperty(unreadableRow, 'symbol', {
+            enumerable: true,
+            get: () => {
+                rowReads += 1;
+                throw new Error('row normalization must not run');
+            },
+        });
+        vi.spyOn(JSON, 'parse').mockReturnValue([unreadableRow, unreadableRow]);
+        globalThis.__futuresTestRawResponse = '[]';
+
+        await expect(adapter.getIncomePage({
+            startTime: 1_000,
+            endTime: 9_000,
+            incomeType: 'FUNDING_FEE',
+            limit: 1,
+        })).rejects.toMatchObject({ code: 'OVERSIZED_INCOME_PAGE' });
+
+        expect(requests).toHaveLength(1);
+        expect(new URL(requests[0].url).searchParams.get('limit')).toBe('1');
+        expect(rowReads).toBe(0);
+    });
+
+    it('preserves missing income amount and time as invalid evidence', () => {
+        expect(normalizeFuturesIncomeRow({
+            symbol: 'BTCUSDT',
+            incomeType: 'FUNDING_FEE',
+            asset: 'USDT',
+        })).toMatchObject({
+            income: null,
+            time: null,
+        });
+        expect(normalizeFuturesIncomeRow({ income: 0, time: 0 })).toMatchObject({
+            income: '0',
+            time: 0,
+        });
+        for (const time of [undefined, null, '', ' ', false, []]) {
+            expect(normalizeFuturesIncomeRow({ time }).time).toBeNull();
+        }
+    });
+
+    it.each([
+        ['padded symbol', { symbol: ' BTCUSDT' }],
+        ['lowercase symbol', { symbol: 'btcusdt' }],
+        ['Unicode-foldable symbol', { symbol: 'BTCU\u017FDT' }],
+        ['padded income type', { incomeType: ' FUNDING_FEE' }],
+        ['lowercase income type', { incomeType: 'funding_fee' }],
+        ['Unicode-foldable income type', { incomeType: '\u0131NSURANCE_CLEAR' }],
+        ['padded asset', { asset: ' USDT' }],
+        ['lowercase asset', { asset: 'usdt' }],
+        ['Unicode-foldable asset', { asset: 'U\u017FDT' }],
+        ['malformed transaction identity', { tranId: 'not-an-integer' }],
+        ['malformed trade identity', { tradeId: '42.5' }],
+    ])('preserves a %s until the canonical lane rejects the page', async (_label, override) => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        const raw = {
+            symbol: 'BTCUSDT',
+            incomeType: 'FUNDING_FEE',
+            income: '-1.25',
+            asset: 'USDT',
+            time: 2_000,
+            tranId: '700000000000000001',
+            tradeId: null,
+            ...override,
+        };
+        globalThis.__futuresTestResponse = [raw];
+
+        const page = await adapter.getIncomePage({
+            startTime: 1_000,
+            endTime: 9_000,
+            incomeType: 'FUNDING_FEE',
+        });
+        const [field, token] = Object.entries(override)[0];
+        expect(page.rows[0][field]).toBe(token);
+
+        const walked = await walkFuturesSettledIncomeLanes({
+            readPage: async () => page,
+            now: 9_000,
+            windowFrom: 1_000,
+            incomeTypes: ['FUNDING_FEE'],
+        });
+        expect(walked.failed).toBe(true);
+        expect(walked.resource.lanes.FUNDING_FEE).toMatchObject({
+            status: 'error',
+            complete: false,
+            error: { code: 'INVALID_INCOME_ROW' },
+        });
+    });
+
+    it('rejects a non-array income endpoint answer before it can look empty', async () => {
+        const adapter = createAdapter();
+        adapter.serverTimeOffsetMs = 0;
+        globalThis.__futuresTestResponse = { rows: [] };
+
+        await expect(adapter.getIncomePage({
+            startTime: 1_000,
+            endTime: 9_000,
+            incomeType: 'FUNDING_FEE',
+        })).rejects.toMatchObject({ code: 'INVALID_RESPONSE' });
+    });
+
     // The endpoint answers a start time with the *oldest* rows after it, so a page
     // that comes back full is a page with newer rows behind it. The numbered page
     // keeps the timestamp boundary inclusive while the caller walks forward.
@@ -860,6 +1481,7 @@ describe('futures normalization', () => {
             origQty: '0.01',
             executedQty: '0',
             positionSide: 'LONG',
+            marginAsset: ' usdt ',
             updateTime: 1000,
         });
         const fromStream = normalizeFuturesExecutionReport({
@@ -867,7 +1489,7 @@ describe('futures normalization', () => {
             E: 1000,
             o: {
                 s: 'BTCUSDT', S: 'BUY', o: 'LIMIT', X: 'NEW', i: 42, c: 'abc',
-                p: '50000', q: '0.01', z: '0', ps: 'LONG', T: 1000,
+                p: '50000', q: '0.01', z: '0', ps: 'LONG', ma: 'usdt', T: 1000,
             },
         });
         for (const report of [fromRest, fromStream]) {
@@ -882,6 +1504,7 @@ describe('futures normalization', () => {
                 price: '50000',
                 origQty: '0.01',
                 positionSide: 'LONG',
+                marginAsset: 'USDT',
             });
         }
     });
@@ -1318,6 +1941,8 @@ describe('a connection the desk already has', () => {
         positionSide: 'BOTH',
     });
 
+    const readOne = adapter => adapter.getTradeHistory({ symbol: 'BTCUSDT' });
+
     it('holds the pool to the bounds it was measured against', () => {
         expect(FUTURES_REST_CONNECTION_POOL).toEqual({
             keepAlive: true,
@@ -1330,22 +1955,26 @@ describe('a connection the desk already has', () => {
         expect(Object.isFrozen(FUTURES_REST_CONNECTION_POOL)).toBe(true);
     });
 
-    it('sends the request again on a connection of its own when a pooled one is lost', async () => {
+    it('sends a replay-safe GET again on a connection of its own when a pooled one is lost', async () => {
         const recorded = [];
         const adapter = createPooledAdapter((kind, value) => recorded.push({ kind, value }));
         globalThis.__futuresTestReusedSocket = attempt => attempt === 0;
         globalThis.__futuresTestTransport = attempt => (attempt === 0 ? connectionLost() : null);
-        globalThis.__futuresTestResponse = { orderId: 88, status: 'NEW', symbol: 'BTCUSDT' };
+        globalThis.__futuresTestResponse = [];
 
-        const report = await placeOne(adapter);
+        const rows = await readOne(adapter);
 
         expect(requests).toHaveLength(2);
         expect(requests[0].options.agent).toBe(pooledConnection);
         expect(requests[1].options.agent).toBe(ownConnection);
-        // The same bytes, so the identity the command was given goes out
-        // unchanged and the exchange can refuse a duplicate rather than fill it.
-        expect(requests[1].body).toBe(requests[0].body);
-        expect(report).toBeTruthy();
+        const firstUrl = new URL(requests[0].url);
+        const fallbackUrl = new URL(requests[1].url);
+        expect(fallbackUrl.pathname).toBe(firstUrl.pathname);
+        expect(fallbackUrl.searchParams.get('symbol')).toBe(firstUrl.searchParams.get('symbol'));
+        expect(fallbackUrl.searchParams.get('recvWindow')).toBe(
+            firstUrl.searchParams.get('recvWindow'),
+        );
+        expect(rows).toEqual([]);
         // The fallback, and then the cost of the connection it had to open —
         // which is the whole of what the record owes the operator here.
         expect(recorded).toEqual([
@@ -1361,20 +1990,89 @@ describe('a connection the desk already has', () => {
         ]);
     });
 
-    it('sends the request again when the pooled connection broke under the write', async () => {
+    it('materializes and charges a safe signed GET after each over-recvWindow admission', async () => {
+        vi.useFakeTimers();
+        vi.setSystemTime(0);
+        const summaries = [];
+        const adapter = new FuturesTradingAdapter({
+            apiKey: 'test-key',
+            apiSecret: 'test-secret',
+            recvWindow: 5_000,
+            proxyAgent: pooledConnection,
+            proxyAgentWithoutReuse: ownConnection,
+        });
+        adapter.serverTimeOffsetMs = 0;
+        const limiter = new RateLimiter(100, 60_000, 6_001, {
+            physicalAttempts: true,
+            onOperation: summary => summaries.push(summary),
+        });
+        globalThis.__futuresTestReusedSocket = attempt => attempt === 0;
+        globalThis.__futuresTestTransport = attempt => (
+            attempt === 0 ? connectionLost() : null
+        );
+        globalThis.__futuresTestResponse = [];
+
+        const pending = limiter.execute(() => readOne(adapter), 5, 0);
+        await vi.advanceTimersByTimeAsync(12_002);
+
+        await expect(pending).resolves.toEqual([]);
+        expect(requests).toHaveLength(2);
+        expect(requests.map(request => request.at)).toEqual([6_001, 12_002]);
+        for (const request of requests) {
+            const query = new URL(request.url).search.slice(1);
+            const unsigned = query.slice(0, query.lastIndexOf('&signature='));
+            const params = new URLSearchParams(unsigned);
+            expect(Number(params.get('timestamp'))).toBe(request.at);
+            expect(Number(params.get('recvWindow'))).toBe(5_000);
+            expect(new URLSearchParams(query).get('signature')).toBe(
+                createHmac('sha256', 'test-secret').update(unsigned).digest('hex'),
+            );
+        }
+        expect(summaries).toEqual([
+            expect.objectContaining({
+                attempts: 2,
+                chargedWeight: 10,
+                connectionRetries: 1,
+                outcome: 'ok',
+            }),
+        ]);
+    });
+
+    it('replays a safe GET when the pooled connection broke under the write', async () => {
         const adapter = createPooledAdapter();
         globalThis.__futuresTestReusedSocket = attempt => attempt === 0;
         globalThis.__futuresTestTransport = attempt => (attempt === 0 ? connectionLost('EPIPE') : null);
-        globalThis.__futuresTestResponse = { orderId: 89, status: 'NEW', symbol: 'BTCUSDT' };
+        globalThis.__futuresTestResponse = [];
 
-        const report = await placeOne(adapter);
+        const rows = await readOne(adapter);
 
-        // The far side refused the bytes rather than answering them, which is
-        // the same fact `ECONNRESET` states and the same reason it is safe.
         expect(requests).toHaveLength(2);
         expect(requests[1].options.agent).toBe(ownConnection);
-        expect(report).toBeTruthy();
+        expect(rows).toEqual([]);
     });
+
+    it.each(['ECONNRESET', 'EPIPE'])(
+        'does not replay a position-margin POST after pooled %s',
+        async (code) => {
+            const adapter = createPooledAdapter();
+            globalThis.__futuresTestReusedSocket = true;
+            globalThis.__futuresTestTransport = connectionLost(code);
+
+            const error = await adapter.adjustPositionMargin({
+                symbol: 'BTCUSDT',
+                positionSide: 'BOTH',
+                direction: 'ADD',
+                amount: '25',
+            }).catch(caught => caught);
+
+            expect(requests).toHaveLength(1);
+            expect(error).toMatchObject({
+                name: 'FuturesApiError',
+                code,
+                indeterminate: true,
+            });
+        },
+    );
 
     it('does not send again when the request opened the connection itself', async () => {
         const recorded = [];
@@ -1382,7 +2080,7 @@ describe('a connection the desk already has', () => {
         globalThis.__futuresTestReusedSocket = false;
         globalThis.__futuresTestTransport = connectionLost();
 
-        const error = await placeOne(adapter).catch(caught => caught);
+        const error = await readOne(adapter).catch(caught => caught);
 
         expect(requests).toHaveLength(1);
         expect(error.name).toBe('FuturesApiError');
@@ -1434,7 +2132,7 @@ describe('a connection the desk already has', () => {
             attempt === 0 ? connectionLost() : connectionLost('ENOTFOUND')
         );
 
-        const error = await placeOne(adapter).catch(caught => caught);
+        const error = await readOne(adapter).catch(caught => caught);
 
         expect(requests).toHaveLength(2);
         expect(error.code).toBe('ENOTFOUND');

@@ -12,6 +12,7 @@ import {
     TRADING_COMMAND_ACTIONS,
     createAccountRefreshCommand,
     createFuturesAdjustPositionMarginCommand,
+    createFuturesAccountRefreshCommand,
     createFuturesAccountHistoryCommand,
     createSpotCancelAllCommand,
     createSpotCancelOrderCommand,
@@ -165,6 +166,22 @@ describe('trading command contract', () => {
         expect(isTypedTradingAction('order')).toBe(false);
     });
 
+    it('marks only an explicitly manual Futures account refresh', () => {
+        expect(createFuturesAccountRefreshCommand({
+            clientOrderId: 'manual-refresh',
+            manual: true,
+            symbol: 'BTCUSDT',
+        })).toMatchObject({
+            action: TRADING_COMMAND_ACTIONS.ACCOUNT_REFRESH,
+            marketType: FUTURES_MARKET_TYPE,
+            clientOrderId: 'manual-refresh',
+            manual: true,
+            symbol: 'BTCUSDT',
+        });
+        expect(createFuturesAccountRefreshCommand({ symbol: 'BTCUSDT' }))
+            .not.toHaveProperty('manual');
+    });
+
     it('builds a futures margin adjustment that names one position and no order', () => {
         const command = createFuturesAdjustPositionMarginCommand({
             symbol: 'BTCUSDT',
@@ -189,7 +206,7 @@ describe('trading command contract', () => {
         expect(command).not.toHaveProperty('price');
     });
 
-    it('carries history coverage as exact identities and keeps full reads explicit', () => {
+    it('carries exact history coverage and keeps full and basis-only reads explicit', () => {
         const coverage = {
             BTCUSDT: {
                 readAt: 1_784_000_000_000,
@@ -198,14 +215,19 @@ describe('trading command contract', () => {
             },
         };
         expect(createFuturesAccountHistoryCommand({
-            symbol: 'BTCUSDT', coverage, full: true,
+            symbol: 'BTCUSDT', coverage, basisOnly: true, full: true, views: ['trades'],
         })).toMatchObject({
             action: TRADING_COMMAND_ACTIONS.ACCOUNT_HISTORY,
             marketType: FUTURES_MARKET_TYPE,
             symbol: 'BTCUSDT',
             coverage,
+            basisOnly: true,
             full: true,
+            views: ['trades'],
         });
+        expect(createFuturesAccountHistoryCommand({
+            symbol: 'BTCUSDT', basisOnly: 'true', views: [],
+        })).not.toHaveProperty('basisOnly');
     });
 
     it('rejects legacy adaptation for unsupported command families', () => {

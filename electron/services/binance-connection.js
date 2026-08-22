@@ -54,23 +54,33 @@ import {
     stampFrameMarks,
 } from '../../src/utils/frameMarks.js';
 import { FUTURES_WORKSTATION_EVENT_MAX_BYTES } from '../../src/utils/futuresWorkstationProtocolShared.js';
+import {
+    FUTURES_HELD_HISTORY_MAX_ORDERS_PER_CONTRACT,
+    FUTURES_HELD_HISTORY_MAX_TRADES_PER_CONTRACT,
+} from '../../src/utils/futuresHeldHistory.js';
 // Shared with the renderer on purpose: the fold that turns these rows into a
 // position's settled money runs there, beside the fills that say when each
 // position opened, and both sides must agree on which flows are a position's at
 // all. One list, one place.
 import {
     FUTURES_UNDERIVABLE_INCOME_TYPES,
-    isFuturesSettledIncomeRow,
-    readFuturesSettledIncome,
 } from '../../src/utils/futuresSettledMoney.js';
 import {
-    compareFuturesSettledReadings,
-    mergeVerifiedFuturesSettledReading,
-} from './futures-settled-income-store.js';
+    createFuturesSettledIncomeLane,
+    createFuturesSettledIncomeResource,
+    finalizeFuturesSettledIncomeResource,
+    sanitizeFuturesSettledIncomeError,
+} from '../../src/utils/futuresSettledIncomeResource.js';
+import { createFuturesSettledIncomeRowSnapshotCache } from './futures-settled-income-frame.js';
 import {
-    emptyFuturesSettledState,
-    walkFuturesSettledIncome,
+    futuresSettledLaneNeedsAutomaticCooldown,
+    walkFuturesSettledIncomeLanes,
 } from './futures-settled-income-walk.js';
+import {
+    FUTURES_TRADE_HISTORY_WINDOW,
+    readFuturesTradeHistoryWindow,
+} from './futures-trade-history-window.js';
+import { proveFuturesTradeHistoryReverseFlat } from './futures-trade-history-reverse-flat.js';
 import {
     SPOT_REST_CONNECTION_POOL,
     createPooledSpotRestAgent,
@@ -86,6 +96,7 @@ import {
     describeFuturesApiError,
     futuresUserDataStreamUrl,
     normalizeFuturesUserDataStreamEvent,
+    parseFuturesUserStreamJson,
     redactFuturesListenKey,
 } from './futures-trading-adapter.js';
 import {
@@ -99,6 +110,7 @@ import {
     computeFuturesAccountMarginEstimates,
     createFuturesMarginEstimateEvents,
 } from './futures-account-margin.js';
+import { runWithBinancePhysicalAttemptContext } from './binance-physical-attempt-context.js';
 import {
     FUTURES_URGENT_ACCOUNT_READ_REASONS,
     FuturesSettledOrderMemory,
@@ -304,6 +316,16 @@ const extractStreamPayload = (rawMessage) => {
     }
 };
 
+const extractFuturesStreamPayload = (rawMessage) => {
+    try {
+        const parsed = parseFuturesUserStreamJson(rawMessage);
+        return parsed?.data ?? parsed;
+    } catch (error) {
+        logger.error("Failed to parse Futures WebSocket payload:", error);
+        return null;
+    }
+};
+
 /**
  * Rate Limiter for Binance API calls
  * Binance limits: ~1200 weight per minute for REST API
@@ -373,6 +395,28 @@ const waitForPromise = (promise, signal) => {
 // the fan-out is held up by at most eight admissions however many orders are
 // worked over it.
 const MAX_ADMISSION_PASSES = 8;
+const MAX_BINANCE_RETRY_AFTER_MS = 3 * 24 * 60 * 60 * 1000;
+
+const addBoundedCount = (left, right = 1) => Math.min(
+    Number.MAX_SAFE_INTEGER,
+    left + right,
+);
+
+const physicalAttemptWeight = (candidate, fallback) => (
+    Number.isSafeInteger(candidate) && candidate > 0 ? candidate : fallback
+);
+
+const physicalAttemptStatus = value => (
+    Number.isSafeInteger(value) && value >= 100 && value <= 599 ? value : null
+);
+
+const PHYSICAL_ATTEMPT_CODE = /^(?:-?\d{1,6}|[A-Z][A-Z0-9_]{0,39})$/;
+const physicalAttemptCode = (value) => {
+    const candidate = Number.isSafeInteger(value) ? String(value) : value;
+    return typeof candidate === 'string' && PHYSICAL_ATTEMPT_CODE.test(candidate)
+        ? candidate
+        : null;
+};
 
 export class RateLimiter {
     /**
@@ -381,14 +425,26 @@ export class RateLimiter {
      *   than the exchange, held a request back: `{ standing, waitedMs, weight,
      *   spent, ceiling }`. Absent, the wait leaves no trace, which is how the
      *   desk spent a day unable to say where 26 seconds had gone.
+     * @param {Function} [options.onOperation] - Receives a bounded physical
+     *   attempt summary in Futures physical mode. Observational only.
+     * @param {boolean} [options.physicalAttempts] - Admit at the low-level
+     *   Futures HTTP boundary. Spot deliberately leaves this disabled.
      */
-    constructor(maxWeight = 800, windowMs = 60000, requestDelayMs = 500, { onDeferred = null } = {}) {
+    constructor(
+        maxWeight = 800,
+        windowMs = 60000,
+        requestDelayMs = 500,
+        { onDeferred = null, onOperation = null, physicalAttempts = false } = {},
+    ) {
         this.maxWeight = maxWeight;        // Max weight per window (conservative)
         this.windowMs = windowMs;          // Window size in ms (1 minute)
         this.requestDelayMs = requestDelayMs; // Hard-coded delay before each request
         this.onDeferred = typeof onDeferred === 'function' ? onDeferred : null;
+        this.onOperation = typeof onOperation === 'function' ? onOperation : null;
+        this.physicalAttempts = physicalAttempts === true;
         this.requests = [];                // Track { timestamp, weight }
         this.lastRequestTime = 0;          // Last request timestamp for spacing
+        this.backpressureUntil = 0;        // Conservative 418/429 Retry-After floor
         // Serialize only admission/reservation. Once admitted, operations remain
         // independent, so one slow read cannot suppress unrelated resources.
         // Queued in arrival order; urgency decides who leaves the queue first.
@@ -425,6 +481,100 @@ export class RateLimiter {
         } catch {
             // Deliberately silent — see above.
         }
+    }
+
+    /**
+     * Publish one logical-operation summary without making diagnostics part of
+     * whether the exchange operation succeeds.
+     */
+    noteOperation(entry, callback = null) {
+        for (const observer of [this.onOperation, callback]) {
+            if (typeof observer !== 'function') continue;
+            try {
+                observer(entry);
+            } catch {
+                // Observational only.
+            }
+        }
+    }
+
+    /**
+     * Binance's minute meter is a conservative floor. A lower or absent sample
+     * cannot refund locally admitted work; a higher one replaces the component
+     * entries with one fresh baseline so it cannot expire piecemeal beneath the
+     * exchange observation.
+     */
+    reconcilePhysicalResponse(
+        { status, usedWeight, retryAfterMs } = {},
+        admission = null,
+    ) {
+        const now = Date.now();
+        const admissionSequence = admission?.sequence;
+        let unresolvedReservations = [];
+        if (Number.isSafeInteger(admissionSequence) && admissionSequence > 0) {
+            // A token is resolved by an answer even when a proxy omitted the
+            // optional weight header. Its local raw charge remains in
+            // `requests`; only the extra uncertainty premium is retired here.
+            unresolvedReservations = (this.physicalReservations ?? [])
+                .filter(reservation => (
+                    now - reservation.timestamp < this.windowMs
+                    && reservation.sequence !== admissionSequence
+                ));
+            this.physicalReservations = unresolvedReservations;
+        }
+        if (Number.isSafeInteger(usedWeight) && usedWeight >= 0) {
+            const locallyUsed = this.getCurrentWeight();
+            if (Number.isSafeInteger(admissionSequence) && admissionSequence > 0) {
+                // `requests` may contain an aggregate observed baseline. Keep a
+                // separate, window-bounded ledger of admissions whose responses
+                // have not arrived yet. A response includes all older physical
+                // sends in Binance's meter, but not a still-unanswered send just
+                // because that send received an earlier local sequence number.
+                // Preserving every *other unresolved* token is therefore what
+                // makes reverse response order conservative in both directions.
+                const unresolvedWeight = unresolvedReservations.reduce(
+                    (sum, reservation) => addBoundedCount(sum, reservation.weight),
+                    0,
+                );
+                const candidateWeight = addBoundedCount(usedWeight, unresolvedWeight);
+                if (candidateWeight > locallyUsed) {
+                    this.requests = [
+                        ...unresolvedReservations,
+                        { timestamp: now, weight: usedWeight },
+                    ].sort((left, right) => left.timestamp - right.timestamp);
+                }
+            } else if (usedWeight > locallyUsed) {
+                // Compatibility for direct/legacy observations which predate
+                // physical-admission tokens. Production Futures sends always
+                // take the token-aware branch above.
+                this.requests = [{ timestamp: now, weight: usedWeight }];
+            }
+        }
+
+        if ((status === 418 || status === 429)
+            && Number.isSafeInteger(retryAfterMs)
+            && retryAfterMs >= 0) {
+            this.backpressureUntil = Math.max(
+                this.backpressureUntil,
+                now + Math.min(retryAfterMs, MAX_BINANCE_RETRY_AFTER_MS),
+            );
+        }
+    }
+
+    reservationWait(weight) {
+        const now = Date.now();
+        const spent = this.getCurrentWeight();
+        const backpressureMs = Math.max(0, this.backpressureUntil - now);
+        const capacityMs = spent + weight > this.maxWeight && this.requests.length > 0
+            ? Math.max(
+                0,
+                this.windowMs - (now - this.requests[0].timestamp) + 100,
+            )
+            : 0;
+        return {
+            spent,
+            sleepFor: Math.max(backpressureMs, capacityMs),
+        };
     }
 
     /**
@@ -538,9 +688,10 @@ export class RateLimiter {
      * guards — one that has just slept a whole window is not the one waiting
      * longest any more.
      */
-    async reserve(weight, signal, { urgent = false } = {}) {
+    async reserve(weight, signal, { urgent = false, isCurrent = null } = {}) {
         let deferredFrom = null;
         let spentWhenHeld = 0;
+        let admission;
         // Carried across the re-queue rather than restarted with it. The bound on
         // urgent overtaking is counted against whoever has waited longest, and a
         // request the window turned away has waited longer than anything that
@@ -553,23 +704,51 @@ export class RateLimiter {
             let booked = false;
             try {
                 throwIfAborted(signal);
-                const spent = this.getCurrentWeight();
-                // `requests.length === 0` admits a request heavier than the whole
-                // window rather than sleeping on a window that will never fit it.
-                if (spent + weight <= this.maxWeight || this.requests.length === 0) {
+                let wait = this.reservationWait(weight);
+                if (wait.sleepFor === 0) {
                     await this.enforceDelay(signal);
                     throwIfAborted(signal);
-                    this.requests.push({ timestamp: Date.now(), weight });
-                    booked = true;
-                } else {
+                    // A previous in-flight request can answer with a higher
+                    // exchange-used-weight sample while this admission is in
+                    // its spacing delay. Recheck before booking rather than
+                    // admitting against the stale lower reading.
+                    if (this.physicalAttempts) wait = this.reservationWait(weight);
+                    if (!this.physicalAttempts || wait.sleepFor === 0) {
+                        if (typeof isCurrent === 'function') {
+                            let stillCurrent = false;
+                            try {
+                                stillCurrent = isCurrent() === true;
+                            } catch {
+                                // A lifecycle guard that cannot answer no longer
+                                // owns the send this slot was about to book.
+                            }
+                            if (!stillCurrent) throw createAbortError();
+                        }
+                        const timestamp = Date.now();
+                        if (this.physicalAttempts) {
+                            const sequence = addBoundedCount(
+                                this.nextPhysicalAdmissionSequence ?? 0,
+                            );
+                            this.nextPhysicalAdmissionSequence = sequence;
+                            const reservation = { timestamp, weight, sequence };
+                            this.physicalReservations = (this.physicalReservations ?? [])
+                                .filter(item => timestamp - item.timestamp < this.windowMs);
+                            this.physicalReservations.push(reservation);
+                            this.requests.push(reservation);
+                            admission = Object.freeze({ sequence });
+                        } else {
+                            this.requests.push({ timestamp, weight });
+                        }
+                        booked = true;
+                    }
+                }
+                if (!booked) {
                     if (deferredFrom === null) {
                         deferredFrom = Date.now();
-                        spentWhenHeld = spent;
+                        spentWhenHeld = wait.spent;
                     }
-                    // +100ms so the window has actually rolled by the time this
-                    // asks again, rather than a millisecond before it.
-                    sleepFor = this.windowMs - (Date.now() - this.requests[0].timestamp) + 100;
-                    logger.debug(`Rate limiter: waiting ${sleepFor}ms (current weight: ${spent}/${this.maxWeight})`);
+                    sleepFor = wait.sleepFor;
+                    logger.debug(`Rate limiter: waiting ${sleepFor}ms (current weight: ${wait.spent}/${this.maxWeight})`);
                 }
             } finally {
                 this.releaseAdmission();
@@ -587,7 +766,7 @@ export class RateLimiter {
                         ceiling: this.maxWeight,
                     });
                 }
-                return;
+                return admission;
             }
             passes = entry.passes;
             // Never negative, and never a tight loop: a zero wait still yields,
@@ -605,46 +784,185 @@ export class RateLimiter {
      * @param {AbortSignal} [options.signal]
      * @param {boolean} [options.urgent] - Admitted ahead of ordinary work, within
      *   the bound above. For what the operator's command needs, nothing else.
+     * @param {Function} [options.onAccounting] - Per-call bounded attempt
+     *   summary in Futures physical mode. Observational only.
+     * @param {Function} [options.onAttemptAdmitted] - Called after each Futures
+     *   physical reservation and immediately before transport creation.
+     * @param {Function} [options.isCurrent] - Lifecycle ownership rechecked
+     *   after reservation; false prevents the now-stale physical send.
      */
-    async execute(fn, weight = 1, maxRetries = 2, { signal, urgent = false } = {}) {
-        await this.reserve(weight, signal, { urgent });
-
-        // Execute with retry on network errors
-        let lastError;
-        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    async execute(
+        fn,
+        weight = 1,
+        maxRetries = 2,
+        {
+            signal,
+            urgent = false,
+            onAccounting = null,
+            onAttemptAdmitted = null,
+            isCurrent = null,
+        } = {},
+    ) {
+        const accounting = this.physicalAttempts ? {
+            attempts: 0,
+            chargedWeight: 0,
+            observedWeight: null,
+            backpressureMs: 0,
+            connectionRetries: 0,
+            networkRetries: 0,
+            timestampRetries: 0,
+            rateLimitResponses: 0,
+            status: null,
+        } : null;
+        const declaredWeight = physicalAttemptWeight(weight, 1);
+        const ownsAttempt = () => {
+            if (typeof isCurrent !== 'function') return true;
             try {
-                throwIfAborted(signal);
-                return await fn();
-            } catch (err) {
-                lastError = err;
-                if (err?.name === 'AbortError') throw err;
-                if (signal?.aborted) throw createAbortError();
-                const isNetworkError = err?.code === 'ECONNRESET' ||
-                                       err?.code === 'ETIMEDOUT' ||
-                                       err?.code === 'ENOTFOUND' ||
-                                       err?.code === 'ECONNREFUSED' ||
-                                       err?.message?.includes('socket disconnected') ||
-                                       err?.message?.includes('network');
-                // Binance -1021: the signed request's timestamp fell outside the
-                // recvWindow (clock drift or a delayed send). A retry rebuilds the
-                // request with a FRESH timestamp, so it usually succeeds. Safe even
-                // for newOrder/deleteOrder: -1021 means the request was rejected
-                // before any matching, so no duplicate order can result.
-                const isTimestampError = err?.code === -1021 ||
-                                       err?.message?.includes('recvWindow') ||
-                                       err?.message?.includes('Timestamp for this request');
-
-                if ((isNetworkError || isTimestampError) && attempt < maxRetries) {
-                    const retryDelay = isTimestampError ? 250 : 1000 * (attempt + 1); // ts: quick retry; net: 1s,2s
-                    const kind = isTimestampError ? 'timestamp/recvWindow' : 'network';
-                    logger.warn(`${kind} error (${err.code || 'unknown'}), retrying in ${retryDelay}ms (attempt ${attempt + 1}/${maxRetries})`);
-                    await waitForDelay(retryDelay, signal);
-                    continue;
-                }
-                throw err;
+                return isCurrent() === true;
+            } catch {
+                // A lifecycle guard that cannot answer no longer owns a send.
+                return false;
             }
+        };
+        const context = accounting === null ? null : {
+            signal: signal ?? null,
+            admit: async (overrideWeight) => {
+                if (!ownsAttempt()) throw createAbortError();
+                const admittedWeight = physicalAttemptWeight(overrideWeight, declaredWeight);
+                const admission = await this.reserve(admittedWeight, signal, {
+                    urgent,
+                    isCurrent: ownsAttempt,
+                });
+                accounting.attempts = addBoundedCount(accounting.attempts);
+                accounting.chargedWeight = addBoundedCount(
+                    accounting.chargedWeight,
+                    admittedWeight,
+                );
+                // Ownership can turn after the atomic booking check. Keep this
+                // final guard immediately before transport creation; a booked
+                // reservation is intentionally not refunded because exchange
+                // observation may already race with local cancellation.
+                if (!ownsAttempt()) throw createAbortError();
+                if (typeof onAttemptAdmitted === 'function') {
+                    try {
+                        onAttemptAdmitted();
+                    } catch {
+                        // Observational timing only.
+                    }
+                }
+                return admission;
+            },
+            observeResponse: (observation, admission) => {
+                this.reconcilePhysicalResponse(observation, admission);
+                const status = physicalAttemptStatus(observation?.status);
+                if (status !== null) accounting.status = status;
+                if (Number.isSafeInteger(observation?.usedWeight)
+                    && observation.usedWeight >= 0) {
+                    accounting.observedWeight = Math.max(
+                        accounting.observedWeight ?? 0,
+                        observation.usedWeight,
+                    );
+                }
+                if (Number.isSafeInteger(observation?.retryAfterMs)
+                    && observation.retryAfterMs >= 0) {
+                    accounting.backpressureMs = Math.max(
+                        accounting.backpressureMs,
+                        Math.min(observation.retryAfterMs, MAX_BINANCE_RETRY_AFTER_MS),
+                    );
+                }
+                if (status === 418 || status === 429) {
+                    accounting.rateLimitResponses = addBoundedCount(
+                        accounting.rateLimitResponses,
+                    );
+                }
+            },
+            noteRetry: (category) => {
+                if (category === 'connection-fallback') {
+                    accounting.connectionRetries = addBoundedCount(
+                        accounting.connectionRetries,
+                    );
+                } else if (category === 'network') {
+                    accounting.networkRetries = addBoundedCount(accounting.networkRetries);
+                } else if (category === 'timestamp') {
+                    accounting.timestampRetries = addBoundedCount(accounting.timestampRetries);
+                }
+            },
+        };
+
+        // Spot keeps its historical logical-operation admission: retries are
+        // part of the one SDK operation the legacy limiter admitted. Futures
+        // installs the physical context below and every low-level HTTP send
+        // reserves itself, so it must not pre-reserve here.
+        if (context === null) await this.reserve(weight, signal, { urgent });
+
+        const executeAttempts = async () => {
+            let lastError;
+            for (let attempt = 0; attempt <= maxRetries; attempt++) {
+                try {
+                    throwIfAborted(signal);
+                    return await fn();
+                } catch (err) {
+                    lastError = err;
+                    if (err?.name === 'AbortError') throw err;
+                    if (signal?.aborted) throw createAbortError();
+                    const isNetworkError = err?.code === 'ECONNRESET' ||
+                                           err?.code === 'ETIMEDOUT' ||
+                                           err?.code === 'ENOTFOUND' ||
+                                           err?.code === 'ECONNREFUSED' ||
+                                           err?.message?.includes('socket disconnected') ||
+                                           err?.message?.includes('network');
+                    // Binance -1021: the signed request's timestamp fell outside the
+                    // recvWindow (clock drift or a delayed send). A retry rebuilds the
+                    // request with a FRESH timestamp, so it usually succeeds. Safe even
+                    // for newOrder/deleteOrder: -1021 means the request was rejected
+                    // before any matching, so no duplicate order can result.
+                    const isTimestampError = err?.code === -1021 ||
+                                           err?.message?.includes('recvWindow') ||
+                                           err?.message?.includes('Timestamp for this request');
+
+                    if ((isNetworkError || isTimestampError) && attempt < maxRetries) {
+                        context?.noteRetry(isTimestampError ? 'timestamp' : 'network');
+                        const retryDelay = isTimestampError ? 250 : 1000 * (attempt + 1); // ts: quick retry; net: 1s,2s
+                        const kind = isTimestampError ? 'timestamp/recvWindow' : 'network';
+                        logger.warn(`${kind} error (${err.code || 'unknown'}), retrying in ${retryDelay}ms (attempt ${attempt + 1}/${maxRetries})`);
+                        await waitForDelay(retryDelay, signal);
+                        continue;
+                    }
+                    throw err;
+                }
+            }
+            throw lastError;
+        };
+
+        if (context === null) return executeAttempts();
+
+        let finalError = null;
+        let outcome = 'error';
+        try {
+            const result = await runWithBinancePhysicalAttemptContext(context, executeAttempts);
+            outcome = 'ok';
+            return result;
+        } catch (error) {
+            finalError = error;
+            outcome = error?.name === 'AbortError' || signal?.aborted ? 'aborted' : 'error';
+            throw error;
+        } finally {
+            const summary = Object.freeze({
+                standing: urgent === true ? 'urgent' : 'ordinary',
+                attempts: accounting.attempts,
+                chargedWeight: accounting.chargedWeight,
+                observedWeight: accounting.observedWeight,
+                backpressureMs: accounting.backpressureMs,
+                connectionRetries: accounting.connectionRetries,
+                networkRetries: accounting.networkRetries,
+                timestampRetries: accounting.timestampRetries,
+                rateLimitResponses: accounting.rateLimitResponses,
+                outcome,
+                status: accounting.status ?? physicalAttemptStatus(finalError?.status),
+                code: outcome === 'ok' ? null : physicalAttemptCode(finalError?.code),
+            });
+            this.noteOperation(summary, onAccounting);
         }
-        throw lastError;
     }
 }
 
@@ -1046,9 +1364,14 @@ export function setupBinanceConnection({
         60000,
         FUTURES_REST_ADMISSION_SPACING_MS,
         {
+            // Futures retries that really send again live below this logical
+            // call. Physical mode lets that low-level boundary reserve each
+            // send once; Spot's separate limiter deliberately remains logical.
+            physicalAttempts: true,
             // The one thing this budget does that the operator can feel is make
             // them wait, and until now that was the one thing it did silently.
             onDeferred: entry => diagnosticRecord.record('deferred', entry),
+            onOperation: entry => diagnosticRecord.record('request', entry),
         },
     );
 
@@ -1469,6 +1792,10 @@ export function setupBinanceConnection({
         regularOrders: 'futures_regular_orders',
         algoOrders: 'futures_algo_orders',
     });
+    const createFuturesAccountStateFrame = () => ({
+        ...createFuturesAccountStateEnvelope(futuresAccountResources),
+        accountFingerprint: futuresTradingAdapter?.credentialFingerprint ?? null,
+    });
     const broadcastFuturesAccountState = (marks = null) => {
         // Versioned renderer contract: futures_account_state.
         //
@@ -1476,7 +1803,7 @@ export function setupBinanceConnection({
         // a read has no exchange time and no arrival to measure from, and a mark
         // invented for it would time the desk's own beat and call it a journey.
         broadcastToRenderers(
-            createFuturesAccountStateEnvelope(futuresAccountResources),
+            createFuturesAccountStateFrame(),
             ACCOUNT_FRAME,
             marks,
         );
@@ -1682,8 +2009,18 @@ export function setupBinanceConnection({
     // retained for presentation while a replacement read is loading, but that
     // retained set is not authority for bypassing an execution safety bound.
     let futuresPositionsActivationGeneration = null;
-    // The contracts the last income walk found, and when it found them.
+    // The contracts the last income walk found, and when it found them. Income
+    // walks are shared by every renderer and may settle out of issue order, so
+    // only a candidate newer than the last committed/reset fence may replace it.
     let futuresHistoryDiscovery = null;
+    let futuresHistoryDiscoveryIssue = 0;
+    let futuresHistoryDiscoveryCommitFence = 0;
+    const commitFuturesHistoryDiscovery = (issue, candidate) => {
+        if (issue <= futuresHistoryDiscoveryCommitFence) return false;
+        futuresHistoryDiscoveryCommitFence = issue;
+        futuresHistoryDiscovery = candidate;
+        return true;
+    };
     // A contract can be skipped only when one uninterrupted authenticated
     // stream interval has vouched for it since a successful REST reading. The
     // epoch invalidates every proof at once; revisions make a stream event that
@@ -1693,7 +2030,22 @@ export function setupBinanceConnection({
     let futuresHistoryActivityRevision = 0;
     let futuresHistoryRotationOffset = 0;
     const futuresHistoryActivityBySymbol = new Map();
+    const futuresHistoryHighestFillIdBySymbol = new Map();
     const futuresHistoryProofBySymbol = new Map();
+    // A Full trade-history read is transactional. Dense contracts can require
+    // more than one bounded pass, so rows acquired by that repair are held here
+    // until the frozen window is complete. Partial passes may be shown only as
+    // non-exact evidence; the visible/stored contract is replaced once, with
+    // the complete reacquisition, never with a newest suffix.
+    const FUTURES_HISTORY_REACQUISITION_CONTINUE_MS = 5_000;
+    const FUTURES_HISTORY_REACQUISITION_MAX_PASSES = 16;
+    const FUTURES_HISTORY_REACQUISITION_MAX_FAILURES = 3;
+    const FUTURES_HISTORY_REACQUISITION_MAX_REQUESTS = 16;
+    // Transactional ownership is per renderer. Shared checkpoints were paired
+    // with a timer/emit closure from whichever renderer happened to schedule
+    // first, so a Spot switch on A could clear B's Full repair or publish B's
+    // final replacement to A after it closed.
+    const futuresHistorySessions = new Set();
 
     const normalizeFuturesHistoryCursor = (value) => {
         const cursor = typeof value === 'string' ? value.trim() : '';
@@ -1705,16 +2057,31 @@ export function setupBinanceConnection({
         return Number.isSafeInteger(value) && value >= 0 ? String(value) : null;
     };
 
+    const futuresHistoryHasFlatBoundary = (coverage) => {
+        if (coverage?.flatBoundary === true) return true;
+        return Number.isSafeInteger(coverage?.flatBoundary)
+            && coverage.flatBoundary >= 0
+            && Number.isSafeInteger(coverage?.coveredFrom)
+            && coverage.flatBoundary <= coverage.coveredFrom;
+    };
+
     const invalidateFuturesHistoryStream = () => {
         futuresHistoryStreamConnected = false;
         futuresHistoryStreamEpoch += 1;
     };
 
-    const noteFuturesHistoryActivity = (value) => {
+    const noteFuturesHistoryActivity = (value, fillIdentity = null) => {
         const symbol = String(value ?? '').trim().toUpperCase();
         if (!symbol) return;
         futuresHistoryActivityRevision += 1;
         futuresHistoryActivityBySymbol.set(symbol, futuresHistoryActivityRevision);
+        const identity = normalizeFuturesHistoryIdentity(fillIdentity);
+        if (identity !== null) {
+            const held = futuresHistoryHighestFillIdBySymbol.get(symbol) ?? null;
+            if (held === null || BigInt(identity) > BigInt(held)) {
+                futuresHistoryHighestFillIdBySymbol.set(symbol, identity);
+            }
+        }
     };
 
     const futuresHistoryActivityOf = symbol => (
@@ -1725,7 +2092,50 @@ export function setupBinanceConnection({
         connected: futuresHistoryStreamConnected,
         epoch: futuresHistoryStreamEpoch,
         activity: futuresHistoryActivityOf(symbol),
+        highestFillId: futuresHistoryHighestFillIdBySymbol.get(symbol) ?? null,
     });
+
+    const futuresHistoryTerminalSnapshotSignature = positions => JSON.stringify(
+        (Array.isArray(positions) ? positions : [])
+            .map(position => [
+                String(position?.symbol ?? '').trim().toUpperCase(),
+                String(position?.positionSide ?? 'BOTH').trim().toUpperCase(),
+                typeof position?.quantity === 'string'
+                    ? position.quantity
+                    : typeof position?.positionAmt === 'string'
+                        ? position.positionAmt
+                        : null,
+            ])
+            .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right))),
+    );
+
+    const captureFuturesHistoryTerminalSnapshot = () => {
+        const resource = futuresAccountResources.positions;
+        const current = resource?.status === 'ready'
+            && resource?.lastSuccessfulAt !== null
+            && resource?.lastSuccessfulAt !== undefined
+            && futuresPositionsActivationGeneration === futuresActivationGeneration
+            && Array.isArray(resource?.data);
+        return Object.freeze({
+            activation: futuresActivationGeneration,
+            resource,
+            current,
+            positions: current ? resource.data : null,
+            signature: current
+                ? futuresHistoryTerminalSnapshotSignature(resource.data)
+                : null,
+        });
+    };
+
+    const futuresHistoryTerminalSnapshotIsCurrent = snapshot => (
+        snapshot?.current === true
+        && snapshot.activation === futuresActivationGeneration
+        && futuresAccountResources.positions?.status === 'ready'
+        && futuresPositionsActivationGeneration === futuresActivationGeneration
+        && snapshot.signature === futuresHistoryTerminalSnapshotSignature(
+            futuresAccountResources.positions?.data,
+        )
+    );
 
     // Proved per endpoint, because a read is now per endpoint: a review that read
     // the fills of a contract has proved nothing about its order log, and saying
@@ -1766,6 +2176,10 @@ export function setupBinanceConnection({
         // Only the endpoints this read is for. A contract vouched for its fills
         // and never read for its orders is unread as far as the order log goes.
         return views.every((view) => {
+            if (view === FUTURES_HISTORY_VIEWS.TRADES
+                && held?.tradeCoverage?.version === 2
+                && held.tradeCoverage.complete !== true
+                && !futuresHistoryHasFlatBoundary(held.tradeCoverage)) return false;
             const cursor = FUTURES_HISTORY_VIEW_CURSORS[view];
             return proof[cursor] === normalizeFuturesHistoryCursor(held?.[cursor]);
         });
@@ -1774,8 +2188,14 @@ export function setupBinanceConnection({
     const forgetFuturesHistoryState = () => {
         invalidateFuturesHistoryStream();
         futuresHistoryActivityBySymbol.clear();
+        futuresHistoryHighestFillIdBySymbol.clear();
         futuresHistoryProofBySymbol.clear();
+        for (const session of futuresHistorySessions) session.reset();
         futuresHistoryRotationOffset = 0;
+        // Fence off every income walk issued before this account/activation
+        // reset. Its owner may still settle, but it cannot resurrect shared
+        // discovery state belonging to the desk that was just left.
+        futuresHistoryDiscoveryCommitFence = ++futuresHistoryDiscoveryIssue;
         futuresHistoryDiscovery = null;
     };
     const noteFuturesMutation = () => {
@@ -1925,54 +2345,57 @@ export function setupBinanceConnection({
         // The signed reads run concurrently: the limiter still spaces their
         // admissions, but the round-trips overlap, so the ticket reaches
         // READY in roughly one round-trip instead of serial endpoint latency.
-        await Promise.all(operations.map(operation => futuresRestLimiter.execute(async () => {
-            // When this read actually leaves, not when the pass was asked for:
-            // anything the stream reports from here on is news the read cannot
-            // carry, and that is what the reconciliation below compares against.
-            const issuedAt = Date.now();
-            const payload = await operation.loadPayload();
-            const payloadKey = futuresAccountPayloadKeys[operation.type];
-            if (!payloadKey || !Object.hasOwn(payload, payloadKey)) {
-                const error = new Error('Invalid Futures account resource payload');
-                error.code = 'INVALID_RESOURCE_PAYLOAD';
-                throw error;
-            }
-            // A mutating command landed while this read was in flight. The read
-            // predates it, so applying it would undo it. The command queued its
-            // own refresh, so nothing is lost by dropping this one. The same
-            // goes for a read that outlived the activation it was started under.
-            if (epoch !== futuresMutationEpoch || activation !== futuresActivationGeneration) return;
-            futuresAccountResources = markFuturesResourceReady(
-                futuresAccountResources,
-                operation.type,
-                // A read that does not agree with the stream describes a world
-                // already moved past — in both directions. The settled memory
-                // refuses what it lists and should not, the streamed memory
-                // restores what it omits and should not. The second one allows
-                // for the exchange's own lag as well: a read issued after the
-                // stream reported an order can still answer without it.
-                readFuturesAccountResource(operation.type, payload[payloadKey], {
-                    issuedAt,
-                    // A read asked for only because a frame could not carry the
-                    // liquidation price is allowed to state the liquidation
-                    // price. What the frame did state stands: the replica it
-                    // answers from can still be describing the account before
-                    // the frame, and showing the exchange's own figure and then
-                    // taking it back is the blink by another route.
-                    unstated: reason === 'unstated',
-                }),
-            );
-            if (operation.type === 'positions') {
-                futuresPositionsActivationGeneration = activation;
-            }
-            if (operation.type === 'positions' || operation.type === 'balances') {
-                recordFuturesMarginEstimates(operation.type);
-            }
-            if (operation.type === 'positions') {
-                futuresMarkPriceFeed?.track(futuresAccountResources.positions.data ?? []);
-            }
-            broadcastFuturesAccountState();
-        }, operation.weight, 2, { urgent }).catch((error) => {
+        await Promise.all(operations.map((operation) => {
+            let issuedAt = null;
+            return futuresRestLimiter.execute(async () => {
+                const payload = await operation.loadPayload();
+                const payloadKey = futuresAccountPayloadKeys[operation.type];
+                if (!payloadKey || !Object.hasOwn(payload, payloadKey)) {
+                    const error = new Error('Invalid Futures account resource payload');
+                    error.code = 'INVALID_RESOURCE_PAYLOAD';
+                    throw error;
+                }
+                // A mutating command landed while this read was in flight. The read
+                // predates it, so applying it would undo it. The command queued its
+                // own refresh, so nothing is lost by dropping this one. The same
+                // goes for a read that outlived the activation it was started under.
+                if (epoch !== futuresMutationEpoch
+                    || activation !== futuresActivationGeneration) return;
+                futuresAccountResources = markFuturesResourceReady(
+                    futuresAccountResources,
+                    operation.type,
+                    // `issuedAt` is updated after every physical admission. A cold
+                    // signed read first admits `/time`; a `-1021` admits it again.
+                    // The last update is therefore the request that produced this
+                    // payload, not the logical callback that may have queued earlier.
+                    readFuturesAccountResource(operation.type, payload[payloadKey], {
+                        issuedAt: issuedAt ?? Date.now(),
+                        // A read asked for only because a frame could not carry the
+                        // liquidation price is allowed to state the liquidation
+                        // price. What the frame did state stands: the replica it
+                        // answers from can still be describing the account before
+                        // the frame, and showing the exchange's own figure and then
+                        // taking it back is the blink by another route.
+                        unstated: reason === 'unstated',
+                    }),
+                );
+                if (operation.type === 'positions') {
+                    futuresPositionsActivationGeneration = activation;
+                }
+                if (operation.type === 'positions' || operation.type === 'balances') {
+                    recordFuturesMarginEstimates(operation.type);
+                }
+                if (operation.type === 'positions') {
+                    futuresMarkPriceFeed?.track(futuresAccountResources.positions.data ?? []);
+                }
+                broadcastFuturesAccountState();
+            }, operation.weight, 2, {
+                urgent,
+                // When this read actually leaves, not when the pass was asked
+                // for: anything the stream reports from here on is news the read
+                // cannot carry, and reconciliation compares against this mark.
+                onAttemptAdmitted: () => { issuedAt = Date.now(); },
+            }).catch((error) => {
                 if (epoch !== futuresMutationEpoch || activation !== futuresActivationGeneration) return;
                 futuresAccountResources = markFuturesResourceFailed(
                     futuresAccountResources,
@@ -1981,7 +2404,8 @@ export function setupBinanceConnection({
                 );
                 broadcastFuturesAccountState();
                 logger.error(`${operation.errorLabel}:`, error?.code || error?.message);
-            })));
+            });
+        }));
 
         // Every contract the account has something riding on, so the dock can
         // state what each is carried at and the free-margin estimate can price
@@ -2164,7 +2588,29 @@ export function setupBinanceConnection({
     // table is what decides whether a kind can be derived from the fills, so a
     // kind marked underivable there and missing here is money the column never
     // sees and nothing anywhere fails.
+    const FUTURES_SETTLED_CREDIT_INCOME_TYPES = Object.freeze([
+        'COMMISSION_REBATE',
+        'API_REBATE',
+        'REFERRAL_KICKBACK',
+        'FEE_RETURN',
+    ]);
     const FUTURES_SETTLED_INCOME_TYPES = FUTURES_UNDERIVABLE_INCOME_TYPES;
+    const FUTURES_SETTLED_INCOME_TYPES_BY_REASON = Object.freeze({
+        funding: Object.freeze(['FUNDING_FEE']),
+        settlement: Object.freeze(['FUNDING_FEE']),
+        confirm: Object.freeze(['FUNDING_FEE']),
+        fill: FUTURES_SETTLED_CREDIT_INCOME_TYPES,
+        'credit-confirm': FUTURES_SETTLED_CREDIT_INCOME_TYPES,
+        insurance: Object.freeze(['INSURANCE_CLEAR']),
+        'insurance-confirm': Object.freeze(['INSURANCE_CLEAR']),
+        bootstrap: FUTURES_SETTLED_INCOME_TYPES,
+        refresh: FUTURES_SETTLED_INCOME_TYPES,
+        tick: FUTURES_SETTLED_INCOME_TYPES,
+        verification: FUTURES_SETTLED_INCOME_TYPES,
+    });
+    const futuresSettledIncomeTypesForReason = reason => (
+        FUTURES_SETTLED_INCOME_TYPES_BY_REASON[reason] ?? FUTURES_SETTLED_INCOME_TYPES
+    );
     // Deliberately not the contract-discovery walk beside it. That walk answers
     // which contracts were traded, which moves when a trade is made, and it is
     // cached and page-budgeted for exactly that. This moves on every settlement.
@@ -2213,7 +2659,9 @@ export function setupBinanceConnection({
     // had. An hourly reconciliation is not something a person can be asked to
     // wait for while looking at a wrong number.
     const FUTURES_SETTLED_ALWAYS_READ_REASONS = new Set([
-        'funding', 'settlement', 'stream', 'refresh', 'confirm',
+        'funding', 'settlement', 'refresh', 'confirm',
+        'fill', 'credit-confirm', 'insurance', 'insurance-confirm',
+        'verification', 'extension',
     ]);
     // How long after a settlement the desk asks again.
     //
@@ -2224,17 +2672,42 @@ export function setupBinanceConnection({
     // it was, and it is written afterwards. So the settlement is read twice —
     // once for the timing, once for the row.
     const FUTURES_SETTLED_CONFIRM_MS = 2 * 60 * 1000;
+    // Persisting a complete lane ledger is synchronous by design. Round durable
+    // invalidation upward so a millisecond fill burst shares one conservative
+    // snapshot, while the exact in-memory event clock below still owns the live
+    // confirmation timer. Restart may wait at most one extra second; it can never
+    // confirm earlier than the newest event covered by the persisted bucket.
+    const FUTURES_SETTLED_CONFIRM_PERSIST_BUCKET_MS = 1_000;
+    const FUTURES_SETTLED_CONFIRM_RETRY_MAX = 3;
+    const FUTURES_SETTLED_TRANSIENT_CONFIRM_CODES = new Set([
+        'READ_FAILED', 'EMPTY_ANSWER', 'ETIMEDOUT', 'ESOCKETTIMEDOUT',
+        'ECONNRESET', 'ECONNREFUSED', 'ECONNABORTED', 'EAI_AGAIN', 'EPIPE',
+        'ENOTFOUND', 'EHOSTUNREACH', 'ENETUNREACH',
+        '429', '-1000', '-1001', '-1003', '-1006', '-1007', '-1008', '-1021',
+    ]);
     // The reasons that mean "a charge has just been made". They are the only
     // ones that arm the confirming pass, and they outrank every other reason a
     // pass can be given.
-    const FUTURES_SETTLED_CONFIRM_REASONS = new Set(['funding', 'settlement']);
-    // How often a kept reading is checked against the exchange rather than
-    // extended. A whole window is one request per kind, so the honest thing is
-    // affordable: read it from nothing, compare, and let the exchange win. This
-    // replaces the tail read the hour used to spend, at the same cost.
-    const FUTURES_SETTLED_VERIFY_MS = FUTURES_SETTLED_RECONCILE_MS;
+    const FUTURES_SETTLED_CONFIRM_REASON_BY_TRIGGER = new Map([
+        ['funding', 'confirm'],
+        ['settlement', 'confirm'],
+        ['fill', 'credit-confirm'],
+        ['insurance', 'insurance-confirm'],
+    ]);
+    const FUTURES_SETTLED_CONFIRM_REASONS = new Set([
+        'confirm', 'credit-confirm', 'insurance-confirm',
+    ]);
+    const FUTURES_SETTLED_PRIORITY_REASONS = new Set([
+        'funding', 'settlement', 'fill', 'insurance',
+    ]);
     let _futuresSettledReadTimer = null;
     let _futuresSettledReadPending = false;
+    let _futuresSettledReadVerifyFullWindow = false;
+    let _futuresSettledReadManualRequested = false;
+    let _futuresSettledReadConfirmationTypes = new Set();
+    let _futuresSettledContinuationTimer = null;
+    let _futuresSettledContinuationTypes = new Set();
+    let _futuresSettledVerificationInterval = null;
     // What the desk holds, and the contiguous span it holds it for. Rows are
     // kept across passes: re-reading a held span on every pass is what spends the
     // budget that should be extending coverage, and it is why a busy account
@@ -2242,7 +2715,13 @@ export function setupBinanceConnection({
     // extends it is in `futures-settled-income-walk.js`, where a test can drive
     // it — the defect was in the walk, and a walk inside this service was not
     // something anything could drive.
-    let _futuresSettled = emptyFuturesSettledState();
+    let _futuresSettled = createFuturesSettledIncomeResource({
+        incomeTypes: FUTURES_SETTLED_INCOME_TYPES,
+    });
+    // Manual loading is process-local coordination. Keep the last resource that
+    // is safe to write separately so an event arriving during that loading frame
+    // can durably add debt without persisting provisional UI intent.
+    let _futuresSettledPersistable = _futuresSettled;
     let _futuresSettledSent = null;
     // When a pass last finished. Only the clock-driven reasons consult it; an
     // event that moved the money is never deferred.
@@ -2251,35 +2730,434 @@ export function setupBinanceConnection({
     // was walking.
     let _futuresSettledInFlight = null;
     let _futuresSettledAgain = null;
+    let _futuresSettledAgainVerifyFullWindow = false;
+    let _futuresSettledAgainManualRequested = false;
+    let _futuresSettledReadTypes = new Set();
+    let _futuresSettledAgainTypes = new Set();
+    let _futuresSettledAgainConfirmationTypes = new Set();
+    // A manual refresh is operator intent, not just another reason attached to
+    // a walk. Keep a per-lane revision so an older automatic pass cannot
+    // publish over the loading frame while that newer request waits its turn.
+    let _futuresSettledManualIntentRevision = 0;
+    const _futuresSettledManualIntentByType = new Map();
+    const futuresSettledIncomeRowsForFrame = createFuturesSettledIncomeRowSnapshotCache();
 
-    // Armed by a settlement, disarmed by anything that ends the activation.
-    let _futuresSettledConfirmTimer = null;
+    // Funding and credit confirmation are independent and coalesce within their
+    // own lane family. Confirmation reasons are not triggers themselves, so a
+    // confirming pass can never arm an infinite chain.
+    const _futuresSettledConfirmTimers = new Map();
+    // A settlement event is evidence that a lane has moved, but the income row
+    // that names the amount is written later. Keep that distinction explicit:
+    // a successful immediate REST answer must not promote the old rows back to
+    // exact while the confirming read is still owed.
+    const _futuresSettledAwaitingConfirmationAt = new Map();
+    const _futuresSettledConfirmationRetryCount = new Map();
+    // Binance's terminal HTTP answers (most importantly 418/IP ban) must not
+    // be bypassed by the generic one-minute incomplete-resource cadence. The
+    // operator and the hourly verifier may still probe recovery deliberately.
+    let _futuresSettledAutomaticRetryNotBefore = null;
+    const _futuresSettledAutomaticRetryNotBeforeByType = new Map();
     // The reason the debounced pass will run under. Held rather than captured,
     // because the reason is not a label — it decides whether the desk goes back
     // for the row once the exchange has written it.
     let _futuresSettledReadReason = null;
-    // Whether the kept reading has been looked for yet this activation, and when
-    // the held rows were last checked against the exchange rather than extended.
+    // Whether the kept reading has been looked for yet this activation.
     let _futuresSettledLoaded = false;
-    let _futuresSettledVerifiedAt = null;
 
     const clearFuturesSettledMoney = () => {
-        _futuresSettled = emptyFuturesSettledState();
+        _futuresSettled = createFuturesSettledIncomeResource({
+            incomeTypes: FUTURES_SETTLED_INCOME_TYPES,
+        });
+        _futuresSettledPersistable = _futuresSettled;
         _futuresSettledSent = null;
         _futuresSettledReadAt = null;
+        _futuresSettledAwaitingConfirmationAt.clear();
+        _futuresSettledConfirmationRetryCount.clear();
+        _futuresSettledAutomaticRetryNotBefore = null;
+        _futuresSettledAutomaticRetryNotBeforeByType.clear();
         // The next activation looks for its own account's reading. The file is
         // keyed by credential, so this is about not carrying a *loaded* flag
         // across an account change, never about the file itself.
         _futuresSettledLoaded = false;
-        _futuresSettledVerifiedAt = null;
     };
 
     // Which of two reasons a pass should run under. A settlement outranks
     // anything else; otherwise the one already held stands.
     const upgradeFuturesSettledReason = (held, reason) => {
         if (held === null) return reason;
-        if (FUTURES_SETTLED_CONFIRM_REASONS.has(held)) return held;
-        return FUTURES_SETTLED_CONFIRM_REASONS.has(reason) ? reason : held;
+        if (FUTURES_SETTLED_PRIORITY_REASONS.has(held)) return held;
+        return FUTURES_SETTLED_PRIORITY_REASONS.has(reason) ? reason : held;
+    };
+
+    const addFuturesSettledIncomeTypes = (target, incomeTypes) => {
+        for (const incomeType of incomeTypes ?? []) {
+            if (FUTURES_SETTLED_INCOME_TYPES.includes(incomeType)) target.add(incomeType);
+        }
+    };
+
+    const createFuturesSettledIncomeFrame = (resource, { reason, readAt }) => {
+        const accountFingerprint = futuresTradingAdapter?.credentialFingerprint ?? null;
+        const rowsByType = futuresSettledIncomeRowsForFrame({
+            activationGeneration: futuresActivationGeneration,
+            accountFingerprint,
+            resource,
+        });
+        const lanes = Object.fromEntries(Object.entries(resource.lanes).map(([
+            incomeType,
+            lane,
+        ]) => [incomeType, {
+            rows: rowsByType[incomeType],
+            coveredFrom: lane.coveredFrom,
+            coveredTo: lane.coveredTo,
+            targetTo: lane.targetTo,
+            status: lane.status,
+            attemptedAt: lane.attemptedAt,
+            successfulAt: lane.successfulAt,
+            confirmationNotBefore: lane.confirmationNotBefore,
+            complete: lane.complete,
+            error: lane.error,
+        }]));
+        return {
+            type: 'futures_settled_income',
+            version: resource.version,
+            status: resource.status,
+            lanes,
+            coveredFrom: resource.coveredFrom,
+            coveredTo: resource.coveredTo,
+            targetTo: resource.targetTo,
+            completeByType: { ...resource.completeByType },
+            complete: resource.complete,
+            attemptedAt: resource.attemptedAt,
+            successfulAt: resource.successfulAt,
+            error: resource.error,
+            generation: resource.generation,
+            digest: resource.digest,
+            accountFingerprint,
+            reason,
+            readAt,
+        };
+    };
+
+    const publishFuturesSettledIncome = (resource, { reason, readAt }) => {
+        // Money/content revisions deliberately ignore observation clocks, but
+        // the operator-facing "last verified" time must still move after a real
+        // unchanged verification. Six fixed lanes make this bounded; an exact
+        // replay with unchanged clocks is still suppressed.
+        const observationRevision = Object.entries(resource.lanes)
+            .sort(([left], [right]) => left.localeCompare(right))
+            .map(([incomeType, lane]) => (
+                `${incomeType}:${lane.attemptedAt ?? ''}:${lane.successfulAt ?? ''}`
+            ))
+            .join('|');
+        const revision = `${resource.generation}:${resource.digest}:${observationRevision}`;
+        if (revision === _futuresSettledSent) return false;
+        _futuresSettledSent = revision;
+        broadcastToRenderers(createFuturesSettledIncomeFrame(resource, { reason, readAt }));
+        return true;
+    };
+
+    const futuresSettledConfirmationReasonForType = incomeType => (
+        incomeType === 'FUNDING_FEE'
+            ? 'confirm'
+            : incomeType === 'INSURANCE_CLEAR'
+                ? 'insurance-confirm'
+                : FUTURES_SETTLED_CREDIT_INCOME_TYPES.includes(incomeType)
+                    ? 'credit-confirm'
+                    : null
+    );
+
+    const currentFuturesSettledConfirmationTypes = incomeTypes => ([...new Set(
+        incomeTypes ?? [],
+    )].filter(incomeType => (
+        FUTURES_SETTLED_INCOME_TYPES.includes(incomeType)
+        && _futuresSettledAwaitingConfirmationAt.has(incomeType)
+    )));
+
+    const futuresSettledConfirmationRetryable = (lane) => {
+        const status = Number(lane?.error?.status);
+        // HTTP status is authoritative when present. In particular Binance's
+        // 418/IP-ban response can carry the same -1003 code as a retryable 429;
+        // retrying it only extends pressure while the ban is active.
+        if (status === 418) return false;
+        if (status === 408 || status === 429 || (status >= 500 && status <= 599)) return true;
+        if (status >= 400 && status <= 499) return false;
+        const code = String(lane?.error?.code ?? '').toUpperCase();
+        if (code === '') return false;
+        if (/^5\d\d$/.test(code)) return true;
+        return FUTURES_SETTLED_TRANSIENT_CONFIRM_CODES.has(code);
+    };
+
+    const futuresSettledDurableConfirmationTarget = (at) => {
+        const remainder = at % FUTURES_SETTLED_CONFIRM_PERSIST_BUCKET_MS;
+        return remainder === 0
+            ? at
+            : at + FUTURES_SETTLED_CONFIRM_PERSIST_BUCKET_MS - remainder;
+    };
+
+    const withFuturesSettledConfirmationDebt = (lane, pendingAt) => {
+        const durableEventTarget = futuresSettledDurableConfirmationTarget(pendingAt);
+        const targetTo = Math.max(lane.targetTo ?? durableEventTarget, durableEventTarget);
+        const eventDeadline = durableEventTarget + FUTURES_SETTLED_CONFIRM_MS;
+        const confirmationNotBefore = Number.isSafeInteger(lane.confirmationNotBefore)
+            ? Math.max(lane.confirmationNotBefore, eventDeadline)
+            : eventDeadline;
+        // This scalar check must precede lane construction: construction clones
+        // and canonicalizes every retained row. A dense fill burst inside one
+        // durable bucket otherwise repeats that bounded but multi-megabyte work
+        // merely to discover that the canonical content did not move.
+        if (lane.targetTo === targetTo
+            && lane.confirmationNotBefore === confirmationNotBefore
+            && lane.status === 'stale'
+            && lane.complete === false) return lane;
+        return createFuturesSettledIncomeLane(lane.incomeType, {
+            ...lane,
+            targetTo,
+            // Acquisition may advance targetTo while a debt is outstanding.
+            // Its deadline belongs to the witnessed event, not to that moving
+            // coverage target, or every bootstrap/restart grants two new
+            // minutes to the same settlement.
+            confirmationNotBefore,
+            // The event is known evidence that the held resource is stale even
+            // when this account has no retained row or successful coverage yet.
+            status: 'stale',
+        });
+    };
+
+    const applyFuturesSettledConfirmationDebt = (resource, incomeTypes) => {
+        const requested = new Set(incomeTypes);
+        let changed = false;
+        const lanes = Object.fromEntries(Object.entries(resource.lanes).map(([
+            incomeType,
+            lane,
+        ]) => {
+            if (!requested.has(incomeType)) return [incomeType, lane];
+            const pendingAt = _futuresSettledAwaitingConfirmationAt.get(incomeType);
+            if (!Number.isSafeInteger(pendingAt)) return [incomeType, lane];
+            const nextLane = withFuturesSettledConfirmationDebt(lane, pendingAt);
+            if (nextLane === lane) return [incomeType, lane];
+            changed = true;
+            return [incomeType, nextLane];
+        }));
+        return changed
+            ? finalizeFuturesSettledIncomeResource({ lanes, previous: resource })
+            : resource;
+    };
+
+    const markFuturesSettledConfirmationPending = (incomeTypes, { reason, at }) => {
+        const windowFrom = Math.max(
+            at - FUTURES_HISTORY_WINDOW_MS,
+            at - FUTURES_INCOME_HISTORY_REACH_MS,
+        );
+        // Private-stream evidence can beat the debounced bootstrap. Restore the
+        // account's canonical rows before persisting invalidation; otherwise the
+        // initial empty resource would replace a valid cache on disk.
+        loadFuturesSettledResourceOnce({
+            now: at,
+            windowFrom,
+            activeIncomeTypes: incomeTypes,
+        });
+        const newlyPending = new Set();
+        for (const incomeType of incomeTypes) {
+            const previous = _futuresSettledAwaitingConfirmationAt.get(incomeType) ?? null;
+            _futuresSettledAwaitingConfirmationAt.set(
+                incomeType,
+                previous === null ? at : Math.max(previous, at),
+            );
+            if (previous === null) newlyPending.add(incomeType);
+        }
+        const persistableSharesLiveBase = _futuresSettledPersistable === _futuresSettled;
+        const nextLiveResource = applyFuturesSettledConfirmationDebt(
+            _futuresSettled,
+            incomeTypes,
+        );
+        const nextPersistableResource = persistableSharesLiveBase
+            ? nextLiveResource
+            : applyFuturesSettledConfirmationDebt(
+                _futuresSettledPersistable,
+                incomeTypes,
+            );
+        // Duplicate/out-of-order witnesses can share the already-persisted
+        // deadline. Do not clone, hash, stringify, or rewrite the full ledger
+        // unless a durable bucket transition actually moved lane content.
+        _futuresSettled = nextLiveResource;
+        if (nextPersistableResource !== _futuresSettledPersistable) {
+            _futuresSettledPersistable = nextPersistableResource;
+            settledIncomeStore?.saveResource?.({
+                fingerprint: futuresTradingAdapter?.credentialFingerprint ?? null,
+                resource: _futuresSettledPersistable,
+            });
+        }
+        // A burst still persists its newest deadline above, but keeps one stale
+        // frame. Publishing every partial fill would only burn renderer work.
+        if (newlyPending.size > 0) {
+            publishFuturesSettledIncome(_futuresSettled, { reason, readAt: at });
+        }
+    };
+
+    const markFuturesSettledManualLoading = (incomeTypes, { reason, at }) => {
+        if (futuresTradingAdapter === null) return;
+        const requested = new Set(incomeTypes);
+        _futuresSettledManualIntentRevision = _futuresSettledManualIntentRevision
+            >= Number.MAX_SAFE_INTEGER
+            ? 1
+            : _futuresSettledManualIntentRevision + 1;
+        for (const incomeType of requested) {
+            _futuresSettledManualIntentByType.set(
+                incomeType,
+                _futuresSettledManualIntentRevision,
+            );
+        }
+        const lanes = Object.fromEntries(Object.entries(_futuresSettled.lanes).map(([
+            incomeType,
+            lane,
+        ]) => [incomeType, requested.has(incomeType)
+            ? createFuturesSettledIncomeLane(incomeType, {
+                ...lane,
+                targetTo: Math.max(lane.targetTo ?? at, at),
+                status: 'loading',
+                error: null,
+            })
+            : lane]));
+        _futuresSettled = finalizeFuturesSettledIncomeResource({
+            lanes,
+            previous: _futuresSettled,
+        });
+        publishFuturesSettledIncome(_futuresSettled, { reason, readAt: at });
+    };
+
+    const scheduleFuturesSettledConfirmation = (
+        confirmationReason,
+        confirmationTypes,
+        { delay = FUTURES_SETTLED_CONFIRM_MS, replace = false } = {},
+    ) => {
+        const existing = _futuresSettledConfirmTimers.get(confirmationReason);
+        if (existing !== undefined && !replace) return;
+        if (existing !== undefined) clearTimeout(existing);
+        const timer = setTimeout(() => {
+            if (_futuresSettledConfirmTimers.get(confirmationReason) !== timer) return;
+            _futuresSettledConfirmTimers.delete(confirmationReason);
+            const currentConfirmationTypes = currentFuturesSettledConfirmationTypes(
+                confirmationTypes,
+            );
+            if (currentConfirmationTypes.length === 0) return;
+            scheduleFuturesSettledRead(confirmationReason, currentConfirmationTypes, {
+                confirmationTypes: currentConfirmationTypes,
+            });
+        }, delay);
+        timer.unref?.();
+        _futuresSettledConfirmTimers.set(confirmationReason, timer);
+    };
+
+    const rearmFuturesSettledConfirmationAfter = (incomeTypes, notBefore) => {
+        const requestedFamilies = new Set(
+            incomeTypes.map(futuresSettledConfirmationReasonForType).filter(Boolean),
+        );
+        const now = Date.now();
+        const accountNotBefore = Number.isSafeInteger(
+            _futuresSettledAutomaticRetryNotBefore,
+        )
+            ? _futuresSettledAutomaticRetryNotBefore > now
+                ? _futuresSettledAutomaticRetryNotBefore
+                : now + FUTURES_SETTLED_RECONCILE_MS
+            : 0;
+        for (const confirmationReason of requestedFamilies) {
+            const pendingFamilyTypes = [..._futuresSettledAwaitingConfirmationAt.keys()]
+                .filter(incomeType => (
+                    futuresSettledConfirmationReasonForType(incomeType) === confirmationReason
+                ));
+            if (pendingFamilyTypes.length === 0) continue;
+            const familyNotBefore = pendingFamilyTypes.reduce((latest, incomeType) => {
+                const deadline = _futuresSettled.lanes[incomeType]?.confirmationNotBefore;
+                const automaticNotBefore = _futuresSettledAutomaticRetryNotBeforeByType
+                    .get(incomeType);
+                return Math.max(
+                    latest,
+                    Number.isSafeInteger(deadline) ? deadline : 0,
+                    Number.isSafeInteger(automaticNotBefore) ? automaticNotBefore : 0,
+                );
+            }, Math.max(
+                Number.isSafeInteger(notBefore) ? notBefore : now,
+                accountNotBefore,
+            ));
+            scheduleFuturesSettledConfirmation(confirmationReason, pendingFamilyTypes, {
+                delay: Math.max(0, familyNotBefore - now),
+                // The family has one timer. Replace it with the newest of its
+                // debt deadline and REST eligibility so neither can fire early.
+                replace: true,
+            });
+        }
+    };
+
+    const loadFuturesSettledResourceOnce = ({
+        now,
+        windowFrom,
+        activeIncomeTypes = [],
+    }) => {
+        if (_futuresSettledLoaded || futuresTradingAdapter === null) return 0;
+        _futuresSettledLoaded = true;
+        const kept = settledIncomeStore?.loadResource?.({
+            fingerprint: futuresTradingAdapter.credentialFingerprint ?? null,
+            windowFrom,
+            now,
+            incomeTypes: FUTURES_SETTLED_INCOME_TYPES,
+        }) ?? null;
+        if (kept === null) return 0;
+        _futuresSettled = kept;
+        _futuresSettledPersistable = kept;
+
+        const active = new Set(activeIncomeTypes);
+        const families = new Map();
+        for (const [incomeType, lane] of Object.entries(kept.lanes)) {
+            const deadline = lane.confirmationNotBefore;
+            if (!Number.isSafeInteger(deadline) || deadline < 0) continue;
+            const confirmationReason = futuresSettledConfirmationReasonForType(incomeType);
+            if (confirmationReason === null) continue;
+            _futuresSettledAwaitingConfirmationAt.set(
+                incomeType,
+                Math.max(0, deadline - FUTURES_SETTLED_CONFIRM_MS),
+            );
+            const family = families.get(confirmationReason) ?? {
+                incomeTypes: [],
+                deadline: 0,
+            };
+            family.incomeTypes.push(incomeType);
+            family.deadline = Math.max(family.deadline, deadline);
+            families.set(confirmationReason, family);
+        }
+        for (const [confirmationReason, family] of families) {
+            const currentPassCanConfirm = family.deadline <= now
+                && family.incomeTypes.every(incomeType => active.has(incomeType));
+            if (currentPassCanConfirm) continue;
+            // One timer per lane family is deliberately conservative when a
+            // persisted family contains different deadlines: wait for its newest
+            // event so one pass cannot make a younger sibling look confirmed.
+            scheduleFuturesSettledConfirmation(
+                confirmationReason,
+                family.incomeTypes,
+                {
+                    delay: Math.max(0, family.deadline - now),
+                    replace: true,
+                },
+            );
+        }
+        return kept.rows.size;
+    };
+
+    const armFuturesSettledConfirmation = (reason) => {
+        const confirmationReason = FUTURES_SETTLED_CONFIRM_REASON_BY_TRIGGER.get(reason);
+        if (confirmationReason === undefined) return;
+        const confirmationTypes = futuresSettledIncomeTypesForReason(confirmationReason);
+        _futuresSettledConfirmationRetryCount.delete(confirmationReason);
+        markFuturesSettledConfirmationPending(confirmationTypes, {
+            reason: confirmationReason,
+            at: Date.now(),
+        });
+        // A burst is one read, two minutes after its newest event. Reading two
+        // minutes after the first fill could still precede a late credit for the
+        // last fill and then leave it behind the tail until the hourly audit.
+        scheduleFuturesSettledConfirmation(confirmationReason, confirmationTypes, {
+            replace: true,
+        });
     };
 
     // Whether this reason has earned a read.
@@ -2298,6 +3176,9 @@ export function setupBinanceConnection({
     // twenty-four reads when it spends its budget, and every fill asking for one
     // is how the cost this change removed would come back somewhere else.
     const futuresSettledReadIsDue = (reason) => {
+        if (reason !== 'refresh'
+            && reason !== 'verification'
+            && _futuresSettledAutomaticRetryNotBefore !== null) return false;
         if (FUTURES_SETTLED_ALWAYS_READ_REASONS.has(reason)) return true;
         if (_futuresSettledReadAt === null) return true;
         const since = Date.now() - _futuresSettledReadAt;
@@ -2306,286 +3187,411 @@ export function setupBinanceConnection({
         return since >= FUTURES_SETTLED_RECONCILE_MS;
     };
 
-    const readFuturesSettledMoney = async (reason) => {
+    const readFuturesSettledMoney = async (
+        reason,
+        requestedIncomeTypes = futuresSettledIncomeTypesForReason(reason),
+        {
+            verifyFullWindow = reason === 'verification',
+            manualRequested = reason === 'refresh',
+            confirmationTypes = [],
+        } = {},
+    ) => {
         const activation = futuresActivationGeneration;
-        // The desk's own history window, floored by how far Binance keeps income
-        // at all. Asking past the exchange's reach is not answered with older
-        // rows — it is answered with silence, which reads exactly like a
-        // position that was never charged anything.
         const now = Date.now();
         const windowFrom = Math.max(
             now - FUTURES_HISTORY_WINDOW_MS,
             now - FUTURES_INCOME_HISTORY_REACH_MS,
         );
+        const refreshIncomeTypes = [...new Set(requestedIncomeTypes)]
+            .filter(incomeType => FUTURES_SETTLED_INCOME_TYPES.includes(incomeType));
+        const manualIntentAtStartByType = new Map(refreshIncomeTypes.map(incomeType => [
+            incomeType,
+            _futuresSettledManualIntentByType.get(incomeType) ?? null,
+        ]));
         let requests = 0;
-        // What the pass actually spent at the exchange. A page here is one read
-        // per kind of flow, so the walk's request count is no longer the number
-        // of times the desk asked for anything.
         let reads = 0;
+        let attempts = 0;
+        let chargedWeight = 0;
         let failureCode = null;
-        // Which way round the exchange hands a page back. Every decision the walk
-        // makes about a full page — that it is the *oldest* thousand rows of the
-        // range, so the newest part is still unread — rests on this, and the
-        // endpoint's documentation states it nowhere. Read off the wire instead of
-        // assumed: the first page of the pass that carries two rows answers it.
         let pageOrder = 'none';
-        // How many rows came off disk rather than off the wire, and what the
-        // exchange said about them when they were checked.
         let restored = 0;
-        let verified = 0;
-        let missing = 0;
-        let differing = 0;
-        // Every way out of this read states itself. The read that says nothing is
-        // the one that cost the operator an afternoon: an empty column could not
-        // be told from a read that never fired, one the exchange refused, one a
-        // newer activation overtook — or, as it turned out, one that spent its
-        // whole budget on the wrong end of the window.
+        let coverageBeforeMs = 0;
+
+        const requestedCoverageMs = resource => refreshIncomeTypes.reduce((total, incomeType) => {
+            const lane = resource?.lanes?.[incomeType];
+            if (!Number.isSafeInteger(lane?.coveredFrom)
+                || !Number.isSafeInteger(lane?.coveredTo)
+                || lane.coveredTo < lane.coveredFrom) return total;
+            return addBoundedCount(total, lane.coveredTo - lane.coveredFrom);
+        }, 0);
+        coverageBeforeMs = requestedCoverageMs(_futuresSettled);
+
         const recordSettled = (outcome, code = null) => {
             const held = [..._futuresSettled.rows.values()];
+            const rebates = held.filter(row => (
+                FUTURES_SETTLED_CREDIT_INCOME_TYPES.includes(row.incomeType)
+            ));
             diagnosticRecord.record('settled', {
                 reason,
                 order: pageOrder,
                 pages: requests,
-                // One page is one read per kind. Weight spent is this times the
-                // endpoint's 30, and it is the number the whole change is about.
                 reads,
-                types: FUTURES_SETTLED_INCOME_TYPES.length,
-                // How many rows this pass started from a kept reading rather
-                // than the wire, and what checking them against the exchange
-                // found. A store that is never wrong should read zero here
-                // forever; a store that is ever wrong must not do so quietly.
+                attempts,
+                chargedWeight,
+                types: refreshIncomeTypes.length,
+                lanes: refreshIncomeTypes.length,
+                incomeTypes: refreshIncomeTypes,
                 restored,
-                // Whether this pass actually checked the held rows against the
-                // exchange, rather than extended them. Without it `missing: 0`
-                // reads the same on a pass that verified and agreed as on one
-                // that never looked — and the operator's gate is "the first
-                // verification of the session records no disagreements", which
-                // needs the verification to be findable in the first place.
-                verified,
-                missing,
-                differing,
+                verified: verifyFullWindow && outcome !== 'failed' ? 1 : 0,
+                missing: 0,
+                differing: 0,
                 rows: held.length,
                 kept: held.length,
-                contracts: new Set(held.map(row => row.symbol)).size,
+                contracts: new Set(held.map(row => row.symbol).filter(Boolean)).size,
                 fundingRows: held.filter(row => row.incomeType === 'FUNDING_FEE').length,
+                rebateRows: rebates.length,
+                rebateSymbolRows: rebates.filter(row => Boolean(row.symbol)).length,
+                rebateTradeRows: rebates.filter(row => (
+                    row.tradeId !== null && row.tradeId !== undefined && row.tradeId !== ''
+                )).length,
                 recipients: rendererConnections.size,
-                // How much of the window the held rows actually reach, as a span
-                // rather than a clock reading. This is the number that would have
-                // named the defect on the first line.
-                coveredMs: _futuresSettled.from === null || _futuresSettled.to === null
+                coveredMs: _futuresSettled.coveredFrom === null
+                    || _futuresSettled.coveredTo === null
                     ? 0
-                    : Math.max(0, _futuresSettled.to - _futuresSettled.from),
+                    : Math.max(0, _futuresSettled.coveredTo - _futuresSettled.coveredFrom),
+                coverageGainedMs: Math.max(
+                    0,
+                    requestedCoverageMs(_futuresSettled) - coverageBeforeMs,
+                ),
+                generation: _futuresSettled.generation,
+                status: _futuresSettled.status,
                 outcome,
                 code,
             });
         };
-        // Recorded rather than returned silently: a desk with no futures adapter
-        // and a desk whose read was never scheduled leave the same empty column,
-        // and only this line tells them apart.
+
         if (futuresTradingAdapter === null) {
             recordSettled('abandoned', 'NO_ADAPTER');
             return;
         }
+        if (refreshIncomeTypes.length === 0) {
+            recordSettled('abandoned', 'NO_LANES');
+            return;
+        }
+
         const current = () => activation === futuresActivationGeneration;
         const fingerprint = futuresTradingAdapter.credentialFingerprint ?? null;
-        // The reading this desk already had, once per activation. Looked for
-        // here rather than on a lifecycle hook because this is the one place
-        // that knows the window it has to be bounded to.
-        if (!_futuresSettledLoaded) {
-            _futuresSettledLoaded = true;
-            const kept = settledIncomeStore?.load({ fingerprint, windowFrom, now }) ?? null;
-            // Nothing kept means nothing to check: this pass reads the window
-            // off the wire, and a reading that came from the exchange a moment
-            // ago does not need the exchange asked about it. Getting this wrong
-            // made the *second* pass of every session a cold walk — the store
-            // paying for itself twice over, in the direction it exists to
-            // remove. A kept reading that never recorded a verification is
-            // checked on sight, which is the one case worth a cold walk.
-            _futuresSettledVerifiedAt = kept === null ? now : kept.verifiedAt;
-            if (kept !== null) {
-                restored = kept.rows.size;
-                _futuresSettled = {
-                    rows: kept.rows, from: kept.from, to: kept.to, slice: kept.slice, gap: kept.gap,
-                };
-            }
-        }
-        // Every hour the held rows are checked rather than extended: the window
-        // is read from nothing and compared. That is what makes keeping a
-        // reading safe instead of storing a guess — and at one request per kind
-        // of flow it costs what the tail read of the same hour used to.
-        const verifying = _futuresSettled.from !== null
-            && (_futuresSettledVerifiedAt === null
-                || now - _futuresSettledVerifiedAt >= FUTURES_SETTLED_VERIFY_MS);
-        // What the desk held going in, kept whole rather than as a reference to
-        // state the walk is about to replace.
-        const before = _futuresSettled.rows;
-        const heldFrom = _futuresSettled.from;
-        const heldTo = _futuresSettled.to;
-        const heldSlice = _futuresSettled.slice;
-        const walked = await walkFuturesSettledIncome({
+        restored = loadFuturesSettledResourceOnce({
             now,
             windowFrom,
-            held: verifying ? emptyFuturesSettledState() : _futuresSettled,
+            activeIncomeTypes: refreshIncomeTypes,
+        });
+        coverageBeforeMs = requestedCoverageMs(_futuresSettled);
+
+        // Manual refresh is a compound operation: account resources may finish
+        // before the income lanes do. Publish that independent pending state
+        // while retaining confirmed rows, so account success cannot make the
+        // wallet adjustments look freshly verified.
+        if (manualRequested) {
+            const requested = new Set(refreshIncomeTypes);
+            const lanes = Object.fromEntries(Object.entries(_futuresSettled.lanes).map(
+                ([incomeType, lane]) => [
+                    incomeType,
+                    requested.has(incomeType)
+                        ? createFuturesSettledIncomeLane(incomeType, {
+                            ...lane,
+                            targetTo: now,
+                            status: 'loading',
+                            attemptedAt: now,
+                            error: null,
+                        })
+                        : lane,
+                ],
+            ));
+            _futuresSettled = finalizeFuturesSettledIncomeResource({
+                lanes,
+                previous: _futuresSettled,
+            });
+            publishFuturesSettledIncome(_futuresSettled, { reason, readAt: now });
+        }
+
+        const walked = await walkFuturesSettledIncomeLanes({
+            now,
+            windowFrom,
+            held: _futuresSettled,
+            incomeTypes: FUTURES_SETTLED_INCOME_TYPES,
+            refreshIncomeTypes,
+            verifyFullWindow,
             isCurrent: current,
-            keepRow: isFuturesSettledIncomeRow,
-            readPage: async ({ startTime, endTime }) => {
+            // A rebate may be account-scoped and carry no contract. It still
+            // moved the wallet and belongs in the account-shared bucket; only
+            // the lane allow-list, not presence of `symbol`, decides whether a
+            // canonical row survives acquisition.
+            keepRow: row => FUTURES_SETTLED_INCOME_TYPES.includes(row?.incomeType),
+            readPage: async ({ incomeType, startTime, endTime, page, limit }) => {
                 try {
-                    const rows = [];
-                    let full = false;
-                    // How far a full page lets the walk advance. Merging kinds
-                    // takes this away from it: the merged newest row belongs to
-                    // whichever kind came back short, and a walk stepping to it
-                    // would step over the rows of a kind that filled. So the
-                    // oldest newest-row among the kinds that filled is stated
-                    // here, which is the furthest point every kind has been read
-                    // up to.
-                    let newest = null;
-                    for (const incomeType of FUTURES_SETTLED_INCOME_TYPES) {
-                        const page = await futuresRestLimiter.execute(
-                            () => (current()
-                                ? futuresTradingAdapter.getIncomePage({
-                                    startTime,
-                                    endTime,
-                                    incomeType,
-                                    page: 1,
-                                })
-                                : null),
-                            FUTURES_INCOME_READ_WEIGHT,
-                        );
-                        // Overtaken by a newer activation part-way through the
-                        // kinds. Half a page is not a page: returning it would
-                        // let the walk claim a span it only read some kinds of.
-                        if (page === null || page === undefined) return null;
-                        reads += 1;
-                        rows.push(...(page.rows ?? []));
-                        if (pageOrder === 'none' && (page.rows?.length ?? 0) > 1) {
-                            const first = page.rows[0]?.time;
-                            const last = page.rows[page.rows.length - 1]?.time;
-                            pageOrder = first < last ? 'ascending'
-                                : first > last ? 'descending'
-                                    : 'flat';
-                        }
-                        if (!page.full) continue;
-                        full = true;
-                        const pageNewest = (page.rows ?? []).reduce(
-                            (latest, row) => (Number.isFinite(row?.time) && row.time > latest
-                                ? row.time
-                                : latest),
+                    if (!current()) return null;
+                    reads += 1;
+                    const answered = await futuresRestLimiter.execute(() => {
+                        if (!current()) return null;
+                        return futuresTradingAdapter.getIncomePage({
                             startTime,
-                        );
-                        newest = newest === null ? pageNewest : Math.min(newest, pageNewest);
+                            endTime,
+                            incomeType,
+                            page,
+                            limit,
+                        });
+                    }, FUTURES_INCOME_READ_WEIGHT, 2, {
+                        isCurrent: current,
+                        onAccounting: (summary) => {
+                            attempts = addBoundedCount(attempts, summary.attempts);
+                            chargedWeight = addBoundedCount(
+                                chargedWeight,
+                                summary.chargedWeight,
+                            );
+                        },
+                    });
+                    if (answered === null || answered === undefined) return null;
+                    if (pageOrder === 'none' && Array.isArray(answered.rows)
+                        && answered.rows.length > 1) {
+                        const first = answered.rows[0]?.time;
+                        const last = answered.rows[answered.rows.length - 1]?.time;
+                        pageOrder = first < last ? 'ascending'
+                            : first > last ? 'descending'
+                                : 'flat';
                     }
-                    return { rows, full, newest };
+                    return { rows: answered.rows };
                 } catch (error) {
-                    // The rows already held are money the desk can account for.
-                    // Throwing them away because one slice timed out would
-                    // replace a partial reading that says so with no reading at
-                    // all, so the refusal ends the walk and keeps its result.
-                    logger.warn('[futures-settled] income read failed:', error?.code || error?.message);
-                    failureCode = error?.code ?? error?.exchangeCode ?? null;
-                    return null;
+                    if (!current() && error?.name === 'AbortError') return null;
+                    const sanitized = sanitizeFuturesSettledIncomeError(error);
+                    logger.warn(
+                        `[futures-settled] ${incomeType} income read failed:`,
+                        sanitized?.code ?? 'READ_FAILED',
+                    );
+                    failureCode = sanitized?.code ?? 'READ_FAILED';
+                    throw error;
                 }
             },
         });
         requests = walked.requests;
         if (!current()) {
-            // A newer activation owns the account now. What was read belongs to
-            // an account this desk is no longer on.
-            clearFuturesSettledMoney();
-            recordSettled('abandoned', failureCode);
+            // Teardown owns the shared resource reset. A retired async pass may
+            // finish after a new activation has already armed its own lanes;
+            // clearing here would erase the new account's pending truth.
+            recordSettled('abandoned', failureCode ?? 'ACTIVATION_RETIRED');
             return;
         }
-        if (verifying && !walked.failed) {
-            // Only inside the span this pass actually covered. A held row older
-            // than that was never asked about, and counting it as missing would
-            // report the walk's own budget as the exchange contradicting itself.
-            const answered = compareFuturesSettledReadings(before, walked.rows, walked.from);
-            missing = answered.missing;
-            differing = answered.differing;
-            if (missing > 0 || differing > 0) {
-                logger.warn('[futures-settled] kept reading corrected by the exchange:',
-                    `${missing} absent, ${differing} restated`);
-            }
-            verified = 1;
-            _futuresSettledVerifiedAt = now;
+
+        const hasAccountWideBan = refreshIncomeTypes.some((incomeType) => {
+            const lane = walked.resource.lanes[incomeType];
+            const status = Number(lane?.error?.status);
+            return status === 418;
+        });
+        const passProducedSuccessfulLane = (lane) => (
+            lane?.error === null
+            && lane?.pending === null
+            && lane?.attemptedAt === now
+            && lane?.successfulAt === now
+            && lane?.coveredFrom !== null
+            && lane?.coveredTo !== null
+            && lane?.targetTo !== null
+            && lane.coveredTo >= lane.targetTo
+        );
+        const fullPassProvedRecovery = refreshIncomeTypes.length
+            === FUTURES_SETTLED_INCOME_TYPES.length
+            && FUTURES_SETTLED_INCOME_TYPES.every(incomeType => (
+                passProducedSuccessfulLane(walked.resource.lanes[incomeType])
+            ));
+        let accountFloorCleared = false;
+        if (hasAccountWideBan) {
+            _futuresSettledAutomaticRetryNotBefore = now + FUTURES_SETTLED_RECONCILE_MS;
+        } else if (fullPassProvedRecovery) {
+            _futuresSettledAutomaticRetryNotBefore = null;
+            accountFloorCleared = true;
+        } else if (_futuresSettledAutomaticRetryNotBefore !== null
+            && refreshIncomeTypes.length === FUTURES_SETTLED_INCOME_TYPES.length
+            && (verifyFullWindow || manualRequested)) {
+            // A deliberate probe consumes the old floor when it becomes due.
+            // Renew it after an inconclusive full pass; retaining an already
+            // elapsed timestamp would look non-null in state while admitting
+            // automatic event work immediately afterwards.
+            _futuresSettledAutomaticRetryNotBefore = now + FUTURES_SETTLED_RECONCILE_MS;
         }
-        // A verification starts from nothing so the exchange can contradict what
-        // is held. What it did not reach, it did not contradict — and a refusal
-        // is not a verdict at all. Adopting the fresh walk wholesale would let
-        // one timed-out request replace a complete week with whatever came back
-        // before it failed, and then write that to disk.
-        _futuresSettled = verifying
-            ? mergeVerifiedFuturesSettledReading(before === null ? null : {
-                rows: before, from: heldFrom, to: heldTo, slice: heldSlice, gap: null,
-            }, walked, windowFrom)
-            : walked;
-        // Written after the exchange has had the last word, never before it —
-        // and what is written is what the desk holds, not what the last walk
-        // happened to return.
-        if (_futuresSettled.from !== null) {
-            settledIncomeStore?.save({
+        for (const incomeType of refreshIncomeTypes) {
+            const lane = walked.resource.lanes[incomeType];
+            if (futuresSettledLaneNeedsAutomaticCooldown(lane)) {
+                _futuresSettledAutomaticRetryNotBeforeByType.set(
+                    incomeType,
+                    now + FUTURES_SETTLED_RECONCILE_MS,
+                );
+            } else if (passProducedSuccessfulLane(lane)) {
+                _futuresSettledAutomaticRetryNotBeforeByType.delete(incomeType);
+            }
+        }
+        if (accountFloorCleared) {
+            // A manual recovery can prove transport health before a younger
+            // event debt is old enough to confirm. The account gate no longer
+            // owns that debt, so restore its exact family timer after clearing
+            // the successful lanes' old per-lane cooldowns.
+            rearmFuturesSettledConfirmationAfter(
+                [..._futuresSettledAwaitingConfirmationAt.keys()],
+                null,
+            );
+        }
+
+        const confirmed = new Set(confirmationTypes);
+        // Manual/full verification can repay an earlier confirmation debt too,
+        // but only if this pass began after the exchange's measured write lag.
+        // A newer event arriving while the pass is in flight updates the map
+        // beyond `now` and therefore cannot be cleared by this older answer.
+        for (const incomeType of refreshIncomeTypes) {
+            const pendingAt = _futuresSettledAwaitingConfirmationAt.get(incomeType) ?? null;
+            if (pendingAt !== null && pendingAt + FUTURES_SETTLED_CONFIRM_MS <= now) {
+                confirmed.add(incomeType);
+            }
+        }
+        const clearedConfirmationTypes = new Set();
+        for (const incomeType of confirmed) {
+            const lane = walked.resource.lanes[incomeType];
+            const pendingAt = _futuresSettledAwaitingConfirmationAt.get(incomeType) ?? null;
+            const passConfirmedLane = lane?.error === null
+                && lane?.pending === null
+                && lane?.attemptedAt === now
+                && lane?.successfulAt === now
+                && lane?.coveredFrom !== null
+                && lane?.coveredTo !== null
+                && lane?.targetTo !== null
+                && lane.coveredTo >= lane.targetTo;
+            if (passConfirmedLane
+                && pendingAt !== null
+                && pendingAt + FUTURES_SETTLED_CONFIRM_MS <= now) {
+                _futuresSettledAwaitingConfirmationAt.delete(incomeType);
+                clearedConfirmationTypes.add(incomeType);
+            }
+        }
+        for (const confirmationReason of new Set(
+            [...confirmed].map(futuresSettledConfirmationReasonForType).filter(Boolean),
+        )) {
+            const familyStillPending = [..._futuresSettledAwaitingConfirmationAt.keys()]
+                .some(incomeType => (
+                    futuresSettledConfirmationReasonForType(incomeType) === confirmationReason
+                ));
+            if (familyStillPending) continue;
+            const timer = _futuresSettledConfirmTimers.get(confirmationReason);
+            if (timer !== undefined) clearTimeout(timer);
+            _futuresSettledConfirmTimers.delete(confirmationReason);
+            _futuresSettledConfirmationRetryCount.delete(confirmationReason);
+        }
+        const retryConfirmationTypes = new Map();
+        for (const incomeType of confirmed) {
+            if (!_futuresSettledAwaitingConfirmationAt.has(incomeType)) continue;
+            const confirmationReason = futuresSettledConfirmationReasonForType(incomeType);
+            if (confirmationReason === null
+                || _futuresSettledConfirmTimers.has(confirmationReason)
+                || !futuresSettledConfirmationRetryable(walked.resource.lanes[incomeType])) {
+                continue;
+            }
+            const types = retryConfirmationTypes.get(confirmationReason) ?? [];
+            types.push(incomeType);
+            retryConfirmationTypes.set(confirmationReason, types);
+        }
+        for (const [confirmationReason, incomeTypes] of retryConfirmationTypes) {
+            const retryCount = _futuresSettledConfirmationRetryCount.get(confirmationReason) ?? 0;
+            if (retryCount >= FUTURES_SETTLED_CONFIRM_RETRY_MAX) continue;
+            _futuresSettledConfirmationRetryCount.set(confirmationReason, retryCount + 1);
+            // A failed delayed read still owes the same row. Retry at the
+            // bounded incomplete-reading cadence rather than leaving a rare
+            // insurance adjustment stale until the next liquidation event.
+            scheduleFuturesSettledConfirmation(confirmationReason, incomeTypes, {
+                delay: FUTURES_SETTLED_EXTEND_MS * (2 ** retryCount),
+            });
+        }
+        const currentResource = _futuresSettled;
+        const protectedManualIncomeTypes = new Set();
+        const pendingLanes = Object.fromEntries(Object.entries(walked.resource.lanes).map(([
+            incomeType,
+            lane,
+        ]) => {
+            const currentManualIntent = _futuresSettledManualIntentByType.get(incomeType)
+                ?? null;
+            const passManualIntent = manualIntentAtStartByType.get(incomeType) ?? null;
+            if (currentManualIntent !== null
+                && (!manualRequested || currentManualIntent !== passManualIntent)) {
+                // A newer manual request published this lane while the walk was
+                // in flight. Preserve that exact state (including any event
+                // debt) until the pass carrying its revision completes.
+                protectedManualIncomeTypes.add(incomeType);
+                return [incomeType, currentResource.lanes[incomeType] ?? lane];
+            }
+            const pendingAt = _futuresSettledAwaitingConfirmationAt.get(incomeType) ?? null;
+            if (pendingAt === null) {
+                if (lane.confirmationNotBefore === null) return [incomeType, lane];
+                const clearedByThisPass = clearedConfirmationTypes.has(incomeType);
+                return [incomeType, createFuturesSettledIncomeLane(incomeType, {
+                    ...lane,
+                    confirmationNotBefore: null,
+                    status: clearedByThisPass ? 'ready' : lane.status,
+                    complete: clearedByThisPass
+                        && lane.coveredFrom !== null
+                        && lane.coveredTo !== null
+                        && lane.targetTo !== null
+                        && lane.coveredFrom <= windowFrom
+                        && lane.coveredTo >= lane.targetTo,
+                })];
+            }
+            return [incomeType, withFuturesSettledConfirmationDebt(lane, pendingAt)];
+        }));
+        _futuresSettled = finalizeFuturesSettledIncomeResource({
+            lanes: pendingLanes,
+            // Events can advance debt while this endpoint walk is in flight.
+            // The exact current marker is reapplied above, and the current
+            // global resource owns both the content comparison and revision
+            // clock. Using the stale walk base could otherwise reuse a published
+            // generation for another digest.
+            previous: currentResource,
+        });
+        if (manualRequested) {
+            for (const incomeType of refreshIncomeTypes) {
+                const passManualIntent = manualIntentAtStartByType.get(incomeType) ?? null;
+                if (passManualIntent !== null
+                    && _futuresSettledManualIntentByType.get(incomeType)
+                        === passManualIntent) {
+                    _futuresSettledManualIntentByType.delete(incomeType);
+                }
+            }
+        }
+        // Loading intent coordinates live overlapping work and is deliberately
+        // process-local. Its authorized queued pass will durably commit every
+        // requested lane; an older pass must not persist that provisional UI
+        // state over the last exchange-backed snapshot in the meantime.
+        if (protectedManualIncomeTypes.size === 0) {
+            _futuresSettledPersistable = _futuresSettled;
+            settledIncomeStore?.saveResource?.({
                 fingerprint,
-                held: _futuresSettled,
-                verifiedAt: _futuresSettledVerifiedAt,
+                resource: _futuresSettledPersistable,
             });
         }
 
-        // What the desk holds, not what the last walk returned. A verification
-        // that was refused holds more than its walk brought back, and the screen
-        // is the reason any of this exists.
-        const holding = _futuresSettled;
-        const kept = readFuturesSettledIncome([...holding.rows.values()]);
-        const from = holding.from ?? now;
-        // Broadcast only what moved. In the steady state the tail is empty and
-        // the coverage is unchanged, and a frame every thirty seconds saying
-        // exactly what the last one said is how a record of the account becomes
-        // a load on the socket carrying it.
-        const revision = `${kept.length}:${from}:${holding.to}:${holding.complete}`;
-        if (revision !== _futuresSettledSent) {
-            _futuresSettledSent = revision;
-            broadcastToRenderers({
-                type: 'futures_settled_income',
-                version: 1,
-                // Only the flows a position can be charged or credited with, and
-                // only those the exchange named a contract on. A transfer into
-                // the futures wallet is the operator moving money, not a
-                // position earning it.
-                //
-                // The renderer reads these again on arrival and the fold reads
-                // them once more; the reader is idempotent so that costs
-                // nothing. It was not, and every row was dropped between here
-                // and the screen.
-                rows: kept,
-                // The oldest instant actually covered — never the window that
-                // was asked for. `from <= openTime` is what decides downstream
-                // whether a round's funding is fully accounted for, so a read
-                // that names the window while having reached a day of it
-                // reports every figure built from it as whole. That is exactly
-                // what happened, and why nothing on screen was ever marked as
-                // qualified.
-                from,
-                readAt: now,
-                complete: holding.complete,
-                reason,
-            });
-        }
-        // Stamped on the way out rather than on the way in, so a pass that took
-        // a minute does not make the next one due a minute early.
+        publishFuturesSettledIncome(_futuresSettled, { reason, readAt: Date.now() });
         _futuresSettledReadAt = Date.now();
-        // A settlement is read twice: now, for the fact that it happened, and
-        // again once the record has caught up with it. Only the two witnesses
-        // arm this — the confirming pass carries its own reason and does not
-        // arm another, so a settlement costs one extra read and never a chain.
-        if (FUTURES_SETTLED_CONFIRM_REASONS.has(reason)
-            && _futuresSettledConfirmTimer === null) {
-            _futuresSettledConfirmTimer = setTimeout(() => {
-                _futuresSettledConfirmTimer = null;
-                scheduleFuturesSettledRead('confirm');
-            }, FUTURES_SETTLED_CONFIRM_MS);
-            _futuresSettledConfirmTimer.unref?.();
+        if (walked.queuedIncomeTypes.length > 0) {
+            _futuresSettledContinuationTypes = new Set(walked.queuedIncomeTypes);
+            if (_futuresSettledContinuationTimer === null) {
+                _futuresSettledContinuationTimer = setTimeout(() => {
+                    _futuresSettledContinuationTimer = null;
+                    const pendingTypes = [..._futuresSettledContinuationTypes];
+                    _futuresSettledContinuationTypes = new Set();
+                    scheduleFuturesSettledRead('extension', pendingTypes);
+                }, FUTURES_SETTLED_EXTEND_MS);
+                _futuresSettledContinuationTimer.unref?.();
+            }
+        } else if (_futuresSettledContinuationTimer !== null) {
+            clearTimeout(_futuresSettledContinuationTimer);
+            _futuresSettledContinuationTimer = null;
+            _futuresSettledContinuationTypes = new Set();
         }
         recordSettled(
-            failureCode !== null ? 'failed' : (_futuresSettled.complete ? 'complete' : 'partial'),
+            walked.failed ? 'failed' : (_futuresSettled.complete ? 'complete' : 'partial'),
             failureCode,
         );
     };
@@ -2600,24 +3606,135 @@ export function setupBinanceConnection({
     // overwrote the first with a reading built from the older state. On the
     // operator's desk coverage measurably went backwards, 136809478 ms to
     // 130692102 ms across three seconds, while both passes spent a full budget.
-    const runFuturesSettledRead = (reason) => {
+    const runFuturesSettledRead = (
+        reason,
+        incomeTypes = futuresSettledIncomeTypesForReason(reason),
+        {
+            verifyFullWindow = reason === 'verification',
+            manualRequested = reason === 'refresh',
+            confirmationTypes = [],
+        } = {},
+    ) => {
         if (_futuresSettledInFlight !== null) {
             // Same rule as the debounce: a settlement asking during a pass is
             // not overwritten by the next fill to come along.
             _futuresSettledAgain = upgradeFuturesSettledReason(_futuresSettledAgain, reason);
+            _futuresSettledAgainVerifyFullWindow = _futuresSettledAgainVerifyFullWindow
+                || verifyFullWindow;
+            _futuresSettledAgainManualRequested = _futuresSettledAgainManualRequested
+                || manualRequested;
+            addFuturesSettledIncomeTypes(_futuresSettledAgainTypes, incomeTypes);
+            addFuturesSettledIncomeTypes(
+                _futuresSettledAgainConfirmationTypes,
+                confirmationTypes,
+            );
             return;
         }
-        _futuresSettledInFlight = readFuturesSettledMoney(reason).finally(() => {
+        _futuresSettledInFlight = readFuturesSettledMoney(reason, incomeTypes, {
+            verifyFullWindow,
+            manualRequested,
+            confirmationTypes,
+        }).finally(() => {
             _futuresSettledInFlight = null;
             const next = _futuresSettledAgain;
+            const nextTypes = [..._futuresSettledAgainTypes];
+            const nextVerifyFullWindow = _futuresSettledAgainVerifyFullWindow;
+            const nextManualRequested = _futuresSettledAgainManualRequested;
+            const nextConfirmationTypes = [..._futuresSettledAgainConfirmationTypes];
             _futuresSettledAgain = null;
-            if (next !== null) scheduleFuturesSettledRead(next);
+            _futuresSettledAgainVerifyFullWindow = false;
+            _futuresSettledAgainManualRequested = false;
+            _futuresSettledAgainTypes = new Set();
+            _futuresSettledAgainConfirmationTypes = new Set();
+            if (next !== null) scheduleFuturesSettledRead(next, nextTypes, {
+                verifyFullWindow: nextVerifyFullWindow,
+                manualRequested: nextManualRequested,
+                confirmationTypes: nextConfirmationTypes,
+                confirmationAlreadyArmed: true,
+                manualLoadingAlreadyMarked: true,
+            });
         });
     };
 
-    const scheduleFuturesSettledRead = (reason) => {
-        if (!futuresSettledReadIsDue(reason)) return;
+    const scheduleFuturesSettledRead = (
+        reason,
+        incomeTypes = futuresSettledIncomeTypesForReason(reason),
+        {
+            verifyFullWindow = reason === 'verification',
+            manualRequested = reason === 'refresh',
+            confirmationTypes = [],
+            confirmationAlreadyArmed = false,
+            manualLoadingAlreadyMarked = false,
+        } = {},
+    ) => {
+        const automatic = !verifyFullWindow && !manualRequested;
+        const normalizedIncomeTypes = [...new Set(incomeTypes)]
+            .filter(incomeType => FUTURES_SETTLED_INCOME_TYPES.includes(incomeType));
+        const pureConfirmation = FUTURES_SETTLED_CONFIRM_REASONS.has(reason)
+            && !verifyFullWindow
+            && !manualRequested;
+        const capturedConfirmationTypes = confirmationTypes.length > 0
+            ? confirmationTypes
+            : pureConfirmation ? normalizedIncomeTypes : [];
+        const currentConfirmationTypes = currentFuturesSettledConfirmationTypes(
+            capturedConfirmationTypes,
+        );
+        const currentConfirmationSet = new Set(currentConfirmationTypes);
+        if (!confirmationAlreadyArmed) armFuturesSettledConfirmation(reason);
+        if (manualRequested && !manualLoadingAlreadyMarked) {
+            markFuturesSettledManualLoading(normalizedIncomeTypes, {
+                reason,
+                at: Date.now(),
+            });
+        }
+        const confirmationEligibleIncomeTypes = pureConfirmation
+            ? normalizedIncomeTypes.filter(incomeType => currentConfirmationSet.has(incomeType))
+            : normalizedIncomeTypes;
+        const tickEligibleIncomeTypes = reason === 'tick'
+            ? confirmationEligibleIncomeTypes.filter((incomeType) => {
+                const lane = _futuresSettled.lanes[incomeType];
+                return lane?.complete !== true
+                    && lane?.status !== 'loading'
+                    && lane?.confirmationNotBefore === null
+                    && !_futuresSettledManualIntentByType.has(incomeType);
+            })
+            : confirmationEligibleIncomeTypes;
+        const now = Date.now();
+        const blockedIncomeTypes = automatic
+            ? tickEligibleIncomeTypes.filter((incomeType) => {
+                const notBefore = _futuresSettledAutomaticRetryNotBeforeByType.get(incomeType);
+                return Number.isSafeInteger(notBefore) && now < notBefore;
+            })
+            : [];
+        const scheduledIncomeTypes = tickEligibleIncomeTypes.filter(
+            incomeType => !blockedIncomeTypes.includes(incomeType),
+        );
+        if (blockedIncomeTypes.length > 0 && currentConfirmationTypes.length > 0) {
+            // The helper reads each family's own lane cooldown. Feeding it the
+            // maximum across unrelated families would unnecessarily hold a
+            // recovered funding lane behind a credit-lane refusal.
+            rearmFuturesSettledConfirmationAfter(blockedIncomeTypes, null);
+        }
+        if (scheduledIncomeTypes.length === 0) return;
+        if (!verifyFullWindow && !manualRequested && !futuresSettledReadIsDue(reason)) {
+            if (currentConfirmationTypes.length > 0) {
+                rearmFuturesSettledConfirmationAfter(
+                    scheduledIncomeTypes,
+                    _futuresSettledAutomaticRetryNotBefore,
+                );
+            }
+            return;
+        }
         _futuresSettledReadPending = true;
+        _futuresSettledReadVerifyFullWindow = _futuresSettledReadVerifyFullWindow
+            || verifyFullWindow;
+        _futuresSettledReadManualRequested = _futuresSettledReadManualRequested
+            || manualRequested;
+        addFuturesSettledIncomeTypes(_futuresSettledReadTypes, scheduledIncomeTypes);
+        addFuturesSettledIncomeTypes(
+            _futuresSettledReadConfirmationTypes,
+            currentConfirmationTypes,
+        );
         // A settlement landing inside another ask's debounce takes the pass
         // over. The desk used to keep whichever reason arrived first, so a
         // funding charge announced a second after a stream opened ran as a
@@ -2634,25 +3751,66 @@ export function setupBinanceConnection({
             if (!_futuresSettledReadPending) return;
             _futuresSettledReadPending = false;
             const next = _futuresSettledReadReason ?? reason;
+            const nextTypes = [..._futuresSettledReadTypes];
+            const nextVerifyFullWindow = _futuresSettledReadVerifyFullWindow;
+            const nextManualRequested = _futuresSettledReadManualRequested;
+            const nextConfirmationTypes = [..._futuresSettledReadConfirmationTypes];
             _futuresSettledReadReason = null;
-            runFuturesSettledRead(next);
+            _futuresSettledReadVerifyFullWindow = false;
+            _futuresSettledReadManualRequested = false;
+            _futuresSettledReadTypes = new Set();
+            _futuresSettledReadConfirmationTypes = new Set();
+            runFuturesSettledRead(next, nextTypes, {
+                verifyFullWindow: nextVerifyFullWindow,
+                manualRequested: nextManualRequested,
+                confirmationTypes: nextConfirmationTypes,
+            });
         }, FUTURES_SETTLED_READ_DELAY_MS);
         _futuresSettledReadTimer.unref?.();
+    };
+
+    const ensureFuturesSettledVerification = () => {
+        if (_futuresSettledVerificationInterval !== null) return;
+        _futuresSettledVerificationInterval = setInterval(() => {
+            if (futuresRendererConnections.size === 0) return;
+            // This reason bypasses the timestamp of narrow funding/credit passes:
+            // those must not postpone reconciliation of every other lane.
+            scheduleFuturesSettledRead('verification');
+        }, FUTURES_SETTLED_RECONCILE_MS);
+        _futuresSettledVerificationInterval.unref?.();
     };
 
     const cancelFuturesSettledRead = () => {
         if (_futuresSettledReadTimer !== null) clearTimeout(_futuresSettledReadTimer);
         _futuresSettledReadTimer = null;
         _futuresSettledReadReason = null;
-        // The settlement it was confirming belongs to the activation being
-        // cancelled, and its row belongs to that account's positions.
-        if (_futuresSettledConfirmTimer !== null) clearTimeout(_futuresSettledConfirmTimer);
-        _futuresSettledConfirmTimer = null;
+        _futuresSettledReadVerifyFullWindow = false;
+        _futuresSettledReadManualRequested = false;
+        _futuresSettledReadTypes = new Set();
+        _futuresSettledReadConfirmationTypes = new Set();
+        if (_futuresSettledContinuationTimer !== null) {
+            clearTimeout(_futuresSettledContinuationTimer);
+        }
+        _futuresSettledContinuationTimer = null;
+        _futuresSettledContinuationTypes = new Set();
+        if (_futuresSettledVerificationInterval !== null) {
+            clearInterval(_futuresSettledVerificationInterval);
+        }
+        _futuresSettledVerificationInterval = null;
+        // Confirmations belong to the activation being cancelled, and their
+        // rows belong to that account's positions.
+        for (const timer of _futuresSettledConfirmTimers.values()) clearTimeout(timer);
+        _futuresSettledConfirmTimers.clear();
         _futuresSettledReadPending = false;
         // A pass asked for during the one in flight belonged to the activation
         // being cancelled, and running it afterwards would read for an account
         // this desk is no longer on.
         _futuresSettledAgain = null;
+        _futuresSettledAgainVerifyFullWindow = false;
+        _futuresSettledAgainManualRequested = false;
+        _futuresSettledAgainTypes = new Set();
+        _futuresSettledAgainConfirmationTypes = new Set();
+        _futuresSettledManualIntentByType.clear();
         // The rows go with it. They are one account's settled money and the next
         // activation may be a different account; carrying them across would state
         // one account's charges against another's positions.
@@ -2760,6 +3918,7 @@ export function setupBinanceConnection({
     let futuresUserDataReconnecting = false;
     let futuresUserDataRequested = false;
     let futuresUserDataGeneration = 0;
+    let futuresHistoryReconcileGeneration = 0;
 
     const markFuturesUserDataLoading = () => {
         invalidateFuturesHistoryStream();
@@ -2983,7 +4142,11 @@ export function setupBinanceConnection({
                     : futuresTradingAdapter.createUserDataStreamListenKey()),
                 1,
                 2,
-                { urgent: true },
+                {
+                    urgent: true,
+                    isCurrent: () => generation === futuresUserDataGeneration
+                        && futuresRendererConnections.size > 0,
+                },
             );
             if (listenKey === FUTURES_LISTEN_KEY_NOT_REQUESTED) {
                 abandonFuturesUserDataStream(generation);
@@ -3033,6 +4196,13 @@ export function setupBinanceConnection({
                 if (generation !== futuresUserDataGeneration
                     || futuresUserDataWs !== socket) return;
                 markFuturesUserDataReady();
+                futuresHistoryReconcileGeneration += 1;
+                broadcastToRenderers({
+                    type: 'futures_history_reconcile',
+                    version: 1,
+                    generation: futuresHistoryReconcileGeneration,
+                    accountFingerprint: futuresTradingAdapter?.credentialFingerprint ?? null,
+                });
                 // The handshake completing is the exchange talking, so the bound
                 // starts here rather than at the first ping — a socket that
                 // opens and says nothing for the whole window is exactly what
@@ -3041,12 +4211,12 @@ export function setupBinanceConnection({
                 logger.info('Futures user data stream connected.');
                 void refreshFuturesAccountState({ reason: 'stream' })
                     .catch(error => reportDetachedFuturesAccountRefreshFailure('stream', error));
-                // The desk has just come up on an account that may already hold
-                // positions with a history behind them. Without this the settled
-                // figures stay absent until the operator happens to trade, and a
-                // column that is empty on a desk that has been running all day
-                // reads as broken rather than as unread.
-                scheduleFuturesSettledRead('stream');
+                // Activation bootstrap owns the historical all-lane income read.
+                // A handshake can finish after that pass leaves the debounce;
+                // starting the same walk here would spend another six reads with
+                // no new settlement evidence. The stream still refreshes account
+                // resources above, and its funding/fill/insurance frames schedule
+                // the narrower lanes when they actually move.
             });
 
             // The exchange's own keep-alive: the one traffic that proves the
@@ -3066,7 +4236,7 @@ export function setupBinanceConnection({
                 // desk's own work and not as time on the wire.
                 const receivedAt = Date.now();
                 noteFuturesUserDataTraffic(socket, generation);
-                const payload = extractStreamPayload(data);
+                const payload = extractFuturesStreamPayload(data);
                 if (!payload) return;
                 const streamEvent = normalizeFuturesUserDataStreamEvent(payload);
                 if (!streamEvent) return;
@@ -3075,7 +4245,6 @@ export function setupBinanceConnection({
                 const marks = { exchangeAt: streamFrameEventTime(payload), receivedAt };
                 if (streamEvent.type === 'executionReport') {
                     const report = streamEvent.executionReport;
-                    noteFuturesHistoryActivity(report.symbol);
                     logger.info(`[futures-stream] ${report.symbol} ${report.side} ${report.status}`);
                     // The exchange has just said what this order is. Folding it
                     // into the held set is what the account-wide read used to be
@@ -3095,15 +4264,29 @@ export function setupBinanceConnection({
                     // nothing here: the ACCOUNT_UPDATE for the same fill carries
                     // the wallet and the position, and asks for its own read.
                     scheduleFuturesUnstatedRead(['balances']);
-                    // A fill that realized something moved money the position
-                    // has now settled, and the report is the only frame that
-                    // says so — the `ACCOUNT_UPDATE` beside it carries the new
-                    // size and entry and never what the close realized. Read on
-                    // the fact, not on every fill: an opening fill realizes
-                    // nothing and has nothing to account for.
-                    if (Number(report?.realizedPnl) !== 0
-                        && Number.isFinite(Number(report?.realizedPnl))) {
-                        scheduleFuturesSettledRead('fill');
+                    // Every actual fill can produce a delayed commission credit,
+                    // including an opening fill whose realized PnL is exactly
+                    // zero. The TRADE execution marker is authoritative; the
+                    // quantity/status fallbacks retain older normalized fixtures
+                    // and REST-shaped reports that omit it.
+                    const lastFilledQuantity = Number(report?.l);
+                    const cumulativeFilledQuantity = Number(report?.z);
+                    const tradeIdentity = String(report?.tradeId ?? '').trim();
+                    const hasTradeIdentity = /^\d+$/.test(tradeIdentity)
+                        && BigInt(tradeIdentity) > 0n;
+                    const actualFill = report?.x === 'TRADE'
+                        || hasTradeIdentity
+                        || (Number.isFinite(lastFilledQuantity) && lastFilledQuantity > 0)
+                        || (['FILLED', 'PARTIALLY_FILLED'].includes(report?.status)
+                            && Number.isFinite(cumulativeFilledQuantity)
+                            && cumulativeFilledQuantity > 0);
+                    if (actualFill) {
+                        noteFuturesHistoryActivity(report.symbol, report.tradeId);
+                        // The fill itself already carries gross commission. Only
+                        // a rebate posted later is missing, so buying four income
+                        // lanes immediately on every partial fill is pure weight.
+                        // One delayed read is coalesced across the burst.
+                        armFuturesSettledConfirmation('fill');
                     }
                 }
                 if (streamEvent.type === 'accountUpdate' && streamEvent.accountUpdate) {
@@ -3143,6 +4326,9 @@ export function setupBinanceConnection({
                     if (streamEvent.accountUpdate.cause === 'FUNDING_FEE') {
                         scheduleFuturesSettledRead('funding');
                     }
+                    if (streamEvent.accountUpdate.cause === 'INSURANCE_CLEAR') {
+                        scheduleFuturesSettledRead('insurance');
+                    }
                 }
                 if (streamEvent.type === 'marginCall') {
                     // The exchange raising its hand, not the desk's own
@@ -3153,6 +4339,7 @@ export function setupBinanceConnection({
                         streamEvent.marginCall.positions.map(position => position.symbol).join(', ')
                     }`);
                     broadcastToRenderers(streamEvent.rendererPayload);
+                    scheduleFuturesSettledRead('insurance');
                 }
                 if (streamEvent.type === 'conditionalTriggerReject') {
                     // A stop that met its trigger and was then refused. No read
@@ -3245,6 +4432,12 @@ export function setupBinanceConnection({
                         return futuresTradingAdapter.renewUserDataStreamListenKey();
                     },
                     1,
+                    2,
+                    {
+                        isCurrent: () => generation === futuresUserDataGeneration
+                            && futuresUserDataWs === socket
+                            && futuresRendererConnections.size > 0,
+                    },
                 ).catch((err) => {
                     if (generation !== futuresUserDataGeneration
                         || futuresUserDataWs !== socket
@@ -3298,9 +4491,26 @@ export function setupBinanceConnection({
         void startFuturesUserDataStream();
     };
 
-    const readFuturesHistoryGap = async ({ cursor, limit, identityOf, load }) => {
+    const readFuturesHistoryGap = async ({
+        cursor,
+        limit,
+        maxRows = limit,
+        identityOf,
+        load,
+    }) => {
         const origin = normalizeFuturesHistoryCursor(cursor);
-        if (origin === null) return load(null);
+        const pageLimit = Math.max(1, Math.floor(Number(limit) || 1));
+        const rowLimit = Math.max(pageLimit, Math.floor(Number(maxRows) || pageLimit));
+        if (origin === null) {
+            const page = await load(null);
+            const entries = Array.isArray(page) ? page : [];
+            return Object.freeze({
+                rows: Object.freeze(entries),
+                complete: entries.length < pageLimit,
+                pageLimited: entries.length >= pageLimit,
+                pages: 1,
+            });
+        }
 
         const rows = [];
         const identities = new Set();
@@ -3316,8 +4526,13 @@ export function setupBinanceConnection({
             return Number(right?.time ?? 0) - Number(left?.time ?? 0);
         };
         let next = origin;
-        for (;;) {
+        let pages = 0;
+        let complete = false;
+        let pageLimited = false;
+        const maxPages = Math.ceil(rowLimit / pageLimit) + 1;
+        while (pages < maxPages) {
             const page = await load(next);
+            pages += 1;
             const entries = Array.isArray(page) ? page : [];
             let furthest = null;
             for (const entry of entries) {
@@ -3334,19 +4549,32 @@ export function setupBinanceConnection({
                     furthest = identity;
                 }
             }
-            rows.sort(newestIdentityFirst);
-            if (rows.length > limit) rows.length = limit;
-            identities.clear();
-            for (const entry of rows) {
-                const identity = normalizeFuturesHistoryIdentity(identityOf(entry));
-                if (identity !== null) identities.add(identity);
+            if (entries.length < pageLimit) {
+                complete = true;
+                break;
             }
-            if (entries.length < limit
-                || furthest === null
-                || BigInt(furthest) <= BigInt(next)) break;
+            if (furthest === null || BigInt(furthest) <= BigInt(next)) {
+                pageLimited = true;
+                break;
+            }
             next = furthest;
         }
-        return rows.sort((left, right) => Number(right?.time ?? 0) - Number(left?.time ?? 0));
+        if (!complete) pageLimited = true;
+        const bounded = rows.length <= rowLimit
+            ? rows
+            : [...rows].sort((left, right) => -newestIdentityFirst(left, right)).slice(0, rowLimit);
+        if (bounded.length !== rows.length) {
+            complete = false;
+            pageLimited = true;
+        }
+        return Object.freeze({
+            rows: Object.freeze(bounded.sort(
+                (left, right) => Number(right?.time ?? 0) - Number(left?.time ?? 0),
+            )),
+            complete,
+            pageLimited,
+            pages,
+        });
     };
 
     const futuresHistoryCursorAfter = (origin, rows, identityOf) => {
@@ -3357,6 +4585,126 @@ export function setupBinanceConnection({
                 && (cursor === null || BigInt(identity) > BigInt(cursor))) cursor = identity;
         }
         return cursor;
+    };
+
+    const mergeFuturesHistoryTradeRows = (symbol, ...groups) => {
+        const byIdentity = new Map();
+        for (const rows of groups) {
+            for (const trade of rows ?? []) {
+                const identity = normalizeFuturesHistoryIdentity(trade?.id);
+                // The adapter rejects unsafe numeric identities before this
+                // point. Retain a deterministic fallback only for legacy
+                // fixtures/rows so malformed input cannot grow a checkpoint.
+                const key = identity === null
+                    ? `${trade?.time ?? ''}:${trade?.orderId ?? ''}:${trade?.side ?? ''}`
+                        + `:${trade?.positionSide ?? ''}:${trade?.price ?? ''}`
+                        + `:${trade?.quantity ?? ''}`
+                    : identity;
+                byIdentity.set(`${symbol}:${key}`, trade);
+            }
+        }
+        return [...byIdentity.values()].sort(
+            (left, right) => Number(right?.time ?? 0) - Number(left?.time ?? 0),
+        );
+    };
+
+    const advanceFuturesHistoryTradeReacquisition = (
+        previous,
+        reading,
+        {
+            symbol,
+            targetFrom,
+            targetTo,
+            activation,
+            accountFingerprint,
+            streamConnected,
+            streamEpoch,
+            activity,
+            highestFillId,
+            terminalSnapshot,
+        },
+    ) => {
+        const acquired = mergeFuturesHistoryTradeRows(
+            symbol,
+            previous?.rows,
+            reading?.rows,
+        );
+        const previousCoveredFrom = Number.isSafeInteger(previous?.coverage?.coveredFrom)
+            ? previous.coverage.coveredFrom
+            : null;
+        const nextCoveredFrom = Number.isSafeInteger(reading?.coverage?.coveredFrom)
+            ? reading.coverage.coveredFrom
+            : null;
+        const previousCoveredTo = Number.isSafeInteger(previous?.coverage?.coveredTo)
+            ? previous.coverage.coveredTo
+            : null;
+        const nextCoveredTo = Number.isSafeInteger(reading?.coverage?.coveredTo)
+            ? reading.coverage.coveredTo
+            : null;
+        const advanced = (nextCoveredFrom !== null
+                && (previousCoveredFrom === null || nextCoveredFrom < previousCoveredFrom))
+            || (nextCoveredTo !== null
+                && (previousCoveredTo === null || nextCoveredTo > previousCoveredTo))
+            || acquired.length > (previous?.rows?.length ?? 0);
+        const passes = (previous?.coverage?.passes ?? 0) + 1;
+        const stalledPasses = advanced
+            ? 0
+            : (previous?.coverage?.stalledPasses ?? 0) + 1;
+        const readingComplete = reading?.coverage?.complete === true;
+        const requests = (Number.isSafeInteger(previous?.coverage?.requests)
+            ? previous.coverage.requests
+            : 0) + (Number.isSafeInteger(reading?.coverage?.requests)
+            ? reading.coverage.requests
+            : 0);
+        const rowsOverflow = acquired.length
+            > FUTURES_HELD_HISTORY_MAX_TRADES_PER_CONTRACT
+        const rows = acquired.slice(0, FUTURES_HELD_HISTORY_MAX_TRADES_PER_CONTRACT);
+        const reverseFlat = !readingComplete
+            && !rowsOverflow
+            && reading?.coverage?.retentionLimited !== true
+            && (previous?.streamConnected ?? streamConnected) === true
+            && terminalSnapshot?.current === true
+            && terminalSnapshot.activation === activation
+            ? proveFuturesTradeHistoryReverseFlat({
+                symbol,
+                positions: terminalSnapshot.positions,
+                rows,
+                coverage: reading.coverage,
+            })
+            : null;
+        const flatBoundaryProven = reverseFlat?.proven === true;
+        const retentionLimited = rowsOverflow
+            || reading?.coverage?.retentionLimited === true
+            || (!readingComplete && !flatBoundaryProven && (
+                passes >= FUTURES_HISTORY_REACQUISITION_MAX_PASSES
+                || stalledPasses >= 2
+                || requests >= FUTURES_HISTORY_REACQUISITION_MAX_REQUESTS
+            ));
+        const coverage = Object.freeze({
+            ...reading.coverage,
+            targetFrom,
+            targetTo,
+            passes,
+            stalledPasses,
+            complete: readingComplete && !retentionLimited,
+            flatBoundary: flatBoundaryProven ? reverseFlat.boundary : false,
+            retentionLimited,
+            requests,
+        });
+        return Object.freeze({
+            phase: 'reacquisition',
+            activation,
+            accountFingerprint,
+            streamConnected: previous?.streamConnected ?? streamConnected,
+            streamEpoch: previous?.streamEpoch ?? streamEpoch,
+            activity: previous?.activity ?? activity,
+            highestFillId: previous?.highestFillId ?? highestFillId,
+            targetFrom,
+            targetTo,
+            rows: Object.freeze(rows),
+            coverage,
+            failureAttempts: 0,
+        });
     };
 
     const chooseFuturesHistoryReadSymbols = (symbols, coverage, { full = false, views } = {}) => {
@@ -3436,6 +4784,25 @@ export function setupBinanceConnection({
         // undone by a Futures read that was already in flight.
         let activeMarketMode = MARKET_MODES.UNSELECTED;
         let marketActivationGeneration = 0;
+        const futuresHistorySession = {
+            checkpoints: new Map(),
+            pending: new Set(),
+            timer: null,
+            queue: Promise.resolve(),
+            generation: 0,
+            disposed: false,
+            reset() {
+                this.generation += 1;
+                this.checkpoints.clear();
+                this.pending = new Set();
+                if (this.timer !== null) clearTimeout(this.timer);
+                this.timer = null;
+                // A queued promise may still settle, but every task captured the
+                // previous generation and becomes a no-op before touching REST.
+                this.queue = Promise.resolve();
+            },
+        };
+        futuresHistorySessions.add(futuresHistorySession);
 
         const marketScopeOf = (data) => {
             if (typeof data?.action === 'string') {
@@ -3942,11 +5309,16 @@ export function setupBinanceConnection({
 
             for (let attempt = 1; attempt <= RECONCILE_ATTEMPTS; attempt += 1) {
                 try {
-                    const outcome = await futuresTradingAdapter.findOrder({
-                        symbol,
-                        orderId,
-                        origClientOrderId,
-                    });
+                    const outcome = await futuresRestLimiter.execute(
+                        () => futuresTradingAdapter.findOrder({
+                            symbol,
+                            orderId,
+                            origClientOrderId,
+                        }),
+                        1,
+                        2,
+                        { urgent: true },
+                    );
                     if (outcome.exists) {
                         logger.info(`[futures-orders] ${action} resolved by reconciliation: order exists`);
                         noteFuturesMutation();
@@ -4142,7 +5514,12 @@ export function setupBinanceConnection({
             }
             try {
                 logger.info(`[futures-orders] ${order.side} ${order.symbol} ${order.orderType} qty=${order.numericQuantity}${order.numericPrice ? ` price=${order.numericPrice}` : ''}`);
-                const report = await futuresTradingAdapter.placeOrder(order);
+                const report = await futuresRestLimiter.execute(
+                    () => futuresTradingAdapter.placeOrder(order),
+                    1,
+                    0,
+                    { urgent: true },
+                );
                 noteFuturesMutation();
                 emit({ futures_execution_update: report });
                 await reconcileAfterFuturesCommand();
@@ -4173,6 +5550,7 @@ export function setupBinanceConnection({
             selectedSymbol,
             { coverage = {}, full = false, isObsolete = () => false } = {},
         ) => {
+            const discoveryIssue = ++futuresHistoryDiscoveryIssue;
             const activation = futuresActivationGeneration;
             const isCurrent = () => (
                 activation === futuresActivationGeneration && !isObsolete()
@@ -4295,13 +5673,13 @@ export function setupBinanceConnection({
             // review looked even though it has no row to contribute.
             if (persisted.length > 0) {
                 for (const [persistedSymbol] of persisted) remember(persistedSymbol);
-                futuresHistoryDiscovery = Object.freeze({
+                commitFuturesHistoryDiscovery(discoveryIssue, Object.freeze({
                     at: now,
                     symbols: Object.freeze(symbols.filter(entry => !seeded.has(entry))),
                     // A bounded local store names what it has seen; it cannot
                     // claim this is every contract traded at the exchange.
                     complete: false,
-                });
+                }));
                 return {
                     symbols: symbols.slice(0, FUTURES_HISTORY_MAX_SYMBOLS),
                     discovered: symbols.length,
@@ -4309,7 +5687,7 @@ export function setupBinanceConnection({
                 };
             }
             const recentFrom = now - FUTURES_HISTORY_RECENT_WINDOW_MS;
-            const recent = await walkIncome(recentFrom, null);
+            const recent = await walkIncome(recentFrom, now);
             if (!isCurrent()) {
                 return { symbols: [], discovered: 0, discoveryComplete: false };
             }
@@ -4335,11 +5713,11 @@ export function setupBinanceConnection({
             // seeds are re-read from the account each time, and folding them in
             // here would let a contract the desk merely held a position on
             // outlive the position.
-            futuresHistoryDiscovery = Object.freeze({
+            commitFuturesHistoryDiscovery(discoveryIssue, Object.freeze({
                 at: now,
                 symbols: Object.freeze(symbols.filter(symbol => !seeded.has(symbol))),
                 complete,
-            });
+            }));
             return {
                 symbols: symbols.slice(0, FUTURES_HISTORY_MAX_SYMBOLS),
                 discovered: symbols.length,
@@ -4348,6 +5726,16 @@ export function setupBinanceConnection({
                 // covers everything it found — and cannot say that is everything.
                 discoveryComplete: complete,
             };
+        };
+
+        // Request-time ordering is part of the renderer/store admission
+        // contract. Date.now() alone collides when basis, gap and panel reads
+        // start in one millisecond, so keep the stamp wall-clock-shaped but
+        // strictly monotonic for this renderer connection.
+        let futuresHistoryRequestClock = 0;
+        const nextFuturesHistoryRequestStamp = () => {
+            futuresHistoryRequestClock = Math.max(Date.now(), futuresHistoryRequestClock + 1);
+            return futuresHistoryRequestClock;
         };
 
         // A history read must never disturb trading state: a failure is reported
@@ -4359,6 +5747,8 @@ export function setupBinanceConnection({
         // does not blank the others — only a total failure is reported as an error.
         const handleFuturesHistory = async (command) => {
             const {
+                basisOnly = false,
+                continuationSymbols = null,
                 symbol,
                 coverage = {},
                 full = false,
@@ -4366,42 +5756,178 @@ export function setupBinanceConnection({
                 // not say is answered with both, as it always was.
                 views = FUTURES_HISTORY_VIEW_VALUES,
             } = command;
+            const forcedSymbols = Array.isArray(continuationSymbols)
+                ? [...new Set(continuationSymbols
+                    .map(value => String(value ?? '').trim().toUpperCase())
+                    .filter(Boolean))]
+                : [];
             const readsOrders = views.includes(FUTURES_HISTORY_VIEWS.ORDERS);
             const readsTrades = views.includes(FUTURES_HISTORY_VIEWS.TRADES);
             const activation = futuresActivationGeneration;
+            const accountFingerprint = futuresTradingAdapter?.credentialFingerprint ?? null;
             const rendererActivation = marketActivationGeneration;
+            const historySessionGeneration = futuresHistorySession.generation;
             const isObsolete = () => (
                 activation !== futuresActivationGeneration
                 || rendererActivation !== marketActivationGeneration
+                || historySessionGeneration !== futuresHistorySession.generation
+                || futuresHistorySession.disposed
                 || activeMarketMode !== MARKET_MODES.FUTURES
             );
+            const basisSymbols = [...new Set(
+                [
+                    ...(futuresAccountResources.positions?.data ?? [])
+                        .map(position => String(position?.symbol ?? '').toUpperCase()),
+                    String(symbol ?? '').toUpperCase(),
+                ].filter(Boolean),
+            )];
             const {
                 symbols, discovered, discoveryComplete,
-            } = await collectFuturesHistorySymbols(symbol, { coverage, full, isObsolete });
+            } = forcedSymbols.length > 0
+                ? {
+                    symbols: forcedSymbols,
+                    discovered: forcedSymbols.length,
+                    discoveryComplete: false,
+                }
+                : basisOnly
+                ? {
+                    symbols: basisSymbols,
+                    discovered: basisSymbols.length,
+                    // This narrow read proves only the positions currently open,
+                    // never the account-wide set of historical contracts.
+                    discoveryComplete: false,
+                }
+                : await collectFuturesHistorySymbols(symbol, { coverage, full, isObsolete });
             if (isObsolete()) return;
-            const readSymbols = chooseFuturesHistoryReadSymbols(symbols, coverage, { full, views });
+            const readSymbols = forcedSymbols.length > 0
+                ? symbols
+                : basisOnly
+                ? symbols.filter(historySymbol => (
+                    !Object.hasOwn(coverage, historySymbol)
+                    || !futuresHistoryIsVouched(historySymbol, coverage[historySymbol], views)
+                ))
+                : chooseFuturesHistoryReadSymbols(symbols, coverage, { full, views });
             const orders = [];
             const trades = [];
             const unavailable = [];
             const failures = [];
+            const pendingTradeReacquisitions = new Set();
+            const completedTradeReacquisitions = new Map();
             const readFrom = {};
+            // A time-window backfill can be incremental even when Binance gave
+            // it no identity cursor. State that explicitly: inferring replace
+            // vs merge from a nullable cursor made the renderer throw away the
+            // newer suffix while an older, cursorless window was being joined.
+            const merge = {};
+            const tradeCoverage = {};
+            const historyReadAt = nextFuturesHistoryRequestStamp();
             await Promise.all(readSymbols.map(async (historySymbol) => {
                 const held = coverage[historySymbol] ?? {};
+                const retainedTradeCheckpoint = readsTrades
+                    ? futuresHistorySession.checkpoints.get(historySymbol) ?? null
+                    : null;
+                const ownedTradeCheckpoint = retainedTradeCheckpoint?.activation === activation
+                    && retainedTradeCheckpoint.accountFingerprint === accountFingerprint
+                    ? retainedTradeCheckpoint
+                    : null;
+                const checkpointPhase = ownedTradeCheckpoint?.phase ?? 'reacquisition';
+                const tradeReacquisition = checkpointPhase === 'reacquisition'
+                    ? ownedTradeCheckpoint
+                    : null;
+                const postGapRepair = checkpointPhase === 'post-gap'
+                    ? ownedTradeCheckpoint
+                    : null;
+                const basisBackfillRepair = checkpointPhase === 'basis-backfill'
+                    ? ownedTradeCheckpoint
+                    : null;
+                const basisGapRepair = checkpointPhase === 'basis-gap'
+                    ? ownedTradeCheckpoint
+                    : null;
+                const incrementalRepair = basisBackfillRepair ?? basisGapRepair;
                 const orderCursor = full
                     ? null
                     : normalizeFuturesHistoryCursor(held.orderCursor);
-                const tradeCursor = full
-                    ? null
-                    : normalizeFuturesHistoryCursor(held.tradeCursor);
+                // An ordinary read resumes immutable fills from the held seam.
+                // Full is the repair path: it deliberately re-enumerates the
+                // bounded time window and replaces that contract, so a corrupt
+                // cached row or an internal cursor hole can actually be healed.
+                const heldTradeCursor = normalizeFuturesHistoryCursor(held.tradeCursor);
+                const tradeTargetTo = tradeReacquisition?.targetTo ?? historyReadAt;
+                const tradeTargetFrom = tradeReacquisition?.targetFrom
+                    ?? tradeTargetTo - FUTURES_HISTORY_WINDOW_MS;
+                const heldTradeCoverage = tradeReacquisition?.coverage
+                    ?? postGapRepair?.postGapCoverage
+                    ?? held?.tradeCoverage;
+                const heldTradeCoveredFrom = Number.isSafeInteger(
+                    heldTradeCoverage?.coveredFrom,
+                ) ? heldTradeCoverage.coveredFrom : null;
+                const heldTradeCoveredTo = Number.isSafeInteger(
+                    heldTradeCoverage?.coveredTo,
+                ) ? heldTradeCoverage.coveredTo : null;
+                const resumesTradeBackfill = (full !== true || tradeReacquisition !== null)
+                    && heldTradeCoverage?.version === 2
+                    && heldTradeCoverage?.continuityComplete === true
+                    && heldTradeCoveredFrom !== null
+                    && heldTradeCoveredFrom > tradeTargetFrom;
+                // A cursor without canonical, contiguous v2 evidence can page
+                // only forward and can never recover the opening boundary (or
+                // the marginAsset omitted by an older cache). Reacquire its
+                // frozen window transactionally instead of blessing that seam.
+                const requiresColdReacquisition = readsTrades
+                    && full !== true
+                    && tradeReacquisition === null
+                    && postGapRepair === null
+                    && incrementalRepair === null
+                    && (heldTradeCoverage?.version !== 2
+                        || heldTradeCoverage?.continuityComplete !== true
+                        || heldTradeCoveredFrom === null
+                        || heldTradeCoveredTo === null);
+                const transactionalTradeRead = full === true
+                    || tradeReacquisition !== null
+                    || requiresColdReacquisition;
+                const reacquisitionRequestsUsed = Number.isSafeInteger(
+                    tradeReacquisition?.coverage?.requests,
+                ) ? tradeReacquisition.coverage.requests : 0;
+                const reacquisitionRequestsRemaining = Math.max(
+                    0,
+                    FUTURES_HISTORY_REACQUISITION_MAX_REQUESTS
+                        - reacquisitionRequestsUsed,
+                );
+                const currentWindowRequestLimit = Math.max(1, Math.min(
+                    FUTURES_TRADE_HISTORY_WINDOW.MAX_REQUESTS,
+                    reacquisitionRequestsRemaining,
+                ));
+                // A continuation with a proved newest suffix needs only to
+                // reconnect that frozen right seam; spend the rest where the
+                // missing opening boundary actually is. The sum never exceeds
+                // this checkpoint's remaining cumulative allowance.
+                const forwardWindowRequestLimit = tradeReacquisition !== null
+                    && resumesTradeBackfill
+                    ? 1
+                    : currentWindowRequestLimit;
+                const olderWindowRequestLimit = tradeReacquisition !== null
+                    ? Math.min(
+                        FUTURES_TRADE_HISTORY_WINDOW.MAX_REQUESTS,
+                        Math.max(
+                            0,
+                            reacquisitionRequestsRemaining - forwardWindowRequestLimit,
+                        ),
+                    )
+                    : FUTURES_TRADE_HISTORY_WINDOW.MAX_REQUESTS;
+                const tradeCursor = postGapRepair !== null
+                    ? normalizeFuturesHistoryCursor(postGapRepair.tradeCursor)
+                    : transactionalTradeRead ? null : heldTradeCursor;
                 const proof = captureFuturesHistoryProof(historySymbol);
+                const terminalSnapshot = captureFuturesHistoryTerminalSnapshot();
                 try {
                     // One endpoint per contract where the panel shows one view.
                     // Both are still read together where both were asked for, so
                     // the two round-trips overlap rather than queue in sequence.
-                    const [symbolOrders, symbolTrades] = await Promise.all([
+                    const [symbolOrderReading, symbolTradeReading] = await Promise.all([
                         readsOrders ? readFuturesHistoryGap({
                             cursor: orderCursor,
                             limit: FUTURES_HISTORY_LIMIT,
+                            maxRows: FUTURES_HELD_HISTORY_MAX_ORDERS_PER_CONTRACT,
                             identityOf: order => order?.orderId,
                             load: from => futuresRestLimiter.execute(
                                 () => (isObsolete()
@@ -4413,62 +5939,640 @@ export function setupBinanceConnection({
                                 FUTURES_HISTORY_READ_WEIGHT,
                             ),
                         }) : null,
-                        readsTrades ? readFuturesHistoryGap({
-                            cursor: tradeCursor,
-                            limit: FUTURES_TRADE_HISTORY_LIMIT,
-                            identityOf: trade => trade?.id,
-                            load: from => futuresRestLimiter.execute(
-                                () => (isObsolete()
-                                    ? []
-                                    : futuresTradingAdapter.getTradeHistory({
-                                        symbol: historySymbol,
-                                        ...(from === null ? {} : { fromTradeId: from }),
-                                    })),
-                                FUTURES_HISTORY_READ_WEIGHT,
-                            ),
-                        }) : null,
+                        readsTrades
+                            ? (tradeCursor === null && !resumesTradeBackfill
+                                ? readFuturesTradeHistoryWindow({
+                                    startTime: tradeTargetFrom,
+                                    endTime: tradeTargetTo,
+                                    expectedSymbol: historySymbol,
+                                    isCurrent: () => !isObsolete(),
+                                    limits: {
+                                        ...FUTURES_TRADE_HISTORY_WINDOW,
+                                        MAX_REQUESTS: currentWindowRequestLimit,
+                                    },
+                                    readWindow: ({ startTime, endTime, limit }) => (
+                                        futuresRestLimiter.execute(
+                                            () => (isObsolete()
+                                                ? []
+                                                : futuresTradingAdapter.getTradeHistory({
+                                                    symbol: historySymbol,
+                                                    startTime,
+                                                    endTime,
+                                                    limit,
+                                                })),
+                                            FUTURES_HISTORY_READ_WEIGHT,
+                                        )
+                                    ),
+                                })
+                                : Promise.allSettled([
+                                    tradeCursor !== null
+                                        ? readFuturesHistoryGap({
+                                            cursor: tradeCursor,
+                                            limit: FUTURES_TRADE_HISTORY_LIMIT,
+                                            maxRows: FUTURES_HELD_HISTORY_MAX_TRADES_PER_CONTRACT,
+                                            identityOf: trade => trade?.id,
+                                            load: from => futuresRestLimiter.execute(
+                                                () => (isObsolete()
+                                                    ? []
+                                                    : futuresTradingAdapter.getTradeHistory({
+                                                        symbol: historySymbol,
+                                                        fromTradeId: from,
+                                                    })),
+                                                FUTURES_HISTORY_READ_WEIGHT,
+                                            ),
+                                        }).then(reading => ({ ...reading, connects: true }))
+                                        : readFuturesTradeHistoryWindow({
+                                            startTime: Math.min(
+                                                tradeTargetTo,
+                                                heldTradeCoveredTo ?? tradeTargetTo,
+                                            ),
+                                            endTime: tradeTargetTo,
+                                            expectedSymbol: historySymbol,
+                                            isCurrent: () => !isObsolete(),
+                                            limits: {
+                                                ...FUTURES_TRADE_HISTORY_WINDOW,
+                                                MAX_REQUESTS: forwardWindowRequestLimit,
+                                            },
+                                            readWindow: ({ startTime, endTime, limit }) => (
+                                                futuresRestLimiter.execute(
+                                                    () => (isObsolete()
+                                                        ? []
+                                                        : futuresTradingAdapter.getTradeHistory({
+                                                            symbol: historySymbol,
+                                                            startTime,
+                                                            endTime,
+                                                            limit,
+                                                        })),
+                                                    FUTURES_HISTORY_READ_WEIGHT,
+                                                )
+                                            ),
+                                        }).then(reading => ({
+                                            rows: reading.rows,
+                                            complete: reading.coverage.complete,
+                                            pageLimited: reading.coverage.pageLimited,
+                                            pages: reading.coverage.requests,
+                                            connects: reading.coverage.continuityComplete === true
+                                                && heldTradeCoveredTo !== null
+                                                && reading.coverage.coveredFrom !== null
+                                                && reading.coverage.coveredFrom <= heldTradeCoveredTo,
+                                        })),
+                                    resumesTradeBackfill && olderWindowRequestLimit > 0
+                                        ? readFuturesTradeHistoryWindow({
+                                            startTime: tradeTargetFrom,
+                                            endTime: heldTradeCoveredFrom - 1,
+                                            expectedSymbol: historySymbol,
+                                            isCurrent: () => !isObsolete(),
+                                            limits: {
+                                                ...FUTURES_TRADE_HISTORY_WINDOW,
+                                                MAX_REQUESTS: olderWindowRequestLimit,
+                                            },
+                                            readWindow: ({ startTime, endTime, limit }) => (
+                                                futuresRestLimiter.execute(
+                                                    () => (isObsolete()
+                                                        ? []
+                                                        : futuresTradingAdapter.getTradeHistory({
+                                                            symbol: historySymbol,
+                                                            startTime,
+                                                            endTime,
+                                                            limit,
+                                                        })),
+                                                    FUTURES_HISTORY_READ_WEIGHT,
+                                                )
+                                            ),
+                                        })
+                                        : null,
+                                ]).then(([forwardResult, olderResult]) => {
+                                    const olderSucceeded = olderResult.status === 'fulfilled'
+                                        && olderResult.value !== null;
+                                    // A transactional Full continuation cannot
+                                    // turn a failed half-read into apparent
+                                    // no-progress. Doing so spends the stall
+                                    // budget and eventually labels a network
+                                    // failure as a permanent retention limit.
+                                    if ((tradeReacquisition !== null
+                                            && forwardResult.status === 'rejected')
+                                        || (resumesTradeBackfill
+                                            && olderResult.status === 'rejected')) {
+                                        throw forwardResult.status === 'rejected'
+                                            ? forwardResult.reason
+                                            : olderResult.reason;
+                                    }
+                                    if (forwardResult.status === 'rejected' && !olderSucceeded) {
+                                        throw forwardResult.reason;
+                                    }
+                                    if (forwardResult.status === 'rejected') {
+                                        logger.warn(
+                                            `[futures-history] ${historySymbol} forward trade gap failed:`,
+                                            forwardResult.reason?.code || forwardResult.reason?.message,
+                                        );
+                                    }
+                                    const forward = forwardResult.status === 'fulfilled'
+                                        ? forwardResult.value
+                                        : {
+                                            rows: [],
+                                            complete: false,
+                                            pageLimited: true,
+                                            pages: 0,
+                                            // Retaining the prior right edge is
+                                            // contiguous even though this pass
+                                            // could not extend it.
+                                            connects: true,
+                                        };
+                                    const older = olderResult.status === 'fulfilled'
+                                        ? olderResult.value
+                                        : null;
+                                    if (olderResult.status === 'rejected') {
+                                        logger.warn(
+                                            `[futures-history] ${historySymbol} older trade backfill failed:`,
+                                            olderResult.reason?.code || olderResult.reason?.message,
+                                        );
+                                    }
+                                    const olderFrom = Number.isSafeInteger(
+                                        older?.coverage?.coveredFrom,
+                                    ) ? older.coverage.coveredFrom : null;
+                                    const olderConnects = olderFrom !== null
+                                        && older?.coverage?.continuityComplete === true
+                                        && older?.coverage?.coveredTo === heldTradeCoveredFrom - 1;
+                                    const coveredFrom = olderConnects
+                                        ? olderFrom
+                                        : heldTradeCoveredFrom;
+                                    const forwardConnects = forward.connects === true;
+                                    const coveredTo = !forwardConnects
+                                        ? heldTradeCoveredTo
+                                        : forward.complete
+                                            ? tradeTargetTo
+                                            : forward.rows.reduce((latest, trade) => (
+                                                Number.isSafeInteger(trade?.time)
+                                                    ? Math.max(latest ?? trade.time, trade.time)
+                                                    : latest
+                                            ), heldTradeCoveredTo);
+                                    const continuityComplete = heldTradeCoverage
+                                        ?.continuityComplete === true;
+                                    const retentionLimited = heldTradeCoverage
+                                        ?.retentionLimited === true;
+                                    const complete = continuityComplete
+                                        && !retentionLimited
+                                        && coveredFrom !== null
+                                        && coveredFrom <= tradeTargetFrom
+                                        && forward.complete
+                                        && forwardConnects
+                                        && (!resumesTradeBackfill
+                                            || (olderConnects && older.coverage.complete === true));
+                                    return {
+                                        rows: [
+                                            ...(olderConnects ? older.rows : []),
+                                            ...(forwardConnects ? forward.rows : []),
+                                        ],
+                                        coverage: {
+                                            version: 2,
+                                            targetFrom: tradeTargetFrom,
+                                            targetTo: tradeTargetTo,
+                                            coveredFrom,
+                                            coveredTo,
+                                            complete,
+                                            pageLimited: !complete && (
+                                                forward.pageLimited
+                                                || !forwardConnects
+                                                || (resumesTradeBackfill && (
+                                                    !olderConnects
+                                                    || older?.coverage?.pageLimited === true
+                                                ))
+                                            ),
+                                            retentionLimited,
+                                            // The forward reader retains the
+                                            // earliest contiguous IDs after the
+                                            // cursor; an unfinished newest tail
+                                            // narrows coveredTo but creates no
+                                            // hole inside the held interval.
+                                            continuityComplete,
+                                            aborted: older?.coverage?.aborted === true,
+                                            requests: forward.pages
+                                                + (older?.coverage?.requests ?? 0),
+                                        },
+                                    };
+                                }))
+                            : null,
                     ]);
-                    if (readsOrders) orders.push(...symbolOrders);
-                    if (readsTrades) trades.push(...symbolTrades);
+                    let acceptedTradeReading = symbolTradeReading;
+                    let acceptedTradeCursor = tradeCursor;
+                    let acceptedTradeMerge = tradeCursor !== null || resumesTradeBackfill;
+                    if (readsTrades && transactionalTradeRead) {
+                        if (isObsolete()) return;
+                        const currentCheckpoint = futuresHistorySession.checkpoints
+                            .get(historySymbol) ?? null;
+                        // A newer concurrent Full owns the checkpoint. This
+                        // older answer may still be delivered under its older
+                        // readAt, but it cannot rewind the acquisition state.
+                        if (currentCheckpoint?.targetTo > tradeTargetTo) {
+                            acceptedTradeMerge = true;
+                        } else {
+                            const baseCheckpoint = (currentCheckpoint?.phase ?? 'reacquisition')
+                                === 'reacquisition'
+                                && currentCheckpoint?.targetTo === tradeTargetTo
+                                ? currentCheckpoint
+                                : tradeReacquisition;
+                            const checkpoint = advanceFuturesHistoryTradeReacquisition(
+                                baseCheckpoint,
+                                symbolTradeReading,
+                                {
+                                    symbol: historySymbol,
+                                    targetFrom: tradeTargetFrom,
+                                    targetTo: tradeTargetTo,
+                                    activation,
+                                    accountFingerprint,
+                                    streamConnected: proof.connected,
+                                    streamEpoch: proof.epoch,
+                                    activity: proof.activity,
+                                    highestFillId: proof.highestFillId,
+                                    terminalSnapshot,
+                                },
+                            );
+                            if (futuresHistoryHasFlatBoundary(checkpoint.coverage)
+                                && checkpoint.coverage.complete !== true) {
+                                const checkpointCursor = futuresHistoryCursorAfter(
+                                    null,
+                                    checkpoint.rows,
+                                    trade => trade?.id,
+                                );
+                                const checkpointHighestFillId = normalizeFuturesHistoryIdentity(
+                                    checkpoint.highestFillId,
+                                );
+                                const observedFillIsMissing = checkpointHighestFillId !== null
+                                    && (checkpointCursor === null
+                                        || BigInt(checkpointCursor)
+                                            < BigInt(checkpointHighestFillId));
+                                const proofWasInvalidated = checkpoint.streamConnected
+                                        !== futuresHistoryStreamConnected
+                                    || checkpoint.streamEpoch !== futuresHistoryStreamEpoch
+                                    || checkpoint.activity
+                                        !== futuresHistoryActivityOf(historySymbol)
+                                    || observedFillIsMissing
+                                    || !futuresHistoryTerminalSnapshotIsCurrent(
+                                        terminalSnapshot,
+                                    );
+                                if (!proofWasInvalidated) {
+                                    acceptedTradeCursor = null;
+                                    acceptedTradeReading = Object.freeze({
+                                        ...symbolTradeReading,
+                                        rows: checkpoint.rows,
+                                        coverage: checkpoint.coverage,
+                                    });
+                                    // The fixed target remains visible and
+                                    // incomplete, while the exact flat edge is
+                                    // sufficient to replace a stale basis and
+                                    // stop only the unnecessary older slices.
+                                    acceptedTradeMerge = false;
+                                    futuresHistorySession.checkpoints.delete(historySymbol);
+                                } else {
+                                    const exhausted = checkpoint.coverage.passes
+                                            >= FUTURES_HISTORY_REACQUISITION_MAX_PASSES
+                                        || checkpoint.coverage.stalledPasses >= 2
+                                        || checkpoint.coverage.requests
+                                            >= FUTURES_HISTORY_REACQUISITION_MAX_REQUESTS;
+                                    const racedCoverage = Object.freeze({
+                                        ...checkpoint.coverage,
+                                        complete: false,
+                                        flatBoundary: false,
+                                        retentionLimited: exhausted
+                                            || checkpoint.coverage.retentionLimited === true,
+                                    });
+                                    const racedCheckpoint = Object.freeze({
+                                        ...checkpoint,
+                                        coverage: racedCoverage,
+                                    });
+                                    acceptedTradeReading = Object.freeze({
+                                        ...symbolTradeReading,
+                                        rows: checkpoint.rows,
+                                        coverage: racedCoverage,
+                                    });
+                                    acceptedTradeMerge = true;
+                                    if (racedCoverage.retentionLimited) {
+                                        futuresHistorySession.checkpoints.delete(historySymbol);
+                                    } else {
+                                        futuresHistorySession.checkpoints.set(
+                                            historySymbol,
+                                            racedCheckpoint,
+                                        );
+                                        pendingTradeReacquisitions.add(historySymbol);
+                                    }
+                                }
+                            } else if (checkpoint.coverage.complete === true) {
+                                acceptedTradeCursor = null;
+                                const checkpointCursor = futuresHistoryCursorAfter(
+                                    null,
+                                    checkpoint.rows,
+                                    trade => trade?.id,
+                                );
+                                const checkpointHighestFillId = normalizeFuturesHistoryIdentity(
+                                    checkpoint.highestFillId,
+                                );
+                                const observedFillIsMissing = checkpointHighestFillId !== null
+                                    && (checkpointCursor === null
+                                        || BigInt(checkpointCursor)
+                                            < BigInt(checkpointHighestFillId));
+                                const requiresPostGap = checkpoint.streamConnected
+                                        !== futuresHistoryStreamConnected
+                                    || checkpoint.streamEpoch !== futuresHistoryStreamEpoch
+                                    || checkpoint.activity
+                                        !== futuresHistoryActivityOf(historySymbol)
+                                    || observedFillIsMissing;
+                                if (requiresPostGap) {
+                                    // The frozen rows are complete only through
+                                    // their frozen target. Publish them additively
+                                    // and explicitly incomplete so a stream fill
+                                    // that arrived during the walk is not deleted
+                                    // for the five-second post-gap interval.
+                                    acceptedTradeReading = Object.freeze({
+                                        ...symbolTradeReading,
+                                        rows: checkpoint.rows,
+                                        coverage: Object.freeze({
+                                            ...checkpoint.coverage,
+                                            complete: false,
+                                            postGapPending: true,
+                                        }),
+                                    });
+                                    acceptedTradeMerge = true;
+                                    const postGapCheckpoint = Object.freeze({
+                                        ...checkpoint,
+                                        phase: 'post-gap',
+                                        tradeCursor: checkpointCursor,
+                                        postGapCoverage: checkpoint.coverage,
+                                        retryAttempts: 0,
+                                    });
+                                    futuresHistorySession.checkpoints.set(
+                                        historySymbol,
+                                        postGapCheckpoint,
+                                    );
+                                    completedTradeReacquisitions.set(
+                                        historySymbol,
+                                        postGapCheckpoint,
+                                    );
+                                } else {
+                                    acceptedTradeReading = Object.freeze({
+                                        ...symbolTradeReading,
+                                        rows: checkpoint.rows,
+                                        coverage: checkpoint.coverage,
+                                    });
+                                    // With no racing stream interval, the
+                                    // complete reacquisition can heal the held
+                                    // contract in one atomic replacement.
+                                    acceptedTradeMerge = false;
+                                    futuresHistorySession.checkpoints.delete(historySymbol);
+                                }
+                            } else {
+                                acceptedTradeReading = Object.freeze({
+                                    ...symbolTradeReading,
+                                    coverage: checkpoint.coverage,
+                                });
+                                acceptedTradeMerge = true;
+                                if (checkpoint.coverage.retentionLimited === true) {
+                                    futuresHistorySession.checkpoints.delete(historySymbol);
+                                } else {
+                                    futuresHistorySession.checkpoints.set(
+                                        historySymbol,
+                                        checkpoint,
+                                    );
+                                    pendingTradeReacquisitions.add(historySymbol);
+                                }
+                            }
+                        }
+                    }
+                    let resultingTradeCursor = readsTrades
+                        ? futuresHistoryCursorAfter(
+                            acceptedTradeCursor,
+                            acceptedTradeReading?.rows ?? [],
+                            trade => trade?.id,
+                        )
+                        : null;
+                    if (incrementalRepair !== null
+                        && futuresHistorySession.checkpoints.get(historySymbol)
+                            === incrementalRepair) {
+                        futuresHistorySession.checkpoints.delete(historySymbol);
+                    }
+                    if (postGapRepair !== null) {
+                        const currentCheckpoint = futuresHistorySession.checkpoints
+                            .get(historySymbol) ?? null;
+                        if (currentCheckpoint === postGapRepair) {
+                            const combinedRows = mergeFuturesHistoryTradeRows(
+                                historySymbol,
+                                postGapRepair.rows,
+                                acceptedTradeReading?.rows,
+                            );
+                            const retentionLimited = combinedRows.length
+                                > FUTURES_HELD_HISTORY_MAX_TRADES_PER_CONTRACT
+                                || acceptedTradeReading?.coverage?.retentionLimited === true;
+                            const proofWasInvalidated = proof.connected
+                                    !== futuresHistoryStreamConnected
+                                || proof.epoch !== futuresHistoryStreamEpoch
+                                || proof.activity !== futuresHistoryActivityOf(historySymbol);
+                            const observedFillIds = [
+                                postGapRepair.highestFillId,
+                                proof.highestFillId,
+                                futuresHistoryHighestFillIdBySymbol.get(historySymbol),
+                            ].map(normalizeFuturesHistoryIdentity).filter(Boolean);
+                            const requiredFillId = observedFillIds.reduce((highest, identity) => (
+                                highest === null || BigInt(identity) > BigInt(highest)
+                                    ? identity
+                                    : highest
+                            ), null);
+                            // Stream delivery may precede `/userTrades` indexing.
+                            // A short/empty HTTP success is not permission to
+                            // atomically replace the stream projection until its
+                            // observed trade identity appears in the REST seam.
+                            const reachedObservedFill = requiredFillId === null
+                                || (resultingTradeCursor !== null
+                                    && BigInt(resultingTradeCursor) >= BigInt(requiredFillId));
+                            if (acceptedTradeReading?.coverage?.complete === true
+                                && !proofWasInvalidated
+                                && reachedObservedFill
+                                && !retentionLimited) {
+                                acceptedTradeReading = Object.freeze({
+                                    ...acceptedTradeReading,
+                                    rows: Object.freeze(combinedRows),
+                                    coverage: Object.freeze({
+                                        ...acceptedTradeReading.coverage,
+                                        passes: postGapRepair.coverage?.passes ?? 1,
+                                        stalledPasses: postGapRepair.coverage?.stalledPasses ?? 0,
+                                        complete: true,
+                                        retentionLimited: false,
+                                        postGapPending: false,
+                                    }),
+                                });
+                                // This is the only replacement for a Full that
+                                // raced stream activity: frozen rows and every
+                                // forward-gap row land in the same frame.
+                                acceptedTradeCursor = null;
+                                acceptedTradeMerge = false;
+                                resultingTradeCursor = futuresHistoryCursorAfter(
+                                    null,
+                                    combinedRows,
+                                    trade => trade?.id,
+                                );
+                                futuresHistorySession.checkpoints.delete(historySymbol);
+                            } else {
+                                const retryAttempts = (postGapRepair.retryAttempts ?? 0) + 1;
+                                const willRetryPostGap = !retentionLimited
+                                    && retryAttempts
+                                        < FUTURES_HISTORY_REACQUISITION_MAX_FAILURES;
+                                acceptedTradeReading = Object.freeze({
+                                    ...acceptedTradeReading,
+                                    coverage: Object.freeze({
+                                        ...acceptedTradeReading.coverage,
+                                        complete: false,
+                                        retentionLimited,
+                                        postGapPending: willRetryPostGap,
+                                    }),
+                                });
+                                acceptedTradeMerge = true;
+                                if (!willRetryPostGap) {
+                                    futuresHistorySession.checkpoints.delete(historySymbol);
+                                } else {
+                                    futuresHistorySession.checkpoints.set(
+                                        historySymbol,
+                                        Object.freeze({
+                                            ...postGapRepair,
+                                            targetTo: acceptedTradeReading?.coverage?.targetTo
+                                                ?? historyReadAt,
+                                            rows: Object.freeze(combinedRows),
+                                            tradeCursor: resultingTradeCursor,
+                                            highestFillId: requiredFillId,
+                                            postGapCoverage: acceptedTradeReading?.coverage
+                                                ?? postGapRepair.postGapCoverage,
+                                            retryAttempts,
+                                        }),
+                                    );
+                                    pendingTradeReacquisitions.add(historySymbol);
+                                }
+                            }
+                        }
+                    }
+                    if (readsOrders) orders.push(...(symbolOrderReading?.rows ?? []));
+                    if (readsTrades) {
+                        trades.push(...(acceptedTradeReading?.rows ?? []));
+                        tradeCoverage[historySymbol] = acceptedTradeReading?.coverage ?? null;
+                    }
                     // Where a read started from, stated only for the endpoint it
                     // started: the renderer decides what it may replace from this,
                     // and a cursor for an endpoint nobody read describes nothing.
                     readFrom[historySymbol] = {
                         ...(readsOrders ? { orderCursor } : {}),
-                        ...(readsTrades ? { tradeCursor } : {}),
+                        ...(readsTrades ? { tradeCursor: acceptedTradeCursor } : {}),
+                    };
+                    merge[historySymbol] = {
+                        ...(readsOrders ? {
+                            // A null-cursor allOrders answer is only a full
+                            // replacement when it ended below the page limit.
+                            // Replacing with a full newest page used to delete
+                            // every older held order from the review.
+                            orders: orderCursor !== null
+                                || symbolOrderReading?.pageLimited === true,
+                        } : {}),
+                        ...(readsTrades ? {
+                            trades: acceptedTradeMerge,
+                        } : {}),
                     };
                     retainFuturesHistoryProof(historySymbol, proof, {
                         ...(readsOrders ? {
                             orderCursor: futuresHistoryCursorAfter(
                                 orderCursor,
-                                symbolOrders,
+                                symbolOrderReading?.rows ?? [],
                                 order => order?.orderId,
                             ),
                         } : {}),
                         ...(readsTrades ? {
-                            tradeCursor: futuresHistoryCursorAfter(
-                                tradeCursor,
-                                symbolTrades,
-                                trade => trade?.id,
-                            ),
+                            // Until the frozen window's forward gap has landed,
+                            // no cursor may vouch for this contract. `undefined`
+                            // deliberately cannot equal either a held numeric
+                            // cursor or its normalized null form.
+                            tradeCursor: completedTradeReacquisitions.has(historySymbol)
+                                ? undefined
+                                : resultingTradeCursor,
                         } : {}),
                     });
                 } catch (error) {
+                    let retryCheckpoint = postGapRepair
+                        ?? tradeReacquisition
+                        ?? incrementalRepair;
+                    let currentCheckpoint = futuresHistorySession.checkpoints
+                        .get(historySymbol) ?? null;
+                    if (!isObsolete()
+                        && retryCheckpoint === null
+                        && readsTrades) {
+                        retryCheckpoint = transactionalTradeRead
+                            ? Object.freeze({
+                                phase: 'reacquisition',
+                                activation,
+                                accountFingerprint,
+                                streamConnected: proof.connected,
+                                streamEpoch: proof.epoch,
+                                activity: proof.activity,
+                                highestFillId: proof.highestFillId,
+                                targetFrom: tradeTargetFrom,
+                                targetTo: tradeTargetTo,
+                                rows: Object.freeze([]),
+                                coverage: null,
+                                failureAttempts: 0,
+                            })
+                            : Object.freeze({
+                                phase: resumesTradeBackfill
+                                    ? 'basis-backfill'
+                                    : 'basis-gap',
+                                activation,
+                                accountFingerprint,
+                                targetTo: historyReadAt,
+                                coverageEntry: Object.freeze({ ...held }),
+                                retryAttempts: 0,
+                            });
+                        futuresHistorySession.checkpoints.set(
+                            historySymbol,
+                            retryCheckpoint,
+                        );
+                        currentCheckpoint = retryCheckpoint;
+                    }
+                    if (!isObsolete()
+                        && retryCheckpoint !== null
+                        && currentCheckpoint === retryCheckpoint) {
+                        const attemptKey = retryCheckpoint.phase === 'reacquisition'
+                            ? 'failureAttempts'
+                            : 'retryAttempts';
+                        const attempts = (retryCheckpoint[attemptKey] ?? 0) + 1;
+                        if (attempts < FUTURES_HISTORY_REACQUISITION_MAX_FAILURES) {
+                            futuresHistorySession.checkpoints.set(
+                                historySymbol,
+                                Object.freeze({
+                                    ...retryCheckpoint,
+                                    [attemptKey]: attempts,
+                                }),
+                            );
+                            pendingTradeReacquisitions.add(historySymbol);
+                        } else {
+                            futuresHistorySession.checkpoints.delete(historySymbol);
+                        }
+                    }
                     unavailable.push(historySymbol);
                     failures.push(error);
                     logger.error(`[futures-history] ${historySymbol} request failed:`, error?.code || error?.message);
                 }
             }));
             if (isObsolete()) return;
+            // Failed internal continuations are still reported below, but their
+            // checkpoint stays truthful and receives only a bounded retry. This
+            // must happen before the all-failed early return.
+            scheduleFuturesHistoryTradeReacquisition(pendingTradeReacquisitions);
             if (readSymbols.length > 0 && unavailable.length === readSymbols.length) {
                 const [failure] = failures;
                 emit({
                     futures_history: {
+                        accountFingerprint: futuresTradingAdapter?.credentialFingerprint ?? null,
                         symbol,
                         symbols: readSymbols,
+                        readAt: historyReadAt,
+                        basisOnly: basisOnly === true,
                         discovered,
                         discoveryComplete,
                         readFrom: {},
+                        merge: {},
+                        tradeCoverage: {},
                         full: full === true,
                         views: [...views],
                         orders: [],
@@ -4484,8 +6588,14 @@ export function setupBinanceConnection({
             }
             emit({
                 futures_history: {
+                    accountFingerprint: futuresTradingAdapter?.credentialFingerprint ?? null,
                     symbol,
                     symbols: readSymbols.filter(entry => !unavailable.includes(entry)),
+                    // Stamped when this request began, not when it happened to
+                    // finish. Concurrent reads can therefore arrive crossed
+                    // without an older answer overwriting a newer one.
+                    readAt: historyReadAt,
+                    basisOnly: basisOnly === true,
                     // How many contracts the account actually traded in the window,
                     // against how many were read. The review surface states the
                     // difference: an operator who cannot see yesterday's losses must
@@ -4493,6 +6603,8 @@ export function setupBinanceConnection({
                     discovered,
                     discoveryComplete,
                     readFrom,
+                    merge,
+                    tradeCoverage,
                     full: full === true,
                     // Which endpoints this answer covers. The renderer replaces
                     // only what was read and keeps the rest of the review it is
@@ -4504,6 +6616,118 @@ export function setupBinanceConnection({
                     error: null,
                 },
             });
+            if (completedTradeReacquisitions.size > 0) {
+                const completedSymbols = [...completedTradeReacquisitions.keys()];
+                // The frozen repair deliberately ends at its original target.
+                // Reuse the bounded continuation scheduler for its forward gap:
+                // one failed REST answer must neither bless the frozen cursor
+                // nor start an unbounded retry loop.
+                scheduleFuturesHistoryTradeReacquisition(completedSymbols);
+            }
+        };
+
+        const queueFuturesHistoryCommand = (command) => {
+            const activation = futuresActivationGeneration;
+            const rendererActivation = marketActivationGeneration;
+            const accountFingerprint = futuresTradingAdapter?.credentialFingerprint ?? null;
+            const historySessionGeneration = futuresHistorySession.generation;
+            const pending = futuresHistorySession.queue.then(() => {
+                if (activation !== futuresActivationGeneration
+                    || rendererActivation !== marketActivationGeneration
+                    || historySessionGeneration !== futuresHistorySession.generation
+                    || futuresHistorySession.disposed
+                    || accountFingerprint !== (futuresTradingAdapter?.credentialFingerprint ?? null)
+                    || activeMarketMode !== MARKET_MODES.FUTURES) return undefined;
+                return handleFuturesHistory(command);
+            });
+            // Keep later reads moving after a reported failure while returning
+            // the original outcome to the command that awaited this one.
+            futuresHistorySession.queue = pending.then(
+                () => undefined,
+                () => undefined,
+            );
+            return pending;
+        };
+
+        const scheduleFuturesHistoryTradeReacquisition = (symbols) => {
+            for (const symbol of symbols ?? []) {
+                if (futuresHistorySession.checkpoints.has(symbol)) {
+                    futuresHistorySession.pending.add(symbol);
+                }
+            }
+            if (futuresHistorySession.pending.size === 0
+                || futuresHistorySession.timer !== null) return;
+            const activation = futuresActivationGeneration;
+            const accountFingerprint = futuresTradingAdapter?.credentialFingerprint ?? null;
+            const historySessionGeneration = futuresHistorySession.generation;
+            futuresHistorySession.timer = setTimeout(() => {
+                futuresHistorySession.timer = null;
+                if (activation !== futuresActivationGeneration
+                    || historySessionGeneration !== futuresHistorySession.generation
+                    || futuresHistorySession.disposed
+                    || accountFingerprint !== (futuresTradingAdapter?.credentialFingerprint ?? null)
+                    || activeMarketMode !== MARKET_MODES.FUTURES) {
+                    futuresHistorySession.pending = new Set();
+                    return;
+                }
+                const pendingSymbols = [...futuresHistorySession.pending]
+                    .filter((symbol) => {
+                        const checkpoint = futuresHistorySession.checkpoints.get(symbol);
+                        return checkpoint?.activation === activation
+                            && checkpoint.accountFingerprint === accountFingerprint;
+                    });
+                futuresHistorySession.pending = new Set();
+                if (pendingSymbols.length === 0) return;
+                const byKind = new Map();
+                for (const symbol of pendingSymbols) {
+                    const checkpoint = futuresHistorySession.checkpoints.get(symbol);
+                    const kind = checkpoint?.phase ?? 'reacquisition';
+                    const grouped = byKind.get(kind) ?? [];
+                    grouped.push(symbol);
+                    byKind.set(kind, grouped);
+                }
+                for (const [continuationKind, continuationSymbols] of byKind) {
+                    const postGap = continuationKind === 'post-gap';
+                    const incremental = continuationKind === 'basis-backfill'
+                        || continuationKind === 'basis-gap';
+                    const checkpointCoverage = Object.fromEntries(
+                        continuationSymbols.map((symbol) => {
+                            const checkpoint = futuresHistorySession.checkpoints
+                                .get(symbol);
+                            if (incremental) {
+                                return [symbol, checkpoint.coverageEntry];
+                            }
+                            const heldCoverage = postGap
+                                ? checkpoint.postGapCoverage
+                                : checkpoint.coverage;
+                            const readAt = heldCoverage?.targetTo ?? checkpoint.targetTo;
+                            return [symbol, {
+                                readAt,
+                                orderReadAt: null,
+                                tradeReadAt: readAt,
+                                orderCursor: null,
+                                tradeCursor: postGap ? checkpoint.tradeCursor : null,
+                                tradeCoverage: heldCoverage,
+                            }];
+                        }),
+                    );
+                    void queueFuturesHistoryCommand({
+                        basisOnly: true,
+                        continuationKind,
+                        continuationSymbols,
+                        symbol: continuationSymbols[0],
+                        coverage: checkpointCoverage,
+                        full: !postGap && !incremental,
+                        views: [FUTURES_HISTORY_VIEWS.TRADES],
+                    }).catch((error) => {
+                        logger.warn(
+                            `[futures-history] ${continuationKind} continuation failed:`,
+                            error?.code || error?.message,
+                        );
+                    });
+                }
+            }, FUTURES_HISTORY_REACQUISITION_CONTINUE_MS);
+            futuresHistorySession.timer.unref?.();
         };
 
         // The leverage of one contract, on demand: sent whenever the desk changes
@@ -4656,7 +6880,12 @@ export function setupBinanceConnection({
             }
             try {
                 logger.info(`[futures-orders] Amend ${amendment.symbol} orderId=${amendment.orderId ?? amendment.origClientOrderId} price=${amendment.numericPrice}`);
-                const report = await futuresTradingAdapter.modifyOrder(amendment);
+                const report = await futuresRestLimiter.execute(
+                    () => futuresTradingAdapter.modifyOrder(amendment),
+                    1,
+                    0,
+                    { urgent: true },
+                );
                 noteFuturesMutation();
                 emit({ futures_execution_update: report });
                 await reconcileAfterFuturesCommand();
@@ -4689,7 +6918,12 @@ export function setupBinanceConnection({
                 return;
             }
             try {
-                const report = await futuresTradingAdapter.cancelOrder(command);
+                const report = await futuresRestLimiter.execute(
+                    () => futuresTradingAdapter.cancelOrder(command),
+                    1,
+                    0,
+                    { urgent: true },
+                );
                 noteFuturesMutation();
                 emit({ futures_execution_update: report });
                 await reconcileAfterFuturesCommand();
@@ -4739,12 +6973,22 @@ export function setupBinanceConnection({
                 {
                     kind: 'regular',
                     label: 'working orders',
-                    run: () => futuresTradingAdapter.cancelAllOrders(command.symbol),
+                    run: () => futuresRestLimiter.execute(
+                        () => futuresTradingAdapter.cancelAllOrders(command.symbol),
+                        1,
+                        0,
+                        { urgent: true },
+                    ),
                 },
                 {
                     kind: 'algo',
                     label: 'conditional (ALGO) orders',
-                    run: () => futuresTradingAdapter.cancelAllAlgoOrders(command.symbol),
+                    run: () => futuresRestLimiter.execute(
+                        () => futuresTradingAdapter.cancelAllAlgoOrders(command.symbol),
+                        1,
+                        0,
+                        { urgent: true },
+                    ),
                 },
             ];
             const outcomes = await Promise.all(cancellations.map(async (cancellation) => {
@@ -4839,7 +7083,12 @@ export function setupBinanceConnection({
             }
             try {
                 logger.info(`[futures-margin] ${adjustment.direction} ${adjustment.amount} USDT ${adjustment.symbol} ${adjustment.positionSide}`);
-                await futuresTradingAdapter.adjustPositionMargin(adjustment);
+                await futuresRestLimiter.execute(
+                    () => futuresTradingAdapter.adjustPositionMargin(adjustment),
+                    1,
+                    0,
+                    { urgent: true },
+                );
                 noteFuturesMutation();
                 // The row shows the exchange's figure, not the requested one.
                 await refreshFuturesAccountState({ reason: 'command' });
@@ -4892,6 +7141,9 @@ export function setupBinanceConnection({
             // envelopes say how a command ended but never what it was.
             const commandRecorded = diagnosticRecord.observeCommand(command);
             const commandAskedAt = Date.now();
+            const manualFuturesRefresh = command.marketType === FUTURES_MARKET_TYPE
+                && command.action === TRADING_COMMAND_ACTIONS.ACCOUNT_REFRESH
+                && command.manual === true;
             // And how long it then took. Paired with the line above by the
             // identity both carry, this is what lets a slow desk be measured
             // instead of described: the command's own line says when it was
@@ -4942,7 +7194,24 @@ export function setupBinanceConnection({
                 noteCommandAnswer('error');
                 throw error;
             }
-            noteCommandAnswer('ok');
+            if (manualFuturesRefresh) {
+                // Acceptance is the compound outcome. Account resources state
+                // their own terminal result, while settled income keeps using
+                // its authoritative loading/ready/stale/error frames. Copying a
+                // provisional income status here would create a second source
+                // of truth and let account success hide a later income failure.
+                emit({
+                    type: 'futures_manual_refresh_outcome',
+                    version: 1,
+                    status: 'accepted',
+                    request: command.clientOrderId,
+                    requestedAt: commandAskedAt,
+                    accountFingerprint: futuresTradingAdapter?.credentialFingerprint ?? null,
+                    account: { disposition: 'resource' },
+                    settledIncome: { disposition: 'resource' },
+                });
+            }
+            noteCommandAnswer(manualFuturesRefresh ? 'accepted' : 'ok');
         };
 
         const dispatchTypedTradingCommand = async (command) => {
@@ -4968,8 +7237,12 @@ export function setupBinanceConnection({
                         // Warm the cached position mode (and the server-time
                         // offset its signed request syncs) so the first order
                         // pays no extra round-trips.
-                        void futuresTradingAdapter?.getPositionMode().catch(() => {});
-                        await refreshFuturesAccountState({ reason: 'refresh' });
+                        void futuresRestLimiter.execute(
+                            () => futuresTradingAdapter?.getPositionMode() ?? null,
+                            30,
+                            2,
+                            { urgent: true },
+                        ).catch(() => {});
                         // The operator asking for the account is asking for all
                         // of it. This is the one read they can reach directly.
                         // A person asking gets everything the desk can find
@@ -4979,9 +7252,14 @@ export function setupBinanceConnection({
                         // seconds — which is exactly what this desk did between
                         // 20:20 and 20:23 on 2026-08-20, in its own journal.
                         scheduleFuturesSettledRead(command.periodic === true ? 'tick' : 'refresh');
+                        // Start the independent income resource before waiting
+                        // for balances/positions/orders. Otherwise those four
+                        // resources can become ready while NET still looks as
+                        // though the operator just refreshed its old reading.
+                        await refreshFuturesAccountState({ reason: 'refresh' });
                         break;
                     case TRADING_COMMAND_ACTIONS.ACCOUNT_HISTORY:
-                        await handleFuturesHistory(command);
+                        await queueFuturesHistoryCommand(command);
                         break;
                     case TRADING_COMMAND_ACTIONS.ACCOUNT_SYMBOL_CONFIG:
                         await handleFuturesSymbolConfig(command);
@@ -5526,7 +7804,23 @@ export function setupBinanceConnection({
             if (!futuresCredentialsReady || futuresDataInitialized) return;
             futuresDataInitialized = true;
             futuresRendererConnections.add(connection);
+            // Broadcast dedup is process-wide. A renderer joining after the
+            // resources were published still needs their current snapshots even
+            // though no content revision changed for the other renderers. Name
+            // the account on this activation before settled income: renderer
+            // admission is intentionally fingerprint-strict, and the account
+            // refresh below may be skipped, delayed, or refused independently.
+            sendJSON(connection, createFuturesAccountStateFrame());
+            sendJSON(connection, createFuturesSettledIncomeFrame(_futuresSettled, {
+                reason: 'snapshot',
+                readAt: _futuresSettledReadAt,
+            }));
+            ensureFuturesSettledVerification();
             ensureFuturesUserDataStream();
+            // REST bootstrap is independent of the private stream. A refused or
+            // slow user-data handshake must not leave Closed Positions without
+            // wallet adjustments until the operator presses Refresh.
+            scheduleFuturesSettledRead('bootstrap');
             void refreshFuturesAccountState({ reason: 'bootstrap' })
                 .catch(error => reportDetachedFuturesAccountRefreshFailure('bootstrap', error));
         };
@@ -5535,6 +7829,7 @@ export function setupBinanceConnection({
             const wasInitialized = futuresDataInitialized
                 || futuresRendererConnections.has(connection);
             futuresDataInitialized = false;
+            futuresHistorySession.reset();
             // This connection may stay open for Spot. A complete mark frame that
             // is still in its market queue belongs to the retiring Futures
             // activation and must not drain after the activation acknowledgement.
@@ -6028,6 +8323,9 @@ export function setupBinanceConnection({
             rendererConnections.delete(connection);
             spotRendererConnections.delete(connection);
             futuresRendererConnections.delete(connection);
+            futuresHistorySession.disposed = true;
+            futuresHistorySession.reset();
+            futuresHistorySessions.delete(futuresHistorySession);
 
             // Invalidate production Futures ownership before asynchronous teardown
             // can resolve. This stops reconnects, sockets, and late delivery.

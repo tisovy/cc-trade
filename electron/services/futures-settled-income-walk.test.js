@@ -1,9 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import {
+    FUTURES_SETTLED_LANE_WALK,
     FUTURES_SETTLED_WALK,
     emptyFuturesSettledState,
     walkFuturesSettledIncome,
+    walkFuturesSettledIncomeLanes,
 } from './futures-settled-income-walk.js';
+import {
+    createFuturesSettledIncomeLane,
+    createFuturesSettledIncomeResource,
+} from '../../src/utils/futuresSettledIncomeResource.js';
 
 const HOUR = 60 * 60 * 1000;
 const DAY = 24 * HOUR;
@@ -391,5 +397,373 @@ describe('walkFuturesSettledIncome', () => {
         expect(exchange.asked).toHaveLength(0);
         expect(walked.requests).toBe(0);
         expect(walked.rows.size).toBe(0);
+    });
+});
+
+describe('walkFuturesSettledIncomeLanes', () => {
+    it('retains a confirmed lane after refusal but no longer calls it complete', async () => {
+        const row = {
+            symbol: 'BTCUSDT',
+            incomeType: 'FUNDING_FEE',
+            income: '-1.25',
+            asset: 'USDT',
+            time: NOW - HOUR,
+            tranId: '700000000000000001',
+        };
+        const held = createFuturesSettledIncomeResource({
+            incomeTypes: ['FUNDING_FEE'],
+            lanes: {
+                FUNDING_FEE: createFuturesSettledIncomeLane('FUNDING_FEE', {
+                    rows: [row],
+                    coveredFrom: WINDOW_FROM,
+                    coveredTo: NOW - 1,
+                    targetTo: NOW - 1,
+                    status: 'ready',
+                    attemptedAt: NOW - 1,
+                    successfulAt: NOW - 1,
+                    complete: true,
+                }),
+            },
+            generation: 7,
+        });
+        const refusal = Object.assign(new Error('credentials rejected'), {
+            code: '-2015',
+            response: { status: 400 },
+        });
+
+        const walked = await walkFuturesSettledIncomeLanes({
+            readPage: async () => { throw refusal; },
+            now: NOW,
+            windowFrom: WINDOW_FROM,
+            held,
+            incomeTypes: ['FUNDING_FEE'],
+            refreshIncomeTypes: ['FUNDING_FEE'],
+        });
+
+        const lane = walked.resource.lanes.FUNDING_FEE;
+        expect(walked).toMatchObject({
+            failed: true,
+            queued: false,
+            attemptsByType: { FUNDING_FEE: 1 },
+        });
+        expect([...lane.rows.values()]).toEqual([expect.objectContaining({
+            tranId: '700000000000000001',
+        })]);
+        expect(lane).toMatchObject({
+            coveredFrom: WINDOW_FROM,
+            coveredTo: NOW - 1,
+            targetTo: NOW,
+            status: 'stale',
+            attemptedAt: NOW,
+            successfulAt: NOW - 1,
+            complete: false,
+            pending: null,
+            error: { code: '-2015', status: 400 },
+        });
+        expect(walked.resource.completeByType.FUNDING_FEE).toBe(false);
+        expect(walked.resource.complete).toBe(false);
+    });
+
+    it.each([
+        [
+            'transport silence',
+            () => ({ answer: null, expectedCode: 'EMPTY_ANSWER', rowReads: () => 0 }),
+        ],
+        [
+            'an answered non-array container',
+            () => ({
+                answer: { rows: { length: 0 } },
+                expectedCode: 'INVALID_INCOME_PAGE',
+                rowReads: () => 0,
+            }),
+        ],
+        [
+            'an over-requested page',
+            () => {
+                let reads = 0;
+                const unreadableRow = {};
+                Object.defineProperty(unreadableRow, 'incomeType', {
+                    enumerable: true,
+                    get: () => {
+                        reads += 1;
+                        throw new Error('over-limit rows must not be normalized');
+                    },
+                });
+                return {
+                    answer: { rows: [unreadableRow, unreadableRow] },
+                    expectedCode: 'OVERSIZED_INCOME_PAGE',
+                    rowReads: () => reads,
+                };
+            },
+        ],
+    ])('retains confirmed evidence atomically after %s', async (_case, makePage) => {
+        const row = {
+            symbol: 'BTCUSDT',
+            incomeType: 'FUNDING_FEE',
+            income: '-1.25',
+            asset: 'USDT',
+            time: NOW - HOUR,
+            tranId: '700000000000000002',
+        };
+        const held = createFuturesSettledIncomeResource({
+            incomeTypes: ['FUNDING_FEE'],
+            lanes: {
+                FUNDING_FEE: createFuturesSettledIncomeLane('FUNDING_FEE', {
+                    rows: [row],
+                    coveredFrom: WINDOW_FROM,
+                    coveredTo: NOW - 1,
+                    targetTo: NOW - 1,
+                    status: 'ready',
+                    attemptedAt: NOW - 1,
+                    successfulAt: NOW - 1,
+                    complete: true,
+                }),
+            },
+            generation: 8,
+        });
+        const page = makePage();
+
+        const walked = await walkFuturesSettledIncomeLanes({
+            readPage: async () => page.answer,
+            now: NOW,
+            windowFrom: WINDOW_FROM,
+            held,
+            incomeTypes: ['FUNDING_FEE'],
+            refreshIncomeTypes: ['FUNDING_FEE'],
+            limits: { PAGE_LIMIT: 1 },
+        });
+
+        const lane = walked.resource.lanes.FUNDING_FEE;
+        expect(walked).toMatchObject({
+            failed: true,
+            queued: false,
+            attemptsByType: { FUNDING_FEE: 1 },
+        });
+        expect([...lane.rows.values()]).toEqual([expect.objectContaining({
+            tranId: '700000000000000002',
+        })]);
+        expect(lane).toMatchObject({
+            coveredFrom: WINDOW_FROM,
+            coveredTo: NOW - 1,
+            targetTo: NOW,
+            status: 'stale',
+            attemptedAt: NOW,
+            successfulAt: NOW - 1,
+            complete: false,
+            pending: null,
+            error: { code: page.expectedCode },
+        });
+        expect(page.rowReads()).toBe(0);
+        expect(walked.resource.completeByType.FUNDING_FEE).toBe(false);
+        expect(walked.resource.complete).toBe(false);
+    });
+
+    it('keeps independent production defaults when only PAGE_LIMIT is narrowed', async () => {
+        const asked = [];
+        const walked = await walkFuturesSettledIncomeLanes({
+            readPage: async (request) => {
+                asked.push(request);
+                return request.page === 1
+                    ? {
+                        rows: [
+                            {
+                                symbol: 'BTCUSDT', incomeType: 'FUNDING_FEE', income: '-1',
+                                asset: 'USDT', time: WINDOW_FROM, tranId: '710000000000000001',
+                            },
+                            {
+                                symbol: 'BTCUSDT', incomeType: 'FUNDING_FEE', income: '-2',
+                                asset: 'USDT', time: WINDOW_FROM + 1, tranId: '710000000000000002',
+                            },
+                        ],
+                    }
+                    : { rows: [] };
+            },
+            now: NOW,
+            windowFrom: WINDOW_FROM,
+            incomeTypes: ['FUNDING_FEE'],
+            refreshIncomeTypes: ['FUNDING_FEE'],
+            limits: { PAGE_LIMIT: 2 },
+        });
+
+        expect(asked.map(({ page, limit }) => ({ page, limit }))).toEqual([
+            { page: 1, limit: 2 },
+            { page: 2, limit: 2 },
+        ]);
+        expect(walked).toMatchObject({
+            requests: 2,
+            failed: false,
+            queued: false,
+            attemptsByType: { FUNDING_FEE: 2 },
+        });
+        expect(walked.resource.lanes.FUNDING_FEE).toMatchObject({
+            status: 'ready',
+            complete: true,
+            pending: null,
+        });
+    });
+
+    it('clamps every oversized injected lane limit to the production ceiling', async () => {
+        const oversizedLimits = {
+            PAGE_LIMIT: Number.MAX_SAFE_INTEGER,
+            MAX_PAGES_PER_LANE: Number.MAX_SAFE_INTEGER,
+            MAX_PAGES_PER_TARGET: Number.MAX_SAFE_INTEGER,
+            MAX_ROWS_PER_LANE: Number.MAX_SAFE_INTEGER,
+            TAIL_OVERLAP_MS: Number.MAX_SAFE_INTEGER,
+        };
+        const repeatedRow = {
+            symbol: 'BTCUSDT',
+            incomeType: 'FUNDING_FEE',
+            income: '-1',
+            asset: 'USDT',
+            time: WINDOW_FROM,
+            tranId: '720000000000000001',
+        };
+        const fullPage = Array(FUTURES_SETTLED_LANE_WALK.PAGE_LIMIT).fill(repeatedRow);
+
+        const passRequests = [];
+        const boundedPass = await walkFuturesSettledIncomeLanes({
+            readPage: async (request) => {
+                passRequests.push(request);
+                return { rows: fullPage };
+            },
+            now: NOW,
+            windowFrom: WINDOW_FROM,
+            incomeTypes: ['FUNDING_FEE'],
+            refreshIncomeTypes: ['FUNDING_FEE'],
+            limits: oversizedLimits,
+        });
+        expect(passRequests).toHaveLength(FUTURES_SETTLED_LANE_WALK.MAX_PAGES_PER_LANE);
+        expect(passRequests.map(request => request.limit)).toEqual(
+            Array(FUTURES_SETTLED_LANE_WALK.MAX_PAGES_PER_LANE)
+                .fill(FUTURES_SETTLED_LANE_WALK.PAGE_LIMIT),
+        );
+        expect(boundedPass).toMatchObject({
+            queued: true,
+            attemptsByType: {
+                FUNDING_FEE: FUTURES_SETTLED_LANE_WALK.MAX_PAGES_PER_LANE,
+            },
+        });
+
+        const targetLimit = FUTURES_SETTLED_LANE_WALK.MAX_PAGES_PER_TARGET;
+        const targetHeld = createFuturesSettledIncomeResource({
+            incomeTypes: ['FUNDING_FEE'],
+            lanes: {
+                FUNDING_FEE: createFuturesSettledIncomeLane('FUNDING_FEE', {
+                    targetTo: NOW,
+                    nextPage: targetLimit,
+                    status: 'loading',
+                    attemptedAt: NOW - 1,
+                    pending: {
+                        targetFrom: WINDOW_FROM,
+                        targetTo: NOW,
+                        nextPage: targetLimit,
+                        rows: [],
+                    },
+                }),
+            },
+        });
+        const targetRequests = [];
+        const boundedTarget = await walkFuturesSettledIncomeLanes({
+            readPage: async (request) => {
+                targetRequests.push(request);
+                return { rows: fullPage };
+            },
+            now: NOW,
+            windowFrom: WINDOW_FROM,
+            held: targetHeld,
+            incomeTypes: ['FUNDING_FEE'],
+            refreshIncomeTypes: ['FUNDING_FEE'],
+            limits: oversizedLimits,
+        });
+        expect(targetRequests).toEqual([expect.objectContaining({
+            page: targetLimit,
+            limit: FUTURES_SETTLED_LANE_WALK.PAGE_LIMIT,
+        })]);
+        expect(boundedTarget.resource.lanes.FUNDING_FEE.error)
+            .toMatchObject({ code: 'PAGE_LIMIT_REACHED' });
+
+        const coveredTo = NOW - 1;
+        const tailHeld = createFuturesSettledIncomeResource({
+            incomeTypes: ['FUNDING_FEE'],
+            lanes: {
+                FUNDING_FEE: createFuturesSettledIncomeLane('FUNDING_FEE', {
+                    rows: [{ ...repeatedRow, time: coveredTo }],
+                    coveredFrom: WINDOW_FROM,
+                    coveredTo,
+                    targetTo: coveredTo,
+                    status: 'ready',
+                    attemptedAt: coveredTo,
+                    successfulAt: coveredTo,
+                    complete: true,
+                }),
+            },
+        });
+        const tailRequests = [];
+        await walkFuturesSettledIncomeLanes({
+            readPage: async (request) => {
+                tailRequests.push(request);
+                return { rows: [] };
+            },
+            now: NOW,
+            windowFrom: WINDOW_FROM,
+            held: tailHeld,
+            incomeTypes: ['FUNDING_FEE'],
+            refreshIncomeTypes: ['FUNDING_FEE'],
+            limits: oversizedLimits,
+        });
+        expect(tailRequests[0].startTime).toBe(
+            coveredTo - FUTURES_SETTLED_LANE_WALK.TAIL_OVERLAP_MS,
+        );
+
+        const saturatedRows = Array.from(
+            { length: FUTURES_SETTLED_LANE_WALK.MAX_ROWS_PER_LANE },
+            (_, index) => ({
+                symbol: 'BTCUSDT',
+                incomeType: 'FUNDING_FEE',
+                income: '-1',
+                asset: 'USDT',
+                time: WINDOW_FROM,
+                tranId: String(730000000000000000n + BigInt(index)),
+            }),
+        );
+        const rowHeld = createFuturesSettledIncomeResource({
+            incomeTypes: ['FUNDING_FEE'],
+            lanes: {
+                FUNDING_FEE: createFuturesSettledIncomeLane('FUNDING_FEE', {
+                    targetTo: NOW,
+                    nextPage: 1,
+                    status: 'loading',
+                    attemptedAt: NOW - 1,
+                    pending: {
+                        targetFrom: WINDOW_FROM,
+                        targetTo: NOW,
+                        nextPage: 1,
+                        rows: saturatedRows,
+                    },
+                }),
+            },
+        });
+        let rowLimitRequests = 0;
+        const boundedRows = await walkFuturesSettledIncomeLanes({
+            readPage: async () => {
+                rowLimitRequests += 1;
+                return { rows: [] };
+            },
+            now: NOW,
+            windowFrom: WINDOW_FROM,
+            held: rowHeld,
+            incomeTypes: ['FUNDING_FEE'],
+            refreshIncomeTypes: ['FUNDING_FEE'],
+            limits: oversizedLimits,
+        });
+        expect(rowLimitRequests).toBe(0);
+        expect(boundedRows.attemptsByType.FUNDING_FEE).toBe(0);
+        expect(boundedRows.resource.lanes.FUNDING_FEE).toMatchObject({
+            complete: false,
+            pending: null,
+            error: { code: 'ROW_LIMIT_REACHED' },
+        });
+        expect(boundedRows.resource.lanes.FUNDING_FEE.rows.size)
+            .toBe(FUTURES_SETTLED_LANE_WALK.MAX_ROWS_PER_LANE);
     });
 });
