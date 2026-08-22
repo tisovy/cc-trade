@@ -275,6 +275,21 @@ And a position or round **older than the read's window** is expected to say so
 rather than show a complete-looking total; that qualification is the fix
 working, not a gap.
 
+## Awaiting The Operator — 2026-08-22 Depth Recovery
+
+Two changes landed on 2026-08-22 after the morning's degradation window on the
+exchange side (05:11–05:24 UTC: `-1008` on orders, depth snapshots served
+behind the stream, 122 `DEPTH_SEQUENCE_GAP` lines in the journal for one
+actual break per book). Both are implemented, tested and committed; neither
+can be closed from a worktree, because both turn on how the journal reads
+through the next real degradation. Nothing needs to be done to provoke one —
+the next bad morning closes both.
+
+| Change | Task | Status | What to look at |
+|---|---:|---|---|
+| `say-why-the-book-stayed-down` | 4.1 | `OUTSTANDING` | Next time the book breaks, the journal should tell the story in order: one `DEPTH_SEQUENCE_GAP` for the break itself, a `DEPTH_BOOTSTRAP_NOT_BRIDGED` or `DEPTH_BOOTSTRAP_BUFFER_GAP` beside every rebuild attempt that failed, and `DEPTH_BOOK_DOWN` for the rounds while it stays down. If a long outage still reads as an unbroken run of `DEPTH_SEQUENCE_GAP`, the relabel is back. |
+| `back-off-a-recovery-that-keeps-failing` | 3.1 | `OUTSTANDING` | In the same window, `book-recovery` round starts per contract should thin — spaced at roughly 5, 10, 20, 40 seconds, then about once a minute — not seven to eight a minute for the duration. And once the exchange recovers, the book should still come back within about a minute. |
+
 ## Defects And Contradictions
 
 - `runbook.md` result 19 is the only literal `FAIL`. It has the separate

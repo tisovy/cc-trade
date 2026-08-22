@@ -1699,6 +1699,7 @@ export class FuturesProductionWorkstationService {
         // contract to read. A recovery that failed still backs off — the stamp
         // below is taken either way, so the next read that is not a rung waits
         // for it.
+        //
         // The cooldown widens while rounds keep failing — doubling from the
         // floor to the ceiling — and one bridged snapshot returns it to the
         // floor. Asking at a flat rate for as long as an exchange-side
