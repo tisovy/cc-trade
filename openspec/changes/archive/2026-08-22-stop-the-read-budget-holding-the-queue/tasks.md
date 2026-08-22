@@ -42,6 +42,8 @@
 
 ## 6. Operator verification
 
-- [ ] 6.1 Start the desk cold and change a contract's leverage within the first minute — the change should answer in about two seconds, not tens of them.
-- [ ] 6.2 Read the day's journal for `"kind":"deferred"`. Lines are expected at a cold start; what they should show is a `spent` near the 800 ceiling and an ordinary `standing`, not an urgent one.
-- [ ] 6.3 If an urgent line does appear with a long `waitedMs`, the budget itself is what needs raising or spending less of — report the numbers rather than the symptom.
+- [x] 6.1 Confirmed live 2026-08-22. Desk started cold at 19:23:54.714Z; the operator raised ONGUSDT from 1x to 2x at 19:24:01.049Z, six seconds in, and it answered at 19:24:02.973Z — **1 924ms**, against 26 368ms for the same command 37 seconds into the morning's start. The position took the change.
+- [x] 6.2 Read: **no `deferred` line was written**, and the record says why. That start spent three account passes of 90 before the command (19:23:55.381 bootstrap, 19:23:57.717 refresh, 19:23:58.616 stream) and one after it, peaking at 360 of the 800 ceiling. The budget never turned anything away, so there was nothing to write.
+- [x] 6.3 Not reached: no deferral of either standing occurred, so the budget is not what the desk is currently short of.
+
+Carried forward rather than left implied: **the instrument itself is still unproven live.** 6.1 shows the queue no longer stalls; nothing yet shows the `deferred` line appearing when it should. The next start that spends the window is what proves it, and until one does, an absent line means "the budget did not bite", not "the budget cannot bite".
