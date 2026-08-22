@@ -78,6 +78,12 @@ export const FUTURES_PRODUCTION_WORKSTATION_BOOK_RECOVERY = Object.freeze({
     ATTEMPTS: 3,
     BRIDGE_MS: 200,
     COOLDOWN_MS: 5_000,
+    // The cooldown doubles from the floor to this while rounds keep failing. A
+    // book that cannot be bridged is one the exchange cannot serve a usable
+    // snapshot for, and a flat five seconds had the desk asking hardest —
+    // three reads a round, seven to eight rounds a minute — through a window
+    // in which the exchange was refusing work (2026-08-22).
+    COOLDOWN_CEILING_MS: 60_000,
 });
 
 // A ceiling the market trips, it trips repeatedly: the frames that reach it come
@@ -1140,6 +1146,10 @@ export class FuturesProductionWorkstationService {
             pendingDepthTimer: null,
             bookRecovering: false,
             bookRecoveredAt: null,
+            // Consecutive recovery rounds that ran to the end and failed. Sets
+            // the cooldown before the next round; a round that bridges resets
+            // it, an abandoned one leaves it.
+            bookRecoveryFailures: 0,
             frameRefusedAt: null,
             frameRefusalStated: false,
             orderBook: new FuturesWorkstationOrderBook(),
@@ -1689,11 +1699,25 @@ export class FuturesProductionWorkstationService {
         // contract to read. A recovery that failed still backs off — the stamp
         // below is taken either way, so the next read that is not a rung waits
         // for it.
+        // The cooldown widens while rounds keep failing — doubling from the
+        // floor to the ceiling — and one bridged snapshot returns it to the
+        // floor. Asking at a flat rate for as long as an exchange-side
+        // condition lasts spends the read budget against the exchange at
+        // exactly the moment it is refusing work.
+        const cooldownMs = Math.min(
+            FUTURES_PRODUCTION_WORKSTATION_BOOK_RECOVERY.COOLDOWN_MS
+                * (2 ** session.bookRecoveryFailures),
+            FUTURES_PRODUCTION_WORKSTATION_BOOK_RECOVERY.COOLDOWN_CEILING_MS,
+        );
         if (!immediate
             && session.bookRecoveredAt !== null
-            && now - session.bookRecoveredAt < FUTURES_PRODUCTION_WORKSTATION_BOOK_RECOVERY.COOLDOWN_MS) return;
+            && now - session.bookRecoveredAt < cooldownMs) return;
         session.bookRecovering = true;
         session.bookRecoveredAt = now;
+        // 'abandoned' is the round leaving through a release or a resync:
+        // those say nothing about whether the exchange can serve a snapshot,
+        // so they neither widen the pause nor reset it.
+        let outcome = 'abandoned';
         try {
             // Inside the guard: anything that raises out here would leave
             // `bookRecovering` set and the book unable to ask again for the rest
@@ -1746,6 +1770,7 @@ export class FuturesProductionWorkstationService {
                     this.onInternalError({ phase: 'book-recovery', code: safeCode(error) });
                     continue;
                 }
+                outcome = 'recovered';
                 session.lastDepthAt = this.observedNow(session);
                 session.staleResources.delete(FUTURES_WORKSTATION_RESOURCES.DEPTH);
                 this.deliverDepth(session, { immediate: true });
@@ -1759,7 +1784,10 @@ export class FuturesProductionWorkstationService {
                 }
                 return;
             }
+            outcome = 'failed';
         } finally {
+            if (outcome === 'recovered') session.bookRecoveryFailures = 0;
+            if (outcome === 'failed') session.bookRecoveryFailures += 1;
             session.bookRecovering = false;
             session.bookRecoveredAt = this.observedNow(session);
         }

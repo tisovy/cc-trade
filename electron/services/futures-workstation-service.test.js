@@ -4144,9 +4144,10 @@ describe('a rebuild names what took the book down', () => {
             'DEPTH_BOOTSTRAP_NOT_BRIDGED',
         ]);
 
-        // Past the cooldown, the next diff lands on a book that is already
-        // down. That is not a second break and must not be written as one.
-        rig.clock.advance(5_001);
+        // Past the cooldown — widened once by the round that just failed —
+        // the next diff lands on a book that is already down. That is not a
+        // second break and must not be written as one.
+        rig.clock.advance(10_001);
         rig.diff(6);
         expect(rig.session.bookRecovering).toBe(true);
         await rig.driveRound();
@@ -4160,5 +4161,67 @@ describe('a rebuild names what took the book down', () => {
             'DEPTH_BOOTSTRAP_NOT_BRIDGED',
             'DEPTH_BOOTSTRAP_NOT_BRIDGED',
         ]);
+    });
+});
+
+// A recovery that cannot succeed — the exchange serving snapshots behind its
+// own stream — used to ask again on a flat five seconds for as long as the
+// condition lasted: three reads a round, seven to eight rounds a minute, for
+// the thirteen minutes of the 2026-08-22 window, at an exchange that was
+// answering trading commands "server overloaded". The pause has to learn.
+describe('a recovery that keeps failing backs off further', () => {
+    it('widens the pause after every failed round, to a ceiling', async () => {
+        const rig = await bookDownRig('backoff-ladder');
+
+        // The genuine break is answered immediately; the round fails.
+        rig.diff(5);
+        expect(rig.session.bookRecovering).toBe(true);
+        await rig.driveRound();
+
+        let cycle = 5;
+        for (const pause of [10_000, 20_000, 40_000, 60_000, 60_000]) {
+            const restedAt = rig.session.bookRecoveredAt;
+            // One millisecond before the widened pause a diff starts nothing —
+            // against a flat cooldown this round starts at five seconds.
+            rig.clock.setNow(restedAt + (pause - 1));
+            rig.diff(cycle += 1);
+            expect(rig.session.bookRecovering).toBe(false);
+            // At the pause it starts, and fails, and the pause widens again.
+            rig.clock.setNow(restedAt + pause);
+            rig.diff(cycle += 1);
+            expect(rig.session.bookRecovering).toBe(true);
+            await rig.driveRound();
+        }
+    });
+
+    // A guard, not a biter: the flat cooldown passes it too. It holds the
+    // ceiling down — a desk that kept the widened pause after the exchange
+    // recovered would answer the next real break a minute late.
+    it('returns the pause to the floor once a snapshot bridges', async () => {
+        const rig = await bookDownRig('backoff-reset');
+
+        rig.diff(5);
+        expect(rig.session.bookRecovering).toBe(true);
+        await rig.driveRound();
+
+        // The exchange recovers: the next round bridges its snapshot level
+        // with the furthest diff the desk has seen, the way a rebuild on a
+        // quiet book does — leaving the stream's own ids able to continue it.
+        rig.snapshots.heal(1_007);
+        const failedAt = rig.session.bookRecoveredAt;
+        rig.clock.setNow(failedAt + 10_000);
+        rig.diff(6);
+        expect(rig.session.bookRecovering).toBe(true);
+        await rig.driveRound();
+
+        // A diff continues the healed book, and a later one breaks its chain:
+        // the break is answered on the floor again, not on the pause the
+        // failed round had earned.
+        rig.diff(7);
+        expect(rig.session.bookRecovering).toBe(false);
+        const recoveredAt = rig.session.bookRecoveredAt;
+        rig.clock.setNow(recoveredAt + 5_000);
+        rig.diff(25);
+        expect(rig.session.bookRecovering).toBe(true);
     });
 });
