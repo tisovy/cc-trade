@@ -29,8 +29,19 @@
 - [x] 4.4 `keeps a deferred request under its declared fields` — asserts the shape `reserve` emits against the field table that has to accept it, and that an unknown standing loses the line.
 - [x] 4.5 Full suite, lint, and all four boundary checks.
 
-## 5. Operator verification
+## 5. Audit of this change
 
-- [ ] 5.1 Start the desk cold and change a contract's leverage within the first minute — the change should answer in about two seconds, not tens of them.
-- [ ] 5.2 Read the day's journal for `"kind":"deferred"`. Lines are expected at a cold start; what they should show is a `spent` near the 800 ceiling and an ordinary `standing`, not an urgent one.
-- [ ] 5.3 If an urgent line does appear with a long `waitedMs`, the budget itself is what needs raising or spending less of — report the numbers rather than the symptom.
+- [x] 5.1 The bound on urgent overtaking was being restarted by the wait: `takeAdmission` minted a fresh entry with `passes: 0` on every re-queue, so urgent work could pass the same request another eight times for every window it waited. Carried across instead.
+- [x] 5.2 The invariant `nextAdmission` reads the head on — "nothing can have been passed more often than the one waiting longest" — no longer holds for a queue a request can rejoin. Restated where it is relied on rather than left as a comment that has quietly stopped being true.
+- [x] 5.3 The deferral line was written while still holding the admission slot. The record opens and rolls a file of its own; a request that has already booked its weight has no business holding the queue while it does that. Moved after the slot is given back.
+- [x] 5.4 `deferredFrom` used `0` for "never deferred", which is a reading the desk's own clock hands out — every test in this file starts at zero. It would have lost the line and re-sampled the spend on each pass. Sentinel is `null`.
+- [x] 5.5 Three tests, all three failing against `724be7c`: `gives a request that waited the passes it had already been given`, `writes the line with the queue already moving`, `records a wait that began at zero on the clock`.
+- [x] 5.6 The implementation of this section landed in commit `20a55e8`, not in a commit of its own:
+  a peer session committed from the shared index while these files were staged for verification,
+  and its commit took them. Nothing is missing; the subject line names other work.
+
+## 6. Operator verification
+
+- [ ] 6.1 Start the desk cold and change a contract's leverage within the first minute — the change should answer in about two seconds, not tens of them.
+- [ ] 6.2 Read the day's journal for `"kind":"deferred"`. Lines are expected at a cold start; what they should show is a `spent` near the 800 ceiling and an ordinary `standing`, not an urgent one.
+- [ ] 6.3 If an urgent line does appear with a long `waitedMs`, the budget itself is what needs raising or spending less of — report the numbers rather than the symptom.
