@@ -105,6 +105,10 @@ const SETTLED_ORDER = /^(?:ascending|descending|flat|none)$/;
 // The desk's own name for a stream of market data — `depth`, `candles`,
 // `trades`, `ticker`. Same shape as the workstation protocol's resource names.
 const RESOURCE = /^[a-z][a-zA-Z0-9]{0,31}$/;
+// Whether the request this budget held back was the operator's business or the
+// desk's own housekeeping. Two words, because the question the line answers is
+// only ever which of the two was waiting.
+const DEFERRED_STANDING = /^(?:urgent|ordinary)$/;
 const VERSION = /^[0-9][0-9A-Za-z.+-]{0,31}$/;
 const ESTIMATE_VALUE = new RegExp(`^(?:${FUTURES_MARGIN_ESTIMATE_VALUES.join('|')})$`);
 
@@ -271,6 +275,26 @@ const RECORDED_FIELDS = Object.freeze({
         ['reason', text(READ_REASON)],
         ['resources', count],
         ['weight', count],
+    ]),
+    // One line each time the desk's own read budget, and not the exchange, made
+    // a request wait — what was waiting, how long, and how full the minute was
+    // when it was turned away.
+    //
+    // Written because on 2026-08-22 the operator's leverage change took 26 368ms
+    // and this file had nothing at all to say about it: a `command` line, then
+    // twenty-six seconds of book faults belonging to something else, then the
+    // `answer`. The wait is the desk's own doing, so it is the desk that has to
+    // admit to it — otherwise the only reading left is that the exchange was
+    // slow, which it was not.
+    //
+    // `spent` and `ceiling` are the weights this budget counts, not the
+    // exchange's own meter, which the desk does not read.
+    deferred: Object.freeze([
+        ['standing', text(DEFERRED_STANDING)],
+        ['waitedMs', count],
+        ['weight', count],
+        ['spent', count],
+        ['ceiling', count],
     ]),
     // One line per pass over the income record — what the open positions have
     // already been charged or paid. Counts only, never the money itself: how

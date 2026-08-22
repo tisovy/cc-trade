@@ -375,10 +375,18 @@ const waitForPromise = (promise, signal) => {
 const MAX_ADMISSION_PASSES = 8;
 
 export class RateLimiter {
-    constructor(maxWeight = 800, windowMs = 60000, requestDelayMs = 500) {
+    /**
+     * @param {object} [options]
+     * @param {Function} [options.onDeferred] - Told when this budget, rather
+     *   than the exchange, held a request back: `{ standing, waitedMs, weight,
+     *   spent, ceiling }`. Absent, the wait leaves no trace, which is how the
+     *   desk spent a day unable to say where 26 seconds had gone.
+     */
+    constructor(maxWeight = 800, windowMs = 60000, requestDelayMs = 500, { onDeferred = null } = {}) {
         this.maxWeight = maxWeight;        // Max weight per window (conservative)
         this.windowMs = windowMs;          // Window size in ms (1 minute)
         this.requestDelayMs = requestDelayMs; // Hard-coded delay before each request
+        this.onDeferred = typeof onDeferred === 'function' ? onDeferred : null;
         this.requests = [];                // Track { timestamp, weight }
         this.lastRequestTime = 0;          // Last request timestamp for spacing
         // Serialize only admission/reservation. Once admitted, operations remain
@@ -405,28 +413,18 @@ export class RateLimiter {
     }
 
     /**
-     * Wait until we have capacity for the given weight
+     * Say that this budget, and not the exchange, held a request back.
+     *
+     * A record that throws is a record, not a queue: it costs its own line and
+     * nothing else.
      */
-    async waitForCapacity(weight, signal) {
-        throwIfAborted(signal);
-        const currentWeight = this.getCurrentWeight();
-        if (currentWeight + weight <= this.maxWeight) {
-            return; // We have capacity
+    noteDeferred(entry) {
+        if (this.onDeferred === null) return;
+        try {
+            this.onDeferred(entry);
+        } catch {
+            // Deliberately silent — see above.
         }
-
-        // Calculate wait time based on oldest request
-        if (this.requests.length === 0) return;
-
-        const oldestRequest = this.requests[0];
-        const waitTime = this.windowMs - (Date.now() - oldestRequest.timestamp) + 100; // +100ms buffer
-
-        if (waitTime > 0) {
-            logger.debug(`Rate limiter: waiting ${waitTime}ms (current weight: ${currentWeight}/${this.maxWeight})`);
-            await waitForDelay(waitTime, signal);
-        }
-
-        // Recursive check after waiting
-        return this.waitForCapacity(weight, signal);
     }
 
     /**
@@ -483,9 +481,13 @@ export class RateLimiter {
     }
 
     /**
-     * Atomically wait for capacity, apply spacing, and reserve request weight.
+     * Wait in the queue for a turn, and come back holding the admission slot.
+     *
+     * Its own method because the slot is now taken more than once for one
+     * reservation: a request the window has no room for gives it back and asks
+     * again rather than sleeping on it.
      */
-    async reserve(weight, signal, { urgent = false } = {}) {
+    async takeAdmission(signal, urgent) {
         const entry = { urgent: urgent === true, passes: 0, admit: null };
         const turn = new Promise(resolve => {
             entry.admit = resolve;
@@ -505,14 +507,73 @@ export class RateLimiter {
             else this.releaseAdmission();
             throw error;
         }
+    }
 
-        try {
-            await this.waitForCapacity(weight, signal);
-            await this.enforceDelay(signal);
-            throwIfAborted(signal);
-            this.requests.push({ timestamp: Date.now(), weight });
-        } finally {
-            this.releaseAdmission();
+    /**
+     * Atomically wait for capacity, apply spacing, and reserve request weight.
+     *
+     * Reading the window and booking against it both happen while holding the
+     * admission slot, so two callers cannot both find room for the last of it.
+     * What does *not* happen under the slot is the waiting.
+     *
+     * It waits outside the slot because it used to wait inside it, and that
+     * stopped the queue dead rather than slowing it. This budget is 800 a minute
+     * against the 2400 the exchange allows; when a start spends it, the request
+     * at the head slept out the rest of the window holding the slot, and nothing
+     * behind it moved — including a one-weight command from the operator that
+     * the remaining budget had room for. `urgent` cannot help there: it decides
+     * who leaves the queue first, and while the slot is held nobody leaves it.
+     *
+     * Measured on this desk, each one a command the operator was waiting on and
+     * none of them longer than the window it was waiting out: 26 368ms to set
+     * leverage on 2026-08-22, 49 576ms on 2026-08-21, 43 196ms to change the
+     * margin mode on 2026-08-15.
+     *
+     * A request that sleeps rejoins the queue at the back, which resets the
+     * passes counted against it. That is not the starvation `MAX_ADMISSION_PASSES`
+     * guards — one that has just slept a whole window is not the one waiting
+     * longest any more.
+     */
+    async reserve(weight, signal, { urgent = false } = {}) {
+        let deferredFrom = 0;
+        let spentWhenHeld = 0;
+        for (;;) {
+            await this.takeAdmission(signal, urgent);
+            let sleepFor = 0;
+            try {
+                throwIfAborted(signal);
+                const spent = this.getCurrentWeight();
+                // `requests.length === 0` admits a request heavier than the whole
+                // window rather than sleeping on a window that will never fit it.
+                if (spent + weight <= this.maxWeight || this.requests.length === 0) {
+                    await this.enforceDelay(signal);
+                    throwIfAborted(signal);
+                    this.requests.push({ timestamp: Date.now(), weight });
+                    if (deferredFrom !== 0) {
+                        this.noteDeferred({
+                            standing: urgent === true ? 'urgent' : 'ordinary',
+                            waitedMs: Date.now() - deferredFrom,
+                            weight,
+                            spent: spentWhenHeld,
+                            ceiling: this.maxWeight,
+                        });
+                    }
+                    return;
+                }
+                if (deferredFrom === 0) {
+                    deferredFrom = Date.now();
+                    spentWhenHeld = spent;
+                }
+                // +100ms so the window has actually rolled by the time this asks
+                // again, rather than a millisecond before it.
+                sleepFor = this.windowMs - (Date.now() - this.requests[0].timestamp) + 100;
+                logger.debug(`Rate limiter: waiting ${sleepFor}ms (current weight: ${spent}/${this.maxWeight})`);
+            } finally {
+                this.releaseAdmission();
+            }
+            // Never negative, and never a tight loop: a zero wait still yields,
+            // and `cleanup` has dropped what expired by the time it comes back.
+            await waitForDelay(Math.max(sleepFor, 0), signal);
         }
     }
 
@@ -965,6 +1026,11 @@ export function setupBinanceConnection({
         800,
         60000,
         FUTURES_REST_ADMISSION_SPACING_MS,
+        {
+            // The one thing this budget does that the operator can feel is make
+            // them wait, and until now that was the one thing it did silently.
+            onDeferred: entry => diagnosticRecord.record('deferred', entry),
+        },
     );
 
     // Optional fat-finger guard: FUTURES_MAX_ORDER_USDT caps the notional of

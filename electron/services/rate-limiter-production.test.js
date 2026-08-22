@@ -185,4 +185,97 @@ describe('production RateLimiter cancellation', () => {
         ]);
         expect(admitted).toHaveLength(14);
     });
+
+    // The stall the operator felt on 2026-08-22: a leverage change that answered
+    // in 26 368ms against a round of about 2 000ms. A start's own reads had spent
+    // the budget, the request at the head was sleeping the rest of the window out
+    // while holding the admission slot, and the command behind it needed one
+    // weight the window still had room for. Urgency could not reach it — nothing
+    // was leaving the queue at all.
+    it('lets a request the window still has room for past one waiting the window out', async () => {
+        vi.setSystemTime(1_000);
+        const limiter = new RateLimiter(100, 60_000, 0);
+        const admitted = [];
+        const run = (label, weight, options) => limiter.execute(
+            async () => { admitted.push(label); },
+            weight,
+            0,
+            options,
+        );
+
+        // A start's own reads take the budget to 99 of its 100.
+        const bootstrap = run('bootstrap', 99);
+        await vi.advanceTimersByTimeAsync(0);
+        await expect(bootstrap).resolves.toBeUndefined();
+        expect(limiter.getCurrentWeight()).toBe(99);
+
+        // The next account pass does not fit, and settles in to wait the window out.
+        const pass = run('account-pass', 90);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(admitted).toEqual(['bootstrap']);
+
+        // The operator's command needs one weight, and the window has one left.
+        const command = run('set-leverage', 1, { urgent: true });
+        await vi.advanceTimersByTimeAsync(0);
+        await expect(command).resolves.toBeUndefined();
+        expect(admitted).toEqual(['bootstrap', 'set-leverage']);
+
+        // The pass that could not fit still waits its turn out, and then goes.
+        await vi.advanceTimersByTimeAsync(60_100);
+        await expect(pass).resolves.toBeUndefined();
+        expect(admitted).toEqual(['bootstrap', 'set-leverage', 'account-pass']);
+    });
+
+    // A wait nobody can see is a wait the desk gets to blame on the exchange.
+    it('says in the record when its own budget, not the exchange, held a request back', async () => {
+        vi.setSystemTime(1_000);
+        const deferrals = [];
+        const limiter = new RateLimiter(100, 60_000, 0, {
+            onDeferred: entry => deferrals.push(entry),
+        });
+
+        await limiter.execute(async () => 'bootstrap', 100, 0);
+        await vi.advanceTimersByTimeAsync(0);
+        // Nothing waited, so nothing is said.
+        expect(deferrals).toEqual([]);
+
+        const held = limiter.execute(async () => 'account-pass', 90, 0);
+        const command = limiter.execute(async () => 'set-leverage', 1, 0, { urgent: true });
+        await vi.advanceTimersByTimeAsync(60_100);
+        await expect(held).resolves.toBe('account-pass');
+        await expect(command).resolves.toBe('set-leverage');
+
+        expect(deferrals).toEqual([
+            {
+                standing: 'ordinary',
+                waitedMs: 60_100,
+                weight: 90,
+                spent: 100,
+                ceiling: 100,
+            },
+            {
+                standing: 'urgent',
+                waitedMs: 60_100,
+                weight: 1,
+                spent: 100,
+                ceiling: 100,
+            },
+        ]);
+    });
+
+    // A guard, not a biter: before the reporter existed this passed by having
+    // nothing to throw. It is here because the reporter is the desk's
+    // diagnostics file, which is allowed to fail — a disk that refuses a line
+    // must not also stop the queue that wrote it.
+    it('keeps the queue moving when the record refuses the line', async () => {
+        vi.setSystemTime(1_000);
+        const limiter = new RateLimiter(100, 60_000, 0, {
+            onDeferred: () => { throw new Error('journal is closed'); },
+        });
+
+        await limiter.execute(async () => 'bootstrap', 100, 0);
+        const held = limiter.execute(async () => 'account-pass', 90, 0);
+        await vi.advanceTimersByTimeAsync(60_100);
+        await expect(held).resolves.toBe('account-pass');
+    });
 });

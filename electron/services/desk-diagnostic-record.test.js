@@ -132,6 +132,36 @@ describe('describeDeskDiagnosticEvent', () => {
         })).toBeNull();
     });
 
+    // The shape `RateLimiter.reserve` hands over, field for field. The risk this
+    // covers is not that the limiter fails to call — it is that it calls with a
+    // name or a word this file quietly drops, and the operator is left with the
+    // same silence the record was added to end.
+    it('keeps a deferred request under its declared fields', () => {
+        expect(describeDeskDiagnosticEvent('deferred', {
+            standing: 'urgent',
+            waitedMs: 26_368,
+            weight: 1,
+            spent: 795,
+            ceiling: 800,
+        })).toEqual({
+            kind: 'deferred',
+            standing: 'urgent',
+            waitedMs: 26_368,
+            weight: 1,
+            spent: 795,
+            ceiling: 800,
+        });
+        // A standing this desk does not have is a call site that never stated
+        // one, and losing the line is how the record says so.
+        expect(describeDeskDiagnosticEvent('deferred', {
+            standing: 'whenever',
+            waitedMs: 26_368,
+            weight: 1,
+            spent: 795,
+            ceiling: 800,
+        })).toBeNull();
+    });
+
     // Why the desk went to the exchange for the signed account. Without it,
     // "the desk reads a lot" and "the desk reads when it must" are the same
     // number, and the operator has no way to tell which one they are looking at.
