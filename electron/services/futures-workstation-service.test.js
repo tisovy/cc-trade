@@ -4055,3 +4055,110 @@ describe('a held book asks the exchange for nothing', () => {
         expect(back.find(event => event.resource === 'depth')).toMatchObject({ state: 'stale' });
     });
 });
+
+// A thirteen-minute exchange degradation on 2026-08-22 stood in the journal as
+// a hundred and twenty-two sequence gaps. The stream broke once per book: every
+// later line was a diff landing on a book already down, relabeled as a fresh
+// break, and the reason each rebuild failed — the snapshot served behind the
+// stream — was never written at all. The journal has to carry the story, not
+// the name of the first thing that happened.
+const bookDownRig = async (requestId) => {
+    const clock = createManualClock();
+    const base = createFuturesProductionWorkstationFakeTransport({ clock: clock.clock });
+    const parsedSnapshot = JSON.parse(
+        FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.depthSnapshot,
+    );
+    // Behind the stream on every read after the bootstrap's own: the shape of
+    // the 2026-08-22 window, where no recovery snapshot could bridge.
+    const snapshots = {
+        body: JSON.stringify({ ...parsedSnapshot, lastUpdateId: 1 }),
+        heal: lastUpdateId => {
+            snapshots.body = JSON.stringify({ ...parsedSnapshot, lastUpdateId });
+        },
+    };
+    const readDepthSnapshot = vi.fn(async options => (
+        readDepthSnapshot.mock.calls.length === 1
+            ? base.readDepthSnapshot(options)
+            : snapshots.body
+    ));
+    let subscriber;
+    const faults = [];
+    const runtime = track(createFuturesProductionWorkstationRuntimeForTest({
+        clock: clock.clock,
+        onInternalError: fault => faults.push(fault),
+        transport: {
+            ...base,
+            readDepthSnapshot,
+            connect: (options) => {
+                subscriber = options;
+                return base.connect(options);
+            },
+        },
+    }));
+    const events = [];
+    await runtime.service.handleRequest(productionRequest(requestId), {
+        emit: event => events.push(event),
+    });
+    const session = runtime.service.shown;
+    // Drive the round's bridge delays until it settles. Three attempts is
+    // three timeouts, but the count is not asserted here — a round that
+    // schedules anything else on the way down is still driven to rest.
+    const driveRound = async () => {
+        while (session.bookRecovering) {
+            await vi.waitFor(() => {
+                if (session.bookRecovering && clock.timeoutCount() === 0) {
+                    throw new Error('recovery is between steps');
+                }
+            });
+            if (session.bookRecovering) clock.runTimeouts();
+        }
+    };
+    return {
+        clock,
+        faults,
+        session,
+        snapshots,
+        driveRound,
+        diff: cycle => subscriber.onMessage(
+            FUTURES_PRODUCTION_WORKSTATION_FIXTURE.symbols.BTCUSDT.streams.makeCycle(cycle)[0],
+        ),
+        recoveryCodes: () => faults
+            .filter(fault => fault.phase === 'book-recovery')
+            .map(fault => fault.code),
+    };
+};
+
+describe('a rebuild names what took the book down', () => {
+    it('writes the break once, the downed book after, and why no attempt bridged', async () => {
+        const rig = await bookDownRig('book-down-names');
+
+        // Cycle 5 does not continue the bridged book at 1001: the one genuine
+        // break in this journal.
+        rig.diff(5);
+        expect(rig.session.bookRecovering).toBe(true);
+        await rig.driveRound();
+        expect(rig.recoveryCodes()).toEqual([
+            'DEPTH_SEQUENCE_GAP',
+            'DEPTH_BOOTSTRAP_NOT_BRIDGED',
+            'DEPTH_BOOTSTRAP_NOT_BRIDGED',
+            'DEPTH_BOOTSTRAP_NOT_BRIDGED',
+        ]);
+
+        // Past the cooldown, the next diff lands on a book that is already
+        // down. That is not a second break and must not be written as one.
+        rig.clock.advance(5_001);
+        rig.diff(6);
+        expect(rig.session.bookRecovering).toBe(true);
+        await rig.driveRound();
+        expect(rig.recoveryCodes()).toEqual([
+            'DEPTH_SEQUENCE_GAP',
+            'DEPTH_BOOTSTRAP_NOT_BRIDGED',
+            'DEPTH_BOOTSTRAP_NOT_BRIDGED',
+            'DEPTH_BOOTSTRAP_NOT_BRIDGED',
+            'DEPTH_BOOK_DOWN',
+            'DEPTH_BOOTSTRAP_NOT_BRIDGED',
+            'DEPTH_BOOTSTRAP_NOT_BRIDGED',
+            'DEPTH_BOOTSTRAP_NOT_BRIDGED',
+        ]);
+    });
+});

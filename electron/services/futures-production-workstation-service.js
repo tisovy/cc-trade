@@ -114,6 +114,20 @@ const depthBootstrapCode = reason => (
     DEPTH_BOOTSTRAP_CODES[reason] ?? 'DEPTH_BOOTSTRAP_GAP'
 );
 
+// Three things ask for a rebuild through the same `resync` flag, and they are
+// three different faults: the live chain broke, a diff landed on a book that is
+// already down, or the buffer overflowed before a snapshot bridged. Written
+// under one code, a book that stayed down through a thirteen-minute exchange
+// degradation read as a hundred fresh stream breaks (2026-08-22).
+const DEPTH_RESYNC_CODES = Object.freeze({
+    gap: 'DEPTH_SEQUENCE_GAP',
+    'resync-required': 'DEPTH_BOOK_DOWN',
+    overflow: 'DEPTH_BUFFER_OVERFLOW',
+});
+const depthResyncCode = reason => (
+    DEPTH_RESYNC_CODES[reason] ?? 'DEPTH_SEQUENCE_GAP'
+);
+
 const safeCode = error => (
     typeof error?.code === 'string' && /^[A-Z0-9_-]{1,96}$/.test(error.code)
         ? error.code.replace(/-/g, '_')
@@ -1597,7 +1611,7 @@ export class FuturesProductionWorkstationService {
                 // operator is not reading it. So a broken sequence rebuilds the
                 // book and nothing else — it used to resynchronize the whole
                 // workspace, which is how a burst took the desk off the market.
-                if (result.resync) void this.recoverBook(session, 'DEPTH_SEQUENCE_GAP');
+                if (result.resync) void this.recoverBook(session, depthResyncCode(result.reason));
                 else if (result.applied && session.bootstrapped) {
                     session.lastDepthAt = this.observedNow(session);
                     const recovered = session.staleResources.delete(
@@ -1717,7 +1731,17 @@ export class FuturesProductionWorkstationService {
                         value,
                         session.symbol,
                     );
-                    if (!session.orderBook.bootstrap(snapshot).live) continue;
+                    const bridged = session.orderBook.bootstrap(snapshot);
+                    if (!bridged.live) {
+                        // Why the book stayed down, not only why the round
+                        // started: the bridging reason names whether to look at
+                        // the exchange's snapshot or the desk's own buffer.
+                        this.onInternalError({
+                            phase: 'book-recovery',
+                            code: depthBootstrapCode(bridged.reason),
+                        });
+                        continue;
+                    }
                 } catch (error) {
                     this.onInternalError({ phase: 'book-recovery', code: safeCode(error) });
                     continue;
