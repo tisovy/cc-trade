@@ -303,11 +303,22 @@ the next bad morning closes both.
   adds `historyReconcileGeneration`, described in its own comment as *"a request
   to close the REST history gap spanning offline time"*, which fits the profile
   exactly: once per start, before a contract has been chosen, so the symbol is
-  empty. Written here rather than sent, because the session holding that work is
-  live (its transcript was being written at 19:31:35 UTC) but is not listed by
-  `ListAgents`, and the desk runs the working tree — so this is live on the
-  operator's desk now and has been failing silently for the better part of an
-  hour. Not diagnosed further and not touched: it is somebody's active work.
+  empty. Written here rather than sent because **the work has no author among
+  this machine's Claude sessions**: no transcript anywhere under
+  `~/.claude/projects` contains an `Edit` or `Write` of `useFuturesTrading.js`
+  carrying that identifier, and the last Claude edit of that file from any
+  transcript is 2026-08-20 14:51:54 UTC against a file mtime of 2026-08-22
+  11:16 UTC. The precedent for authorless work in this tree is the operator's
+  own Codex sessions. The desk runs the working tree, so this is live on the
+  operator's desk now and had been failing silently for the better part of an
+  hour when it was found. Not diagnosed further and not touched.
+
+  A method note, because this entry first named the wrong author: grepping the
+  transcripts for an identifier finds who **mentioned** it, and within minutes of
+  a finding being passed between sessions that is whoever investigated it — two
+  transcripts held the identifier, and both belonged to the investigation rather
+  than the work. Authorship is the identifier inside an `Edit`/`Write` whose
+  `file_path` is the file in question, cross-checked against that file's mtime.
 - `runbook.md` result 19 is the only literal `FAIL`. It has the separate
   `let-the-chart-ask-again` change; because no post-fix repeat exists, its live
   tasks remain open.
