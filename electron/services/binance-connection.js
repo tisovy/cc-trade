@@ -610,21 +610,21 @@ export class RateLimiter {
      * Arrival order, except that an urgent one may pass the ordinary requests
      * ahead of it — what follows the operator's command must not wait out a
      * review of the session. Every request it passes counts the pass, and once
-     * the one at the head has been passed `MAX_ADMISSION_PASSES` times nothing
-     * may pass it again.
+     * any ordinary entry ahead of it has been passed `MAX_ADMISSION_PASSES`
+     * times nothing may pass that entry again.
      *
-     * Reading the head is enough while each request reaches this queue once: a
-     * pass is counted against every request it skipped, so nothing can have been
-     * passed more often than the one that has waited longest. A request the
-     * window turned away rejoins carrying what it had already been passed, so it
-     * may sit behind the head holding a higher count — which makes the bound
-     * bite sooner than the head says, never later.
+     * Capacity backpressure can requeue an entry behind newer work while it
+     * retains its pass count. Fairness therefore belongs to every entry an
+     * urgent request would skip, not only whichever entry is now at the head.
      */
     nextAdmission() {
         const head = this.waiting[0];
-        if (head.urgent || head.passes >= MAX_ADMISSION_PASSES) return 0;
+        if (head.urgent) return 0;
         const urgent = this.waiting.findIndex(entry => entry.urgent);
         if (urgent <= 0) return 0;
+        if (this.waiting.slice(0, urgent).some(
+            entry => entry.passes >= MAX_ADMISSION_PASSES,
+        )) return 0;
         for (let index = 0; index < urgent; index += 1) {
             this.waiting[index].passes += 1;
         }
@@ -696,10 +696,9 @@ export class RateLimiter {
      * leverage on 2026-08-22, 49 576ms on 2026-08-21, 43 196ms to change the
      * margin mode on 2026-08-15.
      *
-     * A request that sleeps rejoins the queue at the back, which resets the
-     * passes counted against it. That is not the starvation `MAX_ADMISSION_PASSES`
-     * guards — one that has just slept a whole window is not the one waiting
-     * longest any more.
+     * A request that sleeps rejoins the queue at the back while retaining the
+     * passes already counted against it. Capacity backpressure changes its queue
+     * position, not how much urgent overtaking it has already endured.
      */
     async reserve(weight, signal, { urgent = false, isCurrent = null } = {}) {
         let deferredFrom = null;
@@ -1766,6 +1765,7 @@ export function setupBinanceConnection({
     const FUTURES_MARGIN_TYPE_UNCHANGED_CODE = -4046;
 
     let _futuresAccountRefreshInFlight = false;
+    let _futuresAccountRefreshCompletion = null;
     let futuresAccountResources = createInitialFuturesAccountResources();
     // Which orders the stream has reported settled. It keeps a late report from
     // putting one back, and keeps a read that left before the settle from doing
@@ -2337,7 +2337,7 @@ export function setupBinanceConnection({
         const requested = resources === null ? null : new Set(resources);
         const operations = futuresTradingAdapter.getAccountRefreshOperations()
             .filter(operation => requested === null || requested.has(operation.type));
-        if (operations.length === 0) return;
+        if (operations.length === 0) return Object.freeze({});
         const epoch = futuresMutationEpoch;
         const activation = futuresActivationGeneration;
         // One line per pass, not per request: what it was for and what it spent.
@@ -2367,58 +2367,65 @@ export function setupBinanceConnection({
         // The signed reads run concurrently: the limiter still spaces their
         // admissions, but the round-trips overlap, so the ticket reaches
         // READY in roughly one round-trip instead of serial endpoint latency.
-        await Promise.all(operations.map((operation) => {
+        const outcomes = await Promise.all(operations.map(async (operation) => {
             let issuedAt = null;
-            return futuresRestLimiter.execute(async () => {
-                const payload = await operation.loadPayload();
-                const payloadKey = futuresAccountPayloadKeys[operation.type];
-                if (!payloadKey || !Object.hasOwn(payload, payloadKey)) {
-                    const error = new Error('Invalid Futures account resource payload');
-                    error.code = 'INVALID_RESOURCE_PAYLOAD';
-                    throw error;
-                }
-                // A mutating command landed while this read was in flight. The read
-                // predates it, so applying it would undo it. The command queued its
-                // own refresh, so nothing is lost by dropping this one. The same
-                // goes for a read that outlived the activation it was started under.
+            try {
+                const outcome = await futuresRestLimiter.execute(async () => {
+                    const payload = await operation.loadPayload();
+                    const payloadKey = futuresAccountPayloadKeys[operation.type];
+                    if (!payloadKey || !Object.hasOwn(payload, payloadKey)) {
+                        const error = new Error('Invalid Futures account resource payload');
+                        error.code = 'INVALID_RESOURCE_PAYLOAD';
+                        throw error;
+                    }
+                    // A mutating command landed while this read was in flight. The read
+                    // predates it, so applying it would undo it. The command queued its
+                    // own refresh, so nothing is lost by dropping this one. The same
+                    // goes for a read that outlived the activation it was started under.
+                    if (epoch !== futuresMutationEpoch
+                        || activation !== futuresActivationGeneration) return 'superseded';
+                    futuresAccountResources = markFuturesResourceReady(
+                        futuresAccountResources,
+                        operation.type,
+                        // `issuedAt` is updated after every physical admission. A cold
+                        // signed read first admits `/time`; a `-1021` admits it again.
+                        // The last update is therefore the request that produced this
+                        // payload, not the logical callback that may have queued earlier.
+                        readFuturesAccountResource(operation.type, payload[payloadKey], {
+                            issuedAt: issuedAt ?? Date.now(),
+                            // A read asked for only because a frame could not carry the
+                            // liquidation price is allowed to state the liquidation
+                            // price. What the frame did state stands: the replica it
+                            // answers from can still be describing the account before
+                            // the frame, and showing the exchange's own figure and then
+                            // taking it back is the blink by another route.
+                            unstated: reason === 'unstated',
+                        }),
+                    );
+                    if (operation.type === 'positions') {
+                        futuresPositionsActivationGeneration = activation;
+                    }
+                    if (operation.type === 'positions' || operation.type === 'balances') {
+                        recordFuturesMarginEstimates(operation.type);
+                    }
+                    if (operation.type === 'positions') {
+                        futuresMarkPriceFeed?.track(futuresAccountResources.positions.data ?? []);
+                    }
+                    broadcastFuturesAccountState();
+                    return 'ready';
+                }, operation.weight, 2, {
+                    urgent,
+                    // When this read actually leaves, not when the pass was asked
+                    // for: anything the stream reports from here on is news the read
+                    // cannot carry, and reconciliation compares against this mark.
+                    onAttemptAdmitted: () => { issuedAt = Date.now(); },
+                });
+                return [operation.type, outcome === 'ready' ? 'ready' : 'superseded'];
+            } catch (error) {
                 if (epoch !== futuresMutationEpoch
-                    || activation !== futuresActivationGeneration) return;
-                futuresAccountResources = markFuturesResourceReady(
-                    futuresAccountResources,
-                    operation.type,
-                    // `issuedAt` is updated after every physical admission. A cold
-                    // signed read first admits `/time`; a `-1021` admits it again.
-                    // The last update is therefore the request that produced this
-                    // payload, not the logical callback that may have queued earlier.
-                    readFuturesAccountResource(operation.type, payload[payloadKey], {
-                        issuedAt: issuedAt ?? Date.now(),
-                        // A read asked for only because a frame could not carry the
-                        // liquidation price is allowed to state the liquidation
-                        // price. What the frame did state stands: the replica it
-                        // answers from can still be describing the account before
-                        // the frame, and showing the exchange's own figure and then
-                        // taking it back is the blink by another route.
-                        unstated: reason === 'unstated',
-                    }),
-                );
-                if (operation.type === 'positions') {
-                    futuresPositionsActivationGeneration = activation;
+                    || activation !== futuresActivationGeneration) {
+                    return [operation.type, 'superseded'];
                 }
-                if (operation.type === 'positions' || operation.type === 'balances') {
-                    recordFuturesMarginEstimates(operation.type);
-                }
-                if (operation.type === 'positions') {
-                    futuresMarkPriceFeed?.track(futuresAccountResources.positions.data ?? []);
-                }
-                broadcastFuturesAccountState();
-            }, operation.weight, 2, {
-                urgent,
-                // When this read actually leaves, not when the pass was asked
-                // for: anything the stream reports from here on is news the read
-                // cannot carry, and reconciliation compares against this mark.
-                onAttemptAdmitted: () => { issuedAt = Date.now(); },
-            }).catch((error) => {
-                if (epoch !== futuresMutationEpoch || activation !== futuresActivationGeneration) return;
                 futuresAccountResources = markFuturesResourceFailed(
                     futuresAccountResources,
                     operation.type,
@@ -2426,8 +2433,10 @@ export function setupBinanceConnection({
                 );
                 broadcastFuturesAccountState();
                 logger.error(`${operation.errorLabel}:`, error?.code || error?.message);
-            });
+                return [operation.type, 'failed'];
+            }
         }));
+        const receipt = Object.freeze(Object.fromEntries(outcomes));
 
         // Every contract the account has something riding on, so the dock can
         // state what each is carried at and the free-margin estimate can price
@@ -2446,7 +2455,8 @@ export function setupBinanceConnection({
         //
         // Not awaited — the account state is already correct without it, and this
         // only adds a reading to it.
-        if (epoch !== futuresMutationEpoch || activation !== futuresActivationGeneration) return;
+        if (epoch !== futuresMutationEpoch
+            || activation !== futuresActivationGeneration) return receipt;
         if (operations.some(operation => FUTURES_HOLDING_RESOURCES.has(operation.type))) {
             void refreshFuturesPositionConfigs(
                 futuresAccountResources.positions.data ?? [],
@@ -2457,6 +2467,7 @@ export function setupBinanceConnection({
                 { urgent },
             );
         }
+        return receipt;
     };
 
     // A refresh asked for while one is running used to be discarded outright, so
@@ -2488,32 +2499,62 @@ export function setupBinanceConnection({
             ...new Set([..._futuresAccountRefreshQueuedResources, ...resources]),
         ];
     };
-    const refreshFuturesAccountState = async ({ resources = null, reason = null } = {}) => {
+
+    const futuresAccountRefreshReceipt = resources => Object.freeze({
+        resources: Object.freeze({ ...resources }),
+    });
+
+    const futuresAccountRefreshIsReady = (receipt, resources) => (
+        resources.every(resource => receipt?.resources?.[resource] === 'ready')
+    );
+
+    const refreshFuturesAccountState = async ({
+        resources = null,
+        reason = null,
+        waitForDrain = false,
+    } = {}) => {
         broadcastFuturesTradingPaused();
-        if (!futuresTradingAdapter) return;
+        if (!futuresTradingAdapter) return futuresAccountRefreshReceipt({});
         if (_futuresAccountRefreshInFlight) {
             queueFuturesAccountRefresh(resources, reason);
-            return;
+            return waitForDrain
+                ? _futuresAccountRefreshCompletion
+                : futuresAccountRefreshReceipt({});
         }
         _futuresAccountRefreshInFlight = true;
-        try {
-            let requested = resources;
-            let requestedFor = reason;
-            for (;;) {
+        _futuresAccountRefreshCompletion = (async () => {
+            const outcomes = {};
+            try {
+                let requested = resources;
+                let requestedFor = reason;
+                for (;;) {
+                    _futuresAccountRefreshQueued = false;
+                    _futuresAccountRefreshQueuedResources = [];
+                    _futuresAccountRefreshQueuedReason = null;
+                    // A later pass is the authority for everything it was
+                    // asked to settle. Do not let an earlier READY survive when
+                    // the follow-up omits, fails, or supersedes that resource.
+                    for (const resource of requested === null
+                        ? Object.keys(futuresAccountPayloadKeys)
+                        : requested) delete outcomes[resource];
+                    Object.assign(
+                        outcomes,
+                        await runFuturesAccountRefreshPass(requested, requestedFor),
+                    );
+                    if (!_futuresAccountRefreshQueued) break;
+                    requested = _futuresAccountRefreshQueuedResources;
+                    requestedFor = _futuresAccountRefreshQueuedReason;
+                }
+                return futuresAccountRefreshReceipt(outcomes);
+            } finally {
+                _futuresAccountRefreshInFlight = false;
+                _futuresAccountRefreshCompletion = null;
                 _futuresAccountRefreshQueued = false;
-                _futuresAccountRefreshQueuedResources = [];
+                _futuresAccountRefreshQueuedResources = null;
                 _futuresAccountRefreshQueuedReason = null;
-                await runFuturesAccountRefreshPass(requested, requestedFor);
-                if (!_futuresAccountRefreshQueued) break;
-                requested = _futuresAccountRefreshQueuedResources;
-                requestedFor = _futuresAccountRefreshQueuedReason;
             }
-        } finally {
-            _futuresAccountRefreshInFlight = false;
-            _futuresAccountRefreshQueued = false;
-            _futuresAccountRefreshQueuedResources = null;
-            _futuresAccountRefreshQueuedReason = null;
-        }
+        })();
+        return _futuresAccountRefreshCompletion;
     };
 
     const reportDetachedFuturesAccountRefreshFailure = (reason, error) => {
@@ -2727,6 +2768,7 @@ export function setupBinanceConnection({
     let _futuresSettledReadVerifyFullWindow = false;
     let _futuresSettledReadManualRequested = false;
     let _futuresSettledReadConfirmationTypes = new Set();
+    let _futuresSettledReadNonConfirmationTypes = new Set();
     let _futuresSettledContinuationTimer = null;
     let _futuresSettledContinuationTypes = new Set();
     let _futuresSettledVerificationInterval = null;
@@ -2757,6 +2799,7 @@ export function setupBinanceConnection({
     let _futuresSettledReadTypes = new Set();
     let _futuresSettledAgainTypes = new Set();
     let _futuresSettledAgainConfirmationTypes = new Set();
+    let _futuresSettledAgainNonConfirmationTypes = new Set();
     // A manual refresh is operator intent, not just another reason attached to
     // a walk. Keep a per-lane revision so an older automatic pass cannot
     // publish over the loading frame while that newer request waits its turn.
@@ -3635,6 +3678,7 @@ export function setupBinanceConnection({
             verifyFullWindow = reason === 'verification',
             manualRequested = reason === 'refresh',
             confirmationTypes = [],
+            nonConfirmationTypes = [],
         } = {},
     ) => {
         if (_futuresSettledInFlight !== null) {
@@ -3650,6 +3694,10 @@ export function setupBinanceConnection({
                 _futuresSettledAgainConfirmationTypes,
                 confirmationTypes,
             );
+            addFuturesSettledIncomeTypes(
+                _futuresSettledAgainNonConfirmationTypes,
+                nonConfirmationTypes,
+            );
             return;
         }
         _futuresSettledInFlight = readFuturesSettledMoney(reason, incomeTypes, {
@@ -3663,15 +3711,20 @@ export function setupBinanceConnection({
             const nextVerifyFullWindow = _futuresSettledAgainVerifyFullWindow;
             const nextManualRequested = _futuresSettledAgainManualRequested;
             const nextConfirmationTypes = [..._futuresSettledAgainConfirmationTypes];
+            const nextNonConfirmationTypes = [
+                ..._futuresSettledAgainNonConfirmationTypes,
+            ];
             _futuresSettledAgain = null;
             _futuresSettledAgainVerifyFullWindow = false;
             _futuresSettledAgainManualRequested = false;
             _futuresSettledAgainTypes = new Set();
             _futuresSettledAgainConfirmationTypes = new Set();
+            _futuresSettledAgainNonConfirmationTypes = new Set();
             if (next !== null) scheduleFuturesSettledRead(next, nextTypes, {
                 verifyFullWindow: nextVerifyFullWindow,
                 manualRequested: nextManualRequested,
                 confirmationTypes: nextConfirmationTypes,
+                nonConfirmationTypes: nextNonConfirmationTypes,
                 confirmationAlreadyArmed: true,
                 manualLoadingAlreadyMarked: true,
             });
@@ -3685,6 +3738,7 @@ export function setupBinanceConnection({
             verifyFullWindow = reason === 'verification',
             manualRequested = reason === 'refresh',
             confirmationTypes = [],
+            nonConfirmationTypes = null,
             confirmationAlreadyArmed = false,
             manualLoadingAlreadyMarked = false,
         } = {},
@@ -3698,6 +3752,10 @@ export function setupBinanceConnection({
         const capturedConfirmationTypes = confirmationTypes.length > 0
             ? confirmationTypes
             : pureConfirmation ? normalizedIncomeTypes : [];
+        const capturedNonConfirmationTypes = nonConfirmationTypes === null
+            ? pureConfirmation ? [] : normalizedIncomeTypes
+            : nonConfirmationTypes;
+        const capturedNonConfirmationSet = new Set(capturedNonConfirmationTypes);
         const currentConfirmationTypes = currentFuturesSettledConfirmationTypes(
             capturedConfirmationTypes,
         );
@@ -3757,6 +3815,12 @@ export function setupBinanceConnection({
             _futuresSettledReadConfirmationTypes,
             currentConfirmationTypes,
         );
+        addFuturesSettledIncomeTypes(
+            _futuresSettledReadNonConfirmationTypes,
+            scheduledIncomeTypes.filter(
+                incomeType => capturedNonConfirmationSet.has(incomeType),
+            ),
+        );
         // A settlement landing inside another ask's debounce takes the pass
         // over. The desk used to keep whichever reason arrived first, so a
         // funding charge announced a second after a stream opened ran as a
@@ -3777,15 +3841,37 @@ export function setupBinanceConnection({
             const nextVerifyFullWindow = _futuresSettledReadVerifyFullWindow;
             const nextManualRequested = _futuresSettledReadManualRequested;
             const nextConfirmationTypes = [..._futuresSettledReadConfirmationTypes];
+            const nextNonConfirmationTypes = [
+                ..._futuresSettledReadNonConfirmationTypes,
+            ];
             _futuresSettledReadReason = null;
             _futuresSettledReadVerifyFullWindow = false;
             _futuresSettledReadManualRequested = false;
             _futuresSettledReadTypes = new Set();
             _futuresSettledReadConfirmationTypes = new Set();
-            runFuturesSettledRead(next, nextTypes, {
+            _futuresSettledReadNonConfirmationTypes = new Set();
+            // Debt can be repaid by a fast manual/verification pass during this
+            // scheduling debounce. Captured timer names are only hints; check
+            // the authoritative map once more immediately before single-flight
+            // admission so an obsolete confirmation cannot spend weight or
+            // degrade the newly exact lane.
+            const currentConfirmationTypes = currentFuturesSettledConfirmationTypes(
+                nextConfirmationTypes.length > 0 ? nextConfirmationTypes : nextTypes,
+            );
+            const currentConfirmationSet = new Set(currentConfirmationTypes);
+            const nextNonConfirmationSet = new Set(nextNonConfirmationTypes);
+            const runnableTypes = nextTypes.filter(incomeType => (
+                nextNonConfirmationSet.has(incomeType)
+                || currentConfirmationSet.has(incomeType)
+            ));
+            if (runnableTypes.length === 0) return;
+            runFuturesSettledRead(next, runnableTypes, {
                 verifyFullWindow: nextVerifyFullWindow,
                 manualRequested: nextManualRequested,
-                confirmationTypes: nextConfirmationTypes,
+                confirmationTypes: currentConfirmationTypes,
+                nonConfirmationTypes: runnableTypes.filter(
+                    incomeType => nextNonConfirmationSet.has(incomeType),
+                ),
             });
         }, FUTURES_SETTLED_READ_DELAY_MS);
         _futuresSettledReadTimer.unref?.();
@@ -3810,6 +3896,7 @@ export function setupBinanceConnection({
         _futuresSettledReadManualRequested = false;
         _futuresSettledReadTypes = new Set();
         _futuresSettledReadConfirmationTypes = new Set();
+        _futuresSettledReadNonConfirmationTypes = new Set();
         if (_futuresSettledContinuationTimer !== null) {
             clearTimeout(_futuresSettledContinuationTimer);
         }
@@ -3832,6 +3919,7 @@ export function setupBinanceConnection({
         _futuresSettledAgainManualRequested = false;
         _futuresSettledAgainTypes = new Set();
         _futuresSettledAgainConfirmationTypes = new Set();
+        _futuresSettledAgainNonConfirmationTypes = new Set();
         _futuresSettledManualIntentByType.clear();
         // The rows go with it. They are one account's settled money and the next
         // activation may be a different account; carrying them across would state
@@ -7068,9 +7156,17 @@ export function setupBinanceConnection({
                     `${UNCONFIRMED_COMMAND_MESSAGE} The ${stillLive} on ${command.symbol} may still be live.`,
                     { marketType: FUTURES_MARKET_TYPE, symbol: command.symbol, reconciled: false },
                 ));
-                await refreshFuturesAccountState({ reason: 'unresolved' });
+                const reconciliation = await refreshFuturesAccountState({
+                    resources: ['regularOrders', 'algoOrders'],
+                    reason: 'unresolved',
+                    waitForDrain: true,
+                });
                 // The re-read is what settles a cancel-all: it names no single
                 // order, so the book itself is the answer.
+                if (!futuresAccountRefreshIsReady(
+                    reconciliation,
+                    ['regularOrders', 'algoOrders'],
+                )) return;
                 emit(createCommandResolved(
                     TRADING_COMMAND_ACTIONS.CANCEL_ALL,
                     'FUTURES_OUTCOME_RESYNCED',
@@ -7149,8 +7245,16 @@ export function setupBinanceConnection({
                             reconciled: false,
                         },
                     ));
-                    await refreshFuturesAccountState({ reason: 'unresolved' });
+                    const reconciliation = await refreshFuturesAccountState({
+                        resources: ['positions', 'balances'],
+                        reason: 'unresolved',
+                        waitForDrain: true,
+                    });
                     // The position's own margin, re-read, is the answer here.
+                    if (!futuresAccountRefreshIsReady(
+                        reconciliation,
+                        ['positions', 'balances'],
+                    )) return;
                     emit(createCommandResolved(
                         TRADING_COMMAND_ACTIONS.ADJUST_POSITION_MARGIN,
                         'FUTURES_OUTCOME_RESYNCED',

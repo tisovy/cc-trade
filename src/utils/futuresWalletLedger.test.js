@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { canonicalFuturesIncomeRow } from './futuresSettledIncomeResource.js'
-import { reconcileFuturesWalletLedger } from './futuresWalletLedger.js'
+import {
+  reconcileFuturesWalletLedger,
+  sumFuturesWalletDecimalAmounts,
+} from './futuresWalletLedger.js'
 
 const completeRound = (overrides = {}) => ({
   key: 'round-1',
@@ -36,6 +39,16 @@ const roundReading = (result, roundId) => (
 )
 
 describe('reconcileFuturesWalletLedger conservation', () => {
+  it('adds presentation component amounts without JavaScript number rounding', () => {
+    expect(sumFuturesWalletDecimalAmounts([
+      '9007199254740993.12',
+      '-0.1151',
+    ])).toBe('9007199254740993.0049')
+    expect(sumFuturesWalletDecimalAmounts(['0.0049', '-0.0049'])).toBe('0')
+    expect(sumFuturesWalletDecimalAmounts(['1', 'not-money'])).toBeNull()
+    expect(sumFuturesWalletDecimalAmounts([])).toBeNull()
+  })
+
   it('assigns every canonical entry to one disjoint owner and conserves every asset', () => {
     const result = reconcileFuturesWalletLedger({
       rounds: [

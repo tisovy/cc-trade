@@ -140,6 +140,21 @@ const addDecimal = (left, right) => {
   return compactDecimal(leftCoefficient + rightCoefficient, scale)
 }
 
+// Presentation projections sometimes need a component subtotal rather than a
+// complete ledger bucket. Keep that arithmetic on the same bounded exact
+// decimal implementation; returning null on one malformed value is safer than
+// silently dropping money from a subtotal.
+export const sumFuturesWalletDecimalAmounts = (values) => {
+  if (!Array.isArray(values) || values.length === 0) return null
+  let total = null
+  for (const value of values) {
+    const amount = decimalOf(value)
+    if (amount === null) return null
+    total = addDecimal(total, amount)
+  }
+  return total === null ? null : decimalText(total)
+}
+
 const negativeMagnitude = (value) => {
   const decimal = decimalOf(value)
   if (decimal === null) return null

@@ -702,9 +702,9 @@ export const normalizeFuturesIncomeRow = (row = {}) => Object.freeze({
     // Missing money/time is malformed evidence, not a zero movement at epoch.
     // Preserve that absence so the lane validator can fail the whole page
     // before it advances coverage.
-    income: typeof row.income === 'string'
-        ? row.income
-        : (Number.isFinite(row.income) ? String(row.income) : null),
+    // Binance states money as an exact decimal string. A numeric substitute may
+    // already be rounded by JSON.parse and therefore cannot be canonical proof.
+    income: typeof row.income === 'string' ? row.income : null,
     asset: typeof row.asset === 'string' && row.asset.length > 0 ? row.asset : null,
     time: normalizeFuturesTradeHistoryTime(row.time),
     // `tranId` is unique only within one income type — Binance says so on the

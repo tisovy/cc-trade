@@ -74,6 +74,42 @@ const walkOneLane = ({ rows, held = null, now = NOW } = {}) => (
 );
 
 describe('the canonical settled-income v2 resource', () => {
+    it('keeps completeness local when one lane advances its target alone', () => {
+        const funding = createFuturesSettledIncomeLane('FUNDING_FEE', {
+            rows: [],
+            coveredFrom: WINDOW_FROM,
+            coveredTo: NOW,
+            targetTo: NOW,
+            status: 'ready',
+            attemptedAt: NOW,
+            successfulAt: NOW,
+            complete: true,
+        });
+        const creditTarget = NOW - MINUTE;
+        const credit = createFuturesSettledIncomeLane('FEE_RETURN', {
+            rows: [],
+            coveredFrom: WINDOW_FROM,
+            coveredTo: creditTarget,
+            targetTo: creditTarget,
+            status: 'ready',
+            attemptedAt: NOW,
+            successfulAt: NOW,
+            complete: true,
+        });
+
+        const resource = createFuturesSettledIncomeResource({
+            lanes: { FUNDING_FEE: funding, FEE_RETURN: credit },
+        });
+
+        expect(resource.targetTo).toBe(NOW);
+        expect(resource.coveredTo).toBe(creditTarget);
+        expect(resource.completeByType).toEqual({
+            FEE_RETURN: true,
+            FUNDING_FEE: true,
+        });
+        expect(resource.complete).toBe(false);
+    });
+
     it('reuses sorted row references only within one activation/account/content revision', () => {
         const firstLane = createFuturesSettledIncomeLane('FUNDING_FEE', {
             rows: [
@@ -516,6 +552,13 @@ describe('the canonical settled-income v2 resource', () => {
         const exact = `0.${'1234567890'.repeat(6)}1234`;
         expect(canonicalFuturesIncomeRow(incomeRow({ id: null, income: exact })).income)
             .toBe(exact);
+    });
+
+    it('rejects numeric income before exact identity and digest construction', () => {
+        expect(canonicalFuturesIncomeRow(incomeRow({ income: 0 }))).toBeNull();
+        expect(canonicalFuturesIncomeRow(incomeRow({
+            income: Number('9007199254740993.12'),
+        }))).toBeNull();
     });
 
     it('preserves a safe HTTP status without leaking request credentials', async () => {
@@ -1225,6 +1268,28 @@ describe('the canonical settled-income v2 store', () => {
         expect(loaded.digest).toBe(walked.digest);
         expect(loaded.generation).toBe(walked.generation);
         expect([...loaded.rows.values()][0].tranId).toBe(tranId);
+    });
+
+    it('rejects numeric money restored from the persisted store', async () => {
+        const walked = await walkOneLane({
+            rows: [incomeRow({ id: 'numeric-store-money', income: '-1.00' })],
+        });
+        expect(store.saveResource({ fingerprint, resource: walked.resource })).toBe(true);
+
+        const file = path.join(directory, FUTURES_SETTLED_STORE_FILE);
+        const persisted = JSON.parse(fs.readFileSync(file, 'utf8'));
+        // A JSON number has already discarded its source decimal spelling. It
+        // must not regain authority merely because its rounded value happens
+        // to equal the canonical string and therefore the stored digest.
+        persisted.lanes[0].rows[0].income = -1;
+        fs.writeFileSync(file, JSON.stringify(persisted));
+
+        expect(store.loadResource({
+            fingerprint,
+            windowFrom: WINDOW_FROM,
+            now: NOW,
+            incomeTypes: ['FUNDING_FEE'],
+        })).toBeNull();
     });
 
     it('loads bounded rollback debt but rejects the same future ready authority', () => {

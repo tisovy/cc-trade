@@ -370,8 +370,8 @@ export const readFuturesSettledIncomeFrame = (payload) => {
         && lane.status === 'ready'
         && lane.coveredFrom !== null
         && lane.coveredTo !== null
-        && targetTo !== null
-        && lane.coveredTo >= targetTo
+        && lane.targetTo !== null
+        && lane.coveredTo >= lane.targetTo
       return [lane.incomeType, Object.freeze({
         incomeType: lane.incomeType,
         rows: lane.rows,
@@ -449,7 +449,10 @@ export const readFuturesSettledIncomeFrame = (payload) => {
       normalizedLanes.map(lane => [lane.incomeType, lane.complete]),
     ))
     const complete = normalizedLanes.length > 0
-      && normalizedLanes.every(lane => lane.complete)
+      && targetTo !== null
+      && normalizedLanes.every(lane => (
+        lane.complete && lane.coveredTo !== null && lane.coveredTo >= targetTo
+      ))
     const error = normalizedLanes.find(lane => lane.error !== null)?.error ?? null
     const suppliedTimeMatches = (key, derived) => {
       if (!Object.hasOwn(payload, key)) return true

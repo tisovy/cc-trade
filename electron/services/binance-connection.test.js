@@ -4372,6 +4372,18 @@ describe('setupBinanceConnection user-data orchestration', () => {
         }));
     };
 
+    const sendInsuranceEvent = (socket) => {
+        socket.handlers.message(JSON.stringify({
+            e: 'MARGIN_CALL',
+            E: Date.now(),
+            cw: '3.16812045',
+            p: [{
+                s: 'TUTUSDT', ps: 'LONG', pa: '1.327', mt: 'crossed', iw: '0',
+                mp: '187.17127', up: '-1.166074', mm: '1.614445',
+            }],
+        }));
+    };
+
     it('bootstraps settled income on first Futures activation without a private stream open', async () => {
         setupBinanceConnection({ localWebSocketAccess: { host: '127.0.0.1' } });
         moduleMocks.websocketServerHandlers.request({
@@ -5310,7 +5322,7 @@ describe('setupBinanceConnection user-data orchestration', () => {
             .resource.lanes.FUNDING_FEE.confirmationNotBefore).toBe(secondDeadline);
     });
 
-    it('drops a single-flight confirmation repaid by a newer manual pass', async () => {
+    it('keeps a coalesced event while dropping repaid confirmation through single-flight', async () => {
         await startFuturesDeskForSettled();
         const socket = await openFuturesHistoryStream();
         await vi.advanceTimersByTimeAsync(30_000);
@@ -5372,9 +5384,17 @@ describe('setupBinanceConnection user-data orchestration', () => {
         await flushMicrotasks();
         expect(resolveManualFunding).toBeTypeOf('function');
 
-        // The re-armed confirmation now fires, leaves its debounce, and queues
-        // behind the held manual walk with the old captured funding lane.
-        await vi.advanceTimersByTimeAsync(15_000);
+        // The re-armed confirmation now fires and enters its debounce. A newer
+        // insurance event joins that same pass before it queues behind the held
+        // manual walk; unlike the old funding hint, this event remains authoritative.
+        await vi.advanceTimersByTimeAsync(5_100);
+        await flushMicrotasks();
+        sendInsuranceEvent(moduleMocks.futuresUserDataSockets.at(-1));
+        await flushMicrotasks();
+        expect(settledFrames().at(-1).reason).toBe('insurance-confirm');
+        expect(settledFrames().at(-1).lanes.INSURANCE_CLEAR.confirmationNotBefore)
+            .toEqual(expect.any(Number));
+        await vi.advanceTimersByTimeAsync(2_000);
         await flushMicrotasks();
         resolveManualFunding({ rows: [], full: false });
         await vi.advanceTimersByTimeAsync(30_000);
@@ -5382,11 +5402,111 @@ describe('setupBinanceConnection user-data orchestration', () => {
         await command;
 
         // The manual pass itself reads all six lanes. Its successful funding
-        // answer repays the debt, so the queued confirmation contributes no
-        // seventh request after single-flight handoff.
-        expect(incomeKindsAsked()).toHaveLength(SETTLED_ALL_INCOME_TYPES.length);
-        expect(new Set(incomeKindsAsked())).toEqual(new Set(SETTLED_ALL_INCOME_TYPES));
+        // answer repays the debt, so the queued follow-up drops funding. The
+        // insurance event happened after the manual pass started, however, and
+        // its independently requested lane must survive the handoff.
+        expect(incomeKindsAsked()).toHaveLength(
+            SETTLED_ALL_INCOME_TYPES.length + 1,
+        );
+        expect(new Set(
+            incomeKindsAsked().slice(0, SETTLED_ALL_INCOME_TYPES.length),
+        )).toEqual(new Set(SETTLED_ALL_INCOME_TYPES));
+        expect(new Set(
+            incomeKindsAsked().slice(SETTLED_ALL_INCOME_TYPES.length),
+        )).toEqual(new Set(['INSURANCE_CLEAR']));
         expect(settledFrames().at(-1).lanes.FUNDING_FEE.confirmationNotBefore).toBeNull();
+        expect(settledFrames().at(-1).lanes.INSURANCE_CLEAR.confirmationNotBefore)
+            .toEqual(expect.any(Number));
+    });
+
+    it('keeps a coalesced event when confirmation is repaid inside the debounce', async () => {
+        await startFuturesDeskForSettled();
+        const socket = await openFuturesHistoryStream();
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
+
+        let fundingCalls = 0;
+        let holdManualFunding = false;
+        let resolveManualFunding;
+        moduleMocks.futuresAdapter.getIncomePage.mockImplementation(({ incomeType }) => {
+            if (incomeType !== 'FUNDING_FEE') {
+                return Promise.resolve({ rows: [], full: false });
+            }
+            fundingCalls += 1;
+            if (fundingCalls === 1) {
+                return Promise.reject(Object.assign(new Error('funding lane refused'), {
+                    code: '-1002',
+                    response: { status: 403 },
+                }));
+            }
+            if (holdManualFunding && resolveManualFunding === undefined) {
+                return new Promise((resolve) => { resolveManualFunding = resolve; });
+            }
+            return Promise.resolve({ rows: [], full: false });
+        });
+
+        sendFundingEvent(socket, Date.now());
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        const failedAt = settledFrames().at(-1).lanes.FUNDING_FEE.attemptedAt;
+
+        await vi.advanceTimersByTimeAsync(2 * 60_000);
+        await flushMicrotasks();
+        const cooldownAt = failedAt + 60 * 60_000;
+        await vi.advanceTimersByTimeAsync(Math.max(0, cooldownAt - Date.now() - 10_000));
+        await flushMicrotasks();
+        moduleMocks.futuresAdapter.getIncomePage.mockClear();
+        holdManualFunding = true;
+        const command = moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                version: 1,
+                marketType: 'futures',
+                accountId: 'default',
+                action: 'account.refresh',
+                clientOrderId: 'manual-repays-debounced-confirmation',
+                manual: true,
+                symbol: 'BTCUSDT',
+            }),
+        });
+        await vi.advanceTimersByTimeAsync(5_000);
+        await flushMicrotasks();
+        expect(resolveManualFunding).toBeTypeOf('function');
+
+        // The family timer fires five seconds later and schedules its 1.2s
+        // debounce. A new insurance event joins the pending pass, then the
+        // already-running manual pass repays only the older funding debt inside that gap.
+        await vi.advanceTimersByTimeAsync(5_100);
+        await flushMicrotasks();
+        sendInsuranceEvent(moduleMocks.futuresUserDataSockets.at(-1));
+        await flushMicrotasks();
+        expect(settledFrames().at(-1).reason).toBe('insurance-confirm');
+        expect(settledFrames().at(-1).lanes.INSURANCE_CLEAR.confirmationNotBefore)
+            .toEqual(expect.any(Number));
+        resolveManualFunding({ rows: [], full: false });
+        await vi.advanceTimersByTimeAsync(1_000);
+        await flushMicrotasks();
+        expect(incomeKindsAsked()).toHaveLength(SETTLED_ALL_INCOME_TYPES.length);
+
+        await vi.advanceTimersByTimeAsync(1_000);
+        await flushMicrotasks();
+        await vi.advanceTimersByTimeAsync(30_000);
+        await flushMicrotasks();
+        await command;
+
+        expect(incomeKindsAsked()).toHaveLength(
+            SETTLED_ALL_INCOME_TYPES.length + 1,
+        );
+        expect(new Set(
+            incomeKindsAsked().slice(0, SETTLED_ALL_INCOME_TYPES.length),
+        )).toEqual(new Set(SETTLED_ALL_INCOME_TYPES));
+        expect(new Set(
+            incomeKindsAsked().slice(SETTLED_ALL_INCOME_TYPES.length),
+        )).toEqual(new Set(['INSURANCE_CLEAR']));
+        expect(settledFrames().at(-1).lanes.FUNDING_FEE.confirmationNotBefore).toBeNull();
+        expect(settledFrames().at(-1).lanes.INSURANCE_CLEAR.confirmationNotBefore)
+            .toEqual(expect.any(Number));
     });
 
     it('keeps a newer funding event pending when an older confirmation finishes', async () => {
@@ -10476,6 +10596,147 @@ describe('setupBinanceConnection user-data orchestration', () => {
         expect(balances.at(-1)).toBe('2');
     });
 
+    it('does not resolve ambiguous margin until its queued reconciliation drain succeeds', async () => {
+        await connectRenderer();
+        let releaseFirstPass;
+        const firstPassGate = new Promise((resolve) => { releaseFirstPass = resolve; });
+        let passes = 0;
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockImplementation(() => {
+            passes += 1;
+            if (passes === 1) {
+                return [{
+                    type: 'balances', weight: 1, errorLabel: 'balances',
+                    loadPayload: async () => {
+                        await firstPassGate;
+                        return { futures_balances: {} };
+                    },
+                }];
+            }
+            return [{
+                type: 'positions', weight: 1, errorLabel: 'positions',
+                loadPayload: async () => ({ futures_positions: [] }),
+            }, {
+                type: 'balances', weight: 1, errorLabel: 'balances',
+                loadPayload: async () => ({ futures_balances: {} }),
+            }];
+        });
+
+        const first = moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'account.refresh',
+                version: 1,
+                marketType: 'futures',
+                accountId: 'default',
+                clientOrderId: 'held-account-refresh',
+                symbol: 'BTCUSDT',
+            }),
+        });
+        await flushMicrotasks();
+        moduleMocks.futuresAdapter.adjustPositionMargin.mockRejectedValueOnce(
+            Object.assign(new Error('socket hang up'), { status: 503, indeterminate: true }),
+        );
+        const adjustment = moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'trade.adjustPositionMargin',
+                version: 1,
+                marketType: 'futures',
+                accountId: 'default',
+                clientOrderId: 'queued-margin-reconcile',
+                symbol: 'BTCUSDT',
+                positionSide: 'BOTH',
+                direction: 'ADD',
+                amount: '10',
+            }),
+        });
+        await vi.advanceTimersByTimeAsync(1_000);
+        await flushMicrotasks();
+        expect(emitted().some(payload => (
+            payload.command_unresolved?.code === 'FUTURES_OUTCOME_UNKNOWN'
+        ))).toBe(true);
+        expect(emitted().some(payload => (
+            payload.command_resolved?.code === 'FUTURES_OUTCOME_RESYNCED'
+        ))).toBe(false);
+
+        releaseFirstPass();
+        await vi.advanceTimersByTimeAsync(3_000);
+        await Promise.all([first, adjustment]);
+
+        expect(passes).toBe(2);
+        expect(emitted().some(payload => (
+            payload.command_resolved?.code === 'FUTURES_OUTCOME_RESYNCED'
+        ))).toBe(true);
+    });
+
+    it('lets a later failed required read replace an earlier ready receipt', async () => {
+        await connectRenderer();
+        let releaseFirstBalance;
+        const firstBalanceGate = new Promise((resolve) => { releaseFirstBalance = resolve; });
+        let passes = 0;
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockImplementation(() => {
+            passes += 1;
+            const pass = passes;
+            return [{
+                type: 'positions', weight: 1, errorLabel: 'positions',
+                loadPayload: async () => ({ futures_positions: [] }),
+            }, {
+                type: 'balances', weight: 1, errorLabel: 'balances',
+                loadPayload: async () => {
+                    if (pass === 1) {
+                        await firstBalanceGate;
+                        return { futures_balances: {} };
+                    }
+                    throw new Error('newer balance read failed');
+                },
+            }];
+        });
+
+        const first = moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'account.refresh',
+                version: 1,
+                marketType: 'futures',
+                accountId: 'default',
+                clientOrderId: 'earlier-ready-account-refresh',
+                symbol: 'BTCUSDT',
+            }),
+        });
+        await flushMicrotasks();
+        moduleMocks.futuresAdapter.adjustPositionMargin.mockRejectedValueOnce(
+            Object.assign(new Error('socket hang up'), { status: 503, indeterminate: true }),
+        );
+        const adjustment = moduleMocks.rendererHandlers.message({
+            type: 'utf8',
+            utf8Data: JSON.stringify({
+                action: 'trade.adjustPositionMargin',
+                version: 1,
+                marketType: 'futures',
+                accountId: 'default',
+                clientOrderId: 'later-failed-margin-reconcile',
+                symbol: 'BTCUSDT',
+                positionSide: 'BOTH',
+                direction: 'ADD',
+                amount: '10',
+            }),
+        });
+        await vi.advanceTimersByTimeAsync(1_000);
+        await flushMicrotasks();
+        expect(emitted().some(payload => (
+            payload.command_unresolved?.code === 'FUTURES_OUTCOME_UNKNOWN'
+        ))).toBe(true);
+
+        releaseFirstBalance();
+        await vi.advanceTimersByTimeAsync(10_000);
+        await Promise.all([first, adjustment]);
+
+        expect(passes).toBe(2);
+        expect(emitted().some(payload => (
+            payload.command_resolved?.code === 'FUTURES_OUTCOME_RESYNCED'
+        ))).toBe(false);
+    });
+
     it('does not let a snapshot started before a trade overwrite the state that trade produced', async () => {
         let releaseSnapshot;
         const snapshotGate = new Promise((resolve) => { releaseSnapshot = resolve; });
@@ -12237,7 +12498,39 @@ describe('setupBinanceConnection user-data orchestration', () => {
             expect(payloads.some(payload => (
                 payload.command_unresolved?.code === 'FUTURES_OUTCOME_UNKNOWN'
             ))).toBe(true);
+            expect(payloads.some(payload => (
+                payload.command_resolved?.code === 'FUTURES_OUTCOME_RESYNCED'
+            ))).toBe(false);
             expect(payloads.some(payload => payload.command_rejected)).toBe(false);
+        });
+
+        it('does not call a margin outcome resynced when a required account read fails', async () => {
+            await connectRenderer();
+            moduleMocks.futuresAdapter.adjustPositionMargin.mockRejectedValueOnce(
+                Object.assign(new Error('socket hang up'), { status: 503, indeterminate: true }),
+            );
+            moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([
+                {
+                    type: 'positions', weight: 1, errorLabel: 'positions',
+                    loadPayload: vi.fn().mockResolvedValue({ futures_positions: [] }),
+                },
+                {
+                    type: 'balances', weight: 1, errorLabel: 'balances',
+                    loadPayload: vi.fn().mockRejectedValue(new Error('balance read failed')),
+                },
+            ]);
+
+            const pending = adjust({ clientOrderId: 'margin-read-failed' });
+            await vi.advanceTimersByTimeAsync(2_000);
+            await pending;
+
+            const payloads = emitted();
+            expect(payloads.some(payload => (
+                payload.command_unresolved?.code === 'FUTURES_OUTCOME_UNKNOWN'
+            ))).toBe(true);
+            expect(payloads.some(payload => (
+                payload.command_resolved?.code === 'FUTURES_OUTCOME_RESYNCED'
+            ))).toBe(false);
         });
 
         it('reports a refused transfer with the exchange own code', async () => {
@@ -13027,7 +13320,9 @@ describe('setupBinanceConnection user-data orchestration', () => {
 
     it('cancels the conditional book as well as the working one', async () => {
         await connectRenderer();
-        await cancelAllFutures();
+        const pending = cancelAllFutures();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await pending;
 
         expect(moduleMocks.futuresAdapter.cancelAllOrders).toHaveBeenCalledWith('BTCUSDT');
         expect(moduleMocks.futuresAdapter.cancelAllAlgoOrders).toHaveBeenCalledWith('BTCUSDT');
@@ -13045,6 +13340,35 @@ describe('setupBinanceConnection user-data orchestration', () => {
         const rejection = emitted().find(payload => payload.command_rejected)?.command_rejected;
         expect(rejection.message).toMatch(/conditional \(ALGO\) orders on BTCUSDT are still live/);
         expect(rejection.details.uncancelled).toEqual(['algo']);
+    });
+
+    it('keeps ambiguous cancel-all unresolved when either order book cannot be re-read', async () => {
+        await connectRenderer();
+        moduleMocks.futuresAdapter.cancelAllAlgoOrders.mockRejectedValueOnce(
+            Object.assign(new Error('socket hang up'), { status: 503, indeterminate: true }),
+        );
+        moduleMocks.futuresAdapter.getAccountRefreshOperations.mockReturnValue([
+            {
+                type: 'regularOrders', weight: 1, errorLabel: 'regular orders',
+                loadPayload: vi.fn().mockResolvedValue({ futures_regular_orders: [] }),
+            },
+            {
+                type: 'algoOrders', weight: 1, errorLabel: 'algo orders',
+                loadPayload: vi.fn().mockRejectedValue(new Error('algo read failed')),
+            },
+        ]);
+
+        const pending = cancelAllFutures();
+        await vi.advanceTimersByTimeAsync(2_000);
+        await pending;
+
+        const payloads = emitted();
+        expect(payloads.some(payload => (
+            payload.command_unresolved?.code === 'FUTURES_OUTCOME_UNKNOWN'
+        ))).toBe(true);
+        expect(payloads.some(payload => (
+            payload.command_resolved?.code === 'FUTURES_OUTCOME_RESYNCED'
+        ))).toBe(false);
     });
 
 });

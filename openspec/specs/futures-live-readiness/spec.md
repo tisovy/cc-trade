@@ -63,7 +63,7 @@ This guarantee SHALL be enforced by an automated check over the production sourc
 - **THEN** the automated check fails rather than reporting success over a reduced graph
 
 ### Requirement: Account synchronization is observable per resource
-The system SHALL expose synchronization state independently for balances, positions, regular open orders, algorithmic open orders, and the futures user-data stream. Each resource state SHALL distinguish at least loading, ready, stale, and error, include the time of the last successful update when available, and retain the last confirmed data during a retry failure rather than replacing it with an empty snapshot.
+The system SHALL expose synchronization state independently for balances, positions, regular open orders, algorithmic open orders, settled income, and the futures user-data stream. Each resource state SHALL distinguish at least loading, ready, stale, and error, include the time of the last successful update when available, and retain the last confirmed data during a retry failure rather than replacing it with an empty snapshot. An attempted time SHALL NOT replace or masquerade as a successful time.
 
 #### Scenario: Initial account synchronization succeeds
 - **WHEN** all required signed account resources return valid responses
@@ -80,6 +80,14 @@ The system SHALL expose synchronization state independently for balances, positi
 #### Scenario: Zero balance is valid data
 - **WHEN** a successful balance response reports zero available USDT
 - **THEN** the system reports a ready balance resource with zero funds and does not misclassify it as a synchronization failure
+
+#### Scenario: Initial settled-income synchronization fails
+- **WHEN** the first settled-income request fails before any confirmed reading exists
+- **THEN** settled income enters error state and is not represented as a ready empty ledger
+
+#### Scenario: Settled-income verification fails
+- **WHEN** settled income was previously ready and a verification attempt fails
+- **THEN** its last confirmed rows and successful time remain visible, the resource becomes stale, and the failure is independently retryable
 
 ### Requirement: Synchronization failures are safe and actionable
 Account-resource failures SHALL be reported to the renderer as bounded, sanitized categories that expose no credential value, signature, signed query, or raw response body. Each reported failure SHALL state whether retrying can plausibly succeed. A failure that cannot succeed on retry — including a client error such as a malformed or unsupported request — SHALL be reported as non-retryable, so the ticket does not offer an action that is guaranteed to fail. Diagnostics SHALL distinguish common configuration, permission, timestamp/clock, network/proxy, rate-limit, and exchange-response failures.
@@ -714,3 +722,197 @@ SHALL be unchanged.
 #### Scenario: A request larger than the whole window
 - **WHEN** a request declares more weight than the window can ever hold and nothing else is booked against it
 - **THEN** it is admitted rather than waiting for room that will not appear
+
+### Requirement: Every physical Binance attempt is admitted and charged
+Before each physical Binance Futures REST attempt, including a replay-safe fresh-connection fallback after pooled `ECONNRESET`/`EPIPE`, clock synchronization, a signed request, resynchronization after `-1021`, and every eligible outer retry after a timeout, reset, or retryable exchange response, the system SHALL reserve that physical endpoint's declared request weight through the shared admission policy exactly once. Internal helper endpoints SHALL use their own declared weight rather than inheriting the surrounding logical operation's weight. A non-GET mutation SHALL NOT be replayed solely because a reused socket reset or broke under its write before a response; that outcome SHALL remain indeterminate because local transport state cannot prove the exchange did not apply it. The legacy Spot limiter SHALL retain its existing logical-operation admission semantics.
+
+For a signed Futures attempt, the system SHALL materialize its timestamp, query or body, and signature only after that attempt's admission and immediately before creating the underlying HTTP request. Time spent waiting for admission SHALL NOT age a signed payload against `recvWindow`; each independently admitted replay-safe GET fallback or eligible retry SHALL materialize a fresh signing envelope from the same semantic request parameters.
+
+A logical Futures operation SHALL expose bounded attempt count, total charged weight, recognized observed used weight, bounded rate-limit backpressure, retry-category counts, and final outcome to diagnostics without exposing endpoint URLs, query strings, request bodies, credentials, signatures, signed parameters, exchange messages, or monetary values. One AbortSignal SHALL govern admission, backoff, and every in-flight physical request belonging to that logical operation. Cancellation before a retry SHALL prevent both the reservation and the physical request for that retry; cancellation after admission SHALL abort the in-flight request without refunding weight that may already have reached Binance.
+
+When Binance response-weight headers are available, the limiter SHALL reconcile conservative local accounting with those observations and SHALL treat `429`/ban guidance as authoritative backpressure. Each observation SHALL remain associated with the physical reservation that produced it. Replacing one local charge with an observed baseline SHALL preserve and add every other still-windowed reservation that has not produced its own response observation, whether it was admitted before or after the responding attempt. Missing, lower, repeated, or stale headers SHALL NOT reduce the locally charged declared weight or erase concurrent unresolved reservations.
+
+Every Futures REST response body SHALL be bounded by one declared global byte ceiling before chunk retention, buffer concatenation, identifier-token preservation, or JSON parsing. An oversized declared `Content-Length` SHALL be refused immediately, and a chunked body SHALL be stopped at the first excess byte. The physical attempt SHALL remain charged. An oversized non-GET response SHALL be classified indeterminate and SHALL NOT make that mutation eligible for automatic transport replay.
+
+Urgent admission MAY pass ordinary work, but every ordinary entry it would pass SHALL enforce the same bounded overtake ceiling even after capacity backpressure removes and requeues that entry behind newer work. A carried pass count SHALL NOT be ignored merely because the affected entry is no longer at the queue head.
+
+An account read used to settle an ambiguous non-idempotent mutation SHALL return the terminal outcome of the complete refresh drain, including any follow-up pass queued behind an in-flight read. The system SHALL emit a reconciled/resynced outcome only after every resource required to answer that mutation reaches `ready` in that drain. A failed, retired, missing, or merely queued read SHALL leave the original unresolved outcome in force and SHALL NOT claim Binance authority.
+
+#### Scenario: A request succeeds first try
+- **WHEN** a weight-30 operation succeeds on its first physical attempt
+- **THEN** the limiter charges 30 and records one attempt
+
+#### Scenario: Two retries follow transient failures
+- **WHEN** a weight-30 operation performs three physical attempts before succeeding or failing
+- **THEN** the limiter charges 90 and each attempt waits for admission as if it were an independent request
+
+#### Scenario: A pooled connection is replaced
+- **WHEN** a replay-safe weight-5 Futures GET loses a reused socket before an answer and is sent again on a fresh connection
+- **THEN** both physical sends are independently admitted and the logical operation reports two attempts and 10 charged weight
+
+#### Scenario: A position-margin mutation loses its reused socket
+- **WHEN** a position-margin POST receives `ECONNRESET` or `EPIPE` before any response begins on a reused socket
+- **THEN** the one admitted attempt is reported as indeterminate, no fresh-connection replay is sent, and account reconciliation determines the resulting margin
+
+#### Scenario: A signed request synchronizes and retries its timestamp
+- **WHEN** a signed weight-30 request first synchronizes time, receives `-1021`, synchronizes again, and retries successfully
+- **THEN** the two `/time` sends are charged at weight 1, the two signed sends are charged at weight 30, and the logical total is 62 without any double charge
+
+#### Scenario: A signed request waits longer than recvWindow
+- **WHEN** a signed Futures request or its replay-safe GET fallback waits in physical admission longer than the configured `recvWindow`
+- **THEN** its timestamp and signature are materialized after that admission, the queued duration does not make the payload stale, and each physical send is charged exactly once
+
+#### Scenario: Position mode is fetched inside a command
+- **WHEN** a command needs the uncached `/fapi/v1/positionSide/dual` reading before sending its own request
+- **THEN** that internal physical request is charged at its declared weight 30 independently of the command request
+
+#### Scenario: A mutating Futures command sends directly through the adapter
+- **WHEN** placement, amendment, cancellation, cancel-all, or position-margin handling sends a Futures request
+- **THEN** the command enters urgent Futures physical-attempt admission before any HTTP send, while neither the logical limiter nor pooled-connection fallback replays an ambiguous mutation and existing reconciliation semantics remain unchanged
+
+#### Scenario: An ambiguous command is reconciled by a read
+- **WHEN** a mutating command has an indeterminate outcome and the desk queries its exchange identity
+- **THEN** the reconciliation read enters Futures physical-attempt admission independently and may use the existing bounded safe-read retry policy without resending the mutation
+
+#### Scenario: Ambiguous account reconciliation is queued or fails
+- **WHEN** cancel-all or position-margin reconciliation queues behind another account pass, or one of its required resource reads fails
+- **THEN** the command remains unresolved until the queued drain actually makes all required resources ready, and no false `FUTURES_OUTCOME_RESYNCED` event is emitted
+
+#### Scenario: A requeued request already reached its pass ceiling
+- **WHEN** capacity backpressure requeues an ordinary request behind newer work after it has already been overtaken the maximum number of times
+- **THEN** a later urgent entry cannot pass that request again even though another ordinary request is now at the head
+
+#### Scenario: Retry is aborted before admission
+- **WHEN** cancellation occurs after one failed attempt and before its retry is admitted
+- **THEN** only the first attempt is charged and no retry request is sent
+
+#### Scenario: Lifecycle ownership changes while admission is queued
+- **WHEN** a listen-key create or renewal loses its generation/renderer ownership while its physical admission is queued
+- **THEN** ownership is rejected before booking weight, so the stale operation creates neither reservation nor HTTP send; a change that occurs only after atomic booking is still stopped by the post-admission guard while that completed reservation remains conservatively charged
+
+#### Scenario: Account snapshot issuance follows physical admission
+- **WHEN** an account read waits for admission or resynchronizes before its final signed send while newer stream state arrives
+- **THEN** reconciliation uses the latest physical-attempt admission time as snapshot issuance authority and cannot let the older snapshot overwrite that stream state
+
+#### Scenario: An admitted request is aborted in flight
+- **WHEN** the logical operation's signal is cancelled after a physical Futures request is admitted
+- **THEN** the same signal aborts the underlying HTTP request, the attempt remains charged, and no nested or outer retry is sent
+
+#### Scenario: Exchange reports a higher used weight
+- **WHEN** a response header shows the exchange has counted more weight than the local window expected
+- **THEN** subsequent admission honors at least the observed higher usage for a conservative local window and does not continue from the lower estimate
+
+#### Scenario: Exchange reports lower used weight
+- **WHEN** a recognized response header reports usage below the limiter's current conservative accounting
+- **THEN** the local accounting is not reduced or refunded
+
+#### Scenario: Older response reports weight after a newer admission
+- **WHEN** physical attempt A is admitted, attempt B is admitted later, and A's response then reports a higher exchange-used-weight baseline
+- **THEN** reconciliation applies that baseline only through A, adds B's reservation on top, and any out-of-order B or repeated A response can only retain or raise the resulting conservative floor
+
+#### Scenario: Newer response arrives before an older unresolved attempt
+- **WHEN** attempt A is admitted, attempt B is admitted later, and B's response arrives before A has produced any response observation
+- **THEN** B's observed baseline replaces only B's raw reservation, A remains additively charged until its own observation or window expiry, and another attempt cannot enter capacity that only exists by assuming Binance already counted A
+
+#### Scenario: Response headers are absent
+- **WHEN** a physical attempt returns without usable weight headers
+- **THEN** its declared local weight remains charged
+
+#### Scenario: Binance rate-limits an attempt
+- **WHEN** Binance returns `429` with retry guidance
+- **THEN** the limiter applies the recognized guidance, capped by the declared safety bound, before admitting another physical attempt
+
+#### Scenario: Attempt diagnostics receive hostile request material
+- **WHEN** a signed request fails after its URL, query, body, signature, exchange message, or credential-bearing headers existed in the transport layer
+- **THEN** the structured diagnostic contains only bounded counts, closed retry/outcome categories, recognized status/weight/backpressure observations, and no request material
+
+#### Scenario: Futures REST response exceeds its byte budget
+- **WHEN** response headers or accumulated chunks exceed the declared body ceiling
+- **THEN** the adapter stops retaining the body before JSON parsing, returns a bounded `RESPONSE_TOO_LARGE` refusal, keeps the attempt charged, and treats a mutation outcome as indeterminate without replay
+
+### Requirement: Settled-income triggers spend weight only on relevant lanes
+Settled-income scheduling SHALL map each trigger to the minimum income lanes needed to make that event current. A funding event SHALL refresh funding; any fill SHALL coalesce a delayed refresh for underivable commission-credit lanes; insurance-related account events SHALL refresh insurance; cold start and periodic verification SHALL reconcile every required lane. Completeness SHALL remain per lane so this narrowing cannot falsely mark the union complete.
+
+A funding, fill, or insurance witness SHALL create and persist the applicable confirmation debt before scheduler cooldown, account-wide backoff, or ordinary due checks decide whether its immediate REST read may run. A declined immediate read SHALL retain the stale lane and its dedicated confirmation timer. If that timer becomes due while admission remains deferred, confirmation SHALL be re-armed for the earliest bounded eligibility instant rather than silently dropped.
+
+Before a fired, re-armed, debounced, or single-flight-queued confirmation performs REST work, the scheduler SHALL intersect its captured lanes with current confirmation debt. A lane already repaid by a successful pass SHALL NOT be re-read merely because an older timer or queue entry named it, and a confirmation with no remaining debt SHALL be discarded before physical admission. A terminal account/IP-wide HTTP 418 floor SHALL remain active until a deliberate all-lane pass produces successful lane answers; a timeout, empty answer, or different refusal without a repeated 418 SHALL NOT by itself prove recovery.
+
+An ordinary account tick SHALL request only genuinely incomplete, non-loading lanes that are not waiting on an unexpired confirmation deadline. Debt-only incompleteness SHALL spend no tick income weight because the dedicated confirmation pass owns it; a simultaneous acquisition gap in another lane SHALL request only that other lane.
+
+The desk SHALL define and verify request-weight budgets for a single event refresh, its confirmation, cold start, and periodic verification using the exchange-declared weight of every physical request. Each settled-income pass diagnostic SHALL expose bounded reason, lane/page/read counts, physical-attempt count, charged weight, and coverage gained. For underivable credit lanes it SHALL expose only aggregate counts of rows with a symbol and/or reliable trade identity, never the identity value, raw row, URL, signed parameters, credential, or money.
+
+The maintained read-only probe SHALL acquire settled income through the production fixed-window per-lane walker with explicit page numbers and the production row/page bounds. It SHALL NOT maintain a separate timestamp cursor or unfiltered union pagination path. If any lane is incomplete or failed, its canonical wallet comparison SHALL remain qualified and its acquisition summary SHALL expose only bounded lane/page/count/state evidence.
+
+Every physical settled-income page attempt SHALL remain owned by the Futures activation that scheduled it. If deactivation or an account switch retires that activation while the attempt is waiting for admission, the retired attempt SHALL stop before transport creation and SHALL NOT publish, persist, or clear settled-income state for a later activation.
+
+#### Scenario: Funding event arrives
+- **WHEN** one funding settlement event invalidates a confirmed reading
+- **THEN** the immediate logical page requests the funding lane rather than all six lanes
+
+#### Scenario: Opening fill may earn a rebate
+- **WHEN** a fill realizes zero but may produce an underivable commission credit
+- **THEN** one coalesced delayed credit-lane refresh is scheduled and the current command is not blocked
+
+#### Scenario: Many fills arrive in a burst
+- **WHEN** multiple executions occur inside the coalescing interval
+- **THEN** they produce one bounded credit-lane confirmation rather than one six-lane walk per fill
+
+#### Scenario: Periodic verification runs
+- **WHEN** the verification interval is due
+- **THEN** all required lanes are eventually reconciled within the declared verification budget
+
+#### Scenario: Private stream opens after bootstrap has started
+- **WHEN** Futures activation has already scheduled its all-lane bootstrap and the private stream opens before or after that pass completes
+- **THEN** stream readiness does not enqueue a second all-lane income pass, while account refresh and later event-specific income triggers remain active
+
+#### Scenario: Request budget would be exceeded
+- **WHEN** completing all pending lane work would exceed the admission budget
+- **THEN** the work remains partial/queued with its target visible and does not borrow unrecorded weight from trading commands
+
+#### Scenario: A lane reaches its local row ceiling
+- **WHEN** a lane terminates with `ROW_LIMIT_REACHED`
+- **THEN** ordinary automatic ticks place that lane in the per-lane reconciliation cooldown instead of restarting page one, while unrelated lanes and deliberate manual/full verification remain eligible
+
+#### Scenario: A settled-income page needs physical retries
+- **WHEN** one logical income page is sent more than once because of transport or timestamp recovery
+- **THEN** the pass diagnostic counts every physical attempt and its charged weight rather than multiplying only logical page count by 30
+
+#### Scenario: Account changes while an income page waits for admission
+- **WHEN** a settled-income physical attempt is queued and its Futures activation is retired by deactivation or an account switch before transport creation
+- **THEN** the old attempt is cancelled at admission and cannot send against, publish into, persist over, or clear state owned by the next activation
+
+#### Scenario: Rebate-shape evidence is recorded safely
+- **WHEN** underivable credit rows are acquired with and without symbol or trade identity
+- **THEN** diagnostics expose bounded aggregate presence counts and do not record any raw identity, row, signed request material, or money
+
+#### Scenario: Every settled scheduler reason reaches the record
+- **WHEN** a pass runs with one of the production reasons `bootstrap`, `stream`, `fill`, `funding`, `settlement`, `refresh`, `confirm`, `credit-confirm`, `insurance`, `insurance-confirm`, `verification`, `extension`, or `tick`
+- **THEN** its closed diagnostic vocabulary recognizes the scheduler's exact bounded reason instead of silently dropping the whole pass record
+
+#### Scenario: Event arrives during lane cooldown or account backoff
+- **WHEN** a funding, fill, or insurance witness arrives while its immediate income read is declined by a lane cooldown or account-wide backoff
+- **THEN** the affected lanes become durably stale before that decision, their confirmation remains armed, and later manual work cannot promote the missing event to exact money
+
+#### Scenario: Confirmation deadline arrives before backoff ends
+- **WHEN** a dedicated confirmation timer becomes due while the applicable lane or account admission backoff is still active
+- **THEN** the stale debt survives and confirmation is re-armed for the earliest bounded eligible instant rather than disappearing with the fired timer
+
+#### Scenario: Queued confirmation debt was already repaid
+- **WHEN** a manual, verification, or sibling pass successfully clears one or more lanes while an older confirmation timer or single-flight request still names them
+- **THEN** the obsolete lanes are removed before REST admission, a fully repaid confirmation sends no request, and a later failure cannot degrade those newly exact lanes
+
+#### Scenario: Confirmation debt is repaid during scheduling debounce
+- **WHEN** a fast manual or verification pass clears a lane after its confirmation was scheduled but before the debounce callback runs, including when a newer fill or funding event coalesces into the same debounce or single-flight follow-up
+- **THEN** confirmation-only and non-confirmation lane provenance survives every queue boundary, the callback keeps genuinely new event lanes but drops each repaid confirmation-only lane before REST admission, and an obsolete failed read cannot replace exact evidence
+
+#### Scenario: Full recovery probe does not succeed
+- **WHEN** an account-wide HTTP 418 floor exists and a deliberate all-lane probe returns a timeout, empty answer, or non-successful lane without another 418
+- **THEN** automatic event and tick work remains behind the account-wide floor until a deliberate pass proves recovery with successful lane answers
+
+#### Scenario: Tick runs before a confirmation deadline
+- **WHEN** an ordinary account tick sees debt lanes plus one unrelated lane with a genuine acquisition gap
+- **THEN** only the unrelated incomplete lane is requested, while a debt-only resource sends no tick income request
+
+#### Scenario: Operator probe reads a dense timestamp peer set
+- **WHEN** the maintained probe encounters more than one income page sharing a millisecond or a lane needs a continuation pass
+- **THEN** it follows the production lane walk and explicit page checkpoint without advancing a timestamp cursor or claiming complete comparison coverage early

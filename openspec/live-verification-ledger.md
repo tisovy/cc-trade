@@ -270,11 +270,11 @@ income read answered N other contracts and nothing against this one* (the frame
 arrived and this contract was not in it), or *nothing settled on this position
 yet* (it was read and there is genuinely no charge).
 
-Two things worth knowing before the sitting. An account that pays fees in **BNB**
-exercises the sharpest defect fixed here — a BNB fee was being subtracted from a
-USDT result — so if BNB fee discount is on, a closed round is the fastest check.
-And a position or round **older than the read's window** is expected to say so
-rather than show a complete-looking total; that qualification is the fix
+Two things worth knowing before the sitting. This operator does not pay Futures
+commission in **BNB**, so that live case is not applicable; deterministic
+coverage still verifies that a foreign-asset fee cannot be subtracted from a
+USDT result. A position or round **older than the read's window** is expected to
+say so rather than show a complete-looking total; that qualification is the fix
 working, not a gap.
 
 ## Awaiting The Operator — 2026-08-22 Depth Recovery
@@ -333,20 +333,13 @@ the next bad morning closes both.
   `futuresHeldHistory.js`, dock ↻ escalates to full while discovery is
   incomplete); journals 2026-08-23 07:43–08:23 UTC hold the refusals and the
   one-request "wide" read that proved the chain.
-- **For the session working the exact-settled money in `FuturesPortfolioDock.jsx`
-  (in flight 2026-08-23 ~08:30 UTC):** the operator ruled the same morning that
-  row surfaces show rounded cents with the exact string on the element, and that
-  no badge or measure word rides a money cell (screenshots: the closed-row NET
-  column and the open-row `PARTIAL` badge, both removed in `04b1c9c`).
-  `formatExactSettledAmount` currently prints the full fraction into the
-  open-position PnL cell — the same complaint will land on it. Also
-  `renders open contract and account adjustments once outside leg rows` is red
-  in the tree right now: the shared-adjustment amounts it expects (`−3 USDT`)
-  changed shape (`−3.00 USDT`) under the in-flight formatter. Left to its
-  author; nothing of it was touched by `04b1c9c`.
-  **Resolved by that session the same hour**: `formatSettledAmountForCell`
-  rounds the cell to cents matching Closed Positions, and the red test was
-  updated. Nothing further owed here.
+- **Closed / superseded 2026-08-23 — exact-settled money in
+  `FuturesPortfolioDock.jsx`:** open and Closed PnL cells now show rounded cents
+  at a glance, retain the exact decimal in the element title, and keep shared
+  contract/account adjustments outside leg-owned totals. The earlier red
+  shared-adjustment expectation and the large/sub-cent/zero regressions are
+  green in the final focused and full suites. Nothing further is owed by this
+  historical defect entry; live account comparison is tracked separately.
 - **Measured 2026-08-23 ~12:00 UTC, offline against the operator's own store
   (LevelDB write-ahead log + Snappy + SSV parsed in scratchpad; desk was down) —
   why Closed Positions showed 3 rounds against a week the operator counts ~20
@@ -416,3 +409,39 @@ the next bad morning closes both.
   the per-contract command serialization, is what stood still. The mode itself
   switched on the exchange in ~340 ms every time, and nothing mispriced: the
   chip kept stating what the exchange last reported.
+
+## Final PnL Audit Archive Handoff — 2026-08-23
+
+The operator confirmed before this final audit that uPnL and PnL were reading
+normally, but reported that some Closed Positions still disagreed with the
+Binance app while others were correct. The audit then changed persisted-fill
+restore, exact-decimal display, lane completeness, confirmation scheduling,
+limiter fairness, and ambiguous account reconciliation. Those final changes
+have deterministic coverage and passed the final full suite (126 files, 2,860
+tests), lint, build, and repository guard checks, but have not yet been observed
+on the live account. The operator explicitly requested commit, spec sync, and
+archive; the archive records implementation completion and does not turn the
+following rows into live evidence. Every remaining observation is carried by
+the active verification-only change `verify-final-futures-pnl-live-data`.
+
+The operator also stated that this Futures account does not use USDC and pays no
+Futures commission in BNB. Those two live cases are therefore `N/A BY OPERATOR`,
+not silently treated as confirmed; their deterministic regression coverage is
+retained.
+
+| Change | Task / case | Status | Observation date | Account | Desk revision | Evidence / remaining check |
+|---|---:|---|---|---|---|---|
+| `charge-every-binance-retry-weight` | 3.3 | `OUTSTANDING` | `NOT RECORDED` | Production | this archive commit | Full automated accounting, retry, fairness, and reconciliation suites pass; live charged weight, latency, priority, and `429` rate after the final fairness fix remain unmeasured. |
+| `charge-every-binance-retry-weight` | 3.4 | `ARCHIVE AUTHORIZED WITH LIVE CHECK OUTSTANDING` | 2026-08-23 | Production | this archive commit | The operator explicitly requested archive. Task 3.3 remains outstanding here and archive is not its proof. |
+| `make-futures-rounds-leg-and-window-correct` | 5.3, USDT/startup/hedge/reversal cases | `OUTSTANDING` | `NOT RECORDED` | Production | this archive commit | The post-audit persisted-fill revision fix still needs a live restart/Closed check; simultaneous hedge legs, one-leg partial close, and reversal also remain unobserved after the final diff. |
+| `make-futures-rounds-leg-and-window-correct` | 5.3, USDC case | `N/A BY OPERATOR / COVERED BY TEST ONLY` | 2026-08-23 | N/A (account does not use USDC) | this archive commit | The operator does not use USDC. Deterministic USDC denomination and no-USDT-relabel regressions remain green. |
+| `make-futures-rounds-leg-and-window-correct` | 5.4 | `ARCHIVE AUTHORIZED WITH LIVE CHECK OUTSTANDING` | 2026-08-23 | Production | this archive commit | The operator explicitly requested archive; the unperformed task-5.3 cases remain recorded above. |
+| `make-futures-wallet-net-additive` | 4.4 | `PARTIAL / COVERED BY DETERMINISTIC PROBE` | 2026-08-23 | N/A (offline fixture) | this archive commit | The canonical USDT probe conserves `10.0049 - 0.21 = 9.7949`, and ownership/presentation are disjoint; live missing-attribution rows and commission-rebate posting delay were not measured. |
+| `make-futures-wallet-net-additive` | 5.3, USDT Closed/hedge cases | `OUTSTANDING` | `NOT RECORDED` | Production | this archive commit | Four representative post-audit Closed rows and simultaneous hedge-leg open settlement still need comparison with Binance rows. |
+| `make-futures-wallet-net-additive` | 5.3, USDC case | `N/A BY OPERATOR / COVERED BY TEST ONLY` | 2026-08-23 | N/A (account does not use USDC) | this archive commit | The operator does not use USDC; per-asset conservation and denomination remain covered deterministically. |
+| `make-futures-wallet-net-additive` | 3.2 / 4.2 / 4.3 / 4.37, BNB cases | `N/A BY OPERATOR / COVERED BY TEST ONLY` | 2026-08-23 | N/A (no Futures BNB commission) | this archive commit | The operator states Futures commissions are not paid in BNB; BNB-only non-relabel behavior remains covered deterministically. |
+| `make-futures-wallet-net-additive` | 5.4 | `ARCHIVE AUTHORIZED WITH LIVE CHECK OUTSTANDING` | 2026-08-23 | Production | this archive commit | The operator explicitly requested archive; live rebate shape and the remaining task-5.3 comparisons stay recorded above. |
+| `make-settled-income-acquisition-lossless` | 5.3 | `OUTSTANDING` | `NOT RECORDED` | Production | this archive commit | Funding/rebate posting latency and an hourly verification cycle after the debounce-debt fix remain unmeasured on the live account. |
+| `make-settled-income-acquisition-lossless` | 5.4 | `ARCHIVE AUTHORIZED WITH LIVE CHECK OUTSTANDING` | 2026-08-23 | Production | this archive commit | The operator explicitly requested archive; task 5.3 and any future live ordering observation remain in this ledger. |
+| `make-settled-income-resource-truthful` | 5.3 | `OUTSTANDING` | `NOT RECORDED` | Production | this archive commit | Live success → failure → recovery and same-shape correction were not forced after the numeric-money and lane-target fixes. |
+| `make-settled-income-resource-truthful` | 5.4 | `ARCHIVE AUTHORIZED WITH LIVE CHECK OUTSTANDING` | 2026-08-23 | Production | this archive commit | The operator explicitly requested archive; task 5.3 remains outstanding and archive is not recovery evidence. |

@@ -32,7 +32,10 @@ import {
   buildFuturesTradeRoundIndex,
   futuresTradePositionKey,
 } from '../utils/futuresTradeRounds.js'
-import { reconcileFuturesWalletLedger } from '../utils/futuresWalletLedger.js'
+import {
+  reconcileFuturesWalletLedger,
+  sumFuturesWalletDecimalAmounts,
+} from '../utils/futuresWalletLedger.js'
 import { DESK_FRAME_KINDS, ensureDeskFrameRouter } from '../utils/deskFrameRouter.js'
 import { measureFrameMarks } from '../utils/frameMarks.js'
 import { createUnsentCommandStore } from '../utils/unsentTradingCommand.js'
@@ -317,23 +320,21 @@ const enrichRoundWithWallet = (round, wallet) => {
 const settledReadingFromWallet = (round, wallet, settlementAsset = round?.settlementAsset) => {
   if (!wallet || typeof settlementAsset !== 'string' || settlementAsset === '') return null
   const components = {
-    realizedPnl: null,
-    funding: null,
-    commission: null,
-    insuranceClear: null,
+    realizedPnl: [],
+    funding: [],
+    commission: [],
+    insuranceClear: [],
   }
   const otherAssets = new Map()
   const add = (target, key, amount) => {
-    const numeric = Number(amount)
-    if (!Number.isFinite(numeric)) return
-    target[key] = target[key] === null ? numeric : target[key] + numeric
+    target[key].push(amount)
   }
   for (const entry of wallet.entries ?? []) {
     const target = entry.asset === settlementAsset
       ? components
       : (() => {
         if (!otherAssets.has(entry.asset)) otherAssets.set(entry.asset, {
-          realizedPnl: null, funding: null, commission: null, insuranceClear: null,
+          realizedPnl: [], funding: [], commission: [], insuranceClear: [],
         })
         return otherAssets.get(entry.asset)
       })()
@@ -343,20 +344,34 @@ const settledReadingFromWallet = (round, wallet, settlementAsset = round?.settle
           : 'commission'
     add(target, component, entry.amount)
   }
+  const exactComponents = totals => Object.freeze(Object.fromEntries(
+    Object.entries(totals).map(([component, amounts]) => [
+      component,
+      sumFuturesWalletDecimalAmounts(amounts),
+    ]),
+  ))
+  const settlementComponents = exactComponents(components)
+  const settlementTotal = sumFuturesWalletDecimalAmounts(
+    Object.values(settlementComponents).filter(amount => amount !== null),
+  )
   return Object.freeze({
     symbol: round.symbol,
     positionKey: round.positionKey,
-    ...components,
-    total: visibleAmount(wallet, settlementAsset) === null
-      ? null
-      : Number(visibleAmount(wallet, settlementAsset)),
+    ...settlementComponents,
+    total: settlementTotal,
     settlementAsset,
-    otherAssets: Object.freeze([...otherAssets.entries()].map(([asset, totals]) => Object.freeze({
-      asset,
-      ...totals,
-      amount: visibleAmount(wallet, asset),
-      total: Object.values(totals).filter(Number.isFinite).reduce((sum, value) => sum + value, 0),
-    }))),
+    otherAssets: Object.freeze([...otherAssets.entries()].map(([asset, totals]) => {
+      const exactTotals = exactComponents(totals)
+      const total = sumFuturesWalletDecimalAmounts(
+        Object.values(exactTotals).filter(amount => amount !== null),
+      )
+      return Object.freeze({
+        asset,
+        ...exactTotals,
+        amount: total,
+        total,
+      })
+    })),
     from: round.openTime,
     complete: wallet.walletNet !== null,
     qualifications: wallet.qualifications,

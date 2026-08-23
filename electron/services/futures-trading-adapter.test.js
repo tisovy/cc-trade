@@ -1315,9 +1315,13 @@ describe('futures contract configuration', () => {
             time: null,
         });
         expect(normalizeFuturesIncomeRow({ income: 0, time: 0 })).toMatchObject({
-            income: '0',
+            income: null,
             time: 0,
         });
+        expect(normalizeFuturesIncomeRow({
+            income: Number('9007199254740993.12'),
+            time: 0,
+        }).income).toBeNull();
         for (const time of [undefined, null, '', ' ', false, []]) {
             expect(normalizeFuturesIncomeRow({ time }).time).toBeNull();
         }

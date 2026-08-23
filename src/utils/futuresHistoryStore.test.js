@@ -372,6 +372,7 @@ describe('the store across runs', () => {
       accountFingerprint: ACCOUNT_FINGERPRINT,
       status: 'ready',
       readAt: READ_AT,
+      tradeGeneration: 1,
     })
     expect(restored.orders.map(row => row.orderId)).toEqual([6, 5])
     expect(restored.trades.map(row => row.id)).toEqual(['2', '1'])
@@ -388,6 +389,24 @@ describe('the store across runs', () => {
     // The store names the contracts it holds, which is no claim about the
     // account: the panel must keep saying the list may be short.
     expect(restored.discoveryComplete).toBe(false)
+  })
+
+  it('does not advance trade evidence when restoring order-only history', async () => {
+    const { store } = createMemoryStore()
+    await store.writeReading({
+      symbols: ['BTCUSDT'],
+      orders: [order(5)],
+      trades: [],
+      readAt: READ_AT,
+    })
+
+    const restored = restoreAccount(await store.readContracts())
+
+    expect(restored).toMatchObject({
+      tradeGeneration: 0,
+      orders: [expect.objectContaining({ orderId: 5 })],
+      trades: [],
+    })
   })
 
   it.each([

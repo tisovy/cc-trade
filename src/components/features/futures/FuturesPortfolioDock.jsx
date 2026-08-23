@@ -70,6 +70,45 @@ const HISTORY_VIEW_OF_TAB = Object.freeze({
   tradeHistory: 'trades',
 })
 
+const EXACT_SETTLED_DECIMAL = /^([+-]?)(?:(\d+)(?:\.(\d*))?|\.(\d+))$/
+
+const exactSettledAmountParts = (value) => {
+  const source = typeof value === 'string'
+    ? value.trim()
+    : Number.isFinite(value) ? String(value) : ''
+  const match = EXACT_SETTLED_DECIMAL.exec(source)
+  if (match === null) return null
+  const whole = (match[2] ?? '0').replace(/^0+(?=\d)/, '') || '0'
+  const fraction = match[3] ?? match[4] ?? ''
+  const zero = /^0+$/.test(whole) && (fraction === '' || /^0+$/.test(fraction))
+  return {
+    sign: zero ? 0 : match[1] === '-' ? -1 : 1,
+    whole,
+    fraction: fraction.padEnd(2, '0'),
+  }
+}
+
+const formatExactSettledAmount = (value) => {
+  const parts = exactSettledAmountParts(value)
+  if (parts === null) return null
+  const prefix = parts.sign < 0 ? '−' : parts.sign > 0 ? '+' : ''
+  return `${prefix}${parts.whole}.${parts.fraction}`
+}
+
+const formatSettledAmountForCell = (value) => {
+  const parts = exactSettledAmountParts(value)
+  if (parts === null) return null
+  if (parts.fraction.length <= 2) return formatExactSettledAmount(value)
+  const scaled = BigInt(`${parts.whole}${parts.fraction.slice(0, 2)}`)
+    + (parts.fraction.charCodeAt(2) >= 53 ? 1n : 0n)
+  // A non-zero amount rendered as 0.00 is not a compact reading; it is a false
+  // zero. Keep the short sub-cent exact text, matching Closed Positions.
+  if (scaled === 0n && parts.sign !== 0) return formatExactSettledAmount(value)
+  const digits = scaled.toString().padStart(3, '0')
+  const prefix = parts.sign < 0 ? '−' : parts.sign > 0 ? '+' : ''
+  return `${prefix}${digits.slice(0, -2)}.${digits.slice(-2)}`
+}
+
 // The settled figure's own tone. Absent is not flat: a reading that has not
 // arrived and a position that has settled exactly nothing are different states,
 // and the tone is the only thing distinguishing them at a glance.
@@ -77,15 +116,16 @@ const settledToneOf = (settled) => {
   if (settled === null) return 'absent'
   if (settled.total === null) {
     const totals = (Array.isArray(settled.otherAssets) ? settled.otherAssets : [])
-      .map(reading => Number(reading?.total))
-      .filter(Number.isFinite)
+      .map(reading => exactSettledAmountParts(reading?.total)?.sign ?? null)
+      .filter(sign => sign !== null)
     if (totals.length === 0) return 'absent'
     if (totals.every(total => total >= 0) && totals.some(total => total > 0)) return 'positive'
     if (totals.every(total => total <= 0) && totals.some(total => total < 0)) return 'negative'
     return 'flat'
   }
-  if (settled.total > 0) return 'positive'
-  return settled.total < 0 ? 'negative' : 'flat'
+  const sign = exactSettledAmountParts(settled.total)?.sign ?? 0
+  if (sign > 0) return 'positive'
+  return sign < 0 ? 'negative' : 'flat'
 }
 
 const SETTLED_COMPONENT_LABELS = Object.freeze({
@@ -100,17 +140,17 @@ const SETTLED_COMPONENT_LABELS = Object.freeze({
 // it against Binance is what this column is for.
 const settledBreakdown = totals => Object.entries(SETTLED_COMPONENT_LABELS)
   .filter(([name]) => totals?.[name] !== null && totals?.[name] !== undefined)
-  .map(([name, label]) => `${formatSignedUsdt(totals[name])} ${label}`)
+  .flatMap(([name, label]) => {
+    const amount = formatExactSettledAmount(totals[name])
+    return amount === null ? [] : [`${amount} ${label}`]
+  })
 
-const signedAssetAmount = (reading) => {
+const signedAssetAmount = (reading, { compact = false } = {}) => {
   const asset = String(reading?.asset ?? '').trim().toUpperCase()
-  const amount = String(reading?.amount ?? '').trim()
-  if (asset === '' || amount === '') return null
-  const signed = amount.startsWith('-')
-    ? `−${amount.slice(1)}`
-    : /^[+]?0+(?:\.0+)?$/.test(amount)
-      ? amount.replace(/^\+/, '')
-      : amount.startsWith('+') ? amount : `+${amount}`
+  const signed = compact
+    ? formatSettledAmountForCell(reading?.amount)
+    : formatExactSettledAmount(reading?.amount)
+  if (asset === '' || signed === null) return null
   return `${signed} ${asset}`
 }
 
@@ -153,15 +193,15 @@ const settledVisibleAmounts = (settled) => {
   if (settled === null || typeof settled !== 'object') return EMPTY_ROWS
   const amounts = []
   const settlementAsset = String(settled.settlementAsset ?? '').trim().toUpperCase()
-  const total = Number(settled.total)
-  if (settled.total !== null && settled.total !== undefined && Number.isFinite(total)) {
+  const total = formatSettledAmountForCell(settled.total)
+  if (total !== null) {
     amounts.push({
       key: `settlement:${settlementAsset || 'unknown'}`,
-      text: `${formatSignedUsdt(total)}${settlementAsset === '' ? '' : ` ${settlementAsset}`}`,
+      text: `${total}${settlementAsset === '' ? '' : ` ${settlementAsset}`}`,
     })
   }
   for (const reading of Array.isArray(settled.otherAssets) ? settled.otherAssets : []) {
-    const text = signedAssetAmount(reading)
+    const text = signedAssetAmount(reading, { compact: true })
     if (text === null) continue
     const asset = String(reading?.asset ?? '').trim().toUpperCase()
     amounts.push({ key: `other:${asset}`, text })
@@ -207,7 +247,8 @@ const settledTitle = (settled, window, read, position) => {
   }
   const parts = []
   if (settled.total !== null) {
-    parts.push(`${formatSignedUsdt(settled.total)} ${settled.settlementAsset} settled`)
+    const total = formatExactSettledAmount(settled.total)
+    if (total !== null) parts.push(`${total} ${settled.settlementAsset} settled`)
     const breakdown = settledBreakdown(settled)
     if (breakdown.length > 0) parts.push(breakdown.join(' · '))
   }

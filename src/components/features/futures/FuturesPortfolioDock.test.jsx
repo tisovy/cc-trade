@@ -285,6 +285,40 @@ describe('FuturesPortfolioDock', () => {
     expect(title).not.toContain('insurance')
   })
 
+  it('rounds beyond-safe-integer settled money to cents while retaining the exact amount', () => {
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[position]}
+        settledMoney={{
+          'BTCUSDT:BOTH': {
+            symbol: 'BTCUSDT',
+            positionKey: 'BTCUSDT:BOTH',
+            realizedPnl: '9007199254740993.12',
+            funding: '0.0049',
+            commission: '-0.12',
+            insuranceClear: null,
+            total: '9007199254740993.0049',
+            settlementAsset: 'USDT',
+            otherAssets: [],
+            from: 1_000,
+            complete: true,
+          },
+        }}
+      />,
+    )
+
+    const settled = screen.getByRole('table', { name: 'Open positions' })
+      .querySelector('.futures-workstation-dock-settled')
+    expect(settled).toHaveTextContent('+9007199254740993.00 USDT')
+    expect(settled).not.toHaveTextContent('+9007199254740993.0049 USDT')
+    expect(settled).toHaveClass('is-positive')
+    expect(settled.getAttribute('title')).toContain('+9007199254740993.0049 USDT settled')
+    expect(settled.getAttribute('title')).toContain('+9007199254740993.12 realized')
+    expect(settled.getAttribute('title')).toContain('+0.0049 funding')
+    expect(settled.getAttribute('title')).toContain('−0.12 commission')
+  })
+
   it('looks up settled money by contract leg and ignores a legacy symbol payload', () => {
     const reading = (positionSide, total) => ({
       symbol: 'BTCUSDT',
@@ -479,6 +513,46 @@ describe('FuturesPortfolioDock', () => {
     expect(settled.getAttribute('title')).toContain('not converted')
   })
 
+  it('renders an exactly cancelling auxiliary asset as a flat zero, never null', () => {
+    render(
+      <FuturesPortfolioDock
+        selectedSymbol="BTCUSDT"
+        positions={[position]}
+        settledMoney={{
+          'BTCUSDT:BOTH': {
+            symbol: 'BTCUSDT',
+            positionKey: 'BTCUSDT:BOTH',
+            realizedPnl: null,
+            funding: null,
+            commission: null,
+            insuranceClear: null,
+            total: null,
+            settlementAsset: 'USDT',
+            otherAssets: [{
+              asset: 'BNB',
+              amount: '0',
+              realizedPnl: null,
+              funding: null,
+              commission: '0',
+              insuranceClear: null,
+              total: '0',
+            }],
+            from: 1_000,
+            complete: true,
+          },
+        }}
+      />,
+    )
+
+    const settled = screen.getByRole('table', { name: 'Open positions' })
+      .querySelector('.futures-workstation-dock-settled')
+    expect(settled).toHaveTextContent('0.00 BNB')
+    expect(settled).toHaveClass('is-flat')
+    expect(settled).not.toHaveTextContent('null')
+    expect(settled.getAttribute('title')).toContain('0.00 BNB settled')
+    expect(settled.getAttribute('title')).not.toContain('null')
+  })
+
   it('renders open contract and account adjustments once outside leg rows', () => {
     render(
       <FuturesPortfolioDock
@@ -522,8 +596,8 @@ describe('FuturesPortfolioDock', () => {
       expect(adjustment).toHaveTextContent('Shared · not assigned to a single position leg')
       expect(adjustment).toHaveAccessibleName(expect.stringContaining('Counted once'))
     }
-    expect(within(shared).getAllByText('−3 USDT')).toHaveLength(1)
-    expect(within(shared).getAllByText('+0.4 BNB')).toHaveLength(1)
+    expect(within(shared).getAllByText('−3.00 USDT')).toHaveLength(1)
+    expect(within(shared).getAllByText('+0.40 BNB')).toHaveLength(1)
     expect(within(shared).getByText('Movements: funding')).toBeInTheDocument()
     expect(within(shared).getByText('Movements: commission credit')).toBeInTheDocument()
     expect(within(table).queryByText('−3 USDT')).not.toBeInTheDocument()

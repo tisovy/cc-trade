@@ -83,9 +83,10 @@ const boundedUpperText = (value, maximumLength) => {
 };
 
 const boundedDecimalText = (value) => {
-    const source = typeof value === 'string'
-        ? value
-        : (Number.isFinite(value) ? String(value) : '');
+    // Exact exchange money is textual. Once a JSON number has crossed the
+    // JavaScript parser its original decimal digits cannot be recovered, even
+    // when the rounded value happens to look finite or safe.
+    const source = typeof value === 'string' ? value : '';
     if (source.length > MAX_DECIMAL_TEXT_LENGTH) return null;
     const candidate = source.trim();
     if (!DECIMAL_TEXT.test(candidate)) return null;
@@ -474,8 +475,8 @@ const composeResource = ({ lanes: laneInput, generation = 0 }) => {
             && lane.complete
             && lane.coveredFrom !== null
             && lane.coveredTo !== null
-            && targetTo !== null
-            && lane.coveredTo >= targetTo,
+            && lane.targetTo !== null
+            && lane.coveredTo >= lane.targetTo,
     ]));
     const error = ordered.find(lane => lane.error !== null)?.error ?? null;
     const resource = {
@@ -487,7 +488,12 @@ const composeResource = ({ lanes: laneInput, generation = 0 }) => {
         coveredTo: coverage.coveredTo,
         targetTo,
         completeByType,
-        complete: ordered.length > 0 && Object.values(completeByType).every(Boolean),
+        complete: ordered.length > 0
+            && targetTo !== null
+            && Object.values(completeByType).every(Boolean)
+            && ordered.every(lane => (
+                lane.coveredTo !== null && lane.coveredTo >= targetTo
+            )),
         attemptedAt: attempted.length > 0 ? Math.max(...attempted) : null,
         successfulAt: successful.length === ordered.length && successful.length > 0
             ? Math.min(...successful)

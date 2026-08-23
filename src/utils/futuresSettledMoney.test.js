@@ -272,6 +272,33 @@ describe('readFuturesSettledIncomeFrame', () => {
     })
   })
 
+  it('keeps ready lanes complete through their independent targets', () => {
+    const payload = v2Frame()
+    payload.lanes.FUNDING_FEE = {
+      ...payload.lanes.FUNDING_FEE,
+      coveredTo: 6_000,
+      targetTo: 6_000,
+    }
+    payload.targetTo = 6_000
+    payload.readAt = 6_000
+    payload.complete = false
+
+    const accepted = readFuturesSettledIncomeFrame(payload)
+
+    expect(accepted).not.toBeNull()
+    expect(accepted).toMatchObject({
+      coveredTo: 5_000,
+      targetTo: 6_000,
+      complete: false,
+    })
+    expect(accepted.lanes.FUNDING_FEE.complete).toBe(true)
+    expect(accepted.lanes.FEE_RETURN).toMatchObject({
+      coveredTo: 5_000,
+      targetTo: 5_000,
+      complete: true,
+    })
+  })
+
   it('carries confirmation debt and rejects it beside a ready lane', () => {
     const pending = v2Frame()
     pending.lanes.FUNDING_FEE = {
@@ -485,6 +512,23 @@ describe('readFuturesSettledIncomeFrame', () => {
 
     expect(changed).not.toBeNull()
     expect(newerFuturesSettledIncomeFrame(held, changed)).toBe(held)
+  })
+
+  it('rejects numeric money at renderer IPC and preserves held authority', () => {
+    const held = readFuturesSettledIncomeFrame(v2Frame())
+    const numericPayload = v2Frame({
+      generation: held.generation + 1,
+      digest: 'numeric-money-cannot-be-exact',
+    })
+    numericPayload.lanes.FUNDING_FEE = {
+      ...numericPayload.lanes.FUNDING_FEE,
+      rows: [fundingRow({ income: -1.25 })],
+    }
+    delete numericPayload.rows
+
+    const rejected = readFuturesSettledIncomeFrame(numericPayload)
+    expect(rejected).toBeNull()
+    expect(newerFuturesSettledIncomeFrame(held, rejected)).toBe(held)
   })
 
   it('rejects over-ceiling lane and compatibility row arrays before canonicalization', () => {

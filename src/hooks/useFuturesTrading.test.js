@@ -744,6 +744,65 @@ describe('useFuturesTrading', () => {
     expect(historyStore.writeReading).not.toHaveBeenCalled()
   })
 
+  it('builds Closed rounds from restored fills before another exchange event', async () => {
+    const socket = createSocket()
+    const historyStore = {
+      readContracts: vi.fn(async () => [{
+        version: 2,
+        key: `${ACCOUNT_FINGERPRINT}:BTCUSDT`,
+        fingerprint: ACCOUNT_FINGERPRINT,
+        symbol: 'BTCUSDT',
+        orders: [],
+        trades: [{
+          id: '1', orderId: '101', symbol: 'BTCUSDT', positionSide: 'BOTH',
+          side: 'BUY', price: '100', quantity: '1', realizedPnl: '0',
+          commission: '0.1', commissionAsset: 'USDT', marginAsset: 'USDT', time: 2_000,
+        }, {
+          id: '2', orderId: '102', symbol: 'BTCUSDT', positionSide: 'BOTH',
+          side: 'SELL', price: '110', quantity: '1', realizedPnl: '10',
+          commission: '0.1', commissionAsset: 'USDT', marginAsset: 'USDT', time: 3_000,
+        }],
+        orderCursor: null,
+        tradeCursor: '2',
+        tradeCoverage: {
+          version: 2,
+          targetFrom: 0,
+          targetTo: 5_000,
+          coveredFrom: 1_000,
+          coveredTo: 5_000,
+          complete: false,
+          flatBoundary: 1_000,
+          pageLimited: true,
+          retentionLimited: false,
+          continuityComplete: true,
+        },
+        readAt: 5_000,
+      }]),
+      writeReading: vi.fn(async () => true),
+    }
+    const { result } = renderHook(() => useFuturesTrading({
+      enabled: true,
+      symbol: 'BTCUSDT',
+      wsConnection: socket,
+      historyStore,
+    }))
+
+    authorizeAccount(socket, {
+      positions: { status: 'ready', data: [], lastSuccessfulAt: 5_000 },
+    })
+    await waitFor(() => expect(result.current.history.status).toBe('ready'))
+
+    expect(result.current.history.tradeGeneration).toBe(1)
+    expect(result.current.tradeRoundIndex.closed).toEqual([
+      expect.objectContaining({
+        symbol: 'BTCUSDT',
+        positionKey: 'BTCUSDT:BOTH',
+        realizedPnlExact: '10',
+        resolved: true,
+      }),
+    ])
+  })
+
   it('carries the stored coverage on an incremental read and marks an explicit full read', async () => {
     const socket = createSocket()
     const historyStore = {
@@ -2168,6 +2227,123 @@ describe('useFuturesTrading', () => {
     act(() => socket.receive(settledFrame(2, 'stale')))
     expect(result.current.settledIncome).toMatchObject({ generation: 2, status: 'stale' })
     expect(fold).not.toHaveBeenCalled()
+  })
+
+  it('keeps open settled component sums as exact decimal strings', () => {
+    const cancellingBnbRebate = Object.freeze({
+      symbol: 'BTCUSDT',
+      incomeType: 'COMMISSION_REBATE',
+      income: '0.003',
+      asset: 'BNB',
+      time: 1_500,
+      tranId: '77',
+      tradeId: '123',
+    })
+    const baseRound = Object.freeze({
+      key: 'exact-open-round',
+      symbol: 'BTCUSDT',
+      positionKey: 'BTCUSDT:LONG',
+      leg: 'LONG',
+      positionSide: 'LONG',
+      fillIds: ['123'],
+      openTime: 1_000,
+      closeTime: 2_000,
+      open: true,
+      partial: false,
+      resolved: true,
+      settlementAsset: 'USDT',
+      exitPrice: null,
+      realizedPnl: '9007199254740993.12',
+      realizedPnlExact: '9007199254740993.12',
+      feesByAsset: [
+        { asset: 'USDT', amount: '0.1151' },
+        { asset: 'BNB', amount: '0.003' },
+      ],
+      tradeCoverage: true,
+      commissionCoverage: true,
+    })
+    const cancellingSettlementRound = Object.freeze({
+      ...baseRound,
+      key: 'zero-settlement-round',
+      symbol: 'ETHUSDT',
+      positionKey: 'ETHUSDT:LONG',
+      fillIds: ['456'],
+      realizedPnl: '0.003',
+      realizedPnlExact: '0.003',
+      feesByAsset: [{ asset: 'USDT', amount: '0.003' }],
+    })
+    vi.spyOn(futuresTradeRounds, 'buildFuturesTradeRoundIndex')
+      .mockReturnValue(Object.freeze({
+        version: 2,
+        rounds: Object.freeze([baseRound, cancellingSettlementRound]),
+        all: Object.freeze([baseRound, cancellingSettlementRound]),
+        open: Object.freeze([baseRound, cancellingSettlementRound]),
+        closed: Object.freeze([]),
+        unresolved: Object.freeze([]),
+        byPosition: Object.freeze({}),
+        legacyRounds: Object.freeze([baseRound, cancellingSettlementRound]),
+      }))
+    const socket = createSocket()
+    const { result } = renderHook(() => useFuturesTrading({
+      enabled: true,
+      symbol: 'BTCUSDT',
+      wsConnection: socket,
+    }))
+    authorizeAccount(socket)
+
+    const readyLane = {
+      coveredFrom: 0,
+      coveredTo: 5_000,
+      targetTo: 5_000,
+      status: 'ready',
+      attemptedAt: 5_000,
+      successfulAt: 5_000,
+      complete: true,
+      error: null,
+    }
+    const lanes = settledIncomeLanes(readyLane)
+    lanes.COMMISSION_REBATE = {
+      ...lanes.COMMISSION_REBATE,
+      rows: [cancellingBnbRebate],
+    }
+
+    act(() => socket.receive({
+      type: 'futures_settled_income',
+      version: 2,
+      accountFingerprint: ACCOUNT_FINGERPRINT,
+      generation: 1,
+      digest: 'exact-open-money',
+      rows: [cancellingBnbRebate],
+      lanes,
+      coveredFrom: 0,
+      coveredTo: 5_000,
+      targetTo: 5_000,
+      readAt: 5_000,
+      attemptedAt: 5_000,
+      successfulAt: 5_000,
+      status: 'ready',
+      complete: true,
+    }))
+
+    expect(result.current.settledMoney['BTCUSDT:LONG']).toMatchObject({
+      realizedPnl: '9007199254740993.12',
+      commission: '-0.1151',
+      total: '9007199254740993.0049',
+      settlementAsset: 'USDT',
+      otherAssets: [{
+        asset: 'BNB',
+        commission: '0',
+        amount: '0',
+        total: '0',
+      }],
+    })
+    expect(result.current.settledMoney['ETHUSDT:LONG']).toMatchObject({
+      realizedPnl: '0.003',
+      commission: '-0.003',
+      total: '0',
+      settlementAsset: 'USDT',
+      otherAssets: [],
+    })
   })
 
   it('reuses wallet identities for observation-only frames and keeps the window on unrelated state', () => {

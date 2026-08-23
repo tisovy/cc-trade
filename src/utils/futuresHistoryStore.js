@@ -339,6 +339,11 @@ export const restoreFuturesHistoryFromStore = (records, { fingerprint = null } =
     ...createHeldFuturesHistory(),
     version: 2,
     generation: 1,
+    // Restored fills are a real trade-evidence transition from the hook's
+    // initially memoized empty snapshot. Keep this revision independent from
+    // the general history generation so Closed/wallet folds run immediately
+    // without making order-only reads invalidate them later.
+    tradeGeneration: trades.length > 0 ? 1 : 0,
     accountFingerprint: account,
     status: 'ready',
     orders: Object.freeze(orders),

@@ -525,6 +525,20 @@ describe('production RateLimiter cancellation', () => {
         expect(admitted).toHaveLength(14);
     });
 
+    it('honors a carried pass ceiling on a requeued non-head request', () => {
+        const limiter = new RateLimiter(1_000, 60_000, 0);
+        limiter.waiting = [
+            { urgent: false, passes: 0 },
+            // This entry slept for capacity and rejoined behind newer ordinary
+            // work while retaining the overtakes it had already absorbed.
+            { urgent: false, passes: 8 },
+            { urgent: true, passes: 0 },
+        ];
+
+        expect(limiter.nextAdmission()).toBe(0);
+        expect(limiter.waiting.map(entry => entry.passes)).toEqual([0, 8, 0]);
+    });
+
     it('keeps combined history and income fan-outs fair behind urgent physical work', async () => {
         vi.setSystemTime(1_000);
         const summaries = [];

@@ -1,0 +1,5 @@
+schema: spec-driven
+created: 2026-08-23
+# This change carries operator verification and a bounded performance
+# measurement only. It changes no product requirement by design.
+skip_specs: true
